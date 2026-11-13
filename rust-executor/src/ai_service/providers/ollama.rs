@@ -116,6 +116,14 @@ impl OllamaChat {
         ctx
     }
 
+    /// The `num_ctx` requests go out at when `/api/show` cannot be read:
+    /// [`FALLBACK_NUM_CTX`], still capped at the operator's `max_num_ctx`.
+    /// `context_window_fallback_tokens` answers the same value, so a
+    /// budget sized after a failed probe matches the request that follows.
+    fn fallback_num_ctx(&self) -> u32 {
+        FALLBACK_NUM_CTX.min(self.max_num_ctx)
+    }
+
     /// Query `/api/show` for a model's context length.
     ///
     /// Walks the `model_info` map looking for `<arch>.context_length`.  Falls
@@ -124,7 +132,7 @@ impl OllamaChat {
     /// `self.max_num_ctx`, including the fallback, so an operator's ceiling
     /// is never exceeded.
     async fn query_model_ctx(&self, model: &str) -> u32 {
-        let fallback = FALLBACK_NUM_CTX.min(self.max_num_ctx);
+        let fallback = self.fallback_num_ctx();
         let url = format!("{}/api/show", self.base);
         let response = match self
             .http
@@ -587,6 +595,18 @@ fn extract_tool_calls(wire_calls: &[WireToolCall]) -> Vec<ToolCall> {
 impl RemoteChat for OllamaChat {
     fn supports_native_tools(&self) -> bool {
         true
+    }
+
+    /// The `num_ctx` the request goes out at — the same resolution `chat`
+    /// and `chat_stream` make, from the same per-model cache.
+    async fn context_window_tokens(&self, model: &str) -> Option<u32> {
+        Some(self.resolve_num_ctx(model).await)
+    }
+
+    /// What `resolve_num_ctx` answers when `/api/show` cannot be read —
+    /// the `num_ctx` the request goes out at then, too.
+    fn context_window_fallback_tokens(&self) -> Option<u32> {
+        Some(self.fallback_num_ctx())
     }
 
     async fn chat(&self, request: ChatRequest) -> Result<ChatReply> {

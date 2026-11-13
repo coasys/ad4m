@@ -69,24 +69,51 @@ pub use crate::ai_service::DEFAULT_TOOL_RESULT_MAX_BYTES;
 const EMPTY_COMPLETION_NUDGE: &str = "Your last answer was empty — the person is still \
      waiting. Answer them now in plain language: what you found, or what you did.";
 
+/// The longest byte prefix of `s` inside `max_bytes`, ending on a char
+/// boundary — `s[..n]` never splits a UTF-8 sequence.
+fn char_boundary_prefix_len(s: &str, max_bytes: usize) -> usize {
+    let mut n = max_bytes.min(s.len());
+    while n > 0 && !s.is_char_boundary(n) {
+        n -= 1;
+    }
+    n
+}
+
+/// The note a cut tool result ends on — how much of it the model sees and
+/// how to get the rest. Shared with the request trim
+/// (`api::openai_compat::harness_bridge`), which cuts a result the
+/// pinned request cannot hold to the space it leaves.
+pub(crate) fn tool_result_truncation_note(kept: usize, total_bytes: usize) -> String {
+    format!(
+        "\n[truncated: {kept} of {total_bytes} bytes shown — the result was cut to fit \
+         the model's context; call the tool again with a narrower query for the rest]"
+    )
+}
+
 /// A tool result that fits `max_bytes` comes back whole; a bigger one is
 /// cut on a char boundary and ends on a note telling the model what it
-/// missed and how to get the rest. The full result still reaches whatever
-/// observes the call — this shapes only what the model sees.
+/// missed and how to get the rest. `max_bytes` counts the note too — the
+/// answer never outgrows the cap it was sized for — and when it cannot
+/// fit even the note, the cut is all there is room for.
+///
+/// The full result still reaches whatever observes the call — this shapes
+/// only what the model sees.
 pub fn cap_tool_result(result: &str, max_bytes: usize) -> String {
     if result.len() <= max_bytes {
         return result.to_string();
     }
-    let mut kept = max_bytes;
-    while !result.is_char_boundary(kept) {
-        kept -= 1;
+    // The note counts against `max_bytes`: reserve it before the cut, or
+    // the answer outgrows the cap it was sized for. `kept` is never wider
+    // than `max_bytes` itself, so a note sized for `max_bytes` is at least
+    // as long as the one the cut below actually needs.
+    let note = |kept: usize| tool_result_truncation_note(kept, result.len());
+    let room = max_bytes.saturating_sub(note(max_bytes).len());
+    if room == 0 {
+        // Even the note alone is wider than the cap.
+        return result[..char_boundary_prefix_len(result, max_bytes)].to_string();
     }
-    format!(
-        "{}\n[truncated: {kept} of {} bytes shown — the result was cut to fit \
-         the model's context; call the tool again with a narrower query for the rest]",
-        &result[..kept],
-        result.len(),
-    )
+    let kept = char_boundary_prefix_len(result, room);
+    format!("{}{}", &result[..kept], note(kept))
 }
 
 /// What the loop tells about each tool call as it makes it: interpretation's live debug events,
@@ -452,6 +479,21 @@ pub trait CompletionSource: Send + Sync {
         messages: &[Value],
         tools: Vec<provider::ToolSchema>,
     ) -> Result<HarnessCompletion>;
+
+    /// Bytes one tool result may occupy in the messages fed back through
+    /// this source before [`cap_tool_result`] cuts it — the share of the
+    /// model's request budget a result can be before the request it joins
+    /// no longer fits the model's window. `run_with_tools` callers size
+    /// [`HarnessConfig::tool_result_max_bytes`] from it.
+    ///
+    /// [`DEFAULT_TOOL_RESULT_MAX_BYTES`] — the AI service's own
+    /// unknown-window answer — for a source that does not know the window,
+    /// so a caller with no model context at hand and one whose window is
+    /// simply unknown cap a result to the same size.
+    async fn tool_result_max_bytes(&self, model_id: &str) -> usize {
+        let _ = model_id;
+        DEFAULT_TOOL_RESULT_MAX_BYTES
+    }
 }
 
 /// Configuration knob wired to `AutoProcessorConfig.max_tool_calls` (v3 §6
@@ -465,8 +507,8 @@ pub trait CompletionSource: Send + Sync {
 pub struct HarnessConfig {
     pub max_tool_calls: u32,
     /// Bytes one tool result may occupy in the messages fed back to the
-    /// model before [`cap_tool_result`] cuts it. An AI session sizes this
-    /// from the model's context window (`AIService::tool_result_max_bytes`);
+    /// model before [`cap_tool_result`] cuts it. Callers size this from the
+    /// model's context window (`CompletionSource::tool_result_max_bytes`);
     /// the default covers callers with no model context at hand.
     pub tool_result_max_bytes: usize,
     /// How often the loop re-asks the model after a completion that came
@@ -1912,16 +1954,19 @@ mod tests {
 
     // ── tool-result capping ──────────────────────────────────────────────
 
-    #[test]
-    fn the_default_result_cap_is_the_unknown_window_fallback() {
+    #[tokio::test]
+    async fn the_default_result_cap_is_the_unknown_window_fallback() {
         // One source of truth: a caller that never learned the model's
         // context window (HarnessConfig's default cap) and a caller whose
         // model's window is simply unknown must cap a result to the same
         // size — the defaults used to disagree (24 KiB vs the formula's
         // 16 KiB).
+        crate::db::Ad4mDb::init_global_instance(":memory:").expect("Ad4mDb to initialize");
         assert_eq!(
             DEFAULT_TOOL_RESULT_MAX_BYTES,
-            crate::ai_service::AIService::tool_result_max_bytes("a-model-nobody-registered"),
+            crate::ai_service::AIService::empty()
+                .tool_result_max_bytes("a-model-nobody-registered")
+                .await,
         );
     }
 
@@ -1930,17 +1975,52 @@ mod tests {
         // A result that fits comes back whole.
         assert_eq!(cap_tool_result("small", 100), "small");
 
-        // A bigger one keeps a bounded prefix and ends on the note.
+        // A bigger one keeps a bounded prefix and ends on the note — the
+        // note inside the cap, so the answer never outgrows it.
         let big = "x".repeat(10_000);
         let capped = cap_tool_result(&big, 1_000);
-        assert!(capped.starts_with(&"x".repeat(1_000)));
-        assert!(capped.contains("truncated: 1000 of 10000 bytes"));
+        assert!(
+            capped.len() <= 1_000,
+            "note inside the cap: {}",
+            capped.len()
+        );
+        let kept = capped.find("\n[truncated:").expect("the note ends the cut");
+        assert!(capped[..kept].chars().all(|c| c == 'x'));
+        assert!(kept < 1_000, "the note reserved room: {kept}B kept");
+        assert!(capped.contains("of 10000 bytes"));
 
-        // The cut lands on a char boundary, not mid-UTF-8.
+        // A cap smaller than the note itself gets the prefix that fits —
+        // still on a char boundary, still under the cap.
         let multibyte = "é".repeat(10); // 20 bytes
         let capped = cap_tool_result(&multibyte, 5);
-        assert!(capped.starts_with("éé"), "4 bytes kept, not 5: {capped:?}");
-        assert!(capped.contains("truncated: 4 of 20 bytes"));
+        assert_eq!(capped, "éé", "4 bytes kept, not 5: {capped:?}");
+    }
+
+    #[test]
+    fn a_capped_result_counts_its_notice_against_the_cap() {
+        // Whatever the cap, the answer — data and note together — never
+        // outgrows it.
+        let big = "x".repeat(10_000);
+        for cap in [5_000usize, 1_000, 300, 160] {
+            let out = cap_tool_result(&big, cap);
+            assert!(out.len() <= cap, "cap {cap}: {}B out", out.len());
+            assert!(
+                out.contains("[truncated:"),
+                "cap {cap} still tells what it missed"
+            );
+        }
+
+        // Multi-byte characters at the cut: the kept prefix ends on a char
+        // boundary, never mid-sequence — at caps the note barely fits too.
+        let multibyte = "é".repeat(200); // 400 bytes
+        for cap in [160usize, 150, 141] {
+            let out = cap_tool_result(&multibyte, cap);
+            assert!(out.len() <= cap, "cap {cap}: {}B out", out.len());
+        }
+
+        // A cap smaller than the note alone returns what fits.
+        let out = cap_tool_result(&big, 10);
+        assert_eq!(out, "x".repeat(10));
     }
 
     #[tokio::test]
@@ -1992,8 +2072,8 @@ mod tests {
             .unwrap()
             .to_string();
         assert!(
-            fed.len() < 1_200 && fed.contains("truncated: 1000 of 10000 bytes"),
-            "the model reads the capped prefix: {fed:?}"
+            fed.len() <= 1_000 && fed.contains("[truncated:") && fed.contains("of 10000 bytes"),
+            "the model reads the capped prefix, note inside the cap: {fed:?}"
         );
         assert_eq!(
             seen.0.lock().unwrap()[0].len(),
