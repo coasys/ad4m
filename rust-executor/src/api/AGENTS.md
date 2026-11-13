@@ -179,7 +179,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-232 methods: Cap 81, Executor 43, Open 9, Operator 29, Owns 68, UserOrOperator 2. Local only (the operator on this machine): 6.
+240 methods: Cap 82, CapAnyPointer 1, Executor 43, Open 9, Operator 29, Owns 74, UserOrOperator 2. Local only (the operator on this machine): 6.
 
 | Method | Guard |
 |---|---|
@@ -231,6 +231,14 @@ the guard checked:
 | `ai.removeEndpoint` | `Executor(artificial intelligence:DELETE)` |
 | `ai.removeModel` | `Executor(artificial intelligence:DELETE)` |
 | `ai.removeTask` | `Owns(Task id, artificial intelligence:CREATE)` |
+| `ai.session` | `Owns(AiSession id, artificial intelligence:READ)` |
+| `ai.sessionCancel` | `Owns(AiSession sessionId, artificial intelligence:CREATE)` |
+| `ai.sessionCreate` | `Cap(artificial intelligence:CREATE)` |
+| `ai.sessionDelete` | `Owns(AiSession id, artificial intelligence:CREATE)` |
+| `ai.sessionList` | `Cap(artificial intelligence:READ)` |
+| `ai.sessionMessages` | `Owns(AiSession sessionId, artificial intelligence:READ)` |
+| `ai.sessionSend` | `Owns(AiSession sessionId, artificial intelligence:CREATE)` |
+| `ai.sessionUpdate` | `Owns(AiSession id, artificial intelligence:CREATE)` |
 | `ai.setDefaultModel` | `Executor(artificial intelligence:UPDATE)` |
 | `ai.tasks` | `Cap(artificial intelligence:READ)` |
 | `ai.transcriptionClose` | `Cap(artificial intelligence:TRANSCRIBE)` |
@@ -286,7 +294,7 @@ the guard checked:
 | `perspective.addLinkExpression` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.addLinks` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.addSdna` | `Owns(Perspective uuid, perspective:UPDATE)` |
-| `perspective.all` | `Cap(perspective:READ)` |
+| `perspective.all` | `CapAnyPointer(perspective:READ)` |
 | `perspective.commitBatch` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.create` | `Cap(perspective:CREATE)` |
 | `perspective.createBatch` | `Owns(Perspective uuid, perspective:UPDATE)` |
