@@ -103,12 +103,18 @@ impl OllamaChat {
         if let Some(&cached) = self.thinking_cache.lock().unwrap().get(model) {
             return cached;
         }
-        let supports = self.query_model_show(model).await.1;
-        self.thinking_cache
-            .lock()
-            .unwrap()
-            .insert(model.to_string(), supports);
-        supports
+        // Only a lookup that answered is remembered: a show that failed once
+        // (server restarting) must not pin a thinking model to "no thinking".
+        match self.query_model_show(model).await.1 {
+            Some(supports) => {
+                self.thinking_cache
+                    .lock()
+                    .unwrap()
+                    .insert(model.to_string(), supports);
+                supports
+            }
+            None => false,
+        }
     }
 
     /// The `/api/chat` body: `think: false` only for a model whose `/api/show`
@@ -176,8 +182,9 @@ impl OllamaChat {
     /// One `/api/show`: the model's context window (capped at `max_num_ctx`)
     /// and whether its capabilities include `thinking`. `None` for the window
     /// means the caller should use its fallback — a failed show, or a show
-    /// that names no context length.
-    async fn query_model_show(&self, model: &str) -> (Option<u32>, bool) {
+    /// that names no context length. `None` for thinking means the show
+    /// failed (nothing is known); `Some(false)` is an answer.
+    async fn query_model_show(&self, model: &str) -> (Option<u32>, Option<bool>) {
         let url = format!("{}/api/show", self.base);
         let response = match self
             .http
@@ -192,13 +199,13 @@ impl OllamaChat {
                     "Ollama /api/show returned {} for {model}; context window unknown",
                     r.status()
                 );
-                return (None, false);
+                return (None, None);
             }
             Err(e) => {
                 log::warn!(
                     "Could not query Ollama /api/show for {model}: {e}; context window unknown"
                 );
-                return (None, false);
+                return (None, None);
             }
         };
 
@@ -206,7 +213,7 @@ impl OllamaChat {
             Ok(v) => v,
             Err(e) => {
                 log::warn!("Could not parse /api/show response for {model}: {e}");
-                return (None, false);
+                return (None, None);
             }
         };
 
@@ -227,7 +234,7 @@ impl OllamaChat {
                         log::info!(
                             "Ollama model {model}: context_length={ctx}, using num_ctx={capped}"
                         );
-                        return (Some(capped), thinking);
+                        return (Some(capped), Some(thinking));
                     }
                 }
             }
@@ -241,14 +248,14 @@ impl OllamaChat {
                     if let Ok(ctx) = parts[1].parse::<u32>() {
                         let capped = ctx.min(self.max_num_ctx);
                         log::info!("Ollama model {model}: Modelfile num_ctx={ctx}, using {capped}");
-                        return (Some(capped), thinking);
+                        return (Some(capped), Some(thinking));
                     }
                 }
             }
         }
 
         log::warn!("Could not determine context_length for {model}");
-        (None, thinking)
+        (None, Some(thinking))
     }
 }
 
@@ -1127,6 +1134,28 @@ mod wire_tests {
             .await
             .expect("a no-thinking completion is accepted");
         mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn a_failed_show_is_not_remembered_as_no_thinking() {
+        let mut server = mockito::Server::new_async().await;
+        let failing = server
+            .mock("POST", "/api/show")
+            .with_status(500)
+            .expect_at_least(1)
+            .create_async()
+            .await;
+        let client = OllamaChat::new("", Url::parse(&server.url()).unwrap(), None);
+        let request = ChatRequest::new("qwen3.8", turns()).with_generation(true, Some(512));
+        let first = serde_json::to_value(client.request_body(&request, false).await).unwrap();
+        assert!(first.get("think").is_none(), "{first}");
+        failing.assert_async().await;
+        failing.remove_async().await;
+
+        // The server is back: the next request asks again and learns the model thinks.
+        let _show = mock_show_thinking(&mut server, 49152).await;
+        let second = serde_json::to_value(client.request_body(&request, false).await).unwrap();
+        assert_eq!(second["think"], false, "{second}");
     }
 
     #[tokio::test]
