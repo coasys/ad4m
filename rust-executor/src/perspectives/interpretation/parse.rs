@@ -21,6 +21,13 @@ pub fn parse_interpretation_output(raw: &str) -> anyhow::Result<InterpretationOu
         )
     })?;
     match value {
+        // A model that wraps the `{instances, flow_proposals}` object in a
+        // single-element array wrote the right payload in a third spelling —
+        // unwrap it rather than failing the inner object's missing `class`.
+        serde_json::Value::Array(ref arr) if arr.len() == 1 && is_wrapper_object(&arr[0]) => {
+            serde_json::from_value(arr[0].clone())
+                .map_err(|e| anyhow::anyhow!("interpretation JSON parse failed: {e}"))
+        }
         serde_json::Value::Array(_) => Ok(InterpretationOutput {
             instances: serde_json::from_value(value)
                 .map_err(|e| anyhow::anyhow!("interpretation JSON parse failed: {e}"))?,
@@ -32,6 +39,21 @@ pub fn parse_interpretation_output(raw: &str) -> anyhow::Result<InterpretationOu
             "interpretation JSON must be an array or an object at the top level"
         )),
     }
+}
+
+/// Whether a value is the `{instances, flow_proposals}` wrapper object rather
+/// than a proposed instance — used to recognise a wrapper nested inside a
+/// single-element array. An instance object carries `class`, never one of the
+/// wrapper keys, so requiring a wrapper key *without* `class` keeps a real
+/// instance whose `props` happen to include an `instances` property from being
+/// reinterpreted as a wrapper.
+fn is_wrapper_object(v: &serde_json::Value) -> bool {
+    v.as_object()
+        .map(|o| {
+            (o.contains_key("instances") || o.contains_key("flow_proposals"))
+                && !o.contains_key("class")
+        })
+        .unwrap_or(false)
 }
 
 /// Strip the reasoning/markdown noise local models add around JSON.
@@ -397,6 +419,26 @@ mod tests {
         let out = parse_interpretation_output(raw).unwrap();
         assert!(out.instances.is_empty());
         assert_eq!(out.flow_proposals.len(), 1);
+    }
+
+    #[test]
+    fn wrapper_object_in_a_single_element_array_is_unwrapped() {
+        // Observed on qwen3.8-27b-48k: the model answers with the correct
+        // `{instances, flow_proposals}` object but wrapped in a one-element
+        // array. Treat that spelling as the wrapper, not as one instance
+        // missing its `class`.
+        let raw = r#"[{"instances":[{"class":"Task","title":"Write the spec","owner":"James"}],"flow_proposals":[{"instance":"ad4m://flow/instance/1","toState":"scoped"}]}]"#;
+        let out = parse_interpretation_output(raw).unwrap();
+        assert_eq!(out.instances.len(), 1);
+        assert_eq!(out.instances[0].class, "Task");
+        assert_eq!(out.flow_proposals.len(), 1);
+        assert_eq!(out.flow_proposals[0].to_state, "scoped");
+
+        // A single-element array holding a real instance is NOT a wrapper.
+        let raw = r#"[{"class":"Task","title":"A","instances":[1,2]}]"#;
+        let out = parse_interpretation_output(raw).unwrap();
+        assert_eq!(out.instances.len(), 1);
+        assert_eq!(out.instances[0].class, "Task");
     }
 
     #[test]
