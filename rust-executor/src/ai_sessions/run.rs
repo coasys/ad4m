@@ -658,8 +658,8 @@ mod tests {
         let history = history(messages, 1_000);
         let tool = history.iter().find(|m| m["role"] == "tool").unwrap();
         let fed = tool["content"].as_str().unwrap();
-        assert!(fed.len() < 1_200, "the model reads the cap: {fed:?}");
-        assert!(fed.contains("truncated: 1000 of"));
+        assert!(fed.len() <= 1_000, "the model reads the cap: {fed:?}");
+        assert!(fed.contains("[truncated:") && fed.contains("of 10000 bytes"));
     }
 
     // The size cap drops oldest-first, but the question the new turn answers
