@@ -350,6 +350,17 @@ pub trait RemoteChat: Send + Sync {
         let _ = model;
         None
     }
+
+    /// The window `chat` sends when [`Self::context_window_tokens`]'s
+    /// resolution cannot happen — its failure fallback, so a caller whose
+    /// probe timed out still budgets for the request the model would get.
+    /// `None` for a client with no resolution of its own.
+    ///
+    /// `OllamaChat`'s is the same `num_ctx` `resolve_num_ctx` falls back
+    /// to on any `/api/show` failure.
+    fn context_window_fallback_tokens(&self) -> Option<u32> {
+        None
+    }
 }
 
 #[cfg(test)]

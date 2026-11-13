@@ -860,8 +860,34 @@ impl AIService {
     async fn resolved_context_tokens(&self, model_id: &str) -> Option<usize> {
         let resolved = Self::replace_model_variables(&model_id.to_string()).ok()?;
         if let Ok(chat) = self.chat_model(&resolved).await {
-            if let Some(tokens) = chat.client.context_window_tokens(&chat.remote_model).await {
-                return Some(tokens as usize);
+            // The probe is part of this call's path: an Ollama client's
+            // `num_ctx` resolution issues `/api/show`, which an endpoint
+            // that cannot answer would stall for the client build's whole
+            // 600 s — long past the request timeout the call itself runs
+            // under. Bound it the same way.
+            let timeout = endpoints::request_timeout(&chat.endpoint, CHAT_TIMEOUT);
+            match tokio::time::timeout(
+                timeout,
+                chat.client.context_window_tokens(&chat.remote_model),
+            )
+            .await
+            {
+                Ok(Some(tokens)) => return Some(tokens as usize),
+                Ok(None) => {}
+                // The completion resolves `num_ctx` the same way once the
+                // upstream recovers — and falls back to the same value when
+                // it cannot. Budget for the request the model will be sent,
+                // not a ceiling it will not see.
+                Err(_) => {
+                    if let Some(tokens) = chat.client.context_window_fallback_tokens() {
+                        log::warn!(
+                            "context window probe for {resolved} did not answer within {}s; \
+                             budgeting for the client's num_ctx fallback",
+                            timeout.as_secs()
+                        );
+                        return Some(tokens as usize);
+                    }
+                }
             }
         }
         Self::model_context_tokens(model_id)
@@ -1875,6 +1901,42 @@ mod tests {
             service.context_budget_bytes(&model).await,
             2_048 * CONTEXT_BYTES_PER_TOKEN / 2
         );
+    }
+
+    #[tokio::test]
+    async fn a_hung_window_probe_budgets_the_clients_fallback_inside_the_request_timeout() {
+        // `/api/show` holds the connection open forever: the probe is part
+        // of this call's path, so it is bounded by the endpoint's request
+        // timeout, not the provider client's 600 s. Its failure answers
+        // what the completion itself resolves on the same failure — the
+        // client's own 2,048 `num_ctx` fallback.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let _held = tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let service = service();
+        let mut endpoint = Endpoint::for_test(
+            "upstream",
+            EndpointKind::Ollama,
+            &format!("http://{address}"),
+            "",
+        );
+        endpoint.request_timeout_secs = Some(1);
+        Ad4mDb::with_global_instance(|db| db.insert_endpoint(&endpoint)).unwrap();
+        let model = service
+            .add_model(model_on(&endpoint, ModelType::Llm, "m"))
+            .await
+            .unwrap();
+
+        let budget = tokio::time::timeout(
+            Duration::from_secs(10),
+            service.context_budget_bytes(&model),
+        )
+        .await
+        .expect("the probe is bounded by the endpoint's request timeout");
+        assert_eq!(budget, 2_048 * CONTEXT_BYTES_PER_TOKEN / 2);
     }
 
     #[tokio::test]
