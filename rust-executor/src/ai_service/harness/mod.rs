@@ -995,10 +995,11 @@ async fn complete_or_retry(
         Ok(completion) => Ok(completion),
         Err(first) if !is_transient(&first) => Err(first),
         Err(first) => {
-            log::warn!(
-                "harness: round {round}: upstream completion failed ({first}); \
-                 retrying the round once"
-            );
+            // Status only. `{first}` is UpstreamStatus's Display, which
+            // includes the retained body (up to 64 KiB) — a prompt the server
+            // echoed — and this line is WARN, past the provider's 500-byte
+            // excerpt.
+            log::warn!("{}", retry_warn_line(round, &first));
             // A throttled upstream said when to come back: wait that long
             // (bounded, so a huge value cannot hold the run) before the retry.
             if let Some(wait) = retry_after_delay(&first) {
@@ -1106,6 +1107,16 @@ fn is_transient(error: &anyhow::Error) -> bool {
             .downcast_ref::<UpstreamUnreachable>()
             .is_some_and(|unreachable| !unreachable.timed_out)
     })
+}
+
+/// The retry warn. Status only: Display of an upstream error includes the
+/// retained body, which can be a prompt the server echoed.
+fn retry_warn_line(round: usize, error: &anyhow::Error) -> String {
+    let status = upstream_status_label(error);
+    format!(
+        "harness: round {round}: upstream completion failed ({status}); \
+         retrying the round once"
+    )
 }
 
 /// `HTTP 500` when the error carries an upstream status, else the error's
@@ -2284,6 +2295,26 @@ mod tests {
             3,
             "failed try, successful retry, final answer"
         );
+    }
+
+    #[test]
+    fn a_retry_warn_names_the_status_not_the_upstream_body() {
+        // An upstream 500 can echo the prompt. Display of that error carries
+        // the retained body; the retry warn must not.
+        let secret = "user-prompt-echoed-by-upstream";
+        let error = anyhow::anyhow!(crate::ai_service::providers::http::UpstreamStatus {
+            url: "http://127.0.0.1:11434/api/chat".into(),
+            status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            body: format!("{secret} {}", "x".repeat(8_000)),
+            retry_after: None,
+        });
+        let line = retry_warn_line(1, &error);
+        assert!(line.contains("HTTP 500"), "{line}");
+        assert!(
+            !line.contains(secret),
+            "retry warn must not carry the upstream body: {line}"
+        );
+        assert!(line.len() < 200, "{line}");
     }
 
     #[tokio::test]
