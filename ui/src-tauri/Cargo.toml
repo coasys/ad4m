@@ -66,9 +66,6 @@ tikv-jemallocator = { version = "0.6", features = ["unprefixed_malloc_on_support
 # by default Tauri runs in production mode
 # when `tauri dev` runs it is executed with `cargo run --no-default-features` if `devPath` is an URL
 default = [ "custom-protocol"]
-# Pass metal and cuda features through to ad4m-executor
-metal = ["ad4m-executor/metal"]
-cuda = ["ad4m-executor/cuda"]
 
 
 dev = []

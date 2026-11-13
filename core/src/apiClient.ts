@@ -422,6 +422,10 @@ export class ApiClient {
         }
 
         ws.onerror = (e) => {
+            // A socket this client already let go (closed, or dropped as silent) is no news:
+            // Node reports an `error` when the server ends the connection without answering
+            // the close frame, as the executor does after the last listener goes.
+            if (this._ws !== ws) return
             console.error('WebSocket error:', e)
         }
     }

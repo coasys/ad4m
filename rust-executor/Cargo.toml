@@ -27,10 +27,7 @@ name = "generate_snapshot"
 path = "src/bin/generate_snapshot.rs"
 
 [features]
-# Pass metal and cuda features (set through build.rs) through to kalosm
 default = []
-metal = ["kalosm/metal"]
-cuda = ["kalosm/cuda"]
 generate_snapshot = []  # Feature flag for snapshot generation mode
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -161,6 +158,10 @@ cid = "0.11"
 once_cell = "1.17.1"
 rust-embed="8.0.0"
 dirs = "5.0.1"
+# Local AI hardware detection (`ai_service/local/hardware.rs`): RAM, CPU, disks,
+# processes; NVML and the Vulkan loader are opened at run time, when present.
+sysinfo = { version = "0.38", default-features = false, features = ["system", "disk"] }
+libloading = "0.8"
 rocket = "0.5.0"
 
 
@@ -201,7 +202,7 @@ scryer-prolog = { version = "0.10", git = "https://github.com/coasys/scryer-prol
 # scryer-prolog = { path = "../../scryer-prolog", features = ["multi_thread"] }
 
 ad4m-client = { path = "../rust-client", version="0.13.1-staging.9" }
-reqwest = { version = "0.11.20", features = ["json", "native-tls", "blocking", "stream"] }
+reqwest = { version = "0.11.20", features = ["json", "native-tls", "blocking", "stream", "multipart"] }
 # reqwest 0.11's DNS `Name` (the identity resolver's public-address-only `dns_resolver`).
 hyper_014 = { package = "hyper", version = "0.14.21", default-features = false, features = ["tcp", "client"] }
 
@@ -226,18 +227,19 @@ tokio-rustls = "0.26"
 rustls-pemfile = "2"
 x509-parser = "0.16"
 
-kalosm = { version = "0.3.2", git = "https://github.com/coasys/floneum.git", branch = "coasys-2-without-pdf", features = ["language", "sound"] }
+# Silero VAD (ONNX, embedded): the speech gate before a transcription request
+# (ai_service/transcription.rs), dev's crate and model, so dev's thresholds hold.
 voice_activity_detector = "0.1.1"
-candle-core = "0.8.2"
+# Its ort (=2.0.0-rc.4) builds only against ort-sys rc.4; a newer pre-release matches
+# ort's requirement and does not compile (size_t is gone from it).
+ort-sys = "=2.0.0-rc.4"
 deflate = "1.0.0"
 tar = "0.4"
 flate2 = "1"
 futures-core = "0.3.30"
 futures-util = "0.3.30"
 futures-channel = "0.3.30"
-rodio = "*"
 libc = "0.2"
-chat-gpt-lib-rs = { version = "0.5.1", git = "https://github.com/coasys/chat-gpt-lib-rs" }
 anyhow = "1.0.95"
 portpicker = "0.1.1"
 # Bumped from 0.5.6 to 0.7.x to match what deno v2.9.5's deno_ops #[op2]
@@ -273,16 +275,15 @@ fs_extra = "1.3.0"
 sha2 = "0.10.8"
 
 
-# Force static CRT on Windows MSVC to match libort_sys (ONNX Runtime) and avoid LNK2038 mismatch
 [target.'cfg(target_env = "msvc")'.dependencies]
 # aws-lc-sys: use pre-compiled NASM assembly objects on Windows.
 # Without this, aws-lc-sys needs NASM installed and cmake integration which
 # fails on MSVC. The prebuilt-nasm feature ships .obj files in the crate.
 aws-lc-sys = { version = "0.35", features = ["prebuilt-nasm"] }
 
-# macOS ARM64: ONNX Runtime static lib is too large for ARM64 branch instructions
-# (b(l) range ±128MB). load-dynamic links ort at runtime instead of statically,
-# reducing binary size below the ARM64 branch limit.
+# The speech gate's ONNX Runtime (voice_activity_detector), as on dev. macOS ARM64: the
+# static lib is too large for ARM64 branch instructions (b(l) range ±128MB), so ort loads
+# it at run time; without it the gate passes every utterance, with a warning.
 [target.'cfg(target_os = "macos")'.dependencies]
 ort = { version = "2.0.0-rc.4", features = ["load-dynamic"] }
 

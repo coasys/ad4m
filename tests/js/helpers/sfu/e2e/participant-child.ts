@@ -11,7 +11,7 @@
  */
 
 import { Ad4mClient, type Session } from "@coasys/ad4m";
-import { Hearing, SCREEN, Source, toneSource, videoSource, wrtc } from "./media.js";
+import { Hearing, PauseWatch, SCREEN, Source, toneSource, videoSource, wrtc } from "./media.js";
 import type { Command, JoinOptions, Snapshot } from "./protocol.js";
 import { failNextOffer, installWebRtc, selectedRemoteAddresses } from "./webrtc.js";
 
@@ -35,6 +35,13 @@ let options: JoinOptions | null = null;
 let tone: Source | null = null;
 let camera: Source | null = null;
 let screen: Source | null = null;
+/** Pauses of this process, from its start: a fresh process on a loaded host stalls most. */
+const pauses = new PauseWatch();
+/**
+ * How long after a pause a receiver can still miss the tone: the half second
+ * it analyses, the jitter buffer, and the spread of one round of snapshots.
+ */
+const PAUSE_RECENT_MS = 2_000;
 
 const state = {
   topology: null as string | null,
@@ -86,6 +93,7 @@ async function snapshot(): Promise<Snapshot> {
     peerStates: state.peerStates,
     recoveries: state.recoveries,
     selectedRemotes: await selectedRemoteAddresses(),
+    pausedMs: pauses.longestWithin(PAUSE_RECENT_MS),
   };
 }
 
@@ -181,6 +189,7 @@ async function run(command: Command): Promise<unknown> {
       state.hearing.stop();
       await session?.destroy().catch(() => {});
       for (const source of [tone, camera, screen]) source?.stop();
+      pauses.stop();
       setTimeout(() => process.exit(0), 50);
       return;
   }

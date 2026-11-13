@@ -36,7 +36,7 @@
 //! Uses the standard `setup_interpretation_e2e` harness: OpenAI-compatible
 //! endpoint at `INTERPRETATION_E2E_BASE_URL` (default `localhost:11434/v1`,
 //! i.e. Ollama on Marvin or over an SSH tunnel from a dev box), model
-//! `INTERPRETATION_E2E_MODEL` (default `gemma3:12b`). Retries the whole
+//! `INTERPRETATION_E2E_MODEL` (default `qwen3.8-27b-48k`). Retries the whole
 //! pass up to 3× to soak up single-sample LLM flake, matching the
 //! sibling generic-interpretation e2e tests.
 //!
