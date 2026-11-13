@@ -17,6 +17,7 @@ use serde_json::Value;
 /// (`agent-updated`): the one list of wire names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Topic {
+    AiSessionChanged,
     AgentStatusChanged,
     AgentUpdated,
     AppsChanged,
@@ -50,7 +51,8 @@ pub enum Topic {
 
 impl Topic {
     /// Every topic, in the order of `events_ws::event_specs`.
-    pub const ALL: [Topic; 29] = [
+    pub const ALL: [Topic; 30] = [
+        Topic::AiSessionChanged,
         Topic::AgentStatusChanged,
         Topic::AgentUpdated,
         Topic::AppsChanged,
@@ -86,6 +88,7 @@ impl Topic {
     /// of `events.watch` params.
     pub const fn as_str(self) -> &'static str {
         match self {
+            Topic::AiSessionChanged => "ai-session-changed",
             Topic::AgentStatusChanged => "agent-status-changed",
             Topic::AgentUpdated => "agent-updated",
             Topic::AppsChanged => "apps-changed",
@@ -175,9 +178,10 @@ impl Topic {
             Topic::ExceptionOccurred => caps::RUNTIME_EXCEPTION_SUBSCRIBE_CAPABILITY.clone(),
             // `ai.transcriptionOpen`.
             Topic::AiTranscriptionText => caps::AI_TRANSCRIBE_CAPABILITY.clone(),
-            // `ai.modelStatus`, `ai.models`; `ai.endpoints` (an operator-only event:
-            // published to the main agent's sessions, as `Guard::Executor` admits).
-            Topic::AiModelStatus | Topic::AiEndpointStatus => {
+            // `ai.modelStatus`, `ai.models`, the `ai.session*` reads; `ai.endpoints` (an
+            // operator-only event: published to the main agent's sessions, as
+            // `Guard::Executor` admits).
+            Topic::AiSessionChanged | Topic::AiModelStatus | Topic::AiEndpointStatus => {
                 caps::AI_READ_CAPABILITY.clone()
             }
             // `ai.localStatus`; published to the operator only, as `ai.localInstall` is

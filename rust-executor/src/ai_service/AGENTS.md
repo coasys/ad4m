@@ -218,7 +218,7 @@ The executor still runs no model in-process: `local/` installs and supervises mo
 
 ## `harness/`
 
-Tool-calling loop used by `perspectives/interpretation` and `perspectives/agent_session` (not by the OpenAI shim):
+Tool-calling loop used by `perspectives/interpretation`, `perspectives/agent_session` and `ai_sessions` (not by the OpenAI shim):
 
 - `provider.rs`: `ToolProvider`, `ToolSchema`, `CreditGate` traits. The clean seam;
   implemented by `mcp/tools/provider_impl.rs`.
