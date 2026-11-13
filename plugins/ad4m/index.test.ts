@@ -3865,6 +3865,8 @@ describe("WakerSubscriptionManager", () => {
     return {
       ProxyClass: vi.fn(function (...args: unknown[]) { return args[3] === "ad4m://Mentioning" ? mentionProxy : proxy; }),
       proxy,
+      /** The mention query's proxy: whether it opens decides whether the subscription opens (#1735). */
+      mentionProxy,
       /** Simulate the subscription delivering a result */
       deliver: (result: any) => {
         if (!resultCallback) throw new Error("onResult not registered yet");
@@ -3886,7 +3888,7 @@ describe("WakerSubscriptionManager", () => {
 
   it("should throw when the executor rejects the subscription, and not keep it active", async () => {
     const mock = makeMockProxy();
-    mock.proxy.subscribe = vi.fn(() =>
+    mock.proxy.subscribe = mock.mentionProxy.subscribe = vi.fn(() =>
       Promise.reject(new Error("RPC error 403: main key not found")),
     );
     const persisted: { subs: any[] } = { subs: [{ placeholder: true }] };
@@ -3921,7 +3923,7 @@ describe("WakerSubscriptionManager", () => {
   it("re-attempts a rejected subscription until the executor accepts it", async () => {
     const mock = makeMockProxy();
     let attempt = 0;
-    mock.proxy.subscribe = vi.fn(() => {
+    mock.mentionProxy.subscribe = vi.fn(() => {
       attempt += 1;
       // Fails while the wallet is locked, succeeds once it is unlocked.
       return attempt === 1
@@ -3959,7 +3961,7 @@ describe("WakerSubscriptionManager", () => {
 
   it("stops re-attempting a subscription that was disposed", async () => {
     const mock = makeMockProxy();
-    mock.proxy.subscribe = vi.fn(() =>
+    mock.proxy.subscribe = mock.mentionProxy.subscribe = vi.fn(() =>
       Promise.reject(new Error("RPC error 403: main key not found")),
     );
 
@@ -3995,7 +3997,7 @@ describe("WakerSubscriptionManager", () => {
     // RPC. Nothing rejects, so before the deadline existed this await never
     // settled: the sub was neither active nor pending, the 30s re-attempt
     // never saw it, and the tool call died at the harness timeout instead.
-    mock.proxy.subscribe = vi.fn(() => new Promise<void>(() => {}));
+    mock.proxy.subscribe = mock.mentionProxy.subscribe = vi.fn(() => new Promise<void>(() => {}));
 
     const manager = new WakerSubscriptionManager({
       perspectiveClient: mockPerspectiveClientSimple,
@@ -4029,7 +4031,7 @@ describe("WakerSubscriptionManager", () => {
   it("re-attempts a timed-out subscription and enrolls it once the executor answers", async () => {
     const mock = makeMockProxy();
     let attempt = 0;
-    mock.proxy.subscribe = vi.fn(() => {
+    mock.mentionProxy.subscribe = vi.fn(() => {
       attempt += 1;
       // Hangs the first time, answers on the re-attempt.
       return attempt === 1 ? new Promise<void>(() => {}) : Promise.resolve();
