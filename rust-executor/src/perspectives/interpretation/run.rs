@@ -1203,6 +1203,9 @@ pub async fn run_interpretation_with_harness_and_model(
     let service = crate::ai_service::AIService::global_instance()
         .await
         .map_err(|e| anyhow::anyhow!("run_interpretation_harness: AIService not ready: {e:#}"))?;
+    // Sized from the window the model's requests actually run at — the same
+    // resolved `num_ctx` the bridge trims its outgoing list to.
+    let tool_result_max_bytes = service.tool_result_max_bytes(&task.model_id).await;
     // A pass with a caller bills the agent it acts as (by DID); the caller's session named that
     // agent. An executor-owned pass (no caller) bills no one.
     let bill_to = context
@@ -1234,9 +1237,7 @@ pub async fn run_interpretation_with_harness_and_model(
         bridge,
         HarnessConfig {
             max_tool_calls,
-            tool_result_max_bytes: crate::ai_service::AIService::tool_result_max_bytes(
-                &task.model_id,
-            ),
+            tool_result_max_bytes,
             // The pass's final text is discarded — a model that made its
             // propose_* calls and went quiet is a normal finish, and each
             // nudge would cost a billed completion nobody reads.
