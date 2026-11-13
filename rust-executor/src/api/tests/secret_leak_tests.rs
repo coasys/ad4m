@@ -39,7 +39,8 @@ use crate::runtime_service::RuntimeService;
 use crate::secret::Secret;
 use crate::test_utils::{ensure_test_db, setup_agent, setup_wallet, MultiUserMode};
 use crate::types::{
-    ModelApiInput, ModelInput, ModelType, PerspectiveHandle, PerspectiveState, RequestContext,
+    Endpoint, EndpointKind, ModelInput, ModelType, PerspectiveHandle, PerspectiveState,
+    RequestContext,
 };
 
 /// Methods that only read but carry no `read` flag (the flag also promises that a client may
@@ -72,6 +73,10 @@ const SKIPPED: &[(&str, &str)] = &[
     (
         "ai.discoverModels",
         "calls the provider at baseUrl over the network",
+    ),
+    (
+        "ai.detectEndpoints",
+        "probes this machine's loopback ports, where unrelated servers may answer",
     ),
     (
         "perspective.queryProlog",
@@ -172,6 +177,7 @@ struct Fixture {
     user_email: String,
     perspective: String,
     model_id: String,
+    ai_session: String,
 }
 
 /// Minimal valid parameters for `method`.
@@ -179,12 +185,14 @@ fn params(method: &str, fx: &Fixture) -> Value {
     let uuid = fx.perspective.as_str();
     match method {
         "agent.byDid" | "runtime.friendStatus" => json!({ "did": fx.main_did }),
+        "ai.session" => json!({ "id": fx.ai_session }),
+        "ai.sessionMessages" => json!({ "sessionId": fx.ai_session }),
         "agent.byDIDs" => json!({ "dids": [fx.main_did] }),
         "agent.entanglementProofPreflight" => {
             json!({ "deviceKey": "leak-test-device", "deviceKeyType": "ethereum" })
         }
         "ai.getDefaultModel" => json!({ "modelType": "LLM" }),
-        "ai.modelLoadingStatus" => json!({ "modelId": fx.model_id }),
+        "ai.modelStatus" => json!({ "id": fx.model_id }),
         "expression.get" | "expression.getRaw" | "expression.interactions" => {
             json!({ "url": "literal://string:leak" })
         }
@@ -326,30 +334,62 @@ async fn no_read_method_or_event_carries_a_seeded_secret() {
 
     // Seeded while the streams listen: seeding publishes the events that leaked before.
     let provider_key = format!("sk-leak-provider-key-{}", id());
+    // The model's upstream refuses the key and echoes it back, as some providers do.
+    let mut upstream = mockito::Server::new_async().await;
+    upstream
+        .mock("GET", "/v1/models")
+        .with_status(401)
+        .with_body(format!(r#"{{"error":"invalid key {provider_key}"}}"#))
+        .create_async()
+        .await;
+    let endpoint = Endpoint::for_test(
+        "leak-endpoint",
+        EndpointKind::OpenAiCompatible,
+        &format!("{}/v1", upstream.url()),
+        &provider_key,
+    );
     let model_id = Ad4mDb::with_global_instance(|db| {
+        db.insert_endpoint(&endpoint)?;
         let id = db.add_model(&ModelInput {
             name: "Leak test model".to_string(),
-            api: Some(ModelApiInput {
-                base_url: "https://api.example.org/v1".to_string(),
-                api_key: Some(provider_key.clone().into()),
-                model: "leak-model".to_string(),
-                api_type: "OpenAi".to_string(),
-                max_num_ctx: None,
-            }),
-            local: None,
             model_type: ModelType::Llm,
+            endpoint_id: endpoint.id.clone(),
+            remote_model: "leak-model".to_string(),
+            native_tools: None,
         })?;
         db.set_default_model(ModelType::Llm, &id)?;
         crate::db::Ad4mDbResult::Ok(id)
     })
     .unwrap();
-    // Loads the model as start-up does: its loading-status events reach the streams.
+    // The model's endpoint, checked as the health loop does: the refusal, with the echoed
+    // key, is its stored health and an `ai-endpoint-status` event.
+    let health = crate::ai_service::endpoints::check_health(&endpoint)
+        .await
+        .unwrap();
+    assert_eq!(health.state, crate::types::EndpointState::Unauthorized);
+    // Starts the service as start-up does: it loads the model from its endpoint.
     crate::ai_service::AIService::init_global_instance()
         .await
         .unwrap();
 
     let main_perspective = perspective(None);
     let user_perspective = perspective(Some(vec![user_did.clone()]));
+    // An AI session of the main agent: the `ai.session`/`ai.sessionMessages` reads name it.
+    let ai_session = id();
+    Ad4mDb::with_global_instance(|db| {
+        db.create_ai_session(&crate::ai_sessions::types::AiSession {
+            id: ai_session.clone(),
+            owner_did: None,
+            title: "leak test".to_string(),
+            model: None,
+            default_perspective: None,
+            library_perspective: None,
+            capabilities: vec![],
+            created_at: "now".to_string(),
+            updated_at: "now".to_string(),
+        })
+    })
+    .expect("an AI session");
     let _registered = Registered(vec![main_perspective.clone(), user_perspective.clone()]);
     let map = Arc::new(build_handler_map());
     let webhook_credential = format!("leak-webhook-credential-{}", id());
@@ -460,6 +500,7 @@ async fn no_read_method_or_event_carries_a_seeded_secret() {
         user_email: user_email.clone(),
         perspective: main_perspective.clone(),
         model_id: model_id.clone(),
+        ai_session,
     };
     let principals = [
         ("operator", operator),
@@ -496,7 +537,7 @@ async fn no_read_method_or_event_carries_a_seeded_secret() {
     // Every event published so far has reached both collectors once this one has.
     let fence = format!("leak-fence-{}", id());
     get_global_pubsub().await.publish_event(Event::new(
-        Topic::AiModelLoadingStatus,
+        Topic::AiModelStatus,
         Audience::Everyone,
         json!({ "fence": fence }),
     ));
@@ -529,9 +570,25 @@ async fn no_read_method_or_event_carries_a_seeded_secret() {
     assert!(users_list.contains(&notifications[1]), "{users_list}");
     let models = operator_answer("ai.models");
     assert!(
-        models.contains(&model_id) && models.contains(r#""hasApiKey":true"#),
+        models.contains(&model_id) && models.contains(&endpoint.id),
         "{models}"
     );
+    // Users read `ai.models` too: a model's status names no endpoint URL (`ai.endpoints`,
+    // the operator's, does).
+    let users_models = &answers[&("ai.models", "user")];
+    assert!(!users_models.contains(&upstream.url()), "{users_models}");
+    let endpoints = operator_answer("ai.endpoints");
+    assert!(
+        endpoints.contains(&endpoint.id)
+            && endpoints.contains(r#""hasApiKey":true"#)
+            && endpoints.contains("invalid key <redacted>"),
+        "{endpoints}"
+    );
+    assert!(operator_events
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|e| e.contains("ai-endpoint-status") && e.contains(&endpoint.id)));
     let users = operator_answer("user.list");
     assert!(users.contains(&user_email), "{users}");
     let operator_events = operator_events.lock().unwrap();

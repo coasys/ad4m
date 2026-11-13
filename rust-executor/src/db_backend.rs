@@ -31,16 +31,19 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use tokio::sync::OnceCell;
 
+use crate::ai_sessions::types::{AiSession, AiSessionMessage, AiSessionUpdate};
 use crate::db::{
     Ad4mDb, Ad4mDbResult, ComputeLogEntry, FlowReplicaStateRow, GrantRow, JoinRow,
     OperatorRecordRow, PaymentRequest,
 };
+use crate::secret::Secret;
 use crate::types::{
-    AIModelLoadingStatus, AIPromptExamples, AITask, EntanglementProof, Expression, ImportResult,
-    LinkExpression, LinkStatus, Model, ModelInput, ModelType, Notification, NotificationInput,
-    PerspectiveDiff, PerspectiveExpression, PerspectiveHandle, SentMessage, UserInfo,
-    UserStatistics,
+    AIPromptExamples, AITask, AiCapability, Endpoint, EndpointHealth, EntanglementProof,
+    Expression, ImportResult, LinkExpression, LinkStatus, Model, ModelInput, ModelType,
+    Notification, NotificationInput, PerspectiveDiff, PerspectiveExpression, PerspectiveHandle,
+    SentMessage, UserInfo, UserStatistics,
 };
+use url::Url;
 
 // ── Domain methods ─────────────────────────────────────────────────────────────
 
@@ -173,19 +176,7 @@ macro_rules! ad4m_db_methods {
             fn delete_grants(&self, ids: &[String]) -> Ad4mDbResult<()>;
             fn delete_grants_expired_before(&self, cutoff: u64) -> Ad4mDbResult<()>;
 
-            // AI: model status, tasks, models
-            fn create_or_update_model_status(
-                &self,
-                model: &str,
-                progress: f64,
-                status: &str,
-                downloaded: bool,
-                loaded: bool
-            ) -> Result<(), rusqlite::Error>;
-            fn get_model_status(
-                &self,
-                model: &str
-            ) -> Result<Option<AIModelLoadingStatus>, rusqlite::Error>;
+            // AI: tasks, models
             fn add_task(
                 &self,
                 name: String,
@@ -219,6 +210,25 @@ macro_rules! ad4m_db_methods {
             fn remove_model(&self, id: &str) -> Ad4mDbResult<()>;
             fn set_default_model(&self, model_type: ModelType, model_id: &str) -> Ad4mDbResult<()>;
             fn get_default_model(&self, model_type: ModelType) -> Ad4mDbResult<Option<String>>;
+
+            // AI endpoints
+            fn get_endpoints(&self) -> Ad4mDbResult<Vec<Endpoint>>;
+            fn get_endpoint(&self, id: &str) -> Ad4mDbResult<Option<Endpoint>>;
+            fn get_endpoint_by_name(&self, name: &str) -> Ad4mDbResult<Option<Endpoint>>;
+            fn insert_endpoint(&self, endpoint: &Endpoint) -> Ad4mDbResult<()>;
+            fn update_endpoint(&self, endpoint: &Endpoint) -> Ad4mDbResult<Vec<String>>;
+            fn kept_endpoint_key(&self, id: &str, base_url: &Url) -> Ad4mDbResult<Secret>;
+            fn set_endpoint_health(
+                &self,
+                id: &str,
+                base_url: &Url,
+                health: &EndpointHealth,
+                capabilities: &[AiCapability]
+            ) -> Ad4mDbResult<bool>;
+            fn endpoint_model_ids(&self, id: &str) -> Ad4mDbResult<Vec<String>>;
+            fn endpoint_remote_models(&self, id: &str) -> Ad4mDbResult<Vec<String>>;
+            fn models_using_remote(&self, id: &str, remote_model: &str) -> Ad4mDbResult<Vec<String>>;
+            fn remove_endpoint(&self, id: &str) -> Ad4mDbResult<()>;
 
             // Notifications
             fn add_notification(
@@ -382,6 +392,68 @@ macro_rules! ad4m_db_methods {
             fn agents_of_identity(&self, scid: &str) -> Ad4mDbResult<Vec<String>>;
             fn add_join(&self, join: &JoinRow) -> Ad4mDbResult<()>;
             fn join(&self, offer_id: &str) -> Ad4mDbResult<Option<JoinRow>>;
+
+            // AI sessions (`ai_sessions/`): a run's state lives in these tables,
+            // never only in memory. Every method scopes by `owner_did` (`None` = the main
+            // agent), so a caller can never reach another agent's session.
+            fn create_ai_session(&self, session: &AiSession) -> Result<(), rusqlite::Error>;
+            fn get_ai_session(
+                &self,
+                owner_did: Option<&str>,
+                id: &str
+            ) -> Result<Option<AiSession>, rusqlite::Error>;
+            fn get_ai_session_any(
+                &self,
+                id: &str
+            ) -> Result<Option<AiSession>, rusqlite::Error>;
+            fn list_ai_sessions(
+                &self,
+                owner_did: Option<&str>
+            ) -> Result<Vec<AiSession>, rusqlite::Error>;
+            fn update_ai_session(
+                &self,
+                owner_did: Option<&str>,
+                id: &str,
+                update: &AiSessionUpdate
+            ) -> Result<bool, rusqlite::Error>;
+            fn delete_ai_session(
+                &self,
+                owner_did: Option<&str>,
+                id: &str
+            ) -> Result<bool, rusqlite::Error>;
+            fn append_ai_message(
+                &self,
+                owner_did: Option<&str>,
+                id: &str,
+                session_id: &str,
+                role: &str,
+                content: &str,
+                status: Option<&str>
+            ) -> Result<Option<AiSessionMessage>, rusqlite::Error>;
+            fn get_ai_message(
+                &self,
+                owner_did: Option<&str>,
+                id: &str
+            ) -> Result<Option<AiSessionMessage>, rusqlite::Error>;
+            fn finish_ai_message(
+                &self,
+                owner_did: Option<&str>,
+                id: &str,
+                status: &str,
+                error: Option<&str>,
+                content_patch: Option<&Value>
+            ) -> Result<bool, rusqlite::Error>;
+            fn list_ai_messages(
+                &self,
+                owner_did: Option<&str>,
+                session_id: &str,
+                limit: u32,
+                before: Option<i64>
+            ) -> Result<Vec<AiSessionMessage>, rusqlite::Error>;
+            fn interrupt_running_ai_messages(
+                &self,
+                session_id: Option<&str>
+            ) -> Result<u64, rusqlite::Error>;
 
             // Expression cache
             fn _add_expression(&self, url: &str, expression: &Expression<Value>) -> Ad4mDbResult<()>;

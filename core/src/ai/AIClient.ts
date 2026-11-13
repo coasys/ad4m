@@ -1,9 +1,42 @@
 import {ApiClient, CallOptions } from '../apiClient';
 import base64js from 'base64-js';
 import pako from 'pako'
-import { AIModelLoadingStatus, AITask, AITaskInput } from "./Tasks";
-import { ModelInput, Model, ModelType } from "./AITypes"
-import type { ModelInput as ModelInputData } from "../generated/api/ModelInput";
+import { AITask, AITaskInput } from "./Tasks";
+import type {
+    AiDiscoverModelsParams,
+    AiEndpoint,
+    AiEndpointInput,
+    DetectedEndpoint,
+    DiscoveredModel,
+    LocalAiHardware,
+    LocalAiInstallParams,
+    LocalAiPlan,
+    LocalAiProgress,
+    LocalAiStatus,
+    Model,
+    ModelInput,
+    ModelStatus,
+    ModelType,
+} from "./AITypes";
+import type { AISession } from "../generated/api/AISession";
+import type { AISessionChanged } from "../generated/api/AISessionChanged";
+import type { AISessionMessage } from "../generated/api/AISessionMessage";
+import type { AISessionSendStarted } from "../generated/api/AISessionSendStarted";
+import type { AISessionUpdateRequest } from "../generated/api/AISessionUpdateRequest";
+import type { Capability } from "../generated/api/Capability";
+
+/** The fields a session's create and update take. A field left out keeps its value on an
+ *  update (and takes the default on a create); a nullable one is cleared with `null`. */
+export interface AISessionInput {
+    title?: string;
+    model?: string | null;
+    defaultPerspective?: string | null;
+    libraryPerspective?: string | null;
+    capabilities?: Capability[];
+}
+
+/** How long `localInstall` waits by default: a first install downloads gigabytes. */
+export const LOCAL_INSTALL_TIMEOUT_MS = 6 * 60 * 60 * 1000
 
 export class AIClient {
     #apiClient: ApiClient;
@@ -13,37 +46,145 @@ export class AIClient {
         this.#apiClient = sharedApiClient || new ApiClient(baseUrl, token);
     }
 
-    /** The executor names the model type `type`. */
-    private serializeModelInput({ modelType, ...model }: ModelInput): ModelInputData {
-        return { ...model, type: modelType };
-    }
-
+    /** Every model, each on its endpoint, with where it stands by the endpoint's last check. */
     async getModels(): Promise<Model[]> {
         return this.#apiClient.call('ai.models', {});
     }
 
     /**
-     * Ask a remote endpoint which models it serves, before adding one.
+     * The models a server lists, with their capabilities: a saved endpoint by
+     * `{ endpointId }`, or a server not saved yet by `{ kind, baseUrl, apiKey? }`.
      *
-     * Takes the credentials of a model that does not exist yet — a settings
-     * form is being filled in and wants the list to pick from. Rejects when
-     * the endpoint is unreachable or the key is refused, which makes this the
-     * credential check too: without it a bad key surfaces later as a failed
-     * completion carrying an error from a different layer.
-     *
-     * `apiType` defaults to the OpenAI shape, which is what every endpoint
-     * that is not Anthropic speaks.
+     * Rejects when the server is unreachable or the key is refused, which makes this the
+     * credential check too: without it a bad key surfaces later as a failed completion
+     * carrying an error from a different layer.
      */
-    async discoverModels(baseUrl: string, apiKey?: string, apiType?: string): Promise<string[]> {
-        return this.#apiClient.call('ai.discoverModels', { baseUrl, apiKey, apiType });
+    async discoverModels(params: AiDiscoverModelsParams): Promise<DiscoveredModel[]> {
+        return this.#apiClient.call('ai.discoverModels', params);
     }
 
+    /**
+     * The upstream model servers this executor uses, with their health. Operator only:
+     * a managed user's session is refused. Keys never come back: `hasApiKey` says
+     * whether one is set.
+     */
+    async endpoints(): Promise<AiEndpoint[]> {
+        return this.#apiClient.call('ai.endpoints', {});
+    }
+
+    /**
+     * Register an upstream server. The executor lists its models once first: the answer
+     * carries the endpoint's health, and its capabilities when `capabilities` is left out.
+     * It saves an endpoint that does not answer yet.
+     */
+    async addEndpoint(endpoint: AiEndpointInput): Promise<AiEndpoint> {
+        return this.#apiClient.call('ai.addEndpoint', endpoint);
+    }
+
+    /**
+     * Replace an endpoint's settings. Without `apiKey` the stored key stays, and the update
+     * is refused if `baseUrl` changes too. The models on the endpoint follow it.
+     */
+    async updateEndpoint(id: string, endpoint: AiEndpointInput): Promise<AiEndpoint> {
+        return this.#apiClient.call('ai.updateEndpoint', { id, endpoint });
+    }
+
+    /** Remove an endpoint. Refused while models run on it, unless `cascade` removes them too. */
+    async removeEndpoint(id: string, cascade?: boolean): Promise<boolean> {
+        return this.#apiClient.call('ai.removeEndpoint', { id, cascade });
+    }
+
+    /** Model servers running on the executor's machine (loopback ports). Nothing is saved. */
+    async detectEndpoints(): Promise<DetectedEndpoint[]> {
+        return this.#apiClient.call('ai.detectEndpoints', {});
+    }
+
+    /**
+     * Pull a model onto an Ollama endpoint. Resolves when the pull is done; progress
+     * arrives as `model-status` events.
+     */
+    async pullModel(endpointId: string, remoteModel: string, options?: CallOptions): Promise<boolean> {
+        return this.#apiClient.call('ai.pullModel', { endpointId, remoteModel }, options);
+    }
+
+    /** Delete a model from an Ollama endpoint. Refused while a model uses it. */
+    async deleteUpstreamModel(endpointId: string, remoteModel: string): Promise<boolean> {
+        return this.#apiClient.call('ai.deleteUpstreamModel', { endpointId, remoteModel });
+    }
+
+    // ── Local AI: the executor runs llama.cpp and nemo-speech itself ──
+
+    /**
+     * The executor's device: OS, CPU, RAM, GPUs, the backends a runtime can use, the memory
+     * budget the models must fit, and the hardware class. Not for managed users.
+     */
+    async localHardware(): Promise<LocalAiHardware> {
+        return this.#apiClient.call('ai.localHardware', {});
+    }
+
+    /**
+     * What `localInstall` would set up on this device: the runtime builds and models per
+     * service, the download size, and whether it fits (with the reasons when not).
+     */
+    async localPlan(): Promise<LocalAiPlan> {
+        return this.#apiClient.call('ai.localPlan', {});
+    }
+
+    /**
+     * Download the plan's runtimes and models into the per-user store (resumable, sha256
+     * checked), start them and register them as managed endpoints, models and defaults.
+     * Resolves when it is done, which takes minutes the first time; `onProgress` gets the
+     * `ai-local-progress` events meanwhile. Operator only (the admin credential).
+     */
+    async localInstall(
+        params: LocalAiInstallParams = {},
+        onProgress?: (progress: LocalAiProgress) => void,
+        options?: CallOptions,
+    ): Promise<LocalAiStatus> {
+        const unsubscribe = onProgress ? this.#apiClient.on('ai-local-progress', onProgress) : undefined;
+        try {
+            // Gigabytes on a slow link take longer than a long call's 20 minutes.
+            return await this.#apiClient.call('ai.localInstall', params, { timeoutMs: LOCAL_INSTALL_TIMEOUT_MS, ...options });
+        } finally {
+            unsubscribe?.();
+        }
+    }
+
+    /** What local AI has installed for this executor and how its runtimes run. */
+    async localStatus(): Promise<LocalAiStatus> {
+        return this.#apiClient.call('ai.localStatus', {});
+    }
+
+    /** Start the installed runtimes (they also start with the executor). Operator only. */
+    async localStart(options?: CallOptions): Promise<LocalAiStatus> {
+        return this.#apiClient.call('ai.localStart', {}, options);
+    }
+
+    /** Stop the runtimes; their endpoints and models stay, down. Operator only. */
+    async localStop(): Promise<LocalAiStatus> {
+        return this.#apiClient.call('ai.localStop', {});
+    }
+
+    /**
+     * Stop the runtimes and remove their endpoints and models. `deleteFiles` also deletes
+     * the downloaded runtimes and models, which other agents of this user may share.
+     * Operator only.
+     */
+    async localRemove(deleteFiles?: boolean): Promise<boolean> {
+        return this.#apiClient.call('ai.localRemove', { deleteFiles });
+    }
+
+    /**
+     * Register an upstream model on an endpoint, by the id the endpoint knows it by. Refused
+     * when the endpoint does not exist or cannot serve the type (embeddings on Anthropic).
+     * Answers the new model's id.
+     */
     async addModel(model: ModelInput, options?: CallOptions): Promise<string> {
-        return this.#apiClient.call('ai.addModel', { model: this.serializeModelInput(model) }, options);
+        return this.#apiClient.call('ai.addModel', { model }, options);
     }
 
     async updateModel(modelId: string, model: ModelInput): Promise<boolean> {
-        return this.#apiClient.call('ai.updateModel', { id: modelId, model: this.serializeModelInput(model) });
+        return this.#apiClient.call('ai.updateModel', { id: modelId, model });
     }
 
     async removeModel(modelId: string): Promise<boolean> {
@@ -54,7 +195,7 @@ export class AIClient {
         return this.#apiClient.call('ai.setDefaultModel', { id: modelId, modelType });
     }
 
-    async getDefaultModel(modelType: ModelType): Promise<Model> {
+    async getDefaultModel(modelType: ModelType): Promise<Model | null> {
         return this.#apiClient.call('ai.getDefaultModel', { modelType });
     }
 
@@ -86,8 +227,9 @@ export class AIClient {
         });
     }
 
-    async modelLoadingStatus(model: string): Promise<AIModelLoadingStatus> {
-        return this.#apiClient.call('ai.modelLoadingStatus', { model });
+    /** Where a model stands by its endpoint's last health check (`READY`, `MISSING`, ...). */
+    async modelStatus(modelId: string): Promise<ModelStatus> {
+        return this.#apiClient.call('ai.modelStatus', { id: modelId });
     }
 
     async prompt(taskId: string, prompt: string, options?: CallOptions): Promise<string> {
@@ -108,18 +250,17 @@ export class AIClient {
         return decompressed;
     }
 
+    /**
+     * Open a transcription stream on a TRANSCRIPTION model. Feed it one utterance at a time
+     * (the caller decides where speech starts and ends; the executor drops an utterance its
+     * speech gate does not take as speech); each utterance's text arrives at
+     * `streamCallback`, in the order fed.
+     */
     async openTranscriptionStream(
         modelId: string,
         streamCallback: (text: string) => void,
-        params?: {
-            startThreshold?: number;
-            startWindow?: number;
-            endThreshold?: number;
-            endWindow?: number;
-            timeBeforeSpeech?: number;
-        }
     ): Promise<string> {
-        const streamId = await this.#apiClient.call('ai.transcriptionOpen', { modelId, params });
+        const streamId = await this.#apiClient.call('ai.transcriptionOpen', { modelId });
 
         const unsub = this.#apiClient.on('transcription-text', (event) => {
             if (event.streamId === streamId && event.text) streamCallback(event.text);
@@ -143,8 +284,10 @@ export class AIClient {
     #pendingStreamIds: Set<string> = new Set();
 
     /**
-     * Feed an audio utterance to one or more transcription streams.
-     * Sends raw binary Float32Array as application/octet-stream.
+     * Feed an audio utterance (16 kHz mono) to one or more transcription streams.
+     * Sends raw binary Float32Array as application/octet-stream. On a model served by an
+     * endpoint this resolves once the utterance is transcribed, and rejects when the upstream
+     * failed (nothing is published then).
      * NOTE: This method still uses HTTP fetch because binary audio data
      * cannot be efficiently sent over the JSON-based WebSocket RPC protocol.
      * Transcription results are delivered via the WS event channel.
@@ -190,4 +333,66 @@ export class AIClient {
         }
     }
 
+    // ── AI sessions ───────────────────────────────────────────────────────
+    // A conversation with the executor's AI, stored in the executor's database.
+    // The agent works through the MCP tools, inside the session's capabilities.
+
+    /** Creates a session. `capabilities` absent: everything the caller holds. */
+    async sessionCreate(input: AISessionInput = {}): Promise<AISession> {
+        return this.#apiClient.call('ai.sessionCreate', {
+            title: input.title ?? null,
+            model: input.model ?? null,
+            defaultPerspective: input.defaultPerspective ?? null,
+            libraryPerspective: input.libraryPerspective ?? null,
+            capabilities: input.capabilities ?? null,
+        });
+    }
+
+    async sessionList(): Promise<AISession[]> {
+        return this.#apiClient.call('ai.sessionList', {});
+    }
+
+    async session(id: string): Promise<AISession> {
+        return this.#apiClient.call('ai.session', { id });
+    }
+
+    /** A field left out keeps its value; a nullable one (`model`, `defaultPerspective`,
+     *  `libraryPerspective`) is cleared with `null`. Capabilities can only be narrowed
+     *  to what the caller holds. */
+    async sessionUpdate(id: string, update: AISessionInput): Promise<AISession> {
+        // Keys left `undefined` are not sent, so a field stays; `null` clears a nullable one.
+        return this.#apiClient.call('ai.sessionUpdate', { id, ...update } as AISessionUpdateRequest);
+    }
+
+    async sessionDelete(id: string): Promise<boolean> {
+        return this.#apiClient.call('ai.sessionDelete', { id });
+    }
+
+    /** Stores the user's message and starts the turn as a detached task; returns the ids
+     *  of the message and of the `running` reply. Follow it with {@link onSessionChanged}. */
+    async sendMessage(sessionId: string, text: string): Promise<AISessionSendStarted> {
+        return this.#apiClient.call('ai.sessionSend', { sessionId, text });
+    }
+
+    async cancelTurn(sessionId: string): Promise<boolean> {
+        return this.#apiClient.call('ai.sessionCancel', { sessionId });
+    }
+
+    /** The transcript, newest entries last. `before` pages older than a `seq`. */
+    async sessionMessages(
+        sessionId: string,
+        options: { limit?: number; before?: number } = {},
+    ): Promise<AISessionMessage[]> {
+        return this.#apiClient.call('ai.sessionMessages', {
+            sessionId,
+            limit: options.limit ?? null,
+            before: options.before ?? null,
+        });
+    }
+
+    /** `handler` gets every change to a session the caller owns: a new message, a status
+     *  change, each tool step. Returns the unsubscribe function. */
+    onSessionChanged(handler: (event: AISessionChanged) => void): () => void {
+        return this.#apiClient.on('ai-session-changed', handler);
+    }
 }
