@@ -198,7 +198,7 @@ pub(super) fn build_instance_sparql(
     let pagination_suffix = if let Some(pg) = sparql_pagination {
         let mut suffix = String::new();
         match &pg.sort_key {
-            SortKey::Timestamp => match pg.direction {
+            SortKey::Timestamp | SortKey::CreatedAt => match pg.direction {
                 OrderDirection::DESC => suffix.push_str("\n    ORDER BY DESC(?_first_ts)"),
                 OrderDirection::ASC => suffix.push_str("\n    ORDER BY ASC(?_first_ts)"),
             },
@@ -276,6 +276,15 @@ pub(super) fn build_instance_sparql(
         }} GROUP BY ?source{anchor_group}{pagination_suffix}"#
                 )
             }
+            SortKey::CreatedAt => {
+                let links = hydrated_links(shape, query, &predicate_filter);
+                format!(
+                    r#"SELECT DISTINCT ?source{anchor_select} (MIN(?timestamp) AS ?_first_ts) WHERE {{
+{conformance}
+{where_extra}
+{links}        }} GROUP BY ?source{anchor_group}{pagination_suffix}"#
+                )
+            }
             SortKey::Property(predicate) => {
                 // `parse_literal` yields the lexical form for a typed literal
                 // and the inner `data` for a signed envelope — sorting a
@@ -326,21 +335,33 @@ pub(super) fn build_instance_sparql(
             predicate_filter,
         }
     } else {
-        let local_status = local_status_filter(shape);
-        let link_status = link_status_filter(query.link_status.as_ref());
-        let proof_valid = proof_valid_filter(query.include_unverified);
+        let links = hydrated_links(shape, query, &predicate_filter);
         InstanceQueryPlan::Single(format!(
             r#"SELECT DISTINCT ?source ?predicate ?target ?author ?timestamp WHERE {{
 {conformance}
 {where_extra}
-{predicate_filter}    ?source ?predicate ?target .
+{links}}}"#
+        ))
+    }
+}
+
+/// The links the single plan hydrates an instance from, each bound as
+/// `?source ?predicate ?target` with its `?author` and `?timestamp`: the
+/// shape's predicates (`predicate_filter`), under the read's link status,
+/// proof and `local` filters. [`SortKey::CreatedAt`] takes its `MIN` over the
+/// same links, so it is the `timestamp` / `createdAt` the hydrated row carries.
+fn hydrated_links(shape: &ModelShape, query: &ModelQueryInput, predicate_filter: &str) -> String {
+    let local_status = local_status_filter(shape);
+    let link_status = link_status_filter(query.link_status.as_ref());
+    let proof_valid = proof_valid_filter(query.include_unverified);
+    format!(
+        r#"{predicate_filter}    ?source ?predicate ?target .
     ?_reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?predicate ?target )>> .
     FILTER(isIRI(?source) && isIRI(?predicate))
     ?_reifier <ad4m://ontology/author> ?author .
     ?_reifier <ad4m://ontology/timestamp> ?timestamp .
-{link_status}{proof_valid}{local_status}}}"#
-        ))
-    }
+{link_status}{proof_valid}{local_status}"#
+    )
 }
 
 /// The link an order key reads, `subject <predicate> object`, as the pattern

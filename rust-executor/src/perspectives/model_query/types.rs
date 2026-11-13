@@ -819,6 +819,12 @@ pub(super) struct SparqlPagination {
 pub(super) enum SortKey {
     /// Sort by reifier timestamp (MIN(?_ts) per source).
     Timestamp,
+    /// Sort by the hydrated row's `timestamp` / `createdAt`: the earliest of
+    /// the links hydration reads, under its filters, bound as `?_first_ts`.
+    /// Not [`Self::Timestamp`], whose probe reads one conformance link (the
+    /// flag) and so can be later. A union over several classes pages on this,
+    /// so every class's creation time is the value its rows carry.
+    CreatedAt,
     /// Sort by a property value extracted from its literal IRI.
     Property(String), // predicate IRI
     /// Sort by a projection count — uses `COUNT(DISTINCT ?_proj_t)` in the
