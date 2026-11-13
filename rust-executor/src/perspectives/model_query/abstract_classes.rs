@@ -27,6 +27,7 @@
 
 use super::types::{ModelShape, ShapeResolver};
 use crate::perspectives::shacl_parser::{ABSTRACT_PREDICATE, ALIAS_PREDICATE};
+use crate::perspectives::sparql_store::EvalStop;
 use crate::perspectives::sparql_store::SparqlStore;
 use crate::perspectives::subject_classes_of::{concrete_subject_class_names, local_name};
 use deno_core::anyhow::Error;
@@ -54,7 +55,7 @@ impl AbstractIndex {
             }}
             "#
         );
-        let rows: Vec<Value> = serde_json::from_str(&store.query(&marked)?)?;
+        let rows: Vec<Value> = serde_json::from_str(&store.query(&EvalStop::none(), &marked)?)?;
         let abstract_classes = rows
             .iter()
             .filter_map(|r| r["targetClass"].as_str())
@@ -72,7 +73,7 @@ impl AbstractIndex {
             }}
             "#
         );
-        let rows: Vec<Value> = serde_json::from_str(&store.query(&aliased)?)?;
+        let rows: Vec<Value> = serde_json::from_str(&store.query(&EvalStop::none(), &aliased)?)?;
         let mut aliases: HashMap<String, HashMap<String, BTreeMap<String, String>>> =
             HashMap::new();
         for row in &rows {
@@ -228,7 +229,7 @@ pub fn resolve(
 ) -> Result<Resolution, Error> {
     let mut resolution = Resolution::default();
     // The classifier's list: an abstract class never conforms to another.
-    for class in concrete_subject_class_names(store)? {
+    for class in concrete_subject_class_names(&EvalStop::none(), store)? {
         let shape = match resolver.get_shape(&class) {
             Ok(shape) => shape,
             Err(e) => {
