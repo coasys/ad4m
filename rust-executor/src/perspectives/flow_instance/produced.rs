@@ -112,7 +112,7 @@ use super::receipt::{
     is_canonical_receipt_uri, is_terminal_state, FlowReceipt, FLOW_GRANTED_BY_PREDICATE,
     FLOW_RECEIPT_CONTENT_PREDICATE, FLOW_RECEIPT_PREDICATE, MAX_RECEIPT_BYTES, RECEIPT_URI_PREFIX,
 };
-use super::verify::memo::{settle, SettledRun, VerdictMemo};
+use super::verify::memo::{settle, HeldAnswers, SettledRun, VerdictMemo};
 use super::verify::{verify_receipt, ReceiptVerdict};
 use super::FlowInstance;
 use crate::agent::AgentContext;
@@ -536,7 +536,8 @@ pub async fn flow_valid_outputs(
     // re-judges them under the live window. A replica that cannot read a
     // signer's log gets no verified answer — and no memoised refusal. One
     // prepare for the whole read, so the discovery cap is per read.
-    prepare_receipt_signers(
+    // The answers the prepare skipped on stay held until the fold is done.
+    let held = prepare_receipt_signers(
         &catalogue,
         &receipts,
         Some(&perspective.receipt_verdict_memo),
@@ -549,6 +550,7 @@ pub async fn flow_valid_outputs(
         &receipts,
         Some(&perspective.receipt_verdict_memo),
     );
+    drop(held);
 
     let refs: Vec<OutputRef> = candidates.iter().map(|c| c.output.clone()).collect();
     let live = super::accept::load_outputs(perspective, &refs).await?;
@@ -597,22 +599,34 @@ pub async fn verify_flow_receipt(
 /// call: the resolver's [`DISCOVERY_PER_BATCH`](crate::identity::resolver::DISCOVERY_PER_BATCH)
 /// then caps the key-index lookups of the whole read, not of each receipt, so
 /// N receipts signed by fresh `did:key`s cost one batch per read. A receipt
-/// `memo` already holds is left out: its verdict is final under the memo key
-/// ([`VerdictMemo::holds`]), so a refresh of its signers could change nothing
-/// the read returns.
-pub(crate) async fn prepare_receipt_signers(
+/// `memo` already answers is left out: its verdict is final under the memo key,
+/// so a refresh of its signers could change nothing the read returns.
+///
+/// The answers it skips on are held in the returned [`HeldAnswers`]: keep it
+/// until the read's fold is done. The fold `put`s every miss into the same
+/// bounded LRU, so without the hold an earlier miss (or a concurrent read)
+/// could evict a skipped receipt's answer, and the receipt would be
+/// re-verified with its signers not refreshed.
+#[must_use = "the held answers must outlive the read's fold"]
+pub(crate) async fn prepare_receipt_signers<'m>(
     catalogue: &HashMap<String, SHACLFlow>,
     receipts: &[FlowReceipt],
-    memo: Option<&VerdictMemo>,
-) {
+    memo: Option<&'m VerdictMemo>,
+) -> Option<HeldAnswers<'m>> {
+    let mut held = memo.map(VerdictMemo::hold_for_read);
     let links: Vec<crate::types::LinkExpression> = receipts
         .iter()
-        .filter(|receipt| !memo.is_some_and(|memo| memo.holds(catalogue, receipt)))
+        .filter(|receipt| {
+            !held
+                .as_mut()
+                .is_some_and(|held| held.hold(catalogue, receipt))
+        })
         .flat_map(|receipt| receipt.read_set.carried_links())
         .collect();
     if !links.is_empty() {
         crate::identity::prepare_link_signers(&links).await;
     }
+    held
 }
 
 /// The verdict as the API reports it: the three-kind `outcome` a caller must
@@ -1192,6 +1206,45 @@ mod tests {
         // And back under the original DNA the memo is still exact — the
         // first verdict, not the second.
         assert!(memo.settled(&same_dna, &receipt).is_some());
+    }
+
+    /// A held answer outlives its eviction from the LRU for exactly as long
+    /// as the read holds it. On a memo of capacity 1: `a` is memoised and
+    /// held, `b` evicts it, and `a` still answers without a verification;
+    /// once the hold is dropped and `a` is evicted again, it verifies afresh.
+    ///
+    /// Red if `settled` ignores the held copy (a third verification while
+    /// held), or if dropping the hold does not release it (no verification
+    /// after the drop).
+    #[test]
+    fn a_held_answer_survives_eviction_until_the_read_drops_it() {
+        let flow = flow_named("Delivery");
+        let cat = catalogue(vec![flow_named("Delivery")]);
+        let a = mint(&flow, &[OUTPUT]);
+        let b = mint(&flow, &["ad4m://deliverable/d2"]);
+        let memo = VerdictMemo::with_capacity(1);
+
+        assert!(memo.settled(&cat, &a).is_some());
+        let mut held = memo.hold_for_read();
+        assert!(held.hold(&cat, &a), "the memo answers `a`");
+        assert!(!held.hold(&cat, &b), "nor yet `b`");
+        assert!(memo.settled(&cat, &b).is_some(), "`b` evicts `a`");
+        assert_eq!(memo.verifications(), 2);
+        assert!(memo.settled(&cat, &a).is_some());
+        assert_eq!(
+            memo.verifications(),
+            2,
+            "while held, `a` answers from the held copy after its eviction"
+        );
+
+        drop(held);
+        assert!(memo.settled(&cat, &b).is_some(), "`b` evicts `a` again");
+        assert!(memo.settled(&cat, &a).is_some());
+        assert_eq!(
+            memo.verifications(),
+            4,
+            "released, `a` is a plain miss once more"
+        );
     }
 
     /// A second read of an unchanged set re-verifies the verified receipts
