@@ -1249,8 +1249,8 @@ async fn identity_log_binds_the_head_to_the_events_and_keeps_the_checkpoint() {
 /// `did` — a key index whose answer does not come from the logs — and that can fail every
 /// log read (`fail_logs`). Review of coasys/ad4m#1673 (Lal P2): the index's answer
 /// installed the binding before any log was read.
-struct LyingIndexHttp {
-    inner: RouterHttp,
+struct LyingIndexHttp<H = RouterHttp> {
+    inner: H,
     /// The `did` every key-index answer names.
     did: Rc<RefCell<Option<String>>>,
     /// While set, `GET /v1/logs/…` is a transport error.
@@ -1258,7 +1258,7 @@ struct LyingIndexHttp {
 }
 
 #[async_trait(?Send)]
-impl HttpClient for LyingIndexHttp {
+impl<H: HttpClient> HttpClient for LyingIndexHttp<H> {
     async fn send(&self, request: HttpRequest) -> Result<HttpResponse, HttpError> {
         if request.method == "GET" {
             if request.url.starts_with(&format!("{STORE_URL}/v1/keys/")) {
@@ -1345,6 +1345,61 @@ async fn an_index_answer_naming_another_identity_binds_nothing() {
     let settled = status(&fresh).await;
     assert_eq!(settled["did"].as_str().unwrap(), did_new, "{settled}");
     assert_eq!(fresh.rpc().identity().as_deref(), Some(scid(&did_new)));
+}
+
+/// Review coasys/ad4m#1673 at b3d9e7002 (Lal): `admitted` bound the signed head's seq and
+/// hash to the folded log, and `check_head` the head's `scid` label to the SCID read, but
+/// nothing compared the folded log's own, self-certifying SCID with the one read. A store
+/// whose signing key is compromised labels a genuine log that lists this device's key with
+/// another SCID (the index names it, the head names it, signed): the phone bound its key to
+/// that SCID. The folded log's SCID must be the one read. Fails at b3d9e7002.
+#[tokio::test]
+async fn a_genuine_log_relabelled_with_another_scid_binds_nothing() {
+    let (router, _dir) = store();
+    // This device's key (seed 1) is in A's log; B's is another identity's.
+    let did_a = create(&phone(&router, 1, None), &MemoryVault::new(), 84).await;
+    let did_b = create(&phone(&router, 2, None), &MemoryVault::new(), 85).await;
+    let (scid_a, scid_b) = (scid(&did_a), scid(&did_b));
+
+    // A's genuine page, under a head labelled B and signed with the store's own key.
+    let mut relabelled: Value = serde_json::from_slice(&log_page(&router, scid_a).await).unwrap();
+    let head_a = relabelled["head"].clone();
+    relabelled["head"] = serde_json::to_value(StoreKey::from_secret(STORE_SECRET).sign_head(
+        scid_b,
+        head_a["seq"].as_u64().unwrap(),
+        head_a["hash"].as_str().unwrap(),
+        head_a["time"].as_u64().unwrap(),
+    ))
+    .unwrap();
+
+    let fresh = phone_with(
+        LyingIndexHttp {
+            inner: LyingHttp {
+                inner: RouterHttp {
+                    router: router.clone(),
+                },
+                scid: Rc::new(RefCell::new(scid_b.to_string())),
+                foreign_head: Rc::new(RefCell::new(None)),
+                replay: Rc::new(RefCell::new(Some(serde_json::to_vec(&relabelled).unwrap()))),
+            },
+            did: Rc::new(RefCell::new(Some(did_b.clone()))),
+            fail_logs: Rc::new(Cell::new(false)),
+        },
+        1,
+        None,
+    );
+    let answer = fresh.rpc().call("identity.status", json!({})).await;
+    assert!(
+        answer.is_err(),
+        "a relabelled log bound this key to another SCID: {answer:?}"
+    );
+    let message = answer.unwrap_err().message;
+    assert!(message.starts_with("bad-log"), "{message}");
+    assert_eq!(
+        fresh.rpc().identity(),
+        None,
+        "a relabelled log installed a binding"
+    );
 }
 
 /// Same review: a candidate whose log the store will not serve installs nothing — no
