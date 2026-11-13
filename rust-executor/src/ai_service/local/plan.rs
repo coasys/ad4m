@@ -1322,8 +1322,9 @@ mod tests {
     }
 
     /// An RTX 3090 (24 GB, CUDA) is nvidia-24gb. The wind tunnel measured Qwen3.8 27B
-    /// there, at a 64k context, on llama-server's CUDA build; nomic rides the same server.
-    /// No STT cell passed, so transcription is the manifest default, not a measured pick.
+    /// there, at a 64k context, one slot, MTP and a 2048-token reasoning budget, on
+    /// llama-server's CUDA build; nomic rides the same server. No STT cell passed, so
+    /// transcription is the manifest default, not a measured pick.
     #[test]
     fn the_embedded_data_plans_qwen3_8_27b_on_nvidia_24gb() {
         let data = crate::ai_service::local::data::embedded().unwrap();
@@ -1344,9 +1345,28 @@ mod tests {
         assert_eq!(llm.model_id, "qwen3.8-27b-ud-q4_k_m");
         assert_eq!(llm.basis, Basis::Measured);
         assert_eq!(llm.from_class, "nvidia-24gb");
+        // The message has spaces. Joining the flags and comparing the string would hide a
+        // split; the budget message has to be one element.
+        let message = "Thinking budget reached. Now give the final answer.";
         assert_eq!(
-            llm.server_flags.join(" "),
-            "-c 65536 -ngl 999 --reasoning off"
+            llm.server_flags,
+            vec![
+                "-c",
+                "65536",
+                "-np",
+                "1",
+                "-ngl",
+                "999",
+                "--jinja",
+                "--spec-type",
+                "draft-mtp",
+                "--spec-draft-n-max",
+                "4",
+                "--reasoning-budget",
+                "2048",
+                "--reasoning-budget-message",
+                message,
+            ]
         );
         let embed = plan
             .models
