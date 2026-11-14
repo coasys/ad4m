@@ -15,7 +15,8 @@ REST/WS shim. Split plan: spec item 6.
 
 `*_ws.rs`, one per RPC namespace: `agent`, `ai`, `expressions`, `hosting`,
 `languages`, `neighbourhoods`, `perspectives` (largest; also SHACL + interpretation
-handlers), `runtime`, `users`, and `agent_session` (`perspective.runAgent`). Each exposes `register_ws_handlers(&mut HandlerMap)`
+handlers), `runtime`, `config` (`runtime.config`, `runtime.setConfig`), `users`, `identity`, and
+`agent_session` (`perspective.runAgent`). Each exposes `register_ws_handlers(&mut HandlerMap)`
 called from `ws_handler::build_handler_map`.
 
 Handler shape (`perspectives_ws.rs::add_link` is representative):
@@ -111,6 +112,16 @@ without that check. A guard runs before the handler's own checks. A handler chec
 part of the guard (compute credits, param validation beyond the contract type) runs after the
 access check: a call that fails both gets the access answer.
 
+**Local only.** A method flagged `.local_only()` (`MethodFlags::local_only`) answers only the
+operator on this machine (`Session::is_operator_on_this_machine`: the admin credential, or no
+token on an executor without one, on a loopback listener). The dispatcher checks it after the
+guard: every other caller gets 403 `guards::LOCAL_ONLY` (`local-only: …`), a grant with every
+capability and the admin credential on a network listener included. The guard table marks
+these methods "local only". `runtime.setConfig` is not local only as a whole: it refuses each
+`machine` key to a caller off this machine (`config_rpc`). `identity.custodyStatus` adds the
+custody channel's own check (`identity::custody::admit`: the admin credential, not a tokenless
+operator, and `--custody-channel`).
+
 Notes on some methods:
 
 - `agent.generate` creates the main agent on first run only: it refuses (409) an
@@ -126,7 +137,9 @@ Notes on some methods:
 - `runtime.exportData` (`Executor`) has two kinds. A `perspective` export checks
   `get_perspective_with_access` in its handler, so an app exports only the main agent's
   perspectives. A `db` export names no perspective and checks nothing past the guard: it writes
-  the whole executor database (`export_all_to_json`) for any session the guard admits.
+  the whole executor database (`export_all_to_json`). It and `runtime.importData` read and
+  write paths on the executor's machine; they are not local only yet (key login adds them,
+  with `agent.generate`, `agent.import` and `agent.lock`).
 - `Cap` methods that read executor-wide data users read today: `agent.getTrustedAgents`,
   `ai.models`, `language.*` reads, link-language templates,
   `runtime.hcAgentInfos`/`networkMetrics`/`hostRates`/`unytVersionInfo`. `Executor` would refuse
@@ -148,7 +161,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-228 methods: Cap 81, CapAnyPointer 1, Executor 43, Open 5, Operator 22, Owns 74, UserOrOperator 2.
+234 methods: Cap 81, CapAnyPointer 1, Executor 43, Open 5, Operator 28, Owns 74, UserOrOperator 2. Local only (the operator on this machine): 5.
 
 | Method | Guard |
 |---|---|
@@ -174,7 +187,7 @@ the guard checked:
 | `agent.revokeToken` | `Owns(Grant token, agent:UPDATE)` |
 | `agent.sign` | `Cap(agent:SIGN)` |
 | `agent.status` | `Cap(agent:READ)` |
-| `agent.unlock` | `Executor(agent:SIGN)` |
+| `agent.unlock` | `Executor(agent:SIGN)`, local only |
 | `agent.updateProfile` | `Cap(agent:UPDATE)` |
 | `ai.addEndpoint` | `Executor(artificial intelligence:CREATE)` |
 | `ai.addModel` | `Executor(artificial intelligence:CREATE)` |
@@ -227,12 +240,14 @@ the guard checked:
 | `hosting.walletHistory` | `Executor(runtime.hosting:READ)` |
 | `identity.claimOffer` | `Operator` |
 | `identity.cosignIncept` | `UserOrOperator(agent:SIGN)` |
+| `identity.custodyStatus` | `Operator`, local only |
 | `identity.devices` | `Cap(agent:READ)` |
 | `identity.joinStatus` | `Cap(agent:READ)` |
 | `identity.log` | `Cap(agent:READ)` |
 | `identity.offers` | `Cap(agent:READ)` |
 | `identity.openOffer` | `Cap(agent:UPDATE)` |
 | `identity.publish` | `UserOrOperator(agent:UPDATE)` |
+| `identity.rekey` | `Operator`, local only |
 | `identity.resetLog` | `Operator` |
 | `identity.resolve` | `Cap(agent:READ)` |
 | `identity.status` | `Cap(agent:READ)` |
@@ -312,6 +327,7 @@ the guard checked:
 | `runtime.addHcAgentInfos` | `Executor(runtime.hc_agent_info:CREATE)` |
 | `runtime.addLinkLanguageTemplates` | `Executor(runtime.known_link_languages:CREATE)` |
 | `runtime.computeLog` | `Cap(agent:READ)` |
+| `runtime.config` | `Operator` |
 | `runtime.createNotification` | `Cap(agent:UPDATE)` |
 | `runtime.deleteNotification` | `Cap(agent:UPDATE)` |
 | `runtime.exportData` | `Executor(agent:UPDATE)` |
@@ -325,15 +341,18 @@ the guard checked:
 | `runtime.inbox` | `Cap(runtime.messages:READ)` |
 | `runtime.info` | `Open` |
 | `runtime.linkLanguageTemplates` | `Cap(runtime.known_link_languages:READ)` |
+| `runtime.logTail` | `Operator` |
 | `runtime.networkMetrics` | `Cap(runtime.hc_agent_info:READ)` |
 | `runtime.notifications` | `Cap(agent:UPDATE)` |
 | `runtime.openLink` | `Operator` |
 | `runtime.outbox` | `Executor(runtime.messages:READ)` |
-| `runtime.quit` | `Executor(runtime:QUIT)` |
+| `runtime.quit` | `Executor(runtime:QUIT)`, local only |
 | `runtime.removeFriends` | `Executor(runtime.friends:DELETE)` |
 | `runtime.removeLinkLanguageTemplates` | `Executor(runtime.known_link_languages:DELETE)` |
+| `runtime.restart` | `Operator`, local only |
 | `runtime.restartHolochain` | `Operator` |
 | `runtime.sendFriendMessage` | `Executor(runtime.messages:CREATE)` |
+| `runtime.setConfig` | `Operator` |
 | `runtime.setFreeHostingEnabled` | `Executor(*:*)` |
 | `runtime.setHostRates` | `Operator` |
 | `runtime.setStatus` | `Cap(runtime.my_status:UPDATE)` |
