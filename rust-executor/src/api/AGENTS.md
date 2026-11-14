@@ -454,7 +454,9 @@ them against those two guards.
   once to each of `event_recipients`, each copy naming that DID as `recipient`
   (`perspectives::publish_telepresence_signal`, used by both link-language paths and by
   `send_signal` / `send_broadcast` for the executor's own agents: a neighbourhood's owners are
-  only this executor's agents). `notification-triggered` goes to the notification's `ownerDid`,
+  only this executor's agents). A broadcast reaches every owner, the sender's own agent too, main
+  or managed, so its other clients hear it (two devices of one agent in a mesh call); `loopback`
+  adds a second copy to every owner. `notification-triggered` goes to the notification's `ownerDid`,
   never to co-owners, and needs the query capability on its perspective (its `triggerMatch` is
   query results), not `runtime.notifications`' AGENT_UPDATE. `auto-processor-event` goes to the pass owner when it is one of
   `event_recipients`, else nobody (`auto_processor::events::pass_audience`);

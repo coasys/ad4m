@@ -180,6 +180,13 @@ This runs all four nightly jobs.
   canvas (not black; headless WebKit never plays a `<video>`, so not there).
   On the SFU, Chromium + Firefox also asserts the payload types differ per
   leg and each receiver gets its own numbers (#1684).
+- The page keeps one muted `<video>` per session (`participantId`), as an
+  app keeps one tile per participant, and removes it when the session
+  leaves the list. Never one per agent DID: an agent listed twice (two
+  devices, or a lost tab beside its successor) then swaps two streams on
+  one element at every render, and headless WebKit's tab hangs or crashes
+  (`Target crashed`). A tab that crashes or does not report within 30 s
+  fails with its user, browser and last console errors.
 - On a host with no audio server (CI's runner: no PulseAudio or PipeWire),
   Firefox keeps every `AudioContext` `suspended` (`currentTime` 0) and its
   analyser reads silence, though the audio arrives and decodes. No Firefox
@@ -220,6 +227,10 @@ This runs all four nightly jobs.
   adapter does. Test code must not use raw call RPCs, `ensureMembership` or
   `WebRtcPeer`; the first test in `sfu-e2e.test.ts` fails if it does (E11's
   outsider is the one exemption). The admin client only builds the world.
+  One exception: a `WorldSpec` user with `main: true` is the executor's main
+  agent, called with the operator credential, still only through the SDK.
+  E23 uses it, since only the main agent's own devices show how the executor
+  routes the main agent's broadcasts.
 - Each user sends its own tone (`toneFor(i)`) and a video of known size, so
   receivers check *who* they hear and at which simulcast layer.
 - E6 shapes the loopback with `tc netem`, only for its world's ports
@@ -309,6 +320,43 @@ state swaps them during a rollback); the answerer holds its own first offer
 until the pair connects; `join` waits for the channel to listen before the
 session announces presence; the buffer for not-yet-listed peers never drops a
 description.
+
+Mesh presence (`core/src/neighbourhood/Session.ts`): each device in a mesh
+call puts two links into its agent's one online status, once, at join: a
+presence link (source `did#device`, `ad4m://session/in-call`, target the
+room) and a marker (same source, `ad4m://session/in-call-beat`, target the
+room) that says the device beats. The beat itself is never persisted: every
+20 s, and at once on join, the device sends a `beat` message on the call's
+telepresence channel (`{v, call, to: "*", kind: "beat"}` through
+`MeshManager.beat`, so it is counted like any send), on its own timer, so a
+roster poll that hangs cannot stop it. Never write liveness into the online
+status: p-diff-sync keeps every `set_online_status` as a permanent chain
+entry and `get_online_status` scans them all. A receiver ties a beat to the
+link author the executor verified plus the device in the payload, so an
+agent can vouch only for its own devices, and a beat never makes a device: a
+device is in the call only through its own agent's presence link. A reader
+records, on its own clock, when it last heard each device with the marker
+(or first saw it, if it never heard it) and leaves it out after 90 s with no
+beat; a new beat brings it back at the next poll (3 s). A poll that finds
+the reader's pair with the device connected counts as hearing it, so a call
+whose signals fail while media flows keeps its peers. The executor routes a
+broadcast to every agent it hosts in the neighbourhood, the sender's agent
+too (main or managed), so two devices of one agent on one executor hear each
+other; each device drops its own messages. So a device that
+died without leaving (a crash, a closed browser, a lost network) leaves every
+roster within about 90 s + a poll, even while another device of its agent
+keeps the status alive, a live device survives three lost beats in a row,
+and a reader that joins late keeps a device it has never heard for up to
+90 s. A device with no marker (an older SDK, which drops the unknown `beat`
+kind without a word) never goes stale. Status writes are join, leave, and
+one repair when a poll finds a stale device of this agent (its links go) or
+this device's presence link or marker missing (a sibling took them out while it missed
+beats; they go back), at most once per 90 s; nothing is written over a
+status that reads as none. The beat stops on leave, destroy and `replaced`.
+A tab reopened in the same browser profile keeps its device id
+(`localStorage`) and simply takes its links over. `sfu-browsers.test.ts` pins
+both: the same-profile rejoin lists the user once, and a dead second device
+leaves everyone's list within `GHOST_GONE_MS`.
 
 ### AI wind tunnel
 

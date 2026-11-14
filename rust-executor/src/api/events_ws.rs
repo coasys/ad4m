@@ -1448,8 +1448,9 @@ mod audience_matrix_tests {
     // `send_signal` and `send_broadcast` deliver to this executor's own agents in a
     // neighbourhood through `event_recipients`: a signal to an owner is published here (once,
     // naming it), a signal to anyone else goes to the link language; a broadcast reaches every
-    // owner but the main agent when the main agent sent it. Without a link language the
-    // remote part fails after the local delivery.
+    // owner, its sender too, without loopback: the main agent like any managed agent, so two
+    // clients of one agent hear each other. Without a link language the remote part fails
+    // after the local delivery.
     #[tokio::test]
     async fn signals_to_this_executors_agents_are_delivered_here() {
         use crate::perspectives::perspective_instance::PerspectiveInstance;
@@ -1508,16 +1509,24 @@ mod audience_matrix_tests {
             author: main.clone(),
             ..Default::default()
         };
+        let mut expected = vec![to(A), to(&main)];
+        expected.sort_by(|x, y| x.1.cmp(&y.1));
         let _ = with_main.send_broadcast(from_main, false).await;
-        assert_eq!(signals(), vec![to(A)], "the main agent sent it");
+        assert_eq!(
+            signals(),
+            expected,
+            "the main agent gets the broadcast it sent, as any owner does"
+        );
         let from_a = PerspectiveExpression {
             author: A.into(),
             ..Default::default()
         };
         let _ = with_main.send_broadcast(from_a, false).await;
-        let mut expected = vec![to(A), to(&main)];
-        expected.sort_by(|x, y| x.1.cmp(&y.1));
-        assert_eq!(signals(), expected);
+        assert_eq!(
+            signals(),
+            expected,
+            "a managed agent gets its own broadcast"
+        );
     }
 
     // A triggered notification carries `triggerMatch`, query results from its perspective. It

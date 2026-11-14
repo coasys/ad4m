@@ -5113,8 +5113,6 @@ impl PerspectiveInstance {
         payload: PerspectiveExpression,
         loopback: bool,
     ) -> Result<(), AnyError> {
-        use crate::agent::AgentService;
-
         let current_perspective_handle = self.persisted.lock().await.clone();
 
         if loopback {
@@ -5129,18 +5127,13 @@ impl PerspectiveInstance {
         }
 
         // Route the broadcast to every local agent that owns the neighbourhood (its
-        // `event_recipients`), each copy naming that agent. The main agent does not get its
-        // own broadcast back: loopback handles that.
+        // `event_recipients`), each copy naming that agent. The sender's own agent gets it
+        // too, the main agent like any managed agent: its other clients (devices) must hear
+        // it, and a client drops its own messages. With `loopback` every owner gets it twice.
         if current_perspective_handle.shared_url.is_some() {
-            let main_agent_did = AgentService::with_global_instance(|s| s.did.clone());
             let mut signal = payload.clone();
             signal.verify_signatures();
             for recipient in super::event_recipients(&current_perspective_handle) {
-                let main_sent_it = main_agent_did.as_deref() == Some(recipient.as_str())
-                    && payload.author == recipient;
-                if main_sent_it {
-                    continue;
-                }
                 super::publish_telepresence_signal(
                     current_perspective_handle.clone(),
                     signal.clone(),
