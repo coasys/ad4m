@@ -10,7 +10,6 @@ use std::time::Duration;
 
 use log::{debug, info, warn};
 use once_cell::sync::OnceCell;
-use str0m::change::SdpOffer;
 use tokio::sync::RwLock;
 
 use super::cascade::{CascadeManager, CascadeSignal};
@@ -1166,22 +1165,10 @@ impl SfuService {
         // Parse SDP offer and create Rtc instance — do this BEFORE
         // creating the room or registering the participant so failures
         // never leave stale state.
-        let offer: SdpOffer = serde_json::from_str(sdp_offer_json)
-            .map_err(|e| format!("Invalid SDP offer: {}", e))?;
-
-        let (rtc, sdp_answer) = SfuServer::create_rtc_for_offer(
-            offer,
-            self.server.local_addr,
-            self.server.advertised.map(|a| a.addr),
-        )?;
-
-        let peer = SfuPeer::new(
-            pid.clone(),
-            room_id.clone(),
-            agent_did.to_string(),
-            rtc,
-            false,
-        );
+        let (add_peer, sdp_answer) = self
+            .server
+            .prepare_peer(pid.clone(), room_id.clone(), agent_did, sdp_offer_json)
+            .await?;
 
         // SDP and RTC succeeded — create the room if needed, register the
         // participant and hand its peer to the event loop in a single
@@ -1240,7 +1227,7 @@ impl SfuService {
                     .send(SfuCommand::RemovePeer(old.clone()))
                     .await;
             }
-            if let Err(e) = self.server.command_tx.send(SfuCommand::AddPeer(peer)).await {
+            if let Err(e) = self.server.command_tx.send(add_peer).await {
                 // AddPeer failed — roll back the participant, and the room
                 // only if this join created it and it is empty again. A room
                 // `start_room` opened stays.

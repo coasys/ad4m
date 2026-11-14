@@ -53,6 +53,7 @@ ignored, and the error names the key by its path, e.g.
 | `sfu_udp_port` | number | a free port, new at each start | `--sfu-udp-port` / `AD4M_SFU_UDP_PORT` |
 | `sfu_public_addr` | string (IP) | the STUN probe's address | `--sfu-public-addr` / `AD4M_SFU_PUBLIC_ADDR` |
 | `sfu_stun_server` | string (`host:port`) | no probe | `--sfu-stun-server` / `AD4M_SFU_STUN_SERVER` |
+| `sfu_process` | bool | `false`: the SFU runs in the executor's process | `--sfu-process` / `AD4M_SFU_PROCESS` |
 | `ai_endpoints` | list of endpoints | none | file only, see below |
 | `ai_models` | list of models | none | file only, see below |
 | `ai_defaults` | object: `llm`, `embedding`, `transcription` → model name | none | file only, see below |

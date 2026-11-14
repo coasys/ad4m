@@ -154,6 +154,10 @@ enum Domain {
         #[command(subcommand)]
         command: LocalAiCommand,
     },
+    /// The SFU media loop of an executor started with `--sfu-process`. The
+    /// executor starts it and talks to it over stdin/stdout.
+    #[command(name = "sfu-worker", hide = true)]
+    SfuWorker,
 }
 
 #[derive(Debug, Subcommand)]
@@ -227,6 +231,15 @@ enum ConfigCommand {
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
     let args = ClapApp::parse();
+
+    if let Domain::SfuWorker = args.domain {
+        if let Err(e) = rust_executor::sfu::process::run_worker().await {
+            eprintln!("SFU worker failed: {e}");
+            std::process::exit(1);
+        }
+        // The loop's tasks stop with the process.
+        std::process::exit(0);
+    }
 
     if let Domain::Dev { command } = args.domain {
         dev::run(command).await?;

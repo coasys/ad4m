@@ -167,6 +167,10 @@ pub struct Ad4mConfig {
     /// DID of the cascade node that takes redirected joins first. Unset:
     /// the least-loaded node.
     pub sfu_preferred_node: Option<String>,
+    /// Run the SFU's media loop in a child process (`sfu-worker`), with its
+    /// own CPU budget, instead of on the executor's runtime. Not with cascade
+    /// gossip. Unset: in-process.
+    pub sfu_process: Option<bool>,
     /// `identity.storeUrl`: the identity store's base URL, given to the agent language as its
     /// `storeUrl` setting. Unset: the network seed's `identityStore`, else no store.
     pub identity_store_url: Option<String>,
@@ -590,6 +594,7 @@ impl Ad4mConfig {
             sfu_udp_port: None,
             sfu_public_addr: None,
             sfu_preferred_node: None,
+            sfu_process: None,
             identity_store_url: None,
             identity_store_keys: None,
             identity_allow_private_src: None,

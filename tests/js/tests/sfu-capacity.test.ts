@@ -10,6 +10,7 @@ import {
 } from "../helpers/sfu/browser/browsers.js";
 import { installCallHarness, type PageReport } from "../helpers/sfu/browser/page.js";
 import { startWorld, type World } from "../helpers/sfu/e2e/world.js";
+import { Ad4mClient, Link, LinkQuery } from "@coasys/ad4m";
 
 /**
  * Capacity measurement, not a pass/fail suite: calls of growing size in real
@@ -25,6 +26,15 @@ import { startWorld, type World } from "../helpers/sfu/e2e/world.js";
  * - `SFU_CAP_STEADY_S` (60): the measured window, after every tab receives every other.
  * - `SFU_CAP_VIDEO` (320x240): the fake camera's size.
  * - `SFU_CAP_OUT`: one JSON file per run is written there.
+ * - `SFU_CAP_SFU_PROCESS=1`: the executor runs its SFU as a child process of
+ *   its own (`--sfu-process`); the child's CPU, memory and threads are read
+ *   apart from the executor's. Default: the SFU runs inside the executor.
+ * - `SFU_CAP_LOAD=<clients>`: while the call joins and through the window,
+ *   that many SDK clients (one socket each) run SPARQL queries, link queries
+ *   and link writes on a perspective seeded with `SFU_CAP_LOAD_LINKS` (30000)
+ *   links, back to back. Their counts and latencies go into the result.
+ * - A run item may end in `:<calls>` (`sfu:8:chromium:3`): that many calls of
+ *   that size at once, each in its own room, with users of their own.
  *
  * Bytes are WebRTC's transport counters (the selected candidate pair) summed
  * over the tabs: a tab's bytes sent reach the SFU, its bytes received left the
@@ -32,17 +42,20 @@ import { startWorld, type World } from "../helpers/sfu/e2e/world.js";
  */
 
 type Topology = "sfu" | "mesh";
-interface RunSpec { topology: Topology; size: number; browsers: BrowserKind | "mixed" }
+interface RunSpec { topology: Topology; size: number; browsers: BrowserKind | "mixed"; calls: number }
 
 const RUNS: RunSpec[] = (process.env.SFU_CAP_RUNS || "sfu:4:chromium").split(",").map((item) => {
-  const [topology, size, browsers] = item.trim().split(":");
-  return { topology: topology as Topology, size: Number(size), browsers: (browsers || "chromium") as RunSpec["browsers"] };
+  const [topology, size, browsers, calls] = item.trim().split(":");
+  return { topology: topology as Topology, size: Number(size), browsers: (browsers || "chromium") as RunSpec["browsers"], calls: Number(calls || 1) };
 });
+const SFU_PROCESS = ["1", "true"].includes(process.env.SFU_CAP_SFU_PROCESS ?? "");
+const LOAD_CLIENTS = Number(process.env.SFU_CAP_LOAD || 0);
+const LOAD_LINKS = Number(process.env.SFU_CAP_LOAD_LINKS || 30_000);
 const STEADY_MS = Number(process.env.SFU_CAP_STEADY_S || 60) * 1000;
 const [VIDEO_W, VIDEO_H] = (process.env.SFU_CAP_VIDEO || "320x240").split("x").map(Number);
 const OUT = process.env.SFU_CAP_OUT || path.join(process.cwd(), "sfu-capacity-results");
 const CONVERGE_TIMEOUT_MS = Number(process.env.SFU_CAP_CONVERGE_S || 240) * 1000;
-const MAX_USERS = Math.max(...RUNS.map((r) => r.size));
+const MAX_USERS = Math.max(...RUNS.map((r) => r.size * r.calls));
 const CLK_TCK = Number(execFileSync("getconf", ["CLK_TCK"]).toString().trim());
 const KINDS: BrowserKind[] = ["chromium", "firefox", "webkit"];
 const TABS_PER_BROWSER = 8;
@@ -204,6 +217,139 @@ function executorPid(port: number): number {
   return pid;
 }
 
+/** The executor's SFU child (`ad4m-executor sfu-worker`), when it runs one. */
+function sfuWorkerPid(executor: number): number | null {
+  for (const entry of readdirSync("/proc")) {
+    if (!/^\d+$/.test(entry)) continue;
+    if (cpuTicks(`/proc/${entry}/stat`)?.ppid !== executor) continue;
+    try {
+      if (readFileSync(`/proc/${entry}/cmdline`, "utf8").split("\0").includes("sfu-worker")) return Number(entry);
+    } catch {
+      // Gone between the listing and the read.
+    }
+  }
+  return null;
+}
+
+/** One process's CPU, memory and threads over a window, sampled each second. */
+class ProcWindow {
+  private readonly threadsStart: Map<string, { comm: string; ticks: number }>;
+  private readonly start: number;
+  private readonly t0 = Date.now();
+  private last: number;
+  private lastT = this.t0;
+  readonly samples: { t: number; cpuPct: number; rssKb: number; threads: number }[] = [];
+  constructor(readonly pid: number) {
+    this.threadsStart = threadTicks(pid);
+    this.start = cpuTicks(`/proc/${pid}/stat`)!.ticks;
+    this.last = this.start;
+  }
+  sample(): void {
+    const ticks = cpuTicks(`/proc/${this.pid}/stat`)!.ticks;
+    const t = Date.now();
+    this.samples.push({ t: t - this.t0, cpuPct: ((ticks - this.last) / CLK_TCK) / ((t - this.lastT) / 1000) * 100, ...status(this.pid) });
+    this.last = ticks; this.lastT = t;
+  }
+  finish(seconds: number) {
+    const end = cpuTicks(`/proc/${this.pid}/stat`)!.ticks;
+    const threadCpu = [...threadTicks(this.pid)].map(([tid, t]) => ({ tid, comm: t.comm, cpuPct: ((t.ticks - (this.threadsStart.get(tid)?.ticks ?? 0)) / CLK_TCK) / seconds * 100 }))
+      .sort((a, b) => b.cpuPct - a.cpuPct);
+    const s = this.samples;
+    return {
+      pid: this.pid, windowS: seconds,
+      cpuPct: ((end - this.start) / CLK_TCK) / seconds * 100,
+      cpuPctMax1s: Math.max(...s.map((x) => x.cpuPct)),
+      rssKbMean: mean(s.map((x) => x.rssKb)), rssKbMax: Math.max(...s.map((x) => x.rssKb)),
+      threads: s[s.length - 1]?.threads,
+      busiestThreads: threadCpu.slice(0, 6),
+      threadsAbove1Pct: threadCpu.filter((t) => t.cpuPct > 1).length,
+      samples: s,
+    };
+  }
+}
+
+// ---- a query and write load on the executor ---------------------------------
+
+const LOAD_PREDICATES = 10;
+const LOAD_SOURCES = 3_000;
+
+/** Seeds a private perspective of `links` links for the load; returns its uuid. */
+async function seedLoadPerspective(client: Ad4mClient, links: number): Promise<string> {
+  const perspective = await client.perspective.add(`capacity-load-${Date.now()}`);
+  const batch = 1_000;
+  for (let i = 0; i < links; i += batch) {
+    const chunk = Array.from({ length: Math.min(batch, links - i) }, (_, j) => {
+      const n = i + j;
+      return new Link({ source: `load://item-${n % LOAD_SOURCES}`, predicate: `load://p${n % LOAD_PREDICATES}`, target: `literal://number:${n}` });
+    });
+    await client.perspective.addLinks(perspective.uuid, chunk);
+  }
+  return perspective.uuid;
+}
+
+interface LoadOp { kind: string; at: number; ms: number; error?: string }
+
+/**
+ * Clients that each run, back to back: a filtered SPARQL select, a SPARQL count
+ * over every link, a link query by source and a link write.
+ */
+class QueryLoad {
+  readonly ops: LoadOp[] = [];
+  private stopped = false;
+  private loops: Promise<void>[] = [];
+  constructor(private readonly clients: Ad4mClient[], private readonly uuid: string) {}
+
+  start(): void {
+    this.stopped = false;
+    this.loops = this.clients.map((client, c) => this.loop(client, c));
+  }
+
+  async stop(): Promise<void> {
+    this.stopped = true;
+    await Promise.all(this.loops);
+  }
+
+  private async loop(client: Ad4mClient, c: number): Promise<void> {
+    for (let i = 0; !this.stopped; i++) {
+      const k = (c * 7919 + i * 31) % LOAD_SOURCES;
+      const steps: [string, () => Promise<unknown>][] = [
+        ["sparql-select", () => client.perspective.querySparql(this.uuid, `SELECT ?s ?t WHERE { ?s <load://p${k % LOAD_PREDICATES}> ?t } LIMIT 200`)],
+        ["sparql-count", () => client.perspective.querySparql(this.uuid, "SELECT (COUNT(?s) AS ?n) WHERE { ?s ?p ?t }")],
+        ["link-query", () => client.perspective.queryLinks(this.uuid, new LinkQuery({ source: `load://item-${k}` }))],
+        ["link-write", () => client.perspective.addLink(this.uuid, new Link({ source: `load://item-${k}`, predicate: `load://w${c}`, target: `literal://number:${Date.now()}` }))],
+      ];
+      for (const [kind, run] of steps) {
+        if (this.stopped) return;
+        const t = performance.now();
+        const at = Date.now();
+        try {
+          await run();
+          this.ops.push({ kind, at, ms: performance.now() - t });
+        } catch (e: any) {
+          this.ops.push({ kind, at, ms: performance.now() - t, error: String(e?.message ?? e).slice(0, 200) });
+          await new Promise((r) => setTimeout(r, 200));
+        }
+      }
+    }
+  }
+
+  /** Per kind: count, rate, latency percentiles and errors, for ops started in [from, to). */
+  summary(from: number, to: number) {
+    const seconds = (to - from) / 1000;
+    const pct = (sorted: number[], p: number) => sorted.length ? sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))] : null;
+    const kinds = [...new Set(this.ops.map((o) => o.kind))];
+    return Object.fromEntries(kinds.map((kind) => {
+      const ops = this.ops.filter((o) => o.kind === kind && o.at >= from && o.at < to);
+      const ms = ops.filter((o) => !o.error).map((o) => o.ms).sort((a, b) => a - b);
+      return [kind, {
+        count: ops.length, perS: ops.length / seconds, errors: ops.filter((o) => o.error).length,
+        firstError: ops.find((o) => o.error)?.error ?? null,
+        msP50: pct(ms, 0.5), msP95: pct(ms, 0.95), msMax: ms.length ? ms[ms.length - 1] : null,
+      }];
+    }));
+  }
+}
+
 // ---- the runs -------------------------------------------------------------
 
 describe("SFU capacity: calls of growing size in real browsers", function () {
@@ -213,6 +359,8 @@ describe("SFU capacity: calls of growing size in real browsers", function () {
   let server: Server | null = null;
   let pageUrl = "";
   let pid = 0;
+  let load: QueryLoad | null = null;
+  const loadClients: Ad4mClient[] = [];
   const browsers = new Map<BrowserKind, Launched>();
   const userNames = Array.from({ length: MAX_USERS }, (_, i) => `u${i + 1}`);
 
@@ -229,7 +377,7 @@ describe("SFU capacity: calls of growing size in real browsers", function () {
     if (!sfuIp) throw new Error("no IPv4 address beyond loopback for the SFU to bind");
     world = await startWorld({
       id: "capacity",
-      executorEnv: { AD4M_SFU_BIND_ADDR: sfuIp },
+      executorEnv: { AD4M_SFU_BIND_ADDR: sfuIp, ...(SFU_PROCESS ? { AD4M_SFU_PROCESS: "true" } : {}) },
       users: userNames.map((name) => ({ name })),
       neighbourhoods: [
         // A room holds maxMeshParticipants x 4: 24 here.
@@ -238,7 +386,18 @@ describe("SFU capacity: calls of growing size in real browsers", function () {
       ],
     });
     pid = executorPid(world.users.u1.port);
-    console.log(`  executor pid ${pid}, SFU on ${sfuIp}`);
+    const worker = sfuWorkerPid(pid);
+    if (SFU_PROCESS && !worker) throw new Error(`SFU_CAP_SFU_PROCESS is set but executor ${pid} runs no sfu-worker child`);
+    if (!SFU_PROCESS && worker) throw new Error(`executor ${pid} runs an sfu-worker child (${worker}) without SFU_CAP_SFU_PROCESS`);
+    console.log(`  executor pid ${pid}, SFU on ${sfuIp}, ${worker ? `in its own process (pid ${worker})` : "in the executor"}`);
+    if (LOAD_CLIENTS > 0) {
+      const u1 = world.users.u1;
+      const t = Date.now();
+      const uuid = await seedLoadPerspective(u1.client, LOAD_LINKS);
+      for (let i = 0; i < LOAD_CLIENTS; i++) loadClients.push(new Ad4mClient(`http://127.0.0.1:${u1.port}`, u1.token));
+      load = new QueryLoad(loadClients, uuid);
+      console.log(`  load: ${LOAD_LINKS} links seeded in ${((Date.now() - t) / 1000).toFixed(1)} s, ${LOAD_CLIENTS} clients`);
+    }
   });
 
   /**
@@ -256,6 +415,8 @@ describe("SFU capacity: calls of growing size in real browsers", function () {
 
   after(async function () {
     for (const { browser } of [...browsers.values(), ...extra.values()]) await browser?.close().catch(() => {});
+    await load?.stop();
+    for (const client of loadClients) client.close();
     server?.close();
     await world?.stop().catch(() => {});
   });
@@ -277,21 +438,23 @@ describe("SFU capacity: calls of growing size in real browsers", function () {
     Object.fromEntries(await Promise.all(users.map(async (u) => [u.name, await u.page.evaluate(() => (window as any).__capStats())] as const))) as Record<string, PcStats>;
   const reports = async (users: BrowserUser[]) =>
     Object.fromEntries(await Promise.all(users.map(async (u) => [u.name, await report(u)] as const))) as Record<string, PageReport>;
-  const problemsOf = (users: BrowserUser[], before: Record<string, PageReport>, now: Record<string, PageReport>) =>
-    Object.fromEntries(users.map((u) => [u.name, users.filter((o) => o !== u).flatMap((o) =>
+  /** What each tab misses from the others in its call; with `size`, users are calls of that size in order. */
+  const problemsOf = (users: BrowserUser[], before: Record<string, PageReport>, now: Record<string, PageReport>, size = users.length) =>
+    Object.fromEntries(users.map((u, i) => [u.name, users.filter((o, j) => o !== u && Math.floor(j / size) === Math.floor(i / size)).flatMap((o) =>
       receiveProblems(before[u.name], now[u.name], o.did).map((p) => `${p} [${o.name}]`))]));
 
   for (const spec of RUNS) {
-    const label = `${spec.topology}-${spec.size}-${spec.browsers}`;
+    const label = `${spec.topology}-${spec.size}-${spec.browsers}${spec.calls > 1 ? `-x${spec.calls}` : ""}`;
     it(label, async function () {
-      const result: Record<string, any> = { label, ...spec, video: `${VIDEO_W}x${VIDEO_H}`, steadyMs: STEADY_MS, startedAt: new Date().toISOString(), loadavgAtStart: loadavg() };
+      const result: Record<string, any> = { label, ...spec, video: `${VIDEO_W}x${VIDEO_H}`, steadyMs: STEADY_MS, startedAt: new Date().toISOString(), loadavgAtStart: loadavg(),
+        sfuProcess: SFU_PROCESS, load: LOAD_CLIENTS > 0 ? { clients: LOAD_CLIENTS, links: LOAD_LINKS } : null };
       const file = path.join(OUT, `${label}-${Date.now()}.json`);
       const save = () => writeFileSync(file, JSON.stringify(result, null, 1));
       const users: BrowserUser[] = [];
       try {
         const kindFor = (i: number): BrowserKind => (spec.browsers === "mixed" ? KINDS[i % 3] : spec.browsers);
         const perKind = new Map<BrowserKind, number>();
-        for (let i = 0; i < spec.size; i++) {
+        for (let i = 0; i < spec.size * spec.calls; i++) {
           const kind = kindFor(i);
           const n = perKind.get(kind) ?? 0;
           perKind.set(kind, n + 1);
@@ -302,17 +465,24 @@ describe("SFU capacity: calls of growing size in real browsers", function () {
         }
         const executorBefore = status(pid);
         result.executorIdle = executorBefore;
+        const workerPid = sfuWorkerPid(pid);
+        if (SFU_PROCESS && !workerPid) throw new Error("the executor's sfu-worker child is gone");
+        if (workerPid) result.sfuWorkerIdle = { pid: workerPid, ...status(workerPid) };
+        const loadT0 = Date.now();
+        load?.start();
 
         // Join everyone, one right after the other, as people do at a meeting's start.
-        const room = `cap-${label}-${Date.now()}`;
+        // With several calls, their joins interleave.
+        const rooms = Array.from({ length: spec.calls }, (_, c) => `cap-${label}-${Date.now()}-${c}`);
+        const joinOrder = users.map((u, i) => ({ u, i })).sort((a, b) => (a.i % spec.size) - (b.i % spec.size) || a.i - b.i);
         const joinedAt: Record<string, number> = {};
         const t0 = Date.now();
-        for (const user of users) {
+        for (const { u: user, i } of joinOrder) {
           const w = world!.users[user.name];
           joinedAt[user.name] = Date.now() - t0;
           await joinCall(user, {
             executorUrl: `http://127.0.0.1:${w.port}`, token: w.token, neighbourhoodUrl: world!.url(spec.topology),
-            room, name: user.name, video: { width: VIDEO_W, height: VIDEO_H },
+            room: rooms[Math.floor(i / spec.size)], name: user.name, video: { width: VIDEO_W, height: VIDEO_H },
           });
         }
         result.joinsIssuedMs = Date.now() - t0;
@@ -325,7 +495,7 @@ describe("SFU capacity: calls of growing size in real browsers", function () {
         for (;;) {
           await new Promise((r) => setTimeout(r, 2_000));
           const now = await reports(users);
-          lastProblems = problemsOf(users, before, now);
+          lastProblems = problemsOf(users, before, now, spec.size);
           const at = Date.now() - t0;
           for (const user of users) {
             if (activeAt[user.name] === undefined && now[user.name].state === "active") activeAt[user.name] = at;
@@ -373,43 +543,30 @@ describe("SFU capacity: calls of growing size in real browsers", function () {
         result.loadavgAtWindow = loadavg();
         const reportsStart = await reports(users);
         const statsStart = await stats(users);
-        const threadsStart = threadTicks(pid);
-        const procStart = cpuTicks(`/proc/${pid}/stat`)!.ticks;
+        // The executor's own figures: a child's CPU is not in its parent's /proc stat.
+        const executorWindow = new ProcWindow(pid);
+        const workerWindow = workerPid ? new ProcWindow(workerPid) : null;
         const sysStart = systemTicks();
         const browsersStart = descendantTicks(process.pid, pid);
         const wStart = Date.now();
-        const samples: { t: number; cpuPct: number; rssKb: number; threads: number }[] = [];
-        let lastTicks = procStart;
-        let lastT = wStart;
         while (Date.now() - wStart < STEADY_MS) {
           await new Promise((r) => setTimeout(r, 1_000));
-          const ticks = cpuTicks(`/proc/${pid}/stat`)!.ticks;
-          const t = Date.now();
-          samples.push({ t: t - wStart, cpuPct: ((ticks - lastTicks) / CLK_TCK) / ((t - lastT) / 1000) * 100, ...status(pid) });
-          lastTicks = ticks; lastT = t;
+          executorWindow.sample();
+          workerWindow?.sample();
         }
         const wEnd = Date.now();
         const seconds = (wEnd - wStart) / 1000;
-        const procEnd = cpuTicks(`/proc/${pid}/stat`)!.ticks;
         const sysEnd = systemTicks();
         const browsersEnd = descendantTicks(process.pid, pid);
-        const threadsEnd = threadTicks(pid);
+        result.executor = executorWindow.finish(seconds);
+        result.sfuWorker = workerWindow?.finish(seconds) ?? null;
         const statsEnd = await stats(users);
         const reportsEnd = await reports(users);
-
-        const threadCpu = [...threadsEnd].map(([tid, t]) => ({ tid, comm: t.comm, cpuPct: ((t.ticks - (threadsStart.get(tid)?.ticks ?? 0)) / CLK_TCK) / seconds * 100 }))
-          .sort((a, b) => b.cpuPct - a.cpuPct);
+        if (load) {
+          await load.stop();
+          result.load = { ...result.load, joinPhase: load.summary(loadT0, wStart), window: load.summary(wStart, wEnd) };
+        }
         const sysTotal = sysEnd.total - sysStart.total;
-        result.executor = {
-          pid, windowS: seconds,
-          cpuPct: ((procEnd - procStart) / CLK_TCK) / seconds * 100,
-          cpuPctMax1s: Math.max(...samples.map((s) => s.cpuPct)),
-          rssKbMean: mean(samples.map((s) => s.rssKb)), rssKbMax: Math.max(...samples.map((s) => s.rssKb)),
-          threads: samples[samples.length - 1]?.threads,
-          busiestThreads: threadCpu.slice(0, 6),
-          threadsAbove1Pct: threadCpu.filter((t) => t.cpuPct > 1).length,
-          samples,
-        };
         result.host = {
           cpus: (await import("node:os")).cpus().length,
           systemBusyPct: ((sysTotal - (sysEnd.idle - sysStart.idle)) / sysTotal) * 100,
@@ -450,7 +607,7 @@ describe("SFU capacity: calls of growing size in real browsers", function () {
             sendAudioBytesPerS: (b.audioOut.bytes - a.audioOut.bytes) / seconds,
             sendVideoBytesPerS: (b.videoOut.bytes - a.videoOut.bytes) / seconds,
             sentLayers: b.videoOut.layers,
-            receivesAllInWindow: problemsOf([user, ...users.filter((u) => u !== user)], reportsStart, reportsEnd)[user.name],
+            receivesAllInWindow: problemsOf(users, reportsStart, reportsEnd, spec.size)[user.name],
             sessionErrors: reportsEnd[user.name].sessionErrors, topology: reportsEnd[user.name].topology,
           };
         }
@@ -466,11 +623,17 @@ describe("SFU capacity: calls of growing size in real browsers", function () {
         console.log(`    ${label}: executor ${result.executor.cpuPct.toFixed(1)}% CPU (top thread ${result.executor.busiestThreads[0]?.comm} ${result.executor.busiestThreads[0]?.cpuPct.toFixed(1)}%), ` +
           `RSS ${(result.executor.rssKbMax / 1024).toFixed(0)} MB, ${result.executor.threads} threads, in ${(inBytes * 8 / 1e6).toFixed(2)} Mbit/s, out ${(outBytes * 8 / 1e6).toFixed(2)} Mbit/s, ` +
           `all receive all: ${result.everyoneReceivesEveryone}, converged ${result.convergedMs} ms -> ${file}`);
+        if (result.sfuWorker) {
+          console.log(`    ${label}: sfu-worker ${result.sfuWorker.cpuPct.toFixed(1)}% CPU (top thread ${result.sfuWorker.busiestThreads[0]?.comm} ${result.sfuWorker.busiestThreads[0]?.cpuPct.toFixed(1)}%), ` +
+            `RSS ${(result.sfuWorker.rssKbMax / 1024).toFixed(0)} MB, ${result.sfuWorker.threads} threads`);
+        }
+        if (result.load?.window) console.log(`    ${label}: load in window ${JSON.stringify(Object.fromEntries(Object.entries(result.load.window).map(([k, v]: [string, any]) => [k, `${v.perS.toFixed(1)}/s p95 ${v.msP95?.toFixed(0)} ms, ${v.errors} errors`])))}`);
       } catch (error) {
         result.error = String(error instanceof Error ? error.stack : error);
         save();
         throw error;
       } finally {
+        await load?.stop();
         for (const user of users) {
           await Promise.race([
             user.page.evaluate(() => (window as any).__call.leave()).catch(() => {}),

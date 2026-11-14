@@ -321,6 +321,11 @@ pub struct RunArgs {
         value_parser = non_empty(StringValueParser::new())
     )]
     pub sfu_preferred_node: Option<String>,
+    /// Run the SFU's media loop (socket, WebRTC sessions, forwarding) in a
+    /// child process with its own CPU budget. Signalling stays on the
+    /// executor. Not with cascade gossip. Default: in-process.
+    #[arg(long, action, env = "AD4M_SFU_PROCESS", value_parser = non_empty(BoolValueParser::new()))]
+    pub sfu_process: Option<bool>,
     /// The identity store's base URL (`identity.storeUrl`), given to the agent language.
     /// Default: the store the network's seed names (`identityStore` in the seed `init`
     /// wrote; this build's seed names `https://store.ad4m.dev`); without one, no store.
@@ -425,6 +430,7 @@ impl RunArgs {
         overlay(&mut file.sfu_udp_port, &self.sfu_udp_port);
         overlay(&mut file.sfu_public_addr, &self.sfu_public_addr);
         overlay(&mut file.sfu_stun_server, &self.sfu_stun_server);
+        overlay(&mut file.sfu_process, &self.sfu_process);
         if self.identity_store_url.is_some()
             || self.identity_store_keys.is_some()
             || self.identity_allow_private_src.is_some()
@@ -788,6 +794,13 @@ pub(crate) mod tests {
             "stun.c.example:3478",
         ),
         (
+            "/sfu_process",
+            "AD4M_SFU_PROCESS",
+            "--sfu-process",
+            "false",
+            "true",
+        ),
+        (
             "/identity/storeUrl",
             "AD4M_IDENTITY_STORE_URL",
             "--identity-store-url",
@@ -858,6 +871,7 @@ pub(crate) mod tests {
             sfu_udp_port: Some(40000),
             sfu_public_addr: Some("203.0.113.10".into()),
             sfu_stun_server: Some("stun.a.example:3478".into()),
+            sfu_process: Some(true),
             identity: Some(rust_executor::config_file::IdentityFileSettings {
                 store_url: Some("http://127.0.0.1:8080".into()),
                 store_keys: Some(vec!["z6MkA".into()]),
@@ -1186,7 +1200,7 @@ pub(crate) mod tests {
             checked += 1;
         }
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
-        assert_eq!(checked, 46, "every flag of run has a variable");
+        assert_eq!(checked, 47, "every flag of run has a variable");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

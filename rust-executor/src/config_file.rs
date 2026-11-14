@@ -226,6 +226,10 @@ pub struct ExecutorConfigFile {
     /// address. Unset: no probe.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sfu_stun_server: Option<String>,
+    /// Run the SFU's media loop in a child process with its own CPU budget.
+    /// Unset: in the executor's process.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sfu_process: Option<bool>,
     /// `identity.storeUrl` and `identity.storeKeys`: the identity store the agent language
     /// reaches and the keys its heads must be signed by.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -565,6 +569,7 @@ impl ExecutorConfigFile {
             sfu_udp_port: self.sfu_udp_port,
             sfu_public_addr: self.sfu_public_addr.clone(),
             sfu_stun_server: self.sfu_stun_server.clone(),
+            sfu_process: self.sfu_process,
             identity_store_url: self.identity.as_ref().and_then(|i| i.store_url.clone()),
             identity_store_keys: self.identity.as_ref().and_then(|i| i.store_keys.clone()),
             identity_allow_private_src: self.identity.as_ref().and_then(|i| i.allow_private_src),

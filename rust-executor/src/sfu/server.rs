@@ -434,6 +434,9 @@ pub enum SfuCommand {
     GetQualityPreferences {
         reply: tokio::sync::oneshot::Sender<HashMap<ParticipantId, String>>,
     },
+    /// Add the peer a worker process prepared for this participant
+    /// ([`SfuServer::prepare_peer`] with `--sfu-process`).
+    AddPrepared(ParticipantId),
     /// Shut down the SFU server.
     Shutdown,
 }
@@ -459,6 +462,10 @@ pub struct SfuServerConfig {
     pub preferred_node: Option<String>,
     /// DIDs of the configured cascade peers, as `sfu.getConfig` reports them.
     pub cascade_peer_dids: Vec<String>,
+    /// Run the media loop in a child process (`--sfu-process`): the socket,
+    /// every `Rtc` and the forwarding live there, signalling stays here.
+    /// See [`super::process`].
+    pub process: bool,
 }
 
 impl Default for SfuServerConfig {
@@ -471,6 +478,7 @@ impl Default for SfuServerConfig {
             public_ip: None,
             preferred_node: None,
             cascade_peer_dids: Vec::new(),
+            process: false,
         }
     }
 }
@@ -617,11 +625,27 @@ pub struct SfuServer {
     /// Notifications about peers whose RTC connection died. Unbounded: a
     /// dropped notification would leave the peer's room slot taken for good.
     pub dead_peer_rx: StdMutex<Option<mpsc::UnboundedReceiver<DeadPeer>>>,
+    /// The child process that runs the media loop, with `--sfu-process`.
+    pub worker: Option<std::sync::Arc<super::process::WorkerLink>>,
 }
 
 impl SfuServer {
     /// Start the SFU server. Binds a UDP socket and spawns the event loop on tokio.
+    /// With `config.process`, the loop runs in a child process instead
+    /// ([`super::process::start`]).
     pub async fn start(config: SfuServerConfig) -> Result<Self, std::io::Error> {
+        if config.process {
+            return super::process::start(config).await;
+        }
+        Self::start_with_sink(config, EventSink::Pubsub).await
+    }
+
+    /// Bind, probe and start the media loop in this process, its client
+    /// events going to `sink`.
+    pub(crate) async fn start_with_sink(
+        config: SfuServerConfig,
+        sink: EventSink,
+    ) -> Result<Self, std::io::Error> {
         let fixed_port = config.bind_addr.port() != 0;
         let socket = UdpSocket::bind(config.bind_addr).await.map_err(|e| {
             if fixed_port {
@@ -682,6 +706,7 @@ impl SfuServer {
             command_rx,
             local_addr,
             dead_peer_tx,
+            sink,
         ));
 
         Ok(Self {
@@ -690,6 +715,7 @@ impl SfuServer {
             reachability,
             command_tx,
             dead_peer_rx: StdMutex::new(Some(dead_peer_rx)),
+            worker: None,
         })
     }
 
@@ -727,12 +753,39 @@ impl SfuServer {
         Ok((rtc, answer_json))
     }
 
+    /// Answer a client's offer and build its peer, without adding it yet:
+    /// returns the answer and the command that adds the peer to the media
+    /// loop. In this process that is `AddPeer` with the peer; with a worker
+    /// process the worker builds and keeps the peer, and the command is
+    /// `AddPrepared`.
+    pub async fn prepare_peer(
+        &self,
+        pid: ParticipantId,
+        room_id: RoomId,
+        agent_did: &str,
+        sdp_offer_json: &str,
+    ) -> Result<(SfuCommand, String), String> {
+        let offer: SdpOffer = serde_json::from_str(sdp_offer_json)
+            .map_err(|e| format!("Invalid SDP offer: {}", e))?;
+        if let Some(worker) = &self.worker {
+            let answer = worker
+                .prepare(&pid, &room_id, agent_did, sdp_offer_json)
+                .await?;
+            return Ok((SfuCommand::AddPrepared(pid), answer));
+        }
+        let (rtc, answer) =
+            Self::create_rtc_for_offer(offer, self.local_addr, self.advertised.map(|a| a.addr))?;
+        let peer = SfuPeer::new(pid, room_id, agent_did.to_string(), rtc, false);
+        Ok((SfuCommand::AddPeer(peer), answer))
+    }
+
     /// The main event loop. Reads UDP packets, drives str0m, and relays media.
     async fn event_loop(
         socket: UdpSocket,
         mut command_rx: mpsc::Receiver<SfuCommand>,
         local_addr: SocketAddr,
         dead_peer_tx: mpsc::UnboundedSender<DeadPeer>,
+        sink: EventSink,
     ) {
         let mut peers: HashMap<ParticipantId, SfuPeer> = HashMap::new();
         let mut relay = MediaRelay::new();
@@ -955,8 +1008,7 @@ impl SfuServer {
                             &data,
                         );
                         let recipients = data_recipients(&peers, &origin_room, &participant_id);
-                        crate::pubsub::get_global_pubsub_sync()
-                            .publish_event(crate::events::Event::sfu_data(&payload, recipients));
+                        sink.data(payload, recipients);
                     }
                     Ok(SfuCommand::RestartIce { participant_id }) => {
                         let Some(peer) = peers.get_mut(&participant_id) else {
@@ -973,6 +1025,7 @@ impl SfuServer {
                             peer.restart_ice(Instant::now())
                         {
                             publish_renegotiation_offer(
+                                &sink,
                                 peer,
                                 &participant_id,
                                 sdp_offer_json,
@@ -982,6 +1035,11 @@ impl SfuServer {
                     }
                     Ok(SfuCommand::GetQualityPreferences { reply }) => {
                         let _ = reply.send(quality_preferences.clone());
+                    }
+                    Ok(SfuCommand::AddPrepared(pid)) => {
+                        // Only a worker link sends it; the worker turns it
+                        // into `AddPeer` before it reaches its loop.
+                        warn!("SFU: AddPrepared({}) reached the media loop", pid);
                     }
                     Ok(SfuCommand::Shutdown) => {
                         info!("SFU event loop shutting down");
@@ -1146,11 +1204,10 @@ impl SfuServer {
             }
 
             if !data_received.is_empty() {
-                let pubsub = crate::pubsub::get_global_pubsub_sync();
                 for (sender, payload) in data_received {
                     let room = RoomId::new(&payload.neighbourhood_url, &payload.room_name);
                     let recipients = data_recipients(&peers, &room, &sender);
-                    pubsub.publish_event(crate::events::Event::sfu_data(&payload, recipients));
+                    sink.data(payload, recipients);
                 }
             }
 
@@ -1236,7 +1293,13 @@ impl SfuServer {
             for (pid, peer) in peers.iter_mut() {
                 if peer.pending_offer.is_none() && peer.has_deferred_changes() {
                     if let Some((sdp_offer_json, track_mapping)) = apply_deferred_tracks(peer) {
-                        publish_renegotiation_offer(peer, pid, sdp_offer_json, track_mapping);
+                        publish_renegotiation_offer(
+                            &sink,
+                            peer,
+                            pid,
+                            sdp_offer_json,
+                            track_mapping,
+                        );
                     }
                 }
             }
@@ -1331,6 +1394,7 @@ impl SfuServer {
             {
                 if let Some(target_peer) = peers.get(&target_pid) {
                     publish_renegotiation_offer(
+                        &sink,
                         target_peer,
                         &target_pid,
                         sdp_offer_json,
@@ -1698,6 +1762,7 @@ fn data_recipients(
 /// `sfu-call-renegotiation-offer` event; a pipe transport's offer goes to the
 /// cascade router through the pipe bus. Both carry the track mapping.
 fn publish_renegotiation_offer(
+    sink: &EventSink,
     peer: &SfuPeer,
     pid: &ParticipantId,
     sdp_offer_json: String,
@@ -1720,10 +1785,42 @@ fn publish_renegotiation_offer(
             sdp_offer: sdp_offer_json,
             track_mapping,
         };
-        crate::pubsub::get_global_pubsub_sync()
-            .publish_event(crate::events::Event::sfu_renegotiation_offer(&payload));
+        sink.renegotiation(payload);
     }
     info!("SFU: renegotiation offer published for peer {}", pid);
+}
+
+/// Where the media loop's events for clients go: the executor's event
+/// stream, or, in an SFU worker process, the executor that runs it.
+#[derive(Clone)]
+pub(crate) enum EventSink {
+    Pubsub,
+    Worker(mpsc::UnboundedSender<super::process::FromWorker>),
+}
+
+impl EventSink {
+    fn data(&self, payload: crate::sfu::SfuDataMessage, recipients: Vec<String>) {
+        match self {
+            EventSink::Pubsub => crate::pubsub::get_global_pubsub_sync()
+                .publish_event(crate::events::Event::sfu_data(&payload, recipients)),
+            EventSink::Worker(tx) => {
+                let _ = tx.send(super::process::FromWorker::Data {
+                    payload,
+                    recipients,
+                });
+            }
+        }
+    }
+
+    fn renegotiation(&self, payload: crate::sfu::SfuCallRenegotiationOffer) {
+        match self {
+            EventSink::Pubsub => crate::pubsub::get_global_pubsub_sync()
+                .publish_event(crate::events::Event::sfu_renegotiation_offer(&payload)),
+            EventSink::Worker(tx) => {
+                let _ = tx.send(super::process::FromWorker::Renegotiation { payload });
+            }
+        }
+    }
 }
 
 #[cfg(test)]

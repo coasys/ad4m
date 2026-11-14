@@ -16,6 +16,7 @@ pub mod cascade;
 pub mod config_store;
 pub mod gossip;
 pub(crate) mod pipe_bus;
+pub mod process;
 pub mod reachability;
 pub mod relay;
 pub mod room;

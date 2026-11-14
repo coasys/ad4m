@@ -714,7 +714,13 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
                 .iter()
                 .filter_map(|entry| entry.split_once('=').map(|(did, _)| did.to_string()))
                 .collect(),
+            // Cascade pipes are built in the executor: they need the media
+            // loop here.
+            process: config.sfu_process.unwrap_or(false) && config.sfu_cascade_listen.is_none(),
         };
+        if config.sfu_process.unwrap_or(false) && !sfu_config.process {
+            warn!("--sfu-process ignored: cascade gossip needs the SFU in-process");
+        }
         match crate::sfu::SfuService::start(sfu_config, gossip).await {
             Ok(_) => {}
             // A fixed port is what the router forwards: running without it
