@@ -136,8 +136,10 @@ impl Drop for Executor {
 }
 
 /// The test class: one required single-valued `title`, one optional
-/// `xsd://boolean` `done` — the smallest shape `perspective.addSdna`
-/// accepts, modelled on the hardwired `flow_instance.json`.
+/// `xsd://boolean` `done`, one `hasMany` collection `tags` — the smallest
+/// shape `perspective.addSdna` accepts that can prove a collection edit
+/// rides the collection RPCs, modelled on the hardwired
+/// `flow_instance.json`.
 const NOTE_SDNA: &str = r#"{
   "target_class": "ad4m://IntegrationNote",
   "constructor_actions": [
@@ -145,7 +147,8 @@ const NOTE_SDNA: &str = r#"{
   ],
   "properties": [
     {"path": "ad4m://note/title", "name": "title", "identity": true, "min_count": 1, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://note/title", "target": "value"}]},
-    {"path": "ad4m://note/done", "name": "done", "datatype": "xsd://boolean", "min_count": 0, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://note/done", "target": "value"}]}
+    {"path": "ad4m://note/done", "name": "done", "datatype": "xsd://boolean", "min_count": 0, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://note/done", "target": "value"}]},
+    {"path": "ad4m://note/tag", "name": "tags", "node_kind": "IRI", "relation_kind": "hasMany", "collection": true}
   ]
 }"#;
 
@@ -252,6 +255,40 @@ async fn model_batch_subscription_reconnect_and_flow() {
     // the declared boolean property stay typed end to end.
     assert_eq!(row["done"], json!(true));
     assert!(row["done"].is_boolean());
+
+    // ── dirty save on a collection (R6): `instanceUpdate` refuses
+    // collections (`CollectionNotSettable`), so `Instance::save` diffs the
+    // array against the snapshot and goes through the item-level
+    // collection RPCs — proven by the writes landing at all. ────────────
+    let row = model.get(&created.base_uri, None).await.unwrap().unwrap();
+    let mut inst = model.instance(created.base_uri.clone(), row.as_object().unwrap().clone());
+    inst.set("title", json!("first-edited"));
+    inst.set("tags", json!(["tag://a", "tag://b"]));
+    inst.save(None).await.unwrap();
+    let row = model.get(&created.base_uri, None).await.unwrap().unwrap();
+    assert_eq!(row["title"], json!("first-edited"));
+    let mut tags: Vec<String> = row["tags"]
+        .as_array()
+        .expect("tags hydrates as an array")
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    tags.sort();
+    assert_eq!(tags, ["tag://a", "tag://b"]);
+
+    // A pure reorder is not even dirty — a collection is a set, so this
+    // save is a no-op, not a rejected `instanceUpdate`.
+    let mut inst = model.instance(created.base_uri.clone(), row.as_object().unwrap().clone());
+    inst.set("tags", json!(["tag://b", "tag://a"]));
+    assert!(!inst.is_dirty());
+    inst.save(None).await.unwrap();
+
+    // Removal diffs item by item too: `tag://a` leaves the collection.
+    let mut inst = model.instance(created.base_uri.clone(), row.as_object().unwrap().clone());
+    inst.set("tags", json!(["tag://b"]));
+    inst.save(None).await.unwrap();
+    let row = model.get(&created.base_uri, None).await.unwrap().unwrap();
+    assert_eq!(row["tags"], json!(["tag://b"]));
 
     // ── batch: writes invisible until commit ─────────────────────────────
     let batch = model.batch().await.unwrap();

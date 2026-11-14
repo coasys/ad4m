@@ -698,15 +698,13 @@ impl Instance {
 
     /// TS `changedFields` — sorted keys whose current value differs from
     /// the snapshot's. A key the caller `set` but the hydration lacked
-    /// counts: it is a real write. Values compare order-sensitively —
-    /// without the class's `ordering` metadata there is no way to know an
-    /// array is an unordered set, and a spurious rewrite is the safe
-    /// failure direction.
+    /// counts: it is a real write. Collections compare as unordered sets
+    /// — a reorder is not a change (R6).
     pub fn changed_fields(&self) -> Vec<String> {
         let mut changed: Vec<String> = self
             .current
             .iter()
-            .filter(|(k, v)| self.snapshot.get(*k) != Some(*v))
+            .filter(|(k, v)| !snapshot_equal(self.snapshot.get(*k), v))
             .map(|(k, _)| k.clone())
             .collect();
         changed.sort();
@@ -718,19 +716,90 @@ impl Instance {
     /// clean — then adopt the current values as the snapshot so further
     /// saves diff against them (TS `takeSnapshot`; a save outside a batch
     /// would rehydrate, which is equivalent for the values written here).
+    /// Collections ride their own RPCs — `instanceUpdate` refuses them
+    /// (`CollectionNotSettable`), so a changed array field is diffed
+    /// against the snapshot and written item by item,
+    /// `instanceRemoveFromCollection` before `instanceAddToCollection`,
+    /// like TS dispatching relation changes separately (R6). A failed
+    /// call aborts the save with the snapshot untouched — a retry
+    /// replays idempotent ops, never a duplicate write.
     pub async fn save(&mut self, batch_id: Option<String>) -> Result<()> {
         let changed = self.changed_fields();
         if changed.is_empty() {
             return Ok(());
         }
-        let props: Map<String, Value> = changed
+        // A hydrated collection always reads as a JSON array of item
+        // URIs, so "either side is an array" marks the field a collection
+        // without any schema to consult (R6).
+        let is_collection = |key: &String| {
+            self.current[key].is_array() || self.snapshot.get(key).is_some_and(Value::is_array)
+        };
+        let scalars: Map<String, Value> = changed
             .iter()
+            .filter(|k| !is_collection(k))
             .map(|k| (k.clone(), self.current[k].clone()))
             .collect();
-        self.model.update(&self.base_uri, props, batch_id).await?;
+        if !scalars.is_empty() {
+            self.model
+                .update(&self.base_uri, scalars, batch_id.clone())
+                .await?;
+        }
+        for key in changed.iter().filter(|k| is_collection(k)) {
+            let before = collection_items(self.snapshot.get(key));
+            let after = collection_items(self.current.get(key));
+            for item in before.iter().filter(|i| !after.contains(i)) {
+                self.model
+                    .remove_from_collection(&self.base_uri, key, item, batch_id.clone())
+                    .await?;
+            }
+            for item in after.iter().filter(|i| !before.contains(i)) {
+                self.model
+                    .add_to_collection(&self.base_uri, key, item, batch_id.clone())
+                    .await?;
+            }
+        }
         self.snapshot = self.current.clone();
         Ok(())
     }
+}
+
+/// Snapshot equality for `Instance::changed_fields`: two arrays compare
+/// as unordered sets — a reorder or a duplicate entry is no change —
+/// everything else as-is.
+fn snapshot_equal(baseline: Option<&Value>, current: &Value) -> bool {
+    match (baseline, current) {
+        (Some(Value::Array(_)), Value::Array(_)) => {
+            let mut before = collection_items(baseline);
+            let mut after = collection_items(Some(current));
+            before.sort_unstable();
+            after.sort_unstable();
+            before == after
+        }
+        (Some(b), c) => b == c,
+        (None, _) => false,
+    }
+}
+
+/// The item URIs of a collection property's wire value: an array of
+/// them, a lone non-array value as a one-item collection, `Null`/absent
+/// as empty — and deduped, since a collection is a set.
+fn collection_items(value: Option<&Value>) -> Vec<String> {
+    let raw: &[Value] = match value {
+        Some(Value::Array(items)) => items,
+        Some(Value::Null) | None => return Vec::new(),
+        Some(item) => std::slice::from_ref(item),
+    };
+    let mut items: Vec<String> = Vec::with_capacity(raw.len());
+    for v in raw {
+        let item = match v {
+            Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+        if !items.contains(&item) {
+            items.push(item);
+        }
+    }
+    items
 }
 
 /// `{ instances, totalCount }` out of a raw subscription result — the parse
@@ -826,6 +895,103 @@ mod tests {
 
         // The snapshot adopted the write: a second clean save sends no RPC.
         assert!(!inst.is_dirty());
+        inst.save(None).await.unwrap();
+        assert!(fake
+            .maybe_request(Duration::from_millis(300))
+            .await
+            .is_none());
+        ws.close().await;
+    }
+
+    /// R6: a changed collection field cannot go through `instanceUpdate`
+    /// — the executor rejects it `CollectionNotSettable` — so `save`
+    /// diffs the array against the snapshot and writes item by item
+    /// (`instanceRemoveFromCollection` before `instanceAddToCollection`),
+    /// while scalar changes keep their single update call.
+    #[tokio::test]
+    async fn save_dispatches_collection_edits_item_by_item() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let ws = Arc::new(WsRpcClient::connect(fake.url(), "").await.unwrap());
+        let model = Model::new(&ws, "p1", "Recipe");
+
+        let hydrated = json!({
+            "id": "recipe://1",
+            "name": "Pasta",
+            "tags": ["tag://a", "tag://b"],
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let mut inst = model.instance("recipe://1", hydrated);
+        inst.set("name", json!("Risotto"));
+        inst.set("tags", json!(["tag://b", "tag://c"]));
+
+        let save = tokio::spawn(async move {
+            let mut inst = inst;
+            (inst.save(None).await, inst)
+        });
+        let mut updated = false;
+        let mut removed = false;
+        let mut added = false;
+        for _ in 0..3 {
+            let req = fake.next_request().await;
+            match req["type"].as_str() {
+                Some("perspective.instanceUpdate") => {
+                    // The collection must not ride the scalar update.
+                    assert_eq!(req["params"]["properties"], json!({"name": "Risotto"}));
+                    updated = true;
+                    fake.reply(
+                        &req,
+                        json!({"className": "Recipe", "baseUri": "recipe://1", "updatedProperties": ["name"]}),
+                    )
+                    .await;
+                }
+                Some("perspective.instanceRemoveFromCollection") => {
+                    assert_eq!(req["params"]["collection"], "tags");
+                    assert_eq!(req["params"]["itemUri"], "tag://a");
+                    removed = true;
+                    fake.reply(
+                        &req,
+                        json!({"className": "Recipe", "baseUri": "recipe://1", "collection": "tags", "itemUri": "tag://a", "linksRemoved": 1}),
+                    )
+                    .await;
+                }
+                Some("perspective.instanceAddToCollection") => {
+                    assert_eq!(req["params"]["collection"], "tags");
+                    assert_eq!(req["params"]["itemUri"], "tag://c");
+                    added = true;
+                    fake.reply(
+                        &req,
+                        json!({"className": "Recipe", "baseUri": "recipe://1", "collection": "tags", "itemUri": "tag://c", "linksAdded": 1, "alreadyMember": false}),
+                    )
+                    .await;
+                }
+                other => panic!("unexpected write on the wire: {other:?}"),
+            }
+        }
+        assert!(updated && removed && added);
+        let (res, _inst) = save.await.unwrap();
+        res.unwrap();
+        ws.close().await;
+    }
+
+    /// R6: reordering a collection changes nothing — `save` sends no RPC
+    /// at all (the array compares as a set, not a sequence).
+    #[tokio::test]
+    async fn a_reordered_collection_is_not_dirty() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let ws = Arc::new(WsRpcClient::connect(fake.url(), "").await.unwrap());
+        let model = Model::new(&ws, "p1", "Recipe");
+
+        let hydrated = json!({"id": "recipe://1", "tags": ["tag://a", "tag://b"]})
+            .as_object()
+            .unwrap()
+            .clone();
+        let mut inst = model.instance("recipe://1", hydrated);
+        inst.set("tags", json!(["tag://b", "tag://a"]));
+        assert!(!inst.is_dirty(), "a pure reorder must not be dirty");
         inst.save(None).await.unwrap();
         assert!(fake
             .maybe_request(Duration::from_millis(300))
