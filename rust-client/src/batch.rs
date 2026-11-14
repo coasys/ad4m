@@ -5,8 +5,13 @@
 //!
 //! `perspective.createBatch` opens one: `commit` applies the batch's writes
 //! and answers the links it changed (a `PerspectiveLinkDiff`), `discard`
-//! drops them. Between open and commit the writes are invisible to reads —
-//! an atomic unit.
+//! drops them. Between open and commit the writes are invisible to reads,
+//! and a commit makes them visible together.
+//!
+//! That is commit visibility, not per-call rollback: a write that fails
+//! inside a batch may already have staged part of its links. A caller that
+//! owns a batch and sees a write fail must `discard` the whole batch; catching
+//! the error and committing commits whatever prefix the failed write staged.
 
 use anyhow::Result;
 use serde::Deserialize;
@@ -77,11 +82,55 @@ impl Batch {
     /// `false` when it could not discard; that is surfaced as an error, not a
     /// silent `Ok(false)`.
     pub async fn discard(&self) -> Result<()> {
-        self.ws
-            .call_void(
+        let discarded: bool = self
+            .ws
+            .call(
                 "perspective.discardBatch",
                 json!({ "uuid": self.uuid, "batchId": self.id }),
             )
+            .await?;
+        if !discarded {
+            anyhow::bail!(
+                "perspective.discardBatch: the executor holds no open batch {} on {}",
+                self.id,
+                self.uuid
+            );
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testkit::FakeExecutor;
+
+    /// The executor answers `perspective.discardBatch` with `false` when the
+    /// batch is unknown (already committed, discarded, or never opened): the
+    /// writes the caller meant to drop are not known to be dropped, so the
+    /// caller must hear it.
+    #[tokio::test]
+    async fn a_refused_discard_is_an_error() {
+        let fake = FakeExecutor::start().await;
+        let ws = Arc::new(WsRpcClient::connect(fake.url(), "").await.unwrap());
+        let batch = Batch::wrap(&ws, "p1", "b1".to_string());
+
+        let b = batch.clone();
+        let refused = tokio::spawn(async move { b.discard().await });
+        let req = fake.next_request().await;
+        assert_eq!(req["type"], "perspective.discardBatch");
+        assert_eq!(req["params"], json!({"uuid": "p1", "batchId": "b1"}));
+        fake.reply(&req, json!(false)).await;
+        let err = refused
             .await
+            .unwrap()
+            .expect_err("a `false` discard must not be Ok");
+        assert!(err.to_string().contains("b1"), "{err}");
+
+        let b = batch.clone();
+        let accepted = tokio::spawn(async move { b.discard().await });
+        let req = fake.next_request().await;
+        fake.reply(&req, json!(true)).await;
+        accepted.await.unwrap().unwrap();
     }
 }

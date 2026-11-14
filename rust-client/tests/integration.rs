@@ -310,6 +310,37 @@ async fn model_batch_subscription_reconnect_and_flow() {
     assert_eq!(after.len(), 3);
     let _ = next_result(&mut sub, "commit").await;
 
+    // ── batch: a failed write is not rolled back per call. The caller
+    // discards the whole batch: the good write staged before it never
+    // lands, and a second discard of the same batch is refused (`false`
+    // from the executor, an error here). ──────────────────────────────────
+    let batch = model.batch().await.unwrap();
+    let in_batch = || CreateOptions {
+        batch_id: Some(batch.id().to_string()),
+        ..Default::default()
+    };
+    model
+        .create(props(&[("title", json!("staged"))]), in_batch())
+        .await
+        .unwrap();
+    // `title` is required: this write fails inside the batch.
+    assert!(model
+        .create(props(&[("done", json!(true))]), in_batch())
+        .await
+        .is_err());
+    batch.discard().await.unwrap();
+    let after = model.find_all(&ModelQuery::default()).await.unwrap();
+    assert_eq!(
+        after.len(),
+        3,
+        "a discarded batch must leave nothing behind"
+    );
+    assert!(after.iter().all(|r| r["title"] != json!("staged")));
+    assert!(
+        batch.discard().await.is_err(),
+        "discarding a batch the executor no longer holds must fail"
+    );
+
     // ── reconnect: write through the gap. `call` waits for a socket, so
     // the create lands once the client reconnects; the re-opened
     // subscription's fresh full result (now 4 rows) is not deduped — the
