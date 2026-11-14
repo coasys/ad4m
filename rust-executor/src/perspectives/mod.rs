@@ -211,6 +211,13 @@ pub fn initialize_from_db() -> Vec<tokio::task::JoinHandle<()>> {
                 }
             }
 
+            // Links stored before verdicts keep their validity as a verdict (idempotent).
+            match p.sparql_store.migrate_link_verdicts() {
+                Ok(0) => {}
+                Ok(n) => log::info!("Gave {n} stored links of {} a verdict", handle_clone.uuid),
+                Err(e) => log::warn!("Verdict migration for {}: {}", handle_clone.uuid, e),
+            }
+
             // No named-graph → reifier migration. The named-graph storage model
             // never shipped: `git tag --contains` on the commit that replaced it
             // (`7aeeb8982`) is empty, and the last release tag carrying
@@ -372,6 +379,37 @@ pub async fn dispose_connection_subscriptions(connection_id: &str) {
             .dispose_connection_subscriptions(connection_id)
             .await;
     }
+}
+
+/// Which stored links a re-check judges again.
+#[derive(Clone, Debug)]
+pub enum Recheck {
+    /// The links these `did:key` DIDs signed (their key's verdict changed).
+    Signers(std::collections::BTreeSet<String>),
+    /// The links stored as `cantCheck`.
+    CantCheck,
+}
+
+/// Judges the links of `scope` again in every perspective, from the key map, and rewrites
+/// those whose verdict or person changed. `false` when a perspective's re-check failed (a
+/// store error): the caller runs the scope again later, since nothing else revisits a valid
+/// link whose signer's verdict changed.
+pub async fn recheck_links(scope: &Recheck) -> bool {
+    let mut all = true;
+    for perspective in all_perspectives() {
+        match perspective.recheck_links(scope).await {
+            Ok(0) => {}
+            Ok(changed) => log::info!(
+                "identity: {changed} links of perspective {} have a new verdict",
+                perspective.persisted.lock().await.uuid
+            ),
+            Err(e) => {
+                all = false;
+                log::warn!("identity: re-check of links failed: {e}")
+            }
+        }
+    }
+    all
 }
 
 pub fn all_perspectives() -> Vec<PerspectiveInstance> {
@@ -759,11 +797,16 @@ pub async fn import_perspective(
         })
         .collect();
 
+    // The proofs arrive with the file: the links are judged as a peer's are,
+    // not as this executor's own write.
     perspective
-        .persist_link_diff(&crate::types::PerspectiveDiff {
-            additions,
-            removals: vec![],
-        })
+        .persist_link_diff(
+            &crate::types::PerspectiveDiff {
+                additions,
+                removals: vec![],
+            },
+            false,
+        )
         .await
         .map_err(|e| format!("Failed to persist link diff to SPARQL store: {}", e))?;
 
@@ -885,6 +928,7 @@ mod tests {
             proof: ExpressionProof {
                 key: "test-key".to_string(),
                 signature: "test-signature".to_string(),
+                anchor: None,
             },
             status: Some(LinkStatus::Local),
         };

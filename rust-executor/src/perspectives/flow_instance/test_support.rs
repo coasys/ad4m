@@ -45,8 +45,11 @@ pub fn link(
             signature: "sig".to_string(),
             valid: Some(valid),
             invalid: Some(!valid),
+            anchor: None,
         },
         status: None,
+        verdict: None,
+        person: None,
     }
 }
 
@@ -350,6 +353,116 @@ pub fn signed_vote(proposal_uri: &str, voter_name: &str, at: &str) -> DecoratedL
         voter_name,
         true,
         None,
+        at,
+    )
+}
+
+// -----------------------------------------------------------------------
+// Device-key fixtures: links signed by a key a person's key log lists
+//
+// The `signed_*` personas are bare `did:key`s no log knows — `person` never
+// resolves for them. The identity slice's question is the next step: the
+// same `did:key`, *listed in a `did:scid` log*, whose links the resolver
+// judges `valid` AND names the person for (`link.person`). These sign with
+// the `SigningKey` of a `TestLog` device
+// ([`crate::identity::cache::tests::TestLog`]), anchored at the log's
+// trusted seq as `anchor_for` anchors a bound agent's links. Publish the
+// signer's log into the executor's key map (`KeyMap::publish` +
+// `note_confirmed`) before calling these: the conversion below runs the
+// real judgement, so what the map holds is what the link earns.
+// -----------------------------------------------------------------------
+
+/// One link signed by `device` — a key a person's key log lists — authoring
+/// as its own `did:key`, anchored at `anchor` of that log. The returned
+/// link is **judged**: `From` runs `check_signed`, so its `verdict` and
+/// `person` are the resolver's answers, not the fixture's say-so.
+pub fn device_link(
+    source: &str,
+    predicate: &str,
+    target: &str,
+    device: &ed25519_dalek::SigningKey,
+    anchor: u64,
+    at: &str,
+) -> DecoratedLinkExpression {
+    use ad4m_identity_core::build::Signer;
+    let key = device.key();
+    let data = CoreLink {
+        source: source.to_string(),
+        predicate: Some(predicate.to_string()),
+        target: target.to_string(),
+    }
+    .normalize();
+    let signature = hex::encode(
+        device.sign(
+            &crate::agent::signatures::anchored_signing_bytes(&data, at, anchor)
+                .expect("anchored signing bytes"),
+        ),
+    );
+    let expr = crate::types::Expression {
+        author: format!("did:key:{key}"),
+        timestamp: at.to_string(),
+        data,
+        proof: crate::types::ExpressionProof {
+            key: format!("did:key:{key}#{key}"),
+            signature,
+            anchor: Some(anchor),
+        },
+    };
+    DecoratedLinkExpression::from((LinkExpression::from(expr), CoreLinkStatus::Shared))
+}
+
+/// [`signed_terminal_proposal`] signed by a device key of a person's log
+/// instead of a persona: the proposer is the device's own `did:key`, and
+/// `anchor` is the trusted seq the device signs against.
+#[allow(clippy::too_many_arguments)]
+pub fn device_terminal_proposal(
+    nonce: &str,
+    device: &ed25519_dalek::SigningKey,
+    anchor: u64,
+    from: &str,
+    to: &str,
+    seal: &str,
+    outputs: &[&str],
+    committed: &str,
+    at: &str,
+) -> (String, Vec<DecoratedLinkExpression>) {
+    use ad4m_identity_core::build::Signer;
+    let proposer = format!("did:key:{}", device.key());
+    let uri = proposal_uri(INSTANCE, from, to, seal, Some(committed), &proposer, nonce);
+    let signed =
+        |predicate: &str, target: &str| device_link(&uri, predicate, target, device, anchor, at);
+    let mut links = vec![
+        signed(PROPOSER_PREDICATE, &proposer),
+        signed(FLOW_INSTANCE_PREDICATE, INSTANCE),
+        signed(FROM_STATE_PREDICATE, &literal(from)),
+        signed(TO_STATE_PREDICATE, &literal(to)),
+        signed(EVIDENCE_HASHES_PREDICATE, &literal(seal)),
+        signed(PROPOSAL_NONCE_PREDICATE, &literal(nonce)),
+    ];
+    links.extend(
+        outputs
+            .iter()
+            .map(|id| signed(OUTPUT_PREDICATE, &literal(&out_ref(id).encode()))),
+    );
+    links.push(signed(OUTPUTS_HASH_PREDICATE, &literal(committed)));
+    (uri, links)
+}
+
+/// A device-signed `proposal --acceptedBy--> did:key` co-signature: the
+/// device votes as its own DID, and the stored verdict names its person.
+pub fn device_vote(
+    proposal_uri: &str,
+    device: &ed25519_dalek::SigningKey,
+    anchor: u64,
+    at: &str,
+) -> DecoratedLinkExpression {
+    use ad4m_identity_core::build::Signer;
+    device_link(
+        proposal_uri,
+        ACCEPTED_BY_PREDICATE,
+        &format!("did:key:{}", device.key()),
+        device,
+        anchor,
         at,
     )
 }

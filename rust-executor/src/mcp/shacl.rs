@@ -8,7 +8,16 @@
 
 use crate::perspectives::model_query::types::ModelShape;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
-use crate::types::{LinkQuery, LinkStatus};
+use crate::types::{DecoratedLinkExpression, LinkQuery, LinkStatus};
+
+/// The first link in `links` that counts — `proof.valid == Some(true)`, the
+/// stored `valid` verdict every schema/logic read of decorated links makes
+/// (`flow_context/loader.rs`'s cut). A definition link a peer sent whose
+/// verdict does not count must not decide a shape, a property's predicate,
+/// or the status of a write.
+fn first_counting(links: &[DecoratedLinkExpression]) -> Option<&DecoratedLinkExpression> {
+    links.iter().find(|l| l.counts())
+}
 
 /// A SHACL subject class with its properties and metadata.
 ///
@@ -252,7 +261,7 @@ pub async fn load_class_properties_with_uri(
         Ok(links) => links,
         Err(_) => return (vec![], None),
     };
-    if shape_links.is_empty() {
+    if !shape_links.iter().any(|l| l.counts()) {
         shape_links = match perspective
             .get_links(&LinkQuery {
                 source: Some(raw),
@@ -266,12 +275,12 @@ pub async fn load_class_properties_with_uri(
         };
     }
 
-    if shape_links.is_empty() {
+    let Some(shape_link) = first_counting(&shape_links) else {
         return (vec![], None);
-    }
+    };
 
-    let shape_uri = &shape_links[0].data.target;
-    let prop_links = match perspective
+    let shape_uri = &shape_link.data.target;
+    let mut prop_links = match perspective
         .get_links(&LinkQuery {
             source: Some(shape_uri.clone()),
             predicate: Some("sh://property".to_string()),
@@ -282,6 +291,7 @@ pub async fn load_class_properties_with_uri(
         Ok(links) => links,
         Err(_) => return (vec![], None),
     };
+    prop_links.retain(|l| l.counts());
 
     let mut properties = Vec::new();
     for prop_link in &prop_links {
@@ -300,7 +310,7 @@ pub async fn load_class_properties_with_uri(
             })
             .await
         {
-            Ok(links) => !links.is_empty(),
+            Ok(links) => links.iter().any(|l| l.counts()),
             Err(_) => false,
         };
 
@@ -313,7 +323,7 @@ pub async fn load_class_properties_with_uri(
             })
             .await
         {
-            Ok(links) if !links.is_empty() => Some(links[0].data.target.clone()),
+            Ok(links) => first_counting(&links).map(|l| l.data.target.clone()),
             _ => None,
         };
 
@@ -326,7 +336,7 @@ pub async fn load_class_properties_with_uri(
             })
             .await
         {
-            Ok(links) if !links.is_empty() => Some(links[0].data.target.clone()),
+            Ok(links) => first_counting(&links).map(|l| l.data.target.clone()),
             _ => None,
         };
 
@@ -339,12 +349,12 @@ pub async fn load_class_properties_with_uri(
             })
             .await
         {
-            Ok(links) if !links.is_empty() => {
-                ad4m_client::literal::Literal::from_url(links[0].data.target.clone())
+            Ok(links) => first_counting(&links).and_then(|link| {
+                ad4m_client::literal::Literal::from_url(link.data.target.clone())
                     .ok()
                     .and_then(|l| l.get().ok())
                     .and_then(|v| v.to_string().parse::<u32>().ok())
-            }
+            }),
             _ => None,
         };
 
@@ -356,12 +366,12 @@ pub async fn load_class_properties_with_uri(
             })
             .await
         {
-            Ok(links) if !links.is_empty() => {
-                ad4m_client::literal::Literal::from_url(links[0].data.target.clone())
+            Ok(links) => first_counting(&links).and_then(|link| {
+                ad4m_client::literal::Literal::from_url(link.data.target.clone())
                     .ok()
                     .and_then(|l| l.get().ok())
                     .and_then(|v| v.to_string().parse::<u32>().ok())
-            }
+            }),
             _ => None,
         };
 
@@ -374,7 +384,7 @@ pub async fn load_class_properties_with_uri(
             })
             .await
         {
-            Ok(links) if !links.is_empty() => Some(links[0].data.target.clone()),
+            Ok(links) => first_counting(&links).map(|l| l.data.target.clone()),
             _ => None,
         };
 
@@ -387,15 +397,13 @@ pub async fn load_class_properties_with_uri(
             })
             .await
         {
-            Ok(links) if !links.is_empty() => {
-                let raw = links[0].data.target.clone();
-                Some(
-                    raw.strip_prefix("literal://string:")
-                        .or_else(|| raw.strip_prefix("literal:string:"))
-                        .unwrap_or(&raw)
-                        .to_string(),
-                )
-            }
+            Ok(links) => first_counting(&links).map(|link| {
+                let raw = link.data.target.clone();
+                raw.strip_prefix("literal://string:")
+                    .or_else(|| raw.strip_prefix("literal:string:"))
+                    .unwrap_or(&raw)
+                    .to_string()
+            }),
             _ => None,
         };
 
@@ -408,7 +416,7 @@ pub async fn load_class_properties_with_uri(
             })
             .await
         {
-            Ok(links) if !links.is_empty() => Some(links[0].data.target.clone()),
+            Ok(links) => first_counting(&links).map(|l| l.data.target.clone()),
             _ => None,
         };
 
@@ -421,15 +429,14 @@ pub async fn load_class_properties_with_uri(
             })
             .await
         {
-            Ok(links) if !links.is_empty() => {
-                let target = &links[0].data.target;
+            Ok(links) => first_counting(&links).map(|link| {
+                let target = &link.data.target;
                 let val = target
                     .strip_prefix("literal://string:")
                     .or_else(|| target.strip_prefix("literal:string:"))
                     .unwrap_or(target);
-                let decoded = urlencoding::decode(val).unwrap_or_default();
-                Some(decoded.to_string())
-            }
+                urlencoding::decode(val).unwrap_or_default().to_string()
+            }),
             _ => None,
         };
 
@@ -444,14 +451,14 @@ pub async fn load_class_properties_with_uri(
             })
             .await
         {
-            Ok(links) if !links.is_empty() => {
-                let target = &links[0].data.target;
+            Ok(links) => first_counting(&links).map(|link| {
+                let target = &link.data.target;
                 let raw = target
                     .strip_prefix("literal://string:")
                     .or_else(|| target.strip_prefix("literal:string:"))
                     .unwrap_or(target);
-                Some(urlencoding::decode(raw).unwrap_or_default().to_string())
-            }
+                urlencoding::decode(raw).unwrap_or_default().to_string()
+            }),
             _ => None,
         };
 
@@ -459,23 +466,26 @@ pub async fn load_class_properties_with_uri(
         // links. Read here as well as in `load_shape`, because this
         // link-walking path is what the dynamic per-class tools resolve
         // against; missing it would leave them writing Shared links for a
-        // property the shape declares local.
-        let local = match perspective
-            .get_links(&LinkQuery {
-                source: Some(prop_uri.clone()),
-                predicate: Some("ad4m://local".to_string()),
-                ..Default::default()
-            })
-            .await
-        {
-            Ok(links) if !links.is_empty() => links[0]
-                .data
-                .target
-                .rsplit(':')
-                .next()
-                .map(|v| v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false),
-            _ => false,
+        // property the shape declares local. Locality fails toward Local:
+        // a `true` from any link that is not `invalid` — `cantCheck`
+        // included — declares the property private; only an `invalid`
+        // declaration stays out, or a forged `true` could stop the
+        // victim's writes being shared. A lookup that fails answers `true`
+        // for the same reason: a write the executor cannot see declared
+        // private must not be gossiped.
+        let local = match local_property_links(perspective, prop_uri).await {
+            Ok(links) => links
+                .iter()
+                .filter(|link| link.verdict.as_ref().is_none_or(|v| v.shown()))
+                .filter_map(|link| link.data.target.rsplit(':').next())
+                .any(|v| v.eq_ignore_ascii_case("true")),
+            Err(e) => {
+                log::warn!(
+                    "the ad4m://local lookup for `{prop_uri}` failed ({e}); treating the \
+                     property as local, so its next write stays on this executor"
+                );
+                true
+            }
         };
 
         properties.push(ShaclProperty {
@@ -495,6 +505,37 @@ pub async fn load_class_properties_with_uri(
     }
 
     (properties, Some(shape_uri.clone()))
+}
+
+/// The property-shape URIs whose `ad4m://local` lookup fails as if the store
+/// errored: the seam the `instance_create` locality tests fail the read
+/// through. Keyed by URI and cleared by the test, so one test's failure
+/// never reaches another's store.
+#[cfg(test)]
+pub(crate) static LOCAL_LOOKUP_FAILS_FOR: std::sync::Mutex<Option<String>> =
+    std::sync::Mutex::new(None);
+
+/// The `ad4m://local` declarations on `prop_uri`, as the store answers them.
+async fn local_property_links(
+    perspective: &PerspectiveInstance,
+    prop_uri: &str,
+) -> Result<Vec<DecoratedLinkExpression>, deno_core::error::AnyError> {
+    #[cfg(test)]
+    if LOCAL_LOOKUP_FAILS_FOR
+        .lock()
+        .unwrap()
+        .as_deref()
+        .is_some_and(|fails| fails == prop_uri)
+    {
+        return Err(anyhow::anyhow!("injected locality lookup failure"));
+    }
+    perspective
+        .get_links(&LinkQuery {
+            source: Some(prop_uri.to_string()),
+            predicate: Some("ad4m://local".to_string()),
+            ..Default::default()
+        })
+        .await
 }
 
 /// Find the original-cased class name from a lowercase name
@@ -527,6 +568,9 @@ pub async fn find_class_name(
     };
 
     for link in &class_links {
+        if !link.counts() {
+            continue;
+        }
         let name = link
             .data
             .source

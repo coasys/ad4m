@@ -17,23 +17,25 @@
 //! [`KelCache::reset`] (`identity.resetLog`) is the one way a held log leaves: the operator
 //! drops this executor's copy, and the next read takes the store's branch.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, LazyLock, Mutex as StdMutex};
+use std::time::{Duration, Instant};
 
 use ad4m_hash_chain::store::{ChainStore, SqliteChainStore, StoredEntry};
 use ad4m_hash_chain::ChainType;
 use ad4m_identity_core::{
-    ChainError, Event, FoldError, ForkEvidence, Head, ImportOutcome, KelChain, Op,
+    ChainError, Event, FoldError, ForkEvidence, Head, ImportOutcome, KelChain, KeyState, Op,
 };
 use ad4m_ldk::identity::SignedHead;
 use rusqlite::{params, Connection, OptionalExtension};
-use tokio::sync::Mutex;
+use tokio::sync::{broadcast, Mutex};
 
 use super::backend::{IdentityBackend, IdentityError};
 use super::head::verify_head;
 use super::types::StoreBehind;
+use super::verdict::{key_verdict, KeyVerdict, VerdictChange};
 
 /// The chain type of key logs in the hash-chain tables.
 pub const KEL_TYPE: ChainType = "coasys:kel";
@@ -58,6 +60,303 @@ pub(super) const MAX_STORE_LOG_BYTES: usize = 32 << 20;
 /// The most logs whose refresh time the cache remembers; past it the oldest time goes (that
 /// log is stale once), never the others.
 const REFRESHED_BOUND: usize = 4096;
+
+/// How many verdict changes wait for a slow receiver before it lags.
+const CHANGES_CAPACITY: usize = 1024;
+/// How long a "no log lists this key" answer holds: a device-only key can gain a log later (a
+/// guest's claim lists it as `d1`), so after this the next read asks the store again.
+pub const NO_LOG_TTL: Duration = Duration::from_secs(15 * 60);
+/// The most logs, and the most "no log" answers, the key map holds. Past it the map starts
+/// over and fills again from the cache and the store.
+const KEY_MAP_BOUND: usize = 16_384;
+
+/// The trusted part of one log: its state and the seq of its accepted, store-signed head.
+/// Nothing past `trusted` counts.
+#[derive(Debug)]
+pub struct TrustedLog {
+    pub state: KeyState,
+    pub trusted: u64,
+}
+
+/// What the key map knows about one signing key.
+#[derive(Clone, Debug)]
+pub enum KeyLookup {
+    /// A trusted log lists the key (as a device or a master key) at or below its trusted seq.
+    Listed { scid: String, log: Arc<TrustedLog> },
+    /// No log lists the key, as the store said less than [`NO_LOG_TTL`] ago.
+    NoLog,
+    /// Nothing known.
+    Unknown,
+}
+
+#[derive(Default)]
+struct KeyMapInner {
+    /// Signing multikey → SCID, for every key a trusted log lists at or below its trusted seq.
+    keys: HashMap<String, String>,
+    logs: HashMap<String, Arc<TrustedLog>>,
+    /// Keys no log lists, with when the store said so.
+    no_log: HashMap<String, Instant>,
+    /// Signing keys asked about and not answered yet: the key index not asked (a batch's
+    /// discovery cap) or not answering, or a log that lists the key only past its
+    /// store-signed head. An unanchored link by such a key is `CantCheck`, not `Valid` as
+    /// one by a key no log lists: the re-check asks again.
+    pending: HashSet<String>,
+    /// The SCIDs of local identities (a row in `identity_agents`): the bound never drops them.
+    pinned: HashSet<String>,
+    /// SCID → when (unix seconds, this run) the configured store last confirmed its trusted
+    /// head ([`KelCache::accept`]): what a new link is admitted against.
+    confirmed: HashMap<String, u64>,
+}
+
+/// The key map: what every trusted log in the cache says, readable without `await`, so the
+/// link check reads the same answer wherever it runs. The cache feeds it (each accepted head,
+/// each read of a trusted log); the resolver adds the store's "no log" answers. A key never
+/// leaves its log, so a listing stays for good (within the bound).
+///
+/// The logs of local identities are pinned ([`KeyMap::pin`]): the bound never drops them, so
+/// the anchor of a link a local agent signs ([`super::anchor_for`]) is always here to read.
+#[derive(Default)]
+pub struct KeyMap {
+    inner: StdMutex<KeyMapInner>,
+}
+
+impl KeyMap {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// What the map knows about the signing multikey `key`.
+    pub fn lookup(&self, key: &str) -> KeyLookup {
+        let Ok(inner) = self.inner.lock() else {
+            return KeyLookup::Unknown;
+        };
+        if let Some(scid) = inner.keys.get(key) {
+            if let Some(log) = inner.logs.get(scid) {
+                return KeyLookup::Listed {
+                    scid: scid.clone(),
+                    log: log.clone(),
+                };
+            }
+        }
+        match inner.no_log.get(key) {
+            Some(at) if at.elapsed() < NO_LOG_TTL => KeyLookup::NoLog,
+            _ => KeyLookup::Unknown,
+        }
+    }
+
+    /// The trusted log of `scid` the map holds.
+    pub fn log(&self, scid: &str) -> Option<Arc<TrustedLog>> {
+        self.inner.lock().ok()?.logs.get(scid).cloned()
+    }
+
+    /// Puts `log` in place of what the map held for `scid`, with every key it lists at or below
+    /// its trusted seq; those keys lose their "no log" answers.
+    pub fn publish(&self, scid: &str, log: TrustedLog) {
+        if let Ok(mut inner) = self.inner.lock() {
+            Self::put(&mut inner, scid, log);
+        }
+    }
+
+    /// [`KeyMap::publish`] in one step with the store's confirmation of the head at
+    /// `confirmed` (unix seconds), unless the map holds `scid` at a later trusted seq (an older
+    /// read that finished late) or at the same one (then only the confirmation is noted). One
+    /// step, so no check pairs a fresh confirmation with the log this one replaces, and an older
+    /// read never puts back a key a newer head revoked. `Some(held)`: the log was put in place
+    /// of `held`.
+    pub fn publish_newer(
+        &self,
+        scid: &str,
+        log: TrustedLog,
+        confirmed: Option<u64>,
+    ) -> Option<Option<Arc<TrustedLog>>> {
+        let mut inner = self.inner.lock().ok()?;
+        let held = inner.logs.get(scid).cloned();
+        if let Some(h) = &held {
+            if h.trusted >= log.trusted {
+                if h.trusted == log.trusted {
+                    if let Some(at) = confirmed {
+                        inner.confirmed.insert(scid.to_string(), at);
+                    }
+                }
+                return None;
+            }
+        }
+        Self::put(&mut inner, scid, log);
+        if let Some(at) = confirmed {
+            inner.confirmed.insert(scid.to_string(), at);
+        }
+        Some(held)
+    }
+
+    fn put(inner: &mut KeyMapInner, scid: &str, log: TrustedLog) {
+        if inner.logs.len() >= KEY_MAP_BOUND && !inner.logs.contains_key(scid) {
+            let KeyMapInner {
+                keys,
+                logs,
+                pinned,
+                confirmed,
+                ..
+            } = inner;
+            logs.retain(|held, _| pinned.contains(held));
+            keys.retain(|_, held| pinned.contains(held));
+            confirmed.retain(|held, _| pinned.contains(held));
+        }
+        let trusted = log.trusted;
+        for record in log.state.masters.iter().chain(log.state.keys.values()) {
+            if record.added <= trusted {
+                inner.no_log.remove(&record.sign);
+                inner.pending.remove(&record.sign);
+                inner.keys.insert(record.sign.clone(), scid.to_string());
+            }
+        }
+        inner.logs.insert(scid.to_string(), Arc::new(log));
+    }
+
+    /// The store's answer that no log lists `key`.
+    pub fn note_no_log(&self, key: &str) {
+        let Ok(mut inner) = self.inner.lock() else {
+            return;
+        };
+        if inner.keys.contains_key(key) {
+            return;
+        }
+        if inner.no_log.len() >= KEY_MAP_BOUND {
+            inner.no_log.retain(|_, at| at.elapsed() < NO_LOG_TTL);
+            if inner.no_log.len() >= KEY_MAP_BOUND {
+                inner.no_log.clear();
+            }
+        }
+        inner.pending.remove(key);
+        inner.no_log.insert(key.to_string(), Instant::now());
+    }
+
+    /// Notes that `key` was asked about and has no answer yet ([`KeyMapInner::pending`]);
+    /// cleared by the log that lists it or the store's "no log".
+    pub fn note_pending(&self, key: &str) {
+        if let Ok(mut inner) = self.inner.lock() {
+            // An expired "no log" answer is none: `lookup` already reads it
+            // as `Unknown`, so it must not keep the key out of `pending` —
+            // the key was asked about and has no fresh answer.
+            if inner
+                .no_log
+                .get(key)
+                .is_some_and(|at| at.elapsed() >= NO_LOG_TTL)
+            {
+                inner.no_log.remove(key);
+            }
+            if !inner.keys.contains_key(key) && !inner.no_log.contains_key(key) {
+                if inner.pending.len() >= KEY_MAP_BOUND {
+                    inner.pending.clear();
+                }
+                inner.pending.insert(key.to_string());
+            }
+        }
+    }
+
+    /// Whether `key` is asked about and unanswered ([`KeyMap::note_pending`]).
+    pub fn is_pending(&self, key: &str) -> bool {
+        self.inner
+            .lock()
+            .map(|inner| inner.pending.contains(key))
+            .unwrap_or(false)
+    }
+
+    /// The keys of `state` (listed at or below `trusted`) that hold a "no log" answer, fresh or
+    /// not, or a pending lookup: their links were judged without this log.
+    fn no_log_keys(&self, state: &KeyState, trusted: u64) -> Vec<String> {
+        let Ok(inner) = self.inner.lock() else {
+            return vec![];
+        };
+        state
+            .masters
+            .iter()
+            .chain(state.keys.values())
+            .filter(|r| {
+                r.added <= trusted
+                    && (inner.no_log.contains_key(&r.sign) || inner.pending.contains(&r.sign))
+            })
+            .map(|r| r.sign.clone())
+            .collect()
+    }
+
+    /// Every signing key a log in the map lists.
+    pub fn listed_keys(&self) -> Vec<String> {
+        self.inner
+            .lock()
+            .map(|inner| inner.keys.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// The listed bot keys with a scope whose `expires` falls in `(after, upto]` (unix
+    /// seconds): the keys whose links the clock, not a new head, may have turned invalid.
+    pub fn expiring(&self, after: u64, upto: u64) -> Vec<String> {
+        let Ok(inner) = self.inner.lock() else {
+            return Vec::new();
+        };
+        inner
+            .logs
+            .values()
+            .flat_map(|log| log.state.keys.values())
+            .filter(|record| {
+                record
+                    .scopes
+                    .iter()
+                    .any(|(_, scope)| after < scope.expires && scope.expires <= upto)
+            })
+            .filter(|record| inner.keys.contains_key(&record.sign))
+            .map(|record| record.sign.clone())
+            .collect()
+    }
+
+    /// Keeps the log of the local identity `scid` through the bound, from now on (an agent of
+    /// this executor speaks for it). The pin outlives [`KeyMap::forget`].
+    pub fn pin(&self, scid: &str) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.pinned.insert(scid.to_string());
+        }
+    }
+
+    /// Drops the log of `scid` and its keys (`identity.resetLog`). A pin stays: the next
+    /// accepted head of the log puts it back for good.
+    pub fn forget(&self, scid: &str) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.logs.remove(scid);
+            inner.confirmed.remove(scid);
+            inner.keys.retain(|_, held| held != scid);
+        }
+    }
+
+    /// Notes that the configured store confirmed the trusted head of `scid` at `at` (unix
+    /// seconds): it signed that head in an answer this executor just read.
+    pub fn note_confirmed(&self, scid: &str, at: u64) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.confirmed.insert(scid.to_string(), at);
+        }
+    }
+
+    /// Whether a new link listed in the log of `scid` may be admitted on the map's answer at
+    /// `now`: the store confirmed that log's trusted head less than `window` seconds before.
+    /// Which key signed it does not enter: a link this executor signs itself is exempt by
+    /// where it is written, not by its key ([`crate::identity::check_signed_own`]), since the
+    /// same key, copied and revoked, may sign a link that arrives from a peer.
+    pub fn admits(&self, scid: &str, now: u64, window: u64) -> bool {
+        let Ok(inner) = self.inner.lock() else {
+            return false;
+        };
+        inner
+            .confirmed
+            .get(scid)
+            .is_some_and(|at| now.saturating_sub(*at) < window)
+    }
+}
+
+static KEY_MAP: LazyLock<Arc<KeyMap>> = LazyLock::new(|| Arc::new(KeyMap::new()));
+
+/// The executor's key map: the one the cache of [`super::init`] feeds and every link check
+/// reads.
+pub fn global_key_map() -> Arc<KeyMap> {
+    KEY_MAP.clone()
+}
 
 /// Why the cache refused or could not answer.
 #[derive(Debug, thiserror::Error)]
@@ -154,6 +453,10 @@ pub struct KelCache {
     behind: StdMutex<HashMap<String, StoreBehind>>,
     store_keys: Vec<String>,
     on_fork: Option<ForkListener>,
+    /// What every trusted log says, for synchronous readers (the link check).
+    key_map: Arc<KeyMap>,
+    /// Key verdicts that an accepted head changed ([`KelCache::subscribe`]).
+    changes: broadcast::Sender<VerdictChange>,
 }
 
 const META_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS identity_heads (
@@ -336,13 +639,26 @@ impl KelCache {
         // The store's connection writes the same file; `reset` deletes through this one.
         meta.busy_timeout(std::time::Duration::from_secs(5))
             .map_err(storage)?;
-        Self::with(store, meta, store_keys)
+        Self::with(store, meta, store_keys, global_key_map())
+    }
+
+    /// [`KelCache::open`] feeding `key_map` (tests: a restart with a fresh key map).
+    #[cfg(test)]
+    pub(crate) fn open_with_map(
+        path: impl AsRef<Path>,
+        store_keys: Vec<String>,
+        key_map: Arc<KeyMap>,
+    ) -> Result<Self, CacheError> {
+        let store = SqliteChainStore::open(path.as_ref()).map_err(storage)?;
+        let meta = Connection::open(path.as_ref()).map_err(storage)?;
+        Self::with(store, meta, store_keys, key_map)
     }
 
     fn with(
         store: SqliteChainStore,
         meta: Connection,
         store_keys: Vec<String>,
+        key_map: Arc<KeyMap>,
     ) -> Result<Self, CacheError> {
         meta.execute_batch(META_SCHEMA).map_err(storage)?;
         Ok(KelCache {
@@ -354,7 +670,77 @@ impl KelCache {
             behind: StdMutex::new(HashMap::new()),
             store_keys,
             on_fork: None,
+            key_map,
+            changes: broadcast::channel(CHANGES_CAPACITY).0,
         })
+    }
+
+    /// The key map this cache feeds.
+    pub fn key_map(&self) -> &Arc<KeyMap> {
+        &self.key_map
+    }
+
+    /// Fires when an accepted head changes a key's verdict at the trusted seq (a revocation,
+    /// an expiry the head reaches, a key a log lists for the first time after the key map
+    /// answered "no log" for it). A receiver that lags misses changes: it re-checks everything
+    /// it holds then.
+    pub fn subscribe(&self) -> broadcast::Receiver<VerdictChange> {
+        self.changes.subscribe()
+    }
+
+    /// Puts the trusted part of `state` (up to `trusted`) into the key map, with the store's
+    /// confirmation at `confirmed` in the same step ([`KeyMap::publish_newer`]: never in place
+    /// of a later trusted seq), and fires a [`VerdictChange`] for each key whose verdict differs
+    /// from what the map held. For a log the map did not hold: each key it had answered "no
+    /// log" for or was still asking about, and each device key that no longer counts.
+    fn publish_trusted(&self, scid: &str, state: &KeyState, trusted: u64, confirmed: Option<u64>) {
+        let now = now();
+        let had_no_log = self.key_map.no_log_keys(state, trusted);
+        let Some(held) = self.key_map.publish_newer(
+            scid,
+            TrustedLog {
+                state: state.clone(),
+                trusted,
+            },
+            confirmed,
+        ) else {
+            return;
+        };
+        let keys = state
+            .masters
+            .iter()
+            .chain(state.keys.values())
+            .map(|r| r.sign.clone());
+        for key in keys {
+            let verdict = key_verdict(state, trusted, &key, now);
+            let changed = match &held {
+                Some(h) => key_verdict(&h.state, h.trusted, &key, now) != verdict,
+                // A log the map did not hold (loaded after a restart, or evicted and read
+                // again): its device keys that no longer count may have stored links judged
+                // while the log was away, an expired bot scope or a revocation among them.
+                None => {
+                    had_no_log.contains(&key)
+                        || (verdict != KeyVerdict::Valid && state.device_key_id_of(&key).is_some())
+                }
+            };
+            if changed {
+                // No receiver is not an error: nothing re-checks then.
+                let _ = self.changes.send(VerdictChange {
+                    key,
+                    scid: scid.to_string(),
+                    verdict,
+                });
+            }
+        }
+    }
+
+    /// Pins the local identity `scid` in the key map ([`KeyMap::pin`]) and loads its trusted
+    /// log there, so a link its agents sign carries its anchor with no read of the cache. At
+    /// startup for every bound identity, and when an agent binds to one. `Ok(false)`: the
+    /// cache holds no trusted log of it yet; its next accepted head puts it in the map.
+    pub async fn keep_local(&self, scid: &str) -> Result<bool, CacheError> {
+        self.key_map.pin(scid);
+        Ok(self.trusted(scid).await?.is_some())
     }
 
     /// Whether `identity.storeKeys` names at least one key: without one the cache accepts no
@@ -419,6 +805,32 @@ impl KelCache {
             .transpose()
     }
 
+    /// Reads the trusted part of every log the cache holds a head for into the key map, so the
+    /// map fires a [`VerdictChange`] for each key that no longer counts (a bot scope expired
+    /// while the executor was down, a revocation) and the signer re-check re-judges the links
+    /// stored `valid` by it ([`KelCache::publish_trusted`] on a log the map did not hold).
+    /// Called once, at start, once the perspectives are open. A log that fails to read is
+    /// logged and skipped: its next read fires the same changes. The number of logs read.
+    pub async fn load_held(&self) -> Result<usize, CacheError> {
+        let scids: Vec<String> = {
+            let meta = self.meta.lock().map_err(storage)?;
+            let mut statement = meta
+                .prepare("SELECT scid FROM identity_heads")
+                .map_err(storage)?;
+            let rows = statement.query_map([], |row| row.get(0)).map_err(storage)?;
+            rows.collect::<Result<_, _>>().map_err(storage)?
+        };
+        let mut read = 0;
+        for scid in scids {
+            match self.trusted(&scid).await {
+                Ok(Some(_)) => read += 1,
+                Ok(None) => {}
+                Err(e) => log::warn!("identity: could not read the log of {scid} at start: {e}"),
+            }
+        }
+        Ok(read)
+    }
+
     /// The cached log of `scid` with its trusted seq: the seq of the accepted head, while that
     /// head still verifies under `identity.storeKeys` (heads persist across a change of the
     /// keys) and the cached log reaches it with the same hash. `None` when the cache holds no
@@ -446,6 +858,9 @@ impl KelCache {
         let matches = held
             .first()
             .is_some_and(|entry| entry.seq == head.seq && entry.hash == head.hash);
+        if matches {
+            self.publish_trusted(scid, chain.state(), head.seq, None);
+        }
         Ok(matches.then_some((chain, head.seq)))
     }
 
@@ -501,6 +916,7 @@ impl KelCache {
             refreshed.remove(scid);
         }
         self.note_behind(scid, None);
+        self.key_map.forget(scid);
         Ok(())
     }
 
@@ -733,6 +1149,9 @@ impl KelCache {
         }
         if ours.seq == head.seq {
             self.accept_head(head)?;
+            // The confirmation with the log, in one step: a re-check the new head starts
+            // admits on it, and no check pairs it with the log this head replaces.
+            self.publish_trusted(scid, chain.state(), head.seq, Some(now()));
         }
         Ok(Some(ours))
     }
@@ -989,7 +1408,16 @@ pub(crate) mod tests {
             SqliteChainStore::from_connection(Connection::open_with_flags(&name, flags).unwrap())
                 .unwrap();
         let meta = Connection::open_with_flags(&name, flags).unwrap();
-        KelCache::with(store, meta, store_keys).unwrap()
+        KelCache::with(store, meta, store_keys, Arc::new(KeyMap::new())).unwrap()
+    }
+
+    /// A cache on the database file at `path`, as [`KelCache::open`] but with a key map of its
+    /// own: a new one is what a restart of the executor sees.
+    pub(crate) fn on_file(path: &Path, store_keys: Vec<String>) -> KelCache {
+        let store = SqliteChainStore::open(path).unwrap();
+        let meta = Connection::open(path).unwrap();
+        meta.busy_timeout(Duration::from_secs(5)).unwrap();
+        KelCache::with(store, meta, store_keys, Arc::new(KeyMap::new())).unwrap()
     }
 
     /// `trusted` answers only while the cached event at the accepted head's seq has the head's
@@ -1037,6 +1465,40 @@ pub(crate) mod tests {
         assert_eq!(cache.refreshed.lock().unwrap().len(), REFRESHED_BOUND);
     }
 
+    /// An expired "no log" answer is no answer — `lookup` already reads the
+    /// entry as Unknown once `NO_LOG_TTL` passes — so it must not keep a key
+    /// out of `pending`: the key was asked about and has no fresh answer. An
+    /// unanchored link by it is `cantCheck`, never `valid` with no person.
+    #[test]
+    fn an_expired_no_log_answer_does_not_block_a_pending_note() {
+        use crate::agent::signatures::TestSigner;
+        use crate::identity::resolver::check_signed_with;
+        use crate::identity::verdict::LinkVerdict;
+        use crate::types::Link;
+
+        let signer = TestSigner::generate();
+        let key = signer.multikey();
+        let map = KeyMap::new();
+        map.inner.lock().unwrap().no_log.insert(
+            key.clone(),
+            Instant::now() - NO_LOG_TTL - Duration::from_secs(1),
+        );
+        map.note_pending(&key);
+        assert!(map.is_pending(&key), "an expired no_log entry is absent");
+
+        // And the link check agrees: a `valid`-with-no-person the unanchored
+        // link would otherwise earn becomes `cantCheck` while the key waits.
+        let expr = signer.sign(Link {
+            source: "ad4m://s".into(),
+            predicate: Some("ad4m://p".into()),
+            target: "ad4m://t".into(),
+        });
+        assert_eq!(
+            check_signed_with(&expr, &map, None, 1_000).verdict,
+            LinkVerdict::CantCheck
+        );
+    }
+
     /// The store key [`FakeStore`] signs its heads with.
     pub(crate) fn store_key() -> TestStoreKey {
         TestStoreKey::new(9)
@@ -1066,8 +1528,14 @@ pub(crate) mod tests {
 
     impl TestLog {
         pub fn new(seed: u8) -> Self {
-            let master = SigningKey::from_bytes(&[seed; 32]);
             let device = SigningKey::from_bytes(&[seed.wrapping_add(100); 32]);
+            Self::with_device(seed, device)
+        }
+
+        /// [`TestLog::new`] with `d1`'s key given: a test identity that lists a key the test
+        /// did not mint here (this executor's own device key).
+        pub(crate) fn with_device(seed: u8, device: SigningKey) -> Self {
+            let master = SigningKey::from_bytes(&[seed; 32]);
             let next = ad4m_identity_core::commitment(&master.key(), "salt");
             let enc = ad4m_identity_core::encode_x25519_multikey(&[seed; 32]);
             let mut incept = incept_human(
@@ -1115,6 +1583,13 @@ pub(crate) mod tests {
         pub pause_store: StdMutex<Option<(Arc<Notify>, Arc<Notify>)>>,
         /// A `log` call fails as unavailable.
         pub store_down: AtomicBool,
+        /// A `key_owner` call fails as unavailable.
+        pub key_index_down: AtomicBool,
+        /// A `key_owner` call for one of these multikeys fails as unavailable.
+        pub key_index_down_for: StdMutex<HashSet<String>>,
+        /// A `key_owner` call fails as an agent language without the key index does.
+        pub key_index_not_served: AtomicBool,
+        pub key_owner_calls: AtomicUsize,
         /// The agent records written, with their signed requests.
         pub puts: StdMutex<Vec<(AgentRecord, Option<SignedRequest>)>>,
         /// A `put_agent` call fails as unavailable.
@@ -1135,6 +1610,10 @@ pub(crate) mod tests {
                 key_owner_override: StdMutex::new(None),
                 pause_store: StdMutex::new(None),
                 store_down: AtomicBool::new(false),
+                key_index_down: AtomicBool::new(false),
+                key_index_down_for: StdMutex::new(HashSet::new()),
+                key_index_not_served: AtomicBool::new(false),
+                key_owner_calls: AtomicUsize::new(0),
                 puts: StdMutex::new(vec![]),
                 put_down: AtomicBool::new(false),
                 page_limit: StdMutex::new(None),
@@ -1194,6 +1673,15 @@ pub(crate) mod tests {
             multikey: &str,
             _wait_s: u8,
         ) -> Result<Option<KeyIndexEntry>, IdentityError> {
+            self.key_owner_calls.fetch_add(1, Ordering::SeqCst);
+            if self.key_index_not_served.load(Ordering::SeqCst) {
+                return Err(IdentityError::NotServed("identity.keyOwner".into()));
+            }
+            if self.key_index_down.load(Ordering::SeqCst)
+                || self.key_index_down_for.lock().unwrap().contains(multikey)
+            {
+                return Err(IdentityError::Unavailable("down".into()));
+            }
             let events = self.events.lock().unwrap().clone();
             if events.is_empty() {
                 return Ok(None);
@@ -1311,6 +1799,115 @@ pub(crate) mod tests {
             seen.fetch_add(1, Ordering::SeqCst);
         }));
         forks
+    }
+
+    /// A "no log" answer holds for `NO_LOG_TTL`, then the key counts as unknown again, so a
+    /// later claim of the key shows.
+    #[test]
+    fn a_no_log_answer_expires() {
+        let map = KeyMap::new();
+        map.note_no_log("z6MkGuest");
+        assert!(matches!(map.lookup("z6MkGuest"), KeyLookup::NoLog));
+        let Some(old) = Instant::now().checked_sub(NO_LOG_TTL) else {
+            return;
+        };
+        map.inner
+            .lock()
+            .unwrap()
+            .no_log
+            .insert("z6MkGuest".into(), old);
+        assert!(matches!(map.lookup("z6MkGuest"), KeyLookup::Unknown));
+    }
+
+    /// An accepted head puts its log's keys in the key map; a listing stays until the log is
+    /// reset (`identity.resetLog`).
+    #[tokio::test]
+    async fn the_key_map_lists_keys_up_to_the_trusted_seq() {
+        let log = TestLog::new(2);
+        let cache = trusting();
+        accept_signed(&cache, &log.events).await;
+        let device = log.device.key();
+        match cache.key_map().lookup(&device) {
+            KeyLookup::Listed { scid, log: trusted } => {
+                assert_eq!(scid, log.scid());
+                assert_eq!(trusted.trusted, 0);
+            }
+            other => panic!("not listed: {other:?}"),
+        }
+        cache.key_map().note_no_log(&device);
+        assert!(
+            matches!(cache.key_map().lookup(&device), KeyLookup::Listed { .. }),
+            "a listed key never turns into no log"
+        );
+        cache.reset(&log.scid()).await.unwrap();
+        assert!(matches!(
+            cache.key_map().lookup(&device),
+            KeyLookup::Unknown
+        ));
+    }
+
+    /// Past the bound the key map starts over, but keeps the logs (and keys) of the pinned
+    /// local identities; a reset drops a pinned log, not its pin.
+    #[test]
+    fn the_bound_keeps_pinned_logs_and_drops_the_others() {
+        let local = TestLog::new(3);
+        let other = TestLog::new(4);
+        let map = KeyMap::new();
+        let trusted = |log: &TestLog| TrustedLog {
+            state: log.chain().state().clone(),
+            trusted: 0,
+        };
+        map.pin(&local.scid());
+        map.publish(&local.scid(), trusted(&local));
+        map.publish(&other.scid(), trusted(&other));
+        let fill = |map: &KeyMap| {
+            let filler = TestLog::new(5).chain().state().clone();
+            for i in 0..KEY_MAP_BOUND {
+                map.publish(
+                    &format!("QmFiller{i}"),
+                    TrustedLog {
+                        state: filler.clone(),
+                        trusted: 0,
+                    },
+                );
+            }
+        };
+        fill(&map);
+        assert!(map.log(&local.scid()).is_some(), "the pinned log stays");
+        assert!(matches!(
+            map.lookup(&local.device.key()),
+            KeyLookup::Listed { scid, .. } if scid == local.scid()
+        ));
+        assert!(map.log(&other.scid()).is_none(), "an unpinned log goes");
+        assert!(matches!(
+            map.lookup(&other.device.key()),
+            KeyLookup::Unknown
+        ));
+
+        map.forget(&local.scid());
+        assert!(map.log(&local.scid()).is_none());
+        map.publish(&local.scid(), trusted(&local));
+        fill(&map);
+        assert!(map.log(&local.scid()).is_some(), "the pin outlives a reset");
+    }
+
+    /// `keep_local` pins the identity and puts its trusted log in the key map.
+    #[tokio::test]
+    async fn keep_local_pins_and_loads_the_trusted_log() {
+        let log = TestLog::new(6);
+        let cache = trusting();
+        assert!(!cache.keep_local(&log.scid()).await.unwrap(), "no log yet");
+        accept_signed(&cache, &log.events).await;
+        cache.key_map().forget(&log.scid());
+        assert!(cache.keep_local(&log.scid()).await.unwrap());
+        assert_eq!(cache.key_map().log(&log.scid()).unwrap().trusted, 0);
+        assert!(cache
+            .key_map()
+            .inner
+            .lock()
+            .unwrap()
+            .pinned
+            .contains(&log.scid()));
     }
 
     #[tokio::test]
@@ -2036,5 +2633,78 @@ pub(crate) mod tests {
         ));
         assert!(cache.forks(&log.scid()).await.unwrap().is_empty());
         assert!(cache.trusted(&log.scid()).await.unwrap().is_some());
+    }
+
+    /// A trusted read that finishes after a newer head was published does not put its older
+    /// log back (that log may still list a key the newer head revoked), and it brings no
+    /// confirmation; the head the map holds, read again, brings one. The log and its
+    /// confirmation land in one step.
+    #[test]
+    fn an_older_trusted_read_does_not_replace_a_newer_one() {
+        let log = TestLog::new(9);
+        let scid = log.scid();
+        let map = KeyMap::new();
+        let at = |trusted| TrustedLog {
+            state: log.chain().state().clone(),
+            trusted,
+        };
+        assert!(map.publish_newer(&scid, at(2), None).is_some());
+        assert!(!map.admits(&scid, 100, 30), "no confirmation yet");
+        assert!(map.publish_newer(&scid, at(1), Some(100)).is_none());
+        assert_eq!(map.log(&scid).unwrap().trusted, 2, "the newer log stays");
+        assert!(
+            !map.admits(&scid, 100, 30),
+            "an older read confirms nothing"
+        );
+        assert!(map.publish_newer(&scid, at(2), Some(100)).is_none());
+        assert!(map.admits(&scid, 100, 30), "the held head is confirmed");
+        let replaced = map.publish_newer(&scid, at(3), Some(200)).unwrap();
+        assert_eq!(replaced.unwrap().trusted, 2);
+        assert_eq!(map.log(&scid).unwrap().trusted, 3);
+        assert!(map.admits(&scid, 200, 30));
+    }
+
+    /// A log the map did not hold yet (loaded after a restart, or evicted and read again)
+    /// may list a bot key whose scope already expired, or a device revoked meanwhile. The
+    /// stored links of such a key were judged before, so the publish must fire a verdict
+    /// change for it, as it does for a head that newly revokes a key.
+    #[tokio::test]
+    async fn a_log_first_published_fires_for_its_keys_that_no_longer_count() {
+        use crate::identity::verdict::KeyVerdict;
+        use ad4m_identity_core::build::add_unsigned;
+        use ad4m_identity_core::BotScope;
+        let mut log = TestLog::new(76);
+        let bot = ed25519_dalek::SigningKey::from_bytes(&[77; 32]);
+        let chain = log.chain();
+        let device = DeviceKey {
+            id: chain.state().next_device_id(),
+            sign: bot.key(),
+            enc: ad4m_identity_core::encode_x25519_multikey(&[77; 32]),
+            life: KeyLife::Bot(BotScope {
+                can: vec!["read".into()],
+                expires: 1,
+            }),
+        };
+        let mut event = add_unsigned(&chain, device, "offer", "co-sig").unwrap();
+        cosign(&mut event, "m0", &log.master).unwrap();
+        log.events.push(event);
+        log.revoke_d1();
+
+        let cache = trusting();
+        let mut changes = cache.subscribe();
+        accept_signed(&cache, &log.events).await;
+        let fired: Vec<VerdictChange> = std::iter::from_fn(|| changes.try_recv().ok()).collect();
+        assert!(
+            fired
+                .iter()
+                .any(|c| c.key == bot.key() && c.verdict == KeyVerdict::Expired),
+            "the expired bot key: {fired:?}"
+        );
+        assert!(
+            fired
+                .iter()
+                .any(|c| c.key == log.device.key() && c.verdict == KeyVerdict::Revoked),
+            "the revoked device: {fired:?}"
+        );
     }
 }

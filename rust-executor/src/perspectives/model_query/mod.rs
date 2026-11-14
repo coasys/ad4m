@@ -119,7 +119,7 @@ mod round_trip_tests;
 #[cfg(test)]
 mod selection_guard_tests;
 pub(crate) mod shape;
-mod sparql_builder;
+pub(crate) mod sparql_builder;
 #[cfg(test)]
 mod test_helpers;
 pub(crate) mod types;

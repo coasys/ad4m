@@ -78,6 +78,7 @@ async fn a_forged_vote_claiming_our_authorship_does_not_suppress_our_own() {
                 proof: crate::types::ExpressionProof {
                     key: format!("{me}#key"),
                     signature: "not-a-signature".to_string(),
+                    anchor: None,
                 },
                 status: Some(LinkStatus::Shared),
             },

@@ -651,6 +651,7 @@ mod tests {
                 proof: crate::types::ExpressionProof {
                     key: "k".into(),
                     signature: "s".into(),
+                    anchor: None,
                 },
                 status: Some(LinkStatus::Shared),
             })

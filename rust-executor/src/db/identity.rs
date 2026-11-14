@@ -188,6 +188,15 @@ impl Ad4mDb {
         Ok(rows.collect::<rusqlite::Result<Vec<String>>>()?)
     }
 
+    /// Every identity a local agent speaks for, once each.
+    pub fn local_identities(&self) -> Ad4mDbResult<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT DISTINCT scid FROM identity_agents ORDER BY scid")?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<String>>>()?)
+    }
+
     /// Remembers a claim this executor made, so `identity.joinStatus` can follow it.
     pub fn add_join(&self, join: &JoinRow) -> Ad4mDbResult<()> {
         self.conn.execute(
@@ -250,6 +259,19 @@ mod tests {
         .unwrap();
         assert_eq!(again, set);
         assert_eq!(db.operator_record().unwrap(), Some(set));
+    }
+
+    #[test]
+    fn the_local_identities_are_each_bound_scid_once() {
+        let (_dir, db) = db();
+        assert!(db.local_identities().unwrap().is_empty());
+        db.set_agent_identity("did:key:z6MkA", "QmB", 1).unwrap();
+        db.set_agent_identity("did:key:z6MkB", "QmB", 1).unwrap();
+        db.set_agent_identity("did:key:z6MkC", "QmA", 1).unwrap();
+        assert_eq!(
+            db.local_identities().unwrap(),
+            vec!["QmA".to_string(), "QmB".to_string()]
+        );
     }
 
     #[test]

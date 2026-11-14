@@ -8,33 +8,23 @@ use super::projection::{
 use super::shape::parse_shape_from_json;
 use super::sparql_builder::{build_instance_sparql, LinkGuard};
 use super::test_helpers::{
-    evaluate_getters_batch_from_json, execute_model_query_from_json, StaticShapeResolver,
+    evaluate_getters_batch_from_json, execute_model_query_from_json, signed_link,
+    StaticShapeResolver,
 };
 use super::types::{ModelQueryInput, ModelShape, Scope, ScopeDirection, ShapeProperty};
 use super::utils::literal_percent_encode;
 use super::*;
 use crate::perspectives::sparql_store::SparqlStore;
-use crate::types::{ExpressionProof, Link, LinkExpression};
+use crate::types::LinkExpression;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 
+/// Signed for real: the classifier these fixtures feed (`subject_classes_of`,
+/// the polymorphic include) counts a link only when its stored verdict is
+/// `valid`, so a fake proof reads as no link at all. `ts` stays the stored
+/// timestamp verbatim when it names a date.
 fn make_link(source: &str, predicate: &str, target: &str, ts: &str) -> LinkExpression {
-    LinkExpression {
-        author: "did:key:test123".to_string(),
-        timestamp: ts.to_string(),
-        data: Link {
-            source: source.to_string(),
-            predicate: Some(predicate.to_string()),
-            target: target.to_string(),
-        },
-        proof: ExpressionProof {
-            key: "key".to_string(),
-            signature: "sig".to_string(),
-        },
-        // The store refuses status-less inserts; Shared is the plain case,
-        // `make_link_with_status` overrides for the local-property tests.
-        status: Some(crate::types::LinkStatus::Shared),
-    }
+    signed_link(source, predicate, target, ts)
 }
 
 /// `make_link` with an explicit [`LinkStatus`], for the local-property read tests.
@@ -9282,8 +9272,15 @@ fn link_by(author: &str, source: &str, predicate: &str, target: &str, ts: &str) 
 }
 
 /// Role instance created at T0 (type + name by admin), one member added at T1
-/// by admin, and — when `revoked` — a tombstone on the instance at T2.
-fn seed_role(store: &SparqlStore, role: &str, member: &str, revoked: bool) {
+/// by admin, and — when `revoked` — a tombstone on the instance at T2, which
+/// the caller gets back: each one is signed fresh, so a test comparing a row
+/// against it needs the very link that landed, not a second mint of it.
+fn seed_role(
+    store: &SparqlStore,
+    role: &str,
+    member: &str,
+    revoked: bool,
+) -> Option<LinkExpression> {
     for l in [
         link_by(ROLE_ADMIN, role, "ad4m://type", "role://Reviewer", ROLE_T0),
         link_by(
@@ -9298,9 +9295,11 @@ fn seed_role(store: &SparqlStore, role: &str, member: &str, revoked: bool) {
         store.add_link(&l).unwrap();
     }
     if revoked {
-        store
-            .add_link(&link_by(ROLE_ADMIN, role, REVOKED, member, ROLE_T2))
-            .unwrap();
+        let tombstone = link_by(ROLE_ADMIN, role, REVOKED, member, ROLE_T2);
+        store.add_link(&tombstone).unwrap();
+        Some(tombstone)
+    } else {
+        None
     }
 }
 
@@ -9325,7 +9324,7 @@ async fn a_revocation_tombstone_is_reachable_through_links() {
     let store = SparqlStore::new(None).unwrap();
     let role = "role://instance/1";
     let member = "did:key:zMember";
-    seed_role(&store, role, member, true);
+    let tombstone = seed_role(&store, role, member, true).expect("seeded");
 
     let result = fixture_query_from_json(
         &store,
@@ -9350,7 +9349,7 @@ async fn a_revocation_tombstone_is_reachable_through_links() {
     // deserialize it and check the signature, which is what the flow engine's
     // revocation rule does.
     let parsed: LinkExpression = serde_json::from_value(rows[0].clone()).expect("LinkExpression");
-    assert_eq!(parsed, link_by(ROLE_ADMIN, role, REVOKED, member, ROLE_T2));
+    assert_eq!(parsed, tombstone);
 }
 
 /// A `__links` row carries the link's status, spelled as `perspective.get`

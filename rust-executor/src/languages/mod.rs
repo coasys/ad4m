@@ -100,6 +100,10 @@ pub struct SystemLanguageAddresses {
     pub neighbourhood_language: Option<String>,
     pub perspective_language: Option<String>,
     pub system_language_set: HashSet<String>,
+    /// Set once [`LanguageController::load_core_system_languages`] has run, whatever it
+    /// loaded: a system language still missing then (language-language only, or a failed
+    /// load) stays missing until the next load, not "not loaded yet".
+    pub settled: bool,
 }
 
 lazy_static! {
@@ -123,6 +127,27 @@ pub struct LanguageController {
 
     // One lock per address `install_language` has seen: one install of a language at a time
     installs: Arc<TokioMutex<HashMap<String, Arc<TokioMutex<()>>>>>,
+}
+
+/// The `(did:key author, proof.anchor)` of an expression in JSON whose signature holds
+/// under that author: the signer the key map is filled for before the expression is checked.
+/// `None` for a `did:scid` author (checked through its record), for an expression that does
+/// not parse, and for one whose signature does not hold: that one is `invalid` whatever any
+/// log says, so it must not cost the key index a lookup on every read (a fresh `did:key` in
+/// an unsigned expression would otherwise be looked up each time it is read).
+fn did_key_signer(expr_json: &JsonValue) -> Option<(String, Option<u64>)> {
+    let author = expr_json.get("author")?.as_str()?;
+    if !author.starts_with("did:key:") {
+        return None;
+    }
+    let mut expr: crate::types::Expression<JsonValue> =
+        serde_json::from_value(expr_json.clone()).ok()?;
+    // The same bytes the check verifies: the data in its canonical key order.
+    expr.data = crate::js_core::utils::sort_json_value(&expr.data);
+    if !crate::agent::signatures::signature_holds(&expr) {
+        return None;
+    }
+    Some((expr.author, expr.proof.anchor))
 }
 
 impl LanguageController {
@@ -734,6 +759,24 @@ impl LanguageController {
     /// conductor before calling this. The link and installed languages, which always need
     /// it, are `load_link_and_installed_languages` (`conductor_languages.rs`).
     pub async fn load_core_system_languages(
+        &self,
+        language_language_only: bool,
+    ) -> Result<(), LanguageError> {
+        let loaded = self.load_system_languages(language_language_only).await;
+        self.note_settled(&loaded).await;
+        loaded
+    }
+
+    /// Records whether the system languages have settled: only a load that succeeded. A failed
+    /// load (the bundle unsaved, the language language not loading) leaves them unsettled, so a
+    /// missing agent language stays `Unavailable` (try later) rather than `NotServed` (no key
+    /// index), which would let an unknown `did:key`'s unanchored links count; a retry that
+    /// succeeds settles them then.
+    async fn note_settled(&self, loaded: &Result<(), LanguageError>) {
+        self.system_addresses.lock().await.settled = loaded.is_ok();
+    }
+
+    async fn load_system_languages(
         &self,
         language_language_only: bool,
     ) -> Result<(), LanguageError> {
@@ -2576,12 +2619,20 @@ impl LanguageController {
         Ok(Some(expr_json))
     }
 
-    /// Verify an expression's proof and set the `valid` field. A `did:scid` author's key is
-    /// checked against the identity module's key-log cache. `record_admitted`: the expression
-    /// came from the agent language, whose store admitted its `proof.record` (see
-    /// [`Self::honours_record`]); otherwise a `proof.record` is ignored.
+    /// Verify an expression's proof and set the `valid` field. A `did:scid` author counts only
+    /// on a profile the agent language served with its `proof.record`: the record's key is
+    /// checked at its anchor against the identity module's key-log cache. `record_admitted`:
+    /// the expression came from the agent language, whose store admitted its `proof.record`
+    /// (see [`Self::honours_record`]); otherwise a `did:scid` author is not valid.
     async fn verify_expression_proof(expr_json: &mut JsonValue, record_admitted: bool) {
         let service = crate::identity::service().ok();
+        // A `did:key` signer a log lists is checked from the key map, which admits it only on
+        // a recently confirmed head: refresh it first, as a link's signers are before a write.
+        if let Some(service) = &service {
+            if let Some(signer) = did_key_signer(expr_json) {
+                service.resolver.prepare(&[signer]).await;
+            }
+        }
         Self::verify_expression_proof_with(
             expr_json,
             service.as_deref().map(|s| s.cache.as_ref()),
@@ -2615,25 +2666,19 @@ impl LanguageController {
                 // while signing always uses alphabetically sorted keys.
                 expr.data = crate::js_core::utils::sort_json_value(&expr.data);
                 let verdict = if expr.author.starts_with(ad4m_identity_core::DID_PREFIX) {
-                    // The agent record a did:scid profile came in (the agent language adds it
-                    // as `proof.record`); the typed expression does not carry it. From any
-                    // other source it is ignored: the head rule judges.
+                    // A did:scid author is the person, never a signer: only the agent
+                    // language's profile names one, with the agent record it came in (the
+                    // language adds it as `proof.record`; the typed expression does not carry
+                    // it). Any other did:scid-authored expression is not valid.
                     let record = expr_json
                         .get("proof")
                         .and_then(|proof| proof.get("record"))
-                        .filter(|record| record_admitted && !record.is_null())
-                        .cloned();
-                    match cache {
-                        Some(cache) => {
-                            crate::identity::verify_expression(
-                                cache,
-                                backend,
-                                &expr,
-                                record.as_ref(),
-                            )
-                            .await
+                        .filter(|record| record_admitted && !record.is_null());
+                    match (cache, record) {
+                        (Some(cache), Some(record)) => {
+                            crate::identity::verify_expression(cache, backend, &expr, record).await
                         }
-                        None => Ok(false),
+                        _ => Ok(false),
                     }
                 } else {
                     crate::agent::signatures::verify(&expr)
@@ -3291,11 +3336,107 @@ mod agent_language_profile_tests {
     const VALID: (JsonValue, JsonValue) = (JsonValue::Bool(true), JsonValue::Bool(false));
     const INVALID: (JsonValue, JsonValue) = (JsonValue::Bool(false), JsonValue::Bool(true));
 
+    /// A `did:key`-signed expression whose signature holds names its signer (with its anchor)
+    /// for the key map to be filled before the check. One whose signature does not hold, one
+    /// that does not parse, and a `did:scid` one (checked through its record) name none.
+    #[test]
+    fn a_did_key_expression_names_its_signer_for_a_refresh_only_when_signed() {
+        let signed: JsonValue = serde_json::from_str(PROFILE_FIXTURE).unwrap();
+        assert_eq!(
+            did_key_signer(&signed),
+            Some((signed["author"].as_str().unwrap().to_string(), None))
+        );
+        let mut forged = signed.clone();
+        forged["proof"]["signature"] = JsonValue::from(hex::encode([7u8; 64]));
+        assert_eq!(did_key_signer(&forged), None);
+        let by_key = serde_json::json!({
+            "author": "did:key:z6MkA",
+            "proof": { "signature": "00", "key": "did:key:z6MkA", "anchor": 3 }
+        });
+        assert_eq!(
+            did_key_signer(&by_key),
+            None,
+            "no timestamp, no data: no expression"
+        );
+        let person = serde_json::json!({ "author": "did:scid:coasys:1:Qm", "proof": {} });
+        assert_eq!(did_key_signer(&person), None);
+    }
+
+    /// Reading an expression must not cost the key index a lookup unless the expression's
+    /// signature holds: an unsigned or badly signed expression by a fresh `did:key` author is
+    /// `invalid` whatever any log says, and every read of it (literal, cache, language) would
+    /// otherwise ask the index about a key nobody vouched for.
+    #[tokio::test]
+    async fn an_unsigned_expression_costs_the_key_index_nothing() {
+        use crate::identity::cache::tests::{trusting, FakeStore};
+        use crate::identity::resolver::Resolver;
+        use std::sync::atomic::Ordering;
+        use std::sync::Arc;
+        let store = Arc::new(FakeStore::new(vec![]));
+        let backend: Arc<dyn crate::identity::backend::IdentityBackend> = store.clone();
+        let resolver = Resolver::new(Arc::new(trusting()), backend, None, false);
+        let resolver = &resolver;
+        let prepare = |expr: &JsonValue| {
+            let signers: Vec<(String, Option<u64>)> = did_key_signer(expr).into_iter().collect();
+            async move { resolver.prepare(&signers).await }
+        };
+
+        let fresh = crate::agent::signatures::TestSigner::generate();
+        let unsigned = serde_json::json!({
+            "author": fresh.did,
+            "timestamp": "2027-01-15T08:00:00.000Z",
+            "data": { "note": "hi" },
+            "proof": { "key": format!("{}#k", fresh.did), "signature": "" }
+        });
+        prepare(&unsigned).await;
+        let mut garbage = unsigned.clone();
+        garbage["proof"]["signature"] = JsonValue::from(hex::encode([7u8; 64]));
+        prepare(&garbage).await;
+        let mut anchored = garbage.clone();
+        anchored["proof"]["anchor"] = JsonValue::from(0);
+        prepare(&anchored).await;
+        assert_eq!(
+            store.key_owner_calls.load(Ordering::SeqCst),
+            0,
+            "no signature held, so the key index was not asked"
+        );
+
+        // A signed one is prepared: one lookup for its author.
+        let signed: JsonValue = serde_json::from_str(PROFILE_FIXTURE).unwrap();
+        prepare(&signed).await;
+        assert_eq!(store.key_owner_calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// A failed load of the system languages does not settle them: the identity backend then
+    /// answers `Unavailable` for a missing agent language, not `NotServed`, so no unknown
+    /// `did:key` gets a "no log" answer from an executor whose bootstrap failed. A retry that
+    /// succeeds settles them.
+    #[tokio::test]
+    async fn a_failed_system_language_load_does_not_settle() {
+        let controller = LanguageController::new();
+        controller
+            .note_settled(&Err(LanguageError::NotFound {
+                address: "language_language".into(),
+            }))
+            .await;
+        assert!(!controller.system_addresses.lock().await.settled);
+        controller.note_settled(&Ok(())).await;
+        assert!(controller.system_addresses.lock().await.settled);
+    }
+
     /// A `did:scid` person's profile as its agent record stores it: the Agent as an AD4M
     /// expression authored by `author`, signed by the device key `signer` the way
     /// `create_signed_expression` signs, `proof.key` the signer's `did:key`.
     fn scid_profile(author: &str, signer: &SigningKey) -> JsonValue {
         crate::identity::resolver::test_profiles::signed_profile(author, signer)
+    }
+
+    /// A profile authored by `author`, signed by `signer`, as the agent language answers it:
+    /// with its agent record as `proof.record`, anchored at the head of `log`.
+    fn answered(log: &TestLog, author: &str, signer: &SigningKey) -> JsonValue {
+        let anchor = log.events.len() as u64 - 1;
+        let profile = scid_profile(author, signer);
+        crate::identity::resolver::test_profiles::with_record(&profile, signer, 1, anchor)
     }
 
     /// Adds a bot key (`read`, never expiring) to `log`, signed by its master; its secret.
@@ -3332,23 +3473,29 @@ mod agent_language_profile_tests {
 
     #[tokio::test]
     async fn a_did_scid_profile_signed_by_a_valid_device_key_of_its_log_verifies() {
+        use crate::identity::resolver::test_profiles::with_record;
         let log = TestLog::new(31);
         let cache = cache_of(&[&log]).await;
         let profile = scid_profile(&did_of(&log), &log.device);
-        assert_eq!(verdict_with(profile.clone(), Some(&cache)).await, VALID);
+        let answered = with_record(&profile, &log.device, 1, 0);
+        assert_eq!(verdict_with(answered.clone(), Some(&cache)).await, VALID);
 
-        let mut changed = profile.clone();
+        // The same profile without its record: a did:scid author counts only through one.
+        assert_eq!(verdict_with(profile.clone(), Some(&cache)).await, INVALID);
+
+        let mut changed = answered.clone();
         changed["data"]["directMessageLanguage"] = JsonValue::from("lang://other");
         assert_eq!(verdict_with(changed, Some(&cache)).await, INVALID);
 
-        // proof.key must name the bare did:key of the listed key.
+        // proof.key must name the bare did:key of the listed key (the record covers it).
         let mut fragment = profile.clone();
         let key = profile["proof"]["key"].as_str().unwrap();
         fragment["proof"]["key"] = JsonValue::from(format!("{key}#{}", &key["did:key:".len()..]));
+        let fragment = with_record(&fragment, &log.device, 1, 0);
         assert_eq!(verdict_with(fragment, Some(&cache)).await, INVALID);
 
         // Without the identity module no did:scid author verifies.
-        assert_eq!(verdict(profile).await, INVALID);
+        assert_eq!(verdict(answered).await, INVALID);
     }
 
     /// The warning for an invalid signature shows a prefix of `proof.signature`. A `did:scid`
@@ -3378,7 +3525,7 @@ mod agent_language_profile_tests {
         let log = TestLog::new(36);
         let store = crate::identity::cache::tests::FakeStore::new(log.events.clone());
         let cache = in_memory(vec![store.key.multikey()]);
-        let profile = scid_profile(&did_of(&log), &log.device);
+        let profile = answered(&log, &did_of(&log), &log.device);
 
         // The cache alone does not know the author.
         assert_eq!(verdict_with(profile.clone(), Some(&cache)).await, INVALID);
@@ -3412,21 +3559,22 @@ mod agent_language_profile_tests {
         let unknown = TestLog::new(35);
         let cache = cache_of(&[&revoked, &with_bot, &other]).await;
 
-        let by_revoked = scid_profile(&did_of(&revoked), &revoked.device);
+        // Each record is anchored at its log's head.
+        let by_revoked = answered(&revoked, &did_of(&revoked), &revoked.device);
         assert_eq!(verdict_with(by_revoked, Some(&cache)).await, INVALID);
 
         // The log's standing device key still verifies; its bot key does not.
-        let by_device = scid_profile(&did_of(&with_bot), &with_bot.device);
+        let by_device = answered(&with_bot, &did_of(&with_bot), &with_bot.device);
         assert_eq!(verdict_with(by_device, Some(&cache)).await, VALID);
-        let by_bot = scid_profile(&did_of(&with_bot), &bot);
+        let by_bot = answered(&with_bot, &did_of(&with_bot), &bot);
         assert_eq!(verdict_with(by_bot, Some(&cache)).await, INVALID);
 
         // A valid key of another log, signing as this person.
-        let by_foreign = scid_profile(&did_of(&with_bot), &other.device);
+        let by_foreign = answered(&with_bot, &did_of(&with_bot), &other.device);
         assert_eq!(verdict_with(by_foreign, Some(&cache)).await, INVALID);
 
         // An author whose log the cache does not hold.
-        let by_unknown = scid_profile(&did_of(&unknown), &unknown.device);
+        let by_unknown = answered(&unknown, &did_of(&unknown), &unknown.device);
         assert_eq!(verdict_with(by_unknown, Some(&cache)).await, INVALID);
     }
 
@@ -3455,7 +3603,7 @@ mod agent_language_profile_tests {
             .await;
         assert_eq!(verdict_with(flagged, Some(&cache)).await, VALID);
 
-        // The same profile without its record: the head rule, and d1 is revoked there.
+        // The same profile without its record: not valid.
         assert_eq!(verdict_with(profile.clone(), Some(&cache)).await, INVALID);
         // An anchor moved without the record signature.
         let mut tampered = answered.clone();
@@ -3464,26 +3612,22 @@ mod agent_language_profile_tests {
         // A record signed anchored at the revoke.
         let at_revoke = with_record(&profile, &log.device, 2, 1);
         assert_eq!(verdict_with(at_revoke, Some(&cache)).await, INVALID);
-        // `proof.record: null` is no record: the head rule.
+        // `proof.record: null` is no record.
         let mut null_record = profile.clone();
         null_record["proof"]["record"] = JsonValue::Null;
         assert_eq!(verdict_with(null_record, Some(&cache)).await, INVALID);
     }
 
-    /// A `proof.record` counts only on what the agent language served (its store admitted the
-    /// record). The same anchored profile, signed before a revocation, served by another
-    /// language: its record is ignored and the head rule finds the key revoked.
+    /// A `did:scid` author counts only on what the agent language served (its store admitted the
+    /// record). The same profile with its record and a valid device key, served by another
+    /// language, is not valid.
     #[tokio::test]
     async fn a_record_counts_only_from_the_agent_language() {
-        use crate::identity::resolver::test_profiles::with_record;
         let controller = LanguageController::new();
         controller.system_addresses.lock().await.agent_language = Some("QmAgent".into());
-        let mut log = TestLog::new(38);
+        let log = TestLog::new(38);
         let cache = cache_of(&[&log]).await;
-        let profile = scid_profile(&did_of(&log), &log.device);
-        let answered = with_record(&profile, &log.device, 1, 0);
-        log.revoke_d1();
-        accept_signed(&cache, &log.events).await;
+        let answered = answered(&log, &did_of(&log), &log.device);
 
         let through = |address: &'static str| {
             let controller = &controller;
@@ -3501,7 +3645,44 @@ mod agent_language_profile_tests {
         assert_eq!(
             through("QmOtherLanguage").await,
             INVALID,
-            "another language's record is ignored: d1 is revoked at the head"
+            "another language's did:scid expression"
+        );
+    }
+
+    /// Only the agent language's profile names a `did:scid` author: any other expression
+    /// claiming the person, signed by a valid device key of the person's log, is not valid.
+    #[tokio::test]
+    async fn a_did_scid_expression_another_language_served_is_invalid_with_a_valid_device_key() {
+        let log = TestLog::new(39);
+        let cache = cache_of(&[&log]).await;
+        let data = crate::js_core::utils::sort_json_value(&serde_json::json!({ "note": "hi" }));
+        let timestamp = chrono::Utc::now();
+        let signature = ed25519_dalek::Signer::sign(
+            &log.device,
+            &crate::agent::signatures::hash_data_and_timestamp(&data, &timestamp),
+        );
+        let expression = serde_json::json!({
+            "author": did_of(&log),
+            "timestamp": timestamp.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            "data": data,
+            "proof": {
+                "key": format!("did:key:{}", log.device.key()),
+                "signature": hex::encode(signature.to_bytes()),
+            },
+        });
+        // The device's signature over the expression holds.
+        let typed: crate::types::Expression<JsonValue> =
+            serde_json::from_value(expression.clone()).unwrap();
+        assert!(crate::agent::signatures::verify_by(&typed, &typed.proof.key).unwrap());
+
+        assert_eq!(
+            served_verdict(expression.clone(), Some(&cache), false).await,
+            INVALID
+        );
+        // Nor from the agent language without a record.
+        assert_eq!(
+            served_verdict(expression, Some(&cache), true).await,
+            INVALID
         );
     }
 

@@ -3,7 +3,7 @@
 //! read, so a write that landed in between is not overwritten.
 
 use super::PerspectiveInstance;
-use crate::agent::{create_signed_expression, AgentContext};
+use crate::agent::{create_signed_expression_anchored, did_for_context, AgentContext};
 use crate::types::{
     DecoratedLinkExpression, DecoratedPerspectiveDiff, LinkExpression, LinkStatus, PerspectiveDiff,
 };
@@ -122,9 +122,11 @@ impl PerspectiveInstance {
         let mut persist_diff = PerspectiveDiff::empty();
 
         // Process additions
+        let anchor = crate::identity::anchor_for(&did_for_context(context)?);
         for link in diff.additions {
             let status = link.status.unwrap_or(LinkStatus::Shared);
-            let signed_expr = create_signed_expression(link.data.normalize(), context)?;
+            let signed_expr =
+                create_signed_expression_anchored(link.data.normalize(), context, anchor)?;
             let mut stored = LinkExpression::from(signed_expr);
             stored.status = Some(status.clone());
             persist_diff.additions.push(stored.clone());
@@ -177,6 +179,9 @@ impl PerspectiveInstance {
             removals: [shared_diff.removals.clone(), local_diff.removals.clone()].concat(),
         };
         let changed = !combined_diff.additions.is_empty() || !combined_diff.removals.is_empty();
+        // The store judges each link from the key map without I/O: fill it for the
+        // signers first, before taking `persist_lock`.
+        crate::identity::prepare_link_signers(&persist_diff.additions).await;
 
         {
             let _persisting = self
@@ -197,8 +202,12 @@ impl PerspectiveInstance {
             // The SPARQL store must be updated first so any subscription re-checks
             // triggered by update_prolog_engines() see the committed batch state.
             if changed {
-                self.write_link_diff(&persist_diff)?
+                self.write_link_diff(&persist_diff, true)?
                     .fold_into(&mut combined_diff);
+                // The reply and the link-added event carry the judgement the
+                // store wrote; `prepare_link_signers` ran above.
+                combined_diff.additions =
+                    self.stored_judgements(std::mem::take(&mut combined_diff.additions));
             }
         }
 

@@ -54,6 +54,14 @@
 //! [`MEMO_ENTRY_MAX_BYTES`] is returned but not stored; the next read
 //! re-verifies it, as an un-memoised read would.
 //!
+//! A `None` is kept only for a verdict the key pins down
+//! ([`ReceiptVerdict::is_structural`]): the checks that answer before the
+//! fold reads a carried verdict — a changed DNA, a seal that does not
+//! re-hash, a receipt with no outputs. A refusal the fold produced is never
+//! stored: it can rest on a carried link this replica judged `cantCheck`,
+//! and that judgement changes under the same key once the signer's log
+//! lands, so the next read verifies again.
+//!
 //! # Why it exists (#1177)
 //!
 //! `load_flow_receipts` has no count cap any more, so a flow with N receipts
@@ -143,16 +151,83 @@ pub fn settle(catalogue: &HashMap<String, SHACLFlow>, receipt: &FlowReceipt) -> 
     settled
 }
 
+/// Memo key → (how many [`HeldAnswers`] hold it, the answer they hold).
+type HeldCopies = HashMap<(String, String), (usize, Option<SettledRun>)>;
+
 /// `(receipt URI, held definition hash) → Option<SettledRun>` for one
 /// perspective. See the module header for why this key is exact and why
 /// the value is a projection.
 pub struct VerdictMemo {
     settled: Mutex<LruCache<(String, String), Option<SettledRun>>>,
+    /// The answers reads in flight left out of their prepare step, with how
+    /// many [`HeldAnswers`] hold each. Outside the LRU, so an eviction
+    /// during the read cannot take one away ([`HeldAnswers`]).
+    held: Mutex<HeldCopies>,
     /// Test-only: how many times this memo has actually run
     /// [`verify_receipt`]. What the counting test reads to prove a second
     /// read of an unchanged set re-verifies nothing.
     #[cfg(test)]
     verifications: std::sync::atomic::AtomicUsize,
+}
+
+/// The memo answers one read relies on, held for as long as the read keeps
+/// this.
+///
+/// A read's prepare step leaves out the receipts the memo already answers:
+/// their verdicts are final under the memo key, so refreshing their signers
+/// could change nothing. But the LRU is shared and bounded, and the fold that
+/// follows `put`s every miss it verifies, so an answer that was there at the
+/// prepare step can be evicted before the fold reaches its receipt — by an
+/// earlier receipt of the same read, or by a concurrent read while this one
+/// awaits the prepare. Re-verified then, without its signers refreshed, a
+/// receipt whose signer's head aged out reads `cantCheck` and drops from the
+/// read. [`hold`](Self::hold) copies the answer out of the LRU at the moment
+/// the prepare step decides to skip on it, and
+/// [`VerdictMemo::settled`] falls back to that copy after an LRU miss, so a
+/// skipped receipt is answered exactly as the prepare step saw it. Dropping
+/// this releases the copies; the extra memory is bounded by the receipts of
+/// the reads in flight, each entry by [`MEMO_ENTRY_MAX_BYTES`].
+#[must_use = "the held answers are released when this is dropped; keep it until the read's fold is done"]
+pub struct HeldAnswers<'a> {
+    memo: &'a VerdictMemo,
+    keys: Vec<(String, String)>,
+}
+
+impl HeldAnswers<'_> {
+    /// Whether the memo answers `receipt` under the definition `catalogue`
+    /// holds — a `Verified` run or a structural refusal, both final under the
+    /// key, so nothing a refresh of the receipt's carried signers could bring
+    /// changes the answer — and, when it does, holds that answer for this
+    /// read. Peeks: the entry's recency is left to the fold that uses it.
+    pub fn hold(&mut self, catalogue: &HashMap<String, SHACLFlow>, receipt: &FlowReceipt) -> bool {
+        let Some(key) = memo_key(catalogue, receipt) else {
+            return false;
+        };
+        let Some(settled) = self.memo.lock().peek(&key).cloned() else {
+            return false;
+        };
+        self.memo
+            .held_lock()
+            .entry(key.clone())
+            .and_modify(|(count, _)| *count += 1)
+            .or_insert((1, settled));
+        self.keys.push(key);
+        true
+    }
+}
+
+impl Drop for HeldAnswers<'_> {
+    fn drop(&mut self) {
+        let mut held = self.memo.held_lock();
+        for key in self.keys.drain(..) {
+            if let Some((count, _)) = held.get_mut(&key) {
+                *count -= 1;
+                if *count == 0 {
+                    held.remove(&key);
+                }
+            }
+        }
+    }
 }
 
 impl Default for VerdictMemo {
@@ -166,6 +241,7 @@ impl VerdictMemo {
         let capacity = NonZeroUsize::new(capacity).unwrap_or(NonZeroUsize::MIN);
         Self {
             settled: Mutex::new(LruCache::new(capacity)),
+            held: Mutex::new(HashMap::new()),
             #[cfg(test)]
             verifications: std::sync::atomic::AtomicUsize::new(0),
         }
@@ -183,16 +259,49 @@ impl VerdictMemo {
             if let Some(settled) = self.lock().get(key) {
                 return settled.clone();
             }
+            // Evicted since a read's prepare step left this receipt out on
+            // the strength of this answer: the held copy answers, and goes
+            // back into the LRU as the most recently used.
+            let held = self
+                .held_lock()
+                .get(key)
+                .map(|(_, settled)| settled.clone());
+            if let Some(settled) = held {
+                self.lock().put(key.clone(), settled.clone());
+                return settled;
+            }
         }
         #[cfg(test)]
         self.verifications
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let settled = settle(catalogue, receipt);
-        let weight = settled.as_ref().map_or(0, SettledRun::bytes);
-        if let Some(key) = key.filter(|_| weight <= MEMO_ENTRY_MAX_BYTES) {
-            self.lock().put(key, settled.clone());
+        let verdict = verify_receipt(catalogue, receipt);
+        let settled = SettledRun::of(&verdict);
+        if settled.is_none() {
+            log::debug!(
+                "a receipt for `{}` does not verify and speaks for nothing here — {verdict}",
+                receipt.flow_uri
+            );
+        }
+        // The key pins down a `Verified` run and a refusal the checks reach
+        // before the fold (`is_structural`): both are final under this key.
+        // A refusal the fold produced is not kept — it can rest on a carried
+        // link this replica judged `cantCheck`, which changes under the same
+        // key once the signer's log lands.
+        if settled.is_some() || verdict.is_structural() {
+            let weight = settled.as_ref().map_or(0, SettledRun::bytes);
+            if let Some(key) = key.filter(|_| weight <= MEMO_ENTRY_MAX_BYTES) {
+                self.lock().put(key, settled.clone());
+            }
         }
         settled
+    }
+
+    /// Starts the set of answers one read relies on. See [`HeldAnswers`].
+    pub fn hold_for_read(&self) -> HeldAnswers<'_> {
+        HeldAnswers {
+            memo: self,
+            keys: Vec::new(),
+        }
     }
 
     /// How many verifications this memo has actually run.
@@ -217,6 +326,14 @@ impl VerdictMemo {
         // A panic while holding the lock leaves a cache, not an invariant, so
         // a poisoned memo is still safe to read.
         self.settled
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn held_lock(&self) -> std::sync::MutexGuard<'_, HeldCopies> {
+        // Counts and copies of final answers: as safe to read after a panic
+        // as the LRU itself.
+        self.held
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }

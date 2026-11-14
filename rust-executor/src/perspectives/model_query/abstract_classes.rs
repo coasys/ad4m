@@ -45,17 +45,71 @@ pub struct AbstractIndex {
 }
 
 impl AbstractIndex {
-    pub fn load(store: &SparqlStore) -> Result<Self, Error> {
-        let marked = format!(
+    /// The query [`load`] runs for the abstract-class markers. Every
+    /// definition triple joins a *counting* reifier through `join_once`, so a
+    /// triple asserted by two signers still yields one row.
+    fn marked_query(guard: &super::sparql_builder::LinkGuard) -> String {
+        format!(
             r#"
             SELECT ?targetClass WHERE {{
-                ?targetClass <rdf://type> <ad4m://SubjectClass> .
-                ?targetClass <ad4m://shape> ?shape .
-                ?shape <{ABSTRACT_PREDICATE}> ?marker .
+                {type_once}
+                {shape_once}
+                {marker_once}
             }}
-            "#
-        );
-        let rows: Vec<Value> = serde_json::from_str(&store.query(&EvalStop::none(), &marked)?)?;
+            "#,
+            type_once = guard.join_once(
+                "?_gr_type",
+                "?targetClass",
+                "<rdf://type>",
+                "<ad4m://SubjectClass>"
+            ),
+            shape_once = guard.join_once("?_gr_shape", "?targetClass", "<ad4m://shape>", "?shape"),
+            marker_once = guard.join_once(
+                "?_gr_marker",
+                "?shape",
+                &format!("<{ABSTRACT_PREDICATE}>"),
+                "?marker"
+            ),
+        )
+    }
+
+    /// The query [`load`] runs for the property aliases, with the same
+    /// one-row-per-guarded-triple rule as [`marked_query`].
+    fn aliased_query(guard: &super::sparql_builder::LinkGuard) -> String {
+        format!(
+            r#"
+            SELECT ?targetClass ?prop ?alias WHERE {{
+                {type_once}
+                {shape_once}
+                {prop_once}
+                {alias_once}
+            }}
+            "#,
+            type_once = guard.join_once(
+                "?_ga_type",
+                "?targetClass",
+                "<rdf://type>",
+                "<ad4m://SubjectClass>"
+            ),
+            shape_once = guard.join_once("?_ga_shape", "?targetClass", "<ad4m://shape>", "?shape"),
+            prop_once = guard.join_once("?_ga_prop", "?shape", "<sh://property>", "?prop"),
+            alias_once = guard.join_once(
+                "?_ga_alias",
+                "?prop",
+                &format!("<{ALIAS_PREDICATE}>"),
+                "?alias"
+            ),
+        )
+    }
+
+    pub fn load(store: &SparqlStore) -> Result<Self, Error> {
+        // Every definition triple joins a *counting* reifier, as the shape loader's do: a
+        // marker or an alias a peer sent whose stored verdict does not count must neither
+        // make a class abstract (which blocks its create) nor pick the property an abstract
+        // write targets.
+        let guard = super::sparql_builder::LinkGuard::default();
+        let rows: Vec<Value> =
+            serde_json::from_str(&store.query(&EvalStop::none(), &Self::marked_query(&guard))?)?;
         let abstract_classes = rows
             .iter()
             .filter_map(|r| r["targetClass"].as_str())
@@ -63,17 +117,8 @@ impl AbstractIndex {
             .filter(|n| !n.is_empty())
             .collect();
 
-        let aliased = format!(
-            r#"
-            SELECT ?targetClass ?prop ?alias WHERE {{
-                ?targetClass <rdf://type> <ad4m://SubjectClass> .
-                ?targetClass <ad4m://shape> ?shape .
-                ?shape <sh://property> ?prop .
-                ?prop <{ALIAS_PREDICATE}> ?alias .
-            }}
-            "#
-        );
-        let rows: Vec<Value> = serde_json::from_str(&store.query(&EvalStop::none(), &aliased)?)?;
+        let rows: Vec<Value> =
+            serde_json::from_str(&store.query(&EvalStop::none(), &Self::aliased_query(&guard))?)?;
         let mut aliases: HashMap<String, HashMap<String, BTreeMap<String, String>>> =
             HashMap::new();
         for row in &rows {

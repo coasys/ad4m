@@ -4,12 +4,17 @@
 //! and an alias are pinned by `fixtures/shacl_writer_golden.json`.
 
 use super::*;
+use crate::agent::signatures::TestSigner;
 use crate::perspectives::model_query::shape::load_shape_from_store;
 use crate::perspectives::model_query::types::ModelQueryInput;
 use crate::perspectives::model_query::{execute_union_query_with_views, ModelQueryResult};
-use crate::perspectives::shacl_parser::parse_shacl_to_links;
-use crate::perspectives::subject_classes_of::subject_classes_of;
-use crate::types::{ExpressionProof, Link, LinkExpression, LinkStatus};
+use crate::perspectives::shacl_parser::{
+    parse_shacl_to_links, ABSTRACT_PREDICATE, ALIAS_PREDICATE,
+};
+use crate::perspectives::subject_classes_of::{
+    all_subject_class_names, concrete_subject_class_names, subject_classes_of,
+};
+use crate::types::{Link, LinkExpression, LinkStatus};
 
 /// The abstract class: anything with `text`. Its path is never compared.
 const TEXT_CONTENT: &str = r#"{"target_class":"app://TextContent","abstract":true,"properties":[
@@ -93,36 +98,33 @@ fn all_classes() -> SparqlStore {
     store
 }
 
-fn link_expression(link: Link, ts: &str) -> LinkExpression {
-    LinkExpression {
-        author: "did:key:test123".to_string(),
-        timestamp: ts.to_string(),
-        data: link,
-        proof: ExpressionProof {
-            key: "key".to_string(),
-            signature: "sig".to_string(),
-        },
-        status: Some(LinkStatus::Shared),
-    }
+fn link_expression(link: Link) -> LinkExpression {
+    // Signed for real: a link whose signature does not hold is judged
+    // `invalid` and never counts, and every schema read now joins the triple
+    // to a counting reifier.
+    let mut le = LinkExpression::from(TestSigner::generate().sign(link.normalize()));
+    le.status = Some(LinkStatus::Shared);
+    le
 }
 
-/// Raw links, past the SHACL writer's checks; timestamps in order.
+/// Raw links, past the SHACL writer's checks.
 fn add(store: &SparqlStore, links: &[(&str, &str, &str)]) {
-    for (i, (source, predicate, target)) in links.iter().enumerate() {
+    for (source, predicate, target) in links.iter() {
         let link = Link {
             source: source.to_string(),
             predicate: Some(predicate.to_string()),
             target: target.to_string(),
         };
-        store
-            .add_link(&link_expression(link, &(i + 1).to_string()))
-            .unwrap();
+        store.add_link(&link_expression(link)).unwrap();
     }
 }
 
 fn install_class(store: &SparqlStore, name: &str, shacl: &str) {
+    // SHACL is read through `load_shape`, which joins every definition
+    // triple to a *counting* reifier — a link whose signature does not hold
+    // never counts, so schema fixtures are signed for real.
     for link in parse_shacl_to_links(shacl, name).unwrap() {
-        store.add_link(&link_expression(link, "0")).unwrap();
+        store.add_link(&link_expression(link)).unwrap();
     }
 }
 
@@ -164,6 +166,153 @@ fn the_index_reads_abstract_markers_and_aliases() {
     assert_eq!((own("text"), own("body")), (Some("body"), None));
 }
 
+/// A marker or an alias a peer sent whose stored verdict does not count must not make a
+/// class abstract (which would block its create) or pick the property an abstract write
+/// targets. Same cut as the shape loader: every definition triple joins a counting reifier.
+#[test]
+fn the_index_ignores_markers_and_aliases_that_do_not_count() {
+    let store = all_classes();
+    let one = |q: &str, var: &str| -> String {
+        let rows: Vec<serde_json::Value> =
+            serde_json::from_str(&store.query(&EvalStop::none(), q).unwrap()).unwrap();
+        rows[0][var].as_str().unwrap().to_string()
+    };
+    let shape = one(
+        "SELECT ?shape WHERE { <app://Post> <ad4m://shape> ?shape }",
+        "shape",
+    );
+    let prop = one(
+        &format!(
+            r#"SELECT ?prop WHERE {{ <{shape}> <sh://property> ?prop FILTER(STRENDS(STR(?prop), ".text")) }}"#
+        ),
+        "prop",
+    );
+    // A real alias value, as the SHACL writer stores one (Message.body's).
+    let alias = one(
+        &format!(
+            r#"SELECT ?alias WHERE {{ <flux://Message> <ad4m://shape> ?s . ?s <sh://property> ?p . ?p <{ALIAS_PREDICATE}> ?alias FILTER(STRENDS(STR(?p), ".body")) }}"#
+        ),
+        "alias",
+    );
+    let forged = |source: &str, predicate: &str, target: &str| {
+        let mut le = link_expression(Link {
+            source: source.to_string(),
+            predicate: Some(predicate.to_string()),
+            target: target.to_string(),
+        });
+        le.proof.signature = "ab".repeat(64);
+        store.add_link(&le).unwrap();
+    };
+    forged(&shape, ABSTRACT_PREDICATE, "literal://string:true");
+    forged(&prop, ALIAS_PREDICATE, &alias);
+
+    let index = AbstractIndex::load(&store).unwrap();
+    assert!(
+        !index.is_abstract("Post"),
+        "a marker that does not count marks nothing"
+    );
+    assert_eq!(
+        index.name_through("Post", "text", "TextContent"),
+        "text",
+        "an alias that does not count renames nothing"
+    );
+    // The same links, counting, do both.
+    add(
+        &store,
+        &[(&shape, ABSTRACT_PREDICATE, "literal://string:true")],
+    );
+    let index = AbstractIndex::load(&store).unwrap();
+    assert!(index.is_abstract("Post"));
+}
+
+/// The classifier's own reads make the same cut as the index's: a marker that
+/// does not count keeps a class concrete, a shape link that does not count
+/// marries it to no marked shape, a registration that does not count registers
+/// nothing, and a record reached only through links that do not count conforms
+/// to nothing. Same rule on the negative pattern too: the enumeration's `FILTER
+/// NOT EXISTS` tests for a *counting* marker.
+#[test]
+fn the_classifier_ignores_triples_that_do_not_count() {
+    let store = all_classes();
+    let one = |q: &str, var: &str| -> String {
+        let rows: Vec<serde_json::Value> =
+            serde_json::from_str(&store.query(&EvalStop::none(), q).unwrap()).unwrap();
+        rows[0][var].as_str().unwrap().to_string()
+    };
+    let post_shape = one(
+        "SELECT ?shape WHERE { <app://Post> <ad4m://shape> ?shape }",
+        "shape",
+    );
+    // Readable's shape carries a counting marker; marrying Post to it takes a
+    // non-counting shape link.
+    let readable_shape = one(
+        "SELECT ?shape WHERE { <app://Readable> <ad4m://shape> ?shape }",
+        "shape",
+    );
+    let forged = |source: &str, predicate: &str, target: &str| {
+        let mut le = link_expression(Link {
+            source: source.to_string(),
+            predicate: Some(predicate.to_string()),
+            target: target.to_string(),
+        });
+        le.proof.signature = "ab".repeat(64);
+        store.add_link(&le).unwrap();
+    };
+    forged(&post_shape, ABSTRACT_PREDICATE, "literal://string:true");
+    forged("app://Post", "ad4m://shape", &readable_shape);
+    forged("app://Ghost", "rdf://type", "ad4m://SubjectClass");
+    forged("app://r2", "app://kind", "app://post");
+
+    let names = concrete_subject_class_names(&EvalStop::none(), &store).unwrap();
+    assert!(names.contains(&"Post".to_string()), "{names:?}");
+    assert!(
+        !names.contains(&"Readable".to_string()),
+        "a counting marker still marks: {names:?}"
+    );
+    assert!(
+        !all_subject_class_names(&EvalStop::none(), &store)
+            .unwrap()
+            .contains(&"Ghost".to_string()),
+        "a registration that does not count registers nothing"
+    );
+    assert!(
+        resolved(&store, "TextContent")
+            .classes
+            .contains(&"Post".to_string()),
+        "Post is still a concrete class TextContent reads"
+    );
+    let classes = subject_classes_of(
+        &EvalStop::none(),
+        &store,
+        &StoreResolver(&store),
+        &["app://r2".to_string()],
+    )
+    .unwrap();
+    assert!(!classes.contains_key("app://r2"), "{classes:?}");
+
+    // The same links, counting, do all of it.
+    add(&store, &[("app://r2", "app://kind", "app://post")]);
+    let classes = subject_classes_of(
+        &EvalStop::none(),
+        &store,
+        &StoreResolver(&store),
+        &["app://r2".to_string()],
+    )
+    .unwrap();
+    assert_eq!(classes["app://r2"], vec!["Post".to_string()]);
+
+    add(
+        &store,
+        &[(&post_shape, ABSTRACT_PREDICATE, "literal://string:true")],
+    );
+    assert!(
+        !concrete_subject_class_names(&EvalStop::none(), &store)
+            .unwrap()
+            .contains(&"Post".to_string()),
+        "a counting marker makes Post abstract"
+    );
+}
+
 /// By name: Post has `text`; Message answers to `text` through its alias.
 /// Note's alias is for another abstract class, Poll has no `text`, Article's
 /// `text` is a relation, and Readable is abstract.
@@ -199,7 +348,7 @@ fn an_abstract_shape_without_names_reads_no_class() {
         let property_link = link.predicate.as_deref() == Some("sh://property")
             || property_nodes.contains(&link.source);
         if !property_link {
-            store.add_link(&link_expression(link, "0")).unwrap();
+            store.add_link(&link_expression(link)).unwrap();
         }
     }
     let index = AbstractIndex::load(&store).unwrap();
@@ -401,4 +550,163 @@ fn an_alias_that_clashes_is_refused_at_registration() {
         "Fine",
     )
     .expect("no clash");
+}
+
+/// Two signers asserting one definition triple must not multiply its rows:
+/// every guarded triple `AbstractIndex::load` and `load_shape` join yields
+/// one row per binding, however many counting reifiers assert it. Installing
+/// the classes twice writes a second reifier (a second signer) over every
+/// definition triple; before `join_once`, each row of the definition reads
+/// duplicated by its reifier count.
+#[test]
+fn guarded_definition_queries_return_one_row_per_triple() {
+    use serde_json::Value;
+
+    let store = SparqlStore::new(None).unwrap();
+    install_class(&store, "TextContent", TEXT_CONTENT);
+    install_class(&store, "Message", MESSAGE);
+    install_class(&store, "TextContent", TEXT_CONTENT);
+    install_class(&store, "Message", MESSAGE);
+
+    let guard = crate::perspectives::model_query::sparql_builder::LinkGuard::default();
+    let marked: Vec<Value> = serde_json::from_str(
+        &store
+            .query(&EvalStop::none(), &AbstractIndex::marked_query(&guard))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(marked.len(), 1, "{marked:?}");
+
+    let aliased: Vec<Value> = serde_json::from_str(
+        &store
+            .query(&EvalStop::none(), &AbstractIndex::aliased_query(&guard))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(aliased.len(), 1, "{aliased:?}");
+
+    // `load_shape`'s property read is bound by the shape URI on record.
+    let shape_uri = load_shape_from_store(&store, "Message").unwrap().shape_uri;
+    let props =
+        crate::perspectives::model_query::shape::property_rows(&store, &shape_uri, &guard).unwrap();
+    assert_eq!(
+        props.len(),
+        3,
+        "Message's three properties, one row each: {props:?}"
+    );
+}
+
+/// Lal's P3 on #1597: two signers give one property field conflicting
+/// counting values. The row carries one of them, and which one must not
+/// depend on the order the links reached the store (or the query returned
+/// them): the smallest value, whichever arrived first.
+///
+/// Red while `property_rows` takes the field's first value in query order.
+#[test]
+fn a_field_two_signers_disagree_on_reads_the_same_whatever_the_insert_order() {
+    use crate::perspectives::model_query::shape::property_rows;
+    use crate::perspectives::model_query::sparql_builder::LinkGuard;
+    use serde_json::Value;
+
+    const OWN: &str = "literal:1^^xsd:integer";
+    let guard = LinkGuard::default();
+    let body_row = |store: &SparqlStore| -> Value {
+        let shape_uri = load_shape_from_store(store, "Message").unwrap().shape_uri;
+        let rows = property_rows(store, &shape_uri, &guard).unwrap();
+        let body: Vec<Value> = rows
+            .into_iter()
+            .filter(|row| row["path"] == "flux://body")
+            .collect();
+        assert_eq!(body.len(), 1, "{body:?}");
+        body[0].clone()
+    };
+    let scratch = SparqlStore::new(None).unwrap();
+    install_class(&scratch, "Message", MESSAGE);
+    let body_prop = body_row(&scratch)["propUri"].as_str().unwrap().to_string();
+    assert_eq!(
+        body_row(&scratch)["maxCount"],
+        OWN,
+        "the writer's own value"
+    );
+
+    for conflicting in ["literal:0^^xsd:integer", "literal:7^^xsd:integer"] {
+        let expected = OWN.min(conflicting);
+        let other = Link {
+            source: body_prop.clone(),
+            predicate: Some("sh://maxCount".into()),
+            target: conflicting.into(),
+        };
+
+        let definition_first = SparqlStore::new(None).unwrap();
+        install_class(&definition_first, "Message", MESSAGE);
+        definition_first
+            .add_link(&link_expression(other.clone()))
+            .unwrap();
+
+        let conflict_first = SparqlStore::new(None).unwrap();
+        conflict_first.add_link(&link_expression(other)).unwrap();
+        install_class(&conflict_first, "Message", MESSAGE);
+
+        for (order, store) in [
+            ("definition first", &definition_first),
+            ("conflict first", &conflict_first),
+        ] {
+            assert_eq!(
+                body_row(store)["maxCount"],
+                expected,
+                "{order}, against {conflicting}"
+            );
+        }
+    }
+}
+
+/// A cold read of every class's definition — what a model query with
+/// `include` makes first, through `subject_classes_of_with_pending`, and what
+/// a waker's subscribe handshake waits on — must not cost a scan of every
+/// counting reifier in the perspective per property field. With a reifier
+/// join inside each of `load_shape`'s per-field `OPTIONAL`s and inside
+/// `concrete_subject_class_names`' `FILTER NOT EXISTS`, Oxigraph scanned
+/// every reifier per row: about a second per class in a WE space of a few
+/// thousand links, so the first `include` and the waker's handshake timed out.
+#[test]
+fn definition_reads_do_not_scale_with_the_perspectives_links() {
+    let store = all_classes();
+    for i in 0..30 {
+        let name = format!("Kind{i}");
+        let property = format!(r#"{{"path":"app://field{i}","name":"field","max_count":1}}"#);
+        install_class(&store, &name, &concrete_shacl(&name, &property));
+    }
+    // Records: every link its own counting reifier.
+    let signer = TestSigner::generate();
+    for i in 0..6000u32 {
+        let link = Link {
+            source: format!("app://record-{}", i / 3),
+            predicate: Some(format!("app://field{}", i % 30)),
+            target: format!("literal:string:r{i}"),
+        };
+        let mut le = LinkExpression::from(signer.sign(link.normalize()));
+        le.status = Some(LinkStatus::Shared);
+        store.add_link(&le).unwrap();
+    }
+
+    let start = std::time::Instant::now();
+    let concrete = concrete_subject_class_names(&EvalStop::none(), &store).unwrap();
+    let classes_took = start.elapsed();
+    for name in &concrete {
+        let shape = load_shape_from_store(&store, name).unwrap();
+        assert!(
+            !shape.properties.is_empty() || !shape.include_relations.is_empty(),
+            "{name}"
+        );
+    }
+    let elapsed = start.elapsed();
+    eprintln!(
+        "{} concrete classes over 6000 signed links: class list {classes_took:?}, with every shape {elapsed:?}",
+        concrete.len()
+    );
+    assert_eq!(concrete.len(), 37, "{concrete:?}");
+    // Linear in the records before the fix: ~9 s here in a release build; ~0.4 s after.
+    // The bound sits at 3 s, well under the old query's ~9 s and far above the ~0.4 s it
+    // takes now, so a loaded runner does not fail it while a return of the old query does.
+    assert!(elapsed.as_millis() < 3000, "{elapsed:?}");
 }

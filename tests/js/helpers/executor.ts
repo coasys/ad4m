@@ -1,7 +1,7 @@
 import { ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import { Ad4mClient } from "@coasys/ad4m";
-import { startExecutor, baseUrl, quitExecutor } from "../utils/utils.js";
+import { startExecutor, baseUrl, quitExecutor, seedHasLanguageLanguage } from "../utils/utils.js";
 import { getFreePorts, registerPorts, deregisterPorts } from "./ports.js";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -76,6 +76,11 @@ export async function startAgent(
     /** Start the Holochain conductor. Defaults to false when
      *  LOCAL_MODE=true, true otherwise. */
     runHolochain?: boolean;
+    /** Load only the language language. Defaults to true on a seed without a
+     *  language-language bundle (a suite run without prepare-test, on the
+     *  committed seed): it names no agent language this suite could install,
+     *  so the executor runs with none, and so with no key index. */
+    languageLanguageOnly?: boolean;
   } = {},
 ): Promise<AgentHandle> {
   const [apiPort, hcAdminPort, hcAppPort] = await getFreePorts(3);
@@ -99,7 +104,7 @@ export async function startAgent(
     apiPort,
     hcAdminPort,
     hcAppPort,
-    false,
+    opts.languageLanguageOnly ?? !seedHasLanguageLanguage(bootstrapSeedPath),
     adminCredential,
     undefined,   // proxyUrl
     undefined,   // bootstrapUrl

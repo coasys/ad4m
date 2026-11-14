@@ -169,6 +169,7 @@ async fn each_collection_member_carries_its_own_author_timestamp_and_verdict() {
             proof: crate::types::ExpressionProof {
                 key: decorated.proof.key.clone(),
                 signature: decorated.proof.signature.clone(),
+                anchor: None,
             },
             status: Some(LinkStatus::Shared),
         };
@@ -211,4 +212,34 @@ async fn an_unsigned_member_reads_as_not_valid() {
         rows[0]["proof"],
         json!({ "key": "", "signature": "", "valid": false, "invalid": true })
     );
+}
+
+/// The anchor is part of the signed bytes when a proof carries one, so a
+/// `__links` row must carry it too: without it the row cannot be re-verified
+/// or forwarded. The signature itself is not the point here (the row is read
+/// with `include_unverified`); the round trip of the stored annotation is.
+#[tokio::test]
+async fn a_member_row_carries_the_proof_anchor() {
+    let store = SparqlStore::new(None).unwrap();
+    let alice = TestSigner::generate();
+    store
+        .add_link(&signed(&alice, "ad4m://type", "team://Team", T0))
+        .unwrap();
+    let mut anchored = signed(&alice, "team://member", "did:key:zCarol", T1);
+    anchored.proof.anchor = Some(3);
+    store.add_link(&anchored).unwrap();
+
+    let query = ModelQueryInput {
+        links: Some(vec!["members".to_string()]),
+        include_unverified: Some(true),
+        ..Default::default()
+    };
+    let result = execute_model_query_from_json(&store, "Team", &query, TEAM_SHAPE_JSON)
+        .await
+        .unwrap();
+    let rows = members_rows(&result);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["proof"]["anchor"], json!(3));
+    let read: DecoratedLinkExpression = serde_json::from_value(rows[0].clone()).unwrap();
+    assert_eq!(read.proof.anchor, Some(3));
 }

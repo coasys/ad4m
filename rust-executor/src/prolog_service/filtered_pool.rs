@@ -797,8 +797,11 @@ mod tests {
                     signature: "test_signature".to_string(),
                     valid: Some(true),
                     invalid: Some(false),
+                    anchor: None,
                 },
                 status: None,
+                verdict: None,
+                person: None,
             },
             DecoratedLinkExpression {
                 author: "user2".to_string(),
@@ -813,8 +816,11 @@ mod tests {
                     signature: "test_signature".to_string(),
                     valid: Some(true),
                     invalid: Some(false),
+                    anchor: None,
                 },
                 status: None,
+                verdict: None,
+                person: None,
             },
             DecoratedLinkExpression {
                 author: "user1".to_string(),
@@ -829,8 +835,11 @@ mod tests {
                     signature: "test_signature".to_string(),
                     valid: Some(true),
                     invalid: Some(false),
+                    anchor: None,
                 },
                 status: None,
+                verdict: None,
+                person: None,
             },
         ]
     }
@@ -853,8 +862,11 @@ mod tests {
                     signature: "test_signature".to_string(),
                     valid: Some(true),
                     invalid: Some(false),
+                    anchor: None,
                 },
                 status: None,
+                verdict: None,
+                person: None,
             });
         }
         links

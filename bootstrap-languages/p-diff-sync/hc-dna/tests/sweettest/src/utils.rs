@@ -5,7 +5,9 @@ use std::path::PathBuf;
 use chrono::Utc;
 use futures::future;
 use holochain::conductor::api::error::ConductorApiError;
-use holochain::sweettest::{SweetAgents, SweetCell, SweetConductor, SweetConductorBatch, SweetDnaFile};
+use holochain::sweettest::{
+    SweetAgents, SweetCell, SweetConductor, SweetConductorBatch, SweetConductorConfig, SweetDnaFile,
+};
 use holochain_types::prelude::*;
 use perspective_diff_sync_integrity::{
     CommitInput, ExpressionProof, LinkExpression, PerspectiveDiff, PullResult, Triple,
@@ -31,7 +33,7 @@ pub async fn load_dna() -> DnaFile {
 /// Setup a single conductor with one agent
 pub async fn setup_1_conductor() -> (SweetConductor, SweetCell) {
     let dna = load_dna().await;
-    let mut conductor = SweetConductor::from_standard_config().await;
+    let mut conductor = SweetConductor::standard().await;
     let agent = SweetAgents::one(conductor.keystore()).await;
     let app = conductor
         .setup_app_for_agent("test-app", agent, &[dna])
@@ -44,7 +46,11 @@ pub async fn setup_1_conductor() -> (SweetConductor, SweetCell) {
 /// Setup multiple conductors with agents, optionally networked together
 pub async fn setup_conductors(n: usize, network: bool) -> (SweetConductorBatch, Vec<SweetCell>) {
     let dna = load_dna().await;
-    let mut conductors = SweetConductorBatch::from_standard_config(n).await;
+    // Without `network` the conductors skip bootstrap, so they meet only through
+    // `exchange_peer_info`.
+    let mut conductors =
+        SweetConductorBatch::from_config_rendezvous(n, SweetConductorConfig::rendezvous(network))
+            .await;
 
     let agents: Vec<AgentPubKey> = future::join_all(
         conductors.iter().map(|c| async {
@@ -77,10 +83,11 @@ pub fn generate_link_expression(author: &str) -> LinkExpression {
             target: Some(format!("test://target/{}", random_id)),
             predicate: Some(format!("test://predicate/{}", Uuid::new_v4())),
         },
-        timestamp: Utc::now(),
+        timestamp: Utc::now().to_rfc3339(),
         proof: ExpressionProof {
             signature: format!("sig_{}", Uuid::new_v4()),
             key: format!("key_{}", author),
+            anchor: None,
         },
     }
 }
