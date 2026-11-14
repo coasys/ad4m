@@ -122,6 +122,11 @@ const MAX_FAILED_CONNECTS: u8 = 3;
 /// Bound on an `events.watch` reply — a socket that stays up but never
 /// answers must not hold `watch_flush` or its pending entry forever (F12).
 const WATCH_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
+/// Bound on a socket write itself — `SinkExt::send` on a peer that keeps
+/// TCP open but stops reading can park forever, holding `sink` (and
+/// `watch_flush`/`pending` behind it) while disconnect and close wait on
+/// those very locks (R5).
+const WATCH_SEND_TIMEOUT: Duration = Duration::from_secs(5);
 /// The WS close code the executor sends when it refuses the capability
 /// token (`close_refused`; tungstenite's `CloseCode::Policy`).
 const AUTH_REFUSAL_CLOSE_CODE: u16 = 1008;
@@ -146,6 +151,15 @@ type PendingMap = Arc<Mutex<HashMap<String, PendingCall>>>;
 /// One named event interest. `spec` is the `events.watch` params fragment for
 /// this watcher: `{ "<event type>": null | ["uuid", ...] }`.
 type WatchMap = BTreeMap<String, Value>;
+
+/// The named interests plus a revision that bumps on every mutation. A
+/// restore flush re-sends until the acknowledged union is the union that
+/// exists — interest recorded mid-restore is never silently dropped (R2).
+struct Watches {
+    map: WatchMap,
+    rev: u64,
+}
+
 /// A callback fired once a fresh socket is installed (post `events.watch`).
 /// The Send+Sync bound only exists natively — the browser socket types are
 /// single-threaded (`Closure` isn't Send), and wasm callbacks never leave
@@ -168,11 +182,19 @@ struct Shared {
     /// Named event interests; the union goes out as `events.watch` on
     /// (re)connect and on every change. Key `""` is the user watch —
     /// `watch_events` replaces it; live queries register their own keys.
-    watches: Mutex<WatchMap>,
+    watches: Mutex<Watches>,
     /// Serializes `events.watch` flushes: snapshot+send+reply run under one
     /// gate, so a slower flush can never write its older union over a newer
     /// one on the wire (F9).
     watch_flush: Mutex<()>,
+    /// How many disconnects have run. The supervisor samples it before
+    /// spawning a socket's reader; under `conn_guard` a changed value means
+    /// the socket died mid-install and its disconnect owns the flag (R1).
+    disconnects: AtomicU64,
+    /// Serializes a disconnect's flag write against an install's
+    /// epoch-check-and-publish, so a `true` can never land over a `false`
+    /// a close already stored (R1).
+    conn_guard: Mutex<()>,
     on_reconnect: Mutex<Vec<(u64, ReconnectCb)>>,
     closed: AtomicBool,
     /// Terminal signal — `true` once `close()` ran or auth was refused.
@@ -187,6 +209,26 @@ struct Shared {
     /// `connected` false, which is exactly what it waits on — there is no
     /// "reconnect in progress" guard a disconnect can hide behind.
     supervisor: Mutex<Option<Task>>,
+    /// `notify_waiters` unwinds every send parked on a socket write: a
+    /// backpressured peer can hold `sink` (and `pending`/`watch_flush`
+    /// behind it) indefinitely, and the disconnect/close paths need those
+    /// locks — so they signal this *before* waiting on them (R5).
+    send_abort: tokio::sync::Notify,
+    /// Test hook: when set, socket writes park inside their critical
+    /// section — held locks stay held — until aborted or released, like a
+    /// peer that keeps TCP open but stops reading (R5).
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    send_block: Mutex<Option<Arc<SendBlocker>>>,
+}
+
+/// The park point behind [`Shared::send_block`]: `parked` announces each
+/// write that reached the critical section; `gate` (zero permits) keeps
+/// it there. The park only ends when the send is aborted or the test adds
+/// a permit — whichever an R5 test wants to prove.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(crate) struct SendBlocker {
+    parked: tokio::sync::mpsc::UnboundedSender<()>,
+    gate: tokio::sync::Semaphore,
 }
 
 /// Merge every named interest into the `events.watch` params: for each event
@@ -271,14 +313,22 @@ impl WsRpcClient {
             pending: Arc::new(Mutex::new(HashMap::new())),
             events: events_tx,
             connected: connected_tx,
-            watches: Mutex::new(WatchMap::new()),
+            watches: Mutex::new(Watches {
+                map: WatchMap::new(),
+                rev: 0,
+            }),
             watch_flush: Mutex::new(()),
+            disconnects: AtomicU64::new(0),
+            conn_guard: Mutex::new(()),
             on_reconnect: Mutex::new(Vec::new()),
             closed: AtomicBool::new(false),
             closed_tx,
             auth_failed: AtomicBool::new(false),
             reader: Mutex::new(None),
             supervisor: Mutex::new(None),
+            send_abort: tokio::sync::Notify::new(),
+            #[cfg(all(test, not(target_arch = "wasm32")))]
+            send_block: Mutex::new(None),
         });
 
         let reader = Self::spawn_reader(read, shared.clone());
@@ -353,20 +403,32 @@ impl WsRpcClient {
     /// reader itself — aborting its own handle would cancel the rest of
     /// this cleanup at the next yield.
     async fn handle_disconnect(shared: &Arc<Shared>, abort_reader: bool) {
+        // Unwind writes parked on this socket FIRST: a backpressured send
+        // holds `sink` (and `pending`/`watch_flush` behind it) — the
+        // locks this path takes next (R5).
+        shared.send_abort.notify_waiters();
         {
-            let mut sink = shared.sink.lock().await;
-            *sink = None; // drop whatever half remains
-        }
-        // Abort the reader when this runs from `disconnect_for_testing` —
-        // dropping `read` closes the TCP stream executor-side too.
-        if abort_reader {
-            if let Some(reader) = shared.reader.lock().await.take() {
-                reader.abort();
+            // `conn_guard` makes the disconnect's flag write atomic against
+            // an install's epoch-check-and-publish: whichever holds it last
+            // wins, and a publish that loses the race sees the bumped epoch
+            // and refuses to overwrite this `false` (R1).
+            let _guard = shared.conn_guard.lock().await;
+            shared.disconnects.fetch_add(1, Ordering::SeqCst);
+            {
+                let mut sink = shared.sink.lock().await;
+                *sink = None; // drop whatever half remains
             }
+            // Abort the reader when this runs from `disconnect_for_testing`
+            // — dropping `read` closes the TCP stream executor-side too.
+            if abort_reader {
+                if let Some(reader) = shared.reader.lock().await.take() {
+                    reader.abort();
+                }
+            }
+            // `send_replace`, not `send`: with no live receivers `send` drops
+            // the value and `is_connected` keeps reporting the stale flag.
+            shared.connected.send_replace(false);
         }
-        // `send_replace`, not `send`: with no live receivers `send` drops
-        // the value and `is_connected` keeps reporting the stale flag.
-        shared.connected.send_replace(false);
 
         // Fail every *sent* call — the executor can't answer them now. An
         // unsent call is only waiting: its frame never went out, so there is
@@ -416,23 +478,58 @@ impl WsRpcClient {
 
                 match transport::connect(&shared.url, &shared.display_url).await {
                     Ok(Socket {
-                        sink: write,
+                        sink: mut write,
                         stream: read,
                     }) => {
-                        {
-                            let mut sink = shared.sink.lock().await;
-                            *sink = Some(write);
-                        }
+                        // The epoch this install owns: the reader does not
+                        // exist yet, so `disconnects` can only move after
+                        // this — a close landing while we restore is always
+                        // caught at the guarded publish below (R1).
+                        let epoch = shared.disconnects.load(Ordering::SeqCst);
                         let reader = Self::spawn_reader(read, shared.clone());
-                        *shared.reader.lock().await = Some(reader);
-                        shared.connected.send_replace(true);
-
-                        // Re-register interest first — subscription re-opens
-                        // fired below need `query-subscription-update` watched.
-                        if let Err(e) = Self::send_watch(&shared).await {
+                        // Restore interest *before* publishing: `connected`
+                        // flips only once the executor acknowledged
+                        // `events.watch`, so a call that waited out the
+                        // outage — a `modelSubscribe` above all — can never
+                        // slip past the filter it needs (R2). The frames go
+                        // over the still-private write half: nothing else
+                        // can see this socket yet.
+                        if let Err(e) = Self::restore_watches(&shared, &mut write).await {
                             rt::log(&format!("[ws-rpc] watch restore failed: {e}"));
+                            // No publish, no callbacks, no re-open on a
+                            // filter that is not there — drop the socket
+                            // and dial again.
+                            drop(write);
+                            reader.abort();
+                            continue;
+                        }
+                        {
+                            let _guard = shared.conn_guard.lock().await;
+                            if shared.closed.load(Ordering::SeqCst)
+                                || shared.disconnects.load(Ordering::SeqCst) != epoch
+                            {
+                                // Died while we restored: its disconnect
+                                // already ran and owns the flag. Drop what
+                                // is left and dial again.
+                                drop(write);
+                                reader.abort();
+                                continue;
+                            }
+                            *shared.sink.lock().await = Some(write);
+                            *shared.reader.lock().await = Some(reader);
+                            shared.connected.send_replace(true);
                         }
 
+                        // Receivers woken by `send_replace` were stashed in
+                        // this worker's LIFO slot — a callback that parks
+                        // the thread (a re-open that blocks, a test
+                        // barrier) would trap them there and nothing would
+                        // ever drain it. Yield so the waiters leave the
+                        // slot before user code can park this worker.
+                        rt::yield_now().await;
+
+                        // Subscription re-opens fired below need the filter
+                        // the acknowledged restore just installed (R2).
                         let callbacks: Vec<ReconnectCb> = shared
                             .on_reconnect
                             .lock()
@@ -459,17 +556,18 @@ impl WsRpcClient {
         })
     }
 
-    /// Merge the named interests and send `events.watch`, awaiting the
-    /// reply — an empty map too: it tells the executor to stop sending
-    /// events (`events.watch` replaces the socket's entire interest, TS
-    /// `ApiClient._flushWatch`). The `watch_flush` gate serializes
-    /// snapshot+send+reply: a flush that took its snapshot earlier can
-    /// never write its stale union over a newer one on the wire (F9).
-    async fn send_watch(shared: &Arc<Shared>) -> Result<()> {
-        let _gate = shared.watch_flush.lock().await;
-        let merged = {
+    /// Snapshot the union and register its pending entry. Caller holds
+    /// `watch_flush`. Returns the flushed watches revision, the request id,
+    /// the serialized frame and the reply channel — everything a send needs
+    /// except the sink itself, so no `watches`/`pending` acquisition can
+    /// ever run under a held `shared.sink` (call paths take them in the
+    /// opposite order).
+    async fn watch_frame_parts(
+        shared: &Arc<Shared>,
+    ) -> Result<(u64, String, String, oneshot::Receiver<Result<Value>>)> {
+        let (merged, rev) = {
             let watches = shared.watches.lock().await;
-            merge_watches(&watches)
+            (merge_watches(&watches.map), watches.rev)
         };
         // Send directly rather than via `call` — `call` on the freshly
         // installed socket works, but this keeps ordering explicit.
@@ -489,35 +587,110 @@ impl WsRpcClient {
                 failed_connects: 0,
             },
         );
-        let sent = {
-            let mut sink = shared.sink.lock().await;
-            match sink.as_mut() {
-                Some(s) => Some(s.send_text(json).await),
-                None => None,
-            }
-        };
-        match sent {
-            Some(Ok(())) => {}
-            other => {
-                shared.pending.lock().await.remove(&id);
-                return Err(match other {
-                    Some(Err(e)) => anyhow!("Failed to send events.watch: {e}"),
-                    _ => anyhow!("events.watch: no socket"),
-                });
-            }
-        }
-        // Await the reply: `events.watch` is a real RPC — a rejection (or a
-        // dropped socket, which fails the pending entry) must reach the
-        // caller (F9). A live socket that never answers is bounded: on
-        // timeout the pending entry is removed — just dropping the receiver
-        // would leave it to linger until disconnect (F12).
+        Ok((rev, id, json, rx))
+    }
+
+    /// Await one `events.watch` reply — a real RPC, so a rejection (or a
+    /// dropped socket, which fails the pending entry) reaches the caller
+    /// (F9). Bounded: on timeout the pending entry is removed — just
+    /// dropping the receiver would leave it to linger until disconnect
+    /// (F12).
+    async fn await_watch_reply(
+        shared: &Arc<Shared>,
+        id: &str,
+        rx: oneshot::Receiver<Result<Value>>,
+    ) -> Result<()> {
         match rt::timeout(WATCH_REPLY_TIMEOUT, rx).await {
             Ok(reply) => reply
                 .map_err(|_| anyhow!("Response channel closed"))?
                 .map(|_| ()),
             Err(_) => {
-                shared.pending.lock().await.remove(&id);
+                shared.pending.lock().await.remove(id);
                 Err(anyhow!("events.watch reply timed out"))
+            }
+        }
+    }
+
+    /// Merge the named interests and send `events.watch` on the installed
+    /// socket, awaiting the reply — an empty map too: it tells the executor
+    /// to stop sending events (`events.watch` replaces the socket's entire
+    /// interest, TS `ApiClient._flushWatch`). The `watch_flush` gate
+    /// serializes the flush: a snapshot taken earlier can never write its
+    /// stale union over a newer one on the wire (F9). The sink is held
+    /// only across the frame send, never across the reply wait.
+    async fn send_watch(shared: &Arc<Shared>) -> Result<()> {
+        let _gate = shared.watch_flush.lock().await;
+        let (_rev, id, json, rx) = Self::watch_frame_parts(shared).await?;
+        // The send — lock acquisition included — is bounded and
+        // abortable: a peer that stops reading must not hold `sink` (and
+        // `watch_flush` behind it) while disconnect or close waits on
+        // those locks; they signal `send_abort` before waiting (R5).
+        // The sink is held only across the send, never the reply wait.
+        let abort = shared.send_abort.notified();
+        tokio::pin!(abort);
+        abort.as_mut().enable();
+        let sent = tokio::select! {
+            r = rt::timeout(WATCH_SEND_TIMEOUT, async {
+                let mut sink = shared.sink.lock().await;
+                #[cfg(all(test, not(target_arch = "wasm32")))]
+                Self::park_for_send_test(shared).await;
+                match sink.as_mut() {
+                    Some(s) => Some(s.send_text(json).await),
+                    None => None,
+                }
+            }) => Some(r),
+            _ = &mut abort => None,
+        };
+        match sent {
+            Some(Ok(Some(Ok(())))) => Self::await_watch_reply(shared, &id, rx).await,
+            other => {
+                shared.pending.lock().await.remove(&id);
+                Err(match other {
+                    Some(Ok(Some(Err(e)))) => anyhow!("Failed to send events.watch: {e}"),
+                    Some(Err(_)) => anyhow!("events.watch send timed out"),
+                    None => anyhow!("events.watch send aborted: socket is closing"),
+                    _ => anyhow!("events.watch: no socket"),
+                })
+            }
+        }
+    }
+
+    /// `send_watch` for the install path: the same serialized flush, but on
+    /// the still-private write half before the socket exists for callers —
+    /// and repeated until the acknowledged union is the union that exists,
+    /// so interest recorded mid-restore is never silently dropped (R2).
+    async fn restore_watches(shared: &Arc<Shared>, sink: &mut WsSink) -> Result<()> {
+        let _gate = shared.watch_flush.lock().await;
+        loop {
+            let (rev, id, json, rx) = Self::watch_frame_parts(shared).await?;
+            // The same bound + abort as the installed-socket flush: a
+            // peer that stops reading mid-restore must not pin the
+            // supervisor on this write (R5).
+            let abort = shared.send_abort.notified();
+            tokio::pin!(abort);
+            abort.as_mut().enable();
+            let sent = tokio::select! {
+                r = rt::timeout(WATCH_SEND_TIMEOUT, async {
+                    #[cfg(all(test, not(target_arch = "wasm32")))]
+                    Self::park_for_send_test(shared).await;
+                    sink.send_text(json).await
+                }) => Some(r),
+                _ = &mut abort => None,
+            };
+            match sent {
+                Some(Ok(Ok(()))) => Self::await_watch_reply(shared, &id, rx).await?,
+                other => {
+                    shared.pending.lock().await.remove(&id);
+                    return Err(match other {
+                        Some(Ok(Err(e))) => anyhow!("Failed to send events.watch: {e}"),
+                        Some(Err(_)) => anyhow!("events.watch send timed out"),
+                        None => anyhow!("events.watch restore aborted: socket is closing"),
+                        Some(Ok(Ok(()))) => unreachable!(),
+                    });
+                }
+            }
+            if rev >= shared.watches.lock().await.rev {
+                return Ok(());
             }
         }
     }
@@ -527,8 +700,11 @@ impl WsRpcClient {
     pub(crate) async fn set_watch(&self, key: &str, spec: Value) -> Result<()> {
         {
             let mut watches = self.shared.watches.lock().await;
-            watches.insert(key.to_string(), spec);
+            watches.map.insert(key.to_string(), spec);
+            watches.rev += 1;
         }
+        // A dead socket sends nothing — the next install's restore flush
+        // picks the interest up instead (R2); a live socket flushes now.
         if *self.shared.connected.borrow() {
             Self::send_watch(&self.shared).await?;
         }
@@ -536,11 +712,17 @@ impl WsRpcClient {
     }
 
     pub(crate) async fn remove_watch(&self, key: &str) -> Result<()> {
-        {
+        let removed = {
             let mut watches = self.shared.watches.lock().await;
-            watches.remove(key);
-        }
-        if *self.shared.connected.borrow() {
+            let removed = watches.map.remove(key).is_some();
+            if removed {
+                watches.rev += 1;
+            }
+            removed
+        };
+        // A key that was never installed changed nothing — a flush would
+        // only resend the same union.
+        if removed && *self.shared.connected.borrow() {
             Self::send_watch(&self.shared).await?;
         }
         Ok(())
@@ -602,6 +784,9 @@ impl WsRpcClient {
     /// Permanently close the client: socket down, no reconnect.
     pub async fn close(&self) {
         self.shared.closed.store(true, Ordering::SeqCst);
+        // Same first move as the disconnect: unwind parked socket writes
+        // before this path waits on the locks they hold (R5).
+        self.shared.send_abort.notify_waiters();
         if let Some(h) = self.shared.supervisor.lock().await.take() {
             h.abort();
         }
@@ -624,6 +809,41 @@ impl WsRpcClient {
     #[doc(hidden)]
     pub async fn disconnect_for_testing(&self) {
         Self::handle_disconnect(&self.shared, true).await;
+    }
+
+    /// How many `on_reconnect` callbacks are currently registered — a leak
+    /// shows up as a count that never returns to what the test installed.
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(crate) async fn reconnect_callback_count(&self) -> usize {
+        self.shared.on_reconnect.lock().await.len()
+    }
+
+    /// Install a [`SendBlocker`]: socket writes now park inside their
+    /// critical section — held locks stay held — and the returned
+    /// receiver announces each park (R5).
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(crate) async fn park_sends(
+        &self,
+    ) -> (Arc<SendBlocker>, tokio::sync::mpsc::UnboundedReceiver<()>) {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let blocker = Arc::new(SendBlocker {
+            parked: tx,
+            gate: tokio::sync::Semaphore::new(0),
+        });
+        *self.shared.send_block.lock().await = Some(blocker.clone());
+        (blocker, rx)
+    }
+
+    /// Park inside a socket write's critical section when a test put a
+    /// [`SendBlocker`] in place — the locks the caller holds stay held,
+    /// like a `SinkExt::send` a backpressured peer stalls forever (R5).
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    async fn park_for_send_test(shared: &Arc<Shared>) {
+        let blocker = shared.send_block.lock().await.clone();
+        if let Some(b) = blocker {
+            let _ = b.parked.send(());
+            let _ = b.gate.acquire().await;
+        }
     }
 
     /// Wait for a socket (or permanent close), then send and await the reply.
@@ -711,12 +931,29 @@ impl WsRpcClient {
                     if let Some(call) = pending.get_mut(id) {
                         call.sent = true;
                     }
-                    break s.send_text(json.clone()).await;
+                    // A write parked on a dead-peer socket must unwind
+                    // when disconnect or close signals — they notify
+                    // before waiting on the `pending`/`sink` locks this
+                    // send holds. Fresh per send: a `Notified` resolved by
+                    // an earlier socket's death would poison this new
+                    // socket's send forever after (R5).
+                    let abort = self.shared.send_abort.notified();
+                    tokio::pin!(abort);
+                    abort.as_mut().enable();
+                    break tokio::select! {
+                        r = async {
+                            #[cfg(all(test, not(target_arch = "wasm32")))]
+                            Self::park_for_send_test(&self.shared).await;
+                            s.send_text(json.clone()).await
+                        } => r,
+                        _ = &mut abort => Err(anyhow!("socket is closing")),
+                    };
                 }
                 drop(sink);
                 drop(pending);
                 // Reconnecting — wait for a socket or the final close.
-                if connected_rx.changed().await.is_err() {
+                let ch = connected_rx.changed().await;
+                if ch.is_err() {
                     self.shared.pending.lock().await.remove(id);
                     return Err(anyhow!("WebSocket client is closed"));
                 }
@@ -848,12 +1085,16 @@ mod tests {
             "lq:2".into(),
             serde_json::json!({"link-added": ["p2", "p1"]}),
         );
-        let merged = merge_watches(&watches);
-        assert_eq!(merged["perspective-added"], serde_json::Value::Null);
-        assert_eq!(merged["query-subscription-update"], serde_json::Value::Null);
-        let mut got: Vec<String> = serde_json::from_value(merged["link-added"].clone()).unwrap();
-        got.sort();
-        assert_eq!(got, vec!["p1".to_string(), "p2".to_string()]);
+        // The whole object: `merged[key] == Null` also holds for a key
+        // the merge dropped.
+        assert_eq!(
+            merge_watches(&watches),
+            serde_json::json!({
+                "perspective-added": null,
+                "query-subscription-update": null,
+                "link-added": ["p1", "p2"],
+            })
+        );
     }
 
     #[test]
@@ -861,7 +1102,7 @@ mod tests {
         let mut watches = WatchMap::new();
         watches.insert("a".into(), serde_json::json!({"ev": ["p1"]}));
         watches.insert("b".into(), serde_json::json!({"ev": null}));
-        assert_eq!(merge_watches(&watches)["ev"], serde_json::Value::Null);
+        assert_eq!(merge_watches(&watches), serde_json::json!({"ev": null}));
     }
 
     #[test]
@@ -1021,6 +1262,207 @@ mod tests {
         client.close().await;
     }
 
+    /// R1: `connected` must go out before the reader can report a close —
+    /// only then can a mid-install disconnect never be overwritten. The
+    /// wrong order lets a close that lands between `spawn_reader` and
+    /// `send_replace(true)` store `false`, the publish overwrite it with
+    /// `true`, and the supervisor sleep on a flag that never flips again:
+    /// dead socket, `is_connected` true, no redial ever.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_immediate_close_during_install_still_reconnects() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let client = WsRpcClient::connect(fake.url(), "").await.unwrap();
+
+        // Socket 1 dies; a drained in-flight call is the barrier that the
+        // whole disconnect path ran.
+        let caller = WsRpcClient {
+            shared: client.shared.clone(),
+        };
+        let c0 = tokio::spawn(async move { caller.call_value("x.y", serde_json::json!({})).await });
+        fake.next_request().await;
+        fake.drop_connection();
+        assert!(c0.await.unwrap().is_err());
+
+        // Park the restore: the fresh socket's reader already runs, but no
+        // `events.watch` can go out — and no publish can land — while the
+        // test holds the flush gate. The fresh socket dies meanwhile.
+        let parked = client.shared.watch_flush.lock().await;
+        fake.connection(2).await;
+
+        // `disconnects` reaching 2 is the barrier that socket 2's whole
+        // disconnect ran — its flag write included — before we release.
+        fake.drop_connection();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while client.shared.disconnects.load(Ordering::SeqCst) < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("socket 2's disconnect never ran");
+        drop(parked);
+
+        // A publish that lands after that disconnect leaves `connected`
+        // stuck at true on a dead socket: the supervisor waits on a change
+        // that never comes and nobody dials epoch 3.
+        fake.connection(3).await;
+        client.close().await;
+    }
+
+    /// R2: a call parked while the client was down — a `modelSubscribe`
+    /// above all — must not wake until the restored `events.watch` was
+    /// acknowledged. If `connected` flips before the filter is in place,
+    /// the subscribe slips past it and the live query never receives an
+    /// update while believing itself ready.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_subscribe_while_disconnected_waits_for_the_watch_ack() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let client = WsRpcClient::connect(fake.url(), "").await.unwrap();
+
+        // Socket 1 dies; a drained in-flight call is the barrier that the
+        // whole disconnect path ran.
+        let caller = WsRpcClient {
+            shared: client.shared.clone(),
+        };
+        let c0 = tokio::spawn(async move { caller.call_value("x.y", serde_json::json!({})).await });
+        fake.next_request().await;
+        fake.drop_connection();
+        assert!(c0.await.unwrap().is_err());
+
+        // While offline the query records its interest — nothing can be
+        // sent yet — and the subscribe call parks waiting for a socket.
+        client
+            .set_watch(
+                "lq:1",
+                serde_json::json!({"query-subscription-update": null}),
+            )
+            .await
+            .unwrap();
+        let caller = WsRpcClient {
+            shared: client.shared.clone(),
+        };
+        let sub = tokio::spawn(async move {
+            caller
+                .call_value(
+                    "perspective.modelSubscribe",
+                    serde_json::json!({"uuid": "p1"}),
+                )
+                .await
+        });
+
+        // Hold the flush gate: the restore cannot send `events.watch` while
+        // the test holds it, so any frame that arrives now provably went
+        // out without the filter.
+        let gate = client.shared.watch_flush.lock().await;
+        fake.connection(2).await;
+        assert!(
+            fake.maybe_request(Duration::from_millis(400))
+                .await
+                .is_none(),
+            "the subscribe went out before events.watch was acknowledged"
+        );
+
+        // Released, the restore must send the union the offline record
+        // joined — and while its ack is outstanding, still nothing else.
+        drop(gate);
+        let w = fake.next_request().await;
+        assert_eq!(w["type"], "events.watch");
+        assert_eq!(
+            w["params"],
+            serde_json::json!({"query-subscription-update": null})
+        );
+        assert!(
+            fake.maybe_request(Duration::from_millis(400))
+                .await
+                .is_none(),
+            "the subscribe went out before events.watch was acknowledged"
+        );
+
+        // Only the acknowledgement may wake the parked call.
+        fake.reply(&w, Value::Bool(true)).await;
+        let s = fake.next_request().await;
+        assert_eq!(s["type"], "perspective.modelSubscribe");
+        fake.reply(
+            &s,
+            serde_json::json!({"subscriptionId": "s1", "result": {"instances": []}, "revision": 0}),
+        )
+        .await;
+        sub.await.unwrap().unwrap();
+        client.close().await;
+    }
+
+    /// R2: a rejected `events.watch` restore is a socket without the event
+    /// filter — publishing it and firing the reconnect callbacks re-opens
+    /// live queries that then receive nothing. The socket must be dropped
+    /// and re-dialed, callbacks only after an acknowledged restore.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_rejected_watch_restore_never_publishes_and_redials() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let client = WsRpcClient::connect(fake.url(), "").await.unwrap();
+
+        let fired = std::sync::Arc::new(AtomicU64::new(0));
+        let fired2 = fired.clone();
+        client
+            .on_reconnect(move || {
+                fired2.fetch_add(1, Ordering::SeqCst);
+            })
+            .await;
+
+        // Register interest while connected — socket 2 must restore it.
+        let caller = WsRpcClient {
+            shared: client.shared.clone(),
+        };
+        let watch =
+            tokio::spawn(
+                async move { caller.set_watch("k", serde_json::json!({"e": null})).await },
+            );
+        let w0 = fake.next_request().await;
+        fake.reply(&w0, Value::Bool(true)).await;
+        watch.await.unwrap().unwrap();
+
+        // Socket 1 dies; a drained in-flight call is the barrier that the
+        // whole disconnect path ran.
+        let caller = WsRpcClient {
+            shared: client.shared.clone(),
+        };
+        let c0 = tokio::spawn(async move { caller.call_value("x.y", serde_json::json!({})).await });
+        fake.next_request().await;
+        fake.drop_connection();
+        assert!(c0.await.unwrap().is_err());
+
+        // Socket 2's restore is rejected: on the buggy path the socket is
+        // published anyway, the callbacks fire and nobody ever dials
+        // again — `connection(3)` times out.
+        fake.connection(2).await;
+        let w = fake.next_request().await;
+        assert_eq!(w["type"], "events.watch");
+        fake.reply_error(&w, 400, "unknown event type").await;
+
+        fake.connection(3).await;
+        assert_eq!(
+            fired.load(Ordering::SeqCst),
+            0,
+            "reconnect callbacks ran on a filter that failed"
+        );
+
+        // The retry restores the same union; this acknowledgement is what
+        // finally publishes the socket and fires the callbacks.
+        let w3 = fake.next_request().await;
+        assert_eq!(w3["type"], "events.watch");
+        assert_eq!(w3["params"], serde_json::json!({"e": null}));
+        fake.reply(&w3, Value::Bool(true)).await;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while fired.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the successful restore never fired the callbacks");
+        client.close().await;
+    }
+
     /// F8: a call that never reached the wire is a *waiting* call, not an
     /// in-flight one — TS `_onClose` rejects only `sent` calls. Draining it
     /// as if it were sent fails the caller while the call still sends on
@@ -1061,12 +1503,15 @@ mod tests {
         // nothing to fail.
         client.disconnect_for_testing().await;
 
-        // The supervisor dials; on the new socket c1 finally sends. Drain
-        // the restoration frame(s) until c1's call arrives.
+        // The supervisor dials; on the new socket c1 finally sends. Ack the
+        // restore frame — `connected` only publishes once it lands (R2) —
+        // then keep draining until c1's call arrives.
         fake.connection(2).await;
         let c1_frame = loop {
             let req = fake.next_request().await;
-            if req["type"] == "x.z" {
+            if req["type"] == "events.watch" {
+                fake.reply(&req, Value::Bool(true)).await;
+            } else if req["type"] == "x.z" {
                 break req;
             }
         };
@@ -1076,6 +1521,119 @@ mod tests {
             .await;
         let result = c1.await.unwrap();
         assert_eq!(result.unwrap(), serde_json::json!({"done": true}));
+        client.close().await;
+    }
+
+    // R5: a peer that keeps TCP open but stops reading backpressures a
+    // socket write forever — `SinkExt::send` holds `sink` (and
+    // `watch_flush`/`pending` behind it) the whole time, while
+    // disconnect and close wait on those very locks. The abort signal
+    // must unwind a parked write the moment teardown needs its locks.
+
+    /// A blocked `events.watch` send holding `sink` must not stall the
+    /// disconnect — or the redial after it.
+    #[tokio::test]
+    async fn a_blocked_watch_send_does_not_hold_the_sink() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let client = WsRpcClient::connect(fake.url(), "").await.unwrap();
+
+        let (_blocker, mut parked) = client.park_sends().await;
+        let caller = WsRpcClient {
+            shared: client.shared.clone(),
+        };
+        let watch =
+            tokio::spawn(
+                async move { caller.set_watch("t", serde_json::json!({"e": null})).await },
+            );
+        parked.recv().await; // parked inside the critical section
+
+        tokio::time::timeout(Duration::from_secs(10), client.disconnect_for_testing())
+            .await
+            .expect("disconnect parked behind a blocked events.watch send");
+        watch.await.unwrap().unwrap_err();
+        fake.connection(2).await;
+        client.close().await;
+    }
+
+    /// A blocked call send holds `pending` while it parks — the
+    /// disconnect drain needs `pending`, so the abort must release both.
+    #[tokio::test]
+    async fn a_blocked_call_send_does_not_hold_pending() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let client = WsRpcClient::connect(fake.url(), "").await.unwrap();
+
+        let (_blocker, mut parked) = client.park_sends().await;
+        let caller = WsRpcClient {
+            shared: client.shared.clone(),
+        };
+        let call =
+            tokio::spawn(async move { caller.call_value("x.y", serde_json::json!({})).await });
+        parked.recv().await; // parked holding pending + sink
+
+        tokio::time::timeout(Duration::from_secs(10), client.disconnect_for_testing())
+            .await
+            .expect("disconnect parked behind a blocked call send");
+        call.await.unwrap().unwrap_err();
+        fake.connection(2).await;
+        client.close().await;
+    }
+
+    /// A blocked call send must not stall the permanent-close path: the
+    /// close signals parked writers *before* it waits on the sink.
+    #[tokio::test]
+    async fn a_blocked_call_send_does_not_delay_close() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let client = WsRpcClient::connect(fake.url(), "").await.unwrap();
+
+        let (_blocker, mut parked) = client.park_sends().await;
+        let caller = WsRpcClient {
+            shared: client.shared.clone(),
+        };
+        let call =
+            tokio::spawn(async move { caller.call_value("x.y", serde_json::json!({})).await });
+        parked.recv().await;
+
+        tokio::time::timeout(Duration::from_secs(10), client.close())
+            .await
+            .expect("close parked behind a blocked call send");
+        call.await.unwrap().unwrap_err();
+    }
+
+    /// A restore's blocked send sits on the private write half holding
+    /// `watch_flush`; the socket dying mid-restore must unwind it and
+    /// keep dialing — the park must not pin the client in limbo.
+    #[tokio::test]
+    async fn a_blocked_watch_restore_does_not_stop_reconnect() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let client = WsRpcClient::connect(fake.url(), "").await.unwrap();
+
+        // Live interest — every fresh socket must send a restore frame.
+        let caller = WsRpcClient {
+            shared: client.shared.clone(),
+        };
+        let watch =
+            tokio::spawn(
+                async move { caller.set_watch("t", serde_json::json!({"e": null})).await },
+            );
+        let req = fake.next_request().await;
+        assert_eq!(req["type"], "events.watch");
+        fake.reply(&req, Value::Bool(true)).await;
+        watch.await.unwrap().unwrap();
+
+        // Socket 2's restore send parks mid-install.
+        let (_blocker, mut parked) = client.park_sends().await;
+        client.disconnect_for_testing().await;
+        fake.connection(2).await;
+        parked.recv().await;
+
+        // Killing this socket too must unwind the parked restore and let
+        // the supervisor dial socket 3 — not wait on the write.
+        client.disconnect_for_testing().await;
+        fake.connection(3).await;
         client.close().await;
     }
 
@@ -1331,7 +1889,10 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(first_watch["query-subscription-update"], Value::Null);
+        // The whole filter, not `w[key] == Null`: indexing an absent key
+        // also yields `Null`, so that form passes on an empty watch.
+        let filter = serde_json::json!({"query-subscription-update": null});
+        assert_eq!(first_watch, filter);
 
         let (reconnected_tx, reconnected_rx) = oneshot::channel::<()>();
         let reconnected_tx = std::sync::Mutex::new(Some(reconnected_tx));
@@ -1356,17 +1917,13 @@ mod tests {
             .expect("on_reconnect never fired")
             .unwrap();
 
-        // The watch must have been re-sent on the new socket.
-        let mut saw_watch = false;
-        while let Ok(Some(w)) =
-            tokio::time::timeout(Duration::from_secs(5), watches_rx.recv()).await
-        {
-            if w["query-subscription-update"] == Value::Null {
-                saw_watch = true;
-                break;
-            }
-        }
-        assert!(saw_watch, "events.watch was not re-sent after reconnect");
+        // The watch must have been re-sent on the new socket, with the
+        // same filter: the key present, every perspective (`null`).
+        let restored = tokio::time::timeout(Duration::from_secs(5), watches_rx.recv())
+            .await
+            .expect("events.watch was not re-sent after reconnect")
+            .unwrap();
+        assert_eq!(restored, filter, "the restored watch lost its filter");
 
         // A call on the reconnected socket answers.
         let result: Value = client

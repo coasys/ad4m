@@ -645,9 +645,18 @@ jobs:
   # The Rust client: unit tests plus its real-executor integration test.
   # ad4m-executor comes from the build job's stash; AD4M_REQUIRE_EXECUTOR
   # turns a missing binary into a failure instead of a silent skip (F11).
+  # The job compiles Rust, so it belongs to the marvin pool (marvin-light
+  # compiles none). The run also resolves its own dependency graph:
+  # restored binaries provide no OpenSSL headers, and a bare
+  # `cargo test -p ad4m-client` selects openssl-sys without `vendored` —
+  # the feature that, in `ad4m`'s graph, only lair_keystore's
+  # bundled-sqlcipher-vendored-openssl path switches on. ad4m-client's own
+  # `vendored` feature does the same through tokio-tungstenite's
+  # native-tls-vendored, so the test invocation carries the vendored
+  # graph on a host with no system OpenSSL.
   rust-client-tests:
     machine: true
-    resource_class: coasys/marvin-light
+    resource_class: coasys/marvin
     steps:
       - fix_workdir
       - checkout
@@ -655,7 +664,7 @@ jobs:
       - restore_binaries
       - run:
           name: ad4m-client tests (unit + real-executor integration)
-          command: AD4M_REQUIRE_EXECUTOR=1 cargo test -p ad4m-client
+          command: AD4M_REQUIRE_EXECUTOR=1 cargo test -p ad4m-client --features vendored
           no_output_timeout: 30m
 
   js-unit-tests:

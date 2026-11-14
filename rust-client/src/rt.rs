@@ -35,6 +35,13 @@ impl Task {
         #[cfg(target_arch = "wasm32")]
         self.abort.abort();
     }
+
+    /// Await the task's end — tests only (aborted tasks report
+    /// `is_cancelled`), like awaiting a tokio `JoinHandle`.
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(crate) async fn join(self) -> Result<(), tokio::task::JoinError> {
+        self.inner.await
+    }
 }
 
 /// `tokio::spawn` natively; `wasm_bindgen_futures::spawn_local` in the
@@ -95,6 +102,29 @@ pub(crate) async fn sleep(d: Duration) {
 #[cfg(target_arch = "wasm32")]
 pub(crate) async fn sleep(d: Duration) {
     gloo_timers::future::sleep(d).await
+}
+
+/// Let other ready tasks run before continuing — `tokio::task::yield_now`
+/// natively; in the browser a future that is pending exactly once (it wakes
+/// itself, so the event loop polls it again after the queued tasks).
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) async fn yield_now() {
+    tokio::task::yield_now().await
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) async fn yield_now() {
+    let mut yielded = false;
+    std::future::poll_fn(|cx| {
+        if yielded {
+            std::task::Poll::Ready(())
+        } else {
+            yielded = true;
+            cx.waker().wake_by_ref();
+            std::task::Poll::Pending
+        }
+    })
+    .await
 }
 
 /// The deadline elapsed — `timeout`'s error on either target.

@@ -21,7 +21,10 @@ use ad4m_client::Ad4mClient;
 use serde_json::{json, Map, Value};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::net::{TcpListener, TcpStream};
 
 fn executor_binary() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("EXECUTOR_PATH") {
@@ -62,6 +65,7 @@ fn free_port() -> u16 {
 struct Executor {
     child: Child,
     url: String,
+    port: u16,
     _data: tempfile::TempDir,
 }
 
@@ -111,8 +115,76 @@ fn start_executor() -> Option<Executor> {
     Some(Executor {
         child,
         url: format!("http://127.0.0.1:{port}"),
+        port,
         _data: data,
     })
+}
+
+/// A TCP relay in front of the executor that the test can take offline:
+/// `set_online(false)` cuts every relayed connection and refuses new ones
+/// (accepted, then closed before the WebSocket handshake), so a client
+/// behind it stays disconnected, retrying, for as long as the test wants,
+/// while other clients reach the executor directly.
+struct Relay {
+    url: String,
+    online: Arc<AtomicBool>,
+    conns: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    accept: tokio::task::JoinHandle<()>,
+}
+
+impl Relay {
+    async fn start(upstream_port: u16) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let online = Arc::new(AtomicBool::new(true));
+        let conns: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>> = Arc::default();
+        let (on, cs) = (online.clone(), conns.clone());
+        let accept = tokio::spawn(async move {
+            while let Ok((mut down, _)) = listener.accept().await {
+                if !on.load(Ordering::SeqCst) {
+                    drop(down);
+                    continue;
+                }
+                let relay = tokio::spawn(async move {
+                    if let Ok(mut up) = TcpStream::connect(("127.0.0.1", upstream_port)).await {
+                        let _ = tokio::io::copy_bidirectional(&mut down, &mut up).await;
+                    }
+                });
+                cs.lock().unwrap().push(relay);
+            }
+        });
+        Self {
+            url: format!("http://127.0.0.1:{port}"),
+            online,
+            conns,
+            accept,
+        }
+    }
+
+    fn set_online(&self, online: bool) {
+        self.online.store(online, Ordering::SeqCst);
+        if !online {
+            for relay in self.conns.lock().unwrap().drain(..) {
+                relay.abort();
+            }
+        }
+    }
+}
+
+impl Drop for Relay {
+    fn drop(&mut self) {
+        self.accept.abort();
+        self.set_online(false);
+    }
+}
+
+/// Poll `cond` every 100 ms until it holds; panic with `what` after `secs`.
+async fn wait_until(secs: u64, what: &str, mut cond: impl FnMut() -> bool) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(secs);
+    while !cond() {
+        assert!(std::time::Instant::now() < deadline, "{what}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 /// The executor takes seconds to come up — poll the socket until it takes.
@@ -140,8 +212,10 @@ impl Drop for Executor {
 }
 
 /// The test class: one required single-valued `title`, one optional
-/// `xsd://boolean` `done` — the smallest shape `perspective.addSdna`
-/// accepts, modelled on the hardwired `flow_instance.json`.
+/// `xsd://boolean` `done`, one `hasMany` collection `tags` — the smallest
+/// shape `perspective.addSdna` accepts that can prove a collection edit
+/// rides the collection RPCs, modelled on the hardwired
+/// `flow_instance.json`.
 const NOTE_SDNA: &str = r#"{
   "target_class": "ad4m://IntegrationNote",
   "constructor_actions": [
@@ -149,7 +223,8 @@ const NOTE_SDNA: &str = r#"{
   ],
   "properties": [
     {"path": "ad4m://note/title", "name": "title", "identity": true, "min_count": 1, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://note/title", "target": "value"}]},
-    {"path": "ad4m://note/done", "name": "done", "datatype": "xsd://boolean", "min_count": 0, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://note/done", "target": "value"}]}
+    {"path": "ad4m://note/done", "name": "done", "datatype": "xsd://boolean", "min_count": 0, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://note/done", "target": "value"}]},
+    {"path": "ad4m://note/tag", "name": "tags", "node_kind": "IRI", "relation_kind": "hasMany", "collection": true}
   ]
 }"#;
 
@@ -176,7 +251,10 @@ async fn model_batch_subscription_reconnect_and_flow() {
         eprintln!("SKIP: no ad4m-executor binary (set EXECUTOR_PATH or build --release)");
         return;
     };
-    let client = connect(&executor.url).await;
+    // The client under test reaches the executor through a relay the test
+    // can take down; the independent writer below connects directly.
+    let relay = Relay::start(executor.port).await;
+    let client = connect(&relay.url).await;
     // Fresh data dir → mint the agent (`agent.generate` is a long call).
     let status = client
         .agent
@@ -257,6 +335,40 @@ async fn model_batch_subscription_reconnect_and_flow() {
     assert_eq!(row["done"], json!(true));
     assert!(row["done"].is_boolean());
 
+    // ── dirty save on a collection (R6): `instanceUpdate` refuses
+    // collections (`CollectionNotSettable`), so `Instance::save` diffs the
+    // array against the snapshot and goes through the item-level
+    // collection RPCs — proven by the writes landing at all. ────────────
+    let row = model.get(&created.base_uri, None).await.unwrap().unwrap();
+    let mut inst = model.instance(created.base_uri.clone(), row.as_object().unwrap().clone());
+    inst.set("title", json!("first-edited"));
+    inst.set("tags", json!(["tag://a", "tag://b"]));
+    inst.save(None).await.unwrap();
+    let row = model.get(&created.base_uri, None).await.unwrap().unwrap();
+    assert_eq!(row["title"], json!("first-edited"));
+    let mut tags: Vec<String> = row["tags"]
+        .as_array()
+        .expect("tags hydrates as an array")
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    tags.sort();
+    assert_eq!(tags, ["tag://a", "tag://b"]);
+
+    // A pure reorder is not even dirty — a collection is a set, so this
+    // save is a no-op, not a rejected `instanceUpdate`.
+    let mut inst = model.instance(created.base_uri.clone(), row.as_object().unwrap().clone());
+    inst.set("tags", json!(["tag://b", "tag://a"]));
+    assert!(!inst.is_dirty());
+    inst.save(None).await.unwrap();
+
+    // Removal diffs item by item too: `tag://a` leaves the collection.
+    let mut inst = model.instance(created.base_uri.clone(), row.as_object().unwrap().clone());
+    inst.set("tags", json!(["tag://b"]));
+    inst.save(None).await.unwrap();
+    let row = model.get(&created.base_uri, None).await.unwrap().unwrap();
+    assert_eq!(row["tags"], json!(["tag://b"]));
+
     // ── batch: writes invisible until commit ─────────────────────────────
     let batch = model.batch().await.unwrap();
     model
@@ -277,9 +389,96 @@ async fn model_batch_subscription_reconnect_and_flow() {
     assert_eq!(after.len(), 3);
     let _ = next_result(&mut sub, "commit").await;
 
+    // ── batch: a failed write is not rolled back per call. The caller
+    // discards the whole batch: the good write staged before it never
+    // lands, and a second discard of the same batch is refused (`false`
+    // from the executor, an error here). ──────────────────────────────────
+    let batch = model.batch().await.unwrap();
+    let in_batch = || CreateOptions {
+        batch_id: Some(batch.id().to_string()),
+        ..Default::default()
+    };
+    model
+        .create(props(&[("title", json!("staged"))]), in_batch())
+        .await
+        .unwrap();
+    // `title` is required: this write fails inside the batch.
+    assert!(model
+        .create(props(&[("done", json!(true))]), in_batch())
+        .await
+        .is_err());
+    batch.discard().await.unwrap();
+    let after = model.find_all(&ModelQuery::default()).await.unwrap();
+    assert_eq!(
+        after.len(),
+        3,
+        "a discarded batch must leave nothing behind"
+    );
+    assert!(after.iter().all(|r| r["title"] != json!("staged")));
+    assert!(
+        batch.discard().await.is_err(),
+        "discarding a batch the executor no longer holds must fail"
+    );
+
+    // ── outage: another client writes while this one is offline. The
+    // relay holds the client disconnected; a second client, connected
+    // straight to the executor, creates a row; only then does the relay
+    // come back. The client's re-opened subscription must deliver that
+    // row: nothing pushed it while the client was away, so only the
+    // re-open's fresh result can carry it. ────────────────────────────────
+    let before_outage = sub.id().await;
+    assert!(before_outage.is_some());
+    relay.set_online(false);
+    wait_until(30, "client never noticed the outage", || {
+        !client.ws().is_connected()
+    })
+    .await;
+
+    let writer = connect(&executor.url).await;
+    Model::new(writer.ws(), uuid.clone(), "IntegrationNote")
+        .create(
+            props(&[("title", json!("written-while-offline"))]),
+            CreateOptions::default(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        !client.ws().is_connected(),
+        "the client must still be offline when the other client's row lands"
+    );
+    writer.ws().close().await;
+
+    relay.set_online(true);
+    wait_until(60, "client did not reconnect after the outage", || {
+        client.ws().is_connected()
+    })
+    .await;
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        match sub.id().await {
+            Some(id) if Some(&id) != before_outage.as_ref() => break,
+            _ => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "subscription did not re-open after the outage"
+                );
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+    }
+    let resynced = next_result(&mut sub, "post-outage resync").await;
+    assert_eq!(resynced.instances.len(), 4);
+    assert!(
+        resynced
+            .instances
+            .iter()
+            .any(|r| r["title"] == json!("written-while-offline")),
+        "the re-opened subscription lost the row written during the outage"
+    );
+
     // ── reconnect: write through the gap. `call` waits for a socket, so
     // the create lands once the client reconnects; the re-opened
-    // subscription's fresh full result (now 4 rows) is not deduped — the
+    // subscription's fresh full result (now 5 rows) is not deduped — the
     // subscriber sees the resync, not a silent gap. The executor-side id
     // also changes: a re-open mints a new subscription. ───────────────────
     let old_sub_id = sub.id().await;
@@ -323,7 +522,7 @@ async fn model_batch_subscription_reconnect_and_flow() {
         }
     }
     let updated = next_result(&mut sub, "post-reconnect resync").await;
-    assert_eq!(updated.instances.len(), 4);
+    assert_eq!(updated.instances.len(), 5);
     sub.dispose().await;
 
     // ── flow: register, start, propose, fire ─────────────────────────────

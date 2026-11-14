@@ -11,6 +11,13 @@ repository = "https://github.com/perspect3vism/ad4m"
 documentation = "https://docs.ad4m.dev"
 readme = "README.md"
 
+[features]
+# Build OpenSSL from source instead of linking a system one — the
+# tokio-tungstenite `native-tls-vendored` passthrough — for hosts that
+# have no OpenSSL development files (the CI machine runners).
+# Native only: tokio-tungstenite is not a wasm32 dependency.
+vendored = ["tokio-tungstenite/native-tls-vendored"]
+
 # Shared dependencies — everything here compiles for both native targets and
 # wasm32-unknown-unknown. `rand` gets its entropy through `getrandom`'s `js`
 # feature below (wasm-only dependency table), never a feature flag.

@@ -9,7 +9,7 @@
 //! (never raw links). Batches ([`crate::batch::Batch`]) group writes
 //! atomically; `Model::transaction` mirrors `Ad4mModel.transaction`.
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use serde_json::{Map, Value};
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -317,34 +317,59 @@ impl Model {
                         "subscriptionId".into(),
                         Value::from(subscription_id.clone()),
                     );
-                    match ws
-                        .call::<Value>("perspective.modelSubscribe", Value::Object(params))
-                        .await
-                    {
-                        Ok(v) => Ok(Subscribed {
-                            subscription_id: v
-                                .get("subscriptionId")
-                                .and_then(Value::as_str)
-                                .unwrap_or(&subscription_id)
-                                .to_string(),
-                            result: v.get("result").cloned().unwrap_or(Value::Null),
-                            revision: v.get("revision").and_then(Value::as_u64).unwrap_or(0),
-                        }),
-                        Err(e) => {
-                            // A failed subscribe leaves no live query nobody
-                            // holds — dispose the minted id (TS `#released`).
-                            let _ = ws
-                                .call_void(
-                                    "perspective.disposeQuery",
-                                    serde_json::json!({
-                                        "uuid": uuid,
-                                        "subscriptionId": subscription_id,
-                                    }),
+                    // The call runs detached: `modelSubscribe` opens a
+                    // server-side resource, so a caller that cancels
+                    // `subscribe`/`start` while the call is on the wire must
+                    // not strand it — the detached half owns the minted id
+                    // and releases the subscription when its reply has no
+                    // taker (R4).
+                    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+                    crate::rt::spawn(async move {
+                        match ws
+                            .call::<Value>("perspective.modelSubscribe", Value::Object(params))
+                            .await
+                        {
+                            Ok(v) => {
+                                let subscribed = Subscribed {
+                                    subscription_id: v
+                                        .get("subscriptionId")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or(&subscription_id)
+                                        .to_string(),
+                                    result: v.get("result").cloned().unwrap_or(Value::Null),
+                                    revision: v
+                                        .get("revision")
+                                        .and_then(Value::as_u64)
+                                        .unwrap_or(0),
+                                };
+                                if done_tx.send(Ok(subscribed)).is_err() {
+                                    // Open cancelled mid-call — nobody will
+                                    // hold the subscription we just made.
+                                    let _ = crate::subscription::dispose_query(
+                                        &ws,
+                                        &uuid,
+                                        &subscription_id,
+                                    )
+                                    .await;
+                                }
+                            }
+                            Err(e) => {
+                                // A failed subscribe leaves no live query
+                                // nobody holds — dispose the minted id (TS
+                                // `#released`).
+                                let _ = crate::subscription::dispose_query(
+                                    &ws,
+                                    &uuid,
+                                    &subscription_id,
                                 )
                                 .await;
-                            Err(e)
+                                let _ = done_tx.send(Err(e));
+                            }
                         }
-                    }
+                    });
+                    done_rx
+                        .await
+                        .map_err(|_| anyhow!("perspective.modelSubscribe lost its caller"))?
                 })
             })
         };
@@ -673,15 +698,13 @@ impl Instance {
 
     /// TS `changedFields` — sorted keys whose current value differs from
     /// the snapshot's. A key the caller `set` but the hydration lacked
-    /// counts: it is a real write. Values compare order-sensitively —
-    /// without the class's `ordering` metadata there is no way to know an
-    /// array is an unordered set, and a spurious rewrite is the safe
-    /// failure direction.
+    /// counts: it is a real write. Collections compare as unordered sets
+    /// — a reorder is not a change (R6).
     pub fn changed_fields(&self) -> Vec<String> {
         let mut changed: Vec<String> = self
             .current
             .iter()
-            .filter(|(k, v)| self.snapshot.get(*k) != Some(*v))
+            .filter(|(k, v)| !snapshot_equal(self.snapshot.get(*k), v))
             .map(|(k, _)| k.clone())
             .collect();
         changed.sort();
@@ -690,34 +713,127 @@ impl Instance {
 
     /// `save` like TS `Ad4mModel.save` on a hydrated instance: dispatch
     /// only the changed properties — nothing at all when the instance is
-    /// clean — then adopt the current values as the snapshot so further
-    /// saves diff against them (TS `takeSnapshot`; a save outside a batch
-    /// would rehydrate, which is equivalent for the values written here).
+    /// clean — then refresh the baseline.
+    ///
+    /// Collections ride their own RPCs — `instanceUpdate` refuses them
+    /// (`CollectionNotSettable`), so a changed array field is diffed
+    /// against the snapshot and written item by item,
+    /// `instanceRemoveFromCollection` before `instanceAddToCollection`,
+    /// like TS dispatching relation changes separately (R6). A failed
+    /// call aborts the save with the snapshot untouched — a retry
+    /// replays idempotent ops, never a duplicate write.
+    ///
+    /// **Baseline** (R7): inside a batch the writes are invisible to
+    /// reads until commit, so the current values are snapshotted
+    /// optimistically, exactly TS's `takeSnapshot` branch. Outside a
+    /// batch the save closes with a re-read (`perspective.modelQuery`,
+    /// TS `getData` — unconditional in `Ad4mModel.save`,
+    /// Ad4mModel.ts:1809–1816) and merges the hydrated row over the
+    /// current values before snapshotting: the executor's coercions
+    /// (`"TRUE"` → `true`), synthetic fields (`updatedAt`), and writes
+    /// another client landed meanwhile all become visible at once, so a
+    /// later `set` diffs against the remote state rather than a stale
+    /// local copy. A re-read that fails or no longer returns the row
+    /// surfaces an error and leaves the snapshot untouched — the writes
+    /// are already committed, so a retry replays idempotent ops before
+    /// re-reading.
     pub async fn save(&mut self, batch_id: Option<String>) -> Result<()> {
         let changed = self.changed_fields();
-        if changed.is_empty() {
+        if changed.is_empty() && batch_id.is_some() {
+            self.snapshot = self.current.clone();
             return Ok(());
         }
-        let props: Map<String, Value> = changed
+        // A hydrated collection always reads as a JSON array of item
+        // URIs, so "either side is an array" marks the field a collection
+        // without any schema to consult (R6).
+        let is_collection = |key: &String| {
+            self.current[key].is_array() || self.snapshot.get(key).is_some_and(Value::is_array)
+        };
+        let scalars: Map<String, Value> = changed
             .iter()
+            .filter(|k| !is_collection(k))
             .map(|k| (k.clone(), self.current[k].clone()))
             .collect();
-        self.model.update(&self.base_uri, props, batch_id).await?;
+        if !scalars.is_empty() {
+            self.model
+                .update(&self.base_uri, scalars, batch_id.clone())
+                .await?;
+        }
+        for key in changed.iter().filter(|k| is_collection(k)) {
+            let before = collection_items(self.snapshot.get(key));
+            let after = collection_items(self.current.get(key));
+            for item in before.iter().filter(|i| !after.contains(i)) {
+                self.model
+                    .remove_from_collection(&self.base_uri, key, item, batch_id.clone())
+                    .await?;
+            }
+            for item in after.iter().filter(|i| !before.contains(i)) {
+                self.model
+                    .add_to_collection(&self.base_uri, key, item, batch_id.clone())
+                    .await?;
+            }
+        }
+        if batch_id.is_some() {
+            // Batch: the writes stay invisible to reads until commit, so
+            // re-reading now would fetch the stale row and regress
+            // in-memory values — TS takes the optimistic snapshot here.
+            self.snapshot = self.current.clone();
+            return Ok(());
+        }
+        // Non-batch (R7): re-read the row — TS `getData` — and merge the
+        // hydrated values over the current ones before baselining.
+        let row = self
+            .model
+            .get(&self.base_uri, None)
+            .await
+            .context("save committed, but re-reading the hydrated baseline failed — the snapshot stays unconfirmed; a retry replays idempotent writes")?
+            .and_then(|row| row.as_object().cloned())
+            .context("save committed, but the instance no longer reads back as a row")?;
+        for (key, value) in row {
+            self.current.insert(key, value);
+        }
         self.snapshot = self.current.clone();
         Ok(())
     }
 }
 
-impl Drop for ModelSubscription {
-    /// Dropping without `dispose()` still tears the subscription down —
-    /// executor-side, and this client's watch and listener (F5). Async
-    /// teardown needs a runtime; off one, only `dispose().await` cleans up
-    /// (native: no runtime in `Drop` context; browser: `spawn_local` always
-    /// has the event loop, see `rt::try_spawn`).
-    fn drop(&mut self) {
-        let live = self.live.clone();
-        crate::rt::try_spawn(async move { live.dispose().await });
+/// Snapshot equality for `Instance::changed_fields`: two arrays compare
+/// as unordered sets — a reorder or a duplicate entry is no change —
+/// everything else as-is.
+fn snapshot_equal(baseline: Option<&Value>, current: &Value) -> bool {
+    match (baseline, current) {
+        (Some(Value::Array(_)), Value::Array(_)) => {
+            let mut before = collection_items(baseline);
+            let mut after = collection_items(Some(current));
+            before.sort_unstable();
+            after.sort_unstable();
+            before == after
+        }
+        (Some(b), c) => b == c,
+        (None, _) => false,
     }
+}
+
+/// The item URIs of a collection property's wire value: an array of
+/// them, a lone non-array value as a one-item collection, `Null`/absent
+/// as empty — and deduped, since a collection is a set.
+fn collection_items(value: Option<&Value>) -> Vec<String> {
+    let raw: &[Value] = match value {
+        Some(Value::Array(items)) => items,
+        Some(Value::Null) | None => return Vec::new(),
+        Some(item) => std::slice::from_ref(item),
+    };
+    let mut items: Vec<String> = Vec::with_capacity(raw.len());
+    for v in raw {
+        let item = match v {
+            Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+        if !items.contains(&item) {
+            items.push(item);
+        }
+    }
+    items
 }
 
 /// `{ instances, totalCount }` out of a raw subscription result — the parse
@@ -808,16 +924,348 @@ mod tests {
             json!({"className": "Recipe", "baseUri": "recipe://1", "updatedProperties": ["name"]}),
         )
         .await;
+        // R7: the non-batch save re-reads the row before baselining.
+        let req = fake.next_request().await;
+        assert_eq!(req["type"], "perspective.modelQuery");
+        fake.reply(
+            &req,
+            json!("{\"instances\":[{\"id\":\"recipe://1\",\"name\":\"Risotto\",\"done\":false}],\"totalCount\":1}"),
+        )
+        .await;
         let (res, mut inst) = save.await.unwrap();
         res.unwrap();
 
-        // The snapshot adopted the write: a second clean save sends no RPC.
+        // The snapshot adopted the write: a second clean save sends no
+        // write — only its re-read.
         assert!(!inst.is_dirty());
-        inst.save(None).await.unwrap();
+        let save = tokio::spawn(async move { inst.save(None).await });
+        let req = fake.next_request().await;
+        assert_eq!(
+            req["type"], "perspective.modelQuery",
+            "a clean save writes nothing — the only frame is the re-read"
+        );
+        fake.reply(
+            &req,
+            json!("{\"instances\":[{\"id\":\"recipe://1\",\"name\":\"Risotto\",\"done\":false}],\"totalCount\":1}"),
+        )
+        .await;
+        save.await.unwrap().unwrap();
         assert!(fake
             .maybe_request(Duration::from_millis(300))
             .await
             .is_none());
+        ws.close().await;
+    }
+
+    /// R6: a changed collection field cannot go through `instanceUpdate`
+    /// — the executor rejects it `CollectionNotSettable` — so `save`
+    /// diffs the array against the snapshot and writes item by item
+    /// (`instanceRemoveFromCollection` before `instanceAddToCollection`),
+    /// while scalar changes keep their single update call.
+    #[tokio::test]
+    async fn save_dispatches_collection_edits_item_by_item() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let ws = Arc::new(WsRpcClient::connect(fake.url(), "").await.unwrap());
+        let model = Model::new(&ws, "p1", "Recipe");
+
+        let hydrated = json!({
+            "id": "recipe://1",
+            "name": "Pasta",
+            "tags": ["tag://a", "tag://b"],
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let mut inst = model.instance("recipe://1", hydrated);
+        inst.set("name", json!("Risotto"));
+        inst.set("tags", json!(["tag://b", "tag://c"]));
+
+        let save = tokio::spawn(async move {
+            let mut inst = inst;
+            (inst.save(None).await, inst)
+        });
+        let mut updated = false;
+        let mut removed = false;
+        let mut added = false;
+        for _ in 0..3 {
+            let req = fake.next_request().await;
+            match req["type"].as_str() {
+                Some("perspective.instanceUpdate") => {
+                    // The collection must not ride the scalar update.
+                    assert_eq!(req["params"]["properties"], json!({"name": "Risotto"}));
+                    updated = true;
+                    fake.reply(
+                        &req,
+                        json!({"className": "Recipe", "baseUri": "recipe://1", "updatedProperties": ["name"]}),
+                    )
+                    .await;
+                }
+                Some("perspective.instanceRemoveFromCollection") => {
+                    assert_eq!(req["params"]["collection"], "tags");
+                    assert_eq!(req["params"]["itemUri"], "tag://a");
+                    removed = true;
+                    fake.reply(
+                        &req,
+                        json!({"className": "Recipe", "baseUri": "recipe://1", "collection": "tags", "itemUri": "tag://a", "linksRemoved": 1}),
+                    )
+                    .await;
+                }
+                Some("perspective.instanceAddToCollection") => {
+                    assert_eq!(req["params"]["collection"], "tags");
+                    assert_eq!(req["params"]["itemUri"], "tag://c");
+                    added = true;
+                    fake.reply(
+                        &req,
+                        json!({"className": "Recipe", "baseUri": "recipe://1", "collection": "tags", "itemUri": "tag://c", "linksAdded": 1, "alreadyMember": false}),
+                    )
+                    .await;
+                }
+                other => panic!("unexpected write on the wire: {other:?}"),
+            }
+        }
+        assert!(updated && removed && added);
+        // R7: the non-batch save closes with its baseline re-read.
+        let req = fake.next_request().await;
+        assert_eq!(req["type"], "perspective.modelQuery");
+        fake.reply(
+            &req,
+            json!("{\"instances\":[{\"id\":\"recipe://1\",\"name\":\"Risotto\",\"tags\":[\"tag://b\",\"tag://c\"]}],\"totalCount\":1}"),
+        )
+        .await;
+        let (res, _inst) = save.await.unwrap();
+        res.unwrap();
+        ws.close().await;
+    }
+
+    /// R6: reordering a collection changes nothing — `save` sends no
+    /// *write* at all (the array compares as a set, not a sequence); the
+    /// only frame on the wire is the post-save re-read (R7).
+    #[tokio::test]
+    async fn a_reordered_collection_is_not_dirty() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let ws = Arc::new(WsRpcClient::connect(fake.url(), "").await.unwrap());
+        let model = Model::new(&ws, "p1", "Recipe");
+
+        let hydrated = json!({"id": "recipe://1", "tags": ["tag://a", "tag://b"]})
+            .as_object()
+            .unwrap()
+            .clone();
+        let mut inst = model.instance("recipe://1", hydrated);
+        inst.set("tags", json!(["tag://b", "tag://a"]));
+        assert!(!inst.is_dirty(), "a pure reorder must not be dirty");
+        let save = tokio::spawn(async move { inst.save(None).await });
+        let req = fake.next_request().await;
+        assert_eq!(
+            req["type"], "perspective.modelQuery",
+            "a clean save writes nothing — the only frame is the re-read"
+        );
+        fake.reply(
+            &req,
+            json!("{\"instances\":[{\"id\":\"recipe://1\",\"tags\":[\"tag://a\",\"tag://b\"]}],\"totalCount\":1}"),
+        )
+        .await;
+        save.await.unwrap().unwrap();
+        assert!(fake
+            .maybe_request(Duration::from_millis(300))
+            .await
+            .is_none());
+        ws.close().await;
+    }
+
+    /// R7: a successful non-batch save re-reads the row (TS `getData`,
+    /// Ad4mModel.ts:1809–1816) and adopts the hydrated values as both the
+    /// live values and the clean baseline — the executor's coercions
+    /// (the caller's `"TRUE"` stored as boolean `true`), synthetic fields
+    /// like `updatedAt`, and writes another client landed meanwhile all
+    /// enter the snapshot at once.
+    #[tokio::test]
+    async fn save_rebaselines_on_the_hydrated_result() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let ws = Arc::new(WsRpcClient::connect(fake.url(), "").await.unwrap());
+        let model = Model::new(&ws, "p1", "Recipe");
+
+        let hydrated = json!({
+            "id": "recipe://1",
+            "name": "Pasta",
+            "done": false,
+            "updatedAt": 1000,
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let mut inst = model.instance("recipe://1", hydrated);
+        inst.set("name", json!("Risotto"));
+        // The declared boolean accepts a coercible string.
+        inst.set("done", json!("TRUE"));
+
+        let save = tokio::spawn(async move {
+            let mut inst = inst;
+            (inst.save(None).await, inst)
+        });
+        let req = fake.next_request().await;
+        assert_eq!(req["type"], "perspective.instanceUpdate");
+        fake.reply(
+            &req,
+            json!({"className": "Recipe", "baseUri": "recipe://1", "updatedProperties": ["name", "done"]}),
+        )
+        .await;
+        // The baseline refresh is a read, TS `getData` shape.
+        let req = fake.next_request().await;
+        assert_eq!(req["type"], "perspective.modelQuery");
+        // The executor stored the coerced boolean, bumped `updatedAt`,
+        // and another client flipped `name` back meanwhile.
+        fake.reply(
+            &req,
+            json!("{\"instances\":[{\"id\":\"recipe://1\",\"name\":\"Pasta\",\"done\":true,\"updatedAt\":2000}],\"totalCount\":1}"),
+        )
+        .await;
+        let (res, inst) = save.await.unwrap();
+        res.unwrap();
+        assert_eq!(inst.get("done"), Some(&json!(true)), "coerced type");
+        assert_eq!(inst.get("updatedAt"), Some(&json!(2000)));
+        assert_eq!(inst.get("name"), Some(&json!("Pasta")), "concurrent write");
+        assert!(!inst.is_dirty());
+        ws.close().await;
+    }
+
+    /// R7: the skipped-write case — another client flips a field between
+    /// hydration and our save of a *different* field. Snapshotting the
+    /// local input would bury that remote value in the baseline, so a
+    /// later `set` to it looked clean and the write never went out. With
+    /// the refresh the remote value lands in the baseline instead, and
+    /// `set` diffs against it.
+    #[tokio::test]
+    async fn a_concurrent_change_is_not_snapshot_blind() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let ws = Arc::new(WsRpcClient::connect(fake.url(), "").await.unwrap());
+        let model = Model::new(&ws, "p1", "Recipe");
+
+        let hydrated = json!({"id": "recipe://1", "name": "A", "done": false})
+            .as_object()
+            .unwrap()
+            .clone();
+        let mut inst = model.instance("recipe://1", hydrated);
+        // While we hold this row, another client sets done = true.
+        inst.set("name", json!("B"));
+        let save = tokio::spawn(async move {
+            let mut inst = inst;
+            (inst.save(None).await, inst)
+        });
+        let req = fake.next_request().await;
+        assert_eq!(req["type"], "perspective.instanceUpdate");
+        fake.reply(
+            &req,
+            json!({"className": "Recipe", "baseUri": "recipe://1", "updatedProperties": ["name"]}),
+        )
+        .await;
+        let req = fake.next_request().await;
+        assert_eq!(req["type"], "perspective.modelQuery");
+        // The re-read carries the other client's write back to us.
+        fake.reply(
+            &req,
+            json!("{\"instances\":[{\"id\":\"recipe://1\",\"name\":\"B\",\"done\":true}],\"totalCount\":1}"),
+        )
+        .await;
+        let (res, mut inst) = save.await.unwrap();
+        res.unwrap();
+
+        // Writing the value back must now be dirty — it diffs against the
+        // *remote* true, not our stale false.
+        inst.set("done", json!(false));
+        assert!(
+            inst.is_dirty(),
+            "set(done,false) diffs against the remote true"
+        );
+        let save = tokio::spawn(async move { inst.save(None).await });
+        let req = fake.next_request().await;
+        assert_eq!(req["type"], "perspective.instanceUpdate");
+        assert_eq!(req["params"]["properties"], json!({"done": false}));
+        fake.reply(
+            &req,
+            json!({"className": "Recipe", "baseUri": "recipe://1", "updatedProperties": ["done"]}),
+        )
+        .await;
+        let req = fake.next_request().await;
+        assert_eq!(req["type"], "perspective.modelQuery");
+        fake.reply(
+            &req,
+            json!("{\"instances\":[{\"id\":\"recipe://1\",\"name\":\"B\",\"done\":false}],\"totalCount\":1}"),
+        )
+        .await;
+        save.await.unwrap().unwrap();
+        ws.close().await;
+    }
+
+    /// R7: the refresh is the *only* unconfirmed part of a non-batch save
+    /// — the writes are already committed when it fails. The save
+    /// reports the failure and keeps the old snapshot, so the caller sees
+    /// the instance still dirty and a retry replays the idempotent
+    /// writes before re-reading.
+    #[tokio::test]
+    async fn a_failed_refresh_keeps_the_save_retryable() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let ws = Arc::new(WsRpcClient::connect(fake.url(), "").await.unwrap());
+        let model = Model::new(&ws, "p1", "Recipe");
+
+        let hydrated = json!({"id": "recipe://1", "name": "A"})
+            .as_object()
+            .unwrap()
+            .clone();
+        let mut inst = model.instance("recipe://1", hydrated);
+        inst.set("name", json!("B"));
+
+        let save = tokio::spawn(async move {
+            let mut inst = inst;
+            (inst.save(None).await, inst)
+        });
+        let req = fake.next_request().await;
+        assert_eq!(req["type"], "perspective.instanceUpdate");
+        fake.reply(
+            &req,
+            json!({"className": "Recipe", "baseUri": "recipe://1", "updatedProperties": ["name"]}),
+        )
+        .await;
+        let req = fake.next_request().await;
+        assert_eq!(req["type"], "perspective.modelQuery");
+        fake.reply_error(&req, 503, "query backend unavailable")
+            .await;
+        let (res, inst) = save.await.unwrap();
+        assert!(
+            res.is_err(),
+            "an unconfirmed baseline must surface, not pass as a clean save"
+        );
+        assert!(
+            inst.is_dirty(),
+            "the unconfirmed snapshot stays the old one"
+        );
+
+        // Retry: the writes replay idempotently, the re-read succeeds.
+        let save = tokio::spawn(async move {
+            let mut inst = inst;
+            (inst.save(None).await, inst)
+        });
+        let req = fake.next_request().await;
+        assert_eq!(req["type"], "perspective.instanceUpdate");
+        assert_eq!(req["params"]["properties"], json!({"name": "B"}));
+        fake.reply(
+            &req,
+            json!({"className": "Recipe", "baseUri": "recipe://1", "updatedProperties": ["name"]}),
+        )
+        .await;
+        let req = fake.next_request().await;
+        fake.reply(
+            &req,
+            json!("{\"instances\":[{\"id\":\"recipe://1\",\"name\":\"B\"}],\"totalCount\":1}"),
+        )
+        .await;
+        let (res, inst) = save.await.unwrap();
+        res.unwrap();
+        assert!(!inst.is_dirty());
         ws.close().await;
     }
 
@@ -859,6 +1307,49 @@ mod tests {
         .await
         .expect("dropping the subscription must send perspective.disposeQuery");
         assert_eq!(disposed["params"]["subscriptionId"], "s1");
+        ws.close().await;
+    }
+
+    /// R4: `perspective.modelSubscribe` opens a server-side resource — a
+    /// caller that cancels `subscribe` while the call is on the wire must
+    /// not strand it. The detached open owns the minted id and disposes the
+    /// subscription once the call lands unanswered-for.
+    #[tokio::test]
+    async fn a_cancelled_subscribe_disposes_the_subscription_it_opened() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let ws = Arc::new(WsRpcClient::connect(fake.url(), "").await.unwrap());
+        let model = Model::new(&ws, "p1", "Recipe");
+        let subscribe = tokio::spawn(async move { model.subscribe(&ModelQuery::default()).await });
+        let watch = fake.next_request().await;
+        assert_eq!(watch["type"], "events.watch");
+        fake.reply(&watch, json!(true)).await;
+        let sub = fake.next_request().await;
+        assert_eq!(sub["type"], "perspective.modelSubscribe");
+        let minted = sub["params"]["subscriptionId"].clone();
+
+        // Cancel mid-open: the caller's future dies with the call in flight.
+        subscribe.abort();
+        fake.reply(&sub, json!({"result": {"instances": []}, "revision": 0}))
+            .await;
+
+        // The detached open must release what it created; the dropped
+        // query's own teardown removes the watch meanwhile — either order.
+        let mut disposed = false;
+        for _ in 0..8 {
+            if disposed {
+                break;
+            }
+            let req = tokio::time::timeout(Duration::from_secs(5), fake.next_request())
+                .await
+                .expect("the cancelled subscribe's cleanup stalled");
+            if req["type"] == "perspective.disposeQuery" {
+                assert_eq!(req["params"]["subscriptionId"], minted);
+                disposed = true;
+            }
+            fake.reply(&req, json!(true)).await;
+        }
+        assert!(disposed, "the minted subscription was never released");
         ws.close().await;
     }
 
