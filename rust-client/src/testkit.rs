@@ -283,15 +283,11 @@ impl LinkStore {
                     .links
                     .iter()
                     .filter(|l| {
-                        params["source"]
-                            .as_str()
-                            .map_or(true, |s| l.data.source == s)
+                        params["source"].as_str().is_none_or(|s| l.data.source == s)
                             && params["predicate"]
                                 .as_str()
-                                .map_or(true, |p| l.data.predicate.as_deref() == Some(p))
-                            && params["target"]
-                                .as_str()
-                                .map_or(true, |t| l.data.target == t)
+                                .is_none_or(|p| l.data.predicate.as_deref() == Some(p))
+                            && params["target"].as_str().is_none_or(|t| l.data.target == t)
                     })
                     .cloned()
                     .collect();

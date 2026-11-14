@@ -309,7 +309,7 @@ impl ShaclFlow {
                 target,
             });
         };
-        let lit = |s: &str| -> Result<String> { Ok(Literal::from_string(s.to_string()).to_url()?) };
+        let lit = |s: &str| -> Result<String> { Literal::from_string(s.to_string()).to_url() };
         // `literal:string:` + percent-encoded JSON — the writer format
         // `toLinks` uses for inputTypes/requires/transitionActions/…
         let json_lit = |v: &Value| -> String {

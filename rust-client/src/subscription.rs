@@ -1082,7 +1082,8 @@ mod tests {
 
         // Take the listener's pin too and drop the handle — a strong
         // callback would keep `Inner` alive forever.
-        if let Some(h) = query.inner.listener.lock().unwrap().take() {
+        let listener = query.inner.listener.lock().unwrap().take();
+        if let Some(h) = listener {
             h.abort();
             let _ = h.await;
         }

@@ -1518,11 +1518,11 @@ mod tests {
         client.close().await;
     }
 
-    /// R5: a peer that keeps TCP open but stops reading backpressures a
-    /// socket write forever — `SinkExt::send` holds `sink` (and
-    /// `watch_flush`/`pending` behind it) the whole time, while
-    /// disconnect and close wait on those very locks. The abort signal
-    /// must unwind a parked write the moment teardown needs its locks.
+    // R5: a peer that keeps TCP open but stops reading backpressures a
+    // socket write forever — `SinkExt::send` holds `sink` (and
+    // `watch_flush`/`pending` behind it) the whole time, while
+    // disconnect and close wait on those very locks. The abort signal
+    // must unwind a parked write the moment teardown needs its locks.
 
     /// A blocked `events.watch` send holding `sink` must not stall the
     /// disconnect — or the redial after it.
