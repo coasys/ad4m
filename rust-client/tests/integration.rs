@@ -1,122 +1,19 @@
 //! Real-executor integration coverage for the A4 client surface: `Model`
 //! CRUD + subscriptions, batches, reconnect resync, and `FlowInstance`.
 //!
-//! Spawns the `ad4m-executor` binary like `tests/js`' `spawnExecutor` does:
-//! `EXECUTOR_PATH` if set, else `<target dir>/release/ad4m-executor` under
-//! `CARGO_TARGET_DIR` or the workspace `target/`. Skips (prints and passes)
-//! when no binary exists — build one with `cargo build --release -p
-//! ad4m-executor` to run it.
+//! The spawn/connect harness lives in `tests/common/`. The suite skips
+//! (prints and passes) when no binary exists — unless
+//! `AD4M_REQUIRE_EXECUTOR=1`, which makes a missing binary fail. Build one
+//! with `cargo build --release -p ad4m-executor` to run it.
+
+mod common;
 
 use ad4m_client::flow::{FlowApi, FlowInstance, FlowState, FlowTransition, ShaclFlow};
 use ad4m_client::model::{CreateOptions, Model, ModelQuery};
-use ad4m_client::Ad4mClient;
 use serde_json::{json, Map, Value};
-use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
-fn executor_binary() -> Option<PathBuf> {
-    if let Ok(p) = std::env::var("EXECUTOR_PATH") {
-        let p = PathBuf::from(p);
-        return p.exists().then_some(p);
-    }
-    let mut candidates = Vec::new();
-    if let Ok(dir) = std::env::var("CARGO_TARGET_DIR") {
-        candidates.push(PathBuf::from(dir).join("release/ad4m-executor"));
-    }
-    // Workspace root = rust-client/..
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
-    candidates.push(root.join("target/release/ad4m-executor"));
-    candidates.into_iter().find(|p| p.exists())
-}
-
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
-
-struct Executor {
-    child: Child,
-    url: String,
-    _data: tempfile::TempDir,
-}
-
-fn start_executor() -> Option<Executor> {
-    let binary = executor_binary()?;
-    let data = tempfile::tempdir().unwrap();
-    let port = free_port();
-    // `init` first — as `tests/js/startExecutor` does: `run` on a data dir
-    // that never saw `init` leaves the runtime service without its seed and
-    // `agent.generate` panics executor-side. The seed is the one the JS
-    // suites use; its language addresses may not resolve, which is fine —
-    // only the language-language is started and our reads don't need it.
-    let seed = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../tests/js/bootstrapSeed.json");
-    let init = Command::new(&binary)
-        .args([
-            "init",
-            "--data-path",
-            data.path().to_str().unwrap(),
-            "--network-bootstrap-seed",
-            seed.to_str().unwrap(),
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .expect("ad4m-executor init");
-    assert!(init.success(), "ad4m-executor init failed");
-    let child = Command::new(&binary)
-        .args([
-            "run",
-            "--app-data-path",
-            data.path().to_str().unwrap(),
-            "--port",
-            &port.to_string(),
-            "--run-holochain",
-            "false",
-            "--language-language-only",
-            "true",
-            "--run-dapp-server",
-            "false",
-            "--insecure-no-admin-credential",
-        ])
-        .env("AD4M_EXIT_WITH_PARENT", "true")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn ad4m-executor");
-    Some(Executor {
-        child,
-        url: format!("http://127.0.0.1:{port}"),
-        _data: data,
-    })
-}
-
-/// The executor takes seconds to come up — poll the socket until it takes.
-async fn connect(url: &str) -> Ad4mClient {
-    let deadline = std::time::Instant::now() + Duration::from_secs(120);
-    loop {
-        match Ad4mClient::connect(url.to_string(), String::new()).await {
-            Ok(c) => return c,
-            Err(e) => {
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "executor did not come up in 120s: {e}"
-                );
-                tokio::time::sleep(Duration::from_millis(500)).await;
-            }
-        }
-    }
-}
-
-impl Drop for Executor {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
+use common::{connect, start_executor};
 
 /// The test class: one required single-valued `title`, one optional `done`
 /// — the smallest shape `perspective.addSdna` accepts, modelled on the
@@ -152,10 +49,9 @@ async fn next_result(
 #[tokio::test]
 async fn model_batch_subscription_reconnect_and_flow() {
     let Some(executor) = start_executor() else {
-        eprintln!("SKIP: no ad4m-executor binary (set EXECUTOR_PATH or build --release)");
-        return;
+        return; // require_binary() printed the skip
     };
-    let client = connect(&executor.url).await;
+    let client = connect(&executor.url, "").await;
     // Fresh data dir → mint the agent (`agent.generate` is a long call).
     let status = client
         .agent
