@@ -6,6 +6,10 @@
 //! `CARGO_TARGET_DIR` or the workspace `target/`. Skips (prints and passes)
 //! when no binary exists — build one with `cargo build --release -p
 //! ad4m-executor` to run it.
+//!
+//! Two ways the skip must *not* hide a failure (F11):
+//! - `AD4M_REQUIRE_EXECUTOR=1`: CI's gate — a missing binary is a failure.
+//! - `EXECUTOR_PATH` set but dangling: a misspelled path is a failure.
 
 use ad4m_client::flow::{FlowApi, FlowInstance, FlowState, FlowTransition, ShaclFlow};
 use ad4m_client::model::{CreateOptions, Model, ModelQuery};
@@ -18,7 +22,11 @@ use std::time::Duration;
 fn executor_binary() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("EXECUTOR_PATH") {
         let p = PathBuf::from(p);
-        return p.exists().then_some(p);
+        // An explicit path that doesn't resolve is a misspelled
+        // environment, not an absent executor — skipping here reports
+        // success without reaching an assertion (F11).
+        assert!(p.exists(), "EXECUTOR_PATH does not exist: {}", p.display());
+        return Some(p);
     }
     let mut candidates = Vec::new();
     if let Ok(dir) = std::env::var("CARGO_TARGET_DIR") {
@@ -27,7 +35,16 @@ fn executor_binary() -> Option<PathBuf> {
     // Workspace root = rust-client/..
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
     candidates.push(root.join("target/release/ad4m-executor"));
-    candidates.into_iter().find(|p| p.exists())
+    let found = candidates.into_iter().find(|p| p.exists());
+    if found.is_none()
+        && std::env::var("AD4M_REQUIRE_EXECUTOR").is_ok_and(|v| v != "0" && !v.is_empty())
+    {
+        panic!(
+            "AD4M_REQUIRE_EXECUTOR is set but no ad4m-executor binary was found \
+             (checked CARGO_TARGET_DIR/release and target/release; set EXECUTOR_PATH)"
+        );
+    }
+    found
 }
 
 fn free_port() -> u16 {

@@ -642,6 +642,22 @@ jobs:
           command: cd rust-executor && cargo test --release -- --test-threads=1
           no_output_timeout: 30m
 
+  # The Rust client: unit tests plus its real-executor integration test.
+  # ad4m-executor comes from the build job's stash; AD4M_REQUIRE_EXECUTOR
+  # turns a missing binary into a failure instead of a silent skip (F11).
+  rust-client-tests:
+    machine: true
+    resource_class: coasys/marvin-light
+    steps:
+      - fix_workdir
+      - checkout
+      - setup_env
+      - restore_binaries
+      - run:
+          name: ad4m-client tests (unit + real-executor integration)
+          command: AD4M_REQUIRE_EXECUTOR=1 cargo test -p ad4m-client
+          no_output_timeout: 30m
+
   js-unit-tests:
     machine: true
     resource_class: coasys/marvin-light
@@ -1220,6 +1236,9 @@ workflows:
           requires:
             - build
       - rust-tests:
+          requires:
+            - build
+      - rust-client-tests:
           requires:
             - build
       - integration-tests-js:
