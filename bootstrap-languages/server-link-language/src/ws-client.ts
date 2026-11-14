@@ -28,6 +28,15 @@ export interface WsClientHandlers {
     onStatusChanged?(msg: Extract<ServerWsMessage, { type: "status-changed" }>): void;
     /** A member sealed room key versions to this agent. */
     onKeysGranted(msg: Extract<ServerWsMessage, { type: "keys-granted" }>): void;
+    /** Membership links the room counted (protocol 2): for the executor's membership. */
+    onMembership?(msg: Extract<ServerWsMessage, { type: "membership" }>): void;
+    /** The room's admitted keys changed: a member rotates the room key (K3). */
+    onRotateNeeded?(msg: Extract<ServerWsMessage, { type: "rotate-needed" }>): void;
+    /**
+     * The server closed the socket for the room's reason: 4005 (this key was removed from the
+     * room or revoked: no reconnect) or 4006 (the room is suspended: reconnects with backoff).
+     */
+    onRoomClosed?(code: number, reason: string): void;
     /** Called on every successful (re)connect — the natural point to kick
      * off an HTTP catch-up sync in case anything was missed while offline. */
     onOpen?(): void;
@@ -51,6 +60,11 @@ export interface WsClientOptions {
     minBackoffMs?: number;
     maxBackoffMs?: number;
 }
+
+/** Close code: this key was removed from the room or revoked (link-server protocol 2). */
+export const CLOSE_KEY_REMOVED = 4005;
+/** Close code: the room is suspended by its operator. */
+export const CLOSE_ROOM_SUSPENDED = 4006;
 
 const DEFAULT_MIN_BACKOFF_MS = 500;
 const DEFAULT_MAX_BACKOFF_MS = 30_000;
@@ -154,12 +168,18 @@ export class WsClient {
 
         conn.onMessage((data) => this.handleMessage(data));
 
-        conn.onClose(() => {
+        conn.onClose((code, reason) => {
             const wasConnected = this.connected;
             this.connected = false;
             this.authenticating = false;
             this.conn = null;
             if (wasConnected) this.opts.handlers.onClose?.();
+            if (code === CLOSE_KEY_REMOVED || code === CLOSE_ROOM_SUSPENDED) {
+                this.opts.handlers.onRoomClosed?.(code, reason);
+            }
+            // A removed or revoked key would only be closed again: it stays away until the
+            // language starts again (a new auth tells it whether it is admitted).
+            if (code === CLOSE_KEY_REMOVED) this.closedByUser = true;
             if (!this.closedByUser) this.scheduleReconnect();
         });
 
@@ -224,6 +244,12 @@ export class WsClient {
                 break;
             case "keys-granted":
                 this.opts.handlers.onKeysGranted(msg);
+                break;
+            case "membership":
+                this.opts.handlers.onMembership?.(msg);
+                break;
+            case "rotate-needed":
+                this.opts.handlers.onRotateNeeded?.(msg);
                 break;
             default:
                 console.warn(

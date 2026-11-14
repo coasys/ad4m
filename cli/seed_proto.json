@@ -8,6 +8,9 @@
         "url": "https://store.ad4m.dev",
         "keys": ["z6MkhPbF9K34GSKpCo9n7XVdAoCctP2Kw7SNJeRWLx7bu9Fj"]
     },
+    "linkServers": [
+        { "url": "https://link-staging.coasys.org", "name": "Coasys staging" }
+    ],
     "languageLanguageRef": "../bootstrap-languages/language-language/build/bundle.js",
     "linkLanguages": [
         {
@@ -24,7 +27,7 @@
                 "name": "Server Link Language",
                 "description": "Link language that syncs through a self-hosted link-server over HTTP and WebSocket",
                 "sourceCodeLink": "https://github.com/coasys/ad4m/tree/dev/bootstrap-languages/server-link-language",
-                "possibleTemplateParams": ["SERVER_URL", "UID"]
+                "possibleTemplateParams": ["SERVER_URL", "UID", "CREATOR"]
             },
             "resource": "../bootstrap-languages/server-link-language/build/bundle.js"
         }

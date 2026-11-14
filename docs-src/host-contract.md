@@ -55,6 +55,7 @@ any language is loaded.
 | `sign(payload)` | `(Uint8Array) => Uint8Array` | Signs raw bytes, returns the signature bytes. |
 | `signStringHex(payload)` | `(string) => string` | Signs a string payload and returns the hex-encoded signature. |
 | `openSealed(sealed)` | `(SealedBox) => string` | Opens a box sealed to the acting agent (the node, or the managed user the call runs for) and returns the plaintext as hex. Throws for a box sealed to any other DID, or an altered one. See "Sealed boxes" below. |
+| `roomKeySeed()` | `() => Uint8Array` | The 32-byte seed of the acting agent's room key X25519 key: `HKDF-SHA256(ikm = the agent's Ed25519 seed, no salt, info = "adam-server-link-language:x25519-seed:v1")`. Every signing method (`sign`, `signStringHex`, and so every signed expression) refuses a message equal to or starting with that info, so no signature in the domain exists. `ad4m:host` exports it as `agentRoomKeySeed(): Promise<Uint8Array>`. |
 | `createSignedExpression(data)` | `(any) => object` | Wraps `data` in an Expression envelope with `author`, `timestamp`, `data`, and `proof` fields. Returns the signed expression object. |
 | `getAllLocalUserDIDs()` | `() => string[]` | Returns DIDs of all local managed users. |
 | `createSignedExpressionForUser(email, data)` | `(string, any) => object` | Like `createSignedExpression` but signs with a managed user's key. Only the user that the current call runs for: any other email, and any call that runs for the main agent, throws. |
@@ -135,6 +136,23 @@ installed before any language is loaded.
   gracefully to in-memory-only if the extension is not installed —
   so a runtime can ship a working (non-persistent) KV with no
   filesystem at all.
+
+## `globalThis.MEMBERSHIP`
+
+A link language's way into its space's membership (`coasys://membership/...`
+links, slice 3.B). Each method acts for the perspective whose link language
+is the calling language, never one the language names. Membership links never
+go in a perspective diff: the runtime drops them there.
+
+**Reference implementation:** `rust-executor/src/js_core/membership_extension.js`
+
+### Required methods
+
+| Method | Signature | `ad4m:host` export | Description |
+|--------|-----------|--------------------|-------------|
+| `links(links)` | `(LinkExpression[]) => Promise<{hash, counted, reason?}[]>` | `membershipLinks` | The membership links the language synced, judged one at a time through the space's owner gate as a peer's links. A result per link, in order: `hash` is the hex sha256 of author, source, predicate, target and timestamp; `reason` is the replay's refusal (`notAdmin`, `malformed`, ...). A link the space holds counts again; a link that is not a membership link is `malformed`. |
+| `admits(didKey)` | `(string) => Promise<{admitted, reason?}>` | `membershipAdmits` | Whether the space admits the key now: a device key while its person is a current member, a bot key while it is one. `reason` is `not-a-member` or `needs-identity` (a key no trusted key log lists). |
+| `roomKeyEvent(e)` | `({kind: "dropped" \| "rotated", removedKeys, version?}) => Promise<void>` | `roomKeyEvent` | Tells the space's owners (`neighbourhood-room-key-changed`) that the room key rotated, or that the room dropped this executor's key. |
 
 ## `globalThis.UTILS`
 
@@ -316,7 +334,7 @@ The host must register the `ad4m:host` module so that
 ## Initialization order
 
 1. Host installs `globalThis.AGENT`, `globalThis.LANGUAGE_CONTROLLER`,
-   and `globalThis.UTILS` with the core methods. If the host supports
+   `globalThis.MEMBERSHIP` and `globalThis.UTILS` with the core methods. If the host supports
    the File I/O extension, it also attaches `readStorageFile` /
    `writeStorageFile` to `LANGUAGE_CONTROLLER` at this step.
 2. Host registers the `ad4m:host` module.

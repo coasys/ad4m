@@ -2,6 +2,7 @@ import {ApiClient, CallOptions } from '../apiClient'
 import { Perspective, PerspectiveExpression } from "../perspectives/Perspective"
 import { RuntimeInfo, SentMessage, NotificationInput, NotificationUpdate, Notification, ImportResult, UserStatistics } from "./RuntimeTypes"
 import type { HostRate, LogTail, RuntimeConfig, SetConfigResult, UnytVersionInfo } from "../generated/api"
+import type { LinkServerEntry } from "../generated/api/LinkServerEntry"
 import { LanguageMeta } from "../language/LanguageMeta"
 
 export class RuntimeClient {
@@ -75,6 +76,12 @@ export class RuntimeClient {
      *  `possibleTemplateParams`). A template whose meta cannot be read is left out. */
     async knownLinkLanguageTemplates(): Promise<LanguageMeta[]> {
         return this.#apiClient.call('runtime.linkLanguageTemplates', {})
+    }
+
+    /** The link servers a space can sync through, the default first: the operator's
+     *  (`link_server.url`), then the platform's, then the seed's. */
+    async linkServers(): Promise<LinkServerEntry[]> {
+        return this.#apiClient.call('runtime.linkServers', {})
     }
 
     async addFriends(dids: string[]): Promise<string[]> {

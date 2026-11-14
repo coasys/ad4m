@@ -17,5 +17,11 @@
     "keys": [
       "z6MkhPbF9K34GSKpCo9n7XVdAoCctP2Kw7SNJeRWLx7bu9Fj"
     ]
-  }
+  },
+  "linkServers": [
+    {
+      "url": "https://link-staging.coasys.org",
+      "name": "Coasys staging"
+    }
+  ]
 }

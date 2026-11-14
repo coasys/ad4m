@@ -169,6 +169,7 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                 known_link_languages: vec![],
                 language_language_bundle: lang_lang_source.clone(),
                 identity_store: None,
+                link_servers: None,
                 direct_message_language: String::from(""),
                 agent_language: String::from(""),
                 perspective_language: String::from(""),

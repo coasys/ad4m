@@ -599,10 +599,15 @@ as `extern "C"`.
 | `agentDidForUser(email: string)` | `string` |
 | `agentCreateSignedExpressionForUser(email, data)` | `Expression` |
 | `agentOpenSealed(sealed: SealedBox)` | `string` (plaintext, hex) |
+| `agentRoomKeySeed()` | `Promise<Uint8Array>` (32 bytes) |
 
 `agentOpenSealed` opens only boxes sealed (`{ ephemeralPublicKey, nonce,
 ciphertext }`, hex) to the acting agent, and throws for any other. The format is
 in `host-contract.md` ("Sealed boxes").
+
+`agentRoomKeySeed` is the seed of the acting agent's room key X25519 key,
+`HKDF-SHA256(agent Ed25519 seed, info = "adam-server-link-language:x25519-seed:v1")`;
+no signing import signs a message equal to or starting with that info.
 
 #### Ambient acting-agent contract
 
@@ -717,6 +722,17 @@ runtime has enqueued the event for fan-out.
 > with other shapes are logged as warnings and dropped. A dedicated
 > `AD4M_SIGNAL_TOPIC` subscription is needed to support arbitrary
 > signal payloads (tracked as a follow-up).
+
+### 7.5b Membership (the link language and its space's membership)
+
+| Import | Returns | Description |
+|---|---|---|
+| `membershipLinks(links: LinkExpression[])` | `Promise<{hash, counted, reason?}[]>` | The membership links (`coasys://membership/...`) the language synced, judged through the space's owner gate one at a time; a result per link, in order. They never go in `emitPerspectiveDiff`. |
+| `membershipAdmits(didKey: string)` | `Promise<{admitted, reason?: JoinRefusal}>` | Whether the space admits the key now. |
+| `roomKeyEvent(e: {kind: "dropped" \| "rotated", removedKeys: string[], version?: number})` | `Promise<void>` | A room key change, for the space's owners. |
+
+Each acts for the calling link language's own perspective. See
+`host-contract.md` (`globalThis.MEMBERSHIP`).
 
 ### 7.6 Raw file/blob storage (optional extension — `ad4m-language-fs` world)
 

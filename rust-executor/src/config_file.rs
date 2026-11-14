@@ -295,6 +295,23 @@ pub struct ExecutorConfigFile {
     /// Unset: the best one detected.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub local_ai_device: Option<crate::ai_service::local::hardware::Backend>,
+    /// `link_server.url` and `link_server.platform_url`: the link servers new spaces sync
+    /// through (`runtime.linkServers`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub link_server: Option<LinkServerFileSettings>,
+}
+
+/// `link_server` in the config file.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct LinkServerFileSettings {
+    /// The operator's own link server, first in `runtime.linkServers` and the default of a new
+    /// space. Checked when written (`link_servers::check_operator_url`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// The link server of the platform this executor is deployed on, after the operator's.
+    /// Written by the deployment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform_url: Option<String>,
 }
 
 /// `identity` in the config file.
@@ -660,6 +677,11 @@ impl ExecutorConfigFile {
             local_ai_dir: self.local_ai_dir.clone(),
             local_ai_autostart: self.local_ai_autostart,
             local_ai_device: self.local_ai_device,
+            link_server_url: self.link_server.as_ref().and_then(|l| l.url.clone()),
+            link_server_platform_url: self
+                .link_server
+                .as_ref()
+                .and_then(|l| l.platform_url.clone()),
             admin_credential: secrets.admin_credential.clone(),
             storage_secret: secrets.storage_secret.clone(),
             allow_secret_on_data_disk: self.allow_secret_on_data_disk,

@@ -12,6 +12,9 @@ pub enum KeyringError {
     /// A sealed envelope for another recipient, or an altered one.
     #[error("the sealed envelope does not open with this key")]
     Open,
+    /// A room-key seal names the room and version it is for; an empty context binds nothing.
+    #[error("a room-key seal needs a context (coasys:room-key:<roomId>:<version>)")]
+    EmptyContext,
     /// A key has [`crate::KEY_LEN`] bytes.
     #[error("a key has 32 bytes, this one has {0}")]
     KeyLength(usize),

@@ -5,11 +5,16 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { ed25519 } from "@noble/curves/ed25519";
+import { sha256 } from "@noble/hashes/sha256";
 
-import type { AgentAdapter, Transport, TransportResponse } from "../src/adapters.js";
+import type { Transport, TransportResponse } from "../src/adapters.js";
 import { initAdapters, resetAdapters } from "../src/adapters.js";
 import * as auth from "../src/auth.js";
+import { bytesToHex } from "../src/encryption.js";
+import { roomKeySigningBytes, verifyRoomKeySignature } from "../src/room.js";
+import { x25519Public } from "../keyring/keyring.js";
+import { TestAgent } from "./agent.js";
 
 // ---------------------------------------------------------------------------
 // Mock adapters
@@ -34,25 +39,7 @@ class MockTransport implements Transport {
     }
 }
 
-class MockAgent implements AgentAdapter {
-    constructor(private readonly didValue: string) {}
-    did(): string {
-        return this.didValue;
-    }
-    signed: string[] = [];
-    signStringHex(payload: string): string {
-        this.signed.push(payload);
-        // Deterministic stand-in for EdDSA signing — auth.ts only relies on
-        // determinism (same input -> same output), not on real Ed25519 math.
-        return createHash("sha256").update(`${this.didValue}:${payload}`).digest("hex");
-    }
-    openSealed(): string {
-        throw new Error("auth never opens");
-    }
-}
 
-/** A challenge in the link server's format: 32 bytes, hex. */
-const CHALLENGE = "c0".repeat(32);
 
 /** Builds an unsigned (alg: none) JWT — auth.ts never verifies the
  * signature, it only decodes the payload to read `exp`. */
@@ -62,9 +49,9 @@ function makeJwt(payload: Record<string, unknown>): string {
     return `${b64url(JSON.stringify({ alg: "none", typ: "JWT" }))}.${b64url(JSON.stringify(payload))}.`;
 }
 
-function setup(transport: Transport, did = "did:key:zTestAgent"): MockAgent {
+function setup(transport: Transport): TestAgent {
     resetAdapters();
-    const agent = new MockAgent(did);
+    const agent = new TestAgent(5);
     initAdapters({
         transport,
         agent,
@@ -75,17 +62,17 @@ function setup(transport: Transport, did = "did:key:zTestAgent"): MockAgent {
 }
 
 /** Routes both auth steps (same endpoint) to a challenge-then-token flow. */
-function authRoute(transport: MockTransport, tokenPayload: Record<string, unknown> = { exp: Math.floor(Date.now() / 1000) + 3600 }) {
+function authRoute(
+    transport: MockTransport,
+    tokenPayload: Record<string, unknown> = { exp: Math.floor(Date.now() / 1000) + 3600 },
+    admitted = true,
+) {
     let authCalls = 0;
     transport.route(
         (url, method) => method === "POST" && url.endsWith("/rooms/room-123/auth"),
-        (body) => {
-            const parsed = JSON.parse(body) as Record<string, unknown>;
-            if (!("signature" in parsed)) {
-                return { status: 200, headers: {}, body: JSON.stringify({ challenge: CHALLENGE }) };
-            }
+        () => {
             authCalls++;
-            return { status: 200, headers: {}, body: JSON.stringify({ token: makeJwt(tokenPayload) }) };
+            return { status: 200, headers: {}, body: JSON.stringify({ token: makeJwt(tokenPayload), admitted }) };
         },
     );
     return () => authCalls;
@@ -114,66 +101,121 @@ describe("auth: parseJwtExpiryMs", () => {
 // authenticate()
 // ---------------------------------------------------------------------------
 
-describe("auth: authenticate", () => {
-    it("performs the two-step DID challenge-response flow, signing only the challenge", async () => {
+describe("auth: authenticate (protocol 2)", () => {
+    it("signs the room's auth message and the X25519 key once, and caches the session", async () => {
         const transport = new MockTransport();
         const agent = setup(transport);
-
+        const before = Date.now();
+        let body: Record<string, unknown> = {};
         transport.route(
             (url, method) => method === "POST" && url.endsWith("/rooms/room-123/auth"),
-            (body) => {
-                const parsed = JSON.parse(body) as Record<string, unknown>;
-                if (!("signature" in parsed)) {
-                    assert.equal(parsed.did, "did:key:zTestAgent");
-                    return { status: 200, headers: {}, body: JSON.stringify({ challenge: CHALLENGE }) };
-                }
-                assert.deepEqual(
-                    Object.keys(parsed).sort(),
-                    ["challenge", "did", "signature"],
-                    "step 2 carries the signed challenge and nothing else: members' keys come from their DIDs",
-                );
-                assert.equal(parsed.challenge, CHALLENGE);
-                assert.ok(typeof parsed.signature === "string" && parsed.signature.length > 0);
+            (raw) => {
+                body = JSON.parse(raw) as Record<string, unknown>;
                 return {
                     status: 200,
                     headers: {},
-                    body: JSON.stringify({ token: makeJwt({ exp: Math.floor(Date.now() / 1000) + 3600 }) }),
+                    body: JSON.stringify({ token: makeJwt({ exp: Math.floor(Date.now() / 1000) + 3600 }), admitted: true }),
                 };
             },
         );
 
         const session = await auth.authenticate();
-        assert.ok(session.token);
-        assert.ok(session.expiresAt !== null && session.expiresAt > Date.now());
-        assert.equal(transport.calls.length, 2);
-        assert.deepEqual(agent.signed, [CHALLENGE], "auth signs the challenge only");
-        // Verify the session got cached — getValidToken should return the same
-        // token without triggering another auth round-trip.
-        const cached = await auth.getValidToken();
-        assert.equal(cached, session.token);
-        assert.equal(transport.calls.length, 2, "no extra auth call for cached token");
+        assert.deepEqual(
+            Object.keys(body).sort(),
+            ["did", "origin", "signature", "timestamp", "x25519PublicKey", "x25519Signature"],
+        );
+        assert.equal(body.did, agent.did());
+        assert.equal(body.origin, "https://server.example", "the server's origin, as it is signed");
+        const timestamp = body.timestamp as number;
+        assert.ok(Number.isInteger(timestamp) && timestamp >= before && timestamp <= Date.now());
+        assert.deepEqual(
+            agent.signed,
+            [`coasys-link-server:auth:2:https://server.example:room-123:${timestamp}`],
+            "the auth message, bound to the server's origin, once",
+        );
+        const message = sha256(new TextEncoder().encode(agent.signed[0]));
+        assert.ok(ed25519.verify(body.signature as string, message, ed25519.getPublicKey(agent.seed)));
+
+        const x25519 = bytesToHex(x25519Public(await agent.roomKeySeed()));
+        assert.equal(body.x25519PublicKey, x25519, "the X25519 key of agentRoomKeySeed");
+        assert.ok(verifyRoomKeySignature(agent.did(), x25519, body.x25519Signature as string));
+        assert.equal(session.admitted, true);
+
+        assert.equal(await auth.getValidToken(), session.token);
+        assert.equal(transport.calls.length, 1, "no extra auth call for a cached token");
     });
 
-    it("signs only a challenge in the link server's format", async () => {
-        for (const challenge of ["chal-abc", "c0".repeat(31), "C0".repeat(32), "c0".repeat(33), ` ${"c0".repeat(32)}`, 42]) {
+    it("signs the origin of the server URL: scheme, host and port, lower case, without the default port", async () => {
+        for (const [serverUrl, origin] of [
+            ["HTTPS://Server.Example:443", "https://server.example"],
+            ["http://127.0.0.1:3456", "http://127.0.0.1:3456"],
+            ["http://links.example.org:80/", "http://links.example.org"],
+        ]) {
             const transport = new MockTransport();
-            const agent = setup(transport);
+            resetAdapters();
+            const agent = new TestAgent(5);
+            initAdapters({ transport, agent, config: { serverUrl, roomId: "room-123" } });
+            auth.resetAuth();
+            let body: Record<string, unknown> = {};
             transport.route(
                 (url, method) => method === "POST" && url.endsWith("/rooms/room-123/auth"),
-                () => ({ status: 200, headers: {}, body: JSON.stringify({ challenge }) }),
+                (raw) => {
+                    body = JSON.parse(raw) as Record<string, unknown>;
+                    return { status: 200, headers: {}, body: JSON.stringify({ token: makeJwt({}), admitted: true }) };
+                },
             );
-            await assert.rejects(() => auth.authenticate(), /not 32 bytes of hex/, `challenge ${JSON.stringify(challenge)}`);
-            assert.deepEqual(agent.signed, [], `signed ${JSON.stringify(challenge)}`);
-            assert.equal(transport.calls.length, 1, "no second auth step");
+            await auth.authenticate();
+            assert.equal(body.origin, origin, serverUrl);
+            assert.deepEqual(agent.signed, [`coasys-link-server:auth:2:${origin}:room-123:${body.timestamp}`], serverUrl);
         }
     });
 
-    it("propagates a server error from the challenge step", async () => {
+    it("reports a key the room does not admit", async () => {
         const transport = new MockTransport();
         setup(transport);
-        transport.route(() => true, () => ({ status: 403, headers: {}, body: "forbidden" }));
+        authRoute(transport, { exp: Math.floor(Date.now() / 1000) + 3600 }, false);
+        const session = await auth.authenticate();
+        assert.equal(session.admitted, false);
+    });
 
-        await assert.rejects(() => auth.authenticate());
+    it("propagates a server error (a room that does not exist yet is a 404)", async () => {
+        const transport = new MockTransport();
+        setup(transport);
+        transport.route(() => true, () => ({ status: 404, headers: {}, body: '{"error":"no such room"}' }));
+
+        await assert.rejects(() => auth.authenticate(), (err: unknown) => (err as { status?: number }).status === 404);
+    });
+});
+
+describe("auth: the room key signature (K7)", () => {
+    // From ad4m-identity-core's `room_key_signing_bytes` and `verify_room_key` (the link
+    // server's node binding) for the Ed25519 seed 0x07 x 32 and the X25519 key 0x11 x 32.
+    const VECTOR = {
+        did: "did:key:z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z",
+        x25519: "11".repeat(32),
+        bytes:
+            '{"did":"did:key:z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z","domain":"coasys:room-key",' +
+            '"x25519PublicKey":"1111111111111111111111111111111111111111111111111111111111111111"}',
+        signature:
+            "2721373cb6dd5136eb153c328541a7098b3ee8d963486c7b6c3274286058fbac" +
+            "12b05878ed4d9ff715afd6205c3b8864cdb0f9fe6210d023bc5410cde8149902",
+    };
+
+    it("signs the identity core's coasys:room-key bytes over {x25519PublicKey, did}", async () => {
+        assert.equal(new TextDecoder().decode(roomKeySigningBytes(VECTOR.did, VECTOR.x25519)), VECTOR.bytes);
+        const agent = new TestAgent(7);
+        assert.equal(agent.did(), VECTOR.did);
+        assert.equal(bytesToHex(agent.sign(roomKeySigningBytes(VECTOR.did, VECTOR.x25519))), VECTOR.signature);
+        assert.ok(verifyRoomKeySignature(VECTOR.did, VECTOR.x25519, VECTOR.signature));
+    });
+
+    it("refuses a malformed statement and a signature of another key or X25519 key", () => {
+        assert.throws(() => roomKeySigningBytes("did:scid:coasys:1:x", VECTOR.x25519));
+        assert.throws(() => roomKeySigningBytes(VECTOR.did, "11".repeat(31)));
+        assert.throws(() => roomKeySigningBytes(VECTOR.did, "AA".repeat(32)));
+        assert.equal(verifyRoomKeySignature(VECTOR.did, "22".repeat(32), VECTOR.signature), false);
+        assert.equal(verifyRoomKeySignature(new TestAgent(8).did(), VECTOR.x25519, VECTOR.signature), false);
+        assert.equal(verifyRoomKeySignature(VECTOR.did, VECTOR.x25519, "zz"), false);
     });
 });
 
@@ -225,10 +267,8 @@ describe("auth: getValidToken", () => {
         transport.route(
             (url, method) => method === "POST" && url.endsWith("/rooms/room-123/auth"),
             (body) => {
-                const parsed = JSON.parse(body) as Record<string, unknown>;
-                if (!("signature" in parsed)) return { status: 200, headers: {}, body: JSON.stringify({ challenge: CHALLENGE }) };
                 authCalls++;
-                return { status: 200, headers: {}, body: JSON.stringify({ token: "opaque-server-token" }) };
+                return { status: 200, headers: {}, body: JSON.stringify({ token: "opaque-server-token", admitted: true }) };
             },
         );
 

@@ -284,6 +284,9 @@ pub fn init(db_path: &Path, settings: &IdentitySettings) -> Result<(), CacheErro
             let changes = service.cache.subscribe();
             handle.spawn(run_recheck(service.clone(), changes));
             handle.spawn(inbox::run_pull(service.clone()));
+            // The spaces each revoked device key reached (`agent.revocationReach`).
+            let changes = service.cache.subscribe();
+            handle.spawn(crate::membership::reach::run(changes));
             // The key sessions' watcher too: `load_local_identities` replays the held
             // verdicts before the spawned task may first run. It waits for the main
             // agent's DID first — its `agent_speaks` reads it and `AgentService` is not
@@ -473,6 +476,21 @@ pub async fn prepare_link_signers(links: &[LinkExpression]) {
         return;
     };
     service.resolver.prepare(&signers_to_prepare(links)).await;
+}
+
+/// [`prepare_link_signers`] for one key that signed no link here: a key a link language asks
+/// about (`membershipAdmits`). Its log is read as of its latest head (no anchor).
+pub async fn prepare_signer(did_key: &str) {
+    let signers = [(did_key.to_string(), None)];
+    #[cfg(test)]
+    if let Ok(resolver) = TEST_RESOLVER.try_with(Arc::clone) {
+        resolver.prepare(&signers).await;
+        return;
+    }
+    let Some(service) = SERVICE.get() else {
+        return;
+    };
+    service.resolver.prepare(&signers).await;
 }
 
 #[cfg(test)]

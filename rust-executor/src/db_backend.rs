@@ -35,7 +35,7 @@ use crate::ai_sessions::types::{AiSession, AiSessionMessage, AiSessionUpdate};
 use crate::db::{
     Ad4mDb, Ad4mDbResult, BotActivityRow, BotGrantRow, BotRow, ComputeLogEntry,
     FlowReplicaStateRow, GrantRow, JoinAccept, JoinAdded, JoinCancel, JoinRow, OperatorRecordRow,
-    OperatorSetBy, PaymentRequest,
+    OperatorSetBy, PaymentRequest, ReachMark, ReachRow,
 };
 use crate::secret::Secret;
 use crate::types::{
@@ -432,6 +432,16 @@ macro_rules! ad4m_db_methods {
             fn set_bot_activity_outcome(&self, id: i64, outcome: &str) -> Ad4mDbResult<bool>;
             fn bot_activity(&self, did: &str, before: Option<i64>, limit: usize) -> Ad4mDbResult<Vec<BotActivityRow>>;
             fn sweep_bot_activity(&self, cutoff: u64) -> Ad4mDbResult<usize>;
+
+            // Spaces: each space's link-language choice, recorded once (`db/spaces.rs`)
+            fn record_space_choice(&self, perspective: &str, choice: &str) -> Ad4mDbResult<bool>;
+            fn space_choice(&self, perspective: &str) -> Ad4mDbResult<Option<String>>;
+
+            // The spaces a revoked key reached (`db/revocation_reach.rs`)
+            fn add_revocation_reach(&self, did_key: &str, spaces: &[(String, String)], at: u64) -> Ad4mDbResult<bool>;
+            fn mark_revocation_reach(&self, did_key: &str, perspective_uuid: &str, name: &str, mark: ReachMark, at: u64) -> Ad4mDbResult<()>;
+            fn revocation_reach(&self, did_key: &str, since: u64) -> Ad4mDbResult<Vec<ReachRow>>;
+            fn prune_revocation_reach(&self, cutoff: u64) -> Ad4mDbResult<usize>;
 
             // Re-key of the main agent: the rows that move to its new DID (`db/rekey.rs`)
             fn move_notification_owner(&self, old: &str, new: &str) -> Ad4mDbResult<usize>;

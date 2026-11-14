@@ -1,18 +1,28 @@
 /**
  * E2E encryption for room links.
  *
- * ## Room keys, sealed to members' DIDs
+ * ## Room keys, sealed to members' X25519 keys
  *
- * A room key version is a random AES-256-GCM key. Whoever holds it seals it
- * to a member with `sealToDid`: the X25519 form of the Ed25519 key in the
- * member's `did:key` (RFC 7748 map), an ephemeral X25519 ECDH, HKDF-SHA256
- * and AES-256-GCM (docs-src/host-contract.md "Sealed boxes"). The member's
- * executor opens it with the `agentOpenSealed` host import, from the agent's
- * own key; the language never holds an agent secret. Any member's X25519
- * key follows from its DID, so the room admin seals each new version to
- * every ACL member, including one that never connected, and any member
- * holding a version can grant it to a member lacking it. The server stores
- * and relays the boxes and never sees a room key.
+ * A room key version is a random AES-256-GCM key. Every key that authenticates to the room
+ * publishes an X25519 key, the public half of its `agentRoomKeySeed`, with the key's
+ * signature over it (src/room.ts, K7). Whoever holds a version seals it to such a key with
+ * the keyring binding's `sealRoomKey` (`keyring/keyring.js`, the wasm build of
+ * `ad4m-keyring`: the room-key seal v2, ephemeral X25519 ECDH, HKDF-SHA256, AES-256-GCM), and
+ * the member opens it with `openRoomKey` from its own seed (K9). The rotator seals each new
+ * version to every admitted key, and any member holding a version can grant it to a member
+ * lacking it. The server stores and relays the boxes and never sees a room key.
+ *
+ * Each box is bound to its room and version: the context `coasys:room-key:<roomId>:<version>`
+ * is the AEAD's associated data. A member opens a box only under the room it is in and the
+ * version the server lists the box at, so the server cannot serve a box made for another room,
+ * or for another version of this one, as this version: such a box does not open and is spoiled.
+ *
+ * ## The link hash (K4)
+ *
+ * An encrypted link carries `link_hash`, HMAC-SHA256 of its canonical plaintext fields under
+ * the room's link-hash key (HKDF of room key version 1, `linkHashKey`). Every member computes
+ * the same hash for a link, so removals match additions across key versions; the server,
+ * without the key, cannot test a guessed link against it.
  *
  * ## Link confidentiality
  *
@@ -24,12 +34,16 @@
  * representation is ciphertext.
  */
 
-import { ed25519, x25519 } from "@noble/curves/ed25519";
 import { gcm } from "@noble/ciphers/aes";
 import { sha256 } from "@noble/hashes/sha2";
-import { hkdf } from "@noble/hashes/hkdf";
+import { hmac } from "@noble/hashes/hmac";
 
-import type { AgentAdapter } from "./adapters.js";
+import {
+    linkHashKey,
+    openRoomKey as keyringOpenRoomKey,
+    roomKeyContext as keyringRoomKeyContext,
+    sealRoomKey as keyringSealRoomKey,
+} from "../keyring/keyring.js";
 import type {
     KeysResponseEntry,
     Link,
@@ -136,6 +150,33 @@ function base58Decode(input: string): Uint8Array {
     return result;
 }
 
+/** Base58btc of `bytes` (leading zero bytes as '1'). */
+export function base58Encode(bytes: Uint8Array): string {
+    const digits: number[] = [0];
+    for (const byte of bytes) {
+        let carry = byte;
+        for (let j = 0; j < digits.length; j++) {
+            carry += digits[j] << 8;
+            digits[j] = carry % 58;
+            carry = (carry / 58) | 0;
+        }
+        while (carry > 0) {
+            digits.push(carry % 58);
+            carry = (carry / 58) | 0;
+        }
+    }
+    let out = "";
+    for (const byte of bytes) {
+        if (byte !== 0) break;
+        out += "1";
+    }
+    // A non-empty input of zeros only leaves the single 0 digit, already written as '1's.
+    if (bytes.some((b) => b !== 0)) {
+        for (let i = digits.length - 1; i >= 0; i--) out += BASE58_ALPHABET[digits[i]];
+    }
+    return out;
+}
+
 // ---------------------------------------------------------------------------
 // DID:key → Ed25519 public key extraction
 // ---------------------------------------------------------------------------
@@ -147,7 +188,7 @@ const ED25519_MULTICODEC = new Uint8Array([0xed, 0x01]);
  * Only supports ed25519 keys (multicodec prefix 0xed01). Strips any
  * `#fragment` key-id suffix.
  */
-function didToEd25519PublicKey(did: string): Uint8Array {
+export function didToEd25519PublicKey(did: string): Uint8Array {
     const base = did.includes("#") ? did.slice(0, did.indexOf("#")) : did;
     const prefix = "did:key:";
     if (!base.startsWith(prefix)) throw new Error(`not a did:key DID: ${did}`);
@@ -161,11 +202,8 @@ function didToEd25519PublicKey(did: string): Uint8Array {
 }
 
 // ---------------------------------------------------------------------------
-// Room keys sealed to DIDs (the executor's sealed boxes)
+// Room keys sealed to X25519 keys (the keyring binding)
 // ---------------------------------------------------------------------------
-
-/** HKDF `info` of every sealed box, as `rust-executor/src/agent/sealed_box.rs` has it. */
-export const SEALED_BOX_INFO = "ad4m:sealed-box:v1";
 
 /** Generates a fresh random 32-byte AES-256 room key. */
 export function generateRoomKey(): Uint8Array {
@@ -187,59 +225,47 @@ export function roomKeyCommitment(roomKey: Uint8Array): string {
     return bytesToHex(sha256(input));
 }
 
-export function deriveSealKey(sharedSecret: Uint8Array, ephemeralPublicKey: Uint8Array, recipientPublicKey: Uint8Array): Uint8Array {
-    const salt = new Uint8Array(64);
-    salt.set(ephemeralPublicKey);
-    salt.set(recipientPublicKey, 32);
-    return hkdf(sha256, sharedSecret, salt, utf8ToBytes(SEALED_BOX_INFO), AES_KEY_BYTES);
+const X25519_HEX = /^[0-9a-f]{64}$/;
+
+/**
+ * The context a box of room key `version` of room `roomId` is sealed under:
+ * `coasys:room-key:<roomId>:<version>`. Throws for an empty room id or a version that is not a
+ * positive integer (versions start at 1).
+ */
+export function roomKeyContext(roomId: string, version: number): string {
+    if (typeof roomId !== "string" || roomId.length === 0) throw new Error("a room key is sealed for a room id");
+    if (!Number.isSafeInteger(version) || version < 1 || version > 0xffff_ffff) {
+        throw new Error(`a room key version is a positive integer, not ${version}`);
+    }
+    return keyringRoomKeyContext(roomId, version);
 }
 
 /**
- * Seals `plaintext` to the agent `did`, which only that agent's executor
- * opens. Needs only the DID. `ephemeralSecret` and `nonce` are for test
- * vectors only.
+ * Seals `roomKey` to the X25519 key `x25519PublicKey` (64 lowercase hex characters), bound to
+ * room `roomId` and key `version`: the box opens only under that room and version.
  */
-export function sealToDid(
-    did: string,
-    plaintext: Uint8Array,
-    ephemeralSecret: Uint8Array = randomBytes(32),
-    nonce: Uint8Array = randomBytes(AES_NONCE_BYTES),
+export function sealRoomKeyTo(
+    x25519PublicKey: string,
+    roomKey: Uint8Array,
+    roomId: string,
+    version: number,
 ): SealedBox {
-    const recipientPublicKey = ed25519.utils.toMontgomery(didToEd25519PublicKey(did));
-    const ephemeralPublicKey = x25519.getPublicKey(ephemeralSecret);
-    const sharedSecret = x25519.getSharedSecret(ephemeralSecret, recipientPublicKey);
-    const ciphertext = gcm(deriveSealKey(sharedSecret, ephemeralPublicKey, recipientPublicKey), nonce).encrypt(plaintext);
-    return {
-        ephemeralPublicKey: bytesToHex(ephemeralPublicKey),
-        nonce: bytesToHex(nonce),
-        ciphertext: bytesToHex(ciphertext),
-    };
+    if (!X25519_HEX.test(x25519PublicKey)) throw new Error("an X25519 key is 32 bytes of lowercase hex");
+    const context = roomKeyContext(roomId, version);
+    return keyringSealRoomKey(roomKey, hexToBytes(x25519PublicKey), context) as SealedBox;
 }
 
 /**
- * Opens a room key sealed to this agent. Throws for a box sealed to anyone
- * else, an altered box, or a sealed value that is not a 32-byte key.
+ * Opens room key `version` of room `roomId`, sealed to the X25519 key of `seed`
+ * (`agentRoomKeySeed`). Throws for a box sealed to anyone else, for another room or another
+ * version, an altered box, or a sealed value that is not a 32-byte key.
  */
-export function openRoomKey(agent: Pick<AgentAdapter, "openSealed">, sealed: SealedBox): Uint8Array {
-    const roomKey = hexToBytes(agent.openSealed(sealed));
+export function openRoomKey(sealed: SealedBox, seed: Uint8Array, roomId: string, version: number): Uint8Array {
+    const roomKey = keyringOpenRoomKey(sealed, seed, roomKeyContext(roomId, version));
     if (roomKey.length !== AES_KEY_BYTES) {
         throw new Error(`a room key has ${AES_KEY_BYTES} bytes, the box held ${roomKey.length}`);
     }
     return roomKey;
-}
-
-/**
- * Whether this agent's executor opens a box sealed to `did` right now. While it
- * cannot use the agent's key (a locked agent), every box fails to open, and
- * none of them is spoiled.
- */
-export function opensOwnBoxes(agent: Pick<AgentAdapter, "openSealed">, did: string): boolean {
-    const probe = generateRoomKey();
-    try {
-        return bytesToHex(openRoomKey(agent, sealToDid(did, probe))) === bytesToHex(probe);
-    } catch {
-        return false;
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -255,18 +281,21 @@ export type KeyRing = Map<number, Uint8Array>;
  * granted a wrong one), is `spoiled`: left out with a log line, so it costs
  * that version, not the room, and the caller drops it so it is granted again.
  * When none opens, the ring is empty and the caller treats the agent as
- * holding no key ("pending").
+ * holding no key ("pending"). `seed` is this agent's `agentRoomKeySeed`; each box opens only
+ * under `roomId` and the version it is listed at (K9), so a box the server moved from another
+ * room or version is spoiled too.
  */
 export function buildKeyRing(
     entries: KeysResponseEntry[],
-    agent: Pick<AgentAdapter, "openSealed">,
+    seed: Uint8Array,
+    roomId: string,
 ): { ring: KeyRing; spoiled: number[] } {
     const ring: KeyRing = new Map();
     const spoiled: number[] = [];
     const failures: string[] = [];
     for (const entry of entries) {
         try {
-            const key = openRoomKey(agent, entry.encryptedKey);
+            const key = openRoomKey(entry.encryptedKey, seed, roomId, entry.version);
             if (roomKeyCommitment(key) !== entry.commitment) {
                 throw new Error("the key does not match the rotation's commitment");
             }
@@ -305,12 +334,18 @@ export function statusField(status: string | undefined): { status?: string } {
     return status !== undefined ? { status } : {};
 }
 
+/** The room's link-hash key: `linkHashKey` of room key version 1, or null while the ring lacks it. */
+export function linkHashKeyOf(ring: KeyRing): Uint8Array | null {
+    const v1 = ring.get(1);
+    return v1 ? linkHashKey(v1) : null;
+}
+
 /**
- * The `link_hash` an encrypted wire link carries: SHA-256 of the canonical
- * plaintext fields, the same inputs as the server's linkHash. Identifies a
- * link across its encrypted copies (each has a fresh nonce).
+ * The `link_hash` an encrypted wire link carries (K4): HMAC-SHA256 under the room's
+ * link-hash key (`linkHashKeyOf`) of the canonical plaintext fields. Identifies a link across
+ * its encrypted copies (each has a fresh nonce) for members only.
  */
-export function wireLinkHash(link: LinkExpression): string {
+export function wireLinkHash(link: LinkExpression, hashKey: Uint8Array): string {
     const canonical = JSON.stringify({
         source: link.data.source,
         predicate: link.data.predicate ?? null,
@@ -318,19 +353,27 @@ export function wireLinkHash(link: LinkExpression): string {
         author: link.author,
         timestamp: link.timestamp,
     });
-    return bytesToHex(sha256(utf8ToBytes(canonical)));
+    return bytesToHex(hmac(sha256, hashKey, utf8ToBytes(canonical)));
+}
+
+/** The keys a link is encrypted with: the room key version, and the room's link-hash key. */
+export interface WireKeys {
+    roomKey: Uint8Array;
+    /** The room key's version, written as `key_version` (absent: version 1). */
+    version?: number;
+    hashKey: Uint8Array;
 }
 
 /**
  * Encrypts the entire LinkExpression (author, timestamp, proof, data) for
  * the wire. No metadata remains in cleartext — the server receives only
- * `{data: {ciphertext, nonce}, link_hash}`. The `link_hash` is a SHA-256
- * of the canonical plaintext fields, computed client-side so the server
- * can still content-address links for OR-Set dedup/removal matching
+ * `{data: {ciphertext, nonce}, link_hash}`. The `link_hash` (`wireLinkHash`)
+ * lets the server content-address links for OR-Set dedup/removal matching
  * without seeing the plaintext.
  */
-export function encryptLinkForWire(link: LinkExpression, roomKey: Uint8Array, keyVersion?: number): WireLinkExpression {
-    const linkHash = wireLinkHash(link);
+export function encryptLinkForWire(link: LinkExpression, keys: WireKeys): WireLinkExpression {
+    const { roomKey, version: keyVersion } = keys;
+    const linkHash = wireLinkHash(link, keys.hashKey);
 
     const fullPayload: Record<string, unknown> = {
         author: link.author,

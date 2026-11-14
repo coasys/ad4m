@@ -81,7 +81,13 @@
       "dependsOn": ["@coasys/ad4m-ldk#build"]
     },
     "@coasys/server-link-language#build": {
-      "dependsOn": ["@coasys/ad4m-ldk#build"]
+      "dependsOn": ["@coasys/ad4m-ldk#build"],
+      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/ad4m-keyring/**", "$TURBO_ROOT$/Cargo.lock"],
+      "outputs": ["build/**", "keyring/**"]
+    },
+    "@coasys/link-server#build": {
+      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/ad4m-identity-core/**", "$TURBO_ROOT$/ad4m-hash-chain/**", "$TURBO_ROOT$/Cargo.lock"],
+      "outputs": ["dist/**", "identity-core/**"]
     },
     "@coasys/server-link-language#test": {
       "dependsOn": ["@coasys/ad4m-ldk#build"],

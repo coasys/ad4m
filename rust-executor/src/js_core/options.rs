@@ -4,6 +4,7 @@ use url::Url;
 
 use super::agent_extension::agent_service;
 use super::languages_extension::language_service;
+use super::membership_extension::membership_service;
 use super::pubsub_extension::pubsub_service;
 use super::signature_extension::signature_service;
 use super::string_module_loader::StringModuleLoader;
@@ -55,6 +56,7 @@ pub fn ad4m_language_extensions() -> Vec<deno_core::Extension> {
         agent_service::init(),
         runtime_service::init(),
         language_service::init(),
+        membership_service::init(),
     ]
 }
 

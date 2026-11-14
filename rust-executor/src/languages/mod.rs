@@ -1699,6 +1699,48 @@ impl LanguageController {
         })
     }
 
+    /// Templates the language `source_language_hash` with `template_data`, saves the bundle
+    /// and publishes it to the language language as `agent_context`: the flow of
+    /// `language.applyTemplate` and `neighbourhood.create`. Returns the new language's address
+    /// and name. Loading it is the caller's: `install_language`, awaited or spawned.
+    pub async fn publish_templated(
+        &self,
+        source_language_hash: &str,
+        template_data: serde_json::Map<String, JsonValue>,
+        agent_context: &AgentContext,
+    ) -> Result<(String, String), LanguageError> {
+        let language_language_address = {
+            let sys = self.system_addresses.lock().await;
+            sys.language_language
+                .clone()
+                .ok_or_else(|| LanguageError::LoadError {
+                    address: source_language_hash.to_string(),
+                    message: "Language language not loaded - cannot apply template and publish"
+                        .to_string(),
+                })?
+        };
+        let input = self
+            .language_apply_template_on_source(source_language_hash, template_data)
+            .await?;
+        let name = input.meta.name.clone();
+
+        let saving = span("applyTemplate.saveBundle");
+        let (hash, _bundle_path) = self.save_language_bundle(&input.bundle, None)?;
+        drop(saving);
+
+        let content =
+            serde_json::to_value(&input).map_err(|e| LanguageError::SerializationError {
+                message: format!("Failed to serialize language input: {e}"),
+            })?;
+        let publishing = span("applyTemplate.publish");
+        self.expression_create(&language_language_address, content, agent_context)
+            .await?;
+        drop(publishing);
+
+        self.set_language_name(&hash, &name).await;
+        Ok((hash, name))
+    }
+
     /// Remove a language: unload runtime, remove Holochain app, delete files.
     /// Port of JS languageRemove method.
     pub async fn language_remove(&mut self, address: &str) -> Result<(), LanguageError> {

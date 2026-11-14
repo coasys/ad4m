@@ -15,6 +15,9 @@ import * as syncModule from "../src/sync.js";
 import { decryptLinkFromWire, encryptLinkForWire, generateRoomKey, wireLinkHash, type KeyRing } from "../src/encryption.js";
 import type { LinkExpression, PerspectiveDiff, WireLinkExpression } from "../src/types.js";
 import { isEncryptedLinkData } from "../src/types.js";
+import { ApiError } from "../src/api.js";
+import { linkHashKey } from "../keyring/keyring.js";
+import { toWireMembershipLink } from "../src/room.js";
 
 // ---------------------------------------------------------------------------
 // Mock adapters
@@ -80,9 +83,19 @@ let keyRing: KeyRing | null;
 /** The room key `setup()` gives the agent: every room is E2E, so a member holding its key is the normal state. */
 const TEST_KEY = generateRoomKey();
 
+/**
+ * `link` encrypted with `roomKey` at `version`, its link_hash keyed by `hashRoot` (K4: every
+ * link hash is keyed by room key version 1). Default: `roomKey` itself for version 1, else
+ * the version 1 key of the agent's ring.
+ */
+function enc(link: LinkExpression, roomKey: Uint8Array, version: number, hashRoot?: Uint8Array): WireLinkExpression {
+    const root = hashRoot ?? (version === 1 ? roomKey : keyRing?.get(1) ?? TEST_KEY);
+    return encryptLinkForWire(link, { roomKey, version, hashKey: linkHashKey(root) });
+}
+
 /** `link` as a member commits it: encrypted with the room key. */
 function wire(link: LinkExpression): WireLinkExpression {
-    return encryptLinkForWire(link, TEST_KEY, 1);
+    return enc(link, TEST_KEY, 1);
 }
 
 function setup(transport: MockTransport): void {
@@ -177,7 +190,7 @@ describe("sync: applyInboundWireDiff (the emitPerspectiveDiff trap)", () => {
         const rk = generateRoomKey();
         keyRing = new Map([[1, rk]]);
         const link = makeLink({ source: "secret-source" });
-        const wireLink = encryptLinkForWire(link, rk, 1);
+        const wireLink = enc(link, rk, 1);
 
         syncModule.applyInboundWireDiff({ additions: [wireLink], removals: [] }, 1, "rev-1");
 
@@ -192,7 +205,7 @@ describe("sync: applyInboundWireDiff (the emitPerspectiveDiff trap)", () => {
         keyRing = null; // a freshly joined member awaiting key grant
         const rk = generateRoomKey();
         const link = makeLink({ source: "encrypted-no-ring" });
-        const wireLink = encryptLinkForWire(link, rk, 1);
+        const wireLink = enc(link, rk, 1);
 
         store.setSequence(4);
         syncModule.applyInboundWireDiff({ additions: [wireLink], removals: [] }, 5, "rev-5");
@@ -210,7 +223,7 @@ describe("sync: applyInboundWireDiff (the emitPerspectiveDiff trap)", () => {
         const rk2 = generateRoomKey();
         keyRing = new Map([[1, rk1]]);
         const link = makeLink({ source: "wrong-version" });
-        const wireLink = encryptLinkForWire(link, rk2, 2); // encrypted with version 2, ring only has 1
+        const wireLink = enc(link, rk2, 2); // encrypted with version 2, ring only has 1
 
         store.setSequence(4);
         syncModule.applyInboundWireDiff({ additions: [wireLink], removals: [] }, 5, "rev-5");
@@ -234,7 +247,7 @@ describe("sync: applyInboundWireDiff (the emitPerspectiveDiff trap)", () => {
 
         store.setSequence(4);
         syncModule.applyInboundWireDiff(
-            { additions: [injected, encryptLinkForWire(member, rk, 1)], removals: [] }, 5, "rev-5",
+            { additions: [injected, enc(member, rk, 1)], removals: [] }, 5, "rev-5",
         );
 
         assert.deepEqual(store.allLinks().links, [member], "only the encrypted link is applied");
@@ -252,12 +265,12 @@ describe("sync: applyInboundWireDiff (the emitPerspectiveDiff trap)", () => {
         const link = makeLink({ source: "will-be-removed" });
 
         // Add with version 1
-        const wireAdd = encryptLinkForWire(link, rk1, 1);
+        const wireAdd = enc(link, rk1, 1);
         syncModule.applyInboundWireDiff({ additions: [wireAdd], removals: [] }, 1, "rev-1");
         assert.equal(store.allLinks().links.length, 1);
 
         // Remove with version 2 (after key rotation)
-        const wireRemove = encryptLinkForWire(link, rk2, 2);
+        const wireRemove = enc(link, rk2, 2);
         syncModule.applyInboundWireDiff({ additions: [], removals: [wireRemove] }, 2, "rev-2");
         assert.equal(store.allLinks().links.length, 0, "removal must match by plaintext identity, not by key version");
     });
@@ -410,7 +423,7 @@ describe("sync: catchUp / performSync", () => {
         keyRing = null;
         const rk = generateRoomKey();
         const link = makeLink({ source: "encrypted-retry" });
-        const wireLink = encryptLinkForWire(link, rk, 1);
+        const wireLink = enc(link, rk, 1);
 
         let refreshCallCount = 0;
         syncModule.initSync({
@@ -711,7 +724,7 @@ describe("sync: bootstrap", () => {
 
         const rk = generateRoomKey();
         const opens = wire(makeLink({ source: "opens" }));
-        const encLink = encryptLinkForWire(makeLink({ source: "secret" }), rk, 3);
+        const encLink = enc(makeLink({ source: "secret" }), rk, 3);
 
         transport.route(
             (url, method) => method === "GET" && url.includes("/render"),
@@ -832,8 +845,8 @@ describe("sync: no history is lost", () => {
                 return grew;
             },
         });
-        const wsLink = encryptLinkForWire(makeLink({ source: "pushed" }), roomKey, 1);
-        const syncedLink = encryptLinkForWire(makeLink({ source: "caught-up" }), roomKey, 1);
+        const wsLink = enc(makeLink({ source: "pushed" }), roomKey, 1);
+        const syncedLink = enc(makeLink({ source: "caught-up" }), roomKey, 1);
         transport.route(
             (url, method) => method === "GET" && url.includes("/sync?since=1"),
             () => jsonResponse(syncPage([{ additions: [syncedLink], removals: [], sequence: 2 }], 2)),
@@ -868,8 +881,8 @@ describe("sync: no history is lost", () => {
         setup(transport);
         const roomKey = generateRoomKey();
         keyRing = new Map([[1, roomKey]]);
-        const a = encryptLinkForWire(makeLink({ source: "a" }), roomKey, 1);
-        const b = encryptLinkForWire(makeLink({ source: "b" }), roomKey, 1);
+        const a = enc(makeLink({ source: "a" }), roomKey, 1);
+        const b = enc(makeLink({ source: "b" }), roomKey, 1);
         transport.route(
             (url, method) => method === "GET" && url.includes("/render"),
             () => jsonResponse(renderPage([a, b], 7)),
@@ -893,7 +906,7 @@ describe("sync: no history is lost", () => {
         setup(transport);
         keyRing = null;
         const roomKey = generateRoomKey();
-        const a = encryptLinkForWire(makeLink({ source: "a" }), roomKey, 1);
+        const a = enc(makeLink({ source: "a" }), roomKey, 1);
         transport.route(
             (url, method) => method === "GET" && url.includes("/render"),
             () => jsonResponse(renderPage([a], 1)),
@@ -921,8 +934,8 @@ describe("sync: no history is lost", () => {
         keyRing = new Map([[1, v1]]);
         const link = makeLink({ source: "short-lived" });
 
-        syncModule.applyInboundWireDiff({ additions: [encryptLinkForWire(link, v2, 2)], removals: [] }, 1, "rev-1");
-        syncModule.applyInboundWireDiff({ additions: [], removals: [encryptLinkForWire(link, v1, 1)] }, 2, "rev-2");
+        syncModule.applyInboundWireDiff({ additions: [enc(link, v2, 2)], removals: [] }, 1, "rev-1");
+        syncModule.applyInboundWireDiff({ additions: [], removals: [enc(link, v1, 1)] }, 2, "rev-2");
         keyRing = new Map([[1, v1], [2, v2]]);
         syncModule.retryHeld();
 
@@ -947,7 +960,7 @@ describe("sync: a link no key opens costs that link only", () => {
     /** `link` encrypted with `key`, its ciphertext altered so the key it names
      *  does not open it (an AES-GCM tag failure). */
     function unopenable(link: LinkExpression, key: Uint8Array, version: number) {
-        const wire = encryptLinkForWire(link, key, version);
+        const wire = enc(link, key, version);
         const data = wire.data as { ciphertext: string; nonce: string };
         const bytes = Buffer.from(data.ciphertext, "base64");
         bytes[0] ^= 0xff;
@@ -961,11 +974,11 @@ describe("sync: a link no key opens costs that link only", () => {
         const roomKey = generateRoomKey();
         // Held in this order under a missing key: valid, unopenable, valid.
         syncModule.applyInboundWireDiff(
-            { additions: [encryptLinkForWire(makeLink({ source: "a" }), roomKey, 1)], removals: [] }, 1, "rev-1");
+            { additions: [enc(makeLink({ source: "a" }), roomKey, 1)], removals: [] }, 1, "rev-1");
         syncModule.applyInboundWireDiff(
             { additions: [unopenable(makeLink({ source: "b" }), roomKey, 1)], removals: [] }, 2, "rev-2");
         syncModule.applyInboundWireDiff(
-            { additions: [encryptLinkForWire(makeLink({ source: "c" }), roomKey, 1)], removals: [] }, 3, "rev-3");
+            { additions: [enc(makeLink({ source: "c" }), roomKey, 1)], removals: [] }, 3, "rev-3");
         assert.equal(emittedDiffs.length, 0);
 
         keyRing = new Map([[1, roomKey]]);
@@ -989,9 +1002,9 @@ describe("sync: a link no key opens costs that link only", () => {
             (url, method) => method === "GET" && url.includes("/sync?since=0"),
             () => jsonResponse({
                 diffs: [
-                    { additions: [encryptLinkForWire(makeLink({ source: "a" }), roomKey, 1)], removals: [], sequence: 1 },
+                    { additions: [enc(makeLink({ source: "a" }), roomKey, 1)], removals: [], sequence: 1 },
                     { additions: [unopenable(makeLink({ source: "b" }), roomKey, 1)], removals: [], sequence: 2 },
-                    { additions: [encryptLinkForWire(makeLink({ source: "c" }), roomKey, 1)], removals: [], sequence: 3 },
+                    { additions: [enc(makeLink({ source: "c" }), roomKey, 1)], removals: [], sequence: 3 },
                 ],
                 revision: "rev-3",
                 sequence: 3,
@@ -1232,7 +1245,7 @@ describe("sync: a failed startup render is retried", () => {
 function roomRevision(links: LinkExpression[]): string {
     const acc = new Uint8Array(32);
     for (const link of links) {
-        const h = wireLinkHash(link);
+        const h = wireLinkHash(link, linkHashKey(keyRing?.get(1) ?? TEST_KEY));
         for (let i = 0; i < 32; i++) acc[i] ^= parseInt(h.slice(i * 2, i * 2 + 2), 16);
     }
     return [...acc].map((b) => b.toString(16).padStart(2, "0")).join("");
@@ -1311,7 +1324,7 @@ describe("sync: an incomplete mirror is not presented as the server's state", ()
         const otherKey = generateRoomKey();
         const waiting = makeLink({ source: "waiting" });
         store.putLink(room[0]);
-        syncModule.applyInboundWireDiff({ additions: [encryptLinkForWire(waiting, otherKey, 2)], removals: [] }, 1, "");
+        syncModule.applyInboundWireDiff({ additions: [enc(waiting, otherKey, 2)], removals: [] }, 1, "");
         store.setSequence(1);
         store.setRevision(roomRevision([room[0], waiting]));
 
@@ -1324,7 +1337,7 @@ describe("sync: an incomplete mirror is not presented as the server's state", ()
         const otherKey = generateRoomKey();
         store.putLink(room[0]);
         store.putLink(room[1]);
-        syncModule.applyInboundWireDiff({ additions: [], removals: [encryptLinkForWire(room[1], otherKey, 2)] }, 1, "");
+        syncModule.applyInboundWireDiff({ additions: [], removals: [enc(room[1], otherKey, 2)] }, 1, "");
         store.setSequence(1);
         store.setRevision(roomRevision([room[0]]));
 
@@ -1395,5 +1408,307 @@ describe("sync: an incomplete mirror is not presented as the server's state", ()
         assert.equal(store.getRenderProgress(), null);
         assert.equal(store.allLinks().links.length, 5);
         assert.equal(syncModule.render(), null, "still short of the room's revision: unknown");
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Membership links (protocol 2, K5): /membership, never /commit
+// ---------------------------------------------------------------------------
+
+const CREATOR = "did:scid:coasys:1:QmCreator";
+const UID = "3f2a-uid";
+const genesisConfig: RoomConfig = { ...config, creator: CREATOR, uid: UID };
+
+function membershipLink(source: string, predicate = "coasys://membership/member"): LinkExpression {
+    return {
+        author: "did:key:zMember",
+        timestamp: "2026-01-02T00:00:00.000Z",
+        data: { source, predicate, target: "literal:json:%7B%7D" },
+        proof: { signature: "ab", key: "did:key:zMember#zMember" },
+    };
+}
+
+/** The `membershipLinks` the executor gets, and the setup that wires it. */
+let handed: LinkExpression[][];
+
+function setupMembership(
+    transport: MockTransport,
+    opts: { getToken?: () => Promise<string>; roomConfig?: RoomConfig } = {},
+): void {
+    const roomConfig = opts.roomConfig ?? genesisConfig;
+    resetAdapters();
+    syncModule._resetRenderStateForTests();
+    initAdapters({ storage: new MockStorage(), transport, config: roomConfig });
+    store.initStore(simpleHash);
+    emittedDiffs = [];
+    syncStates = [];
+    handed = [];
+    keyRing = new Map([[1, TEST_KEY]]);
+    syncModule.initSync({
+        config: roomConfig,
+        getToken: opts.getToken ?? (async () => "test-token"),
+        emitDiff: (diff) => emittedDiffs.push(diff),
+        emitSyncState: (state) => syncStates.push(state),
+        getKeyRing: () => keyRing,
+        membershipLinks: async (links) => {
+            handed.push(links);
+            return links.map((l) => ({ hash: l.data.source, counted: true }));
+        },
+    });
+}
+
+function postsTo(transport: MockTransport, path: string): Array<{ body: any; url: string }> {
+    return transport.calls
+        .filter((c) => c.method === "POST" && c.url.endsWith(path))
+        .map((c) => ({ url: c.url, body: JSON.parse(c.body) }));
+}
+
+describe("sync: commit routes membership links to /membership (K5)", () => {
+    it("posts membership additions with the genesis, plain links to /commit", async () => {
+        const transport = new MockTransport();
+        setupMembership(transport);
+        new MockLinkServer(transport);
+        transport.route(
+            (url, method) => method === "POST" && url.endsWith("/membership"),
+            () => jsonResponse({ results: [{ hash: "h", counted: true }] }),
+        );
+        const member = membershipLink("did:scid:coasys:1:QmAlice");
+        const plain = makeLink({ source: "plain" });
+
+        await syncModule.commit({ additions: [member, plain], removals: [] });
+
+        const [post] = postsTo(transport, "/membership");
+        assert.deepEqual(post.body.genesis, { creator: CREATOR, salt: UID });
+        assert.equal(post.body.links.length, 1);
+        assert.equal(post.body.links[0].data.predicate, "coasys://membership/member");
+        assert.equal(post.body.links[0].proof.key, "did:key:zMember#zMember");
+        const [commit] = postsTo(transport, "/commit");
+        assert.equal(commit.body.additions.length, 1, "only the plain link is committed");
+        assert.deepEqual(store.allLinks().links.map((l) => l.data.source), ["plain"], "membership is not in the link store");
+    });
+
+    it("needs no room key when the diff holds only membership links", async () => {
+        const transport = new MockTransport();
+        setupMembership(transport);
+        keyRing = null;
+        transport.route(
+            (url, method) => method === "POST" && url.endsWith("/membership"),
+            () => jsonResponse({ results: [{ hash: "h", counted: true }] }),
+        );
+
+        await syncModule.commit({ additions: [membershipLink("did:scid:coasys:1:QmAlice")], removals: [] });
+
+        assert.equal(postsTo(transport, "/membership").length, 1);
+        assert.equal(postsTo(transport, "/commit").length, 0);
+    });
+
+    it("posts without a token, with the genesis, while the room does not exist (auth 404)", async () => {
+        const transport = new MockTransport();
+        const headers: Array<Record<string, string>> = [];
+        const inner = transport.fetch.bind(transport);
+        transport.fetch = async (url, method, h, body) => {
+            headers.push(h);
+            return inner(url, method, h, body);
+        };
+        setupMembership(transport, {
+            getToken: async () => {
+                throw new ApiError(404, "{\"error\":\"room not found\"}");
+            },
+        });
+        transport.route(
+            (url, method) => method === "POST" && url.endsWith("/membership"),
+            () => jsonResponse({ results: [{ hash: "h", counted: true }] }),
+        );
+
+        await syncModule.commit({ additions: [membershipLink("did:scid:coasys:1:QmCreator")], removals: [] });
+
+        const [post] = postsTo(transport, "/membership");
+        assert.deepEqual(post.body.genesis, { creator: CREATOR, salt: UID });
+        assert.equal(headers[0].Authorization ?? headers[0].authorization, undefined, "no token");
+    });
+
+    it("throws while the room does not exist and the language knows no genesis", async () => {
+        const transport = new MockTransport();
+        setupMembership(transport, {
+            roomConfig: config,
+            getToken: async () => {
+                throw new ApiError(404, "{\"error\":\"room not found\"}");
+            },
+        });
+        await assert.rejects(
+            () => syncModule.commit({ additions: [membershipLink("did:scid:coasys:1:QmAlice")], removals: [] }),
+            /genesis/,
+        );
+        assert.equal(postsTo(transport, "/membership").length, 0);
+    });
+
+    it("logs a refusal (403 with results) and does not throw: a resend gets the same answer", async () => {
+        const transport = new MockTransport();
+        setupMembership(transport);
+        transport.route(
+            (url, method) => method === "POST" && url.endsWith("/membership"),
+            () => ({
+                status: 403,
+                headers: {},
+                body: JSON.stringify({ reason: "notAdmitted", results: [{ hash: "h", counted: false, reason: "notAdmitted" }] }),
+            }),
+        );
+        const errors = mock.method(console, "error", () => undefined);
+        try {
+            await syncModule.commit({ additions: [membershipLink("did:scid:coasys:1:QmAlice")], removals: [] });
+            assert.ok(errors.mock.calls.some((c) => String(c.arguments.join(" ")).includes("notAdmitted")));
+        } finally {
+            errors.mock.restore();
+        }
+    });
+
+    it("throws on a server failure, so the executor retries the diff", async () => {
+        const transport = new MockTransport();
+        setupMembership(transport);
+        transport.route(
+            (url, method) => method === "POST" && url.endsWith("/membership"),
+            () => ({ status: 503, headers: {}, body: "{\"error\":\"store down\"}" }),
+        );
+        await assert.rejects(
+            () => syncModule.commit({ additions: [membershipLink("did:scid:coasys:1:QmAlice")], removals: [] }),
+            (e: unknown) => e instanceof ApiError && e.status === 503,
+        );
+    });
+
+    it("re-authenticates once on 401", async () => {
+        const transport = new MockTransport();
+        let tokens = 0;
+        setupMembership(transport, { getToken: async () => `token-${++tokens}` });
+        let answered = 0;
+        transport.route(
+            (url, method) => method === "POST" && url.endsWith("/membership"),
+            () => (answered++ === 0
+                ? { status: 401, headers: {}, body: "{\"error\":\"session revoked\"}" }
+                : jsonResponse({ results: [{ hash: "h", counted: true }] })),
+        );
+        let invalidated = 0;
+        syncModule.initSync({
+            config: genesisConfig,
+            getToken: async () => `token-${++tokens}`,
+            invalidateToken: () => { invalidated++; },
+            emitDiff: () => undefined,
+            getKeyRing: () => keyRing,
+            membershipLinks: async () => [],
+        });
+
+        await syncModule.commit({ additions: [membershipLink("did:scid:coasys:1:QmAlice")], removals: [] });
+        assert.equal(invalidated, 1);
+        assert.equal(postsTo(transport, "/membership").length, 2);
+    });
+
+    it("drops membership removals: a membership link is ended by another link, never removed", async () => {
+        const transport = new MockTransport();
+        setupMembership(transport);
+        new MockLinkServer(transport);
+        const logs = mock.method(console, "warn", () => undefined);
+        try {
+            await syncModule.commit({ additions: [], removals: [membershipLink("did:scid:coasys:1:QmAlice")] });
+        } finally {
+            logs.mock.restore();
+        }
+        assert.equal(postsTo(transport, "/membership").length, 0);
+        assert.equal(postsTo(transport, "/commit").length, 0, "an empty diff is not posted");
+        assert.ok(logs.mock.calls.length >= 1, "the drop is logged");
+    });
+});
+
+describe("sync: membership catch-up hands the room's membership links to the executor", () => {
+    function membershipServer(transport: MockTransport, links: LinkExpression[], roomSeq: number): void {
+        transport.route(
+            (url, method) => method === "GET" && url.includes("/membership?"),
+            (url) => {
+                const params = new URL(url).searchParams;
+                const since = Number(params.get("since"));
+                const limit = Number(params.get("limit"));
+                // Seq i + 1 for link i, as the room numbers them.
+                const page = links.map((l, i) => ({ l, seq: i + 1 })).filter((e) => e.seq > since).slice(0, limit);
+                const seq = page.length > 0 ? page[page.length - 1].seq : roomSeq;
+                return jsonResponse({ links: page.map((e) => toWireMembershipLink(e.l)), seq });
+            },
+        );
+    }
+
+    it("pages from the stored cursor and stores the room's seq after the executor took each page", async () => {
+        const transport = new MockTransport();
+        setupMembership(transport);
+        const links = [1, 2, 3, 4, 5].map((i) => membershipLink(`did:scid:coasys:1:Qm${i}`));
+        membershipServer(transport, links, 9);
+        syncModule._setPageLimitsForTests(undefined, undefined, 2);
+        try {
+            await syncModule.catchUpMembership();
+        } finally {
+            syncModule._setPageLimitsForTests();
+        }
+
+        assert.deepEqual(handed.map((page) => page.map((l) => l.data.source)), [
+            ["did:scid:coasys:1:Qm1", "did:scid:coasys:1:Qm2"],
+            ["did:scid:coasys:1:Qm3", "did:scid:coasys:1:Qm4"],
+            ["did:scid:coasys:1:Qm5"],
+        ]);
+        assert.equal(store.getMembershipSeq(), 5);
+        assert.deepEqual(handed[0][0].proof, { key: "did:key:zMember#zMember", signature: "ab" });
+
+        // The next catch-up starts at the cursor: nothing new, nothing handed.
+        handed = [];
+        await syncModule.catchUpMembership();
+        assert.deepEqual(handed, []);
+        assert.equal(store.getMembershipSeq(), 9, "an empty page moves the cursor to the room's seq");
+    });
+
+    it("keeps the cursor when the executor fails to take a page", async () => {
+        const transport = new MockTransport();
+        setupMembership(transport);
+        membershipServer(transport, [membershipLink("did:scid:coasys:1:Qm1")], 1);
+        syncModule.initSync({
+            config: genesisConfig,
+            getToken: async () => "test-token",
+            emitDiff: () => undefined,
+            getKeyRing: () => keyRing,
+            membershipLinks: async () => {
+                throw new Error("executor busy");
+            },
+        });
+        await assert.rejects(() => syncModule.catchUpMembership(), /executor busy/);
+        assert.equal(store.getMembershipSeq(), 0);
+    });
+
+    it("catch-up reads membership before the link log, and a membership failure does not stop it", async () => {
+        const transport = new MockTransport();
+        setupMembership(transport);
+        transport.route(
+            (url, method) => method === "GET" && url.includes("/membership?"),
+            () => ({ status: 403, headers: {}, body: "{\"error\":\"not admitted to this room\"}" }),
+        );
+        transport.route(
+            (url, method) => method === "GET" && url.includes("/sync"),
+            () => jsonResponse(syncPage([], 0)),
+        );
+        const errors = mock.method(console, "error", () => undefined);
+        try {
+            await syncModule.catchUp();
+        } finally {
+            errors.mock.restore();
+        }
+        const order = transport.calls.map((c) => (c.url.includes("/membership") ? "membership" : c.url.includes("/sync") ? "sync" : c.url));
+        assert.deepEqual(order, ["membership", "sync"]);
+        assert.deepEqual(syncStates.slice(-1), ["Synced"]);
+    });
+
+    it("a pushed membership message reaches the executor, and catch-up moves the cursor", async () => {
+        const transport = new MockTransport();
+        setupMembership(transport);
+        const links = [membershipLink("did:scid:coasys:1:Qm1"), membershipLink("did:scid:coasys:1:Qm2")];
+        membershipServer(transport, links, 2);
+
+        await syncModule.onMembershipPush({ type: "membership", links: [toWireMembershipLink(links[1])], seq: 2 });
+
+        assert.deepEqual(handed[0].map((l) => l.data.source), ["did:scid:coasys:1:Qm2"], "the push first");
+        assert.deepEqual(handed[1].map((l) => l.data.source), ["did:scid:coasys:1:Qm1", "did:scid:coasys:1:Qm2"], "then the log from the cursor");
+        assert.equal(store.getMembershipSeq(), 2);
     });
 });

@@ -270,20 +270,44 @@ export class WsManager {
   }
 
   /**
-   * Closes every socket a DID has open in a room (code 4005). Called when the
-   * DID leaves the ACL: revoking its sessions stops HTTP at once, but an open
-   * socket would otherwise keep receiving the room's diffs until it reconnects.
+   * Closes every socket a key has open in a room (code 4005). Called when the key's person is
+   * removed or its log revokes it: ending its sessions stops HTTP at once, but an open socket
+   * would otherwise keep receiving the room's diffs until it reconnects.
    */
-  disconnectDid(roomId: string, did: string): void {
+  disconnectDid(roomId: string, did: string, reason = "removed from room"): void {
     const conns = this.rooms.get(roomId)?.get(did);
     if (!conns) return;
     for (const conn of [...conns]) {
       try {
-        conn.socket.close(4005, "removed from room");
+        conn.socket.close(4005, reason);
       } catch {
         // already closing
       }
     }
+  }
+
+  /** Closes every socket open in a room, with `code` (4006 when the operator suspends it). */
+  closeRoom(roomId: string, code: number, reason: string): void {
+    for (const conns of this.rooms.get(roomId)?.values() ?? []) {
+      for (const conn of [...conns]) {
+        try {
+          conn.socket.close(code, reason);
+        } catch {
+          // already closing
+        }
+      }
+    }
+  }
+
+  /** Every (room, key) with at least one open socket. */
+  connectedKeys(): Array<{ roomId: string; did: string }> {
+    const keys: Array<{ roomId: string; did: string }> = [];
+    for (const [roomId, room] of this.rooms) {
+      for (const [did, conns] of room) {
+        if (conns.size > 0) keys.push({ roomId, did });
+      }
+    }
+    return keys;
   }
 
   hasConnections(roomId: string): boolean {
