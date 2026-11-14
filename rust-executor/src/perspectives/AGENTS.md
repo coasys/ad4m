@@ -35,6 +35,13 @@ or writes the graph. Split plan: spec items 3, 7, 8.
   typed event (`Topic::LinkAdded/LinkRemoved/LinkUpdated`, one event to all owners via
   `publish_to_owners`, the main agent if unowned) → commit to
   link language if `LinkStatus::Shared`. Use the same sequence; a helper `apply_diff` is planned.
+  The persist step (`persist_link_diff`) writes the whole diff in one store transaction
+  (`SparqlStore::apply_diff`); a write the store refuses fails the call with nothing written,
+  and the later steps do not run. A peer's diff goes through `ingest::persist_remote_diff`
+  instead, which writes link by link and publishes only the links it wrote.
+- `SparqlStore::reload` (the boot rebuild, `sync_existing_links_to_sparql`) clears and rewrites
+  the store in one transaction under the writer lock: readers never see it empty or half
+  written, and a failed reload leaves the old contents.
 - SHACL triples are the source of truth for shapes. `shape_cache` on the instance is
   invalidated by `add_sdna_inner`. `get_shape(class)` → `Arc<ModelShape>`.
 - `get_subject_data` currently routes through Prolog and, while Prolog is disabled, returns only
