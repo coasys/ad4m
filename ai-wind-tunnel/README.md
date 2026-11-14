@@ -24,7 +24,7 @@ The code lives in `tests/js/helpers/ai-wind-tunnel/`; its unit tests in
 | | llm | completion | embeddings | stt | tts |
 |---|---|---|---|---|---|
 | **ollama** | qwen3.5 0.8b/2b/4b | qwen3.5:0.8b | nomic-embed-text | unsupported | unsupported |
-| **llama-server** (llama.cpp) | Qwen3.5 0.8B Q8_0, 2B/4B Q4_K_M; Qwen3.8 27B UD-Q4_K_M at a 64k context | 0.8B | nomic-embed-text v1.5 Q8_0 | Qwen3-ASR 0.6B/1.7B Q8_0, Voxtral Mini 3B Q4_K_M (through a front) | unsupported (no speech route in b11669) |
+| **llama-server** (llama.cpp) | Qwen3.5 0.8B Q8_0, 2B/4B Q4_K_M; Qwen3.8 27B UD-Q4_K_M at a 64k context, one slot, MTP, reasoning budget 2048 | 0.8B | nomic-embed-text v1.5 Q8_0 | Qwen3-ASR 0.6B/1.7B Q8_0, Voxtral Mini 3B Q4_K_M (through a front) | unsupported (no speech route in b11669) |
 | **vllm** | Qwen/Qwen3.5-0.8B | same | | | unsupported |
 | **whisper-server** (whisper.cpp) | unsupported | unsupported | unsupported | whisper base.en, small (q5_1) | unsupported |
 | **speaches** | unsupported | unsupported | unsupported | faster-whisper base.en, small | Kokoro 82M |
@@ -187,8 +187,13 @@ executor endpoint kind or a sidecar would cost.
 Qwen3.5 thinks by default. The cells turn it off where it can be turned off, because an
 app's `ai.prompt` has no way to (it sends no `max_tokens` and no thinking switch):
 
-- llama-server is started with `--reasoning off` for LLMs. Without it, `ai.prompt` on
-  Qwen3.5 thinks until the 8k context is spent and returns an empty answer.
+- llama-server is started with `--reasoning off` for LLMs, unless the cell's `serverFlags`
+  set reasoning themselves. Without a cap, `ai.prompt` on Qwen3.5 thinks until the context
+  is spent and returns an empty answer. The Qwen3.8 27B cell sets a budget instead
+  (`--reasoning-budget 2048` and one message), with MTP (`--spec-type draft-mtp`, draft
+  length 4) and one slot (`-np 1`): at 64k the draft's recurrent-state cache does not fit
+  in 24 GB beside the model when the server keeps the default 4 slots. The message is one
+  flag value, not several words.
 - Ollama requests send `reasoning_effort: "none"`: the executor passes `/v1` chat through to
   Ollama's OpenAI route, where the reasoning otherwise fills `max_tokens` and no content
   comes. Ollama's `/v1/completions` applies the chat template and thinks whatever the

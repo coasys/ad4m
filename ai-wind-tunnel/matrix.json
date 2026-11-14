@@ -30,7 +30,7 @@
           { "modelId": "qwen3.5-0.8b-q8_0" },
           { "modelId": "qwen3.5-2b-q4_k_m" },
           { "modelId": "qwen3.5-4b-q4_k_m" },
-          { "modelId": "qwen3.8-27b-ud-q4_k_m", "context": 65536 }
+          { "modelId": "qwen3.8-27b-ud-q4_k_m", "context": 65536, "serverFlags": ["-c", "65536", "-np", "1", "-ngl", "999", "--jinja", "--spec-type", "draft-mtp", "--spec-draft-n-max", "4", "--reasoning-budget", "2048", "--reasoning-budget-message", "Thinking budget reached. Now give the final answer."] }
         ],
         "completion": [
           { "modelId": "qwen3.5-0.8b-q8_0" }

@@ -1147,6 +1147,48 @@ mod tests {
         assert_eq!(default_flags(Service::Llm), vec!["--reasoning", "off"]);
     }
 
+    /// A reasoning-budget message with spaces is one server flag, from the recommendation
+    /// JSON through the plan. Joining and splitting on spaces would truncate it.
+    #[test]
+    fn a_spaced_reasoning_budget_message_stays_one_server_flag() {
+        let message = "Thinking budget reached. Now give the final answer.";
+        let mut budgeted = recommendation("big", "llama-server", true);
+        budgeted["serverFlags"] = json!([
+            "-c",
+            "65536",
+            "-np",
+            "1",
+            "--reasoning-budget",
+            "2048",
+            "--reasoning-budget-message",
+            message
+        ]);
+        let mut recommendations = full();
+        recommendations["gpu-12gb"]["llm"] = budgeted;
+        let data = data(recommendations);
+        let plan = plan(&data, &nvidia_12(&data, 32), &nothing_installed);
+        let carried = plan
+            .models
+            .iter()
+            .find(|m| m.service == Service::Llm)
+            .unwrap();
+        assert_eq!(
+            carried
+                .server_flags
+                .iter()
+                .filter(|f| f.as_str() == message)
+                .count(),
+            1
+        );
+        let at = carried
+            .server_flags
+            .iter()
+            .position(|f| f == "--reasoning-budget-message")
+            .unwrap();
+        assert_eq!(carried.server_flags[at + 1], message);
+        assert!(!carried.server_flags[at + 1].contains('"'));
+    }
+
     /// The embedded data on the smoke-test device: a Strix Halo APU, 128 GB, Vulkan. The
     /// wind tunnel measured this class: Qwen3.5 4B on Vulkan, nomic (measured on ROCm, here
     /// on the chat model's Vulkan llama-server), Parakeet v3 on nemo-speech's Vulkan build
@@ -1280,8 +1322,9 @@ mod tests {
     }
 
     /// An RTX 3090 (24 GB, CUDA) is nvidia-24gb. The wind tunnel measured Qwen3.8 27B
-    /// there, at a 64k context, on llama-server's CUDA build; nomic rides the same server.
-    /// No STT cell passed, so transcription is the manifest default, not a measured pick.
+    /// there, at a 64k context, one slot, MTP and a 2048-token reasoning budget, on
+    /// llama-server's CUDA build; nomic rides the same server. No STT cell passed, so
+    /// transcription is the manifest default, not a measured pick.
     #[test]
     fn the_embedded_data_plans_qwen3_8_27b_on_nvidia_24gb() {
         let data = crate::ai_service::local::data::embedded().unwrap();
@@ -1302,9 +1345,28 @@ mod tests {
         assert_eq!(llm.model_id, "qwen3.8-27b-ud-q4_k_m");
         assert_eq!(llm.basis, Basis::Measured);
         assert_eq!(llm.from_class, "nvidia-24gb");
+        // The message has spaces. Joining the flags and comparing the string would hide a
+        // split; the budget message has to be one element.
+        let message = "Thinking budget reached. Now give the final answer.";
         assert_eq!(
-            llm.server_flags.join(" "),
-            "-c 65536 -ngl 999 --reasoning off"
+            llm.server_flags,
+            vec![
+                "-c",
+                "65536",
+                "-np",
+                "1",
+                "-ngl",
+                "999",
+                "--jinja",
+                "--spec-type",
+                "draft-mtp",
+                "--spec-draft-n-max",
+                "4",
+                "--reasoning-budget",
+                "2048",
+                "--reasoning-budget-message",
+                message,
+            ]
         );
         let embed = plan
             .models

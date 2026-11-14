@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-11-13T14:07:41.291Z",
+  "generatedAt": "2026-11-13T19:05:59.213Z",
   "rules": {
     "llm": {
       "floor": [
@@ -357,27 +357,35 @@
         "serverFlags": [
           "-c",
           "65536",
+          "-np",
+          "1",
           "-ngl",
           "999",
-          "--reasoning",
-          "off"
+          "--jinja",
+          "--spec-type",
+          "draft-mtp",
+          "--spec-draft-n-max",
+          "4",
+          "--reasoning-budget",
+          "2048",
+          "--reasoning-budget-message",
+          "Thinking budget reached. Now give the final answer."
         ],
         "metrics": {
-          "ttftMs": 333.5,
-          "decodeTps": 42.906,
-          "prefillTps": 1027.2,
-          "latencyMs": 375.3,
-          "throughputTpsC4": 87.137,
-          "firstRequestMs": 370,
-          "peakRssBytes": 9402601472,
-          "peakGpuBytes": 20984102912,
-          "executorOverheadMs": 29.8
+          "ttftMs": 542.4,
+          "decodeTps": 64.258,
+          "prefillTps": 825.2,
+          "latencyMs": 433.3,
+          "firstRequestMs": 379,
+          "peakRssBytes": 9274994688,
+          "peakGpuBytes": 21896364032,
+          "executorOverheadMs": -367.1
         },
         "evidence": [
-          "ai-wind-tunnel/evidence/nvidia-24gb/2026-11-13-b6c87a0d.json"
+          "ai-wind-tunnel/evidence/nvidia-24gb/2026-11-13-b6c87a0d-qwen38-27b-mtp.json"
         ],
-        "candidates": 7,
-        "overFloor": 7
+        "candidates": 8,
+        "overFloor": 8
       },
       "completion": {
         "provider": "llama-server",
