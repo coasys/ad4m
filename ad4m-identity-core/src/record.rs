@@ -218,6 +218,11 @@ pub struct DeviceEntry {
     pub address: Option<String>,
     pub runs_executor: bool,
     pub holds_master: HoldsMaster,
+    /// With `holdsMaster: true`: the index *n* of the master key the device holds, written by
+    /// the device when its vault keeps that key. Absent (an older entry, or a `true` written
+    /// without it) is unknown: no proof that the device holds the current master key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub master_index: Option<u32>,
     /// For an executor: who operates it, as a bare did:scid, when known.
     #[serde(default)]
     pub operator: Option<String>,
@@ -571,25 +576,35 @@ fn attestation_by(
     }
 }
 
-/// The envelope's attestation, if any, checked against the master it names, current or
-/// replaced: what a reader refuses outright is a recovery key no master of the identity ever
-/// attested. Whether it still counts is [`recovery_of`].
-fn check_attested_by_some_master(
+/// The envelope's attestation, if any, checked against the master it names, which must have
+/// been the master in force at `seq` (the seq the store receipted the write against), as the
+/// envelope's writer must: an honest store took the write only with the then-current master's
+/// attestation, so a reader trusting the receipt alone refuses what that store would have. A
+/// record receipted before a rotation still opens after it; whether its recovery key still
+/// counts is [`recovery_of`].
+fn check_attested_by_master_at(
     sealed: &SealedRecord,
     chain: &KelChain,
+    seq: u64,
 ) -> Result<(), RecordError> {
     let (Some(key), Some(attestation)) = (&sealed.recovery_key, &sealed.recovery_attestation)
     else {
         return Ok(());
     };
-    let master = chain
-        .state()
+    let state = chain.state();
+    let master = state
         .masters
         .iter()
         .find(|m| m.id == attestation.key_id)
         .ok_or_else(|| {
             RecordError::Attestation(format!("{} is not a master key", attestation.key_id))
         })?;
+    if !state.key_valid_at(&attestation.key_id, seq) {
+        return Err(RecordError::Attestation(format!(
+            "{} was not the master key at seq {seq}, when the store took this record",
+            attestation.key_id
+        )));
+    }
     attestation_by(key, attestation, chain.id(), &master.sign)
 }
 
@@ -788,7 +803,7 @@ fn verify_stored(
     stores: &[Multikey],
 ) -> Result<(), RecordError> {
     verify_receipt(sealed, receipt, chain, stores)?;
-    check_attested_by_some_master(sealed, chain)
+    check_attested_by_master_at(sealed, chain, receipt.seq)
 }
 
 /// Opens `sealed` of the identity whose log is `chain` through its `wrapped[entry]` (a key id,

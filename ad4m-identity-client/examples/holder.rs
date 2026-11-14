@@ -5,7 +5,7 @@
 //!
 //! ```text
 //! {"cmd":"connect","url":"http://127.0.0.1:12000","token":""}  -> {"ok":true}
-//! {"cmd":"create"}                                              -> {"did","scid","seq"}
+//! {"cmd":"create","name":"Home","kind":"desktop-app"}           -> {"did","scid","seq","words","record"}
 //! {"cmd":"open","did":"did:scid:…","store":"http://…"}           -> {"link","offerString","offerId"}
 //! {"cmd":"scan","did":"…","store":"http://…","device":"coasys:device:1:…"} -> {"offerId"}
 //! {"cmd":"waitClaim"}                                -> {"matchCode","deviceKey","hint","canKeepMaster"}
@@ -19,6 +19,13 @@
 //! {"cmd":"postRequest","body":{"kind":"send-master"}}           -> {"id"}
 //! {"cmd":"requests"}                                            -> [DeviceRequest]
 //! {"cmd":"answer","did":"did:scid:…","id":"…"}                   -> {"answered","record"}
+//! {"cmd":"rotate","did":"did:scid:…","keyIds":[]}   -> {"index","seq","tries","revoked","pushes","record","kept"}
+//! {"cmd":"refreshMaster","did":"did:scid:…"}         -> {"refreshed","index"?,"id"?,"record"?}
+//! {"cmd":"removeMaster","did":"did:scid:…"}          -> {"record"}
+//! {"cmd":"restore","words":"…","name":"Laptop","kind":"desktop-app","lockOut":["d1"]}
+//!        -> {"did","devices","index","seq","tries","revoked","keyId","pushes","record"}
+//!           (an enrolment that failed after the rotation: {…,"enrolled":{"error"}} instead of
+//!           keyId, pushes and record)
 //! ```
 //!
 //! `scan` is the holder scanning a device string: a bound offer whose ticket goes into the
@@ -30,6 +37,11 @@
 //! connects to the device's executor as its custody service. `record` and `master`/`record`
 //! fields answer a record write's version, or `{"error"}`.
 //!
+//! `create` lists this device in the record as `name` (default `This computer`) of `kind`
+//! (default `desktop-app`), holding master #0. It answers the 12 words too, so a test can restore from them on another executor;
+//! `rotate` rotates with the words this holder made the identity with. `restore` is a new
+//! device's holder: without `lockOut` it locks out the devices ticked by default.
+//!
 //! Build: `cargo build -p ad4m-identity-client --example holder --features ws,test-vault`.
 
 use std::collections::HashMap;
@@ -38,9 +50,13 @@ use std::io::{BufRead, Write};
 use ad4m_client::ws_rpc::WsRpcClient;
 use ad4m_identity_client::flows::create::{CreateFlow, CreateScreen};
 use ad4m_identity_client::flows::link::{Claimed, LinkFlow};
-use ad4m_identity_client::flows::master::{send_master, take_master};
+use ad4m_identity_client::flows::master::{
+    refresh_master, remove_master, send_master, take_master, Refreshed,
+};
 use ad4m_identity_client::flows::requests::{answer, Answered};
+use ad4m_identity_client::flows::restore::RestoreFlow;
 use ad4m_identity_client::flows::revoke::revoke;
+use ad4m_identity_client::flows::rotate::rotate;
 use ad4m_identity_client::record::{self, Change};
 use ad4m_identity_client::{ClientError, MemoryVault, OsRandom, SystemClock, ViaExecutor};
 use ad4m_identity_core::link::{DeviceString, OfferKind};
@@ -80,6 +96,7 @@ fn device_entry(
         address: None,
         runs_executor: true,
         holds_master: HoldsMaster::No,
+        master_index: None,
         operator: None,
     })
 }
@@ -92,14 +109,50 @@ fn written(record: &Result<u64, ClientError>) -> Value {
     }
 }
 
+/// A step's outcome as JSON: `true`, or `{"error"}`.
+fn done(step: &Result<(), ClientError>) -> Value {
+    match step {
+        Ok(()) => json!(true),
+        Err(e) => json!({ "error": e.to_string() }),
+    }
+}
+
 /// The master #0 secret of each identity this holder made, base58btc, from the words: what
 /// `sendMaster` answers so a test can compare what the device takes. The flows never see it.
 type Masters = HashMap<String, String>;
+
+/// The words of each identity this holder made, for `rotate`.
+type Phrases = HashMap<String, String>;
+
+/// The words this holder made `did` with.
+fn words_of(phrases: &Phrases, did: &str) -> Result<words::Words, String> {
+    let phrase = phrases
+        .get(did)
+        .ok_or_else(|| format!("this holder did not make {did}"))?;
+    words::parse(phrase).map_err(|e| e.to_string())
+}
+
+/// The master-key pushes of a rotation as JSON: the message id, or `{"error"}`, by key id.
+fn pushes(pushes: &[(String, Result<String, ClientError>)]) -> Value {
+    pushes
+        .iter()
+        .map(|(key_id, pushed)| {
+            let value = match pushed {
+                Ok(id) => json!(id),
+                Err(e) => json!({ "error": e.to_string() }),
+            };
+            (key_id.clone(), value)
+        })
+        .collect::<serde_json::Map<_, _>>()
+        .into()
+}
 
 async fn create(
     executor: &ViaExecutor<WsRpcClient>,
     vault: &MemoryVault,
     masters: &mut Masters,
+    phrases: &mut Phrases,
+    this: DeviceEntry,
 ) -> Result<Value, String> {
     let (mut flow, screen) = CreateFlow::start(&RANDOM);
     let CreateScreen::ShowWords(words) = screen else {
@@ -116,14 +169,22 @@ async fn create(
     flow.confirm([&words[positions[0] - 1], &words[positions[1] - 1]])
         .map_err(|e| e.to_string())?;
     let created = flow
-        .finish(executor, vault)
+        .finish(executor, vault, this, &SystemClock, &OsRandom)
         .await
         .map_err(|e| e.to_string())?;
     masters.insert(
         created.did.clone(),
         bs58::encode(master.to_bytes()).into_string(),
     );
-    Ok(json!({ "did": created.did, "scid": created.scid, "seq": created.head.seq }))
+    let phrase = words.join(" ");
+    phrases.insert(created.did.clone(), phrase.clone());
+    Ok(json!({
+        "did": created.did,
+        "scid": created.scid,
+        "seq": created.head.seq,
+        "words": phrase,
+        "record": created.record.as_ref().map(written),
+    }))
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -168,6 +229,7 @@ async fn main() {
     let mut link: Option<(LinkFlow<'_, WsRpcClient>, DeviceKind)> = None;
     let mut claimed: Option<Claimed> = None;
     let mut masters = Masters::new();
+    let mut phrases = Phrases::new();
 
     for line in lines {
         let Ok(line) = line else { return };
@@ -179,7 +241,124 @@ async fn main() {
             }
         };
         let answer: Result<Value, String> = match command["cmd"].as_str() {
-            Some("create") => create(&executor, &vault, &mut masters).await,
+            Some("create") => {
+                match device_entry(&command, Some("This computer"), DeviceKind::DesktopApp) {
+                    Ok(this) => create(&executor, &vault, &mut masters, &mut phrases, this).await,
+                    Err(e) => Err(e),
+                }
+            }
+            Some("rotate") => {
+                async {
+                    let did = field(&command, "did")?;
+                    let ids: Vec<String> = match command.get("keyIds") {
+                        Some(ids) => serde_json::from_value(ids.clone())
+                            .map_err(|e| format!("keyIds: {e}"))?,
+                        None => Vec::new(),
+                    };
+                    let words = words_of(&phrases, did)?;
+                    let rotated = rotate(&executor, &vault, did, &words, &ids, &CLOCK, &RANDOM)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    Ok(json!({
+                        "index": rotated.index,
+                        "seq": rotated.head.seq,
+                        "tries": rotated.tries,
+                        "revoked": rotated.revoked,
+                        "pushes": pushes(&rotated.pushes),
+                        "record": written(&rotated.record),
+                        "kept": written(&rotated.kept.map(u64::from)),
+                    }))
+                }
+                .await
+            }
+            Some("refreshMaster") => {
+                async {
+                    let did = field(&command, "did")?;
+                    match refresh_master(&executor, &vault, did, &CLOCK, &RANDOM)
+                        .await
+                        .map_err(|e| e.to_string())?
+                    {
+                        Refreshed::Current => Ok(json!({ "refreshed": "current" })),
+                        Refreshed::Promoted { index, record } => Ok(json!({
+                            "refreshed": "promoted",
+                            "index": index,
+                            "record": written(&record),
+                        })),
+                        Refreshed::Unknown => Ok(json!({ "refreshed": "unknown" })),
+                        Refreshed::Taken(taken) => Ok(json!({
+                            "refreshed": "taken",
+                            "index": taken.index,
+                            "record": written(&taken.record),
+                        })),
+                        Refreshed::Asked(id) => Ok(json!({ "refreshed": "asked", "id": id })),
+                    }
+                }
+                .await
+            }
+            Some("removeMaster") => {
+                async {
+                    let did = field(&command, "did")?;
+                    let version = remove_master(&executor, &vault, did, &RANDOM)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    Ok(json!({ "record": version }))
+                }
+                .await
+            }
+            Some("restore") => {
+                async {
+                    let typed = field(&command, "words")?;
+                    let this = device_entry(&command, Some("restored"), DeviceKind::DesktopApp)?;
+                    let mut flow = RestoreFlow::start(&executor, &vault, typed, &CLOCK, &RANDOM)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    let did = flow.did().to_string();
+                    let devices: Vec<Value> = flow
+                        .devices()
+                        .iter()
+                        .map(|d| {
+                            json!({
+                                "keyId": d.key_id,
+                                "name": d.name,
+                                "kind": d.kind,
+                                "lockOut": d.lock_out,
+                            })
+                        })
+                        .collect();
+                    let lock_out: Vec<String> = match command.get("lockOut") {
+                        Some(ids) => serde_json::from_value(ids.clone())
+                            .map_err(|e| format!("lockOut: {e}"))?,
+                        None => flow
+                            .devices()
+                            .iter()
+                            .filter(|d| d.lock_out)
+                            .map(|d| d.key_id.clone())
+                            .collect(),
+                    };
+                    let restored = flow
+                        .finish(&lock_out, this)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    let mut answer = json!({
+                        "did": did,
+                        "devices": devices,
+                        "index": restored.index,
+                        "seq": restored.head.seq,
+                        "tries": restored.tries,
+                        "revoked": restored.revoked,
+                    });
+                    match &restored.enrolled {
+                        Ok(enrolled) => {
+                            answer["keyId"] = json!(enrolled.key_id);
+                            answer["pushes"] = pushes(&enrolled.pushes);
+                            answer["record"] = written(&enrolled.record);
+                        }
+                        Err(e) => answer["enrolled"] = json!({ "error": e.to_string() }),
+                    }
+                    Ok(answer)
+                }
+                .await
+            }
             Some("open") => {
                 async {
                     let did = field(&command, "did")?;
@@ -377,6 +556,13 @@ async fn main() {
                             "answered": "confirm-revoke",
                             "seq": revoked.head.seq,
                             "record": written(&revoked.record),
+                        })),
+                        Answered::Rotated { rotated, deleted } => Ok(json!({
+                            "answered": "confirm-revoke",
+                            "seq": rotated.head.seq,
+                            "master": rotated.index,
+                            "record": written(&rotated.record),
+                            "deleted": done(&deleted),
                         })),
                     }
                 }

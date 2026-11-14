@@ -93,6 +93,8 @@ import type { JoinNeighbourhoodRequest } from "./JoinNeighbourhoodRequest";
 import type { JoinStatus } from "./JoinStatus";
 import type { JoinStatusParams } from "./JoinStatusParams";
 import type { JsonValue } from "./serde_json/JsonValue";
+import type { KeyOwner } from "./KeyOwner";
+import type { KeyOwnerParams } from "./KeyOwnerParams";
 import type { KeySessionResult } from "./KeySessionResult";
 import type { LanguageAddressParams } from "./LanguageAddressParams";
 import type { LanguageHandle } from "./LanguageHandle";
@@ -352,6 +354,7 @@ export interface RpcMethods {
   "identity.inboxAck": { params: InboxAckParams; result: boolean };
   "identity.inboxPut": { params: InboxPutParams; result: InboxStored };
   "identity.joinStatus": { params: JoinStatusParams; result: JoinStatus };
+  "identity.keyOwner": { params: KeyOwnerParams; result: KeyOwner | null };
   "identity.log": { params: LogParams; result: IdentityLog };
   "identity.offers": { params: OffersParams; result: Array<OfferListing> };
   "identity.openOffer": { params: OpenOfferParams; result: OfferOpened };
@@ -558,6 +561,7 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "identity.custodyStatus",
   "identity.devices",
   "identity.inbox",
+  "identity.keyOwner",
   "identity.log",
   "identity.offers",
   "identity.record",

@@ -8,6 +8,7 @@ import type { IdentityStatus } from "../generated/api/IdentityStatus";
 import type { JoinAccepted } from "../generated/api/JoinAccepted";
 import type { JoinCancelled } from "../generated/api/JoinCancelled";
 import type { JoinStatus } from "../generated/api/JoinStatus";
+import type { KeyOwner } from "../generated/api/KeyOwner";
 import type { OfferListing } from "../generated/api/OfferListing";
 import type { OfferOpened } from "../generated/api/OfferOpened";
 import type { SignedHead } from "../generated/api/SignedHead";
@@ -147,6 +148,15 @@ export class IdentityClient {
      */
     async cancelJoin(offerId: string): Promise<JoinCancelled> {
         return this.#apiClient.call("identity.cancelJoin", { offerId });
+    }
+
+    /**
+     * The identity whose log lists `key` (a multikey), from the store's key index; `null` when
+     * no log lists it. A restore from the 12 words finds its identity by master #0 this way.
+     * A hint only: read the named log and check the key there.
+     */
+    async keyOwner(key: string): Promise<KeyOwner | null> {
+        return this.#apiClient.call("identity.keyOwner", { key });
     }
 
     /**

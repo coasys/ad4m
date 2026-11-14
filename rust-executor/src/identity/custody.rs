@@ -35,6 +35,8 @@ pub const NOT_A_CUSTODY_CALL: &str = "not-a-custody-call";
 pub const CUSTODY_METHODS: &[&str] = &[
     "identity.status",
     "identity.log",
+    // A restore from the 12 words finds the identity that lists their `m0`: a read.
+    "identity.keyOwner",
     "identity.cosignIncept",
     "identity.publish",
     "identity.openOffer",
@@ -151,6 +153,9 @@ mod tests {
         let refused = admit_call("runtime.setConfig", &custody).unwrap_err();
         assert_eq!(refused.code, 403);
         assert!(refused.message.starts_with(NOT_A_CUSTODY_CALL));
+        // A restore from the 12 words finds the identity whose `m0` they derive through the
+        // key index before it claims as a keeper (`ad4m-identity-client` `flows/restore.rs`).
+        assert!(admit_call("identity.keyOwner", &custody).is_ok());
 
         let remote = custody.on_network();
         let refused = admit_call("identity.takeMaster", &remote).unwrap_err();

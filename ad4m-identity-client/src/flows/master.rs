@@ -17,8 +17,36 @@
 //! a device of the log.
 //!
 //! The device's side ([`take_master`]): its custody service takes the key its executor opened
-//! (`identity.takeMaster`), checks it against its own fold of the log, keeps it in the vault,
-//! acknowledges the message, and marks itself `holdsMaster: true` in the record.
+//! (`identity.takeMaster`), checks it against its own fold of the log, keeps it in the vault
+//! — under the vault's never-go-back rule, so an older key taken late never replaces a newer
+//! one already kept — acknowledges the message, and marks itself `holdsMaster: true` with
+//! the `masterIndex` the vault keeps in the record ([`hold_mark`], fenced by the custody
+//! epoch, so the mark never stands for a copy a `remove_master` on the shared vault already
+//! took). When that write is refused because the
+//! record's recovery pair is stale after a rotation ([`ClientError::RecoveryNeedsReattest`]),
+//! the key and the ack stand all the same — the master copy is never lost behind a record
+//! that cannot be written — and the take answers the marking owed ([`Taken::record_pending`]):
+//! [`complete_pending_mark`] signs the fenced mark with the master just taken, re-attesting
+//! the recovery key and landing the mark, and [`refresh_master`] makes it on such a take.
+//!
+//! **After a rotation** ([`refresh_master`]): a device whose own rotation was cut off after
+//! its publish promotes the key its vault staged once the log's current master index is the
+//! staged one, leaves a key staged ahead of the log (its publish may still land) and discards
+//! one behind it; a device whose vault keeps a master key the
+//! log has replaced takes the new one when the rotating app sent it; when none waits (the push
+//! failed, or the device was offline past it), it forgets the replaced key and asks for the
+//! new one with a `send-master` request, which a holder answers ([`super::requests::answer`]).
+//! It forgets a key only when the vault's authenticated index ([`Vault::master_index`]) is
+//! known and behind the log's current master: never on an unknown index.
+//!
+//! **Removing the master key from a device** ([`remove_master`]): refused when no other
+//! device valid at the head holds the current master key: one the record lists as
+//! `holdsMaster: true` with the log's current `masterIndex` and the log lets keep it
+//! ([`may_keep_master`], never the record's kind; a key only offered, an entry without an
+//! index or with a replaced one, or the 12 words, do not count). Otherwise the record marks
+//! this device `holdsMaster: false` first, then the vault forgets the key and its retry list
+//! for the identity. The check runs on the version the record write builds on, again after
+//! each stale version, so two holders removing it at once leave one copy.
 
 use ad4m_identity_core::build::Signer;
 use ad4m_identity_core::inbox::{InboxAddress, InboxError};
@@ -28,11 +56,11 @@ use ad4m_identity_core::{Event, KelChain, KeyId};
 use ad4m_ldk::identity::InboxWrite;
 
 use crate::executor::{ExecutorRpc, RpcError, ViaExecutor};
-use crate::record::{self, Change};
+use crate::record::{self, Change, Reader};
 use crate::request::{
     body_bytes, chain_of, log_of, master_at_head, master_request, scid_of, store_of, MasterPosition,
 };
-use crate::vault::{KeySigner, MasterSigner, MasterUse, PendingPush, Vault};
+use crate::vault::{Forgot, KeySigner, MasterSigner, MasterUse, PendingPush, Stored, Vault};
 use crate::{ClientError, Clock, Random};
 
 /// A master key put into a device's inbox.
@@ -60,14 +88,25 @@ pub struct Retried {
 #[derive(Debug)]
 pub struct Taken {
     pub did: String,
+    /// The index of the master key the vault keeps now: the key taken, or a newer one the
+    /// vault already kept ([`Vault::store_master`] never replaces a newer kept key).
     pub index: u32,
-    /// The record write that marks this device `holdsMaster: true`. The vault keeps the key
-    /// either way.
+    /// The record write that marks this device `holdsMaster: true` with `index`. The vault
+    /// keeps the key either way.
     pub record: Result<u64, ClientError>,
+    /// The record's `holdsMaster` write is still owed: refused
+    /// [`ClientError::RecoveryNeedsReattest`], since the record's recovery pair went stale
+    /// with a rotation and waits for the new master's attestation. The key is stored and the
+    /// inbox message acked either way — the master copy is never lost behind a record that
+    /// cannot be written; [`complete_pending_mark`], which [`refresh_master`] makes on a
+    /// take that answers so, re-attests and lands the mark. There is no persistent repair
+    /// queue: a caller must act on a pending take — a later refresh answers
+    /// [`Refreshed::Current`] without repairing it.
+    pub record_pending: bool,
 }
 
 /// A refusal that a later try may pass: the store or the executor unreachable or busy.
-fn transient(e: &ClientError) -> bool {
+pub(crate) fn transient(e: &ClientError) -> bool {
     matches!(e, ClientError::Rpc(RpcError { code, .. }) if *code >= 500 || *code == 429)
 }
 
@@ -208,8 +247,9 @@ pub(crate) async fn send_with<R: ExecutorRpc>(
 /// record does not list is left out the same way ([`ClientError::NotListed`]), so one cannot
 /// block the rest.
 ///
-/// The record has one master generation here (no rotation yet), so `true` is always the
-/// current master key.
+/// `true` counts only for the master pushed (the log's current one) or a later one: a device
+/// whose entry says `true` with the index of a replaced master holds a stale key and is
+/// offered the current one like any other ([`Change::Offered`]).
 pub(crate) async fn mark_offered<R: ExecutorRpc>(
     executor: &ViaExecutor<R>,
     vault: &dyn Vault,
@@ -217,19 +257,32 @@ pub(crate) async fn mark_offered<R: ExecutorRpc>(
     mut key_ids: Vec<KeyId>,
     random: &dyn Random,
 ) -> Result<u64, ClientError> {
+    // The master pushed is the log's current one; a rotation landing between this read and the
+    // write leaves a take of the newer master standing all the same (`Change::Offered`).
+    let current = chain_of(executor, did)
+        .await?
+        .state()
+        .masters
+        .len()
+        .saturating_sub(1);
+    let current = u32::try_from(current)
+        .map_err(|_| ClientError::Protocol("the log lists too many masters".into()))?;
     loop {
         let changes: Vec<Change> = key_ids
             .iter()
-            .map(|key_id| Change::HoldsMaster {
+            .map(|key_id| Change::Offered {
                 key_id: key_id.clone(),
-                holds: HoldsMaster::Offered,
+                index: current,
             })
             .collect();
         let not_held = |record: Option<&PrivateRecord>, _: &KelChain| {
             let held = key_ids.iter().find(|key_id| {
                 record
                     .and_then(|r| r.devices.get(*key_id))
-                    .is_some_and(|entry| entry.holds_master == HoldsMaster::Yes)
+                    .is_some_and(|entry| {
+                        entry.holds_master == HoldsMaster::Yes
+                            && entry.master_index.is_none_or(|held| held >= current)
+                    })
             });
             match held {
                 Some(key_id) => Err(ClientError::HoldsMaster(key_id.clone())),
@@ -351,6 +404,7 @@ fn retry_entry(key_id: &str) -> DeviceEntry {
         address: None,
         runs_executor: true,
         holds_master: HoldsMaster::No,
+        master_index: None,
         operator: None,
     }
 }
@@ -358,8 +412,12 @@ fn retry_entry(key_id: &str) -> DeviceEntry {
 /// The device's side, after its own unlock: takes the master key its executor opened
 /// (`identity.takeMaster`, the custody channel), checks that it is the current master of the
 /// log as this app folds it, keeps it in `vault`, acknowledges the message, and marks this
-/// device `holdsMaster: true` in the record. `None` when no master key waits. A key that does
-/// not check, or a vault that refuses it, leaves the message for the next try.
+/// device `holdsMaster: true` in the record ([`hold_mark`], fenced by the custody epoch).
+/// `None` when no master key waits. A key that does
+/// not check, or a vault that refuses it, leaves the message for the next try. The key and
+/// the ack stand even when the record write is refused [`ClientError::RecoveryNeedsReattest`]
+/// — the record's recovery pair waiting on the new master — and the take answers it owed
+/// ([`Taken::record_pending`]); [`complete_pending_mark`] completes it.
 pub async fn take_master<R: ExecutorRpc>(
     executor: &ViaExecutor<R>,
     vault: &dyn Vault,
@@ -381,22 +439,403 @@ pub async fn take_master<R: ExecutorRpc>(
         executor.status().await?.key_id.ok_or_else(|| {
             ClientError::Protocol("the executor's device key is in no log".into())
         })?;
-    vault.store_master(&scid, taken.index, taken.secret)?;
+    // Another app sharing the vault may keep a newer master already (its own take or promote
+    // landed while this take was in flight): the older key never replaces it, and the answer
+    // and the record name the index the vault keeps.
+    let index = match vault.store_master(&scid, taken.index, taken.secret)? {
+        Stored::Stored => taken.index,
+        Stored::AlreadyNewer { kept } => kept,
+    };
     executor.inbox_ack(&taken.message_id).await?;
-    let record = record::write(
+    let record = hold_mark(
         executor,
         vault,
         &taken.did,
-        &[Change::HoldsMaster {
-            key_id,
-            holds: HoldsMaster::Yes,
-        }],
+        &scid,
+        &key_id,
+        &Reader::Executor,
         random,
     )
     .await;
+    // A write refused because the record's recovery pair waits for the new master's
+    // attestation is owed still: reported pending, the key and the ack stand.
+    let record_pending = matches!(record, Err(ClientError::RecoveryNeedsReattest));
     Ok(Some(Taken {
         did: taken.did,
-        index: taken.index,
+        index,
         record,
+        record_pending,
     }))
+}
+
+/// This device's `holdsMaster` as the vault's custody of `scid`, fenced by the custody
+/// epoch. Only the operation that kept the key (a take's [`Vault::store_master`], a
+/// [`Vault::promote_master`]) writes through here — never a bare re-attestation, which
+/// asserts no custody. Each write names the index [`Vault::master_index`] authenticates
+/// (`holdsMaster: true` with it, `false` when the vault keeps none), with the custody
+/// epoch read before it and again after: while it moved under a write, a custody
+/// operation won in between — a removal the record may not advertise past, or another
+/// app's store — and the entry is written again from what the vault keeps then, so a
+/// `true` never stands for a copy a `remove_master` already took.
+pub(crate) async fn hold_mark<R: ExecutorRpc>(
+    executor: &ViaExecutor<R>,
+    vault: &dyn Vault,
+    did: &str,
+    scid: &str,
+    key_id: &KeyId,
+    reader: &Reader<'_>,
+    random: &dyn Random,
+) -> Result<u64, ClientError> {
+    for _ in 0..record::MAX_WRITES {
+        // The epoch first: a custody change after it lands in `held` or in the re-read.
+        let fenced = vault.custody_epoch(scid)?;
+        let held = vault.master_index(scid)?;
+        let mut changes = vec![Change::HoldsMaster {
+            key_id: key_id.clone(),
+            holds: HoldsMaster::No,
+        }];
+        if let Some(kept) = held {
+            // `Change::Holds` alone never lowers a stale `masterIndex`: the entry is
+            // cleared first, so it ends naming exactly the index the vault keeps.
+            changes.push(Change::Holds {
+                key_id: key_id.clone(),
+                index: kept,
+            });
+        }
+        let written =
+            record::write_as(executor, vault, did, reader, &changes, None, random).await?;
+        if vault.custody_epoch(scid)? == fenced {
+            return Ok(written);
+        }
+        // Custody moved under the write: mirror what it moved to.
+    }
+    Err(ClientError::RecordBusy)
+}
+
+/// Re-attests the record's recovery key with the current master key this device's vault
+/// keeps — the write a device is refused with [`ClientError::RecoveryNeedsReattest`] while
+/// the stored recovery pair is stale after a rotation. One unlock; the master signs the
+/// record write itself ([`record::Reader::Master`]), so it attests the key the stored
+/// record names. **It writes no `holdsMaster` mark**: a re-attestation asserts no custody —
+/// an unlocked signer outlives its kept slot, so a mark here could re-advertise a copy a
+/// `remove_master` on the shared vault already took, and the last other holder's only-copy
+/// check would trust it. The holder mark comes only from the operation that kept the key
+/// ([`hold_mark`]); a take's owed mark is [`complete_pending_mark`]'s. Answers the version
+/// written.
+pub async fn reattest_recovery<R: ExecutorRpc>(
+    executor: &ViaExecutor<R>,
+    vault: &dyn Vault,
+    did: &str,
+    clock: &dyn Clock,
+    random: &dyn Random,
+) -> Result<u64, ClientError> {
+    let scid = scid_of(did)?;
+    let unlocked = vault.unlock(&scid, MasterUse::Record, clock.now())?;
+    let signer = unlocked.signer(clock.now())?;
+    record::write_as(
+        executor,
+        vault,
+        did,
+        &Reader::Master {
+            master: signer,
+            clock,
+        },
+        &[],
+        None,
+        random,
+    )
+    .await
+}
+
+/// Completes the mark a pending take owes ([`Taken::record_pending`]), and any other
+/// caller's `holdsMaster` write refused [`ClientError::RecoveryNeedsReattest`]: one unlock,
+/// then this device's `holdsMaster` as the vault's custody, signed by the master the vault
+/// keeps ([`record::Reader::Master`]) — the same write re-attests the record's recovery
+/// pair when it is stale. The mark is fenced by the custody epoch ([`hold_mark`]): it
+/// names the index the vault keeps when it lands, and a `remove_master` that won meanwhile
+/// leaves the entry `holdsMaster: false`. There is no persistent repair queue — a caller
+/// with a pending take must call this (a later `refresh_master` may answer
+/// [`Refreshed::Current`] without repairing anything). Answers the version written.
+pub async fn complete_pending_mark<R: ExecutorRpc>(
+    executor: &ViaExecutor<R>,
+    vault: &dyn Vault,
+    did: &str,
+    clock: &dyn Clock,
+    random: &dyn Random,
+) -> Result<u64, ClientError> {
+    let scid = scid_of(did)?;
+    let key_id =
+        executor.status().await?.key_id.ok_or_else(|| {
+            ClientError::Protocol("the executor's device key is in no log".into())
+        })?;
+    let unlocked = vault.unlock(&scid, MasterUse::Record, clock.now())?;
+    let signer = unlocked.signer(clock.now())?;
+    hold_mark(
+        executor,
+        vault,
+        did,
+        &scid,
+        &key_id,
+        &Reader::Master {
+            master: signer,
+            clock,
+        },
+        random,
+    )
+    .await
+}
+
+/// What [`refresh_master`] found.
+#[derive(Debug)]
+pub enum Refreshed {
+    /// The vault keeps the current master key.
+    Current,
+    /// A rotation of this device had staged the current master key and was cut off before it
+    /// promoted it: the vault keeps a master key now, and the record marks this device
+    /// holding it — by the master itself, re-attesting the recovery key, when the record's
+    /// stored pair went stale with the rotation.
+    Promoted {
+        /// The index the vault keeps: the staged key's, or a newer one another app sharing
+        /// the vault kept first.
+        index: u32,
+        /// The record write (`holdsMaster: true` with `index`). The key is kept either way.
+        record: Result<u64, ClientError>,
+    },
+    /// The current master key was waiting in this device's inbox: the vault keeps it now.
+    /// A take whose record write was refused while the record's recovery pair waited on the
+    /// new master is completed with it ([`complete_pending_mark`]).
+    Taken(Taken),
+    /// None waited: the vault forgot the replaced key, and a `send-master` request (its id)
+    /// asks a holder for the current one.
+    Asked(String),
+    /// None waited, and the vault keeps no master key of the identity, cannot tell which one
+    /// it keeps ([`Vault::master_index`] is `None`), or keeps a still-replaced key at another
+    /// index than the one read (installed by another app in between: [`Forgot::Kept`]).
+    /// Nothing was forgotten and nothing asked. A device that never held it asks with
+    /// [`super::requests::ask_for_master`].
+    Unknown,
+}
+
+/// A device whose vault may keep a replaced master key of `did`, its executor's identity, or a
+/// staged one: brings the vault to the log's current master where it can, in this order.
+///
+/// 1. A key staged by a rotation on this computer (cut off between its publish and its
+///    promote, or whose publish answer was lost), by its master index against the log's
+///    current one: **equal**, promoted ([`Refreshed::Promoted`]; a promote another app on the
+///    computer made first counts); **ahead**, left staged (a publish may still be on its way,
+///    in this app or another one sharing the vault); **behind**, or the identity ended,
+///    discarded (a later rotation superseded it, or its publish was refused long ago). The
+///    promotion goes by index only: the words derive the key at each index, and the staged key
+///    is not checked against the log's commitment. The `holdsMaster` write that follows is
+///    fenced by the custody epoch ([`hold_mark`]) and goes as the device, or — when the
+///    record's recovery pair went stale with the rotation — as the promoted master itself,
+///    re-attesting it ([`complete_pending_mark`]).
+/// 2. The vault keeps the current master: [`Refreshed::Current`].
+/// 3. The current master waits in the inbox: taken ([`take_master`], [`Refreshed::Taken`]);
+///    a take whose record write was refused [`ClientError::RecoveryNeedsReattest`] is
+///    completed by [`complete_pending_mark`] with the master just taken.
+/// 4. The vault's key is **known** to be replaced ([`Vault::master_index`], authenticated,
+///    names an index behind the log's current master, or the identity has ended): the vault
+///    forgets it — [`Vault::forget_master_at`] the custody epoch read with `kept`, so a key
+///    another app sharing the vault installed since, the same one included, is never removed
+///    — and a `send-master` request asks a holder for
+///    the current one ([`Refreshed::Asked`]). An unknown index (`None`) never forgets a key:
+///    [`Refreshed::Unknown`].
+pub async fn refresh_master<R: ExecutorRpc>(
+    executor: &ViaExecutor<R>,
+    vault: &dyn Vault,
+    did: &str,
+    clock: &dyn Clock,
+    random: &dyn Random,
+) -> Result<Refreshed, ClientError> {
+    let scid = scid_of(did)?;
+    let chain = chain_of(executor, did).await?;
+    let state = chain.state();
+    let live = state.current_master().is_some();
+    let current = u32::try_from(state.masters.len().saturating_sub(1))
+        .map_err(|_| ClientError::Protocol("the log lists too many masters".into()))?;
+    match vault.staged_index(&scid)? {
+        // The rotation to it landed: promote (or another app on this computer did first).
+        Some(staged) if live && staged == current => {
+            let index = super::rotate::promote(vault, &scid, staged)?;
+            let record = async {
+                let key_id = executor.status().await?.key_id.ok_or_else(|| {
+                    ClientError::Protocol("the executor's device key is in no log".into())
+                })?;
+                match hold_mark(
+                    executor,
+                    vault,
+                    did,
+                    &scid,
+                    &key_id,
+                    &Reader::Executor,
+                    random,
+                )
+                .await
+                {
+                    // The record's recovery pair went stale with the rotation that made this
+                    // key current: a device write is refused rather than seal the record
+                    // without it, so the promoted master signs the fenced mark that
+                    // re-attests it and lands it.
+                    Err(ClientError::RecoveryNeedsReattest) => {
+                        complete_pending_mark(executor, vault, did, clock, random).await
+                    }
+                    other => other,
+                }
+            }
+            .await;
+            return Ok(Refreshed::Promoted { index, record });
+        }
+        // Behind the log (a later rotation superseded it, or its publish was refused long
+        // ago), or the identity ended: it can never become current.
+        Some(staged) if !live || staged < current => vault.discard_staged(&scid, staged, None)?,
+        // Ahead of the log: a rotation's publish may be on its way (in this app or another one
+        // sharing the vault). Left as it is; the rotating flow discards it when its publish is
+        // refused, and the next stage replaces it.
+        Some(_) | None => {}
+    }
+    // Read together, before the take: the forget below is bound to this custody state.
+    let epoch = vault.custody_epoch(&scid)?;
+    let kept = vault.master_index(&scid)?;
+    if live && kept == Some(current) {
+        return Ok(Refreshed::Current);
+    }
+    if let Some(mut taken) = take_master(executor, vault, random).await? {
+        if taken.did == did {
+            // The take stored and acked the key though its record write was refused: the
+            // record's recovery pair waited on the new master's attestation. The repair
+            // re-attests it and lands the held mark, fenced by the custody epoch.
+            if taken.record_pending {
+                taken.record = complete_pending_mark(executor, vault, did, clock, random).await;
+                taken.record_pending = taken.record.is_err();
+            }
+            return Ok(Refreshed::Taken(taken));
+        }
+    }
+    match kept {
+        Some(index) if index < current || !live => {
+            // `kept` was read before the take. Another app sharing the vault may have
+            // installed a key since (its take, or its promote), the same index included: the
+            // forget holds only while the custody epoch read with `kept` is unchanged, so it
+            // never takes a key installed after the check.
+            match vault.forget_master_at(&scid, epoch)? {
+                Forgot::Forgot => {
+                    let id = executor
+                        .post_request(&ad4m_ldk::identity::DeviceRequestBody::SendMaster {}, None)
+                        .await?;
+                    Ok(Refreshed::Asked(id))
+                }
+                Forgot::Kept(kept) => Ok(if live && kept == current {
+                    Refreshed::Current
+                } else {
+                    Refreshed::Unknown
+                }),
+            }
+        }
+        _ => Ok(Refreshed::Unknown),
+    }
+}
+
+/// Removes the master key of `did`, its executor's identity, from this device. Refused with
+/// [`ClientError::OnlyCopy`] unless another device valid at the head holds the current master
+/// key ([`another_copy`]): the record lists it as `holdsMaster: true` with the log's current
+/// master index, and the log lets it keep the master key ([`may_keep_master`]; the record's
+/// device kind grants nothing, any linked device can write the record). The check runs on the
+/// record version the write builds on, again after each stale version ([`record::write_if`]),
+/// so of two holders removing it at once at most one does. Writes the record (this device
+/// `holdsMaster: false`) before the vault forgets the key, so a failed write leaves the key
+/// where it was; the forget is [`Vault::forget_master_at`] the custody epoch read before the
+/// check, so a key another app sharing the vault installed in between, the same one
+/// included, is never removed. Answers the
+/// record version written.
+pub async fn remove_master<R: ExecutorRpc>(
+    executor: &ViaExecutor<R>,
+    vault: &dyn Vault,
+    did: &str,
+    random: &dyn Random,
+) -> Result<u64, ClientError> {
+    let scid = scid_of(did)?;
+    let own =
+        executor.status().await?.key_id.ok_or_else(|| {
+            ClientError::Protocol("the executor's device key is in no log".into())
+        })?;
+    // Before the only-copy check: the forget below holds only while this custody state lasts.
+    let epoch = vault.custody_epoch(&scid)?;
+    let (events, log_chain) = log_of(executor, did).await?;
+    let check = |record: Option<&PrivateRecord>, chain: &KelChain| {
+        // The events may lag the chain the write read; a key `add`ed since is no copy yet.
+        if record.is_some_and(|r| another_copy(r, &events, chain, &own)) {
+            Ok(())
+        } else {
+            Err(ClientError::OnlyCopy)
+        }
+    };
+    let version = record::write_if(
+        executor,
+        vault,
+        did,
+        &[Change::HoldsMaster {
+            key_id: own.clone(),
+            holds: HoldsMaster::No,
+        }],
+        &check,
+        random,
+    )
+    .await?;
+    // Compare-and-delete on the custody epoch read before the only-copy check: a key another
+    // app sharing the vault installed since (a duplicate delivery of the same master taken, a
+    // promote) is never removed, whatever its index, since the check did not see it; an
+    // unknown index (`None`) forgets nothing.
+    let mut version = version;
+    if vault.master_index(&scid)?.is_some()
+        && matches!(vault.forget_master_at(&scid, epoch)?, Forgot::Forgot)
+    {
+        // A holder mark that read the custody before this forget (between the write above and
+        // here) may have written `true` back: mark again from what the vault keeps now, so the
+        // record matches the vault once the key is gone. A copy installed since (a take, a
+        // promote) moved the epoch and is marked `true` with its index.
+        version = hold_mark(executor, vault, did, &scid, &own, &Reader::Executor, random).await?;
+    }
+    // A stage at or behind the log would be promoted or kept by the next refresh, bringing back
+    // the key the person just removed. One ahead is a rotation in flight: its owner decides.
+    let current = log_chain.state().masters.len().saturating_sub(1);
+    if let Some(staged) = vault.staged_index(&scid)? {
+        if usize::try_from(staged).is_ok_and(|staged| staged <= current) {
+            vault.discard_staged(&scid, staged, None)?;
+        }
+    }
+    for push in vault.pending_pushes()? {
+        if push.scid == scid {
+            vault.push_done(&push)?;
+        }
+    }
+    Ok(version)
+}
+
+/// Whether `record` lists a device other than `own` that holds the current master key of
+/// `chain`: valid at the head, `holdsMaster: true` with `masterIndex` the index of the log's
+/// current master (an entry without an index, or with an older one, proves no current copy),
+/// and let keep it by the log `events` ([`may_keep_master`]).
+pub(crate) fn another_copy(
+    record: &PrivateRecord,
+    events: &[Event],
+    chain: &KelChain,
+    own: &str,
+) -> bool {
+    let state = chain.state();
+    let head = chain.head().seq;
+    let Some(current) = state
+        .current_master()
+        .and_then(|_| u32::try_from(state.masters.len() - 1).ok())
+    else {
+        return false;
+    };
+    record.devices.iter().any(|(id, entry)| {
+        id != own
+            && entry.holds_master == HoldsMaster::Yes
+            && entry.master_index == Some(current)
+            && state.keys.contains_key(id)
+            && state.key_valid_at(id, head)
+            && may_keep_master(events, id)
+    })
 }

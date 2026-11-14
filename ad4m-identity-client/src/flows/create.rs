@@ -13,16 +13,24 @@
 //!    fails or its answer is lost, [`resume`] (or `finish` with the same words) publishes the
 //!    kept incept again: the executor answers a repeat of the events its store holds with the
 //!    store's head, so the identity is made once, with the master key the vault holds.
+//! 6. The private record's first version, with the words' recovery key: a restore from the
+//!    words alone opens it and shows the devices by name. It lists this device (`d1`) as
+//!    the surface names it, `holdsMaster: true` with `masterIndex` 0: the creator counts as a
+//!    copy of master #0 (`remove_master` on another holder), and a rotation elsewhere sends
+//!    it the new master.
 
 use ad4m_identity_core::build::{incept_human, Signer};
+use ad4m_identity_core::record::{DeviceEntry, HoldsMaster};
 use ad4m_identity_core::words::{self, Seed, Words};
 use ad4m_identity_core::{DeviceKey, Event, KeyLife, Op};
 use ad4m_ldk::identity::SignedHead;
 
 use crate::executor::{ExecutorRpc, IdentityStatus, ViaExecutor};
+use crate::flows::rotate::{master_of, recovery_key_of};
+use crate::record::{self, Change, Reader};
 use crate::secret::Secret;
 use crate::vault::Vault;
-use crate::{fold, ClientError, Random};
+use crate::{fold, ClientError, Clock, Random};
 
 /// What the surface shows at each step.
 pub enum CreateScreen {
@@ -50,13 +58,17 @@ impl std::fmt::Debug for CreateScreen {
 }
 
 /// The identity made.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug)]
 pub struct Created {
     pub did: String,
     pub scid: String,
     /// The executor's device key's id in the log (`d1`).
     pub device_key_id: String,
     pub head: SignedHead,
+    /// The record write that sets the words' recovery key and lists this device as holding
+    /// master #0 (`None` from [`resume`], which has no words; a later rotation sets it). The
+    /// identity stands either way.
+    pub record: Option<Result<u64, ClientError>>,
 }
 
 enum Step {
@@ -135,23 +147,85 @@ impl CreateFlow {
         Ok(())
     }
 
-    /// Makes the identity on `executor` and keeps master #0 in `vault`.
+    /// Makes the identity on `executor`, keeps master #0 in `vault`, and lists this device as
+    /// `this_device` in the record (its `holdsMaster` and `masterIndex` are set here: `true`,
+    /// 0).
     pub async fn finish<R: ExecutorRpc>(
         self,
         executor: &ViaExecutor<R>,
         vault: &dyn Vault,
+        this_device: DeviceEntry,
+        clock: &dyn Clock,
+        random: &dyn Random,
     ) -> Result<Created, ClientError> {
         let Some(Step::Confirmed(seed)) = self.step else {
             return Err(ClientError::Step("finish follows confirm"));
         };
-        create_from_seed(&seed, executor, vault).await
+        create_from_seed(&seed, executor, vault, this_device, clock, random).await
     }
 }
 
-/// Steps 3 to 5 of `create` from the seed of confirmed words. When the vault keeps an incept of
-/// these words for this executor (an earlier `create` that did not see its publish answered),
-/// publishes that one again instead of making another.
+/// Steps 3 to 6 of `create` from the seed of confirmed words; the record lists this device as
+/// `this_device`, holding master #0. When the vault keeps an incept of these words for this
+/// executor (an earlier `create` that did not see its publish answered), publishes that one
+/// again instead of making another.
 pub async fn create_from_seed<R: ExecutorRpc>(
+    seed: &Seed,
+    executor: &ViaExecutor<R>,
+    vault: &dyn Vault,
+    this_device: DeviceEntry,
+    clock: &dyn Clock,
+    random: &dyn Random,
+) -> Result<Created, ClientError> {
+    let mut created = publish_from_seed(seed, executor, vault).await?;
+    let this = Change::Device {
+        key_id: created.device_key_id.clone(),
+        entry: DeviceEntry {
+            holds_master: HoldsMaster::Yes,
+            master_index: Some(0),
+            ..this_device
+        },
+    };
+    // The first version installs the recovery key: a master-signed write (only the master
+    // attests a recovery key), which master #0 signs. Its `holdsMaster: true` mark is
+    // fenced by the custody epoch the store produced: moved under the write — a removal
+    // won — the entry is set to what the vault keeps now.
+    let epoch = vault.custody_epoch(&created.scid)?;
+    let master = master_of(seed, 0)?;
+    let secret = words::recovery_secret(seed);
+    let reader = Reader::Recovery {
+        secret: &secret,
+        master: &master,
+        clock,
+    };
+    let mut written = record::write_as(
+        executor,
+        vault,
+        &created.did,
+        &reader,
+        &[this],
+        Some(&recovery_key_of(seed)),
+        random,
+    )
+    .await;
+    if written.is_ok() && vault.custody_epoch(&created.scid)? != epoch {
+        written = crate::flows::master::hold_mark(
+            executor,
+            vault,
+            &created.did,
+            &created.scid,
+            &created.device_key_id,
+            &reader,
+            random,
+        )
+        .await;
+    }
+    created.record = Some(written);
+    Ok(created)
+}
+
+/// Steps 3 to 5.
+async fn publish_from_seed<R: ExecutorRpc>(
     seed: &Seed,
     executor: &ViaExecutor<R>,
     vault: &dyn Vault,
@@ -253,5 +327,6 @@ async fn publish_kept<R: ExecutorRpc>(
         scid: incept.scid,
         device_key_id,
         head,
+        record: None,
     })
 }

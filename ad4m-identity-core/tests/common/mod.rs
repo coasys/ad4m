@@ -1530,6 +1530,7 @@ pub fn record_fixture() -> PrivateRecord {
         address: None,
         runs_executor: kind == DeviceKind::DesktopApp,
         holds_master: holds,
+        master_index: None,
         operator: None,
     };
     PrivateRecord {

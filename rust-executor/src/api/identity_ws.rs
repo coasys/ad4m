@@ -19,10 +19,10 @@ use crate::identity::types::{
     AcceptJoinParams, CancelJoinParams, ClaimOfferParams, ClaimOfferResult, CosignInceptParams,
     DeleteRequestParams, DeviceKeys, DeviceRequest, DeviceView, DidResolutionResult, IdentityLog,
     IdentityStatus, InboxAckParams, InboxEntry, InboxPutParams, InboxStored, JoinAccepted,
-    JoinCancelled, JoinStatus, JoinStatusParams, LogParams, OfferListing, OfferOpened,
-    OffersParams, OpenOfferParams, PostRequestParams, PreparedDevice, PublishParams, RecordKey,
-    RecordParams, RecordPutParams, RecordStored, RequestPosted, RequestsParams, ResetLogParams,
-    ResolveParams, SignedHead, StoredRecord, TakenMaster, UnwrapRecordKeyParams,
+    JoinCancelled, JoinStatus, JoinStatusParams, KeyOwner, KeyOwnerParams, LogParams, OfferListing,
+    OfferOpened, OffersParams, OpenOfferParams, PostRequestParams, PreparedDevice, PublishParams,
+    RecordKey, RecordParams, RecordPutParams, RecordStored, RequestPosted, RequestsParams,
+    ResetLogParams, ResolveParams, SignedHead, StoredRecord, TakenMaster, UnwrapRecordKeyParams,
 };
 use crate::types::RequestContext;
 
@@ -92,6 +92,11 @@ async fn log(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcErr
         .log(&p.did, p.from.unwrap_or(0), p.fresh.unwrap_or(false))
         .await?;
     answer(log)
+}
+
+async fn key_owner(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let p: KeyOwnerParams = parse(params)?;
+    answer(crate::identity::service()?.key_owner(&p.key).await?)
 }
 
 async fn reset_log(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
@@ -332,6 +337,10 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.method::<LogParams, IdentityLog>("identity.log", log)
         .read()
         .guard(Guard::Cap(AGENT_READ_CAPABILITY.clone()));
+    // The identity whose log lists a key: the store's key index, public like the logs.
+    map.method::<KeyOwnerParams, Option<KeyOwner>>("identity.keyOwner", key_owner)
+        .read()
+        .guard(Guard::Cap(AGENT_READ_CAPABILITY.clone()));
     // Any DID's document: public data derived from public logs.
     map.method::<ResolveParams, DidResolutionResult>("identity.resolve", resolve)
         .read()
@@ -531,6 +540,7 @@ mod tests {
             ("identity.inboxAck", format!("{:?}", Guard::Operator)),
             ("identity.inboxPut", cap(&AGENT_UPDATE_CAPABILITY)),
             ("identity.joinStatus", cap(&AGENT_READ_CAPABILITY)),
+            ("identity.keyOwner", cap(&AGENT_READ_CAPABILITY)),
             ("identity.log", cap(&AGENT_READ_CAPABILITY)),
             ("identity.offers", cap(&AGENT_READ_CAPABILITY)),
             ("identity.openOffer", cap(&AGENT_UPDATE_CAPABILITY)),
@@ -620,6 +630,7 @@ mod tests {
                 "identity.custodyStatus",
                 "identity.devices",
                 "identity.inbox",
+                "identity.keyOwner",
                 "identity.log",
                 "identity.offers",
                 "identity.record",

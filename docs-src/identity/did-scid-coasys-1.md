@@ -752,13 +752,20 @@ refuses a write whose attestation does not (`400 attestation`). A device-signed 
 stored record's counting recovery key and attestation unchanged, or carries none when it has
 none (`400 recovery-key`). Only a master-signed write installs, replaces or drops it, so a
 device cannot put back a key the master replaced. After a rotation the old master's attestation
-no longer counts. A host refuses a write that carries it. A device writer drops the recovery key
-until the new master attests it again. A reader still opens a record written before the
+no longer counts. A host refuses a write that carries it, and a device writer refuses to
+write rather than seal the record without the recovery key, until the new master attests it
+again. A reader still opens a record written before the
 rotation (its receipt names a seq where the writer was valid), but does not trust its recovery
 key. A reader refuses outright a record whose attestation no master of the log signed. So a
 rotation is followed promptly by a master-signed write that attests the recovery key with the
 new master and rewraps the record to the log's readers at the new head; until then the words
-still open the stored record, but no writer copies its recovery key. The record
+still open the stored record, and a device write waits on the new master's attestation. A
+revocation published while the pair is stale stands all the same; only the record rewrite
+after it is refused until the re-attestation. The re-attesting master-signed write carries the
+recovery pair only: it marks no device as holding the master key, since custody is asserted
+only by the operation that keeps the key, never by an earlier unlock — a vault unlock's signer
+outlives the kept slot it was taken from, so a mark written from it could re-advertise a copy
+a removal on the shared vault already took. The record
 key is sealed (above) with `info = "coasys:record" ‖ 0x00 ‖ scid` to the `enc` key of every
 device key valid at the head without the bot mark (`wrapped[keyId]`), and to `recoveryKey` when
 set (`wrapped["recovery"]`). A writer reads the `enc` keys from the log, so a removed or revoked
@@ -767,7 +774,9 @@ other than the stored version plus one; with no record stored the version is 0, 
 is version 1); a reader refuses a version lower than one it has read. A host can serve back an
 older version with its valid receipt, so that high-water mark is the reader's own state: the
 client keeps the highest version it has read per identity; the core functions keep none. A device entry's `holdsMaster` is `false`, `"offered"` or
-`true`; a pending revocation's `reason` is `left-host` or `account-deleted`.
+`true`; with `true` it carries `masterIndex`, the index *n* of the master key the device's
+vault keeps, written by the device (or the flow that put the key there). An entry without
+`masterIndex` (written before it existed) is read as an unknown index. A pending revocation's `reason` is `left-host` or `account-deleted`.
 
 **The request box.** A device key without the bot mark posts `{body, expires}` with `body`
 `{kind: "send-master"}` or `{kind: "confirm-revoke", keyIds, rotate}`; `expires` lies at most 7
@@ -857,9 +866,15 @@ a new string ends the read of the last one.
   recovery key's attestation against the log. That app's writes are its device's: it seals
   the envelope naming the device key as `signer` with an empty `sig`, and the executor signs
   it with the device key before the put (it refuses an unsigned envelope naming any other
-  key). A device write copies the recovery key and its attestation that still count, unchanged.
+  key). A device write copies the recovery key and its attestation that still count, unchanged,
+  and while the stored attestation is stale after a rotation it is refused rather than seal
+  the record without it.
 
-**The holder's side.** An app that holds the current master key:
+**The holder's side.** The 12 words are the root authority of the identity: they derive
+every master key, the salts that open each rotation's commitment, and the recovery secret
+that opens the private record, so their holder rotates, revokes and enrols a device without
+any device of the log — and a rotation revokes no one's copy of them. An app that holds the
+current master key:
 
 - *Links with the holder scanning.* It reads a device string, refuses one past its `exp` or
   naming another host, opens an offer bound to the string's `sign`, and puts the offer ticket,
@@ -882,18 +897,63 @@ a new string ends the read of the last one.
   app keeps the push on a retry list of its own; it forgets it once the host takes it, or when
   the host refuses it for good, or when the device key has left the log, and retries what is
   left at each start and unlock. The holder marks the device `holdsMaster: "offered"`; the
-  device marks itself `true` once its vault keeps the key. An `"offered"` never replaces
-  `true`: the holder writes it only on a version where the device's entry is not `true`, and
-  checks again on every newer version it reads after a stale one, so a device that took the
-  key before the holder's write landed stays `true`. At a first link the device's entry
-  (`false`) is written before the push, so a device that takes the key at once finds its
-  entry to mark.
-- *Delivers at least once.* A push whose answer was lost stays on the retry list and is put
-  again, so a device may find the same master key in two messages; a request answered whose
-  delete failed stays in the box and may be answered again. Both sides act idempotently: a
-  device keeps a master key it already keeps without change and acknowledges each message,
-  and the holder refuses a `confirm-revoke` naming a key no longer valid at the head before
-  it signs anything.
+  device marks itself `true` with the key's `masterIndex` once its vault keeps the key, and
+  only the operation that keeps it does so, fenced by the vault's custody epoch: the mark
+  names the index the vault keeps, and once it lands the epoch is read again — moved, a
+  removal won and the entry is written to `false` (or to the index the vault keeps then).
+  A take whose mark is refused while the recovery pair waits on the new master is owed the
+  mark still: the key is stored and the message acknowledged either way, and the caller
+  completes it — there is no persistent repair queue, and a later refresh that finds the
+  current key kept repairs nothing on its own. An
+  `"offered"` never replaces `true`: the holder writes it only on a version where the device's
+  entry is not `true`, and checks again on every newer version it reads after a stale one, so
+  a device that took the key before the holder's write landed stays `true`. At a first link
+  the device's entry (`false`) is written before the push, so a device that takes the key at
+  once finds its entry to mark.
+- *Removes the master key from a device* only while another copy of the current master key
+  remains: another device valid at the head that the log lets keep it, listed `holdsMaster:
+  true` with `masterIndex` equal to the index of the log's current master. An entry offered,
+  without an index or with a replaced index, and the 12 words, are no copy. The app checks this
+  on the record version its write (this device `holdsMaster: false`) builds on, again on each
+  re-read after a stale version, and the vault forgets the key only after the write; of two
+  devices removing it at once, the second write builds on the first's version and is refused.
+- *Lists itself at creation.* The record's first version, written right after the `incept`
+  lands, lists the creating device as `d1` with `holdsMaster: true` and `masterIndex` 0, so it
+  counts as a copy and a rotation on another device sends it the new master key.
+- *Keeps a rotated master key before the rotation is public.* A rotation (from the 12 words,
+  in a restore too) stages master *n*+1 in the vault before it publishes the `rotate`: staged,
+  the key is durable but signs nothing, and the vault's kept key is still master *n*. A vault
+  that refuses to stage stops the rotation before anything is published. A publish the host
+  refuses for good discards the key that rotation staged, and revokes nothing; the vault keeps
+  an opaque owner token beside each staged key, so a rotation discards only the key it staged
+  itself, never one another app on the device staged after it; after a publish whose answer
+  never came the key stays staged, since that publish may still land. Once the `rotate`
+  landed, the vault promotes the staged key to its kept key; a failed promotion is reported
+  with the rotation, which stands. Every app on the device shares the vault, so a refresh in
+  any of them may find a staged key, and judges it by its master index against the log's
+  current master index: **equal**, it promotes it (and lists the device holding it);
+  **ahead**, it leaves it staged (a rotation's publish may be on its way); **behind**, or the
+  identity has ended, it discards it (a later rotation superseded it, or its publish was
+  refused long ago). A rotation whose own promotion finds the key already promoted by such a
+  refresh keeps it all the same. Promotion goes by master index only: the words derive the
+  key at each index, and the staged key is not checked against the commitment in the log.
+- *Finishes a restore without the words again.* A restore whose rotation landed but whose
+  enrolment (the vault's promotion, the link of this device) failed reports the rotation as
+  standing with the failure; the restore finishes from the master key it already holds, without a second
+  rotation.
+- *Refreshes a replaced master key* by taking the current one from its joined inbox, else
+  forgetting its own key and asking a holder with `send-master`. It forgets its key only when
+  the vault can tell the key's index (authenticated with the key, not a note beside it) and
+  that index is behind the log's current master; a key whose index it cannot tell is kept.
+- *Delivers at least once.* Delivery of a master key is at least once: a push whose answer
+  was lost stays on the retry list and is put again, so a device may find the same master
+  key in two messages, or take an older one after a newer one is already kept; a request
+  answered whose delete failed stays in the box and may be answered again. Both sides act
+  idempotently: a device keeps a master key it already keeps without change and never lets
+  an older one replace a newer kept one (its vault forgets or replaces a key only on the
+  index it checked, a shared custody folder is generation-aware), acknowledges each
+  message, and the holder refuses a `confirm-revoke` naming a key no longer valid at the
+  head before it signs anything.
 - *Writes the record* by reading the newest version, applying its own changes (a device's
   entry, a name, `holdsMaster`, a pending revocation) and dropping the entries of keys no
   longer valid at the head, sealing the result as the next version to every reader of the
@@ -904,4 +964,5 @@ a new string ends the read of the last one.
   holds, covers `JCS({body, expires})`) and that it still holds (not past `expires`; a
   `confirm-revoke` names keys valid at the head): `send-master` as above, `confirm-revoke` with a
   `revoke` signed by the master key (one with `rotate` needs the 12 words). It then deletes the
-  request with a store request the master key signs.
+  request with a store request the master key signs (after a rotation, master *n*+1; a delete
+  that fails then is reported with the rotation, which stands).

@@ -243,6 +243,8 @@ fn params(method: &str, fx: &Fixture) -> Value {
         "identity.resolve" => {
             json!({ "didUrl": "did:scid:coasys:1:QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG" })
         }
+        "identity.joinStatus" => json!({ "offerId": "leak-offer" }),
+        "identity.keyOwner" => json!({ "key": "z6MkLeak" }),
         "identity.offers" => json!({ "request": {
             "req": {
                 "did": "did:scid:coasys:1:QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG",

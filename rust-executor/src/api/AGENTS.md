@@ -188,7 +188,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-253 methods: Cap 86, CapAnyPointer 1, Executor 43, Open 9, Operator 36, Owns 74, UserOrOperator 4. Local only (the operator on this machine): 13.
+254 methods: Cap 87, CapAnyPointer 1, Executor 43, Open 9, Operator 36, Owns 74, UserOrOperator 4. Local only (the operator on this machine): 13.
 
 | Method | Guard |
 |---|---|
@@ -277,6 +277,7 @@ the guard checked:
 | `identity.inboxAck` | `Operator`, local only |
 | `identity.inboxPut` | `Cap(agent:UPDATE)` |
 | `identity.joinStatus` | `Cap(agent:READ)` |
+| `identity.keyOwner` | `Cap(agent:READ)` |
 | `identity.log` | `Cap(agent:READ)` |
 | `identity.offers` | `Cap(agent:READ)` |
 | `identity.openOffer` | `Cap(agent:UPDATE)` |

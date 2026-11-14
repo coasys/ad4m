@@ -714,6 +714,7 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
         || json!({ "offer": "coasys:offer:1:x" }),
     ),
     ("identity.joinStatus", || json!({ "offerId": "o" })),
+    ("identity.keyOwner", || json!({ "key": "z6Mk" })),
     ("identity.acceptJoin", || json!({ "offerId": "o" })),
     ("identity.cancelJoin", || json!({ "offerId": "o" })),
     ("identity.inboxAck", || json!({ "id": "m" })),
