@@ -629,11 +629,14 @@ impl<E: ExecutorIo> Ad4mConnect<E> {
             .unwrap_or(false);
 
         let jwt = if multi_user {
-            self.email_login(&anon, prompts).await?
+            self.email_login(&anon, prompts).await
         } else {
-            self.capability_handshake(&anon, prompts).await?
+            self.capability_handshake(&anon, prompts).await
         };
+        // The anonymous socket is always closed — a dropped WsRpcClient keeps
+        // its reader (and reconnect task) alive.
         anon.close().await;
+        let jwt = jwt?;
 
         // The minted token opens the real session; it must read authenticated.
         let rpc = self.io.rpc(&url, &jwt).await?;
@@ -651,9 +654,12 @@ impl<E: ExecutorIo> Ad4mConnect<E> {
                     AuthState::Locked
                 }))
             }
-            Reading::Unauthenticated { .. } => Err(anyhow!(
-                "the executor still refuses the token it just minted"
-            )),
+            Reading::Unauthenticated { .. } => {
+                rpc.close().await;
+                Err(anyhow!(
+                    "the executor still refuses the token it just minted"
+                ))
+            }
         }
     }
 

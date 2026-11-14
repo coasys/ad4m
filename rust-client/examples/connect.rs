@@ -117,9 +117,11 @@ async fn main() -> Result<()> {
                         .ok_or_else(|| anyhow!("--email needs a value"))?,
                 )
             }
-            _ => return Err(anyhow!(
+            _ => {
+                return Err(anyhow!(
                 "unknown argument {arg}\nusage: connect [--url URL] [--port PORT] [--email EMAIL]"
-            )),
+            ))
+            }
         }
     }
 
