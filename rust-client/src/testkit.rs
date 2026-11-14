@@ -175,12 +175,19 @@ async fn serve_conn(
     drop_conn: watch::Sender<(u64, Option<u16>)>,
     epoch: u64,
 ) {
+    // Subscribe before the handshake: the drop counter is cumulative, so a
+    // `drop_connection` fired while this socket was still handshaking — the
+    // receiver's already-seen initial value — must close it too.
+    let mut drop_rx = drop_conn.subscribe();
     let ws = match tokio_tungstenite::accept_async(stream).await {
         Ok(ws) => ws,
         Err(_) => return,
     };
     let (mut write, mut read) = ws.split();
-    let mut drop_rx = drop_conn.subscribe();
+    if drop_rx.borrow_and_update().0 >= epoch {
+        let _ = write.send(Message::Close(None)).await;
+        return;
+    }
 
     loop {
         tokio::select! {

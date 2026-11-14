@@ -434,9 +434,16 @@ impl WsRpcClient {
                             let mut sink = shared.sink.lock().await;
                             *sink = Some(write);
                         }
+                        // Publish before the reader exists: only
+                        // `handle_disconnect` clears the flag and a
+                        // disconnect cannot run before the reader does —
+                        // so the flip can never overwrite a `false` a
+                        // close already stored (R1). Published last, it
+                        // could, and the dead flag then slept the
+                        // supervisor forever.
+                        shared.connected.send_replace(true);
                         let reader = Self::spawn_reader(read, shared.clone());
                         *shared.reader.lock().await = Some(reader);
-                        shared.connected.send_replace(true);
 
                         // Re-register interest first — subscription re-opens
                         // fired below need `query-subscription-update` watched.
@@ -1010,6 +1017,52 @@ mod tests {
         gate.wait();
         fake.connection(3).await;
 
+        client.close().await;
+    }
+
+    /// R1: `connected` must go out before the reader can report a close —
+    /// only then can a mid-install disconnect never be overwritten. The
+    /// wrong order lets a close that lands between `spawn_reader` and
+    /// `send_replace(true)` store `false`, the publish overwrite it with
+    /// `true`, and the supervisor sleep on a flag that never flips again:
+    /// dead socket, `is_connected` true, no redial ever.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_immediate_close_during_install_still_reconnects() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let client = WsRpcClient::connect(fake.url(), "").await.unwrap();
+
+        // Socket 1 dies; a drained in-flight call is the barrier that the
+        // whole disconnect path ran.
+        let caller = WsRpcClient {
+            shared: client.shared.clone(),
+        };
+        let c0 = tokio::spawn(async move { caller.call_value("x.y", serde_json::json!({})).await });
+        fake.next_request().await;
+        fake.drop_connection();
+        assert!(c0.await.unwrap().is_err());
+
+        // Park the supervisor where it stores the reader handle — on the
+        // buggy order that is *after* the reader already runs and *before*
+        // `connected` publishes. The fresh socket dies while it is parked.
+        let parked = client.shared.reader.lock().await;
+        fake.connection(2).await;
+
+        // `send_replace` bumps the channel's version even for an identical
+        // value, so `changed()` resolving is the barrier that socket 2's
+        // disconnect stored `false` — provably before we release the gate.
+        let mut flag = client.shared.connected.subscribe();
+        fake.drop_connection();
+        tokio::time::timeout(Duration::from_secs(10), flag.changed())
+            .await
+            .expect("socket 2's disconnect never ran")
+            .unwrap();
+        drop(parked);
+
+        // A publish that lands after that disconnect leaves `connected`
+        // stuck at true on a dead socket: the supervisor waits on a change
+        // that never comes and nobody dials epoch 3.
+        fake.connection(3).await;
         client.close().await;
     }
 
