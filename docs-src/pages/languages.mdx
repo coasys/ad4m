@@ -414,12 +414,15 @@ template update when the migration lands on `main`.
 
 Languages run in per-instance Deno isolates, mutually sandboxed.
 
-**Filesystem.** Each isolate has a permission allow-list scoped to its
-own storage directory (typically `{app_data}/ad4m/languages/{hash}/`).
-System Languages (the bootstrap set) additionally get read/write
-access to the executor's working directory so they can read bundle
-paths passed in via `languagePublish`. Everything outside those paths
-is off-limits and fails with a permission error.
+**Filesystem.** A Language has no direct filesystem access: Deno's
+file APIs fail with a permission error. It keeps data through the KV
+store (`storageGet` / `storagePut`) or `readStorageFile` /
+`writeStorageFile`, which reach only its own storage directory
+(typically `{app_data}/ad4m/languages/{hash}/`) and which the executor
+stores encrypted under its keys. System Languages (the bootstrap set)
+additionally get read/write access to their storage directory and the
+executor's working directory, so they can read bundle paths passed in
+via `languagePublish`. Everything else is off-limits.
 
 **Network.** Languages can call `httpFetch` and reach Holochain; this
 is necessary because most Languages are network protocols. A future

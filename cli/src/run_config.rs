@@ -387,6 +387,16 @@ pub struct RunArgs {
         value_parser = non_empty(BoolValueParser::new())
     )]
     pub identity_allow_private_src: Option<bool>,
+    /// Accept a storage secret file (`AD4M_STORAGE_SECRET_FILE`) on the same disk as the data
+    /// folder (`allow_secret_on_data_disk`). Off by default: a secret beside the data it
+    /// opens protects nothing. For tests and development.
+    #[arg(
+        long,
+        action,
+        env = "AD4M_ALLOW_SECRET_ON_DATA_DISK",
+        value_parser = non_empty(BoolValueParser::new())
+    )]
+    pub allow_secret_on_data_disk: Option<bool>,
     /// The per-user store of local AI runtimes and models. Default:
     /// `~/.local/share/ad4m/local-ai` (Linux), `~/Library/Application
     /// Support/ad4m/local-ai` (macOS), `%LOCALAPPDATA%\ad4m\local-ai` (Windows).
@@ -465,6 +475,10 @@ impl RunArgs {
         overlay(&mut file.sfu_stun_server, &self.sfu_stun_server);
         overlay(&mut file.log_dir, &self.log_dir);
         overlay(&mut file.public_origins, &self.public_origins);
+        overlay(
+            &mut file.allow_secret_on_data_disk,
+            &self.allow_secret_on_data_disk,
+        );
         if self.identity_store_url.is_some()
             || self.identity_store_keys.is_some()
             || self.identity_allow_private_src.is_some()
@@ -553,6 +567,10 @@ impl RunArgs {
             ("multi_user_config", self.enable_multi_user.is_some() || tls),
             ("log_dir", self.log_dir.is_some()),
             ("public_origins", self.public_origins.is_some()),
+            (
+                "allow_secret_on_data_disk",
+                self.allow_secret_on_data_disk.is_some(),
+            ),
         ]
         .into_iter()
         .filter(|(_, pinned)| *pinned)
@@ -1006,6 +1024,13 @@ pub(crate) mod tests {
             "/c/logs",
         ),
         (
+            "/allow_secret_on_data_disk",
+            "AD4M_ALLOW_SECRET_ON_DATA_DISK",
+            "--allow-secret-on-data-disk",
+            "true",
+            "false",
+        ),
+        (
             "/local_ai_dir",
             "AD4M_LOCAL_AI_DIR",
             "--local-ai-dir",
@@ -1069,6 +1094,7 @@ pub(crate) mod tests {
             }),
             log_dir: Some("/a/logs".into()),
             public_origins: Some(vec!["https://a.example".into()]),
+            allow_secret_on_data_disk: Some(false),
             local_ai_dir: Some("/store-a".into()),
             local_ai_autostart: Some(true),
             local_ai_device: Some(Backend::Cuda),
@@ -1437,7 +1463,7 @@ pub(crate) mod tests {
             checked += 1;
         }
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
-        assert_eq!(checked, 50, "every flag of run has a variable");
+        assert_eq!(checked, 51, "every flag of run has a variable");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

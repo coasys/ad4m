@@ -28,6 +28,11 @@
 # $AD4M_STAGING_PUBLIC_STATUS (served as https://staging.ad4m.dev/status.json),
 # so no message names a local path. The script reads no secret value itself:
 # agent.mjs reads the admin credential from its file for the unlock check.
+# It makes one: the storage secret that opens the data folder's keyring, once,
+# with the new build's `ad4m-executor storage new-secret`, straight into a
+# 0600 file. It never prints it and never replaces an existing one; a missing
+# secret beside an existing keyring stops the update, since a new secret
+# cannot open that data.
 #
 # Environment (defaults in brackets):
 #   AD4M_STAGING_REPO           repo the source worktree is created from [~/nico/ad4m]
@@ -35,6 +40,8 @@
 #   AD4M_STAGING_STATE          releases, snapshots, logs, status.json [~/.local/share/ad4m-staging]
 #   AD4M_STAGING_CONFIG         config dir with executor-config.json and secrets/ [~/.config/ad4m-staging]
 #   AD4M_STAGING_DATA           executor data dir [~/.ad4m-staging]
+#   AD4M_STAGING_STORAGE_SECRET storage secret file, the unit's AD4M_STORAGE_SECRET_FILE
+#                                 [<config dir>/secrets/storage-secret]
 #   AD4M_STAGING_PUBLIC_STATUS  public copy of status.json [/var/www/ad4m-staging/status.json]
 #   AD4M_STAGING_BRANCH         branch to track [staging]
 #   AD4M_STAGING_UNIT           executor unit [ad4m-staging.service]
@@ -63,6 +70,7 @@ SRC=${AD4M_STAGING_SRC:-$HOME/ad4m-staging-src}
 STATE=${AD4M_STAGING_STATE:-$HOME/.local/share/ad4m-staging}
 CONFIG=${AD4M_STAGING_CONFIG:-$HOME/.config/ad4m-staging}
 DATA=${AD4M_STAGING_DATA:-$HOME/.ad4m-staging}
+STORAGE_SECRET=${AD4M_STAGING_STORAGE_SECRET:-$CONFIG/secrets/storage-secret}
 PUBLIC_STATUS=${AD4M_STAGING_PUBLIC_STATUS:-/var/www/ad4m-staging/status.json}
 BRANCH=${AD4M_STAGING_BRANCH:-staging}
 UNIT=${AD4M_STAGING_UNIT:-ad4m-staging.service}
@@ -74,7 +82,13 @@ KEEP_DATA=${AD4M_STAGING_KEEP_DATA:-0}
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 STATUS=$STATE/status.json
-REQUIRED_SECRETS=(admin-credential unlock-passphrase)
+# Each is checked when present: 0600 or 0400, not empty. admin-credential
+# must be there. unlock-passphrase is only for an agent made before the
+# keyring, until its first start with the storage secret. The storage secret
+# is made by this script (make_storage_secret).
+REQUIRED_SECRETS=(admin-credential)
+SECRET_FILES=("$CONFIG/secrets/admin-credential" "$CONFIG/secrets/unlock-passphrase" "$STORAGE_SECRET")
+KEYRING=$DATA/ad4m/keyring.json
 # The branch head is fetched into a ref of its own and always named in full:
 # a short name like origin/staging also matches a tag of that name, which
 # anyone who can push a tag could point at any commit.
@@ -177,12 +191,41 @@ fail() {
 
 # --- Preconditions: config and secrets in place
 [[ -f $CONFIG/executor-config.json ]] || fail "error: executor-config.json is missing from the config directory"
-for name in "${REQUIRED_SECRETS[@]}"; do
-  file=$CONFIG/secrets/$name
+for file in "${SECRET_FILES[@]}"; do
+  name=$(basename "$file")
+  if [[ " ${REQUIRED_SECRETS[*]} " != *" $name "* && ! -e $file ]]; then continue; fi
   [[ -s $file ]] || fail "error: secret file $name is missing or empty"
   mode=$(stat -c %a "$file")
   [[ $mode == 600 || $mode == 400 ]] || fail "error: secret file $name has mode $mode, needs 600 or 400"
 done
+if [[ ! -e $STORAGE_SECRET && -e $KEYRING ]]; then
+  fail "error: secret file $(basename "$STORAGE_SECRET") is missing, and the data folder has a keyring only it opens; put the secret back (a new one cannot open this data)"
+fi
+
+# make_storage_secret <ad4m-executor>: writes a new storage secret if there is
+# none. The first line of `storage new-secret` is the 64 hex characters; the
+# rest is advice for a terminal. The file is 0600 from its first byte, and the
+# hard link fails if a secret appeared meanwhile, so one is never replaced.
+# Returns 1 if the build cannot make one (a build from before the keyring).
+make_storage_secret() {
+  local tmp line
+  [[ -e $STORAGE_SECRET ]] && return 0
+  # Next to the secret: the hard link needs the same file system.
+  tmp=$(mktemp "$(dirname "$STORAGE_SECRET")/.storage-secret.XXXXXX") || return 1
+  if "$1" storage new-secret >"$tmp" 2>/dev/null && IFS= read -r line <"$tmp" &&
+    [[ $line =~ ^[0-9a-f]{64}$ ]]; then
+    printf '%s\n' "$line" >"$tmp"
+    line=
+    if ln "$tmp" "$STORAGE_SECRET" 2>/dev/null; then
+      rm -f "$tmp"
+      log "made the storage secret ($(basename "$STORAGE_SECRET")); keep a copy off this machine"
+      return 0
+    fi
+  fi
+  line=
+  rm -f "$tmp"
+  [[ -e $STORAGE_SECRET ]]
+}
 
 # --- Deploy steps shared by `deploy` and `rollback`
 link() { ln -sfn "releases/$2" "$STATE/$1.new" && mv -T "$STATE/$1.new" "$STATE/$1"; }
@@ -208,9 +251,11 @@ prune_snapshots() {
 # can no longer read, as the launcher does on every start.
 init_data() { "$STATE/current/ad4m-executor" init --data-path "$DATA"; }
 
-# /health only shows that the HTTP server is up; the agent has to unlock from
-# the passphrase file too. A node that never had an agent passes on /health
-# alone; once an agent has been seen unlocked, a build that finds none fails.
+# /health only shows that the HTTP server is up; the agent has to unlock too
+# (from the keyring, which the storage secret opens). A build that waits for
+# its storage secret answers `sealed` and fails. A node that never had an
+# agent passes on /health alone; once an agent has been seen unlocked, a
+# build that finds none fails.
 agent_state=
 # It probes at least once, so a slow machine cannot use up the time before
 # the first probe.
@@ -445,6 +490,11 @@ find "$STATE/logs" -name 'build-*.log' -printf '%T@ %p\n' | sort -rn | tail -n +
 
 mkdir -p "$STATE/releases/$sha"
 install -m 0755 "$SRC/target/release/ad4m-executor" "$SRC/target/release/ad4m" "$STATE/releases/$sha/"
+# Before the stop, so a failure here leaves the running build alone.
+if ! make_storage_secret "$STATE/releases/$sha/ad4m-executor"; then
+  # A build with the keyring then starts sealed and fails the check.
+  log "$sha made no storage secret (a build from before the keyring has no \`storage new-secret\`); deploying without one"
+fi
 
 # --- Swap: stop, snapshot, point current at the new build
 deployed=$(field deployed_sha)

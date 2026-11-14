@@ -44,6 +44,9 @@ use self::futures::{EventLoopFuture, SmartGlobalVariableFuture};
 pub struct JsCore {
     worker: Arc<TokioMutex<MainWorker>>,
     loaded_modules: Arc<TokioMutex<HashSet<String>>>,
+    /// A system language: bundled with the executor and trusted with plain files under the
+    /// executor's working directory.
+    system_language: bool,
 }
 
 // Dummy LanguageController placeholder — use a real type if available
@@ -60,6 +63,12 @@ pub struct IsolateState {
     pub language_storage_directory: Option<String>,
     pub language_address: Option<String>,
     pub language_settings: Option<String>,
+    /// A system language: its storage calls may also use plain files under the executor's
+    /// working directory.
+    pub system_language: bool,
+    /// The keys the language's storage files are sealed under; `None`: the installed ones
+    /// (`at_rest::lang_storage::installed`), and plain files when none are.
+    pub storage_keys: Option<Arc<crate::at_rest::DataKeys>>,
 }
 
 impl IsolateState {
@@ -71,6 +80,8 @@ impl IsolateState {
             language_storage_directory: None,
             language_address: None,
             language_settings: None,
+            system_language: false,
+            storage_keys: None,
         }
     }
 }
@@ -95,9 +106,11 @@ impl std::fmt::Display for ExternWrapper {
 
 impl JsCore {
     /// Create a new language-specific JsCore instance with sandboxed permissions.
-    /// Filesystem access is scoped to the language's storage directory only.
-    /// System/bootstrap languages additionally get access to the executor's CWD
-    /// (they are bundled by the developer and trusted).
+    /// A non-system language gets no filesystem permission at all: its storage
+    /// files go through the host's storage ops (`LANGUAGE_CONTROLLER.readStorageFile`
+    /// / `writeStorageFile`), which seal them. System/bootstrap languages (bundled
+    /// by the developer and trusted) keep read and write access to their storage
+    /// directory and the executor's CWD.
     /// Network access is allowed (languages need HTTP for peers/DHT).
     /// All other capabilities (env, run, ffi, sys) are denied.
     pub fn new_for_language(storage_directory: PathBuf, is_system_language: bool) -> Self {
@@ -116,15 +129,19 @@ impl JsCore {
             storage_dir_str
         );
 
-        // Build the filesystem allow list
-        let mut allowed_paths = vec![storage_dir_str.clone()];
-        if is_system_language {
+        // The filesystem allow list. `Some(vec![])` would allow every path, so a
+        // language without file access gets `None`.
+        let allowed_paths = if is_system_language {
+            let mut allowed = vec![storage_dir_str.clone()];
             if let Ok(cwd) = std::env::current_dir() {
                 let cwd_str = cwd.to_string_lossy().to_string();
                 info!("System language also gets CWD access: {}", cwd_str);
-                allowed_paths.push(cwd_str);
+                allowed.push(cwd_str);
             }
-        }
+            Some(allowed)
+        } else {
+            None
+        };
 
         // deno v2.9 removed `allow_all` from PermissionsOptions — the old
         // semantics of "allow_all = true bypasses everything" is now expressed
@@ -132,9 +149,9 @@ impl JsCore {
         // (as in AD4M's sandboxed language runtime), the field was already a
         // no-op, so simply removing it preserves behavior.
         let permissions_opts = PermissionsOptions {
-            allow_read: Some(allowed_paths.clone()),
+            allow_read: allowed_paths.clone(),
             deny_read: None,
-            allow_write: Some(allowed_paths),
+            allow_write: allowed_paths,
             deny_write: None,
             allow_net: Some(vec![]),
             deny_net: None,
@@ -155,12 +172,14 @@ impl JsCore {
             .expect("Failed to create sandboxed permissions for language runtime");
         let container = PermissionsContainer::new(permission_desc_parser, permissions);
 
-        Self::new_with_options(
+        let mut core = Self::new_with_options(
             options::language_main_module_url(),
             options::language_module_loader(),
             options::language_worker_options(),
             container,
-        )
+        );
+        core.system_language = is_system_language;
+        core
     }
 
     fn new_with_options(
@@ -208,6 +227,7 @@ impl JsCore {
             #[allow(clippy::arc_with_non_send_sync)]
             worker: Arc::new(TokioMutex::new(worker)),
             loaded_modules: Arc::new(TokioMutex::new(HashSet::new())),
+            system_language: false,
         }
     }
 
@@ -219,10 +239,29 @@ impl JsCore {
         language_address: String,
         language_settings: String,
     ) {
+        self.set_language_context_with_keys(
+            storage_directory,
+            language_address,
+            language_settings,
+            None,
+        );
+    }
+
+    /// [`Self::set_language_context`] with the keys the language's storage files are sealed
+    /// under given, not the installed ones: tests open their own keyring.
+    pub fn set_language_context_with_keys(
+        &self,
+        storage_directory: String,
+        language_address: String,
+        language_settings: String,
+        storage_keys: Option<Arc<crate::at_rest::DataKeys>>,
+    ) {
         let mut state = IsolateState::new();
         state.language_storage_directory = Some(storage_directory);
         state.language_address = Some(language_address);
         state.language_settings = Some(language_settings);
+        state.system_language = self.system_language;
+        state.storage_keys = storage_keys;
         languages_extension::init_isolate_state(state);
     }
 

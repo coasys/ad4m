@@ -68,12 +68,19 @@ if (typeof globalThis.window === "undefined") {
 //
 // Kept in the bootstrap (not the extension snapshot) so this opt-in is
 // plainly visible at runtime and easy to audit or swap out.
+//
+// Both go through the host's storage ops, not Deno's file API: the host
+// seals every file in the language's storage folder under the key of the
+// store the language serves, and a non-system language has no file
+// permission of its own. A relative path is inside the storage folder.
 if (typeof globalThis.LANGUAGE_CONTROLLER === "object" && globalThis.LANGUAGE_CONTROLLER) {
+    const storageRead = globalThis.LANGUAGE_CONTROLLER.languageStorageRead;
+    const storageWrite = globalThis.LANGUAGE_CONTROLLER.languageStorageWrite;
     globalThis.LANGUAGE_CONTROLLER.readStorageFile = function(path) {
-        return Deno.readTextFileSync(path);
+        return storageRead(String(path));
     };
     globalThis.LANGUAGE_CONTROLLER.writeStorageFile = function(path, content) {
-        Deno.writeTextFileSync(path, content);
+        storageWrite(String(path), String(content));
     };
 }
 

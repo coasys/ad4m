@@ -287,6 +287,14 @@ pub struct Ad4mConfig {
     #[serde(serialize_with = "crate::secret::serialize_redacted")]
     pub internal_api_token: Option<Secret>,
 
+    /// The operator secret that opens the keyring of data keys, for a shell that embeds the
+    /// executor (the launcher) or the secret file the cli read (`AD4M_STORAGE_SECRET_FILE`).
+    /// Unset: `run` waits sealed for `storage.unlock`. Never serialised and no config file key.
+    #[serde(skip)]
+    pub storage_secret: Option<crate::at_rest::StorageSecret>,
+    /// Accept a storage secret file on the data folder's disk; the status then reports the
+    /// data as not encrypted at rest. Default false.
+    pub allow_secret_on_data_disk: Option<bool>,
     /// Seconds one request-driven SPARQL evaluation may run before it is
     /// stopped (default 30). Covers `perspective.querySparql`,
     /// `perspective.modelQuery`, live-query opening and their re-checks.
@@ -858,6 +866,8 @@ impl Ad4mConfig {
             db_backend_url: None,
             snapshot_interval_secs: None,
             internal_api_token: None,
+            storage_secret: None,
+            allow_secret_on_data_disk: None,
         }
     }
 }

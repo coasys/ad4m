@@ -48,6 +48,9 @@ ratatui = "0.26.0"
 crossterm = "0.27.0"
 # The device string's terminal QR code (`ad4m-executor link-code`); no image backends.
 qrcode = { version = "0.14", default-features = false }
+# `ad4m-executor storage unlock` reads the operator secret from the terminal with echo off.
+rpassword = "7.5"
+zeroize = "1.9"
 
 [dev-dependencies]
 tempfile = "3"

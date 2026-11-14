@@ -6,8 +6,10 @@
 # start nothing when a restore fails, clean up after a deploy killed in its gate,
 # leave a lost status.json, a failed status write or an unfinished rollback by
 # hand (killed in its gate, in its restore or before it) to the operator,
-# refuse a rollback by hand over any of these, and start the deployed build
-# again after a deploy killed while it was stopped.
+# refuse a rollback by hand over any of these, start the deployed build
+# again after a deploy killed while it was stopped, make the storage secret
+# once (0600, never printed, never replaced), deploy without an unlock
+# passphrase, and stop when the storage secret is gone beside a keyring.
 # Needs bash, git, jq, flock and GNU coreutils. Usage: update.test.sh
 set -euo pipefail
 
@@ -38,12 +40,25 @@ echo "pnpm $*" >>"$STUB_DIR/calls"
 EOF
 cat >"$T/stubs/cargo" <<'EOF'
 #!/usr/bin/env bash
-# The build of commit <sha> produces an ad4m-executor that answers `init`.
+# The build of commit <sha> produces an ad4m-executor that answers `init` and
+# `storage new-secret`: <sha> padded to 64 hex characters, then a line of
+# advice. With $STUB_DIR/old-build-<sha>, it is a build from before the
+# keyring and has no `storage` command.
 echo "cargo $*" >>"$STUB_DIR/calls"
 sha=$(git rev-parse HEAD)
 if [[ -f $STUB_DIR/fail-build-$sha ]]; then echo "error[E0000]: stub build failure"; exit 101; fi
 mkdir -p "$CARGO_TARGET_DIR/release"
-printf '#!/usr/bin/env bash\necho "init %s $*" >>"$STUB_DIR/calls"\n' "$sha" >"$CARGO_TARGET_DIR/release/ad4m-executor"
+cat >"$CARGO_TARGET_DIR/release/ad4m-executor" <<STUB
+#!/usr/bin/env bash
+if [[ \$1 == storage ]]; then
+  if [[ -f \$STUB_DIR/old-build-$sha ]]; then echo "error: unrecognized subcommand 'storage'" >&2; exit 2; fi
+  echo "storage \$2 $sha" >>"\$STUB_DIR/calls"
+  echo ${sha}000000000000000000000000
+  echo "Keep this secret safe, away from the data folder's disk."
+  exit 0
+fi
+echo "init $sha \$*" >>"\$STUB_DIR/calls"
+STUB
 printf '#!/usr/bin/env bash\n' >"$CARGO_TARGET_DIR/release/ad4m"
 chmod +x "$CARGO_TARGET_DIR/release/ad4m-executor" "$CARGO_TARGET_DIR/release/ad4m"
 EOF
@@ -226,6 +241,12 @@ check "subject is recorded" [ "$(status subject)" = PR1 ]
 check "first deploy has no previous_sha" [ -z "$(status previous_sha)" ]
 check "current points at the release" [ "$(readlink "$T/state/current")" = "releases/$first" ]
 check "init ran with the new build" called "init $first init --data-path $T/data"
+check "the first deploy makes the storage secret with the new build" called "storage new-secret $first"
+check "the storage secret is mode 600" [ "$(stat -c %a "$T/config/secrets/storage-secret")" = 600 ]
+check "it holds only the secret line" [ "$(cat "$T/config/secrets/storage-secret")" = "${first}000000000000000000000000" ]
+check "no temporary secret file is left" bash -c "! ls -A '$T/config/secrets' | grep -q '^\.storage-secret'"
+check "the secret is in neither the output nor status.json" \
+  bash -c "! grep -rq '$first'000 '$T/out' '$T/state/status.json' '$T/www/status.json' '$T/state/logs'"
 check "public status shows the deployed SHA" [ "$(jq -r .deployed_sha "$T/www/status.json")" = "$first" ]
 check "first deploy syncs the staging link-server through the stub" \
   grep -q "deploy-link-server staging $first" "$T/calls"
@@ -272,6 +293,8 @@ check "deployed_sha is unchanged" [ "$(status deployed_sha)" = "$bad" ]
 last=$(commit "next" "AD4M_UNLOCK_PASSPHRASE_FILE")
 run
 check "a later deploy succeeds" [ "$(status deployed_sha)" = "$last" ]
+check "and does not make another storage secret" bash -c "! grep -q 'storage new-secret' '$T/calls'"
+check "the first storage secret stays" [ "$(cat "$T/config/secrets/storage-secret")" = "${first}000000000000000000000000" ]
 check "only the previous build's snapshot is kept" \
   [ "$(find "$T/state/snapshots" -mindepth 1 -maxdepth 1 -printf '%f\n' | sed 's/.*-//')" = "$bad" ]
 check "only current and previous releases are kept" \
@@ -817,6 +840,77 @@ check "a deploy calls the stub for staging and prod" \
   bash -c "grep -q 'deploy-link-server staging $link23' '$T/calls' && grep -q 'deploy-link-server prod $link23' '$T/calls'"
 check "and clears pending after both" \
   [ "$(jq -r .link_server_pending "$T/state23/status.json")" = null ]
+
+# 34. A node with no unlock passphrase (an agent made with the keyring):
+# deploys, and makes its storage secret.
+mkdir -p "$T/config24/secrets"
+echo '{}' >"$T/config24/executor-config.json"
+(umask 077 && echo cred >"$T/config24/secrets/admin-credential")
+export AD4M_STAGING_CONFIG=$T/config24
+export AD4M_STAGING_STATE=$T/state24 AD4M_STAGING_DATA=$T/data24 AD4M_STAGING_SRC=$T/src24
+nopass=$(commit "no passphrase file" "AD4M_UNLOCK_PASSPHRASE_FILE")
+run
+check "a deploy without an unlock passphrase succeeds" [ "$(jq -r .deployed_sha "$T/state24/status.json")" = "$nopass" ]
+check "and makes the storage secret" [ "$(cat "$T/config24/secrets/storage-secret")" = "${nopass}000000000000000000000000" ]
+
+# 35. The storage secret is gone but the data folder has a keyring: stop
+# before anything, never make a new one.
+mkdir -p "$T/data24/ad4m"
+echo '{}' >"$T/data24/ad4m/keyring.json"
+mv "$T/config24/secrets/storage-secret" "$T/storage-secret.aside"
+lost=$(commit "secret lost" "AD4M_UNLOCK_PASSPHRASE_FILE")
+run
+check "a lost storage secret beside a keyring stops the update" \
+  bash -c "[[ '$(jq -r .last_result "$T/state24/status.json")' == 'error: secret file storage-secret is missing'* ]]"
+check "and nothing is built or stopped" bash -c "! grep -qE 'cargo|systemctl' '$T/calls'"
+check "and no new secret is made" [ ! -e "$T/config24/secrets/storage-secret" ]
+check "and the running build stays" [ "$(cat "$T/running")" = "$nopass" ]
+mv "$T/storage-secret.aside" "$T/config24/secrets/storage-secret"
+
+# 36. A storage secret others can read is refused like any secret file.
+chmod 644 "$T/config24/secrets/storage-secret"
+run
+check "a readable storage secret is refused" \
+  bash -c "[[ '$(jq -r .last_result "$T/state24/status.json")' == *'storage-secret has mode 644'* ]]"
+check "and nothing is built" bash -c "! grep -q cargo '$T/calls'"
+chmod 600 "$T/config24/secrets/storage-secret"
+run
+check "with the secret back, the deploy goes on" [ "$(jq -r .deployed_sha "$T/state24/status.json")" = "$lost" ]
+check "and keeps the first secret" [ "$(cat "$T/config24/secrets/storage-secret")" = "${nopass}000000000000000000000000" ]
+
+# 37. A build from before the keyring cannot make a storage secret: it is
+# deployed without one (it does not read it).
+mkdir -p "$T/config25/secrets"
+echo '{}' >"$T/config25/executor-config.json"
+(umask 077 && echo cred >"$T/config25/secrets/admin-credential" && echo pass >"$T/config25/secrets/unlock-passphrase")
+export AD4M_STAGING_CONFIG=$T/config25
+export AD4M_STAGING_STATE=$T/state25 AD4M_STAGING_DATA=$T/data25 AD4M_STAGING_SRC=$T/src25
+old=$(commit "before the keyring" "AD4M_UNLOCK_PASSPHRASE_FILE")
+touch "$T/old-build-$old"
+run
+check "a build without storage new-secret still deploys" [ "$(jq -r .deployed_sha "$T/state25/status.json")" = "$old" ]
+check "and says it has no storage secret" grep -q "made no storage secret" "$T/out"
+check "and leaves no secret file, not even a partial one" bash -c "[ -z \"\$(ls -A '$T/config25/secrets' | grep storage)\" ]"
+next=$(commit "with the keyring" "AD4M_UNLOCK_PASSPHRASE_FILE")
+run
+check "the next build with the keyring makes it" [ "$(cat "$T/config25/secrets/storage-secret")" = "${next}000000000000000000000000" ]
+
+# 38. AD4M_STAGING_STORAGE_SECRET puts the secret elsewhere (another disk).
+mkdir -p "$T/otherdisk"
+chmod 700 "$T/otherdisk"
+export AD4M_STAGING_STORAGE_SECRET=$T/otherdisk/ad4m-storage-secret
+export AD4M_STAGING_STATE=$T/state26 AD4M_STAGING_DATA=$T/data26 AD4M_STAGING_SRC=$T/src26
+elsewhere=$(commit "secret elsewhere" "AD4M_UNLOCK_PASSPHRASE_FILE")
+run
+check "the secret is made at AD4M_STAGING_STORAGE_SECRET" \
+  [ "$(cat "$T/otherdisk/ad4m-storage-secret")" = "${elsewhere}000000000000000000000000" ]
+check "with mode 600" [ "$(stat -c %a "$T/otherdisk/ad4m-storage-secret")" = 600 ]
+chmod 640 "$T/otherdisk/ad4m-storage-secret"
+commit "after chmod elsewhere" "AD4M_UNLOCK_PASSPHRASE_FILE" >/dev/null
+run
+check "its mode is checked there" \
+  bash -c "[[ '$(jq -r .last_result "$T/state26/status.json")' == *'ad4m-storage-secret has mode 640'* ]]"
+unset AD4M_STAGING_STORAGE_SECRET
 
 echo "$failures failed"
 ((failures == 0))

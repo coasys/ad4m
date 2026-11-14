@@ -67,7 +67,7 @@ pub async fn internal_shutdown(headers: HeaderMap) -> Result<Json<serde_json::Va
         // The local AI runtimes are this executor's children: they stop with it.
         crate::ai_service::local::stop_on_exit().await;
         log::info!("Exiting process after graceful shutdown");
-        std::process::exit(0);
+        crate::exit::exit_now(0);
     });
 
     Ok(Json(json!({"status": "shutting_down"})))

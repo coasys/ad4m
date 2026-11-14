@@ -2,6 +2,7 @@
 extern crate lazy_static;
 
 pub mod api;
+pub mod at_rest;
 pub mod bots;
 pub mod config;
 pub mod config_file;
@@ -229,18 +230,26 @@ async fn holochain_signal_receiver() {
     }
 }
 
-/// Unlocks the main agent with the passphrase an operator supplied at
-/// startup (`AD4M_UNLOCK_PASSPHRASE_FILE`), the way `agent.unlock` does, so
-/// a restarted headless executor serves requests without a person or a
-/// script unlocking it. Call after [`run`] has returned. Without an agent
-/// (not generated yet) it only logs. Neither path logs the passphrase.
+/// Unlocks the main agent with the passphrase an operator supplied at startup
+/// (`AD4M_UNLOCK_PASSPHRASE_FILE`), the way `agent.unlock` does, and so puts it in the
+/// keyring: later starts unlock from the keyring ([`unlock_agent_from_keyring`]) and the file
+/// is no longer needed. When the keyring already gives the passphrase, the file is not read
+/// and a warning says it can go. Call after [`run`] has returned. Without an agent (not
+/// generated yet) it only logs. No path logs the passphrase.
 pub async fn unlock_agent_at_startup(passphrase: String) {
+    const RETIRED: &str = "AD4M_UNLOCK_PASSPHRASE_FILE is no longer needed: the keyring holds \
+                           the agent passphrase. Remove the file and the variable.";
     let initialized = AgentService::with_global_instance(|agent| agent.is_initialized());
     if !initialized {
         warn!(
-            "AD4M_UNLOCK_PASSPHRASE_FILE is set but there is no agent yet: generate one \
-             (agent.generate); later starts unlock it from the file"
+            "AD4M_UNLOCK_PASSPHRASE_FILE is set but there is no agent yet: a new agent's \
+             passphrase comes from the keyring, so remove the file and the variable"
         );
+        return;
+    }
+    let keys = at_rest::agent_passphrase::keys();
+    if at_rest::agent_passphrase::from_keyring(keys.as_deref()).is_some() {
+        warn!("{RETIRED}");
         return;
     }
     const FAILED: &str = "Unlocking the agent at startup with the passphrase from \
@@ -248,21 +257,66 @@ pub async fn unlock_agent_at_startup(passphrase: String) {
     const STAYS_LOCKED: &str = "The executor stays up with the agent locked; check the file, \
                                 then unlock with agent.unlock or restart";
     match api::agent_ws::unlock_main_agent(passphrase).await {
-        Ok(status) if status.is_unlocked => match status.error {
-            None => info!(
-                "Agent unlocked at startup with the passphrase from AD4M_UNLOCK_PASSPHRASE_FILE"
-            ),
-            Some(error) => error!(
-                "Agent unlocked at startup with the passphrase from \
-                 AD4M_UNLOCK_PASSPHRASE_FILE, but starting its services failed: {error}"
-            ),
-        },
+        Ok(status) if status.is_unlocked => {
+            match status.error {
+                None => info!(
+                    "Agent unlocked at startup with the passphrase from AD4M_UNLOCK_PASSPHRASE_FILE"
+                ),
+                Some(error) => error!(
+                    "Agent unlocked at startup with the passphrase from \
+                     AD4M_UNLOCK_PASSPHRASE_FILE, but starting its services failed: {error}"
+                ),
+            }
+            if at_rest::agent_passphrase::from_keyring(keys.as_deref()).is_some() {
+                warn!("{RETIRED}");
+            }
+        }
         Ok(status) => error!(
             "{FAILED}: {}. {STAYS_LOCKED}",
             status.error.unwrap_or_default()
         ),
         Err(e) => error!("{FAILED}: {}. {STAYS_LOCKED}", e.message),
     }
+}
+
+/// The start's unlock of the main agent from the keyring, decided now: when an agent exists
+/// and the keyring gives its passphrase (derived, or held since an operator's unlock), a task
+/// unlocks it the way `agent.unlock` does and starts Holochain with it. Otherwise the agent
+/// stays locked until an operator unlocks it once; that unlock puts the passphrase in the
+/// keyring. `run` calls it once its stores are open.
+fn unlock_agent_from_keyring() {
+    let initialized = AgentService::with_global_instance(|agent| agent.is_initialized());
+    if !initialized {
+        return;
+    }
+    let keys = at_rest::agent_passphrase::keys();
+    let Some(passphrase) = at_rest::agent_passphrase::from_keyring(keys.as_deref()) else {
+        info!(
+            "The agent stays locked until it is unlocked once with its passphrase \
+             (agent.unlock or AD4M_UNLOCK_PASSPHRASE_FILE); the keyring then holds it"
+        );
+        return;
+    };
+    let passphrase = passphrase.to_string();
+    tokio::spawn(async move {
+        match api::agent_ws::unlock_main_agent(passphrase).await {
+            Ok(status) if status.is_unlocked => match status.error {
+                None => info!("Agent unlocked at startup from the keyring"),
+                Some(error) => error!(
+                    "Agent unlocked at startup from the keyring, but starting its services \
+                     failed: {error}"
+                ),
+            },
+            Ok(status) => error!(
+                "Unlocking the agent at startup from the keyring failed: {}",
+                status.error.unwrap_or_default()
+            ),
+            Err(e) => error!(
+                "Unlocking the agent at startup from the keyring failed: {}",
+                e.message
+            ),
+        }
+    });
 }
 
 /// How long the graceful shutdown that a signal starts may take before the process exits anyway.
@@ -353,7 +407,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
                     SHUTDOWN_DEADLINE
                 ),
             }
-            std::process::exit(1);
+            exit::exit_now(1);
         });
     }
 
@@ -368,7 +422,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
                 "Graceful shutdown complete, exiting with {}.",
                 reason.code()
             );
-            std::process::exit(reason.code());
+            exit::exit_now(reason.code());
         }
     });
 
@@ -419,7 +473,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
                     )
                 });
                 std::thread::sleep(SHUTDOWN_DEADLINE);
-                std::process::exit(1);
+                exit::exit_now(1);
             })
             .expect("failed to start the parent-watch thread");
     }
@@ -435,11 +489,19 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
         panic!("{}", message);
     }
 
-    // The wallet's keys are in this process's memory once unlocked.
-    #[cfg(target_os = "linux")]
+    // Out of the config before it is copied anywhere (the global config, the API thread).
+    let storage_secret = config.storage_secret.take();
+
+    // The storage keys and the wallet's keys are in this process's memory once unlocked. The
+    // executor binaries did this first thing; an embedder's process gets it here.
+    #[cfg(unix)]
     if let Err(e) = exit::forbid_core_dumps() {
         warn!("Could not turn off core dumps for the executor: {e}");
     }
+    // Files and folders made from here on are private to this user, the ones libraries make
+    // with the default mode too (the perspectives' SPARQL stores, which add files while they
+    // run). For an embedder this applies to its whole process.
+    at_rest::files::private_umask();
 
     // Write PID file if requested via config.
     // Test harnesses can set pid_file to get a reliable PID for targeted cleanup.
@@ -466,6 +528,111 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
 
     // Store config globally so services (e.g. agent mutation resolvers) can access it
     crate::config::set_global_config(config.clone());
+
+    // The data folders, before the keyring is read from one. Each new one is 0700, and the data
+    // folder itself is closed to 0700 whoever made it (the data-folder lock, an older executor).
+    let data_root = std::path::PathBuf::from(
+        config
+            .app_data_path
+            .as_ref()
+            .expect("App data path not set in Ad4mConfig"),
+    );
+    {
+        let base = data_root.join("ad4m");
+        let dirs = [
+            data_root.clone(),
+            base.clone(),
+            base.join("data"),
+            base.join("languages"),
+            base.join("languages").join("temp"),
+            base.join("h"),
+            base.join("h").join("d"),
+            base.join("h").join("c"),
+        ];
+        for dir in &dirs {
+            if let Err(e) = at_rest::files::create_private_dir_all(dir) {
+                error!("Failed to create data directory {:?}: {}", dir, e);
+                panic!(
+                    "Cannot continue without required data directory {:?}: {}",
+                    dir, e
+                );
+            }
+        }
+        at_rest::files::close_if_open(&data_root);
+        at_rest::files::close_if_open(&base);
+    }
+
+    // No store opens before the storage secret arrived. With the secret from the embedding
+    // shell or the secret file the keyring opens here; without it, or when it does not open
+    // the keyring, the API starts now and answers only `runtime.storageStatus` and
+    // `storage.unlock` until the operator unlocks (`at_rest`).
+    let gate = std::sync::Arc::new(at_rest::StorageGate::new(
+        &data_root,
+        config.allow_secret_on_data_disk.unwrap_or(false),
+    ));
+    if at_rest::install(gate.clone()).is_err() {
+        return failed_start(
+            "The executor already ran in this process: one executor per process".to_string(),
+        );
+    }
+    let unlocked = match &storage_secret {
+        Some(secret) => match gate.unlock(secret) {
+            Ok(outcome) => {
+                info!(
+                    "Storage unlocked with the secret from {:?}{}",
+                    secret.source,
+                    if outcome.created {
+                        "; keyring made"
+                    } else {
+                        ""
+                    }
+                );
+                true
+            }
+            Err(e) => {
+                error!("The storage secret of this start did not open the keyring: {e}");
+                false
+            }
+        },
+        None => false,
+    };
+    drop(storage_secret);
+    // An executor that ran before at-rest encryption moves its plaintext data under its keys
+    // now, before any store opens (`at_rest::migration`). A failed move keeps the plaintext
+    // and seals the gate again: the next `storage.unlock` runs the steps not done.
+    let mut early = None;
+    let mut unlocked = unlocked;
+    loop {
+        if !unlocked {
+            let (_, api_ended) = early.get_or_insert_with(|| {
+                find_and_set_port(&mut config.port, 4000, "REST API");
+                spawn_api_thread(config.clone())
+            });
+            warn!(
+                "Storage sealed (keyring {}): waiting for storage.unlock, e.g. `ad4m-executor storage unlock` on this machine",
+                gate.keys().keyring_id().to_hex()
+            );
+            let api_stopped = tokio::select! {
+                _ = gate.unsealed() => false,
+                // The API could not start (port taken) or stopped: nobody can unlock any more.
+                _ = api_ended => true,
+            };
+            if api_stopped {
+                if let Some((api, _)) = early.take() {
+                    return api;
+                }
+            }
+        }
+        match at_rest::migration::run(&gate, &at_rest::migration::Paths::in_data_dir(&data_root)) {
+            Ok(at_rest::migration::Outcome::NothingToDo) => break,
+            Ok(at_rest::migration::Outcome::Migrated { steps }) => {
+                info!("This executor's plaintext data is under its keys ({steps:?})");
+                break;
+            }
+            Err(_) => unlocked = false,
+        }
+    }
+    let early_api = early.map(|(api, _)| api);
 
     // Initialise the wallet backend based on config.
     // "shared" mode connects to an external HTTP wallet service;
@@ -529,12 +696,22 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
     }
 
     // Restore perspective data from the platform backend if running in shared mode.
-    // Downloads the tar.gz snapshot and extracts to the data directory
-    // before perspectives initialise (so OxiGraph opens with restored data).
+    // Downloads the sealed snapshot, opens it under the keyring (open by now) and
+    // extracts it to the data directory before perspectives initialise (so OxiGraph
+    // opens with restored data). A plain snapshot from before snapshots were sealed
+    // is restored once and replaced by a sealed one as soon as perspectives are open.
+    let mut reseal_snapshot = false;
     if config.wallet_backend.as_deref() == Some("shared") {
+        use crate::perspective_snapshot::Restored;
         match crate::perspective_snapshot::restore_perspectives(&config) {
-            Ok(true) => info!("Restored perspectives from remote snapshot"),
-            Ok(false) => info!("No remote snapshot found — starting with fresh perspectives"),
+            Ok(Restored::Sealed) => info!("Restored perspectives from remote snapshot"),
+            Ok(Restored::Plain) => {
+                info!("Restored perspectives from a plain remote snapshot; resealing it");
+                reseal_snapshot = true;
+            }
+            Ok(Restored::Nothing) => {
+                info!("No remote snapshot found — starting with fresh perspectives")
+            }
             Err(e) => log::warn!("Perspective restore failed (continuing without): {}", e),
         }
     }
@@ -556,37 +733,19 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
         }
     }
 
-    // Create data directories that were previously created by the JS executor's Config.init().
-    // These must exist before any service tries to write to them.
-    {
-        let app_data_path = config
-            .app_data_path
-            .as_ref()
-            .expect("App data path not set in Ad4mConfig");
-        let base = std::path::Path::new(app_data_path).join("ad4m");
-        let dirs = [
-            base.clone(),
-            base.join("data"),
-            base.join("languages"),
-            base.join("languages").join("temp"),
-            base.join("h"),
-            base.join("h").join("d"),
-            base.join("h").join("c"),
-        ];
-        for dir in &dirs {
-            if let Err(e) = std::fs::create_dir_all(dir) {
-                error!("Failed to create data directory {:?}: {}", dir, e);
-                panic!(
-                    "Cannot continue without required data directory {:?}: {}",
-                    dir, e
-                );
-            }
-        }
-    }
-
     aws_lc_rs::default_provider()
         .install_default()
         .expect("Failed to install rustls' aws_lc_rs crypto provider");
+
+    // The database file is under its key (a plaintext one moved in the migration above): it is
+    // checked under the key and the database keys are installed before anything opens it.
+    match at_rest::database::prepare(gate.keys(), &data_root.join("ad4m_db.sqlite"), Some(&gate)) {
+        Ok(at_rest::database::DatabaseStep::Keyed(_)) => {}
+        Ok(at_rest::database::DatabaseStep::KeptPlain(e)) => {
+            warn!("The database stays in the clear this start: {e}");
+        }
+        Err(e) => return failed_start(e),
+    }
 
     info!("Initializing Ad4mDb...");
 
@@ -604,6 +763,34 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
             .as_str(),
     )
     .expect("Failed to initialize Ad4mDb");
+    // SQLite makes its files with the process umask: only the owner reads them.
+    for name in [
+        "ad4m_db.sqlite",
+        "ad4m_db.sqlite-wal",
+        "ad4m_db.sqlite-shm",
+        "ad4m_db.sqlite-journal",
+    ] {
+        let file = data_root.join(name);
+        if file.exists() {
+            if let Err(e) = at_rest::files::restrict(&file) {
+                warn!("Could not make {} private: {e}", file.display());
+            }
+        }
+    }
+
+    // Managed users made before each user had its own data key get theirs now, before any of
+    // their sessions writes.
+    if gate.keys().is_open() {
+        let usernames = match crate::db_backend::db_backend().list_users() {
+            Ok(users) => users.into_iter().map(|u| u.username).collect::<Vec<_>>(),
+            Err(e) => return failed_start(format!("Could not list the managed users: {e}")),
+        };
+        match at_rest::persons::prepare(gate.keys(), &usernames) {
+            Ok(0) => {}
+            Ok(made) => info!("Made the data keys of {made} managed users"),
+            Err(e) => return failed_start(e),
+        }
+    }
 
     // The bots and their grants, which every call of a bot's session reads. Without them no
     // managed agent's session is served (`bots::classify`): a bot must not pass as a user.
@@ -803,6 +990,31 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
     // Set languages directory based on app data path (must be before LanguageController)
     crate::utils::set_languages_directory(config.app_data_path.as_ref().unwrap());
 
+    // The languages' storage files go under their keys before any language loads. Each link
+    // language's files are sealed under its neighbourhood's perspective store, so the routing
+    // cache learns every neighbourhood's link language first.
+    match db_backend::db_backend().get_all_perspectives() {
+        Ok(handles) => at_rest::migration::route_link_languages(&handles),
+        Err(e) => {
+            warn!("Could not list the perspectives before sealing the languages' storage: {e}")
+        }
+    }
+    match at_rest::lang_storage::prepare(
+        gate.keys(),
+        &crate::utils::languages_directory(),
+        Some(&gate),
+    ) {
+        Ok(at_rest::lang_storage::LanguageStorageStep::Sealed { sealed }) => {
+            info!("The languages' storage is under its keys ({sealed} files sealed now)");
+        }
+        Ok(at_rest::lang_storage::LanguageStorageStep::KeptPlain { sealed, error }) => {
+            warn!(
+                "The languages' storage stays partly in the clear this start ({sealed} files sealed): {error}"
+            );
+        }
+        Err(e) => return failed_start(e),
+    }
+
     LanguageController::init_global_instance();
 
     // NOTE: system languages are loaded from the agent.generate/agent.unlock handlers:
@@ -815,7 +1027,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
 
     // Start periodic perspective snapshots in shared mode.
     if config.wallet_backend.as_deref() == Some("shared") {
-        crate::perspective_snapshot::spawn_periodic_backup(config.clone());
+        crate::perspective_snapshot::spawn_periodic_backup(config.clone(), reseal_snapshot);
     }
 
     // Start periodic memory diagnostics (logs RSS, jemalloc stats,
@@ -1001,9 +1213,32 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
         });
     }
 
-    info!("Starting REST API server...");
+    // Every store is open: the gate lets every method through.
+    gate.mark_open();
+    info!("Storage open");
 
-    std::thread::spawn(move || {
+    let api = match early_api {
+        // It has served the storage methods since the start.
+        Some(api) => api,
+        None => {
+            info!("Starting REST API server...");
+            spawn_api_thread(config).0
+        }
+    };
+    unlock_agent_from_keyring();
+    api
+}
+
+/// The REST API on a thread of its own, and a receiver that resolves when that thread's
+/// server ended (it failed to start, or stopped).
+fn spawn_api_thread(
+    config: Ad4mConfig,
+) -> (
+    JoinHandle<Result<(), AnyError>>,
+    tokio::sync::oneshot::Receiver<()>,
+) {
+    let (ended_tx, ended_rx) = tokio::sync::oneshot::channel();
+    let api = std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .thread_name(String::from("rest_server"))
             .enable_all()
@@ -1013,8 +1248,10 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
         if let Err(e) = &result {
             error!("REST API server failed: {:?}", e);
         }
+        let _ = ended_tx.send(());
         result
-    })
+    });
+    (api, ended_rx)
 }
 
 /// `run`'s order for the start-up pass over the key-bound grants: the persisted agent is
@@ -1153,7 +1390,7 @@ pub fn exit_when_api_fails(api_thread: JoinHandle<Result<(), AnyError>>) {
             Err(_) => (String::from("the REST API thread panicked"), 1),
         };
         error!("REST API server failed, exiting with {code}: {reason}");
-        std::process::exit(code);
+        exit::exit_now(code);
     });
 }
 

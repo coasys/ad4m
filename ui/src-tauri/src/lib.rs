@@ -323,11 +323,22 @@ pub fn run() {
             // produce: an SMTP password is always set (possibly "", which is
             // valid here), and free_port + 1 cannot overflow. Should that
             // change, setup fails with the reason logged instead of a panic.
+            // Without the OS keyring the executor starts sealed: `ad4m-executor storage
+            // unlock` on this machine opens it.
+            let storage_secret = encryption::storage_secret()
+                .map_err(|e| {
+                    error!(
+                        "No storage secret from the OS keyring ({e}): the executor starts \
+                         sealed until `ad4m-executor storage unlock`"
+                    )
+                })
+                .ok();
             let mut config = config_file
                 .to_ad4m_config(&ExecutorSecrets {
                     admin_credential: Some(req_credential.clone().into()),
                     smtp_password,
                     unlock_passphrase: None,
+                    storage_secret,
                 })
                 .map_err(|e| {
                     error!("Cannot start the executor with the launcher's settings: {e}");

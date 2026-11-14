@@ -58,6 +58,7 @@ mod perspectives;
 mod repl;
 mod run_config;
 mod runtime;
+mod storage;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -160,6 +161,12 @@ enum Domain {
         #[command(subcommand)]
         command: ConfigCommand,
     },
+    /// The operator secret that encrypts this executor's data at rest: make one, unlock a
+    /// sealed executor with it, or read the storage status
+    Storage {
+        #[command(subcommand)]
+        command: storage::StorageCommand,
+    },
     /// Local AI without a running executor
     LocalAi {
         #[command(subcommand)]
@@ -235,6 +242,47 @@ enum ConfigCommand {
     Print(RunArgs),
 }
 
+/// `storage unlock`: refuses a secret given as an argument or in the environment, reads it from
+/// the terminal, and prints what the executor answered.
+async fn storage_unlock(
+    executor_url: Option<String>,
+    admin_credential: Option<String>,
+    given: &[String],
+) -> Result<()> {
+    storage::refuse_given_secret("unlock", given, process_env)?;
+    let executor_url = match executor_url {
+        Some(url) => url,
+        None => startup::get_executor_url()?,
+    };
+    let token = identity::admin_credential(admin_credential, process_env)?;
+    let secret = storage::read_secret_from_terminal("Storage secret")?;
+    println!("{}", storage::unlock(&executor_url, &token, &secret).await?);
+    Ok(())
+}
+
+/// `storage rotate-secret`: refuses a secret given as an argument or in the environment, reads
+/// the current secret and the new one (twice) from the terminal, and prints the fingerprints.
+async fn storage_rotate_secret(
+    executor_url: Option<String>,
+    admin_credential: Option<String>,
+    given: &[String],
+) -> Result<()> {
+    storage::refuse_given_secret("rotate-secret", given, process_env)?;
+    let executor_url = match executor_url {
+        Some(url) => url,
+        None => startup::get_executor_url()?,
+    };
+    let token = identity::admin_credential(admin_credential, process_env)?;
+    let current = storage::read_secret_from_terminal("Current storage secret")?;
+    let new = storage::read_secret_from_terminal("New storage secret")?;
+    let confirmed = storage::read_secret_from_terminal("New storage secret again")?;
+    println!(
+        "{}",
+        storage::rotate_secret(&executor_url, &token, &current, &new, &confirmed).await?
+    );
+    Ok(())
+}
+
 /// The exit code for a command line clap does not run: 0 for `--help` and `--version`, else 78
 /// (`ExitReason::ConfigRefused`), as for a refused config file: an invalid flag or `AD4M_*`
 /// variable fails the same way at every start, so a supervisor does not retry it.
@@ -247,6 +295,12 @@ fn command_line_exit_code(error: &clap::Error) -> i32 {
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
+    // Before anything holds a key: no core file, no debugger attach.
+    #[cfg(unix)]
+    if let Err(e) = rust_executor::exit::forbid_core_dumps() {
+        eprintln!("Cannot turn off core dumps: {e}");
+        std::process::exit(1);
+    }
     let args = ClapApp::try_parse().unwrap_or_else(|e| {
         let code = command_line_exit_code(&e);
         let _ = e.print();
@@ -346,6 +400,42 @@ async fn main() -> Result<()> {
         };
         if let Err(e) = shown {
             eprintln!("{e}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
+    if let Domain::Storage { command } = args.domain {
+        let done = match command {
+            storage::StorageCommand::NewSecret => {
+                println!("{}", &*storage::new_secret_text());
+                Ok(())
+            }
+            storage::StorageCommand::Unlock { given } => {
+                storage_unlock(args.executor_url, args.admin_credential, &given).await
+            }
+            storage::StorageCommand::RotateSecret { given } => {
+                storage_rotate_secret(args.executor_url, args.admin_credential, &given).await
+            }
+            storage::StorageCommand::Reset { data_path, confirm } => {
+                let data_dir = data_path.unwrap_or_else(startup::executor_data_path);
+                storage::reset(&data_dir, confirm.as_deref()).map(|text| println!("{text}"))
+            }
+            storage::StorageCommand::Status => {
+                async {
+                    let executor_url = match args.executor_url {
+                        Some(url) => url,
+                        None => startup::get_executor_url()?,
+                    };
+                    let token = identity::admin_credential(args.admin_credential, process_env)?;
+                    println!("{}", storage::status(&executor_url, &token).await?);
+                    Ok(())
+                }
+                .await
+            }
+        };
+        if let Err(e) = done {
+            eprintln!("{e:#}");
             std::process::exit(1);
         }
         return Ok(());

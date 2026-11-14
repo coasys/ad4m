@@ -245,10 +245,48 @@ languages that explicitly opt into filesystem-like semantics.
 Both throw `"[ad4m:host] Storage File I/O extension is not installed …"`
 on runtimes that don't install the methods.
 
+### The Deno executor's storage contract
+
+The Deno executor implements both methods with its own storage calls,
+not with Deno's file API, and seals what a language keeps:
+
+- **Where.** A relative path is inside the language's storage folder
+  (`languageStorageDirectory()`); an absolute path inside that folder is
+  the same file. Sub-folders are made as needed. A path with `..`, the
+  folder itself, and the executor's own files at the top of the folder
+  (`bundle.js`, `meta.json`, `settings.json`) are refused.
+- **Sealed.** Once the executor's storage is unlocked, every file a
+  language writes in its folder is stored encrypted under a key the
+  executor holds: the key of the neighbourhood's perspective for the
+  neighbourhood's link language, the executor's own key for every other
+  language. The file on disk starts with `AD4MSEAL`; its content is
+  XChaCha20-Poly1305 ciphertext bound to the language's address, the
+  file's path inside the folder and the key's store. A file copied into
+  another language's folder, or renamed, does not open. A language reads
+  and writes plain strings; the sealing is invisible to it.
+- **Atomic.** A write replaces the whole file at once: a reader sees the
+  old content or the new, never part of either.
+- **Missing files.** Reading a file that does not exist throws an error
+  whose message starts `NotFound: No such file`.
+- **No direct file access.** A non-system language's isolate has no
+  filesystem permission: `Deno.readTextFileSync`,
+  `Deno.writeTextFileSync` and every other file API fail with a
+  permission error, its own storage folder included. Use
+  `readStorageFile` / `writeStorageFile` or the KV store.
+- **System languages** (the bootstrap set) may also name absolute paths
+  under the executor's working directory. Those files are written in the
+  clear (the executor logs a warning once per language), and these
+  languages keep Deno read/write permission on their storage folder and
+  the working directory.
+- **From older executors.** Plaintext files already in a storage folder
+  are sealed in place when the executor starts. Until every one is
+  sealed, a plaintext file a language reads is accepted and sealed on
+  the spot; after that, a plaintext file in a storage folder is refused.
+- **Deleting a neighbourhood** destroys its perspective's key, and with
+  it the link language's sealed files.
+
 ### Notes
 
-- Deno executor: `Deno.readTextFileSync` / `Deno.writeTextFileSync`
-  (sandboxed by Deno's filesystem permission allow-list).
 - Browser runtime: could wrap IndexedDB with a synthetic path scheme
   (e.g. `idb:/lang-x/bundle-y.js`), use the Origin Private File
   System, or route to an HTTP API. "Path" is opaque to the contract.

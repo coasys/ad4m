@@ -8,6 +8,7 @@ import { mkdirSync, existsSync, writeFileSync, rmSync, readFileSync, copyFileSyn
 import { homedir, tmpdir } from "os";
 import { join } from "path";
 import WebSocket from "ws";
+import { testStorageSecretEnv } from "../../utils/utils.js";
 
 /**
  * The snapshot is determined by whichever `deno_runtime` git revision is
@@ -205,7 +206,7 @@ export async function startExecutor(
   ], {
     stdio: ["pipe", "pipe", "pipe"],
     // Ends with this process, however it ends (see spawnExecutor in utils/utils.ts).
-    env: { ...process.env, RUST_LOG: "info", AD4M_EXIT_WITH_PARENT: "true" },
+    env: { ...process.env, ...testStorageSecretEnv(), RUST_LOG: "info", AD4M_EXIT_WITH_PARENT: "true" },
   });
 
   if (config.logPath) {

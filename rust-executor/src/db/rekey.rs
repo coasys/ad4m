@@ -2,7 +2,7 @@
 //! to the new one. Perspective owners move through `perspectives::update_perspective_with`,
 //! so the cache and the events follow; the rows here have no cache.
 
-use super::{Ad4mDb, Ad4mDbResult};
+use super::{sealed, Ad4mDb, Ad4mDbResult};
 use rusqlite::params;
 
 impl Ad4mDb {
@@ -35,6 +35,12 @@ impl Ad4mDb {
                 ),
                 params![old, new],
             )?;
+            if table == "flow_replica_state" && self.seals() {
+                // The agent is part of the row's key, which a sealed state is bound to: the
+                // state is sealed again for its new row.
+                moved += self.reseal_flow_states(&tx, old, new)?;
+                continue;
+            }
             moved += tx.execute(
                 &format!("UPDATE {table} SET agent_did = ?2 WHERE agent_did = ?1"),
                 params![old, new],
@@ -42,6 +48,47 @@ impl Ad4mDb {
         }
         tx.commit()?;
         Ok(moved)
+    }
+
+    /// Moves `old`'s `flow_replica_state` rows to `new`, each state opened for its old row and
+    /// sealed for its new one. Answers how many moved.
+    fn reseal_flow_states(
+        &self,
+        tx: &rusqlite::Transaction,
+        old: &str,
+        new: &str,
+    ) -> Ad4mDbResult<usize> {
+        let rows: Vec<(i64, String, String, Option<String>)> = tx
+            .prepare(
+                "SELECT rowid, perspective, instance, current_state FROM flow_replica_state
+                 WHERE agent_did = ?1",
+            )?
+            .query_map(params![old], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?
+            .collect::<Result<_, _>>()?;
+        for (rowid, perspective, instance, state) in &rows {
+            let state = self
+                .reader(
+                    &sealed::FLOW_REPLICA_STATE,
+                    Some(perspective),
+                    &[perspective, old, instance],
+                )?
+                .open_opt("current_state", state.clone())?;
+            let state = self
+                .writer(
+                    &sealed::FLOW_REPLICA_STATE,
+                    Some(perspective),
+                    &[perspective, new, instance],
+                    None,
+                )?
+                .seal_opt("current_state", state.as_deref())?;
+            tx.execute(
+                "UPDATE flow_replica_state SET agent_did = ?2, current_state = ?3 WHERE rowid = ?1",
+                params![rowid, new, state],
+            )?;
+        }
+        Ok(rows.len())
     }
 
     /// Forgets every claim this executor made for its main agent: the old key made them, and

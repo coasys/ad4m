@@ -436,4 +436,10 @@ cargo clippy -p identity-store --all-targets -- -D warnings
 cargo fmt -p identity-store --check
 # the agent language suites start this store and drive examples/test_agent.rs:
 cd bootstrap-languages/centralized-agent-language && pnpm test
+# the same tests inside the image's build stage (what the image workflow runs first):
+docker build -f identity-store/Dockerfile --target test .
 ```
+
+Releases: pushing the tag `identity-store-v<version>` (the version in `Cargo.toml`) makes
+`.github/workflows/publish-images.yml` run the tests, push `ghcr.io/coasys/identity-store:<version>`
+and write the image's digest into the tag's GitHub release. Deploy by that digest.

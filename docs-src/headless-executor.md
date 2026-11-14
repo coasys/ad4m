@@ -24,7 +24,7 @@ below takes one as an argument.
 |---|---|
 | Unit | `~/.config/systemd/user/ad4m-executor.service` |
 | Config | `~/.config/ad4m/executor-config.json` |
-| Secrets | `~/.config/ad4m/secrets/admin-credential`, `…/unlock-passphrase` (dir 0700, files 0600) |
+| Secrets | `~/.config/ad4m/secrets/admin-credential` (dir 0700, file 0600); the storage secret, a 0600 file on another disk than the data where there is one |
 | Builds | `~/.local/share/ad4m/releases/<version>/ad4m-executor`, with a link `current` to the one that runs |
 | Data | `~/.ad4m` (the executor's default `app_data_path`); copies next to it before an update |
 | Ports | RPC 12000, Holochain admin 12001 and app 12002, MCP 3001 (if enabled), all on `127.0.0.1` |
@@ -55,6 +55,29 @@ sha=$(git rev-parse --short HEAD) && install -D -m 0755 -t ~/.local/share/ad4m/r
 
 Expected: no output. `readlink ~/.local/share/ad4m/current` prints
 `releases/<sha>`.
+
+### Or download a release build
+
+Each release on GitHub carries the headless executor for Linux x86_64
+(`ad4m-cli-executor-linux-<version>-x64`) and macOS on Apple silicon
+(`ad4m-cli-executor-macos-<version>-aarch64`), each with a `.sha256` file
+beside it. There is no macOS Intel or Windows headless build. Download the
+binary and its `.sha256` into one directory and check it there:
+
+```bash
+sha256sum -c ad4m-cli-executor-linux-<version>-x64.sha256
+```
+
+On macOS: `shasum -a 256 -c ad4m-cli-executor-macos-<version>-aarch64.sha256`.
+Expected: `ad4m-cli-executor-...: OK`. Anything else is a damaged or altered
+download; do not run it. Then install it under its version:
+
+```bash
+v=<version> && install -D -m 0755 ad4m-cli-executor-linux-$v-x64 ~/.local/share/ad4m/releases/$v/ad4m-executor && ln -sfn releases/$v ~/.local/share/ad4m/current
+```
+
+The release build already holds the dapp and the Deno snapshot; the steps
+below are the same for both.
 
 ## First-time setup
 
@@ -110,27 +133,46 @@ Expected: no output. `readlink ~/.local/share/ad4m/current` prints
 
    Expected: no output. `FileExistsError` means there already is one; keep it.
 
-5. **The unlock passphrase**, the same way:
+5. **The storage secret.** It opens the keyring that encrypts the data
+   directory at rest and holds the agent's passphrase, so the executor
+   starts and unlocks its agent without anyone typing anything (the keys
+   and the rules are in `executor-config.mdx`, "Storage secret"). Whoever
+   has the data disk and the secret has the data: put the file on another
+   disk where the machine has one, in a directory only the service user can
+   read. `<secret dir>` below is that directory:
 
    ```bash
-   python3 -c 'import os,secrets,sys; fd=os.open(sys.argv[1], os.O_WRONLY|os.O_CREAT|os.O_EXCL, 0o600); os.write(fd, secrets.token_urlsafe(32).encode()); os.close(fd)' ~/.config/ad4m/secrets/unlock-passphrase
+   install -d -m 0700 <secret dir> && (umask 077 && ~/.local/share/ad4m/current/ad4m-executor storage new-secret | head -n 1 > <secret dir>/storage-secret.new) && ln <secret dir>/storage-secret.new <secret dir>/storage-secret && rm <secret dir>/storage-secret.new
    ```
 
-   Expected: no output. For an agent that already exists (an executor moved off
-   the launcher), write its passphrase into the file with an editor instead
-   and `chmod 600` it. Check both files:
+   Expected: no output. The first line of `storage new-secret` is the
+   secret (64 hex characters); the rest is advice and stays out of the
+   file. `ln` fails with `File exists` if there already is one; keep that
+   one. **Copy the file somewhere safe off the machine** (a password
+   manager, an offline copy) without printing it: a lost secret is lost
+   data. Check the files:
 
    ```bash
-   stat -c '%a %n' ~/.config/ad4m/secrets/*
+   stat -c '%a %n' ~/.config/ad4m/secrets/* <secret dir>/storage-secret
    ```
 
-   Expected: `600 …/admin-credential` and `600 …/unlock-passphrase`. The
+   Expected: `600 …/admin-credential` and `600 …/storage-secret`. The
    executor refuses a secret file that group or others can read.
 
-6. **The unit.** `LoadCredential=` copies each secret file into a directory
-   only this unit can read, and the `AD4M_*_FILE` variables point the
-   executor at the copies, so the secrets are in no environment or argument
-   list. `ConditionPathExists=` lets the unit skip, instead of failing in a
+   On a machine with one disk, the secret can only sit next to the data.
+   The executor refuses that unless `AD4M_ALLOW_SECRET_ON_DATA_DISK=true`
+   is set, and then reports the data as not encrypted at rest
+   (`secret_on_data_disk` in `runtime.storageStatus`): the files are still
+   encrypted, but a stolen disk carries the key with it. Use
+   `~/.config/ad4m/secrets/storage-secret` then, and set the variable in
+   the unit with a comment saying why.
+
+6. **The unit.** `LoadCredential=` copies the admin credential into a
+   directory only this unit can read, and `AD4M_ADMIN_CREDENTIAL_FILE`
+   points the executor at the copy, so no secret is in an environment or
+   argument list. `AD4M_STORAGE_SECRET_FILE` names the storage secret
+   itself, not a copy: the executor checks which disk the file is on, and a
+   copy in the unit's credentials directory would hide that. `ConditionPathExists=` lets the unit skip, instead of failing in a
    loop, until a build is installed. With an admin credential set, MCP
    binds `0.0.0.0` unless `MCP_HOST` says otherwise. Every perspective keeps
    its store's files open, so `LimitNOFILE=` lifts the 1024 default.
@@ -147,9 +189,8 @@ Expected: no output. `readlink ~/.local/share/ad4m/current` prints
    Type=simple
    WorkingDirectory=%h
    LoadCredential=admin-credential:%h/.config/ad4m/secrets/admin-credential
-   LoadCredential=unlock-passphrase:%h/.config/ad4m/secrets/unlock-passphrase
    Environment=AD4M_ADMIN_CREDENTIAL_FILE=%d/admin-credential
-   Environment=AD4M_UNLOCK_PASSPHRASE_FILE=%d/unlock-passphrase
+   Environment=AD4M_STORAGE_SECRET_FILE=<secret dir>/storage-secret
    Environment=MCP_HOST=127.0.0.1
    ExecStart=%h/.local/share/ad4m/current/ad4m-executor run --config %h/.config/ad4m/executor-config.json
    Restart=on-failure
@@ -163,7 +204,8 @@ Expected: no output. `readlink ~/.local/share/ad4m/current` prints
    systemctl --user daemon-reload
    ```
 
-   Expected: no output.
+   Expected: no output. Put the real path in place of `<secret dir>` (the
+   heredoc is quoted, so `%h` stays for systemd to expand).
 
 7. **Review** what `run` will start with, secrets redacted:
 
@@ -183,15 +225,18 @@ Expected: no output. `readlink ~/.local/share/ad4m/current` prints
    minutes (Holochain starts and the system languages install).
 
 9. **Create the agent** (first start only). The helper reads the admin
-   credential and the passphrase from their files:
+   credential from its file; the executor derives the agent's passphrase
+   from its keyring:
 
    ```bash
-   AD4M_ADMIN_CREDENTIAL_FILE=~/.config/ad4m/secrets/admin-credential AD4M_UNLOCK_PASSPHRASE_FILE=~/.config/ad4m/secrets/unlock-passphrase node deploy/staging/agent.mjs generate
+   AD4M_ADMIN_CREDENTIAL_FILE=~/.config/ad4m/secrets/admin-credential node deploy/staging/agent.mjs generate
    ```
 
-   Expected: `generated did:key:z6Mk…`. From now on every start unlocks the
-   agent from the passphrase file (`Agent unlocked at startup` in the log).
-   Skip this step for an agent that already exists.
+   Expected: `generated did:key:z6Mk…`. From now on every start opens the
+   keyring with the storage secret and unlocks the agent from it
+   (`Agent unlocked at startup from the keyring` in the log). Skip this
+   step for an agent that already exists (see "An agent from before the
+   keyring").
 
 10. **Check** with the health commands below.
 
@@ -220,9 +265,13 @@ Expected: no output. `readlink ~/.local/share/ad4m/current` prints
    AD4M_ADMIN_CREDENTIAL_FILE=~/.config/ad4m/secrets/admin-credential node deploy/staging/agent.mjs status
    ```
 
-   Expected: `unlocked`. `locked` means the passphrase file does not match
-   the agent (`journalctl --user -u ad4m-executor | grep 'Unlocking the agent at startup'`);
-   `no-agent` means step 9 of the setup has not run.
+   Expected: `unlocked`. `sealed` means the executor waits for its storage
+   secret: the variable is not set, the file is missing or readable by
+   others, it is on the data disk without the allow flag, or it does not
+   open the keyring (`journalctl --user -u ad4m-executor | grep -i storage`).
+   `locked` means the keyring does not hold the passphrase of an agent made
+   before it (see "An agent from before the keyring"); `no-agent` means
+   step 9 of the setup has not run.
 
 4. Nothing listens beyond loopback:
 
@@ -285,6 +334,31 @@ and the old build cannot read it afterwards.
 4. Keep one copy of the data directory and the previous release; delete
    older ones.
 
+### An agent from before the keyring
+
+An executor whose agent was made by a build without the keyring unlocks
+from a passphrase file (`AD4M_UNLOCK_PASSPHRASE_FILE`). The first start of
+a build with the keyring takes that passphrase once and keeps it in the
+keyring; the file is not needed after that. For that update:
+
+1. Make the storage secret (setup step 5) with the new build.
+2. Give the unit `AD4M_STORAGE_SECRET_FILE` (setup step 6) and keep its
+   two passphrase lines (`LoadCredential=unlock-passphrase:…` and
+   `Environment=AD4M_UNLOCK_PASSPHRASE_FILE=%d/unlock-passphrase`) for
+   now; `systemctl --user daemon-reload`.
+3. Update as above. The log of the first start says
+   `The keyring now holds the agent passphrase`; a later start says
+   `AD4M_UNLOCK_PASSPHRASE_FILE is no longer needed`.
+4. While a rollback to the old build is still possible (its copy of the
+   data directory is kept), keep the passphrase lines and the file: the old
+   build unlocks from them. After that, remove the two lines,
+   `daemon-reload`, delete the file and restart. Health check 3 still
+   prints `unlocked`.
+
+A build with the keyring that starts without the storage secret stays
+sealed (health check 3 prints `sealed`); nothing in the data directory is
+opened or changed, so rolling back from there is safe.
+
 To automate this (follow a branch, build, snapshot, swap, check, roll back
 on failure, publish the result), see `deploy/staging/update.sh` in this
 repository and its test, which exercise the failure paths with the build
@@ -322,14 +396,14 @@ Expected: no output. Then health check 3 prints `unlocked` (it reads the
 new file). Every script or client that held the old credential has to get
 the new one; JWTs that users got by logging in stay valid.
 
-**Unlock passphrase.** The passphrase encrypts the agent's keys, and the
-executor has no call to change it, so replacing the file alone makes every
-start fail to unlock. Keep the passphrase of an agent that holds data.
-Rotating it means a new, empty agent: stop the service, move the data
-directory aside, write a new passphrase file as in setup step 5, run
-`~/.local/share/ad4m/current/ad4m-executor init --data-path ~/.ad4m`, start
-the service and repeat setup step 9. All data and accounts of the executor are
-gone after that.
+**Storage secret.** It opens the keyring of this data directory and no
+other, and the executor has no call to change it, so replacing the file
+leaves the executor sealed. Keep the secret of a data directory that holds
+data. Starting over means a new, empty agent: stop the service, move the
+data directory and the secret aside, make a new secret as in setup step 5,
+run `~/.local/share/ad4m/current/ad4m-executor init --data-path ~/.ad4m`,
+start the service and repeat setup step 9. All data and accounts of the
+executor are gone after that.
 
 ## Accounts in multi-user mode without SMTP
 
@@ -391,7 +465,9 @@ running executor.
 2. Put the secrets into `~/.config/ad4m/secrets/` (0700 / 0600): a new
    admin credential (setup step 4), the agent's existing passphrase as
    `unlock-passphrase` (typed into the file with an editor; it is not
-   generated), and, if SMTP is set, the SMTP password as `smtp-password`
+   generated; needed for the first start of a build with the keyring only,
+   see "An agent from before the keyring"), a storage secret if the build
+   has the keyring (setup step 5), and, if SMTP is set, the SMTP password as `smtp-password`
    (from the mail account; the launcher's copy is encrypted with a key in
    the desktop keyring).
 
@@ -400,7 +476,11 @@ running executor.
 
 4. Install the unit (setup step 6) with `ExecStart=` on an
    `ad4m-executor` built from the commit the launcher runs, so no data
-   migration happens during the switch; add a third `LoadCredential=` line
+   migration happens during the switch; add
+   `LoadCredential=unlock-passphrase:%h/.config/ad4m/secrets/unlock-passphrase`
+   and `Environment=AD4M_UNLOCK_PASSPHRASE_FILE=%d/unlock-passphrase` for the
+   agent's passphrase (a build without the keyring unlocks from them at every
+   start); add a `LoadCredential=` line
    and `AD4M_SMTP_PASSWORD_FILE=%d/smtp-password` if SMTP is set, and drop
    `Environment=MCP_HOST=127.0.0.1` if MCP is meant to stay reachable from
    outside (it is behind the admin credential). Do not enable it yet.

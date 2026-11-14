@@ -54,6 +54,7 @@ ignored, and the error names the key by its path, e.g.
 | `sfu_udp_port` | number | a free port, new at each start | `--sfu-udp-port` / `AD4M_SFU_UDP_PORT` |
 | `sfu_public_addr` | string (IP) | the STUN probe's address | `--sfu-public-addr` / `AD4M_SFU_PUBLIC_ADDR` |
 | `sfu_stun_server` | string (`host:port`) | no probe | `--sfu-stun-server` / `AD4M_SFU_STUN_SERVER` |
+| `allow_secret_on_data_disk` | bool | `false`: a storage secret file on the data folder's disk is refused | `--allow-secret-on-data-disk` / `AD4M_ALLOW_SECRET_ON_DATA_DISK` |
 | `ai_endpoints` | list of endpoints | none | file only, see below |
 | `ai_models` | list of models | none | file only, see below |
 | `ai_defaults` | object: `llm`, `embedding`, `transcription` → model name | none | file only, see below |
@@ -363,7 +364,11 @@ Secrets come from files or environment variables:
 |---|---|---|---|
 | Admin credential | `AD4M_ADMIN_CREDENTIAL_FILE` | `AD4M_ADMIN_CREDENTIAL` | — |
 | SMTP password | `AD4M_SMTP_PASSWORD_FILE` | `AD4M_SMTP_PASSWORD` | `smtp_config.password_file` |
-| Agent passphrase | `AD4M_UNLOCK_PASSPHRASE_FILE` | — | — |
+| Storage secret | `AD4M_STORAGE_SECRET_FILE` | — (`AD4M_STORAGE_SECRET` stops `run`) | — |
+| Agent passphrase (retired) | `AD4M_UNLOCK_PASSPHRASE_FILE` | — | — |
+
+The storage secret and the agent passphrase are described in
+[Storage secret](#storage-secret).
 
 - Setting both variables of one secret stops `run`. The variables win over
   `smtp_config.password_file`.
@@ -389,21 +394,73 @@ at the credentials directory:
 
 ```ini
 LoadCredential=admin-credential:/etc/ad4m/secrets/admin-credential
-LoadCredential=unlock-passphrase:/etc/ad4m/secrets/unlock-passphrase
+LoadCredential=storage-secret:/etc/ad4m/secrets/storage-secret
 Environment=AD4M_ADMIN_CREDENTIAL_FILE=%d/admin-credential
-Environment=AD4M_UNLOCK_PASSPHRASE_FILE=%d/unlock-passphrase
+Environment=AD4M_STORAGE_SECRET_FILE=%d/storage-secret
 ```
 
-### Unlocking at startup
+## Storage secret
 
-With `AD4M_UNLOCK_PASSPHRASE_FILE` set, the executor unlocks its agent
-itself once it has started, as `agent.unlock` would, so a restarted executor
-serves requests without anyone unlocking it. It logs
-`Agent unlocked at startup` on success. On a wrong passphrase it logs an
-error starting `Unlocking the agent at startup … failed`, keeps running
-with the agent locked, and waits for `agent.unlock`. If no agent has been
-generated yet it logs a warning and does nothing; generate the agent, and
-the next start unlocks it.
+The storage secret opens the executor's keyring (`ad4m/keyring.json` in the
+data folder), and the keyring holds the keys of everything the executor
+keeps at rest: its databases, the languages' stored secrets, the agent
+passphrase and the executor's own secrets. The keyring file holds these keys
+only wrapped; without the secret it opens nothing.
+
+- **Where it comes from.** A file named by `AD4M_STORAGE_SECRET_FILE`, read
+  at start; or, when that is unset, the operator types it:
+  `ad4m-executor storage unlock` on the same machine, with echo off. The
+  secret is 64 hex characters; `ad4m-executor storage new-secret` prints a
+  fresh one. `AD4M_STORAGE_SECRET` (a value in the environment) stops `run`.
+- **Sealed until then.** Without the secret the executor starts sealed:
+  `/health` and `runtime.storageStatus` answer, every other call gets
+  `storage-sealed`, and nothing in the data folder is opened.
+  `ad4m-executor storage status` shows the state (sealed, unlocking, open)
+  and the keyring id.
+- **Off the data disk.** Whoever has the data disk and the secret has the
+  data, so keep the secret somewhere else: a credentials store
+  (`LoadCredential=`, above), a different disk, or the operator's memory. A
+  secret file on the same disk as the data folder stops the unlock
+  (`secret-on-data-disk`) unless `allow_secret_on_data_disk` is `true`
+  (`AD4M_ALLOW_SECRET_ON_DATA_DISK`, `--allow-secret-on-data-disk`).
+- **Keep it.** A lost secret is lost data: nothing in the data folder
+  recovers it.
+
+### The agent passphrase
+
+The agent passphrase encrypts the agent's keys (`ad4m/agent.json`) and
+Holochain's keystore. The keyring keeps it, so nobody types it:
+
+- **A new agent** (generated on an executor with a keyring) gets a
+  passphrase derived from the keyring. The passphrase `agent.generate` takes
+  is not used for it. The keyring records only that the passphrase is
+  derived; the passphrase itself is in no file.
+- **An agent generated before the keyring** keeps its passphrase: the agent
+  file and Holochain's keystore are not changed. The first time an operator
+  unlocks it with that passphrase (`agent.unlock`, or
+  `AD4M_UNLOCK_PASSPHRASE_FILE` at start), the executor checks it against
+  the agent file and holds it in the keyring, encrypted under the keyring's
+  root key. A wrong passphrase is not held. Until then the agent stays
+  locked at start (the log says so).
+
+From then on every start unlocks the agent from the keyring as soon as the
+storage is open, and logs `Agent unlocked at startup from the keyring`.
+`agent.lock` still works: it locks the agent in memory under the passphrase
+it is given, and only that passphrase unlocks it again, until the next
+start.
+
+### `AD4M_UNLOCK_PASSPHRASE_FILE` (retired)
+
+The variable is read only to hand an agent generated before the keyring its
+passphrase, once, as above. Once the keyring holds the passphrase, the
+executor does not read the file and logs a warning:
+`AD4M_UNLOCK_PASSPHRASE_FILE is no longer needed`. Remove the file and the
+variable then. On an executor with no agent yet it is not read either: a new
+agent's passphrase comes from the keyring.
+
+A wrong passphrase in the file logs an error starting
+`Unlocking the agent at startup with the passphrase from AD4M_UNLOCK_PASSPHRASE_FILE failed`
+and the executor keeps running with the agent locked.
 
 ## Example
 
@@ -431,6 +488,6 @@ the next start unlocks it.
 
 ```bash
 AD4M_ADMIN_CREDENTIAL_FILE=/etc/ad4m/secrets/admin-credential \
-AD4M_UNLOCK_PASSPHRASE_FILE=/etc/ad4m/secrets/unlock-passphrase \
+AD4M_STORAGE_SECRET_FILE=/run/credentials/ad4m/storage-secret \
   ad4m-executor run --config /etc/ad4m/executor-config.json
 ```

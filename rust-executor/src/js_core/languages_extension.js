@@ -1,7 +1,8 @@
 import {
     perspective_diff_received, sync_state_changed, telepresence_signal_received,
     register_holochain_signal_handler, ad4m_signal_emitted,
-    language_storage_directory, language_address, language_settings
+    language_storage_directory, language_address, language_settings,
+    op_language_storage_read, op_language_storage_write
 } from 'ext:core/ops';
 
 ((globalThis) => {
@@ -30,6 +31,14 @@ import {
         },
         languageSettings: () => {
             return language_settings();
+        },
+        // The calling language's storage files, sealed by the host. The bootstrap
+        // exposes them as readStorageFile / writeStorageFile.
+        languageStorageRead: (path) => {
+            return op_language_storage_read(path);
+        },
+        languageStorageWrite: (path, content) => {
+            return op_language_storage_write(path, content);
         },
     };
   })(globalThis);

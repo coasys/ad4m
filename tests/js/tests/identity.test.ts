@@ -22,6 +22,7 @@ import WebSocket from "ws";
 import { v4 as uuidv4 } from "uuid";
 import {
     baseUrl, executorBinary, executorDataPath, pollUntil, quitExecutor, spawnExecutor, startExecutor,
+    testStorageSecretEnv,
 } from "../utils/utils";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import { buildIdentityTools, ClaimCommand, Holder, IdentityStore } from "../helpers/identity";
@@ -378,13 +379,18 @@ describe("Identity: create, link, refuse a stranger, revoke, fork, restart", fun
         expect(String(refused?.message ?? refused)).to.contain("no-operator");
 
         // With an operator recorded for another identity, the first link must come from it.
-        execSync(`"${executorBinary()}" init --data-path "${executorDataPath(c.dataPath)}" --network-bootstrap-seed "${SEED_PATH}" --operator ${STRANGER}`);
+        // The executor's database is under its key, so `init` needs the storage secret too.
+        const env = { ...process.env, ...testStorageSecretEnv() };
+        execSync(
+            `"${executorBinary()}" init --data-path "${executorDataPath(c.dataPath)}" --network-bootstrap-seed "${SEED_PATH}" --operator ${STRANGER}`,
+            { env },
+        );
         refused = await c.client.identity.claimOffer(opened.link).then(() => null, (e) => e);
         expect(String(refused?.message ?? refused)).to.contain("first-link");
         // `init` never replaces a recorded operator.
         expect(() => execSync(
             `"${executorBinary()}" init --data-path "${executorDataPath(c.dataPath)}" --network-bootstrap-seed "${SEED_PATH}" --operator ${did}`,
-            { stdio: "pipe" },
+            { stdio: "pipe", env },
         )).to.throw(/This executor's operator is/);
         expect((await c.client.identity.status()).did).to.be.null;
     });

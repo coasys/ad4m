@@ -378,7 +378,7 @@ pub fn admin_credential(
 }
 
 /// Whether `url` names a loopback host: `identity.rekey` answers only there.
-fn is_loopback_url(url: &str) -> bool {
+pub(crate) fn is_loopback_url(url: &str) -> bool {
     let Ok(url) = url::Url::parse(url) else {
         return false;
     };
