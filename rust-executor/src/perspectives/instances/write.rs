@@ -20,7 +20,7 @@ use super::{
 use crate::agent::AgentContext;
 use crate::mcp::shacl;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
-use crate::types::{Link, LinkQuery, LinkStatus};
+use crate::types::{Link, LinkExpression, LinkQuery, LinkStatus};
 use deno_core::anyhow::anyhow;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -564,15 +564,19 @@ pub async fn add_to_collection(
     // Idempotent: the store dedups the raw triple, but every signed link expression gets its
     // own reifier, so adding the same item twice would show up as a duplicate member. Look for
     // an existing membership link first and leave the collection untouched if the item is
-    // already in it.
+    // already in it — on the batch's effective graph, so a member the same batch dropped reads
+    // as out and one it added reads as in.
     let wanted = params.item_uri.trim();
     let encoded = link_target(wanted);
     let existing = perspective
-        .get_links(&LinkQuery {
-            source: Some(base_uri.clone()),
-            predicate: Some(predicate.clone()),
-            ..Default::default()
-        })
+        .get_links_effective(
+            &LinkQuery {
+                source: Some(base_uri.clone()),
+                predicate: Some(predicate.clone()),
+                ..Default::default()
+            },
+            params.batch_id.as_deref(),
+        )
         .await
         .map_err(|e| {
             failed(
@@ -675,12 +679,17 @@ pub async fn remove_from_collection(
 
     let wanted = params.item_uri.trim();
     let encoded = link_target(wanted);
+    // The batch's effective graph, so a member the same batch dropped reads as out already
+    // and one it added is found and removed.
     let links = perspective
-        .get_links(&LinkQuery {
-            source: Some(base_uri.clone()),
-            predicate: Some(predicate),
-            ..Default::default()
-        })
+        .get_links_effective(
+            &LinkQuery {
+                source: Some(base_uri.clone()),
+                predicate: Some(predicate),
+                ..Default::default()
+            },
+            params.batch_id.as_deref(),
+        )
         .await
         .map_err(|e| {
             failed(
@@ -697,19 +706,25 @@ pub async fn remove_from_collection(
         if !target_matches(&link.data.target, wanted, &encoded) {
             continue;
         }
-        if let Err(e) = perspective
-            .remove_link(link.into(), params.batch_id.clone())
-            .await
-        {
-            return Err(failed(
-                &class_name,
-                WriteStep::RemoveCollectionItem {
-                    collection,
-                    item: wanted.to_string(),
-                    removed,
-                },
-                e,
-            ));
+        let link = LinkExpression::from(link);
+        // A member that exists only inside this batch leaves by cancelling the staged
+        // addition; the store has nothing to remove.
+        let staged = match params.batch_id.as_deref() {
+            Some(batch_id) => perspective.cancel_batch_addition(batch_id, &link).await,
+            None => false,
+        };
+        if !staged {
+            if let Err(e) = perspective.remove_link(link, params.batch_id.clone()).await {
+                return Err(failed(
+                    &class_name,
+                    WriteStep::RemoveCollectionItem {
+                        collection,
+                        item: wanted.to_string(),
+                        removed,
+                    },
+                    e,
+                ));
+            }
         }
         removed += 1;
     }
