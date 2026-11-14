@@ -26,11 +26,12 @@ request box), is informative.
 | `src/document.rs` | `did_document(chain, version, also_known_as)`: `DidDocument`, `VerificationMethod`, `DocumentMetadata`, `DocumentError` (spec section 9); the contexts `DID_CONTEXT`, `MULTIKEY_CONTEXT`, `COASYS_CONTEXT` |
 | `src/domain.rs` | the signing-domain registry and labels (spec sections 7 and 16); `signing_bytes`, `verify_signed`, `check_domain`; `LINK_DOMAIN`, `AGENT_RECORD_DOMAIN`, `HEAD_DOMAIN`, `REQUEST_DOMAIN`, `SESSION_DOMAIN` (key statements: a device key's login on an executor); `HeadStatement` (what the store signs for a head; the store signs it, executors verify it) |
 | `src/judgement.rs` | the link judgement, one copy for the executor, the link server and the link language: `LinkVerdict` (`counts`, `shown`, `stored`, `from_stored`), `InvalidReason`, `SignerLog`, `LinkFacts`, `judge`; the bytes a link signs: `anchored_signing_bytes` (`coasys:link` over `{data, timestamp, anchor}`), `anchored_signature_holds`, `hash_data_and_timestamp` (the old bytes, no anchor), `LinkBytesError`. Feature `ts` derives `ts_rs::TS` on the verdict types for the executor's SDK types |
+| `src/membership.rs` | a space's membership replay (AR-08 §4.5, the plan's §6.4 link shapes): `MembershipGraph` (`new`, `apply` as links arrive, `replay` of a set, `members`, `is_member`, `role_of`, `rules`, `join`, `admits(person, by_bot, invite, now)`), `JudgedLink` (a link with its `LinkVerdict` and speaker), `MembershipChange`, `Refusal`, `Member`, `Role`, `Rules`, `Join`, `AddRule`; the `predicate` names, `SPACE`, `INVITE_PREFIX`, `is_membership_predicate` |
 | `src/pow.rs` | `Pow`, `solve`, `solve_range`, `check` (the brake's proof of work, bound to the SCID; host policy, spec section 14) |
 | `src/link.rs` | device linking: `Offer`, `SignedOffer`, `Claim`, `ClaimBody`, `ClaimView`, `OfferState`, `LinkError`; `offer_commit`, `sign_offer`/`verify_offer`, `make_claim`/`verify_claim`, `verify_claim_view` (the holder's check of the store's claim view before `add_claimed`), `check_secret`, `match_code`, `check_add` (conditions 2–5 of the store's claim check, `identity-store/AGENTS.md`), `may_keep_master` (whether the log lets a device key keep the master key: a standing key of the incept, or an `add` whose co-signature is over a claim that said `canKeepMaster`; never the record's kind), `OfferString` (offer string and link), `DeviceString` |
 | `src/build.rs` | feature `build`: `*_unsigned` builders, `signing_input`, `attach_proof`, `Signer`, `cosign`, `incept_human`, `add_claimed`, `revoke`, `scope`, `rotate`, `sign_domain` |
 | `src/words.rs` | feature `words`: `generate`, `parse`, `seed`, `master_key`, `salt`, `next_commitment`, `recovery_secret`, `derive_ed25519` |
-| `src/wasm.rs` | feature `wasm`: the `KelChain` class (`fold`, `import`) and `KelHandle` (`state`, `didDocument(version?, alsoKnownAs?)`) |
+| `src/wasm.rs` | feature `wasm`: the `KelChain` class (`fold`, `import`) and `KelHandle` (`state`, `didDocument(version?, alsoKnownAs?)`); `MembershipReplay` (`apply`, `members`, `isMember`, `admits`; throws `{code: "refused", reason}` for a refused link) |
 | `tests/common/mod.rs` | fixed keys, the `Log` builder, the refusal cases, the vector builders and checkers |
 
 ## Rules
@@ -109,6 +110,12 @@ request box), is informative.
   wallets use `fold` and `import`. It sits behind the `stored-fold` feature, which only the
   identity store enables, so no other crate reaches it by accident. Every check that is not a
   signature or the duplicate-key scan runs in it, the bot actions of a `scope` included.
+- **Membership is ordered by (timestamp, hash), not arrival.** `apply` refuses a link
+  timestamped before its author's counted removal (`Backdated`) and, for a link that sorts
+  before kept links, replays the kept links and returns the whole graph's diff.
+  `replay` sorts its input and never refuses `Backdated`, so a caller that replays stored
+  history leaves out the links `apply` refused as `Backdated`. A bot key's links never use
+  its owner's rights; only an admin's removal bars an open rejoin.
 - Changing an encoding, a field or a derivation changes the vectors: that is a format change
   and needs the spec updated with it.
 
@@ -144,6 +151,13 @@ of the log of `log.json` at the head and after every seq.
 the signed bytes of a link against `vectors/link-signing-bytes.json`. That file is not built by
 the generator: it was pinned from the executor's bytes before the layout moved into the core,
 and `rust-executor/src/agent/signatures.rs` checks the executor against it too.
+`tests/membership.rs` runs every `vectors/membership/*.json` (one file per rule: each step's
+changes or refusal, the final members and `admits` queries), applied as the steps arrive and
+replayed, and fails if a file has no test; two proptests check that `replay` does not depend
+on the order of its input and that links applied in any arrival order give the replay of the
+ones not refused as `Backdated`. `tests/membership_wasm.rs` runs the same files through the
+`MembershipReplay` export. `cargo bench -p ad4m-identity-core --bench membership_replay`
+reports the replay of 1,000 links against the 50 ms budget; it asserts nothing.
 `tests/fold.rs` has one test per refusal case and fails if a case in `refusal_cases()` has none.
 `tests/fold_stored.rs` pins `fold_stored` to `fold`: the same chain at every seq of a log of
 every op, the same refusal for every case but a bad signature or a duplicate key, and the

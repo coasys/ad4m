@@ -1,0 +1,75 @@
+{
+  "description": "A bot counts as a member (role bot, botOf its owner) once a member's bot link and its owner's approved-by link both count; the owner must write approved-by with a key that is not a bot's (needsIdentity) and must be the owner it names (notOwner). A bot key never exercises its owner's rights. The owner or the bot itself removes the bot; removal clears both rows, so it takes both again to come back.",
+  "creator": "did:scid:coasys:1:Ada",
+  "steps": [
+    {
+      "link": {"hash": "0000000000000000000000000000000000000000000000000000000000000001", "source": "coasys://membership/space", "predicate": "coasys://membership/rules", "target": "literal:json:%7B%22add%22%3A%22admins%22%2C%22guests%22%3A%22no%22%2C%22join%22%3A%22open%22%7D", "authorKey": "did:key:zAda", "timestamp": 100, "verdict": {"kind": "valid"}, "person": "did:scid:coasys:1:Ada", "byBot": false},
+      "changes": [
+        {"kind": "joined", "person": "did:scid:coasys:1:Ada", "role": "admin", "botOf": null, "since": 100, "until": null},
+        {"kind": "joinChanged", "join": "open"}
+      ]
+    },
+    {
+      "link": {"hash": "0000000000000000000000000000000000000000000000000000000000000002", "source": "did:scid:coasys:1:Bea", "predicate": "coasys://membership/member", "target": "coasys://membership/space", "authorKey": "did:key:zBea", "timestamp": 200, "verdict": {"kind": "valid"}, "person": "did:scid:coasys:1:Bea", "byBot": false},
+      "changes": [
+        {"kind": "joined", "person": "did:scid:coasys:1:Bea", "role": "member", "botOf": null, "since": 200, "until": null}
+      ]
+    },
+    {
+      "link": {"hash": "0000000000000000000000000000000000000000000000000000000000000003", "source": "did:key:zBot", "predicate": "coasys://membership/bot", "target": "coasys://membership/space", "authorKey": "did:key:zCid", "timestamp": 250, "verdict": {"kind": "valid"}, "person": "did:scid:coasys:1:Cid", "byBot": false},
+      "refused": "notMember"
+    },
+    {
+      "link": {"hash": "0000000000000000000000000000000000000000000000000000000000000004", "source": "did:key:zBot", "predicate": "coasys://membership/bot", "target": "coasys://membership/space", "authorKey": "did:key:zBea", "timestamp": 300, "verdict": {"kind": "valid"}, "person": "did:scid:coasys:1:Bea", "byBot": false},
+      "changes": []
+    },
+    {
+      "link": {"hash": "0000000000000000000000000000000000000000000000000000000000000005", "source": "did:key:zBot", "predicate": "coasys://membership/approved-by", "target": "did:scid:coasys:1:Bea", "authorKey": "did:key:zCid", "timestamp": 350, "verdict": {"kind": "valid"}, "person": "did:scid:coasys:1:Cid", "byBot": false},
+      "refused": "notOwner"
+    },
+    {
+      "link": {"hash": "0000000000000000000000000000000000000000000000000000000000000006", "source": "did:key:zBot", "predicate": "coasys://membership/approved-by", "target": "did:scid:coasys:1:Bea", "authorKey": "did:key:zBot", "timestamp": 380, "verdict": {"kind": "valid"}, "person": "did:scid:coasys:1:Bea", "byBot": true},
+      "refused": "needsIdentity"
+    },
+    {
+      "link": {"hash": "0000000000000000000000000000000000000000000000000000000000000007", "source": "did:key:zBot", "predicate": "coasys://membership/approved-by", "target": "did:scid:coasys:1:Bea", "authorKey": "did:key:zBea", "timestamp": 400, "verdict": {"kind": "valid"}, "person": "did:scid:coasys:1:Bea", "byBot": false},
+      "changes": [
+        {"kind": "joined", "person": "did:key:zBot", "role": "bot", "botOf": "did:scid:coasys:1:Bea", "since": 400, "until": null}
+      ]
+    },
+    {
+      "link": {"hash": "0000000000000000000000000000000000000000000000000000000000000008", "source": "did:scid:coasys:1:Cid", "predicate": "coasys://membership/member", "target": "coasys://membership/space", "authorKey": "did:key:zBot", "timestamp": 450, "verdict": {"kind": "valid"}, "person": "did:scid:coasys:1:Bea", "byBot": true},
+      "refused": "needsIdentity"
+    },
+    {
+      "link": {"hash": "0000000000000000000000000000000000000000000000000000000000000009", "source": "did:key:zBot", "predicate": "coasys://membership/removed", "target": "coasys://membership/space", "authorKey": "did:key:zBea", "timestamp": 500, "verdict": {"kind": "valid"}, "person": "did:scid:coasys:1:Bea", "byBot": false},
+      "changes": [
+        {"kind": "removed", "person": "did:key:zBot", "by": "did:scid:coasys:1:Bea", "at": 500}
+      ]
+    },
+    {
+      "link": {"hash": "000000000000000000000000000000000000000000000000000000000000000a", "source": "did:key:zBot", "predicate": "coasys://membership/approved-by", "target": "did:scid:coasys:1:Bea", "authorKey": "did:key:zBea", "timestamp": 600, "verdict": {"kind": "valid"}, "person": "did:scid:coasys:1:Bea", "byBot": false},
+      "changes": []
+    },
+    {
+      "link": {"hash": "000000000000000000000000000000000000000000000000000000000000000b", "source": "did:key:zBot", "predicate": "coasys://membership/bot", "target": "coasys://membership/space", "authorKey": "did:key:zBea", "timestamp": 700, "verdict": {"kind": "valid"}, "person": "did:scid:coasys:1:Bea", "byBot": false},
+      "changes": [
+        {"kind": "joined", "person": "did:key:zBot", "role": "bot", "botOf": "did:scid:coasys:1:Bea", "since": 700, "until": null}
+      ]
+    },
+    {
+      "link": {"hash": "000000000000000000000000000000000000000000000000000000000000000c", "source": "did:key:zBot", "predicate": "coasys://membership/removed", "target": "coasys://membership/space", "authorKey": "did:key:zBot", "timestamp": 800, "verdict": {"kind": "valid"}, "person": "did:scid:coasys:1:Bea", "byBot": true},
+      "changes": [
+        {"kind": "removed", "person": "did:key:zBot", "by": "did:key:zBot", "at": 800}
+      ]
+    }
+  ],
+  "rules": {"add": "admins", "join": "open"},
+  "join": "open",
+  "members": [
+    {"person": "did:key:zBot", "role": "bot", "botOf": "did:scid:coasys:1:Bea", "since": 700, "until": 800},
+    {"person": "did:scid:coasys:1:Ada", "role": "admin", "botOf": null, "since": 100, "until": null},
+    {"person": "did:scid:coasys:1:Bea", "role": "member", "botOf": null, "since": 200, "until": null}
+  ],
+  "admits": []
+}

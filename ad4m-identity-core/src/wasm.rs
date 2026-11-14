@@ -1,4 +1,4 @@
-//! wasm-bindgen exports of the `KelChain` TypeScript surface:
+//! wasm-bindgen exports of the `KelChain` and `MembershipReplay` TypeScript surface:
 //!
 //! ```ts
 //! class KelChain { static fold(events: object[]): KelHandle;                  // throws ChainErrorCode
@@ -7,12 +7,21 @@
 //!                   state(): KeyState;
 //!                   didDocument(version?: number, alsoKnownAs?: string[]):
 //!                     { didDocument: DidDocument, didDocumentMetadata: DocumentMetadata }; }
+//! class MembershipReplay { constructor(creator: string);
+//!                          apply(judgedLinkJson: string): string;   // MembershipChange[] as JSON
+//!                          members(): string;                       // Member[] as JSON
+//!                          isMember(person: string): boolean;
+//!                          admits(person: string | undefined, byBot: boolean,
+//!                                 invite: string | undefined, now: number): void; }
 //! ```
 //!
 //! Errors are thrown as a `ChainErrorCode` object. A KEL refusal is
 //! `{ code: "policy", reason: <FoldError name>, detail: <message> }`. `didDocument` throws
 //! `{ code: "document", reason: "VersionPastHead", detail }` for a version past the head and
-//! `{ code: "malformed", reason }` for a version that is not a seq.
+//! `{ code: "malformed", reason }` for a version that is not a seq. `MembershipReplay.apply` and
+//! `admits` throw `{ code: "refused", reason: <Refusal> }` for a link or a join that counts for
+//! nothing, and `{ code: "malformed", reason }` for a judged link that is not one or a `now`
+//! that is not a safe integer.
 
 use serde_json::{json, Value};
 use wasm_bindgen::prelude::*;
@@ -144,5 +153,62 @@ impl KelChainJs {
         let outcome =
             crate::import_json(&mut handle.chain, &events).map_err(|e| thrown(error_code(&e)))?;
         json_of(&outcome)
+    }
+}
+
+fn refused(refusal: crate::membership::Refusal) -> JsValue {
+    thrown(json!({"code": "refused", "reason": refusal}))
+}
+
+fn text_of(value: &impl serde::Serialize) -> Result<String, JsValue> {
+    serde_json::to_string(value).map_err(|e| malformed(&e.to_string()))
+}
+
+/// The membership replay of one space, held in WASM memory.
+#[wasm_bindgen]
+pub struct MembershipReplay {
+    graph: crate::membership::MembershipGraph,
+}
+
+#[wasm_bindgen]
+impl MembershipReplay {
+    /// The empty graph of a space whose creator is the person `creator`.
+    #[wasm_bindgen(constructor)]
+    pub fn new(creator: String) -> MembershipReplay {
+        MembershipReplay {
+            graph: crate::membership::MembershipGraph::new(&creator),
+        }
+    }
+
+    /// Applies one judged link (JSON, as `JudgedLink` serializes): the changes as JSON.
+    pub fn apply(&mut self, judged_link_json: &str) -> Result<String, JsValue> {
+        let link: crate::membership::JudgedLink =
+            serde_json::from_str(judged_link_json).map_err(|e| malformed(&e.to_string()))?;
+        text_of(&self.graph.apply(&link).map_err(refused)?)
+    }
+
+    /// Every membership, current or ended, as JSON.
+    pub fn members(&self) -> Result<String, JsValue> {
+        text_of(&self.graph.members())
+    }
+
+    /// Whether `person` is a current member.
+    #[wasm_bindgen(js_name = isMember)]
+    pub fn is_member(&self, person: &str) -> bool {
+        self.graph.is_member(person)
+    }
+
+    /// What a self-join by `person` would meet at `now` (ms): returns when it would count.
+    pub fn admits(
+        &self,
+        person: Option<String>,
+        by_bot: bool,
+        invite: Option<String>,
+        now: f64,
+    ) -> Result<(), JsValue> {
+        let now = seq_of(now).ok_or_else(|| malformed("now must be a safe integer"))?;
+        self.graph
+            .admits(person.as_deref(), by_bot, invite.as_deref(), now)
+            .map_err(refused)
     }
 }

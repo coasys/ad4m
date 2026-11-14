@@ -1,0 +1,72 @@
+{
+  "description": "After an admin removed a person, the open rule does not admit them again (removed). An admin's member link, or the person's own member link with a valid invite, does; then the bar is gone until the next admin removal.",
+  "creator": "did:scid:coasys:1:Ada",
+  "steps": [
+    {
+      "link": {"hash": "0000000000000000000000000000000000000000000000000000000000000001", "source": "coasys://membership/space", "predicate": "coasys://membership/rules", "target": "literal:json:%7B%22add%22%3A%22admins%22%2C%22guests%22%3A%22no%22%2C%22join%22%3A%22open%22%7D", "authorKey": "did:key:zAda", "timestamp": 100, "verdict": {"kind": "valid"}, "person": "did:scid:coasys:1:Ada", "byBot": false},
+      "changes": [
+        {"kind": "joined", "person": "did:scid:coasys:1:Ada", "role": "admin", "botOf": null, "since": 100, "until": null},
+        {"kind": "joinChanged", "join": "open"}
+      ]
+    },
+    {
+      "link": {"hash": "0000000000000000000000000000000000000000000000000000000000000002", "source": "did:scid:coasys:1:Bea", "predicate": "coasys://membership/member", "target": "coasys://membership/space", "authorKey": "did:key:zBea", "timestamp": 200, "verdict": {"kind": "valid"}, "person": "did:scid:coasys:1:Bea", "byBot": false},
+      "changes": [
+        {"kind": "joined", "person": "did:scid:coasys:1:Bea", "role": "member", "botOf": null, "since": 200, "until": null}
+      ]
+    },
+    {
+      "link": {"hash": "0000000000000000000000000000000000000000000000000000000000000003", "source": "did:scid:coasys:1:Bea", "predicate": "coasys://membership/removed", "target": "coasys://membership/space", "authorKey": "did:key:zAda", "timestamp": 300, "verdict": {"kind": "valid"}, "person": "did:scid:coasys:1:Ada", "byBot": false},
+      "changes": [
+        {"kind": "removed", "person": "did:scid:coasys:1:Bea", "by": "did:scid:coasys:1:Ada", "at": 300}
+      ]
+    },
+    {
+      "link": {"hash": "0000000000000000000000000000000000000000000000000000000000000004", "source": "did:scid:coasys:1:Bea", "predicate": "coasys://membership/member", "target": "coasys://membership/space", "authorKey": "did:key:zBea", "timestamp": 400, "verdict": {"kind": "valid"}, "person": "did:scid:coasys:1:Bea", "byBot": false},
+      "refused": "removed"
+    },
+    {
+      "link": {"hash": "0000000000000000000000000000000000000000000000000000000000000005", "source": "did:scid:coasys:1:Bea", "predicate": "coasys://membership/member", "target": "coasys://membership/space", "authorKey": "did:key:zAda", "timestamp": 500, "verdict": {"kind": "valid"}, "person": "did:scid:coasys:1:Ada", "byBot": false},
+      "changes": [
+        {"kind": "joined", "person": "did:scid:coasys:1:Bea", "role": "member", "botOf": null, "since": 500, "until": null}
+      ]
+    },
+    {
+      "link": {"hash": "0000000000000000000000000000000000000000000000000000000000000006", "source": "did:scid:coasys:1:Bea", "predicate": "coasys://membership/member", "target": "coasys://membership/space", "authorKey": "did:key:zBea", "timestamp": 600, "verdict": {"kind": "valid"}, "person": "did:scid:coasys:1:Bea", "byBot": false},
+      "changes": []
+    },
+    {
+      "link": {"hash": "0000000000000000000000000000000000000000000000000000000000000007", "source": "did:scid:coasys:1:Bea", "predicate": "coasys://membership/removed", "target": "coasys://membership/space", "authorKey": "did:key:zAda", "timestamp": 700, "verdict": {"kind": "valid"}, "person": "did:scid:coasys:1:Ada", "byBot": false},
+      "changes": [
+        {"kind": "removed", "person": "did:scid:coasys:1:Bea", "by": "did:scid:coasys:1:Ada", "at": 700}
+      ]
+    },
+    {
+      "link": {"hash": "0000000000000000000000000000000000000000000000000000000000000008", "source": "invite://re", "predicate": "coasys://membership/invite", "target": "literal:json:%7B%22expiresAt%22%3A5000%7D", "authorKey": "did:key:zAda", "timestamp": 800, "verdict": {"kind": "valid"}, "person": "did:scid:coasys:1:Ada", "byBot": false},
+      "changes": []
+    },
+    {
+      "link": {"hash": "0000000000000000000000000000000000000000000000000000000000000009", "source": "did:scid:coasys:1:Bea", "predicate": "coasys://membership/member", "target": "invite://re", "authorKey": "did:key:zBea", "timestamp": 900, "verdict": {"kind": "valid"}, "person": "did:scid:coasys:1:Bea", "byBot": false},
+      "changes": [
+        {"kind": "joined", "person": "did:scid:coasys:1:Bea", "role": "member", "botOf": null, "since": 900, "until": null}
+      ]
+    },
+    {
+      "link": {"hash": "000000000000000000000000000000000000000000000000000000000000000a", "source": "did:scid:coasys:1:Bea", "predicate": "coasys://membership/removed", "target": "coasys://membership/space", "authorKey": "did:key:zAda", "timestamp": 1000, "verdict": {"kind": "valid"}, "person": "did:scid:coasys:1:Ada", "byBot": false},
+      "changes": [
+        {"kind": "removed", "person": "did:scid:coasys:1:Bea", "by": "did:scid:coasys:1:Ada", "at": 1000}
+      ]
+    }
+  ],
+  "rules": {"add": "admins", "join": "open"},
+  "join": "open",
+  "members": [
+    {"person": "did:scid:coasys:1:Ada", "role": "admin", "botOf": null, "since": 100, "until": null},
+    {"person": "did:scid:coasys:1:Bea", "role": "member", "botOf": null, "since": 900, "until": 1000}
+  ],
+  "admits": [
+    {"person": "did:scid:coasys:1:Bea", "byBot": false, "invite": null, "now": 2000, "refused": "removed"},
+    {"person": "did:scid:coasys:1:Bea", "byBot": false, "invite": "invite://re", "now": 2000, "refused": null},
+    {"person": "did:scid:coasys:1:Cid", "byBot": false, "invite": null, "now": 2000, "refused": null}
+  ]
+}

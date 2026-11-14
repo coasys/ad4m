@@ -1,0 +1,58 @@
+{
+  "description": "Order is (timestamp, hash), not arrival. A link that sorts before links already applied replays the kept links, refused ones included, and returns what changed in the whole graph: Ada's admin link for Bea (200) arrives after Bea's join link (300) and her member link for Cid (400), which then count. A replay that changes nothing returns no changes.",
+  "creator": "did:scid:coasys:1:Ada",
+  "steps": [
+    {
+      "link": {"hash": "0000000000000000000000000000000000000000000000000000000000000001", "source": "coasys://membership/space", "predicate": "coasys://membership/rules", "target": "literal:json:%7B%22add%22%3A%22admins%22%2C%22guests%22%3A%22no%22%2C%22join%22%3A%22open%22%7D", "authorKey": "did:key:zAda", "timestamp": 100, "verdict": {"kind": "valid"}, "person": "did:scid:coasys:1:Ada", "byBot": false},
+      "changes": [
+        {"kind": "joined", "person": "did:scid:coasys:1:Ada", "role": "admin", "botOf": null, "since": 100, "until": null},
+        {"kind": "joinChanged", "join": "open"}
+      ]
+    },
+    {
+      "link": {"hash": "0000000000000000000000000000000000000000000000000000000000000004", "source": "did:scid:coasys:1:Cid", "predicate": "coasys://membership/member", "target": "coasys://membership/space", "authorKey": "did:key:zBea", "timestamp": 400, "verdict": {"kind": "valid"}, "person": "did:scid:coasys:1:Bea", "byBot": false},
+      "refused": "notAdmin"
+    },
+    {
+      "link": {"hash": "0000000000000000000000000000000000000000000000000000000000000003", "source": "coasys://membership/space", "predicate": "coasys://membership/join", "target": "literal:string:invite", "authorKey": "did:key:zBea", "timestamp": 300, "verdict": {"kind": "valid"}, "person": "did:scid:coasys:1:Bea", "byBot": false},
+      "refused": "notAdmin"
+    },
+    {
+      "link": {"hash": "0000000000000000000000000000000000000000000000000000000000000002", "source": "did:scid:coasys:1:Bea", "predicate": "coasys://membership/admin", "target": "coasys://membership/space", "authorKey": "did:key:zAda", "timestamp": 200, "verdict": {"kind": "valid"}, "person": "did:scid:coasys:1:Ada", "byBot": false},
+      "changes": [
+        {"kind": "joinChanged", "join": "invite"},
+        {"kind": "joined", "person": "did:scid:coasys:1:Bea", "role": "admin", "botOf": null, "since": 200, "until": null},
+        {"kind": "joined", "person": "did:scid:coasys:1:Cid", "role": "member", "botOf": null, "since": 400, "until": null}
+      ]
+    },
+    {
+      "link": {"hash": "0000000000000000000000000000000000000000000000000000000000000005", "source": "did:scid:coasys:1:Dee", "predicate": "coasys://membership/member", "target": "coasys://membership/space", "authorKey": "did:key:zDee", "timestamp": 500, "verdict": {"kind": "valid"}, "person": "did:scid:coasys:1:Dee", "byBot": false},
+      "refused": "inviteOnly"
+    },
+    {
+      "link": {"hash": "0000000000000000000000000000000000000000000000000000000000000006", "source": "coasys://membership/space", "predicate": "coasys://membership/join", "target": "literal:string:open", "authorKey": "did:key:zAda", "timestamp": 250, "verdict": {"kind": "valid"}, "person": "did:scid:coasys:1:Ada", "byBot": false},
+      "changes": []
+    },
+    {
+      "link": {"hash": "0000000000000000000000000000000000000000000000000000000000000007", "source": "did:scid:coasys:1:Dee", "predicate": "coasys://membership/member", "target": "coasys://membership/space", "authorKey": "did:key:zDee", "timestamp": 260, "verdict": {"kind": "valid"}, "person": "did:scid:coasys:1:Dee", "byBot": false},
+      "changes": [
+        {"kind": "joined", "person": "did:scid:coasys:1:Dee", "role": "member", "botOf": null, "since": 260, "until": null}
+      ]
+    },
+    {
+      "link": {"hash": "0000000000000000000000000000000000000000000000000000000000000002", "source": "did:scid:coasys:1:Bea", "predicate": "coasys://membership/admin", "target": "coasys://membership/space", "authorKey": "did:key:zAda", "timestamp": 200, "verdict": {"kind": "valid"}, "person": "did:scid:coasys:1:Ada", "byBot": false},
+      "refused": "repeated"
+    }
+  ],
+  "rules": {"add": "admins", "join": "open"},
+  "join": "invite",
+  "members": [
+    {"person": "did:scid:coasys:1:Ada", "role": "admin", "botOf": null, "since": 100, "until": null},
+    {"person": "did:scid:coasys:1:Bea", "role": "admin", "botOf": null, "since": 200, "until": null},
+    {"person": "did:scid:coasys:1:Cid", "role": "member", "botOf": null, "since": 400, "until": null},
+    {"person": "did:scid:coasys:1:Dee", "role": "member", "botOf": null, "since": 260, "until": null}
+  ],
+  "admits": [
+    {"person": "did:scid:coasys:1:Eve", "byBot": false, "invite": null, "now": 1000, "refused": "inviteOnly"}
+  ]
+}
