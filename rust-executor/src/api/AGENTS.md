@@ -15,7 +15,11 @@ REST/WS shim. Split plan: spec item 6.
 
 `*_ws.rs`, one per RPC namespace: `agent`, `ai`, `expressions`, `hosting`,
 `languages`, `neighbourhoods`, `perspectives` (largest; also SHACL + interpretation
-handlers), `runtime`, `users`, and `agent_session` (`perspective.runAgent`). Each exposes `register_ws_handlers(&mut HandlerMap)`
+handlers), `runtime`, `users`, `agent_session` (`perspective.runAgent`), and
+`perspective_instances` (`perspective.instance*`: validated instance writes over
+`perspectives/instances/`, the same functions as the MCP `instance_*` tools; a refused write is
+a `WsRpcError` with the `InstanceError` as `data`: 422 for a shape violation, see the module
+doc). Each exposes `register_ws_handlers(&mut HandlerMap)`
 called from `ws_handler::build_handler_map`.
 
 Handler shape (`perspectives_ws.rs::add_link` is representative):
