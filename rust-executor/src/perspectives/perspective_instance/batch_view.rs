@@ -16,27 +16,29 @@
 //! `execute_commands` does for `RemoveLink` and `SetSingleTarget` in `perspective_instance.rs`.
 //! The same signed expression can sit in both places at once, though:
 //! `perspective.addLinkExpression` stages the caller's expression verbatim, including one the
-//! store already holds. Cancelling the staged copy then does not remove the link — the
-//! committed one still needs its removal staged. [`EffectiveLink`] keeps the two apart.
+//! store already holds, or one it already staged. Cancelling the staged copies then does not
+//! remove the link — the committed one still needs its removal staged — and two staged
+//! copies are still one link. [`EffectiveLink`] folds one identity to one entry and keeps
+//! the two presences apart.
 
 use super::PerspectiveInstance;
 use crate::db::link_identity;
 use crate::types::{DecoratedLinkExpression, Link, LinkExpression, LinkQuery};
 use deno_core::error::AnyError;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
-/// A link on a batch's effective graph. `committed` says whether the store holds this
-/// expression — if it does, removing the link means staging its removal through
-/// `remove_link`; a staged-only link leaves through `cancel_batch_addition` instead.
-///
-/// The committed and the staged copies of one expression are separate entries here, so a
-/// committed link the batch restaged shows up twice: the entries are ordered persisted
-/// first, which lets a caller that dedups by [`link_identity`] take the committed one.
+/// A link on a batch's effective graph — one entry per [`link_identity`], however many
+/// copies of it were staged. `committed` and `staged` are not exclusive:
+/// `perspective.addLinkExpression` can stage the exact signed expression the store holds,
+/// so removing the link can mean dropping staged copies AND staging the committed one's
+/// removal.
 pub(crate) struct EffectiveLink {
-    /// The expression as the store or the batch holds it.
+    /// The expression; the committed spelling when the store holds it.
     pub link: DecoratedLinkExpression,
-    /// The store holds this expression.
+    /// The store holds this expression: its removal is staged through `remove_link`.
     pub committed: bool,
+    /// The batch holds staged copies of it: they drop through `cancel_batch_addition`.
+    pub staged: bool,
 }
 
 impl EffectiveLink {
@@ -44,13 +46,7 @@ impl EffectiveLink {
         EffectiveLink {
             link,
             committed: true,
-        }
-    }
-
-    fn staged(link: DecoratedLinkExpression) -> Self {
-        EffectiveLink {
-            link,
-            committed: false,
+            staged: false,
         }
     }
 }
@@ -59,7 +55,8 @@ impl PerspectiveInstance {
     /// What `query` matches on the batch's effective graph: its `get_links` answer minus the
     /// links the batch has staged for removal, plus the batch's staged additions that match
     /// the query's `source`/`predicate`/`target` (dates and `limit` are the caller's
-    /// business — the write core's queries carry none).
+    /// business — the write core's queries carry none), deduplicated to one
+    /// [`EffectiveLink`] per link identity.
     ///
     /// The persisted answer as it is when `batch_id` is absent or names no open batch — every
     /// caller outside a transaction.
@@ -95,26 +92,34 @@ impl PerspectiveInstance {
         // The exact stored expressions this batch has already dropped.
         let removed: HashSet<_> = batch.diff.removals.iter().map(link_identity).collect();
 
-        // Committed first: a link the batch restaged over its own committed copy then has
-        // its persisted entry ahead of the staged one.
-        let mut out: Vec<EffectiveLink> = persisted
-            .into_iter()
-            .filter(|link| !removed.contains(&link_identity(&link.clone().into())))
-            .map(EffectiveLink::committed)
-            .collect();
-        out.extend(
-            batch
-                .diff
-                .additions
-                .iter()
-                .filter(|e| relevant(&e.data))
-                .map(|expr| {
-                    EffectiveLink::staged(DecoratedLinkExpression::from((
-                        expr.clone(),
-                        expr.status.clone().unwrap_or_default(),
-                    )))
-                }),
-        );
+        // One entry per identity — a restaged committed link counts once, flagged both
+        // ways — with committed entries first and staged additions in their own order.
+        let mut out: Vec<EffectiveLink> = Vec::new();
+        let mut index: HashMap<_, usize> = HashMap::new();
+        for link in persisted {
+            let identity = link_identity(&link.clone().into());
+            if removed.contains(&identity) {
+                continue;
+            }
+            index.insert(identity, out.len());
+            out.push(EffectiveLink::committed(link));
+        }
+        for expr in batch.diff.additions.iter().filter(|e| relevant(&e.data)) {
+            match index.get(&link_identity(expr)) {
+                Some(&i) => out[i].staged = true,
+                None => {
+                    index.insert(link_identity(expr), out.len());
+                    out.push(EffectiveLink {
+                        link: DecoratedLinkExpression::from((
+                            expr.clone(),
+                            expr.status.clone().unwrap_or_default(),
+                        )),
+                        committed: false,
+                        staged: true,
+                    });
+                }
+            }
+        }
         Ok(out)
     }
 

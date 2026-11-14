@@ -670,6 +670,53 @@ async fn a_restaged_committed_link_still_goes_with_the_instance() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn two_staged_copies_of_one_membership_link_remove_once() {
+    // The same signed membership link staged twice (through `perspective.addLink`
+    // for the signature, then `perspective.addLinkExpression` for the duplicate) is
+    // one link on the batch's effective graph: removing the item cancels it once and
+    // must not fall through to a store removal that finds nothing.
+    let world = World::new().await;
+    let created = world.create(json!({ "title": "t" })).await;
+    let id = created["baseUri"].as_str().unwrap().to_string();
+    let item = "ad4m://label/urgent";
+
+    let batch_id = world.ok("perspective.createBatch", json!({})).await;
+    let batch_id = batch_id.as_str().expect("batch id").to_string();
+    let signed = world
+        .ok(
+            "perspective.addLink",
+            json!({ "link": { "source": id, "predicate": "ns://task_label", "target": item }, "batchId": batch_id }),
+        )
+        .await;
+    world
+        .ok(
+            "perspective.addLinkExpression",
+            json!({ "link": signed, "batchId": batch_id }),
+        )
+        .await;
+
+    let removed = world
+        .ok(
+            "perspective.instanceRemoveFromCollection",
+            json!({ "className": "Task", "baseUri": id, "collection": "labels", "itemUri": item, "batchId": batch_id }),
+        )
+        .await;
+    assert_eq!(
+        removed["linksRemoved"], 1,
+        "one effective link leaves, however many copies were staged: {removed}"
+    );
+
+    world
+        .ok("perspective.commitBatch", json!({ "batchId": batch_id }))
+        .await;
+    let labels = world.task(&id).await.unwrap()["labels"].clone();
+    assert!(
+        labels.is_null() || labels == json!([]),
+        "the item is out: {labels}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_batch_that_is_not_open_is_refused_before_writing() {
     let world = World::new().await;
     let before = world.link_count().await;

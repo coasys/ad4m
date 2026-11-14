@@ -729,12 +729,13 @@ pub async fn remove_from_collection(
             continue;
         }
         let link = LinkExpression::from(effective.link);
-        if let Some(batch_id) = params.batch_id.as_deref() {
-            // Every staged copy of this identity goes — a member that exists only inside
-            // the batch leaves that way, but so does a staged twin of a committed member
-            // (`addLinkExpression` restages stored expressions verbatim): dropping the
-            // copy alone would commit it back over the removal staged just below.
-            perspective.cancel_batch_addition(batch_id, &link).await;
+        // Both presences can hold at once (`addLinkExpression` restages the stored
+        // expression verbatim): the staged copies drop, and the committed copy is staged
+        // for removal — one without the other would leave the membership behind.
+        if effective.staged {
+            if let Some(batch_id) = params.batch_id.as_deref() {
+                perspective.cancel_batch_addition(batch_id, &link).await;
+            }
         }
         if effective.committed {
             if let Err(e) = perspective.remove_link(link, params.batch_id.clone()).await {

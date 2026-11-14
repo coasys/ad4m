@@ -29,10 +29,12 @@ Invariants:
 - In a caller's batch, the reads a write does of the links it manages — collection
   membership, the remove cascade — see the batch's effective graph
   (`get_links_effective` in `perspective_instance/batch_view.rs`: committed + staged
-  additions − staged removals); a link that exists only inside the batch is removed by
-  `cancel_batch_addition`, not `remove_link`. Instance existence (`fetch_instance`,
-  `require_instance`) still reads committed state: a create+update/-remove of a new instance
-  in one batch fails `notFound`.
+  additions − staged removals, deduplicated to one `EffectiveLink` per link identity
+  that flags the `committed`/`staged` presences — `addLinkExpression` can restage a
+  stored expression, so both can hold); removal drops the staged copies
+  (`cancel_batch_addition`) and stages the committed copy's (`remove_link`). Instance
+  existence (`fetch_instance`, `require_instance`) still reads committed state: a
+  create+update/-remove/collection-write of a new instance in one batch fails `notFound`.
 
 Do not: add MCP- or RPC-specific wording, or read the token: take the `AgentContext`.
 Known wart: still calls `crate::mcp::shacl` for class names, predicates and link status.

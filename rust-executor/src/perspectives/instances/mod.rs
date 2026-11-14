@@ -642,9 +642,7 @@ pub(crate) async fn remove_all_links_of(
         };
         for effective in links {
             let link = LinkExpression::from(effective.link);
-            // A link naming `uri` both ways answers both queries; remove it once. The
-            // committed entry of an identity comes before its staged copies, so `seen`
-            // always decides on the committed spelling first.
+            // A link naming `uri` both ways answers both queries; remove it once.
             if !seen.insert(crate::db::link_identity(&link)) {
                 continue;
             }
@@ -653,12 +651,13 @@ pub(crate) async fn remove_all_links_of(
                 predicate: link.data.predicate.clone(),
                 target: link.data.target.clone(),
             };
-            if let Some(batch_id) = batch_id {
-                // Every staged copy of this identity goes — not only when this entry is
-                // one of them: `addLinkExpression` can restage the very expression the
-                // store holds, and that staged twin must not commit on top of the
-                // removal staged just below.
-                perspective.cancel_batch_addition(batch_id, &link).await;
+            // Both presences can hold at once (`addLinkExpression` restages the stored
+            // expression verbatim): the staged copies drop, and the committed copy is
+            // staged for removal — one without the other would leave the link behind.
+            if effective.staged {
+                if let Some(batch_id) = batch_id {
+                    perspective.cancel_batch_addition(batch_id, &link).await;
+                }
             }
             if effective.committed {
                 if let Err(error) = perspective
