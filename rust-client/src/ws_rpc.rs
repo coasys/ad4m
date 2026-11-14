@@ -3,11 +3,14 @@ use futures_util::{SinkExt, StreamExt};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::TcpStream;
-use tokio::sync::{broadcast, oneshot, Mutex};
+use tokio::sync::{broadcast, oneshot, watch, Mutex};
+use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async_with_config, MaybeTlsStream, WebSocketStream};
@@ -16,6 +19,61 @@ static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn next_id() -> String {
     ID_COUNTER.fetch_add(1, Ordering::Relaxed).to_string()
+}
+
+/// First delay between socket reconnect attempts; it doubles per failure.
+pub(crate) const RECONNECT_BASE_DELAY_MS: u64 = 1_000;
+/// Longest delay between two socket reconnect attempts.
+pub(crate) const RECONNECT_MAX_DELAY_MS: u64 = 30_000;
+
+/// A call's budget — covering the wait for a socket and the reply — as TS
+/// `DEFAULT_TIMEOUT_MS` (`apiClient.ts`).
+const DEFAULT_TIMEOUT: Duration = Duration::from_millis(30_000);
+/// The budget of a method the executor marks long (LLM work, Holochain,
+/// publishing) — TS `LONG_TIMEOUT_MS`, 20 minutes.
+const LONG_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+/// The `LONG_METHODS` of the generated contract
+/// (`core/src/generated/api/RpcMethods.ts`) — kept in step by
+/// `rpc_methods_stay_in_the_generated_contract` in `drift.rs`.
+pub(crate) const LONG_METHODS: &[&str] = &[
+    "agent.generate",
+    "agent.unlock",
+    "ai.deleteUpstreamModel",
+    "ai.embed",
+    "ai.localInstall",
+    "ai.localStart",
+    "ai.prompt",
+    "ai.pullModel",
+    "ai.removeEndpoint",
+    "ai.updateEndpoint",
+    "language.applyTemplate",
+    "language.publish",
+    "neighbourhood.join",
+    "neighbourhood.publish",
+    "perspective.runAgent",
+    "perspective.runInterpretation",
+    "perspective.runInterpretationWithHarness",
+    "runtime.restartHolochain",
+];
+
+/// The delay before reconnect attempt `failures + 1`: between half and all of
+/// `base * 2^(failures - 1)`, capped at `max`. The random half spreads the
+/// clients of a restarted executor apart. Same formula as `LiveQuery`'s
+/// re-open delay (`subscription.rs`).
+pub(crate) fn backoff_delay_ms(failures: u64, base_ms: u64, max_ms: u64) -> u64 {
+    let exp = failures.saturating_sub(1).min(20);
+    let ceiling = base_ms.saturating_mul(1 << exp).min(max_ms);
+    let jitter = rand_jitter(ceiling / 2);
+    ceiling / 2 + jitter
+}
+
+/// A uniform `0..=max` random — the jitter that spreads the clients of a
+/// restarted executor apart.
+fn rand_jitter(max: u64) -> u64 {
+    if max == 0 {
+        return 0;
+    }
+    rand::random::<u64>() % (max + 1)
 }
 
 #[derive(Serialize)]
@@ -62,11 +120,80 @@ impl std::error::Error for RpcCallError {}
 
 type PendingMap = Arc<Mutex<HashMap<String, oneshot::Sender<Result<Value>>>>>;
 type WsSink = futures_util::stream::SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>;
+type WsSource = futures_util::stream::SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>;
 
-pub struct WsRpcClient {
-    sender: Arc<Mutex<WsSink>>,
+/// One named event interest. `spec` is the `events.watch` params fragment for
+/// this watcher: `{ "<event type>": null | ["uuid", ...] }`.
+type WatchMap = BTreeMap<String, Value>;
+/// A callback fired once a fresh socket is installed (post `events.watch`).
+type ReconnectCb = Arc<dyn Fn() + Send + Sync>;
+
+struct Shared {
+    /// The WS URL (token already inside) — needed by the reconnect task.
+    url: String,
+    sink: Mutex<Option<WsSink>>,
     pending: PendingMap,
     events: broadcast::Sender<Value>,
+    /// `true` while a socket is installed and callable.
+    connected: watch::Sender<bool>,
+    /// Named event interests; the union goes out as `events.watch` on
+    /// (re)connect and on every change. Key `""` is the user watch —
+    /// `watch_events` replaces it; live queries register their own keys.
+    watches: Mutex<WatchMap>,
+    on_reconnect: Mutex<Vec<(u64, ReconnectCb)>>,
+    closed: AtomicBool,
+    /// Auth refusal (close 1008) — do not reconnect, mirror TS.
+    auth_failed: AtomicBool,
+    reader: Mutex<Option<JoinHandle<()>>>,
+    reconnect: Mutex<Option<JoinHandle<()>>>,
+}
+
+/// Merge every named interest into the `events.watch` params: for each event
+/// type, `null` (all perspectives) wins over any uuid list; lists union.
+fn merge_watches(watches: &WatchMap) -> Value {
+    let mut by_type: BTreeMap<String, Option<Vec<String>>> = BTreeMap::new();
+    for spec in watches.values() {
+        if let Some(obj) = spec.as_object() {
+            for (event, filter) in obj {
+                match filter {
+                    Value::Null => {
+                        by_type.insert(event.clone(), None);
+                    }
+                    Value::Array(uuids) => {
+                        let entry = by_type.entry(event.clone()).or_insert_with(|| Some(vec![]));
+                        if let Some(list) = entry {
+                            for u in uuids {
+                                if let Some(s) = u.as_str() {
+                                    if !list.iter().any(|x| x == s) {
+                                        list.push(s.to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    Value::Object(
+        by_type
+            .into_iter()
+            .map(|(k, v)| (k, v.map(Value::from).unwrap_or(Value::Null)))
+            .collect(),
+    )
+}
+
+pub struct WsRpcClient {
+    shared: Arc<Shared>,
+}
+
+impl std::fmt::Debug for WsRpcClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WsRpcClient")
+            .field("connected", &self.is_connected())
+            .finish()
+    }
 }
 
 fn to_ws_url(executor_url: &str, token: &str) -> String {
@@ -82,39 +209,70 @@ fn to_ws_url(executor_url: &str, token: &str) -> String {
     }
 }
 
+fn ws_config() -> WebSocketConfig {
+    WebSocketConfig {
+        max_message_size: Some(256 * 1024 * 1024),
+        max_frame_size: Some(64 * 1024 * 1024),
+        ..Default::default()
+    }
+}
+
 impl WsRpcClient {
     pub async fn connect(executor_url: &str, token: &str) -> Result<Self> {
         let url = to_ws_url(executor_url, token);
-        let ws_config = WebSocketConfig {
-            max_message_size: Some(256 * 1024 * 1024),
-            max_frame_size: Some(64 * 1024 * 1024),
-            ..Default::default()
-        };
-        let (ws_stream, _) = connect_async_with_config(&url, Some(ws_config), false)
+        let (write, read) = Self::open_socket(&url, executor_url).await?;
+
+        let (events_tx, _) = broadcast::channel::<Value>(512);
+        let (connected_tx, _) = watch::channel(true);
+
+        let shared = Arc::new(Shared {
+            url: url.clone(),
+            sink: Mutex::new(Some(write)),
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            events: events_tx,
+            connected: connected_tx,
+            watches: Mutex::new(WatchMap::new()),
+            on_reconnect: Mutex::new(Vec::new()),
+            closed: AtomicBool::new(false),
+            auth_failed: AtomicBool::new(false),
+            reader: Mutex::new(None),
+            reconnect: Mutex::new(None),
+        });
+
+        let reader = Self::spawn_reader(read, shared.clone());
+        *shared.reader.lock().await = Some(reader);
+
+        Ok(Self { shared })
+    }
+
+    async fn open_socket(url: &str, executor_url_for_errors: &str) -> Result<(WsSink, WsSource)> {
+        let (ws_stream, _) = connect_async_with_config(url, Some(ws_config()), false)
             .await
             // Named without the token: callers print this error.
             .map_err(|e| {
                 anyhow!(
                     "WebSocket connection to {} failed: {}",
-                    to_ws_url(executor_url, ""),
+                    to_ws_url(executor_url_for_errors, ""),
                     e
                 )
             })?;
-        let (write, mut read) = ws_stream.split();
+        Ok(ws_stream.split())
+    }
 
-        let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
-        let pending_reader = pending.clone();
-
-        let (events_tx, _) = broadcast::channel::<Value>(256);
-        let events_tx_reader = events_tx.clone();
-
-        // Background reader task: dispatches RPC responses to pending callers
-        // and broadcasts server-push events to subscribers.
+    /// Background reader: RPC replies go to pending callers, everything else
+    /// to the event broadcast. On exit it drives the disconnect path.
+    fn spawn_reader(mut read: WsSource, shared: Arc<Shared>) -> JoinHandle<()> {
+        let shared_reader = shared.clone();
         tokio::spawn(async move {
+            let mut auth_failed = false;
             while let Some(msg) = read.next().await {
                 let text = match msg {
                     Ok(Message::Text(t)) => t,
                     Ok(Message::Close(frame)) => {
+                        auth_failed = matches!(
+                            &frame,
+                            Some(f) if f.code == tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Policy
+                        );
                         eprintln!("[ws-rpc] connection closed by server: {:?}", frame);
                         break;
                     }
@@ -136,7 +294,7 @@ impl WsRpcClient {
                         Ok(r) => r,
                         Err(_) => continue,
                     };
-                    if let Some(tx) = pending_reader.lock().await.remove(&id) {
+                    if let Some(tx) = shared_reader.pending.lock().await.remove(&id) {
                         if let Some(error) = resp.error {
                             let _ = tx.send(Err(anyhow::Error::new(RpcCallError {
                                 code: error.code.unwrap_or(500),
@@ -149,45 +307,212 @@ impl WsRpcClient {
                     }
                 } else {
                     // Server-push event — broadcast to subscribers
-                    let _ = events_tx_reader.send(parsed);
+                    let _ = shared_reader.events.send(parsed);
                 }
             }
 
-            // Connection closed — reject all pending calls
-            let mut map = pending_reader.lock().await;
-            for (_, tx) in map.drain() {
-                let _ = tx.send(Err(anyhow!("WebSocket connection closed")));
+            if auth_failed {
+                shared.auth_failed.store(true, Ordering::SeqCst);
             }
-        });
-
-        Ok(Self {
-            sender: Arc::new(Mutex::new(write)),
-            pending,
-            events: events_tx,
+            Self::handle_disconnect(&shared, false).await;
         })
     }
 
-    pub async fn call<T: DeserializeOwned>(&self, msg_type: &str, params: Value) -> Result<T> {
+    /// The socket is gone: drain pending calls, mark the client disconnected,
+    /// and (unless closed/auth-refused) spawn the reconnect task.
+    /// `abort_reader` is `false` from the reader itself — aborting its own
+    /// handle would cancel the rest of this cleanup at the next yield.
+    async fn handle_disconnect(shared: &Arc<Shared>, abort_reader: bool) {
+        {
+            let mut sink = shared.sink.lock().await;
+            *sink = None; // drop whatever half remains
+        }
+        // Abort the reader when this runs from `disconnect_for_testing` —
+        // dropping `read` closes the TCP stream executor-side too.
+        if abort_reader {
+            if let Some(reader) = shared.reader.lock().await.take() {
+                reader.abort();
+            }
+        }
+        let _ = shared.connected.send(false);
+
+        // Fail every in-flight call — the executor can't answer them now.
+        let mut map = shared.pending.lock().await;
+        for (_, tx) in map.drain() {
+            let _ = tx.send(Err(anyhow!("WebSocket connection closed")));
+        }
+        drop(map);
+
+        if shared.closed.load(Ordering::SeqCst) || shared.auth_failed.load(Ordering::SeqCst) {
+            return;
+        }
+
+        let mut guard = shared.reconnect.lock().await;
+        if guard.as_ref().is_some_and(|h| !h.is_finished()) {
+            return; // a reconnect task is already working
+        }
+        let shared2 = shared.clone();
+        *guard = Some(tokio::spawn(async move {
+            let mut failures: u64 = 0;
+            loop {
+                if shared2.closed.load(Ordering::SeqCst) {
+                    return;
+                }
+                failures += 1;
+                let delay =
+                    backoff_delay_ms(failures, RECONNECT_BASE_DELAY_MS, RECONNECT_MAX_DELAY_MS);
+                tokio::time::sleep(Duration::from_millis(delay)).await;
+
+                match connect_async_with_config(&shared2.url, Some(ws_config()), false).await {
+                    Ok((ws_stream, _)) => {
+                        let (write, read) = ws_stream.split();
+                        {
+                            let mut sink = shared2.sink.lock().await;
+                            *sink = Some(write);
+                        }
+                        let reader = Self::spawn_reader(read, shared2.clone());
+                        *shared2.reader.lock().await = Some(reader);
+                        let _ = shared2.connected.send(true);
+
+                        // Re-register interest first — subscription re-opens
+                        // fired below need `query-subscription-update` watched.
+                        Self::send_watch(&shared2).await;
+
+                        let callbacks: Vec<ReconnectCb> = shared2
+                            .on_reconnect
+                            .lock()
+                            .await
+                            .iter()
+                            .map(|(_, cb)| cb.clone())
+                            .collect();
+                        for cb in callbacks {
+                            cb();
+                        }
+                        return;
+                    }
+                    Err(e) => {
+                        eprintln!("[ws-rpc] reconnect failed (attempt {failures}): {e}");
+                    }
+                }
+            }
+        }));
+    }
+
+    /// Merge the named interests and send `events.watch` — an empty map too:
+    /// it tells the executor to stop sending events (`events.watch` replaces
+    /// the socket's entire interest, TS `ApiClient._flushWatch`).
+    async fn send_watch(shared: &Arc<Shared>) {
+        let merged = {
+            let watches = shared.watches.lock().await;
+            merge_watches(&watches)
+        };
+        // Send directly rather than via `call` — `call` on the freshly
+        // installed socket works, but this keeps ordering explicit.
         let id = next_id();
         let msg = RpcMessage {
             id: id.clone(),
-            msg_type: msg_type.to_string(),
-            params,
+            msg_type: "events.watch".to_string(),
+            params: merged,
         };
-
         let (tx, rx) = oneshot::channel();
-        self.pending.lock().await.insert(id.clone(), tx);
-
-        let json = serde_json::to_string(&msg)?;
-        let send_result = self.sender.lock().await.send(Message::Text(json)).await;
-
-        if let Err(e) = send_result {
-            self.pending.lock().await.remove(&id);
-            return Err(anyhow!("Failed to send WS message: {}", e));
+        shared.pending.lock().await.insert(id, tx);
+        if let Ok(json) = serde_json::to_string(&msg) {
+            let mut sink = shared.sink.lock().await;
+            if let Some(s) = sink.as_mut() {
+                let _ = s.send(Message::Text(json)).await;
+            }
         }
+        // Fire-and-forget: the reply is drained by the reader; a 5s guard
+        // avoids a leaked pending entry when it never comes.
+        tokio::spawn(async move {
+            let _ = tokio::time::timeout(Duration::from_secs(5), rx).await;
+        });
+    }
 
-        let result = rx.await.map_err(|_| anyhow!("Response channel closed"))??;
+    /// Register `key`'s event interest; the merged union is sent on the socket.
+    /// Live queries use this so a subscription watch survives reconnects.
+    pub(crate) async fn set_watch(&self, key: &str, spec: Value) {
+        {
+            let mut watches = self.shared.watches.lock().await;
+            watches.insert(key.to_string(), spec);
+        }
+        if *self.shared.connected.borrow() {
+            Self::send_watch(&self.shared).await;
+        }
+    }
 
+    pub(crate) async fn remove_watch(&self, key: &str) {
+        {
+            let mut watches = self.shared.watches.lock().await;
+            watches.remove(key);
+        }
+        if *self.shared.connected.borrow() {
+            Self::send_watch(&self.shared).await;
+        }
+    }
+
+    /// `callback` runs after each successful reconnect, once the watch was
+    /// re-sent. Returns an id for `remove_on_reconnect`.
+    pub async fn on_reconnect(&self, callback: impl Fn() + Send + Sync + 'static) -> u64 {
+        static CB_ID: AtomicU64 = AtomicU64::new(0);
+        let id = CB_ID.fetch_add(1, Ordering::Relaxed);
+        self.shared
+            .on_reconnect
+            .lock()
+            .await
+            .push((id, Arc::new(callback)));
+        id
+    }
+
+    pub async fn remove_on_reconnect(&self, id: u64) {
+        self.shared
+            .on_reconnect
+            .lock()
+            .await
+            .retain(|(cb_id, _)| *cb_id != id);
+    }
+
+    /// Whether a socket is currently installed.
+    pub fn is_connected(&self) -> bool {
+        *self.shared.connected.borrow()
+    }
+
+    /// The raw server-push event stream (before any `events.watch` filter —
+    /// the executor only sends what a watched socket asked for).
+    pub(crate) fn events(&self) -> broadcast::Receiver<Value> {
+        self.shared.events.subscribe()
+    }
+
+    /// Permanently close the client: socket down, no reconnect.
+    pub async fn close(&self) {
+        self.shared.closed.store(true, Ordering::SeqCst);
+        if let Some(h) = self.shared.reconnect.lock().await.take() {
+            h.abort();
+        }
+        if let Some(h) = self.shared.reader.lock().await.take() {
+            h.abort();
+        }
+        *self.shared.sink.lock().await = None;
+        let _ = self.shared.connected.send(false);
+        let mut map = self.shared.pending.lock().await;
+        for (_, tx) in map.drain() {
+            let _ = tx.send(Err(anyhow!("WebSocket connection closed")));
+        }
+    }
+
+    /// Drop the live socket and walk the same disconnect path a dead socket
+    /// walks: TCP closes server-side (subscriptions die), then the client
+    /// reconnects. For tests that exercise reconnect/resync.
+    #[doc(hidden)]
+    pub async fn disconnect_for_testing(&self) {
+        Self::handle_disconnect(&self.shared, true).await;
+    }
+
+    /// Wait for a socket (or permanent close), then send and await the reply.
+    /// Times out as TS `ApiClient._request` does: 30 s, 20 min on a
+    /// `LONG_METHODS` call; the budget covers reconnecting.
+    pub async fn call<T: DeserializeOwned>(&self, msg_type: &str, params: Value) -> Result<T> {
+        let result = self.call_value(msg_type, params).await?;
         serde_json::from_value(result.clone()).map_err(|e| {
             anyhow!(
                 "Failed to deserialize response for '{}': {} (raw: {})",
@@ -198,6 +523,70 @@ impl WsRpcClient {
         })
     }
 
+    /// `call` returning the raw result `Value` — for callers whose result
+    /// needs a parse serde can't give (e.g. `modelQuery`'s JSON-in-a-string).
+    pub async fn call_value(&self, msg_type: &str, params: Value) -> Result<Value> {
+        let id = next_id();
+        let timeout = if LONG_METHODS.contains(&msg_type) {
+            LONG_TIMEOUT
+        } else {
+            DEFAULT_TIMEOUT
+        };
+        match tokio::time::timeout(timeout, self.call_inner(&id, msg_type, params)).await {
+            Ok(r) => r,
+            Err(_) => {
+                // The pending entry would sit until a reply lands (or the
+                // socket drains it); drop it now so a late reply answers no
+                // one.
+                self.shared.pending.lock().await.remove(&id);
+                Err(anyhow!(
+                    "RPC call '{}' timed out after {}ms",
+                    msg_type,
+                    timeout.as_millis()
+                ))
+            }
+        }
+    }
+
+    async fn call_inner(&self, id: &str, msg_type: &str, params: Value) -> Result<Value> {
+        let msg = RpcMessage {
+            id: id.to_string(),
+            msg_type: msg_type.to_string(),
+            params,
+        };
+
+        let (tx, rx) = oneshot::channel();
+        self.shared.pending.lock().await.insert(id.to_string(), tx);
+
+        let json = serde_json::to_string(&msg)?;
+        let send_result = {
+            let mut connected_rx = self.shared.connected.subscribe();
+            loop {
+                if self.shared.closed.load(Ordering::SeqCst) {
+                    self.shared.pending.lock().await.remove(id);
+                    return Err(anyhow!("WebSocket client is closed"));
+                }
+                let mut sink = self.shared.sink.lock().await;
+                if let Some(s) = sink.as_mut() {
+                    break s.send(Message::Text(json.clone())).await;
+                }
+                drop(sink);
+                // Reconnecting — wait for a socket or the final close.
+                if connected_rx.changed().await.is_err() {
+                    self.shared.pending.lock().await.remove(id);
+                    return Err(anyhow!("WebSocket client is closed"));
+                }
+            }
+        };
+
+        if let Err(e) = send_result {
+            self.shared.pending.lock().await.remove(id);
+            return Err(anyhow!("Failed to send WS message: {}", e));
+        }
+
+        rx.await.map_err(|_| anyhow!("Response channel closed"))?
+    }
+
     /// Fire-and-forget call that discards the result.
     pub async fn call_void(&self, msg_type: &str, params: Value) -> Result<()> {
         let _: Value = self.call(msg_type, params).await?;
@@ -206,11 +595,12 @@ impl WsRpcClient {
 
     /// Receive server-push events. The executor sends a socket only the
     /// events it asked for: `events` maps each event type to the perspective
-    /// uuids wanted, or `null` for all (`events.watch`). Replaces the
-    /// connection's earlier interest. Each event has a `"type"` field.
+    /// uuids wanted, or `null` for all (`events.watch`). Replaces the user
+    /// interest — named interests (e.g. live queries' `query-subscription-update`)
+    /// persist alongside it. Each event has a `"type"` field.
     pub async fn watch_events(&self, events: Value) -> Result<broadcast::Receiver<Value>> {
-        let rx = self.events.subscribe();
-        self.call_void("events.watch", events).await?;
+        let rx = self.shared.events.subscribe();
+        self.set_watch("", events).await;
         Ok(rx)
     }
 }
@@ -262,8 +652,7 @@ mod tests {
         });
         let error = WsRpcClient::connect(&format!("http://127.0.0.1:{port}"), "secret-cap-token")
             .await
-            .err()
-            .expect("the upgrade is refused")
+            .expect_err("the upgrade is refused")
             .to_string();
         assert!(!error.contains("secret-cap-token"), "{error}");
         assert!(error.contains(&format!("127.0.0.1:{port}")), "{error}");
@@ -289,6 +678,44 @@ mod tests {
         let n1: u64 = id1.parse().unwrap();
         let n2: u64 = id2.parse().unwrap();
         assert_eq!(n2, n1 + 1);
+    }
+
+    #[test]
+    fn backoff_delay_grows_and_caps() {
+        let d1 = backoff_delay_ms(1, 1000, 30_000);
+        assert!((500..=1000).contains(&d1), "{d1}");
+        let d5 = backoff_delay_ms(5, 1000, 30_000);
+        assert!((8000..=16000).contains(&d5), "{d5}");
+        let d_big = backoff_delay_ms(50, 1000, 30_000);
+        assert!((15_000..=30_000).contains(&d_big), "{d_big}");
+    }
+
+    #[test]
+    fn merge_watches_unions_named_interests() {
+        let mut watches = WatchMap::new();
+        watches.insert("".into(), serde_json::json!({"perspective-added": null}));
+        watches.insert(
+            "lq:1".into(),
+            serde_json::json!({"query-subscription-update": null, "link-added": ["p1"]}),
+        );
+        watches.insert(
+            "lq:2".into(),
+            serde_json::json!({"link-added": ["p2", "p1"]}),
+        );
+        let merged = merge_watches(&watches);
+        assert_eq!(merged["perspective-added"], serde_json::Value::Null);
+        assert_eq!(merged["query-subscription-update"], serde_json::Value::Null);
+        let mut got: Vec<String> = serde_json::from_value(merged["link-added"].clone()).unwrap();
+        got.sort();
+        assert_eq!(got, vec!["p1".to_string(), "p2".to_string()]);
+    }
+
+    #[test]
+    fn merge_watches_null_wins_over_uuid_lists() {
+        let mut watches = WatchMap::new();
+        watches.insert("a".into(), serde_json::json!({"ev": ["p1"]}));
+        watches.insert("b".into(), serde_json::json!({"ev": null}));
+        assert_eq!(merge_watches(&watches)["ev"], serde_json::Value::Null);
     }
 
     #[test]
@@ -347,7 +774,9 @@ mod tests {
         server.await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        // Call should fail because connection is closed
+        // The client starts reconnecting (executor is down); close() makes the
+        // call fail rather than wait forever.
+        client.close().await;
         let result: Result<Value> = client.call("test.method", serde_json::json!({})).await;
         assert!(result.is_err());
     }
@@ -424,5 +853,99 @@ mod tests {
             "Error should contain message: {}",
             err_msg
         );
+    }
+
+    /// Reconnect: the client's socket dies, a second server accepts the
+    /// reconnect, the watch is re-sent and `on_reconnect` fires.
+    #[tokio::test]
+    async fn reconnects_after_socket_drop_and_resends_watch() {
+        use tokio::net::TcpListener;
+        use tokio_tungstenite::accept_async;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (watches_tx, mut watches_rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
+        let (second_conn_tx, mut second_conn_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+
+        tokio::spawn(async move {
+            let mut conn_count = 0;
+            while let Ok((stream, _)) = listener.accept().await {
+                conn_count += 1;
+                let watches_tx = watches_tx.clone();
+                let second_conn_tx = second_conn_tx.clone();
+                tokio::spawn(async move {
+                    let mut ws = accept_async(stream).await.unwrap();
+                    if conn_count == 2 {
+                        let _ = second_conn_tx.send(());
+                    }
+                    while let Some(Ok(Message::Text(text))) = ws.next().await {
+                        let req: Value = serde_json::from_str(&text).unwrap();
+                        if req["type"] == "events.watch" {
+                            let _ = watches_tx.send(req["params"].clone());
+                        }
+                        let response = serde_json::json!({"id": req["id"], "result": true});
+                        if ws.send(Message::Text(response.to_string())).await.is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+
+        let url = format!("http://127.0.0.1:{}", addr.port());
+        let client = WsRpcClient::connect(&url, "").await.unwrap();
+        let rx = client
+            .watch_events(serde_json::json!({"query-subscription-update": null}))
+            .await
+            .unwrap();
+        let first_watch = tokio::time::timeout(Duration::from_secs(5), watches_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first_watch["query-subscription-update"], Value::Null);
+
+        let (reconnected_tx, reconnected_rx) = oneshot::channel::<()>();
+        let reconnected_tx = std::sync::Mutex::new(Some(reconnected_tx));
+        client
+            .on_reconnect(move || {
+                if let Some(tx) = reconnected_tx.lock().unwrap().take() {
+                    let _ = tx.send(());
+                }
+            })
+            .await;
+
+        client.disconnect_for_testing().await;
+        // Give the reader task a beat to observe the aborted socket.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        tokio::time::timeout(Duration::from_secs(15), second_conn_rx.recv())
+            .await
+            .expect("executor never saw the reconnect")
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), reconnected_rx)
+            .await
+            .expect("on_reconnect never fired")
+            .unwrap();
+
+        // The watch must have been re-sent on the new socket.
+        let mut saw_watch = false;
+        while let Ok(Some(w)) =
+            tokio::time::timeout(Duration::from_secs(5), watches_rx.recv()).await
+        {
+            if w["query-subscription-update"] == Value::Null {
+                saw_watch = true;
+                break;
+            }
+        }
+        assert!(saw_watch, "events.watch was not re-sent after reconnect");
+
+        // A call on the reconnected socket answers.
+        let result: Value = client
+            .call("test.echo", serde_json::json!({}))
+            .await
+            .unwrap();
+        assert_eq!(result, Value::Bool(true));
+        drop(rx);
+        client.close().await;
     }
 }
