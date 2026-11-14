@@ -14,7 +14,7 @@ protocol and health. A fresh executor has no model and loads none.
 |---|---|
 | top | DTOs: `PromptResult`, `EmbedResult`, `EmbedBatch`, `TranscriptionSession`; `AIService` (two client maps), `ChatModel`, `Embedder`; token estimates; `turns_for` |
 | ~260–430 | construction, `load` (a client per stored model), `init_model` / `drop_clients`, model add/default/views, global instance |
-| ~430–860 | AI tasks CRUD (rows only: a prompt reads its task from the database), `prompt` / `prompt_messages` / `prompt_messages_stream` / `prompt_with_tools`, billing hooks (`bill_prompt_if_authed`) |
+| ~430–860 | AI tasks CRUD (rows only: a prompt reads its task from the database), `prompt` / `prompt_interpretation` (no thinking, output capped at the room the window leaves) / `prompt_messages` / `prompt_messages_stream` / `prompt_with_tools`, billing hooks (`bill_prompt_if_authed`) |
 | ~860–950 | embeddings: `embed_batch` resolves an id or a name and sends one request per batch to the model's `Embedder` |
 | ~950–1110 | transcription streams: open, feed, close, ownership |
 | ~1110–1135 | model update / reload / remove |

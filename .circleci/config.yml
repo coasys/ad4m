@@ -399,6 +399,12 @@ jobs:
           name: Test install-hc-toolchain.sh
           command: bash scripts/install-hc-toolchain.test.sh
       - run:
+          # Scratch workdirs + fake cargo, no network; about a second. The snapshot's
+          # stamp and the host-wide cache's digests (a kept workdir must not embed
+          # another commit's snapshot).
+          name: Test build-deno-snapshot.sh
+          command: bash rust-executor/scripts/build-deno-snapshot.test.sh
+      - run:
           # Scratch git repos, no network; about two seconds. Runs the fix_workdir
           # block above against healthy and deliberately broken workdirs (#1325).
           name: Test the fix_workdir step
@@ -501,12 +507,19 @@ jobs:
       - run:
           # clippy and rust-tests compile on other runners. These generated files are
           # embedded by that compile (include_bytes!/include!/include_dir!) and are
-          # not in git.
+          # not in git. The stamp (.inputs) goes with the snapshot: the workdir
+          # keeps what this restores. Without it, another commit's snapshot sat
+          # under this workdir's old stamp, the next build there said "up to
+          # date" and embedded it (deno panics: the snapshot's op count is not
+          # the binary's). The stamp now also holds the outputs' digest, so
+          # build-deno-snapshot.sh rebuilds such a mix anyway; with the stamp
+          # restored too, a later build of this commit there needs no rebuild.
           name: Stash generated Rust compile inputs for clippy and rust-tests
           command: |
             CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-/var/lib/ci-artifacts}"
             dst="$CI_ARTIFACT_DIR/${CIRCLE_SHA1}/compile-inputs.tar"
             tar -cf "$dst.tmp" \
+              rust-executor/CUSTOM_DENO_SNAPSHOT.inputs \
               rust-executor/CUSTOM_DENO_SNAPSHOT.bin \
               rust-executor/CUSTOM_DENO_SNAPSHOT.residual_esm.rs \
               rust-executor/CUSTOM_DENO_SNAPSHOT.residual_js.rs \

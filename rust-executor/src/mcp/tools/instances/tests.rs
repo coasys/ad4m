@@ -1667,7 +1667,7 @@ async fn instance_add_to_collection_writes_when_the_only_membership_does_not_cou
     let verdict_of = |target: &str| {
         perspective
             .sparql_store
-            .get_all_links()
+            .get_all_links(&crate::perspectives::sparql_store::EvalStop::none())
             .unwrap()
             .into_iter()
             .find(|l| l.data.target == target)
@@ -4882,6 +4882,7 @@ async fn instance_create_writes_a_collection_local_when_its_local_is_unresolved(
     let stored = perspective
         .sparql_store
         .get_link(
+            &crate::perspectives::sparql_store::EvalStop::none(),
             &local_decl.data.source,
             local_decl.data.predicate.as_deref(),
             &local_decl.data.target,
