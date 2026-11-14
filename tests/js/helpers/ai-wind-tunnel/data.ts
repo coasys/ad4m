@@ -59,6 +59,8 @@ export interface PlanModel {
   params?: string;
   source?: string;
   voice?: string;
+  /** llama-server's context in tokens (`-c`); left out: 8192. A model meant for long prompts is measured at the context it is recommended with. */
+  context?: number;
 }
 
 export interface MatrixPlan {

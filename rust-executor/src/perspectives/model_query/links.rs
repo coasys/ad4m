@@ -52,7 +52,7 @@ use std::collections::BTreeMap;
 use super::sparql_builder::{link_status_filter, local_status_filter, proof_valid_filter};
 use super::types::{IncludeValue, ModelQueryInput, ModelShape, ShapeResolver};
 use super::utils::{emittable_iri, values_or_str_filter};
-use crate::perspectives::sparql_store::{status_from_str, SparqlStore};
+use crate::perspectives::sparql_store::{status_from_str, EvalStop, SparqlStore};
 use crate::types::LinkStatus;
 
 /// Instance key carrying the requested per-link rows. Reserved as a property
@@ -198,6 +198,7 @@ pub(super) fn resolve_link_keys(
 /// `model_query`, this query needs it too, after `{local_status}`. It accepts
 /// arbitrary predicate IRIs, so it is the widest read to leave unscoped.
 pub(super) async fn attach_links(
+    stop: &EvalStop,
     store: &SparqlStore,
     shape: &ModelShape,
     keys: &[(String, String)],
@@ -248,7 +249,7 @@ pub(super) async fn attach_links(
     OPTIONAL {{ ?_reifier <ad4m://ontology/status> ?rowStatus . }}
 {local_status}}}"#
         );
-        let rows: Vec<Value> = serde_json::from_str(&store.query_async(&sparql).await?)?;
+        let rows: Vec<Value> = serde_json::from_str(&store.query_async(stop, &sparql).await?)?;
         for row in &rows {
             let s = |var: &str| row[var].as_str().unwrap_or("").to_string();
             let source = s("source");
@@ -626,15 +627,25 @@ mod tests {
         };
         let store = SparqlStore::new(None).unwrap();
         store.add_link(&link).unwrap();
-        let person = store.get_all_links().unwrap()[0].person.clone();
+        let person = store.get_all_links(&EvalStop::none()).unwrap()[0]
+            .person
+            .clone();
         assert!(person.is_some(), "the store derived the person");
 
         let shape = shape("Proposal", vec![prop("name", "we://name")]);
         let keys = vec![("votes".to_string(), "we://acceptedBy".to_string())];
         let mut instances = vec![json!({ "id": "we://proposal" })];
-        attach_links(&store, &shape, &keys, None, None, &mut instances)
-            .await
-            .unwrap();
+        attach_links(
+            &EvalStop::none(),
+            &store,
+            &shape,
+            &keys,
+            None,
+            None,
+            &mut instances,
+        )
+        .await
+        .unwrap();
         let row = &instances[0][LINKS_KEY]["votes"][0];
         assert_eq!(row["person"].as_str(), person.as_deref(), "{row}");
         let decorated: crate::types::DecoratedLinkExpression =
@@ -691,6 +702,7 @@ mod tests {
             let mut instances = vec![json!({ "id": "we://s7" })];
             let started = std::time::Instant::now();
             attach_links(
+                &crate::perspectives::sparql_store::EvalStop::none(),
                 &store,
                 &shape,
                 &keys,

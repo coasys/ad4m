@@ -484,6 +484,7 @@ impl RemoteChat for AnthropicChat {
             text,
             tool_calls,
             usage,
+            stop_reason: None,
         })
     }
 
@@ -562,6 +563,7 @@ impl RemoteChat for AnthropicChat {
                             text,
                             tool_calls: Vec::new(),
                             usage,
+                            stop_reason: None,
                         });
                     }
                 }
@@ -574,6 +576,7 @@ impl RemoteChat for AnthropicChat {
             text,
             tool_calls: Vec::new(),
             usage,
+            stop_reason: None,
         })
     }
 }

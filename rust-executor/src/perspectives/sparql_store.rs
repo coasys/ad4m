@@ -11,7 +11,295 @@ use oxigraph::sparql::{QueryResults, SparqlEvaluator};
 use oxigraph::store::{Store, StoreOptions, Transaction};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+/// `StopInfo::kind`: how the evaluation carrying the stop ended, for the error
+/// it reports. `0` while it may still run; written once, first writer wins.
+const RUNNING: u8 = 0;
+const STOP_CANCELLED: u8 = 1;
+const STOP_DEADLINE: u8 = 2;
+
+/// Which way of stopping fired for one evaluation, and the deadline that was
+/// armed (the deadline error names it). Shared by the gate that fires and the
+/// evals that report.
+#[derive(Debug)]
+struct StopInfo {
+    kind: AtomicU8,
+    deadline: Duration,
+}
+
+impl StopInfo {
+    /// First writer wins: a race between the deadline and a cancel reports
+    /// whichever fired first.
+    fn mark(&self, kind: u8) {
+        let _ = self
+            .kind
+            .compare_exchange(RUNNING, kind, Ordering::AcqRel, Ordering::Acquire);
+    }
+}
+
+/// What stops one store evaluation: the oxigraph `CancellationToken` the
+/// evaluator checks while it works, plus a record of which way of stopping
+/// fired so the eval's error can say — "cancelled", or "the SPARQL deadline
+/// of Ns passed".
+///
+/// Cheap to clone: every clone shares the one token and the one record, and
+/// keeps hold of the connection's running-query slot (`permit`), so a slot
+/// frees only when the eval actually ends — a dropped call whose eval is
+/// still stopping still holds it.
+///
+/// What fires it is an [`EvalGate`]: the deadline, a bridged request cancel
+/// (`request.cancel`, or the connection closing — those tokens are children
+/// of the connection's), or the gate's own drop when the call's future ends.
+#[derive(Clone)]
+pub struct EvalStop {
+    token: oxigraph::sparql::CancellationToken,
+    stop: Arc<StopInfo>,
+    /// The slots the eval holds while it runs — the connection's
+    /// running-query slot, and for a subscribe call the connection's
+    /// live-query-opening slot too. Empty for internal evals (background
+    /// loops, tests).
+    permits: Vec<Arc<tokio::sync::OwnedSemaphorePermit>>,
+}
+
+impl EvalStop {
+    /// A stop that never fires: tests, and internal evals that bound their
+    /// work some other way (migrations, startup scans, background reads).
+    pub fn none() -> EvalStop {
+        EvalStop {
+            token: oxigraph::sparql::CancellationToken::new(),
+            stop: Arc::new(StopInfo {
+                kind: AtomicU8::new(RUNNING),
+                deadline: Duration::ZERO,
+            }),
+            permits: Vec::new(),
+        }
+    }
+
+    /// A stop already fired as cancelled: for tests of the cancelled path.
+    #[cfg(test)]
+    pub(crate) fn cancelled() -> EvalStop {
+        let stop = EvalStop::none();
+        stop.stop.mark(STOP_CANCELLED);
+        stop.token.cancel();
+        stop
+    }
+
+    /// Whether the eval carrying this stop must end. The evaluator checks the
+    /// token itself; manual scans (`for_each_matched_link`) check this.
+    pub(crate) fn is_stopped(&self) -> bool {
+        self.stop.kind.load(Ordering::Acquire) != RUNNING || self.token.is_cancelled()
+    }
+
+    /// The error a stopped eval reports, saying why; `None` while it may
+    /// still run. `what` is what the eval was doing ("query", "link scan"),
+    /// for the deadline's wording.
+    pub(crate) fn stopped_err(&self, what: &str) -> Option<Error> {
+        match self.stop.kind.load(Ordering::Acquire) {
+            STOP_CANCELLED => Some(anyhow!("query cancelled")),
+            STOP_DEADLINE => Some(anyhow!(
+                "{what} stopped: SPARQL deadline of {:?} passed",
+                self.stop.deadline
+            )),
+            _ => None,
+        }
+    }
+}
+
+/// The gate one evaluation runs under. Fires its [`EvalStop`] when the
+/// deadline passes, when the bridged request cancel fires (`request.cancel`,
+/// or the connection closing — those tokens are children of the
+/// connection's), or when the gate itself drops — the call's future ending,
+/// so a caller that stops waiting still stops the eval.
+///
+/// One gate per call: it is not `Clone`. Keep it in the awaiting call's
+/// frame and hand evals `gate.stop()`.
+pub struct EvalGate {
+    stop: EvalStop,
+    /// Ends the watchdog when the gate drops, before the token fires.
+    _watchdog: Option<Watchdog>,
+}
+
+impl EvalGate {
+    /// A gate that fires `deadline` after it is made, or when `cancel`
+    /// (a request's `cancel_token`) fires — whichever first.
+    pub fn request(
+        deadline: Duration,
+        cancel: Option<tokio_util::sync::CancellationToken>,
+    ) -> EvalGate {
+        let stop = EvalStop {
+            token: oxigraph::sparql::CancellationToken::new(),
+            stop: Arc::new(StopInfo {
+                kind: AtomicU8::new(RUNNING),
+                deadline,
+            }),
+            permits: Vec::new(),
+        };
+        let watchdog = Watchdog::arm(stop.clone(), deadline, cancel);
+        EvalGate {
+            stop,
+            _watchdog: Some(watchdog),
+        }
+    }
+
+    /// The stop evals take. Clones share the gate's token, its why-record and
+    /// any held slot.
+    pub fn stop(&self) -> EvalStop {
+        self.stop.clone()
+    }
+
+    /// Hang one of the connection's slots on the gate: evals under it stay
+    /// covered by the slot until they end.
+    pub fn hold_slot(&mut self, permit: tokio::sync::OwnedSemaphorePermit) {
+        self.stop.permits.push(Arc::new(permit));
+    }
+}
+
+impl Drop for EvalGate {
+    fn drop(&mut self) {
+        // The call's future ended — whatever still runs under the stop ends now.
+        self.stop.stop.mark(STOP_CANCELLED);
+        self.stop.token.cancel();
+    }
+}
+
+/// Fires an eval's stop on its deadline or on the bridged request cancel.
+/// One short thread per gate; it ends the moment the gate drops (`done`).
+struct Watchdog {
+    done: std::sync::mpsc::SyncSender<()>,
+}
+
+impl Watchdog {
+    fn arm(
+        stop: EvalStop,
+        deadline: Duration,
+        cancel: Option<tokio_util::sync::CancellationToken>,
+    ) -> Watchdog {
+        let (done, until_done) = std::sync::mpsc::sync_channel::<()>(1);
+        let fire_now = stop.clone();
+        let spawned = std::thread::Builder::new()
+            .name("ad4m-eval-watchdog".into())
+            .spawn(move || {
+                let till = Instant::now() + deadline;
+                loop {
+                    if cancel.as_ref().is_some_and(|c| c.is_cancelled()) {
+                        stop.stop.mark(STOP_CANCELLED);
+                        stop.token.cancel();
+                        return;
+                    }
+                    let now = Instant::now();
+                    if now >= till {
+                        stop.stop.mark(STOP_DEADLINE);
+                        stop.token.cancel();
+                        return;
+                    }
+                    // Poll the request cancel at 25ms granularity at most;
+                    // the deadline ends each wait early too.
+                    match until_done.recv_timeout((till - now).min(Duration::from_millis(25))) {
+                        Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    }
+                }
+            });
+        if let Err(e) = spawned {
+            // No thread left to watch the deadline. An eval with no deadline is
+            // the pile-up this gate exists to prevent, so refuse it instead.
+            log::error!("SPARQL eval watchdog did not start ({e}); stopping the eval");
+            fire_now.stop.mark(STOP_DEADLINE);
+            fire_now.token.cancel();
+        }
+        Watchdog { done }
+    }
+}
+
+impl Drop for Watchdog {
+    fn drop(&mut self) {
+        let _ = self.done.send(());
+    }
+}
+
+/// The deadline one request-driven evaluation runs under, from the executor
+/// config (`query_deadline_secs`, default 30s). 0 would fail every query, so
+/// it means the default too.
+pub(crate) fn query_deadline() -> Duration {
+    Duration::from_secs(
+        crate::config::get_global_config()
+            .query_deadline_secs
+            .filter(|secs| *secs > 0)
+            .unwrap_or(30),
+    )
+}
+
+/// The gate one WS query call runs under: the configured deadline, the
+/// request's cancel (`request.cancel` + the connection closing), and one of
+/// the connection's running-query slots. Waiting for the slot is part of the
+/// call, so a `request.cancel` drops it here like anywhere else. The deadline
+/// starts once the slot is held: time spent queued behind other evals is not
+/// the query's own. Drop the gate to stop the eval.
+pub(crate) async fn query_gate(ctx: &crate::types::domain::RequestContext) -> EvalGate {
+    let mut permit = None;
+    if let Some(slots) = ctx.query_slots.clone() {
+        let cancelled = ctx.cancel_token.clone();
+        // Waiting for a slot stays cancellable: a `request.cancel` (or the
+        // connection closing) ends the wait instead of queueing behind evals
+        // that are themselves stopping.
+        permit = match cancelled {
+            Some(token) => {
+                tokio::select! {
+                    p = slots.acquire_owned() => p.ok(),
+                    _ = token.cancelled() => None,
+                }
+            }
+            None => slots.acquire_owned().await.ok(),
+        };
+    }
+    // A wait the request cancelled leaves no permit; the gate below sees the
+    // fired cancel at once and stops the eval before it reads anything.
+    let mut gate = EvalGate::request(query_deadline(), ctx.cancel_token.clone());
+    if let Some(permit) = permit {
+        gate.hold_slot(permit);
+    }
+    gate
+}
+
+/// The counter the tests use to prove a stopped evaluation actually ended —
+/// incremented while an eval runs, decremented when it ends.
+#[cfg(test)]
+pub(crate) mod eval_count {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    pub(crate) static RUNNING: AtomicUsize = AtomicUsize::new(0);
+    /// The most evals seen running at once — the per-connection limit test
+    /// asserts it never passes the limit.
+    pub(crate) static RUNNING_MAX: AtomicUsize = AtomicUsize::new(0);
+
+    /// Counts one running eval until dropped, and records the high-water mark.
+    pub(crate) struct Count;
+    pub(crate) fn one() -> Count {
+        let now = RUNNING.fetch_add(1, Ordering::AcqRel) + 1;
+        RUNNING_MAX.fetch_max(now, Ordering::AcqRel);
+        Count
+    }
+    impl Drop for Count {
+        fn drop(&mut self) {
+            RUNNING.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+    pub(crate) fn running() -> usize {
+        RUNNING.load(Ordering::Acquire)
+    }
+
+    /// Zero the counters between tests (they are process-global).
+    pub(crate) fn reset() {
+        RUNNING.store(0, Ordering::Release);
+        RUNNING_MAX.store(0, Ordering::Release);
+    }
+    pub(crate) fn running_max() -> usize {
+        RUNNING_MAX.load(Ordering::Acquire)
+    }
+}
 
 const ONT_AUTHOR: &str = "ad4m://ontology/author";
 const ONT_TIMESTAMP: &str = "ad4m://ontology/timestamp";
@@ -1342,8 +1630,8 @@ impl SparqlStore {
     }
 
     /// Return all links in the store using a SPARQL 1.2 reifier query.
-    pub fn get_all_links(&self) -> Result<Vec<DecoratedLinkExpression>, Error> {
-        self.query_decorated_links(&decorated_links_query("", "isIRI(?predicate)"))
+    pub fn get_all_links(&self, stop: &EvalStop) -> Result<Vec<DecoratedLinkExpression>, Error> {
+        self.query_decorated_links(stop, &decorated_links_query("", "isIRI(?predicate)"))
     }
 
     /// Run a SELECT that binds the link variables `?source ?predicate ?target
@@ -1353,21 +1641,29 @@ impl SparqlStore {
     /// (non-IRI source, blank-node target, ...) are skipped.
     pub(crate) fn query_decorated_links(
         &self,
+        stop: &EvalStop,
         query: &str,
     ) -> Result<Vec<DecoratedLinkExpression>, Error> {
+        #[cfg(test)]
+        let _eval_count = eval_count::one();
         let results = self
-            .sparql_evaluator()
+            .sparql_evaluator(stop)
             .parse_query(query)
             .map_err(|e| anyhow!("Failed to parse link query: {}", e))?
             .on_store(&self.store)
             .execute()
-            .map_err(|e| anyhow!("link query failed: {}", e))?;
+            .map_err(|e| {
+                stop.stopped_err("link query")
+                    .unwrap_or_else(|| anyhow!("link query failed: {}", e))
+            })?;
 
         match results {
             QueryResults::Solutions(solutions) => {
                 let mut links = Vec::new();
                 for solution in solutions {
-                    let solution = solution?;
+                    let solution = solution.map_err(|e| {
+                        stop.stopped_err("link query").unwrap_or_else(|| anyhow!(e))
+                    })?;
                     if let Some(link) = self.link_from_solution(&solution) {
                         links.push(link);
                     }
@@ -1399,7 +1695,7 @@ impl SparqlStore {
             &format!("VALUES ?author {{ {values} }}"),
             &after_reifier("true", after),
         );
-        self.query_decorated_links(&format!("{query} {}", page_order(limit)))
+        self.query_decorated_links(&EvalStop::none(), &format!("{query} {}", page_order(limit)))
     }
 
     /// The links whose stored verdict is `verdict`: a page of at most `limit`, in reifier
@@ -1419,7 +1715,7 @@ impl SparqlStore {
                 after,
             ),
         );
-        self.query_decorated_links(&format!("{query} {}", page_order(limit)))
+        self.query_decorated_links(&EvalStop::none(), &format!("{query} {}", page_order(limit)))
     }
 
     /// Gives every link stored before verdicts (a `proofValid` annotation and no
@@ -1477,8 +1773,10 @@ impl SparqlStore {
     /// `limit` truncates in iteration order (RocksDB scan order, not timestamp);
     /// callers that need a top-N page by timestamp should use
     /// [`Self::query_links_top_n_by_timestamp`] instead, which bounds memory.
+    #[allow(clippy::too_many_arguments)]
     pub fn query_links(
         &self,
+        stop: &EvalStop,
         source: Option<&str>,
         predicate: Option<&str>,
         target: Option<&str>,
@@ -1494,13 +1792,21 @@ impl SparqlStore {
             return Ok(Vec::new());
         }
         let mut links = Vec::new();
-        self.for_each_matched_link(source, predicate, target, from_date, until_date, |link| {
-            links.push(link);
-            match limit {
-                Some(lim) if links.len() >= lim => ControlFlow::Break(()),
-                _ => ControlFlow::Continue(()),
-            }
-        })?;
+        self.for_each_matched_link(
+            stop,
+            source,
+            predicate,
+            target,
+            from_date,
+            until_date,
+            |link| {
+                links.push(link);
+                match limit {
+                    Some(lim) if links.len() >= lim => ControlFlow::Break(()),
+                    _ => ControlFlow::Continue(()),
+                }
+            },
+        )?;
         Ok(links)
     }
 
@@ -1512,6 +1818,7 @@ impl SparqlStore {
     #[allow(clippy::too_many_arguments)]
     pub fn query_links_top_n_by_timestamp(
         &self,
+        stop: &EvalStop,
         source: Option<&str>,
         predicate: Option<&str>,
         target: Option<&str>,
@@ -1521,6 +1828,7 @@ impl SparqlStore {
         reverse: bool,
     ) -> Result<Vec<DecoratedLinkExpression>, Error> {
         self.top_n_by_timestamp(
+            stop,
             source,
             predicate,
             target,
@@ -1537,6 +1845,7 @@ impl SparqlStore {
     #[allow(clippy::too_many_arguments)]
     pub fn query_shown_links_top_n_by_timestamp(
         &self,
+        stop: &EvalStop,
         source: Option<&str>,
         predicate: Option<&str>,
         target: Option<&str>,
@@ -1546,13 +1855,14 @@ impl SparqlStore {
         reverse: bool,
     ) -> Result<Vec<DecoratedLinkExpression>, Error> {
         self.top_n_by_timestamp(
-            source, predicate, target, from_date, until_date, limit, reverse, shown,
+            stop, source, predicate, target, from_date, until_date, limit, reverse, shown,
         )
     }
 
     #[allow(clippy::too_many_arguments)]
     fn top_n_by_timestamp(
         &self,
+        stop: &EvalStop,
         source: Option<&str>,
         predicate: Option<&str>,
         target: Option<&str>,
@@ -1576,18 +1886,27 @@ impl SparqlStore {
             // so evicting the top whenever size exceeds `limit` retains
             // exactly the K smallest.
             let mut heap: BinaryHeap<TimestampedLink> = BinaryHeap::with_capacity(limit + 1);
-            self.for_each_matched_link(source, predicate, target, from_date, until_date, |link| {
-                if !keep(&link) {
-                    return ControlFlow::Continue(());
-                }
-                let dt = ChronoDateTime::parse_from_rfc3339(&link.timestamp).unwrap_or_default();
-                heap.push(TimestampedLink { dt, seq, link });
-                seq += 1;
-                if heap.len() > limit {
-                    heap.pop();
-                }
-                ControlFlow::Continue(())
-            })?;
+            self.for_each_matched_link(
+                stop,
+                source,
+                predicate,
+                target,
+                from_date,
+                until_date,
+                |link| {
+                    if !keep(&link) {
+                        return ControlFlow::Continue(());
+                    }
+                    let dt =
+                        ChronoDateTime::parse_from_rfc3339(&link.timestamp).unwrap_or_default();
+                    heap.push(TimestampedLink { dt, seq, link });
+                    seq += 1;
+                    if heap.len() > limit {
+                        heap.pop();
+                    }
+                    ControlFlow::Continue(())
+                },
+            )?;
             let mut out: Vec<DecoratedLinkExpression> = Vec::with_capacity(heap.len());
             while let Some(r) = heap.pop() {
                 out.push(r.link);
@@ -1600,18 +1919,27 @@ impl SparqlStore {
             // evicts the smallest whenever size exceeds `limit`.
             let mut heap: BinaryHeap<Reverse<TimestampedLink>> =
                 BinaryHeap::with_capacity(limit + 1);
-            self.for_each_matched_link(source, predicate, target, from_date, until_date, |link| {
-                if !keep(&link) {
-                    return ControlFlow::Continue(());
-                }
-                let dt = ChronoDateTime::parse_from_rfc3339(&link.timestamp).unwrap_or_default();
-                heap.push(Reverse(TimestampedLink { dt, seq, link }));
-                seq += 1;
-                if heap.len() > limit {
-                    heap.pop();
-                }
-                ControlFlow::Continue(())
-            })?;
+            self.for_each_matched_link(
+                stop,
+                source,
+                predicate,
+                target,
+                from_date,
+                until_date,
+                |link| {
+                    if !keep(&link) {
+                        return ControlFlow::Continue(());
+                    }
+                    let dt =
+                        ChronoDateTime::parse_from_rfc3339(&link.timestamp).unwrap_or_default();
+                    heap.push(Reverse(TimestampedLink { dt, seq, link }));
+                    seq += 1;
+                    if heap.len() > limit {
+                        heap.pop();
+                    }
+                    ControlFlow::Continue(())
+                },
+            )?;
             let mut out: Vec<DecoratedLinkExpression> = Vec::with_capacity(heap.len());
             while let Some(Reverse(r)) = heap.pop() {
                 out.push(r.link);
@@ -1627,8 +1955,10 @@ impl SparqlStore {
     /// Shared by [`Self::query_links`] and
     /// [`Self::query_links_top_n_by_timestamp`] so the (gnarly) RocksDB
     /// reifier walk lives in exactly one place.
+    #[allow(clippy::too_many_arguments)]
     fn for_each_matched_link<F>(
         &self,
+        stop: &EvalStop,
         source: Option<&str>,
         predicate: Option<&str>,
         target: Option<&str>,
@@ -1640,6 +1970,9 @@ impl SparqlStore {
         F: FnMut(DecoratedLinkExpression) -> std::ops::ControlFlow<()>,
     {
         use std::ops::ControlFlow;
+
+        #[cfg(test)]
+        let _eval_count = eval_count::one();
 
         let source_node = source.map(|s| NamedNode::new_unchecked(s));
         let predicate_node = predicate.map(|p| NamedNode::new_unchecked(p));
@@ -1666,6 +1999,11 @@ impl SparqlStore {
             self.store
                 .quads_for_pattern(s_ref, p_ref, t_ref, Some(GraphNameRef::DefaultGraph))
         {
+            if stop.is_stopped() {
+                return Err(stop
+                    .stopped_err("link scan")
+                    .unwrap_or_else(|| anyhow!("query cancelled")));
+            }
             let quad = quad_result?;
 
             // Skip reifier and metadata predicates — only process data triples
@@ -1838,26 +2176,43 @@ impl SparqlStore {
     /// Find a specific link by source, predicate, target, author, and timestamp.
     pub fn get_link(
         &self,
+        stop: &EvalStop,
         source: &str,
         predicate: Option<&str>,
         target: &str,
         author: &str,
         timestamp: &str,
     ) -> Result<Option<DecoratedLinkExpression>, Error> {
-        let links = self.query_links(Some(source), predicate, Some(target), None, None, None)?;
+        let links = self.query_links(
+            stop,
+            Some(source),
+            predicate,
+            Some(target),
+            None,
+            None,
+            None,
+        )?;
         Ok(links
             .into_iter()
             .find(|l| l.author == author && l.timestamp == timestamp))
     }
 
     /// Get all links with the given source.
-    pub fn get_links_by_source(&self, source: &str) -> Result<Vec<DecoratedLinkExpression>, Error> {
-        self.query_links(Some(source), None, None, None, None, None)
+    pub fn get_links_by_source(
+        &self,
+        stop: &EvalStop,
+        source: &str,
+    ) -> Result<Vec<DecoratedLinkExpression>, Error> {
+        self.query_links(stop, Some(source), None, None, None, None, None)
     }
 
     /// Get all links with the given target.
-    pub fn get_links_by_target(&self, target: &str) -> Result<Vec<DecoratedLinkExpression>, Error> {
-        self.query_links(None, None, Some(target), None, None, None)
+    pub fn get_links_by_target(
+        &self,
+        stop: &EvalStop,
+        target: &str,
+    ) -> Result<Vec<DecoratedLinkExpression>, Error> {
+        self.query_links(stop, None, None, Some(target), None, None, None)
     }
 
     /// Whether the link triple `source predicate target` is stored, whoever
@@ -1936,26 +2291,29 @@ impl SparqlStore {
     /// Get all links with the given predicate.
     pub fn get_links_by_predicate(
         &self,
+        stop: &EvalStop,
         predicate: &str,
     ) -> Result<Vec<DecoratedLinkExpression>, Error> {
-        self.query_links(None, Some(predicate), None, None, None, None)
+        self.query_links(stop, None, Some(predicate), None, None, None, None)
     }
 
     /// Get all links with the given predicate where source ends with the given suffix.
     pub fn get_links_by_predicate_and_source_suffix(
         &self,
+        stop: &EvalStop,
         predicate: &str,
         source_suffix: &str,
     ) -> Result<Vec<DecoratedLinkExpression>, Error> {
-        let links = self.get_links_by_predicate(predicate)?;
+        let links = self.get_links_by_predicate(stop, predicate)?;
         Ok(links
             .into_iter()
             .filter(|l| l.data.source.ends_with(source_suffix))
             .collect())
     }
 
-    fn sparql_evaluator(&self) -> SparqlEvaluator {
+    fn sparql_evaluator(&self, stop: &EvalStop) -> SparqlEvaluator {
         SparqlEvaluator::new()
+            .with_cancellation_token(stop.token.clone())
             .with_custom_function(
                 NamedNode::new_unchecked("ad4m://fn/strip_html"),
                 strip_html_fn,
@@ -2047,8 +2405,8 @@ impl SparqlStore {
     /// untrusted caller (who has no reason to expect — or want — a
     /// same-named variable of their own silently reformatted), use
     /// [`Self::query_arbitrary`] instead.
-    pub fn query(&self, query_string: &str) -> Result<String, Error> {
-        self.query_internal(query_string, true)
+    pub fn query(&self, stop: &EvalStop, query_string: &str) -> Result<String, Error> {
+        self.query_internal(stop, query_string, true)
     }
 
     /// Execute a caller-supplied read-only SPARQL SELECT query (e.g. the
@@ -2058,31 +2416,41 @@ impl SparqlStore {
     /// external caller choosing the same name for something unrelated
     /// (say, `SELECT ?target WHERE { ?r <ad4m://ontology/author> ?target }`)
     /// should get its plain lexical value back, not a silently mangled one.
-    pub fn query_arbitrary(&self, query_string: &str) -> Result<String, Error> {
-        self.query_internal(query_string, false)
+    pub fn query_arbitrary(&self, stop: &EvalStop, query_string: &str) -> Result<String, Error> {
+        self.query_internal(stop, query_string, false)
     }
 
     fn query_internal(
         &self,
+        stop: &EvalStop,
         query_string: &str,
         hydrate_target_vars: bool,
     ) -> Result<String, Error> {
+        // A stop that already fired must fail even on an empty store:
+        // Oxigraph consults the token per quad it reads, so a query that
+        // reads no quads would otherwise return `[]` as if nothing cancelled.
+        if let Some(err) = stop.stopped_err("query") {
+            return Err(err);
+        }
         validate_readonly_query(query_string)?;
         #[cfg(test)]
         self.query_log
             .lock()
             .map_err(|_| anyhow!("SPARQL store query log lock poisoned"))?
             .push(query_string.to_string());
+        #[cfg(test)]
+        let _eval_count = eval_count::one();
 
         let results = self
-            .sparql_evaluator()
+            .sparql_evaluator(stop)
             .parse_query(query_string)
             .map_err(|e| anyhow!("Failed to parse SPARQL query: {}", e))?
             .on_store(&self.store)
             .execute()
             .map_err(|e| {
                 let truncated = &query_string[..query_string.len().min(500)];
-                anyhow!("SPARQL query failed: {}\nQuery: {}", e, truncated)
+                stop.stopped_err("query")
+                    .unwrap_or_else(|| anyhow!("SPARQL query failed: {}\nQuery: {}", e, truncated))
             })?;
 
         match results {
@@ -2094,7 +2462,8 @@ impl SparqlStore {
                     .collect();
                 let mut rows = Vec::new();
                 for solution in solutions {
-                    let solution = solution?;
+                    let solution = solution
+                        .map_err(|e| stop.stopped_err("query").unwrap_or_else(|| anyhow!(e)))?;
                     let mut row = serde_json::Map::new();
                     for var in &vars {
                         if let Some(term) = solution.get(var.as_str()) {
@@ -2159,46 +2528,34 @@ impl SparqlStore {
 
     /// Async wrapper around `query()` that runs the blocking SPARQL operation
     /// on a dedicated thread pool to avoid blocking the tokio runtime.
-    pub async fn query_async(&self, query_string: &str) -> Result<String, Error> {
+    /// `stop` decides when the eval ends: the gate that owns it fires it and
+    /// the eval stops itself, reporting why.
+    pub async fn query_async(&self, stop: &EvalStop, query_string: &str) -> Result<String, Error> {
         let store = self.clone();
+        let stop = stop.clone();
         let query = query_string.to_string();
-        tokio::task::spawn_blocking(move || store.query(&query))
+        tokio::task::spawn_blocking(move || store.query(&stop, &query))
             .await
             .map_err(|e| deno_core::anyhow::anyhow!("spawn_blocking join error: {}", e))?
     }
 
-    /// Cancellation-aware async wrapper around `query()`.
+    /// `query_arbitrary` on the blocking pool under `stop` — the eval checks
+    /// the token itself, so a stopped eval really ends (the oxigraph
+    /// cancellation token fires in its inner quad loop), not merely its
+    /// caller stops waiting. The error it reports says why: the deadline
+    /// with its value, or cancelled.
     ///
-    /// Races the SPARQL evaluation against `cancel.cancelled()`.  If the
-    /// caller cancels mid-flight, this returns
-    /// [`Error::msg("query cancelled")`] immediately and the result
-    /// (whenever it arrives on the blocking thread) is dropped without
-    /// being serialised to JSON or sent over the network.
-    ///
-    /// **Caveat — Oxigraph cannot be interrupted.**  The blocking thread
-    /// continues running until Oxigraph returns, so this method does
-    /// *not* free CPU that's already in flight.  What it does save:
-    ///
-    /// - JSON serialisation of the result (often the biggest single cost
-    ///   for large result sets)
-    /// - the WebSocket write back to the client
-    /// - the client's deserialisation tax
-    /// - any post-processing the caller would have done with the value
-    ///
-    /// For a long-running scan-all that would have shipped megabytes of
-    /// SPARQL results back, that's still meaningful network + memory
-    /// savings.  A future Oxigraph release with an interrupt hook would
-    /// let us actually preempt the eval; the API here is forward-compatible
-    /// with that.
+    /// There is no race here on purpose: the gate on the caller's side
+    /// already drops when the call's future ends, cancelling the token, so
+    /// awaiting the worker is enough — and a cancelled call's running-query
+    /// slot stays held (on the `EvalStop`) until the eval reports it ended.
     pub async fn query_cancellable(
         &self,
+        stop: &EvalStop,
         query_string: &str,
-        cancel: tokio_util::sync::CancellationToken,
     ) -> Result<String, Error> {
-        if cancel.is_cancelled() {
-            return Err(anyhow!("query cancelled"));
-        }
         let store = self.clone();
+        let stop = stop.clone();
         let query = query_string.to_string();
         // query_arbitrary, not query: this is the arbitrary-caller-supplied-
         // SPARQL entry point (matches the non-cancellable sparql_query path
@@ -2206,23 +2563,9 @@ impl SparqlStore {
         // external ?target/?t bindings into AD4M's internal literal:*: wire
         // format, which callers of an ad-hoc query string have no reason to
         // expect (CodeRabbit review, PR #855).
-        let handle = tokio::task::spawn_blocking(move || store.query_arbitrary(&query));
-
-        tokio::select! {
-            biased;
-            _ = cancel.cancelled() => {
-                // We intentionally don't `handle.abort()`: a JoinHandle's
-                // abort signal can't preempt a synchronous loop in
-                // Oxigraph anyway, and abort tends to leave the blocking
-                // pool in a degraded state under repeated cancellation.
-                // The handle is dropped by `select!` when this arm wins;
-                // the result will be discarded when it eventually arrives.
-                Err(anyhow!("query cancelled"))
-            }
-            result = handle => {
-                result.map_err(|e| deno_core::anyhow::anyhow!("spawn_blocking join error: {}", e))?
-            }
-        }
+        tokio::task::spawn_blocking(move || store.query_arbitrary(&stop, &query))
+            .await
+            .map_err(|e| deno_core::anyhow::anyhow!("spawn_blocking join error: {}", e))?
     }
 
     /// Remove all triples from the store.
@@ -2512,7 +2855,7 @@ mod tests {
         .unwrap();
 
         let mut targets: Vec<(String, String)> = svc
-            .get_links_by_source("ad4m://n")
+            .get_links_by_source(&EvalStop::none(), "ad4m://n")
             .unwrap()
             .into_iter()
             .map(|l| (l.data.predicate.unwrap_or_default(), l.data.target))
@@ -2544,7 +2887,7 @@ mod tests {
 
         // Direct triple should be in default graph
         let result = svc
-            .query(
+            .query(&EvalStop::none(),
                 "SELECT ?s ?p ?o WHERE { ?s ?p ?o . FILTER(isIRI(?s) && isIRI(?o) && ?p != <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies>) }",
             )
             .unwrap();
@@ -2590,13 +2933,16 @@ mod tests {
 
         // Query for metadata on the reifier IRI
         let result = svc
-            .query(&format!(
-                r#"SELECT ?p ?v WHERE {{
+            .query(
+                &EvalStop::none(),
+                &format!(
+                    r#"SELECT ?p ?v WHERE {{
                 <{}> ?p ?v .
                 FILTER(STRSTARTS(STR(?p), "ad4m://ontology/"))
             }}"#,
-                reifier.as_str()
-            ))
+                    reifier.as_str()
+                ),
+            )
             .unwrap();
         let rows: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
 
@@ -2696,7 +3042,8 @@ mod tests {
         let mut reads = 0;
         while !done.load(std::sync::atomic::Ordering::SeqCst) {
             let rows: Vec<serde_json::Value> =
-                serde_json::from_str(&svc.query(&half_written).unwrap()).unwrap();
+                serde_json::from_str(&svc.query(&EvalStop::none(), &half_written).unwrap())
+                    .unwrap();
             assert!(
                 rows.is_empty(),
                 "read {reads} saw half-written links: {rows:?}"
@@ -2750,15 +3097,18 @@ mod tests {
                 removal.join().unwrap();
             }
             let rows: Vec<Value> = serde_json::from_str(
-                &svc.query("SELECT ?s WHERE { ?s <ad4m://p> <ad4m://t> }")
-                    .unwrap(),
+                &svc.query(
+                    &EvalStop::none(),
+                    "SELECT ?s WHERE { ?s <ad4m://p> <ad4m://t> }",
+                )
+                .unwrap(),
             )
             .unwrap();
             assert!(
                 rows.is_empty(),
                 "round {i}: direct triples outlived their links: {rows:?}"
             );
-            assert!(svc.get_all_links().unwrap().is_empty());
+            assert!(svc.get_all_links(&EvalStop::none()).unwrap().is_empty());
             assert_eq!(
                 svc.quad_count(),
                 0,
@@ -2781,7 +3131,10 @@ mod tests {
 
         // Direct triple should be gone
         let result = svc
-            .query("SELECT ?s ?p ?o WHERE { ?s ?p ?o . FILTER(?s = <ad4m://src>) }")
+            .query(
+                &EvalStop::none(),
+                "SELECT ?s ?p ?o WHERE { ?s ?p ?o . FILTER(?s = <ad4m://src>) }",
+            )
             .unwrap();
         let rows: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
         assert!(
@@ -2802,10 +3155,10 @@ mod tests {
 
         // No reifier triples should remain
         let result = svc
-            .query(&format!(
-                r#"SELECT ?p ?v WHERE {{ <{}> ?p ?v . }}"#,
-                reifier.as_str()
-            ))
+            .query(
+                &EvalStop::none(),
+                &format!(r#"SELECT ?p ?v WHERE {{ <{}> ?p ?v . }}"#, reifier.as_str()),
+            )
             .unwrap();
         let rows: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
         assert!(rows.is_empty(), "Reifier triples still exist: {}", result);
@@ -2836,7 +3189,7 @@ mod tests {
         // Remove link1 — direct triple should remain because link2 still references it
         svc.remove_link(&link1).unwrap();
 
-        let all = svc.get_all_links().unwrap();
+        let all = svc.get_all_links(&EvalStop::none()).unwrap();
         assert_eq!(all.len(), 1, "Should have 1 link remaining");
         assert_eq!(all[0].author, signer.did);
     }
@@ -2926,7 +3279,7 @@ mod tests {
         .unwrap();
 
         let by = |source: &str, pred: &str| -> String {
-            svc.get_all_links()
+            svc.get_all_links(&EvalStop::none())
                 .unwrap()
                 .into_iter()
                 .find(|l| l.data.source == source && l.data.predicate.as_deref() == Some(pred))
@@ -2989,7 +3342,15 @@ mod tests {
             .unwrap();
 
         let results = svc
-            .query_links(Some("ad4m://a"), None, None, None, None, None)
+            .query_links(
+                &EvalStop::none(),
+                Some("ad4m://a"),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
             .unwrap();
         assert_eq!(results.len(), 2);
         assert!(results.iter().all(|l| l.data.source == "ad4m://a"));
@@ -3007,7 +3368,15 @@ mod tests {
             .unwrap();
 
         let results = svc
-            .query_links(None, Some("ad4m://p"), None, None, None, None)
+            .query_links(
+                &EvalStop::none(),
+                None,
+                Some("ad4m://p"),
+                None,
+                None,
+                None,
+                None,
+            )
             .unwrap();
         assert_eq!(results.len(), 2);
         assert!(results
@@ -3027,7 +3396,15 @@ mod tests {
             .unwrap();
 
         let results = svc
-            .query_links(None, None, Some("ad4m://t1"), None, None, None)
+            .query_links(
+                &EvalStop::none(),
+                None,
+                None,
+                Some("ad4m://t1"),
+                None,
+                None,
+                None,
+            )
             .unwrap();
         assert_eq!(results.len(), 2);
         assert!(results.iter().all(|l| l.data.target == "ad4m://t1"));
@@ -3045,7 +3422,15 @@ mod tests {
             .unwrap();
 
         let results = svc
-            .query_links(Some("ad4m://a"), Some("ad4m://p"), None, None, None, None)
+            .query_links(
+                &EvalStop::none(),
+                Some("ad4m://a"),
+                Some("ad4m://p"),
+                None,
+                None,
+                None,
+                None,
+            )
             .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].data.target, "ad4m://t1");
@@ -3062,6 +3447,7 @@ mod tests {
 
         let results = svc
             .query_links(
+                &EvalStop::none(),
                 Some("ad4m://a"),
                 Some("ad4m://p"),
                 Some("ad4m://t1"),
@@ -3088,7 +3474,15 @@ mod tests {
         svc.add_link(&link).unwrap();
 
         let results = svc
-            .query_links(Some("ad4m://s"), None, None, None, None, None)
+            .query_links(
+                &EvalStop::none(),
+                Some("ad4m://s"),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
             .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].author, signer.did);
@@ -3130,19 +3524,36 @@ mod tests {
 
         // fromDate filter
         let results = svc
-            .query_links(None, None, None, Some("2024-06-01T00:00:00Z"), None, None)
+            .query_links(
+                &EvalStop::none(),
+                None,
+                None,
+                None,
+                Some("2024-06-01T00:00:00Z"),
+                None,
+                None,
+            )
             .unwrap();
         assert_eq!(results.len(), 2);
 
         // untilDate filter
         let results = svc
-            .query_links(None, None, None, None, Some("2024-06-30T00:00:00Z"), None)
+            .query_links(
+                &EvalStop::none(),
+                None,
+                None,
+                None,
+                None,
+                Some("2024-06-30T00:00:00Z"),
+                None,
+            )
             .unwrap();
         assert_eq!(results.len(), 2);
 
         // both
         let results = svc
             .query_links(
+                &EvalStop::none(),
                 None,
                 None,
                 None,
@@ -3171,7 +3582,7 @@ mod tests {
         }
 
         let results = svc
-            .query_links(None, None, None, None, None, Some(3))
+            .query_links(&EvalStop::none(), None, None, None, None, None, Some(3))
             .unwrap();
         assert_eq!(results.len(), 3);
     }
@@ -3197,6 +3608,7 @@ mod tests {
 
         let result = svc
             .query(
+                &EvalStop::none(),
                 r#"SELECT ?channel WHERE {
                 <flux://community1> <flux://has_channel> ?channel .
             }"#,
@@ -3251,6 +3663,7 @@ mod tests {
 
         let result = svc
             .query(
+                &EvalStop::none(),
                 r#"SELECT ?ch ?name WHERE {
                 ?ch <flux://entry_type> <flux://channel> .
                 ?ch <flux://name> ?name .
@@ -3274,7 +3687,7 @@ mod tests {
         ];
         svc.reload(links).unwrap();
 
-        let all = svc.get_all_links().unwrap();
+        let all = svc.get_all_links(&EvalStop::none()).unwrap();
         assert_eq!(all.len(), 3);
     }
 
@@ -3292,6 +3705,7 @@ mod tests {
 
         let results = svc
             .query_links(
+                &EvalStop::none(),
                 Some("literal:string:hello"),
                 Some("flux://has_channel"),
                 None,
@@ -3334,7 +3748,7 @@ mod tests {
         svc.add_link(&make_link(&signer, "ad4m://a", "ad4m://p", "ad4m://t"))
             .unwrap();
         svc.clear().unwrap();
-        let all = svc.get_all_links().unwrap();
+        let all = svc.get_all_links(&EvalStop::none()).unwrap();
         assert!(all.is_empty());
     }
 
@@ -3364,7 +3778,7 @@ mod tests {
         for h in handles {
             h.join().unwrap();
         }
-        let all = svc.get_all_links().unwrap();
+        let all = svc.get_all_links(&EvalStop::none()).unwrap();
         assert_eq!(all.len(), 1000, "Expected 1000 links, got {}", all.len());
     }
 
@@ -3392,7 +3806,10 @@ mod tests {
             for _ in 0..200 {
                 // Should never error, even during concurrent writes
                 let _ = svc_reader
-                    .query("SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 10")
+                    .query(
+                        &EvalStop::none(),
+                        "SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 10",
+                    )
                     .unwrap();
             }
         });
@@ -3445,11 +3862,27 @@ mod tests {
         }
 
         let keep_links = svc
-            .query_links(Some("ad4m://keep"), None, None, None, None, None)
+            .query_links(
+                &EvalStop::none(),
+                Some("ad4m://keep"),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
             .unwrap();
         assert_eq!(keep_links.len(), 100, "Keep links corrupted");
         let remove_links = svc
-            .query_links(Some("ad4m://remove"), None, None, None, None, None)
+            .query_links(
+                &EvalStop::none(),
+                Some("ad4m://remove"),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
             .unwrap();
         assert_eq!(remove_links.len(), 0, "Remove links not fully removed");
     }
@@ -3523,7 +3956,7 @@ mod tests {
              FILTER(STR(?proofValid) = \"true\" && STR(?author) != \"{me}\") \
              }} ORDER BY DESC(?timestamp)"
         );
-        serde_json::from_str(&svc.query(&query).unwrap()).unwrap()
+        serde_json::from_str(&svc.query(&EvalStop::none(), &query).unwrap()).unwrap()
     }
 
     fn only_the_writers_mention(writer: &TestSigner) -> Value {
@@ -3588,7 +4021,7 @@ mod tests {
             mention_rows(&svc, &me.did),
             only_the_writers_mention(&writer)
         );
-        assert_eq!(svc.get_all_links().unwrap().len(), 2);
+        assert_eq!(svc.get_all_links(&EvalStop::none()).unwrap().len(), 2);
     }
 
     /// A store written before it refused those links keeps what they stated
@@ -3634,7 +4067,7 @@ mod tests {
             mention_rows(&svc, &me.did),
             only_the_writers_mention(&writer)
         );
-        let mut links = svc.get_all_links().unwrap();
+        let mut links = svc.get_all_links(&EvalStop::none()).unwrap();
         links.sort_by(|a, b| a.data.source.cmp(&b.data.source));
         assert_eq!(links.len(), 2, "{links:?}");
         assert_eq!(links[0].data.source, "ad4m://claimed");
@@ -3678,7 +4111,7 @@ mod tests {
 
         assert_eq!(svc.purge_link_metadata_links().unwrap(), 1);
         let check = |svc: &SparqlStore| {
-            let links = svc.get_all_links().unwrap();
+            let links = svc.get_all_links(&EvalStop::none()).unwrap();
             assert_eq!(links.len(), 1, "{links:?}");
             let link = &links[0];
             assert_eq!(link.author, writer.did);
@@ -3741,7 +4174,7 @@ mod tests {
         svc.add_link_unguarded(&forged).unwrap();
 
         assert_eq!(svc.purge_link_metadata_links().unwrap(), 1);
-        let links = svc.get_all_links().unwrap();
+        let links = svc.get_all_links(&EvalStop::none()).unwrap();
         assert_eq!(links.len(), 1, "{links:?}");
         assert_eq!(links[0].proof.signature, genuine.proof.signature);
         assert_eq!(links[0].proof.anchor, Some(1));
@@ -3792,7 +4225,7 @@ mod tests {
         };
         let svc = new_service();
         let judged = |svc: &SparqlStore| {
-            let links = svc.get_all_links().unwrap();
+            let links = svc.get_all_links(&EvalStop::none()).unwrap();
             assert_eq!(links.len(), 1, "{links:?}");
             (
                 links[0].verdict.clone(),
@@ -3971,7 +4404,7 @@ mod tests {
     #[test]
     fn test_valid_query_on_empty_store_returns_ok() {
         let svc = new_service();
-        let result = svc.query("SELECT ?s ?p ?o WHERE { ?s ?p ?o }");
+        let result = svc.query(&EvalStop::none(), "SELECT ?s ?p ?o WHERE { ?s ?p ?o }");
         assert!(result.is_ok());
         let rows: Vec<serde_json::Value> = serde_json::from_str(&result.unwrap()).unwrap();
         assert_eq!(rows.len(), 0);
@@ -4060,7 +4493,7 @@ mod tests {
         .unwrap();
 
         // Direct query should find the triple without GRAPH wrapper
-        let result = svc.query(
+        let result = svc.query(&EvalStop::none(),
             "SELECT ?s ?p ?o WHERE { ?s ?p ?o . FILTER(?s = <ad4m://src> && ?p = <ad4m://pred>) }"
         ).unwrap();
         let rows: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
@@ -4097,7 +4530,7 @@ mod tests {
                 store.has_data(),
                 "Persistent store should retain data after drop"
             );
-            let links = store.get_all_links().unwrap();
+            let links = store.get_all_links(&EvalStop::none()).unwrap();
             assert_eq!(links.len(), 1);
             assert_eq!(links[0].data.source, "ad4m://src");
             assert_eq!(links[0].data.predicate.as_deref(), Some("ad4m://pred"));
@@ -4161,7 +4594,15 @@ mod tests {
             svc.add_link(&link).unwrap();
         }
         let results = svc
-            .query_links(Some("ad4m://source7"), None, None, None, None, None)
+            .query_links(
+                &EvalStop::none(),
+                Some("ad4m://source7"),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
             .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].data.source, "ad4m://source7");
@@ -4178,7 +4619,15 @@ mod tests {
             svc.add_link(&link).unwrap();
         }
         let results = svc
-            .query_links(None, Some("ad4m://pred2"), None, None, None, None)
+            .query_links(
+                &EvalStop::none(),
+                None,
+                Some("ad4m://pred2"),
+                None,
+                None,
+                None,
+                None,
+            )
             .unwrap();
         assert_eq!(results.len(), 5);
         for r in &results {
@@ -4197,7 +4646,15 @@ mod tests {
             svc.add_link(&link).unwrap();
         }
         let results = svc
-            .query_links(None, None, Some("ad4m://tgt1"), None, None, None)
+            .query_links(
+                &EvalStop::none(),
+                None,
+                None,
+                Some("ad4m://tgt1"),
+                None,
+                None,
+                None,
+            )
             .unwrap();
         assert!(results.len() >= 3);
         for r in &results {
@@ -4222,6 +4679,7 @@ mod tests {
         }
         let results = svc
             .query_links(
+                &EvalStop::none(),
                 None,
                 None,
                 None,
@@ -4243,7 +4701,7 @@ mod tests {
             svc.add_link(&link).unwrap();
         }
         let results = svc
-            .query_links(None, None, None, None, None, Some(5))
+            .query_links(&EvalStop::none(), None, None, None, None, None, Some(5))
             .unwrap();
         assert_eq!(results.len(), 5);
     }
@@ -4260,7 +4718,7 @@ mod tests {
         // The closure-based collector pushes a link before checking the limit,
         // so without the early-return for `Some(0)` this would return 1 row.
         let results = svc
-            .query_links(None, None, None, None, None, Some(0))
+            .query_links(&EvalStop::none(), None, None, None, None, None, Some(0))
             .unwrap();
         assert!(
             results.is_empty(),
@@ -4283,7 +4741,16 @@ mod tests {
         }
         // Top 3 ascending = the 3 oldest, sorted oldest→newest.
         let results = svc
-            .query_links_top_n_by_timestamp(None, None, None, None, None, 3, false)
+            .query_links_top_n_by_timestamp(
+                &EvalStop::none(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                3,
+                false,
+            )
             .unwrap();
         assert_eq!(results.len(), 3);
         assert_eq!(results[0].timestamp, "2024-01-01T00:00:00.000Z");
@@ -4303,7 +4770,16 @@ mod tests {
         }
         // Top 3 descending = the 3 newest, sorted newest→oldest.
         let results = svc
-            .query_links_top_n_by_timestamp(None, None, None, None, None, 3, true)
+            .query_links_top_n_by_timestamp(
+                &EvalStop::none(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                3,
+                true,
+            )
             .unwrap();
         assert_eq!(results.len(), 3);
         assert_eq!(results[0].timestamp, "2024-01-10T00:00:00.000Z");
@@ -4323,7 +4799,16 @@ mod tests {
         }
         // Asking for 100 but only 3 exist — should return all 3 sorted.
         let results = svc
-            .query_links_top_n_by_timestamp(None, None, None, None, None, 100, false)
+            .query_links_top_n_by_timestamp(
+                &EvalStop::none(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                100,
+                false,
+            )
             .unwrap();
         assert_eq!(results.len(), 3);
         assert_eq!(results[0].timestamp, "2024-01-01T00:00:00.000Z");
@@ -4337,7 +4822,16 @@ mod tests {
         svc.add_link(&make_link(&signer, "ad4m://a", "ad4m://p", "ad4m://t"))
             .unwrap();
         let results = svc
-            .query_links_top_n_by_timestamp(None, None, None, None, None, 0, false)
+            .query_links_top_n_by_timestamp(
+                &EvalStop::none(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                0,
+                false,
+            )
             .unwrap();
         assert!(results.is_empty());
     }
@@ -4357,6 +4851,7 @@ mod tests {
 
         let results = svc
             .query_links(
+                &EvalStop::none(),
                 Some("ad4m://a"),
                 Some("ad4m://likes"),
                 None,
@@ -4373,6 +4868,7 @@ mod tests {
 
         let results = svc
             .query_links(
+                &EvalStop::none(),
                 Some("ad4m://a"),
                 Some("ad4m://likes"),
                 Some("ad4m://b"),
@@ -4388,7 +4884,9 @@ mod tests {
     #[test]
     fn query_links_empty_store() {
         let svc = new_service();
-        let results = svc.query_links(None, None, None, None, None, None).unwrap();
+        let results = svc
+            .query_links(&EvalStop::none(), None, None, None, None, None, None)
+            .unwrap();
         assert!(results.is_empty());
     }
 
@@ -4401,7 +4899,9 @@ mod tests {
             svc.add_link(&make_link(&signer, &src, "ad4m://pred", "ad4m://tgt"))
                 .unwrap();
         }
-        let results = svc.query_links(None, None, None, None, None, None).unwrap();
+        let results = svc
+            .query_links(&EvalStop::none(), None, None, None, None, None, None)
+            .unwrap();
         assert_eq!(results.len(), 10);
     }
 
@@ -4425,12 +4925,21 @@ mod tests {
         .unwrap();
 
         let results = svc
-            .query_links(Some("ad4m://src"), None, None, None, None, None)
+            .query_links(
+                &EvalStop::none(),
+                Some("ad4m://src"),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
             .unwrap();
         assert_eq!(results.len(), 2);
 
         let results = svc
             .query_links(
+                &EvalStop::none(),
                 Some("ad4m://src"),
                 None,
                 Some("literal:string:hello"),
@@ -4459,6 +4968,7 @@ mod tests {
 
         let results = svc
             .query_links(
+                &EvalStop::none(),
                 Some("ad4m://src"),
                 Some("ad4m://pred_42"),
                 None,
@@ -4471,7 +4981,15 @@ mod tests {
         assert_eq!(results[0].data.target, "ad4m://target_42");
 
         let all = svc
-            .query_links(Some("ad4m://src"), None, None, None, None, None)
+            .query_links(
+                &EvalStop::none(),
+                Some("ad4m://src"),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
             .unwrap();
         assert_eq!(all.len(), 100);
     }
@@ -4503,18 +5021,42 @@ mod tests {
         .unwrap();
 
         let results = svc
-            .query_links(Some("ad4m://héllo"), None, None, None, None, None)
+            .query_links(
+                &EvalStop::none(),
+                Some("ad4m://héllo"),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
             .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].data.target, "ad4m://目标");
 
         let results = svc
-            .query_links(Some("ad4m://emoji🎉"), None, None, None, None, None)
+            .query_links(
+                &EvalStop::none(),
+                Some("ad4m://emoji🎉"),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
             .unwrap();
         assert_eq!(results.len(), 1);
 
         let results = svc
-            .query_links(Some("ad4m://中文源"), None, None, None, None, None)
+            .query_links(
+                &EvalStop::none(),
+                Some("ad4m://中文源"),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
             .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(
@@ -4539,7 +5081,15 @@ mod tests {
         .unwrap();
 
         let results = svc
-            .query_links(None, None, None, Some(exact_ts), None, None)
+            .query_links(
+                &EvalStop::none(),
+                None,
+                None,
+                None,
+                Some(exact_ts),
+                None,
+                None,
+            )
             .unwrap();
         assert_eq!(
             results.len(),
@@ -4548,7 +5098,15 @@ mod tests {
         );
 
         let results = svc
-            .query_links(None, None, None, None, Some(exact_ts), None)
+            .query_links(
+                &EvalStop::none(),
+                None,
+                None,
+                None,
+                None,
+                Some(exact_ts),
+                None,
+            )
             .unwrap();
         assert_eq!(
             results.len(),
@@ -4557,7 +5115,15 @@ mod tests {
         );
 
         let results = svc
-            .query_links(None, None, None, Some(exact_ts), Some(exact_ts), None)
+            .query_links(
+                &EvalStop::none(),
+                None,
+                None,
+                None,
+                Some(exact_ts),
+                Some(exact_ts),
+                None,
+            )
             .unwrap();
         assert_eq!(results.len(), 1, "exact from+until should include the link");
     }
@@ -4624,7 +5190,7 @@ mod tests {
         let link = signed_link_without_verdict(&signer, "ad4m://derive-src");
         svc.add_link(&link).unwrap();
 
-        let links = svc.get_all_links().unwrap();
+        let links = svc.get_all_links(&EvalStop::none()).unwrap();
         assert_eq!(links.len(), 1);
         assert_eq!(
             links[0].proof.valid,
@@ -4658,7 +5224,7 @@ mod tests {
         link.proof.signature = hex::encode(sig);
         svc.add_link(&link).unwrap();
 
-        let links = svc.get_all_links().unwrap();
+        let links = svc.get_all_links(&EvalStop::none()).unwrap();
         assert_eq!(links.len(), 1);
         assert_eq!(
             links[0].proof.valid,
@@ -4682,7 +5248,7 @@ mod tests {
         link.proof.signature = "!!!not-hex!!!".to_string();
         svc.add_link(&link).unwrap();
 
-        let links = svc.get_all_links().unwrap();
+        let links = svc.get_all_links(&EvalStop::none()).unwrap();
         assert_eq!(links.len(), 1);
         assert_eq!(
             links[0].proof.valid,
@@ -4723,7 +5289,7 @@ mod tests {
             "a re-insert must replace the verdict quad, not add a second one"
         );
 
-        let links = svc.get_all_links().unwrap();
+        let links = svc.get_all_links(&EvalStop::none()).unwrap();
         assert_eq!(
             links.len(),
             1,
@@ -4758,7 +5324,7 @@ mod tests {
         svc.remove_reifier_annotation(&link, ONT_PROOF_SIG).unwrap();
 
         svc.add_link(&link).unwrap();
-        let links = svc.get_all_links().unwrap();
+        let links = svc.get_all_links(&EvalStop::none()).unwrap();
         assert_eq!(links.len(), 1);
         assert_eq!(
             links[0].data.target, "literal:string:Write%20the%20guide",
@@ -4785,7 +5351,7 @@ mod tests {
         let mut bad = link.clone();
         bad.proof.signature = "cafebabe".to_string();
         svc.add_link(&bad).unwrap();
-        let links = svc.get_all_links().unwrap();
+        let links = svc.get_all_links(&EvalStop::none()).unwrap();
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].proof.signature, link.proof.signature);
     }
@@ -4809,14 +5375,22 @@ mod tests {
             "exactly one proofValid quad must be stored for every link"
         );
 
-        for from_get_all in svc.get_all_links().unwrap() {
+        for from_get_all in svc.get_all_links(&EvalStop::none()).unwrap() {
             assert!(
                 from_get_all.proof.valid.is_some(),
                 "get_all_links must never report an unevaluated verdict"
             );
         }
         for from_query in svc
-            .query_links(Some("ad4m://always-present"), None, None, None, None, None)
+            .query_links(
+                &EvalStop::none(),
+                Some("ad4m://always-present"),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
             .unwrap()
         {
             assert!(
@@ -4839,12 +5413,20 @@ mod tests {
         link.proof.signature = "deadbeef".to_string();
         svc.add_link(&link).unwrap();
 
-        let from_get_all = svc.get_all_links().unwrap();
+        let from_get_all = svc.get_all_links(&EvalStop::none()).unwrap();
         assert_eq!(from_get_all.len(), 1);
         assert_eq!(from_get_all[0].proof.valid, Some(false));
 
         let from_query = svc
-            .query_links(Some("ad4m://neg"), None, None, None, None, None)
+            .query_links(
+                &EvalStop::none(),
+                Some("ad4m://neg"),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
             .unwrap();
         assert_eq!(from_query.len(), 1);
         assert_eq!(from_query[0].proof.valid, Some(false));
@@ -4894,7 +5476,15 @@ mod tests {
 
         let verdict_of = |target: &str| {
             let found = svc
-                .query_links(Some("ad4m://v"), None, Some(target), None, None, None)
+                .query_links(
+                    &EvalStop::none(),
+                    Some("ad4m://v"),
+                    None,
+                    Some(target),
+                    None,
+                    None,
+                    None,
+                )
                 .unwrap();
             assert_eq!(found.len(), 1, "{target}");
             found[0].clone()
@@ -4925,6 +5515,7 @@ mod tests {
 
         let page = svc
             .query_shown_links_top_n_by_timestamp(
+                &EvalStop::none(),
                 Some("ad4m://v"),
                 None,
                 None,
@@ -5009,7 +5600,7 @@ mod tests {
         // Before the migration, reads fall back to `proofValid`.
         let verdicts = |svc: &SparqlStore| {
             let mut all: Vec<_> = svc
-                .get_all_links()
+                .get_all_links(&EvalStop::none())
                 .unwrap()
                 .into_iter()
                 .map(|l| (l.data.target, l.verdict))
@@ -5067,7 +5658,7 @@ mod tests {
             ))
             .unwrap();
         let verdict = |svc: &SparqlStore| {
-            let links = svc.get_all_links().unwrap();
+            let links = svc.get_all_links(&EvalStop::none()).unwrap();
             assert_eq!(links.len(), 1, "{links:?}");
             links[0].verdict.clone()
         };
@@ -5081,7 +5672,7 @@ mod tests {
         let mut replay = link.clone();
         replay.proof = make_link(&other, "ad4m://rejudge", "ad4m://p", "ad4m://t").proof;
         svc.add_link(&replay).unwrap();
-        let row = &svc.get_all_links().unwrap()[0];
+        let row = &svc.get_all_links(&EvalStop::none()).unwrap()[0];
         assert_eq!(row.proof.key, link.proof.key);
         assert_eq!(row.verdict, Some(LinkVerdict::Valid));
     }
@@ -5142,7 +5733,9 @@ mod tests {
         svc.add_link(&n2u2).unwrap();
 
         // Wildcard query (same as the integration test: LinkQuery({}))
-        let all = svc.query_links(None, None, None, None, None, None).unwrap();
+        let all = svc
+            .query_links(&EvalStop::none(), None, None, None, None, None, None)
+            .unwrap();
 
         assert_eq!(
             all.len(),
@@ -5197,7 +5790,7 @@ mod tests {
             svc.add_link(link).unwrap();
         }
 
-        let all = svc.get_all_links().unwrap();
+        let all = svc.get_all_links(&EvalStop::none()).unwrap();
         assert_eq!(
             all.len(),
             5,
@@ -5206,7 +5799,9 @@ mod tests {
         );
 
         // Also check query_links returns the same count
-        let queried = svc.query_links(None, None, None, None, None, None).unwrap();
+        let queried = svc
+            .query_links(&EvalStop::none(), None, None, None, None, None, None)
+            .unwrap();
         assert_eq!(
             queried.len(),
             5,
@@ -5233,7 +5828,9 @@ mod tests {
         svc.add_link(&link).unwrap();
         svc.add_link(&link).unwrap();
 
-        let all = svc.query_links(None, None, None, None, None, None).unwrap();
+        let all = svc
+            .query_links(&EvalStop::none(), None, None, None, None, None, None)
+            .unwrap();
         assert_eq!(
             all.len(),
             1,
@@ -5370,7 +5967,7 @@ mod tests {
             LIMIT 20
         "#;
 
-        let result = svc.query(query).unwrap();
+        let result = svc.query(&EvalStop::none(), query).unwrap();
         let rows: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
         assert!(
             !rows.is_empty(),
@@ -5433,7 +6030,7 @@ mod tests {
             LIMIT 20
         "#;
 
-        let result = svc.query(query).unwrap();
+        let result = svc.query(&EvalStop::none(), query).unwrap();
         let rows: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
         let channel_ids: Vec<&str> = rows
             .iter()
@@ -5479,7 +6076,7 @@ mod tests {
             }
         "#;
 
-        let result = svc.query(query).unwrap();
+        let result = svc.query(&EvalStop::none(), query).unwrap();
         let rows: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
         assert!(
             !rows.is_empty(),
@@ -5523,7 +6120,7 @@ mod tests {
             LIMIT 20
         "#;
 
-        let result = svc.query(query).unwrap();
+        let result = svc.query(&EvalStop::none(), query).unwrap();
         let rows: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
         assert!(
             !rows.is_empty(),
@@ -5548,7 +6145,7 @@ mod tests {
             }}"#,
             ch_id
         );
-        let result = svc.query(&all_items_query).unwrap();
+        let result = svc.query(&EvalStop::none(), &all_items_query).unwrap();
         let rows: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
         assert_eq!(
             rows.len(),
@@ -5577,7 +6174,7 @@ mod tests {
             ?sg <flux://has_item> ?id .
             ?sg <flux://entry_type> <flux://conversation_subgroup> .
         }"#;
-        let result = svc.query(processed_query).unwrap();
+        let result = svc.query(&EvalStop::none(), processed_query).unwrap();
         let processed: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
         assert_eq!(
             processed.len(),
@@ -5616,7 +6213,7 @@ mod tests {
             values_clause, ch_id, ch_id
         );
 
-        let result = svc.query(&data_query).unwrap();
+        let result = svc.query(&EvalStop::none(), &data_query).unwrap();
         let rows: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
         assert_eq!(
             rows.len(),
@@ -5740,7 +6337,7 @@ mod tests {
             LIMIT 20
         "#;
 
-        let result = svc.query(query).unwrap();
+        let result = svc.query(&EvalStop::none(), query).unwrap();
         let rows: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
         assert_eq!(rows.len(), 2, "Expected 2 channels. Raw: {}", result);
         // Newer channel should come first
@@ -5770,7 +6367,7 @@ mod tests {
         let query = r#"SELECT ?id WHERE {
             <flux://ch-sub> <ad4m://has_child> ?id .
         }"#;
-        let result = svc.query(query).unwrap();
+        let result = svc.query(&EvalStop::none(), query).unwrap();
         let rows: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["id"].as_str().unwrap(), "flux://msg-1");
@@ -5795,7 +6392,7 @@ mod tests {
             <flux://test> <flux://prop> ?raw .
             BIND(STR(?raw) AS ?val)
         }"#;
-        let result = svc.query(query).unwrap();
+        let result = svc.query(&EvalStop::none(), query).unwrap();
         let rows: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
         assert_eq!(rows.len(), 1, "Expected 1 result. Raw: {}", result);
         assert_eq!(
@@ -5844,7 +6441,7 @@ mod tests {
             ?s <flux://flag> ?val .
             FILTER(STR(?val) = "true")
         }"#;
-        let result = svc.query(query).unwrap();
+        let result = svc.query(&EvalStop::none(), query).unwrap();
         let rows: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
         assert_eq!(
             rows.len(),
@@ -5892,7 +6489,7 @@ mod tests {
             GROUP BY ?groupId
         "#;
 
-        let result = svc.query(query).unwrap();
+        let result = svc.query(&EvalStop::none(), query).unwrap();
         let rows: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
         assert_eq!(rows.len(), 1, "Expected 1 group. Raw: {}", result);
         assert_eq!(
@@ -5918,9 +6515,8 @@ mod tests {
         let link = make_link(&signer, "ad4m://s", "ad4m://p", "ad4m://t");
         svc.add_link(&link).unwrap();
 
-        let cancel = tokio_util::sync::CancellationToken::new();
         let result = svc
-            .query_cancellable("SELECT ?s ?p ?o WHERE { ?s ?p ?o }", cancel)
+            .query_cancellable(&EvalStop::none(), "SELECT ?s ?p ?o WHERE { ?s ?p ?o }")
             .await
             .expect("non-cancelled query should succeed");
         let rows: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
@@ -5930,11 +6526,9 @@ mod tests {
     #[tokio::test]
     async fn query_cancellable_returns_error_when_cancelled_before_call() {
         let svc = new_service();
-        let cancel = tokio_util::sync::CancellationToken::new();
-        // Cancel up front — the select! biased arm should fire immediately.
-        cancel.cancel();
+        // Cancel up front — the eval never really starts.
         let err = svc
-            .query_cancellable("SELECT ?s ?p ?o WHERE { ?s ?p ?o }", cancel)
+            .query_cancellable(&EvalStop::cancelled(), "SELECT ?s ?p ?o WHERE { ?s ?p ?o }")
             .await
             .expect_err("pre-cancelled query should error");
         assert!(
@@ -5973,13 +6567,10 @@ mod tests {
             svc.add_link(&link).unwrap();
         }
 
-        let cancel = tokio_util::sync::CancellationToken::new();
-        let cancel_clone = cancel.clone();
-        // Cancel before the await — guarantees the biased cancel arm
-        // fires regardless of how fast the blocking handle resolves.
-        cancel_clone.cancel();
+        // Cancel before the eval — the token fires the moment the
+        // evaluator's first internalize/quads call checks it.
         let err = svc
-            .query_cancellable("SELECT ?s ?p ?o WHERE { ?s ?p ?o }", cancel)
+            .query_cancellable(&EvalStop::cancelled(), "SELECT ?s ?p ?o WHERE { ?s ?p ?o }")
             .await
             .expect_err("cancelled query should error");
         assert!(err.to_string().contains("query cancelled"));
@@ -6017,7 +6608,7 @@ mod tests {
         );
         svc.add_link(&link).unwrap();
 
-        let before = svc.get_all_links().unwrap();
+        let before = svc.get_all_links(&EvalStop::none()).unwrap();
         assert_eq!(
             before
                 .iter()
@@ -6045,7 +6636,7 @@ mod tests {
         );
         svc.remove_link(&remove_link).unwrap();
 
-        let after = svc.get_all_links().unwrap();
+        let after = svc.get_all_links(&EvalStop::none()).unwrap();
         assert_eq!(
             after
                 .iter()
@@ -6083,7 +6674,10 @@ mod tests {
         // query_arbitrary(): ?t bound to a typed-integer literal must come
         // back as its plain lexical value, not `literal:number:5`.
         let arbitrary_result = svc
-            .query_arbitrary("SELECT ?t WHERE { <ad4m://msg1> <flux://priority> ?t . }")
+            .query_arbitrary(
+                &EvalStop::none(),
+                "SELECT ?t WHERE { <ad4m://msg1> <flux://priority> ?t . }",
+            )
             .unwrap();
         let arbitrary_rows: Vec<serde_json::Value> =
             serde_json::from_str(&arbitrary_result).unwrap();
@@ -6097,7 +6691,10 @@ mod tests {
         // query(): same shape, but through the internal-hydration path —
         // still wire-encodes ?t, unchanged from before this fix.
         let internal_result = svc
-            .query("SELECT ?t WHERE { <ad4m://msg1> <flux://priority> ?t . }")
+            .query(
+                &EvalStop::none(),
+                "SELECT ?t WHERE { <ad4m://msg1> <flux://priority> ?t . }",
+            )
             .unwrap();
         let internal_rows: Vec<serde_json::Value> = serde_json::from_str(&internal_result).unwrap();
         assert_eq!(
@@ -6118,7 +6715,7 @@ mod tests {
         store.add_link(&link).expect("add");
 
         // Verify it was added
-        let all = store.get_all_links().expect("get_all");
+        let all = store.get_all_links(&EvalStop::none()).expect("get_all");
         assert!(
             all.iter().any(|l| l.data.source == "literal:string:hello"),
             "link should appear in get_all_links"
@@ -6128,13 +6725,40 @@ mod tests {
         store.remove_link(&link).expect("remove");
 
         // Verify removal
-        let all_after = store.get_all_links().expect("get_all_after");
+        let all_after = store
+            .get_all_links(&EvalStop::none())
+            .expect("get_all_after");
         assert!(
             !all_after
                 .iter()
                 .any(|l| l.data.source == "literal:string:hello"),
             "link should no longer appear after removal"
         );
+    }
+
+    #[tokio::test]
+    async fn gate_deadline_stops_slow_query_store_level() {
+        let svc = new_service();
+        let signer = TestSigner::generate();
+        for i in 0..80 {
+            svc.add_link(&make_link(
+                &signer,
+                &format!("test://s/{i}"),
+                "test://p",
+                &format!("test://t/{i}"),
+            ))
+            .unwrap();
+        }
+        eval_count::reset();
+        let gate = EvalGate::request(Duration::from_millis(500), None);
+        let stop = gate.stop();
+        let res = svc.query_async(&stop, r#"SELECT ?a ?o WHERE { ?a ?p ?o . FILTER EXISTS { ?b ?q ?r . FILTER EXISTS { ?c ?q2 ?r2 . FILTER(STR(?c) = "urn:no-match") } } }"#).await;
+        let err = res.expect_err("the deadline must stop the eval");
+        assert!(
+            err.to_string().contains("deadline"),
+            "the error names the deadline: {err}"
+        );
+        assert!(eval_count::running() == 0);
     }
 }
 

@@ -5,6 +5,7 @@
 //! mirror), and sending would push the room's whole set again.
 
 use super::perspective_instance::{links_missing_remotely, PerspectiveInstance};
+use super::sparql_store::EvalStop;
 use crate::types::{LinkExpression, LinkStatus, PerspectiveDiff};
 
 /// Who asks for the shared links the remote lacks.
@@ -52,21 +53,22 @@ impl PerspectiveInstance {
     /// diff holds. A link the room already has is sent again; the link
     /// language drops the duplicate. False when the queue could not be written.
     fn queue_unsent_shared_links(&self) -> bool {
-        let shared: Vec<(LinkExpression, LinkStatus)> = match self.sparql_store.get_all_links() {
-            Ok(links) => links
-                .into_iter()
-                .filter(|l| l.status == Some(LinkStatus::Shared))
-                .map(|l| (LinkExpression::from(l), LinkStatus::Shared))
-                .collect(),
-            Err(e) => {
-                log::error!(
-                    "share_links_after_publish: could not read the links of perspective {}: {}",
-                    self.uuid,
-                    e
-                );
-                return false;
-            }
-        };
+        let shared: Vec<(LinkExpression, LinkStatus)> =
+            match self.sparql_store.get_all_links(&EvalStop::none()) {
+                Ok(links) => links
+                    .into_iter()
+                    .filter(|l| l.status == Some(LinkStatus::Shared))
+                    .map(|l| (LinkExpression::from(l), LinkStatus::Shared))
+                    .collect(),
+                Err(e) => {
+                    log::error!(
+                        "share_links_after_publish: could not read the links of perspective {}: {}",
+                        self.uuid,
+                        e
+                    );
+                    return false;
+                }
+            };
         let db = crate::db_backend::db_backend();
         let unsent = match db.get_unsent_additions(&self.uuid) {
             Ok(unsent) => unsent,

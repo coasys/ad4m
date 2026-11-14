@@ -8,6 +8,7 @@
 //! store actually wrote.
 
 use super::PerspectiveInstance;
+use crate::perspectives::sparql_store::EvalStop;
 use crate::types::DecoratedLinkExpression;
 
 impl PerspectiveInstance {
@@ -23,6 +24,7 @@ impl PerspectiveInstance {
             .map(|link| {
                 self.sparql_store
                     .get_link(
+                        &EvalStop::none(),
                         &link.data.source,
                         link.data.predicate.as_deref(),
                         &link.data.target,
