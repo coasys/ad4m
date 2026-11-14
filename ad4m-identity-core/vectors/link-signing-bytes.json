@@ -1,0 +1,52 @@
+{
+  "description": "The bytes a link signs (judgement::anchored_signing_bytes with an anchor, judgement::hash_data_and_timestamp without one), pinned from the executor's rust-executor/src/agent/signatures.rs before the layout moved into the core. bytes: hex of the coasys:link signing bytes (anchored) or of the 32-byte hash (no anchor). The unanchored timestamp is read as RFC 3339 and written back in UTC with milliseconds; the anchored timestamp is signed as the link carries it.",
+  "links": [
+    {
+      "data": {
+        "predicate": "ad4m://has_child",
+        "source": "ad4m://self",
+        "target": "literal:string:hello%20world"
+      },
+      "timestamp": "2026-11-14T10:00:00.000Z",
+      "bytes": "e6c595c74842a49e0aa5746714c77776e4b0af62c1c79df773f55b62a7940ed9"
+    },
+    {
+      "data": {
+        "predicate": null,
+        "source": "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
+        "target": "ad4m://target"
+      },
+      "timestamp": "2026-11-14T10:00:00Z",
+      "bytes": "ee1d80df6efc045366e4fcc288c5f1954c2553af9be59d82d7f2badb80d340f3"
+    },
+    {
+      "data": {
+        "predicate": "coasys://membership/member",
+        "source": "did:scid:coasys:1:QmPerson",
+        "target": "coasys://membership/space"
+      },
+      "timestamp": "2026-11-14T12:00:00.123456+02:00",
+      "bytes": "913cc95542e92569d5a23a81be5c61395dd40abab8f2fe3db7bac832b3e374aa"
+    },
+    {
+      "data": {
+        "predicate": "coasys://membership/rules",
+        "source": "coasys://membership/space",
+        "target": "literal:json:%7B%22add%22%3A%22admins%22%2C%22guests%22%3A%22no%22%2C%22join%22%3A%22open%22%7D"
+      },
+      "timestamp": "2026-11-14T10:00:00.000Z",
+      "anchor": 0,
+      "bytes": "7b22616e63686f72223a302c2264617461223a7b22707265646963617465223a22636f617379733a2f2f6d656d626572736869702f72756c6573222c22736f75726365223a22636f617379733a2f2f6d656d626572736869702f7370616365222c22746172676574223a226c69746572616c3a6a736f6e3a25374225323261646425323225334125323261646d696e732532322532432532326775657374732532322533412532326e6f2532322532432532326a6f696e2532322533412532326f70656e253232253744227d2c22646f6d61696e223a22636f617379733a6c696e6b222c2274696d657374616d70223a22323032362d31312d31345431303a30303a30302e3030305a227d"
+    },
+    {
+      "data": {
+        "predicate": null,
+        "source": "ad4m://self",
+        "target": "café 😀"
+      },
+      "timestamp": "2026-11-14T10:00:00.5Z",
+      "anchor": 7,
+      "bytes": "7b22616e63686f72223a372c2264617461223a7b22707265646963617465223a6e756c6c2c22736f75726365223a226164346d3a2f2f73656c66222c22746172676574223a22636166c3a920f09f9880227d2c22646f6d61696e223a22636f617379733a6c696e6b222c2274696d657374616d70223a22323032362d31312d31345431303a30303a30302e355a227d"
+    }
+  ]
+}

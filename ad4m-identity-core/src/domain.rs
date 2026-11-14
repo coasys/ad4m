@@ -269,7 +269,7 @@ pub(crate) fn verify_secret_signed(
 }
 
 /// True when `signature` is `key`'s Ed25519 signature (strict) of `bytes`.
-fn verify_bytes(bytes: &[u8], key: &str, signature: &[u8]) -> bool {
+pub(crate) fn verify_bytes(bytes: &[u8], key: &str, signature: &[u8]) -> bool {
     let Some(key) = decode_ed25519_multikey(key) else {
         return false;
     };

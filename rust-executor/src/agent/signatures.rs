@@ -1,4 +1,5 @@
 use crate::types::Expression;
+use ad4m_identity_core::judgement;
 use chrono::SecondsFormat;
 use chrono::{DateTime, Utc};
 use deno_core::anyhow::anyhow;
@@ -56,14 +57,10 @@ pub fn signature_holds<T: Serialize>(expr: &Expression<T>) -> bool {
             let Some(key) = expr.author.strip_prefix("did:key:") else {
                 return false;
             };
-            let value = AnchoredLink {
-                data: &expr.data,
-                timestamp: &expr.timestamp,
+            judgement::anchored_signature_holds(
+                &expr.data,
+                &expr.timestamp,
                 anchor,
-            };
-            ad4m_identity_core::verify_signed(
-                ad4m_identity_core::LINK_DOMAIN,
-                &value,
                 key,
                 &sig_bytes,
             )
@@ -71,30 +68,15 @@ pub fn signature_holds<T: Serialize>(expr: &Expression<T>) -> bool {
     }
 }
 
-/// What an anchored link signs under `coasys:link`: its data, its timestamp as it carries it,
-/// and the anchor.
-#[derive(Serialize)]
-struct AnchoredLink<'a, T: Serialize> {
-    data: &'a T,
-    timestamp: &'a str,
-    anchor: u64,
-}
-
-/// The bytes an anchored expression signs: `coasys:link` over `{data, timestamp, anchor}`.
+/// The bytes an anchored expression signs: `coasys:link` over `{data, timestamp, anchor}`
+/// ([`judgement::anchored_signing_bytes`]).
 pub(crate) fn anchored_signing_bytes<T: Serialize>(
     data: &T,
     timestamp: &str,
     anchor: u64,
 ) -> Result<Vec<u8>, AnyError> {
-    ad4m_identity_core::signing_bytes(
-        ad4m_identity_core::LINK_DOMAIN,
-        &AnchoredLink {
-            data,
-            timestamp,
-            anchor,
-        },
-    )
-    .map_err(|e| anyhow!("cannot build the signed bytes of an anchored expression: {e}"))
+    judgement::anchored_signing_bytes(data, timestamp, anchor)
+        .map_err(|e| anyhow!("cannot build the signed bytes of an anchored expression: {e}"))
 }
 
 fn parse_timestamp(timestamp: &str) -> Result<DateTime<Utc>, AnyError> {
@@ -159,22 +141,16 @@ pub fn verify_or_false<T: Serialize>(expr: &Expression<T>, context: &str) -> boo
     }
 }
 
+/// The bytes an expression without an anchor signs, at `timestamp`
+/// ([`judgement::hash_data_and_timestamp`]). Panics when `data` has no JSON form.
 pub(crate) fn hash_data_and_timestamp<T: Serialize>(
     data: &T,
     timestamp: &DateTime<Utc>,
 ) -> Vec<u8> {
-    let mut hasher = Sha256::new();
-
-    // Serialize and hash the data directly.
-    let serialized_data = serde_json::to_vec(data).expect("Failed to serialize data");
-    hasher.update(&serialized_data);
-
-    // Serialize and hash the timestamp.
-    let timestamp_str = timestamp.to_rfc3339_opts(SecondsFormat::Millis, true);
-    hasher.update(timestamp_str.as_bytes());
-
-    // Finalize the hash and return the result.
-    hasher.finalize().as_slice().into()
+    let timestamp = timestamp.to_rfc3339_opts(SecondsFormat::Millis, true);
+    judgement::hash_data_and_timestamp(data, &timestamp)
+        .expect("Failed to serialize data")
+        .to_vec()
 }
 
 pub(super) fn hash_message(message: &String) -> Vec<u8> {
@@ -324,5 +300,39 @@ mod verify_or_false_tests {
         let mut forged = signed.clone();
         forged.data = "other".to_string();
         assert!(!verify_or_false(&forged, "test"));
+    }
+}
+
+/// The executor's signed bytes of a link equal the core's vectors
+/// (`ad4m-identity-core/vectors/link-signing-bytes.json`), so the bytes did not move when the
+/// layout moved into the core, and every reader that uses the core reads the same bytes.
+#[cfg(test)]
+mod link_signing_vector_tests {
+    use super::*;
+    use crate::types::Link;
+    use serde_json::Value;
+
+    #[test]
+    fn the_executor_signs_the_bytes_of_the_core_vectors() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../ad4m-identity-core/vectors/link-signing-bytes.json"
+        );
+        let file: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let links = file["links"].as_array().unwrap();
+        assert_eq!(links.len(), 5);
+        for case in links {
+            let link: Link = serde_json::from_value(case["data"].clone()).unwrap();
+            let timestamp = case["timestamp"].as_str().unwrap();
+            let bytes = match case["anchor"].as_u64() {
+                Some(anchor) => anchored_signing_bytes(&link, timestamp, anchor).unwrap(),
+                None => hash_data_and_timestamp(&link, &parse_timestamp(timestamp).unwrap()),
+            };
+            assert_eq!(
+                hex::encode(bytes),
+                case["bytes"].as_str().unwrap(),
+                "{case}"
+            );
+        }
     }
 }

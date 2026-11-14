@@ -1,0 +1,35 @@
+{
+  "description": "Only the creator's first rules link counts: it makes the creator the first admin and sets the join mode. A rules link by another person or by the creator's bot key is notCreator; a second one by the creator, or the same link again, is repeated.",
+  "creator": "did:scid:coasys:1:Ada",
+  "steps": [
+    {
+      "link": {"hash": "0000000000000000000000000000000000000000000000000000000000000001", "source": "coasys://membership/space", "predicate": "coasys://membership/rules", "target": "literal:json:%7B%22add%22%3A%22admins%22%2C%22guests%22%3A%22no%22%2C%22join%22%3A%22open%22%7D", "authorKey": "did:key:zBea", "timestamp": 50, "verdict": {"kind": "valid"}, "person": "did:scid:coasys:1:Bea", "byBot": false},
+      "refused": "notCreator"
+    },
+    {
+      "link": {"hash": "0000000000000000000000000000000000000000000000000000000000000002", "source": "coasys://membership/space", "predicate": "coasys://membership/rules", "target": "literal:json:%7B%22add%22%3A%22admins%22%2C%22guests%22%3A%22no%22%2C%22join%22%3A%22open%22%7D", "authorKey": "did:key:zAdaBot", "timestamp": 60, "verdict": {"kind": "valid"}, "person": "did:scid:coasys:1:Ada", "byBot": true},
+      "refused": "notCreator"
+    },
+    {
+      "link": {"hash": "0000000000000000000000000000000000000000000000000000000000000003", "source": "coasys://membership/space", "predicate": "coasys://membership/rules", "target": "literal:json:%7B%22add%22%3A%22admins%22%2C%22guests%22%3A%22no%22%2C%22join%22%3A%22open%22%7D", "authorKey": "did:key:zAda", "timestamp": 100, "verdict": {"kind": "valid"}, "person": "did:scid:coasys:1:Ada", "byBot": false},
+      "changes": [
+        {"kind": "joined", "person": "did:scid:coasys:1:Ada", "role": "admin", "botOf": null, "since": 100, "until": null},
+        {"kind": "joinChanged", "join": "open"}
+      ]
+    },
+    {
+      "link": {"hash": "0000000000000000000000000000000000000000000000000000000000000004", "source": "coasys://membership/space", "predicate": "coasys://membership/rules", "target": "literal:json:%7B%22add%22%3A%22admins%22%2C%22guests%22%3A%22no%22%7D", "authorKey": "did:key:zAda", "timestamp": 110, "verdict": {"kind": "valid"}, "person": "did:scid:coasys:1:Ada", "byBot": false},
+      "refused": "repeated"
+    },
+    {
+      "link": {"hash": "0000000000000000000000000000000000000000000000000000000000000003", "source": "coasys://membership/space", "predicate": "coasys://membership/rules", "target": "literal:json:%7B%22add%22%3A%22admins%22%2C%22guests%22%3A%22no%22%2C%22join%22%3A%22open%22%7D", "authorKey": "did:key:zAda", "timestamp": 100, "verdict": {"kind": "valid"}, "person": "did:scid:coasys:1:Ada", "byBot": false},
+      "refused": "repeated"
+    }
+  ],
+  "rules": {"add": "admins", "join": "open"},
+  "join": "open",
+  "members": [
+    {"person": "did:scid:coasys:1:Ada", "role": "admin", "botOf": null, "since": 100, "until": null}
+  ],
+  "admits": []
+}

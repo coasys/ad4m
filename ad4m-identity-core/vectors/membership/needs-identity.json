@@ -1,0 +1,42 @@
+{
+  "description": "A self-join needs a person's own key: a device-only key (no person) and a bot key are needsIdentity, even in an open space. A bot key never exercises its owner's rights, so an admin's bot cannot add a member either.",
+  "creator": "did:scid:coasys:1:Ada",
+  "steps": [
+    {
+      "link": {"hash": "0000000000000000000000000000000000000000000000000000000000000001", "source": "coasys://membership/space", "predicate": "coasys://membership/rules", "target": "literal:json:%7B%22add%22%3A%22admins%22%2C%22guests%22%3A%22no%22%2C%22join%22%3A%22open%22%7D", "authorKey": "did:key:zAda", "timestamp": 100, "verdict": {"kind": "valid"}, "person": "did:scid:coasys:1:Ada", "byBot": false},
+      "changes": [
+        {"kind": "joined", "person": "did:scid:coasys:1:Ada", "role": "admin", "botOf": null, "since": 100, "until": null},
+        {"kind": "joinChanged", "join": "open"}
+      ]
+    },
+    {
+      "link": {"hash": "0000000000000000000000000000000000000000000000000000000000000002", "source": "did:scid:coasys:1:Dee", "predicate": "coasys://membership/member", "target": "coasys://membership/space", "authorKey": "did:key:zDevice", "timestamp": 200, "verdict": {"kind": "valid"}, "person": null, "byBot": false},
+      "refused": "needsIdentity"
+    },
+    {
+      "link": {"hash": "0000000000000000000000000000000000000000000000000000000000000003", "source": "did:scid:coasys:1:Bea", "predicate": "coasys://membership/member", "target": "coasys://membership/space", "authorKey": "did:key:zBeaBot", "timestamp": 300, "verdict": {"kind": "valid"}, "person": "did:scid:coasys:1:Bea", "byBot": true},
+      "refused": "needsIdentity"
+    },
+    {
+      "link": {"hash": "0000000000000000000000000000000000000000000000000000000000000004", "source": "did:scid:coasys:1:Cid", "predicate": "coasys://membership/member", "target": "coasys://membership/space", "authorKey": "did:key:zAdaBot", "timestamp": 400, "verdict": {"kind": "valid"}, "person": "did:scid:coasys:1:Ada", "byBot": true},
+      "refused": "needsIdentity"
+    },
+    {
+      "link": {"hash": "0000000000000000000000000000000000000000000000000000000000000005", "source": "did:scid:coasys:1:Bea", "predicate": "coasys://membership/member", "target": "coasys://membership/space", "authorKey": "did:key:zBea", "timestamp": 500, "verdict": {"kind": "valid"}, "person": "did:scid:coasys:1:Bea", "byBot": false},
+      "changes": [
+        {"kind": "joined", "person": "did:scid:coasys:1:Bea", "role": "member", "botOf": null, "since": 500, "until": null}
+      ]
+    }
+  ],
+  "rules": {"add": "admins", "join": "open"},
+  "join": "open",
+  "members": [
+    {"person": "did:scid:coasys:1:Ada", "role": "admin", "botOf": null, "since": 100, "until": null},
+    {"person": "did:scid:coasys:1:Bea", "role": "member", "botOf": null, "since": 500, "until": null}
+  ],
+  "admits": [
+    {"person": null, "byBot": false, "invite": null, "now": 1000, "refused": "needsIdentity"},
+    {"person": "did:scid:coasys:1:Cid", "byBot": true, "invite": null, "now": 1000, "refused": "needsIdentity"},
+    {"person": "did:scid:coasys:1:Cid", "byBot": false, "invite": null, "now": 1000, "refused": null}
+  ]
+}
