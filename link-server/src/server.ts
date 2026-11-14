@@ -41,8 +41,9 @@ export interface ServerOptions {
   /** Multikeys of the store keys whose signed heads the server trusts. */
   storeHeadKeys?: string[];
   /**
-   * How often the keys with open sockets are asked of the store again, so a key its log
-   * revoked loses its sockets (ms). Default 600 000 (10 min).
+   * How often the keys not revoked in some room (and keys with open sockets) are asked of the
+   * store again, so a key its log revoked loses its sessions and sockets (ms). Default 600 000
+   * (10 min).
    */
   refreshIntervalMs?: number;
   /**
@@ -165,7 +166,8 @@ export async function buildServer(opts: ServerOptions): Promise<BuiltServer> {
   app.log.info({ admission }, `admission mode: ${admission}`);
   if (!store.configured) app.log.warn("no identity store configured (STORE_URL, STORE_HEAD_KEYS): no person can be admitted");
 
-  // Keys with open sockets are asked of the store again: a revoked key loses them.
+  // Keys not revoked in some room, and keys with open sockets, are asked of the store again: a
+  // key its log revoked loses its sessions and sockets (refreshKeys).
   let refreshing = false;
   const refreshInterval = setInterval(() => {
     if (refreshing || !store.configured) return;

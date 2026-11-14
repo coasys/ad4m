@@ -17,7 +17,15 @@ import {
   verifyRoomKey,
   type WireMembershipLink,
 } from "./identity-core.js";
-import { hashOf, judgeLink, roomIdOf, type Judged, type LinkResult, type MembershipRooms } from "./membership.js";
+import {
+  hashOf,
+  judgeLink,
+  MAX_MEMBERSHIP_BATCH,
+  roomIdOf,
+  type Judged,
+  type LinkResult,
+  type MembershipRooms,
+} from "./membership.js";
 import type { SlidingWindowLimiter } from "./rate-limit.js";
 import { admittedKeys, announce } from "./room-events.js";
 import { StoreUnavailable, type StoreClient } from "./store-client.js";
@@ -235,9 +243,12 @@ async function judgeBatch(
   return batch;
 }
 
-/** 200 with the results when any link counted; 403 with the first refusal otherwise. */
+/**
+ * 200 with the results when any link counted or was stored already (`repeated`); 403 with the
+ * first refusal otherwise.
+ */
 function answerResults(reply: FastifyReply, results: LinkResult[]) {
-  if (results.some((r) => r.counted)) return reply.send({ results });
+  if (results.some((r) => r.counted || r.stored)) return reply.send({ results });
   const reason = results.find((r) => r.reason)?.reason ?? "notCounted";
   return reply.code(403).send({ reason, results });
 }
@@ -329,6 +340,10 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
         return reply.code(400).send({ error: "body must be {genesis?, links: [...]} with at least one link" });
       }
       const links = body.links as unknown[];
+      // Before any other work: each link may cost a store lookup and a replay step.
+      if (links.length > MAX_MEMBERSHIP_BATCH) {
+        return reply.code(400).send({ error: `at most ${MAX_MEMBERSHIP_BATCH} links per request` });
+      }
       const now = Date.now();
 
       if (!ctx.db.getRoom(roomId)) {
@@ -348,7 +363,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
           if (e instanceof StoreUnavailable) return reply.code(503).send({ error: "the identity store is unavailable" });
           throw e;
         }
-        const { created, results } = ctx.rooms.genesis(roomId, genesis.creator, batch);
+        const { created, results } = ctx.rooms.genesis(roomId, genesis.creator, batch, now);
         if (!created) {
           const reason = results.find((r) => r.reason)?.reason ?? "notCreator";
           return reply.code(403).send({ reason, results });
@@ -388,7 +403,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       }
       // The room may have gone while the links were judged.
       if (!ctx.rooms.replay(roomId)) return reply.code(404).send({ error: "no such room" });
-      const outcome = ctx.rooms.apply(roomId, batch);
+      const outcome = ctx.rooms.apply(roomId, batch, Date.now());
       announce(ctx, roomId, outcome);
       return answerResults(reply, outcome.results);
     }

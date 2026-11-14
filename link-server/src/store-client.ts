@@ -52,6 +52,10 @@ export interface StoreClientOptions {
   cacheMs?: number;
   /** Per-request timeout (ms). Default 10 000. */
   timeoutMs?: number;
+  /** The most key resolutions held (least recently used go first). Default 10 000. */
+  maxCachedKeys?: number;
+  /** The most folded logs held (least recently used go first). Default 2 000. */
+  maxLogs?: number;
 }
 
 /** The most events the store returns per log page. */
@@ -67,7 +71,15 @@ export class StoreClient {
   private readonly headKeys: string[];
   private readonly cacheMs: number;
   private readonly timeoutMs: number;
+  private readonly maxCachedKeys: number;
+  private readonly maxLogs: number;
+  /**
+   * Folded logs by scid, least recently used first. A log dropped from here is not freed: a
+   * cached resolution or a request in flight may still hold its handle; the binding's
+   * finalizer frees it once nothing does.
+   */
   private readonly logs = new Map<string, KelHandle>();
+  /** Resolutions by key, least recently used first; an expired one is deleted when met. */
   private readonly cache = new Map<string, { at: number; resolution: KeyResolution }>();
 
   constructor(opts: StoreClientOptions) {
@@ -75,6 +87,13 @@ export class StoreClient {
     this.headKeys = opts.headKeys;
     this.cacheMs = opts.cacheMs ?? 60_000;
     this.timeoutMs = opts.timeoutMs ?? 10_000;
+    this.maxCachedKeys = Math.max(1, opts.maxCachedKeys ?? 10_000);
+    this.maxLogs = Math.max(1, opts.maxLogs ?? 2_000);
+  }
+
+  /** How many key resolutions and folded logs are held now. */
+  get held(): { keys: number; logs: number } {
+    return { keys: this.cache.size, logs: this.logs.size };
   }
 
   /** Whether a store is configured at all. */
@@ -89,10 +108,40 @@ export class StoreClient {
   async resolve(didKey: string, opts: { fresh?: boolean; now?: number } = {}): Promise<KeyResolution> {
     const now = opts.now ?? Date.now();
     const cached = this.cache.get(didKey);
-    if (!opts.fresh && cached && now - cached.at < this.cacheMs) return cached.resolution;
+    if (cached) {
+      this.cache.delete(didKey);
+      if (now - cached.at < this.cacheMs) {
+        this.cache.set(didKey, cached);
+        if (!opts.fresh) return cached.resolution;
+      }
+    }
     const resolution = await this.fetchResolution(didKey, now);
-    this.cache.set(didKey, { at: now, resolution });
+    this.cacheResolution(didKey, { at: now, resolution }, now);
     return resolution;
+  }
+
+  /** Holds a resolution as the most recent, deleting expired ones and then the oldest past the cap. */
+  private cacheResolution(didKey: string, entry: { at: number; resolution: KeyResolution }, now: number): void {
+    this.cache.delete(didKey);
+    this.cache.set(didKey, entry);
+    if (this.cache.size <= this.maxCachedKeys) return;
+    for (const [key, held] of this.cache) {
+      if (now - held.at >= this.cacheMs) this.cache.delete(key);
+    }
+    for (const key of this.cache.keys()) {
+      if (this.cache.size <= this.maxCachedKeys) break;
+      this.cache.delete(key);
+    }
+  }
+
+  /** Holds a folded log as the most recent, dropping the least recently used past the cap. */
+  private holdLog(scid: string, handle: KelHandle): void {
+    this.logs.delete(scid);
+    this.logs.set(scid, handle);
+    for (const key of this.logs.keys()) {
+      if (this.logs.size <= this.maxLogs) break;
+      this.logs.delete(key);
+    }
   }
 
   private async fetchResolution(didKey: string, now: number): Promise<KeyResolution> {
@@ -105,15 +154,25 @@ export class StoreClient {
       throw new StoreUnavailable("the store's key entry carries no head");
     }
     const handle = await this.logUpTo(entry.head);
-    const trusted = handle.trustedSeq(entry.head, this.headKeys);
-    if (trusted === undefined) throw new StoreUnavailable(`no trusted store key signed the head of ${entry.head.scid}`);
-    const author = handle.authorOf(multikey, trusted, now) as KeyAuthor | null;
+    // What the core throws over a head or key the store sent is the store's fault, like any
+    // other answer it cannot back: unavailable for this key, never a crash of the caller.
+    let trusted: number | undefined;
+    let author: KeyAuthor | null;
+    try {
+      trusted = handle.trustedSeq(entry.head, this.headKeys);
+      if (trusted === undefined) throw new StoreUnavailable(`no trusted store key signed the head of ${entry.head.scid}`);
+      author = handle.authorOf(multikey, trusted, now) as KeyAuthor | null;
+    } catch (e) {
+      if (e instanceof StoreUnavailable) throw e;
+      throw new StoreUnavailable(`the store's answer for ${didKey} does not check: ${JSON.stringify(e) ?? String(e)}`);
+    }
     return { kind: "listed", scid: entry.head.scid, handle, trusted, author };
   }
 
   /** The log `head` names, held at least up to `head.seq`. */
   private async logUpTo(head: SignedHead): Promise<KelHandle> {
     let handle = this.logs.get(head.scid);
+    if (handle) this.holdLog(head.scid, handle);
     while (!handle || (handle.head() as { seq: number }).seq < head.seq) {
       const from = handle ? (handle.head() as { seq: number }).seq + 1 : 0;
       const page = await this.get<LogPage>(`/v1/logs/${encodeURIComponent(head.scid)}?from=${from}`);
@@ -139,7 +198,7 @@ export class StoreClient {
           throw new StoreUnavailable(`the log of ${head.scid} does not continue the one held: ${outcome.kind}`);
         }
       }
-      this.logs.set(head.scid, handle);
+      this.holdLog(head.scid, handle);
     }
     return handle;
   }

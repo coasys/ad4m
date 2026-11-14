@@ -33,7 +33,8 @@ Options:
   --store-head-keys <multikey,...>
                      The store keys whose signed heads are trusted
   --auto-admit       Admit every key that authenticates, member or not
-                     (tests and development only; refused when
+                     (tests and development only: refused unless
+                     ALLOW_AUTO_ADMIT_DEV=true, and always with
                      NODE_ENV=production). Default: by the room's membership
   --operator-port <number>
                      Also serve the operator admission UI and API on this
@@ -56,6 +57,9 @@ STORE_URL, STORE_HEAD_KEYS (comma-separated), AUTO_ADMIT, OPERATOR_PORT,
 OPERATOR_HOST, OPERATOR_TOKEN_FILE, OPERATOR_ORIGINS (comma-separated),
 OPERATOR_LABEL.
 `;
+
+/** The flag that marks a development server, the only kind that may auto-admit. */
+const ALLOW_AUTO_ADMIT_ENV = "ALLOW_AUTO_ADMIT_DEV";
 
 function envBool(key: string): boolean {
   const val = process.env[key];
@@ -154,9 +158,16 @@ function parseArgs(argv: string[]): CliArgs {
     }
   }
 
-  // Auto-admit lets every key into every room: never on a production server.
+  // Auto-admit lets every key into every room: only on a server explicitly marked as a
+  // development one. Fail closed: an image or unit that forgot NODE_ENV is not a dev server.
+  if (autoAdmit && !envBool(ALLOW_AUTO_ADMIT_ENV)) {
+    console.error(
+      `AUTO_ADMIT (--auto-admit) admits every key to every room; it is refused unless ${ALLOW_AUTO_ADMIT_ENV}=true marks this a development server`
+    );
+    process.exit(1);
+  }
   if (autoAdmit && process.env.NODE_ENV === "production") {
-    console.error("AUTO_ADMIT (--auto-admit) is refused when NODE_ENV=production: it admits every key to every room");
+    console.error("AUTO_ADMIT (--auto-admit) is refused when NODE_ENV=production, even with " + ALLOW_AUTO_ADMIT_ENV);
     process.exit(1);
   }
 

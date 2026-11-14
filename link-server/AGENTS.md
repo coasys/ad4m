@@ -35,12 +35,12 @@ rate-limit.ts   sliding-window limiter, fully standalone
 telepresence.ts online/offline + grace-period timers; DOES NOT import ws.ts (returns state, caller broadcasts) to avoid a cycle
 ws.ts           WebSocket connection registry + telepresence message routing; imports auth.ts + telepresence.ts
 room-events.ts  what follows a membership change: admitted keys, ending a removed person's keys (4005), `membership` and `rotate-needed` broadcasts
-refresh.ts      `refreshKeys`: asks the store again about every key with an open socket; a revoked key loses sessions and sockets in every room
+refresh.ts      `refreshKeys`: asks the store again about every key not revoked in some room and every key with an open socket; a revoked key loses sessions and sockets in every room; an error about one key is logged and the sweep goes on
 routes.ts       all HTTP handlers; imports everything above
 log-tail.ts     in-memory ring buffer of recent log lines (both apps' pino output, teed from stdout) for the operator's live log view
 operator.ts     optional loopback-only operator app (rooms, members, keys, suspend/resume, /api/logs SSE stream); shares db/auth/ws with routes.ts, page in operator-page.ts
 server.ts       composition root: builds db/auth/store/rooms/telepresence/ws, registers routes, starts the 10-minute key refresh, builds the operator app when asked
-index.ts        CLI arg parsing (AUTO_ADMIT with NODE_ENV=production exits 1), calls buildServer + app.listen
+index.ts        CLI arg parsing (AUTO_ADMIT exits 1 unless ALLOW_AUTO_ADMIT_DEV=true, and always with NODE_ENV=production), calls buildServer + app.listen
 ```
 
 `RouteContext` (defined in `routes.ts`) is the one bag of wired dependencies passed into `registerRoutes`. If you add a new module that needs to reach into storage or auth, wire it through `server.ts` and add it to that context rather than reaching for a singleton/global.

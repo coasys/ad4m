@@ -80,6 +80,8 @@ export async function startLinkServer(opts: LinkServerOptions = {}): Promise<Lin
                 PORT: String(port),
                 DATA_DIR: dataDir,
                 AUTO_ADMIT: autoAdmit ? "true" : "false",
+                // The server starts with AUTO_ADMIT only when marked a development one.
+                ALLOW_AUTO_ADMIT_DEV: autoAdmit ? "true" : "false",
             },
             stdio: ["ignore", "pipe", "pipe"],
         },

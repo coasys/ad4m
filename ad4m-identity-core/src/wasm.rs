@@ -12,12 +12,14 @@
 //!                     { didDocument: DidDocument, didDocumentMetadata: DocumentMetadata }; }
 //! class MembershipReplay { constructor(creator: string);
 //!                          apply(judgedLinkJson: string): string;   // MembershipChange[] as JSON
+//!                          tryApply(judgedLinkJson: string): string; // as apply; a refusal keeps nothing
 //!                          members(): string;                       // Member[] as JSON
 //!                          isMember(person: string): boolean;
 //!                          admits(person: string | undefined, byBot: boolean,
 //!                                 invite: string | undefined, now: number): void; }
 //! function judgeLinkWithoutLog(wireLinkJson: string, now: number): string;   // JudgedLink JSON
 //! function wireLinkHash(wireLinkJson: string): string;                      // hex
+//! function wireSignatureHolds(wireLinkJson: string): boolean;
 //! function roomKeySigningBytes(did: string, x25519PublicKey: string): Uint8Array;
 //! function verifyRoomKey(did: string, x25519PublicKey: string, signature: string): boolean;
 //! ```
@@ -242,6 +244,13 @@ pub fn wire_link_hash_js(link_json: &str) -> Result<String, JsValue> {
     )?)))
 }
 
+/// Whether a signed link's (JSON text) signature holds under its author's `did:key`, without
+/// asking any log: a cheap first check, so a forged link costs its reader no store lookup.
+#[wasm_bindgen(js_name = wireSignatureHolds)]
+pub fn wire_signature_holds_js(link_json: &str) -> Result<bool, JsValue> {
+    Ok(crate::wire::wire_signature_holds(&wire_link_of(link_json)?))
+}
+
 /// What the device key `did` signs for its X25519 key (`x25519PublicKey`, 64 lowercase hex):
 /// `coasys:room-key` over `{x25519PublicKey, did}`.
 #[wasm_bindgen(js_name = roomKeySigningBytes)]
@@ -285,6 +294,20 @@ impl MembershipReplay {
         let link: crate::membership::JudgedLink =
             serde_json::from_str(judged_link_json).map_err(|e| malformed(&e.to_string()))?;
         text_of(&self.graph.apply(&link).map_err(refused)?)
+    }
+
+    /// Applies one judged link like [`apply`](Self::apply), but only when it counts: a refused
+    /// link leaves the replay exactly as it was (`apply` keeps some refused links, to count them
+    /// should an earlier link arrive later). A reader that stores only counted links keeps its
+    /// replay equal to the replay of what it stored, with no rebuild after a refusal.
+    #[wasm_bindgen(js_name = tryApply)]
+    pub fn try_apply(&mut self, judged_link_json: &str) -> Result<String, JsValue> {
+        let link: crate::membership::JudgedLink =
+            serde_json::from_str(judged_link_json).map_err(|e| malformed(&e.to_string()))?;
+        let mut trial = self.graph.clone();
+        let changes = trial.apply(&link).map_err(refused)?;
+        self.graph = trial;
+        text_of(&changes)
     }
 
     /// Every membership, current or ended, as JSON.

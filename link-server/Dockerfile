@@ -32,6 +32,8 @@ VOLUME /data
 # PORT, DATA_DIR, AUTO_ADMIT, NAME, STORE_URL, STORE_HEAD_KEYS read from env vars
 # (see src/index.ts parseArgs). Defaults: port 3456, data ./data.
 ENV DATA_DIR=/data
+# A production image: AUTO_ADMIT is refused here (it also needs ALLOW_AUTO_ADMIT_DEV=true).
+ENV NODE_ENV=production
 USER node
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
   CMD node -e "fetch('http://localhost:'+(process.env.PORT||3456)+'/health').then(r=>{if(!r.ok)throw r.status}).catch(()=>process.exit(1))"

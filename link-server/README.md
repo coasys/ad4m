@@ -48,7 +48,8 @@ PORT=4000 STORE_URL=https://store.example.org STORE_HEAD_KEYS=z6Mk... docker com
 | `NAME` | `link-server` | The server's name in `/.well-known/coasys-link-server` |
 | `STORE_URL` | none | The identity store's base URL |
 | `STORE_HEAD_KEYS` | none | Comma-separated multikeys of the store keys whose signed heads are trusted |
-| `AUTO_ADMIT` | `false` | Admit every authenticating key (tests and development only; refused with `NODE_ENV=production`) |
+| `AUTO_ADMIT` | `false` | Admit every authenticating key (tests and development only; refused unless `ALLOW_AUTO_ADMIT_DEV=true`, and always with `NODE_ENV=production`) |
+| `ALLOW_AUTO_ADMIT_DEV` | `false` | Marks a development server: the only kind that starts with `AUTO_ADMIT` |
 
 The image copies `link-server/identity-core/`, so run `ad4m-identity-core/build-node.sh` before `docker compose build`.
 
@@ -75,7 +76,7 @@ Control the server through environment variables or CLI flags:
 | `NAME` | `--name` | `link-server` | The server's name in `/.well-known/coasys-link-server` |
 | `STORE_URL` | `--store-url` | none | The identity store's base URL (`/v1/keys/{multikey}`, `/v1/heads/{scid}`, `/v1/logs/{scid}`). Without it no person can be admitted |
 | `STORE_HEAD_KEYS` (comma-separated) | `--store-head-keys` | none | The store keys whose signed heads are trusted |
-| `AUTO_ADMIT` | `--auto-admit` | `false` | Admit every key that authenticates, member or not. For tests and development: with `NODE_ENV=production` the server refuses to start |
+| `AUTO_ADMIT` | `--auto-admit` | `false` | Admit every key that authenticates, member or not. For tests and development: the server refuses to start with it unless `ALLOW_AUTO_ADMIT_DEV=true`, and always with `NODE_ENV=production` (the Docker image sets it) |
 | `BODY_LIMIT` | `--body-limit` | `10485760` | Maximum HTTP request body size in bytes (10 MiB) |
 | `OPERATOR_PORT` | `--operator-port` | off | Also serve the [operator page](#operator-page-operator-listener) and its API on this port (1-65535; the proxy needs a fixed port) |
 | `OPERATOR_HOST` | `--operator-host` | `127.0.0.1` | Address of the operator listener; must be loopback |
@@ -91,7 +92,8 @@ Who belongs to a room is the room's own business, written as signed **membership
 - **Keys speak for persons.** A device key (`did:key`) signs in; the server asks the identity store, through the person's key log, which person the key belongs to now, and whether it is a bot key. A key whose log revoked it, or that expired, is refused (`403`); a key no log lists signs in but is never admitted; while the store cannot answer, auth answers `503` and admits no one.
 - **Joining.** A signed-in key that is not admitted yet may send one thing: its own person's self-join (`<person> member <space or invite>`), which counts in an open room or with a valid invite. An admin adds members in a room whose rules let admins add. A bot key never joins by itself; its owner's `bot` link brings it in.
 - **Removal.** A `removed` link by an admin ends the person's access at once: the sessions of each of their keys are deleted, their sockets close with `4005`, and the room hears `rotate-needed` naming the keys the next room key must leave out.
-- **Revocation.** Every 10 minutes the server asks the store again about every key with an open socket. A key its log has revoked loses its sessions and sockets (`4005`), and each room it was in hears `rotate-needed` (`revoked`). A store outage ends no one's access.
+- **Posting membership links.** `POST /rooms/:roomId/membership` takes at most 100 links (genesis included); more answers `400` before anything else is looked at. A link whose signature does not hold is refused without asking the store. A self-join the server does not have yet must be dated within 5 minutes of the server's clock, whoever posts it; otherwise it is refused as `stale` (`403`), neither stored nor relayed, so no one can date a join back into a period the room was open or an invite was valid. Admin links (invites, adds, removals, rules) keep their own dates: an admin may sign them offline. A link the server already has answers `repeated` with `stored: true` and does not count again. The answer is `200` when any link was stored, otherwise `403` with the first link's reason.
+- **Revocation.** Every 10 minutes the server asks the store again about every key not revoked in some room it signed in to (with or without a socket or a session) and every key with an open socket. A key its log has revoked loses its sessions and sockets (`4005`), and each room it was in hears `rotate-needed` (`revoked`). A key revoked in a room is refused there (`401`), is left out of the admitted keys a rotation must seal to, and gets no grant. A store outage, or any error about one key, ends no one's access; the sweep goes on with the next key.
 - **Rooms from before protocol 2** are kept but marked legacy and answer `410` to protocol 2 clients.
 
 ### Admission mode
@@ -101,7 +103,7 @@ The server runs in one of two modes. It logs the mode at startup (`admission mod
 | Mode | Set by | A key whose person is not a member |
 |---|---|---|
 | **membership** (default) | nothing; `AUTO_ADMIT` unset or false | gets a token with `admitted: false`: it may send its self-join and nothing else, until its person counts as a member. |
-| **auto** | `AUTO_ADMIT=true` or `--auto-admit` | is admitted. For tests and development only: the server refuses to start with it when `NODE_ENV=production`. Without a store, every key is treated as a device key of no person. |
+| **auto** | `AUTO_ADMIT=true` or `--auto-admit` | is admitted. For tests and development only: the server refuses to start with it unless `ALLOW_AUTO_ADMIT_DEV=true`, and always when `NODE_ENV=production`. Without a store, every key is treated as a device key of no person. |
 
 ### Operator page (operator listener)
 

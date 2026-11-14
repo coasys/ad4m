@@ -242,6 +242,11 @@ export class AuthManager {
     if (!session || new Date(session.expires_at).getTime() < Date.now()) {
       return { ok: false, status: 401, error: "session expired or revoked" };
     }
+    // A key revoked here (by the key refresh, or in this room) has no session left, whatever
+    // the session table says.
+    if (this.db.getMemberKey(roomId, did)?.revoked === 1) {
+      return { ok: false, status: 401, error: "this key is revoked" };
+    }
     const room = this.db.getRoom(roomId);
     if (!room) return { ok: false, status: 404, error: "no such room" };
     if (room.legacy) return { ok: false, status: 410, error: "this room predates protocol 2 and is closed" };

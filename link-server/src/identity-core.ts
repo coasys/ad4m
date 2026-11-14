@@ -9,8 +9,15 @@ import type * as Core from "../identity-core/ad4m_identity_core.js";
  */
 const core = createRequire(import.meta.url)("../identity-core/ad4m_identity_core.js") as typeof Core;
 
-export const { KelChain, MembershipReplay, judgeLinkWithoutLog, roomKeySigningBytes, verifyRoomKey, wireLinkHash } =
-  core;
+export const {
+  KelChain,
+  MembershipReplay,
+  judgeLinkWithoutLog,
+  roomKeySigningBytes,
+  verifyRoomKey,
+  wireLinkHash,
+  wireSignatureHolds,
+} = core;
 export type KelHandle = Core.KelHandle;
 export type MembershipReplay = Core.MembershipReplay;
 

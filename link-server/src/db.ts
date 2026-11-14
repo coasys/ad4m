@@ -258,6 +258,7 @@ export class LinkServerDB {
         "SELECT * FROM room_member_keys WHERE room_id = ? AND ((person = ? AND by_bot = 0) OR did = ?)"
       ),
       getRoomsOfKey: this.raw.prepare("SELECT room_id FROM room_member_keys WHERE did = ? AND revoked = 0"),
+      getUnrevokedKeys: this.raw.prepare("SELECT DISTINCT did FROM room_member_keys WHERE revoked = 0 ORDER BY did"),
       markKeyRevoked: this.raw.prepare(
         "UPDATE room_member_keys SET revoked = 1, updated_at = ? WHERE did = ? AND revoked = 0"
       ),
@@ -449,6 +450,11 @@ export class LinkServerDB {
   /** The rooms a key (not revoked) authenticated to. */
   getRoomsOfKey(did: string): string[] {
     return (this.stmts.getRoomsOfKey.all(did) as Array<{ room_id: string }>).map((r) => r.room_id);
+  }
+
+  /** Every key that authenticated to some room and is not revoked there. */
+  getUnrevokedKeys(): string[] {
+    return (this.stmts.getUnrevokedKeys.all() as Array<{ did: string }>).map((r) => r.did);
   }
 
   /** Marks a key revoked in every room (`roomId` absent) or one room. */

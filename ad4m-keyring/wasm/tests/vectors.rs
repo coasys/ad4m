@@ -76,7 +76,7 @@ fn json(value: &JsValue) -> serde_json::Value {
 fn seals_each_vector_as_the_language_does() {
     for v in vectors() {
         serve_random(&[bytes(&v.ephemeral_secret), bytes(&v.nonce)].concat());
-        let sealed = seal_room_key(&bytes(&v.room_key), &bytes(&v.x25519_public)).unwrap();
+        let sealed = seal_room_key(bytes(&v.room_key), &bytes(&v.x25519_public)).unwrap();
         assert_eq!(json(&sealed), v.sealed);
     }
 }
@@ -85,8 +85,8 @@ fn seals_each_vector_as_the_language_does() {
 fn opens_each_vector_to_its_room_key() {
     for v in vectors() {
         let sealed = parse(&v.sealed.to_string());
-        let opened = open_room_key(sealed, &bytes(&v.x25519_secret)).unwrap();
-        assert_eq!(opened, bytes(&v.room_key));
+        let opened = open_room_key(sealed, bytes(&v.x25519_secret)).unwrap();
+        assert_eq!(opened.to_vec(), bytes(&v.room_key));
     }
 }
 
@@ -94,7 +94,7 @@ fn opens_each_vector_to_its_room_key() {
 fn derives_each_vector_public_key_from_its_secret() {
     for v in vectors() {
         assert_eq!(
-            x25519_public(&bytes(&v.x25519_secret)).unwrap(),
+            x25519_public(bytes(&v.x25519_secret)).unwrap(),
             bytes(&v.x25519_public)
         );
     }
@@ -104,26 +104,28 @@ fn derives_each_vector_public_key_from_its_secret() {
 fn a_fresh_seal_opens_only_for_its_recipient() {
     let v = &vectors()[0];
     let other = &vectors()[1];
-    let key = random_room_key();
+    let key = random_room_key().to_vec();
     assert_eq!(key.len(), 32);
-    let sealed = seal_room_key(&key, &bytes(&v.x25519_public)).unwrap();
+    let sealed = seal_room_key(key.clone(), &bytes(&v.x25519_public)).unwrap();
     assert_eq!(
-        open_room_key(sealed.clone(), &bytes(&v.x25519_secret)).unwrap(),
+        open_room_key(sealed.clone(), bytes(&v.x25519_secret))
+            .unwrap()
+            .to_vec(),
         key
     );
-    assert!(open_room_key(sealed, &bytes(&other.x25519_secret)).is_err());
+    assert!(open_room_key(sealed, bytes(&other.x25519_secret)).is_err());
 }
 
 #[test]
 fn refuses_keys_of_the_wrong_length() {
     let v = &vectors()[0];
-    assert!(seal_room_key(&[7u8; 31], &bytes(&v.x25519_public)).is_err());
-    assert!(seal_room_key(&bytes(&v.room_key), &[7u8; 33]).is_err());
-    assert!(x25519_public(&[7u8; 16]).is_err());
-    assert!(link_hash_key(&[7u8; 31]).is_err());
+    assert!(seal_room_key(vec![7u8; 31], &bytes(&v.x25519_public)).is_err());
+    assert!(seal_room_key(bytes(&v.room_key), &[7u8; 33]).is_err());
+    assert!(x25519_public(vec![7u8; 16]).is_err());
+    assert!(link_hash_key(vec![7u8; 31]).is_err());
     let sealed = parse(&v.sealed.to_string());
-    assert!(open_room_key(sealed, &[7u8; 31]).is_err());
-    assert!(open_room_key(parse("{\"nonce\":\"00\"}"), &bytes(&v.x25519_secret)).is_err());
+    assert!(open_room_key(sealed, vec![7u8; 31]).is_err());
+    assert!(open_room_key(parse("{\"nonce\":\"00\"}"), bytes(&v.x25519_secret)).is_err());
 }
 
 #[test]
@@ -133,5 +135,8 @@ fn the_link_hash_key_is_hkdf_of_room_key_v1() {
     Hkdf::<Sha256>::new(None, &room_key)
         .expand(b"adam-server-link-language:link-hash:v1", &mut expected)
         .unwrap();
-    assert_eq!(link_hash_key(&room_key).unwrap(), expected.to_vec());
+    assert_eq!(
+        link_hash_key(room_key.clone()).unwrap().to_vec(),
+        expected.to_vec()
+    );
 }

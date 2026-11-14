@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Builds the identity core's wasm-bindgen exports (feature `wasm`: `KelChain`, `KelHandle`
 # with `trustedSeq`/`judgeLink`/`authorOf`, `MembershipReplay`, `judgeLinkWithoutLog`,
-# `wireLinkHash`, `roomKeySigningBytes`, `verifyRoomKey`) for Node:
+# `wireLinkHash`, `wireSignatureHolds`, `roomKeySigningBytes`, `verifyRoomKey`) for Node:
 #   --target nodejs -> link-server/identity-core/ (CommonJS + the .wasm file beside it)
 # The output is generated and gitignored; run this before building or testing the link server.
 #

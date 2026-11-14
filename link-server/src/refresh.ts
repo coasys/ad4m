@@ -14,16 +14,19 @@ export interface RefreshContext {
 }
 
 /**
- * Asks the store again whom each key with an open socket speaks for. A key its log no longer
- * lists as a standing device key (revoked, expired) is revoked in every room: its sessions and
- * sockets end (4005), and each room it was in hears `rotate-needed` (`revoked`), so the next
- * room key is not sealed to it. A key the store cannot answer for keeps its socket: an outage
- * of the store ends no one's access, it only stops new admissions.
+ * Asks the store again whom each key speaks for: every key that authenticated to a room and is
+ * not revoked there (with or without a socket or a live session: such a key is still one a room
+ * key is sealed to), and every key with an open socket. A key its log no longer lists as a
+ * standing device key (revoked, expired) is revoked in every room: its sessions and sockets end
+ * (4005), and each room it was in hears `rotate-needed` (`revoked`), so the next room key is not
+ * sealed to it. A key the store cannot answer for keeps its access: an outage of the store ends
+ * no one's access, it only stops new admissions. Any error for one key (the store unavailable,
+ * or anything else) is logged and the sweep goes on with the next key.
  *
  * Returns the keys revoked.
  */
 export async function refreshKeys(ctx: RefreshContext): Promise<string[]> {
-  const dids = [...new Set(ctx.ws.connectedKeys().map((k) => k.did))];
+  const dids = [...new Set([...ctx.db.getUnrevokedKeys(), ...ctx.ws.connectedKeys().map((k) => k.did)])];
   const revoked: string[] = [];
   for (const did of dids) {
     let standing: boolean;
@@ -32,10 +35,11 @@ export async function refreshKeys(ctx: RefreshContext): Promise<string[]> {
       standing = resolution.kind === "unlisted" || resolution.author !== null;
     } catch (e) {
       if (e instanceof StoreUnavailable) {
-        ctx.log.warn({ did, err: e.message }, "key refresh: identity store unavailable; the key keeps its sockets");
-        continue;
+        ctx.log.warn({ did, err: e.message }, "key refresh: identity store unavailable; the key keeps its access");
+      } else {
+        ctx.log.error({ did, err: e }, "key refresh: resolving the key failed; the key keeps its access");
       }
-      throw e;
+      continue;
     }
     if (standing) continue;
     revokeKey(ctx, did);

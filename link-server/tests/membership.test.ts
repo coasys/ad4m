@@ -24,7 +24,7 @@ import {
 } from "./identity.js";
 
 interface Results {
-  results?: Array<{ hash: string; counted: boolean; reason?: string }>;
+  results?: Array<{ hash: string; counted: boolean; stored?: boolean; reason?: string }>;
   reason?: string;
   error?: string;
 }
@@ -140,10 +140,12 @@ test("an open room admits a person's self-join, and members hear of it", async (
     assert.equal(rotate.reason, "joined");
     assert.deepEqual(rotate.removedKeys, []);
 
-    // The same link again counts once.
+    // The same link again counts once: it is stored already, not counted now.
     const again = await postMembership(server, roomId, { links: [join] }, bobToken);
     assert.equal(again.status, 200);
-    assert.equal(again.body.results![0].counted, true);
+    assert.equal(again.body.results![0].counted, false);
+    assert.equal(again.body.results![0].stored, true);
+    assert.equal(again.body.results![0].reason, "repeated");
     const page = await getJson<{ links: unknown[]; seq: number }>(
       `${server.url}/rooms/${roomId}/membership?since=1`,
       aliceToken
