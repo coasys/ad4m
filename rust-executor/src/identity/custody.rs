@@ -1,5 +1,9 @@
 //! The custody channel: the path by which the desktop app's custody service takes a master key
-//! that arrived sealed to this computer's device key. It is no listener of its own: it is the
+//! that arrived sealed to this computer's device key. The custody service keeps the person's
+//! master key (`ad4m-identity-client`); the executor never stores one, and its main agent's key
+//! is its `main` wallet key, a device key. A master key sent to this computer arrives in the main
+//! agent's device inbox: the executor opens it in memory, hands it once to the custody service
+//! on this channel, then drops it (`identity.takeMaster`). It is no listener of its own: it is the
 //! custody credential on a loopback listener of an executor started with `--custody-channel`.
 //! The credential arrives as the first line of stdin
 //! ([`read_custody_credential`](crate::config::read_custody_credential)), never in the
