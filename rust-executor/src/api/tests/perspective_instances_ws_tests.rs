@@ -615,6 +615,61 @@ async fn repeated_adds_and_removes_in_one_batch_are_idempotent() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_restaged_committed_link_still_goes_with_the_instance() {
+    // `perspective.addLinkExpression` can stage the exact signed expression the store
+    // already holds. The batch then carries a copy of a committed link; removing the
+    // instance must still stage the committed one's removal, not just drop the copy.
+    let world = World::new().await;
+    let created = world.create(json!({ "title": "t" })).await;
+    let id = created["baseUri"].as_str().unwrap().to_string();
+    let before = world.links_touching(&id).await;
+    assert!(before > 0);
+
+    // The instance's type link, signed, as queryLinks reports it.
+    let links = world
+        .ok("perspective.queryLinks", json!({ "source": id }))
+        .await;
+    let type_link = links
+        .as_array()
+        .expect("links")
+        .iter()
+        .find(|l| l["data"]["predicate"] == "rdf://type")
+        .expect("the instance's type link")
+        .clone();
+
+    let batch_id = world.ok("perspective.createBatch", json!({})).await;
+    let batch_id = batch_id.as_str().expect("batch id").to_string();
+    world
+        .ok(
+            "perspective.addLinkExpression",
+            json!({ "link": type_link, "batchId": batch_id }),
+        )
+        .await;
+
+    let removed = world
+        .ok(
+            "perspective.instanceRemove",
+            json!({ "className": "Task", "baseUri": id, "batchId": batch_id }),
+        )
+        .await;
+    assert_eq!(
+        removed["linksRemoved"].as_u64().unwrap() as usize,
+        before,
+        "every effective link of the instance, counted once: {removed}"
+    );
+    world
+        .ok("perspective.commitBatch", json!({ "batchId": batch_id }))
+        .await;
+
+    assert_eq!(
+        world.links_touching(&id).await,
+        0,
+        "a staged copy of a committed link must not leave the committed link behind"
+    );
+    assert!(world.task(&id).await.is_none(), "the task is gone");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_batch_that_is_not_open_is_refused_before_writing() {
     let world = World::new().await;
     let before = world.link_count().await;

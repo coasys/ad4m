@@ -607,7 +607,7 @@ pub async fn add_to_collection(
         })?;
     if existing
         .iter()
-        .any(|link| target_matches(&link.data.target, wanted, &encoded))
+        .any(|effective| target_matches(&effective.link.data.target, wanted, &encoded))
     {
         return Ok(CollectionItemAdded {
             class_name,
@@ -719,20 +719,24 @@ pub async fn remove_from_collection(
                 e,
             )
         })?;
-    let stored_targets: Vec<String> = links.iter().map(|l| l.data.target.clone()).collect();
+    let stored_targets: Vec<String> = links
+        .iter()
+        .map(|effective| effective.link.data.target.clone())
+        .collect();
     let mut removed = 0usize;
-    for link in links {
-        if !target_matches(&link.data.target, wanted, &encoded) {
+    for effective in links {
+        if !target_matches(&effective.link.data.target, wanted, &encoded) {
             continue;
         }
-        let link = LinkExpression::from(link);
-        // A member that exists only inside this batch leaves by cancelling the staged
-        // addition; the store has nothing to remove.
-        let staged = match params.batch_id.as_deref() {
-            Some(batch_id) => perspective.cancel_batch_addition(batch_id, &link).await,
-            None => false,
-        };
-        if !staged {
+        let link = LinkExpression::from(effective.link);
+        if let Some(batch_id) = params.batch_id.as_deref() {
+            // Every staged copy of this identity goes — a member that exists only inside
+            // the batch leaves that way, but so does a staged twin of a committed member
+            // (`addLinkExpression` restages stored expressions verbatim): dropping the
+            // copy alone would commit it back over the removal staged just below.
+            perspective.cancel_batch_addition(batch_id, &link).await;
+        }
+        if effective.committed {
             if let Err(e) = perspective.remove_link(link, params.batch_id.clone()).await {
                 return Err(failed(
                     &class_name,

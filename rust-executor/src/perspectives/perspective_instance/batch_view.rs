@@ -14,12 +14,46 @@
 //! [`PerspectiveInstance::remove_link`] insists on a stored expression, so
 //! [`PerspectiveInstance::cancel_batch_addition`] is the way — the same pruning
 //! `execute_commands` does for `RemoveLink` and `SetSingleTarget` in `perspective_instance.rs`.
+//! The same signed expression can sit in both places at once, though:
+//! `perspective.addLinkExpression` stages the caller's expression verbatim, including one the
+//! store already holds. Cancelling the staged copy then does not remove the link — the
+//! committed one still needs its removal staged. [`EffectiveLink`] keeps the two apart.
 
 use super::PerspectiveInstance;
 use crate::db::link_identity;
 use crate::types::{DecoratedLinkExpression, Link, LinkExpression, LinkQuery};
 use deno_core::error::AnyError;
 use std::collections::HashSet;
+
+/// A link on a batch's effective graph. `committed` says whether the store holds this
+/// expression — if it does, removing the link means staging its removal through
+/// `remove_link`; a staged-only link leaves through `cancel_batch_addition` instead.
+///
+/// The committed and the staged copies of one expression are separate entries here, so a
+/// committed link the batch restaged shows up twice: the entries are ordered persisted
+/// first, which lets a caller that dedups by [`link_identity`] take the committed one.
+pub(crate) struct EffectiveLink {
+    /// The expression as the store or the batch holds it.
+    pub link: DecoratedLinkExpression,
+    /// The store holds this expression.
+    pub committed: bool,
+}
+
+impl EffectiveLink {
+    fn committed(link: DecoratedLinkExpression) -> Self {
+        EffectiveLink {
+            link,
+            committed: true,
+        }
+    }
+
+    fn staged(link: DecoratedLinkExpression) -> Self {
+        EffectiveLink {
+            link,
+            committed: false,
+        }
+    }
+}
 
 impl PerspectiveInstance {
     /// What `query` matches on the batch's effective graph: its `get_links` answer minus the
@@ -33,14 +67,20 @@ impl PerspectiveInstance {
         &self,
         query: &LinkQuery,
         batch_id: Option<&str>,
-    ) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
+    ) -> Result<Vec<EffectiveLink>, AnyError> {
         let persisted = self.get_links(query).await?;
         let Some(bid) = batch_id else {
-            return Ok(persisted);
+            return Ok(persisted
+                .into_iter()
+                .map(EffectiveLink::committed)
+                .collect());
         };
         let batches = self.batch_store.read().await;
         let Some(batch) = batches.get(bid) else {
-            return Ok(persisted);
+            return Ok(persisted
+                .into_iter()
+                .map(EffectiveLink::committed)
+                .collect());
         };
 
         let relevant = |link: &Link| {
@@ -55,9 +95,12 @@ impl PerspectiveInstance {
         // The exact stored expressions this batch has already dropped.
         let removed: HashSet<_> = batch.diff.removals.iter().map(link_identity).collect();
 
-        let mut out: Vec<DecoratedLinkExpression> = persisted
+        // Committed first: a link the batch restaged over its own committed copy then has
+        // its persisted entry ahead of the staged one.
+        let mut out: Vec<EffectiveLink> = persisted
             .into_iter()
             .filter(|link| !removed.contains(&link_identity(&link.clone().into())))
+            .map(EffectiveLink::committed)
             .collect();
         out.extend(
             batch
@@ -66,19 +109,23 @@ impl PerspectiveInstance {
                 .iter()
                 .filter(|e| relevant(&e.data))
                 .map(|expr| {
-                    DecoratedLinkExpression::from((
+                    EffectiveLink::staged(DecoratedLinkExpression::from((
                         expr.clone(),
                         expr.status.clone().unwrap_or_default(),
-                    ))
+                    )))
                 }),
         );
         Ok(out)
     }
 
-    /// Drop the staged addition that is `link` (by `link_identity`), returning whether one
-    /// was staged. "Removing" a link that exists only inside its batch is cancelling the
-    /// addition: the store has nothing to remove, so `remove_link` cannot take it. A link the
-    /// store holds returns `false` — its removal is staged through `remove_link` instead.
+    /// Drop the staged additions that are `link` (by `link_identity`), returning whether any
+    /// were staged. "Removing" a link that exists only inside its batch is cancelling the
+    /// addition: the store has nothing to remove, so `remove_link` cannot take it.
+    ///
+    /// This only ever touches the batch's staged copies — a committed link with the same
+    /// identity is the store's business: when the caller restaged a stored expression
+    /// (`perspective.addLinkExpression` takes it verbatim), the committed copy still needs
+    /// `remove_link`, and that is the caller's check, not this one's.
     pub(crate) async fn cancel_batch_addition(
         &self,
         batch_id: &str,
