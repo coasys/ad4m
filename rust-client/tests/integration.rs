@@ -118,9 +118,9 @@ impl Drop for Executor {
     }
 }
 
-/// The test class: one required single-valued `title`, one optional `done`
-/// — the smallest shape `perspective.addSdna` accepts, modelled on the
-/// hardwired `flow_instance.json`.
+/// The test class: one required single-valued `title`, one optional
+/// `xsd://boolean` `done` — the smallest shape `perspective.addSdna`
+/// accepts, modelled on the hardwired `flow_instance.json`.
 const NOTE_SDNA: &str = r#"{
   "target_class": "ad4m://IntegrationNote",
   "constructor_actions": [
@@ -128,7 +128,7 @@ const NOTE_SDNA: &str = r#"{
   ],
   "properties": [
     {"path": "ad4m://note/title", "name": "title", "identity": true, "min_count": 1, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://note/title", "target": "value"}]},
-    {"path": "ad4m://note/done", "name": "done", "min_count": 0, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://note/done", "target": "value"}]}
+    {"path": "ad4m://note/done", "name": "done", "datatype": "xsd://boolean", "min_count": 0, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://note/done", "target": "value"}]}
   ]
 }"#;
 
@@ -197,9 +197,13 @@ async fn model_batch_subscription_reconnect_and_flow() {
         .unwrap();
     let got = model.get(&created.base_uri, None).await.unwrap().unwrap();
     assert_eq!(got["title"], json!("first"));
+    // Declared `xsd://boolean`: a stored `false` hydrates as a bool, not "false".
+    assert_eq!(got["done"], json!(false));
+    assert!(got["done"].is_boolean());
     let all = model.find_all(&ModelQuery::default()).await.unwrap();
     assert_eq!(all.len(), 1);
     assert_eq!(all[0]["title"], json!("first"));
+    assert_eq!(all[0]["done"], json!(false));
 
     // ── subscribe: initial result, then a live update ───────────────────
     let mut sub = model.subscribe(&ModelQuery::default()).await.unwrap();
@@ -227,8 +231,10 @@ async fn model_batch_subscription_reconnect_and_flow() {
         .iter()
         .find(|i| i["id"] == json!(created.base_uri))
         .unwrap();
-    // Hydrated values come back as their literal strings.
-    assert_eq!(row["done"], json!("true"));
+    // The `true` round trip comes back as a bool too — both polarities of
+    // the declared boolean property stay typed end to end.
+    assert_eq!(row["done"], json!(true));
+    assert!(row["done"].is_boolean());
 
     // ── batch: writes invisible until commit ─────────────────────────────
     let batch = model.batch().await.unwrap();
