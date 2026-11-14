@@ -17,6 +17,7 @@ import type { AgentAddEntanglementProofsParams } from "./AgentAddEntanglementPro
 import type { AgentByDidParams } from "./AgentByDidParams";
 import type { AgentRemoveAppParams } from "./AgentRemoveAppParams";
 import type { AgentReply } from "./AgentReply";
+import type { AgentRevocationReachParams } from "./AgentRevocationReachParams";
 import type { AgentRevokeTokenParams } from "./AgentRevokeTokenParams";
 import type { AgentSignature } from "./AgentSignature";
 import type { AgentStatus } from "./AgentStatus";
@@ -149,6 +150,8 @@ import type { OpenLinkRequest } from "./OpenLinkRequest";
 import type { OpenOfferParams } from "./OpenOfferParams";
 import type { OverlayView } from "./OverlayView";
 import type { PermitCapabilityRequest } from "./PermitCapabilityRequest";
+import type { PersonCount } from "./PersonCount";
+import type { PersonCountQuery } from "./PersonCountQuery";
 import type { PerspectiveAddAutoProcessorParams } from "./PerspectiveAddAutoProcessorParams";
 import type { PerspectiveAddLinkExpressionParams } from "./PerspectiveAddLinkExpressionParams";
 import type { PerspectiveAddLinkParams } from "./PerspectiveAddLinkParams";
@@ -217,6 +220,7 @@ import type { RequestPosted } from "./RequestPosted";
 import type { RequestsParams } from "./RequestsParams";
 import type { ResetLogParams } from "./ResetLogParams";
 import type { ResolveParams } from "./ResolveParams";
+import type { RevocationReach } from "./RevocationReach";
 import type { RunAgentRequest } from "./RunAgentRequest";
 import type { RunInterpretationRequest } from "./RunInterpretationRequest";
 import type { RunInterpretationWithHarnessRequest } from "./RunInterpretationWithHarnessRequest";
@@ -317,6 +321,7 @@ export interface RpcMethods {
   "agent.permitCapability": { params: PermitCapabilityRequest; result: string };
   "agent.removeApp": { params: AgentRemoveAppParams; result: Array<Apps> };
   "agent.requestCapability": { params: RequestCapabilityRequest; result: string };
+  "agent.revocationReach": { params: AgentRevocationReachParams; result: Array<RevocationReach> };
   "agent.revokeToken": { params: AgentRevokeTokenParams; result: Array<Apps> };
   "agent.sign": { params: SignMessageRequest; result: AgentSignature };
   "agent.signSessionStatement": { params: SignSessionStatementParams; result: SignedKeyStatement };
@@ -416,6 +421,7 @@ export interface RpcMethods {
   "language.writeSettings": { params: LanguageWriteSettingsParams; result: boolean };
   "neighbourhood.addBot": { params: NeighbourhoodBotParams; result: null };
   "neighbourhood.addMember": { params: NeighbourhoodAddMemberParams; result: null };
+  "neighbourhood.countByPerson": { params: PersonCountQuery; result: PersonCount };
   "neighbourhood.create": { params: CreateNeighbourhoodParams; result: CreateNeighbourhoodResult };
   "neighbourhood.createInvite": { params: NeighbourhoodCreateInviteParams; result: CreatedInvite };
   "neighbourhood.hasTelepresence": { params: NeighbourhoodUuidParams; result: boolean };
@@ -592,6 +598,7 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "agent.getEntanglementProofs",
   "agent.getTrustedAgents",
   "agent.isLocked",
+  "agent.revocationReach",
   "agent.status",
   "ai.detectEndpoints",
   "ai.discoverModels",
@@ -630,6 +637,7 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "language.get",
   "language.meta",
   "language.source",
+  "neighbourhood.countByPerson",
   "neighbourhood.hasTelepresence",
   "neighbourhood.invites",
   "neighbourhood.linkLanguageChoice",

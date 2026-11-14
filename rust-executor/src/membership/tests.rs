@@ -75,6 +75,25 @@ impl Person {
         (Person { log, person }, bot)
     }
 
+    /// A person with a second standing device key, added at seq 1.
+    fn with_second_device(seed: u8) -> (Self, SigningKey) {
+        let mut log = TestLog::new(seed);
+        let second = SigningKey::from_bytes(&[seed.wrapping_add(50); 32]);
+        let chain = log.chain();
+        let key = DeviceKey {
+            id: chain.state().next_device_id(),
+            sign: second.key(),
+            enc: ad4m_identity_core::encode_x25519_multikey(&[seed.wrapping_add(50); 32]),
+            life: KeyLife::Standing,
+        };
+        let mut event = add_unsigned(&chain, key, "offer", "co-sig").unwrap();
+        cosign(&mut event, "m0", &log.master).unwrap();
+        log.events.push(event);
+        publish(&log);
+        let person = ad4m_identity_core::did_of(&log.scid());
+        (Person { log, person }, second)
+    }
+
     fn says(&self, source: &str, predicate: &str, target: &str, at: u64) -> LinkExpression {
         signed(
             &self.log.device,
@@ -827,4 +846,415 @@ async fn a_key_is_admitted_while_its_person_is_a_member() {
         admits(did_key(&bea.log.device)).await,
         MembershipAdmission::refused(JoinRefusalReason::NotAMember)
     );
+}
+
+const POLL: &str = "ad4m://poll";
+const VOTE: &str = "ad4m://vote";
+
+/// The votes on [`POLL`], counted once per person at `at` (step; now without it).
+fn tally(perspective: &PerspectiveInstance, at: Option<u64>) -> PersonCount {
+    let links = perspective
+        .sparql_store
+        .query_links(
+            &crate::perspectives::sparql_store::EvalStop::none(),
+            Some(POLL),
+            Some(VOTE),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    count_by_person(
+        &links,
+        perspective.sparql_store.membership(),
+        at.map(|step| time(step) + 500),
+    )
+}
+
+fn targets(pairs: &[(&str, u32)]) -> std::collections::BTreeMap<String, u32> {
+    pairs.iter().map(|(t, n)| (t.to_string(), *n)).collect()
+}
+
+/// A9: a person who votes from two device keys counts once, for their latest vote.
+#[tokio::test]
+async fn two_keys_of_one_person_count_once() {
+    let perspective = setup().await;
+    let ada = Person::new(210);
+    let (bea, second) = Person::with_second_device(211);
+    let cyd = Person::new(212);
+    write(&perspective, rules(&ada, OPEN)).await.unwrap();
+    for person in [&bea, &cyd] {
+        write(
+            &perspective,
+            person.says(&person.person, predicate::MEMBER, SPACE, 1),
+        )
+        .await
+        .unwrap();
+    }
+    write(&perspective, bea.says(POLL, VOTE, "ad4m://opt-a", 2))
+        .await
+        .unwrap();
+    write(
+        &perspective,
+        signed(&second, POLL, VOTE, "ad4m://opt-b", 3, bea.anchor()),
+    )
+    .await
+    .unwrap();
+    write(&perspective, cyd.says(POLL, VOTE, "ad4m://opt-a", 3))
+        .await
+        .unwrap();
+
+    let count = tally(&perspective, None);
+    assert_eq!(
+        count.by_target,
+        targets(&[("ad4m://opt-a", 1), ("ad4m://opt-b", 1)])
+    );
+    assert_eq!(count.counted, 2);
+    assert_eq!(count.eligible, 3, "Ada, Bea and Cyd");
+    assert_eq!(count.skipped, SkipCounts::default());
+
+    // At step 2 only Bea's first vote was cast.
+    let then = tally(&perspective, Some(2));
+    assert_eq!(then.by_target, targets(&[("ad4m://opt-a", 1)]));
+    assert_eq!(then.counted, 1);
+}
+
+/// A9: a bot's vote stays shown but is not counted: it goes to `bots`.
+#[tokio::test]
+async fn a_bots_vote_is_skipped_into_bots() {
+    let perspective = setup().await;
+    let ada = Person::new(213);
+    let (bea, bot) = Person::with_bot(214);
+    write(&perspective, rules(&ada, OPEN)).await.unwrap();
+    write(
+        &perspective,
+        bea.says(&bea.person, predicate::MEMBER, SPACE, 1),
+    )
+    .await
+    .unwrap();
+    let [proposed, approved] = links::add_bot(&did_key(&bot), &bea.person);
+    let diff = PerspectiveDiff::from_additions(vec![
+        bea.says(&proposed.source, predicate::BOT, &proposed.target, 2),
+        bea.says(
+            &approved.source,
+            predicate::APPROVED_BY,
+            &approved.target,
+            2,
+        ),
+    ]);
+    perspective.persist_link_diff(&diff, false).await.unwrap();
+    write(
+        &perspective,
+        signed(&bot, POLL, VOTE, "ad4m://opt-a", 3, bea.anchor()),
+    )
+    .await
+    .unwrap();
+    write(&perspective, bea.says(POLL, VOTE, "ad4m://opt-b", 3))
+        .await
+        .unwrap();
+    assert_eq!(
+        verdict_of(&perspective, "ad4m://opt-a"),
+        Some(LinkVerdict::Valid),
+        "the bot's vote is shown"
+    );
+
+    let count = tally(&perspective, None);
+    assert_eq!(count.by_target, targets(&[("ad4m://opt-b", 1)]));
+    assert_eq!(count.counted, 1);
+    assert_eq!(count.skipped.bots, 1);
+    assert_eq!(count.eligible, 2, "Ada and Bea; the bot is not a person");
+}
+
+/// A9: a member's vote counts until an admin removes them; then it moves to `nonMembers`.
+/// Counted at a time before the vote, it is left out, and both members were eligible then.
+#[tokio::test]
+async fn a_removed_members_vote_moves_into_non_members() {
+    let perspective = setup().await;
+    let ada = Person::new(215);
+    let bea = Person::new(216);
+    write(&perspective, rules(&ada, OPEN)).await.unwrap();
+    write(
+        &perspective,
+        bea.says(&bea.person, predicate::MEMBER, SPACE, 1),
+    )
+    .await
+    .unwrap();
+    write(&perspective, bea.says(POLL, VOTE, "ad4m://opt-a", 2))
+        .await
+        .unwrap();
+    let count = tally(&perspective, None);
+    assert_eq!(count.by_target, targets(&[("ad4m://opt-a", 1)]));
+    assert_eq!((count.counted, count.eligible), (1, 2));
+
+    write(
+        &perspective,
+        ada.says(&bea.person, predicate::REMOVED, SPACE, 3),
+    )
+    .await
+    .unwrap();
+    let count = tally(&perspective, None);
+    assert!(count.by_target.is_empty());
+    assert_eq!(count.counted, 0);
+    assert_eq!(count.eligible, 1, "only Ada");
+    assert_eq!(
+        count.skipped,
+        SkipCounts {
+            non_members: 1,
+            ..SkipCounts::default()
+        }
+    );
+
+    let before = tally(&perspective, Some(1));
+    assert_eq!(before.counted, 0);
+    assert_eq!(before.skipped, SkipCounts::default());
+    assert_eq!(before.eligible, 2, "Bea was a member at step 1");
+}
+
+/// A space registered with the executor: a neighbourhood (`shared`) or a private perspective,
+/// named `name`. Unregistered when dropped.
+struct Space {
+    perspective: PerspectiveInstance,
+}
+
+impl Space {
+    async fn open(name: &str, shared: bool) -> Self {
+        let uuid = uuid::Uuid::new_v4().to_string();
+        let perspective = PerspectiveInstance::new(
+            PerspectiveHandle {
+                uuid: uuid.clone(),
+                name: Some(name.to_string()),
+                shared_url: shared.then(|| format!("neighbourhood://{uuid}")),
+                neighbourhood: None,
+                state: PerspectiveState::Synced,
+                owners: None,
+            },
+            None,
+        );
+        perspective
+            .ensure_prolog_engine_pool()
+            .await
+            .expect("prolog engine pool");
+        crate::perspectives::register_perspective(uuid, perspective.clone());
+        Space { perspective }
+    }
+
+    async fn uuid(&self) -> String {
+        self.perspective.persisted.lock().await.uuid.clone()
+    }
+}
+
+impl Drop for Space {
+    fn drop(&mut self) {
+        if let Ok(handle) = self.perspective.persisted.try_lock() {
+            crate::perspectives::unregister_perspective(&handle.uuid);
+        }
+    }
+}
+
+/// The main agent speaks for `person` from now on.
+fn bind_main_agent(person: &Person) {
+    let did = crate::agent::did_for_context(&crate::agent::AgentContext::main_agent()).unwrap();
+    crate::db_backend::db_backend()
+        .set_agent_identity(&did, &person.log.scid(), 1)
+        .unwrap();
+}
+
+/// Bea's device key revoked in her log, as the key cache reports it.
+fn revoke_device(person: &mut Person) -> crate::identity::verdict::VerdictChange {
+    person.log.revoke_d1();
+    publish(&person.log);
+    crate::identity::verdict::VerdictChange {
+        key: person.log.device.key(),
+        scid: person.log.scid(),
+        verdict: crate::identity::verdict::KeyVerdict::Revoked,
+    }
+}
+
+fn now_ms() -> u64 {
+    chrono::Utc::now().timestamp_millis() as u64
+}
+
+/// A9: a revoked device key gets one row per space its person holds here: a neighbourhood
+/// the main agent (bound to the person) owns, of which, if governed, the person is a member.
+/// A private perspective, and a governed space the person is not a member of, get none. A
+/// space whose link language never reports (Holochain) keeps both times empty.
+#[tokio::test]
+async fn a_revocation_records_a_row_per_held_space() {
+    let _ = setup().await;
+    let ada = Person::new(217);
+    let mut bea = Person::new(218);
+    let garden = Space::open("Garden", true).await;
+    let closed = Space::open("Closed", true).await;
+    let private = Space::open("Private", false).await;
+    write(&garden.perspective, rules(&ada, OPEN)).await.unwrap();
+    write(
+        &garden.perspective,
+        bea.says(&bea.person, predicate::MEMBER, SPACE, 1),
+    )
+    .await
+    .unwrap();
+    write(&closed.perspective, rules(&ada, OPEN)).await.unwrap();
+    bind_main_agent(&bea);
+
+    let held = reach::held_spaces(&bea.log.scid()).await;
+    let garden_uuid = garden.uuid().await;
+    assert!(held.contains(&(garden_uuid.clone(), "Garden".to_string())));
+    let (closed_uuid, private_uuid) = (closed.uuid().await, private.uuid().await);
+    assert!(!held.iter().any(|(uuid, _)| *uuid == closed_uuid));
+    assert!(!held.iter().any(|(uuid, _)| *uuid == private_uuid));
+
+    let change = revoke_device(&mut bea);
+    let now = now_ms();
+    assert!(reach::record_revocation(&change, now).await.unwrap());
+    // The cache fires it again after a restart: recorded once.
+    assert!(!reach::record_revocation(&change, now + 1).await.unwrap());
+    let did_key = did_key(&bea.log.device);
+    let rows = reach::reach_of(&did_key, now).unwrap();
+    let garden_row = rows
+        .iter()
+        .find(|r| r.perspective_uuid == garden_uuid)
+        .expect("a row for the garden");
+    assert_eq!(
+        *garden_row,
+        reach::RevocationReach {
+            did_key: did_key.clone(),
+            perspective_uuid: garden_uuid,
+            name: "Garden".into(),
+            dropped_at: None,
+            rotated_at: None,
+        }
+    );
+    assert_eq!(rows.len(), held.len());
+
+    // A master key's change, or one that is not a revocation, records nothing.
+    let other = crate::identity::verdict::VerdictChange {
+        key: ada.log.device.key(),
+        scid: ada.log.scid(),
+        verdict: crate::identity::verdict::KeyVerdict::Expired,
+    };
+    assert!(!reach::record_revocation(&other, now).await.unwrap());
+    let master = crate::identity::verdict::VerdictChange {
+        key: bea.log.master.key(),
+        scid: bea.log.scid(),
+        verdict: crate::identity::verdict::KeyVerdict::Revoked,
+    };
+    assert!(!reach::record_revocation(&master, now).await.unwrap());
+}
+
+/// A9: the space's link language reports the drop and the rotation (`roomKeyEvent`): each
+/// time lands on the key's row once.
+#[tokio::test]
+async fn a_room_key_event_fills_the_times() {
+    let _ = setup().await;
+    let ada = Person::new(219);
+    let mut bea = Person::new(220);
+    let garden = Space::open("Garden", true).await;
+    write(&garden.perspective, rules(&ada, OPEN)).await.unwrap();
+    write(
+        &garden.perspective,
+        bea.says(&bea.person, predicate::MEMBER, SPACE, 1),
+    )
+    .await
+    .unwrap();
+    bind_main_agent(&bea);
+    let change = revoke_device(&mut bea);
+    let did_key = did_key(&bea.log.device);
+    let uuid = garden.uuid().await;
+    assert!(reach::record_revocation(&change, now_ms()).await.unwrap());
+
+    let before = now_ms();
+    garden
+        .perspective
+        .publish_room_key_event(RoomKeyEvent {
+            kind: RoomKeyEventKind::Dropped,
+            removed_keys: vec![did_key.clone()],
+            version: None,
+        })
+        .await;
+    garden
+        .perspective
+        .publish_room_key_event(RoomKeyEvent {
+            kind: RoomKeyEventKind::Rotated,
+            removed_keys: vec![did_key.clone(), "did:key:zSomeoneElse".into()],
+            version: Some(2),
+        })
+        .await;
+    let row = reach::reach_of(&did_key, now_ms())
+        .unwrap()
+        .into_iter()
+        .find(|r| r.perspective_uuid == uuid)
+        .expect("the garden's row");
+    let dropped = row.dropped_at.clone().expect("dropped");
+    let rotated = row.rotated_at.clone().expect("rotated");
+    assert!(ms_of(&dropped).unwrap() >= before);
+    assert!(ms_of(&rotated).unwrap() >= ms_of(&dropped).unwrap());
+
+    // A second drop keeps the first time.
+    garden
+        .perspective
+        .publish_room_key_event(RoomKeyEvent {
+            kind: RoomKeyEventKind::Dropped,
+            removed_keys: vec![did_key.clone()],
+            version: None,
+        })
+        .await;
+    let again = reach::reach_of(&did_key, now_ms())
+        .unwrap()
+        .into_iter()
+        .find(|r| r.perspective_uuid == uuid)
+        .unwrap();
+    assert_eq!(again.dropped_at, Some(dropped));
+}
+
+/// A9: rows live 30 days: older ones are not read, and the prune deletes them.
+#[tokio::test]
+async fn rows_older_than_30_days_are_pruned() {
+    let _ = setup().await;
+    let ada = Person::new(221);
+    // Two device keys of Bea's, revoked 31 and 29 days ago (an agent speaks for one person
+    // for good, so one person).
+    let (mut bea, second) = Person::with_second_device(222);
+    let garden = Space::open("Garden", true).await;
+    write(&garden.perspective, rules(&ada, OPEN)).await.unwrap();
+    write(
+        &garden.perspective,
+        bea.says(&bea.person, predicate::MEMBER, SPACE, 1),
+    )
+    .await
+    .unwrap();
+    let now = now_ms();
+    let day = 24 * 60 * 60 * 1000;
+    bind_main_agent(&bea);
+    let old_key = did_key(&bea.log.device);
+    let old = revoke_device(&mut bea);
+    assert!(reach::record_revocation(&old, now - 31 * day)
+        .await
+        .unwrap());
+    let recent = crate::identity::verdict::VerdictChange {
+        key: second.key(),
+        scid: bea.log.scid(),
+        verdict: crate::identity::verdict::KeyVerdict::Revoked,
+    };
+    assert!(reach::record_revocation(&recent, now - 29 * day)
+        .await
+        .unwrap());
+
+    let recent_key = did_key(&second);
+    let uuid = garden.uuid().await;
+    let in_garden = |key: &str, at: u64| {
+        reach::reach_of(key, at)
+            .unwrap()
+            .iter()
+            .any(|row| row.perspective_uuid == uuid)
+    };
+    assert!(!in_garden(&old_key, now));
+    assert!(
+        in_garden(&old_key, now - 2 * day),
+        "read within 30 days of its record, the old row is there"
+    );
+    assert!(in_garden(&recent_key, now));
+    assert!(reach::prune(now).unwrap() >= 1);
+    assert!(!in_garden(&old_key, now - 2 * day), "pruned");
+    assert!(in_garden(&recent_key, now));
 }

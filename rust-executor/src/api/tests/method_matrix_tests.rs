@@ -273,6 +273,14 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
     ("agent.byDid", || json!({ "did": "did:key:z6Mk" })),
     ("agent.byDIDs", || json!({ "dids": ["did:key:z6Mk"] })),
     (
+        "agent.revocationReach",
+        || json!({ "didKey": "did:key:z6Mk" }),
+    ),
+    (
+        "neighbourhood.countByPerson",
+        || json!({ "perspectiveUuid": TARGET, "predicate": "ad4m://vote" }),
+    ),
+    (
         "agent.import",
         || json!({ "did": "did:key:z6Mk", "didDocument": "{}", "keystore": "k", "passphrase": "p" }),
     ),

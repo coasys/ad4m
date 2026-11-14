@@ -361,6 +361,7 @@ fn the_guard_table_names_the_param_an_owner_guard_reads() {
         ("ai.sessionSend", "AiSession sessionId"),
         ("ai.sessionCancel", "AiSession sessionId"),
         ("agent.permitCapability", "Request auth(JSON).requestId"),
+        ("neighbourhood.countByPerson", "Perspective perspectiveUuid"),
         (
             "neighbourhood.publish",
             "Perspective perspectiveUuid or perspectiveUUID",

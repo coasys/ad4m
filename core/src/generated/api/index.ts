@@ -209,7 +209,8 @@ export type { SignSessionStatementParams } from "./SignSessionStatementParams";
 export type { SignedKeyStatement } from "./SignedKeyStatement";
 export type { UnsignedKeyStatement } from "./UnsignedKeyStatement";
 // Spaces by person: neighbourhood.create, neighbourhood.linkLanguageChoice, runtime.linkServers,
-// spaces.list.
+// spaces.list, neighbourhood.countByPerson and agent.revocationReach.
+export type { AgentRevocationReachParams } from "./AgentRevocationReachParams";
 export type { ChoiceKind } from "./ChoiceKind";
 export type { CreateNeighbourhoodParams } from "./CreateNeighbourhoodParams";
 export type { CreateNeighbourhoodResult } from "./CreateNeighbourhoodResult";
@@ -221,6 +222,10 @@ export type { RulesInput } from "./RulesInput";
 export type { SpaceAddRule } from "./SpaceAddRule";
 export type { SpaceHolding } from "./SpaceHolding";
 export type { SyncChoice } from "./SyncChoice";
+export type { PersonCount } from "./PersonCount";
+export type { PersonCountQuery } from "./PersonCountQuery";
+export type { RevocationReach } from "./RevocationReach";
+export type { SkipCounts } from "./SkipCounts";
 export { READ_METHODS, LONG_METHODS, OPENS_METHODS } from "./RpcMethods";
 export type { RpcMethods, RpcMethod } from "./RpcMethods";
 export { SCOPED_EVENTS } from "./Events";

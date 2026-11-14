@@ -30,6 +30,7 @@ pub(crate) mod grants;
 mod identity;
 mod model_migration;
 mod rekey;
+mod revocation_reach;
 pub(crate) mod sealed;
 mod spaces;
 mod tasks;
@@ -40,6 +41,7 @@ pub use grants::{GrantKeyRow, GrantRow};
 pub(crate) use identity::operator_record_in;
 pub(crate) use identity::set_operator_record_if_empty_in;
 pub use identity::{JoinAccept, JoinAdded, JoinCancel, JoinRow, OperatorRecordRow, OperatorSetBy};
+pub use revocation_reach::{ReachMark, ReachRow};
 
 #[derive(Serialize, Deserialize)]
 struct LinkSchema {
@@ -474,6 +476,8 @@ impl Ad4mDb {
         Self::create_bot_tables(&conn)?;
         // The link-language choice of each space: see spaces::.
         Self::create_space_tables(&conn)?;
+        // The spaces a revoked key reached: see revocation_reach::.
+        Self::create_revocation_reach_tables(&conn)?;
 
         conn.execute(
             "CREATE TABLE IF NOT EXISTS email_verifications (

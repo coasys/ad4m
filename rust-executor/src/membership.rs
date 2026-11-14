@@ -770,5 +770,9 @@ pub async fn membership_admits(
     )
 }
 
+mod count;
+pub mod reach;
+pub use count::{count_by_person, PersonCount, PersonCountQuery, SkipCounts};
+
 #[cfg(test)]
 mod tests;
