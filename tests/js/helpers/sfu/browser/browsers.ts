@@ -177,7 +177,7 @@ export function receiveProblems(before: PageReport | undefined, now: PageReport,
   if (!(b.audioPackets > (a?.audioPackets ?? 0))) problems.push(`audio packets from ${short(did)} not growing (${a?.audioPackets ?? 0} → ${b.audioPackets})`);
   if (!(b.videoPackets > (a?.videoPackets ?? 0))) problems.push(`video packets from ${short(did)} not growing (${a?.videoPackets ?? 0} → ${b.videoPackets})`);
   if (!(b.framesDecoded > (a?.framesDecoded ?? 0))) problems.push(`no new decoded frames from ${short(did)} (${a?.framesDecoded ?? 0} → ${b.framesDecoded})`);
-  if (!(b.audioPeak > AUDIBLE_PEAK)) problems.push(`audio from ${short(did)} is silent (peak ${b.audioPeak.toFixed(4)})`);
+  if (!(b.audioPeak > AUDIBLE_PEAK)) problems.push(`audio from ${short(did)} is silent (peak ${b.audioPeak.toFixed(4)}, ${b.audioMeter})`);
   if (b.luma !== null && !(b.luma > NOT_BLACK_LUMA)) problems.push(`video from ${short(did)} is black (luma ${b.luma.toFixed(1)})`);
   return problems;
 }
