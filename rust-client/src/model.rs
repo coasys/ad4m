@@ -354,7 +354,15 @@ impl Model {
         // open's buffer emit on `results()` as start resolves, and a
         // broadcast send reaches only receivers that already exist (F4).
         let rx = live.results();
-        let initial = live.start().await?;
+        let initial = match live.start().await {
+            Ok(v) => v,
+            Err(e) => {
+                // A failed open must not leave the installed watch, the
+                // listener and the reconnect registration running (F5).
+                live.dispose().await;
+                return Err(e);
+            }
+        };
         Ok(ModelSubscription {
             live,
             rx,
@@ -608,6 +616,18 @@ impl ModelSubscription {
     }
 }
 
+impl Drop for ModelSubscription {
+    /// Dropping without `dispose()` still tears the subscription down —
+    /// executor-side, and this client's watch and listener (F5). Async
+    /// teardown needs a runtime; off one, only `dispose().await` cleans up.
+    fn drop(&mut self) {
+        if let Ok(rt) = tokio::runtime::Handle::try_current() {
+            let live = self.live.clone();
+            rt.spawn(async move { live.dispose().await });
+        }
+    }
+}
+
 /// `{ instances, totalCount }` out of a raw subscription result — the parse
 /// TS `parseModelResult` does.
 fn parse_model_result(raw: &Value) -> ModelResult {
@@ -661,6 +681,86 @@ mod tests {
     use crate::subscription::{apply_update, QueryUpdate};
     use serde_json::json;
     use std::time::Duration;
+
+    /// F5: dropping the owned subscription must clean it up executor-side —
+    /// an abandoned stream leaves a live subscription (and the interest it
+    /// re-registers on every reconnect) behind.
+    #[tokio::test]
+    async fn dropping_the_subscription_disposes_it_executor_side() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let ws = Arc::new(WsRpcClient::connect(fake.url(), "").await.unwrap());
+        let model = Model::new(&ws, "p1", "Recipe");
+        let subscribe = tokio::spawn(async move { model.subscribe(&ModelQuery::default()).await });
+        for _ in 0..2 {
+            let req = fake.next_request().await;
+            match req["type"].as_str() {
+                Some("events.watch") => fake.reply(&req, json!(true)).await,
+                _ => {
+                    fake.reply(
+                        &req,
+                        json!({"subscriptionId": "s1", "result": {"instances": [], "totalCount": 0}, "revision": 0}),
+                    )
+                    .await
+                }
+            }
+        }
+        let sub = subscribe.await.unwrap().unwrap();
+        drop(sub);
+        let disposed = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let req = fake.next_request().await;
+                if req["type"] == "perspective.disposeQuery" {
+                    return req;
+                }
+                // The spawned dispose awaits its unwatch reply.
+                fake.reply(&req, json!(true)).await;
+            }
+        })
+        .await
+        .expect("dropping the subscription must send perspective.disposeQuery");
+        assert_eq!(disposed["params"]["subscriptionId"], "s1");
+        ws.close().await;
+    }
+
+    /// F5: a subscribe that fails must not leave the installed watch,
+    /// listener and reconnect registration running — the live query it
+    /// built is dropped with the error and would otherwise stay live.
+    #[tokio::test]
+    async fn a_failed_subscribe_does_not_leave_the_watch_behind() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let ws = Arc::new(WsRpcClient::connect(fake.url(), "").await.unwrap());
+        let model = Model::new(&ws, "p1", "Recipe");
+        let subscribe = tokio::spawn(async move { model.subscribe(&ModelQuery::default()).await });
+        let sub_req = loop {
+            let req = fake.next_request().await;
+            if req["type"] == "events.watch" {
+                fake.reply(&req, json!(true)).await;
+            } else {
+                break req;
+            }
+        };
+        fake.reply_error(&sub_req, 500, "no such class").await;
+        // The failed open releases its minted id (a disposeQuery), then the
+        // cleanup unwatch empties the union. The dispose awaits that
+        // unwatch's reply, so `subscribe` only resolves once we answer.
+        let unwatch = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let req = fake.next_request().await;
+                if req["type"] == "events.watch" {
+                    fake.reply(&req, json!(true)).await;
+                    return req;
+                }
+                fake.reply(&req, json!(true)).await;
+            }
+        })
+        .await
+        .expect("a failed subscribe must remove its watch");
+        assert_eq!(unwatch["params"], json!({}));
+        assert!(subscribe.await.unwrap().is_err());
+        ws.close().await;
+    }
 
     /// F4: an update the executor publishes while the subscribe call is
     /// outstanding must reach the subscriber. The change drains inside

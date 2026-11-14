@@ -190,13 +190,18 @@ struct Inner {
     open: OpenFn,
     state: Mutex<State>,
     /// Every result after the first (the first `start` returns it instead).
-    results: broadcast::Sender<Value>,
+    /// `None` once the query terminated — dropping the sender is what ends
+    /// every receiver's `recv()` (F5).
+    results: std::sync::Mutex<Option<broadcast::Sender<Value>>>,
     watch_key: String,
     /// The `events.watch` install — run once, and awaited by `start`
     /// before the subscribe call goes out, so the executor's event filter
     /// is in place before the subscription it feeds exists (F4).
     watch_ready: tokio::sync::OnceCell<()>,
     listener: std::sync::Mutex<Option<JoinHandle<()>>>,
+    /// The detached `on_reconnect` registration — aborted on dispose so a
+    /// dispose racing it can never leave a callback behind (F5).
+    reg_task: std::sync::Mutex<Option<JoinHandle<()>>>,
     reconnect_cb: std::sync::Mutex<Option<u64>>,
 }
 
@@ -231,31 +236,44 @@ impl LiveQuery {
                 buffer: None,
                 reopening: false,
             }),
-            results,
+            results: std::sync::Mutex::new(Some(results)),
             watch_key,
             watch_ready: tokio::sync::OnceCell::new(),
             listener: std::sync::Mutex::new(None),
+            reg_task: std::sync::Mutex::new(None),
             reconnect_cb: std::sync::Mutex::new(None),
         });
 
         // Event listener — filters update events, feeds `receive` IN ORDER:
         // the listener awaits each receive, so a resync or a revision gap
-        // is decided before the next event is read.
+        // is decided before the next event is read. It also watches the
+        // client's terminal signal: a permanently closed socket ends this
+        // stream too (F5).
         let inner2 = inner.clone();
         let mut events = inner.ws.events();
+        let mut closed = inner.ws.closed();
         let listener = tokio::spawn(async move {
             loop {
-                match events.recv().await {
-                    Ok(event) => {
-                        if let Some(update) = QueryUpdate::from_event(&event) {
-                            inner2.receive(update).await;
+                tokio::select! {
+                    event = events.recv() => match event {
+                        Ok(event) => {
+                            if let Some(update) = QueryUpdate::from_event(&event) {
+                                inner2.receive(update).await;
+                            }
                         }
+                        Err(broadcast::error::RecvError::Lagged(_)) => {
+                            // Missed event(s): every live query must resync.
+                            inner2.resync().await;
+                        }
+                        Err(broadcast::error::RecvError::Closed) => return,
+                    },
+                    _ = closed.changed() => {
+                        // The socket is gone for good — remote teardown is
+                        // impossible and the executor already dropped the
+                        // socket's subscriptions.
+                        inner2.terminate_stream().await;
+                        return;
                     }
-                    Err(broadcast::error::RecvError::Lagged(_)) => {
-                        // Missed event(s): every live query must resync.
-                        inner2.resync().await;
-                    }
-                    Err(broadcast::error::RecvError::Closed) => return,
                 }
             }
         });
@@ -264,17 +282,25 @@ impl LiveQuery {
         // Reconnect → re-open (the executor's subscriptions died with the old
         // socket, so `resyncSubscription` cannot help: a fresh subscribe).
         let ws2 = inner.ws.clone();
+        let ws3 = inner.ws.clone();
         let inner5 = inner.clone();
         let inner6 = inner.clone();
-        tokio::spawn(async move {
+        let reg = tokio::spawn(async move {
             let cb_id = ws2
                 .on_reconnect(move || {
                     let inner7 = inner6.clone();
                     tokio::spawn(async move { inner7.reopen().await });
                 })
                 .await;
-            *inner5.reconnect_cb.lock().unwrap() = Some(cb_id);
+            // A dispose landing while the registration was in flight must
+            // not park a callback nobody will ever remove (F5).
+            if inner5.state.lock().await.disposed {
+                let _ = ws3.remove_on_reconnect(cb_id).await;
+            } else {
+                *inner5.reconnect_cb.lock().unwrap() = Some(cb_id);
+            }
         });
+        *inner.reg_task.lock().unwrap() = Some(reg);
 
         Self { inner }
     }
@@ -295,9 +321,13 @@ impl LiveQuery {
     }
 
     /// Every result after the initial one (resyncs and re-opens included —
-    /// always the full current result).
+    /// always the full current result). A terminated query yields a
+    /// receiver that reports `Closed` at once.
     pub fn results(&self) -> broadcast::Receiver<Value> {
-        self.inner.results.subscribe()
+        match self.inner.results.lock().unwrap().as_ref() {
+            Some(tx) => tx.subscribe(),
+            None => broadcast::channel(1).1,
+        }
     }
 
     /// Install this query's `query-subscription-update` interest — once.
@@ -377,6 +407,11 @@ impl LiveQuery {
         if let Some(h) = self.inner.listener.lock().unwrap().take() {
             h.abort();
         }
+        if let Some(h) = self.inner.reg_task.lock().unwrap().take() {
+            h.abort();
+        }
+        // End every receiver's `recv()` — a disposed query's stream closes.
+        self.inner.results.lock().unwrap().take();
         let cb = self.inner.reconnect_cb.lock().unwrap().take();
         if let Some(cb) = cb {
             self.inner.ws.remove_on_reconnect(cb).await;
@@ -392,6 +427,25 @@ impl LiveQuery {
 }
 
 impl Inner {
+    /// Terminal local teardown for a permanently dead socket: mark
+    /// disposed, cancel the pending registration, end the results
+    /// channel. Remote teardown is impossible — the executor dropped the
+    /// socket's subscriptions with it. The listener calls this on its own
+    /// way out, so it deliberately doesn't touch the listener handle.
+    async fn terminate_stream(self: &Arc<Self>) {
+        {
+            let mut s = self.state.lock().await;
+            s.disposed = true;
+            s.generation += 1;
+            s.buffer = None;
+        }
+        if let Some(h) = self.reg_task.lock().unwrap().take() {
+            h.abort();
+        }
+        // Dropping the sender ends every receiver's `recv()` (F5).
+        self.results.lock().unwrap().take();
+    }
+
     /// Take `result` at `revision`, then apply the updates buffered meanwhile.
     /// Takes the state lock guard itself — released before the buffered
     /// updates drain, since `receive` re-acquires it.
@@ -405,7 +459,9 @@ impl Inner {
         state.result = Some(result.clone());
         let buffered = state.buffer.take().unwrap_or_default();
         if state.started {
-            let _ = self.results.send(result);
+            if let Some(tx) = self.results.lock().unwrap().as_ref() {
+                let _ = tx.send(result);
+            }
         }
         state.started = true;
         let this = self.clone();
@@ -455,7 +511,9 @@ impl Inner {
         };
         state.revision = revision;
         state.result = Some(result.clone());
-        let _ = self.results.send(result);
+        if let Some(tx) = self.results.lock().unwrap().as_ref() {
+            let _ = tx.send(result);
+        }
     }
 
     /// Mark the query as resyncing (updates arriving meanwhile buffer) and
@@ -640,6 +698,91 @@ mod tests {
         assert!((500..=1000).contains(&d1));
         let d_big = reopen_delay(20);
         assert!((30_000..=60_000).contains(&d_big));
+    }
+
+    /// Drive one LiveQuery through watch+open against the fake; returns the
+    /// query once `start` has resolved.
+    async fn started_query(
+        fake: &crate::testkit::FakeExecutor,
+        client: &Arc<WsRpcClient>,
+    ) -> LiveQuery {
+        let open: OpenFn = {
+            let ws = client.clone();
+            Arc::new(move || {
+                let ws = ws.clone();
+                Box::pin(async move {
+                    ws.call(
+                        "perspective.subscribeQuery",
+                        serde_json::json!({"uuid": "p1", "subscriptionId": "s1"}),
+                    )
+                    .await
+                    .map(|v| Subscribed {
+                        subscription_id: "s1".into(),
+                        result: v,
+                        revision: 0,
+                    })
+                })
+            })
+        };
+        let query = LiveQuery::new(client.clone(), "p1", open);
+        let q = query.clone();
+        let start = tokio::spawn(async move { q.start().await });
+        for _ in 0..2 {
+            let req = fake.next_request().await;
+            match req["type"].as_str() {
+                Some("events.watch") => fake.reply(&req, serde_json::json!(true)).await,
+                _ => {
+                    fake.reply(&req, serde_json::json!({"result": [], "revision": 0}))
+                        .await
+                }
+            }
+        }
+        start.await.unwrap().unwrap();
+        query
+    }
+
+    /// F5: `dispose` must end the stream — after the buffer drains,
+    /// `rx.recv()` reports `Closed`, not another endless wait.
+    #[tokio::test]
+    async fn dispose_ends_the_results_stream() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let client = Arc::new(WsRpcClient::connect(fake.url(), "").await.unwrap());
+        let query = started_query(&fake, &client).await;
+        let mut rx = query.results();
+
+        let q = query.clone();
+        let dispose = tokio::spawn(async move { q.dispose().await });
+        // dispose awaits the unwatch reply — answer every request it sends.
+        for _ in 0..2 {
+            let req = fake.next_request().await;
+            fake.reply(&req, serde_json::json!(true)).await;
+        }
+        dispose.await.unwrap();
+        match tokio::time::timeout(Duration::from_secs(1), rx.recv()).await {
+            Ok(Err(broadcast::error::RecvError::Closed)) => {}
+            other => panic!("a disposed query's stream must close, got {other:?}"),
+        }
+        client.close().await;
+    }
+
+    /// F5: closing the client for good ends every live query's stream —
+    /// the executor dropped the socket's subscriptions, and waiting
+    /// forever for events that can no longer arrive is a leak, not
+    /// patience.
+    #[tokio::test]
+    async fn a_permanently_closed_socket_ends_the_results_stream() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let client = Arc::new(WsRpcClient::connect(fake.url(), "").await.unwrap());
+        let query = started_query(&fake, &client).await;
+        let mut rx = query.results();
+
+        client.close().await;
+        match tokio::time::timeout(Duration::from_secs(1), rx.recv()).await {
+            Ok(Err(broadcast::error::RecvError::Closed)) => {}
+            other => panic!("a closed socket must end its live queries, got {other:?}"),
+        }
     }
 
     /// F4: the subscribe call must not reach the executor while the

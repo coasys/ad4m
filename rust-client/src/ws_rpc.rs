@@ -168,6 +168,10 @@ struct Shared {
     watch_flush: Mutex<()>,
     on_reconnect: Mutex<Vec<(u64, ReconnectCb)>>,
     closed: AtomicBool,
+    /// Terminal signal — `true` once `close()` ran or auth was refused.
+    /// Live queries end their streams on it; plain disconnects don't set
+    /// it (those reconnect).
+    closed_tx: watch::Sender<bool>,
     /// Auth refusal (close 1008) — do not reconnect, mirror TS.
     auth_failed: AtomicBool,
     reader: Mutex<Option<JoinHandle<()>>>,
@@ -254,6 +258,7 @@ impl WsRpcClient {
 
         let (events_tx, _) = broadcast::channel::<Value>(512);
         let (connected_tx, _) = watch::channel(true);
+        let (closed_tx, _) = watch::channel(false);
 
         let shared = Arc::new(Shared {
             url: url.clone(),
@@ -265,6 +270,7 @@ impl WsRpcClient {
             watch_flush: Mutex::new(()),
             on_reconnect: Mutex::new(Vec::new()),
             closed: AtomicBool::new(false),
+            closed_tx,
             auth_failed: AtomicBool::new(false),
             reader: Mutex::new(None),
             supervisor: Mutex::new(None),
@@ -346,6 +352,8 @@ impl WsRpcClient {
 
             if auth_failed {
                 shared.auth_failed.store(true, Ordering::SeqCst);
+                // Terminal, like `close`: no socket will ever come back.
+                shared.closed_tx.send_replace(true);
             }
             Self::handle_disconnect(&shared, false).await;
         })
@@ -573,6 +581,12 @@ impl WsRpcClient {
         *self.shared.connected.borrow()
     }
 
+    /// Permanent-close signal: `true` once `close()` ran or the executor
+    /// refused auth. Live queries end their streams on it.
+    pub(crate) fn closed(&self) -> watch::Receiver<bool> {
+        self.shared.closed_tx.subscribe()
+    }
+
     /// The raw server-push event stream (before any `events.watch` filter —
     /// the executor only sends what a watched socket asked for).
     pub(crate) fn events(&self) -> broadcast::Receiver<Value> {
@@ -590,6 +604,8 @@ impl WsRpcClient {
         }
         *self.shared.sink.lock().await = None;
         self.shared.connected.send_replace(false);
+        // Wake the live queries' listeners: their streams end here too.
+        self.shared.closed_tx.send_replace(true);
         let mut map = self.shared.pending.lock().await;
         for (_, call) in map.drain() {
             let _ = call.tx.send(Err(anyhow!("WebSocket connection closed")));
