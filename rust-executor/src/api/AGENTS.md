@@ -202,7 +202,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-274 methods: Cap 87, CapAnyPointer 1, Executor 48, Open 10, Operator 41, Owns 83, UserOrOperator 4. Local only (the operator on this machine): 16.
+276 methods: Cap 88, CapAnyPointer 1, Executor 48, Open 10, Operator 41, Owns 84, UserOrOperator 4. Local only (the operator on this machine): 16.
 
 | Method | Guard |
 |---|---|
@@ -225,6 +225,7 @@ the guard checked:
 | `agent.permitCapability` | `Owns(Request auth(JSON).requestId, agent:PERMIT)` |
 | `agent.removeApp` | `Owns(Grant id, agent:UPDATE)` |
 | `agent.requestCapability` | `Cap(agent:AUTHENTICATE)` |
+| `agent.revocationReach` | `Cap(agent:READ)` |
 | `agent.revokeToken` | `Owns(Grant token, agent:UPDATE)` |
 | `agent.sign` | `Cap(agent:SIGN)` |
 | `agent.signSessionStatement` | `Operator`, local only |
@@ -322,6 +323,7 @@ the guard checked:
 | `language.writeSettings` | `Executor(language:UPDATE)` |
 | `neighbourhood.addBot` | `Owns(Perspective uuid, neighbourhood:UPDATE)` |
 | `neighbourhood.addMember` | `Owns(Perspective uuid, neighbourhood:UPDATE)` |
+| `neighbourhood.countByPerson` | `Owns(Perspective perspectiveUuid, neighbourhood:READ)` |
 | `neighbourhood.createInvite` | `Owns(Perspective uuid, neighbourhood:UPDATE)` |
 | `neighbourhood.hasTelepresence` | `Owns(Perspective uuid, neighbourhood:READ)` |
 | `neighbourhood.invites` | `Owns(Perspective uuid, neighbourhood:READ)` |

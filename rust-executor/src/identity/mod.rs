@@ -284,6 +284,9 @@ pub fn init(db_path: &Path, settings: &IdentitySettings) -> Result<(), CacheErro
             let changes = service.cache.subscribe();
             handle.spawn(run_recheck(service.clone(), changes));
             handle.spawn(inbox::run_pull(service.clone()));
+            // The spaces each revoked device key reached (`agent.revocationReach`).
+            let changes = service.cache.subscribe();
+            handle.spawn(crate::membership::reach::run(changes));
             // The key sessions' watcher too: `load_local_identities` replays the held
             // verdicts before the spawned task may first run. It waits for the main
             // agent's DID first — its `agent_speaks` reads it and `AgentService` is not

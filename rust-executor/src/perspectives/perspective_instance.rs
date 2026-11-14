@@ -4647,8 +4647,12 @@ impl PerspectiveInstance {
 
     /// A room key change the link language reports (`roomKeyEvent`): one
     /// `neighbourhood-room-key-changed` to the owners.
+    /// The time also lands on the rows of the keys it shut out
+    /// ([`crate::membership::reach::note_room_key_event`], `agent.revocationReach`).
     pub(crate) async fn publish_room_key_event(&self, event: crate::membership::RoomKeyEvent) {
         let handle = self.persisted.lock().await.clone();
+        let now = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0);
+        crate::membership::reach::note_room_key_event(&handle, &event, now);
         super::publish_to_owners(
             Topic::NeighbourhoodRoomKeyChanged,
             super::event_recipients(&handle),

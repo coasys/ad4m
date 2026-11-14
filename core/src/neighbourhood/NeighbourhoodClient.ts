@@ -10,6 +10,8 @@ import type { InviteInfo } from "../generated/api/InviteInfo"
 import type { JoinMode } from "../generated/api/JoinMode"
 import type { MemberInfo } from "../generated/api/MemberInfo"
 import type { NewMemberRole } from "../generated/api/NewMemberRole"
+import type { PersonCount } from "../generated/api/PersonCount"
+import type { PersonCountQuery } from "../generated/api/PersonCountQuery"
 import type {
     CallSessionInfo,
     SfuCallRenegotiationOffer,
@@ -103,6 +105,16 @@ export class NeighbourhoodClient {
     /** Removes a bot: its owner or an admin. */
     async removeBot(perspectiveUUID: string, botDid: DID): Promise<void> {
         await this.#apiClient.call('neighbourhood.removeBot', { uuid: perspectiveUUID, botDid })
+    }
+
+    /**
+     * Counts the links `source -[predicate]-> *` of a space once per person (a vote, a
+     * reaction): each person's latest link counts for its target. Bots, keys without a log,
+     * non-members and links whose author could not be checked are left out, by reason, in
+     * `skipped`. With `at` (ISO 8601) the count is as of that time.
+     */
+    async countByPerson(q: PersonCountQuery): Promise<PersonCount> {
+        return this.#apiClient.call('neighbourhood.countByPerson', q)
     }
 
     async otherAgents(perspectiveUUID: string): Promise<DID[]> {

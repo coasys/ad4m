@@ -393,6 +393,44 @@ async fn other_agents(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
     Ok(serde_json::to_value(others)?)
 }
 
+/// The perspective `neighbourhood.countByPerson` counts in: `perspectiveUuid`.
+const COUNTED_PERSPECTIVE: IdParam = IdParam::Field(&["perspectiveUuid"]);
+
+/// `neighbourhood.countByPerson` (A9): the links `source -[predicate]-> *` of the space,
+/// counted once per person from the verdict and person each link is stored with
+/// ([`membership::count_by_person`]).
+async fn count_by_person(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let query: membership::PersonCountQuery = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let at =
+        match query.at.as_deref() {
+            Some(at) => Some(membership::ms_of(at).ok_or_else(|| {
+                WsRpcError::bad_request(format!("at is not an ISO 8601 time: {at}"))
+            })?),
+            None => None,
+        };
+    let perspective =
+        super::perspectives_ws::get_perspective_or_404(&query.perspective_uuid).await?;
+    let gate = crate::perspectives::sparql_store::query_gate(&ctx).await;
+    let links = perspective
+        .sparql_store
+        .query_links(
+            &gate.stop(),
+            query.source.as_deref(),
+            Some(&query.predicate),
+            None,
+            None,
+            None,
+            None,
+        )
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    Ok(serde_json::to_value(membership::count_by_person(
+        &links,
+        perspective.sparql_store.membership(),
+        at,
+    ))?)
+}
+
 pub fn register_ws_handlers(map: &mut HandlerMap) {
     // The caller joins and publishes as itself (`ctx.acts_as()`).
     map.method::<JoinNeighbourhoodRequest, PerspectiveHandle>(
@@ -465,6 +503,17 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         .guard(Guard::perspective(neighbourhood_update));
     map.method::<NeighbourhoodBotParams, ()>("neighbourhood.removeBot", remove_bot)
         .guard(Guard::perspective(neighbourhood_update));
+    // A9: votes and other per-person tallies, read from the stored verdicts.
+    map.method::<membership::PersonCountQuery, membership::PersonCount>(
+        "neighbourhood.countByPerson",
+        count_by_person,
+    )
+    .read()
+    .guard(Guard::Owns {
+        cap: neighbourhood_read,
+        id: COUNTED_PERSPECTIVE,
+        owner: Owner::Perspective,
+    });
 }
 
 // ── Contracts ──

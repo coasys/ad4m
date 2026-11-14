@@ -208,6 +208,12 @@ export type { SessionRole } from "./SessionRole";
 export type { SignSessionStatementParams } from "./SignSessionStatementParams";
 export type { SignedKeyStatement } from "./SignedKeyStatement";
 export type { UnsignedKeyStatement } from "./UnsignedKeyStatement";
+// Spaces by person: neighbourhood.countByPerson and agent.revocationReach.
+export type { AgentRevocationReachParams } from "./AgentRevocationReachParams";
+export type { PersonCount } from "./PersonCount";
+export type { PersonCountQuery } from "./PersonCountQuery";
+export type { RevocationReach } from "./RevocationReach";
+export type { SkipCounts } from "./SkipCounts";
 export { READ_METHODS, LONG_METHODS, OPENS_METHODS } from "./RpcMethods";
 export type { RpcMethods, RpcMethod } from "./RpcMethods";
 export { SCOPED_EVENTS } from "./Events";
