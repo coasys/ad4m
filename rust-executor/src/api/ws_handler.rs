@@ -458,7 +458,11 @@ impl HandlerMap {
     ) -> Result<Value, WsRpcError> {
         let entry = self.entry(msg_type)?;
         let answer = match Self::admit_entry(entry, msg_type, &params, &ctx).await {
-            Ok(()) => (entry.handler)(params, ctx).await,
+            // The link writes the handler makes count for the caller's agent (`GET /metrics`).
+            Ok(()) => {
+                let did = ctx.session.acts_as_did().map(str::to_string);
+                crate::metrics::as_caller(did.as_deref(), (entry.handler)(params, ctx)).await
+            }
             Err(e) => Err(e),
         };
         let result = match answer {

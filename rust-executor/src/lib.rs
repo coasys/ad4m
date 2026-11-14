@@ -14,6 +14,7 @@ pub mod holochain_service;
 pub mod identity;
 pub mod js_core;
 pub mod mcp;
+pub mod metrics;
 pub mod perspective_snapshot;
 pub mod perspectives;
 pub mod presence;

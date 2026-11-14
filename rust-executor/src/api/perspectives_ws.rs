@@ -313,7 +313,7 @@ async fn get_perspective_handler(
 
 async fn get_snapshot(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let perspective = guarded_perspective(&params).await?;
-    let gate = crate::perspectives::sparql_store::query_gate(&ctx).await;
+    let gate = crate::perspectives::sparql_store::query_gate(&ctx, &perspective).await;
     let links = perspective
         .get_links_stopped(
             &gate.stop(),
@@ -358,7 +358,7 @@ async fn query_links(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
             .map(|v| v as i32),
     };
 
-    let gate = crate::perspectives::sparql_store::query_gate(&ctx).await;
+    let gate = crate::perspectives::sparql_store::query_gate(&ctx, &perspective).await;
     let links = perspective
         .get_links_stopped(&gate.stop(), &query)
         .await
@@ -661,7 +661,7 @@ async fn query_sparql(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
             // the connection's running-query slots, and a stop the eval
             // itself watches. Dropping the gate stops the eval too, so a
             // call given up on does not keep its evaluation running.
-            let gate = crate::perspectives::sparql_store::query_gate(&ctx).await;
+            let gate = crate::perspectives::sparql_store::query_gate(&ctx, &perspective).await;
             match perspective
                 .sparql_query_cancellable(gate.stop(), query)
                 .await
@@ -810,7 +810,7 @@ async fn subscribe_query(params: Value, ctx: Arc<RequestContext>) -> Result<Valu
 
     let perspective = guarded_perspective(&params).await?;
 
-    let gate = crate::perspectives::sparql_store::query_gate(&ctx).await;
+    let gate = crate::perspectives::sparql_store::query_gate(&ctx, &perspective).await;
     let opened = perspective
         .subscribe_and_query(
             &gate.stop(),
@@ -1071,7 +1071,7 @@ async fn subject_classes_of_handler(
     // synchronous SPARQL plus in-memory containment over every class × every
     // URI, so it runs on a blocking thread under a clone of the gate's stop —
     // a timeout here now ends the evaluation, not just the wait for it.
-    let gate = crate::perspectives::sparql_store::query_gate(&ctx).await;
+    let gate = crate::perspectives::sparql_store::query_gate(&ctx, &perspective).await;
     let stop = gate.stop();
     let result =
         tokio::task::spawn_blocking(move || perspective.subject_classes_of_stopped(&stop, &uris))
@@ -1092,7 +1092,7 @@ async fn model_query_handler(params: Value, ctx: Arc<RequestContext>) -> Result<
 
     // The same gate every query call gets: deadline, cancel, connection
     // close, one of the connection's running-query slots.
-    let gate = crate::perspectives::sparql_store::query_gate(&ctx).await;
+    let gate = crate::perspectives::sparql_store::query_gate(&ctx, &perspective).await;
     match perspective
         .model_query_classes_stopped(&gate.stop(), &classes, &query_json)
         .await
@@ -1134,7 +1134,7 @@ async fn evaluate_getters_handler(
     // The same gate every query call gets. The eval runs on a blocking
     // thread under a clone of its stop, which the gate still owns: a
     // cancel, the deadline, or this call's future dropped ends the eval.
-    let gate = crate::perspectives::sparql_store::query_gate(&ctx).await;
+    let gate = crate::perspectives::sparql_store::query_gate(&ctx, &perspective).await;
     let stop = gate.stop();
     let result = tokio::task::spawn_blocking(move || {
         perspective.evaluate_getters_stopped(
@@ -1164,7 +1164,7 @@ async fn model_subscribe_handler(
     let connection_id = connection_id(&ctx)?;
     let perspective = guarded_perspective(&params).await?;
 
-    let gate = crate::perspectives::sparql_store::query_gate(&ctx).await;
+    let gate = crate::perspectives::sparql_store::query_gate(&ctx, &perspective).await;
     let opened = perspective
         .model_subscribe_and_query(
             &gate.stop(),

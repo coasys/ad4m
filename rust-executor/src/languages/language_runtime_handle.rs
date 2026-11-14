@@ -3,6 +3,7 @@ use serde_json::Value as JsonValue;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::runtime::Builder;
 use tokio::sync::{
@@ -47,6 +48,8 @@ pub struct LanguageRuntimeHandle {
     call_deadline: Duration,
     /// The request the runtime is running.
     running: RunningRequest,
+    /// The script calls into this language (`GET /metrics`), shared by every clone.
+    pub(crate) call_stats: Arc<crate::metrics::LanguageCallStats>,
 }
 
 impl LanguageRuntimeHandle {
@@ -98,6 +101,7 @@ impl LanguageRuntimeHandle {
             language_name: None,
             tx,
             call_deadline: LANGUAGE_CALL_DEADLINE,
+            call_stats: Arc::default(),
             running,
         })
     }
@@ -114,6 +118,7 @@ impl LanguageRuntimeHandle {
             language_name: None,
             tx,
             call_deadline: LANGUAGE_CALL_DEADLINE,
+            call_stats: Arc::default(),
             running: RunningRequest::default(),
         }
     }
@@ -184,6 +189,8 @@ impl LanguageRuntimeHandle {
 
         // Only script calls give up: loading a language and its teardown wait for it.
         let is_call = matches!(operation, LanguageOperation::Execute(..));
+        // A call refused below (busy, channel closed) counts as an error.
+        let counted = is_call.then(|| self.call_stats.start());
         if is_call {
             // Not queued behind a call that has run past the deadline: retries during a hang
             // would pile up in the channel.
@@ -210,6 +217,9 @@ impl LanguageRuntimeHandle {
         };
         let result =
             response.map_err(|e| format!("Language runtime dropped without responding: {}", e))?;
+        if let Some(call) = counted {
+            call.finish(result.is_ok());
+        }
 
         match &result {
             Ok(_) => debug!("[handle:{}] Operation completed OK", self.language_address),

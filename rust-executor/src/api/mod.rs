@@ -9,6 +9,7 @@ pub mod event_interest;
 pub mod events_ws;
 pub mod guards;
 pub mod internal;
+pub mod metrics;
 pub mod openai_compat;
 pub mod types;
 pub mod ws_rpc;
@@ -90,6 +91,8 @@ pub fn api_router(state: AppState) -> Router {
             }),
         )
         .route("/health", get(|| async { Json(json!({"status": "ok"})) }))
+        // Resource counters in the Prometheus text format, for the operator only
+        .route("/metrics", get(metrics::metrics))
         // Internal platform → executor endpoint (INTERNAL_API_TOKEN auth)
         .route("/internal/shutdown", post(internal::internal_shutdown));
 

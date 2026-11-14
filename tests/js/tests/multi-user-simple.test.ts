@@ -390,6 +390,52 @@ describe("Multi-User Simple integration tests", () => {
         })
     })
 
+    describe("Resource metrics", () => {
+        after(cleanupAllMainExecutorPerspectives);
+
+        async function getMetrics(token?: string) {
+            const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
+            const response = await fetch(`${baseUrl(apiPort)}/metrics`, { headers });
+            return { status: response.status, body: await response.text() };
+        }
+
+        it("counts a user's links and queries and shows them to the admin only", async () => {
+            await createTestUser("metrics@example.com", "password");
+            const token = await adminAd4mClient!.agent.loginUser("metrics@example.com", "password");
+            const client = new Ad4mClient(baseUrl(apiPort), token);
+            const did = (await client.agent.me()).did;
+
+            const perspective = await client.perspective.add("Metrics Perspective");
+            await perspective.add(new Link({ source: "ad4m://self", predicate: "ad4m://has", target: "literal://string:one" }));
+            await perspective.add(new Link({ source: "ad4m://self", predicate: "ad4m://has", target: "literal://string:two" }));
+            const links = await perspective.get(new LinkQuery({ source: "ad4m://self" }));
+            expect(links.length).to.equal(2);
+
+            const admin = await getMetrics(ADMIN_CREDENTIAL);
+            expect(admin.status).to.equal(200);
+            const lines = admin.body.split("\n");
+            const value = (prefix: string) => {
+                const line = lines.find((l) => l.startsWith(prefix));
+                expect(line, `${prefix} in /metrics`).to.not.be.undefined;
+                return Number(line!.split(" ").pop());
+            };
+            expect(value(`ad4m_perspective_links_added_total{perspective="${perspective.uuid}"}`)).to.equal(2);
+            expect(value(`ad4m_perspective_queries_total{perspective="${perspective.uuid}"}`)).to.be.at.least(1);
+            // At least: signing up may write links (a profile) on the user's behalf.
+            expect(value(`ad4m_user_links_written_total{user="${did}"}`)).to.be.at.least(2);
+            expect(value(`ad4m_user_queries_total{user="${did}"}`)).to.be.at.least(1);
+            expect(value(`ad4m_user_perspectives{user="${did}"}`)).to.be.at.least(1);
+
+            // Per-user labels are personal data: a user and an anonymous caller get nothing.
+            const asUser = await getMetrics(token);
+            expect(asUser.status).to.equal(403);
+            expect(asUser.body).to.not.contain("ad4m_");
+            const anonymous = await getMetrics();
+            expect(anonymous.status).to.equal(403);
+            expect(anonymous.body).to.not.contain("ad4m_");
+        });
+    });
+
     describe("Perspective Isolation", () => {
         after(cleanupAllMainExecutorPerspectives);
 
