@@ -1623,7 +1623,7 @@ fn build_devices() -> Value {
         },
         "payload": {
             "value": payload,
-            "signingBytes": String::from_utf8(payload_signing_bytes(&payload.to, &payload.body, payload.sent_at, &payload.by).unwrap()).unwrap(),
+            "signingBytes": String::from_utf8(payload_signing_bytes(&payload.to, &payload.body, payload.sent_at, &payload.by).unwrap().to_vec()).unwrap(),
         },
         "seal": {
             "recipientSecret": hex(&enc_secret(1).to_bytes()),
@@ -1676,7 +1676,9 @@ fn check_devices(file: &Value) {
 
     let payload: InboxPayload = serde_json::from_value(file["payload"]["value"].clone()).unwrap();
     assert_eq!(
-        payload_signing_bytes(&payload.to, &payload.body, payload.sent_at, &payload.by).unwrap(),
+        payload_signing_bytes(&payload.to, &payload.body, payload.sent_at, &payload.by)
+            .unwrap()
+            .to_vec(),
         file["payload"]["signingBytes"].as_str().unwrap().as_bytes()
     );
     assert_eq!(

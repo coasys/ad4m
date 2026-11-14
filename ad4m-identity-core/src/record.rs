@@ -50,7 +50,6 @@ use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use rand_core::{CryptoRng, RngCore};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{json, Value};
-#[cfg(feature = "build")]
 use zeroize::Zeroizing;
 
 use crate::domain::{signing_bytes, verify_signed};
@@ -688,8 +687,33 @@ pub fn seal_record<R: CryptoRng + RngCore>(
     signer: &dyn crate::build::Signer,
     rng: &mut R,
 ) -> Result<SealedRecord, RecordError> {
+    let signer_key = signer.key();
+    let signer_id = chain
+        .state()
+        .key_id_of(&signer_key)
+        .cloned()
+        .ok_or_else(|| RecordError::Signer(signer_key.to_string()))?;
+    let mut sealed = seal_unsigned(chain, version, record, recovery, signer_id, rng)?;
+    sign_envelope(chain, &mut sealed, signer)?;
+    Ok(sealed)
+}
+
+/// [`seal_record`] without the signature: the envelope names `signer` (a device key without
+/// the bot mark valid at the head, or the current master) and leaves `sig` empty, for a writer
+/// whose key signs elsewhere: an app whose device key is in its executor's wallet passes the
+/// envelope to `identity.recordPut`, which signs it there ([`sign_envelope`]).
+#[cfg(feature = "build")]
+pub fn seal_unsigned<R: CryptoRng + RngCore>(
+    chain: &KelChain,
+    version: u64,
+    record: &PrivateRecord,
+    recovery: Option<Recovery>,
+    signer: KeyId,
+    rng: &mut R,
+) -> Result<SealedRecord, RecordError> {
     use base64::Engine;
     let scid = chain.id();
+    writer_at(&signer, chain, chain.head().seq)?;
     if let Some(r) = &recovery {
         if !is_x25519_multikey(&r.key) {
             return Err(malformed("recoveryKey is an X25519 multikey"));
@@ -702,11 +726,6 @@ pub fn seal_record<R: CryptoRng + RngCore>(
     };
     let aad = record_aad(scid, version, recovery_key.as_deref())?;
     let state = chain.state();
-    let signer_key = signer.key();
-    let signer_id = state
-        .key_id_of(&signer_key)
-        .cloned()
-        .ok_or_else(|| RecordError::Signer(signer_key.to_string()))?;
     let value = serde_json::to_value(record).map_err(|e| malformed(e.to_string()))?;
     let text = canonical_json(&value).map_err(|e| malformed(e.to_string()))?;
     let mut key = Zeroizing::new([0u8; RECORD_KEY_LEN]);
@@ -730,20 +749,46 @@ pub fn seal_record<R: CryptoRng + RngCore>(
             .map_err(|_| malformed(format!("the enc key of {entry} is not X25519")))?;
         wrapped.insert(entry, sealed);
     }
-    let mut sealed = SealedRecord {
+    Ok(SealedRecord {
         version,
         wrapped,
         recovery_key,
         recovery_attestation,
         nonce: bs58::encode(nonce).into_string(),
         ciphertext: b64().encode(ciphertext),
-        signer: signer_id,
+        signer,
         sig: String::new(),
-    };
-    writer_at(&sealed.signer, chain, chain.head().seq)?;
-    let bytes = envelope_signing_bytes(scid, &sealed)?;
+    })
+}
+
+/// Signs the envelope of `sealed` with `signer`, the key `sealed.signer` names in `chain`.
+#[cfg(feature = "build")]
+pub fn sign_envelope(
+    chain: &KelChain,
+    sealed: &mut SealedRecord,
+    signer: &dyn crate::build::Signer,
+) -> Result<(), RecordError> {
+    let (_, key) = writer_at(&sealed.signer, chain, chain.head().seq)?;
+    if *key != signer.key() {
+        return Err(RecordError::Signer(signer.key().to_string()));
+    }
+    let bytes = envelope_signing_bytes(chain.id(), sealed)?;
     sealed.sig = ad4m_hash_chain::encode_proof_value(&signer.sign(&bytes));
-    Ok(sealed)
+    Ok(())
+}
+
+/// The checks every read of a stored `sealed` makes before its record key is trusted: the
+/// store's `receipt` ([`verify_receipt`]: this identity, version and envelope, a store key of
+/// `stores`, the writer valid at the receipt's seq), then the recovery attestation against
+/// the log.
+fn verify_stored(
+    sealed: &SealedRecord,
+    receipt: &RecordReceipt,
+    chain: &KelChain,
+    stores: &[Multikey],
+) -> Result<(), RecordError> {
+    verify_receipt(sealed, receipt, chain, stores)?;
+    check_attested_by_some_master(sealed, chain)
 }
 
 /// Opens `sealed` of the identity whose log is `chain` through its `wrapped[entry]` (a key id,
@@ -766,32 +811,70 @@ pub fn open_record(
     entry: &str,
     secret: &X25519Secret,
 ) -> Result<PrivateRecord, RecordError> {
-    use base64::Engine;
-    verify_receipt(sealed, receipt, chain, stores)?;
-    check_attested_by_some_master(sealed, chain)?;
-    let scid = chain.id();
+    verify_stored(sealed, receipt, chain, stores)?;
     let wrapped = sealed
         .wrapped
         .get(entry)
         .ok_or_else(|| RecordError::NoEntry(entry.to_string()))?;
+    let key = unwrap_key(wrapped, chain.id(), secret)?;
+    decrypt_verified(sealed, chain.id(), &key)
+}
+
+/// The record key that `wrapped` (one entry of a record's `wrapped`) seals for identity `scid`,
+/// opened with that reader's X25519 `secret`.
+pub fn unwrap_key(
+    wrapped: &str,
+    scid: &str,
+    secret: &X25519Secret,
+) -> Result<Zeroizing<[u8; RECORD_KEY_LEN]>, RecordError> {
     let key = seal::open(secret, &wrap_info(scid), wrapped).map_err(|_| RecordError::Open)?;
+    let mut out = Zeroizing::new([0u8; RECORD_KEY_LEN]);
     if key.len() != RECORD_KEY_LEN {
         return Err(RecordError::Open);
     }
+    out.copy_from_slice(&key);
+    Ok(out)
+}
+
+/// Decrypts `sealed` of the identity whose log is `chain` with its record `key` (from
+/// [`unwrap_key`], or a key the executor unwrapped for the caller). Like [`open_record`] it
+/// checks the store's `receipt` (the writer at the receipt's seq, so a record whose writer was
+/// revoked or replaced after the write still opens) and the recovery attestation against the
+/// log first.
+pub fn decrypt_record(
+    sealed: &SealedRecord,
+    receipt: &RecordReceipt,
+    chain: &KelChain,
+    stores: &[Multikey],
+    key: &[u8; RECORD_KEY_LEN],
+) -> Result<PrivateRecord, RecordError> {
+    verify_stored(sealed, receipt, chain, stores)?;
+    decrypt_verified(sealed, chain.id(), key)
+}
+
+/// Decrypts `sealed` of identity `scid` whose envelope the caller has verified.
+fn decrypt_verified(
+    sealed: &SealedRecord,
+    scid: &str,
+    key: &[u8; RECORD_KEY_LEN],
+) -> Result<PrivateRecord, RecordError> {
+    use base64::Engine;
     let aad = record_aad(scid, sealed.version, sealed.recovery_key.as_deref())?;
     let nonce = decode_nonce(&sealed.nonce)?;
     let ciphertext = b64()
         .decode(&sealed.ciphertext)
         .map_err(|_| malformed("ciphertext is base64url"))?;
-    let plain = XChaCha20Poly1305::new(key.as_slice().into())
-        .decrypt(
-            XNonce::from_slice(&nonce),
-            Payload {
-                msg: &ciphertext,
-                aad: &aad,
-            },
-        )
-        .map_err(|_| RecordError::Open)?;
+    let plain = Zeroizing::new(
+        XChaCha20Poly1305::new(key.into())
+            .decrypt(
+                XNonce::from_slice(&nonce),
+                Payload {
+                    msg: &ciphertext,
+                    aad: &aad,
+                },
+            )
+            .map_err(|_| RecordError::Open)?,
+    );
     serde_json::from_slice(&plain).map_err(|e| malformed(e.to_string()))
 }
 

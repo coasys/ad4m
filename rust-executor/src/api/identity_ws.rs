@@ -20,9 +20,9 @@ use crate::identity::types::{
     DeleteRequestParams, DeviceKeys, DeviceRequest, DeviceView, DidResolutionResult, IdentityLog,
     IdentityStatus, InboxAckParams, InboxEntry, InboxPutParams, InboxStored, JoinAccepted,
     JoinCancelled, JoinStatus, JoinStatusParams, LogParams, OfferListing, OfferOpened,
-    OffersParams, OpenOfferParams, PostRequestParams, PreparedDevice, PublishParams, RecordParams,
-    RecordPutParams, RecordStored, RequestPosted, RequestsParams, ResetLogParams, ResolveParams,
-    SignedHead, StoredRecord, TakenMaster,
+    OffersParams, OpenOfferParams, PostRequestParams, PreparedDevice, PublishParams, RecordKey,
+    RecordParams, RecordPutParams, RecordStored, RequestPosted, RequestsParams, ResetLogParams,
+    ResolveParams, SignedHead, StoredRecord, TakenMaster, UnwrapRecordKeyParams,
 };
 use crate::types::RequestContext;
 
@@ -271,6 +271,17 @@ async fn record_put(params: Value, ctx: Arc<RequestContext>) -> Result<Value, Ws
     )
 }
 
+/// `identity.unwrapRecordKey`: the main agent's record key of one version, for the app on this
+/// machine that opens the record (the desktop's custody service).
+async fn unwrap_record_key(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let p: UnwrapRecordKeyParams = parse(params)?;
+    answer(
+        crate::identity::service()?
+            .unwrap_record_key(&AgentContext::main_agent(), &p)
+            .await?,
+    )
+}
+
 async fn requests(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let p: RequestsParams = parse(params)?;
     answer(
@@ -394,6 +405,11 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         .guard(Guard::Cap(AGENT_READ_CAPABILITY.clone()));
     map.method::<RecordPutParams, RecordStored>("identity.recordPut", record_put)
         .guard(Guard::Cap(AGENT_UPDATE_CAPABILITY.clone()));
+    // The record key of the main agent's entry, opened in the wallet for the app on this
+    // machine that reads the record through this executor: the operator here only.
+    map.method::<UnwrapRecordKeyParams, RecordKey>("identity.unwrapRecordKey", unwrap_record_key)
+        .local_only()
+        .guard(Guard::Operator);
     map.method::<RequestsParams, Vec<DeviceRequest>>("identity.requests", requests)
         .read()
         .guard(Guard::Cap(AGENT_READ_CAPABILITY.clone()));
@@ -538,6 +554,7 @@ mod tests {
             ("identity.resolve", cap(&AGENT_READ_CAPABILITY)),
             ("identity.status", cap(&AGENT_READ_CAPABILITY)),
             ("identity.takeMaster", format!("{:?}", Guard::Operator)),
+            ("identity.unwrapRecordKey", format!("{:?}", Guard::Operator)),
         ];
         let got: Vec<(String, String)> = map
             .guards()
@@ -645,6 +662,10 @@ mod tests {
             ("identity.prepareDevice", serde_json::json!({})),
             ("identity.inbox", serde_json::json!({})),
             ("identity.inboxAck", serde_json::json!({ "id": "m1" })),
+            (
+                "identity.unwrapRecordKey",
+                serde_json::json!({ "wrapped": "x" }),
+            ),
             ("identity.acceptJoin", serde_json::json!({ "offerId": "o" })),
             ("identity.cancelJoin", serde_json::json!({ "offerId": "o" })),
         ] {

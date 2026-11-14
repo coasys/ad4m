@@ -251,6 +251,45 @@ pub fn canonical_json(value: &Value) -> Result<String, CanonError> {
     Ok(out)
 }
 
+/// The JCS text of `value` in a buffer allocated once, at the text's exact length: no earlier,
+/// shorter copy of the text is left behind in freed memory as it grows. For a value that holds
+/// a secret, whose caller wipes the text.
+pub fn canonical_json_exact(value: &Value) -> Result<String, CanonError> {
+    let mut len = Len(0);
+    write_value(&mut len, value)?;
+    let mut out = String::with_capacity(len.0);
+    write_value(&mut out, value)?;
+    debug_assert_eq!((out.len(), out.capacity()), (len.0, len.0));
+    Ok(out)
+}
+
+/// Where the writers put the text: a `String`, or [`Len`], which only counts it.
+trait Out {
+    fn push(&mut self, c: char);
+    fn push_str(&mut self, s: &str);
+}
+
+impl Out for String {
+    fn push(&mut self, c: char) {
+        String::push(self, c)
+    }
+    fn push_str(&mut self, s: &str) {
+        String::push_str(self, s)
+    }
+}
+
+/// The length in bytes of the text written.
+struct Len(usize);
+
+impl Out for Len {
+    fn push(&mut self, c: char) {
+        self.0 += c.len_utf8();
+    }
+    fn push_str(&mut self, s: &str) {
+        self.0 += s.len();
+    }
+}
+
 /// The JCS text of an object, leaving out the top-level member `skip`.
 pub(crate) fn canonical_object_without(
     map: &Map<String, Value>,
@@ -261,7 +300,7 @@ pub(crate) fn canonical_object_without(
     Ok(out)
 }
 
-fn write_value(out: &mut String, value: &Value) -> Result<(), CanonError> {
+fn write_value(out: &mut impl Out, value: &Value) -> Result<(), CanonError> {
     match value {
         Value::Null => out.push_str("null"),
         Value::Bool(true) => out.push_str("true"),
@@ -298,7 +337,7 @@ fn write_value(out: &mut String, value: &Value) -> Result<(), CanonError> {
 }
 
 fn write_object(
-    out: &mut String,
+    out: &mut impl Out,
     map: &Map<String, Value>,
     skip: Option<&str>,
 ) -> Result<(), CanonError> {
@@ -321,7 +360,7 @@ fn write_object(
     Ok(())
 }
 
-fn write_string(out: &mut String, s: &str) {
+fn write_string(out: &mut impl Out, s: &str) {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     out.push('"');
     for c in s.chars() {
@@ -360,6 +399,20 @@ mod tests {
         assert_eq!(
             canonical_json(&v).unwrap(),
             "{\"\\r\":2,\"1\":4,\"\u{80}\":6,\"\u{f6}\":7,\"\u{20ac}\":1,\"\u{1f600}\":5,\"\u{fb33}\":3}"
+        );
+    }
+
+    #[test]
+    fn the_exact_text_is_the_text_in_a_buffer_of_its_length() {
+        let v: Value =
+            serde_json::from_str(r#"{"b":[1,-2,true,null,"€\u000f\"x"],"a":{"😀":"s\n"},"c":""}"#)
+                .unwrap();
+        let exact = canonical_json_exact(&v).unwrap();
+        assert_eq!(exact, canonical_json(&v).unwrap());
+        assert_eq!(exact.capacity(), exact.len());
+        assert_eq!(
+            canonical_json_exact(&json!({"f": 1.5})),
+            Err(CanonError::Float("1.5".into()))
         );
     }
 

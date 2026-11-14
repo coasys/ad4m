@@ -441,6 +441,13 @@ DID URL from the identity, the anchor and the key id that the log lists for the 
   not, so a revoked key can never return to this identity. A host that requires one key per
   identity (section 14) also refuses it in every other log, so it can never speak for another
   identity there either.
+- The match code (6 base32 characters, 30 bits) is for a person comparing two screens, not an
+  authentication against grinding: someone who could claim an offer could try device keys
+  offline until one shows the code the person expects. What keeps a stranger's key out of a
+  link is the offer secret, which only the offer string or the sealed ticket carries, the
+  single claim an offer takes, and, for a scanned device string, the offer bound to that
+  device's key; the match code catches a claim by another device than the one in front of
+  the person.
 - The core reads no clock. Expiries are compared with the caller's trusted time. The window a
   host accepts for a new `expires` is host policy (section 14).
 - A generic DID Core verifier ignores `coasys:bot`. Bot keys sit outside `authentication` and
@@ -801,7 +808,7 @@ a new string ends the read of the last one.
   credential as the first line of its stdin at start, and the executor keeps it in memory
   only: never in its environment or on its command line, which other processes of the user
   can read (`/proc/<pid>/environ`), as can the admin credential, which reads host files. An
-  executor with `AD4M_CUSTODY_CREDENTIAL` set refuses to start. The admin credential, an app,
+  executor with `AD4M_CUSTODY_CREDENTIAL` or `AD4M_CUSTODY_CREDENTIAL_FILE` set refuses to start. The admin credential, an app,
   a network listener, a device-key login and an operator without a credential are refused (403
   `no-custody-channel`). The key reaches the answer only: no log line, event, store or
   language, and the executor wipes its copy.
@@ -843,4 +850,58 @@ a new string ends the read of the last one.
   the refresh of an identity it already speaks for, bind as before.
 - The executor never opens the private record. It passes the record and request-box calls
   with a store request the caller signed with the master key, or signs one with its own key
-  (always for a post).
+  (always for a post). For the app on its machine whose device it is (the desktop's custody
+  service, which has no `enc` key of its own), the operator there may have it open the record
+  key of its own entry of `wrapped` (`identity.unwrapRecordKey`, local only); the app
+  decrypts the record with that key after it verified the envelope's signature and the
+  recovery key's attestation against the log. That app's writes are its device's: it seals
+  the envelope naming the device key as `signer` with an empty `sig`, and the executor signs
+  it with the device key before the put (it refuses an unsigned envelope naming any other
+  key). A device write copies the recovery key and its attestation that still count, unchanged.
+
+**The holder's side.** An app that holds the current master key:
+
+- *Links with the holder scanning.* It reads a device string, refuses one past its `exp` or
+  naming another host, opens an offer bound to the string's `sign`, and puts the offer ticket,
+  signed by the master key and sealed to the string's `enc`, at the string's pre-join address
+  with `bind {scid, offerId, sign, r}`. Then it waits for the claim and confirms with the match
+  code as for any link.
+- *Gives the master key to a device that keeps it*, only to a device key valid at the head
+  that the log lets keep it: a standing key of the `incept`, or a standing key whose `add`
+  carries a co-signature over a claim that said `canKeepMaster: true` (the co-signature covers
+  the flag, so the log proves it; at a link, only on a `device` offer). A key the log does not
+  list, or a revoked one, gets nothing. The offer's kind counts only at the link: an `add`
+  that spent a `node` offer, whose claim said `canKeepMaster` (an executor with the custody
+  channel claimed it), lets the key keep the master key, so a later yes of the person (sending
+  it, or answering its `send-master` request) gives the master key to that node device. That
+  is by design: the device's co-signature said its custody service may keep it, and each send
+  is the holder's own decision. The record's device kind decides nothing here: any
+  linked device can write the record, so its kind is shown to people and grants nothing. After
+  the `add`, the master key seals itself into a `master` body, signed by itself, to the `enc` key the log
+  lists for the device key, and writes it to the device's joined inbox. Before the write the
+  app keeps the push on a retry list of its own; it forgets it once the host takes it, or when
+  the host refuses it for good, or when the device key has left the log, and retries what is
+  left at each start and unlock. The holder marks the device `holdsMaster: "offered"`; the
+  device marks itself `true` once its vault keeps the key. An `"offered"` never replaces
+  `true`: the holder writes it only on a version where the device's entry is not `true`, and
+  checks again on every newer version it reads after a stale one, so a device that took the
+  key before the holder's write landed stays `true`. At a first link the device's entry
+  (`false`) is written before the push, so a device that takes the key at once finds its
+  entry to mark.
+- *Delivers at least once.* A push whose answer was lost stays on the retry list and is put
+  again, so a device may find the same master key in two messages; a request answered whose
+  delete failed stays in the box and may be answered again. Both sides act idempotently: a
+  device keeps a master key it already keeps without change and acknowledges each message,
+  and the holder refuses a `confirm-revoke` naming a key no longer valid at the head before
+  it signs anything.
+- *Writes the record* by reading the newest version, applying its own changes (a device's
+  entry, a name, `holdsMaster`, a pending revocation) and dropping the entries of keys no
+  longer valid at the head, sealing the result as the next version to every reader of the
+  log, and writing it. When the host answers a stale version, or that the readers changed, it
+  reads and merges again. The holder writes after each link and each revocation.
+- *Answers the request box* only on the person's yes, after checking that the device named
+  posted the request (its signed store request, by that device key at a position the log
+  holds, covers `JCS({body, expires})`) and that it still holds (not past `expires`; a
+  `confirm-revoke` names keys valid at the head): `send-master` as above, `confirm-revoke` with a
+  `revoke` signed by the master key (one with `rotate` needs the 12 words). It then deletes the
+  request with a store request the master key signs.
