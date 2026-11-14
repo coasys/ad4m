@@ -15,9 +15,10 @@ REST/WS shim. Split plan: spec item 6.
 
 `*_ws.rs`, one per RPC namespace: `agent`, `ai`, `expressions`, `hosting`,
 `languages`, `neighbourhoods`, `perspectives` (largest; also SHACL + interpretation
-handlers), `runtime`, `config` (`runtime.config`, `runtime.setConfig`), `users`, `identity`, and
-`agent_session` (`perspective.runAgent`). Each exposes `register_ws_handlers(&mut HandlerMap)`
-called from `ws_handler::build_handler_map`.
+handlers), `runtime`, `config` (`runtime.config`, `runtime.setConfig`), `users`, `identity`,
+`key_login` (login with a device key and the calls of key sessions; the work is in
+`identity::key_login`), and `agent_session` (`perspective.runAgent`). Each exposes
+`register_ws_handlers(&mut HandlerMap)` called from `ws_handler::build_handler_map`.
 
 Handler shape (`perspectives_ws.rs::add_link` is representative):
 
@@ -116,8 +117,15 @@ access check: a call that fails both gets the access answer.
 operator on this machine (`Session::is_operator_on_this_machine`: the admin credential, or no
 token on an executor without one, on a loopback listener). The dispatcher checks it after the
 guard: every other caller gets 403 `guards::LOCAL_ONLY` (`local-only: …`), a grant with every
-capability and the admin credential on a network listener included. The guard table marks
-these methods "local only". `runtime.setConfig` is not local only as a whole: it refuses each
+capability and the admin credential on a network listener included. An operator from a key
+login is never on this machine, on a loopback listener too (a forwarded port makes a remote
+device key look local), so every local-only method refuses it. Every method that is not
+local only admits it as the operator, as its guard says. That is the rule for the calls
+that create or lock the executor's agent and move its data folder: `agent.generate`,
+`agent.lock`, `runtime.exportData` and `runtime.importData` are not local
+only, so a remote operator (a key login, or the admin credential on a network listener) may
+move the whole data folder. `agent.import` is not local only either — but it is not
+implemented: its handler answers "Agent import not yet implemented". The guard table marks the local-only methods "local only". `runtime.setConfig` is not local only as a whole: it refuses each
 `machine` key to a caller off this machine (`config_rpc`). `identity.custodyStatus` adds the
 custody channel's own check (`identity::custody::admit`: the admin credential, not a tokenless
 operator, and `--custody-channel`).
@@ -128,7 +136,16 @@ Notes on some methods:
   agent that is already initialised (`agent.status`'s `isInitialized`) — the check
   runs inside the agent lock, so a racing generate cannot slip between it and the
   write. `agent.unlock` is the call for an existing agent.
-- `Open` handlers check the session's principal (`user.logout`). `user.revokeAllSessions` is
+- `Open` handlers check the session's principal: `user.logout` revokes the caller's own grant
+  (any session a token opened, a key session's operator role included; 400 without a grant),
+  `user.renewSession` needs a key-bound grant, `user.endAllSessions` a key-bound session or a
+  session on a managed agent, `user.currentSession` answers every caller.
+  `user.loginWithKey` is `Cap(agent:AUTHENTICATE)`, which the anonymous set holds in
+  single-user mode too. `user.sessionChallenge` is `Open`: a key session asks for its grant's
+  own challenge whatever its capabilities, and its handler asks AGENT_AUTH of every other
+  caller (the anonymous set included). `agent.signSessionStatement` is `Operator` and
+  local only: only the operator on this machine signs as this device, never an operator from a
+  key login. `user.revokeAllSessions` is
   `Cap(agent:UPDATE)`, as `agent.removeApp`: since #1399 an app a user approved acts as the
   user's agent too; its handler checks the principal for a named user.
 - `Operator`: `runtime.importData` writes rows as they are in the file, granted notifications
@@ -138,8 +155,9 @@ Notes on some methods:
   `get_perspective_with_access` in its handler, so an app exports only the main agent's
   perspectives. A `db` export names no perspective and checks nothing past the guard: it writes
   the whole executor database (`export_all_to_json`). It and `runtime.importData` read and
-  write paths on the executor's machine; they are not local only yet (key login adds them,
-  with `agent.generate`, `agent.import` and `agent.lock`).
+  write paths on the executor's machine and are not local only (nor are `agent.generate`,
+  `agent.import` and `agent.lock`): the operator calls them from anywhere, an operator
+  from a key login included (`method_matrix_tests::OPERATOR_ANYWHERE`).
 - `Cap` methods that read executor-wide data users read today: `agent.getTrustedAgents`,
   `ai.models`, `language.*` reads, link-language templates,
   `runtime.hcAgentInfos`/`networkMetrics`/`hostRates`/`unytVersionInfo`. `Executor` would refuse
@@ -161,7 +179,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-234 methods: Cap 81, CapAnyPointer 1, Executor 43, Open 5, Operator 28, Owns 74, UserOrOperator 2. Local only (the operator on this machine): 5.
+240 methods: Cap 82, CapAnyPointer 1, Executor 43, Open 9, Operator 29, Owns 74, UserOrOperator 2. Local only (the operator on this machine): 6.
 
 | Method | Guard |
 |---|---|
@@ -186,6 +204,7 @@ the guard checked:
 | `agent.requestCapability` | `Cap(agent:AUTHENTICATE)` |
 | `agent.revokeToken` | `Owns(Grant token, agent:UPDATE)` |
 | `agent.sign` | `Cap(agent:SIGN)` |
+| `agent.signSessionStatement` | `Operator`, local only |
 | `agent.status` | `Cap(agent:READ)` |
 | `agent.unlock` | `Executor(agent:SIGN)`, local only |
 | `agent.updateProfile` | `Cap(agent:UPDATE)` |
@@ -388,14 +407,19 @@ the guard checked:
 | `sfu.stopRoom` | `Cap(neighbourhood:UPDATE)` |
 | `user.create` | `Cap(runtime.user_management:CREATE)` |
 | `user.credits` | `Operator` |
+| `user.currentSession` | `Open` |
 | `user.emailTest` | `Executor(*:*)` |
+| `user.endAllSessions` | `Open` |
 | `user.freeAccess` | `Operator` |
 | `user.list` | `Executor(runtime.user_management:READ)` |
 | `user.login` | `Cap(runtime.user_management:LOGIN)` |
+| `user.loginWithKey` | `Cap(agent:AUTHENTICATE)` |
 | `user.logout` | `Open` |
 | `user.multiUserEnabled` | `Cap(runtime.user_management[enabled]:READ)` |
+| `user.renewSession` | `Open` |
 | `user.requestVerification` | `Cap(runtime.user_management:VERIFY)` |
 | `user.revokeAllSessions` | `Cap(agent:UPDATE)` |
+| `user.sessionChallenge` | `Open` |
 | `user.setMultiUserEnabled` | `Operator` |
 | `user.verifyEmail` | `Cap(runtime.user_management:VERIFY)` |
 | `user.wallet` | `Executor(runtime.user_management:READ)` |

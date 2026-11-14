@@ -9,10 +9,9 @@ with its own `impl Ad4mDb` block. Child modules can use the private `conn` field
 | File | Content |
 |---|---|
 | `rekey.rs` | The rows `identity.rekey` moves to the main agent's new DID: notification owners, the flow bookkeeping (`flow_replica_state`, `flow_fired_mark`); and the claims the old key made, which it forgets |
+| `grants.rs` | The `grants` table: one row per token the executor issued, read by `agent::grants`; plus `pending_grant_writes`, the durable notes of the end-of-grant journal (see `agent::grants`' module doc): one pending op per grant id, `delete` outranking `revoke` in the note and the in-memory map alike — a revoke never downgrades a pending delete (`note_pending_grant_writes`'s upsert keeps a `delete` over a `revoke`). A grant is ended in memory before any persistence attempt; each pass writes the note, then the grant's own change, then clears the note — the note is cleared only when that op or a stronger one landed (`clear_pending_grant_writes` takes the landed op, so a landed revoke drops no `delete` note), and the pass retries the note's insert as well as the write. `agent::grants::load` ends every grant with a note and drives the ops again. Only a crash between the in-memory end and the first landed note loses the end |
 | `endpoints.rs` | The `ai_endpoints` table (AI model servers: URL, key, protocol, capabilities, health). A model (`models`: `id, name, type, endpoint_id, remote_model, native_tools`) names its endpoint; `add_model` refuses an endpoint that does not exist and gives the endpoint the model type's capability. `ai_service::endpoints` calls them through `db_backend()` |
-| `grants.rs` | The `grants` table: one row per token the executor issued, read by `agent::grants` |
 | `model_migration.rs` | The one-time move of a `models` table with `api_*` / `local_*` columns: each API model gets the endpoint with its protocol, URL and key (one is created, named by the host), each local model is deleted with one warning line (and its default), the table is rebuilt, `model_status` dropped. An import of an old export goes through the same linking. Runs only inside `Ad4mDb` (startup, import) |
-| `session_cutoffs.rs` | The users' session cutoffs (`users.sessions_valid_after`), read by `agent::revoked` |
 | `tasks.rs` | Owner-scoped reads of the `tasks` table: `get_task_owner`, `get_tasks_owned_by` |
 | `identity.rs` | `operator_record`, `identity_agents`, `identity_joins` (created in `Ad4mDb::new`), read by `identity/`. The operator record functions also take a bare connection for `ad4m-executor init --operator`, which runs before any executor. The key logs and `identity_heads`/`identity_fork_signers` are `identity::cache::KelCache`'s own connection to the same file |
 
@@ -51,7 +50,9 @@ never `Ad4mDb` directly: `Ad4mDb::with_global_instance` is `#[cfg(test)]`.
 
 ## Do not
 
-- Add a column without an `alter_add_column` migration in `Ad4mDb::new`. Append it last, so
-  `SELECT *` positions match on fresh and migrated tables.
+- Add a column without a migration: an `alter_add_column` in `Ad4mDb::new`, or the
+  table module's own migration that appends the columns last in one transaction (as
+  `add_key_login_columns` in `db/grants.rs` does), so `SELECT *` positions match on
+  fresh and migrated tables.
 - Make a `SharedDb` domain method fail because the Worker does not serve it. A shared-mode
   executor serves it from SQLite.

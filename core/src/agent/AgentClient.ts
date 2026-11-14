@@ -17,6 +17,14 @@ import { PersistentCache, createPersistentCache } from "../cache/PersistentCache
 import type { Agent as AgentData } from "../generated/api/Agent";
 import type { AgentSignature } from "../generated/api/AgentSignature";
 import type { AgentWithIdentity } from "../generated/api/AgentWithIdentity";
+import type { AuthInfoInput as AuthInfoWire } from "../generated/api/AuthInfoInput";
+import type { EndedSessions } from "../generated/api/EndedSessions";
+import type { KeySessionResult } from "../generated/api/KeySessionResult";
+import type { RenewedSession } from "../generated/api/RenewedSession";
+import type { SessionChallenge } from "../generated/api/SessionChallenge";
+import type { SessionInfo } from "../generated/api/SessionInfo";
+import type { SignedKeyStatement } from "../generated/api/SignedKeyStatement";
+import type { UnsignedKeyStatement } from "../generated/api/UnsignedKeyStatement";
 
 export interface InitializeArgs {
   did: string;
@@ -313,7 +321,10 @@ export class AgentClient {
     return this.#apiClient.call('user.verifyEmail', { email, code, verificationType });
   }
 
-  /** Revokes this client's user token. The executor then closes the client's sockets. */
+  /**
+   * Revokes this client's token: a user's login, an app's, or a key session's. The executor
+   * then closes the client's sockets. A key session's device key stays valid.
+   */
   async logout(): Promise<boolean> {
     return this.#apiClient.call('user.logout', {});
   }
@@ -325,6 +336,70 @@ export class AgentClient {
    */
   async revokeAllSessions(email?: string): Promise<boolean> {
     return this.#apiClient.call('user.revokeAllSessions', email === undefined ? {} : { email });
+  }
+
+  // Key sessions: login with one of the person's device keys
+
+  /**
+   * A one-use challenge (60 s) for a key statement, the executor's DID (the statement's
+   * `executor`) and the challenge's expiry by the executor's clock. Each address holds at
+   * most 100 open challenges (`too-many-challenges` past that). On a key session the
+   * challenge is the session's renewal challenge: one per session, so asking again closes the
+   * one before.
+   */
+  async sessionChallenge(): Promise<SessionChallenge> {
+    return this.#apiClient.call('user.sessionChallenge', {});
+  }
+
+  /**
+   * Logs in with a `login` statement that a device key signed under `coasys:session`. The
+   * executor gives the operator role to its operator record's identity, or a session on the
+   * local agent that speaks for the identity; it refuses with one reason: `challenge`,
+   * `audience`, `no-public-origin`, `signature`, `key`, `not-known` or `store-unavailable`.
+   * The statement's `audience` is the origin this client dialed (`https://host[:port]`): the
+   * executor accepts only its configured `public_origins`, or without them its own loopback
+   * origins, so a statement a relaying server obtained for its own origin is refused. The
+   * token lives one hour.
+   */
+  async loginWithKey(proof: SignedKeyStatement, app: AuthInfoWire): Promise<KeySessionResult> {
+    return this.#apiClient.call('user.loginWithKey', { proof, app });
+  }
+
+  /**
+   * Renews this client's key session with a `renew` statement of the same key naming its
+   * grant: one more hour, the same grant id. Open sockets stay open. Use the returned token for
+   * new connections.
+   */
+  async renewSession(proof: SignedKeyStatement): Promise<RenewedSession> {
+    return this.#apiClient.call('user.renewSession', { proof });
+  }
+
+  /** This client's own session: its role, agent, identity, grant and expiry. */
+  async currentSession(): Promise<SessionInfo> {
+    return this.#apiClient.call('user.currentSession', {});
+  }
+
+  /**
+   * Log out everywhere on this executor: ends every session of this client's identity (and,
+   * on a managed agent, every session of that agent). `keepCurrent` keeps this client's own;
+   * `before` (Unix seconds) ends only sessions opened before it.
+   */
+  async endAllSessions(keepCurrent: boolean, before?: number): Promise<EndedSessions> {
+    return this.#apiClient.call(
+      'user.endAllSessions',
+      before === undefined ? { keepCurrent } : { keepCurrent, before },
+    );
+  }
+
+  /**
+   * Signs a native key statement with this executor's own device key, as the identity it
+   * speaks for. Local only: it answers only the operator on this machine, that is the admin
+   * credential, or no token on an executor without one, on a loopback listener. Every other caller
+   * gets 403 `local-only`, the admin credential on a network listener and an operator from a key
+   * login included. Its caller is the shell on the machine that signs a login to another executor.
+   */
+  async signSessionStatement(statement: UnsignedKeyStatement): Promise<SignedKeyStatement> {
+    return this.#apiClient.call('agent.signSessionStatement', { statement });
   }
 
   // Hosting methods

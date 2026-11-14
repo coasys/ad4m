@@ -116,6 +116,33 @@ impl Claims {
         }
     }
 
+    /// Claims for a token expiring at `expires_at` (Unix seconds) exactly; `iat` is now.
+    pub fn expiring_at(
+        issuer: String,
+        audience: String,
+        expires_at: u64,
+        sub: Option<String>,
+    ) -> Self {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("Time went backwards")
+            .as_secs();
+
+        Claims {
+            iss: issuer,
+            sub,
+            aud: audience,
+            exp: expires_at,
+            iat: now,
+            nonce: uuid::Uuid::new_v4().to_string(),
+        }
+    }
+
+    /// These claims with `nonce` as the token's id: a renewed token names the grant it renews.
+    pub(crate) fn with_nonce(self, nonce: String) -> Self {
+        Claims { nonce, ..self }
+    }
+
     /// The DID of the key that signed the token.
     pub fn issuer(&self) -> &str {
         &self.iss

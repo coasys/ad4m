@@ -437,17 +437,61 @@ struct Gate {
     succeeded: AtomicU64,
 }
 
+/// A caller's hold on one identity's fetch gate ([`KelCache::fetching`]). Its
+/// drop — the fetch answered, or the caller's future was cancelled — removes
+/// the map's entry, but only while the map still holds this very handle and no
+/// other caller does ([`Arc::strong_count`] `== 2`: the map's and the handle the
+/// drop took out of this guard): a stale generation's drop removes no newer
+/// caller's entry. The drop takes the handle before it counts and lets it go
+/// while the map's mutex is still held, so two guards dropped at once can never
+/// both count their own holds: the second one's check sees the first one's
+/// handle already gone.
+struct FetchGate<'a> {
+    fetching: &'a StdMutex<HashMap<String, Arc<Gate>>>,
+    scid: String,
+    gate: Option<Arc<Gate>>,
+}
+
+impl Drop for FetchGate<'_> {
+    fn drop(&mut self) {
+        let mut fetching = self
+            .fetching
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(gate) = self.gate.take() else {
+            return;
+        };
+        if fetching
+            .get(&self.scid)
+            .is_some_and(|held| Arc::ptr_eq(held, &gate))
+            && Arc::strong_count(&gate) == 2
+        {
+            fetching.remove(&self.scid);
+        }
+    }
+}
+
 /// The verified key logs, by SCID.
 pub struct KelCache {
     store: SqliteChainStore,
     /// `identity_heads`: the last signed head accepted per log.
     meta: StdMutex<Connection>,
     chains: Mutex<HashMap<String, KelChain>>,
-    /// One fetch per identity at a time, so concurrent callers share store round trips.
-    fetching: Mutex<HashMap<String, Arc<Gate>>>,
+    /// One fetch per identity at a time, so concurrent callers share store round
+    /// trips. Each caller holds the gate through a guard ([`FetchGate`]) whose
+    /// drop removes the entry once no other caller holds the handle — a refresh
+    /// cancelled mid-fetch leaves no gate a later refresh would find stale, and
+    /// the map holds exactly the identities with a fetch in flight.
+    fetching: StdMutex<HashMap<String, Arc<Gate>>>,
     /// When each log last refreshed from the configured store (unix seconds), in memory only:
-    /// after a restart every log counts as stale ([`KelCache::refreshed_within`]).
+    /// after a restart every log counts as stale ([`KelCache::refreshed_within`]). A failed
+    /// refresh notes one too, so a link's read keeps its backoff; a session admission counts
+    /// only `read_ok`.
     refreshed: StdMutex<HashMap<String, u64>>,
+    /// When the store last answered each log's read (unix seconds), in memory only: what a
+    /// session admission's freshness counts ([`KelCache::read_ok_within`]). A failed refresh
+    /// never notes one, so an outage cannot age-stamp a stale head as fresh.
+    read_ok: StdMutex<HashMap<String, u64>>,
     /// The logs the configured store answers behind the cache ([`CacheError::Behind`]), in
     /// memory only, until a refresh succeeds ([`KelCache::store_behind`]).
     behind: StdMutex<HashMap<String, StoreBehind>>,
@@ -665,8 +709,9 @@ impl KelCache {
             store,
             meta: StdMutex::new(meta),
             chains: Mutex::new(HashMap::new()),
-            fetching: Mutex::new(HashMap::new()),
+            fetching: StdMutex::new(HashMap::new()),
             refreshed: StdMutex::new(HashMap::new()),
+            read_ok: StdMutex::new(HashMap::new()),
             behind: StdMutex::new(HashMap::new()),
             store_keys,
             on_fork: None,
@@ -841,6 +886,10 @@ impl KelCache {
     /// to its person reads the log only up to this seq. Events past it (from a foreign `src`,
     /// or not yet under a store head) are for resolution display only.
     pub async fn trusted(&self, scid: &str) -> Result<Option<(KelChain, u64)>, CacheError> {
+        #[cfg(test)]
+        if tests::FAIL_TRUSTED.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            return Err(CacheError::Storage("the read was made to fail".into()));
+        }
         let Some(head) = self.accepted_head(scid)? else {
             return Ok(None);
         };
@@ -914,6 +963,9 @@ impl KelCache {
         chains.remove(scid);
         if let Ok(mut refreshed) = self.refreshed.lock() {
             refreshed.remove(scid);
+        }
+        if let Ok(mut read_ok) = self.read_ok.lock() {
+            read_ok.remove(scid);
         }
         self.note_behind(scid, None);
         self.key_map.forget(scid);
@@ -1156,6 +1208,25 @@ impl KelCache {
         Ok(Some(ours))
     }
 
+    /// The gate one caller's [`KelCache::refresh`] runs under: the map's entry
+    /// for `scid` or a new one, handed back in a guard whose drop removes it
+    /// once no other caller holds the handle.
+    fn fetch_gate(&self, scid: &str) -> FetchGate<'_> {
+        let mut fetching = self
+            .fetching
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let gate = fetching
+            .entry(scid.to_string())
+            .or_insert_with(|| Arc::new(Gate::default()))
+            .clone();
+        FetchGate {
+            fetching: &self.fetching,
+            scid: scid.to_string(),
+            gate: Some(gate),
+        }
+    }
+
     /// Refreshes `did`'s log from the agent language: reads the pages from the cached head on
     /// (the head's own event included, so a different event there shows as a fork) and accepts
     /// them with [`KelCache::accept`]. One fetch per identity at a time; a caller that waited
@@ -1169,13 +1240,8 @@ impl KelCache {
         did: &str,
     ) -> Result<KelChain, CacheError> {
         let scid = scid_from(did).to_string();
-        let gate = {
-            let mut fetching = self.fetching.lock().await;
-            fetching
-                .entry(scid.clone())
-                .or_insert_with(|| Arc::new(Gate::default()))
-                .clone()
-        };
+        let one_fetch = self.fetch_gate(&scid);
+        let gate = one_fetch.gate.as_ref().unwrap();
         let asked = gate.begun.load(Ordering::SeqCst);
         let result = {
             let _one_fetch = gate.one_fetch.lock().await;
@@ -1198,17 +1264,19 @@ impl KelCache {
         };
         match &result {
             Ok(_) => {
-                self.note_refreshed(&scid, now());
+                let at = now();
+                self.note_refreshed(&scid, at);
+                self.note_read(&scid, at);
                 self.note_behind(&scid, None);
             }
+            // A head the store signed below the cache's is no read of the cached head:
+            // it does not mark it fresh (no `note_read`), so a session is not admitted
+            // on a head the store has not confirmed. The cached log stays the newer one.
             Err(CacheError::Behind { store, .. }) => self.note_behind(&scid, Some(*store)),
             Err(_) => {}
         }
-        let mut fetching = self.fetching.lock().await;
-        // The map's handle and ours: nobody else waits on this gate.
-        if Arc::strong_count(&gate) <= 2 {
-            fetching.remove(&scid);
-        }
+        // `one_fetch`'s drop removes the map's entry once no other caller waits
+        // on the gate — the same cleanup a cancelled refresh's drop runs.
         result
     }
 
@@ -1228,6 +1296,35 @@ impl KelCache {
             }
             refreshed.insert(scid.to_string(), at);
         }
+    }
+
+    /// Marks `scid`'s log as answered by the store at `at`: a refresh that folded. A
+    /// head the store signed behind the cache's is no read of the cached head — it
+    /// is noted `Behind`, never here. Sessions count these, never a failed attempt.
+    pub(crate) fn note_read(&self, scid: &str, at: u64) {
+        if let Ok(mut read_ok) = self.read_ok.lock() {
+            if read_ok.len() >= REFRESHED_BOUND && !read_ok.contains_key(scid) {
+                let oldest = read_ok
+                    .iter()
+                    .min_by_key(|(_, at)| **at)
+                    .map(|(scid, _)| scid.clone());
+                if let Some(oldest) = oldest {
+                    read_ok.remove(&oldest);
+                }
+            }
+            read_ok.insert(scid.to_string(), at);
+        }
+    }
+
+    /// Whether the store answered `scid`'s log within `window` seconds before `now` (in this
+    /// run of the executor). Session admission uses this, never
+    /// [`KelCache::refreshed_within`]: a failed refresh marks an attempt, not a read.
+    pub fn read_ok_within(&self, scid: &str, now: u64, window: u64) -> bool {
+        self.read_ok
+            .lock()
+            .ok()
+            .and_then(|read_ok| read_ok.get(scid).copied())
+            .is_some_and(|at| now.saturating_sub(at) < window)
     }
 
     /// Whether `scid`'s log refreshed from the configured store within `window` seconds before
@@ -1509,6 +1606,9 @@ pub(crate) mod tests {
         in_memory(vec![store_key().multikey()])
     }
 
+    /// Test seam: the next `trusted` fails as a cache whose storage cannot be read.
+    pub(crate) static FAIL_TRUSTED: AtomicBool = AtomicBool::new(false);
+
     /// Takes `events` (a log from seq 0) into `cache` as the configured store would answer
     /// them: with a head signed by [`store_key`] at their last event, so that event is the log's
     /// trusted seq. The events may continue what the cache holds.
@@ -1581,6 +1681,9 @@ pub(crate) mod tests {
         pub key_owner_override: StdMutex<Option<String>>,
         /// When set, the first `log` call notifies `.0`, then waits for `.1`.
         pub pause_store: StdMutex<Option<(Arc<Notify>, Arc<Notify>)>>,
+        /// A `log` call for one of these DIDs notifies the paired `Notify` once and never
+        /// answers: a store that stalls for that log only.
+        pub stall_for: StdMutex<HashMap<String, Arc<Notify>>>,
         /// A `log` call fails as unavailable.
         pub store_down: AtomicBool,
         /// A `key_owner` call fails as unavailable.
@@ -1609,6 +1712,7 @@ pub(crate) mod tests {
                 log_calls: AtomicUsize::new(0),
                 key_owner_override: StdMutex::new(None),
                 pause_store: StdMutex::new(None),
+                stall_for: StdMutex::new(HashMap::new()),
                 store_down: AtomicBool::new(false),
                 key_index_down: AtomicBool::new(false),
                 key_index_down_for: StdMutex::new(HashSet::new()),
@@ -1656,6 +1760,11 @@ pub(crate) mod tests {
     impl IdentityBackend for FakeStore {
         async fn log(&self, _did: &str, from: u64) -> Result<Option<LogPage>, IdentityError> {
             self.log_calls.fetch_add(1, Ordering::SeqCst);
+            let stalled = self.stall_for.lock().unwrap().get(_did).cloned();
+            if let Some(entered) = stalled {
+                entered.notify_one();
+                std::future::pending::<()>().await;
+            }
             let pause = self.pause_store.lock().unwrap().take();
             if let Some((entered, release)) = pause {
                 entered.notify_one();
@@ -2510,7 +2619,9 @@ pub(crate) mod tests {
             tokio::spawn(async move { cache.refresh(store.as_ref(), &did).await.map(|c| c.head()) })
         };
         let mut tasks = vec![refresh()];
-        entered.notified().await;
+        tokio::time::timeout(std::time::Duration::from_secs(60), entered.notified())
+            .await
+            .expect("the read reached the paused store");
         for _ in 0..19 {
             tasks.push(refresh());
         }
@@ -2518,7 +2629,7 @@ pub(crate) mod tests {
         while cache
             .fetching
             .lock()
-            .await
+            .unwrap()
             .get(&log.scid())
             .map(Arc::strong_count)
             != Some(21)
@@ -2534,7 +2645,7 @@ pub(crate) mod tests {
         assert_eq!(cache.stored_events(&log.scid(), 0).await.unwrap().len(), 1);
         assert!(cache.forks(&log.scid()).await.unwrap().is_empty());
         assert!(
-            cache.fetching.lock().await.is_empty(),
+            cache.fetching.lock().unwrap().is_empty(),
             "the last fetch drops the gate"
         );
     }
@@ -2551,7 +2662,46 @@ pub(crate) mod tests {
                 Err(CacheError::NotFound)
             ));
         }
-        assert!(cache.fetching.lock().await.is_empty());
+        assert!(cache.fetching.lock().unwrap().is_empty());
+    }
+
+    /// A refresh dropped mid-fetch — the caller's timeout cancelled it, as a
+    /// renewal's read bound does — leaves no gate behind: the next refresh of the
+    /// same identity reads the store again, not a stale gate, and the map holds
+    /// no entry for it once it is done.
+    #[tokio::test]
+    async fn a_refresh_dropped_mid_fetch_leaves_no_gate() {
+        let log = TestLog::new(1);
+        let store = Arc::new(FakeStore::new(log.events.clone()));
+        let cache = Arc::new(in_memory(vec![store.key.multikey()]));
+        let (entered, release) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+        *store.pause_store.lock().unwrap() = Some((entered.clone(), release.clone()));
+        let first = tokio::spawn({
+            let (cache, store, did) = (cache.clone(), store.clone(), log.scid());
+            async move { cache.refresh(store.as_ref(), &did).await }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(60), entered.notified())
+            .await
+            .expect("the read reached the paused store");
+        first.abort();
+        assert!(first.await.is_err(), "the caller went away");
+        release.notify_one();
+        assert!(
+            cache.fetching.lock().unwrap().is_empty(),
+            "a dropped fetch leaves no gate in fetching"
+        );
+        let chain = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            cache.refresh(store.as_ref(), &log.scid()),
+        )
+        .await
+        .expect("a later refresh reads again")
+        .unwrap();
+        assert_eq!(chain.head(), log.chain().head());
+        assert!(
+            cache.fetching.lock().unwrap().is_empty(),
+            "the map holds no entry for it afterwards"
+        );
     }
 
     /// The trusted seq is the accepted, store-signed head's: events from `ingest` (any source)

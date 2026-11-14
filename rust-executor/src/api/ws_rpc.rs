@@ -12,7 +12,7 @@
 use axum::{
     extract::{
         ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade},
-        Query, State,
+        ConnectInfo, Query, State,
     },
     response::IntoResponse,
 };
@@ -20,6 +20,7 @@ use futures::stream::StreamExt;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
@@ -60,9 +61,11 @@ pub async fn ws_rpc(
     Query(query): Query<WsAuthQuery>,
     axum::extract::Extension(handler_map): axum::extract::Extension<Arc<HandlerMap>>,
     reach: ListenerReach,
+    connect_info: Option<axum::extract::Extension<ConnectInfo<SocketAddr>>>,
 ) -> impl IntoResponse {
     let token = query.token.unwrap_or_default();
-    match connection_context(&token, &state.admin_credential, reach) {
+    let peer = connect_info.map(|info| info.0 .0.ip());
+    match connection_context(&token, &state.admin_credential, reach, peer) {
         Ok(ctx) => ws.on_upgrade(move |socket| handle_ws(socket, handler_map, ctx)),
         Err(e) => {
             let code = e.close_code();
@@ -81,10 +84,12 @@ fn connection_context(
     token: &str,
     admin_credential: &Option<Secret>,
     reach: ListenerReach,
+    peer: Option<IpAddr>,
 ) -> Result<Arc<RequestContext>, AuthError> {
     let mut ctx = RequestContext::open(token, admin_credential, reach)?;
     // Live queries opened on this connection belong to it and end when it closes.
     ctx.connection_id = Some(uuid::Uuid::new_v4().to_string());
+    ctx.peer = peer;
     Ok(Arc::new(ctx))
 }
 
@@ -546,15 +551,18 @@ impl Connection {
         // - `drop_token` drops the call's future in the select below, on
         //   `request.cancel` or the session ending — and, for a call that
         //   opens a live query, on the connection closing too (#1595: its
-        //   first result has nobody left to receive it). Other calls still
-        //   finish once the socket closes: their evals end on `ctx_token`,
-        //   and a subscribe that still completes is swept as the call ends
-        //   (the dispose loop in `serve`).
+        //   first result has nobody left to receive it). So is a key login: its
+        //   minted grant needs the connection to reach its answer, so it is
+        //   dropped (and the grant ended) with it rather than left live without
+        //   one. Other calls still finish once the socket closes: their evals
+        //   end on `ctx_token`, and a subscribe that still completes is swept as
+        //   the call ends (the dispose loop in `serve`).
         // - `ctx_token` (a `closed` child) rides `req_ctx` into the eval gate:
         //   a `request.cancel`, the connection closing, a revocation or an
         //   expiry stops the call's eval — for every query-running method, not
         //   only live-query openers (#1736). `request.cancel` cancels both.
-        let drop_token = if opens_live_query {
+        let ends_with_connection = opens_live_query || msg_type == "user.loginWithKey";
+        let drop_token = if ends_with_connection {
             self.closed.child_token()
         } else {
             self.session_over.child_token()
@@ -702,13 +710,17 @@ where
     let over = conn.ctx.session.over();
     tokio::pin!(incoming, over);
     loop {
+        // Biased: a request already received is answered before the session's end is: it
+        // gets its 401 from the session check rather than no answer. `over` is ready at once
+        // for a grant that expired before the connection opened.
         let text = tokio::select! {
+            biased;
             _ = conn.session_over.cancelled() => break,
+            text = incoming.next() => text,
             _ = &mut over => {
                 conn.session_over.cancel();
                 break;
             }
-            text = incoming.next() => text,
         };
         let Some(text) = text else { break };
         conn.handle_text(&text).await;
@@ -774,7 +786,7 @@ mod connection_context_tests {
         for token in &refused {
             for reach in [ListenerReach::Loopback, ListenerReach::Network] {
                 assert!(
-                    connection_context(token, &Some(ADMIN.into()), reach).is_err(),
+                    connection_context(token, &Some(ADMIN.into()), reach, None).is_err(),
                     "token {token:.20}…, {reach:?}"
                 );
             }
@@ -788,10 +800,13 @@ mod connection_context_tests {
         setup_wallet();
         setup_agent();
         let admin = Some(crate::secret::Secret::from(ADMIN.to_string()));
-        let a = connection_context(ADMIN, &admin, ListenerReach::Network).unwrap();
-        let b = connection_context(ADMIN, &admin, ListenerReach::Network).unwrap();
+        let peer: IpAddr = "203.0.113.7".parse().unwrap();
+        let a = connection_context(ADMIN, &admin, ListenerReach::Network, Some(peer)).unwrap();
+        let b = connection_context(ADMIN, &admin, ListenerReach::Network, None).unwrap();
         assert!(a.connection_id.is_some());
         assert_ne!(a.connection_id, b.connection_id);
+        // The address it comes from, which `user.sessionChallenge` budgets by.
+        assert_eq!(a.peer, Some(peer));
         let http = RequestContext::open(ADMIN, &admin, ListenerReach::Network).unwrap();
         assert_eq!(http.connection_id, None);
     }
@@ -802,7 +817,8 @@ mod connection_context_tests {
         setup_agent();
         let token = jwt(Some(vec![AGENT_READ_CAPABILITY.clone()]));
 
-        let ctx = connection_context(&token, &Some(ADMIN.into()), ListenerReach::Network).unwrap();
+        let ctx =
+            connection_context(&token, &Some(ADMIN.into()), ListenerReach::Network, None).unwrap();
         assert!(ctx.session.check().is_ok());
         revoke(&token);
         assert_eq!(
@@ -829,7 +845,7 @@ mod connection_context_tests {
             crate::agent::AgentContext::managed(user_did),
         ];
         for (token, expected) in tokens.iter().zip(expected) {
-            let ctx = connection_context(token, &Some(ADMIN.into()), ListenerReach::Network)
+            let ctx = connection_context(token, &Some(ADMIN.into()), ListenerReach::Network, None)
                 .unwrap_or_else(|e| panic!("token {token:.20}… opens a session: {e}"));
             assert_eq!(ctx.acts_as(), expected, "token {token:.20}…");
         }

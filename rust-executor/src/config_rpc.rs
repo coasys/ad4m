@@ -177,6 +177,7 @@ const BUILT_IN_KEYS: &[(&str, KeyClass)] = &[
     ("log_dir", KeyClass::Machine),
     ("multi_user_config", KeyClass::Machine),
     ("port", KeyClass::Machine),
+    ("public_origins", KeyClass::Machine),
     ("run_dapp_server", KeyClass::Machine),
     ("sfu_bind_addr", KeyClass::Machine),
     ("sfu_public_addr", KeyClass::Machine),
@@ -339,6 +340,12 @@ fn next_start_accepts(values: &Map<String, Value>, start: &Ad4mConfig) -> Result
         next.localhost.unwrap_or(true),
         next.sfu_udp_port,
         next.sfu_public_addr.as_deref(),
+    )?;
+    // `run` stops on a public origin that is not an origin.
+    crate::identity::key_login::Audiences::new(
+        next.public_origins.as_deref().unwrap_or_default(),
+        next.port,
+        next.listens_on_network(),
     )?;
     crate::config::refuse_custody_channel_with_multi_user(
         start.custody_channel == Some(true),
@@ -548,6 +555,7 @@ mod tests {
             "localhost",
             "log_dir",
             "multi_user_config",
+            "public_origins",
             "ai_endpoints",
             "local_ai_dir",
             "local_ai_device",
@@ -575,6 +583,7 @@ mod tests {
             sfu_stun_server: Some("a".into()),
             identity: Some(Default::default()),
             log_dir: Some("a".into()),
+            public_origins: Some(vec!["https://a.example".into()]),
             ai_endpoints: Some(Vec::new()),
             ai_models: Some(Vec::new()),
             ai_defaults: Some(Default::default()),
@@ -744,6 +753,43 @@ mod tests {
         .unwrap();
         assert!(result.refused.is_empty(), "{result:?}");
         assert_eq!(read_values(&path).unwrap().get("port"), Some(&json!(12100)));
+    }
+
+    /// A public origin that is not an origin (a path) is refused; a list of origins is written.
+    #[tokio::test]
+    async fn a_public_origin_the_next_start_stops_on_is_invalid() {
+        let (_dir, path) = config_file(r#"{"port": 12000}"#);
+        let result = set_config(
+            &started(Some(&path), &[]),
+            true,
+            set(json!({ "public_origins": ["https://a.example/api"] })),
+            VALIDATOR_LIMIT,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            reasons(&result),
+            vec![("public_origins".to_string(), RefusalReason::Invalid)]
+        );
+        assert!(result.refused[0]
+            .detail
+            .as_deref()
+            .is_some_and(|d| d.contains("public_origins")));
+        assert!(!read_values(&path).unwrap().contains_key("public_origins"));
+
+        let result = set_config(
+            &started(Some(&path), &[]),
+            true,
+            set(json!({ "public_origins": ["https://a.example", "http://127.0.0.1:12000"] })),
+            VALIDATOR_LIMIT,
+        )
+        .await
+        .unwrap();
+        assert!(result.refused.is_empty(), "{result:?}");
+        assert_eq!(
+            read_values(&path).unwrap().get("public_origins"),
+            Some(&json!(["https://a.example", "http://127.0.0.1:12000"]))
+        );
     }
 
     /// An SFU bind address that `run` would stop on is refused: with a fixed UDP port it must

@@ -25,6 +25,7 @@ pub mod config_ws;
 pub mod expressions_ws;
 pub mod hosting_ws;
 pub mod identity_ws;
+pub mod key_login_ws;
 pub mod languages_ws;
 pub mod neighbourhoods_ws;
 pub mod perspectives_ws;
@@ -276,7 +277,7 @@ pub async fn start_server(config: Ad4mConfig) -> Result<(), AnyError> {
 
         tokio::spawn(async move {
             axum_server::from_tcp_rustls(tls_listener, rustls_config)
-                .serve(tls_app.into_make_service())
+                .serve(tls_app.into_make_service_with_connect_info::<std::net::SocketAddr>())
                 .await
                 // Same reasoning as the MCP HTTPS listener: the cleartext API
                 // below is bound to 127.0.0.1 because TLS is *configured*, not
@@ -298,7 +299,12 @@ pub async fn start_server(config: Ad4mConfig) -> Result<(), AnyError> {
         listener.local_addr()?
     );
 
-    axum::serve(listener, app.into_make_service()).await?;
+    // The peer address reaches `ws_rpc`: `user.sessionChallenge` budgets by it.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
 
     Ok(())
 }

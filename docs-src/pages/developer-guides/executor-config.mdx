@@ -42,6 +42,7 @@ ignored, and the error names the key by its path, e.g.
 |---|---|---|---|
 | `app_data_path` | string | `~/.ad4m` | `--app-data-path` / `AD4M_APP_DATA_PATH` |
 | `port` | number | `12000` | `--port` / `AD4M_PORT` |
+| `public_origins` | list of origins | none: only this executor's loopback origins as a key statement's audience — and none on a network listener, so key login is refused there | `--public-origin` (repeat it, or separate with `,`) / `AD4M_PUBLIC_ORIGINS` |
 | `hc_admin_port` | number | first free from 2000 | `--hc-admin-port` / `AD4M_HC_ADMIN_PORT` |
 | `hc_app_port` | number | first free from 1337 | `--hc-app-port` / `AD4M_HC_APP_PORT` |
 | `localhost` | bool | `true` | `--localhost` / `AD4M_LOCALHOST` |
@@ -184,6 +185,35 @@ the seed's `identityStore`.
   "storeKeys": ["z6Mk…"] } }
 ```
 
+**`public_origins`** lists the origins (`scheme://host[:port]`) clients reach
+this executor at, such as `["https://ad4m.example.org"]`. A key login
+(`user.loginWithKey`, `user.renewSession`) signs the origin the client dialed
+into its statement, and the executor accepts the statement only when that
+origin, normalised (`wss` reads as `https`, `ws` as `http`, the host in lower
+case, a default port left out), is one of these. So a server that passes this
+executor's challenge on to a person's app gets a statement for its own origin,
+which this executor refuses. Without `public_origins` a loopback-only executor
+accepts only its own loopback origins (`http://127.0.0.1:<port>`,
+`http://localhost:<port>`, `http://[::1]:<port>`), and refuses a statement for
+any other origin with 403 `no-public-origin`. The check restricts the signed
+audience, not the caller's location: a remote key holder can sign a loopback
+audience just as easily as any other, so on a listener the network reaches (TLS,
+or `localhost` off) without `public_origins` no origin is accepted at all and
+key login is refused outright — `user.sessionChallenge`, `user.loginWithKey`
+and `user.renewSession` answer 403 `no-audience`, which names the setting.
+Set `public_origins` there to pin key logins to origins the operator names. Once the key is set, only the listed origins count: list a
+loopback origin too if local apps log in with a key. The executor never reads
+the origin from the connection's `Host` or `Origin` header, which a caller
+chooses. A value that is not an origin (a path, a query, no host) stops the
+start with an error that names `public_origins`.
+
+`user.sessionChallenge` counts open challenges by the address the caller
+connects from: at most 100 per address. The executor does not read forwarding
+headers for this. Behind a reverse proxy every caller connects from the proxy,
+so all of them share the proxy's budget. Callers without connect info share one
+budget too. Rate-limit `user.sessionChallenge` at the proxy. A key session's
+renewal does not draw from this budget: each key session has its own slot.
+
 **`log_config`** sets a level (`error`, `warn`, `info`, `debug`, `trace`)
 per crate over the defaults `rust_executor: info`, `holochain: warn`,
 `wasmer_compiler_cranelift: warn`, `warp::server: info`.
@@ -235,7 +265,7 @@ write, with a reason:
 
 `restart` keys: `mcp_enabled`, `mcp_port`, `log_config`,
 `auto_permit_cap_requests`, `ai_models`, `ai_defaults`, `local_ai_autostart`.
-Every other key is a `machine` key: paths, listeners, ports,
+Every other key is a `machine` key: paths, listeners, ports, `public_origins`,
 `multi_user_config`, `identity`, `log_dir`, `local_ai_dir`, `local_ai_device`,
 and `ai_endpoints` (an endpoint names an environment variable whose value is
 sent to its URL, so only the operator on this machine sets it). A write
@@ -271,8 +301,8 @@ A supervisor (the desktop app, systemd, a host) reads the exit code:
   only. Multi-user mode refuses it: `run` exits 78, and
   `user.setMultiUserEnabled(true)` answers 403.
 - **Local only**: `runtime.quit`, `runtime.restart`, `agent.unlock`,
-  `identity.rekey` and `identity.custodyStatus` answer only the operator on a
-  loopback listener.
+  `agent.signSessionStatement`, `identity.rekey` and `identity.custodyStatus`
+  answer only the operator on a loopback listener.
   A caller without the admin credential gets 403 `Admin credential required`;
   the admin credential on a network listener gets 403 `local-only`.
   `runtime.setConfig` from such a caller writes the other keys and lists each
@@ -288,7 +318,11 @@ A supervisor (the desktop app, systemd, a host) reads the exit code:
   no admin credential (`--insecure-no-admin-credential`), a loopback connection without a token
   is the operator, and the WebSocket endpoint does not check `Origin`: a web
   page in a browser on the same machine can reach these methods. Run with an
-  admin credential.
+  admin credential. An operator who logged in with a device key is never on
+  this machine, so these refuse it too. Creating, importing or locking the
+  agent and exporting or importing data (`agent.generate`, `agent.import`,
+  `agent.lock`, `runtime.exportData`, `runtime.importData`) are not local
+  only: a remote operator may move the whole data folder.
 - **`ad4m-executor rekey`**: gives the executor a new main wallet key, so a
   revoked server links again. Run it on the server itself: it calls
   `identity.rekey` on a loopback address with the admin credential from
