@@ -250,10 +250,10 @@ export class IdentityClient {
     }
 
     /**
-     * The custody channel: the device keys a master key for this computer is sealed to. Only
-     * the custody credential (the first line of the executor's stdin) on a loopback listener of an executor
-     * started with `--custody-channel`; any other caller, the admin credential included, gets
-     * 403.
+     * The custody channel: the main agent's device keys (public keys only), the keys a master
+     * key sent to this computer is sealed to. Only the custody credential (the first line of the
+     * executor's stdin) on a loopback listener of an executor started with `--custody-channel`;
+     * any other caller, the admin credential included, gets 403.
      */
     async custodyStatus(): Promise<DeviceKeys> {
         return this.#apiClient.call("identity.custodyStatus", {});
