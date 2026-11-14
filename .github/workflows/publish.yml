@@ -455,6 +455,14 @@ jobs:
           tag: ${{ env.NPM_TAG }}
           access: public
 
+      - name: Publish ad4m-ldk
+        uses: JS-DevTools/npm-publish@v1
+        with:
+          token: ${{ secrets.COASYS_NPM_TOKEN }}
+          package: ad4m-ldk/js/package.json
+          tag: ${{ env.NPM_TAG }}
+          access: public
+
       - name: Publish connect
         uses: JS-DevTools/npm-publish@v1
         with:
