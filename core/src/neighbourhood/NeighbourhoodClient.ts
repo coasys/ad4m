@@ -6,6 +6,9 @@ import { Perspective, PerspectiveExpression, PerspectiveUnsignedInput } from "..
 import { PerspectiveHandle } from "../perspectives/PerspectiveHandle"
 import { NeighbourhoodProxy } from "./NeighbourhoodProxy"
 import type { CreatedInvite } from "../generated/api/CreatedInvite"
+import type { CreateNeighbourhoodParams } from "../generated/api/CreateNeighbourhoodParams"
+import type { CreateNeighbourhoodResult } from "../generated/api/CreateNeighbourhoodResult"
+import type { LinkLanguageChoice } from "../generated/api/LinkLanguageChoice"
 import type { InviteInfo } from "../generated/api/InviteInfo"
 import type { JoinMode } from "../generated/api/JoinMode"
 import type { MemberInfo } from "../generated/api/MemberInfo"
@@ -43,6 +46,26 @@ export class NeighbourhoodClient {
         return this.#apiClient.call('neighbourhood.publish', {
             perspectiveUuid: perspectiveUUID, linkLanguage, meta: Perspective.toWire(meta)
         }, options)
+    }
+
+    /**
+     * Makes the perspective a space as this session's person, on a link server: the executor
+     * makes the space's link language (its creator is the person), writes the space's rules
+     * and the person's `admin` link, and publishes it. The link language is fixed from then on:
+     * a second `create` of the same perspective rejects (`already-created`). A session without
+     * a person rejects with `needs-identity`; `{ kind: "holochain" }` with `coming-soon`.
+     */
+    async create(
+        params: CreateNeighbourhoodParams,
+        options?: CallOptions,
+    ): Promise<CreateNeighbourhoodResult> {
+        return this.#apiClient.call('neighbourhood.create', params, options)
+    }
+
+    /** The link language the space syncs through, fixed when it was made; `null` for a
+     *  perspective that is not a space. */
+    async linkLanguageChoice(perspectiveUUID: string): Promise<LinkLanguageChoice | null> {
+        return this.#apiClient.call('neighbourhood.linkLanguageChoice', { perspectiveUuid: perspectiveUUID })
     }
 
     /**

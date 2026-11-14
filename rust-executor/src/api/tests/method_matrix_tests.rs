@@ -450,6 +450,17 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
         "neighbourhood.publish",
         || json!({ "perspectiveUuid": TARGET, "linkLanguage": "QmLang", "meta": { "links": [] } }),
     ),
+    ("neighbourhood.create", || {
+        json!({
+            "perspectiveUuid": TARGET,
+            "sync": { "kind": "default" },
+            "rules": { "add": "admins", "join": "open" },
+        })
+    }),
+    (
+        "neighbourhood.linkLanguageChoice",
+        || json!({ "perspectiveUuid": TARGET }),
+    ),
     (
         "neighbourhood.sendBroadcast",
         || json!({ "uuid": "p", "payload": { "links": [] } }),

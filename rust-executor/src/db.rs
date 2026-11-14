@@ -31,6 +31,7 @@ mod identity;
 mod model_migration;
 mod rekey;
 pub(crate) mod sealed;
+mod spaces;
 mod tasks;
 pub use bots::{BotActivityRow, BotGrantRow, BotRow};
 pub use endpoints::InvalidEndpoint;
@@ -471,6 +472,8 @@ impl Ad4mDb {
         Self::create_identity_tables(&conn)?;
         // The bots and their activity log: see bots::.
         Self::create_bot_tables(&conn)?;
+        // The link-language choice of each space: see spaces::.
+        Self::create_space_tables(&conn)?;
 
         conn.execute(
             "CREATE TABLE IF NOT EXISTS email_verifications (
@@ -1655,6 +1658,7 @@ impl Ad4mDb {
         )?;
 
         self.remove_flow_replica_rows(uuid)?;
+        self.remove_space_choice(uuid)?;
 
         Ok(())
     }

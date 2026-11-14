@@ -202,7 +202,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-274 methods: Cap 87, CapAnyPointer 1, Executor 48, Open 10, Operator 41, Owns 83, UserOrOperator 4. Local only (the operator on this machine): 16.
+278 methods: Cap 88, CapAnyPointer 2, Executor 48, Open 10, Operator 41, Owns 85, UserOrOperator 4. Local only (the operator on this machine): 16.
 
 | Method | Guard |
 |---|---|
@@ -322,11 +322,13 @@ the guard checked:
 | `language.writeSettings` | `Executor(language:UPDATE)` |
 | `neighbourhood.addBot` | `Owns(Perspective uuid, neighbourhood:UPDATE)` |
 | `neighbourhood.addMember` | `Owns(Perspective uuid, neighbourhood:UPDATE)` |
+| `neighbourhood.create` | `Owns(Perspective perspectiveUuid, neighbourhood:CREATE)` |
 | `neighbourhood.createInvite` | `Owns(Perspective uuid, neighbourhood:UPDATE)` |
 | `neighbourhood.hasTelepresence` | `Owns(Perspective uuid, neighbourhood:READ)` |
 | `neighbourhood.invites` | `Owns(Perspective uuid, neighbourhood:READ)` |
 | `neighbourhood.join` | `Cap(neighbourhood:READ)` |
 | `neighbourhood.leave` | `Owns(Perspective uuid, neighbourhood:UPDATE)` |
+| `neighbourhood.linkLanguageChoice` | `Owns(Perspective perspectiveUuid, neighbourhood:READ)` |
 | `neighbourhood.members` | `Owns(Perspective uuid, neighbourhood:READ)` |
 | `neighbourhood.onlineAgents` | `Owns(Perspective uuid, neighbourhood:READ)` |
 | `neighbourhood.otherAgents` | `Owns(Perspective uuid, neighbourhood:READ)` |
@@ -411,6 +413,7 @@ the guard checked:
 | `runtime.inbox` | `Cap(runtime.messages:READ)` |
 | `runtime.info` | `Open` |
 | `runtime.linkLanguageTemplates` | `Cap(runtime.known_link_languages:READ)` |
+| `runtime.linkServers` | `Cap(runtime.known_link_languages:READ)` |
 | `runtime.logTail` | `Operator` |
 | `runtime.networkMetrics` | `Cap(runtime.hc_agent_info:READ)` |
 | `runtime.notifications` | `Cap(agent:UPDATE)` |
@@ -457,6 +460,7 @@ the guard checked:
 | `sfu.startRoom` | `Cap(neighbourhood:UPDATE)` |
 | `sfu.status` | `Cap(neighbourhood:READ)` |
 | `sfu.stopRoom` | `Cap(neighbourhood:UPDATE)` |
+| `spaces.list` | `CapAnyPointer(perspective:READ)` |
 | `storage.keys` | `Operator` |
 | `storage.reencrypt` | `Operator`, local only |
 | `storage.rotatePersonKey` | `Operator` |

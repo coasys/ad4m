@@ -239,6 +239,7 @@ fn params(method: &str, fx: &Fixture) -> Value {
             json!({ "neighbourhoodUrl": "neighbourhood://leak" })
         }
         "sfu.servesAllMembers" => json!({ "uuid": uuid }),
+        "neighbourhood.linkLanguageChoice" => json!({ "perspectiveUuid": uuid }),
         "identity.log" => {
             json!({ "did": "did:scid:coasys:1:QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG" })
         }

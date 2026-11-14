@@ -365,6 +365,11 @@ fn the_guard_table_names_the_param_an_owner_guard_reads() {
             "neighbourhood.publish",
             "Perspective perspectiveUuid or perspectiveUUID",
         ),
+        ("neighbourhood.create", "Perspective perspectiveUuid"),
+        (
+            "neighbourhood.linkLanguageChoice",
+            "Perspective perspectiveUuid",
+        ),
     ] {
         let row = row(method);
         assert!(row.contains(&format!("`Owns({param}, ")), "{row}");

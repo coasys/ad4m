@@ -46,6 +46,17 @@ describe("template uniqueness", () => {
         }
     });
 
+    it("every template variable is unfilled: SERVER_URL has no default server", () => {
+        const lines = readBundle().split("\n");
+        const values = lines
+            .flatMap((line, i) => (line.includes("//!@ad4m-template-variable") ? [lines[i + 1] || ""] : []));
+        assert.strictEqual(values.length, 3);
+        for (const value of values) {
+            assert.match(value, /=\s*["']<to-be-filled>["']/, `a template variable has a default: ${value}`);
+        }
+        assert.ok(!readBundle().includes("link.ad4m.dev"), "the bundle names link.ad4m.dev");
+    });
+
     it("bundle has exactly three template variable markers", () => {
         const markers = readBundle()
             .split("\n")

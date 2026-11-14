@@ -58,8 +58,9 @@ import {
 // Replaced at publish time by the executor. See README.md § Template
 // Variables and possibleTemplateParams below.
 
+/** The link server's base URL. No default: `neighbourhood.create` fills it from the link-server directory. */
 //!@ad4m-template-variable
-const SERVER_URL = "https://link.ad4m.dev";
+const SERVER_URL = "<to-be-filled>";
 
 //!@ad4m-template-variable
 const UID = "<to-be-filled>";

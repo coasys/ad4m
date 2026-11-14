@@ -433,6 +433,10 @@ macro_rules! ad4m_db_methods {
             fn bot_activity(&self, did: &str, before: Option<i64>, limit: usize) -> Ad4mDbResult<Vec<BotActivityRow>>;
             fn sweep_bot_activity(&self, cutoff: u64) -> Ad4mDbResult<usize>;
 
+            // Spaces: each space's link-language choice, recorded once (`db/spaces.rs`)
+            fn record_space_choice(&self, perspective: &str, choice: &str) -> Ad4mDbResult<bool>;
+            fn space_choice(&self, perspective: &str) -> Ad4mDbResult<Option<String>>;
+
             // Re-key of the main agent: the rows that move to its new DID (`db/rekey.rs`)
             fn move_notification_owner(&self, old: &str, new: &str) -> Ad4mDbResult<usize>;
             fn move_flow_rows(&self, old: &str, new: &str) -> Ad4mDbResult<usize>;

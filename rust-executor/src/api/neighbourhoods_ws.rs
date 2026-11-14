@@ -235,6 +235,11 @@ async fn publish_neighbourhood(
     let body: PublishNeighbourhoodRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
+    // A server-link language's creator is the caller's person: `neighbourhood.create` only.
+    crate::spaces::refuse_creator_template(&body.link_language)
+        .await
+        .map_err(WsRpcError::bad_request)?;
+
     let agent_context = ctx.acts_as();
     let url = neighbourhoods::neighbourhood_publish_from_perspective_with_context(
         &perspective_uuid,

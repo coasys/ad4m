@@ -51,6 +51,8 @@ import type { ComputeLogEntry } from "./ComputeLogEntry";
 import type { CosignInceptParams } from "./CosignInceptParams";
 import type { CreateBotParams } from "./CreateBotParams";
 import type { CreateExpressionRequest } from "./CreateExpressionRequest";
+import type { CreateNeighbourhoodParams } from "./CreateNeighbourhoodParams";
+import type { CreateNeighbourhoodResult } from "./CreateNeighbourhoodResult";
 import type { CreatePerspectiveRequest } from "./CreatePerspectiveRequest";
 import type { CreateUserRequest } from "./CreateUserRequest";
 import type { CreatedBot } from "./CreatedBot";
@@ -111,7 +113,10 @@ import type { LanguageListParams } from "./LanguageListParams";
 import type { LanguageMeta } from "./LanguageMeta";
 import type { LanguageRef } from "./LanguageRef";
 import type { LanguageWriteSettingsParams } from "./LanguageWriteSettingsParams";
+import type { LinkLanguageChoice } from "./LinkLanguageChoice";
+import type { LinkLanguageChoiceParams } from "./LinkLanguageChoiceParams";
 import type { LinkLanguageTemplatesRequest } from "./LinkLanguageTemplatesRequest";
+import type { LinkServerEntry } from "./LinkServerEntry";
 import type { LocalAiHardware } from "./LocalAiHardware";
 import type { LocalAiInstallParams } from "./LocalAiInstallParams";
 import type { LocalAiPlan } from "./LocalAiPlan";
@@ -260,6 +265,7 @@ import type { SignMessageRequest } from "./SignMessageRequest";
 import type { SignSessionStatementParams } from "./SignSessionStatementParams";
 import type { SignedHead } from "./SignedHead";
 import type { SignedKeyStatement } from "./SignedKeyStatement";
+import type { SpaceHolding } from "./SpaceHolding";
 import type { StorageReencryptParams } from "./StorageReencryptParams";
 import type { StorageReencryptResult } from "./StorageReencryptResult";
 import type { StorageRotatePersonKeyParams } from "./StorageRotatePersonKeyParams";
@@ -410,11 +416,13 @@ export interface RpcMethods {
   "language.writeSettings": { params: LanguageWriteSettingsParams; result: boolean };
   "neighbourhood.addBot": { params: NeighbourhoodBotParams; result: null };
   "neighbourhood.addMember": { params: NeighbourhoodAddMemberParams; result: null };
+  "neighbourhood.create": { params: CreateNeighbourhoodParams; result: CreateNeighbourhoodResult };
   "neighbourhood.createInvite": { params: NeighbourhoodCreateInviteParams; result: CreatedInvite };
   "neighbourhood.hasTelepresence": { params: NeighbourhoodUuidParams; result: boolean };
   "neighbourhood.invites": { params: NeighbourhoodUuidParams; result: Array<InviteInfo> };
   "neighbourhood.join": { params: JoinNeighbourhoodRequest; result: PerspectiveHandle };
   "neighbourhood.leave": { params: NeighbourhoodUuidParams; result: null };
+  "neighbourhood.linkLanguageChoice": { params: LinkLanguageChoiceParams; result: LinkLanguageChoice | null };
   "neighbourhood.members": { params: NeighbourhoodUuidParams; result: Array<MemberInfo> };
   "neighbourhood.onlineAgents": { params: NeighbourhoodUuidParams; result: Array<OnlineAgent> };
   "neighbourhood.otherAgents": { params: NeighbourhoodUuidParams; result: Array<string> };
@@ -499,6 +507,7 @@ export interface RpcMethods {
   "runtime.inbox": { params: Record<string, never>; result: Array<PerspectiveExpression> };
   "runtime.info": { params: Record<string, never>; result: RuntimeInfo };
   "runtime.linkLanguageTemplates": { params: Record<string, never>; result: Array<LanguageMeta> };
+  "runtime.linkServers": { params: Record<string, never>; result: Array<LinkServerEntry> };
   "runtime.logTail": { params: LogTailParams; result: LogTail };
   "runtime.networkMetrics": { params: Record<string, never>; result: string };
   "runtime.notifications": { params: Record<string, never>; result: Array<Notification> };
@@ -545,6 +554,7 @@ export interface RpcMethods {
   "sfu.startRoom": { params: SfuRoomParams; result: SfuRoomInfo };
   "sfu.status": { params: Record<string, never>; result: SfuStatus };
   "sfu.stopRoom": { params: SfuRoomParams; result: boolean };
+  "spaces.list": { params: Record<string, never>; result: Array<SpaceHolding> };
   "storage.keys": { params: Record<string, never>; result: KeyringSummary };
   "storage.reencrypt": { params: StorageReencryptParams; result: StorageReencryptResult };
   "storage.rotatePersonKey": { params: StorageRotatePersonKeyParams; result: StorageRotatePersonKeyResult };
@@ -622,6 +632,7 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "language.source",
   "neighbourhood.hasTelepresence",
   "neighbourhood.invites",
+  "neighbourhood.linkLanguageChoice",
   "neighbourhood.members",
   "neighbourhood.onlineAgents",
   "neighbourhood.otherAgents",
@@ -655,6 +666,7 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "runtime.inbox",
   "runtime.info",
   "runtime.linkLanguageTemplates",
+  "runtime.linkServers",
   "runtime.logTail",
   "runtime.networkMetrics",
   "runtime.notifications",
@@ -675,6 +687,7 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "sfu.sfuPeerForNeighbourhood",
   "sfu.sfuPeersForNeighbourhood",
   "sfu.status",
+  "spaces.list",
   "storage.keys",
   "user.currentSession",
   "user.list",
@@ -697,6 +710,7 @@ export const LONG_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "bot.createAgent",
   "language.applyTemplate",
   "language.publish",
+  "neighbourhood.create",
   "neighbourhood.join",
   "neighbourhood.publish",
   "perspective.runAgent",

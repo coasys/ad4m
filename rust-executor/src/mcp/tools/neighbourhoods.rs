@@ -9,6 +9,7 @@ use super::{labelled_json, method_error, Ad4mMcpHandler};
 use crate::agent::AgentContext;
 use crate::api::ws_handler::WsRpcError;
 use crate::languages::LanguageController;
+use crate::spaces::{CreateNeighbourhoodParams, CreateNeighbourhoodResult, RulesInput, SyncChoice};
 use crate::types::{LanguageMeta, Perspective, PerspectiveHandle};
 use rmcp::{handler::server::wrapper::Parameters, tool};
 use schemars::JsonSchema;
@@ -92,7 +93,7 @@ impl Ad4mMcpHandler {
 
     /// Publish a local perspective as a shared neighbourhood for P2P collaboration
     #[tool(
-        description = "Publish a local perspective as a shared neighbourhood. Automatically clones the given link language template to create a unique sync instance. Returns the neighbourhood URL that others can use to join via `neighbourhood_join_from_url`. Use `list_link_language_templates` first to find available templates."
+        description = "Publish a local perspective as a shared neighbourhood. Automatically clones the given link language template to create a unique sync instance; the server-link template instead makes a space on the default link server with you (your identity) as its admin. Returns the neighbourhood URL that others can use to join via `neighbourhood_join_from_url`. Use `list_link_language_templates` first to find available templates."
     )]
     pub async fn neighbourhood_publish_from_perspective(
         &self,
@@ -115,6 +116,16 @@ impl Ad4mMcpHandler {
             .await
         {
             return method_error(e);
+        }
+        // The server-link template names the space's creator, which only `neighbourhood.create`
+        // fills in (with the caller's person): such a space is made, not published.
+        if let Ok(meta) = LanguageController::global_instance()
+            .get_language_expression(&p.link_language)
+            .await
+        {
+            if crate::spaces::is_creator_template(&meta) {
+                return self.create_space(&p.perspective_uuid).await;
+            }
         }
         let apply_template = json!({
             "sourceLanguageHash": p.link_language,
@@ -153,6 +164,35 @@ impl Ad4mMcpHandler {
                 "cloned_link_language": cloned_address,
                 "name": p.name,
                 "message": "Perspective published as neighbourhood. Share the neighbourhood_url for others to join."
+            })
+            .to_string(),
+            Err(e) => e,
+        }
+    }
+
+    /// Makes the perspective a space through `neighbourhood.create`: the directory's default
+    /// link server, admins add members and anyone may join (R56).
+    async fn create_space(&self, perspective_uuid: &str) -> String {
+        let params = CreateNeighbourhoodParams {
+            perspective_uuid: perspective_uuid.to_string(),
+            sync: SyncChoice::Default,
+            rules: RulesInput::default(),
+        };
+        let created = self
+            .call::<CreateNeighbourhoodResult>(
+                "neighbourhood.create",
+                json!(params),
+                labelled_json("Failed to create the neighbourhood"),
+            )
+            .await;
+        match created {
+            Ok(created) => json!({
+                "success": true,
+                "neighbourhood_url": created.url,
+                "perspective_uuid": perspective_uuid,
+                "link_language": created.choice.link_language,
+                "link_server": created.choice.server_url,
+                "message": "Perspective made a space on a link server, with you as its admin. Share the neighbourhood_url for others to join."
             })
             .to_string(),
             Err(e) => e,
@@ -535,7 +575,7 @@ mod tests {
         assert_eq!(map.get("name").unwrap(), "my neighbourhood");
         assert!(
             !map.contains_key("SERVER_URL"),
-            "SERVER_URL must not appear — it keeps its bundle default"
+            "SERVER_URL must not appear — a clone keeps its template's value"
         );
         assert!(!map.contains_key("description"));
         assert!(!map.contains_key("extra_param"));
@@ -558,7 +598,7 @@ mod tests {
         include_str!("../../../../bootstrap-languages/server-link-language/index.ts");
 
     #[test]
-    fn sll_declares_server_url_with_default() {
+    fn sll_declares_server_url_without_default() {
         let lines: Vec<&str> = SLL_SOURCE.lines().collect();
         let marker_positions: Vec<usize> = lines
             .iter()
@@ -575,10 +615,12 @@ mod tests {
             server_url_line.contains("SERVER_URL"),
             "first template variable should declare SERVER_URL"
         );
+        // `neighbourhood.create` fills it from the link-server directory (Q9: no default).
         assert!(
-            server_url_line.contains("https://link.ad4m.dev"),
-            "SERVER_URL default must point to https://link.ad4m.dev"
+            server_url_line.contains("<to-be-filled>"),
+            "SERVER_URL must have no default: got {server_url_line}"
         );
+        assert!(!SLL_SOURCE.contains("link.ad4m.dev"));
     }
 
     #[test]
@@ -607,47 +649,41 @@ mod tests {
     }
 
     #[test]
-    fn sll_clone_with_default_server_url() {
-        let sll_params = vec!["SERVER_URL".into(), "UID".into()];
-        let map = build_clone_template_map(&sll_params, "Test Neighbourhood");
+    fn sll_is_made_by_create_with_every_variable_filled() {
+        // Its meta declares CREATOR: the tool makes it through `neighbourhood.create`.
+        let meta = LanguageMeta {
+            possible_template_params: Some(vec![
+                "SERVER_URL".into(),
+                "UID".into(),
+                "CREATOR".into(),
+            ]),
+            ..Default::default()
+        };
+        assert!(crate::spaces::is_creator_template(&meta));
 
-        assert!(
-            map.contains_key("UID"),
-            "clone map must contain UID (case-matched from declared params)"
-        );
-        assert!(
-            !map.contains_key("SERVER_URL"),
-            "clone map must NOT contain SERVER_URL — the bundle default applies"
-        );
-        assert_eq!(map.get("name").unwrap(), "Test Neighbourhood");
-
+        // The three params `create` passes leave nothing unfilled.
+        let mut map = serde_json::Map::new();
+        for (key, value) in [
+            (crate::spaces::SERVER_URL_PARAM, "https://link.example"),
+            (crate::spaces::UID_PARAM, "salt"),
+            (crate::spaces::CREATOR_PARAM, "did:scid:coasys:1:QmCreator"),
+        ] {
+            map.insert(key.into(), json!(value));
+        }
         let mut lines: Vec<String> = SLL_SOURCE.lines().map(String::from).collect();
         crate::languages::LanguageController::apply_template_data(&mut lines, &map);
-
-        let marker_positions: Vec<usize> = lines
+        let filled: Vec<&String> = lines
             .iter()
             .enumerate()
-            .filter(|(_, l)| l.contains("//!@ad4m-template-variable"))
-            .map(|(i, _)| i)
+            .filter(|(i, _)| *i > 0 && lines[i - 1].contains("//!@ad4m-template-variable"))
+            .map(|(_, l)| l)
             .collect();
-
-        let server_url_line = &lines[marker_positions[0] + 1];
-        assert!(
-            server_url_line.contains("https://link.ad4m.dev"),
-            "SERVER_URL must remain at bundle default after clone: got {}",
-            server_url_line
-        );
-
-        let uid_line = &lines[marker_positions[1] + 1];
-        assert!(
-            !uid_line.contains("<to-be-filled>"),
-            "UID must get replaced by the clone: got {}",
-            uid_line
-        );
-        let uid_val = map.get("UID").unwrap().as_str().unwrap();
-        assert!(
-            uid_line.contains(uid_val),
-            "UID line must contain the generated UUID"
-        );
+        assert_eq!(filled.len(), 3, "{filled:?}");
+        for line in &filled {
+            assert!(!line.contains("<to-be-filled>"), "unfilled: {line}");
+        }
+        assert!(filled[0].contains("https://link.example"));
+        assert!(filled[1].contains("salt"));
+        assert!(filled[2].contains("did:scid:coasys:1:QmCreator"));
     }
 }
