@@ -4,4 +4,8 @@ export type PerspectiveInstanceUpdateParams = { uuid: string, className: string,
 /**
  * Values by property name, at least one; single-valued properties only.
  */
-properties: Record<string, unknown>, batchId?: string, };
+properties: Record<string, unknown>, 
+/**
+ * An open batch to stage the write into; see `InstanceCreate`'s `batchId`.
+ */
+batchId?: string, };

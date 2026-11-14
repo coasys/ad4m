@@ -72,6 +72,26 @@ impl World {
             .len()
     }
 
+    /// The stored links that mention `id` as source or target.
+    async fn links_touching(&self, id: &str) -> usize {
+        let perspective =
+            crate::perspectives::get_perspective(&self.uuid).expect("registered perspective");
+        let mut touching = 0;
+        for query in [
+            LinkQuery {
+                source: Some(id.to_string()),
+                ..Default::default()
+            },
+            LinkQuery {
+                target: Some(id.to_string()),
+                ..Default::default()
+            },
+        ] {
+            touching += perspective.get_links(&query).await.expect("links").len();
+        }
+        touching
+    }
+
     /// The Task at `id` as a model query reads it, or `None`.
     async fn task(&self, id: &str) -> Option<Value> {
         let raw = self
@@ -423,6 +443,277 @@ async fn writes_in_one_batch_are_invisible_until_the_commit() {
         .await;
     assert_eq!(world.task(&first).await.unwrap()["title"], "one");
     assert_eq!(world.task(&second).await.unwrap()["title"], "two");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_add_then_a_remove_in_one_batch_leaves_the_item_out() {
+    let world = World::new().await;
+    let created = world.create(json!({ "title": "t" })).await;
+    let id = created["baseUri"].as_str().unwrap().to_string();
+    let item = "ad4m://label/urgent";
+    let batch_id = world.ok("perspective.createBatch", json!({})).await;
+    let batch_id = batch_id.as_str().expect("batch id").to_string();
+
+    world
+        .ok(
+            "perspective.instanceAddToCollection",
+            json!({ "className": "Task", "baseUri": id, "collection": "labels", "itemUri": item, "batchId": batch_id }),
+        )
+        .await;
+    let removed = world
+        .ok(
+            "perspective.instanceRemoveFromCollection",
+            json!({ "className": "Task", "baseUri": id, "collection": "labels", "itemUri": item, "batchId": batch_id }),
+        )
+        .await;
+    assert_eq!(removed["linksRemoved"], 1, "{removed}");
+
+    world
+        .ok("perspective.commitBatch", json!({ "batchId": batch_id }))
+        .await;
+    let labels = world.task(&id).await.unwrap()["labels"].clone();
+    assert!(
+        labels.is_null() || labels == json!([]),
+        "an add the same batch removed must not land: {labels}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_remove_then_an_add_in_one_batch_keeps_the_item() {
+    let world = World::new().await;
+    let created = world.create(json!({ "title": "t" })).await;
+    let id = created["baseUri"].as_str().unwrap().to_string();
+    let item = "ad4m://label/urgent";
+    world
+        .ok(
+            "perspective.instanceAddToCollection",
+            json!({ "className": "Task", "baseUri": id, "collection": "labels", "itemUri": item }),
+        )
+        .await;
+    assert_eq!(world.task(&id).await.unwrap()["labels"], json!([item]));
+
+    let batch_id = world.ok("perspective.createBatch", json!({})).await;
+    let batch_id = batch_id.as_str().expect("batch id").to_string();
+    let removed = world
+        .ok(
+            "perspective.instanceRemoveFromCollection",
+            json!({ "className": "Task", "baseUri": id, "collection": "labels", "itemUri": item, "batchId": batch_id }),
+        )
+        .await;
+    assert_eq!(removed["linksRemoved"], 1, "{removed}");
+    let added = world
+        .ok(
+            "perspective.instanceAddToCollection",
+            json!({ "className": "Task", "baseUri": id, "collection": "labels", "itemUri": item, "batchId": batch_id }),
+        )
+        .await;
+    assert_eq!(
+        added["linksAdded"], 1,
+        "the item is out as the batch sees it, so the add is real: {added}"
+    );
+    assert_eq!(added["alreadyMember"], false, "{added}");
+
+    world
+        .ok("perspective.commitBatch", json!({ "batchId": batch_id }))
+        .await;
+    assert_eq!(
+        world.task(&id).await.unwrap()["labels"],
+        json!([item]),
+        "a remove the same batch re-added must not land"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_update_then_a_remove_in_one_batch_leaves_no_links() {
+    let world = World::new().await;
+    let created = world
+        .create(json!({ "title": "t", "status": "todo" }))
+        .await;
+    let id = created["baseUri"].as_str().unwrap().to_string();
+    assert!(world.links_touching(&id).await > 0);
+    let batch_id = world.ok("perspective.createBatch", json!({})).await;
+    let batch_id = batch_id.as_str().expect("batch id").to_string();
+
+    world
+        .ok(
+            "perspective.instanceUpdate",
+            json!({ "className": "Task", "baseUri": id, "properties": { "status": "doing" }, "batchId": batch_id }),
+        )
+        .await;
+    world
+        .ok(
+            "perspective.instanceRemove",
+            json!({ "className": "Task", "baseUri": id, "batchId": batch_id }),
+        )
+        .await;
+    world
+        .ok("perspective.commitBatch", json!({ "batchId": batch_id }))
+        .await;
+
+    assert!(world.task(&id).await.is_none(), "the task is gone");
+    assert_eq!(
+        world.links_touching(&id).await,
+        0,
+        "a link the update staged inside the batch must go with the instance"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn repeated_adds_and_removes_in_one_batch_are_idempotent() {
+    let world = World::new().await;
+    let created = world.create(json!({ "title": "t" })).await;
+    let id = created["baseUri"].as_str().unwrap().to_string();
+    let item = "ad4m://label/urgent";
+    let batch_id = world.ok("perspective.createBatch", json!({})).await;
+    let batch_id = batch_id.as_str().expect("batch id").to_string();
+
+    let first = world
+        .ok(
+            "perspective.instanceAddToCollection",
+            json!({ "className": "Task", "baseUri": id, "collection": "labels", "itemUri": item, "batchId": batch_id }),
+        )
+        .await;
+    assert_eq!(first["linksAdded"], 1, "{first}");
+    let second = world
+        .ok(
+            "perspective.instanceAddToCollection",
+            json!({ "className": "Task", "baseUri": id, "collection": "labels", "itemUri": item, "batchId": batch_id }),
+        )
+        .await;
+    assert_eq!(
+        second["linksAdded"], 0,
+        "the item the same batch added is already a member: {second}"
+    );
+    assert_eq!(second["alreadyMember"], true, "{second}");
+
+    let first_out = world
+        .ok(
+            "perspective.instanceRemoveFromCollection",
+            json!({ "className": "Task", "baseUri": id, "collection": "labels", "itemUri": item, "batchId": batch_id }),
+        )
+        .await;
+    assert_eq!(first_out["linksRemoved"], 1, "{first_out}");
+    let second_out = world
+        .ok(
+            "perspective.instanceRemoveFromCollection",
+            json!({ "className": "Task", "baseUri": id, "collection": "labels", "itemUri": item, "batchId": batch_id }),
+        )
+        .await;
+    assert_eq!(
+        second_out["linksRemoved"], 0,
+        "the item the same batch removed is already out: {second_out}"
+    );
+
+    world
+        .ok("perspective.commitBatch", json!({ "batchId": batch_id }))
+        .await;
+    let labels = world.task(&id).await.unwrap()["labels"].clone();
+    assert!(
+        labels.is_null() || labels == json!([]),
+        "nothing was a member at the commit: {labels}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restaged_committed_link_still_goes_with_the_instance() {
+    // `perspective.addLinkExpression` can stage the exact signed expression the store
+    // already holds. The batch then carries a copy of a committed link; removing the
+    // instance must still stage the committed one's removal, not just drop the copy.
+    let world = World::new().await;
+    let created = world.create(json!({ "title": "t" })).await;
+    let id = created["baseUri"].as_str().unwrap().to_string();
+    let before = world.links_touching(&id).await;
+    assert!(before > 0);
+
+    // The instance's type link, signed, as queryLinks reports it.
+    let links = world
+        .ok("perspective.queryLinks", json!({ "source": id }))
+        .await;
+    let type_link = links
+        .as_array()
+        .expect("links")
+        .iter()
+        .find(|l| l["data"]["predicate"] == "rdf://type")
+        .expect("the instance's type link")
+        .clone();
+
+    let batch_id = world.ok("perspective.createBatch", json!({})).await;
+    let batch_id = batch_id.as_str().expect("batch id").to_string();
+    world
+        .ok(
+            "perspective.addLinkExpression",
+            json!({ "link": type_link, "batchId": batch_id }),
+        )
+        .await;
+
+    let removed = world
+        .ok(
+            "perspective.instanceRemove",
+            json!({ "className": "Task", "baseUri": id, "batchId": batch_id }),
+        )
+        .await;
+    assert_eq!(
+        removed["linksRemoved"].as_u64().unwrap() as usize,
+        before,
+        "every effective link of the instance, counted once: {removed}"
+    );
+    world
+        .ok("perspective.commitBatch", json!({ "batchId": batch_id }))
+        .await;
+
+    assert_eq!(
+        world.links_touching(&id).await,
+        0,
+        "a staged copy of a committed link must not leave the committed link behind"
+    );
+    assert!(world.task(&id).await.is_none(), "the task is gone");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn two_staged_copies_of_one_membership_link_remove_once() {
+    // The same signed membership link staged twice (through `perspective.addLink`
+    // for the signature, then `perspective.addLinkExpression` for the duplicate) is
+    // one link on the batch's effective graph: removing the item cancels it once and
+    // must not fall through to a store removal that finds nothing.
+    let world = World::new().await;
+    let created = world.create(json!({ "title": "t" })).await;
+    let id = created["baseUri"].as_str().unwrap().to_string();
+    let item = "ad4m://label/urgent";
+
+    let batch_id = world.ok("perspective.createBatch", json!({})).await;
+    let batch_id = batch_id.as_str().expect("batch id").to_string();
+    let signed = world
+        .ok(
+            "perspective.addLink",
+            json!({ "link": { "source": id, "predicate": "ns://task_label", "target": item }, "batchId": batch_id }),
+        )
+        .await;
+    world
+        .ok(
+            "perspective.addLinkExpression",
+            json!({ "link": signed, "batchId": batch_id }),
+        )
+        .await;
+
+    let removed = world
+        .ok(
+            "perspective.instanceRemoveFromCollection",
+            json!({ "className": "Task", "baseUri": id, "collection": "labels", "itemUri": item, "batchId": batch_id }),
+        )
+        .await;
+    assert_eq!(
+        removed["linksRemoved"], 1,
+        "one effective link leaves, however many copies were staged: {removed}"
+    );
+
+    world
+        .ok("perspective.commitBatch", json!({ "batchId": batch_id }))
+        .await;
+    let labels = world.task(&id).await.unwrap()["labels"].clone();
+    assert!(
+        labels.is_null() || labels == json!([]),
+        "the item is out: {labels}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

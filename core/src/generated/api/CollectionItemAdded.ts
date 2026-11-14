@@ -6,6 +6,6 @@ export type CollectionItemAdded = { className: string, baseUri: string,
  */
 collection: string, itemUri: string, 
 /**
- * 0 when the item was in the collection already.
+ * 0 when the item was in the collection already (as the batch's effective graph has it).
  */
 linksAdded: number, alreadyMember: boolean, };

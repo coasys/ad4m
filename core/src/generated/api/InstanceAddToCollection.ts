@@ -7,4 +7,8 @@ export type InstanceAddToCollection = { className: string, baseUri: string, coll
 /**
  * The item, usually another instance's URI.
  */
-itemUri: string, batchId?: string, };
+itemUri: string, 
+/**
+ * An open batch to stage the write into; see `InstanceCreate`'s `batchId`.
+ */
+batchId?: string, };

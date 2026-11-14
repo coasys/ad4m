@@ -78,6 +78,8 @@ mod local_agents;
 // Committing a batch only if the links it expects still stand.
 mod expected_links;
 pub use expected_links::{ExpectedLinks, LinksChanged};
+// A batch's effective view of the graph for the validated write core.
+mod batch_view;
 
 #[cfg(test)]
 #[path = "perspective_instance_subscription_tests.rs"]
