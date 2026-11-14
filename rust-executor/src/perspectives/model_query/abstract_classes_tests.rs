@@ -173,7 +173,8 @@ fn the_index_reads_abstract_markers_and_aliases() {
 fn the_index_ignores_markers_and_aliases_that_do_not_count() {
     let store = all_classes();
     let one = |q: &str, var: &str| -> String {
-        let rows: Vec<serde_json::Value> = serde_json::from_str(&store.query(q).unwrap()).unwrap();
+        let rows: Vec<serde_json::Value> =
+            serde_json::from_str(&store.query(&EvalStop::none(), q).unwrap()).unwrap();
         rows[0][var].as_str().unwrap().to_string()
     };
     let shape = one(
@@ -234,7 +235,8 @@ fn the_index_ignores_markers_and_aliases_that_do_not_count() {
 fn the_classifier_ignores_triples_that_do_not_count() {
     let store = all_classes();
     let one = |q: &str, var: &str| -> String {
-        let rows: Vec<serde_json::Value> = serde_json::from_str(&store.query(q).unwrap()).unwrap();
+        let rows: Vec<serde_json::Value> =
+            serde_json::from_str(&store.query(&EvalStop::none(), q).unwrap()).unwrap();
         rows[0][var].as_str().unwrap().to_string()
     };
     let post_shape = one(
@@ -261,14 +263,14 @@ fn the_classifier_ignores_triples_that_do_not_count() {
     forged("app://Ghost", "rdf://type", "ad4m://SubjectClass");
     forged("app://r2", "app://kind", "app://post");
 
-    let names = concrete_subject_class_names(&store).unwrap();
+    let names = concrete_subject_class_names(&EvalStop::none(), &store).unwrap();
     assert!(names.contains(&"Post".to_string()), "{names:?}");
     assert!(
         !names.contains(&"Readable".to_string()),
         "a counting marker still marks: {names:?}"
     );
     assert!(
-        !all_subject_class_names(&store)
+        !all_subject_class_names(&EvalStop::none(), &store)
             .unwrap()
             .contains(&"Ghost".to_string()),
         "a registration that does not count registers nothing"
@@ -279,14 +281,24 @@ fn the_classifier_ignores_triples_that_do_not_count() {
             .contains(&"Post".to_string()),
         "Post is still a concrete class TextContent reads"
     );
-    let classes =
-        subject_classes_of(&store, &StoreResolver(&store), &["app://r2".to_string()]).unwrap();
+    let classes = subject_classes_of(
+        &EvalStop::none(),
+        &store,
+        &StoreResolver(&store),
+        &["app://r2".to_string()],
+    )
+    .unwrap();
     assert!(!classes.contains_key("app://r2"), "{classes:?}");
 
     // The same links, counting, do all of it.
     add(&store, &[("app://r2", "app://kind", "app://post")]);
-    let classes =
-        subject_classes_of(&store, &StoreResolver(&store), &["app://r2".to_string()]).unwrap();
+    let classes = subject_classes_of(
+        &EvalStop::none(),
+        &store,
+        &StoreResolver(&store),
+        &["app://r2".to_string()],
+    )
+    .unwrap();
     assert_eq!(classes["app://r2"], vec!["Post".to_string()]);
 
     add(
@@ -294,7 +306,7 @@ fn the_classifier_ignores_triples_that_do_not_count() {
         &[(&post_shape, ABSTRACT_PREDICATE, "literal://string:true")],
     );
     assert!(
-        !concrete_subject_class_names(&store)
+        !concrete_subject_class_names(&EvalStop::none(), &store)
             .unwrap()
             .contains(&"Post".to_string()),
         "a counting marker makes Post abstract"
@@ -412,6 +424,7 @@ fn an_abstract_class_is_never_a_records_class() {
         ],
     );
     let classes = subject_classes_of(
+        &crate::perspectives::sparql_store::EvalStop::none(),
         &store,
         &StoreResolver(&store),
         &["app://r1".to_string(), "app://r2".to_string()],
@@ -440,6 +453,7 @@ fn ids_and_texts(result: &ModelQueryResult) -> Vec<(String, String, String)> {
 async fn run(store: &SparqlStore, resolution: &Resolution, query: &str) -> ModelQueryResult {
     let query: ModelQueryInput = serde_json::from_str(query).unwrap();
     execute_union_query_with_views(
+        &crate::perspectives::sparql_store::EvalStop::none(),
         store,
         &resolution.classes,
         &query,
@@ -555,12 +569,20 @@ fn guarded_definition_queries_return_one_row_per_triple() {
     install_class(&store, "Message", MESSAGE);
 
     let guard = crate::perspectives::model_query::sparql_builder::LinkGuard::default();
-    let marked: Vec<Value> =
-        serde_json::from_str(&store.query(&AbstractIndex::marked_query(&guard)).unwrap()).unwrap();
+    let marked: Vec<Value> = serde_json::from_str(
+        &store
+            .query(&EvalStop::none(), &AbstractIndex::marked_query(&guard))
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(marked.len(), 1, "{marked:?}");
 
-    let aliased: Vec<Value> =
-        serde_json::from_str(&store.query(&AbstractIndex::aliased_query(&guard)).unwrap()).unwrap();
+    let aliased: Vec<Value> = serde_json::from_str(
+        &store
+            .query(&EvalStop::none(), &AbstractIndex::aliased_query(&guard))
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(aliased.len(), 1, "{aliased:?}");
 
     // `load_shape`'s property read is bound by the shape URI on record.
@@ -668,7 +690,7 @@ fn definition_reads_do_not_scale_with_the_perspectives_links() {
     }
 
     let start = std::time::Instant::now();
-    let concrete = concrete_subject_class_names(&store).unwrap();
+    let concrete = concrete_subject_class_names(&EvalStop::none(), &store).unwrap();
     let classes_took = start.elapsed();
     for name in &concrete {
         let shape = load_shape_from_store(&store, name).unwrap();

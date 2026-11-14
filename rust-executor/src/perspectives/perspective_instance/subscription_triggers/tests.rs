@@ -158,6 +158,7 @@ async fn subscribe(p: &PerspectiveInstance, class: &str, query: Value) -> (Strin
     query["includeUnverified"] = json!(true);
     let (id, _revision, result) = p
         .model_subscribe_and_query(
+            &crate::perspectives::sparql_store::EvalStop::none(),
             class.into(),
             query.to_string(),
             uuid::Uuid::new_v4().to_string(),

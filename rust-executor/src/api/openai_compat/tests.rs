@@ -965,6 +965,7 @@ fn sample_prompt_result() -> PromptResult {
         prompt_tokens: 10,
         completion_tokens: 5,
         model_id: "gpt-4".to_string(),
+        stop_reason: None,
     }
 }
 
@@ -1169,6 +1170,7 @@ fn reply_calling(text: &str) -> ChatReply {
             arguments: serde_json::json!({ "patches": [] }),
         }],
         usage: ChatUsage::default(),
+        stop_reason: None,
     }
 }
 

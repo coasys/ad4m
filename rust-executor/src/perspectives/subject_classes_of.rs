@@ -47,7 +47,7 @@ use super::model_query::sparql_builder::LinkGuard;
 use super::model_query::types::{ModelShape, ShapeResolver};
 use super::model_query::utils::looks_like_absolute_iri;
 use super::shacl_parser::ABSTRACT_PREDICATE;
-use super::sparql_store::SparqlStore;
+use super::sparql_store::{EvalStop, SparqlStore};
 
 /// Every subject class registered in this perspective.
 ///
@@ -57,7 +57,7 @@ use super::sparql_store::SparqlStore;
 ///
 /// The registration triple joins a *counting* reifier, as every schema read
 /// does: a link whose stored verdict does not count registers no class.
-pub fn all_subject_class_names(store: &SparqlStore) -> Result<Vec<String>, Error> {
+pub fn all_subject_class_names(stop: &EvalStop, store: &SparqlStore) -> Result<Vec<String>, Error> {
     let query = format!(
         r#"
         SELECT ?targetClass WHERE {{
@@ -71,7 +71,7 @@ pub fn all_subject_class_names(store: &SparqlStore) -> Result<Vec<String>, Error
             "<ad4m://SubjectClass>"
         ),
     );
-    let rows: Vec<Value> = serde_json::from_str(&store.query(&query)?)?;
+    let rows: Vec<Value> = serde_json::from_str(&store.query(stop, &query)?)?;
 
     let mut names: Vec<String> = rows
         .iter()
@@ -98,7 +98,10 @@ pub fn all_subject_class_names(store: &SparqlStore) -> Result<Vec<String>, Error
 /// join inside `NOT EXISTS` per class by scanning every reifier in the store
 /// — a second per call in a perspective of a few thousand links, against
 /// tens of milliseconds for `MINUS`.
-pub fn concrete_subject_class_names(store: &SparqlStore) -> Result<Vec<String>, Error> {
+pub fn concrete_subject_class_names(
+    stop: &EvalStop,
+    store: &SparqlStore,
+) -> Result<Vec<String>, Error> {
     let guard = LinkGuard::default();
     let query = format!(
         r#"
@@ -124,7 +127,7 @@ pub fn concrete_subject_class_names(store: &SparqlStore) -> Result<Vec<String>, 
             "?marker"
         ),
     );
-    let rows: Vec<Value> = serde_json::from_str(&store.query(&query)?)?;
+    let rows: Vec<Value> = serde_json::from_str(&store.query(stop, &query)?)?;
     let mut names: Vec<String> = rows
         .iter()
         .filter_map(|r| r["targetClass"].as_str())
@@ -223,11 +226,12 @@ fn order_by_specificity(matches: &mut Vec<(String, usize)>) -> Vec<String> {
 /// because an empty list would claim the stronger thing — that the URI belongs
 /// to no class — which this cannot know.
 pub fn subject_classes_of(
+    stop: &EvalStop,
     store: &SparqlStore,
     resolver: &dyn ShapeResolver,
     uris: &[String],
 ) -> Result<HashMap<String, Vec<String>>, Error> {
-    subject_classes_of_with_pending(store, resolver, uris, &[])
+    subject_classes_of_with_pending(stop, store, resolver, uris, &[])
 }
 
 /// [`subject_classes_of`], counting links that are staged but not yet committed.
@@ -243,6 +247,7 @@ pub fn subject_classes_of(
 /// Membership is set containment, so a staged triple counts exactly as a
 /// committed one does — this widens what is known, never what conforms.
 pub fn subject_classes_of_with_pending(
+    stop: &EvalStop,
     store: &SparqlStore,
     resolver: &dyn ShapeResolver,
     uris: &[String],
@@ -270,7 +275,7 @@ pub fn subject_classes_of_with_pending(
 
     // Load every class's shape once. Shapes are cached per perspective, so this
     // is a map lookup after the first call.
-    let class_names = concrete_subject_class_names(store)?;
+    let class_names = concrete_subject_class_names(stop, store)?;
     let mut shapes: Vec<(String, Vec<(String, Option<String>)>)> = Vec::new();
     for name in class_names {
         match resolver.get_shape(&name) {
@@ -321,7 +326,7 @@ pub fn subject_classes_of_with_pending(
     }
 
     if !flag_preds.is_empty() {
-        let rows = fetch(store, &values_clause, &flag_preds, true)?;
+        let rows = fetch(stop, store, &values_clause, &flag_preds, true)?;
         for row in &rows {
             let (s, p, o) = match (row["s"].as_str(), row["p"].as_str(), row["o"].as_str()) {
                 (Some(s), Some(p), Some(o)) => (s, p, o),
@@ -341,7 +346,7 @@ pub fn subject_classes_of_with_pending(
     }
 
     if !presence_preds.is_empty() {
-        let rows = fetch(store, &values_clause, &presence_preds, false)?;
+        let rows = fetch(stop, store, &values_clause, &presence_preds, false)?;
         for row in &rows {
             let (s, p) = match (row["s"].as_str(), row["p"].as_str()) {
                 (Some(s), Some(p)) => (s, p),
@@ -394,6 +399,7 @@ pub fn subject_classes_of_with_pending(
 /// keeps a peer's non-counting flag or required-property link from routing a
 /// write to a class's setter or destructor.
 fn fetch(
+    stop: &EvalStop,
     store: &SparqlStore,
     values_clause: &str,
     preds: &HashSet<&str>,
@@ -418,7 +424,7 @@ fn fetch(
         )
     };
 
-    Ok(serde_json::from_str(&store.query(&query)?)?)
+    Ok(serde_json::from_str(&store.query(stop, &query)?)?)
 }
 
 #[cfg(test)]
