@@ -33,7 +33,7 @@ use super::sparql_builder::{
 };
 use super::types::{IncludeValue, ModelQueryInput, ModelShape, Scope, WhereCondition};
 use super::utils::{validate_iri, values_or_str_filter};
-use crate::perspectives::sparql_store::SparqlStore;
+use crate::perspectives::sparql_store::{EvalStop, SparqlStore};
 use crate::types::LinkStatus;
 use deno_core::anyhow::{anyhow, Error};
 use serde_json::Value;
@@ -353,6 +353,7 @@ fn visit_children(
 /// The nodes that hold one of `children` (anything, when `None`) over
 /// `edges`, under `guard`.
 async fn holders_of(
+    stop: &EvalStop,
     store: &SparqlStore,
     edges: &[ContainmentEdge],
     children: Option<&[String]>,
@@ -368,7 +369,7 @@ async fn holders_of(
             .map(|c| values_or_str_filter("_held", c))
             .unwrap_or_default(),
     );
-    let rows: Vec<Value> = serde_json::from_str(&store.query_async(&sparql).await?)?;
+    let rows: Vec<Value> = serde_json::from_str(&store.query_async(stop, &sparql).await?)?;
     Ok(rows
         .iter()
         .filter_map(|r| r["_holder"].as_str().map(str::to_string))
@@ -398,6 +399,7 @@ async fn holders_of(
 /// an `order` on it, which would sort and page on one reading's (#1461
 /// review).
 pub async fn resolve_children_where(
+    stop: &EvalStop,
     store: &SparqlStore,
     query: &mut ModelQueryInput,
     edges: &[ContainmentEdge],
@@ -455,7 +457,8 @@ pub async fn resolve_children_where(
             Holds::AnyOf(ids) => (Some(ids.as_slice()), false),
             Holds::Anything { negated } => (None, *negated),
         };
-        let ids = WhereCondition::StringArray(holders_of(store, edges, children, guard).await?);
+        let ids =
+            WhereCondition::StringArray(holders_of(stop, store, edges, children, guard).await?);
         let in_holders = BTreeMap::from([("id".to_string(), ids)]);
         replacements.push(if negated {
             BTreeMap::from([("NOT".to_string(), WhereCondition::SubClause(in_holders))])
@@ -481,6 +484,7 @@ pub async fn resolve_children_where(
 /// review). `__links` is replaced only where it has a `children` entry.
 /// `children` is ordered by each child's first link, then by id.
 pub async fn fill_container_rows(
+    stop: &EvalStop,
     store: &SparqlStore,
     rows: &mut [Value],
     edges: &[ContainmentEdge],
@@ -537,7 +541,7 @@ pub async fn fill_container_rows(
         branches.join(" } UNION { "),
         values_or_str_filter("source", &ids),
     );
-    let found: Vec<Value> = serde_json::from_str(&store.query_async(&sparql).await?)?;
+    let found: Vec<Value> = serde_json::from_str(&store.query_async(stop, &sparql).await?)?;
     // source -> (children by first timestamp, link rows)
     let mut by_source: BTreeMap<String, (BTreeMap<String, String>, Vec<Value>)> = BTreeMap::new();
     for row in &found {
@@ -662,6 +666,7 @@ mod tests {
             ];
             let started = std::time::Instant::now();
             fill_container_rows(
+                &crate::perspectives::sparql_store::EvalStop::none(),
                 &store,
                 &mut rows,
                 &edges,

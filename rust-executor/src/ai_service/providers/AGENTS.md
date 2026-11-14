@@ -46,6 +46,14 @@ comes through here: it runs none itself.
   client sends it as `response_format` `json_schema` (unless the caller set its own
   `response_format`), Ollama's native client as `format`, Anthropic not at all. The caller
   validates the reply whichever answered (`/v1` text-tools path: `tool_grammar::ToolCallConstraint`).
+- `ChatRequest::disable_thinking` / `max_output_tokens` are the same kind of internal
+  constraint. Ollama sends `think: false` only when `/api/show` capabilities include
+  `thinking` (otherwise some versions answer 400 "does not support thinking") and
+  `options.num_predict` when a cap is set. llama-server gets
+  `chat_template_kwargs.enable_thinking: false` plus `max_tokens`. A strict OpenAI
+  endpoint (`EndpointKind::OpenAi`) gets `max_tokens` only — it rejects unknown fields.
+  Anthropic gets neither. A failed completion is logged here
+  (`log_upstream_error`: status + a 500-char body excerpt, key already scrubbed).
 - Whether a *model* gets tools as data is `Model::uses_native_tools(endpoint)`: the client can,
   and the model's `native_tools` flag (default on for Anthropic and Ollama, off for
   OpenAI-shaped servers) says it should.
