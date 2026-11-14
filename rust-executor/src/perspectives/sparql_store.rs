@@ -1718,6 +1718,18 @@ impl SparqlStore {
         self.query_decorated_links(&EvalStop::none(), &format!("{query} {}", page_order(limit)))
     }
 
+    /// The links stored with a person (a valid link whose signer a key log lists): a page of at
+    /// most `limit`, in reifier order, after the reifier `after`.
+    pub fn links_with_person(
+        &self,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<DecoratedLinkExpression>, Error> {
+        // `?person` is bound in an OPTIONAL; the FILTER keeps the rows where it matched.
+        let query = decorated_links_query("", &after_reifier("BOUND(?person)", after));
+        self.query_decorated_links(&EvalStop::none(), &format!("{query} {}", page_order(limit)))
+    }
+
     /// Gives every link stored before verdicts (a `proofValid` annotation and no
     /// `linkVerdict`) the verdict it had: `valid` for `proofValid "true"`, else
     /// `invalid:badSignature`. Idempotent; answers how many links it changed.
