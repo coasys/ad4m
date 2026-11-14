@@ -317,34 +317,59 @@ impl Model {
                         "subscriptionId".into(),
                         Value::from(subscription_id.clone()),
                     );
-                    match ws
-                        .call::<Value>("perspective.modelSubscribe", Value::Object(params))
-                        .await
-                    {
-                        Ok(v) => Ok(Subscribed {
-                            subscription_id: v
-                                .get("subscriptionId")
-                                .and_then(Value::as_str)
-                                .unwrap_or(&subscription_id)
-                                .to_string(),
-                            result: v.get("result").cloned().unwrap_or(Value::Null),
-                            revision: v.get("revision").and_then(Value::as_u64).unwrap_or(0),
-                        }),
-                        Err(e) => {
-                            // A failed subscribe leaves no live query nobody
-                            // holds — dispose the minted id (TS `#released`).
-                            let _ = ws
-                                .call_void(
-                                    "perspective.disposeQuery",
-                                    serde_json::json!({
-                                        "uuid": uuid,
-                                        "subscriptionId": subscription_id,
-                                    }),
+                    // The call runs detached: `modelSubscribe` opens a
+                    // server-side resource, so a caller that cancels
+                    // `subscribe`/`start` while the call is on the wire must
+                    // not strand it — the detached half owns the minted id
+                    // and releases the subscription when its reply has no
+                    // taker (R4).
+                    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+                    tokio::spawn(async move {
+                        match ws
+                            .call::<Value>("perspective.modelSubscribe", Value::Object(params))
+                            .await
+                        {
+                            Ok(v) => {
+                                let subscribed = Subscribed {
+                                    subscription_id: v
+                                        .get("subscriptionId")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or(&subscription_id)
+                                        .to_string(),
+                                    result: v.get("result").cloned().unwrap_or(Value::Null),
+                                    revision: v
+                                        .get("revision")
+                                        .and_then(Value::as_u64)
+                                        .unwrap_or(0),
+                                };
+                                if done_tx.send(Ok(subscribed)).is_err() {
+                                    // Open cancelled mid-call — nobody will
+                                    // hold the subscription we just made.
+                                    let _ = crate::subscription::dispose_query(
+                                        &ws,
+                                        &uuid,
+                                        &subscription_id,
+                                    )
+                                    .await;
+                                }
+                            }
+                            Err(e) => {
+                                // A failed subscribe leaves no live query
+                                // nobody holds — dispose the minted id (TS
+                                // `#released`).
+                                let _ = crate::subscription::dispose_query(
+                                    &ws,
+                                    &uuid,
+                                    &subscription_id,
                                 )
                                 .await;
-                            Err(e)
+                                let _ = done_tx.send(Err(e));
+                            }
                         }
-                    }
+                    });
+                    done_rx
+                        .await
+                        .map_err(|_| anyhow!("perspective.modelSubscribe lost its caller"))?
                 })
             })
         };
@@ -708,18 +733,6 @@ impl Instance {
     }
 }
 
-impl Drop for ModelSubscription {
-    /// Dropping without `dispose()` still tears the subscription down —
-    /// executor-side, and this client's watch and listener (F5). Async
-    /// teardown needs a runtime; off one, only `dispose().await` cleans up.
-    fn drop(&mut self) {
-        if let Ok(rt) = tokio::runtime::Handle::try_current() {
-            let live = self.live.clone();
-            rt.spawn(async move { live.dispose().await });
-        }
-    }
-}
-
 /// `{ instances, totalCount }` out of a raw subscription result — the parse
 /// TS `parseModelResult` does.
 fn parse_model_result(raw: &Value) -> ModelResult {
@@ -859,6 +872,49 @@ mod tests {
         .await
         .expect("dropping the subscription must send perspective.disposeQuery");
         assert_eq!(disposed["params"]["subscriptionId"], "s1");
+        ws.close().await;
+    }
+
+    /// R4: `perspective.modelSubscribe` opens a server-side resource — a
+    /// caller that cancels `subscribe` while the call is on the wire must
+    /// not strand it. The detached open owns the minted id and disposes the
+    /// subscription once the call lands unanswered-for.
+    #[tokio::test]
+    async fn a_cancelled_subscribe_disposes_the_subscription_it_opened() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let ws = Arc::new(WsRpcClient::connect(fake.url(), "").await.unwrap());
+        let model = Model::new(&ws, "p1", "Recipe");
+        let subscribe = tokio::spawn(async move { model.subscribe(&ModelQuery::default()).await });
+        let watch = fake.next_request().await;
+        assert_eq!(watch["type"], "events.watch");
+        fake.reply(&watch, json!(true)).await;
+        let sub = fake.next_request().await;
+        assert_eq!(sub["type"], "perspective.modelSubscribe");
+        let minted = sub["params"]["subscriptionId"].clone();
+
+        // Cancel mid-open: the caller's future dies with the call in flight.
+        subscribe.abort();
+        fake.reply(&sub, json!({"result": {"instances": []}, "revision": 0}))
+            .await;
+
+        // The detached open must release what it created; the dropped
+        // query's own teardown removes the watch meanwhile — either order.
+        let mut disposed = false;
+        for _ in 0..8 {
+            if disposed {
+                break;
+            }
+            let req = tokio::time::timeout(Duration::from_secs(5), fake.next_request())
+                .await
+                .expect("the cancelled subscribe's cleanup stalled");
+            if req["type"] == "perspective.disposeQuery" {
+                assert_eq!(req["params"]["subscriptionId"], minted);
+                disposed = true;
+            }
+            fake.reply(&req, json!(true)).await;
+        }
+        assert!(disposed, "the minted subscription was never released");
         ws.close().await;
     }
 

@@ -13,7 +13,7 @@ use anyhow::{anyhow, Result};
 use serde_json::{Map, Value};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, Mutex};
@@ -208,12 +208,39 @@ struct Inner {
     /// instead of sleeping out its backoff (F10 — TS clears the pending
     /// retry timer on every start).
     reopen_wake: tokio::sync::Notify,
+    /// Live `LiveQuery` handles. Clones share `Inner`, so the query must be
+    /// torn down by the *last* handle's drop, not any handle's (R4).
+    handles: AtomicUsize,
 }
 
 /// One live query on the executor. Cheap to clone — clones share the query.
-#[derive(Clone)]
 pub struct LiveQuery {
     inner: Arc<Inner>,
+}
+
+impl Clone for LiveQuery {
+    fn clone(&self) -> Self {
+        self.inner.handles.fetch_add(1, Ordering::Relaxed);
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
+impl Drop for LiveQuery {
+    /// The last handle's drop tears the query down like `dispose()` —
+    /// executor-side subscription, watch interest, listener — or every
+    /// abandoned query leaks all three server-side and locally (R4).
+    /// Async teardown needs a runtime; off one, `dispose().await` is the
+    /// clean path.
+    fn drop(&mut self) {
+        if self.inner.handles.fetch_sub(1, Ordering::SeqCst) == 1 {
+            if let Ok(rt) = tokio::runtime::Handle::try_current() {
+                let inner = self.inner.clone();
+                rt.spawn(async move { inner.dispose_shared().await });
+            }
+        }
+    }
 }
 
 static WATCH_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -248,6 +275,7 @@ impl LiveQuery {
             reg_task: std::sync::Mutex::new(None),
             reconnect_cb: std::sync::Mutex::new(None),
             reopen_wake: tokio::sync::Notify::new(),
+            handles: AtomicUsize::new(1),
         });
 
         // Event listener — filters update events, feeds `receive` IN ORDER:
@@ -340,17 +368,30 @@ impl LiveQuery {
         }
     }
 
+    /// Open the subscription (again) and return its snapshot. Updates that
+    /// arrived while the open was in flight are emitted on `results()`,
+    /// like TS `LiveQuery.start` — they do not fold into the snapshot. A
+    /// start that a newer one overtakes resolves with the newer result.
+    pub async fn start(&self) -> Result<Value> {
+        self.inner.start().await
+    }
+
+    /// End the subscription: stop listening, dispose executor-side.
+    pub async fn dispose(&self) {
+        self.inner.dispose_shared().await;
+    }
+}
+
+impl Inner {
     /// Install this query's `query-subscription-update` interest — once.
     /// `start` awaits it before opening, so the watch is acknowledged
     /// before the subscribe call it feeds can reach the executor (F4).
-    async fn ensure_watch(&self) -> Result<()> {
-        self.inner
-            .watch_ready
+    async fn ensure_watch(self: &Arc<Self>) -> Result<()> {
+        self.watch_ready
             .get_or_try_init(|| async {
-                self.inner
-                    .ws
+                self.ws
                     .set_watch(
-                        &self.inner.watch_key,
+                        &self.watch_key,
                         serde_json::json!({"query-subscription-update": null}),
                     )
                     .await
@@ -359,14 +400,13 @@ impl LiveQuery {
             .map(|_| ())
     }
 
-    /// Open the subscription (again) and return its snapshot. Updates that
-    /// arrived while the open was in flight are emitted on `results()`,
-    /// like TS `LiveQuery.start` — they do not fold into the snapshot. A
-    /// start that a newer one overtakes resolves with the newer result.
-    pub async fn start(&self) -> Result<Value> {
+    /// `LiveQuery::start` on the shared inner — a re-open (or the
+    /// last-handle teardown) must not mint a handle to call it: a handle
+    /// dropping mid-teardown would run the teardown again (R4).
+    async fn start(self: &Arc<Self>) -> Result<Value> {
         self.ensure_watch().await?;
         let generation = {
-            let mut s = self.inner.state.lock().await;
+            let mut s = self.state.lock().await;
             s.generation += 1;
             s.buffer = Some(Vec::new());
             s.generation
@@ -374,12 +414,12 @@ impl LiveQuery {
         // A re-open retry sleeping off a failure is obsolete the moment a
         // newer start exists — wake it so it dies on the generation check
         // (F10; TS clears the pending retry timer on every start).
-        self.inner.reopen_wake.notify_waiters();
-        let open = self.inner.open.clone();
+        self.reopen_wake.notify_waiters();
+        let open = self.open.clone();
         let subscribed = match open().await {
             Ok(s) => s,
             Err(e) => {
-                let mut state = self.inner.state.lock().await;
+                let mut state = self.state.lock().await;
                 if state.generation == generation {
                     state.buffer = None;
                 }
@@ -387,15 +427,15 @@ impl LiveQuery {
             }
         };
 
-        let mut state = self.inner.state.lock().await;
+        let mut state = self.state.lock().await;
         if state.disposed || state.generation != generation {
             let dispose_id = subscribed.subscription_id.clone();
-            let ws = self.inner.ws.clone();
-            let uuid = self.inner.uuid.clone();
+            let ws = self.ws.clone();
+            let uuid = self.uuid.clone();
             drop(state);
             let _ = dispose_query(&ws, &uuid, &dispose_id).await;
             // Disposed while opening: the caller still gets the snapshot.
-            let state = self.inner.state.lock().await;
+            let state = self.state.lock().await;
             return Ok(state
                 .result
                 .clone()
@@ -403,16 +443,15 @@ impl LiveQuery {
         }
         let superseded = state.id.replace(subscribed.subscription_id.clone());
         let snapshot = subscribed.result.clone();
-        self.inner
-            .replace_locked(state, subscribed.revision, subscribed.result)
+        self.replace_locked(state, subscribed.revision, subscribed.result)
             .await;
         // The subscription this start replaced is still live on the
         // executor — release it, or every re-open leaks a second one
         // while only the newest is tracked (F10). Fire-and-forget: it's
         // cleanup, not part of the open.
         if let Some(old) = superseded {
-            let ws = self.inner.ws.clone();
-            let uuid = self.inner.uuid.clone();
+            let ws = self.ws.clone();
+            let uuid = self.uuid.clone();
             tokio::spawn(async move {
                 let _ = dispose_query(&ws, &uuid, &old).await;
             });
@@ -420,33 +459,34 @@ impl LiveQuery {
         Ok(snapshot)
     }
 
-    /// End the subscription: stop listening, dispose executor-side.
-    pub async fn dispose(&self) {
+    /// `LiveQuery::dispose` without a handle — the last-drop teardown uses
+    /// it too, and minting a handle to call it would recurse (R4).
+    async fn dispose_shared(self: &Arc<Self>) {
         let id = {
-            let mut s = self.inner.state.lock().await;
+            let mut s = self.state.lock().await;
             s.disposed = true;
             s.generation += 1;
             s.buffer = None;
             s.id.take()
         };
-        if let Some(h) = self.inner.listener.lock().unwrap().take() {
+        if let Some(h) = self.listener.lock().unwrap().take() {
             h.abort();
         }
-        if let Some(h) = self.inner.reg_task.lock().unwrap().take() {
+        if let Some(h) = self.reg_task.lock().unwrap().take() {
             h.abort();
         }
         // End every receiver's `recv()` — a disposed query's stream closes.
-        self.inner.results.lock().unwrap().take();
-        let cb = self.inner.reconnect_cb.lock().unwrap().take();
+        self.results.lock().unwrap().take();
+        let cb = self.reconnect_cb.lock().unwrap().take();
         if let Some(cb) = cb {
-            self.inner.ws.remove_on_reconnect(cb).await;
+            self.ws.remove_on_reconnect(cb).await;
         }
         // An install still in flight must finish before the removal, or the
         // `events.watch` could land after its unwatch (F4).
         let _ = self.ensure_watch().await;
-        let _ = self.inner.ws.remove_watch(&self.inner.watch_key).await;
+        let _ = self.ws.remove_watch(&self.watch_key).await;
         if let Some(id) = id {
-            let _ = dispose_query(&self.inner.ws, &self.inner.uuid, &id).await;
+            let _ = dispose_query(&self.ws, &self.uuid, &id).await;
         }
     }
 }
@@ -626,11 +666,9 @@ impl Inner {
             };
             // `start` bumps `generation`, so this attempt's generation is
             // `before + 1` — anything newer means another start overtook us.
-            match LiveQuery::start(&LiveQuery {
-                inner: self.clone(),
-            })
-            .await
-            {
+            // Straight on the Arc: minting a `LiveQuery` handle for the
+            // duration would corrupt the handle count (R4).
+            match self.start().await {
                 Ok(_) => {
                     let mut state = self.state.lock().await;
                     if !state.disposed && state.generation == before + 1 {
@@ -664,7 +702,11 @@ impl Inner {
 }
 
 /// `perspective.disposeQuery` — ends a subscription on the executor.
-async fn dispose_query(ws: &Arc<WsRpcClient>, uuid: &str, subscription_id: &str) -> Result<()> {
+pub(crate) async fn dispose_query(
+    ws: &Arc<WsRpcClient>,
+    uuid: &str,
+    subscription_id: &str,
+) -> Result<()> {
     ws.call_void(
         "perspective.disposeQuery",
         serde_json::json!({ "uuid": uuid, "subscriptionId": subscription_id }),
@@ -1046,9 +1088,74 @@ mod tests {
         }
         let weak = Arc::downgrade(&query.inner);
         drop(query);
+        // The last handle's drop runs the teardown detached: it legitimately
+        // holds `Inner` until the executor RPCs finish, so serve them while
+        // it dies. A leaked strong callback would keep `Inner` pinned past
+        // that and time this out.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if weak.upgrade().is_none() {
+                    break;
+                }
+                match tokio::time::timeout(Duration::from_millis(200), fake.next_request()).await {
+                    Ok(req) => fake.reply(&req, serde_json::json!(true)).await,
+                    Err(_) => tokio::task::yield_now().await,
+                }
+            }
+        })
+        .await
+        .expect("a callback outliving the query still holds a strong Inner");
+        client.close().await;
+    }
+
+    /// R4: `LiveQuery` is cloneable over a shared `Arc<Inner>` — dropping
+    /// the last handle must tear the query down: the subscription is
+    /// disposed executor-side and its `query-subscription-update` interest
+    /// leaves the watch union. An earlier handle's drop must not.
+    #[tokio::test]
+    async fn a_dropped_live_query_releases_its_watch_and_subscription() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let client = Arc::new(WsRpcClient::connect(fake.url(), "").await.unwrap());
+        let query = started_query(&fake, &client).await;
+
+        // A surviving clone keeps the query — nothing may go out yet.
+        let clone = query.clone();
+        drop(query);
         assert!(
-            weak.upgrade().is_none(),
-            "a callback outliving the query still holds a strong Inner"
+            fake.maybe_request(Duration::from_millis(300))
+                .await
+                .is_none(),
+            "a surviving handle still owns the query"
+        );
+
+        // The last handle's drop runs the teardown: unwatch + disposeQuery.
+        drop(clone);
+        let mut disposed = false;
+        let mut unwatched = false;
+        for _ in 0..8 {
+            if disposed && unwatched {
+                break;
+            }
+            let req = tokio::time::timeout(Duration::from_secs(5), fake.next_request())
+                .await
+                .expect("the dropped query's teardown stalled");
+            match req["type"].as_str() {
+                Some("perspective.disposeQuery") => {
+                    assert_eq!(req["params"]["subscriptionId"], "s1");
+                    disposed = true;
+                }
+                Some("events.watch") => {
+                    assert_eq!(req["params"], json!({}));
+                    unwatched = true;
+                }
+                _ => {}
+            }
+            fake.reply(&req, json!(true)).await;
+        }
+        assert!(
+            disposed && unwatched,
+            "dropping the last handle must dispose s1 and remove its watch"
         );
         client.close().await;
     }
