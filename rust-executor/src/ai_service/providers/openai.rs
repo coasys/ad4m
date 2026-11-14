@@ -33,13 +33,17 @@ pub struct OpenAiChat {
     api_key: String,
     /// Fully resolved, e.g. `https://api.groq.com/openai/v1/chat/completions`.
     endpoint: String,
+    /// Which OpenAI-shaped server this is. llama-server honours
+    /// `chat_template_kwargs`; a strict OpenAI endpoint rejects that field,
+    /// so it is sent only for [`EndpointKind::LlamaServer`].
+    kind: EndpointKind,
 }
 
 impl OpenAiChat {
     /// Build a client for `base_url`, given with or without its trailing `/v1`: every
     /// provider documents the `/v1` form, and a path prefix (Groq's `/openai/v1`, this
     /// executor's `/api/v1/openai/v1`) survives.
-    pub fn new(api_key: &str, base_url: Url) -> Self {
+    pub fn new(api_key: &str, base_url: Url, kind: EndpointKind) -> Self {
         Self {
             // `expect`: the default client follows redirects, so a fallback to it would
             // drop the policy that keeps the key on the host it was set for.
@@ -48,7 +52,15 @@ impl OpenAiChat {
                 .expect("the HTTP client builds"),
             api_key: api_key.to_string(),
             endpoint: super::http::versioned_endpoint(base_url, "chat/completions"),
+            kind,
         }
+    }
+
+    /// A client for tests: a strict OpenAI endpoint, so a body assertion that
+    /// omits `chat_template_kwargs` stays the default.
+    #[cfg(test)]
+    fn new_test(api_key: &str, base_url: Url) -> Self {
+        Self::new(api_key, base_url, EndpointKind::OpenAi)
     }
 
     /// `error` without the key: an upstream's error or refusal text may echo it.
@@ -66,18 +78,25 @@ impl OpenAiChat {
             super::http::UpstreamUnreachable::new(&self.endpoint, &e, &self.api_key)
         })?;
         if !response.status().is_success() {
-            return Err(
+            let error: anyhow::Error =
                 super::http::UpstreamStatus::read(response, &self.endpoint, &self.api_key)
                     .await
-                    .into(),
-            );
+                    .into();
+            super::http::log_upstream_error("OpenAI-compatible", &error);
+            return Err(error);
         }
         Ok(response)
     }
 }
 
 /// The request body. Shared by both entry points so they cannot drift in what they send.
-fn build_body(request: ChatRequest, stream: bool) -> Value {
+///
+/// `chat_template_kwargs.enable_thinking` is llama-server's per-request switch
+/// (it reads the field into the chat template; `-rea off` is the server-wide
+/// one). A strict OpenAI endpoint rejects unknown fields, so only a
+/// llama-server endpoint gets it. `max_tokens` goes with it: where the thinking
+/// switch cannot be sent, a cap would only be spent on reasoning, so it is not sent.
+fn build_body(request: ChatRequest, stream: bool, kind: EndpointKind) -> Value {
     let mut body = json!({
         "model": request.model,
         "messages": request.messages.iter().map(wire_message).collect::<Vec<_>>(),
@@ -116,7 +135,44 @@ fn build_body(request: ChatRequest, stream: bool) -> Value {
         body["stream"] = json!(true);
         body["stream_options"] = json!({ "include_usage": true });
     }
+    if request.disable_thinking && kind == EndpointKind::LlamaServer {
+        body["chat_template_kwargs"] = json!({ "enable_thinking": false });
+    }
+    // A cap without the switch is worse than none: a thinking model on an endpoint that
+    // cannot be told to stop thinking spends the cap on reasoning and answers empty. When
+    // the caller asked for no thinking and this kind cannot do it, the cap stays off too.
+    let thinking_stays_on = request.disable_thinking && kind != EndpointKind::LlamaServer;
+    if let Some(max_tokens) = request.max_output_tokens {
+        if !thinking_stays_on {
+            // OpenAI's reasoning models (o-series, gpt-5) reject `max_tokens`
+            // and take `max_completion_tokens`. Other OpenAI-shaped servers
+            // (llama-server, vLLM, clones) keep `max_tokens`.
+            let field =
+                if kind == EndpointKind::OpenAi && takes_max_completion_tokens(&request.model) {
+                    "max_completion_tokens"
+                } else {
+                    "max_tokens"
+                };
+            body[field] = json!(max_tokens);
+        }
+    }
     body
+}
+
+/// Whether an OpenAI model name is a reasoning model that only accepts
+/// `max_completion_tokens`: the o-series (`o1`, `o3-mini`, `o4-mini`, ...) and
+/// the gpt-5 family. A provider prefix (`openai/o3`) is ignored.
+fn takes_max_completion_tokens(model: &str) -> bool {
+    let name = model
+        .rsplit('/')
+        .next()
+        .unwrap_or(model)
+        .to_ascii_lowercase();
+    let o_series = name
+        .strip_prefix('o')
+        .and_then(|rest| rest.chars().next())
+        .is_some_and(|c| c.is_ascii_digit());
+    o_series || name.starts_with("gpt-5")
 }
 
 fn wire_message(turn: &ChatTurn) -> Value {
@@ -221,6 +277,10 @@ fn read_reply(json: &Value) -> Result<ChatReply> {
             .to_string(),
         tool_calls,
         usage: json.get("usage").map(usage_of).unwrap_or_default(),
+        stop_reason: json
+            .pointer("/choices/0/finish_reason")
+            .and_then(Value::as_str)
+            .map(str::to_string),
     })
 }
 
@@ -300,6 +360,7 @@ impl StreamState {
     fn into_reply(self) -> ChatReply {
         ChatReply {
             text: self.text,
+            stop_reason: None,
             tool_calls: self
                 .calls
                 .into_values()
@@ -321,7 +382,7 @@ impl RemoteChat for OpenAiChat {
     }
 
     async fn chat(&self, request: ChatRequest) -> Result<ChatReply> {
-        let response = self.send(&build_body(request, false)).await?;
+        let response = self.send(&build_body(request, false, self.kind)).await?;
         let json: Value = super::http::read_json(response)
             .await
             .map_err(|e| anyhow!("Could not read the completion: {e}"))?;
@@ -336,7 +397,7 @@ impl RemoteChat for OpenAiChat {
     ) -> Result<ChatReply> {
         use futures::StreamExt;
 
-        let response = self.send(&build_body(request, true)).await?;
+        let response = self.send(&build_body(request, true, self.kind)).await?;
         let mut stream = response.bytes_stream();
         // Bytes, decoded a complete line at a time: a chunk boundary can split a
         // multi-byte character.
@@ -475,12 +536,12 @@ mod wire_tests {
     #[test]
     fn chat_and_listing_resolve_the_same_base_url() {
         // Groq's documented URL: a `/v1` under a path prefix must not be doubled.
-        let client = OpenAiChat::new("", url("https://api.groq.com/openai/v1"));
+        let client = OpenAiChat::new_test("", url("https://api.groq.com/openai/v1"));
         assert_eq!(
             client.endpoint,
             "https://api.groq.com/openai/v1/chat/completions"
         );
-        let bare = OpenAiChat::new("", url("http://localhost:11434"));
+        let bare = OpenAiChat::new_test("", url("http://localhost:11434"));
         assert_eq!(bare.endpoint, "http://localhost:11434/v1/chat/completions");
     }
 
@@ -501,6 +562,7 @@ mod wire_tests {
                 ],
             ),
             false,
+            EndpointKind::OpenAi,
         );
         let messages = &body["messages"];
         assert_eq!(messages[0], json!({ "role": "system", "content": "s" }));
@@ -547,7 +609,7 @@ mod wire_tests {
             ChatRequest::new("qwen3", vec![ChatTurn::user("hi")]).with_tools(vec![search_tool()]);
         request.tool_choice = Some(json!("required"));
         request.response_format = Some(json!({ "type": "json_object" }));
-        let reply = OpenAiChat::new("sk-test", url(&server.url()))
+        let reply = OpenAiChat::new_test("sk-test", url(&server.url()))
             .chat(request)
             .await
             .expect("completion succeeds");
@@ -572,7 +634,7 @@ mod wire_tests {
         let constrained = ChatRequest::new("m", vec![ChatTurn::user("hi")])
             .with_json_schema(Some(schema.clone()));
         for stream in [false, true] {
-            let body = build_body(constrained.clone(), stream);
+            let body = build_body(constrained.clone(), stream, EndpointKind::OpenAi);
             assert_eq!(
                 body["response_format"],
                 json!({
@@ -586,11 +648,15 @@ mod wire_tests {
         let mut own = constrained;
         own.response_format = Some(json!({ "type": "json_object" }));
         assert_eq!(
-            build_body(own, false)["response_format"],
+            build_body(own, false, EndpointKind::OpenAi)["response_format"],
             json!({ "type": "json_object" })
         );
 
-        let free = build_body(ChatRequest::new("m", vec![ChatTurn::user("hi")]), false);
+        let free = build_body(
+            ChatRequest::new("m", vec![ChatTurn::user("hi")]),
+            false,
+            EndpointKind::OpenAi,
+        );
         assert!(free.get("response_format").is_none(), "{free}");
     }
 
@@ -604,7 +670,7 @@ mod wire_tests {
             .with_body(r#"{"choices":[{"message":{"content":"hello"}}]}"#)
             .create_async()
             .await;
-        let reply = OpenAiChat::new("", url(&server.url()))
+        let reply = OpenAiChat::new_test("", url(&server.url()))
             .chat(ChatRequest::new("m", vec![ChatTurn::user("hi")]))
             .await
             .unwrap();
@@ -618,6 +684,97 @@ mod wire_tests {
     }
 
     #[tokio::test]
+    async fn a_llama_server_no_thinking_request_sends_enable_thinking_false_and_max_tokens() {
+        // llama-server honours `chat_template_kwargs.enable_thinking` (and
+        // `max_tokens`). Interpretation of a thinking model otherwise fills
+        // the window with reasoning and returns an empty answer.
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/v1/chat/completions")
+            .match_body(Matcher::PartialJson(json!({
+                "chat_template_kwargs": { "enable_thinking": false },
+                "max_tokens": 2048
+            })))
+            .with_status(200)
+            .with_body(r#"{"choices":[{"message":{"content":"{}"}}]}"#)
+            .create_async()
+            .await;
+
+        let client = OpenAiChat::new("", url(&server.url()), EndpointKind::LlamaServer);
+        client
+            .chat(
+                ChatRequest::new("qwen3.8", vec![ChatTurn::user("extract")])
+                    .with_generation(true, Some(2048)),
+            )
+            .await
+            .expect("llama-server accepts the thinking switch");
+        mock.assert_async().await;
+    }
+
+    #[test]
+    fn a_strict_openai_endpoint_gets_neither_the_thinking_switch_nor_a_cap_that_needs_it() {
+        // OpenAI rejects unknown fields, so `chat_template_kwargs` stays off. A no-thinking
+        // request's cap would then only be spent on a thinking model's reasoning, so
+        // `max_tokens` stays off too. A cap the caller set without asking for no thinking
+        // is the caller's own and is sent.
+        let no_thinking = build_body(
+            ChatRequest::new("gpt-4o", vec![ChatTurn::user("extract")])
+                .with_generation(true, Some(512)),
+            false,
+            EndpointKind::OpenAi,
+        );
+        assert!(
+            no_thinking.get("chat_template_kwargs").is_none(),
+            "{no_thinking}"
+        );
+        assert!(no_thinking.get("max_tokens").is_none(), "{no_thinking}");
+
+        let capped_only = build_body(
+            ChatRequest::new("gpt-4o", vec![ChatTurn::user("extract")])
+                .with_generation(false, Some(512)),
+            false,
+            EndpointKind::OpenAi,
+        );
+        assert_eq!(capped_only["max_tokens"], 512, "{capped_only}");
+    }
+
+    #[test]
+    fn an_openai_reasoning_model_gets_max_completion_tokens_and_others_max_tokens() {
+        let capped = |model: &str, kind| {
+            build_body(
+                ChatRequest::new(model, vec![ChatTurn::user("x")])
+                    .with_generation(false, Some(512)),
+                false,
+                kind,
+            )
+        };
+        for model in [
+            "o3-mini",
+            "o1",
+            "o4-mini",
+            "openai/o3",
+            "gpt-5",
+            "gpt-5-mini",
+        ] {
+            let body = capped(model, EndpointKind::OpenAi);
+            assert_eq!(body["max_completion_tokens"], 512, "{model}: {body}");
+            assert!(body.get("max_tokens").is_none(), "{model}: {body}");
+        }
+        for model in ["gpt-4o", "gpt-4.1", "omni-x"] {
+            let body = capped(model, EndpointKind::OpenAi);
+            assert_eq!(body["max_tokens"], 512, "{model}: {body}");
+            assert!(
+                body.get("max_completion_tokens").is_none(),
+                "{model}: {body}"
+            );
+        }
+        // llama-server keeps max_tokens whatever the model is called.
+        let body = capped("o3-mini", EndpointKind::LlamaServer);
+        assert_eq!(body["max_tokens"], 512, "{body}");
+        assert!(body.get("max_completion_tokens").is_none(), "{body}");
+    }
+
+    #[tokio::test]
     async fn a_refusal_is_an_error_not_an_empty_answer() {
         let mut server = mockito::Server::new_async().await;
         server
@@ -628,7 +785,7 @@ mod wire_tests {
             )
             .create_async()
             .await;
-        let error = OpenAiChat::new("", url(&server.url()))
+        let error = OpenAiChat::new_test("", url(&server.url()))
             .chat(ChatRequest::new("m", vec![ChatTurn::user("hi")]))
             .await
             .unwrap_err();
@@ -647,7 +804,7 @@ mod wire_tests {
             .with_body(r#"{"error":{"message":"bad request for key sk-test"}}"#)
             .create_async()
             .await;
-        let error = OpenAiChat::new("sk-test", url("http://127.0.0.1:1"))
+        let error = OpenAiChat::new_test("sk-test", url("http://127.0.0.1:1"))
             .chat(ChatRequest::new("m", vec![]))
             .await
             .unwrap_err();
@@ -661,7 +818,7 @@ mod wire_tests {
         );
         assert!(!error.to_string().contains("sk-test"), "{error}");
 
-        let error = OpenAiChat::new("sk-test", url(&server.url()))
+        let error = OpenAiChat::new_test("sk-test", url(&server.url()))
             .chat(ChatRequest::new("m", vec![]))
             .await
             .unwrap_err();
@@ -704,7 +861,7 @@ mod wire_tests {
             .await;
 
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let reply = OpenAiChat::new("", url(&server.url()))
+        let reply = OpenAiChat::new_test("", url(&server.url()))
             .chat_stream(
                 ChatRequest::new("m", vec![ChatTurn::user("hi")]).with_tools(vec![search_tool()]),
                 tx,
@@ -756,12 +913,12 @@ mod wire_tests {
             .create_async()
             .await;
 
-        let refusal = OpenAiChat::new("sk-echo", url(&refusing.url()))
+        let refusal = OpenAiChat::new_test("sk-echo", url(&refusing.url()))
             .chat(ChatRequest::new("m", vec![ChatTurn::user("hi")]))
             .await
             .unwrap_err();
         let (tx, _rx) = mpsc::unbounded_channel();
-        let stream = OpenAiChat::new("sk-echo", url(&streaming.url()))
+        let stream = OpenAiChat::new_test("sk-echo", url(&streaming.url()))
             .chat_stream(ChatRequest::new("m", vec![ChatTurn::user("hi")]), tx)
             .await
             .unwrap_err();
@@ -785,7 +942,7 @@ mod wire_tests {
             .await;
 
         let (tx, _rx) = mpsc::unbounded_channel();
-        let error = OpenAiChat::new("", url(&server.url()))
+        let error = OpenAiChat::new_test("", url(&server.url()))
             .chat_stream(ChatRequest::new("m", vec![ChatTurn::user("hi")]), tx)
             .await
             .unwrap_err();

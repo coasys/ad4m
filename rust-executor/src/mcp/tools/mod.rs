@@ -279,6 +279,7 @@ pub(crate) fn request_context(session: Arc<Session>) -> crate::types::RequestCon
         session,
         connection_id: None,
         peer: None,
+        query_slots: None,
     }
 }
 
