@@ -295,6 +295,10 @@ pub struct Ad4mConfig {
     /// Accept a storage secret file on the data folder's disk; the status then reports the
     /// data as not encrypted at rest. Default false.
     pub allow_secret_on_data_disk: Option<bool>,
+    /// Seconds one request-driven SPARQL evaluation may run before it is
+    /// stopped (default 30). Covers `perspective.querySparql`,
+    /// `perspective.modelQuery`, live-query opening and their re-checks.
+    pub query_deadline_secs: Option<u64>,
 }
 
 impl Ad4mConfig {
@@ -800,6 +804,7 @@ impl Ad4mConfig {
     /// bootstrap seed path inside `app_data_path`.
     pub fn unprepared() -> Self {
         Ad4mConfig {
+            query_deadline_secs: None,
             app_data_path: None,
             network_bootstrap_seed: None,
             language_language_only: None,

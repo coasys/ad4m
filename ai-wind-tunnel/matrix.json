@@ -29,7 +29,8 @@
         "llm": [
           { "modelId": "qwen3.5-0.8b-q8_0" },
           { "modelId": "qwen3.5-2b-q4_k_m" },
-          { "modelId": "qwen3.5-4b-q4_k_m" }
+          { "modelId": "qwen3.5-4b-q4_k_m" },
+          { "modelId": "qwen3.8-27b-ud-q4_k_m", "context": 65536 }
         ],
         "completion": [
           { "modelId": "qwen3.5-0.8b-q8_0" }

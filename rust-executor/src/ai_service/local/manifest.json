@@ -286,6 +286,16 @@
       "params": "4B",
       "memoryBytes": 4000000000
     },
+    "qwen3.8-27b-ud-q4_k_m": {
+      "service": "llm",
+      "provider": "llama-server",
+      "url": "https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/4af51b3542f775b0a8e4b310bfb3f17e01c306c9/Qwen3.8-27B-UD-Q4_K_M.gguf",
+      "sha256": "1bce504dfecd84153666928a41d8a66706f0158d3a317bc5196b72819d7dc529",
+      "sizeBytes": 16564259744,
+      "license": "Apache-2.0",
+      "params": "27B",
+      "memoryBytes": 21000000000
+    },
     "nomic-embed-text-v1.5-q8_0": {
       "service": "embeddings",
       "provider": "llama-server",
@@ -294,7 +304,7 @@
       "sizeBytes": 146146432,
       "license": "Apache-2.0",
       "params": "137M",
-      "memoryBytes": 400000000
+      "memoryBytes": 500000000
     },
     "whisper-small-q5_1": {
       "service": "stt",
@@ -324,7 +334,7 @@
       "sizeBytes": 713975456,
       "license": "CC-BY-4.0",
       "params": "0.6B",
-      "memoryBytes": 900000000
+      "memoryBytes": 1200000000
     },
     "nemotron-3.5-asr-streaming-0.6b-q8_0": {
       "service": "stt",
@@ -334,7 +344,7 @@
       "sizeBytes": 742090464,
       "license": "OpenMDW-1.1",
       "params": "0.6B",
-      "memoryBytes": 1300000000
+      "memoryBytes": 2200000000
     },
     "parakeet-tdt-0.6b-v3-int8-onnx": {
       "service": "stt",
@@ -378,7 +388,7 @@
       },
       "license": "Apache-2.0",
       "params": "0.6B",
-      "memoryBytes": 2200000000
+      "memoryBytes": 2300000000
     },
     "qwen3-asr-1.7b-q8_0": {
       "service": "stt",

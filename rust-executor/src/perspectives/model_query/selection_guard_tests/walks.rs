@@ -305,12 +305,15 @@ async fn test_perf_exists_guard_binds_the_reifier() {
          ?_r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?s <sg://member> ?o )>> . \
          ?_r <ad4m://ontology/proofValid> \"true\" . }";
     let rows = |q: &str| {
-        let mut rows: Vec<String> =
-            serde_json::from_str::<Vec<Value>>(&store.query_arbitrary(q).unwrap())
-                .unwrap()
-                .iter()
-                .map(|r| r.to_string())
-                .collect();
+        let mut rows: Vec<String> = serde_json::from_str::<Vec<Value>>(
+            &store
+                .query_arbitrary(&crate::perspectives::sparql_store::EvalStop::none(), q)
+                .unwrap(),
+        )
+        .unwrap()
+        .iter()
+        .map(|r| r.to_string())
+        .collect();
         rows.sort();
         rows
     };

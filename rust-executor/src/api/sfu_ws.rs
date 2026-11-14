@@ -383,10 +383,8 @@ async fn send_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
 
 /// Whether every member of a neighbourhood is hosted on this executor, so all
 /// of them can join its SFU. A call's `auto` topology uses the SFU only then:
-/// a member on another executor could not join the same room. Members are the
-/// DIDs the neighbourhood's link language knows plus its local owners
-/// (`PerspectiveInstance::others`); hosted are the main agent and the managed
-/// users. A neighbourhood with no known member answers `false`.
+/// a member on another executor could not join the same room. See
+/// [`crate::sfu::config_store::hosts_every_member`].
 async fn serves_all_members(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let perspective = super::perspectives_ws::guarded_perspective(&params).await?;
     let shared_url = perspective
@@ -398,22 +396,10 @@ async fn serves_all_members(params: Value, ctx: Arc<RequestContext>) -> Result<V
         .ok_or_else(|| WsRpcError::bad_request("Not a neighbourhood".to_string()))?;
     member_did(&ctx, &shared_url)?;
     service()?;
-    let members = perspective
-        .others()
+    let hosted = crate::sfu::config_store::hosts_every_member(&perspective)
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
-    let mut hosted: Vec<String> = crate::db_backend::db_backend()
-        .list_users()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|user| user.did)
-        .collect();
-    hosted.extend(crate::agent::did_for_context(&crate::agent::AgentContext::main_agent()).ok());
-    Ok(Value::Bool(all_hosted(&members, &hosted)))
-}
-
-fn all_hosted(members: &[String], hosted: &[String]) -> bool {
-    !members.is_empty() && members.iter().all(|did| hosted.contains(did))
+    Ok(Value::Bool(hosted))
 }
 
 /// Read-only query: SFU service status including public reachability.
@@ -769,15 +755,6 @@ pub struct SfuParticipantQualityPreference {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn serves_all_members_only_when_every_member_is_hosted() {
-        let s = |v: &[&str]| v.iter().map(|d| d.to_string()).collect::<Vec<_>>();
-        let hosted = s(&["did:main", "did:alice", "did:bob"]);
-        assert!(super::all_hosted(&s(&["did:alice", "did:bob"]), &hosted));
-        assert!(!super::all_hosted(&s(&["did:alice", "did:carol"]), &hosted));
-        assert!(!super::all_hosted(&[], &hosted));
-    }
-
     use super::*;
     use crate::api::tests::support::admin_ctx;
     use crate::api::ws_handler::build_handler_map;

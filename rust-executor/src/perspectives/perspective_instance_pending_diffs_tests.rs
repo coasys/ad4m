@@ -525,7 +525,10 @@ async fn a_link_added_with_an_empty_predicate_and_removed_does_not_reach_peers()
 
     let read_back: Vec<LinkExpression> = perspective
         .sparql_store
-        .get_links_by_source("ad4m://self")
+        .get_links_by_source(
+            &crate::perspectives::sparql_store::EvalStop::none(),
+            "ad4m://self",
+        )
         .unwrap()
         .into_iter()
         .map(LinkExpression::from)
