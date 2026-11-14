@@ -15,16 +15,19 @@ use crate::languages::capability::{parse_capability_list, Capability};
 use crate::languages::LanguageContext;
 
 use super::language_runtime::{
-    LanguageOperation, LanguageRuntime, LanguageRuntimeRequest, RunningRequest,
+    CallKind, LanguageOperation, LanguageRuntime, LanguageRuntimeRequest, RunningRequest,
 };
 
 /// How long a script call into a language (`Execute`) may run before the calls behind it stop
 /// waiting for it.
 ///
-/// A language serves its calls one at a time, and nothing interrupts a call once it runs: a
-/// call that never returns blocks every later call to it. Once the running call has run for
-/// the deadline, a caller whose call is still queued gets an error, and a new call fails at
-/// once instead of being queued. The runtime never starts a call whose caller has gone, so a
+/// A language serves its ordered calls one at a time, and nothing interrupts a call once it
+/// runs: an ordered call that never returns blocks every later ordered call to it. Once the
+/// running ordered call has run for the deadline, a caller whose ordered call is still queued
+/// gets an error, and a new ordered call fails at once instead of being queued. A read runs
+/// beside them; one that has not started by the deadline after it was sent (it waits only
+/// behind loading, callback registration or teardown, or a JS CPU loop that holds the thread)
+/// gets an error. The runtime never starts a call whose caller has gone, so a
 /// caller that got the error can retry without doing the work twice. The running call's own
 /// caller waits until it ends: a call that keeps making progress (a file upload with one zome
 /// call per chunk) has no total bound, and each of its waits has its own (a zome call 90 s, an
@@ -142,25 +145,46 @@ impl LanguageRuntimeHandle {
         )
     }
 
-    /// Waits for the result of call `id`. While the call is queued, its caller gets an error as
-    /// soon as the call the runtime is running has run for the deadline. Once the call runs,
-    /// its caller waits until it ends.
+    /// Waits for the result of call `id`, sent at `queued_at`. While the call is queued, its
+    /// caller gets an error at the deadline: an ordered call's once the ordered call running
+    /// before it has run for the deadline, a read's (or an ordered call's with none running
+    /// before it, its thread held by a read) once it has waited for the deadline. Once the call
+    /// runs, its caller waits until it ends.
     async fn wait_for_call(
         &self,
         id: u64,
+        kind: CallKind,
+        queued_at: Instant,
         mut response_rx: oneshot::Receiver<Result<String, String>>,
     ) -> Result<Result<String, String>, oneshot::error::RecvError> {
         loop {
-            let check_at = match *self.running.lock().unwrap() {
-                Some((running_id, _)) if running_id == id => break,
-                Some((_, since)) if since.elapsed() >= self.call_deadline => {
-                    // Dropped under the lock the runtime starts a call under, so the runtime
-                    // either has started this call (and the arm above matched) or will skip it.
-                    drop(response_rx);
-                    return Ok(Err(self.busy_error(since)));
+            let check_at = {
+                let running = self.running.lock().unwrap();
+                if running.ordered.map(|(running_id, _)| running_id) == Some(id)
+                    || running.reads.contains(&id)
+                {
+                    break;
                 }
-                Some((_, since)) => since + self.call_deadline,
-                None => Instant::now() + self.call_deadline,
+                let (error, limit) = match (kind, running.ordered) {
+                    (CallKind::Ordered, Some((_, since))) => {
+                        (self.busy_error(since), since + self.call_deadline)
+                    }
+                    _ => (
+                        format!(
+                            "Language {} did not start the call within the call deadline of {:?}",
+                            self.language_address, self.call_deadline
+                        ),
+                        queued_at + self.call_deadline,
+                    ),
+                };
+                if Instant::now() >= limit {
+                    // Dropped under the lock the runtime starts a call under, so the runtime
+                    // either has started this call (and the check above broke out) or will
+                    // skip it.
+                    drop(response_rx);
+                    return Ok(Err(error));
+                }
+                limit
             };
             tokio::select! {
                 biased;
@@ -183,28 +207,32 @@ impl LanguageRuntimeHandle {
         );
 
         // Only script calls give up: loading a language and its teardown wait for it.
-        let is_call = matches!(operation, LanguageOperation::Execute(..));
-        if is_call {
+        let kind = match &operation {
+            LanguageOperation::Execute(_, _, kind) => Some(*kind),
+            _ => None,
+        };
+        if kind == Some(CallKind::Ordered) {
             // Not queued behind a call that has run past the deadline: retries during a hang
-            // would pile up in the channel.
-            if let Some((_, since)) = *self.running.lock().unwrap() {
+            // would pile up in the channel. A read does not wait for that call.
+            if let Some((_, since)) = self.running.lock().unwrap().ordered {
                 if since.elapsed() >= self.call_deadline {
                     return Err(self.busy_error(since));
                 }
             }
         }
         let id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+        let queued_at = Instant::now();
         self.tx
             .send(LanguageRuntimeRequest {
                 operation,
                 response_tx,
-                queued_at: Instant::now(),
+                queued_at,
                 id,
             })
             .map_err(|e| format!("Language runtime channel closed: {}", e))?;
 
-        let response = if is_call {
-            self.wait_for_call(id, response_rx).await
+        let response = if let Some(kind) = kind {
+            self.wait_for_call(id, kind, queued_at, response_rx).await
         } else {
             response_rx.await
         };
@@ -220,20 +248,43 @@ impl LanguageRuntimeHandle {
     }
 
     pub async fn execute(&self, script: String) -> Result<String, String> {
-        self.send(LanguageOperation::Execute(
-            script,
-            AgentContext::main_agent(),
-        ))
-        .await
+        self.execute_with_context(script, AgentContext::main_agent())
+            .await
     }
 
+    /// An ordered call as `agent_context`: it starts once the ordered calls sent before it
+    /// have ended (`CallKind::Ordered`).
     pub async fn execute_with_context(
         &self,
         script: String,
         agent_context: AgentContext,
     ) -> Result<String, String> {
-        self.send(LanguageOperation::Execute(script, agent_context))
+        self.send(LanguageOperation::Execute(
+            script,
+            agent_context,
+            CallKind::Ordered,
+        ))
+        .await
+    }
+
+    pub async fn execute_read(&self, script: String) -> Result<String, String> {
+        self.execute_read_with_context(script, AgentContext::main_agent())
             .await
+    }
+
+    /// A read as `agent_context`: it starts at once and runs beside the language's other calls
+    /// (`CallKind::Read`). Only for a call that changes no state a later call depends on.
+    pub async fn execute_read_with_context(
+        &self,
+        script: String,
+        agent_context: AgentContext,
+    ) -> Result<String, String> {
+        self.send(LanguageOperation::Execute(
+            script,
+            agent_context,
+            CallKind::Read,
+        ))
+        .await
     }
 
     pub async fn load_module(&self, path: String, context: LanguageContext) -> Result<(), String> {

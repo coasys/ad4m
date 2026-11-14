@@ -3,32 +3,57 @@ import {
     agent_sign_string_hex, agent, agent_is_initialized, agent_is_unlocked,
     agent_create_signed_expression_stringified, agent_create_signed_expression_for_user,
     agent_did_for_user, agent_list_user_emails, agent_get_all_local_user_dids, agent_agent_for_user,
-    agent_open_sealed
+    agent_open_sealed, agent_call_token
 } from 'ext:core/ops';
 
 ((globalThis) => {
     const core = Deno.core;
+
+    // The agent of the call this code runs for: a token from `agent_call_token`, kept in a
+    // V8 async-context variable, so every await, promise reaction and timer of the call
+    // keeps it while other calls into this language run (agent_extension.rs, "The agent a
+    // call acts as"). Outside any call it is null and the ops refuse: no token, no agent.
+    // The host enters a language only through `__ad4mRunCall`, with a main-agent token for
+    // its own entries (loading, init, callback registration, teardown).
+    const callAgent = new core.AsyncVariable();
+    const caller = () => callAgent.get() ?? null;
+
+    // The runtime runs every script call as `__ad4mRunCall(id, async () => (script))`.
+    Object.defineProperty(globalThis, "__ad4mRunCall", {
+        value: (id, fn) => {
+            const token = agent_call_token(id);
+            const previous = callAgent.enter(token);
+            try {
+                return fn();
+            } finally {
+                core.setAsyncContext(previous);
+            }
+        },
+        writable: false,
+        enumerable: false,
+        configurable: false,
+    });
 
     globalThis.AGENT = {
         didDocument: () => {
             return agent_did_document();
         },
         signingKeyId: () => {
-            return agent_signing_key_id();
+            return agent_signing_key_id(caller());
         },
         did: () => {
-            return agent_did();
+            return agent_did(caller());
         },
         createSignedExpression: (data) => {
             try {
-                return agent_create_signed_expression(data);
+                return agent_create_signed_expression(data, caller());
             } catch (error) {
                 console.error("Error calling agent_create_signed_expression:", error);
                 console.error("Data was:", data)
                 console.log("Falling back to stringified version")
                 try {
                     let stringified = JSON.stringify(data);
-                    let resultString = agent_create_signed_expression_stringified(stringified)
+                    let resultString = agent_create_signed_expression_stringified(stringified, caller())
                     let result = JSON.parse(resultString);
                     return result;
                 } catch (fallbackError) {
@@ -45,13 +70,13 @@ import {
             }
         },
         sign: (payload) => {
-            return agent_sign(payload);
+            return agent_sign(payload, caller());
         },
         signStringHex: (payload) => {
-            return agent_sign_string_hex(payload);
+            return agent_sign_string_hex(payload, caller());
         },
         openSealed: (sealed) => {
-            return agent_open_sealed(sealed);
+            return agent_open_sealed(sealed, caller());
         },
         agent: () => {
             return agent();
@@ -67,7 +92,7 @@ import {
                 throw new TypeError('userEmail must be a non-empty string');
             }
             try {
-                return agent_create_signed_expression_for_user(userEmail, data);
+                return agent_create_signed_expression_for_user(userEmail, data, caller());
             } catch (error) {
                 console.error("Error calling agent_create_signed_expression_for_user:", error);
                 console.error("userEmail was:", userEmail);

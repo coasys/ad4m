@@ -169,6 +169,10 @@ impl JsCore {
         worker_options: WorkerOptions,
         permissions: PermissionsContainer,
     ) -> Self {
+        // In tests, start V8 with the process's flags before the worker can start it without
+        // them: a test that sets them after that aborts the process (`!IsFrozen()`).
+        #[cfg(test)]
+        crate::test_utils::init_v8_platform();
         let fs = Arc::new(RealFs);
 
         let worker = MainWorker::bootstrap_from_options(
@@ -251,10 +255,41 @@ impl JsCore {
         specifier: &str,
         source: String,
     ) -> Result<(), AnyError> {
+        if let Some(module_id) = self.load_module_source(specifier, source).await? {
+            let mut worker = self.worker.lock().await;
+            let evaluate_fut = worker.js_runtime.mod_evaluate(module_id);
+            worker
+                .js_runtime
+                .with_event_loop_future(evaluate_fut, PollEventLoopOptions::default())
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Load an ES module from source code without evaluating it: the first `import()` of
+    /// `specifier` evaluates it, in the async context of the code that imports it (deno_core
+    /// carries the importer's context into the evaluation), so the module's top-level code
+    /// runs as the agent of the call that imports it.
+    pub async fn load_module_from_source_unevaluated(
+        &self,
+        specifier: &str,
+        source: String,
+    ) -> Result<(), AnyError> {
+        self.load_module_source(specifier, source).await?;
+        Ok(())
+    }
+
+    /// Registers the module under `specifier`. Returns its id, or `None` if it was loaded
+    /// before.
+    async fn load_module_source(
+        &self,
+        specifier: &str,
+        source: String,
+    ) -> Result<Option<deno_core::ModuleId>, AnyError> {
         let mut worker = self.worker.lock().await;
         let mut loaded_modules = self.loaded_modules.lock().await;
         if loaded_modules.contains(specifier) {
-            return Ok(());
+            return Ok(None);
         }
 
         let url = Url::parse(specifier)
@@ -264,12 +299,7 @@ impl JsCore {
             .load_side_es_module_from_code(&url, source)
             .await?;
         loaded_modules.insert(specifier.to_string());
-        let evaluate_fut = worker.js_runtime.mod_evaluate(module_id);
-        worker
-            .js_runtime
-            .with_event_loop_future(evaluate_fut, PollEventLoopOptions::default())
-            .await?;
-        Ok(())
+        Ok(Some(module_id))
     }
 
     /// Initialize a language-specific runtime by executing the minimal bootstrap module.
