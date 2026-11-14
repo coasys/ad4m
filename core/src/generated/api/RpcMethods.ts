@@ -49,6 +49,7 @@ import type { CreateUserRequest } from "./CreateUserRequest";
 import type { DecoratedLinkExpression } from "./DecoratedLinkExpression";
 import type { DecoratedPerspective } from "./DecoratedPerspective";
 import type { DetectedEndpoint } from "./DetectedEndpoint";
+import type { DeviceKeys } from "./DeviceKeys";
 import type { DeviceView } from "./DeviceView";
 import type { DidResolutionResult } from "./DidResolutionResult";
 import type { DiscoveredModel } from "./DiscoveredModel";
@@ -94,6 +95,8 @@ import type { LocalAiRemoveParams } from "./LocalAiRemoveParams";
 import type { LocalAiStatus } from "./LocalAiStatus";
 import type { LockAgentRequest } from "./LockAgentRequest";
 import type { LogParams } from "./LogParams";
+import type { LogTail } from "./LogTail";
+import type { LogTailParams } from "./LogTailParams";
 import type { Model } from "./Model";
 import type { ModelStatus } from "./ModelStatus";
 import type { NeighbourhoodBroadcastParams } from "./NeighbourhoodBroadcastParams";
@@ -172,6 +175,7 @@ import type { RunAgentRequest } from "./RunAgentRequest";
 import type { RunInterpretationRequest } from "./RunInterpretationRequest";
 import type { RunInterpretationWithHarnessRequest } from "./RunInterpretationWithHarnessRequest";
 import type { RuntimeComputeLogParams } from "./RuntimeComputeLogParams";
+import type { RuntimeConfig } from "./RuntimeConfig";
 import type { RuntimeFriendStatusParams } from "./RuntimeFriendStatusParams";
 import type { RuntimeGrantNotificationParams } from "./RuntimeGrantNotificationParams";
 import type { RuntimeImportResult } from "./RuntimeImportResult";
@@ -183,6 +187,8 @@ import type { RuntimeUnytSendHotParams } from "./RuntimeUnytSendHotParams";
 import type { RuntimeUnytWalletHistoryParams } from "./RuntimeUnytWalletHistoryParams";
 import type { RuntimeUpdateNotificationParams } from "./RuntimeUpdateNotificationParams";
 import type { SentMessage } from "./SentMessage";
+import type { SetConfigParams } from "./SetConfigParams";
+import type { SetConfigResult } from "./SetConfigResult";
 import type { SetHostRatesRequest } from "./SetHostRatesRequest";
 import type { SetHotWalletAddressRequest } from "./SetHotWalletAddressRequest";
 import type { SetMultiUserRequest } from "./SetMultiUserRequest";
@@ -305,12 +311,14 @@ export interface RpcMethods {
   "hosting.walletHistory": { params: Record<string, never>; result: JsonValue };
   "identity.claimOffer": { params: ClaimOfferParams; result: ClaimOfferResult };
   "identity.cosignIncept": { params: CosignInceptParams; result: JsonValue };
+  "identity.custodyStatus": { params: Record<string, never>; result: DeviceKeys };
   "identity.devices": { params: Record<string, never>; result: Array<DeviceView> };
   "identity.joinStatus": { params: JoinStatusParams; result: JoinStatus };
   "identity.log": { params: LogParams; result: IdentityLog };
   "identity.offers": { params: OffersParams; result: Array<OfferListing> };
   "identity.openOffer": { params: OpenOfferParams; result: OfferOpened };
   "identity.publish": { params: PublishParams; result: SignedHead };
+  "identity.rekey": { params: Record<string, never>; result: DeviceKeys };
   "identity.resetLog": { params: ResetLogParams; result: boolean };
   "identity.resolve": { params: ResolveParams; result: DidResolutionResult };
   "identity.status": { params: Record<string, never>; result: IdentityStatus };
@@ -390,6 +398,7 @@ export interface RpcMethods {
   "runtime.addHcAgentInfos": { params: AddAgentInfosRequest; result: boolean };
   "runtime.addLinkLanguageTemplates": { params: LinkLanguageTemplatesRequest; result: Array<string> };
   "runtime.computeLog": { params: RuntimeComputeLogParams; result: Array<ComputeLogEntry> };
+  "runtime.config": { params: Record<string, never>; result: RuntimeConfig };
   "runtime.createNotification": { params: NotificationInput; result: string };
   "runtime.deleteNotification": { params: RuntimeNotificationIdParams; result: boolean };
   "runtime.exportData": { params: ExportRequest; result: boolean };
@@ -403,6 +412,7 @@ export interface RpcMethods {
   "runtime.inbox": { params: Record<string, never>; result: Array<PerspectiveExpression> };
   "runtime.info": { params: Record<string, never>; result: RuntimeInfo };
   "runtime.linkLanguageTemplates": { params: Record<string, never>; result: Array<LanguageMeta> };
+  "runtime.logTail": { params: LogTailParams; result: LogTail };
   "runtime.networkMetrics": { params: Record<string, never>; result: string };
   "runtime.notifications": { params: Record<string, never>; result: Array<Notification> };
   "runtime.openLink": { params: OpenLinkRequest; result: boolean };
@@ -410,8 +420,10 @@ export interface RpcMethods {
   "runtime.quit": { params: Record<string, never>; result: boolean };
   "runtime.removeFriends": { params: FriendsListRequest; result: Array<string> };
   "runtime.removeLinkLanguageTemplates": { params: LinkLanguageTemplatesRequest; result: Array<string> };
+  "runtime.restart": { params: Record<string, never>; result: boolean };
   "runtime.restartHolochain": { params: Record<string, never>; result: boolean };
   "runtime.sendFriendMessage": { params: RuntimeSendFriendMessageParams; result: boolean };
+  "runtime.setConfig": { params: SetConfigParams; result: SetConfigResult };
   "runtime.setFreeHostingEnabled": { params: RuntimeSetFreeHostingEnabledParams; result: boolean };
   "runtime.setHostRates": { params: SetHostRatesRequest; result: boolean };
   "runtime.setStatus": { params: SetStatusRequest; result: boolean };
@@ -493,6 +505,7 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "hosting.info",
   "hosting.wallet",
   "hosting.walletHistory",
+  "identity.custodyStatus",
   "identity.devices",
   "identity.joinStatus",
   "identity.log",
@@ -527,6 +540,7 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "perspective.subjectClassesOf",
   "perspective.verifyFlowReceipt",
   "runtime.computeLog",
+  "runtime.config",
   "runtime.freeHostingEnabled",
   "runtime.friendStatus",
   "runtime.friends",
@@ -535,6 +549,7 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "runtime.inbox",
   "runtime.info",
   "runtime.linkLanguageTemplates",
+  "runtime.logTail",
   "runtime.networkMetrics",
   "runtime.notifications",
   "runtime.outbox",
