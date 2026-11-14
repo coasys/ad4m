@@ -616,6 +616,98 @@ impl ModelSubscription {
     }
 }
 
+/// A hydrated model instance and the snapshot it was fetched at — the
+/// dirty-tracking half of TS `Ad4mModel`: [`Instance::save`] writes only
+/// the properties that differ.
+///
+/// Build one from a `get`/`find_all` row via [`Model::instance`].
+#[derive(Clone)]
+pub struct Instance {
+    model: Model,
+    base_uri: String,
+    /// The hydrated values — the baseline `save` diffs against (TS
+    /// `_snapshot`; `takeSnapshot` after each save).
+    snapshot: Map<String, Value>,
+    /// The hydrated values plus every `set` since.
+    current: Map<String, Value>,
+}
+
+impl Model {
+    /// Wrap a hydrated instance row (`get`/`find_all`) for dirty-tracked
+    /// mutation. `base_uri` is the instance's own URI (its `id`).
+    pub fn instance(&self, base_uri: impl Into<String>, hydrated: Map<String, Value>) -> Instance {
+        Instance {
+            model: self.clone(),
+            base_uri: base_uri.into(),
+            snapshot: hydrated.clone(),
+            current: hydrated,
+        }
+    }
+}
+
+impl Instance {
+    /// The instance's URI.
+    pub fn base_uri(&self) -> &str {
+        &self.base_uri
+    }
+
+    /// The current (possibly edited) value of `key`.
+    pub fn get(&self, key: &str) -> Option<&Value> {
+        self.current.get(key)
+    }
+
+    /// All current properties — the hydrated row plus edits.
+    pub fn properties(&self) -> &Map<String, Value> {
+        &self.current
+    }
+
+    /// Set `key` — `save` writes it only if it differs from the snapshot.
+    pub fn set(&mut self, key: impl Into<String>, value: Value) {
+        self.current.insert(key.into(), value);
+    }
+
+    /// TS `isDirty` — any property differing from the snapshot.
+    pub fn is_dirty(&self) -> bool {
+        !self.changed_fields().is_empty()
+    }
+
+    /// TS `changedFields` — sorted keys whose current value differs from
+    /// the snapshot's. A key the caller `set` but the hydration lacked
+    /// counts: it is a real write. Values compare order-sensitively —
+    /// without the class's `ordering` metadata there is no way to know an
+    /// array is an unordered set, and a spurious rewrite is the safe
+    /// failure direction.
+    pub fn changed_fields(&self) -> Vec<String> {
+        let mut changed: Vec<String> = self
+            .current
+            .iter()
+            .filter(|(k, v)| self.snapshot.get(*k) != Some(*v))
+            .map(|(k, _)| k.clone())
+            .collect();
+        changed.sort();
+        changed
+    }
+
+    /// `save` like TS `Ad4mModel.save` on a hydrated instance: dispatch
+    /// only the changed properties — nothing at all when the instance is
+    /// clean — then adopt the current values as the snapshot so further
+    /// saves diff against them (TS `takeSnapshot`; a save outside a batch
+    /// would rehydrate, which is equivalent for the values written here).
+    pub async fn save(&mut self, batch_id: Option<String>) -> Result<()> {
+        let changed = self.changed_fields();
+        if changed.is_empty() {
+            return Ok(());
+        }
+        let props: Map<String, Value> = changed
+            .iter()
+            .map(|k| (k.clone(), self.current[k].clone()))
+            .collect();
+        self.model.update(&self.base_uri, props, batch_id).await?;
+        self.snapshot = self.current.clone();
+        Ok(())
+    }
+}
+
 impl Drop for ModelSubscription {
     /// Dropping without `dispose()` still tears the subscription down —
     /// executor-side, and this client's watch and listener (F5). Async
@@ -681,6 +773,53 @@ mod tests {
     use crate::subscription::{apply_update, QueryUpdate};
     use serde_json::json;
     use std::time::Duration;
+
+    /// Q3: `save` on an instance writes only the properties that changed
+    /// since hydration — like TS `Ad4mModel.save` dispatching
+    /// `changedValuesForDispatch()`, not the whole row.
+    #[tokio::test]
+    async fn save_writes_only_the_changed_properties() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let ws = Arc::new(WsRpcClient::connect(fake.url(), "").await.unwrap());
+        let model = Model::new(&ws, "p1", "Recipe");
+
+        let hydrated = json!({"id": "recipe://1", "name": "Pasta", "done": false})
+            .as_object()
+            .unwrap()
+            .clone();
+        let mut inst = model.instance("recipe://1", hydrated);
+        assert!(!inst.is_dirty());
+        inst.set("name", json!("Risotto"));
+        assert_eq!(inst.changed_fields(), vec!["name".to_string()]);
+
+        let save = tokio::spawn(async move {
+            let mut inst = inst;
+            let r = inst.save(None).await;
+            (r, inst)
+        });
+        let req = fake.next_request().await;
+        assert_eq!(req["type"], "perspective.instanceUpdate");
+        assert_eq!(req["params"]["baseUri"], "recipe://1");
+        // Only the dirty property — the hydrated `done`/`id` stay home.
+        assert_eq!(req["params"]["properties"], json!({"name": "Risotto"}));
+        fake.reply(
+            &req,
+            json!({"className": "Recipe", "baseUri": "recipe://1", "updatedProperties": ["name"]}),
+        )
+        .await;
+        let (res, mut inst) = save.await.unwrap();
+        res.unwrap();
+
+        // The snapshot adopted the write: a second clean save sends no RPC.
+        assert!(!inst.is_dirty());
+        inst.save(None).await.unwrap();
+        assert!(fake
+            .maybe_request(Duration::from_millis(300))
+            .await
+            .is_none());
+        ws.close().await;
+    }
 
     /// F5: dropping the owned subscription must clean it up executor-side —
     /// an abandoned stream leaves a live subscription (and the interest it
