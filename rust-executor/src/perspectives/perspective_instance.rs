@@ -4669,7 +4669,8 @@ impl PerspectiveInstance {
     /// Judges the stored links of `scope` again from the key map (after filling it for their
     /// signers) and rewrites each link whose verdict or person changed; answers how many
     /// changed. `Signers` runs once per verdict change, so it pages through every link of
-    /// those signers, [`RECHECK_BATCH`] at a time. `CantCheck` runs every tick: one page per
+    /// those signers, [`RECHECK_BATCH`] at a time; `Logged` (after the identity re-check lagged)
+    /// pages through every link stored with a person the same way. `CantCheck` runs every tick: one page per
     /// call, continuing after the last one, so links that stay unresolvable rotate to the
     /// back and every one is reached. The rewritten links go out as a remote diff does
     /// (`update_prolog_engines`): Prolog, notifications and subscriptions see the new verdict.
@@ -4687,13 +4688,22 @@ impl PerspectiveInstance {
     ) -> Result<usize, AnyError> {
         let mut changed = 0;
         match scope {
-            super::Recheck::Signers(signers) => {
-                let signers: Vec<String> = signers.iter().cloned().collect();
+            super::Recheck::Signers(_) | super::Recheck::Logged => {
+                let signers: Vec<String> = match scope {
+                    super::Recheck::Signers(signers) => signers.iter().cloned().collect(),
+                    _ => Vec::new(),
+                };
                 let mut after: Option<String> = None;
                 loop {
-                    let stored =
-                        self.sparql_store
-                            .links_by_authors(&signers, after.as_deref(), page)?;
+                    let stored = match scope {
+                        super::Recheck::Logged => self
+                            .sparql_store
+                            .links_with_person(after.as_deref(), page)?,
+                        _ => {
+                            self.sparql_store
+                                .links_by_authors(&signers, after.as_deref(), page)?
+                        }
+                    };
                     let full = stored.len() == page;
                     after = stored.last().map(super::sparql_store::reifier_of);
                     let rewrites = self.rejudge(stored).await?;
@@ -4768,6 +4778,11 @@ impl PerspectiveInstance {
             return Ok(vec![]);
         }
         let links: Vec<LinkExpression> = stored.iter().cloned().map(LinkExpression::from).collect();
+        // A stored person names the log its link was judged by: read it back into the key map
+        // when the map's bound dropped it, so the link is judged by that log again (with no key
+        // index call), not kept on its old verdict.
+        let people: Vec<&str> = stored.iter().filter_map(|l| l.person.as_deref()).collect();
+        crate::identity::read_logs_of(&people).await;
         crate::identity::prepare_link_signers(&links).await;
         let _persisting = self
             .persist_lock
@@ -9890,6 +9905,108 @@ mod tests {
             "the new verdict: {payload}"
         );
         map.forget(&log.scid());
+    }
+
+    /// A start-up load past the key map's bound evicts logs while the change buffer overflows:
+    /// the re-check's receiver lags and the change for a bot whose scope expired is lost after
+    /// its log left the map. The lag recovery must still judge that bot's stored links again,
+    /// though no key the map lists is its key, and with the key index down (the log comes back
+    /// from the cache, named by the person the stored link carries). The link turns `invalid`.
+    #[tokio::test]
+    async fn after_a_lag_the_links_of_a_signer_the_key_map_dropped_are_judged_again() {
+        use crate::identity::cache::tests::{accept_signed, store_key, FakeStore, TestLog};
+        use crate::identity::cache::{global_key_map, KelCache};
+        use crate::identity::resolver::Resolver;
+        use crate::identity::verdict::InvalidReason;
+        use ad4m_identity_core::build::{add_unsigned, cosign, Signer};
+        use ad4m_identity_core::{BotScope, DeviceKey, KeyLife};
+        use std::sync::atomic::Ordering;
+        use std::sync::Arc;
+
+        let perspective = setup().await;
+        let mut log = TestLog::new(150);
+        let bot = ed25519_dalek::SigningKey::from_bytes(&[151; 32]);
+        let start = chrono::Utc::now().timestamp() as u64;
+        let chain = log.chain();
+        let device = DeviceKey {
+            id: chain.state().next_device_id(),
+            sign: bot.key(),
+            enc: ad4m_identity_core::encode_x25519_multikey(&[151; 32]),
+            life: KeyLife::Bot(BotScope {
+                can: vec!["read".into()],
+                expires: start + 2,
+            }),
+        };
+        let mut event = add_unsigned(&chain, device, "offer", "co-sig").unwrap();
+        cosign(&mut event, "m0", &log.master).unwrap();
+        log.events.push(event);
+        let scid = log.scid();
+        let person = ad4m_identity_core::did_of(&scid);
+
+        // The cache holds the log at an accepted head and feeds the global key map.
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Arc::new(
+            KelCache::open(
+                dir.path().join("ad4m_db.sqlite"),
+                vec![store_key().multikey()],
+            )
+            .unwrap(),
+        );
+        accept_signed(&cache, &log.events).await;
+        let map = global_key_map();
+        map.note_confirmed(&scid, start);
+        cache.note_refreshed(&scid, start);
+        let store = Arc::new(FakeStore::new(log.events.clone()));
+        store.key_index_down.store(true, Ordering::SeqCst);
+        store.store_down.store(true, Ordering::SeqCst);
+        let backend: Arc<dyn crate::identity::backend::IdentityBackend> = store.clone();
+        let resolver = Arc::new(Resolver::new(cache.clone(), backend, None, false));
+
+        let key = bot.key();
+        let data = create_link().normalize();
+        let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let bytes = crate::agent::signatures::anchored_signing_bytes(&data, &timestamp, 1).unwrap();
+        let link = LinkExpression {
+            author: format!("did:key:{key}"),
+            timestamp,
+            data,
+            proof: ExpressionProof {
+                key: format!("did:key:{key}#{key}"),
+                signature: hex::encode(bot.sign(&bytes)),
+                anchor: Some(1),
+            },
+            status: Some(LinkStatus::Shared),
+        };
+        assert!(perspective.sparql_store.add_remote_link(&link).unwrap());
+        let stored = perspective
+            .sparql_store
+            .get_all_links(&EvalStop::none())
+            .unwrap();
+        assert_eq!(stored[0].verdict, Some(LinkVerdict::Valid));
+        assert_eq!(stored[0].person.as_deref(), Some(person.as_str()));
+
+        // The bound evicts the log, the scope expires, and the change is lost to the lag.
+        map.forget(&scid);
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        for scope in crate::identity::lag_scopes(&map, std::collections::BTreeSet::new()) {
+            crate::identity::with_test_resolver(
+                resolver.clone(),
+                perspective.recheck_links(&scope),
+            )
+            .await
+            .unwrap();
+        }
+        let stored = perspective
+            .sparql_store
+            .get_all_links(&EvalStop::none())
+            .unwrap();
+        assert_eq!(
+            stored[0].verdict,
+            Some(LinkVerdict::Invalid(InvalidReason::Expired)),
+            "the evicted bot's link is judged again"
+        );
+        assert_eq!(stored[0].person, None);
+        map.forget(&scid);
     }
 
     /// A rewrite goes to Prolog as an update does: the old link removed and the new added, so
