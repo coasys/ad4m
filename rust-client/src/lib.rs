@@ -18,6 +18,7 @@ extern crate urlencoding;
 pub mod agent;
 pub mod batch;
 pub mod expressions;
+pub mod flow;
 pub mod instances;
 pub mod languages;
 pub mod literal;
