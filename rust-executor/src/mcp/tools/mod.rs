@@ -312,6 +312,7 @@ pub(crate) fn request_context(session: Arc<Session>) -> crate::types::RequestCon
             .ok()
             .flatten(),
         peer: None,
+        query_slots: None,
     }
 }
 

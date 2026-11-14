@@ -14,6 +14,7 @@
 //! and ICE credentials never go into a link every member syncs. A link an
 //! older build wrote with those fields is read for its policy only.
 
+use deno_core::error::AnyError;
 use serde::{Deserialize, Serialize};
 
 use crate::agent::{did_for_context, AgentContext};
@@ -140,9 +141,44 @@ pub async fn stored_policy(neighbourhood_url: &str) -> Option<CallPolicy> {
     }
 }
 
-/// [`stored_policy`], or the default policy.
+/// [`stored_policy`], or the policy of a neighbourhood with none: this
+/// executor's SFU (`designated`) when it hosts every member, so all of them
+/// reach the same room, and mesh otherwise. SFUs on different executors meet
+/// only through a cascade an operator sets up, so members on two executors
+/// would each sit alone in their own executor's room.
 pub async fn read_policy(neighbourhood_url: &str) -> CallPolicy {
-    stored_policy(neighbourhood_url).await.unwrap_or_default()
+    if let Some(policy) = stored_policy(neighbourhood_url).await {
+        return policy;
+    }
+    let hosted = match neighbourhood_perspective(neighbourhood_url).await {
+        Some(perspective) => hosts_every_member(&perspective).await.unwrap_or(false),
+        None => false,
+    };
+    CallPolicy {
+        mode: if hosted { "designated" } else { "mesh" }.to_string(),
+        ..Default::default()
+    }
+}
+
+/// Whether every member of the neighbourhood is hosted on this executor, so
+/// all of them can join its SFU. Members are the DIDs the neighbourhood's
+/// link language knows plus its local owners (`PerspectiveInstance::others`);
+/// hosted are the main agent and the managed users. A neighbourhood with no
+/// known member is not.
+pub async fn hosts_every_member(perspective: &PerspectiveInstance) -> Result<bool, AnyError> {
+    let members = perspective.others().await?;
+    let mut hosted: Vec<String> = crate::db_backend::db_backend()
+        .list_users()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|user| user.did)
+        .collect();
+    hosted.extend(did_for_context(&AgentContext::main_agent()).ok());
+    Ok(all_hosted(&members, &hosted))
+}
+
+fn all_hosted(members: &[String], hosted: &[String]) -> bool {
+    !members.is_empty() && members.iter().all(|did| hosted.contains(did))
 }
 
 /// Store `policy` as a shared link in the neighbourhood, signed as `context`,
@@ -294,6 +330,15 @@ mod tests {
     }
 
     #[test]
+    fn every_member_is_hosted_only_when_none_is_elsewhere() {
+        let s = |v: &[&str]| v.iter().map(|d| d.to_string()).collect::<Vec<_>>();
+        let hosted = s(&["did:main", "did:alice", "did:bob"]);
+        assert!(all_hosted(&s(&["did:alice", "did:bob"]), &hosted));
+        assert!(!all_hosted(&s(&["did:alice", "did:carol"]), &hosted));
+        assert!(!all_hosted(&[], &hosted));
+    }
+
+    #[test]
     fn a_stored_mesh_limit_outside_the_accepted_range_is_clamped() {
         let read = |n: u32| {
             let target = to_literal(&policy("mesh", n)).unwrap();
@@ -335,7 +380,9 @@ mod tests {
 
         assert_eq!(neighbourhood_creator(&url).await, Some(creator));
         assert!(stored_policy(&url).await.is_none());
-        assert_eq!(read_policy(&url).await, CallPolicy::default());
+        // No policy and no known members (no link language here): mesh, as a
+        // space with a member on another executor.
+        assert_eq!(read_policy(&url).await, policy("mesh", 4));
 
         write_policy(&url, &policy("cascaded", 6), &context)
             .await

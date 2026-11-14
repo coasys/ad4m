@@ -600,6 +600,7 @@ mod tests {
         let query = r#"{"includeUnverified": true}"#.to_string();
         let (id, _, initial) = p
             .model_subscribe_and_query(
+                &crate::perspectives::sparql_store::EvalStop::none(),
                 "Todo".into(),
                 query.clone(),
                 uuid::Uuid::new_v4().to_string(),
@@ -648,6 +649,7 @@ mod tests {
         let q = "SELECT ?s ?o WHERE { ?s <test://p> ?o }".to_string();
         let (id, _, _) = p
             .subscribe_and_query(
+                &crate::perspectives::sparql_store::EvalStop::none(),
                 q.clone(),
                 uuid::Uuid::new_v4().to_string(),
                 "c".into(),
@@ -677,7 +679,13 @@ mod tests {
         let (p, _, _) = setup_perspective_no_llm(&[("Todo", TODO_SDNA)]).await;
         let q = "SELECT ?s ?o WHERE { ?s <test://p> ?o }".to_string();
         let (id, revision, _) = p
-            .subscribe_and_query(q.clone(), "client-minted".into(), "c".into(), None)
+            .subscribe_and_query(
+                &crate::perspectives::sparql_store::EvalStop::none(),
+                q.clone(),
+                "client-minted".into(),
+                "c".into(),
+                None,
+            )
             .await
             .unwrap();
         assert_eq!((id.as_str(), revision), ("client-minted", 0));
@@ -685,6 +693,7 @@ mod tests {
 
         let (id, _, _) = p
             .model_subscribe_and_query(
+                &crate::perspectives::sparql_store::EvalStop::none(),
                 "Todo".into(),
                 "{}".into(),
                 "client-minted-model".into(),
@@ -704,13 +713,20 @@ mod tests {
     async fn an_id_already_registered_is_refused_and_registers_nothing() {
         let (p, _, _) = setup_perspective_no_llm(&[("Todo", TODO_SDNA)]).await;
         let held = "SELECT ?s ?o WHERE { ?s <test://p> ?o }".to_string();
-        p.subscribe_and_query(held.clone(), "taken".into(), "c".into(), None)
-            .await
-            .unwrap();
+        p.subscribe_and_query(
+            &crate::perspectives::sparql_store::EvalStop::none(),
+            held.clone(),
+            "taken".into(),
+            "c".into(),
+            None,
+        )
+        .await
+        .unwrap();
         // Any connection's id counts, whichever kind of live query asks for it.
         for connection in ["c", "other"] {
             let err = p
                 .subscribe_and_query(
+                    &crate::perspectives::sparql_store::EvalStop::none(),
                     "SELECT ?s WHERE { ?s <test://q> ?o }".into(),
                     "taken".into(),
                     connection.into(),
@@ -724,6 +740,7 @@ mod tests {
             );
             let err = p
                 .model_subscribe_and_query(
+                    &crate::perspectives::sparql_store::EvalStop::none(),
                     "Todo".into(),
                     "{}".into(),
                     "taken".into(),
@@ -754,17 +771,29 @@ mod tests {
     async fn a_dispose_after_the_open_completed_ends_it() {
         let (p, _, _) = setup_perspective_no_llm(&[]).await;
         let q = "SELECT ?s ?o WHERE { ?s <test://p> ?o }".to_string();
-        p.subscribe_and_query(q.clone(), "mine".into(), "c".into(), None)
-            .await
-            .unwrap();
+        p.subscribe_and_query(
+            &crate::perspectives::sparql_store::EvalStop::none(),
+            q.clone(),
+            "mine".into(),
+            "c".into(),
+            None,
+        )
+        .await
+        .unwrap();
         // The client gave up on the call after the executor answered: it releases the
         // id it minted, without the reply.
         assert!(p.dispose_query_subscription("mine", "c").await);
         assert!(p.subscribed_queries.lock().await.is_empty());
         // The id is free again.
-        p.subscribe_and_query(q, "mine".into(), "c".into(), None)
-            .await
-            .unwrap();
+        p.subscribe_and_query(
+            &crate::perspectives::sparql_store::EvalStop::none(),
+            q,
+            "mine".into(),
+            "c".into(),
+            None,
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -798,6 +827,7 @@ mod tests {
         let q = "SELECT ?s ?o WHERE { ?s <test://p> ?o }".to_string();
         let (first, _, _) = p
             .subscribe_and_query(
+                &crate::perspectives::sparql_store::EvalStop::none(),
                 q.clone(),
                 uuid::Uuid::new_v4().to_string(),
                 "c".into(),
@@ -812,7 +842,13 @@ mod tests {
         );
 
         let (second, _, _) = p
-            .subscribe_and_query(q, uuid::Uuid::new_v4().to_string(), "c".into(), None)
+            .subscribe_and_query(
+                &crate::perspectives::sparql_store::EvalStop::none(),
+                q,
+                uuid::Uuid::new_v4().to_string(),
+                "c".into(),
+                None,
+            )
             .await
             .unwrap();
         assert_ne!(first, second, "not shared");
@@ -824,6 +860,7 @@ mod tests {
         let (p, _, _) = setup_perspective_no_llm(&[]).await;
         let err = p
             .subscribe_and_query(
+                &crate::perspectives::sparql_store::EvalStop::none(),
                 r#"triple(X, _, "test://b")."#.into(),
                 uuid::Uuid::new_v4().to_string(),
                 "c".into(),
