@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 use crate::literal::{Literal, LiteralValue};
 use crate::model::{Model, ModelQuery};
-use crate::types::LinkExpression;
+use crate::types::{Link, LinkExpression, LinkExpressionInput};
 use crate::ws_rpc::WsRpcClient;
 
 // ── Flow definition types (mirror the executor's `SHACLFlow` serde) ────────
@@ -292,7 +292,203 @@ impl ShaclFlow {
         }
         Ok(flow)
     }
+
+    /// The definition's link set — TS `SHACLFlow.toLinks()`, the `wanted`
+    /// of `addFlow`'s diff. Predicates and literal encodings match the
+    /// executor's `parse_flow_to_links` except `ad4m://transitionActions`,
+    /// which TS writes unconditionally (an empty list is still a written
+    /// field) and the executor only when non-empty; this writer follows
+    /// TS.
+    pub fn to_links(&self) -> Result<Vec<Link>> {
+        let mut links = Vec::new();
+        let flow_uri = self.flow_uri();
+        let mut push = |source: &str, predicate: &str, target: String| {
+            links.push(Link {
+                source: source.to_string(),
+                predicate: Some(predicate.to_string()),
+                target,
+            });
+        };
+        let lit = |s: &str| -> Result<String> { Ok(Literal::from_string(s.to_string()).to_url()?) };
+        // `literal:string:` + percent-encoded JSON — the writer format
+        // `toLinks` uses for inputTypes/requires/transitionActions/…
+        let json_lit = |v: &Value| -> String {
+            format!("literal:string:{}", urlencoding::encode(&v.to_string()))
+        };
+
+        push(&flow_uri, "rdf://type", "ad4m://Flow".to_string());
+        push(&flow_uri, "ad4m://flowName", lit(&self.name)?);
+        if let Some(h) = self
+            .interpretation_hint
+            .as_deref()
+            .filter(|s| !s.is_empty())
+        {
+            push(&flow_uri, "ad4m://interpretationHint", lit(h)?);
+        }
+        if !self.input_types.is_empty() {
+            push(
+                &flow_uri,
+                "ad4m://inputTypes",
+                json_lit(&json!(self.input_types)),
+            );
+        }
+        if !self.output_types.is_empty() {
+            push(
+                &flow_uri,
+                "ad4m://outputTypes",
+                json_lit(&json!(self.output_types)),
+            );
+        }
+        if let Some(h) = self.creation_hint.as_deref().filter(|s| !s.is_empty()) {
+            push(&flow_uri, "ad4m://creationHint", lit(h)?);
+        }
+        if let Some(ctx) = self.context.as_ref().filter(|c| !c.is_empty()) {
+            push(&flow_uri, "ad4m://context", json_lit(&json!(ctx)));
+        }
+        if let Some(rule) = &self.consensus_rule {
+            push(
+                &flow_uri,
+                "ad4m://consensusRule",
+                json_lit(&serde_json::to_value(rule)?),
+            );
+        }
+
+        for state in &self.states {
+            let state_uri = self.state_uri(&state.name);
+            push(&flow_uri, "ad4m://hasState", state_uri.clone());
+            push(&state_uri, "rdf://type", "ad4m://FlowState".to_string());
+            push(&state_uri, "ad4m://stateName", lit(&state.name)?);
+            push(
+                &state_uri,
+                "ad4m://stateValue",
+                format!(
+                    "literal:number:{}",
+                    urlencoding::encode(&js_number_string(state.value))
+                ),
+            );
+            if let Some(h) = state
+                .interpretation_hint
+                .as_deref()
+                .filter(|s| !s.is_empty())
+            {
+                push(&state_uri, "ad4m://interpretationHint", lit(h)?);
+            }
+            if let Some(qs) = state.requires.as_ref().filter(|q| !q.is_empty()) {
+                push(&state_uri, "ad4m://requires", json_lit(&json!(qs)));
+            }
+            if let Some(c) = state.semantic_check.as_deref().filter(|s| !s.is_empty()) {
+                push(&state_uri, "ad4m://semanticCheck", lit(c)?);
+            }
+            if let Some(rule) = &state.consensus_rule {
+                push(
+                    &state_uri,
+                    "ad4m://consensusRule",
+                    json_lit(&serde_json::to_value(rule)?),
+                );
+            }
+        }
+
+        for transition in &self.transitions {
+            let transition_uri = self.transition_uri(
+                &transition.from_state,
+                &transition.to_state,
+                &transition.action_name,
+            );
+            push(&flow_uri, "ad4m://hasTransition", transition_uri.clone());
+            push(
+                &transition_uri,
+                "rdf://type",
+                "ad4m://FlowTransition".to_string(),
+            );
+            push(
+                &transition_uri,
+                "ad4m://actionName",
+                lit(&transition.action_name)?,
+            );
+            push(
+                &transition_uri,
+                "ad4m://fromState",
+                self.state_uri(&transition.from_state),
+            );
+            push(
+                &transition_uri,
+                "ad4m://toState",
+                self.state_uri(&transition.to_state),
+            );
+            push(
+                &transition_uri,
+                "ad4m://transitionActions",
+                json_lit(&json!(transition.actions)),
+            );
+        }
+        Ok(links)
+    }
 }
+
+/// JS `String(number)` — the spelling `Literal.from(number).toUrl()`
+/// encodes on the wire: `NaN`, `±Infinity`, decimal inside [1e-6, 1e21)
+/// (shortest roundtrip digits, which `Display` also produces), `e±`
+/// outside it.
+fn js_number_string(v: f64) -> String {
+    if v.is_nan() {
+        return "NaN".to_string();
+    }
+    if v.is_infinite() {
+        return if v < 0.0 { "-Infinity" } else { "Infinity" }.to_string();
+    }
+    if v == 0.0 {
+        return "0".to_string();
+    }
+    let a = v.abs();
+    if (1e-6..1e21).contains(&a) {
+        format!("{v}")
+    } else {
+        let s = format!("{v:e}");
+        let (mantissa, exp) = s.split_once('e').expect("exponential format has e");
+        let exp: i32 = exp.parse().expect("exponent is an integer");
+        format!(
+            "{mantissa}e{}{}",
+            if exp >= 0 { "+" } else { "-" },
+            exp.abs()
+        )
+    }
+}
+
+/// `SHACLFlow.FLOW_LEVEL_PREDICATES` — every predicate [`ShaclFlow::to_links`]
+/// writes from the flow's own URI. That URI also carries links the
+/// definition does not own (a receipt index, for one), so replacing a
+/// definition removes only these from it.
+const FLOW_LEVEL_PREDICATES: &[&str] = &[
+    "rdf://type",
+    "ad4m://flowName",
+    "ad4m://interpretationHint",
+    "ad4m://inputTypes",
+    "ad4m://outputTypes",
+    "ad4m://creationHint",
+    "ad4m://context",
+    "ad4m://consensusRule",
+    "ad4m://hasState",
+    "ad4m://hasTransition",
+];
+
+/// `SHACLFlow.STATE_AND_TRANSITION_PREDICATES` — every predicate
+/// [`ShaclFlow::to_links`] writes from a state's or a transition's URI,
+/// plus the retired `ad4m://stateCheck`, so a re-add still clears it from
+/// an older definition.
+const STATE_AND_TRANSITION_PREDICATES: &[&str] = &[
+    "rdf://type",
+    "ad4m://stateName",
+    "ad4m://stateValue",
+    "ad4m://interpretationHint",
+    "ad4m://requires",
+    "ad4m://semanticCheck",
+    "ad4m://consensusRule",
+    "ad4m://stateCheck",
+    "ad4m://actionName",
+    "ad4m://fromState",
+    "ad4m://toState",
+    "ad4m://transitionActions",
+];
 
 /// Decode a `literal:string:` (or a `literal:json:` string payload) target
 /// into its text — TS `Literal.fromUrl(t).get()` where the result must be a
@@ -502,38 +698,140 @@ impl FlowApi {
             .await
     }
 
-    /// Register a flow definition — `perspective.addSdna` with
-    /// `sdnaType: "flow"` (which writes the `has_flow`/`sdna` registration
-    /// and the parsed definition links) plus the `ad4m://flow_uri` link TS
-    /// `addFlow` writes alongside them — `get_flow` resolves a name through
-    /// it and `addSdna` does not write it. Re-adding a flow does not purge
-    /// stale definition links (TS `addFlow` removes them first); register
-    /// each definition once.
+    /// Register a flow definition — TS `PerspectiveProxy.addFlow`. The
+    /// wanted links are [`ShaclFlow::to_links`] plus the registration pair
+    /// (`ad4m://has_flow` off `ad4m://self`, `ad4m://flow_uri` under the
+    /// name literal). Re-adding replaces: the stored links that are not
+    /// wanted — read back off the flow URI, each state/transition URI
+    /// (definition predicates only: those URIs carry foreign links too)
+    /// and the name's registrations — go with the additions in one
+    /// `perspective.linkMutations`. An unchanged re-add writes nothing.
+    ///
+    /// The runtime classes (`FlowInstance`, `FlowTransitionProposal`) are
+    /// not registered here — TS leaves that to `FlowInstance.start`'s
+    /// `registerAll`, which [`ensure_flow_classes`] mirrors.
     pub async fn add_flow(&self, name: &str, flow: &ShaclFlow) -> Result<()> {
-        let shacl_json = serde_json::to_string(flow)?;
-        self.ws
-            .call::<Value>(
-                "perspective.addSdna",
-                json!({
-                    "uuid": self.uuid,
-                    "name": name,
-                    "sdnaCode": "",
-                    "sdnaType": "flow",
-                    "shaclJson": shacl_json,
-                }),
-            )
-            .await?;
         let name_literal = Literal::from_string(name.to_string()).to_url()?;
+        let flow_uri = flow.flow_uri();
+        let mut wanted = flow.to_links()?;
+        wanted.push(Link {
+            source: "ad4m://self".to_string(),
+            predicate: Some("ad4m://has_flow".to_string()),
+            target: name_literal.clone(),
+        });
+        wanted.push(Link {
+            source: name_literal.clone(),
+            predicate: Some("ad4m://flow_uri".to_string()),
+            target: flow_uri.clone(),
+        });
+
+        // What is stored is found through the flow's own links, since state
+        // and transition URIs may use an older scheme. Only definition
+        // predicates are taken, from the flow's URI and from each state and
+        // transition URI: all of them can carry links the definition does
+        // not own.
+        let own_links: Vec<LinkExpression> = self
+            .query_links(Some(&flow_uri), None, None)
+            .await?
+            .into_iter()
+            .filter(|l| {
+                l.data
+                    .predicate
+                    .as_deref()
+                    .is_some_and(|p| FLOW_LEVEL_PREDICATES.contains(&p))
+            })
+            .collect();
+        let children: Vec<String> = own_links
+            .iter()
+            .filter(|l| {
+                matches!(
+                    l.data.predicate.as_deref(),
+                    Some("ad4m://hasState") | Some("ad4m://hasTransition")
+                )
+            })
+            .map(|l| l.data.target.clone())
+            .collect();
+        let mut stored = own_links;
+        for uri in &children {
+            stored.extend(
+                self.query_links(Some(uri), None, None)
+                    .await?
+                    .into_iter()
+                    .filter(|l| {
+                        l.data
+                            .predicate
+                            .as_deref()
+                            .is_some_and(|p| STATE_AND_TRANSITION_PREDICATES.contains(&p))
+                    }),
+            );
+        }
+        // A name points at one flow: `get_flow` reads the first flow_uri
+        // link, so every flow_uri link of this name is taken and one left
+        // from an earlier namespace is removed rather than kept beside the
+        // new one.
+        stored.extend(
+            self.query_links(
+                Some("ad4m://self"),
+                Some(&name_literal),
+                Some("ad4m://has_flow"),
+            )
+            .await?,
+        );
+        stored.extend(
+            self.query_links(Some(&name_literal), None, Some("ad4m://flow_uri"))
+                .await?,
+        );
+
+        // Only the difference is written, so an unchanged definition writes
+        // nothing and a changed one touches only what changed. The key is
+        // the JSON tuple TS keys on.
+        let key = |source: &str, predicate: Option<&str>, target: &str| -> String {
+            serde_json::to_string(&json!([source, predicate.unwrap_or(""), target]))
+                .expect("strings always serialize")
+        };
+        let wanted_keys: BTreeSet<String> = wanted
+            .iter()
+            .map(|l| key(&l.source, l.predicate.as_deref(), &l.target))
+            .collect();
+        let stored_keys: BTreeSet<String> = stored
+            .iter()
+            .map(|l| key(&l.data.source, l.data.predicate.as_deref(), &l.data.target))
+            .collect();
+        let mut first_seen = BTreeSet::new();
+        let additions: Vec<&Link> = wanted
+            .iter()
+            .filter(|l| {
+                let k = key(&l.source, l.predicate.as_deref(), &l.target);
+                !stored_keys.contains(&k) && first_seen.insert(k)
+            })
+            .collect();
+        let removals: Vec<&LinkExpression> = stored
+            .iter()
+            .filter(|l| {
+                !wanted_keys.contains(&key(
+                    &l.data.source,
+                    l.data.predicate.as_deref(),
+                    &l.data.target,
+                ))
+            })
+            .collect();
+
+        if additions.is_empty() && removals.is_empty() {
+            return Ok(());
+        }
         self.ws
             .call::<Value>(
-                "perspective.addLink",
+                "perspective.linkMutations",
                 json!({
                     "uuid": self.uuid,
-                    "link": {
-                        "source": name_literal,
-                        "predicate": "ad4m://flow_uri",
-                        "target": flow.flow_uri(),
+                    "mutations": {
+                        "additions": additions,
+                        "removals": removals
+                            .iter()
+                            .map(|l| LinkExpressionInput::from((*l).clone()))
+                            .collect::<Vec<_>>(),
                     },
+                    "status": "shared",
                 }),
             )
             .await?;
@@ -1225,6 +1523,199 @@ mod tests {
         assert!(decode_state_value(&enc_num("NaN")).is_nan());
         assert!(decode_state_value("not-a-literal").is_nan());
         assert!(decode_state_value(&enc_str("3")).is_nan());
+    }
+
+    /// TS `addFlow` replaces a re-registered flow: the stored links that
+    /// are not in the new definition go — through one
+    /// `perspective.linkMutations` — including a stale `flow_uri` mapping
+    /// left by an earlier namespace and a retired `stateCheck`, while
+    /// non-definition links on the same URIs (an app's label, the
+    /// addSdna-era `ad4m://sdna` link) stay.
+    #[tokio::test]
+    async fn re_adding_a_flow_replaces_the_stored_definition() {
+        use crate::testkit::{FakeExecutor, LinkStore};
+
+        let server = FakeExecutor::start().await;
+        let ws = Arc::new(WsRpcClient::connect(server.url(), "").await.unwrap());
+        let api = FlowApi::new(&ws, "p1");
+        let name_lit = Literal::from_string("F".into()).to_url().unwrap();
+
+        let mut store = LinkStore::default();
+        store.seed("ad4m://self", "ad4m://has_flow", &name_lit);
+        store.seed(&name_lit, "ad4m://flow_uri", "old://FFlow");
+        store.seed("old://FFlow", "rdf://type", "ad4m://Flow");
+        store.seed(&name_lit, "ad4m://sdna", "literal:string:");
+        store.seed("new://FFlow", "ad4m://hasState", "new://F.S1");
+        store.seed("new://F.S1", "rdf://type", "ad4m://FlowState");
+        store.seed("new://F.S1", "ad4m://stateName", &enc_str("S1"));
+        store.seed("new://F.S1", "ad4m://stateValue", "literal:number:1");
+        store.seed("new://F.S1", "ad4m://consensusRule", &enc_str("{\"n\":2}"));
+        store.seed("new://F.S1", "ad4m://stateCheck", &enc_str("old"));
+        store.seed("new://F.S1", "app://label", &enc_str("mine"));
+
+        let mut flow = ShaclFlow::new("F", "new://");
+        flow.states = vec![
+            FlowState {
+                name: "S1".into(),
+                value: 1.0,
+                ..Default::default()
+            },
+            FlowState {
+                name: "S2".into(),
+                value: 2.0,
+                consensus_rule: Some(ConsensusRule {
+                    n: 2,
+                    from_role: None,
+                }),
+                ..Default::default()
+            },
+        ];
+        flow.transitions = vec![FlowTransition {
+            action_name: "advance".into(),
+            from_state: "S1".into(),
+            to_state: "S2".into(),
+            actions: vec![],
+        }];
+
+        let mut add = tokio::spawn({
+            let api = api.clone();
+            async move { api.add_flow("F", &flow).await }
+        });
+        let mut saw_mutations = 0;
+        let mut saw_add_sdna = false;
+        loop {
+            tokio::select! {
+                req = server.next_request() => {
+                    match req["type"].as_str() {
+                        Some("perspective.linkMutations") => saw_mutations += 1,
+                        Some("perspective.addSdna") => saw_add_sdna = true,
+                        _ => {}
+                    }
+                    match store.handle(&req) {
+                        Some(result) => server.reply(&req, result).await,
+                        None => server.reply(&req, Value::Bool(true)).await,
+                    }
+                }
+                r = &mut add => { r.unwrap().unwrap(); break; }
+            }
+        }
+
+        assert_eq!(
+            saw_mutations, 1,
+            "re-registering must write the diff through perspective.linkMutations"
+        );
+        assert!(
+            !saw_add_sdna,
+            "TS addFlow writes links itself; addSdna is the subject-class path"
+        );
+
+        let triples: BTreeSet<(String, String, String)> = store.triples().into_iter().collect();
+        // Stale definition predicates are removed …
+        assert!(
+            !triples.contains(&(
+                "new://F.S1".into(),
+                "ad4m://consensusRule".into(),
+                enc_str("{\"n\":2}")
+            )),
+            "stale consensusRule must go: {triples:?}"
+        );
+        assert!(!triples.contains(&(
+            "new://F.S1".into(),
+            "ad4m://stateCheck".into(),
+            enc_str("old")
+        )));
+        // … as is the stale name→URI mapping — but not the orphaned
+        // definition it pointed at (TS removes the mapping, not the foreign
+        // flow's own links).
+        assert!(!triples.contains(&(
+            name_lit.clone(),
+            "ad4m://flow_uri".into(),
+            "old://FFlow".into()
+        )));
+        assert!(triples.contains(&(
+            "old://FFlow".into(),
+            "rdf://type".into(),
+            "ad4m://Flow".into()
+        )));
+        // Non-definition links on the same URIs stay.
+        assert!(triples.contains(&("new://F.S1".into(), "app://label".into(), enc_str("mine"))));
+        assert!(triples.contains(&(
+            name_lit.clone(),
+            "ad4m://sdna".into(),
+            "literal:string:".into()
+        )));
+        // The new definition and registration are on the graph.
+        assert!(triples.contains(&(
+            name_lit.clone(),
+            "ad4m://flow_uri".into(),
+            "new://FFlow".into()
+        )));
+        assert!(triples.contains(&(
+            "new://FFlow".into(),
+            "ad4m://hasTransition".into(),
+            "new://F.transition/S1/S2/advance".into()
+        )));
+        assert!(triples.contains(&(
+            "new://F.S2".into(),
+            "ad4m://consensusRule".into(),
+            enc_str("{\"n\":2}")
+        )));
+        assert!(triples.contains(&(
+            "ad4m://self".into(),
+            "ad4m://has_flow".into(),
+            name_lit.clone()
+        )));
+    }
+
+    /// An unchanged re-add writes nothing — `addFlow` returns before the
+    /// mutations call when the diff is empty.
+    #[tokio::test]
+    async fn re_adding_an_unchanged_flow_writes_nothing() {
+        use crate::testkit::{FakeExecutor, LinkStore};
+
+        let server = FakeExecutor::start().await;
+        let ws = Arc::new(WsRpcClient::connect(server.url(), "").await.unwrap());
+        let api = FlowApi::new(&ws, "p1");
+        let mut store = LinkStore::default();
+
+        let mut flow = ShaclFlow::new("F", "new://");
+        flow.states = vec![FlowState {
+            name: "S1".into(),
+            value: 1.0,
+            ..Default::default()
+        }];
+
+        async fn round(
+            api: &FlowApi,
+            server: &FakeExecutor,
+            store: &mut LinkStore,
+            flow: &ShaclFlow,
+        ) -> u64 {
+            let mut add = tokio::spawn({
+                let api = api.clone();
+                let flow = flow.clone();
+                async move { api.add_flow("F", &flow).await }
+            });
+            let mut mutations = 0;
+            loop {
+                tokio::select! {
+                    req = server.next_request() => {
+                        if req["type"] == "perspective.linkMutations" {
+                            mutations += 1;
+                        }
+                        match store.handle(&req) {
+                            Some(result) => server.reply(&req, result).await,
+                            None => server.reply(&req, Value::Bool(true)).await,
+                        }
+                    }
+                    r = &mut add => { r.unwrap().unwrap(); break; }
+                }
+            }
+            mutations
+        }
+
+        assert_eq!(round(&api, &server, &mut store, &flow).await, 1);
+        assert_eq!(round(&api, &server, &mut store, &flow).await, 0);
     }
 
     #[test]

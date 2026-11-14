@@ -34,6 +34,8 @@ pub mod ws_rpc;
 
 #[cfg(test)]
 mod drift;
+#[cfg(test)]
+pub(crate) mod testkit;
 
 pub struct Ad4mClient {
     pub agent: AgentClient,
