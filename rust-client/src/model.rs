@@ -9,7 +9,7 @@
 //! (never raw links). Batches ([`crate::batch::Batch`]) group writes
 //! atomically; `Model::transaction` mirrors `Ad4mModel.transaction`.
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use serde_json::{Map, Value};
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -713,9 +713,8 @@ impl Instance {
 
     /// `save` like TS `Ad4mModel.save` on a hydrated instance: dispatch
     /// only the changed properties — nothing at all when the instance is
-    /// clean — then adopt the current values as the snapshot so further
-    /// saves diff against them (TS `takeSnapshot`; a save outside a batch
-    /// would rehydrate, which is equivalent for the values written here).
+    /// clean — then refresh the baseline.
+    ///
     /// Collections ride their own RPCs — `instanceUpdate` refuses them
     /// (`CollectionNotSettable`), so a changed array field is diffed
     /// against the snapshot and written item by item,
@@ -723,9 +722,25 @@ impl Instance {
     /// like TS dispatching relation changes separately (R6). A failed
     /// call aborts the save with the snapshot untouched — a retry
     /// replays idempotent ops, never a duplicate write.
+    ///
+    /// **Baseline** (R7): inside a batch the writes are invisible to
+    /// reads until commit, so the current values are snapshotted
+    /// optimistically, exactly TS's `takeSnapshot` branch. Outside a
+    /// batch the save closes with a re-read (`perspective.modelQuery`,
+    /// TS `getData` — unconditional in `Ad4mModel.save`,
+    /// Ad4mModel.ts:1809–1816) and merges the hydrated row over the
+    /// current values before snapshotting: the executor's coercions
+    /// (`"TRUE"` → `true`), synthetic fields (`updatedAt`), and writes
+    /// another client landed meanwhile all become visible at once, so a
+    /// later `set` diffs against the remote state rather than a stale
+    /// local copy. A re-read that fails or no longer returns the row
+    /// surfaces an error and leaves the snapshot untouched — the writes
+    /// are already committed, so a retry replays idempotent ops before
+    /// re-reading.
     pub async fn save(&mut self, batch_id: Option<String>) -> Result<()> {
         let changed = self.changed_fields();
-        if changed.is_empty() {
+        if changed.is_empty() && batch_id.is_some() {
+            self.snapshot = self.current.clone();
             return Ok(());
         }
         // A hydrated collection always reads as a JSON array of item
@@ -757,6 +772,25 @@ impl Instance {
                     .add_to_collection(&self.base_uri, key, item, batch_id.clone())
                     .await?;
             }
+        }
+        if batch_id.is_some() {
+            // Batch: the writes stay invisible to reads until commit, so
+            // re-reading now would fetch the stale row and regress
+            // in-memory values — TS takes the optimistic snapshot here.
+            self.snapshot = self.current.clone();
+            return Ok(());
+        }
+        // Non-batch (R7): re-read the row — TS `getData` — and merge the
+        // hydrated values over the current ones before baselining.
+        let row = self
+            .model
+            .get(&self.base_uri, None)
+            .await
+            .context("save committed, but re-reading the hydrated baseline failed — the snapshot stays unconfirmed; a retry replays idempotent writes")?
+            .and_then(|row| row.as_object().cloned())
+            .context("save committed, but the instance no longer reads back as a row")?;
+        for (key, value) in row {
+            self.current.insert(key, value);
         }
         self.snapshot = self.current.clone();
         Ok(())
@@ -890,12 +924,32 @@ mod tests {
             json!({"className": "Recipe", "baseUri": "recipe://1", "updatedProperties": ["name"]}),
         )
         .await;
+        // R7: the non-batch save re-reads the row before baselining.
+        let req = fake.next_request().await;
+        assert_eq!(req["type"], "perspective.modelQuery");
+        fake.reply(
+            &req,
+            json!("{\"instances\":[{\"id\":\"recipe://1\",\"name\":\"Risotto\",\"done\":false}],\"totalCount\":1}"),
+        )
+        .await;
         let (res, mut inst) = save.await.unwrap();
         res.unwrap();
 
-        // The snapshot adopted the write: a second clean save sends no RPC.
+        // The snapshot adopted the write: a second clean save sends no
+        // write — only its re-read.
         assert!(!inst.is_dirty());
-        inst.save(None).await.unwrap();
+        let save = tokio::spawn(async move { inst.save(None).await });
+        let req = fake.next_request().await;
+        assert_eq!(
+            req["type"], "perspective.modelQuery",
+            "a clean save writes nothing — the only frame is the re-read"
+        );
+        fake.reply(
+            &req,
+            json!("{\"instances\":[{\"id\":\"recipe://1\",\"name\":\"Risotto\",\"done\":false}],\"totalCount\":1}"),
+        )
+        .await;
+        save.await.unwrap().unwrap();
         assert!(fake
             .maybe_request(Duration::from_millis(300))
             .await
@@ -971,13 +1025,22 @@ mod tests {
             }
         }
         assert!(updated && removed && added);
+        // R7: the non-batch save closes with its baseline re-read.
+        let req = fake.next_request().await;
+        assert_eq!(req["type"], "perspective.modelQuery");
+        fake.reply(
+            &req,
+            json!("{\"instances\":[{\"id\":\"recipe://1\",\"name\":\"Risotto\",\"tags\":[\"tag://b\",\"tag://c\"]}],\"totalCount\":1}"),
+        )
+        .await;
         let (res, _inst) = save.await.unwrap();
         res.unwrap();
         ws.close().await;
     }
 
-    /// R6: reordering a collection changes nothing — `save` sends no RPC
-    /// at all (the array compares as a set, not a sequence).
+    /// R6: reordering a collection changes nothing — `save` sends no
+    /// *write* at all (the array compares as a set, not a sequence); the
+    /// only frame on the wire is the post-save re-read (R7).
     #[tokio::test]
     async fn a_reordered_collection_is_not_dirty() {
         use crate::testkit::FakeExecutor;
@@ -992,11 +1055,217 @@ mod tests {
         let mut inst = model.instance("recipe://1", hydrated);
         inst.set("tags", json!(["tag://b", "tag://a"]));
         assert!(!inst.is_dirty(), "a pure reorder must not be dirty");
-        inst.save(None).await.unwrap();
+        let save = tokio::spawn(async move { inst.save(None).await });
+        let req = fake.next_request().await;
+        assert_eq!(
+            req["type"], "perspective.modelQuery",
+            "a clean save writes nothing — the only frame is the re-read"
+        );
+        fake.reply(
+            &req,
+            json!("{\"instances\":[{\"id\":\"recipe://1\",\"tags\":[\"tag://a\",\"tag://b\"]}],\"totalCount\":1}"),
+        )
+        .await;
+        save.await.unwrap().unwrap();
         assert!(fake
             .maybe_request(Duration::from_millis(300))
             .await
             .is_none());
+        ws.close().await;
+    }
+
+    /// R7: a successful non-batch save re-reads the row (TS `getData`,
+    /// Ad4mModel.ts:1809–1816) and adopts the hydrated values as both the
+    /// live values and the clean baseline — the executor's coercions
+    /// (the caller's `"TRUE"` stored as boolean `true`), synthetic fields
+    /// like `updatedAt`, and writes another client landed meanwhile all
+    /// enter the snapshot at once.
+    #[tokio::test]
+    async fn save_rebaselines_on_the_hydrated_result() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let ws = Arc::new(WsRpcClient::connect(fake.url(), "").await.unwrap());
+        let model = Model::new(&ws, "p1", "Recipe");
+
+        let hydrated = json!({
+            "id": "recipe://1",
+            "name": "Pasta",
+            "done": false,
+            "updatedAt": 1000,
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let mut inst = model.instance("recipe://1", hydrated);
+        inst.set("name", json!("Risotto"));
+        // The declared boolean accepts a coercible string.
+        inst.set("done", json!("TRUE"));
+
+        let save = tokio::spawn(async move {
+            let mut inst = inst;
+            (inst.save(None).await, inst)
+        });
+        let req = fake.next_request().await;
+        assert_eq!(req["type"], "perspective.instanceUpdate");
+        fake.reply(
+            &req,
+            json!({"className": "Recipe", "baseUri": "recipe://1", "updatedProperties": ["name", "done"]}),
+        )
+        .await;
+        // The baseline refresh is a read, TS `getData` shape.
+        let req = fake.next_request().await;
+        assert_eq!(req["type"], "perspective.modelQuery");
+        // The executor stored the coerced boolean, bumped `updatedAt`,
+        // and another client flipped `name` back meanwhile.
+        fake.reply(
+            &req,
+            json!("{\"instances\":[{\"id\":\"recipe://1\",\"name\":\"Pasta\",\"done\":true,\"updatedAt\":2000}],\"totalCount\":1}"),
+        )
+        .await;
+        let (res, inst) = save.await.unwrap();
+        res.unwrap();
+        assert_eq!(inst.get("done"), Some(&json!(true)), "coerced type");
+        assert_eq!(inst.get("updatedAt"), Some(&json!(2000)));
+        assert_eq!(inst.get("name"), Some(&json!("Pasta")), "concurrent write");
+        assert!(!inst.is_dirty());
+        ws.close().await;
+    }
+
+    /// R7: the skipped-write case — another client flips a field between
+    /// hydration and our save of a *different* field. Snapshotting the
+    /// local input would bury that remote value in the baseline, so a
+    /// later `set` to it looked clean and the write never went out. With
+    /// the refresh the remote value lands in the baseline instead, and
+    /// `set` diffs against it.
+    #[tokio::test]
+    async fn a_concurrent_change_is_not_snapshot_blind() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let ws = Arc::new(WsRpcClient::connect(fake.url(), "").await.unwrap());
+        let model = Model::new(&ws, "p1", "Recipe");
+
+        let hydrated = json!({"id": "recipe://1", "name": "A", "done": false})
+            .as_object()
+            .unwrap()
+            .clone();
+        let mut inst = model.instance("recipe://1", hydrated);
+        // While we hold this row, another client sets done = true.
+        inst.set("name", json!("B"));
+        let save = tokio::spawn(async move {
+            let mut inst = inst;
+            (inst.save(None).await, inst)
+        });
+        let req = fake.next_request().await;
+        assert_eq!(req["type"], "perspective.instanceUpdate");
+        fake.reply(
+            &req,
+            json!({"className": "Recipe", "baseUri": "recipe://1", "updatedProperties": ["name"]}),
+        )
+        .await;
+        let req = fake.next_request().await;
+        assert_eq!(req["type"], "perspective.modelQuery");
+        // The re-read carries the other client's write back to us.
+        fake.reply(
+            &req,
+            json!("{\"instances\":[{\"id\":\"recipe://1\",\"name\":\"B\",\"done\":true}],\"totalCount\":1}"),
+        )
+        .await;
+        let (res, mut inst) = save.await.unwrap();
+        res.unwrap();
+
+        // Writing the value back must now be dirty — it diffs against the
+        // *remote* true, not our stale false.
+        inst.set("done", json!(false));
+        assert!(
+            inst.is_dirty(),
+            "set(done,false) diffs against the remote true"
+        );
+        let save = tokio::spawn(async move { inst.save(None).await });
+        let req = fake.next_request().await;
+        assert_eq!(req["type"], "perspective.instanceUpdate");
+        assert_eq!(req["params"]["properties"], json!({"done": false}));
+        fake.reply(
+            &req,
+            json!({"className": "Recipe", "baseUri": "recipe://1", "updatedProperties": ["done"]}),
+        )
+        .await;
+        let req = fake.next_request().await;
+        assert_eq!(req["type"], "perspective.modelQuery");
+        fake.reply(
+            &req,
+            json!("{\"instances\":[{\"id\":\"recipe://1\",\"name\":\"B\",\"done\":false}],\"totalCount\":1}"),
+        )
+        .await;
+        save.await.unwrap().unwrap();
+        ws.close().await;
+    }
+
+    /// R7: the refresh is the *only* unconfirmed part of a non-batch save
+    /// — the writes are already committed when it fails. The save
+    /// reports the failure and keeps the old snapshot, so the caller sees
+    /// the instance still dirty and a retry replays the idempotent
+    /// writes before re-reading.
+    #[tokio::test]
+    async fn a_failed_refresh_keeps_the_save_retryable() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let ws = Arc::new(WsRpcClient::connect(fake.url(), "").await.unwrap());
+        let model = Model::new(&ws, "p1", "Recipe");
+
+        let hydrated = json!({"id": "recipe://1", "name": "A"})
+            .as_object()
+            .unwrap()
+            .clone();
+        let mut inst = model.instance("recipe://1", hydrated);
+        inst.set("name", json!("B"));
+
+        let save = tokio::spawn(async move {
+            let mut inst = inst;
+            (inst.save(None).await, inst)
+        });
+        let req = fake.next_request().await;
+        assert_eq!(req["type"], "perspective.instanceUpdate");
+        fake.reply(
+            &req,
+            json!({"className": "Recipe", "baseUri": "recipe://1", "updatedProperties": ["name"]}),
+        )
+        .await;
+        let req = fake.next_request().await;
+        assert_eq!(req["type"], "perspective.modelQuery");
+        fake.reply_error(&req, 503, "query backend unavailable")
+            .await;
+        let (res, inst) = save.await.unwrap();
+        assert!(
+            res.is_err(),
+            "an unconfirmed baseline must surface, not pass as a clean save"
+        );
+        assert!(
+            inst.is_dirty(),
+            "the unconfirmed snapshot stays the old one"
+        );
+
+        // Retry: the writes replay idempotently, the re-read succeeds.
+        let save = tokio::spawn(async move {
+            let mut inst = inst;
+            (inst.save(None).await, inst)
+        });
+        let req = fake.next_request().await;
+        assert_eq!(req["type"], "perspective.instanceUpdate");
+        assert_eq!(req["params"]["properties"], json!({"name": "B"}));
+        fake.reply(
+            &req,
+            json!({"className": "Recipe", "baseUri": "recipe://1", "updatedProperties": ["name"]}),
+        )
+        .await;
+        let req = fake.next_request().await;
+        fake.reply(
+            &req,
+            json!("{\"instances\":[{\"id\":\"recipe://1\",\"name\":\"B\"}],\"totalCount\":1}"),
+        )
+        .await;
+        let (res, inst) = save.await.unwrap();
+        res.unwrap();
+        assert!(!inst.is_dirty());
         ws.close().await;
     }
 
