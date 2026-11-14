@@ -159,6 +159,10 @@ struct Shared {
     /// (re)connect and on every change. Key `""` is the user watch —
     /// `watch_events` replaces it; live queries register their own keys.
     watches: Mutex<WatchMap>,
+    /// Serializes `events.watch` flushes: snapshot+send+reply run under one
+    /// gate, so a slower flush can never write its older union over a newer
+    /// one on the wire (F9).
+    watch_flush: Mutex<()>,
     on_reconnect: Mutex<Vec<(u64, ReconnectCb)>>,
     closed: AtomicBool,
     /// Auth refusal (close 1008) — do not reconnect, mirror TS.
@@ -255,6 +259,7 @@ impl WsRpcClient {
             events: events_tx,
             connected: connected_tx,
             watches: Mutex::new(WatchMap::new()),
+            watch_flush: Mutex::new(()),
             on_reconnect: Mutex::new(Vec::new()),
             closed: AtomicBool::new(false),
             auth_failed: AtomicBool::new(false),
@@ -424,7 +429,9 @@ impl WsRpcClient {
 
                         // Re-register interest first — subscription re-opens
                         // fired below need `query-subscription-update` watched.
-                        Self::send_watch(&shared).await;
+                        if let Err(e) = Self::send_watch(&shared).await {
+                            eprintln!("[ws-rpc] watch restore failed: {e}");
+                        }
 
                         let callbacks: Vec<ReconnectCb> = shared
                             .on_reconnect
@@ -450,10 +457,14 @@ impl WsRpcClient {
         })
     }
 
-    /// Merge the named interests and send `events.watch` — an empty map too:
-    /// it tells the executor to stop sending events (`events.watch` replaces
-    /// the socket's entire interest, TS `ApiClient._flushWatch`).
-    async fn send_watch(shared: &Arc<Shared>) {
+    /// Merge the named interests and send `events.watch`, awaiting the
+    /// reply — an empty map too: it tells the executor to stop sending
+    /// events (`events.watch` replaces the socket's entire interest, TS
+    /// `ApiClient._flushWatch`). The `watch_flush` gate serializes
+    /// snapshot+send+reply: a flush that took its snapshot earlier can
+    /// never write its stale union over a newer one on the wire (F9).
+    async fn send_watch(shared: &Arc<Shared>) -> Result<()> {
+        let _gate = shared.watch_flush.lock().await;
         let merged = {
             let watches = shared.watches.lock().await;
             merge_watches(&watches)
@@ -466,48 +477,62 @@ impl WsRpcClient {
             msg_type: "events.watch".to_string(),
             params: merged,
         };
+        let json = serde_json::to_string(&msg)?;
         let (tx, rx) = oneshot::channel();
         shared.pending.lock().await.insert(
-            id,
+            id.clone(),
             PendingCall {
                 tx,
                 sent: true,
                 failed_connects: 0,
             },
         );
-        if let Ok(json) = serde_json::to_string(&msg) {
+        let sent = {
             let mut sink = shared.sink.lock().await;
-            if let Some(s) = sink.as_mut() {
-                let _ = s.send(Message::Text(json)).await;
+            match sink.as_mut() {
+                Some(s) => Some(s.send(Message::Text(json)).await),
+                None => None,
+            }
+        };
+        match sent {
+            Some(Ok(())) => {}
+            other => {
+                shared.pending.lock().await.remove(&id);
+                return Err(match other {
+                    Some(Err(e)) => anyhow!("Failed to send events.watch: {e}"),
+                    _ => anyhow!("events.watch: no socket"),
+                });
             }
         }
-        // Fire-and-forget: the reply is drained by the reader; a 5s guard
-        // avoids a leaked pending entry when it never comes.
-        tokio::spawn(async move {
-            let _ = tokio::time::timeout(Duration::from_secs(5), rx).await;
-        });
+        // Await the reply: `events.watch` is a real RPC — a rejection (or a
+        // dropped socket, which fails the pending entry) must reach the
+        // caller (F9).
+        rx.await.map_err(|_| anyhow!("Response channel closed"))??;
+        Ok(())
     }
 
     /// Register `key`'s event interest; the merged union is sent on the socket.
     /// Live queries use this so a subscription watch survives reconnects.
-    pub(crate) async fn set_watch(&self, key: &str, spec: Value) {
+    pub(crate) async fn set_watch(&self, key: &str, spec: Value) -> Result<()> {
         {
             let mut watches = self.shared.watches.lock().await;
             watches.insert(key.to_string(), spec);
         }
         if *self.shared.connected.borrow() {
-            Self::send_watch(&self.shared).await;
+            Self::send_watch(&self.shared).await?;
         }
+        Ok(())
     }
 
-    pub(crate) async fn remove_watch(&self, key: &str) {
+    pub(crate) async fn remove_watch(&self, key: &str) -> Result<()> {
         {
             let mut watches = self.shared.watches.lock().await;
             watches.remove(key);
         }
         if *self.shared.connected.borrow() {
-            Self::send_watch(&self.shared).await;
+            Self::send_watch(&self.shared).await?;
         }
+        Ok(())
     }
 
     /// `callback` runs after each successful reconnect, once the watch was
@@ -685,7 +710,7 @@ impl WsRpcClient {
     /// persist alongside it. Each event has a `"type"` field.
     pub async fn watch_events(&self, events: Value) -> Result<broadcast::Receiver<Value>> {
         let rx = self.shared.events.subscribe();
-        self.set_watch("", events).await;
+        self.set_watch("", events).await?;
         Ok(rx)
     }
 }
@@ -1047,6 +1072,74 @@ mod tests {
         .expect("a call on an auth-refused client must not wait out its timeout");
         let err = result.unwrap_err().to_string();
         assert!(err.contains("auth"), "unexpected error: {err}");
+        client.close().await;
+    }
+
+    /// F9: `events.watch` is a real RPC — a rejection must reach the
+    /// caller, not vanish into a fire-and-forget oneshot.
+    #[tokio::test]
+    async fn watch_events_propagates_the_executors_rejection() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let client = WsRpcClient::connect(fake.url(), "").await.unwrap();
+
+        let caller = WsRpcClient {
+            shared: client.shared.clone(),
+        };
+        let watch = tokio::spawn(async move {
+            caller
+                .watch_events(serde_json::json!({"bogus-event": null}))
+                .await
+        });
+        let req = fake.next_request().await;
+        assert_eq!(req["type"], "events.watch");
+        fake.reply_error(&req, 400, "unknown event type").await;
+
+        let result = watch.await.unwrap();
+        assert!(
+            result.is_err(),
+            "a rejected events.watch must not report success"
+        );
+        client.close().await;
+    }
+
+    /// The serialized flush: each change sends the union as of its own
+    /// snapshot — sequential changes land on the wire in order, cumulative.
+    #[tokio::test]
+    async fn watch_changes_send_each_union_in_order() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let client = WsRpcClient::connect(fake.url(), "").await.unwrap();
+
+        // set_watch awaits the watch's reply — drive it from a task so the
+        // test can answer.
+        let caller = WsRpcClient {
+            shared: client.shared.clone(),
+        };
+        let s1 = tokio::spawn(async move {
+            caller
+                .set_watch("k1", serde_json::json!({"e1": null}))
+                .await
+        });
+        let w1 = fake.next_request().await;
+        fake.reply(&w1, Value::Bool(true)).await;
+        s1.await.unwrap().unwrap();
+
+        let caller = WsRpcClient {
+            shared: client.shared.clone(),
+        };
+        let s2 = tokio::spawn(async move {
+            caller
+                .set_watch("k2", serde_json::json!({"e2": null}))
+                .await
+        });
+        let w2 = fake.next_request().await;
+        fake.reply(&w2, Value::Bool(true)).await;
+        s2.await.unwrap().unwrap();
+
+        assert_eq!(w1["type"], "events.watch");
+        assert_eq!(w1["params"], serde_json::json!({"e1": null}));
+        assert_eq!(w2["params"], serde_json::json!({"e1": null, "e2": null}));
         client.close().await;
     }
 

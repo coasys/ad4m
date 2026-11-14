@@ -237,11 +237,15 @@ impl LiveQuery {
         // survives both other watchers and reconnects.
         let watch_key = inner.watch_key.clone();
         tokio::spawn(async move {
-            ws.set_watch(
-                &watch_key,
-                serde_json::json!({"query-subscription-update": null}),
-            )
-            .await;
+            if let Err(e) = ws
+                .set_watch(
+                    &watch_key,
+                    serde_json::json!({"query-subscription-update": null}),
+                )
+                .await
+            {
+                eprintln!("[live-query] events.watch failed: {e}");
+            }
         });
 
         // Event listener — filters update events, feeds `receive` IN ORDER:
@@ -371,7 +375,7 @@ impl LiveQuery {
         if let Some(cb) = cb {
             self.inner.ws.remove_on_reconnect(cb).await;
         }
-        self.inner.ws.remove_watch(&self.inner.watch_key).await;
+        let _ = self.inner.ws.remove_watch(&self.inner.watch_key).await;
         if let Some(id) = id {
             let _ = dispose_query(&self.inner.ws, &self.inner.uuid, &id).await;
         }
