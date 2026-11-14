@@ -465,6 +465,30 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
     ("neighbourhood.hasTelepresence", || json!({ "uuid": "p" })),
     ("neighbourhood.onlineAgents", || json!({ "uuid": "p" })),
     ("neighbourhood.otherAgents", || json!({ "uuid": "p" })),
+    ("neighbourhood.members", || json!({ "uuid": "p" })),
+    ("neighbourhood.invites", || json!({ "uuid": "p" })),
+    (
+        "neighbourhood.addMember",
+        || json!({ "uuid": "p", "person": "did:scid:coasys:1:p", "role": "member" }),
+    ),
+    (
+        "neighbourhood.removeMember",
+        || json!({ "uuid": "p", "person": "did:scid:coasys:1:p" }),
+    ),
+    ("neighbourhood.leave", || json!({ "uuid": "p" })),
+    ("neighbourhood.createInvite", || json!({ "uuid": "p" })),
+    (
+        "neighbourhood.setJoinMode",
+        || json!({ "uuid": "p", "join": "invite" }),
+    ),
+    (
+        "neighbourhood.addBot",
+        || json!({ "uuid": "p", "botDid": "did:key:z6Mk" }),
+    ),
+    (
+        "neighbourhood.removeBot",
+        || json!({ "uuid": "p", "botDid": "did:key:z6Mk" }),
+    ),
     ("expression.get", || json!({ "url": "literal://string:x" })),
     (
         "expression.getRaw",

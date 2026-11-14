@@ -54,6 +54,7 @@ import type { CreateExpressionRequest } from "./CreateExpressionRequest";
 import type { CreatePerspectiveRequest } from "./CreatePerspectiveRequest";
 import type { CreateUserRequest } from "./CreateUserRequest";
 import type { CreatedBot } from "./CreatedBot";
+import type { CreatedInvite } from "./CreatedInvite";
 import type { DecoratedLinkExpression } from "./DecoratedLinkExpression";
 import type { DecoratedPerspective } from "./DecoratedPerspective";
 import type { DeleteRequestParams } from "./DeleteRequestParams";
@@ -93,6 +94,7 @@ import type { InboxEntry } from "./InboxEntry";
 import type { InboxPutParams } from "./InboxPutParams";
 import type { InboxStored } from "./InboxStored";
 import type { InteractionMeta } from "./InteractionMeta";
+import type { InviteInfo } from "./InviteInfo";
 import type { JoinAccepted } from "./JoinAccepted";
 import type { JoinCancelled } from "./JoinCancelled";
 import type { JoinNeighbourhoodRequest } from "./JoinNeighbourhoodRequest";
@@ -120,10 +122,16 @@ import type { LogParams } from "./LogParams";
 import type { LogTail } from "./LogTail";
 import type { LogTailParams } from "./LogTailParams";
 import type { LoginWithKeyParams } from "./LoginWithKeyParams";
+import type { MemberInfo } from "./MemberInfo";
 import type { Model } from "./Model";
 import type { ModelStatus } from "./ModelStatus";
+import type { NeighbourhoodAddMemberParams } from "./NeighbourhoodAddMemberParams";
+import type { NeighbourhoodBotParams } from "./NeighbourhoodBotParams";
 import type { NeighbourhoodBroadcastParams } from "./NeighbourhoodBroadcastParams";
+import type { NeighbourhoodCreateInviteParams } from "./NeighbourhoodCreateInviteParams";
+import type { NeighbourhoodJoinModeParams } from "./NeighbourhoodJoinModeParams";
 import type { NeighbourhoodOnlineStatusParams } from "./NeighbourhoodOnlineStatusParams";
+import type { NeighbourhoodPersonParams } from "./NeighbourhoodPersonParams";
 import type { NeighbourhoodSignalParams } from "./NeighbourhoodSignalParams";
 import type { NeighbourhoodUuidParams } from "./NeighbourhoodUuidParams";
 import type { Notification } from "./Notification";
@@ -400,14 +408,23 @@ export interface RpcMethods {
   "language.remove": { params: LanguageAddressParams; result: boolean };
   "language.source": { params: LanguageAddressParams; result: string };
   "language.writeSettings": { params: LanguageWriteSettingsParams; result: boolean };
+  "neighbourhood.addBot": { params: NeighbourhoodBotParams; result: null };
+  "neighbourhood.addMember": { params: NeighbourhoodAddMemberParams; result: null };
+  "neighbourhood.createInvite": { params: NeighbourhoodCreateInviteParams; result: CreatedInvite };
   "neighbourhood.hasTelepresence": { params: NeighbourhoodUuidParams; result: boolean };
+  "neighbourhood.invites": { params: NeighbourhoodUuidParams; result: Array<InviteInfo> };
   "neighbourhood.join": { params: JoinNeighbourhoodRequest; result: PerspectiveHandle };
+  "neighbourhood.leave": { params: NeighbourhoodUuidParams; result: null };
+  "neighbourhood.members": { params: NeighbourhoodUuidParams; result: Array<MemberInfo> };
   "neighbourhood.onlineAgents": { params: NeighbourhoodUuidParams; result: Array<OnlineAgent> };
   "neighbourhood.otherAgents": { params: NeighbourhoodUuidParams; result: Array<string> };
   "neighbourhood.ownOnlineStatus": { params: NeighbourhoodUuidParams; result: PerspectiveExpression | null };
   "neighbourhood.publish": { params: PublishNeighbourhoodRequest; result: string };
+  "neighbourhood.removeBot": { params: NeighbourhoodBotParams; result: null };
+  "neighbourhood.removeMember": { params: NeighbourhoodPersonParams; result: null };
   "neighbourhood.sendBroadcast": { params: NeighbourhoodBroadcastParams; result: boolean };
   "neighbourhood.sendSignal": { params: NeighbourhoodSignalParams; result: boolean };
+  "neighbourhood.setJoinMode": { params: NeighbourhoodJoinModeParams; result: null };
   "neighbourhood.setOnlineStatus": { params: NeighbourhoodOnlineStatusParams; result: boolean };
   "perspective.acceptFlowProposal": { params: PerspectiveFlowProposalParams; result: Array<FireOutcome> };
   "perspective.acceptInterpretation": { params: PerspectiveResolveInterpretationParams; result: boolean };
@@ -604,6 +621,8 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "language.meta",
   "language.source",
   "neighbourhood.hasTelepresence",
+  "neighbourhood.invites",
+  "neighbourhood.members",
   "neighbourhood.onlineAgents",
   "neighbourhood.otherAgents",
   "neighbourhood.ownOnlineStatus",

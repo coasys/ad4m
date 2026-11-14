@@ -31,9 +31,22 @@ use std::sync::PoisonError;
 /// rules the key out. A `cantCheck` link stays (its signer's log is not
 /// known yet; the store re-checks it once it is), and so does a `flagged`
 /// one: both are stored with that verdict, and logic reads count neither.
+/// A membership link (`coasys://membership/…`) is dropped however it is
+/// signed (R13): membership reaches a space only through the membership
+/// sync, never in an ordinary diff.
 /// The caller fills the key map first ([`crate::identity::prepare_link_signers`]).
 pub(crate) fn retain_ingestible(additions: &mut Vec<LinkExpression>) {
     additions.retain(|link| {
+        let predicate = link.data.predicate.as_deref().unwrap_or("");
+        if ad4m_identity_core::membership::is_membership_predicate(predicate) {
+            log::warn!(
+                "Dropping membership link from a remote diff: {} -[{predicate}]-> {} by {}",
+                link.data.source,
+                link.data.target,
+                link.author
+            );
+            return false;
+        }
         let verdict = link.check().verdict;
         let invalid = matches!(verdict, LinkVerdict::Invalid(_));
         if invalid {
@@ -41,7 +54,7 @@ pub(crate) fn retain_ingestible(additions: &mut Vec<LinkExpression>) {
                 "Dropping remote link whose verdict is {}: {} -[{}]-> {} by {}",
                 verdict.stored(),
                 link.data.source,
-                link.data.predicate.as_deref().unwrap_or(""),
+                predicate,
                 link.data.target,
                 link.author
             );
@@ -107,5 +120,35 @@ impl PerspectiveInstance {
             },
             effects,
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::retain_ingestible;
+    use crate::agent::signatures::TestSigner;
+    use crate::types::{Link, LinkExpression};
+
+    /// R13: a membership link that arrives in an ordinary diff is dropped, however it is
+    /// signed; an ordinary link beside it stays.
+    #[test]
+    fn a_membership_link_in_a_diff_is_dropped() {
+        let signer = TestSigner::generate();
+        let link = |predicate: &str| -> LinkExpression {
+            signer
+                .sign(Link {
+                    source: "did:scid:coasys:1:Ada".into(),
+                    predicate: Some(predicate.into()),
+                    target: "coasys://membership/space".into(),
+                })
+                .into()
+        };
+        let mut additions = vec![link("coasys://membership/member"), link("test://likes")];
+        retain_ingestible(&mut additions);
+        let kept: Vec<_> = additions
+            .iter()
+            .map(|l| l.data.predicate.clone().unwrap())
+            .collect();
+        assert_eq!(kept, vec!["test://likes".to_string()]);
     }
 }

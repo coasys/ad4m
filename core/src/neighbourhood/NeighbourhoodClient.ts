@@ -5,6 +5,11 @@ import { OnlineAgent, TelepresenceSignalCallback } from "../language/Language"
 import { Perspective, PerspectiveExpression, PerspectiveUnsignedInput } from "../perspectives/Perspective"
 import { PerspectiveHandle } from "../perspectives/PerspectiveHandle"
 import { NeighbourhoodProxy } from "./NeighbourhoodProxy"
+import type { CreatedInvite } from "../generated/api/CreatedInvite"
+import type { InviteInfo } from "../generated/api/InviteInfo"
+import type { JoinMode } from "../generated/api/JoinMode"
+import type { MemberInfo } from "../generated/api/MemberInfo"
+import type { NewMemberRole } from "../generated/api/NewMemberRole"
 import type {
     CallSessionInfo,
     SfuCallRenegotiationOffer,
@@ -40,8 +45,64 @@ export class NeighbourhoodClient {
         }, options)
     }
 
-    async joinFromUrl(url: string, options?: CallOptions): Promise<PerspectiveHandle> {
-        return PerspectiveHandle.fromWire(await this.#apiClient.call('neighbourhood.join', { url }, options))
+    /**
+     * Joins the neighbourhood at `url`. In a space with membership rules the executor writes
+     * this person's own `member` link (with `invite`, an `invite://<id>` from a
+     * `coasys://join` link, in an invite-only space); a refused join rejects, removes the
+     * perspective and pushes `neighbourhood-join-refused` with the reason.
+     */
+    async joinFromUrl(url: string, options?: CallOptions & { invite?: string }): Promise<PerspectiveHandle> {
+        const { invite, ...callOptions } = options ?? {}
+        const params = invite ? { url, invite } : { url }
+        return PerspectiveHandle.fromWire(await this.#apiClient.call('neighbourhood.join', params, callOptions))
+    }
+
+    /** The current members of the space: people, admins and their bots. */
+    async members(perspectiveUUID: string): Promise<MemberInfo[]> {
+        return this.#apiClient.call('neighbourhood.members', { uuid: perspectiveUUID })
+    }
+
+    /** Adds `person` as a member or admin; refused unless the rules let this person add. */
+    async addMember(perspectiveUUID: string, person: DID, role: NewMemberRole = "member"): Promise<void> {
+        await this.#apiClient.call('neighbourhood.addMember', { uuid: perspectiveUUID, person, role })
+    }
+
+    /** Removes `person` (admins only): they cannot join again on their own. */
+    async removeMember(perspectiveUUID: string, person: DID): Promise<void> {
+        await this.#apiClient.call('neighbourhood.removeMember', { uuid: perspectiveUUID, person })
+    }
+
+    /** Leaves the space; a person who left may join again. */
+    async leave(perspectiveUUID: string): Promise<void> {
+        await this.#apiClient.call('neighbourhood.leave', { uuid: perspectiveUUID })
+    }
+
+    /** Makes an invite (admins only), with no expiry unless `expiresAt` is given. */
+    async createInvite(perspectiveUUID: string, expiresAt?: Date): Promise<CreatedInvite> {
+        const params = expiresAt
+            ? { uuid: perspectiveUUID, expiresAt: expiresAt.toISOString() }
+            : { uuid: perspectiveUUID }
+        return this.#apiClient.call('neighbourhood.createInvite', params)
+    }
+
+    /** The space's invites, with who used each. */
+    async invites(perspectiveUUID: string): Promise<InviteInfo[]> {
+        return this.#apiClient.call('neighbourhood.invites', { uuid: perspectiveUUID })
+    }
+
+    /** Sets whether anyone may join (`open`) or only with an invite (admins only). */
+    async setJoinMode(perspectiveUUID: string, join: JoinMode): Promise<void> {
+        await this.#apiClient.call('neighbourhood.setJoinMode', { uuid: perspectiveUUID, join })
+    }
+
+    /** Adds `botDid`, a bot key of this person's, as their bot in the space. */
+    async addBot(perspectiveUUID: string, botDid: DID): Promise<void> {
+        await this.#apiClient.call('neighbourhood.addBot', { uuid: perspectiveUUID, botDid })
+    }
+
+    /** Removes a bot: its owner or an admin. */
+    async removeBot(perspectiveUUID: string, botDid: DID): Promise<void> {
+        await this.#apiClient.call('neighbourhood.removeBot', { uuid: perspectiveUUID, botDid })
     }
 
     async otherAgents(perspectiveUUID: string): Promise<DID[]> {

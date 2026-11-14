@@ -114,6 +114,60 @@ fn every_vector_file_has_a_test() {
     assert_eq!(files, tested);
 }
 
+/// `invites` lists every counted invite with its expiry and the person who used it.
+#[test]
+fn the_graph_lists_its_invites() {
+    use ad4m_identity_core::membership::{InviteState, SPACE};
+    const ADA: &str = "did:scid:coasys:1:Ada";
+    const BEA: &str = "did:scid:coasys:1:Bea";
+    let link = |n: u8, source: &str, predicate: &str, target: &str, person: &str| JudgedLink {
+        hash: [n; 32],
+        source: source.into(),
+        predicate: predicate.into(),
+        target: target.into(),
+        author_key: format!("did:key:z{n}"),
+        timestamp: u64::from(n) * 100,
+        verdict: LinkVerdict::Valid,
+        person: Some(person.into()),
+        by_bot: false,
+    };
+    let links = [
+        link(1, SPACE, predicate::RULES, "literal:json:%7B%7D", ADA),
+        link(
+            2,
+            "invite://a",
+            predicate::INVITE,
+            "literal:json:%7B%22expiresAt%22%3A5000%7D",
+            ADA,
+        ),
+        link(
+            3,
+            "invite://b",
+            predicate::INVITE,
+            "literal:json:%7B%22expiresAt%22%3A9000%7D",
+            ADA,
+        ),
+        link(4, BEA, predicate::MEMBER, "invite://a", BEA),
+    ];
+    let (graph, refused) = MembershipGraph::replay(ADA, &links);
+    assert!(refused.is_empty(), "{refused:?}");
+    assert_eq!(
+        graph.invites(),
+        vec![
+            InviteState {
+                invite: "invite://a".into(),
+                expires_at: 5000,
+                used_by: Some(BEA.into()),
+            },
+            InviteState {
+                invite: "invite://b".into(),
+                expires_at: 9000,
+                used_by: None,
+            },
+        ]
+    );
+}
+
 /// The people, keys and nodes the generated links draw from.
 mod arbitrary {
     use super::*;

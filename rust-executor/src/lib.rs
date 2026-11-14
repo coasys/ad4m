@@ -42,6 +42,7 @@ pub mod init;
 pub mod languages;
 pub mod log_files;
 pub mod logging;
+pub mod membership;
 mod neighbourhoods;
 mod pubsub;
 pub mod tool_bundles;

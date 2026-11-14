@@ -196,6 +196,9 @@ pub struct QueryRequest {
 #[ts(export)]
 pub struct JoinNeighbourhoodRequest {
     pub url: String,
+    /// The invite the join uses (`invite://<id>`), in an invite-only space.
+    #[ts(optional)]
+    pub invite: Option<String>,
 }
 
 #[derive(Deserialize, TS)]

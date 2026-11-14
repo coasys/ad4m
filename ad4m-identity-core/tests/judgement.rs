@@ -299,6 +299,7 @@ fn stored_verdicts_read_back() {
         LinkVerdict::Valid,
         LinkVerdict::CantCheck,
         LinkVerdict::Flagged,
+        LinkVerdict::NotMember,
         LinkVerdict::Invalid(InvalidReason::BadSignature),
         LinkVerdict::Invalid(InvalidReason::NotListed),
         LinkVerdict::Invalid(InvalidReason::MasterKey),
@@ -322,6 +323,19 @@ fn logic_reads_count_only_valid_and_display_hides_only_invalid() {
     }
     let invalid = LinkVerdict::Invalid(InvalidReason::Revoked);
     assert!(!invalid.counts() && !invalid.shown());
+}
+
+/// A link by a person who is not a member of a governed space: stored `notMember`, neither
+/// counted nor shown, `{kind: "notMember"}` in JSON.
+#[test]
+fn a_link_by_a_non_member_is_neither_counted_nor_shown() {
+    let v = LinkVerdict::NotMember;
+    assert!(!v.counts() && !v.shown());
+    assert_eq!(v.stored(), "notMember");
+    assert_eq!(
+        serde_json::to_value(&v).unwrap(),
+        serde_json::json!({"kind": "notMember"})
+    );
 }
 
 /// The verdict's JSON is the SDK's `LinkVerdict`: `{kind}`, and `{kind, reason}` for `invalid`.

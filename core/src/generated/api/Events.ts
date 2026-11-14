@@ -17,6 +17,8 @@ import type { InboxMessageEvent } from "./InboxMessageEvent";
 import type { LinkTicketEvent } from "./LinkTicketEvent";
 import type { LocalAiProgress } from "./LocalAiProgress";
 import type { ModelStatusEvent } from "./ModelStatusEvent";
+import type { NeighbourhoodJoinRefusedEvent } from "./NeighbourhoodJoinRefusedEvent";
+import type { NeighbourhoodMembershipChangedEvent } from "./NeighbourhoodMembershipChangedEvent";
 import type { NeighbourhoodSignalFilter } from "./NeighbourhoodSignalFilter";
 import type { NotificationTriggeredEvent } from "./NotificationTriggeredEvent";
 import type { PerspectiveEvent } from "./PerspectiveEvent";
@@ -72,12 +74,14 @@ export interface EventMap {
   "inbox-message": InboxMessageEvent;
   "storage-state-changed": StorageStatus;
   "storage-migration-progress": StorageMigrationProgress;
+  "neighbourhood-membership-changed": NeighbourhoodMembershipChangedEvent;
+  "neighbourhood-join-refused": NeighbourhoodJoinRefusedEvent;
 }
 
 export type EventName = keyof EventMap;
 
 /** Events about one perspective: they carry `perspectiveUuid`. */
-export type ScopedEventName = "perspective-added" | "perspective-removed" | "perspective-updated" | "sync-state-change" | "link-added" | "link-removed" | "link-updated" | "signal" | "notification-triggered" | "query-subscription-update" | "subscription-ended" | "auto-processor-event" | "auto-processor-neighbourhood-state" | "flow-state-changed";
+export type ScopedEventName = "perspective-added" | "perspective-removed" | "perspective-updated" | "sync-state-change" | "link-added" | "link-removed" | "link-updated" | "signal" | "notification-triggered" | "query-subscription-update" | "subscription-ended" | "auto-processor-event" | "auto-processor-neighbourhood-state" | "flow-state-changed" | "neighbourhood-membership-changed";
 
 /** {@link ScopedEventName} as a set. */
 export const SCOPED_EVENTS: ReadonlySet<EventName> = new Set<EventName>([
@@ -95,4 +99,5 @@ export const SCOPED_EVENTS: ReadonlySet<EventName> = new Set<EventName>([
   "auto-processor-event",
   "auto-processor-neighbourhood-state",
   "flow-state-changed",
+  "neighbourhood-membership-changed",
 ]);

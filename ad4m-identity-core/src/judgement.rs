@@ -44,6 +44,11 @@ pub enum LinkVerdict {
     /// The signer's key was valid at the anchor, but the link entered the space's ordered
     /// history after the key's `revoke` entered it.
     Flagged,
+    /// Every check holds, but the space has membership rules and the link's person (or bot
+    /// key) is not a current member ([`crate::membership`]). [`judge`] never answers it: the
+    /// reader that holds the space's membership graph sets it over a `Valid`, and judges the
+    /// link again when the membership changes.
+    NotMember,
 }
 
 /// Why a link is `Invalid`.
@@ -103,19 +108,20 @@ impl LinkVerdict {
         matches!(self, LinkVerdict::Valid)
     }
 
-    /// Display reads show the link (all but `Invalid`).
+    /// Display reads show the link (all but `Invalid` and `NotMember`).
     pub fn shown(&self) -> bool {
-        !matches!(self, LinkVerdict::Invalid(_))
+        !matches!(self, LinkVerdict::Invalid(_) | LinkVerdict::NotMember)
     }
 
     /// The verdict as the link store keeps it: `valid`, `invalid:<reason>`, `cantCheck`,
-    /// `flagged`.
+    /// `flagged`, `notMember`.
     pub fn stored(&self) -> String {
         match self {
             LinkVerdict::Valid => "valid".into(),
             LinkVerdict::Invalid(reason) => format!("invalid:{}", reason.name()),
             LinkVerdict::CantCheck => "cantCheck".into(),
             LinkVerdict::Flagged => "flagged".into(),
+            LinkVerdict::NotMember => "notMember".into(),
         }
     }
 
@@ -125,6 +131,7 @@ impl LinkVerdict {
             "valid" => Some(LinkVerdict::Valid),
             "cantCheck" => Some(LinkVerdict::CantCheck),
             "flagged" => Some(LinkVerdict::Flagged),
+            "notMember" => Some(LinkVerdict::NotMember),
             _ => s
                 .strip_prefix("invalid:")
                 .and_then(InvalidReason::from_name)

@@ -52,11 +52,13 @@ pub enum Topic {
     InboxMessage,
     StorageStateChanged,
     StorageMigrationProgress,
+    NeighbourhoodMembershipChanged,
+    NeighbourhoodJoinRefused,
 }
 
 impl Topic {
     /// Every topic, in the order of `events_ws::event_specs`.
-    pub const ALL: [Topic; 35] = [
+    pub const ALL: [Topic; 37] = [
         Topic::AiSessionChanged,
         Topic::AgentStatusChanged,
         Topic::AgentUpdated,
@@ -92,6 +94,8 @@ impl Topic {
         Topic::InboxMessage,
         Topic::StorageStateChanged,
         Topic::StorageMigrationProgress,
+        Topic::NeighbourhoodMembershipChanged,
+        Topic::NeighbourhoodJoinRefused,
     ];
 
     /// The event type on the wire: the `type` field of the socket message and the key
@@ -133,6 +137,8 @@ impl Topic {
             Topic::InboxMessage => "inbox-message",
             Topic::StorageStateChanged => "storage-state-changed",
             Topic::StorageMigrationProgress => "storage-migration-progress",
+            Topic::NeighbourhoodMembershipChanged => "neighbourhood-membership-changed",
+            Topic::NeighbourhoodJoinRefused => "neighbourhood-join-refused",
         }
     }
 
@@ -188,12 +194,21 @@ impl Topic {
             | Topic::RuntimeNotificationTriggered => {
                 caps::perspective_query_capability(on_perspective())
             }
-            // `neighbourhood.onlineAgents` / `otherAgents` check NEIGHBOURHOOD_READ; a signal
-            // names it for its perspective, which a `*` grant covers.
-            Topic::NeighbourhoodSignal => Capability {
+            // `neighbourhood.onlineAgents` / `otherAgents` / `members` check NEIGHBOURHOOD_READ;
+            // a signal or a membership change names it for its perspective, which a `*` grant
+            // covers. A refused join has no perspective left: on every perspective, as
+            // `neighbourhood.join` checks it.
+            Topic::NeighbourhoodSignal | Topic::NeighbourhoodMembershipChanged => Capability {
                 with: Resource {
                     domain: caps::NEIGHBOURHOOD.to_string(),
                     pointers: on_perspective(),
+                },
+                can: vec![caps::READ.to_string()],
+            },
+            Topic::NeighbourhoodJoinRefused => Capability {
+                with: Resource {
+                    domain: caps::NEIGHBOURHOOD.to_string(),
+                    pointers: vec![caps::WILD_CARD.to_string()],
                 },
                 can: vec![caps::READ.to_string()],
             },

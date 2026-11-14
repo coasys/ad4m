@@ -202,7 +202,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-265 methods: Cap 87, CapAnyPointer 1, Executor 48, Open 10, Operator 41, Owns 74, UserOrOperator 4. Local only (the operator on this machine): 16.
+274 methods: Cap 87, CapAnyPointer 1, Executor 48, Open 10, Operator 41, Owns 83, UserOrOperator 4. Local only (the operator on this machine): 16.
 
 | Method | Guard |
 |---|---|
@@ -320,14 +320,23 @@ the guard checked:
 | `language.remove` | `Executor(language:DELETE)` |
 | `language.source` | `Cap(language:READ)` |
 | `language.writeSettings` | `Executor(language:UPDATE)` |
+| `neighbourhood.addBot` | `Owns(Perspective uuid, neighbourhood:UPDATE)` |
+| `neighbourhood.addMember` | `Owns(Perspective uuid, neighbourhood:UPDATE)` |
+| `neighbourhood.createInvite` | `Owns(Perspective uuid, neighbourhood:UPDATE)` |
 | `neighbourhood.hasTelepresence` | `Owns(Perspective uuid, neighbourhood:READ)` |
+| `neighbourhood.invites` | `Owns(Perspective uuid, neighbourhood:READ)` |
 | `neighbourhood.join` | `Cap(neighbourhood:READ)` |
+| `neighbourhood.leave` | `Owns(Perspective uuid, neighbourhood:UPDATE)` |
+| `neighbourhood.members` | `Owns(Perspective uuid, neighbourhood:READ)` |
 | `neighbourhood.onlineAgents` | `Owns(Perspective uuid, neighbourhood:READ)` |
 | `neighbourhood.otherAgents` | `Owns(Perspective uuid, neighbourhood:READ)` |
 | `neighbourhood.ownOnlineStatus` | `Owns(Perspective uuid, neighbourhood:READ)` |
 | `neighbourhood.publish` | `Owns(Perspective perspectiveUuid or perspectiveUUID, neighbourhood:CREATE)` |
+| `neighbourhood.removeBot` | `Owns(Perspective uuid, neighbourhood:UPDATE)` |
+| `neighbourhood.removeMember` | `Owns(Perspective uuid, neighbourhood:UPDATE)` |
 | `neighbourhood.sendBroadcast` | `Owns(Perspective uuid, neighbourhood:UPDATE)` |
 | `neighbourhood.sendSignal` | `Owns(Perspective uuid, neighbourhood:UPDATE)` |
+| `neighbourhood.setJoinMode` | `Owns(Perspective uuid, neighbourhood:UPDATE)` |
 | `neighbourhood.setOnlineStatus` | `Owns(Perspective uuid, neighbourhood:UPDATE)` |
 | `perspective.acceptFlowProposal` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.acceptInterpretation` | `Owns(Perspective uuid, perspective:UPDATE)` |

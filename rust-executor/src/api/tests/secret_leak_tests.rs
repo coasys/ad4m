@@ -205,6 +205,8 @@ fn params(method: &str, fx: &Fixture) -> Value {
         | "neighbourhood.ownOnlineStatus"
         | "neighbourhood.onlineAgents"
         | "neighbourhood.otherAgents"
+        | "neighbourhood.members"
+        | "neighbourhood.invites"
         | "perspective.get"
         | "perspective.getAllShacl"
         | "perspective.getShaclNames"

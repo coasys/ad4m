@@ -49,6 +49,8 @@
 //! | `config-changed`              | (inline)      | the operator           | `runtime.setConfig` wrote keys to the config file; they take effect at the next start |
 //! | `link-ticket`                 | (inline)      | the operator on this machine | The executor claimed the offer a holder sent to an open `identity.prepareDevice`: the identity, the match code, and `needsAccept` (a first-run claim binds only after `identity.acceptJoin`) |
 //! | `inbox-message`               | (inline)      | the operator on this machine | A message waits in this executor's inbox (`{id, kind}`, never a body); for `master` the custody service calls `identity.takeMaster` |
+//! | `neighbourhood-membership-changed` | (inline) | owners                 | Membership links a write counted changed who is in the space (`crate::membership`) |
+//! | `neighbourhood-join-refused`  | (inline)      | the agent that joined  | `neighbourhood.join` let the caller in nowhere: the url and the reason |
 //!
 //! Every session also needs the event's capability (`Event::capability`).
 
@@ -151,6 +153,14 @@ pub fn event_specs() -> Vec<EventSpec> {
         EventSpec::of::<crate::identity::types::InboxMessageEvent>(InboxMessage, false),
         EventSpec::of::<crate::at_rest::StorageStatus>(StorageStateChanged, false),
         EventSpec::of::<crate::at_rest::StorageMigrationProgress>(StorageMigrationProgress, false),
+        EventSpec::of::<crate::membership::NeighbourhoodMembershipChangedEvent>(
+            NeighbourhoodMembershipChanged,
+            true,
+        ),
+        EventSpec::of::<crate::membership::NeighbourhoodJoinRefusedEvent>(
+            NeighbourhoodJoinRefused,
+            false,
+        ),
     ]
 }
 
@@ -354,7 +364,9 @@ fn payload_key(topic: Topic) -> Option<&'static str> {
         | Topic::LinkTicket
         | Topic::InboxMessage
         | Topic::StorageStateChanged
-        | Topic::StorageMigrationProgress => None,
+        | Topic::StorageMigrationProgress
+        | Topic::NeighbourhoodMembershipChanged
+        | Topic::NeighbourhoodJoinRefused => None,
     }
 }
 
@@ -2578,6 +2590,13 @@ mod event_spec_tests {
                     stores_done: 2,
                     stores_total: 4,
                     store: Some("language:QmLanguage".into()),
+                }),
+            ),
+            (
+                Topic::NeighbourhoodJoinRefused,
+                serde_json::to_value(crate::membership::NeighbourhoodJoinRefusedEvent {
+                    url: "neighbourhood://Qm".into(),
+                    reason: crate::membership::JoinRefusalReason::InviteOnly,
                 }),
             ),
         ];

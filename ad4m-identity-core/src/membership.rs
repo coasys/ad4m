@@ -133,6 +133,18 @@ pub struct Member {
     pub until: Option<u64>,
 }
 
+/// One counted invite: its expiry and the person who used it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InviteState {
+    /// The invite, `invite://<id>`.
+    pub invite: String,
+    /// When it expires (ms): a self-join timestamped at or after it is refused.
+    pub expires_at: u64,
+    /// The person whose self-join used it.
+    pub used_by: Option<String>,
+}
+
 /// What one counted link changed.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
@@ -411,6 +423,19 @@ impl MembershipGraph {
     /// Every membership, current or ended (`until` set), by person.
     pub fn members(&self) -> Vec<Member> {
         self.state.members.values().cloned().collect()
+    }
+
+    /// Every counted invite, by invite.
+    pub fn invites(&self) -> Vec<InviteState> {
+        self.state
+            .invites
+            .iter()
+            .map(|(invite, held)| InviteState {
+                invite: invite.clone(),
+                expires_at: held.expires_at,
+                used_by: held.used_by.clone(),
+            })
+            .collect()
     }
 
     /// What a self-join by `person` would meet at `now` (ms): `Ok` when it would count or the

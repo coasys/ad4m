@@ -115,3 +115,50 @@ describe("NeighbourhoodClient SFU calls", () => {
     check.mockRestore();
   });
 });
+
+describe("NeighbourhoodClient membership calls", () => {
+  const api = new ApiClient("http://localhost:0", undefined, FakeWebSocket as unknown as new (url: string) => WebSocket);
+  afterAll(() => api.closeAll());
+
+  it("sends each membership call in the shape of its contract", async () => {
+    const client = new NeighbourhoodClient("http://localhost:0", undefined, api);
+    FakeWebSocket.sent = [];
+    await client.members("u");
+    await client.addMember("u", "did:scid:coasys:1:p");
+    await client.addMember("u", "did:scid:coasys:1:a", "admin");
+    await client.removeMember("u", "did:scid:coasys:1:p");
+    await client.leave("u");
+    await client.createInvite("u");
+    await client.createInvite("u", new Date("2026-12-01T00:00:00.000Z"));
+    await client.invites("u");
+    await client.setJoinMode("u", "invite");
+    await client.addBot("u", "did:key:z6Mk");
+    await client.removeBot("u", "did:key:z6Mk");
+
+    expect(FakeWebSocket.sent.filter((m) => m.type.startsWith("neighbourhood."))).toEqual([
+      { type: "neighbourhood.members", params: { uuid: "u" } },
+      { type: "neighbourhood.addMember", params: { uuid: "u", person: "did:scid:coasys:1:p", role: "member" } },
+      { type: "neighbourhood.addMember", params: { uuid: "u", person: "did:scid:coasys:1:a", role: "admin" } },
+      { type: "neighbourhood.removeMember", params: { uuid: "u", person: "did:scid:coasys:1:p" } },
+      { type: "neighbourhood.leave", params: { uuid: "u" } },
+      { type: "neighbourhood.createInvite", params: { uuid: "u" } },
+      { type: "neighbourhood.createInvite", params: { uuid: "u", expiresAt: "2026-12-01T00:00:00.000Z" } },
+      { type: "neighbourhood.invites", params: { uuid: "u" } },
+      { type: "neighbourhood.setJoinMode", params: { uuid: "u", join: "invite" } },
+      { type: "neighbourhood.addBot", params: { uuid: "u", botDid: "did:key:z6Mk" } },
+      { type: "neighbourhood.removeBot", params: { uuid: "u", botDid: "did:key:z6Mk" } },
+    ]);
+  });
+
+  it("sends the invite with a join only when there is one", async () => {
+    const client = new NeighbourhoodClient("http://localhost:0", undefined, api);
+    FakeWebSocket.sent = [];
+    // The fake answers `true`; the handle it makes is not under test.
+    await client.joinFromUrl("ad4m://nh").catch(() => undefined);
+    await client.joinFromUrl("ad4m://nh", { invite: "invite://i" }).catch(() => undefined);
+    expect(FakeWebSocket.sent.filter((m) => m.type === "neighbourhood.join")).toEqual([
+      { type: "neighbourhood.join", params: { url: "ad4m://nh" } },
+      { type: "neighbourhood.join", params: { url: "ad4m://nh", invite: "invite://i" } },
+    ]);
+  });
+});
