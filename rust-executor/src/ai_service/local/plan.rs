@@ -1208,7 +1208,8 @@ mod tests {
     }
 
     /// The embedded data on an 8 GB device without a GPU (cpu-8gb): the default set fits
-    /// the budget of RAM - 4 GiB, by the models' `memoryBytes` (about 2.6 GB together).
+    /// the budget of RAM - 4 GiB. The models' `memoryBytes` are the measured peaks
+    /// (0.8B 1.4 GB, nomic 0.5 GB, Parakeet v3 1.2 GB: 3.1 GB together).
     #[test]
     fn the_embedded_data_plans_a_set_that_fits_8_gb() {
         let data = crate::ai_service::local::data::embedded().unwrap();
@@ -1222,11 +1223,7 @@ mod tests {
             services,
             vec![Service::Llm, Service::Embeddings, Service::Stt]
         );
-        assert!(
-            plan.memory_bytes <= 3_000_000_000,
-            "the set needs {} bytes",
-            plan.memory_bytes
-        );
+        assert_eq!(plan.memory_bytes, 3_100_000_000);
         assert!(plan.memory_bytes <= plan.memory_budget_bytes);
     }
 
@@ -1280,5 +1277,56 @@ mod tests {
         assert_eq!(ids, expected);
         let builds: Vec<_> = cpu.runtimes.iter().map(|r| r.build.as_str()).collect();
         assert_eq!(builds, vec!["linux-x64-cpu", "linux-x64-cpu"]);
+    }
+
+    /// An RTX 3090 (24 GB, CUDA) is nvidia-24gb. The wind tunnel measured Qwen3.8 27B
+    /// there, at a 64k context, on llama-server's CUDA build; nomic rides the same server.
+    /// No STT cell passed, so transcription is the manifest default, not a measured pick.
+    #[test]
+    fn the_embedded_data_plans_qwen3_8_27b_on_nvidia_24gb() {
+        let data = crate::ai_service::local::data::embedded().unwrap();
+        let hardware = device(
+            data,
+            64,
+            vec![gpu(GpuVendor::Nvidia, GpuType::Discrete, 24)],
+            vec![Backend::Cpu, Backend::Vulkan, Backend::Cuda],
+        );
+        assert_eq!(hardware.hardware_class, "nvidia-24gb");
+        let plan = plan(data, &hardware, &nothing_installed);
+        assert!(plan.fits, "{:?}", plan.reasons);
+        let llm = plan
+            .models
+            .iter()
+            .find(|m| m.service == Service::Llm)
+            .unwrap();
+        assert_eq!(llm.model_id, "qwen3.8-27b-ud-q4_k_m");
+        assert_eq!(llm.basis, Basis::Measured);
+        assert_eq!(llm.from_class, "nvidia-24gb");
+        assert_eq!(
+            llm.server_flags.join(" "),
+            "-c 65536 -ngl 999 --reasoning off"
+        );
+        let embed = plan
+            .models
+            .iter()
+            .find(|m| m.service == Service::Embeddings)
+            .unwrap();
+        assert_eq!(embed.model_id, "nomic-embed-text-v1.5-q8_0");
+        assert_eq!(embed.basis, Basis::Measured);
+        assert_eq!(embed.from_class, "nvidia-24gb");
+        let llama = plan
+            .runtimes
+            .iter()
+            .find(|r| r.runtime_id == "llama-server")
+            .unwrap();
+        assert_eq!(llama.build, "linux-x64-cuda");
+        assert_eq!(llama.backend, Backend::Cuda);
+        let stt = plan
+            .models
+            .iter()
+            .find(|m| m.service == Service::Stt)
+            .unwrap();
+        assert_eq!(stt.model_id, "parakeet-tdt-0.6b-v3-q8_0");
+        assert_eq!(stt.basis, Basis::Default);
     }
 }
