@@ -7,7 +7,7 @@ An **executor service** is a Rust module inside the executor that is not a langu
 **Parent:** [Executor](../README.md)
 
 ## Parts
-- [AI service](ai.md): local and remote LLMs, embeddings, transcription, AI tasks, the OpenAI-compatible `/v1` API.
+- [AI service](ai.md): models on endpoints, one-click local AI, AI tasks, AI sessions and the OpenAI-compatible `/v1` API.
 - [SFU](sfu.md): the WebRTC media server in the executor for neighbourhood calls, and cascades of SFUs.
 - [Holochain service](holochain.md): the embedded conductor that Holochain languages and the Unyt DNA run on.
 - [Billing and hosting](billing-and-hosting.md): compute credits per managed agent, host rates, top-ups through the Unyt DNA.

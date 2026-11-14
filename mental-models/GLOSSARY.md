@@ -26,6 +26,10 @@ This file defines each ADAM term once, in alphabetical order. Each entry gives t
 
 **AI service** (`AIService`, `ai_service/endpoints/`, `ai_service/local/`): The executor service that sends LLM, embedding, transcription and speech requests to models on endpoints, which are model servers such as Ollama, llama-server or OpenAI. One-click local AI (`ai.localInstall`) installs model servers on the device and registers them as endpoints. [AI service](agents/executor/services/ai.md)
 
+**AI session** (`AiSession`, `ai.sessionSend`, `ai_sessions` and `ai_messages` tables): A conversation with the executor's AI that the executor stores in its own database. Each turn runs the harness with the MCP tools, within the session's capabilities and the caller's own. [AI service](agents/executor/services/ai.md) — not: agent session (that is `perspective.runAgent`, in one perspective), chat
+
+**AI task** (`AITask`, `ai.addTask`, `tasks` table): A stored system prompt with examples, bound to one LLM. `ai.prompt` sends a prompt through a task. [AI service](agents/executor/services/ai.md)
+
 **ALDK** (`ad4m-ldk/`, `defineLanguage`, `ad4m_language!`): The AD4M Language Development Kit. Developers use it to write languages in TypeScript or in Rust compiled to WASM. [Language interface](languages/runtime/interface.md)
 
 **Alias** (`LanguageController::language_aliases`): One of the names `did`, `lang`, `neighbourhood` and `perspective`, each of which stands for the address of a system language. [Language addresses](languages/expressions/addresses.md)
@@ -56,6 +60,8 @@ This file defines each ADAM term once, in alphabetical order. Each entry gives t
 
 **Consensus rule** (`ConsensusRule` in `shacl_parser.rs`, `ConsensusRule.from_role`): The number of different DIDs that must sign a transition proposal before the transition settles. An optional role is a model query that each voter must match at the time of the vote. [Flows](perspectives/social-dna/flows/README.md)
 
+**Endpoint** (`Endpoint`, `EndpointKind`, `ai_endpoints` table, `ai.addEndpoint`): A model server that the AI service sends requests to, such as Ollama, llama-server, vLLM, OpenAI, Anthropic or a speech server. It holds the URL, the key, the health and the request limits. A model names one endpoint. A managed endpoint is one that local AI registers. [AI service](agents/executor/services/ai.md) — not: provider, backend
+
 **Entanglement proof** (`EntanglementProof`, `entanglement_service`): Two signatures, one in each direction, that link the main agent's DID to another key, such as a device key or a Holochain agent key. [Signing and verification](agents/identity/signing-and-verification.md)
 
 **Event** (`Event` and `Topic` in `events.rs`, `event_specs()`, `events.watch`): A typed message that the executor pushes to each socket that watches its type with `events.watch`. A socket gets it only when its session is in the audience that the publisher names and holds the event's capability. [Events](agents/interfaces/events.md) — not: subscription (that is a live query), notification
@@ -84,7 +90,7 @@ This file defines each ADAM term once, in alphabetical order. Each entry gives t
 
 **Hard-wired class** (`hardwired_class.rs`, `hardwired_sdna/`): A subject class that the executor registers itself from bundled JSON, such as `FlowInstance`, `InterpretationRun` or `AutoProcessor`. [Social DNA](perspectives/social-dna/README.md) — not: built-in class (that is an abstract class that the executor declares and never stores, such as `ad4m://TextContent`)
 
-**Harness** (`ai_service/harness/`, `run_with_tools`): The tool-calling LLM loop that runs agent sessions. Interpretation can use it in place of one prompt. [Interpretation](perspectives/social-dna/interpretation/README.md)
+**Harness** (`ai_service/harness/`, `run_with_tools`): The tool-calling LLM loop that runs agent sessions and AI sessions. Interpretation can use it in place of one prompt. [Interpretation](perspectives/social-dna/interpretation/README.md)
 
 **Holochain service** (`HolochainService`, `HolochainServiceInterface`): The executor service that runs the embedded Holochain conductor behind one actor channel. [Holochain service](agents/executor/services/holochain.md)
 
@@ -131,6 +137,8 @@ This file defines each ADAM term once, in alphabetical order. Each entry gives t
 **Literal expression** (`Literal`, `literal_encode`, `literal_decode`): A value that its URL holds in full: `literal:string:`, `literal:number:`, `literal:boolean:` or `literal:json:`. [Literal expressions](languages/expressions/literals.md) — not: literal target (a literal target is a literal expression in a link's target)
 
 **Live query** (`SubscribedQuery`, `perspective.subscribeQuery`, `perspective.modelSubscribe`): A SPARQL query or model query that the executor runs again after relevant writes. The executor sends each change of the result only to the RPC connection that opened the query. [Live queries](perspectives/querying/live-queries.md) — not: query subscription, subscription
+
+**Local AI** (`ai_service/local/`, `ai.localInstall`): The AI service part that installs model servers and models on the device, supervises them as child processes and registers them as managed endpoints. It downloads only when the operator asks. [AI service](agents/executor/services/ai.md) — not: local model, in-process model
 
 **Local link language** (`bootstrap-languages/local/link-language.js`): A link language with no peers that keeps links in the executor's key-value store. [Local link language](languages/link-languages/local-link-language.md)
 
