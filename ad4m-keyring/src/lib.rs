@@ -45,4 +45,7 @@ pub mod tags {
     /// HKDF `info` of the room-key seal: the server link language's `SEALED_BOX_INFO` and the
     /// executor's sealed boxes.
     pub const ROOM_KEY_SEAL_V1: &str = "ad4m:sealed-box:v1";
+    /// HKDF `info` (no salt) of a room's link-hash key, derived from the room key's version 1
+    /// (AR-08 K4): the key of the HMAC that names an encrypted link on the link server.
+    pub const LINK_HASH_V1: &str = "adam-server-link-language:link-hash:v1";
 }

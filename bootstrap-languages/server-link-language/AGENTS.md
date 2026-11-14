@@ -57,7 +57,13 @@ src/telepresence.ts              — online-agent roster + outbound signal/broad
 src/encryption.ts                 — room keys sealed to DIDs via the executor, key ring, AES-256-GCM link encryption
 src/room-keys.ts                   — admin rotation (seals to every ACL member) and any member's grants
 tests/*.test.ts                    — node:test + tsx, one file per pure module, all use mock adapters (no real network/WS/Deno)
+keyring/keyring.js                 — generated, gitignored: ad4m-keyring's JS binding (--target deno, wasm inlined); ad4m-keyring/wasm/build.sh
 ```
+
+`tests/keyring.test.ts` imports `keyring/keyring.js`, so run `bash
+ad4m-keyring/wasm/build.sh` (from the repo root) before the tests. It checks the binding
+against `ad4m-keyring/vectors/room-key-seal.json` byte for byte and against noble's X25519
+and HKDF. The language's `src/encryption.ts` does not use the binding yet.
 
 ## Non-obvious conventions
 

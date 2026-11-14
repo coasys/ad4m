@@ -278,6 +278,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "ad4m-keyring-wasm"
+version = "0.1.0"
+dependencies = [
+ "ad4m-keyring",
+ "hex",
+ "hkdf 0.12.4",
+ "js-sys",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "wasm-bindgen",
+ "wasm-bindgen-test",
+ "x25519-dalek 2.0.1",
+ "zeroize",
+]
+
+[[package]]
 name = "ad4m-launcher"
 version = "0.13.1-staging.11"
 dependencies = [
