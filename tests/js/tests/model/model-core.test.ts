@@ -109,7 +109,7 @@ describe("Ad4mModel — Core CRUD", function () {
       title: "getData Target",
       body: "snapshot body",
     });
-    const data = await post.get();
+    const data = (await post.get())!;
     expect(data).to.be.an("object");
     expect(data.title).to.equal("getData Target");
     expect(data.body).to.equal("snapshot body");
