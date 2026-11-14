@@ -278,6 +278,7 @@ pub(crate) fn request_context(session: Arc<Session>) -> crate::types::RequestCon
         cancel_token: None,
         session,
         connection_id: None,
+        query_slots: None,
     }
 }
 

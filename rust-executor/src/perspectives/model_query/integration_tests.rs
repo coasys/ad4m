@@ -808,9 +808,9 @@ async fn test_build_projection_order_clause_by_id() {
 }
 
 // -----------------------------------------------------------------------
-// Integration tests: resolve_projections()
+// Integration tests: resolve_projections(&crate::perspectives::sparql_store::EvalStop::none(),)
 //
-// These tests verify that resolve_projections() correctly issues grouped
+// These tests verify that resolve_projections(&crate::perspectives::sparql_store::EvalStop::none(),) correctly issues grouped
 // SPARQL queries against a real SparqlStore and attaches the results to
 // the parent instance objects.
 // -----------------------------------------------------------------------
@@ -888,6 +888,7 @@ async fn test_resolve_projections_count() {
     {
         let _resolver = super::test_helpers::StaticShapeResolver::new();
         resolve_projections(
+            &crate::perspectives::sparql_store::EvalStop::none(),
             &store,
             &mut instances,
             &projections,
@@ -944,6 +945,7 @@ async fn test_resolve_projections_list() {
     {
         let _resolver = super::test_helpers::StaticShapeResolver::new();
         resolve_projections(
+            &crate::perspectives::sparql_store::EvalStop::none(),
             &store,
             &mut instances,
             &projections,
@@ -999,6 +1001,7 @@ async fn test_resolve_projections_scalar() {
     {
         let _resolver = super::test_helpers::StaticShapeResolver::new();
         resolve_projections(
+            &crate::perspectives::sparql_store::EvalStop::none(),
             &store,
             &mut instances,
             &projections,
@@ -1046,6 +1049,7 @@ async fn test_resolve_projections_count_zero_when_no_links() {
     {
         let _resolver = super::test_helpers::StaticShapeResolver::new();
         resolve_projections(
+            &crate::perspectives::sparql_store::EvalStop::none(),
             &store,
             &mut instances,
             &projections,
@@ -1123,6 +1127,7 @@ async fn test_resolve_projections_where_filter_by_plain_iri() {
     {
         let _resolver = super::test_helpers::StaticShapeResolver::new();
         resolve_projections(
+            &crate::perspectives::sparql_store::EvalStop::none(),
             &store,
             &mut instances,
             &projections,
@@ -1197,6 +1202,7 @@ async fn test_resolve_projections_where_filter_by_author() {
     {
         let _resolver = super::test_helpers::StaticShapeResolver::new();
         resolve_projections(
+            &crate::perspectives::sparql_store::EvalStop::none(),
             &store,
             &mut instances,
             &projections,
@@ -1485,8 +1491,16 @@ async fn test_evaluate_getters_where_compiled_literal_filter() {
     };
 
     let mut instances = vec![serde_json::json!({"id": board})];
-    let eval_result =
-        evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true));
+    let eval_result = evaluate_getters(
+        &crate::perspectives::sparql_store::EvalStop::none(),
+        &store,
+        &mut instances,
+        &shape,
+        None,
+        true,
+        None,
+        Some(true),
+    );
     assert!(
         eval_result.is_ok(),
         "evaluate_getters should succeed: {:?}",
@@ -2057,7 +2071,17 @@ async fn test_where_filter_signed_expression_string() {
     };
 
     let mut instances = vec![json!({"id": board})];
-    evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true)).unwrap();
+    evaluate_getters(
+        &crate::perspectives::sparql_store::EvalStop::none(),
+        &store,
+        &mut instances,
+        &shape,
+        None,
+        true,
+        None,
+        Some(true),
+    )
+    .unwrap();
 
     let active = instances[0]["activeTasks"].as_array().unwrap();
     assert_eq!(
@@ -2136,7 +2160,17 @@ async fn test_where_filter_signed_expression_no_matches() {
     };
 
     let mut instances = vec![json!({"id": parent})];
-    evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true)).unwrap();
+    evaluate_getters(
+        &crate::perspectives::sparql_store::EvalStop::none(),
+        &store,
+        &mut instances,
+        &shape,
+        None,
+        true,
+        None,
+        Some(true),
+    )
+    .unwrap();
 
     let result = instances[0]["activeChildren"].as_array().unwrap();
     assert_eq!(result.len(), 0, "Should be empty when no matches");
@@ -2263,7 +2297,17 @@ async fn test_where_filter_multiple_conditions() {
     };
 
     let mut instances = vec![json!({"id": board})];
-    evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true)).unwrap();
+    evaluate_getters(
+        &crate::perspectives::sparql_store::EvalStop::none(),
+        &store,
+        &mut instances,
+        &shape,
+        None,
+        true,
+        None,
+        Some(true),
+    )
+    .unwrap();
 
     let result = instances[0]["highPriActive"].as_array().unwrap();
     assert_eq!(result.len(), 1, "Only task_hi should match: {:?}", result);
@@ -2335,7 +2379,17 @@ async fn test_where_filter_missing_property_on_target() {
     };
 
     let mut instances = vec![json!({"id": parent})];
-    evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true)).unwrap();
+    evaluate_getters(
+        &crate::perspectives::sparql_store::EvalStop::none(),
+        &store,
+        &mut instances,
+        &shape,
+        None,
+        true,
+        None,
+        Some(true),
+    )
+    .unwrap();
 
     let result = instances[0]["active"].as_array().unwrap();
     assert_eq!(result.len(), 1, "Only child_with should match");
@@ -2405,7 +2459,17 @@ async fn test_where_filter_plain_literal_string() {
     };
 
     let mut instances = vec![json!({"id": parent})];
-    evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true)).unwrap();
+    evaluate_getters(
+        &crate::perspectives::sparql_store::EvalStop::none(),
+        &store,
+        &mut instances,
+        &shape,
+        None,
+        true,
+        None,
+        Some(true),
+    )
+    .unwrap();
 
     let result = instances[0]["redChildren"].as_array().unwrap();
     assert_eq!(result.len(), 1);
@@ -2498,7 +2562,17 @@ async fn test_where_filter_on_multiple_instances() {
     };
 
     let mut instances = vec![json!({"id": board1}), json!({"id": board2})];
-    evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true)).unwrap();
+    evaluate_getters(
+        &crate::perspectives::sparql_store::EvalStop::none(),
+        &store,
+        &mut instances,
+        &shape,
+        None,
+        true,
+        None,
+        Some(true),
+    )
+    .unwrap();
 
     let active1 = instances[0]["activeTasks"].as_array().unwrap();
     assert_eq!(active1.len(), 1, "board1 should have 1 active task");
@@ -4062,7 +4136,12 @@ async fn test_perf_flux_message_parent_scope_paginated() {
         <test://channel-2> <ad4m://has_child> ?source .
         ?source <flux://entry_type> <flux://has_message> .
     } LIMIT 30"#;
-    let _r = store.query(q_no_order).unwrap();
+    let _r = store
+        .query(
+            &crate::perspectives::sparql_store::EvalStop::none(),
+            q_no_order,
+        )
+        .unwrap();
     eprintln!("[RAW] no ORDER BY: {:?}", t_no_order.elapsed());
 
     // Test 2: Flag-reifier probe (what we currently generate)
@@ -4073,7 +4152,9 @@ async fn test_perf_flux_message_parent_scope_paginated() {
         ?_r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source <flux://entry_type> <flux://has_message> )>> .
         ?_r <ad4m://ontology/timestamp> ?_first_ts .
     } ORDER BY DESC(?_first_ts) LIMIT 30"#;
-    let _r = store.query(q_flag).unwrap();
+    let _r = store
+        .query(&crate::perspectives::sparql_store::EvalStop::none(), q_flag)
+        .unwrap();
     eprintln!("[RAW] flag-reifier ORDER BY: {:?}", t_flag.elapsed());
 
     // Test 3: Parent-reifier probe (uses the fully-bound parent IRI)
@@ -4084,7 +4165,12 @@ async fn test_perf_flux_message_parent_scope_paginated() {
         ?_r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( <test://channel-2> <ad4m://has_child> ?source )>> .
         ?_r <ad4m://ontology/timestamp> ?_first_ts .
     } ORDER BY DESC(?_first_ts) LIMIT 30"#;
-    let _r = store.query(q_parent).unwrap();
+    let _r = store
+        .query(
+            &crate::perspectives::sparql_store::EvalStop::none(),
+            q_parent,
+        )
+        .unwrap();
     eprintln!("[RAW] parent-reifier ORDER BY: {:?}", t_parent.elapsed());
 
     // Test 4: Wildcard reifier (the old expensive pattern)
@@ -4096,7 +4182,9 @@ async fn test_perf_flux_message_parent_scope_paginated() {
         ?_r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?_anyP ?_anyT )>> .
         ?_r <ad4m://ontology/timestamp> ?_first_ts .
     } ORDER BY DESC(?_first_ts) LIMIT 30"#;
-    let _r = store.query(q_wild).unwrap();
+    let _r = store
+        .query(&crate::perspectives::sparql_store::EvalStop::none(), q_wild)
+        .unwrap();
     eprintln!("[RAW] wildcard-reifier ORDER BY: {:?}", t_wild.elapsed());
 
     // Test 5: Full outer query (the actual generated pattern)
@@ -4117,7 +4205,12 @@ async fn test_perf_flux_message_parent_scope_paginated() {
         ?_reifier <ad4m://ontology/author> ?author .
         ?_reifier <ad4m://ontology/timestamp> ?timestamp .
     }"#;
-    let r_full: Vec<Value> = serde_json::from_str(&store.query(q_full).unwrap()).unwrap();
+    let r_full: Vec<Value> = serde_json::from_str(
+        &store
+            .query(&crate::perspectives::sparql_store::EvalStop::none(), q_full)
+            .unwrap(),
+    )
+    .unwrap();
     eprintln!(
         "[RAW] full outer query: {:?} ({} rows)",
         t_full.elapsed(),
@@ -4132,7 +4225,12 @@ async fn test_perf_flux_message_parent_scope_paginated() {
         ?_r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source <flux://entry_type> <flux://has_message> )>> .
         ?_r <ad4m://ontology/timestamp> ?_first_ts .
     } ORDER BY DESC(?_first_ts) LIMIT 30"#;
-    let ids_json: Vec<Value> = serde_json::from_str(&store.query(q_ids).unwrap()).unwrap();
+    let ids_json: Vec<Value> = serde_json::from_str(
+        &store
+            .query(&crate::perspectives::sparql_store::EvalStop::none(), q_ids)
+            .unwrap(),
+    )
+    .unwrap();
     let source_values: String = ids_json
         .iter()
         .filter_map(|r| r["source"].as_str())
@@ -4151,7 +4249,15 @@ async fn test_perf_flux_message_parent_scope_paginated() {
         ?_reifier <ad4m://ontology/timestamp> ?timestamp .
     }}"#
     );
-    let r_outer: Vec<Value> = serde_json::from_str(&store.query(&q_outer).unwrap()).unwrap();
+    let r_outer: Vec<Value> = serde_json::from_str(
+        &store
+            .query(
+                &crate::perspectives::sparql_store::EvalStop::none(),
+                &q_outer,
+            )
+            .unwrap(),
+    )
+    .unwrap();
     eprintln!(
         "[RAW] pre-materialized VALUES outer: {:?} ({} rows)",
         t_outer.elapsed(),
@@ -4473,6 +4579,7 @@ async fn test_resolve_projections_where_filter_via_target_shape_property() {
     );
 
     resolve_projections(
+        &crate::perspectives::sparql_store::EvalStop::none(),
         &store,
         &mut instances,
         &projections,
@@ -4508,6 +4615,7 @@ async fn test_resolve_projections_where_filter_via_target_shape_property() {
     );
 
     resolve_projections(
+        &crate::perspectives::sparql_store::EvalStop::none(),
         &store,
         &mut instances2,
         &projections2,
@@ -5226,8 +5334,18 @@ fn bench_indexed_literal_vs_str_filter() {
     );
 
     // Warm-up — touch every triple under both query plans before timing.
-    let _ = store.query(&indexed).unwrap();
-    let _ = store.query(&filtered).unwrap();
+    let _ = store
+        .query(
+            &crate::perspectives::sparql_store::EvalStop::none(),
+            &indexed,
+        )
+        .unwrap();
+    let _ = store
+        .query(
+            &crate::perspectives::sparql_store::EvalStop::none(),
+            &filtered,
+        )
+        .unwrap();
 
     let runs = 5;
     let mut indexed_total = std::time::Duration::ZERO;
@@ -5236,7 +5354,12 @@ fn bench_indexed_literal_vs_str_filter() {
 
     for _ in 0..runs {
         let start = Instant::now();
-        let r = store.query(&indexed).unwrap();
+        let r = store
+            .query(
+                &crate::perspectives::sparql_store::EvalStop::none(),
+                &indexed,
+            )
+            .unwrap();
         indexed_total += start.elapsed();
         let rows: Vec<Value> = serde_json::from_str(&r).unwrap();
         assert_eq!(rows.len(), 1, "indexed query must return exactly 1 row");
@@ -5247,7 +5370,12 @@ fn bench_indexed_literal_vs_str_filter() {
         );
 
         let start = Instant::now();
-        let r = store.query(&filtered).unwrap();
+        let r = store
+            .query(
+                &crate::perspectives::sparql_store::EvalStop::none(),
+                &filtered,
+            )
+            .unwrap();
         filtered_total += start.elapsed();
         let rows: Vec<Value> = serde_json::from_str(&r).unwrap();
         assert_eq!(rows.len(), 1, "filtered query must return exactly 1 row");
@@ -5390,6 +5518,7 @@ async fn test_persistent_store_typed_literal_comparison() {
     // Diagnostic: raw SPARQL to verify typed literal comparison
     let raw_gt = store
         .query(
+            &crate::perspectives::sparql_store::EvalStop::none(),
             r#"SELECT ?s WHERE {
                 ?s <ns://score> ?v .
                 FILTER(?v > "50"^^<http://www.w3.org/2001/XMLSchema#integer>)
@@ -5406,6 +5535,7 @@ async fn test_persistent_store_typed_literal_comparison() {
 
     let raw_neq = store
         .query(
+            &crate::perspectives::sparql_store::EvalStop::none(),
             r#"SELECT ?s WHERE {
                 ?s <ns://name> ?v .
                 FILTER(?v != "Alpha"^^<http://www.w3.org/2001/XMLSchema#string>)
@@ -5739,7 +5869,13 @@ async fn test_subject_classes_of_batch() {
         "ns://c".to_string(),
         "ns://nothing".to_string(),
     ];
-    let result = subject_classes_of(&store, &resolver, &uris).unwrap();
+    let result = subject_classes_of(
+        &crate::perspectives::sparql_store::EvalStop::none(),
+        &store,
+        &resolver,
+        &uris,
+    )
+    .unwrap();
 
     assert_eq!(result.get("ns://a"), Some(&vec!["TextBlock".to_string()]));
     assert_eq!(result.get("ns://b"), Some(&vec!["ImageBlock".to_string()]));
@@ -5799,7 +5935,13 @@ async fn test_subject_classes_of_mixed_absolute_and_unusable_uris() {
         ":leading-colon".to_string(),
         "ns://b".to_string(),
     ];
-    let result = subject_classes_of(&store, &resolver, &uris).expect("the batch still resolves");
+    let result = subject_classes_of(
+        &crate::perspectives::sparql_store::EvalStop::none(),
+        &store,
+        &resolver,
+        &uris,
+    )
+    .expect("the batch still resolves");
 
     assert_eq!(result.get("ns://a"), Some(&vec!["TextBlock".to_string()]));
     assert_eq!(
@@ -5859,8 +6001,13 @@ async fn test_subject_classes_of_skips_class_with_unusable_predicate() {
         .add_link(&make_link("ns://a", "title", "literal:string:hi", "2"))
         .unwrap();
 
-    let result =
-        subject_classes_of(&store, &resolver, &["ns://a".to_string()]).expect("the batch resolves");
+    let result = subject_classes_of(
+        &crate::perspectives::sparql_store::EvalStop::none(),
+        &store,
+        &resolver,
+        &["ns://a".to_string()],
+    )
+    .expect("the batch resolves");
 
     assert_eq!(
         result.get("ns://a"),
@@ -5904,7 +6051,13 @@ async fn test_subject_classes_of_requires_every_triple_not_just_a_flag() {
         .add_link(&make_link("ns://a", "ns://flag", "ns://text_block", "2"))
         .unwrap();
 
-    let result = subject_classes_of(&store, &resolver, &["ns://a".to_string()]).unwrap();
+    let result = subject_classes_of(
+        &crate::perspectives::sparql_store::EvalStop::none(),
+        &store,
+        &resolver,
+        &["ns://a".to_string()],
+    )
+    .unwrap();
 
     assert!(
         !result.contains_key("ns://a"),
@@ -5961,7 +6114,13 @@ async fn test_subject_classes_of_returns_every_class_most_specific_first() {
         .add_link(&make_link("ns://a", "ns://text", "literal:string:hi", "2"))
         .unwrap();
 
-    let result = subject_classes_of(&store, &resolver, &["ns://a".to_string()]).unwrap();
+    let result = subject_classes_of(
+        &crate::perspectives::sparql_store::EvalStop::none(),
+        &store,
+        &resolver,
+        &["ns://a".to_string()],
+    )
+    .unwrap();
 
     let classes = result.get("ns://a").expect("ns://a is classified");
     assert_eq!(
@@ -10021,4 +10180,49 @@ async fn a_short_page_sliced_per_anchor_keeps_the_stores_count() {
         result.total_count, 3,
         "the page is short because of the slice, not because the scope ran out"
     );
+}
+
+/// A getter cut off by the call's stop fails the call. Logging and skipping it,
+/// as for a getter that errors on its own, would answer with properties missing,
+/// and a model subscription's re-check would keep that as its baseline.
+#[tokio::test]
+async fn a_stopped_getter_fails_the_call_instead_of_dropping_the_property() {
+    let store = SparqlStore::new(None).unwrap();
+    store
+        .add_link(&make_link(
+            "test://inst-1",
+            "test://is_active",
+            "literal:boolean:true",
+            "2024-01-01T00:00:00Z",
+        ))
+        .unwrap();
+    let shape = parse_shape_from_json(
+        r#"{
+        "className": "TestModel",
+        "properties": {
+            "isActive": {
+                "predicate": "test://is_active",
+                "getter": "ASK WHERE { <Base> <test://is_active> ?x }"
+            },
+            "status": {
+                "predicate": "test://is_active",
+                "getter": "SELECT ?value WHERE { <Base> <test://is_active> ?value }"
+            }
+        },
+        "relations": {}
+    }"#,
+        "TestModel",
+    )
+    .unwrap();
+
+    let result = super::getters::evaluate_getters_batch(
+        &crate::perspectives::sparql_store::EvalStop::cancelled(),
+        &store,
+        &shape,
+        &["test://inst-1".to_string()],
+        None,
+    );
+
+    let err = result.expect_err("a stopped getter must fail the call, not drop the property");
+    assert!(err.to_string().contains("cancelled"), "{err}");
 }

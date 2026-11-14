@@ -67,6 +67,7 @@ async fn sync_in(
 fn present(p: &PerspectiveInstance, link: &LinkExpression) -> bool {
     p.sparql_store
         .get_link(
+            &crate::perspectives::sparql_store::EvalStop::none(),
             &link.data.source,
             link.data.predicate.as_deref(),
             &link.data.target,
@@ -235,7 +236,15 @@ async fn t2_update_link_refuses_to_replace_a_shared_monotonic_link() {
     assert!(present(&p, &field));
     let targets: Vec<String> = p
         .sparql_store
-        .query_links(Some(PROPOSAL), Some(TO_STATE), None, None, None, None)
+        .query_links(
+            &crate::perspectives::sparql_store::EvalStop::none(),
+            Some(PROPOSAL),
+            Some(TO_STATE),
+            None,
+            None,
+            None,
+            None,
+        )
         .unwrap()
         .into_iter()
         .map(|l| l.data.target)
@@ -268,7 +277,15 @@ async fn t2_link_mutations_refuses_and_writes_nothing() {
     assert!(present(&p, &vote));
     assert!(
         p.sparql_store
-            .query_links(Some(PROPOSAL), Some(PLAIN), None, None, None, None)
+            .query_links(
+                &crate::perspectives::sparql_store::EvalStop::none(),
+                Some(PROPOSAL),
+                Some(PLAIN),
+                None,
+                None,
+                None,
+                None
+            )
             .unwrap()
             .is_empty(),
         "the addition in the refused call is not written either"
@@ -327,7 +344,15 @@ async fn t2_commit_batch_refuses_a_queued_shared_monotonic_removal() {
     assert!(present(&p, &vote));
     assert!(p
         .sparql_store
-        .query_links(Some(PROPOSAL), Some(PLAIN), None, None, None, None)
+        .query_links(
+            &crate::perspectives::sparql_store::EvalStop::none(),
+            Some(PROPOSAL),
+            Some(PLAIN),
+            None,
+            None,
+            None,
+            None
+        )
         .unwrap()
         .is_empty());
 }
@@ -451,7 +476,15 @@ async fn t2_a_batched_update_of_a_local_flow_link_commits() {
     assert!(!present(&p, &cache));
     let targets: Vec<String> = p
         .sparql_store
-        .query_links(Some(PROPOSAL), Some(CURRENT_STATE), None, None, None, None)
+        .query_links(
+            &crate::perspectives::sparql_store::EvalStop::none(),
+            Some(PROPOSAL),
+            Some(CURRENT_STATE),
+            None,
+            None,
+            None,
+            None,
+        )
         .unwrap()
         .into_iter()
         .map(|l| l.data.target)

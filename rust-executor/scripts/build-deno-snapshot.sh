@@ -7,9 +7,19 @@
 # depends only on the files below, the locked crate versions and the platform.
 # A hit skips the `generate_snapshot` compile of the whole executor lib.
 #
+# The stamp (CUSTOM_DENO_SNAPSHOT.inputs) holds "<input hash> <output digest>":
+# the outputs' digest is the sha256 of their content hashes. The outputs are
+# "up to date" only when both match, so outputs that something else put here
+# (another commit's, restored from a CI stash into a kept workdir) are rebuilt
+# and never embedded: their op count would not be the binary's, and deno
+# panics at startup.
+#
 #   FORCE_DENO_SNAPSHOT=1   build even when the stamp matches.
 #   CI_ARTIFACT_DIR=<dir>   also keep and reuse the outputs in
 #                           <dir>/deno-snapshot/<hash>/ (host-wide CI cache).
+#                           Each entry has a `digest` file; an entry without
+#                           one, or whose files do not match it, is never
+#                           restored and is replaced by the next store.
 #
 # A new `extension!` in the snapshot list, or a new file that one of them
 # reads, must go into `inputs` below. A listed file that is gone stops the
@@ -60,19 +70,34 @@ have_outputs() {
   done
 }
 
+# The digest of the outputs in a directory: the same files give the same
+# digest wherever they are. Fails when an output is missing or empty.
+digest() {
+  have_outputs "$1" || return 1
+  (cd "$1" && sha256 "${outputs[@]}") | sha256 | cut -c1-64
+}
+
+# A cache entry is whole when its files match the digest it was stored with.
+entry_ok() {
+  local entry=$1 want have
+  want=$(cat "$entry/digest" 2>/dev/null) && [[ -n "$want" ]] \
+    && have=$(digest "$entry") && [[ "$have" == "$want" ]]
+}
+
 cache=${CI_ARTIFACT_DIR:+$CI_ARTIFACT_DIR/deno-snapshot}
 
-# Puts the outputs in the host-wide cache (CI only) and drops the entries that
-# no build used for a day (about 6 MB each). A cache that cannot be written
-# (disk full) costs the next run a build, never this one: the snapshot is
-# already made.
+# Puts the outputs (whose digest is $1) in the host-wide cache (CI only) and
+# drops the entries that no build used for a day (about 6 MB each). A cache
+# that cannot be written (disk full) costs the next run a build, never this
+# one: the snapshot is already made.
 store() {
   [[ -n "$cache" ]] || return 0
-  if have_outputs "$cache/$hash"; then
-    touch "$cache/$hash" || true
+  local sum=$1 entry=$cache/$hash
+  if entry_ok "$entry"; then
+    touch "$entry" || true
   else
-    # An entry that lost an output (not one this script published) would
-    # otherwise stay, touched by every build that falls back to building.
+    # An entry from before digests, or one that lost or changed an output,
+    # would otherwise stay, touched by every build that falls back to building.
     rm -rf "${cache:?}/$hash" || true
     local tmp
     # mktemp: runners in separate containers can share a PID.
@@ -80,8 +105,9 @@ store() {
     # A partial copy is never published: only a complete $tmp is renamed.
     # mktemp makes it 0700; runners under other users must read the entry.
     if mkdir -p "$cache" && tmp=$(mktemp -d "$cache/$hash.tmp.XXXXXX") \
-      && chmod 755 "$tmp" && cp "${outputs[@]}" "$tmp/"; then
-      mv -T "$tmp" "$cache/$hash" 2>/dev/null || rm -rf "$tmp"
+      && chmod 755 "$tmp" && cp "${outputs[@]}" "$tmp/" \
+      && echo "$sum" >"$tmp/digest"; then
+      mv -T "$tmp" "$entry" 2>/dev/null || rm -rf "$tmp"
     else
       rm -rf "${tmp:-}"
     fi
@@ -90,23 +116,31 @@ store() {
 }
 
 if [[ "${FORCE_DENO_SNAPSHOT:-}" != 1 ]]; then
-  if [[ "$(cat "$stamp" 2>/dev/null)" == "$hash" ]] && have_outputs .; then
-    store
+  if sum=$(digest .) && [[ "$(cat "$stamp" 2>/dev/null)" == "$hash $sum" ]]; then
+    store "$sum"
     echo "Deno snapshot up to date ($hash)"
     exit 0
   fi
-  # A copy that fails (another runner pruned the entry meanwhile) builds.
-  if [[ -n "$cache" ]] && have_outputs "$cache/$hash" && cp "${outputs[@]/#/$cache/$hash/}" .; then
-    echo "$hash" >"$stamp"
-    store
-    echo "Deno snapshot restored from $cache/$hash"
-    exit 0
+  rm -f "$stamp"
+  # Only an entry with a digest is copied, and the copy must match it. A copy
+  # that fails (another runner pruned the entry meanwhile) or does not match
+  # builds, and the store after the build replaces a damaged entry.
+  if [[ -n "$cache" ]] && want=$(cat "$cache/$hash/digest" 2>/dev/null) && [[ -n "$want" ]] \
+    && have_outputs "$cache/$hash" && cp "${outputs[@]/#/$cache/$hash/}" .; then
+    if sum=$(digest .) && [[ "$sum" == "$want" ]]; then
+      echo "$hash $sum" >"$stamp"
+      store "$sum"
+      echo "Deno snapshot restored from $cache/$hash"
+      exit 0
+    fi
+    echo "Deno snapshot cache entry $cache/$hash does not match its digest; building"
   fi
 fi
 
 # A stamp left from a run that failed half-way would vouch for mixed outputs.
 rm -f "$stamp"
 cargo run --release --features generate_snapshot --bin generate_snapshot
-echo "$hash" >"$stamp"
-store
+sum=$(digest .)
+echo "$hash $sum" >"$stamp"
+store "$sum"
 echo "Deno snapshot built ($hash)"

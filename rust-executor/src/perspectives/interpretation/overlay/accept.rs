@@ -140,9 +140,10 @@ pub(crate) async fn list_overlays(
         bases.into_iter().partition(|b| emittable_iri(b));
     let mut by_base: BTreeMap<String, Vec<DecoratedLinkExpression>> = BTreeMap::new();
     if !iri_bases.is_empty() {
-        let rows = perspective
-            .sparql_store
-            .query_decorated_links(&overlay_links_query(&iri_bases))?;
+        let rows = perspective.sparql_store.query_decorated_links(
+            &crate::perspectives::sparql_store::EvalStop::none(),
+            &overlay_links_query(&iri_bases),
+        )?;
         for l in rows {
             by_base.entry(l.data.source.clone()).or_default().push(l);
         }
@@ -1046,14 +1047,19 @@ mod tests {
             ),
         );
         assert_eq!(
-            p.sparql_store.query_decorated_links(&scan).unwrap().len(),
+            p.sparql_store
+                .query_decorated_links(&crate::perspectives::sparql_store::EvalStop::none(), &scan)
+                .unwrap()
+                .len(),
             3
         );
 
         let reps = 5;
         let t = std::time::Instant::now();
         for _ in 0..reps {
-            p.sparql_store.query_decorated_links(&scan).unwrap();
+            p.sparql_store
+                .query_decorated_links(&crate::perspectives::sparql_store::EvalStop::none(), &scan)
+                .unwrap();
         }
         let scan_ms = t.elapsed().as_secs_f64() * 1000.0 / f64::from(reps);
         let t = std::time::Instant::now();
