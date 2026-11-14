@@ -1240,6 +1240,29 @@ mod tests {
         assert_eq!(flow_name_from_uri("plain"), None);
     }
 
+    /// Fetched records come through the model's `hydrateFromLinks` decode
+    /// (RFC3339 → epoch millis), so the earliest run is picked on time —
+    /// not, as with both sorts at +∞, on whichever URI happens to sort
+    /// first.
+    #[test]
+    fn the_earliest_run_wins_on_time_not_on_uri_order() {
+        let mut records = vec![
+            json!({"id": "a://run-late", "createdAt": "2026-01-02T00:00:00.000Z"}),
+            json!({"id": "z://run-early", "createdAt": "2026-01-01T00:00:00.000Z"}),
+        ];
+        for r in &mut records {
+            crate::model::decode_timestamps_in_instance(r);
+        }
+        records.sort_by(|a, b| {
+            started_at(a)
+                .partial_cmp(&started_at(b))
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| record_id(a).cmp(record_id(b)))
+        });
+        assert_eq!(record_id(&records[0]), "z://run-early");
+        assert_eq!(started_at(&records[0]), 1767225600000.0);
+    }
+
     #[test]
     fn state_of_prefers_recorded_then_first_state() {
         let mut flow = ShaclFlow::new("F", "ns://");

@@ -238,11 +238,12 @@ impl Model {
             Value::String(s) => serde_json::from_str(s)?,
             other => other.clone(),
         };
-        let instances = parsed
+        let mut instances = parsed
             .get("instances")
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
+        decode_timestamps(&mut instances);
         let total_count = parsed.get("totalCount").and_then(Value::as_u64);
         Ok(ModelResult {
             instances,
@@ -611,14 +612,43 @@ fn parse_model_result(raw: &Value) -> ModelResult {
         Value::String(s) => serde_json::from_str(s).unwrap_or_else(|_| raw.clone()),
         v => v.clone(),
     };
-    let instances = parsed
+    let mut instances = parsed
         .get("instances")
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_else(|| parsed.as_array().cloned().unwrap_or_default());
+    decode_timestamps(&mut instances);
     ModelResult {
         instances,
         total_count: parsed.get("totalCount").and_then(Value::as_u64),
+    }
+}
+
+fn decode_timestamps(instances: &mut [Value]) {
+    for instance in instances {
+        decode_timestamps_in_instance(instance);
+    }
+}
+
+/// The decode TS `hydrateFromLinks` applies where the executor's hydration
+/// wrote `createdAt`/`updatedAt` as RFC3339 strings: a string containing
+/// 'T' becomes `Date.getTime()` — epoch millis — so a fetched row carries
+/// typed values, not strings (and `FlowInstance.startedAtMillis` reads the
+/// number it expects). An RFC3339-unparseable value stays as it arrived:
+/// `getTime()` on it yields NaN, which no honest JSON value can stand in
+/// for.
+pub(crate) fn decode_timestamps_in_instance(instance: &mut Value) {
+    let Some(obj) = instance.as_object_mut() else {
+        return;
+    };
+    for key in ["createdAt", "updatedAt"] {
+        let s = match obj.get(key).and_then(Value::as_str) {
+            Some(s) if s.contains('T') => s.to_string(),
+            _ => continue,
+        };
+        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&s) {
+            obj.insert(key.into(), Value::from(dt.timestamp_millis()));
+        }
     }
 }
 
@@ -690,5 +720,35 @@ mod tests {
             apply_update(&old, &update).unwrap(),
             json!([{"a": 1}, {"a": 2}])
         );
+    }
+
+    /// The executor hydrates `createdAt`/`updatedAt` as RFC3339 strings; TS
+    /// `hydrateFromLinks` converts them to epoch millis before a caller sees
+    /// the row (and `FlowInstance.startedAtMillis` reads a number). The Rust
+    /// row must carry the same typed value.
+    #[test]
+    fn hydrated_rows_decode_timestamps_to_epoch_millis() {
+        let raw = json!({"instances":[{
+            "id": "x://1",
+            "createdAt": "2026-01-01T00:00:00.000Z",
+            "updatedAt": "2026-01-02T00:00:00.000Z",
+            "title": "a"
+        }],"totalCount":1});
+        let r = parse_model_result(&raw);
+        assert_eq!(r.instances[0]["createdAt"], json!(1767225600000_i64));
+        assert_eq!(r.instances[0]["updatedAt"], json!(1767312000000_i64));
+        // Other strings, including ones containing 'T' under other keys,
+        // stay untouched.
+        assert_eq!(r.instances[0]["title"], json!("a"));
+    }
+
+    /// A `createdAt` that is not an RFC3339 string is left as it is —
+    /// `getTime()` on an unparseable string yields NaN in TS; there is no
+    /// honest JSON value for that, so the row keeps what the executor sent.
+    #[test]
+    fn an_unreadable_timestamp_is_left_alone() {
+        let raw = json!({"instances":[{"id":"x://1","createdAt":"not a date"}]});
+        let r = parse_model_result(&raw);
+        assert_eq!(r.instances[0]["createdAt"], json!("not a date"));
     }
 }
