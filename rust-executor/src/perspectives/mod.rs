@@ -396,6 +396,10 @@ pub enum Recheck {
     Signers(std::collections::BTreeSet<String>),
     /// The links stored as `cantCheck`.
     CantCheck,
+    /// The links stored with a person: every link whose verdict came from its signer's key log,
+    /// whether or not the key map holds that log now. After the re-check's receiver lagged,
+    /// since a lost change may belong to a log the map's bound dropped.
+    Logged,
 }
 
 /// Judges the links of `scope` again in every perspective, from the key map, and rewrites
