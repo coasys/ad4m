@@ -35,7 +35,9 @@ pub(crate) struct FakeExecutor {
     /// task. `None` while no socket is live.
     outgoing: Mutex<Option<mpsc::UnboundedSender<Value>>>,
     /// Bump to sever the live socket; the accept loop keeps listening.
-    drop_conn: watch::Sender<u64>,
+    /// The payload pairs a drop counter with an optional close code —
+    /// `None` sends a bare `Close`, `Some(1008)` a policy (auth) one.
+    drop_conn: watch::Sender<(u64, Option<u16>)>,
     /// Counts accepted sockets: epoch 1 is the initial `connect`.
     epoch: Arc<AtomicU64>,
     /// Signalled each time a socket is accepted, carrying the new epoch.
@@ -49,7 +51,7 @@ impl FakeExecutor {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
-        let (drop_tx, _) = watch::channel(0u64);
+        let (drop_tx, _) = watch::channel((0u64, None));
         let (accepted_tx, accepted_rx) = mpsc::unbounded_channel();
         let epoch = Arc::new(AtomicU64::new(0));
 
@@ -150,8 +152,19 @@ impl FakeExecutor {
     /// network would; the accept loop keeps listening for the reconnect.
     #[allow(dead_code)] // the reconnect findings use this
     pub fn drop_connection(&self) {
-        let next = self.drop_conn.borrow().wrapping_add(1);
-        self.drop_conn.send_replace(next);
+        self.bump_drop(None);
+    }
+
+    /// Sever the live socket with a close code — `1008` (policy) is the
+    /// executor's auth refusal.
+    #[allow(dead_code)] // the reconnect findings use this
+    pub fn drop_connection_with_code(&self, code: u16) {
+        self.bump_drop(Some(code));
+    }
+
+    fn bump_drop(&self, code: Option<u16>) {
+        let next = self.drop_conn.borrow().0.wrapping_add(1);
+        self.drop_conn.send_replace((next, code));
     }
 }
 
@@ -159,7 +172,7 @@ async fn serve_conn(
     stream: tokio::net::TcpStream,
     incoming: mpsc::UnboundedSender<Value>,
     mut outgoing: mpsc::UnboundedReceiver<Value>,
-    drop_conn: watch::Sender<u64>,
+    drop_conn: watch::Sender<(u64, Option<u16>)>,
     epoch: u64,
 ) {
     let ws = match tokio_tungstenite::accept_async(stream).await {
@@ -199,8 +212,15 @@ async fn serve_conn(
                 }
             }
             _ = drop_rx.changed() => {
-                if *drop_rx.borrow() >= epoch {
-                    let _ = write.send(Message::Close(None)).await;
+                let (n, code) = *drop_rx.borrow();
+                if n >= epoch {
+                    let frame = code.map(|c| {
+                        tokio_tungstenite::tungstenite::protocol::frame::CloseFrame {
+                            code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::from(c),
+                            reason: "".into(),
+                        }
+                    });
+                    let _ = write.send(Message::Close(frame)).await;
                     return;
                 }
             }

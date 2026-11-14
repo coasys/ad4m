@@ -118,7 +118,26 @@ impl std::fmt::Display for RpcCallError {
 
 impl std::error::Error for RpcCallError {}
 
-type PendingMap = Arc<Mutex<HashMap<String, oneshot::Sender<Result<Value>>>>>;
+/// Dead sockets an unsent call survives before it too is failed — TS
+/// `MAX_CONNECT_ATTEMPTS` (`apiClient.ts`).
+const MAX_FAILED_CONNECTS: u8 = 3;
+
+/// One RPC awaiting a reply — or still waiting for a socket to send on.
+/// `sent` flips only while `pending` and `sink` are held together, in that
+/// order, so the disconnect drain can never fail a call whose frame then
+/// still goes out (F8).
+struct PendingCall {
+    tx: oneshot::Sender<Result<Value>>,
+    /// The wire send happened — a socket death fails the call. An unsent
+    /// call is a *waiting* call: it survives the disconnect and sends on
+    /// the next socket, like TS `_onClose` (`!pending.sent → continue`).
+    sent: bool,
+    /// Dead sockets seen while still unsent; at [`MAX_FAILED_CONNECTS`]
+    /// the call is failed too.
+    failed_connects: u8,
+}
+
+type PendingMap = Arc<Mutex<HashMap<String, PendingCall>>>;
 type WsSink = futures_util::stream::SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>;
 type WsSource = futures_util::stream::SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>;
 
@@ -300,15 +319,15 @@ impl WsRpcClient {
                         Ok(r) => r,
                         Err(_) => continue,
                     };
-                    if let Some(tx) = shared_reader.pending.lock().await.remove(&id) {
+                    if let Some(call) = shared_reader.pending.lock().await.remove(&id) {
                         if let Some(error) = resp.error {
-                            let _ = tx.send(Err(anyhow::Error::new(RpcCallError {
+                            let _ = call.tx.send(Err(anyhow::Error::new(RpcCallError {
                                 code: error.code.unwrap_or(500),
                                 message: error.message.unwrap_or_default(),
                                 data: error.data,
                             })));
                         } else {
-                            let _ = tx.send(Ok(resp.result.unwrap_or(Value::Null)));
+                            let _ = call.tx.send(Ok(resp.result.unwrap_or(Value::Null)));
                         }
                     }
                 } else {
@@ -346,10 +365,21 @@ impl WsRpcClient {
         // the value and `is_connected` keeps reporting the stale flag.
         shared.connected.send_replace(false);
 
-        // Fail every in-flight call — the executor can't answer them now.
+        // Fail every *sent* call — the executor can't answer them now. An
+        // unsent call is only waiting: its frame never went out, so there is
+        // nothing to fail; it rides the next socket instead (F8, TS
+        // `_onClose`). After `MAX_FAILED_CONNECTS` dead sockets it gives up.
         let mut map = shared.pending.lock().await;
-        for (_, tx) in map.drain() {
-            let _ = tx.send(Err(anyhow!("WebSocket connection closed")));
+        let ids: Vec<String> = map.keys().cloned().collect();
+        for id in ids {
+            let Some(call) = map.get_mut(&id) else {
+                continue;
+            };
+            call.failed_connects += 1;
+            if call.sent || call.failed_connects >= MAX_FAILED_CONNECTS {
+                let call = map.remove(&id).unwrap();
+                let _ = call.tx.send(Err(anyhow!("WebSocket connection closed")));
+            }
         }
     }
 
@@ -437,7 +467,14 @@ impl WsRpcClient {
             params: merged,
         };
         let (tx, rx) = oneshot::channel();
-        shared.pending.lock().await.insert(id, tx);
+        shared.pending.lock().await.insert(
+            id,
+            PendingCall {
+                tx,
+                sent: true,
+                failed_connects: 0,
+            },
+        );
         if let Ok(json) = serde_json::to_string(&msg) {
             let mut sink = shared.sink.lock().await;
             if let Some(s) = sink.as_mut() {
@@ -517,8 +554,8 @@ impl WsRpcClient {
         *self.shared.sink.lock().await = None;
         self.shared.connected.send_replace(false);
         let mut map = self.shared.pending.lock().await;
-        for (_, tx) in map.drain() {
-            let _ = tx.send(Err(anyhow!("WebSocket connection closed")));
+        for (_, call) in map.drain() {
+            let _ = call.tx.send(Err(anyhow!("WebSocket connection closed")));
         }
     }
 
@@ -576,11 +613,18 @@ impl WsRpcClient {
             msg_type: msg_type.to_string(),
             params,
         };
+        let json = serde_json::to_string(&msg)?;
 
         let (tx, rx) = oneshot::channel();
-        self.shared.pending.lock().await.insert(id.to_string(), tx);
+        self.shared.pending.lock().await.insert(
+            id.to_string(),
+            PendingCall {
+                tx,
+                sent: false,
+                failed_connects: 0,
+            },
+        );
 
-        let json = serde_json::to_string(&msg)?;
         let send_result = {
             let mut connected_rx = self.shared.connected.subscribe();
             loop {
@@ -588,11 +632,30 @@ impl WsRpcClient {
                     self.shared.pending.lock().await.remove(id);
                     return Err(anyhow!("WebSocket client is closed"));
                 }
+                if self.shared.auth_failed.load(Ordering::SeqCst) {
+                    self.shared.pending.lock().await.remove(id);
+                    return Err(anyhow!("WebSocket authentication refused by the executor"));
+                }
+                // `pending` then `sink` — the drain's order — so a socket
+                // death cannot interleave between "marked sent" and "sent":
+                // either the frame went out before the drain (an honest
+                // in-flight failure) or the call stays a waiting one and
+                // rides the next socket (F8).
+                let mut pending = self.shared.pending.lock().await;
+                if pending.get(id).is_none() {
+                    // Timed out or closed while waiting — whoever failed the
+                    // call already told the caller; never send now.
+                    return Err(anyhow!("WebSocket connection closed"));
+                }
                 let mut sink = self.shared.sink.lock().await;
                 if let Some(s) = sink.as_mut() {
+                    if let Some(call) = pending.get_mut(id) {
+                        call.sent = true;
+                    }
                     break s.send(Message::Text(json.clone())).await;
                 }
                 drop(sink);
+                drop(pending);
                 // Reconnecting — wait for a socket or the final close.
                 if connected_rx.changed().await.is_err() {
                     self.shared.pending.lock().await.remove(id);
@@ -894,6 +957,96 @@ mod tests {
         gate.wait();
         fake.connection(3).await;
 
+        client.close().await;
+    }
+
+    /// F8: a call that never reached the wire is a *waiting* call, not an
+    /// in-flight one — TS `_onClose` rejects only `sent` calls. Draining it
+    /// as if it were sent fails the caller while the call still sends on
+    /// the next socket: the executor commits a write the caller was told
+    /// failed, and a retry duplicates it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_waiting_call_is_not_failed_and_sends_on_the_next_socket() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let client = WsRpcClient::connect(fake.url(), "").await.unwrap();
+
+        // c0 rides socket 1 and dies with it — the disconnect barrier.
+        let caller = WsRpcClient {
+            shared: client.shared.clone(),
+        };
+        let c0 = tokio::spawn(async move { caller.call_value("x.y", serde_json::json!({})).await });
+        fake.next_request().await;
+        client.disconnect_for_testing().await;
+        assert!(c0.await.unwrap().is_err());
+
+        // c1 now waits for a socket: it is pending but was never sent. Wait
+        // for its entry to land — otherwise the drain below could race the
+        // insert itself.
+        let caller = WsRpcClient {
+            shared: client.shared.clone(),
+        };
+        let c1 = tokio::spawn(async move { caller.call_value("x.z", serde_json::json!({})).await });
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while client.shared.pending.lock().await.is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("c1 never entered pending");
+
+        // A second socket death (executor restarted again before the client
+        // re-dialed) must not fail c1 — its frame never went out, so there is
+        // nothing to fail.
+        client.disconnect_for_testing().await;
+
+        // The supervisor dials; on the new socket c1 finally sends. Drain
+        // the restoration frame(s) until c1's call arrives.
+        fake.connection(2).await;
+        let c1_frame = loop {
+            let req = fake.next_request().await;
+            if req["type"] == "x.z" {
+                break req;
+            }
+        };
+        // The caller gets the real reply — not a synthetic "closed" for a
+        // write that went out anyway.
+        fake.reply(&c1_frame, serde_json::json!({"done": true}))
+            .await;
+        let result = c1.await.unwrap();
+        assert_eq!(result.unwrap(), serde_json::json!({"done": true}));
+        client.close().await;
+    }
+
+    /// F8 (terminal path): an auth refusal is permanent — a later call must
+    /// fail immediately, not sit out its whole timeout on a client that can
+    /// never reconnect.
+    #[tokio::test]
+    async fn an_auth_refused_client_fails_calls_fast() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let client = WsRpcClient::connect(fake.url(), "").await.unwrap();
+
+        // Close 1008 (policy): the executor's token refusal. The drained
+        // in-flight call is the barrier that auth_failed was recorded.
+        let caller = WsRpcClient {
+            shared: client.shared.clone(),
+        };
+        let c0 = tokio::spawn(async move { caller.call_value("x.y", serde_json::json!({})).await });
+        fake.next_request().await;
+        fake.drop_connection_with_code(1008);
+        assert!(c0.await.unwrap().is_err());
+
+        // No reconnect may come: a new call has to fail now — bounded by a
+        // fraction of the 30 s call timeout the buggy wait would sit out.
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            client.call::<Value>("x.z", serde_json::json!({})),
+        )
+        .await
+        .expect("a call on an auth-refused client must not wait out its timeout");
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("auth"), "unexpected error: {err}");
         client.close().await;
     }
 
