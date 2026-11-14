@@ -571,6 +571,7 @@ pub fn build_handler_map() -> HandlerMap {
     let mut map = HandlerMap::new();
     super::agent_ws::register_ws_handlers(&mut map);
     super::perspectives_ws::register_ws_handlers(&mut map);
+    super::perspective_instances_ws::register_ws_handlers(&mut map);
     super::agent_session_ws::register_ws_handlers(&mut map);
     super::ai_sessions_ws::register_ws_handlers(&mut map);
     super::runtime_ws::register_ws_handlers(&mut map);

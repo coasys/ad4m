@@ -37,7 +37,7 @@ pub struct InstanceCreate {
     pub class_name: String,
     /// Values by property name: one JSON value per single-valued property (of the property's
     /// type), an array of item URIs per collection. Required properties must be present.
-    #[ts(type = "Record<string, unknown>")]
+    #[ts(optional, type = "Record<string, unknown>")]
     pub properties: Option<Map<String, Value>>,
     /// The new instance's URI. A random `ad4m://obj/…` one when absent; a bare string becomes a
     /// literal URI.
@@ -105,14 +105,14 @@ pub struct InstanceRemoveFromCollection {
 }
 
 /// The items a create put into one collection.
-#[derive(Debug, Clone, Serialize, PartialEq, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
 #[ts(export)]
 pub struct CollectionItems {
     pub collection: String,
     pub items: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct InstanceCreated {
@@ -126,7 +126,7 @@ pub struct InstanceCreated {
     pub parent: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct InstanceUpdated {
@@ -135,7 +135,7 @@ pub struct InstanceUpdated {
     pub updated_properties: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct InstanceRemoved {
@@ -145,7 +145,7 @@ pub struct InstanceRemoved {
     pub links_removed: Option<usize>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct CollectionItemAdded {
@@ -159,7 +159,7 @@ pub struct CollectionItemAdded {
     pub already_member: bool,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct CollectionItemRemoved {
