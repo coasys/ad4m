@@ -216,6 +216,11 @@ pub struct Ad4mConfig {
     /// Serialises as `"<redacted>"`, like `admin_credential`.
     #[serde(serialize_with = "crate::secret::serialize_redacted")]
     pub internal_api_token: Option<Secret>,
+
+    /// Seconds one request-driven SPARQL evaluation may run before it is
+    /// stopped (default 30). Covers `perspective.querySparql`,
+    /// `perspective.modelQuery`, live-query opening and their re-checks.
+    pub query_deadline_secs: Option<u64>,
 }
 
 impl Ad4mConfig {
@@ -546,6 +551,7 @@ impl Ad4mConfig {
     /// bootstrap seed path inside `app_data_path`.
     pub fn unprepared() -> Self {
         Ad4mConfig {
+            query_deadline_secs: None,
             app_data_path: None,
             network_bootstrap_seed: None,
             language_language_only: None,

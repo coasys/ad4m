@@ -1803,8 +1803,8 @@ impl SfuService {
     /// neighbourhood's mode: this node itself for `designated`, the
     /// `"gateway"` sentinel for `gateway`, none otherwise.
     pub async fn sfu_peer_for_neighbourhood(&self, neighbourhood_url: &str) -> Option<String> {
-        match config_store::stored_policy(neighbourhood_url)
-            .await?
+        match config_store::read_policy(neighbourhood_url)
+            .await
             .mode
             .as_str()
         {
@@ -1817,9 +1817,7 @@ impl SfuService {
     /// The SFU nodes under the neighbourhood's mode: for `cascaded`, this
     /// node and its configured cascade peers.
     pub async fn sfu_peers_for_neighbourhood(&self, neighbourhood_url: &str) -> Vec<String> {
-        let Some(policy) = config_store::stored_policy(neighbourhood_url).await else {
-            return vec![];
-        };
+        let policy = config_store::read_policy(neighbourhood_url).await;
         let local = self.gossip.local_did().to_string();
         match policy.mode.as_str() {
             "cascaded" => std::iter::once(local)
