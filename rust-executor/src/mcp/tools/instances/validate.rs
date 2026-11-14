@@ -88,9 +88,26 @@ pub(crate) fn allowed_value(entry: &Value) -> &Value {
 fn value_text(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),
-        Value::Number(n) => n.to_string(),
+        Value::Number(n) => number_text(n),
         Value::Bool(b) => b.to_string(),
         other => serde_json::to_string(other).unwrap_or_default(),
+    }
+}
+
+/// A number as JavaScript's `String(n)` writes it: a whole float is printed
+/// without a fraction (`3.0` -> `3`), so a `number` property coerced from the
+/// text `"3"` matches the option `3` that WE writes with `String(3)`.
+fn number_text(n: &serde_json::Number) -> String {
+    match n.as_f64() {
+        Some(f)
+            if n.is_f64()
+                && f.is_finite()
+                && f.fract() == 0.0
+                && f.abs() < 9_007_199_254_740_992.0 =>
+        {
+            format!("{}", f as i64)
+        }
+        _ => n.to_string(),
     }
 }
 
@@ -413,4 +430,23 @@ pub(crate) fn normalize_filter(
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// A whole float compares like JavaScript prints it: `3.0` matches `3`
+    /// and `"3"`; a real fraction does not.
+    #[test]
+    fn whole_floats_compare_like_js_numbers() {
+        let three_f = Value::Number(serde_json::Number::from_f64(3.0).unwrap());
+        assert!(matches_allowed(&three_f, &json!(3)));
+        assert!(matches_allowed(&three_f, &json!("3")));
+        assert!(matches_allowed(&json!(3), &three_f));
+        let frac = Value::Number(serde_json::Number::from_f64(3.5).unwrap());
+        assert!(matches_allowed(&frac, &json!("3.5")));
+        assert!(!matches_allowed(&frac, &json!(3)));
+    }
 }
