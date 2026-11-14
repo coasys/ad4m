@@ -1105,7 +1105,7 @@ mod tests {
         }
 
         let started = Instant::now();
-        crate::clean_up_before_exit().await;
+        crate::clean_up_before_exit(None).await;
         let took = started.elapsed();
 
         let alive = |pid: u32| {

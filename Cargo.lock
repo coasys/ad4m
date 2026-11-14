@@ -23,9 +23,11 @@ dependencies = [
  "serde_cbor",
  "serde_json",
  "syntect",
+ "tempfile",
  "tikv-jemallocator",
  "tokio",
  "unicode-width 0.1.14",
+ "url",
  "urlencoding",
 ]
 

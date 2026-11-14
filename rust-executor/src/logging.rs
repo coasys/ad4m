@@ -131,7 +131,7 @@ pub fn without_mcp_session_ids(rust_log: &str) -> String {
 
 /// Set `RUST_LOG`: the environment's if set, else the one `log_config` (or the defaults)
 /// builds; either way without MCP session ids ([`without_mcp_session_ids`]).
-fn set_rust_log(log_config: Option<&std::collections::HashMap<String, String>>) {
+pub(crate) fn set_rust_log(log_config: Option<&std::collections::HashMap<String, String>>) {
     let rust_log = env::var("RUST_LOG").unwrap_or_else(|_| {
         let default_config = get_default_log_config();
         build_rust_log_from_config(log_config.unwrap_or(&default_config))
@@ -151,6 +151,41 @@ pub fn init_cli_logging(log_config: Option<&std::collections::HashMap<String, St
         }
         *initialized = true;
     }
+}
+
+/// Logging for an executor started with `--log-dir`: this run's lines go to
+/// `<dir>/executor-0.log` (`log_files`: the runs before rotate up, five kept, each file
+/// capped), one plain line per record: UTC time, level, target, message.
+pub fn init_file_logging(
+    dir: &std::path::Path,
+    log_config: Option<&std::collections::HashMap<String, String>>,
+) -> std::io::Result<()> {
+    set_rust_log(log_config);
+    let mut initialized = LOGGER_INITIALIZED.lock().unwrap();
+    if *initialized {
+        return Ok(());
+    }
+    let file = crate::log_files::LogFile::open(dir)?;
+    let mut builder = Builder::new();
+    builder
+        .target(Target::Pipe(Box::new(file)))
+        .parse_default_env()
+        .format(|buf, record| {
+            writeln!(
+                buf,
+                "[{} {} {}] {}",
+                chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ"),
+                record.level(),
+                record.target(),
+                record.args()
+            )
+        });
+    if let Err(e) = builder.try_init() {
+        eprintln!("Failed to initialize the file logger: {}", e);
+    }
+    crate::log_files::set_log_dir(dir);
+    *initialized = true;
+    Ok(())
 }
 
 /// Create a formatted logger builder for launcher (file output)

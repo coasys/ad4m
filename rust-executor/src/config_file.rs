@@ -230,6 +230,9 @@ pub struct ExecutorConfigFile {
     /// reaches and the keys its heads must be signed by.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub identity: Option<IdentityFileSettings>,
+    /// The folder of the executor's own rotated log files. Unset: stdout.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub log_dir: Option<String>,
     /// AI endpoints registered at startup, by name. A key comes from the
     /// environment variable an entry's `api_key_env` names.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -277,7 +280,7 @@ pub struct IdentityFileSettings {
 /// Secret keys someone may paste into the config file, as JSON pointers,
 /// with where the secret belongs instead. Checked before parsing so the
 /// error says why, not just "unknown field".
-const INLINE_SECRETS: &[(&str, &str)] = &[
+pub(crate) const INLINE_SECRETS: &[(&str, &str)] = &[
     (
         "/admin_credential",
         "admin_credential is not allowed in the config file; set \
@@ -568,6 +571,7 @@ impl ExecutorConfigFile {
             identity_store_url: self.identity.as_ref().and_then(|i| i.store_url.clone()),
             identity_store_keys: self.identity.as_ref().and_then(|i| i.store_keys.clone()),
             identity_allow_private_src: self.identity.as_ref().and_then(|i| i.allow_private_src),
+            log_dir: self.log_dir.clone(),
             ai_settings: (self.ai_endpoints.is_some()
                 || self.ai_models.is_some()
                 || self.ai_defaults.is_some())
@@ -591,6 +595,16 @@ mod tests {
 
     fn parse(json: &str) -> Result<ExecutorConfigFile, ConfigFileError> {
         ExecutorConfigFile::parse(json)
+    }
+
+    /// `log_dir` reaches the executor's config.
+    #[test]
+    fn log_dir_reaches_the_executor_config() {
+        let config = parse(r#"{"log_dir": "/data/adam/logs"}"#)
+            .unwrap()
+            .to_ad4m_config(&ExecutorSecrets::default())
+            .unwrap();
+        assert_eq!(config.log_dir.as_deref(), Some("/data/adam/logs"));
     }
 
     /// `identity.storeUrl` and `identity.storeKeys` reach the executor's config.

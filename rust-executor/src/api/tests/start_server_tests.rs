@@ -99,3 +99,19 @@ async fn a_bad_tls_certificate_leaves_the_cleartext_api_serving() {
 
     server.abort();
 }
+
+/// A taken API port ends the server with exit code 80 (`BindFailed`): a supervisor picks
+/// another port and starts the executor again, which it does not do for a crash.
+#[tokio::test]
+async fn a_taken_port_ends_the_server_with_exit_code_80() {
+    let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let config = Ad4mConfig {
+        port: Some(taken.local_addr().unwrap().port()),
+        ..Default::default()
+    };
+    let error = tokio::time::timeout(Duration::from_secs(10), start_server(config))
+        .await
+        .expect("start_server returns at once")
+        .expect_err("the port is taken");
+    assert_eq!(crate::exit::exit_code_of(&error), 80, "{error:?}");
+}

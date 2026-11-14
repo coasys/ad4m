@@ -1,6 +1,4 @@
 use lazy_static::lazy_static;
-use std::sync::Mutex;
-use tokio::sync::oneshot;
 
 lazy_static! {
     /// The current version of AD4M
@@ -10,11 +8,6 @@ lazy_static! {
     pub static ref AD4M_COMMIT: Option<String> =
         Some(env!("AD4M_GIT_COMMIT").to_string()).filter(|commit| !commit.is_empty());
 }
-
-/// Global shutdown signal sender. Used by the `runtime_quit` WS-RPC method and signal handlers
-/// to trigger a graceful shutdown of the executor.
-/// Wrapped in Mutex<Option<...>> so we can take() the sender from a shared static reference.
-pub static SHUTDOWN_TX: Mutex<Option<oneshot::Sender<()>>> = Mutex::new(None);
 
 /// Struct representing oldest supported version and indicator if state should be cleared if update is required
 pub struct OldestVersion {

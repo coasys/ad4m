@@ -1,7 +1,7 @@
 import {ApiClient, CallOptions } from '../apiClient'
 import { Perspective, PerspectiveExpression } from "../perspectives/Perspective"
 import { RuntimeInfo, SentMessage, NotificationInput, NotificationUpdate, Notification, ImportResult, UserStatistics } from "./RuntimeTypes"
-import type { HostRate, UnytVersionInfo } from "../generated/api"
+import type { HostRate, LogTail, RuntimeConfig, SetConfigResult, UnytVersionInfo } from "../generated/api"
 import { LanguageMeta } from "../language/LanguageMeta"
 
 export class RuntimeClient {
@@ -19,8 +19,32 @@ export class RuntimeClient {
         return this.#apiClient.call('runtime.tlsDomain', {})
     }
 
+    /** Stops the executor (exit 0). Only the operator on the executor's machine. */
     async quit(): Promise<Boolean> {
         return this.#apiClient.call('runtime.quit', {})
+    }
+
+    /** Answers, then the executor exits 75 and its supervisor starts it again. */
+    async restart(): Promise<boolean> {
+        return this.#apiClient.call('runtime.restart', {})
+    }
+
+    /** The newest lines (at most 2000) of the executor's log file (`--log-dir`). */
+    async logTail(lines: number): Promise<LogTail> {
+        return this.#apiClient.call('runtime.logTail', { lines })
+    }
+
+    /** The executor's config file: its values, every key with its class, and whether a write waits for a restart. */
+    async config(): Promise<RuntimeConfig> {
+        return this.#apiClient.call('runtime.config', {})
+    }
+
+    /**
+     * Writes keys to the executor's config file (`--config`); they take effect at the next
+     * start. A `machine` key from a caller off the executor's machine is refused `local-only`.
+     */
+    async setConfig(set?: Record<string, unknown>, unset?: string[]): Promise<SetConfigResult> {
+        return this.#apiClient.call('runtime.setConfig', { set, unset })
     }
 
     async openLink(url: string): Promise<Boolean> {

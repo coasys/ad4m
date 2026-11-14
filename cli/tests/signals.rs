@@ -18,7 +18,8 @@ use std::time::{Duration, Instant};
 
 const READY: &str = "API server starting on http://127.0.0.1:";
 /// The graceful shutdown's last line: the cleanup ran to its end.
-const SHUT_DOWN: &str = "Graceful shutdown complete, exiting.";
+/// The graceful shutdown's last line; the run contract appends the exit code it ends with.
+const SHUT_DOWN: &str = "Graceful shutdown complete, exiting";
 const STARTUP: Duration = Duration::from_secs(120);
 /// How long the executor may take to end. Callers escalate to SIGKILL after 5 s (tests/js SFU
 /// harness) or 10 s (tests/js `gracefulShutdown`, WE's `stopProcess`).
