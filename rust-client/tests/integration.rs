@@ -17,7 +17,10 @@ use ad4m_client::Ad4mClient;
 use serde_json::{json, Map, Value};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::net::{TcpListener, TcpStream};
 
 fn executor_binary() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("EXECUTOR_PATH") {
@@ -58,6 +61,7 @@ fn free_port() -> u16 {
 struct Executor {
     child: Child,
     url: String,
+    port: u16,
     _data: tempfile::TempDir,
 }
 
@@ -107,8 +111,76 @@ fn start_executor() -> Option<Executor> {
     Some(Executor {
         child,
         url: format!("http://127.0.0.1:{port}"),
+        port,
         _data: data,
     })
+}
+
+/// A TCP relay in front of the executor that the test can take offline:
+/// `set_online(false)` cuts every relayed connection and refuses new ones
+/// (accepted, then closed before the WebSocket handshake), so a client
+/// behind it stays disconnected, retrying, for as long as the test wants,
+/// while other clients reach the executor directly.
+struct Relay {
+    url: String,
+    online: Arc<AtomicBool>,
+    conns: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    accept: tokio::task::JoinHandle<()>,
+}
+
+impl Relay {
+    async fn start(upstream_port: u16) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let online = Arc::new(AtomicBool::new(true));
+        let conns: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>> = Arc::default();
+        let (on, cs) = (online.clone(), conns.clone());
+        let accept = tokio::spawn(async move {
+            while let Ok((mut down, _)) = listener.accept().await {
+                if !on.load(Ordering::SeqCst) {
+                    drop(down);
+                    continue;
+                }
+                let relay = tokio::spawn(async move {
+                    if let Ok(mut up) = TcpStream::connect(("127.0.0.1", upstream_port)).await {
+                        let _ = tokio::io::copy_bidirectional(&mut down, &mut up).await;
+                    }
+                });
+                cs.lock().unwrap().push(relay);
+            }
+        });
+        Self {
+            url: format!("http://127.0.0.1:{port}"),
+            online,
+            conns,
+            accept,
+        }
+    }
+
+    fn set_online(&self, online: bool) {
+        self.online.store(online, Ordering::SeqCst);
+        if !online {
+            for relay in self.conns.lock().unwrap().drain(..) {
+                relay.abort();
+            }
+        }
+    }
+}
+
+impl Drop for Relay {
+    fn drop(&mut self) {
+        self.accept.abort();
+        self.set_online(false);
+    }
+}
+
+/// Poll `cond` every 100 ms until it holds; panic with `what` after `secs`.
+async fn wait_until(secs: u64, what: &str, mut cond: impl FnMut() -> bool) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(secs);
+    while !cond() {
+        assert!(std::time::Instant::now() < deadline, "{what}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 /// The executor takes seconds to come up — poll the socket until it takes.
@@ -175,7 +247,10 @@ async fn model_batch_subscription_reconnect_and_flow() {
         eprintln!("SKIP: no ad4m-executor binary (set EXECUTOR_PATH or build --release)");
         return;
     };
-    let client = connect(&executor.url).await;
+    // The client under test reaches the executor through a relay the test
+    // can take down; the independent writer below connects directly.
+    let relay = Relay::start(executor.port).await;
+    let client = connect(&relay.url).await;
     // Fresh data dir → mint the agent (`agent.generate` is a long call).
     let status = client
         .agent
@@ -341,9 +416,65 @@ async fn model_batch_subscription_reconnect_and_flow() {
         "discarding a batch the executor no longer holds must fail"
     );
 
+    // ── outage: another client writes while this one is offline. The
+    // relay holds the client disconnected; a second client, connected
+    // straight to the executor, creates a row; only then does the relay
+    // come back. The client's re-opened subscription must deliver that
+    // row: nothing pushed it while the client was away, so only the
+    // re-open's fresh result can carry it. ────────────────────────────────
+    let before_outage = sub.id().await;
+    assert!(before_outage.is_some());
+    relay.set_online(false);
+    wait_until(30, "client never noticed the outage", || {
+        !client.ws().is_connected()
+    })
+    .await;
+
+    let writer = connect(&executor.url).await;
+    Model::new(writer.ws(), uuid.clone(), "IntegrationNote")
+        .create(
+            props(&[("title", json!("written-while-offline"))]),
+            CreateOptions::default(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        !client.ws().is_connected(),
+        "the client must still be offline when the other client's row lands"
+    );
+    writer.ws().close().await;
+
+    relay.set_online(true);
+    wait_until(60, "client did not reconnect after the outage", || {
+        client.ws().is_connected()
+    })
+    .await;
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        match sub.id().await {
+            Some(id) if Some(&id) != before_outage.as_ref() => break,
+            _ => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "subscription did not re-open after the outage"
+                );
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+    }
+    let resynced = next_result(&mut sub, "post-outage resync").await;
+    assert_eq!(resynced.instances.len(), 4);
+    assert!(
+        resynced
+            .instances
+            .iter()
+            .any(|r| r["title"] == json!("written-while-offline")),
+        "the re-opened subscription lost the row written during the outage"
+    );
+
     // ── reconnect: write through the gap. `call` waits for a socket, so
     // the create lands once the client reconnects; the re-opened
-    // subscription's fresh full result (now 4 rows) is not deduped — the
+    // subscription's fresh full result (now 5 rows) is not deduped — the
     // subscriber sees the resync, not a silent gap. The executor-side id
     // also changes: a re-open mints a new subscription. ───────────────────
     let old_sub_id = sub.id().await;
@@ -387,7 +518,7 @@ async fn model_batch_subscription_reconnect_and_flow() {
         }
     }
     let updated = next_result(&mut sub, "post-reconnect resync").await;
-    assert_eq!(updated.instances.len(), 4);
+    assert_eq!(updated.instances.len(), 5);
     sub.dispose().await;
 
     // ── flow: register, start, propose, fire ─────────────────────────────
