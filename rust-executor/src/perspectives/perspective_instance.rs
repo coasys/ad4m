@@ -6,6 +6,7 @@ use super::model_query::types::{ModelShape, ShapeResolver};
 use super::monotonic::{committable, drop_monotonic_removals, refuse_monotonic_removal};
 use super::sdna::{generic_link_fact, is_sdna_link};
 use super::shacl_parser::{check_consensus_rule_links, parse_flow_to_links, parse_shacl_to_links};
+use super::sparql_store::EvalStop;
 use super::update_perspective_with;
 use super::utils::prolog_get_all_string_bindings;
 use crate::agent::{create_signed_expression_anchored, create_signed_link, did_for_context};
@@ -1598,7 +1599,7 @@ impl PerspectiveInstance {
 
         if let Some(mut link_language) = link_language_clone {
             // Query SPARQL store for all links
-            let decorated_links = match self.sparql_store.get_all_links() {
+            let decorated_links = match self.sparql_store.get_all_links(&EvalStop::none()) {
                 Ok(links) => links,
                 Err(e) => {
                     log::error!(
@@ -2066,6 +2067,7 @@ impl PerspectiveInstance {
             let decorated_link = self
                 .sparql_store
                 .get_link(
+                    &EvalStop::none(),
                     &link_expression.data.source,
                     link_expression.data.predicate.as_deref(),
                     &link_expression.data.target,
@@ -2085,6 +2087,7 @@ impl PerspectiveInstance {
 
             // Query SPARQL store
             if let Some(decorated_link) = self.sparql_store.get_link(
+                &EvalStop::none(),
                 &link_expression.data.source,
                 link_expression.data.predicate.as_deref(),
                 &link_expression.data.target,
@@ -2392,6 +2395,7 @@ impl PerspectiveInstance {
             .map(|removal| {
                 let link = LinkExpression::try_from(removal)?;
                 let stored = self.sparql_store.get_link(
+                    &EvalStop::none(),
                     &link.data.source,
                     link.data.predicate.as_deref(),
                     &link.data.target,
@@ -2504,6 +2508,7 @@ impl PerspectiveInstance {
 
         // Query SPARQL store
         let decorated_link_option = self.sparql_store.get_link(
+            &EvalStop::none(),
             &old_link.data.source,
             old_link.data.predicate.as_deref(),
             &old_link.data.target,
@@ -2633,6 +2638,7 @@ impl PerspectiveInstance {
         for link in link_expressions {
             // Query SPARQL store
             if let Some(decorated_link) = self.sparql_store.get_link(
+                &EvalStop::none(),
                 &link.data.source,
                 link.data.predicate.as_deref(),
                 &link.data.target,
@@ -2765,11 +2771,14 @@ impl PerspectiveInstance {
         // Query for SHACL class definition links. Only a link that counts
         // registers a class — the same cut the shape loader makes on the
         // same triple.
-        let shacl_class_links = self.get_links_local_decorated(&LinkQuery {
-            predicate: Some("rdf://type".to_string()),
-            target: Some("ad4m://SubjectClass".to_string()),
-            ..Default::default()
-        })?;
+        let shacl_class_links = self.get_links_local_decorated(
+            &EvalStop::none(),
+            &LinkQuery {
+                predicate: Some("rdf://type".to_string()),
+                target: Some("ad4m://SubjectClass".to_string()),
+                ..Default::default()
+            },
+        )?;
         log::debug!(
             "🔶 get_subject_classes_from_shacl: Found {} links",
             shacl_class_links.len()
@@ -2821,6 +2830,7 @@ impl PerspectiveInstance {
     /// Prolog) should use [`Self::get_links_local`] which unwraps for them.
     fn get_links_local_decorated(
         &self,
+        stop: &EvalStop,
         query: &LinkQuery,
     ) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
         let from_date = query.from_date.as_ref().map(|d| {
@@ -2833,6 +2843,7 @@ impl PerspectiveInstance {
         });
 
         Ok(self.sparql_store.query_links(
+            stop,
             query.source.as_deref(),
             query.predicate.as_deref(),
             query.target.as_deref(),
@@ -2846,10 +2857,18 @@ impl PerspectiveInstance {
         &self,
         query: &LinkQuery,
     ) -> Result<Vec<(LinkExpression, LinkStatus)>, AnyError> {
+        self.get_links_local_stopped(&EvalStop::none(), query)
+    }
+
+    fn get_links_local_stopped(
+        &self,
+        stop: &EvalStop,
+        query: &LinkQuery,
+    ) -> Result<Vec<(LinkExpression, LinkStatus)>, AnyError> {
         // Unwrap the decorated form into the (LinkExpression, LinkStatus)
         // tuple format the legacy in-process callers (SDNA, Prolog facts)
         // expect. No re-verification — we trust the stored `valid` flag.
-        let decorated_links = self.get_links_local_decorated(query)?;
+        let decorated_links = self.get_links_local_decorated(stop, query)?;
         Ok(decorated_links
             .into_iter()
             .map(|decorated| {
@@ -2869,7 +2888,17 @@ impl PerspectiveInstance {
     /// Every stored link that matches `q`, whatever its verdict, each with its verdict.
     /// Readers inside the executor use it and test `proof.valid` where a link must count.
     pub async fn get_links(&self, q: &LinkQuery) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
-        self.links(q, false).await
+        self.get_links_stopped(&EvalStop::none(), q).await
+    }
+
+    /// [`Self::get_links`] under `stop`: the store reads end when the call's
+    /// gate fires (deadline, cancel, or the call's future dropped).
+    pub async fn get_links_stopped(
+        &self,
+        stop: &EvalStop,
+        q: &LinkQuery,
+    ) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
+        self.links(stop, q, false).await
     }
 
     /// The display read behind `perspective.queryLinks` and `perspective.snapshot`: as
@@ -2880,12 +2909,23 @@ impl PerspectiveInstance {
         &self,
         q: &LinkQuery,
     ) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
+        self.get_links_shown_stopped(&EvalStop::none(), q).await
+    }
+
+    /// [`Self::get_links_shown`] under `stop`, as [`Self::get_links_stopped`] is to
+    /// [`Self::get_links`].
+    pub async fn get_links_shown_stopped(
+        &self,
+        stop: &EvalStop,
+        q: &LinkQuery,
+    ) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
         let shown_only = q.include_unverified != Some(true);
-        self.links(q, shown_only).await
+        self.links(stop, q, shown_only).await
     }
 
     async fn links(
         &self,
+        stop: &EvalStop,
         q: &LinkQuery,
         shown_only: bool,
     ) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
@@ -2931,6 +2971,7 @@ impl PerspectiveInstance {
             };
             return page(
                 &self.sparql_store,
+                stop,
                 query.source.as_deref(),
                 query.predicate.as_deref(),
                 query.target.as_deref(),
@@ -2951,7 +2992,7 @@ impl PerspectiveInstance {
         // that's ~30K extra small allocations + 10K crypto ops every call.
         // The wind-tunnel S9 query path was the dominant remaining source of
         // RSS growth; this collapses it to a single Vec.
-        let mut links = self.get_links_local_decorated(&query)?;
+        let mut links = self.get_links_local_decorated(stop, &query)?;
         if shown_only {
             links.retain(super::sparql_store::shown);
         }
@@ -3573,7 +3614,7 @@ impl PerspectiveInstance {
                 // Get all links for Simple mode. Use the decorated form
                 // directly — re-running signature verification per link was
                 // hot in the wind tunnel.
-                self.get_links_local_decorated(&LinkQuery::default())?
+                self.get_links_local_decorated(&EvalStop::none(), &LinkQuery::default())?
             }
             PrologMode::SdnaOnly => {
                 // Get only SDNA links for SdnaOnly mode (efficient query)
@@ -3670,7 +3711,8 @@ impl PerspectiveInstance {
                 };
 
                 // Get links for SDNA fact generation
-                let links = self.get_links_local_decorated(&LinkQuery::default())?;
+                let links =
+                    self.get_links_local_decorated(&EvalStop::none(), &LinkQuery::default())?;
 
                 service
                     .run_query_simple(
@@ -3765,7 +3807,8 @@ impl PerspectiveInstance {
                 });
 
                 // Get links for SDNA fact generation
-                let links = self.get_links_local_decorated(&LinkQuery::default())?;
+                let links =
+                    self.get_links_local_decorated(&EvalStop::none(), &LinkQuery::default())?;
 
                 service
                     .run_query_simple(
@@ -3912,7 +3955,18 @@ impl PerspectiveInstance {
     /// `query` (no wire-format re-encoding of coincidentally-named
     /// `?target`/`?t` bindings; see `SparqlStore::query_arbitrary`).
     pub fn sparql_query(&self, query: String) -> Result<String, deno_core::anyhow::Error> {
-        self.sparql_store.query_arbitrary(&query)
+        self.sparql_query_stopped(&EvalStop::none(), &query)
+    }
+
+    /// [`Self::sparql_query`] under `stop`: the evaluation ends when the
+    /// call's gate fires — its deadline passing, `request.cancel`, the
+    /// connection closing, or the call's future being dropped.
+    pub fn sparql_query_stopped(
+        &self,
+        stop: &EvalStop,
+        query: &str,
+    ) -> Result<String, deno_core::anyhow::Error> {
+        self.sparql_store.query_arbitrary(stop, query)
     }
 
     /// Resolve each URI to every subject class it is an instance of, most
@@ -3933,22 +3987,32 @@ impl PerspectiveInstance {
         &self,
         uris: &[String],
     ) -> Result<std::collections::HashMap<String, Vec<String>>, AnyError> {
+        self.subject_classes_of_stopped(&EvalStop::none(), uris)
+    }
+
+    /// [`Self::subject_classes_of`] under `stop` — every store evaluation
+    /// the classification makes ends when the call's gate fires.
+    pub fn subject_classes_of_stopped(
+        &self,
+        stop: &EvalStop,
+        uris: &[String],
+    ) -> Result<std::collections::HashMap<String, Vec<String>>, AnyError> {
         let resolver = self.shape_resolver();
-        super::subject_classes_of::subject_classes_of(&self.sparql_store, &resolver, uris)
+        super::subject_classes_of::subject_classes_of(stop, &self.sparql_store, &resolver, uris)
     }
 
     /// Cancellation-aware async variant of [`Self::sparql_query`].
     ///
-    /// Forwards to [`SparqlStore::query_cancellable`] — see that method
-    /// for the cancellation semantics (the eval is uncancellable on the
-    /// Oxigraph side, but the network reply + JSON serialisation are
-    /// short-circuited).
+    /// Runs the evaluation on a blocking thread under `stop`: when its gate
+    /// fires (deadline, `request.cancel`, the connection closing, or the
+    /// caller's future dropped) the Oxigraph token cancels the evaluation
+    /// itself, and its error says which way it stopped.
     pub async fn sparql_query_cancellable(
         &self,
+        stop: EvalStop,
         query: String,
-        cancel: tokio_util::sync::CancellationToken,
     ) -> Result<String, deno_core::anyhow::Error> {
-        self.sparql_store.query_cancellable(&query, cancel).await
+        self.sparql_store.query_cancellable(&stop, &query).await
     }
 
     /// The ordering strategy declared for `(source, predicate)`, if any.
@@ -3989,6 +4053,7 @@ impl PerspectiveInstance {
         let pending = self.staged_triples_for(source, batch_id).await;
         let resolver = self.shape_resolver();
         let classes = super::subject_classes_of::subject_classes_of_with_pending(
+            &EvalStop::none(),
             &self.sparql_store,
             &resolver,
             &[source.to_string()],
@@ -4240,7 +4305,20 @@ impl PerspectiveInstance {
         class_name: &str,
         query_json: &str,
     ) -> Result<String, deno_core::anyhow::Error> {
-        self.model_query_within(class_name, query_json, MODEL_QUERY_SHAPE_WAIT)
+        self.model_query_stopped(&EvalStop::none(), class_name, query_json)
+            .await
+    }
+
+    /// [`Self::model_query`] under `stop`: every evaluation the query makes
+    /// ends when the call's gate fires, reporting why.
+    pub async fn model_query_stopped(
+        &self,
+        stop: &EvalStop,
+        class_name: &str,
+        query_json: &str,
+    ) -> Result<String, deno_core::anyhow::Error> {
+        let classes = super::model_query::QueryClasses::One(class_name.to_string());
+        self.model_query_classes_within(stop, &classes, query_json, MODEL_QUERY_SHAPE_WAIT)
             .await
     }
 
@@ -4250,12 +4328,30 @@ impl PerspectiveInstance {
         classes: &super::model_query::QueryClasses,
         query_json: &str,
     ) -> Result<String, deno_core::anyhow::Error> {
-        self.model_query_classes_within(classes, query_json, MODEL_QUERY_SHAPE_WAIT)
+        self.model_query_classes_within(
+            &EvalStop::none(),
+            classes,
+            query_json,
+            MODEL_QUERY_SHAPE_WAIT,
+        )
+        .await
+    }
+
+    /// [`Self::model_query_classes`] under `stop` — every evaluation the
+    /// query makes ends when the call's gate fires.
+    pub async fn model_query_classes_stopped(
+        &self,
+        stop: &EvalStop,
+        classes: &super::model_query::QueryClasses,
+        query_json: &str,
+    ) -> Result<String, deno_core::anyhow::Error> {
+        self.model_query_classes_within(stop, classes, query_json, MODEL_QUERY_SHAPE_WAIT)
             .await
     }
 
     /// [`Self::model_query`] with the shape-wait budget as a parameter, so
     /// tests can exercise its expiry without waiting the production 20 s.
+    #[cfg(test)]
     async fn model_query_within(
         &self,
         class_name: &str,
@@ -4263,7 +4359,7 @@ impl PerspectiveInstance {
         shape_wait: Duration,
     ) -> Result<String, deno_core::anyhow::Error> {
         let classes = super::model_query::QueryClasses::One(class_name.to_string());
-        self.model_query_classes_within(&classes, query_json, shape_wait)
+        self.model_query_classes_within(&EvalStop::none(), &classes, query_json, shape_wait)
             .await
     }
 
@@ -4272,6 +4368,7 @@ impl PerspectiveInstance {
     /// union names is waited for under the one budget, as an included class is.
     pub(super) async fn model_query_classes_within(
         &self,
+        stop: &EvalStop,
         classes: &super::model_query::QueryClasses,
         query_json: &str,
         shape_wait: Duration,
@@ -4309,7 +4406,7 @@ impl PerspectiveInstance {
         if let Some(edges) = &targets.containment {
             super::model_query::containment::set_containment(&mut query_input, edges);
         }
-        self.resolve_container_children(classes, &mut query_input)
+        self.resolve_container_children(stop, classes, &mut query_input)
             .await?;
         let named = classes;
         let classes = &targets.classes;
@@ -4388,7 +4485,8 @@ impl PerspectiveInstance {
         let result = loop {
             let run = match classes {
                 super::model_query::QueryClasses::One(_) => {
-                    super::model_query::execute_model_query(
+                    super::model_query::execute_model_query_stopped(
+                        stop,
                         &self.sparql_store,
                         shapes[0].1.as_ref(),
                         &query_input,
@@ -4398,6 +4496,7 @@ impl PerspectiveInstance {
                 }
                 super::model_query::QueryClasses::Union(names) => {
                     super::model_query::execute_union_query_with_views(
+                        stop,
                         &self.sparql_store,
                         names,
                         &query_input,
@@ -4422,7 +4521,7 @@ impl PerspectiveInstance {
                 .await?;
         };
         let mut result = result;
-        self.finish_container_rows(named, &query_input, &mut result)
+        self.finish_container_rows(stop, named, &query_input, &mut result)
             .await?;
 
         serde_json::to_string(&result).map_err(|e| {
@@ -4439,8 +4538,20 @@ impl PerspectiveInstance {
         instance_ids: &[String],
         property_names: Option<&[String]>,
     ) -> Result<String, deno_core::anyhow::Error> {
+        self.evaluate_getters_stopped(&EvalStop::none(), class_name, instance_ids, property_names)
+    }
+
+    /// [`Self::evaluate_getters`] under `stop`.
+    pub fn evaluate_getters_stopped(
+        &self,
+        stop: &EvalStop,
+        class_name: &str,
+        instance_ids: &[String],
+        property_names: Option<&[String]>,
+    ) -> Result<String, deno_core::anyhow::Error> {
         let shape = self.get_shape(class_name)?;
         let result = super::model_query::evaluate_getters_batch(
+            stop,
             &self.sparql_store,
             shape.as_ref(),
             instance_ids,
@@ -4679,6 +4790,7 @@ impl PerspectiveInstance {
             let held = self
                 .sparql_store
                 .query_links(
+                    &EvalStop::none(),
                     Some(&link.data.source),
                     link.data.predicate.as_deref(),
                     Some(&link.data.target),
@@ -4938,7 +5050,7 @@ impl PerspectiveInstance {
                 // One failing trigger must not silence the other notifications.
                 match {
                     let query = n.trigger.clone();
-                    let result_json = self.sparql_store.query(&query);
+                    let result_json = self.sparql_store.query(&EvalStop::none(), &query);
                     match result_json {
                         Ok(json) => serde_json::from_str::<Vec<serde_json::Value>>(&json)
                             .map_err(|e| anyhow::anyhow!(e)),
@@ -5744,9 +5856,11 @@ impl PerspectiveInstance {
         let shape_suffix = format!("{}Shape", class_name);
         let _uuid = self.uuid.clone();
 
-        let links = self
-            .sparql_store
-            .get_links_by_predicate_and_source_suffix(predicate, &shape_suffix)?;
+        let links = self.sparql_store.get_links_by_predicate_and_source_suffix(
+            &EvalStop::none(),
+            predicate,
+            &shape_suffix,
+        )?;
 
         // Only a link that counts defines an action — the same
         // `proof.valid == Some(true)` cut every schema reader makes. A
@@ -5773,9 +5887,11 @@ impl PerspectiveInstance {
         let prop_suffix = format!("{}.{}", class_name, property);
         let _uuid = self.uuid.clone();
 
-        let links = self
-            .sparql_store
-            .get_links_by_predicate_and_source_suffix(predicate, &prop_suffix)?;
+        let links = self.sparql_store.get_links_by_predicate_and_source_suffix(
+            &EvalStop::none(),
+            predicate,
+            &prop_suffix,
+        )?;
 
         // Only a link that counts defines an action — same cut as
         // `get_shape_actions_from_shacl`. A property whose only
@@ -5809,9 +5925,11 @@ impl PerspectiveInstance {
     ) -> Result<Option<String>, AnyError> {
         let prop_suffix = format!("{}.{}", class_name, property);
 
-        let links = self
-            .sparql_store
-            .get_links_by_predicate_and_source_suffix("ad4m://resolveLanguage", &prop_suffix)?;
+        let links = self.sparql_store.get_links_by_predicate_and_source_suffix(
+            &EvalStop::none(),
+            "ad4m://resolveLanguage",
+            &prop_suffix,
+        )?;
 
         // Property metadata counts only when its link does — same cut as the
         // action readers above.
@@ -6425,6 +6543,7 @@ impl PerspectiveInstance {
     /// is not SPARQL fails with [`PROLOG_LIVE_QUERY_UNSUPPORTED`].
     pub async fn subscribe_and_query(
         &self,
+        stop: &EvalStop,
         query: String,
         subscription_id: String,
         connection_id: String,
@@ -6434,7 +6553,7 @@ impl PerspectiveInstance {
             return Err(anyhow!(PROLOG_LIVE_QUERY_UNSUPPORTED));
         }
         let subscribed_query = SubscribedQuery::new(query.clone(), connection_id, subscriber);
-        let first_result = async { self.sparql_query(query) };
+        let first_result = async { self.sparql_query_stopped(stop, &query) };
         self.open_subscription(subscription_id, subscribed_query, first_result)
             .await
     }
@@ -6450,6 +6569,7 @@ impl PerspectiveInstance {
     /// it re-runs when a diff touches the trigger set of any class it names.
     pub async fn model_subscribe_and_query(
         &self,
+        stop: &EvalStop,
         classes: super::model_query::QueryClasses,
         query_json: String,
         subscription_id: String,
@@ -6483,7 +6603,7 @@ impl PerspectiveInstance {
             subscriber,
         };
         let first_result =
-            self.model_query_classes_within(&classes, &query_json, MODEL_QUERY_SHAPE_WAIT);
+            self.model_query_classes_within(stop, &classes, &query_json, MODEL_QUERY_SHAPE_WAIT);
         self.open_subscription(subscription_id, subscribed_query, first_result)
             .await
     }
@@ -6628,9 +6748,20 @@ impl PerspectiveInstance {
                 // subscription's unsynced class would hold back every other
                 // subscription's update. A class still missing fails this pass
                 // at once and is retried on the next one.
+                // A re-check runs under its own deadline gate: one slow
+                // subscription's eval stops there and is skipped for this
+                // pass — it does not kill the subscription or hold back the
+                // others. The gate drops with the future, so an eval still
+                // stopping is still ended.
+                let gate = crate::perspectives::sparql_store::EvalGate::request(
+                    crate::perspectives::sparql_store::query_deadline(),
+                    None,
+                );
+                let stop = gate.stop();
                 let result_string = if let Some(ref params) = model_params {
                     match self_clone
                         .model_query_classes_within(
+                            &stop,
                             &params.classes,
                             &params.query_json,
                             Duration::ZERO,
@@ -6639,15 +6770,23 @@ impl PerspectiveInstance {
                     {
                         Ok(r) => r,
                         Err(e) => {
-                            log::error!("❌ 🔗 🧠 model-based subscription query failed: {}", e);
+                            log::error!(
+                                "❌ 🔗 🧠 model-based subscription query failed (subscriptions {:?}): {}",
+                                ids,
+                                e
+                            );
                             return None;
                         }
                     }
                 } else {
-                    match self_clone.sparql_query(query_string) {
+                    match self_clone.sparql_query_stopped(&stop, &query_string) {
                         Ok(r) => r,
                         Err(e) => {
-                            log::error!("❌ 🔗 🔎 SPARQL subscription query failed: {}", e);
+                            log::error!(
+                                "❌ 🔗 🔎 SPARQL subscription query failed (subscriptions {:?}): {}",
+                                ids,
+                                e
+                            );
                             return None;
                         }
                     }
@@ -8284,7 +8423,10 @@ mod tests {
             status: Some(LinkStatus::Shared),
         };
         perspective.sparql_store.add_link(&link).unwrap();
-        let stored = perspective.sparql_store.get_all_links().unwrap();
+        let stored = perspective
+            .sparql_store
+            .get_all_links(&EvalStop::none())
+            .unwrap();
         assert_eq!(stored[0].verdict, Some(LinkVerdict::CantCheck));
         assert_eq!(
             perspective
@@ -8320,7 +8462,10 @@ mod tests {
                 .unwrap(),
             1
         );
-        let stored = perspective.sparql_store.get_all_links().unwrap();
+        let stored = perspective
+            .sparql_store
+            .get_all_links(&EvalStop::none())
+            .unwrap();
         assert_eq!(
             stored[0].verdict,
             Some(LinkVerdict::Invalid(InvalidReason::Revoked))
@@ -8407,7 +8552,10 @@ mod tests {
 
         let before = signed(Some(0));
         perspective.sparql_store.add_link(&before).unwrap();
-        let stored = perspective.sparql_store.get_all_links().unwrap();
+        let stored = perspective
+            .sparql_store
+            .get_all_links(&EvalStop::none())
+            .unwrap();
         assert_eq!(stored[0].verdict, Some(LinkVerdict::Valid));
         assert_eq!(stored[0].person.as_deref(), Some(person.as_str()));
 
@@ -8429,7 +8577,10 @@ mod tests {
             0,
             "the link the store counted before the revocation stays counted"
         );
-        let stored = perspective.sparql_store.get_all_links().unwrap();
+        let stored = perspective
+            .sparql_store
+            .get_all_links(&EvalStop::none())
+            .unwrap();
         assert_eq!(stored[0].verdict, Some(LinkVerdict::Valid));
         assert_eq!(stored[0].person.as_deref(), Some(person.as_str()));
 
@@ -8439,7 +8590,10 @@ mod tests {
         for link in &later {
             perspective.sparql_store.add_link(link).unwrap();
         }
-        let stored = perspective.sparql_store.get_all_links().unwrap();
+        let stored = perspective
+            .sparql_store
+            .get_all_links(&EvalStop::none())
+            .unwrap();
         let verdict_of = |link: &LinkExpression| {
             stored
                 .iter()
@@ -8527,7 +8681,10 @@ mod tests {
                 status: Some(LinkStatus::Shared),
             };
             assert!(perspective.sparql_store.add_remote_link(&link).unwrap());
-            let stored = perspective.sparql_store.get_all_links().unwrap();
+            let stored = perspective
+                .sparql_store
+                .get_all_links(&EvalStop::none())
+                .unwrap();
             assert_eq!(stored[0].verdict, Some(LinkVerdict::Valid));
 
             let mut after_replay = None;
@@ -8536,7 +8693,10 @@ mod tests {
                 // eviction), and the same link arrives again.
                 map.forget(&log.scid());
                 let _ = perspective.sparql_store.add_remote_link(&link).unwrap();
-                let stored = perspective.sparql_store.get_all_links().unwrap();
+                let stored = perspective
+                    .sparql_store
+                    .get_all_links(&EvalStop::none())
+                    .unwrap();
                 assert_eq!(stored.len(), 1);
                 after_replay = stored[0].verdict.clone();
             }
@@ -8560,7 +8720,10 @@ mod tests {
                 .recheck_links(&crate::perspectives::Recheck::CantCheck)
                 .await
                 .unwrap();
-            let stored = perspective.sparql_store.get_all_links().unwrap();
+            let stored = perspective
+                .sparql_store
+                .get_all_links(&EvalStop::none())
+                .unwrap();
             seen.push((replay, after_replay, stored[0].verdict.clone()));
             map.forget(&log.scid());
         }
@@ -8619,7 +8782,10 @@ mod tests {
             0,
             "no rewrite of a counted link to cantCheck"
         );
-        let stored = perspective.sparql_store.get_all_links().unwrap();
+        let stored = perspective
+            .sparql_store
+            .get_all_links(&EvalStop::none())
+            .unwrap();
         assert_eq!(stored[0].verdict, Some(LinkVerdict::Valid));
         assert_eq!(stored[0].person.as_deref(), Some(person.as_str()));
 
@@ -8637,7 +8803,10 @@ mod tests {
             .recheck_links(&crate::perspectives::Recheck::Signers(signers))
             .await
             .unwrap();
-        let stored = perspective.sparql_store.get_all_links().unwrap();
+        let stored = perspective
+            .sparql_store
+            .get_all_links(&EvalStop::none())
+            .unwrap();
         assert_eq!(stored[0].verdict, Some(LinkVerdict::Valid));
         map.forget(&log.scid());
     }
@@ -8696,7 +8865,11 @@ mod tests {
         for link in &links {
             assert!(perspective.sparql_store.add_remote_link(link).unwrap());
         }
-        for stored in perspective.sparql_store.get_all_links().unwrap() {
+        for stored in perspective
+            .sparql_store
+            .get_all_links(&EvalStop::none())
+            .unwrap()
+        {
             assert_eq!(stored.verdict, Some(LinkVerdict::CantCheck));
             assert_eq!(stored.person, None);
         }
@@ -8725,7 +8898,11 @@ mod tests {
                 .unwrap(),
             2
         );
-        for stored in perspective.sparql_store.get_all_links().unwrap() {
+        for stored in perspective
+            .sparql_store
+            .get_all_links(&EvalStop::none())
+            .unwrap()
+        {
             assert_eq!(stored.verdict, Some(LinkVerdict::Flagged));
             assert_eq!(stored.person, None);
             assert_ne!(stored.proof.valid, Some(true));
@@ -8788,7 +8965,7 @@ mod tests {
         let verdict_of = |target: &str| {
             perspective
                 .sparql_store
-                .get_all_links()
+                .get_all_links(&EvalStop::none())
                 .unwrap()
                 .into_iter()
                 .find(|l| l.data.target == target)
@@ -8876,7 +9053,7 @@ mod tests {
         let stored = |target: &str| {
             perspective
                 .sparql_store
-                .get_all_links()
+                .get_all_links(&EvalStop::none())
                 .unwrap()
                 .into_iter()
                 .find(|l| l.data.target == target)
@@ -8986,7 +9163,7 @@ mod tests {
         let stored = |target: &str| {
             perspective
                 .sparql_store
-                .get_all_links()
+                .get_all_links(&EvalStop::none())
                 .unwrap()
                 .into_iter()
                 .find(|l| l.data.target == target)
@@ -9058,7 +9235,10 @@ mod tests {
             )
             .await
             .unwrap();
-        let stored = perspective.sparql_store.get_all_links().unwrap();
+        let stored = perspective
+            .sparql_store
+            .get_all_links(&EvalStop::none())
+            .unwrap();
         assert_eq!(stored.len(), 1);
         assert_eq!(
             stored[0].verdict,
@@ -9132,6 +9312,7 @@ mod tests {
         let stored = perspective
             .sparql_store
             .get_link(
+                &EvalStop::none(),
                 &updated.data.source,
                 updated.data.predicate.as_deref(),
                 &updated.data.target,
@@ -9181,7 +9362,7 @@ mod tests {
         perspective.sparql_store.add_link(&forged).unwrap();
         assert!(perspective
             .sparql_store
-            .get_all_links()
+            .get_all_links(&EvalStop::none())
             .unwrap()
             .iter()
             .all(|l| l.proof.valid != Some(true)));
@@ -9657,7 +9838,10 @@ mod tests {
             status: Some(LinkStatus::Shared),
         };
         perspective.sparql_store.add_link(&link).unwrap();
-        let stored = perspective.sparql_store.get_all_links().unwrap();
+        let stored = perspective
+            .sparql_store
+            .get_all_links(&EvalStop::none())
+            .unwrap();
         assert_eq!(stored[0].verdict, Some(LinkVerdict::Valid));
 
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
@@ -9675,7 +9859,10 @@ mod tests {
                 .unwrap(),
             1
         );
-        let stored = perspective.sparql_store.get_all_links().unwrap();
+        let stored = perspective
+            .sparql_store
+            .get_all_links(&EvalStop::none())
+            .unwrap();
         assert_eq!(
             stored[0].verdict,
             Some(LinkVerdict::Invalid(InvalidReason::Expired))
@@ -9738,13 +9925,19 @@ mod tests {
         let perspective = setup().await;
         let log = TestLog::new(97);
         five_unchecked_links(&perspective, &log).await;
-        let stored = perspective.sparql_store.get_all_links().unwrap();
+        let stored = perspective
+            .sparql_store
+            .get_all_links(&EvalStop::none())
+            .unwrap();
         let gone = LinkExpression::from(stored[0].clone());
         perspective.sparql_store.remove_link(&gone).unwrap();
         reach_seq_one(&log);
         let rewrites = perspective.rejudge(stored).await.unwrap();
         assert_eq!(rewrites.len(), 4, "the four links still stored");
-        let held = perspective.sparql_store.get_all_links().unwrap();
+        let held = perspective
+            .sparql_store
+            .get_all_links(&EvalStop::none())
+            .unwrap();
         assert_eq!(held.len(), 4);
         assert!(held
             .iter()
@@ -9786,7 +9979,10 @@ mod tests {
             };
             perspective.sparql_store.add_link(&link).unwrap();
         }
-        let stored = perspective.sparql_store.get_all_links().unwrap();
+        let stored = perspective
+            .sparql_store
+            .get_all_links(&EvalStop::none())
+            .unwrap();
         assert_eq!(stored.len(), 5);
         assert!(stored
             .iter()
@@ -9829,7 +10025,7 @@ mod tests {
         );
         assert!(perspective
             .sparql_store
-            .get_all_links()
+            .get_all_links(&EvalStop::none())
             .unwrap()
             .iter()
             .all(|l| l.verdict == Some(LinkVerdict::Valid)));
@@ -9847,7 +10043,7 @@ mod tests {
         five_unchecked_links(&perspective, &log).await;
         let mut order: Vec<String> = perspective
             .sparql_store
-            .get_all_links()
+            .get_all_links(&EvalStop::none())
             .unwrap()
             .iter()
             .map(reifier_of)
@@ -9862,7 +10058,7 @@ mod tests {
         let valid = || {
             let mut valid: Vec<String> = perspective
                 .sparql_store
-                .get_all_links()
+                .get_all_links(&EvalStop::none())
                 .unwrap()
                 .iter()
                 .filter(|l| l.verdict == Some(LinkVerdict::Valid))
@@ -9893,7 +10089,11 @@ mod tests {
         let perspective = setup().await;
         let log = TestLog::new(101);
         five_unchecked_links(&perspective, &log).await;
-        let watched = perspective.sparql_store.get_all_links().unwrap()[0].clone();
+        let watched = perspective
+            .sparql_store
+            .get_all_links(&EvalStop::none())
+            .unwrap()[0]
+            .clone();
         let query = format!(
             r#"SELECT ?t WHERE {{
             ?s <{predicate}> ?t .
@@ -9904,7 +10104,13 @@ mod tests {
             predicate = watched.data.predicate.clone().unwrap()
         );
         let (id, _, first) = perspective
-            .subscribe_and_query(query, uuid::Uuid::new_v4().to_string(), "c".into(), None)
+            .subscribe_and_query(
+                &EvalStop::none(),
+                query,
+                uuid::Uuid::new_v4().to_string(),
+                "c".into(),
+                None,
+            )
             .await
             .unwrap();
         let target = watched.data.target.clone();
@@ -10308,6 +10514,7 @@ mod tests {
             perspective
                 .sparql_store
                 .query_links(
+                    &crate::perspectives::sparql_store::EvalStop::none(),
                     Some("test://record"),
                     Some("test://body"),
                     None,
@@ -11495,6 +11702,7 @@ mod tests {
         // No board has tasks yet, so hydration does not need `Task`.
         let (board_sub, _, _) = perspective
             .model_subscribe_and_query(
+                &crate::perspectives::sparql_store::EvalStop::none(),
                 "Board".into(),
                 NESTED_INCLUDE_QUERY.into(),
                 uuid::Uuid::new_v4().to_string(),
@@ -11505,6 +11713,7 @@ mod tests {
             .expect("subscribe to Board");
         let (other_sub, _, _) = perspective
             .subscribe_and_query(
+                &crate::perspectives::sparql_store::EvalStop::none(),
                 "SELECT ?s ?o WHERE { ?s <ns://title> ?o . }".into(),
                 uuid::Uuid::new_v4().to_string(),
                 "c".into(),
@@ -12135,7 +12344,16 @@ mod tests {
         // assertion below catches drift between the two implementations.
         let direct = perspective
             .sparql_store
-            .query_links_top_n_by_timestamp(None, None, None, None, None, 5, false)
+            .query_links_top_n_by_timestamp(
+                &crate::perspectives::sparql_store::EvalStop::none(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                5,
+                false,
+            )
             .unwrap();
         assert_eq!(
             direct.len(),
@@ -12171,9 +12389,11 @@ mod tests {
             .unwrap();
 
         // Uncancelled — should return JSON with at least the inserted triple.
-        let cancel = tokio_util::sync::CancellationToken::new();
         let result = perspective
-            .sparql_query_cancellable("SELECT ?s ?p ?o WHERE { ?s ?p ?o }".to_string(), cancel)
+            .sparql_query_cancellable(
+                EvalStop::none(),
+                "SELECT ?s ?p ?o WHERE { ?s ?p ?o }".to_string(),
+            )
             .await
             .expect("non-cancelled query should succeed");
         let rows: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
@@ -12183,10 +12403,11 @@ mod tests {
     #[tokio::test]
     async fn sparql_query_cancellable_pre_cancelled_errors() {
         let perspective = setup().await;
-        let cancel = tokio_util::sync::CancellationToken::new();
-        cancel.cancel();
         let err = perspective
-            .sparql_query_cancellable("SELECT ?s ?p ?o WHERE { ?s ?p ?o }".to_string(), cancel)
+            .sparql_query_cancellable(
+                EvalStop::cancelled(),
+                "SELECT ?s ?p ?o WHERE { ?s ?p ?o }".to_string(),
+            )
             .await
             .expect_err("pre-cancelled query should error");
         assert!(
