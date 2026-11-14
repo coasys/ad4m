@@ -6,6 +6,8 @@ members = [
     "ad4m-identity-client",
     "identity-store",
     "cli",
+    "crates/perspective-diff-algorithm",
+    "crates/perspective-diff-types",
     "rust-client",
     "rust-executor",
     "ui/src-tauri"
