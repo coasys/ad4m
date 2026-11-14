@@ -25,6 +25,7 @@ request box), is informative.
 | `src/requests.rs` | the request box: `DeviceRequestBody` (`SendMaster`, `ConfirmRevoke`), `PostedRequest`, `check_post`, `posted_bytes`, `verify_posted` (a reader's check of the poster, on `BoxedRequest`/`SignedStoreRequest`), `REQUEST_TTL_S`, `MAX_OPEN_REQUESTS`, `MAX_OPEN_REQUESTS_PER_KEY` |
 | `src/document.rs` | `did_document(chain, version, also_known_as)`: `DidDocument`, `VerificationMethod`, `DocumentMetadata`, `DocumentError` (spec section 9); the contexts `DID_CONTEXT`, `MULTIKEY_CONTEXT`, `COASYS_CONTEXT` |
 | `src/domain.rs` | the signing-domain registry and labels (spec sections 7 and 16); `signing_bytes`, `verify_signed`, `check_domain`; `LINK_DOMAIN`, `AGENT_RECORD_DOMAIN`, `HEAD_DOMAIN`, `REQUEST_DOMAIN`, `SESSION_DOMAIN` (key statements: a device key's login on an executor); `HeadStatement` (what the store signs for a head; the store signs it, executors verify it) |
+| `src/judgement.rs` | the link judgement, one copy for the executor, the link server and the link language: `LinkVerdict` (`counts`, `shown`, `stored`, `from_stored`), `InvalidReason`, `SignerLog`, `LinkFacts`, `judge`; the bytes a link signs: `anchored_signing_bytes` (`coasys:link` over `{data, timestamp, anchor}`), `anchored_signature_holds`, `hash_data_and_timestamp` (the old bytes, no anchor), `LinkBytesError`. Feature `ts` derives `ts_rs::TS` on the verdict types for the executor's SDK types |
 | `src/pow.rs` | `Pow`, `solve`, `solve_range`, `check` (the brake's proof of work, bound to the SCID; host policy, spec section 14) |
 | `src/link.rs` | device linking: `Offer`, `SignedOffer`, `Claim`, `ClaimBody`, `ClaimView`, `OfferState`, `LinkError`; `offer_commit`, `sign_offer`/`verify_offer`, `make_claim`/`verify_claim`, `verify_claim_view` (the holder's check of the store's claim view before `add_claimed`), `check_secret`, `match_code`, `check_add` (conditions 2–5 of the store's claim check, `identity-store/AGENTS.md`), `may_keep_master` (whether the log lets a device key keep the master key: a standing key of the incept, or an `add` whose co-signature is over a claim that said `canKeepMaster`; never the record's kind), `OfferString` (offer string and link), `DeviceString` |
 | `src/build.rs` | feature `build`: `*_unsigned` builders, `signing_input`, `attach_proof`, `Signer`, `cosign`, `incept_human`, `add_claimed`, `revoke`, `scope`, `rotate`, `sign_domain` |
@@ -139,6 +140,10 @@ the store's check and the record JSON; `tests/requests.rs` expiry, `confirm-revo
 `tests/document.rs` covers the DID document mapping (live, revoked, bot, rotated,
 ended, past the head, member order); `vectors/document.json` pins the document and metadata
 of the log of `log.json` at the head and after every seq.
+`tests/judgement.rs` covers `judge` (each verdict and reason, bot scopes, the space order) and
+the signed bytes of a link against `vectors/link-signing-bytes.json`. That file is not built by
+the generator: it was pinned from the executor's bytes before the layout moved into the core,
+and `rust-executor/src/agent/signatures.rs` checks the executor against it too.
 `tests/fold.rs` has one test per refusal case and fails if a case in `refusal_cases()` has none.
 `tests/fold_stored.rs` pins `fold_stored` to `fold`: the same chain at every seq of a log of
 every op, the same refusal for every case but a bad signature or a duplicate key, and the

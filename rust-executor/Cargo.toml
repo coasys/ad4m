@@ -138,9 +138,10 @@ semver = "1.0.17"
 did-key = "0.2.1"
 # The key log: the hash-chain module's SQLite store for the KelCache, the identity
 # core's fold, builders and offer/claim module (never `words`: no node makes the words), and
-# the identity wire types the agent language speaks.
+# the identity wire types the agent language speaks; the link judgement and signed bytes, with
+# their TS types (`ts`) for the SDK.
 ad4m-hash-chain = { path = "../ad4m-hash-chain", features = ["sqlite"] }
-ad4m-identity-core = { path = "../ad4m-identity-core", features = ["build"] }
+ad4m-identity-core = { path = "../ad4m-identity-core", features = ["build", "ts"] }
 ad4m-ldk = { path = "../ad4m-ldk/rust" }
 # Data at rest: the keys of the keyring file and their wraps (at_rest/).
 ad4m-keyring = { path = "../ad4m-keyring" }

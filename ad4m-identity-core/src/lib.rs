@@ -10,6 +10,7 @@
 //! holds offers, claims and the match code of device linking; [`inbox`] the device inbox (HPKE
 //! seals, payloads and their checks), [`record`] the private details record and [`requests`]
 //! the request box. [`did_document`] derives the DID Core document of a log at a seq.
+//! [`judgement`] holds the verdict of a link and the bytes a link signs.
 
 use serde_json::{json, Value};
 
@@ -22,6 +23,7 @@ mod state;
 pub mod document;
 pub mod domain;
 pub mod inbox;
+pub mod judgement;
 pub mod link;
 pub mod pow;
 pub mod record;
