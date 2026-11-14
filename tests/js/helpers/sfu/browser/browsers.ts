@@ -8,9 +8,7 @@
  * would: `http://127.0.0.1` is a secure context, so `getUserMedia` works.
  */
 
-import { createSocket } from "node:dgram";
 import { existsSync, readFileSync } from "node:fs";
-import { networkInterfaces } from "node:os";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import path from "node:path";
@@ -85,29 +83,6 @@ export async function launch(kind: BrowserKind): Promise<Launched> {
     if (process.env.SFU_BROWSERS_REQUIRED) throw new Error(reason);
     return { kind, browser: null, reason };
   }
-}
-
-/**
- * This host's IPv4 address on the interface its default route uses, as the
- * executor picks it for an SFU served beyond loopback (`detect_outbound_ip`):
- * a connected UDP socket's local address. Connecting sends nothing. Falls
- * back to the first non-internal IPv4 interface address; null with neither.
- */
-export async function outboundIp(): Promise<string | null> {
-  const viaRoute = await new Promise<string | null>((resolve) => {
-    const socket = createSocket("udp4");
-    socket.on("error", () => { socket.close(); resolve(null); });
-    socket.connect(53, "192.0.2.1", () => {
-      const { address } = socket.address();
-      socket.close();
-      resolve(address && address !== "0.0.0.0" ? address : null);
-    });
-  });
-  if (viaRoute) return viaRoute;
-  for (const addresses of Object.values(networkInterfaces())) {
-    for (const a of addresses ?? []) if (a.family === "IPv4" && !a.internal) return a.address;
-  }
-  return null;
 }
 
 /** Serve the page and the SDK's ESM bundle on loopback. */

@@ -20,13 +20,13 @@
 //! - prune entries when the gossip layer reports a remote node leaving.
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use log::{info, warn};
 use str0m::change::SdpOffer;
 use str0m::{Candidate, Rtc};
 
+use super::hosts::MediaSockets;
 use super::room::{ParticipantId, RoomId};
 use super::server::SfuPeer;
 use super::types::{SfuRosterParticipant, TrackMapEntry};
@@ -183,8 +183,9 @@ impl CascadeSignal {
 pub struct CascadeManager {
     /// Our DID
     local_did: String,
-    /// Local SFU server address for creating pipe transport RTCs
-    local_addr: SocketAddr,
+    /// The SFU's sockets: every pipe offers their host addresses
+    /// ([`MediaSockets::host_addrs`]) as candidates.
+    hosts: MediaSockets,
     /// Known SFU nodes per room: room_id_str -> (did -> node_info)
     known_nodes: HashMap<String, HashMap<String, SfuNodeInfo>>,
     /// Active pipe transport metadata keyed by `(room_id_str, remote_did)`.
@@ -199,15 +200,33 @@ pub struct CascadeManager {
 }
 
 impl CascadeManager {
-    pub fn new(local_did: String, local_addr: SocketAddr, max_participants_per_node: u32) -> Self {
+    pub fn new(
+        local_did: String,
+        hosts: impl Into<MediaSockets>,
+        max_participants_per_node: u32,
+    ) -> Self {
         Self {
             local_did,
-            local_addr,
+            hosts: hosts.into(),
             known_nodes: HashMap::new(),
             pipes: HashMap::new(),
             max_participants_per_node,
             rebalance_cooldowns: HashMap::new(),
         }
+    }
+
+    /// Add a host candidate for each address the SFU offers now.
+    fn add_host_candidates(&self, rtc: &mut Rtc) -> Result<(), String> {
+        let hosts = self.hosts.host_addrs();
+        if hosts.is_empty() {
+            return Err("The SFU has no address to offer".to_string());
+        }
+        for host in hosts {
+            let candidate = Candidate::host(host, "udp")
+                .map_err(|e| format!("Failed to create candidate: {}", e))?;
+            rtc.add_local_candidate(candidate);
+        }
+        Ok(())
     }
 
     /// Maximum participants this node accepts per room.
@@ -335,9 +354,7 @@ impl CascadeManager {
         }
 
         let mut rtc = Rtc::builder().build(Instant::now());
-        let candidate = Candidate::host(self.local_addr, "udp")
-            .map_err(|e| format!("Failed to create candidate: {}", e))?;
-        rtc.add_local_candidate(candidate);
+        self.add_host_candidates(&mut rtc)?;
 
         // Create offer via SDP API.  str0m requires at least one
         // queued change before `apply()` produces an offer, so we open
@@ -401,9 +418,7 @@ impl CascadeManager {
             .map_err(|e| format!("Invalid pipe SDP offer: {}", e))?;
 
         let mut rtc = Rtc::builder().build(Instant::now());
-        let candidate = Candidate::host(self.local_addr, "udp")
-            .map_err(|e| format!("Failed to create candidate: {}", e))?;
-        rtc.add_local_candidate(candidate);
+        self.add_host_candidates(&mut rtc)?;
 
         let answer = rtc
             .sdp_api()

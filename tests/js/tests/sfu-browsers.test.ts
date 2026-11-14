@@ -1,7 +1,7 @@
 import { expect } from "chai";
 import type { Server } from "node:http";
 import {
-  BROWSER_KINDS, joinCall, launch, openTab, outboundIp, receiveProblems, report, servePage, short,
+  BROWSER_KINDS, joinCall, launch, openTab, receiveProblems, report, servePage, short,
   type BrowserKind, type BrowserUser, type Launched,
 } from "../helpers/sfu/browser/browsers.js";
 import type { PageReport } from "../helpers/sfu/browser/page.js";
@@ -62,18 +62,17 @@ describe("SFU: calls in real browsers, mixed, through the SDK", function () {
       console.log(launched.browser ? `  ${kind} ${launched.browser.version()}` : `  ${launched.reason}`);
     }
     ({ url: pageUrl, server } = await servePage());
-    // The SFU on this host's network interface, as an executor serving browsers beyond its own
-    // loopback binds it. On loopback (a localhost-only executor's default) Firefox cannot reach
-    // it: Firefox gathers no loopback candidate (`media.peerconnection.ice.loopback` is off) and
-    // its LAN candidates never pair with the SFU's 127.0.0.1, so ICE stays `checking` and the
-    // SFU's DTLS handshake times out. Chromium (through a peer-reflexive pair) and WebKit connect.
-    // `SFU_BROWSERS_SFU_ADDR` overrides it, e.g. `127.0.0.1` to see the loopback case.
-    const sfuIp = process.env.SFU_BROWSERS_SFU_ADDR || await outboundIp();
-    if (!sfuIp) throw new Error("this host has no IPv4 address beyond loopback for the SFU to bind (see the comment above)");
+    // The executor's default SFU binding: loopback plus this host's LAN address, both offered.
+    // Firefox needs the LAN one: it gathers no loopback candidate
+    // (`media.peerconnection.ice.loopback` is off) and its LAN candidates never pair with an SFU
+    // on 127.0.0.1 only, so ICE stays `checking` and the SFU's DTLS handshake times out.
+    // Chromium (through a peer-reflexive pair) and WebKit connect either way.
+    // `SFU_BROWSERS_SFU_ADDR` binds the SFU there instead, e.g. `127.0.0.1` to see the loopback case.
+    const sfuIp = process.env.SFU_BROWSERS_SFU_ADDR;
     const names = Object.keys(USERS);
     world = await startWorld({
       id: "browsers",
-      executorEnv: { AD4M_SFU_BIND_ADDR: sfuIp },
+      executorEnv: sfuIp ? { AD4M_SFU_BIND_ADDR: sfuIp } : undefined,
       users: names.map((name) => ({ name })),
       neighbourhoods: TOPOLOGIES.flatMap((topology) =>
         SCENARIOS.map((scenario) => ({
