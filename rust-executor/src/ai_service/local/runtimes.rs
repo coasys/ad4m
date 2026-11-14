@@ -790,6 +790,89 @@ mod tests {
         assert!(ini.ends_with("ngl = 999\nembeddings = true\n"), "{ini}");
     }
 
+    /// A reasoning-budget message with spaces is one flag value. Joining the flags and
+    /// splitting on spaces would hand llama-server several arguments and a truncated
+    /// message. The preset file keeps the rest of the line as the value; llama.cpp's
+    /// `to_args` then pushes that value as one argv element.
+    #[test]
+    fn a_spaced_reasoning_budget_message_stays_one_value_and_one_argv_element() {
+        let message = "Thinking budget reached. Now give the final answer.";
+        let flags = [
+            "-c",
+            "65536",
+            "-np",
+            "1",
+            "-ngl",
+            "999",
+            "--jinja",
+            "--spec-type",
+            "draft-mtp",
+            "--spec-draft-n-max",
+            "4",
+            "--reasoning-budget",
+            "2048",
+            "--reasoning-budget-message",
+            message,
+        ]
+        .map(String::from)
+        .to_vec();
+        let keys = preset_keys(&flags);
+        assert_eq!(
+            keys.iter()
+                .find(|(k, _)| k == "reasoning-budget-message")
+                .map(|(_, v)| v.as_str()),
+            Some(message)
+        );
+        assert_eq!(
+            keys.iter()
+                .filter(|(_, v)| v.split_whitespace().count() > 1)
+                .count(),
+            1,
+            "the message must not be split into words: {keys:?}"
+        );
+        let mut chat = selected(Service::Llm, "qwen3.8-27b-ud-q4_k_m", Provider::LlamaServer);
+        chat.server_flags = flags;
+        let ini = llama_presets(&[&chat]);
+        let line = format!("reasoning-budget-message = {message}\n");
+        assert!(
+            ini.contains(&line),
+            "the message must be one preset value, not quoted into the text and not split: {ini}"
+        );
+        assert_eq!(ini.matches(message).count(), 1, "{ini}");
+        // llama.cpp's preset `to_args` pushes each value as one argv element. Reconstruct
+        // that argv from the keys we write: a join-and-split would make this fail.
+        let argv: Vec<String> = preset_keys(&chat.server_flags)
+            .into_iter()
+            .flat_map(|(key, value)| {
+                let flag = if key.len() == 1 {
+                    format!("-{key}")
+                } else {
+                    format!("--{key}")
+                };
+                if value == "true" {
+                    vec![flag]
+                } else {
+                    vec![flag, value]
+                }
+            })
+            .collect();
+        let at = argv
+            .iter()
+            .position(|a| a == "--reasoning-budget-message")
+            .unwrap();
+        assert_eq!(argv[at + 1], message);
+        assert_eq!(
+            argv.iter()
+                .filter(|a| a.contains("Thinking budget"))
+                .count(),
+            1
+        );
+        assert!(
+            !argv[at + 1].contains('"'),
+            "quotes are shell syntax, not part of the value"
+        );
+    }
+
     #[test]
     fn llama_server_and_nemo_speech_listen_on_loopback_with_their_keys_out_of_the_arguments() {
         let dir = tempfile::tempdir().unwrap();

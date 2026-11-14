@@ -22,7 +22,7 @@ import { drmClientBytes, MemorySampler, once, spawnLogged, waitForHttp } from ".
 import { assertAttachedModel, canBeSttReference, SkipError } from "../helpers/ai-wind-tunnel/providers/types.js";
 import { chatTranscriptionRequest, parseChatTranscript, parseSherpaResult, sherpaFrame, startAudioFront } from "../helpers/ai-wind-tunnel/providers/audio-front.js";
 import { containerMemoryArgs } from "../helpers/ai-wind-tunnel/providers/docker.js";
-import { llamaVariants, sttInstruction } from "../helpers/ai-wind-tunnel/providers/llama-server.js";
+import { llamaServerFlags, llamaVariants, sttInstruction } from "../helpers/ai-wind-tunnel/providers/llama-server.js";
 import { runtimeVariants } from "../helpers/ai-wind-tunnel/providers/nemo-speech.js";
 import { ollamaBackendFromLog } from "../helpers/ai-wind-tunnel/providers/ollama.js";
 import { deriveRecommendations, parseParams } from "../helpers/ai-wind-tunnel/recommend.js";
@@ -151,6 +151,22 @@ describe("AI wind tunnel (unit)", () => {
       const cells = buildMatrix(loadMatrixPlan(), loadManifest(), [...PROVIDERS], [...SERVICES]);
       expect(cells.length).to.be.greaterThan(10);
       for (const c of cells) expect(Boolean(c.unsupported) !== Boolean(c.model), `${c.provider} ${c.service}`).to.be.true;
+    });
+    it("starts the 27B cell with its own flags: MTP, one slot, a reasoning budget, the message as one element", () => {
+      const cells = buildMatrix(loadMatrixPlan(), loadManifest(), ["llama-server"], ["llm"]);
+      const model = cells.find((c) => c.model?.modelId === "qwen3.8-27b-ud-q4_k_m")?.model;
+      const message = "Thinking budget reached. Now give the final answer.";
+      expect(model?.context).to.equal(65536);
+      expect(model?.serverFlags).to.include(message);
+      expect(model?.serverFlags?.filter((f) => f === message)).to.have.length(1);
+      const flags = llamaServerFlags(model!, "llm", true);
+      expect(flags).to.deep.equal(model!.serverFlags);
+      expect(flags).to.not.include("off");
+      expect(flags.indexOf("--reasoning-budget-message") + 1).to.equal(flags.indexOf(message));
+      // A cell that does not name flags still turns thinking off, and does not inherit the 27B's budget.
+      expect(llamaServerFlags({ context: 8192 }, "llm", true)).to.deep.equal(["-c", "8192", "-ngl", "999", "--reasoning", "off"]);
+      expect(llamaServerFlags({}, "embeddings", false)).to.deep.equal(["-c", "8192", "--embeddings"]);
+      expect(llamaServerFlags({}, "stt", true)).to.deep.equal(["-c", "4096", "-np", "1", "-ngl", "999", "--reasoning", "off"]);
     });
   });
 
