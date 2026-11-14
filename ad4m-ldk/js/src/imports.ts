@@ -23,6 +23,7 @@ export {
     agentSign,
     agentSignStringHex,
     agentOpenSealed,
+    agentRoomKeySeed,
     agentCreateSignedExpression,
     agentGetAllLocalUserDids,
     agentCreateSignedExpressionForUser,
@@ -49,6 +50,11 @@ export {
     emitSyncStateChange,
     emitTelepresenceSignal,
     emitSignal,
+
+    // Membership (Spec section 7.5b)
+    membershipLinks,
+    membershipAdmits,
+    roomKeyEvent,
 
     // Storage KV -- CORE (Spec section 7.4)
     storageGet,

@@ -7,9 +7,12 @@
 // matrix.
 //
 // Holochain flavor: perspective-diff-sync, params = {uid, name}.
-// Server flavor:    server-link-language,  params = {SERVER_URL, UID, name}
+// Server flavor:    server-link-language,  params = {SERVER_URL, UID, CREATOR, name}
 //                   (SERVER_URL comes from a running link-server, UID is fresh
-//                    per neighbourhood so tests don't collide).
+//                    per neighbourhood so tests don't collide, CREATOR is the
+//                    person DID that makes the neighbourhood: the room's id is
+//                    roomIdOf(CREATOR, UID), and its first membership commit
+//                    makes the room).
 
 import { Ad4mClient, LanguageRef } from "@coasys/ad4m";
 import { v4 as uuidv4 } from "uuid";
@@ -36,12 +39,16 @@ export function holochainLinkLang(languageHash: string): LinkLangConfig {
     };
 }
 
-export function serverLinkLang(languageHash: string, serverUrl: string): LinkLangConfig {
+/**
+ * `creator` answers the person DID (`did:scid:coasys:1:…`) of the agent that
+ * publishes the neighbourhood: a language without CREATOR stays inert.
+ */
+export function serverLinkLang(languageHash: string, serverUrl: string, creator: () => string): LinkLangConfig {
     return {
         label: "server-link",
         languageHash,
         buildTemplateParams: (name) =>
-            JSON.stringify({ SERVER_URL: serverUrl, UID: uuidv4(), name }),
+            JSON.stringify({ SERVER_URL: serverUrl, UID: uuidv4(), CREATOR: creator(), name }),
     };
 }
 

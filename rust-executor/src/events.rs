@@ -54,11 +54,12 @@ pub enum Topic {
     StorageMigrationProgress,
     NeighbourhoodMembershipChanged,
     NeighbourhoodJoinRefused,
+    NeighbourhoodRoomKeyChanged,
 }
 
 impl Topic {
     /// Every topic, in the order of `events_ws::event_specs`.
-    pub const ALL: [Topic; 37] = [
+    pub const ALL: [Topic; 38] = [
         Topic::AiSessionChanged,
         Topic::AgentStatusChanged,
         Topic::AgentUpdated,
@@ -96,6 +97,7 @@ impl Topic {
         Topic::StorageMigrationProgress,
         Topic::NeighbourhoodMembershipChanged,
         Topic::NeighbourhoodJoinRefused,
+        Topic::NeighbourhoodRoomKeyChanged,
     ];
 
     /// The event type on the wire: the `type` field of the socket message and the key
@@ -139,6 +141,7 @@ impl Topic {
             Topic::StorageMigrationProgress => "storage-migration-progress",
             Topic::NeighbourhoodMembershipChanged => "neighbourhood-membership-changed",
             Topic::NeighbourhoodJoinRefused => "neighbourhood-join-refused",
+            Topic::NeighbourhoodRoomKeyChanged => "neighbourhood-room-key-changed",
         }
     }
 
@@ -198,7 +201,9 @@ impl Topic {
             // a signal or a membership change names it for its perspective, which a `*` grant
             // covers. A refused join has no perspective left: on every perspective, as
             // `neighbourhood.join` checks it.
-            Topic::NeighbourhoodSignal | Topic::NeighbourhoodMembershipChanged => Capability {
+            Topic::NeighbourhoodSignal
+            | Topic::NeighbourhoodMembershipChanged
+            | Topic::NeighbourhoodRoomKeyChanged => Capability {
                 with: Resource {
                     domain: caps::NEIGHBOURHOOD.to_string(),
                     pointers: on_perspective(),

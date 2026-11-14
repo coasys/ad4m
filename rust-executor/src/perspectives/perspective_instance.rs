@@ -2005,6 +2005,30 @@ impl PerspectiveInstance {
         Ok(())
     }
 
+    /// The membership links the link language synced (A7): each through the owner gate as a
+    /// peer's link, one at a time (`persist_membership_links`), then what they changed
+    /// published as a local write's is. Membership links never come in a diff (R13).
+    pub async fn membership_links_from_link_language(
+        &self,
+        links: Vec<LinkExpression>,
+    ) -> Vec<crate::membership::MembershipLinkResult> {
+        crate::identity::prepare_link_signers(&links).await;
+        let (results, written) = self.persist_membership_links(links);
+        self.publish_membership_changes().await;
+        if !written.is_empty() {
+            let decorated = DecoratedPerspectiveDiff {
+                additions: written
+                    .into_iter()
+                    .map(|link| DecoratedLinkExpression::from((link, LinkStatus::Shared)))
+                    .collect(),
+                removals: vec![],
+            };
+            self.update_prolog_engines(decorated.clone()).await;
+            self.pubsub_publish_diff(&decorated).await;
+        }
+        results
+    }
+
     pub async fn telepresence_signal_from_link_language(
         &self,
         mut signal: PerspectiveExpression,
@@ -4619,6 +4643,22 @@ impl PerspectiveInstance {
         if let Err(e) = self.recheck_links(&scope).await {
             log::warn!("membership: re-check of the links a membership change touches failed: {e}");
         }
+    }
+
+    /// A room key change the link language reports (`roomKeyEvent`): one
+    /// `neighbourhood-room-key-changed` to the owners.
+    pub(crate) async fn publish_room_key_event(&self, event: crate::membership::RoomKeyEvent) {
+        let handle = self.persisted.lock().await.clone();
+        super::publish_to_owners(
+            Topic::NeighbourhoodRoomKeyChanged,
+            super::event_recipients(&handle),
+            crate::membership::NeighbourhoodRoomKeyChangedEvent {
+                perspective_uuid: handle.uuid.clone(),
+                kind: event.kind,
+                removed_keys: event.removed_keys,
+                version: event.version,
+            },
+        );
     }
 
     /// The store write of [`Self::persist_link_diff`], for a caller that holds `persist_lock`

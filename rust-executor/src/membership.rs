@@ -17,8 +17,11 @@
 //!   (`perspectives::Recheck::Members`), so a removal hides a person's links and a rejoin shows
 //!   them again.
 //! - Membership links never end by a diff (R12, `perspectives::monotonic`), and one in a
-//!   remote diff is dropped (R13, `perspectives::ingest`): until the membership sync (A7) they
-//!   reach a space only by a local write.
+//!   remote diff is dropped (R13, `perspectives::ingest`). A peer's membership links reach a
+//!   space through the link language's membership sync (A7): `MEMBERSHIP.links`
+//!   (`js_core::membership_extension`) judges them one at a time as a peer's, and a refused one
+//!   is refused alone. `MEMBERSHIP.admits` ([`membership_admits`]) answers whether the space
+//!   admits a key now.
 //!
 //! The creator, until the space template names one (A8), is the person of the first counted
 //! `rules` link this store holds.
@@ -235,6 +238,46 @@ impl From<Refusal> for JoinRefusalReason {
 pub struct NeighbourhoodJoinRefusedEvent {
     pub url: String,
     pub reason: JoinRefusalReason,
+}
+
+/// What happened to a space's room keys, as its link language reports it (`roomKeyEvent`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub enum RoomKeyEventKind {
+    /// This executor's key was removed from the room or revoked: the server closed its
+    /// connection and it reads no new room key.
+    Dropped,
+    /// The room key rotated to a new version, sealed to every admitted key but the removed
+    /// ones.
+    Rotated,
+}
+
+/// A link language's report of a room key change (`roomKeyEvent`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomKeyEvent {
+    pub kind: RoomKeyEventKind,
+    /// The keys (`did:key`) the change shut out.
+    #[serde(default)]
+    pub removed_keys: Vec<String>,
+    /// The room key version a rotation made.
+    #[serde(default)]
+    pub version: Option<u64>,
+}
+
+/// `neighbourhood-room-key-changed`: a space's room key rotated, or this executor's key was
+/// dropped from the room.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct NeighbourhoodRoomKeyChangedEvent {
+    pub perspective_uuid: String,
+    pub kind: RoomKeyEventKind,
+    pub removed_keys: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub version: Option<u64>,
 }
 
 /// A membership link refused by the owner gate: the replay's [`Refusal`], as an error a write
@@ -470,6 +513,12 @@ impl SpaceMembership {
         }
     }
 
+    /// Whether this store holds the membership link of `hash` (`sparql_store::link_hash`):
+    /// the gate let it in, or the store held it when it opened.
+    pub fn holds(&self, hash: &[u8; 32]) -> bool {
+        self.state().links.iter().any(|l| &l.hash == hash)
+    }
+
     /// The current members.
     pub fn members(&self) -> Vec<MemberInfo> {
         self.state()
@@ -641,6 +690,84 @@ pub fn join_link(
 /// The refusal behind a write the owner gate refused, if that is why it failed.
 pub fn refusal_of(error: &deno_core::error::AnyError) -> Option<Refusal> {
     error.downcast_ref::<MembershipRefused>().map(|r| r.0)
+}
+
+/// What the space made of one membership link the link language synced (A7): the link's hash
+/// (hex of `sparql_store::link_hash`), whether it counts here, and why not when it does not.
+/// The link language's `membershipLinks` host import answers a list of these.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MembershipLinkResult {
+    pub hash: String,
+    pub counted: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<Refusal>,
+}
+
+/// Whether the space admits a key now (the link language's `membershipAdmits`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MembershipAdmission {
+    pub admitted: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<JoinRefusalReason>,
+}
+
+impl MembershipAdmission {
+    pub const ADMITTED: MembershipAdmission = MembershipAdmission {
+        admitted: true,
+        reason: None,
+    };
+
+    pub fn refused(reason: JoinRefusalReason) -> Self {
+        MembershipAdmission {
+            admitted: false,
+            reason: Some(reason),
+        }
+    }
+}
+
+/// Whether `membership` admits the key `did_key` at `now_ms`, from the key map: a device key
+/// while its person is a current member, a bot key while the key itself is one. A key no
+/// trusted log lists (or one it lists as revoked or expired) needs an identity.
+pub fn admission(membership: &SpaceMembership, did_key: &str, now_ms: u64) -> MembershipAdmission {
+    use crate::identity::cache::{global_key_map, KeyLookup};
+    let author = crate::identity::resolver::multikey_of(did_key).and_then(|key| {
+        match global_key_map().lookup(key) {
+            KeyLookup::Listed { log, .. } => {
+                ad4m_identity_core::wire::author_of(&log.state, key, log.trusted, now_ms)
+            }
+            KeyLookup::NoLog | KeyLookup::Unknown => None,
+        }
+    });
+    let Some(graph) = membership.graph().filter(|g| g.rules().is_some()) else {
+        return MembershipAdmission::refused(JoinRefusalReason::NotAMember);
+    };
+    let member = match author {
+        None => return MembershipAdmission::refused(JoinRefusalReason::NeedsIdentity),
+        Some(author) if author.by_bot => graph.is_member(did_key),
+        Some(author) => graph.is_member(&author.person),
+    };
+    if member {
+        MembershipAdmission::ADMITTED
+    } else {
+        MembershipAdmission::refused(JoinRefusalReason::NotAMember)
+    }
+}
+
+/// [`admission`] in `perspective`'s space now, after filling the key map for `did_key`.
+pub async fn membership_admits(
+    perspective: &crate::perspectives::perspective_instance::PerspectiveInstance,
+    did_key: &str,
+) -> MembershipAdmission {
+    if crate::identity::resolver::multikey_of(did_key).is_some() {
+        crate::identity::prepare_signer(did_key).await;
+    }
+    admission(
+        perspective.sparql_store.membership(),
+        did_key,
+        Utc::now().timestamp_millis().max(0) as u64,
+    )
 }
 
 #[cfg(test)]

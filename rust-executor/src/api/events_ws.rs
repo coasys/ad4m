@@ -51,6 +51,7 @@
 //! | `inbox-message`               | (inline)      | the operator on this machine | A message waits in this executor's inbox (`{id, kind}`, never a body); for `master` the custody service calls `identity.takeMaster` |
 //! | `neighbourhood-membership-changed` | (inline) | owners                 | Membership links a write counted changed who is in the space (`crate::membership`) |
 //! | `neighbourhood-join-refused`  | (inline)      | the agent that joined  | `neighbourhood.join` let the caller in nowhere: the url and the reason |
+//! | `neighbourhood-room-key-changed` | (inline)   | owners                 | The space's link language rotated its room key, or the room dropped this executor's key (`crate::membership::RoomKeyEvent`) |
 //!
 //! Every session also needs the event's capability (`Event::capability`).
 
@@ -160,6 +161,10 @@ pub fn event_specs() -> Vec<EventSpec> {
         EventSpec::of::<crate::membership::NeighbourhoodJoinRefusedEvent>(
             NeighbourhoodJoinRefused,
             false,
+        ),
+        EventSpec::of::<crate::membership::NeighbourhoodRoomKeyChangedEvent>(
+            NeighbourhoodRoomKeyChanged,
+            true,
         ),
     ]
 }
@@ -366,7 +371,8 @@ fn payload_key(topic: Topic) -> Option<&'static str> {
         | Topic::StorageStateChanged
         | Topic::StorageMigrationProgress
         | Topic::NeighbourhoodMembershipChanged
-        | Topic::NeighbourhoodJoinRefused => None,
+        | Topic::NeighbourhoodJoinRefused
+        | Topic::NeighbourhoodRoomKeyChanged => None,
     }
 }
 

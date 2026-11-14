@@ -475,6 +475,21 @@ pub async fn prepare_link_signers(links: &[LinkExpression]) {
     service.resolver.prepare(&signers_to_prepare(links)).await;
 }
 
+/// [`prepare_link_signers`] for one key that signed no link here: a key a link language asks
+/// about (`membershipAdmits`). Its log is read as of its latest head (no anchor).
+pub async fn prepare_signer(did_key: &str) {
+    let signers = [(did_key.to_string(), None)];
+    #[cfg(test)]
+    if let Ok(resolver) = TEST_RESOLVER.try_with(Arc::clone) {
+        resolver.prepare(&signers).await;
+        return;
+    }
+    let Some(service) = SERVICE.get() else {
+        return;
+    };
+    service.resolver.prepare(&signers).await;
+}
+
 #[cfg(test)]
 tokio::task_local! {
     /// Test-only: the resolver [`prepare_link_signers`] uses inside [`with_test_resolver`],

@@ -54,7 +54,7 @@ Register the language code on the AD4M network. This only needs to happen once �
 ad4m languages publish ./build/bundle.js \
   --name server-link-language \
   --description "Link language syncing through a self-hosted link-server" \
-  --possible-template-params SERVER_URL,UID
+  --possible-template-params SERVER_URL,UID,CREATOR
 ```
 
 This returns a **template address** (content hash). Save it — you need it in the next step.
@@ -63,14 +63,14 @@ If someone else already published the template, skip this step and use their tem
 
 #### 3. Create an instance pointing at your server
 
-Fill in the template with your server's URL and a unique identifier:
+Fill in the template with your server's URL, a unique identifier and your person DID (the room's creator):
 
 ```bash
 ad4m languages apply-template-and-publish <template-address> \
-  '{"SERVER_URL": "https://your-server.example.com:3457", "UID": "'$(uuidgen)'"}'
+  '{"SERVER_URL": "https://your-server.example.com:3457", "UID": "'$(uuidgen)'", "CREATOR": "did:scid:coasys:1:..."}'
 ```
 
-`UID` guarantees a unique language address and server-side room. Each `UID` maps to exactly one room on the server — the language hash depends only on `SERVER_URL` and `UID`, so no other template parameter can cause address collisions.
+The room id is `roomIdOf(CREATOR, UID)` (`src/room.ts`): `base58(sha256(CREATOR ‖ 0x00 ‖ UID))`. A `UID` is unique per creator, and the language hash depends only on the three parameters, so no other template parameter can cause address collisions.
 
 This returns an **instantiated language address** — the template code with your server details baked in.
 
@@ -83,7 +83,7 @@ ad4m neighbourhoods create <perspective-UUID> <instantiated-language-address>
 
 This returns a **neighbourhood URL** (`neighbourhood://Qm...`). Share it with anyone you want to invite.
 
-Your agent — the first one to connect — automatically becomes the room's admin on the server.
+The room exists once its creator writes the space's first membership links (the `rules` link, with the genesis `{creator, salt: UID}`) to the server's `/membership`; until then every agent's `init()` logs "the room does not exist yet" and waits. Who belongs to the room is decided by those signed membership links, not by the server: see [Rooms and membership](../../link-server/README.md#rooms-and-membership-protocol-2).
 
 ### For users joining a neighbourhood
 
@@ -111,17 +111,20 @@ self-hosted HTTP+WebSocket server. One "room" = one AD4M neighbourhood.
 
 ### HTTP
 
+Protocol 2; the full list is in the [link-server API](../../link-server/README.md#api). What this language uses:
+
 | Method & path | Purpose |
 |---|---|
-| `POST /rooms/:roomId/auth` | DID challenge-response. Step 1: `{did}` → `{challenge}`. Step 2: `{did, challenge, signature}` → `{token}`; the call that creates the room makes the caller its admin |
-| `POST /rooms/:roomId/commit` | Push a `{additions, removals}` diff of encrypted links (base64 `{ciphertext, nonce}`); the server refuses a plaintext link (400) in every room |
+| `POST /rooms/:roomId/auth` | `{did, signature, timestamp, x25519PublicKey, x25519Signature}` → `{token, expiresAt, admitted}`; 404 while the room does not exist |
+| `POST /rooms/:roomId/membership` | Membership links (`coasys://membership/...`), plain and signed: `{genesis?, links}` → `{results}`. The creator's first call (with `genesis`) makes the room |
+| `GET /rooms/:roomId/membership?since=<seq>` | The membership log after `seq` → `{links, seq}`; each link goes to the executor (`membershipLinks`) |
+| `GET /rooms/:roomId/members` | The admitted keys, each with its X25519 key and signed statement |
+| `POST /rooms/:roomId/commit` | Push a `{additions, removals}` diff of encrypted links (base64 `{ciphertext, nonce}`); the server refuses a plaintext link and a membership predicate (400) |
 | `GET /rooms/:roomId/sync?since=<sequence>&limit=100` | Pull up to 100 diffs newer than `sequence` → `{diffs[] (each with its sequence), revision, sequence, next}` |
 | `GET /rooms/:roomId/render?limit=500[&next=<cursor>]` | One page of the snapshot pinned at `upto` → `{links[], revision, sequence, upto, next}` |
 | `GET /rooms/:roomId/peers` | Connected agent DIDs → `{peers: string[]}` |
-| `GET /rooms/:roomId/revision` | `{revision, sequence}` |
-| `GET /rooms/:roomId/acl` | `{admin, members: [{did}]}` |
-| `GET /rooms/:roomId/keys` | This agent's sealed room key versions → `{keys: [{encryptedKey, version, commitment}]}`. An empty list means this agent waits for one; an error status, 404 included, is an error |
-| `POST /rooms/:roomId/keys/rotate` | Room admin: `{keys, commitment}`, a new version sealed to every ACL member and the commitment to its key (`roomKeyCommitment`) |
+| `GET /rooms/:roomId/keys` | This key's sealed room key versions → `{keys: [{encryptedKey, version, commitment}]}`. Empty: this key waits for one; 403: the room does not admit this key |
+| `POST /rooms/:roomId/keys/rotate` | Any member: `{keys, commitment}`, a new version sealed to exactly the admitted keys (409 otherwise) |
 | `DELETE /rooms/:roomId/keys/:version` | Any member: drops its own box for a version whose key does not match the commitment, so a holder grants it again |
 | `GET /rooms/:roomId/keys/missing` | Any member: `{membersNeedingHistoricalKeys: [{did, missingVersions}]}` |
 | `POST /rooms/:roomId/keys/grant` | Any member: `{targetDid, keys: [{version, encryptedKey}]}`, only versions the caller holds |
@@ -131,7 +134,11 @@ self-hosted HTTP+WebSocket server. One "room" = one AD4M neighbourhood.
 Server → client: `diff`, `telepresence-signal`, `telepresence-broadcast`,
 `online-agents`, `peer-joined`, `peer-left`, `status-changed`,
 `keys-granted {versions}` (to the grantee's sockets after a stored grant: the
-language refreshes its key ring and catches up), `auth-error`.
+language refreshes its key ring and catches up), `membership` (a counted
+membership link: to the executor), `rotate-needed {reasons, removedKeys}`
+(members holding a key rotate), `auth-error`. Close codes: `4005` (this key
+was removed or revoked: the key ring is dropped and the socket stays closed
+until the next `init()`), `4006` (room suspended).
 Client → server: `telepresence-signal`, `telepresence-broadcast`,
 `set-online-status`.
 
@@ -146,7 +153,7 @@ executor's language sandbox runs a full `deno_runtime` worker (not a bare
 
 - **Pure** (`src/types.ts`, `src/store.ts`, `src/adapters.ts`, `src/api.ts`,
   `src/auth.ts`, `src/sync.ts`, `src/ws-client.ts`, `src/telepresence.ts`,
-  `src/encryption.ts`, `src/room-keys.ts`) — no `ad4m:host` imports. Everything talks to the
+  `src/encryption.ts`, `src/room.ts`, `src/room-keys.ts`) — no `ad4m:host` imports. Everything talks to the
   outside world through the `Transport` / `StorageAdapter` / `AgentAdapter`
   / `RuntimeAdapter` / `WebSocketFactory` interfaces in `src/adapters.ts`,
   swapped for mocks in tests.
@@ -163,8 +170,9 @@ executor's language sandbox runs a full `deno_runtime` worker (not a bare
 | `src/ws-client.ts` | WebSocket lifecycle: connect, typed message dispatch, send queue, exponential-backoff reconnect |
 | `src/sync.ts` | Commit (stored locally once the server accepted it, not echoed back) / catch-up sync / cold-start bootstrap; the single inbound path |
 | `src/telepresence.ts` | Online-agent roster + outbound signal/broadcast/status |
-| `src/encryption.ts` | Room keys sealed to DIDs (through the executor), key ring, AES-256-GCM link encryption |
-| `src/room-keys.ts` | Room admin's rotation and any member's grants of the versions it holds |
+| `src/room.ts` | Protocol 2: room id, auth message, the signed X25519 statement, membership links on the wire |
+| `src/encryption.ts` | Room keys sealed with the keyring binding (`keyring/keyring.js`), key ring, AES-256-GCM link encryption |
+| `src/room-keys.ts` | Any member's rotation and grants, sealed only to keys the space admits |
 | `index.ts` | Wires it all together behind `defineLanguage()` |
 
 ### The `emitPerspectiveDiff` rule
@@ -236,18 +244,22 @@ costs that one link, not the rest of its batch or the other held links.
 See the doc comment at the top of `src/encryption.ts` for the full design;
 summary:
 
-- **Room keys are sealed to DIDs.** A member's X25519 key is the Montgomery
-  form of the Ed25519 key in its `did:key`, so it follows from the DID; the
-  language never sees an agent secret. It seals itself (`sealToDid`) and
-  opens with the executor's `agentOpenSealed` host import, which opens only
-  boxes sealed to the agent the language runs for
-  (`docs-src/host-contract.md` "Sealed boxes": ephemeral X25519 ECDH,
-  HKDF-SHA256, AES-256-GCM, hex `{ephemeralPublicKey, nonce, ciphertext}`).
-  Auth carries no key.
-- **Distribution.** The room admin seals each new version to every ACL
-  member, including members that never connected. Any member holding a
-  version grants it to an ACL member lacking it (`src/room-keys.ts`); the
-  server accepts a grant only of versions the granter holds.
+- **Room keys are sealed to published X25519 keys.** Each key's X25519 key
+  comes from its room-key seed (the `agentRoomKeySeed` host import: an HKDF of
+  the agent key, used for nothing else) and is published at auth with a
+  statement the key signs. The language seals and opens with the
+  `ad4m-keyring` binding (ephemeral X25519 ECDH, HKDF-SHA256, AES-256-GCM, hex
+  `{ephemeralPublicKey, nonce, ciphertext}`; vectors in
+  `ad4m-keyring/vectors/room-key-seal.json`).
+- **Distribution.** Any admitted member seals each new version to every
+  admitted key, including keys that never connected, and only to keys whose
+  statement verifies and that the executor's membership admits
+  (`membershipAdmits`): the server chooses whom `/members` lists, so the
+  language does not take its word. The first admitted member without a key
+  mints version 1; a `rotate-needed` push (a join, a removal, a revocation)
+  makes every member holding a key rotate. Any member holding a version grants
+  it to an admitted key lacking it (`src/room-keys.ts`); the server accepts a
+  grant only of versions the granter holds.
 - **Link confidentiality.** `encryptLinkForWire` / `decryptLinkFromWire`
   protect the whole link (`author`, `timestamp`, `proof`, `data`) with
   AES-256-GCM (fresh nonce per link); the server sees only
@@ -262,8 +274,8 @@ summary:
   plaintext link is skipped: no member can commit one, so only a server could
   have put it there.
 
-The `encryptedKey` wire framing (JSON `SealedBox`) is the executor's sealed
-box; `link-server` only checks its shape.
+The `encryptedKey` wire framing (JSON `SealedBox`) is `ad4m-keyring`'s seal;
+`link-server` only checks its shape.
 
 ## Template variables
 
@@ -272,27 +284,29 @@ box; `link-server` only checks its shape.
 const SERVER_URL = "<to-be-filled>";  // e.g. "https://my-server.example.com"
 
 //!@ad4m-template-variable
-const UID = "<to-be-filled>";         // unique identifier (UUID), used as server-side room ID
+const UID = "<to-be-filled>";         // unique identifier (UUID), the room's salt
+
+//!@ad4m-template-variable
+const CREATOR = "<to-be-filled>";     // the creator's person DID (did:scid:coasys:1:...)
 ```
 
-Filled in by the executor at publish time. Until then, `init()` runs in an
-inert mode (logs and returns without attempting any network I/O).
+Filled in by the executor at publish time. Until all three are, `init()` runs
+in an inert mode (logs and returns without attempting any network I/O).
 
-`UID` serves as the server-side room identifier in all API paths
-(`/rooms/:uid/...`). The language hash depends only on `SERVER_URL` and
-`UID` — no other parameter can cause address collisions. The human-readable
-neighbourhood name lives in the language meta (`name` field), not in the
-source code.
+The server-side room id is `roomIdOf(CREATOR, UID)`, used in all API paths
+(`/rooms/:roomId/...`). The language hash depends only on these three
+parameters — no other parameter can cause address collisions. The
+human-readable neighbourhood name lives in the language meta (`name` field),
+not in the source code.
 
 Every room is E2E from creation: the link server refuses plaintext links in
-every room, before any key exists. The agent that creates the room (its
-admin: it is the first to sign in) mints key version 1 in its `init()`,
-before its first commit; the commit path rotates too, if `init()` could not,
-and reads the ACL again first only if the read at `init()` failed. Members receive keys from any member
-holding them (grants run on `peer-joined`, at init and after every sync); a
-member without a key commits nothing until it has one, re-checks `/keys` on
-every commit and on every sync while it holds links it cannot open, and a
-`keys-granted` push re-checks at once. There is no plaintext mode.
+every room, before any key exists. The first admitted member without a key
+mints key version 1 (in `init()`, or after the membership commit that admits
+it). Members receive keys from any member holding them (grants run on
+`peer-joined`, at init and after every sync); a member without a key commits
+no diff until it has one, re-checks `/keys` on every commit and on every sync
+while it holds links it cannot open, and a `keys-granted` push re-checks at
+once. There is no plaintext mode.
 
 ## Publishing
 
@@ -302,7 +316,7 @@ every commit and on every sync while it holds links it cannot open, and a
     "languageMeta": {
         "name": "server-link-language",
         "description": "AD4M link language syncing through a self-hosted link-server",
-        "possibleTemplateParams": ["SERVER_URL", "UID"],
+        "possibleTemplateParams": ["SERVER_URL", "UID", "CREATOR"],
         "sourceCodeLink": "https://github.com/coasys/ad4m/tree/dev/bootstrap-languages/server-link-language"
     }
 }

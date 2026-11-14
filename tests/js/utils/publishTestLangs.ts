@@ -28,11 +28,11 @@ const languagesToPublish = {
     "neighbourhood-store": {name: "neighbourhood-store", description: "", possibleTemplateParams: ["uid", "name", "description"]} as LanguageMetaInput,
     "perspective-diff-sync": {name: "perspective-diff-sync", description: "", possibleTemplateParams: ["uid", "name", "description"]} as LanguageMetaInput,
     "perspective-language": {name: "perspective-language", description: "", possibleTemplateParams: ["uid", "name", "description"]} as LanguageMetaInput,
-    // SERVER_URL + UID match the //!@ad4m-template-variable declarations in
+    // SERVER_URL, UID and CREATOR match the //!@ad4m-template-variable declarations in
     // bootstrap-languages/server-link-language/index.ts. `name` + `description`
     // aren't code-templated — they get through to the language meta so tests
     // can assert on `socialContext.name` the same way they do for p-diff-sync.
-    "server-link-language": {name: "server-link-language", description: "", possibleTemplateParams: ["SERVER_URL", "UID", "name", "description"]} as LanguageMetaInput,
+    "server-link-language": {name: "server-link-language", description: "", possibleTemplateParams: ["SERVER_URL", "UID", "CREATOR", "name", "description"]} as LanguageMetaInput,
     // The agent language on the identity store; the identity suite seeds it.
     "centralized-agent-language": {name: "centralized-agent-language", description: "", possibleTemplateParams: []} as LanguageMetaInput,
 }

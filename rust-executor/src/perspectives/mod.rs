@@ -642,7 +642,9 @@ pub(crate) fn cached_perspective_handle(language_address: &str) -> Option<Perspe
         .cloned()
 }
 
-async fn perspective_by_link_language(language_address: String) -> Option<PerspectiveInstance> {
+pub(crate) async fn perspective_by_link_language(
+    language_address: String,
+) -> Option<PerspectiveInstance> {
     // Fast path: check cache first
     if let Some(handle) = cached_perspective_handle(&language_address) {
         if let Some(perspective) = get_perspective(&handle.uuid) {

@@ -84,8 +84,18 @@ describe("Multi-node integration tests [server-link] (no Holochain)", function (
         testContext.bobCore = bobExecutorProcess
         await testContext.bob.agent.generate("passphrase")
 
+        // Protocol 2: a room is made by its creator, a person. Alice publishes
+        // the neighbourhoods here, so she is the CREATOR; her executor must
+        // speak for a person (an identity store behind it) to make a room.
+        const aliceIdentity = (await testContext.alice.agent.me()).identity;
+        if (!aliceIdentity) {
+            throw new Error(
+                "[integration-server-link] Alice's executor speaks for no person (agent.me().identity is empty): " +
+                "a protocol 2 room needs its creator's person DID as CREATOR.",
+            );
+        }
         linkServer = await startLinkServer();
-        serverLinkConfig = serverLinkLang(SERVER_LINK_HASH, linkServer.url);
+        serverLinkConfig = serverLinkLang(SERVER_LINK_HASH, linkServer.url, () => aliceIdentity);
     })
 
     after(async () => {

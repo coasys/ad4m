@@ -691,3 +691,140 @@ async fn a_refused_membership_link_refuses_its_diff() {
     assert_eq!(refusal_of(&error), Some(Refusal::InviteOnly));
     assert_eq!(verdict_of(&perspective, "ad4m://beside"), None);
 }
+
+/// A7: the membership links the link language syncs go to the space's membership, one by one
+/// as the server counted them: each counts or is refused on its own, a link this store holds
+/// already counts again, and a link that is not a membership link is refused as malformed and
+/// not written. Each result names the link by its hash.
+#[tokio::test]
+async fn membership_links_from_the_link_language_go_to_the_membership() {
+    let perspective = setup().await;
+    let ada = Person::new(182);
+    let bea = Person::new(183);
+    let cyd = Person::new(184);
+    let rules = rules(&ada, OPEN);
+    let join = bea.says(&bea.person, predicate::MEMBER, SPACE, 1);
+    let forged = cyd.says(&cyd.person, predicate::ADMIN, SPACE, 2);
+    let plain = ada.says("ad4m://ada", "ad4m://says", "ad4m://plain", 3);
+    let sent = vec![rules.clone(), join.clone(), forged.clone(), plain.clone()];
+    let results = perspective
+        .membership_links_from_link_language(sent.clone())
+        .await;
+
+    let hashes: Vec<String> = sent
+        .iter()
+        .map(|l| hex::encode(crate::perspectives::sparql_store::link_hash(l)))
+        .collect();
+    let got: Vec<(String, bool, Option<Refusal>)> = results
+        .into_iter()
+        .map(|r| (r.hash, r.counted, r.reason))
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            (hashes[0].clone(), true, None),
+            (hashes[1].clone(), true, None),
+            (hashes[2].clone(), false, Some(Refusal::NotAdmin)),
+            (hashes[3].clone(), false, Some(Refusal::Malformed)),
+        ]
+    );
+    assert_eq!(
+        role(&perspective, &bea.person).unwrap().role,
+        MemberRole::Member
+    );
+    assert!(role(&perspective, &cyd.person).is_none());
+    assert_eq!(verdict_of(&perspective, "ad4m://plain"), None);
+    let stored = perspective.sparql_store.membership_links().unwrap();
+    assert_eq!(stored.len(), 2, "the counted links are stored: {stored:?}");
+    assert!(stored.iter().all(|l| l.status == Some(LinkStatus::Shared)));
+    // Bea's join was published as a membership change.
+    let (changes, _) = perspective.sparql_store.membership().take_changes();
+    assert!(changes.is_empty(), "published already: {changes:?}");
+
+    // The same links again: what is held counts, the forged link is refused again.
+    let again = perspective
+        .membership_links_from_link_language(vec![rules, join, forged])
+        .await;
+    let counted: Vec<bool> = again.iter().map(|r| r.counted).collect();
+    assert_eq!(counted, vec![true, true, false]);
+    assert_eq!(
+        perspective.sparql_store.membership_links().unwrap().len(),
+        2
+    );
+}
+
+/// A7: whether the space admits a key now, as the link language asks before it seals a room
+/// key or grants one: a current member's device key or a member bot's key is admitted; a
+/// person who is not a member is not; a key with no identity needs one.
+#[tokio::test]
+async fn a_key_is_admitted_while_its_person_is_a_member() {
+    let perspective = setup().await;
+    let ada = Person::new(185);
+    let (bea, bot) = Person::with_bot(186);
+    let cyd = Person::new(188);
+    let unknown = SigningKey::from_bytes(&[189; 32]);
+    let admits = |key: String| {
+        let perspective = perspective.clone();
+        async move { membership_admits(&perspective, &key).await }
+    };
+    // No rules yet: nobody is a member.
+    assert_eq!(
+        admits(did_key(&ada.log.device)).await,
+        MembershipAdmission::refused(JoinRefusalReason::NotAMember)
+    );
+    write(&perspective, rules(&ada, OPEN)).await.unwrap();
+    write(
+        &perspective,
+        bea.says(&bea.person, predicate::MEMBER, SPACE, 1),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        admits(did_key(&ada.log.device)).await,
+        MembershipAdmission::ADMITTED
+    );
+    assert_eq!(
+        admits(did_key(&bea.log.device)).await,
+        MembershipAdmission::ADMITTED
+    );
+    assert_eq!(
+        admits(did_key(&cyd.log.device)).await,
+        MembershipAdmission::refused(JoinRefusalReason::NotAMember)
+    );
+    assert_eq!(
+        admits(did_key(&unknown)).await,
+        MembershipAdmission::refused(JoinRefusalReason::NeedsIdentity)
+    );
+    assert_eq!(
+        admits("not a did".to_string()).await,
+        MembershipAdmission::refused(JoinRefusalReason::NeedsIdentity)
+    );
+    // Bea's bot: not a member until she adds it.
+    assert_eq!(
+        admits(did_key(&bot)).await,
+        MembershipAdmission::refused(JoinRefusalReason::NotAMember)
+    );
+    let [proposed, approved] = links::add_bot(&did_key(&bot), &bea.person);
+    let diff = PerspectiveDiff::from_additions(vec![
+        bea.says(&proposed.source, predicate::BOT, &proposed.target, 2),
+        bea.says(
+            &approved.source,
+            predicate::APPROVED_BY,
+            &approved.target,
+            2,
+        ),
+    ]);
+    perspective.persist_link_diff(&diff, false).await.unwrap();
+    assert_eq!(admits(did_key(&bot)).await, MembershipAdmission::ADMITTED);
+    // Removed: no longer admitted.
+    write(
+        &perspective,
+        ada.says(&bea.person, predicate::REMOVED, SPACE, 3),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        admits(did_key(&bea.log.device)).await,
+        MembershipAdmission::refused(JoinRefusalReason::NotAMember)
+    );
+}

@@ -16,13 +16,20 @@
 //! ```
 //!
 //! Removals of Shared links are not checked for authority here.
+//!
+//! Membership links never ride a diff: one in a diff is dropped. The link language hands
+//! them over apart (`membershipLinks`, slice 3.B A7), and
+//! `PerspectiveInstance::persist_membership_links` judges each through the owner gate as a
+//! peer's link before it writes it.
 
 use super::monotonic::RetractionEffects;
 use super::perspective_instance::PerspectiveInstance;
 #[cfg(doc)]
 use super::sparql_store::SparqlStore;
 use crate::identity::verdict::LinkVerdict;
-use crate::types::{LinkExpression, PerspectiveDiff};
+use crate::membership::{MembershipLinkResult, MembershipRefused};
+use crate::types::{LinkExpression, LinkStatus, PerspectiveDiff};
+use ad4m_identity_core::membership::{is_membership_predicate, Refusal};
 use deno_core::error::AnyError;
 use std::sync::PoisonError;
 
@@ -64,6 +71,71 @@ pub(crate) fn retain_ingestible(additions: &mut Vec<LinkExpression>) {
 }
 
 impl PerspectiveInstance {
+    /// Write the membership links a link language synced (A7, `membershipLinks`), one at a
+    /// time under `persist_lock`, each through the owner gate as a peer's link
+    /// ([`crate::membership::SpaceMembership::gate`] with `own` false): a link the gate refuses
+    /// is not written and refuses only itself. A link this store holds already counts again; a
+    /// link that is not a membership link is refused as malformed (it belongs in a diff).
+    /// Returns the result per link, in order, and the links written. The caller fills the key
+    /// map for their signers first and publishes after (`membership_links_from_link_language`).
+    pub(super) fn persist_membership_links(
+        &self,
+        links: Vec<LinkExpression>,
+    ) -> (Vec<MembershipLinkResult>, Vec<LinkExpression>) {
+        let _persisting = self
+            .persist_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let membership = self.sparql_store.membership();
+        let mut results = Vec::with_capacity(links.len());
+        let mut written = Vec::new();
+        for mut link in links {
+            link.status = Some(LinkStatus::Shared);
+            let hash = super::sparql_store::link_hash(&link);
+            let result = |counted: bool, reason: Option<Refusal>| MembershipLinkResult {
+                hash: hex::encode(hash),
+                counted,
+                reason,
+            };
+            let predicate = link.data.predicate.as_deref().unwrap_or("");
+            if !is_membership_predicate(predicate) {
+                results.push(result(false, Some(Refusal::Malformed)));
+                continue;
+            }
+            if membership.holds(&hash) {
+                results.push(result(true, None));
+                continue;
+            }
+            if let Err(MembershipRefused(refusal)) =
+                membership.gate(std::slice::from_ref(&link), false)
+            {
+                results.push(result(false, Some(refusal)));
+                continue;
+            }
+            match self.sparql_store.add_remote_link(&link) {
+                Ok(true) => {
+                    results.push(result(true, None));
+                    written.push(link);
+                }
+                outcome => {
+                    // The gate took the link and the store did not: replay what the store
+                    // holds, so the membership is the store's again.
+                    log::warn!(
+                        "Membership link {} -[{predicate}]-> {} not stored: {outcome:?}",
+                        link.data.source,
+                        link.data.target
+                    );
+                    match self.sparql_store.membership_links() {
+                        Ok(stored) => membership.rebuild(&stored),
+                        Err(e) => log::error!("Membership links unreadable: {e:?}"),
+                    }
+                    results.push(result(false, Some(Refusal::Malformed)));
+                }
+            }
+        }
+        (results, written)
+    }
+
     /// Write a link language's diff, removals first like
     /// [`Self::persist_link_diff`] and under the same `persist_lock`,
     /// skipping every link this store holds as `Local` (#1146). Returns what

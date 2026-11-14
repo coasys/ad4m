@@ -1,23 +1,48 @@
 /**
- * DID challenge-response authentication against link-server, plus
- * token-expiry tracking so callers can request a guaranteed-fresh JWT
- * without re-authenticating on every single call.
+ * Protocol 2 authentication against link-server, plus token-expiry tracking so callers can
+ * request a guaranteed-fresh JWT without re-authenticating on every single call.
+ *
+ * One request: the agent's key signs `coasys-link-server:auth:2:<roomId>:<timestamp>`
+ * (`agentSignStringHex`) and its room key statement: its X25519 key, the public half of
+ * `agentRoomKeySeed`, signed raw over the identity core's `coasys:room-key` bytes (`agentSign`,
+ * K7). The server answers a token and whether the room admits the key now.
  */
 
+import { x25519Public } from "../keyring/keyring.js";
 import { getAgent, getConfig } from "./adapters.js";
 import * as api from "./api.js";
+import { bytesToHex } from "./encryption.js";
+import { authMessage, roomKeySigningBytes } from "./room.js";
 
 export interface AuthSession {
     token: string;
     /** ms since epoch the token expires at, or null if it has no readable `exp` claim. */
     expiresAt: number | null;
+    /** Whether the room admitted this key when it authenticated. */
+    admitted: boolean;
+}
+
+/** This agent's X25519 key and its signed statement, as sent at auth. */
+export interface RoomKeyIdentity {
+    x25519PublicKey: string;
+    x25519Signature: string;
 }
 
 let _session: AuthSession | null = null;
-/** In-flight authenticate() promise — prevents two concurrent callers from
- * each consuming a fresh challenge (the second would overwrite the first's
- * token before it's used). */
+/** In-flight authenticate() promise: two concurrent callers share one auth request. */
 let _authInFlight: Promise<AuthSession> | null = null;
+/** The room key statement, signed once per run. */
+let _roomKeyIdentity: RoomKeyIdentity | null = null;
+
+/** This agent's X25519 key (from `agentRoomKeySeed`) and its signed statement, made once. */
+export async function roomKeyIdentity(): Promise<RoomKeyIdentity> {
+    if (_roomKeyIdentity) return _roomKeyIdentity;
+    const agent = getAgent();
+    const x25519PublicKey = bytesToHex(x25519Public(await agent.roomKeySeed()));
+    const x25519Signature = bytesToHex(agent.sign(roomKeySigningBytes(agent.did(), x25519PublicKey)));
+    _roomKeyIdentity = { x25519PublicKey, x25519Signature };
+    return _roomKeyIdentity;
+}
 
 /**
  * Decodes a JWT's payload WITHOUT verifying its signature — we only read
@@ -41,29 +66,30 @@ export function parseJwtExpiryMs(token: string): number | null {
     }
 }
 
-/**
- * The link server's challenge: 32 random bytes as lowercase hex
- * (`generateChallenge` in `link-server/src/auth.ts`). The agent's key signs
- * more than auth challenges, so the language signs nothing else here.
- */
-const CHALLENGE_FORMAT = /^[0-9a-f]{64}$/;
-
-/** Runs the full two-step DID challenge-response flow and caches the result. */
+/** Authenticates with one signed request and caches the session. */
 export async function authenticate(): Promise<AuthSession> {
     const config = getConfig();
     const agent = getAgent();
     const did = agent.did();
+    const { x25519PublicKey, x25519Signature } = await roomKeyIdentity();
+    const timestamp = Date.now();
+    const signature = agent.signStringHex(authMessage(config.roomId, timestamp));
+    const res = await api.authenticate(config, { did, signature, timestamp, x25519PublicKey, x25519Signature });
 
-    const challenge = await api.requestChallenge(config, did);
-    if (typeof challenge !== "string" || !CHALLENGE_FORMAT.test(challenge)) {
-        throw new Error("the link server's challenge is not 32 bytes of hex; not signing it");
-    }
-    const signature = agent.signStringHex(challenge);
-    const token = await api.verifyChallenge(config, did, challenge, signature);
-
-    const session: AuthSession = { token, expiresAt: parseJwtExpiryMs(token) };
+    const session: AuthSession = { token: res.token, expiresAt: parseJwtExpiryMs(res.token), admitted: res.admitted };
     _session = session;
     return session;
+}
+
+/** The cached session, or a new one; like `getValidToken`, but with whether the room admits the key. */
+export async function getValidSession(skewMs = 30_000): Promise<AuthSession> {
+    if (_session && (_session.expiresAt === null || _session.expiresAt - Date.now() > skewMs)) {
+        return _session;
+    }
+    if (!_authInFlight) {
+        _authInFlight = authenticate().finally(() => { _authInFlight = null; });
+    }
+    return _authInFlight;
 }
 
 /**
@@ -72,20 +98,10 @@ export async function authenticate(): Promise<AuthSession> {
  * session, the cached token is expired, or it's about to expire.
  *
  * Uses an in-flight promise cache so two concurrent callers (e.g. WS
- * reconnect + batched flush) share the same authenticate() round-trip
- * instead of each consuming a separate challenge.
+ * reconnect + batched flush) share the same authenticate() round-trip.
  */
 export async function getValidToken(skewMs = 30_000): Promise<string> {
-    if (_session && (_session.expiresAt === null || _session.expiresAt - Date.now() > skewMs)) {
-        return _session.token;
-    }
-    if (_authInFlight) {
-        const session = await _authInFlight;
-        return session.token;
-    }
-    _authInFlight = authenticate().finally(() => { _authInFlight = null; });
-    const session = await _authInFlight;
-    return session.token;
+    return (await getValidSession(skewMs)).token;
 }
 
 /** Forces the next getValidToken() call to re-authenticate — call this
@@ -97,4 +113,5 @@ export function invalidateSession(): void {
 export function resetAuth(): void {
     _session = null;
     _authInFlight = null;
+    _roomKeyIdentity = null;
 }

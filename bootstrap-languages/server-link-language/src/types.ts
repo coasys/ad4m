@@ -120,14 +120,6 @@ export interface WirePerspectiveDiff {
     removals: WireLinkExpression[];
 }
 
-export interface AuthChallengeResponse {
-    challenge: string;
-}
-
-export interface AuthTokenResponse {
-    token: string;
-}
-
 export interface CommitResponse {
     revision?: string;
     sequence?: number;
@@ -162,13 +154,62 @@ export interface PeersResponse {
     peers: DID[];
 }
 
-export interface AclMember {
+// ---------------------------------------------------------------------------
+// Protocol 2: auth, membership, members
+// ---------------------------------------------------------------------------
+
+/** `POST /rooms/:roomId/auth` (protocol 2). */
+export interface AuthRequest {
     did: DID;
+    /** Hex: the key's signature over `coasys-link-server:auth:2:<roomId>:<timestamp>`, as `agentSignStringHex` signs. */
+    signature: string;
+    /** ms since epoch; the server allows 5 min of skew. */
+    timestamp: number;
+    /** Hex: this key's room key X25519 public key. */
+    x25519PublicKey: string;
+    /** Hex: Ed25519 over the `coasys:room-key` signing bytes of `{x25519PublicKey, did}` (K7). */
+    x25519Signature: string;
 }
 
-export interface AclResponse {
-    admin: DID;
-    members: AclMember[];
+export interface AuthResponse {
+    token: string;
+    expiresAt?: string | number;
+    /** Whether the room admits this key now (a member, or a bot that is one). */
+    admitted: boolean;
+}
+
+/** A membership link as the link server carries it: plain and signed, never encrypted. */
+export interface WireMembershipLink {
+    author: DID;
+    timestamp: string;
+    data: { source: string; predicate: string; target: string };
+    proof: { key: string; signature: string; anchor?: string };
+}
+
+/** One membership link's outcome, from the server or the executor. */
+export interface MembershipLinkResult {
+    hash: string;
+    counted: boolean;
+    reason?: string;
+}
+
+export interface MembershipResponse {
+    links: WireMembershipLink[];
+    seq: number;
+}
+
+/** An admitted key and the X25519 key it signed (`GET /members`). */
+export interface MemberKey {
+    did: DID;
+    person?: string | null;
+    byBot?: boolean;
+    x25519PublicKey: string;
+    x25519Signature: string;
+}
+
+export interface MembersResponse {
+    members: unknown[];
+    keys: MemberKey[];
 }
 
 export interface KeysResponseEntry {
@@ -204,6 +245,8 @@ export type ServerWsMessage =
     | { type: "peer-left"; did: DID }
     | { type: "status-changed"; did: DID; status: unknown }
     | { type: "keys-granted"; versions: number[] }
+    | { type: "membership"; links: WireMembershipLink[]; seq: number }
+    | { type: "rotate-needed"; reason: "removed" | "revoked" | "joined"; removedKeys: string[] }
     | { type: "auth-error"; error: string };
 
 export type ClientWsMessage =

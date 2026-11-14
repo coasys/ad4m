@@ -160,6 +160,17 @@ fn agent_open_sealed(#[serde] sealed: SealedBox) -> Result<String, AnyhowWrapper
         .map_err(AnyhowWrapperError::from)
 }
 
+/// The seed of the X25519 key the server link language opens room keys with, for the agent
+/// the language runs for (`agent::room_key_seed`): HKDF of the agent's signing seed. The
+/// signing secret itself never reaches language code.
+#[op2]
+#[serde]
+fn agent_room_key_seed() -> Result<Vec<u8>, AnyhowWrapperError> {
+    crate::agent::room_key_seed::room_key_seed_for_context(&get_runtime_agent_context())
+        .map(|seed| seed.to_vec())
+        .map_err(AnyhowWrapperError::from)
+}
+
 #[op2(fast)]
 fn agent_is_initialized() -> Result<bool, AnyhowWrapperError> {
     AgentService::with_global_instance(|agent_service| Ok(agent_service.is_initialized()))
@@ -193,7 +204,7 @@ fn agent() -> Result<Agent, AnyhowWrapperError> {
 // profile.
 deno_core::extension!(
     agent_service,
-    ops = [agent_did_document, agent_signing_key_id, agent_did, agent_create_signed_expression, agent_create_signed_expression_stringified, agent_create_signed_expression_for_user, agent_did_for_user, agent_list_user_emails, agent_get_all_local_user_dids, agent_agent_for_user, agent_sign, agent_sign_string_hex, agent_open_sealed, agent_is_initialized, agent_is_unlocked, agent],
+    ops = [agent_did_document, agent_signing_key_id, agent_did, agent_create_signed_expression, agent_create_signed_expression_stringified, agent_create_signed_expression_for_user, agent_did_for_user, agent_list_user_emails, agent_get_all_local_user_dids, agent_agent_for_user, agent_sign, agent_sign_string_hex, agent_open_sealed, agent_room_key_seed, agent_is_initialized, agent_is_unlocked, agent],
     esm_entry_point = "ext:agent_service/agent_extension.js",
     esm = [dir "src/js_core", "agent_extension.js"]
 );

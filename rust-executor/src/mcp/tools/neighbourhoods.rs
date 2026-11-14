@@ -600,8 +600,9 @@ mod tests {
     #[test]
     fn sll_possible_template_params_matches_variables() {
         assert!(
-            SLL_SOURCE.contains(r#"possibleTemplateParams: string[] = ["SERVER_URL", "UID"]"#),
-            "possibleTemplateParams export must declare exactly SERVER_URL and UID"
+            SLL_SOURCE
+                .contains(r#"possibleTemplateParams: string[] = ["SERVER_URL", "UID", "CREATOR"]"#),
+            "possibleTemplateParams export must declare exactly SERVER_URL, UID and CREATOR"
         );
     }
 

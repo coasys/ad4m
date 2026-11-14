@@ -2,11 +2,16 @@
  * # Server Link Language
  *
  * AD4M link language that syncs a perspective through a self-hosted
- * `link-server` instance over HTTP (auth, commit, catch-up sync,
- * peers, ACL, E2E key exchange) and native WebSocket (real-time diff
- * push, telepresence, presence). Implements every link-language
+ * `link-server` instance (protocol 2) over HTTP (auth, commit, catch-up sync,
+ * membership, peers, E2E key exchange) and native WebSocket (real-time diff
+ * and membership push, telepresence, presence). Implements every link-language
  * capability: perspective-commit, perspective-sync, perspective-query,
  * peers, and telepresence.
+ *
+ * The room is the space's: its id is `roomIdOf(CREATOR, UID)`, and the
+ * creator's first membership commit makes it (genesis). Who is in the room is
+ * the executor's membership of the space (`membershipLinks`,
+ * `membershipAdmits`); the language holds no membership state.
  *
  * See README.md for architecture and AGENTS.md for operational notes /
  * known limitations.
@@ -14,21 +19,21 @@
 
 import { defineLanguage, hash } from "@coasys/ad4m-ldk";
 
-import type { PerspectiveDiff } from "./src/types.js";
+import type { KeysResponse, LinkExpression, PerspectiveDiff } from "./src/types.js";
 import * as store from "./src/store.js";
 import * as api from "./src/api.js";
 import * as auth from "./src/auth.js";
 import * as syncModule from "./src/sync.js";
 import * as telepresenceModule from "./src/telepresence.js";
-import { WsClient } from "./src/ws-client.js";
-import { buildKeyRing, opensOwnBoxes, type KeyRing } from "./src/encryption.js";
+import { WsClient, CLOSE_KEY_REMOVED, CLOSE_ROOM_SUSPENDED } from "./src/ws-client.js";
+import { buildKeyRing, type KeyRing } from "./src/encryption.js";
+import { isMembershipLink, roomIdOf } from "./src/room.js";
 import {
-    adminRotationStep,
     afterFailedKeyRead,
     grantMissingRoomKeys,
+    mintsRoomKey,
     rotateRoomKey,
     type KeyRingStatus,
-    type RoomRole,
 } from "./src/room-keys.js";
 
 import {
@@ -59,6 +64,10 @@ const SERVER_URL = "https://link.ad4m.dev";
 //!@ad4m-template-variable
 const UID = "<to-be-filled>";
 
+/** The person DID (`did:scid:coasys:1:…`) that made the space: with UID, the room's genesis. */
+//!@ad4m-template-variable
+const CREATOR = "<to-be-filled>";
+
 // ---------------------------------------------------------------------------
 // Module state (fresh per perspective instance — see language-interface-spec.md §2)
 // ---------------------------------------------------------------------------
@@ -68,22 +77,22 @@ let configured = false;
 let localAgents: string[] = [];
 let wsClient: WsClient | null = null;
 
-/** The room's versioned key ring (version → decrypted AES-256-GCM key).
- * Null while this agent holds no room key it can open. */
+/** The room's versioned key ring (version → room key). Null while this agent holds no room key it can open. */
 let keyRing: KeyRing | null = null;
 /**
- * Every room is end-to-end encrypted: commits wait for "ready".
- * - "pending": this agent holds no key it can open: the admin has not
- *   rotated one in yet, no member holding one has been online since it
- *   joined, or none of its boxes opens (a spoiled grant). An admin in this
- *   state rotates; a member waits for a grant.
- * - "ready": key ring acquired and decrypted — encrypted commits ready.
+ * Every room is end-to-end encrypted: plain commits wait for "ready".
+ * - "pending": this agent holds no key it can open: none minted yet, the room
+ *   does not admit this key, no member holding one has been online since it
+ *   joined, or none of its boxes opens (a spoiled grant). An admitted member
+ *   in this state mints one when the room has none (K2); otherwise it waits
+ *   for a grant.
+ * - "ready": key ring acquired and opened.
  * - "error": we could not get/open the keys.
  */
 let keyRingStatus: KeyRingStatus = "pending";
-/** What the ACL said this agent is at init; "unknown" while that read has not succeeded. */
-let roomRole: RoomRole = "unknown";
-/** Set once this run has minted a room key version (see `rotateIfAdminWithoutKey`). */
+/** Whether the room admitted this key at its last auth (the server decides it per request). */
+let admitted = false;
+/** Set once this run has minted a room key version (K2: once a run). */
 let rotatedThisRun = false;
 /** In-flight setupKeyRing promise for single-flight deduplication. */
 let keyRingInflight: Promise<void> | null = null;
@@ -105,6 +114,12 @@ function setupKeyRingCoalesced(): Promise<void> {
     return keyRingInflight;
 }
 
+/** K1: whether the space admits a key now, as the executor's membership says. */
+async function admits(did: string): Promise<boolean> {
+    const answer = await getRuntime().membershipAdmits(did);
+    return answer.admitted;
+}
+
 // ---------------------------------------------------------------------------
 // Startup helpers
 // ---------------------------------------------------------------------------
@@ -114,23 +129,35 @@ async function setupKeyRing(): Promise<void> {
     const config = getConfig();
     try {
         const token = await auth.getValidToken();
-        const keysRes = await api.fetchRoomKeys(config, token);
+        let keysRes: KeysResponse;
+        try {
+            keysRes = await api.fetchRoomKeys(config, token);
+        } catch (err) {
+            if (err instanceof api.ApiError && err.status === 403) {
+                // The room does not admit this key (yet): it holds no room key.
+                if (gen !== lifecycleGen) return;
+                admitted = false;
+                keyRingStatus = "pending";
+                keyRing = null;
+                console.log("[server-link-language] the room does not admit this key yet — it holds no room key");
+                return;
+            }
+            throw err;
+        }
         if (gen !== lifecycleGen) return;
         if (keysRes.keys.length === 0) {
             keyRingStatus = "pending";
             keyRing = null;
             console.log(
-                "[server-link-language] this agent holds no room key yet — commits wait until the admin " +
-                "rotates one in or a member holding one grants it",
+                "[server-link-language] this agent holds no room key yet — plain commits wait until a member " +
+                "mints one or a member holding one grants it",
             );
             return;
         }
-        const { ring, spoiled } = buildKeyRing(keysRes.keys, getAgent());
-        if (spoiled.length > 0 && !opensOwnBoxes(getAgent(), myDid)) {
-            // The boxes failed because this executor cannot open any box now (a locked
-            // agent), not because they are spoiled: drop none, and try again later.
-            throw new Error(`this executor does not open a box sealed to ${myDid} right now`);
-        }
+        // Reading the seed throws while this executor cannot derive it (a locked agent):
+        // then no box is judged spoiled, and the read is tried again later.
+        const seed = await getAgent().roomKeySeed();
+        const { ring, spoiled } = buildKeyRing(keysRes.keys, seed);
         // A spoiled box would block its version for good: drop it, and a member holding the
         // version grants it again.
         for (const version of spoiled) {
@@ -171,44 +198,41 @@ async function setupKeyRing(): Promise<void> {
     }
 }
 
-/** This agent's role, as the server's ACL says now; "unknown" when the read fails. */
-async function readRoomRole(): Promise<RoomRole> {
-    try {
-        const aclInfo = await api.fetchAclInfo(getConfig(), await auth.getValidToken());
-        return aclInfo.admin === myDid ? "admin" : "member";
-    } catch (err) {
-        console.error("[server-link-language] could not read the room's ACL — retrying before the next rotation check:", err);
-        return "unknown";
-    }
+/** Authenticates again, so `admitted` is what the room says now. */
+async function refreshAdmitted(): Promise<void> {
+    auth.invalidateSession();
+    const session = await auth.getValidSession();
+    admitted = session.admitted;
 }
 
 /**
- * The admin mints a room key when it holds none it can open
- * (`adminRotationStep`). An admin whose ACL read at init failed would never
- * commit, so the ACL is read again while a key is missing and the role is
- * still unknown; a member the ACL already named is not re-read.
+ * K2: an admitted member holding no room key mints version 1 when the room has
+ * none (`mintsRoomKey`), once a run. A member `/keys/missing` names (the room has
+ * versions it lacks) waits for a grant instead.
  */
-async function rotateIfAdminWithoutKey(): Promise<void> {
-    if (adminRotationStep(keyRingStatus, rotatedThisRun, roomRole) === "read-acl") {
-        roomRole = await readRoomRole();
-    }
-    if (adminRotationStep(keyRingStatus, rotatedThisRun, roomRole) !== "rotate") return;
-    console.log(`[server-link-language] admin holds no room key (${keyRingStatus}) — generating a new one`);
-    await performRotation();
+async function mintRoomKeyIfNone(): Promise<void> {
+    if (keyRingStatus === "ready" || rotatedThisRun) return;
+    await setupKeyRingCoalesced();
+    if (keyRingStatus !== "pending" || !admitted) return;
+    const token = await auth.getValidToken();
+    const { membersNeedingHistoricalKeys } = await api.fetchMissingKeys(getConfig(), token);
+    if (!mintsRoomKey({ status: keyRingStatus, rotatedThisRun, admitted }, membersNeedingHistoricalKeys, myDid)) return;
+    console.log("[server-link-language] the room has no key yet — minting version 1");
+    await performRotation([]);
 }
 
 /**
- * If this agent holds room key versions, seal them to every ACL member
- * lacking them. Any member does this, not only the admin: a member's key
- * follows from its DID, so a joiner gets the room's history from whichever
- * member holding it is online first. Runs after setupKeyRing, after every
- * sync and on peer-joined events; the server rate-limits the calls.
+ * If this agent holds room key versions, seal them to every admitted key
+ * lacking them that the space admits (K1). Any member does this: a joiner gets
+ * the room's history from whichever member holding it is online first. Runs
+ * after setupKeyRing, after every sync and on peer-joined events; the server
+ * rate-limits the calls.
  */
 async function performKeyGrants(): Promise<void> {
     if (!keyRing || keyRing.size === 0) return;
     try {
         const token = await auth.getValidToken();
-        const grants = await grantMissingRoomKeys(getConfig(), token, keyRing, myDid);
+        const grants = await grantMissingRoomKeys(getConfig(), token, keyRing, myDid, admits);
         for (const grant of grants) {
             console.log(
                 `[server-link-language] granted key versions [${grant.versions.join(", ")}] to ${grant.did}`,
@@ -220,30 +244,58 @@ async function performKeyGrants(): Promise<void> {
 }
 
 /**
- * Client-side key rotation (room admin only): generates the room key
- * locally, seals it to the DID of every ACL member, including members that
- * never connected, and sends only the sealed boxes. The server never
- * touches plaintext key material. Called from the language's init flow.
+ * Any admitted member: a new room key version, generated here and sealed to every
+ * key the room lists and the space admits (K1). The server never sees the key. A
+ * 409 (the room's admitted keys changed) catches up on membership and seals again.
+ * The executor hears `roomKeyEvent({kind: "rotated"})` with the keys the
+ * rotation left out (`removedKeys`).
  */
-async function performRotation(): Promise<void> {
-    if (roomRole !== "admin") return;
-    try {
-        const token = await auth.getValidToken();
-        const result = await rotateRoomKey(getConfig(), token);
-        if (!result) {
-            console.log("[server-link-language] no ACL member to seal a room key to — skipping rotation");
-            return;
-        }
-        rotatedThisRun = true;
-        console.log(
-            `[server-link-language] client-side key rotation complete: version ${result.version}, ` +
-            `${result.recipients.length} recipient(s)`,
-        );
-        await setupKeyRing();
-    } catch (err) {
-        console.error("[server-link-language] key rotation failed:", err);
-        throw err;
+async function performRotation(removedKeys: string[]): Promise<void> {
+    const token = await auth.getValidToken();
+    const outcome = await rotateRoomKey(getConfig(), token, admits, {
+        beforeRetry: () => syncModule.catchUpMembership(),
+    });
+    if (!outcome) {
+        console.log("[server-link-language] no admitted key to seal a room key to — skipping rotation");
+        return;
     }
+    rotatedThisRun = true;
+    console.log(
+        `[server-link-language] key rotation complete: version ${outcome.result.version}, ` +
+        `${outcome.result.recipients.length} recipient(s)`,
+    );
+    try {
+        await getRuntime().roomKeyEvent({ kind: "rotated", removedKeys, version: outcome.result.version });
+    } catch (err) {
+        console.error("[server-link-language] roomKeyEvent(rotated) failed:", err);
+    }
+    await setupKeyRingCoalesced();
+}
+
+/**
+ * K3: the room's admitted keys changed (`rotate-needed`). A member holding a key
+ * catches up on membership, so the executor knows who is in now, and rotates.
+ */
+async function rotateAfterMembershipChange(removedKeys: string[]): Promise<void> {
+    await syncModule.catchUpMembership();
+    await refreshAdmitted();
+    if (!admitted) return;
+    if (keyRingStatus !== "ready") {
+        await mintRoomKeyIfNone();
+        return;
+    }
+    await performRotation(removedKeys);
+}
+
+function splitMembership(diff: PerspectiveDiff): { membership: LinkExpression[]; plain: PerspectiveDiff } {
+    const membership = diff.additions.filter(isMembershipLink);
+    return {
+        membership,
+        plain: {
+            additions: diff.additions.filter((l) => !isMembershipLink(l)),
+            removals: diff.removals,
+        },
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -268,16 +320,18 @@ const language = defineLanguage({
         myDid = getAgent().did();
         store.initStore(hash);
 
-        configured = !isPlaceholder(SERVER_URL) && !isPlaceholder(UID);
+        configured = !isPlaceholder(SERVER_URL) && !isPlaceholder(UID) && !isPlaceholder(CREATOR);
         if (!configured) {
             console.log(
                 `[server-link-language] init: did=${myDid}, template variables not filled in — ` +
-                "running inert until published with SERVER_URL/UID.",
+                "running inert until published with SERVER_URL, UID and CREATOR.",
             );
             return;
         }
 
-        initAdapters({ config: { serverUrl: SERVER_URL, roomId: UID } });
+        initAdapters({
+            config: { serverUrl: SERVER_URL, roomId: roomIdOf(CREATOR, UID), creator: CREATOR, uid: UID },
+        });
         const config = getConfig();
 
         syncModule.initSync({
@@ -288,6 +342,9 @@ const language = defineLanguage({
             emitSyncState: (state) => getRuntime().emitSyncStateChange(state),
             getKeyRing: () => keyRing,
             refreshKeyRing: () => setupKeyRingCoalesced(),
+            // K5: the membership links the room counted go to the executor's
+            // membership of the space; the language keeps none.
+            membershipLinks: (links) => getRuntime().membershipLinks(links),
             // Periodic key grants — fallback for when the WS
             // `peer-joined` event never fires (WS down, CI, firewalls).
             // Each successful HTTP sync triggers a check so a member
@@ -305,6 +362,29 @@ const language = defineLanguage({
                     // re-reads the key ring for it.
                     syncModule.applyInboundWireDiff(msg.payload, msg.sequence, msg.revision);
                 },
+                onMembership(msg) {
+                    void syncModule.onMembershipPush(msg);
+                },
+                onRotateNeeded(msg) {
+                    void rotateAfterMembershipChange(msg.removedKeys).catch((err) => {
+                        console.error(`[server-link-language] rotation after '${msg.reason}' failed:`, err);
+                    });
+                },
+                onRoomClosed(code, reason) {
+                    if (code === CLOSE_KEY_REMOVED) {
+                        // This key was removed from the room or revoked: no reconnect
+                        // until the next init, and the executor drops its room key.
+                        console.error(`[server-link-language] the room removed this key (${reason})`);
+                        keyRing = null;
+                        keyRingStatus = "pending";
+                        admitted = false;
+                        void getRuntime()
+                            .roomKeyEvent({ kind: "dropped", removedKeys: [myDid] })
+                            .catch((err) => console.error("[server-link-language] roomKeyEvent(dropped) failed:", err));
+                    } else if (code === CLOSE_ROOM_SUSPENDED) {
+                        console.error(`[server-link-language] the room is suspended by its operator (${reason}); reconnecting with backoff`);
+                    }
+                },
                 onTelepresenceSignal(msg) {
                     // Directed at us specifically — this connection is
                     // authenticated as myDid, so we are the local recipient.
@@ -318,12 +398,10 @@ const language = defineLanguage({
                 },
                 onPeerJoined(msg) {
                     telepresenceModule.handlePeerJoined(msg);
-                    // Grant historical keys to members who lack them.
-                    // Do NOT rotate here — onPeerJoined is a presence
-                    // event (reconnect, second device, wake) not an ACL
-                    // event. Rotating on presence would mint a new version
-                    // on every reconnect. Rotation belongs on ACL changes
-                    // or explicit admin action.
+                    // Grant historical keys to members who lack them. Do not
+                    // rotate here: peer-joined is presence (reconnect, second
+                    // device, wake), not membership; the room says
+                    // `rotate-needed` when its admitted keys change.
                     void performKeyGrants().catch((err) => {
                         console.error("[server-link-language] peer-joined key grant failed:", err);
                     });
@@ -377,21 +455,29 @@ const language = defineLanguage({
         // below fails first. A member with a cursor above 0 only catches up.
         syncModule.needRender();
         try {
-            await auth.authenticate();
-
-            // Determine admin status — only the admin rotates the room key.
-            roomRole = await readRoomRole();
+            try {
+                admitted = (await auth.authenticate()).admitted;
+            } catch (err) {
+                if (err instanceof api.ApiError && err.status === 404) {
+                    // Nobody made the room yet: the creator's first membership
+                    // commit makes it (genesis). Until then there is nothing to read.
+                    console.log(
+                        "[server-link-language] the room does not exist yet — the creator's first membership " +
+                        "commit makes it",
+                    );
+                    return;
+                }
+                throw err;
+            }
 
             await setupKeyRingCoalesced();
-            // The admin that just created the room (E2E from creation, no key
-            // yet) mints key version 1 here, before its first commit; any admin
-            // holding no key it can open rotates, sealing a new version to
-            // every ACL member.
-            await rotateIfAdminWithoutKey();
+            // K2: an admitted member holding no key mints version 1 when the
+            // room has none, before its first plain commit.
+            await mintRoomKeyIfNone();
 
             // The room's current links (a fresh member's snapshot, or the
             // diffs after the cursor), emitted to the executor; those no key
-            // opens yet are held until one does.
+            // opens yet are held until one does. Membership comes first.
             await syncModule.bootstrap();
 
             // With a key ring, grant the versions we hold to any member
@@ -406,15 +492,14 @@ const language = defineLanguage({
                 "the room render with backoff until it succeeds:",
                 err,
             );
+        } finally {
+            // Always attempt to connect, even if the steps above failed: getUrl()
+            // re-authenticates internally, and the reconnect loop retries with backoff.
+            void wsClient.connect().catch((err) => {
+                console.error("[server-link-language] initial websocket connect failed:", err);
+            });
+            console.log(`[server-link-language] init complete: did=${myDid}, room=${config.roomId}`);
         }
-
-        // Always attempt to connect, even if the steps above failed: getUrl()
-        // re-authenticates internally, and the reconnect loop retries with backoff.
-        void wsClient.connect().catch((err) => {
-            console.error("[server-link-language] initial websocket connect failed:", err);
-        });
-
-        console.log(`[server-link-language] init complete: did=${myDid}, uid=${UID}`);
     },
 
     async teardown() {
@@ -428,7 +513,7 @@ const language = defineLanguage({
         localAgents = [];
         keyRing = null;
         keyRingStatus = "pending";
-        roomRole = "unknown";
+        admitted = false;
         rotatedThisRun = false;
         keyRingInflight = null;
         auth.resetAuth();
@@ -447,9 +532,25 @@ const language = defineLanguage({
         async commit(diff: PerspectiveDiff) {
             if (!configured) {
                 throw new Error(
-                    "server-link-language: not configured (SERVER_URL/UID template variables unfilled)",
+                    "server-link-language: not configured (SERVER_URL/UID/CREATOR template variables unfilled)",
                 );
             }
+            const { membership, plain } = splitMembership(diff);
+
+            // K5: membership links go first, plain and signed, and need no room
+            // key: the creator's first one makes the room (genesis), and a
+            // joiner's self-join is what admits it.
+            if (membership.length > 0) {
+                await syncModule.commit({ additions: membership, removals: [] });
+                if (!admitted || keyRingStatus !== "ready") {
+                    await refreshAdmitted();
+                    await mintRoomKeyIfNone();
+                }
+            }
+
+            const hasPlain = plain.additions.length > 0 || plain.removals.length > 0;
+            if (!hasPlain) return "";
+
             if (keyRingStatus === "pending" || keyRingStatus === "error") {
                 // Loading the key also opens any links held for it.
                 await setupKeyRingCoalesced();
@@ -460,21 +561,20 @@ const language = defineLanguage({
                     "acquired/decrypted. Retry once connectivity/auth recovers.",
                 );
             }
-            // An admin that still holds no room key rotates before it
-            // commits; a failed rotation throws, and the executor keeps the
-            // diff for retry. There is no plaintext mode: a member without a
-            // key waits for a grant.
-            await rotateIfAdminWithoutKey();
+            // An admitted member holding no key mints one when the room has none
+            // (K2); a failed mint throws, and the executor keeps the diff for
+            // retry. There is no plaintext mode: otherwise it waits for a grant.
+            await mintRoomKeyIfNone();
             if (keyRingStatus !== "ready") {
                 throw new Error(
                     "server-link-language: cannot commit yet — this agent holds no room key it can open. " +
-                    "The admin rotates one in, or a member holding one grants it when it is next online.",
+                    "A member holding one grants it when it is next online.",
                 );
             }
 
             console.log(
-                `[server-link-language] commit: ${diff.additions.length} adds, ` +
-                `${diff.removals.length} removes (keyRingStatus=${keyRingStatus})`,
+                `[server-link-language] commit: ${plain.additions.length} adds, ` +
+                `${plain.removals.length} removes (keyRingStatus=${keyRingStatus})`,
             );
 
             // Push the diff to the server; syncModule.commit stores it
@@ -482,7 +582,7 @@ const language = defineLanguage({
             // it back (the executor committed it and already holds it).
             // Awaiting the POST ensures the executor only clears its
             // pending-diff DB entry AFTER the server accepted the commit.
-            await syncModule.commit(diff);
+            await syncModule.commit(plain);
 
             return "";
         },
@@ -594,4 +694,4 @@ export default language;
 // Template params metadata (for language.publish / LanguageMeta)
 // ---------------------------------------------------------------------------
 
-export const possibleTemplateParams: string[] = ["SERVER_URL", "UID"];
+export const possibleTemplateParams: string[] = ["SERVER_URL", "UID", "CREATOR"];

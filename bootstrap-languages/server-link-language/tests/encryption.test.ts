@@ -1,18 +1,19 @@
 /**
- * Tests for src/encryption.ts — room keys sealed to members' DIDs in the
- * executor's sealed-box format, and AES-256-GCM link encryption. No mocking
- * of the crypto primitives: the mock agents open with the noble reference
- * of the executor's opening (tests/sealed-box.ts), so a broken wire format
- * or a swapped key fails the round trip.
+ * Tests for src/encryption.ts: room keys sealed to members' X25519 keys with the keyring
+ * binding (AR-08 K9), the HMAC link hash (K4), and AES-256-GCM link encryption. No mocking of
+ * the crypto primitives: members open with the keyring binding from their own seed, so a
+ * broken wire format or a swapped key fails the round trip.
  */
 
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { ed25519, x25519 } from "@noble/curves/ed25519";
 import { gcm } from "@noble/ciphers/aes";
+import { hkdf } from "@noble/hashes/hkdf";
+import { hmac } from "@noble/hashes/hmac";
+import { sha256 } from "@noble/hashes/sha256";
 
-import type { AgentAdapter } from "../src/adapters.js";
+import { x25519Public } from "../keyring/keyring.js";
 import {
     AES_KEY_BYTES,
     buildKeyRing,
@@ -23,33 +24,25 @@ import {
     generateRoomKey,
     hexToBytes,
     latestKeyVersion,
+    linkHashKeyOf,
     openRoomKey,
-    opensOwnBoxes,
     randomBytes,
     roomKeyCommitment,
-    sealToDid,
+    sealRoomKeyTo,
+    wireLinkHash,
 } from "../src/encryption.js";
-import type { LinkExpression, SealedBox } from "../src/types.js";
+import type { KeysResponseEntry, LinkExpression } from "../src/types.js";
 import { isEncryptedLinkData } from "../src/types.js";
-import { didForEd25519PublicKey, openSealed } from "./sealed-box.js";
 
-/** An agent whose executor opens like the real one. */
-class OpeningAgent implements AgentAdapter {
-    readonly secret: Uint8Array;
-    readonly didValue: string;
-    constructor(secret: Uint8Array = ed25519.utils.randomPrivateKey()) {
-        this.secret = secret;
-        this.didValue = didForEd25519PublicKey(ed25519.getPublicKey(secret));
-    }
-    did(): string {
-        return this.didValue;
-    }
-    signStringHex(): string {
-        throw new Error("room keys need no signature");
-    }
-    openSealed(sealed: SealedBox): string {
-        return bytesToHex(openSealed(sealed, this.secret));
-    }
+/** A member: the seed `agentRoomKeySeed` gives it, and the X25519 key it publishes at auth. */
+function member(seed: Uint8Array = randomBytes(32)): { seed: Uint8Array; x25519: string } {
+    return { seed, x25519: bytesToHex(x25519Public(seed)) };
+}
+
+/** A room key's encryption and link-hash keys, as a ring with this key as version 1 gives them. */
+function keys(roomKey: Uint8Array = generateRoomKey(), version?: number) {
+    const hashKey = linkHashKeyOf(new Map([[1, roomKey]]))!;
+    return { roomKey, hashKey, ...(version !== undefined ? { version } : {}) };
 }
 
 // ---------------------------------------------------------------------------
@@ -72,91 +65,45 @@ describe("encryption: hex helpers", () => {
 });
 
 // ---------------------------------------------------------------------------
-// The executor's sealed box, pinned on both sides
+// Room keys sealed to X25519 keys (K9)
 // ---------------------------------------------------------------------------
 
-describe("encryption: the sealed box format", () => {
-    // `rust-executor/src/agent/sealed_box.rs` pins the same values. Changing
-    // either side makes every room key sealed so far unreadable.
-    const secret = new Uint8Array(32).fill(1);
-
-    it("maps a did:key's Ed25519 key to X25519 like the executor", () => {
-        const did = didForEd25519PublicKey(ed25519.getPublicKey(secret));
-        assert.equal(did, "did:key:z6Mkon3Necd6NkkyfoGoHxid2znGc59LU3K7mubaRcFbLfLX");
-        const x25519Public = ed25519.utils.toMontgomery(ed25519.getPublicKey(secret));
-        const x25519Secret = ed25519.utils.toMontgomerySecret(secret);
-        assert.equal(bytesToHex(x25519Public), "1b1b58dd50ea14b60da17b790cd02754d970c9bab864ebb3c0f3016fe51d3f57");
-        assert.equal(bytesToHex(x25519Secret), "58e86efb75fa4e2c410f46e16de9f6acae1a1703528651b69bc176c088bef36e");
-        assert.deepEqual(x25519.getPublicKey(x25519Secret), x25519Public, "the two maps agree");
-    });
-
-    it("seals the box the executor opens", () => {
-        const did = didForEd25519PublicKey(ed25519.getPublicKey(secret));
-        const sealed = sealToDid(
-            did,
-            new TextEncoder().encode("ad4m room key v1"),
-            new Uint8Array(32).fill(2),
-            new Uint8Array(12).fill(3),
-        );
-        assert.deepEqual(sealed, {
-            ephemeralPublicKey: "ce8d3ad1ccb633ec7b70c17814a5c76ecd029685050d344745ba05870e587d59",
-            nonce: "030303030303030303030303",
-            ciphertext: "11b99acbd7bdf173901c669b2ed8c4794cb801ac9c2ac9642531fd873dfde2cc",
-        });
-        assert.equal(new TextDecoder().decode(openSealed(sealed, secret)), "ad4m room key v1");
-    });
-
-    it("seals the room keys of ad4m-keyring's vectors byte for byte", () => {
-        // `ad4m-keyring` (Rust and its wasm build) gives these same envelopes from the same
-        // inputs and opens them; changing the seal here breaks both.
+describe("encryption: sealRoomKeyTo / openRoomKey", () => {
+    it("opens ad4m-keyring's vectors from the recipient's seed", () => {
+        // `ad4m-keyring` (Rust and its wasm build) seals and opens these same envelopes.
         const file = new URL("../../../ad4m-keyring/vectors/room-key-seal.json", import.meta.url);
         const { vectors } = JSON.parse(readFileSync(file, "utf8"));
         assert.ok(vectors.length > 0);
         for (const v of vectors) {
-            const seed = hexToBytes(v.ed25519Seed);
-            assert.equal(didForEd25519PublicKey(ed25519.getPublicKey(seed)), v.did);
-            const sealed = sealToDid(v.did, hexToBytes(v.roomKey), hexToBytes(v.ephemeralSecret), hexToBytes(v.nonce));
-            assert.deepEqual(sealed, v.sealed);
-            assert.equal(bytesToHex(openSealed(sealed, seed)), v.roomKey);
+            assert.equal(bytesToHex(openRoomKey(v.sealed, hexToBytes(v.x25519Secret))), v.roomKey);
         }
     });
-});
 
-// ---------------------------------------------------------------------------
-// Room keys sealed to DIDs
-// ---------------------------------------------------------------------------
-
-describe("encryption: sealToDid / openRoomKey", () => {
-    it("seals a room key to a member by DID alone, and the member opens it", () => {
-        const member = new OpeningAgent();
+    it("seals a room key to a member's X25519 key, and the member opens it with its seed", () => {
+        const m = member();
         const roomKey = generateRoomKey();
-
-        const sealed = sealToDid(member.did(), roomKey);
-        assert.deepEqual(openRoomKey(member, sealed), roomKey);
+        assert.deepEqual(openRoomKey(sealRoomKeyTo(m.x25519, roomKey), m.seed), roomKey);
     });
 
     it("produces a different box each time (fresh ephemeral key + nonce)", () => {
-        const member = new OpeningAgent();
+        const m = member();
         const roomKey = generateRoomKey();
-        const box1 = sealToDid(member.did(), roomKey);
-        const box2 = sealToDid(member.did(), roomKey);
+        const box1 = sealRoomKeyTo(m.x25519, roomKey);
+        const box2 = sealRoomKeyTo(m.x25519, roomKey);
         assert.notEqual(box1.ephemeralPublicKey, box2.ephemeralPublicKey);
         assert.notEqual(box1.ciphertext, box2.ciphertext);
-        assert.deepEqual(openRoomKey(member, box1), roomKey);
-        assert.deepEqual(openRoomKey(member, box2), roomKey);
+        assert.deepEqual(openRoomKey(box1, m.seed), roomKey);
+        assert.deepEqual(openRoomKey(box2, m.seed), roomKey);
     });
 
-    it("another agent cannot open it", () => {
-        const member = new OpeningAgent();
-        const impostor = new OpeningAgent();
-        const sealed = sealToDid(member.did(), generateRoomKey());
-        assert.throws(() => openRoomKey(impostor, sealed));
+    it("another member cannot open it", () => {
+        const sealed = sealRoomKeyTo(member().x25519, generateRoomKey());
+        assert.throws(() => openRoomKey(sealed, member().seed));
     });
 
-    it("refuses a sealed value that is not a room key", () => {
-        const member = new OpeningAgent();
-        const sealed = sealToDid(member.did(), new Uint8Array(16));
-        assert.throws(() => openRoomKey(member, sealed), /32 bytes/);
+    it("refuses an X25519 key that is not 32 bytes of hex", () => {
+        assert.throws(() => sealRoomKeyTo("11".repeat(31), generateRoomKey()));
+        assert.throws(() => sealRoomKeyTo("zz".repeat(32), generateRoomKey()));
     });
 
     it("generateRoomKey returns AES_KEY_BYTES (32) random bytes", () => {
@@ -167,7 +114,7 @@ describe("encryption: sealToDid / openRoomKey", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Link expression wire encryption
+// The link hash (K4)
 // ---------------------------------------------------------------------------
 
 function makeLink(overrides?: Partial<LinkExpression["data"]>): LinkExpression {
@@ -184,28 +131,59 @@ function makeLink(overrides?: Partial<LinkExpression["data"]>): LinkExpression {
     };
 }
 
+describe("encryption: the link hash (K4)", () => {
+    it("is HMAC-SHA256 under the link-hash key of room key version 1, over the canonical link", () => {
+        const roomKey = generateRoomKey();
+        const hashKey = linkHashKeyOf(new Map([[1, roomKey], [2, generateRoomKey()]]));
+        assert.deepEqual(hashKey, hkdf(sha256, roomKey, undefined, "adam-server-link-language:link-hash:v1", 32));
+        const link = makeLink();
+        const canonical =
+            '{"source":"channel://main","predicate":"flux://has_message","target":"expr://msg-001",' +
+            '"author":"did:key:z6MkAuthor","timestamp":"2026-01-01T00:00:00.000Z"}';
+        assert.equal(wireLinkHash(link, hashKey!), bytesToHex(hmac(sha256, hashKey!, new TextEncoder().encode(canonical))));
+        assert.notEqual(
+            wireLinkHash(link, hashKey!),
+            bytesToHex(sha256(new TextEncoder().encode(canonical))),
+            "the server cannot compute it from a guessed link",
+        );
+    });
+
+    it("differs between rooms with different keys", () => {
+        const link = makeLink();
+        assert.notEqual(wireLinkHash(link, keys().hashKey), wireLinkHash(link, keys().hashKey));
+    });
+
+    it("has no key until the ring holds version 1", () => {
+        assert.equal(linkHashKeyOf(new Map()), null);
+        assert.equal(linkHashKeyOf(new Map([[2, generateRoomKey()]])), null);
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Link expression wire encryption
+// ---------------------------------------------------------------------------
+
 describe("encryption: encryptLinkForWire / decryptLinkFromWire", () => {
     it("round-trips a link through the room key (full encryption)", () => {
-        const roomKey = generateRoomKey();
+        const k = keys();
         const link = makeLink();
 
-        const wire = encryptLinkForWire(link, roomKey);
+        const wire = encryptLinkForWire(link, k);
         assert.ok(isEncryptedLinkData(wire.data));
         assert.equal(typeof (wire.data as any).ciphertext, "string");
         assert.equal(typeof (wire.data as any).nonce, "string");
         assert.equal(wire.author, undefined);
         assert.equal(wire.timestamp, undefined);
         assert.equal(wire.proof, undefined);
-        assert.equal(typeof wire.link_hash, "string");
+        assert.equal(wire.link_hash, wireLinkHash(link, k.hashKey));
 
-        const decrypted = decryptLinkFromWire(wire, roomKey);
+        const decrypted = decryptLinkFromWire(wire, k.roomKey);
         assert.deepEqual(decrypted, link);
     });
 
     it("encrypts everything — no metadata in the clear", () => {
-        const roomKey = generateRoomKey();
         const link = makeLink({ source: "s3cr3t://topic" });
-        const wire = encryptLinkForWire(link, roomKey);
+        const wire = encryptLinkForWire(link, keys());
 
         assert.equal(wire.author, undefined);
         assert.equal(wire.timestamp, undefined);
@@ -214,8 +192,7 @@ describe("encryption: encryptLinkForWire / decryptLinkFromWire", () => {
     });
 
     it("writes ciphertext and nonce in canonical base64", () => {
-        const roomKey = generateRoomKey();
-        const wire = encryptLinkForWire(makeLink(), roomKey, 1);
+        const wire = encryptLinkForWire(makeLink(), keys(undefined, 1));
         const data = wire.data as { ciphertext: string; nonce: string };
         assert.match(data.nonce, /^[A-Za-z0-9+/]{16}$/, "a 12-byte nonce is 16 base64 characters");
         const ciphertextBytes = Buffer.from(data.ciphertext, "base64");
@@ -223,16 +200,15 @@ describe("encryption: encryptLinkForWire / decryptLinkFromWire", () => {
     });
 
     it("uses a fresh nonce per call (different ciphertext for identical input)", () => {
-        const roomKey = generateRoomKey();
+        const k = keys();
         const link = makeLink();
-        const wire1 = encryptLinkForWire(link, roomKey);
-        const wire2 = encryptLinkForWire(link, roomKey);
+        const wire1 = encryptLinkForWire(link, k);
+        const wire2 = encryptLinkForWire(link, k);
         assert.notEqual((wire1.data as any).ciphertext, (wire2.data as any).ciphertext);
     });
 
     it("fails to decrypt with the wrong room key", () => {
-        const link = makeLink();
-        const wire = encryptLinkForWire(link, generateRoomKey());
+        const wire = encryptLinkForWire(makeLink(), keys());
         assert.throws(() => decryptLinkFromWire(wire, generateRoomKey()));
     });
 
@@ -265,16 +241,12 @@ describe("encryption: encryptLinkForWire / decryptLinkFromWire", () => {
     });
 
     it("attaches key_version when provided", () => {
-        const roomKey = generateRoomKey();
-        const link = makeLink();
-        const wire = encryptLinkForWire(link, roomKey, 3);
+        const wire = encryptLinkForWire(makeLink(), keys(undefined, 3));
         assert.equal(wire.key_version, 3);
     });
 
     it("omits key_version when not provided", () => {
-        const roomKey = generateRoomKey();
-        const link = makeLink();
-        const wire = encryptLinkForWire(link, roomKey);
+        const wire = encryptLinkForWire(makeLink(), keys());
         assert.equal("key_version" in wire, false);
     });
 
@@ -282,29 +254,26 @@ describe("encryption: encryptLinkForWire / decryptLinkFromWire", () => {
         const key1 = generateRoomKey();
         const key2 = generateRoomKey();
         const ring = new Map([[1, key1], [2, key2]]);
+        const hashKey = linkHashKeyOf(ring)!;
         const link = makeLink();
 
-        const wire1 = encryptLinkForWire(link, key1, 1);
-        const wire2 = encryptLinkForWire(link, key2, 2);
+        const wire1 = encryptLinkForWire(link, { roomKey: key1, version: 1, hashKey });
+        const wire2 = encryptLinkForWire(link, { roomKey: key2, version: 2, hashKey });
 
         assert.deepEqual(decryptLinkFromWire(wire1, ring), link);
         assert.deepEqual(decryptLinkFromWire(wire2, ring), link);
     });
 
     it("defaults to version 1 when wire link has no key_version", () => {
-        const key1 = generateRoomKey();
-        const ring = new Map([[1, key1]]);
+        const k = keys();
+        const ring = new Map([[1, k.roomKey]]);
         const link = makeLink();
-        const wire = encryptLinkForWire(link, key1);
-        assert.deepEqual(decryptLinkFromWire(wire, ring), link);
+        assert.deepEqual(decryptLinkFromWire(encryptLinkForWire(link, k), ring), link);
     });
 
     it("throws when KeyRing lacks the required version", () => {
-        const key1 = generateRoomKey();
-        const key2 = generateRoomKey();
-        const ring = new Map([[1, key1]]);
-        const link = makeLink();
-        const wire = encryptLinkForWire(link, key2, 2);
+        const ring = new Map([[1, generateRoomKey()]]);
+        const wire = encryptLinkForWire(makeLink(), keys(undefined, 2));
         assert.throws(() => decryptLinkFromWire(wire, ring), /no key for version 2/);
     });
 });
@@ -314,17 +283,17 @@ describe("encryption: encryptLinkForWire / decryptLinkFromWire", () => {
 // ---------------------------------------------------------------------------
 
 describe("encryption: buildKeyRing / latestKeyVersion", () => {
-    const entry = (did: string, key: Uint8Array, version: number, committed = key) => ({
-        encryptedKey: sealToDid(did, key),
+    const entry = (x25519: string, key: Uint8Array, version: number, committed = key): KeysResponseEntry => ({
+        encryptedKey: sealRoomKeyTo(x25519, key),
         version,
         commitment: roomKeyCommitment(committed),
     });
 
-    it("builds a KeyRing from the boxes sealed to this agent", () => {
-        const agent = new OpeningAgent();
+    it("builds a KeyRing from the boxes sealed to this agent's X25519 key", () => {
+        const me = member();
         const rk1 = generateRoomKey();
         const rk2 = generateRoomKey();
-        const { ring, spoiled } = buildKeyRing([entry(agent.did(), rk1, 1), entry(agent.did(), rk2, 2)], agent);
+        const { ring, spoiled } = buildKeyRing([entry(me.x25519, rk1, 1), entry(me.x25519, rk2, 2)], me.seed);
         assert.equal(ring.size, 2);
         assert.deepEqual(ring.get(1), rk1);
         assert.deepEqual(ring.get(2), rk2);
@@ -332,12 +301,11 @@ describe("encryption: buildKeyRing / latestKeyVersion", () => {
     });
 
     it("spoils a version that does not open, so one bad grant does not lock the room", () => {
-        const agent = new OpeningAgent();
-        const other = new OpeningAgent();
+        const me = member();
         const rk1 = generateRoomKey();
         const { ring, spoiled } = buildKeyRing(
-            [entry(agent.did(), rk1, 1), entry(other.did(), generateRoomKey(), 2)],
-            agent,
+            [entry(me.x25519, rk1, 1), entry(member().x25519, generateRoomKey(), 2)],
+            me.seed,
         );
         assert.deepEqual([...ring.keys()], [1]);
         assert.deepEqual(ring.get(1), rk1);
@@ -345,51 +313,26 @@ describe("encryption: buildKeyRing / latestKeyVersion", () => {
     });
 
     it("spoils a version whose box opens to a key other than the committed one", () => {
-        const agent = new OpeningAgent();
-        const rk1 = generateRoomKey();
+        const me = member();
         // A member holding version 1 sealed a key of its own under it.
-        const { ring, spoiled } = buildKeyRing([entry(agent.did(), generateRoomKey(), 1, rk1)], agent);
+        const { ring, spoiled } = buildKeyRing([entry(me.x25519, generateRoomKey(), 1, generateRoomKey())], me.seed);
         assert.equal(ring.size, 0);
         assert.deepEqual(spoiled, [1]);
     });
 
     it("spoils a version with no commitment", () => {
-        const agent = new OpeningAgent();
+        const me = member();
         const { ring, spoiled } = buildKeyRing(
-            [{ encryptedKey: sealToDid(agent.did(), generateRoomKey()), version: 1 }],
-            agent,
+            [{ encryptedKey: sealRoomKeyTo(me.x25519, generateRoomKey()), version: 1 }],
+            me.seed,
         );
         assert.equal(ring.size, 0);
         assert.deepEqual(spoiled, [1]);
     });
 
-    it("is empty when no version opens: the agent waits for a key, and an admin rotates", () => {
-        const agent = new OpeningAgent();
-        const other = new OpeningAgent();
-        const { ring } = buildKeyRing([entry(other.did(), generateRoomKey(), 1)], agent);
+    it("is empty when no version opens: the agent waits for a key", () => {
+        const { ring } = buildKeyRing([entry(member().x25519, generateRoomKey(), 1)], member().seed);
         assert.equal(ring.size, 0);
-    });
-
-    it("tells a box that is spoiled from an executor that opens nothing now", () => {
-        const agent = new OpeningAgent();
-        assert.equal(opensOwnBoxes(agent, agent.did()), true, "the agent opens a box sealed to itself");
-
-        // A locked agent: the executor cannot use the key, so every box fails, good ones too.
-        const locked: Pick<AgentAdapter, "openSealed"> = {
-            openSealed: () => {
-                throw new Error("main key not found");
-            },
-        };
-        const rk1 = generateRoomKey();
-        const { ring, spoiled } = buildKeyRing([entry(agent.did(), rk1, 1)], locked);
-        assert.equal(ring.size, 0);
-        assert.deepEqual(spoiled, [1], "the good box failed too");
-        assert.equal(opensOwnBoxes(locked, agent.did()), false, "so its failure is not the box's");
-
-        // An executor that answers with bytes other than the box's.
-        const wrong: Pick<AgentAdapter, "openSealed"> = { openSealed: () => bytesToHex(generateRoomKey()) };
-        assert.equal(opensOwnBoxes(wrong, agent.did()), false);
-        assert.equal(opensOwnBoxes(agent, "not a did"), false);
     });
 
     it("latestKeyVersion returns the highest version", () => {
@@ -408,12 +351,12 @@ describe("encryption: buildKeyRing / latestKeyVersion", () => {
 
 describe("encryption: link_hash invariant", () => {
     it("encryptLinkForWire produces identical link_hash regardless of key version", () => {
-        const key1 = generateRoomKey();
-        const key2 = generateRoomKey();
+        const ring = new Map([[1, generateRoomKey()], [2, generateRoomKey()]]);
+        const hashKey = linkHashKeyOf(ring)!;
         const link = makeLink();
 
-        const wire1 = encryptLinkForWire(link, key1, 1);
-        const wire2 = encryptLinkForWire(link, key2, 2);
+        const wire1 = encryptLinkForWire(link, { roomKey: ring.get(1)!, version: 1, hashKey });
+        const wire2 = encryptLinkForWire(link, { roomKey: ring.get(2)!, version: 2, hashKey });
 
         assert.equal(wire1.link_hash, wire2.link_hash, "same plaintext must produce same link_hash across key versions");
         assert.notEqual(
@@ -424,13 +367,12 @@ describe("encryption: link_hash invariant", () => {
     });
 
     it("encrypted removal matches original addition by link_hash across key rotations", () => {
-        const key1 = generateRoomKey();
-        const key2 = generateRoomKey();
-        const ring = new Map([[1, key1], [2, key2]]);
+        const ring = new Map([[1, generateRoomKey()], [2, generateRoomKey()]]);
+        const hashKey = linkHashKeyOf(ring)!;
         const link = makeLink();
 
-        const wireAdd = encryptLinkForWire(link, key1, 1);
-        const wireRemove = encryptLinkForWire(link, key2, 2);
+        const wireAdd = encryptLinkForWire(link, { roomKey: ring.get(1)!, version: 1, hashKey });
+        const wireRemove = encryptLinkForWire(link, { roomKey: ring.get(2)!, version: 2, hashKey });
 
         assert.equal(wireAdd.link_hash, wireRemove.link_hash, "removal link_hash must match addition link_hash");
 
@@ -439,4 +381,3 @@ describe("encryption: link_hash invariant", () => {
         assert.deepEqual(decryptedAdd, decryptedRemove, "both decrypt to the same plaintext link");
     });
 });
-
