@@ -192,6 +192,10 @@ struct Inner {
     /// Every result after the first (the first `start` returns it instead).
     results: broadcast::Sender<Value>,
     watch_key: String,
+    /// The `events.watch` install — run once, and awaited by `start`
+    /// before the subscribe call goes out, so the executor's event filter
+    /// is in place before the subscription it feeds exists (F4).
+    watch_ready: tokio::sync::OnceCell<()>,
     listener: std::sync::Mutex<Option<JoinHandle<()>>>,
     reconnect_cb: std::sync::Mutex<Option<u64>>,
 }
@@ -229,23 +233,9 @@ impl LiveQuery {
             }),
             results,
             watch_key,
+            watch_ready: tokio::sync::OnceCell::new(),
             listener: std::sync::Mutex::new(None),
             reconnect_cb: std::sync::Mutex::new(None),
-        });
-
-        // Watch `query-subscription-update` under our own key so the interest
-        // survives both other watchers and reconnects.
-        let watch_key = inner.watch_key.clone();
-        tokio::spawn(async move {
-            if let Err(e) = ws
-                .set_watch(
-                    &watch_key,
-                    serde_json::json!({"query-subscription-update": null}),
-                )
-                .await
-            {
-                eprintln!("[live-query] events.watch failed: {e}");
-            }
         });
 
         // Event listener — filters update events, feeds `receive` IN ORDER:
@@ -310,9 +300,31 @@ impl LiveQuery {
         self.inner.results.subscribe()
     }
 
-    /// Open the subscription (again) and return its initial result. A start
-    /// that a newer one overtakes resolves with the newer one's result.
+    /// Install this query's `query-subscription-update` interest — once.
+    /// `start` awaits it before opening, so the watch is acknowledged
+    /// before the subscribe call it feeds can reach the executor (F4).
+    async fn ensure_watch(&self) -> Result<()> {
+        self.inner
+            .watch_ready
+            .get_or_try_init(|| async {
+                self.inner
+                    .ws
+                    .set_watch(
+                        &self.inner.watch_key,
+                        serde_json::json!({"query-subscription-update": null}),
+                    )
+                    .await
+            })
+            .await
+            .map(|_| ())
+    }
+
+    /// Open the subscription (again) and return its snapshot. Updates that
+    /// arrived while the open was in flight are emitted on `results()`,
+    /// like TS `LiveQuery.start` — they do not fold into the snapshot. A
+    /// start that a newer one overtakes resolves with the newer result.
     pub async fn start(&self) -> Result<Value> {
+        self.ensure_watch().await?;
         let generation = {
             let mut s = self.inner.state.lock().await;
             s.generation += 1;
@@ -346,17 +358,11 @@ impl LiveQuery {
                 .unwrap_or_else(|| subscribed.result.clone()));
         }
         state.id = Some(subscribed.subscription_id.clone());
+        let snapshot = subscribed.result.clone();
         self.inner
-            .replace_locked(state, subscribed.revision, subscribed.result.clone())
+            .replace_locked(state, subscribed.revision, subscribed.result)
             .await;
-        Ok(self
-            .inner
-            .state
-            .lock()
-            .await
-            .result
-            .clone()
-            .unwrap_or(subscribed.result))
+        Ok(snapshot)
     }
 
     /// End the subscription: stop listening, dispose executor-side.
@@ -375,6 +381,9 @@ impl LiveQuery {
         if let Some(cb) = cb {
             self.inner.ws.remove_on_reconnect(cb).await;
         }
+        // An install still in flight must finish before the removal, or the
+        // `events.watch` could land after its unwatch (F4).
+        let _ = self.ensure_watch().await;
         let _ = self.inner.ws.remove_watch(&self.inner.watch_key).await;
         if let Some(id) = id {
             let _ = dispose_query(&self.inner.ws, &self.inner.uuid, &id).await;
@@ -631,6 +640,56 @@ mod tests {
         assert!((500..=1000).contains(&d1));
         let d_big = reopen_delay(20);
         assert!((30_000..=60_000).contains(&d_big));
+    }
+
+    /// F4: the subscribe call must not reach the executor while the
+    /// `events.watch` that feeds its updates is still unacknowledged — a
+    /// change published in that window is filtered out server-side and the
+    /// subscriber stays stale forever.
+    #[tokio::test]
+    async fn start_waits_for_the_watch_reply_before_opening() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let client = Arc::new(WsRpcClient::connect(fake.url(), "").await.unwrap());
+
+        let open: OpenFn = {
+            let ws = client.clone();
+            Arc::new(move || {
+                let ws = ws.clone();
+                Box::pin(async move {
+                    ws.call(
+                        "perspective.subscribeQuery",
+                        serde_json::json!({"uuid": "p1", "subscriptionId": "s1"}),
+                    )
+                    .await
+                    .map(|v| Subscribed {
+                        subscription_id: "s1".into(),
+                        result: v,
+                        revision: 0,
+                    })
+                })
+            })
+        };
+        let query = LiveQuery::new(client.clone(), "p1", open);
+        let start = tokio::spawn(async move { query.start().await });
+
+        // The watch must be the first thing on the wire…
+        let watch = fake.next_request().await;
+        assert_eq!(watch["type"], "events.watch");
+        // …and while its reply is outstanding, no subscribe may leave.
+        assert!(
+            fake.maybe_request(Duration::from_millis(300))
+                .await
+                .is_none(),
+            "the subscribe call went out before events.watch was acknowledged"
+        );
+        fake.reply(&watch, serde_json::json!(true)).await;
+        let sub = fake.next_request().await;
+        assert_eq!(sub["type"], "perspective.subscribeQuery");
+        fake.reply(&sub, serde_json::json!({"result": [], "revision": 0}))
+            .await;
+        start.await.unwrap().unwrap();
+        client.close().await;
     }
 
     #[test]

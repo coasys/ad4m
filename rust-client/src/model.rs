@@ -350,8 +350,11 @@ impl Model {
         };
 
         let live = LiveQuery::new(ws, &uuid, open);
-        let initial = live.start().await?;
+        // Attach the receiver before `start`: updates drained out of the
+        // open's buffer emit on `results()` as start resolves, and a
+        // broadcast send reaches only receivers that already exist (F4).
         let rx = live.results();
+        let initial = live.start().await?;
         Ok(ModelSubscription {
             live,
             rx,
@@ -657,6 +660,62 @@ mod tests {
     use super::*;
     use crate::subscription::{apply_update, QueryUpdate};
     use serde_json::json;
+    use std::time::Duration;
+
+    /// F4: an update the executor publishes while the subscribe call is
+    /// outstanding must reach the subscriber. The change drains inside
+    /// `start`'s own snapshot handoff — a `results()` receiver that only
+    /// attaches after `start` returns misses it for good (broadcast sends
+    /// reach only receivers that already exist).
+    #[tokio::test]
+    async fn subscribe_delivers_an_update_emitted_during_open() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let ws = Arc::new(WsRpcClient::connect(fake.url(), "").await.unwrap());
+        let model = Model::new(&ws, "p1", "Recipe");
+        let subscribe = tokio::spawn(async move { model.subscribe(&ModelQuery::default()).await });
+
+        // Answer the watch whenever it arrives; hold the subscribe reply.
+        let sub_req = loop {
+            let req = fake.next_request().await;
+            if req["type"] == "perspective.modelSubscribe" {
+                break req;
+            }
+            if req["type"] == "events.watch" {
+                fake.reply(&req, json!(true)).await;
+            }
+        };
+        let sid = sub_req["params"]["subscriptionId"].as_str().unwrap();
+        // The executor publishes revision 1 while the snapshot is in flight.
+        fake.send(json!({
+            "type": "query-subscription-update",
+            "subscriptionId": sid,
+            "revision": 1,
+            "ids": ["i1"],
+            "upsert": [{"id": "i1", "done": true}],
+            "totalCount": 1,
+        }))
+        .await;
+        fake.reply(
+            &sub_req,
+            json!({
+                "subscriptionId": sid,
+                "result": {"instances": [], "totalCount": 0},
+                "revision": 0,
+            }),
+        )
+        .await;
+
+        let mut sub = subscribe.await.unwrap().unwrap();
+        let first = sub.next().await.unwrap();
+        assert!(first.instances.is_empty());
+        let second = tokio::time::timeout(Duration::from_secs(2), sub.next())
+            .await
+            .expect("the update emitted during open must reach the subscriber")
+            .unwrap();
+        assert_eq!(second.instances[0]["id"], "i1");
+        ws.close().await;
+    }
 
     #[test]
     fn query_json_serializes_like_prepare_model_query_params() {
