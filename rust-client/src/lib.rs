@@ -32,6 +32,9 @@ pub mod subscription;
 pub mod types;
 pub mod ws_rpc;
 
+#[cfg(test)]
+mod drift;
+
 pub struct Ad4mClient {
     pub agent: AgentClient,
     pub languages: LanguagesClient,
