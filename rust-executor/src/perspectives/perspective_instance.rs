@@ -8921,12 +8921,18 @@ mod tests {
                 None,
             ),
         ];
-        let queried = marks(perspective.sparql_store.get_all_links().unwrap());
+        let queried = marks(
+            perspective
+                .sparql_store
+                .get_all_links(&EvalStop::none())
+                .unwrap(),
+        );
         assert_eq!(queried, expected, "the SPARQL read");
         let scanned = marks(
             perspective
                 .sparql_store
                 .query_shown_links_top_n_by_timestamp(
+                    &EvalStop::none(),
                     Some("ad4m://bot-mark"),
                     None,
                     None,
@@ -8938,8 +8944,13 @@ mod tests {
                 .unwrap(),
         );
         assert_eq!(scanned, expected, "the reifier scan");
-        let json =
-            serde_json::to_value(&perspective.sparql_store.get_all_links().unwrap()).unwrap();
+        let json = serde_json::to_value(
+            &perspective
+                .sparql_store
+                .get_all_links(&EvalStop::none())
+                .unwrap(),
+        )
+        .unwrap();
         let wire: Vec<_> = json
             .as_array()
             .unwrap()
@@ -9058,7 +9069,10 @@ mod tests {
             .remove_bot_mark_and_version(&link)
             .unwrap();
 
-        let stored = perspective.sparql_store.get_all_links().unwrap();
+        let stored = perspective
+            .sparql_store
+            .get_all_links(&EvalStop::none())
+            .unwrap();
         assert_eq!(stored.len(), 1);
         assert_eq!(stored[0].verdict, Some(LinkVerdict::Valid));
         assert_eq!(
@@ -9078,7 +9092,10 @@ mod tests {
                 .unwrap(),
             1
         );
-        let stored = perspective.sparql_store.get_all_links().unwrap();
+        let stored = perspective
+            .sparql_store
+            .get_all_links(&EvalStop::none())
+            .unwrap();
         assert_eq!(stored[0].verdict, Some(LinkVerdict::Valid));
         assert_eq!(stored[0].person.as_deref(), Some(person.as_str()));
         assert_eq!(stored[0].by_bot, Some(true));
@@ -9114,7 +9131,10 @@ mod tests {
                 .unwrap(),
             1
         );
-        let stored = perspective.sparql_store.get_all_links().unwrap();
+        let stored = perspective
+            .sparql_store
+            .get_all_links(&EvalStop::none())
+            .unwrap();
         assert_eq!(
             stored[0].verdict,
             Some(LinkVerdict::Invalid(
@@ -9160,7 +9180,10 @@ mod tests {
             1,
             "still stale: the next tick selects it again"
         );
-        let stored = perspective.sparql_store.get_all_links().unwrap();
+        let stored = perspective
+            .sparql_store
+            .get_all_links(&EvalStop::none())
+            .unwrap();
         assert_eq!(stored[0].person, None, "still unclassified");
 
         publish_log(&log, 1);
@@ -9171,7 +9194,10 @@ mod tests {
                 .unwrap(),
             1
         );
-        let stored = perspective.sparql_store.get_all_links().unwrap();
+        let stored = perspective
+            .sparql_store
+            .get_all_links(&EvalStop::none())
+            .unwrap();
         assert_eq!(stored[0].by_bot, Some(true));
         map_cleanup(&log);
     }
@@ -9243,6 +9269,7 @@ mod tests {
 
         let (subscription_id, _revision, _first) = perspective
             .subscribe_and_query(
+                &EvalStop::none(),
                 "SELECT ?source ?predicate ?target WHERE { ?source ?predicate ?target . }"
                     .to_string(),
                 "bot-live-1".to_string(),
@@ -9307,6 +9334,7 @@ mod tests {
         .unwrap();
         let (fresh_id, _revision, _result) = perspective
             .subscribe_and_query(
+                &EvalStop::none(),
                 "SELECT ?source ?predicate ?target WHERE { ?source ?predicate ?target . }"
                     .to_string(),
                 "bot-live-2".to_string(),
