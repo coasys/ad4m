@@ -1794,7 +1794,7 @@ impl SparqlStore {
             ),
         );
         let results = self
-            .sparql_evaluator()
+            .sparql_evaluator(&EvalStop::none())
             .parse_query(&format!("{query} {}", page_order(limit)))
             .map_err(|e| anyhow!("Failed to parse link query: {}", e))?
             .on_store(&self.store)
