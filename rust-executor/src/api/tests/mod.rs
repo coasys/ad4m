@@ -35,6 +35,8 @@ pub mod protocol_tests;
 #[cfg(test)]
 pub mod query_stop_tests;
 #[cfg(test)]
+pub mod run_agent_access_tests;
+#[cfg(test)]
 pub mod runtime_access_tests;
 #[cfg(test)]
 pub mod runtime_ws_tests;

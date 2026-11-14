@@ -15,7 +15,9 @@ REST/WS shim. Split plan: spec item 6.
 
 `*_ws.rs`, one per RPC namespace: `agent`, `ai`, `expressions`, `hosting`,
 `languages`, `neighbourhoods`, `perspectives` (largest; also SHACL + interpretation
-handlers), `runtime`, `users`, and `agent_session` (`perspective.runAgent`). Each exposes `register_ws_handlers(&mut HandlerMap)`
+handlers), `runtime`, `users`, and `agent_session` (`perspective.runAgent`, which runs its
+perspective guard on the person's `library` too when one is named, where the template tools may
+also act). Each exposes `register_ws_handlers(&mut HandlerMap)`
 called from `ws_handler::build_handler_map`.
 
 Handler shape (`perspectives_ws.rs::add_link` is representative):

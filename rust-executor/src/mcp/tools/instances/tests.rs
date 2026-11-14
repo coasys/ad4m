@@ -1,7 +1,7 @@
 //! Integration tests for the static `instance_*` surface, driven through
 //! the same handler methods the MCP transport dispatches to.
 
-use super::template_tools::TemplateToolParams;
+use super::template_tools::{TemplateCreateParams, TemplateToolParams};
 use super::*;
 use crate::mcp::server::McpContext;
 use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
@@ -3662,7 +3662,8 @@ async fn a_we_calls_blocks_are_its_children() {
 // ── template tools (WE's rules, compiled in) ─────────────────────────────
 
 /// WE's `Template`, as far as the template tools read and write it: the schema is stored through
-/// a language (a file, in WE) and the version moves with it.
+/// a language (a file, in WE) and the version moves with it. The listing fields are the ones a new
+/// template is made with (`template_create`).
 const TEMPLATE_SDNA: &str = r#"{
   "target_class": "we://Template",
   "constructor_actions": [
@@ -3671,6 +3672,16 @@ const TEMPLATE_SDNA: &str = r#"{
   "properties": [
     {"path":"we://name","name":"name","datatype":"xsd:string","min_count":0,"max_count":1,"writable":true,
      "setter":[{"action":"setSingleTarget","source":"this","predicate":"we://name","target":"value"}]},
+    {"path":"we://description","name":"description","datatype":"xsd:string","min_count":0,"max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"we://description","target":"value"}]},
+    {"path":"we://icon","name":"icon","datatype":"xsd:string","min_count":0,"max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"we://icon","target":"value"}]},
+    {"path":"we://origin","name":"origin","datatype":"xsd:string","min_count":0,"max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"we://origin","target":"value"}]},
+    {"path":"we://slug","name":"slug","datatype":"xsd:string","min_count":0,"max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"we://slug","target":"value"}]},
+    {"path":"we://template_role","name":"role","datatype":"xsd:string","min_count":0,"max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"we://template_role","target":"value"}]},
     {"path":"we://template_schema","name":"schema","datatype":"xsd:string","min_count":0,"max_count":1,"writable":true,
      "resolve_language":"QmzSYwdTestFileLanguage",
      "setter":[{"action":"setSingleTarget","source":"this","predicate":"we://template_schema","target":"value"}]},
@@ -3724,6 +3735,21 @@ fn template_params(uuid: &str, base_uri: &str, arguments: Value) -> Parameters<T
     Parameters(TemplateToolParams {
         perspective_id: uuid.to_string(),
         base_uri: base_uri.to_string(),
+        library_perspective_id: None,
+        arguments: arguments.as_object().cloned().unwrap_or_default(),
+    })
+}
+
+fn create_params(
+    uuid: &str,
+    library: Option<&str>,
+    base_uri: Option<&str>,
+    arguments: Value,
+) -> Parameters<TemplateCreateParams> {
+    Parameters(TemplateCreateParams {
+        perspective_id: uuid.to_string(),
+        library_perspective_id: library.map(str::to_string),
+        base_uri: base_uri.map(str::to_string),
         arguments: arguments.as_object().cloned().unwrap_or_default(),
     })
 }
@@ -3767,16 +3793,29 @@ async fn the_template_tools_are_listed_with_the_bundle_s_arguments() {
                 declared.name
             );
         }
-        for named in ["perspective_id", "base_uri"] {
-            assert!(schema["required"]
-                .as_array()
-                .unwrap()
-                .contains(&json!(named)));
-        }
+        let required = schema["required"].as_array().unwrap();
+        assert!(
+            required.contains(&json!("perspective_id")),
+            "{}",
+            declared.name
+        );
+        // A tool that makes a record may start from one; every other tool works on one.
+        assert_eq!(
+            required.contains(&json!("base_uri")),
+            declared.creates.is_none(),
+            "{}",
+            declared.name
+        );
+        assert!(
+            schema["properties"]["library_perspective_id"].is_object(),
+            "{}: every template tool may be told where the library is",
+            declared.name
+        );
+        assert!(!required.contains(&json!("library_perspective_id")));
     }
     assert_eq!(
         offered.map(|t| t.name.as_str()).collect::<Vec<_>>(),
-        vec!["template_read", "template_update"],
+        vec!["template_read", "template_update", "template_create"],
         "a tool the bundle adds or renames needs its #[tool] method here, or a place in NOT_OFFERED"
     );
 }
@@ -4534,4 +4573,443 @@ async fn a_property_stored_through_a_language_takes_the_value_the_language_does(
             .await,
     );
     assert_eq!(on_a_file["success"], true, "{on_a_file}");
+}
+
+// ── template_create ──────────────────────────────────────────────────────
+
+/// The Templates `uuid` holds, by id.
+async fn templates_in(uuid: &str) -> Vec<Value> {
+    let perspective = crate::perspectives::get_perspective(uuid).expect("registered");
+    let raw = perspective
+        .model_query("Template", "{}")
+        .await
+        .expect("Template is a class here");
+    let parsed: Value = serde_json::from_str(&raw).unwrap();
+    parsed["instances"].as_array().cloned().unwrap_or_default()
+}
+
+/// A space holding one Template, and a library holding none.
+async fn space_and_library() -> (
+    Ad4mMcpHandler,
+    String,
+    String,
+    String,
+    PerspectiveGuard,
+    PerspectiveGuard,
+) {
+    let (handler, space, space_guard, base_uri) =
+        template_setup(TEMPLATE_SDNA, small_template()).await;
+    let (_, library, library_guard) = setup_with(&[("Template", TEMPLATE_SDNA)], false).await;
+    (
+        handler,
+        space,
+        library,
+        base_uri,
+        space_guard,
+        library_guard,
+    )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn template_create_makes_a_template_in_the_library_it_is_given() {
+    let (handler, space, library, _, _g1, _g2) = space_and_library().await;
+    let made = parse(
+        &handler
+            .template_create(create_params(
+                &space,
+                Some(&library),
+                None,
+                json!({ "name": "Reading list", "role": "view" }),
+            ))
+            .await,
+    );
+    assert_eq!(made["place"], "library", "{made}");
+    assert_eq!(made["perspective_id"], library.as_str(), "{made}");
+    assert!(
+        made["text"].as_str().unwrap().starts_with("Made the view"),
+        "{made}"
+    );
+    let base_uri = made["base_uri"].as_str().unwrap().to_string();
+
+    let in_library = templates_in(&library).await;
+    assert_eq!(in_library.len(), 1, "{in_library:?}");
+    let record = &in_library[0];
+    assert_eq!(record["id"], base_uri.as_str());
+    assert_eq!(record["name"], "Reading list");
+    assert_eq!(record["origin"], "custom");
+    assert_eq!(record["role"], "view");
+    assert!(
+        !record["slug"].as_str().unwrap_or_default().is_empty(),
+        "{record}"
+    );
+    assert!(
+        schema_file_text(record).contains("Reading list"),
+        "{record}"
+    );
+    assert_eq!(
+        templates_in(&space).await.len(),
+        1,
+        "the space keeps only its own"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_template_in_the_library_is_found_from_a_call_working_in_the_space() {
+    let (handler, space, library, _, _g1, _g2) = space_and_library().await;
+    let mine = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: library.clone(),
+                class_name: "Template".into(),
+                properties: Some(props(&[
+                    ("name", json!("Mine")),
+                    ("schema", small_template()),
+                    ("version", json!(1)),
+                ])),
+                base_uri: None,
+                parent: None,
+            }))
+            .await,
+    );
+    let base_uri = mine["base_uri"].as_str().unwrap().to_string();
+
+    let mut told = template_params(&space, &base_uri, json!({}));
+    told.0.library_perspective_id = Some(library.clone());
+    let read = parse(&handler.template_read(told).await);
+    assert_eq!(read["version"], 1, "{read}");
+    assert!(read.to_string().contains("Hello"), "{read}");
+
+    let not_told = handler
+        .template_read(template_params(&space, &base_uri, json!({})))
+        .await;
+    assert!(not_told.contains("there is no such record"), "{not_told}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn template_create_in_the_space_makes_it_where_the_call_works() {
+    let (handler, space, library, _, _g1, _g2) = space_and_library().await;
+    let made = parse(
+        &handler
+            .template_create(create_params(
+                &space,
+                Some(&library),
+                None,
+                json!({ "name": "Board", "place": "space" }),
+            ))
+            .await,
+    );
+    assert_eq!(made["place"], "space", "{made}");
+    assert_eq!(templates_in(&space).await.len(), 2);
+    assert_eq!(templates_in(&library).await.len(), 0);
+    let record = templates_in(&space)
+        .await
+        .into_iter()
+        .find(|t| t["id"] == made["base_uri"])
+        .unwrap();
+    assert_eq!(record["origin"], "shared", "{record}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn template_create_refuses_a_place_it_was_not_given() {
+    let (handler, space, library, _, _g1, _g2) = space_and_library().await;
+
+    // No library: `library` is refused, and nothing is made anywhere.
+    let no_library = handler
+        .template_create(create_params(&space, None, None, json!({ "name": "Mine" })))
+        .await;
+    assert!(no_library.contains("No library was given"), "{no_library}");
+
+    // Working in the library itself: there is no space to make it in.
+    let no_space = handler
+        .template_create(create_params(
+            &library,
+            Some(&library),
+            None,
+            json!({ "name": "Shared", "place": "space" }),
+        ))
+        .await;
+    assert!(no_space.contains("not in a space"), "{no_space}");
+
+    // A place the tool does not know.
+    let elsewhere = handler
+        .template_create(create_params(
+            &space,
+            Some(&library),
+            None,
+            json!({ "name": "Lost", "place": "attic" }),
+        ))
+        .await;
+    assert!(elsewhere.contains("not in 'attic'"), "{elsewhere}");
+
+    // A `place` that is there but not a string is refused, not read as the library.
+    for place in [json!(null), json!(3)] {
+        let odd = handler
+            .template_create(create_params(
+                &space,
+                Some(&library),
+                None,
+                json!({ "name": "Odd", "place": place }),
+            ))
+            .await;
+        assert!(odd.contains("takes `place` as a string"), "{odd}");
+    }
+
+    assert_eq!(templates_in(&space).await.len(), 1);
+    assert_eq!(templates_in(&library).await.len(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn template_create_makes_nothing_the_bundle_refuses_or_only_checks() {
+    let (handler, space, library, _, _g1, _g2) = space_and_library().await;
+
+    // An app is the person's: WE's rules refuse it in a space.
+    let app = handler
+        .template_create(create_params(
+            &space,
+            Some(&library),
+            None,
+            json!({ "name": "Chrome", "role": "app", "place": "space" }),
+        ))
+        .await;
+    assert!(app.starts_with("Error"), "{app}");
+
+    let checked = handler
+        .template_create(create_params(
+            &space,
+            Some(&library),
+            None,
+            json!({ "name": "Draft", "dry_run": true }),
+        ))
+        .await;
+    assert!(checked.starts_with("Valid"), "{checked}");
+
+    assert_eq!(templates_in(&space).await.len(), 1);
+    assert_eq!(templates_in(&library).await.len(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn template_create_forks_the_template_it_is_given() {
+    let (handler, space, library, source, _g1, _g2) = space_and_library().await;
+    let made = parse(
+        &handler
+            .template_create(create_params(
+                &space,
+                Some(&library),
+                Some(&source),
+                json!({ "name": "My copy" }),
+            ))
+            .await,
+    );
+    let base_uri = made["base_uri"].as_str().expect("made").to_string();
+    assert_ne!(base_uri, source);
+    let fork = templates_in(&library)
+        .await
+        .into_iter()
+        .find(|t| t["id"] == base_uri.as_str())
+        .expect("the fork is in the library");
+    let text = schema_file_text(&fork);
+    assert!(
+        text.contains("Hello"),
+        "the fork starts from the source: {text}"
+    );
+    assert!(text.contains("My copy"), "{text}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn template_create_refuses_a_caller_who_may_not_write_where_it_would_go() {
+    use crate::agent::capabilities::{perspective_query_capability, WILD_CARD};
+    use crate::agent::session::{Principal, Session};
+    let (_admin, space, library, _, _g1, _g2) = space_and_library().await;
+    let reader = handler_holding(
+        Session::for_test(Principal::Agent(crate::agent::AgentContext::main_agent()))
+            .with_caps(vec![perspective_query_capability(vec![WILD_CARD.into()])]),
+    );
+    let refused = reader
+        .template_create(create_params(
+            &space,
+            Some(&library),
+            None,
+            json!({ "name": "Mine" }),
+        ))
+        .await;
+    assert_eq!(parse(&refused)["status"], 403, "{refused}");
+    assert_eq!(templates_in(&library).await.len(), 0);
+}
+
+/// A Template in `library`, made there as the operator: its id.
+async fn template_in(handler: &Ad4mMcpHandler, library: &str) -> String {
+    let made = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: library.to_string(),
+                class_name: "Template".into(),
+                properties: Some(props(&[
+                    ("name", json!("Mine")),
+                    ("schema", small_template()),
+                    ("version", json!(1)),
+                ])),
+                base_uri: None,
+                parent: None,
+            }))
+            .await,
+    );
+    made["base_uri"].as_str().expect("made").to_string()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn template_update_saves_a_library_template_in_the_library() {
+    let (handler, space, library, _, _g1, _g2) = space_and_library().await;
+    let mine = template_in(&handler, &library).await;
+
+    let mut params = template_params(&space, &mine, rename(1, "Goodbye"));
+    params.0.library_perspective_id = Some(library.clone());
+    let saved = handler.template_update(params).await;
+    assert!(saved.starts_with("Saved as version 2."), "{saved}");
+
+    let record = templates_in(&library)
+        .await
+        .into_iter()
+        .find(|t| t["id"] == mine.as_str())
+        .expect("still in the library");
+    assert_eq!(record["version"], 2, "{record}");
+    assert_eq!(
+        templates_in(&space).await.len(),
+        1,
+        "the space keeps only its own"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn template_create_forks_a_library_template() {
+    let (handler, space, library, _, _g1, _g2) = space_and_library().await;
+    let mine = template_in(&handler, &library).await;
+    let made = parse(
+        &handler
+            .template_create(create_params(
+                &space,
+                Some(&library),
+                Some(&mine),
+                json!({ "name": "Shared copy", "place": "space" }),
+            ))
+            .await,
+    );
+    let base_uri = made["base_uri"].as_str().expect("made").to_string();
+    let fork = templates_in(&space)
+        .await
+        .into_iter()
+        .find(|t| t["id"] == base_uri.as_str())
+        .expect("the fork is in the space");
+    let text = schema_file_text(&fork);
+    assert!(
+        text.contains("Hello"),
+        "the fork starts from the library's: {text}"
+    );
+    assert!(text.contains("Shared copy"), "{text}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_template_tools_do_not_reach_a_library_the_caller_does_not_own() {
+    use crate::agent::capabilities::{
+        perspective_query_capability, perspective_update_capability, WILD_CARD,
+    };
+    use crate::agent::session::{Principal, Session};
+    let (admin, space, library, theirs, _g1, _g2) = space_and_library().await;
+    let mine = template_in(&admin, &library).await;
+    // The caller owns the space; the library is another agent's (the main agent's).
+    let did = "did:key:z6MkTemplateCreateSpaceOwner";
+    crate::perspectives::get_perspective(&space)
+        .unwrap()
+        .persisted
+        .lock()
+        .await
+        .owners = Some(vec![did.to_string()]);
+    let stranger = handler_holding(
+        Session::for_test(Principal::Agent(crate::agent::AgentContext::managed(
+            did.to_string(),
+        )))
+        .with_caps(vec![
+            perspective_query_capability(vec![WILD_CARD.into()]),
+            perspective_update_capability(vec![WILD_CARD.into()]),
+        ])
+        .with_did(did),
+    );
+
+    // In its own space the caller reads its own template.
+    let own = parse(
+        &stranger
+            .template_read(template_params(&space, &theirs, json!({})))
+            .await,
+    );
+    assert_eq!(own["version"], 1, "{own}");
+
+    let mut read = template_params(&space, &mine, json!({}));
+    read.0.library_perspective_id = Some(library.clone());
+    let read = stranger.template_read(read).await;
+    assert_eq!(parse(&read)["status"], 404, "{read}");
+    assert!(!read.contains("Hello"), "{read}");
+
+    let mut update = template_params(&space, &mine, rename(1, "Goodbye"));
+    update.0.library_perspective_id = Some(library.clone());
+    let update = stranger.template_update(update).await;
+    assert_eq!(parse(&update)["status"], 404, "{update}");
+
+    let made = stranger
+        .template_create(create_params(
+            &space,
+            Some(&library),
+            None,
+            json!({ "name": "Planted" }),
+        ))
+        .await;
+    assert_eq!(parse(&made)["status"], 404, "{made}");
+
+    let forked = stranger
+        .template_create(create_params(
+            &space,
+            Some(&library),
+            Some(&mine),
+            json!({ "name": "Taken", "place": "space" }),
+        ))
+        .await;
+    assert_eq!(parse(&forked)["status"], 404, "{forked}");
+
+    let in_library = templates_in(&library).await;
+    assert_eq!(in_library.len(), 1, "{in_library:?}");
+    assert_eq!(in_library[0]["version"], 1, "{in_library:?}");
+    assert_eq!(
+        templates_in(&space).await.len(),
+        1,
+        "nothing was made in the space"
+    );
+}
+
+/// An agent session binds the library its caller named: `template_create` makes its record
+/// there, also when the model names another perspective as the library.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_makes_its_template_in_the_library_its_caller_named() {
+    let (handler, space, library, _, _g1, _g2) = space_and_library().await;
+    let (_, elsewhere, _g3) = setup_with(&[("Template", TEMPLATE_SDNA)], false).await;
+    let create = vec!["template_create".to_string()];
+    let tools = crate::perspectives::agent_session::session_tools(
+        std::sync::Arc::new(handler),
+        &space,
+        Some(&library),
+        &create,
+    );
+    let made = parse(
+        &tools
+            .call(
+                "template_create",
+                json!({ "library_perspective_id": elsewhere, "name": "Reading list" }),
+            )
+            .await
+            .unwrap(),
+    );
+    assert_eq!(made["perspective_id"], library.as_str(), "{made}");
+    assert_eq!(templates_in(&library).await.len(), 1);
+    assert_eq!(
+        templates_in(&elsewhere).await.len(),
+        0,
+        "the model named this one"
+    );
 }

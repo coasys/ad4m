@@ -439,6 +439,10 @@ impl Ad4mMcpHandler {
                 Self::template_update,
             ))
             .with_route((
+                instances::template_tools::from_bundle(Self::template_create_tool_attr()),
+                Self::template_create,
+            ))
+            .with_route((
                 Self::instance_add_to_collection_tool_attr(),
                 Self::instance_add_to_collection,
             ))

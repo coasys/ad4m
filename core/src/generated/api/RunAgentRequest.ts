@@ -3,6 +3,11 @@ import type { AgentMessage } from "./AgentMessage";
 
 export type RunAgentRequest = { uuid: string, 
 /**
+ * The person's library: the perspective holding their own templates, where the template
+ * tools also look and `template_create` may make one. Absent: only `uuid`.
+ */
+library?: string, 
+/**
  * The conversation so far, the person's request last.
  */
 messages: Array<AgentMessage>, 
