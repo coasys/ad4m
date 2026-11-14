@@ -121,6 +121,9 @@ impl std::error::Error for RpcCallError {}
 /// Dead sockets an unsent call survives before it too is failed — TS
 /// `MAX_CONNECT_ATTEMPTS` (`apiClient.ts`).
 const MAX_FAILED_CONNECTS: u8 = 3;
+/// Bound on an `events.watch` reply — a socket that stays up but never
+/// answers must not hold `watch_flush` or its pending entry forever (F12).
+const WATCH_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// One RPC awaiting a reply — or still waiting for a socket to send on.
 /// `sent` flips only while `pending` and `sink` are held together, in that
@@ -506,9 +509,18 @@ impl WsRpcClient {
         }
         // Await the reply: `events.watch` is a real RPC — a rejection (or a
         // dropped socket, which fails the pending entry) must reach the
-        // caller (F9).
-        rx.await.map_err(|_| anyhow!("Response channel closed"))??;
-        Ok(())
+        // caller (F9). A live socket that never answers is bounded: on
+        // timeout the pending entry is removed — just dropping the receiver
+        // would leave it to linger until disconnect (F12).
+        match tokio::time::timeout(WATCH_REPLY_TIMEOUT, rx).await {
+            Ok(reply) => reply
+                .map_err(|_| anyhow!("Response channel closed"))?
+                .map(|_| ()),
+            Err(_) => {
+                shared.pending.lock().await.remove(&id);
+                Err(anyhow!("events.watch reply timed out"))
+            }
+        }
     }
 
     /// Register `key`'s event interest; the merged union is sent on the socket.
@@ -1099,6 +1111,37 @@ mod tests {
         assert!(
             result.is_err(),
             "a rejected events.watch must not report success"
+        );
+        client.close().await;
+    }
+
+    /// F12: a socket that stays up but never answers `events.watch` must
+    /// not keep the pending entry — the reply wait is bounded, and the
+    /// timeout removes the entry rather than just dropping the receiver.
+    #[tokio::test]
+    async fn a_watch_reply_timeout_removes_its_pending_entry() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let client = WsRpcClient::connect(fake.url(), "").await.unwrap();
+
+        let caller = WsRpcClient {
+            shared: client.shared.clone(),
+        };
+        let watch =
+            tokio::spawn(
+                async move { caller.set_watch("k", serde_json::json!({"e": null})).await },
+            );
+        let req = fake.next_request().await;
+        assert_eq!(req["type"], "events.watch");
+        // Never reply: the watch's own timeout must end the wait.
+        let result = tokio::time::timeout(Duration::from_secs(8), watch)
+            .await
+            .expect("a silent executor must not hold a watch flush forever")
+            .unwrap();
+        assert!(result.is_err(), "the unanswered watch must fail");
+        assert!(
+            client.shared.pending.lock().await.is_empty(),
+            "the watch's pending entry was left behind"
         );
         client.close().await;
     }
