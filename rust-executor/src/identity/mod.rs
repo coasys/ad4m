@@ -3,9 +3,10 @@
 //! `identity.*` calls. See `AGENTS.md` in this directory.
 //!
 //! The executor holds device keys only (the wallet key `main`, one per managed user); master
-//! keys and the 12 words stay with the apps (`ad4m-identity-client`). Logs arrive only through
-//! the agent language ([`backend`]) and are kept, after `fold`, in the executor database
-//! ([`cache`]).
+//! keys and the 12 words stay with the apps (`ad4m-identity-client`). A master key sealed to
+//! the desktop app's computer opens here only inside `identity.takeMaster`, for its custody
+//! service ([`inbox`]). Logs arrive only through the agent language ([`backend`]) and are
+//! kept, after `fold`, in the executor database ([`cache`]).
 
 pub mod backend;
 pub mod cache;
@@ -13,9 +14,11 @@ pub mod claim;
 pub mod custody;
 pub mod device;
 pub mod head;
+pub mod inbox;
 pub mod key_login;
 pub mod operator;
 pub mod person;
+pub mod record;
 pub mod rekey;
 pub mod resolver;
 pub mod service;
@@ -266,6 +269,7 @@ pub fn init(db_path: &Path, settings: &IdentitySettings) -> Result<(), CacheErro
         store_keys_source: settings.store_keys_source,
         resolver: Arc::new(resolver),
         challenges: Default::default(),
+        inbox: Default::default(),
         audiences,
     };
     let service = Arc::new(service);
@@ -278,6 +282,7 @@ pub fn init(db_path: &Path, settings: &IdentitySettings) -> Result<(), CacheErro
             // Subscribed here, so no change the cache fires before the task runs is lost.
             let changes = service.cache.subscribe();
             handle.spawn(run_recheck(service.clone(), changes));
+            handle.spawn(inbox::run_pull(service.clone()));
             // The key sessions' watcher too: `load_local_identities` replays the held
             // verdicts before the spawned task may first run. It waits for the main
             // agent's DID first — its `agent_speaks` reads it and `AgentService` is not
@@ -290,7 +295,9 @@ pub fn init(db_path: &Path, settings: &IdentitySettings) -> Result<(), CacheErro
                 crate::agent::agent_ready(),
             ));
         }
-        Err(_) => log::error!("identity: no runtime for the re-check of links and key sessions"),
+        Err(_) => log::error!(
+            "identity: no runtime for the re-check of links, the inbox pull and key sessions"
+        ),
     }
     Ok(())
 }

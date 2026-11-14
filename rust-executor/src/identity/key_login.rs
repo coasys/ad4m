@@ -981,6 +981,7 @@ fn end(grant: &Arc<LiveGrant>) {
 pub fn session_info(session: &Session) -> SessionInfo {
     let role = match &session.principal {
         Principal::Operator => SessionRole::Operator,
+        Principal::Custody => SessionRole::Custody,
         Principal::Agent(AgentContext::Managed { .. }) => SessionRole::Tenant,
         Principal::Agent(AgentContext::Main) => SessionRole::App,
         Principal::Anonymous => SessionRole::Anonymous,
@@ -1584,6 +1585,7 @@ mod tests {
             cache,
             store_url: None,
             challenges: Default::default(),
+            inbox: Default::default(),
             audiences: Audiences::loopback(LOCAL_PORT),
             store_keys_source: crate::identity::StoreSource::Config,
         }
@@ -1605,6 +1607,7 @@ mod tests {
                 cache: self.service.cache.clone(),
                 store_url: None,
                 challenges: Default::default(),
+                inbox: Default::default(),
                 audiences: Audiences::loopback(LOCAL_PORT),
                 store_keys_source: crate::identity::StoreSource::Config,
             };
@@ -1684,6 +1687,7 @@ mod tests {
             challenges: Default::default(),
             audiences: Audiences::loopback(LOCAL_PORT),
             store_keys_source: crate::identity::StoreSource::Config,
+            inbox: Default::default(),
         };
         let world = World {
             service,
@@ -2439,6 +2443,7 @@ mod tests {
             challenges: Default::default(),
             audiences: Audiences::loopback(LOCAL_PORT),
             store_keys_source: crate::identity::StoreSource::Config,
+            inbox: Default::default(),
         };
         assert!(
             reloaded.get(&grant_id).is_some(),

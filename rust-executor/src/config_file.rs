@@ -70,6 +70,10 @@ pub enum ConfigFileError {
     },
     MissingSmtpPassword,
     TlsPortOverflow,
+    /// `variable` would carry the custody credential: refused, it comes only from stdin.
+    CustodyCredentialInEnvironment {
+        variable: &'static str,
+    },
 }
 
 impl fmt::Display for ConfigFileError {
@@ -114,6 +118,9 @@ impl fmt::Display for ConfigFileError {
             Self::TlsPortOverflow => write!(
                 f,
                 "tls_config.tls_port is unset and port + 1 is above 65535; set tls_port"
+            ),
+            Self::CustodyCredentialInEnvironment { variable } => f.write_str(
+                &crate::config::custody_credential_in_environment_error(variable),
             ),
         }
     }
@@ -298,6 +305,11 @@ pub(crate) const INLINE_SECRETS: &[(&str, &str)] = &[
         "smtp_config.password is not allowed in the config file; put the password in a \
          file and set smtp_config.password_file or AD4M_SMTP_PASSWORD_FILE",
     ),
+    (
+        "/custody_credential",
+        "custody_credential is not allowed in the config file; with --custody-channel the \
+         custody service writes it as the first line of the executor's stdin",
+    ),
 ];
 
 /// The secret values, resolved outside the config file. `Debug` shows only
@@ -336,7 +348,9 @@ impl ExecutorSecrets {
     /// | SMTP password | `AD4M_SMTP_PASSWORD` | `AD4M_SMTP_PASSWORD_FILE` | `smtp_config.password_file` |
     /// | unlock passphrase | | `AD4M_UNLOCK_PASSPHRASE_FILE` | |
     ///
-    /// Setting both variables of one secret is an error.
+    /// Setting both variables of one secret is an error. The custody credential is not here: it
+    /// comes only from stdin ([`crate::config::read_custody_credential`]), and
+    /// `AD4M_CUSTODY_CREDENTIAL` or `AD4M_CUSTODY_CREDENTIAL_FILE` set is an error.
     pub fn from_env(
         env: impl Fn(&str) -> Option<String>,
         file: &ExecutorConfigFile,
@@ -346,6 +360,12 @@ impl ExecutorSecrets {
             .as_ref()
             .and_then(|m| m.smtp_config.as_ref())
             .and_then(|s| s.password_file.as_deref());
+        if let Some(variable) = crate::config::CUSTODY_CREDENTIAL_VARIABLES
+            .into_iter()
+            .find(|variable| env(variable).is_some())
+        {
+            return Err(ConfigFileError::CustodyCredentialInEnvironment { variable });
+        }
         Ok(ExecutorSecrets {
             admin_credential: secret_from_env(
                 &env,
@@ -929,6 +949,29 @@ mod tests {
         assert!(err.contains("admin_credential is not allowed"), "{err}");
     }
 
+    /// The custody credential is no config key: it comes only from stdin. A pasted one stops
+    /// the start with the reason, and `runtime.config` leaves it out of its echo.
+    #[test]
+    fn an_inline_custody_credential_is_rejected_and_never_echoed() {
+        let err = parse(r#"{"custody_credential": "pasted-custody"}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("custody_credential is not allowed"), "{err}");
+        assert!(err.contains("stdin"), "{err}");
+        assert!(!err.contains("pasted-custody"), "{err}");
+
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("config.json");
+        std::fs::write(
+            &file,
+            r#"{"port": 4000, "custody_credential": "pasted-custody"}"#,
+        )
+        .unwrap();
+        let echoed = crate::config_rpc::runtime_config(Some(&file), &[]).unwrap();
+        assert!(!echoed.values.contains_key("custody_credential"));
+        assert_eq!(echoed.values["port"], 4000);
+    }
+
     #[test]
     fn an_unknown_key_is_rejected() {
         let err = parse(r#"{"mcp_prot": 3003}"#).unwrap_err().to_string();
@@ -1099,6 +1142,18 @@ mod tests {
         assert_eq!(secrets.smtp_password.as_deref(), Some("config-pw"));
         assert!(secrets.admin_credential.is_none());
         assert_eq!(secrets.unlock_passphrase, None);
+
+        // The custody credential never comes from the environment: either variable set is an
+        // error that names it, and never echoes the value.
+        for variable in crate::config::CUSTODY_CREDENTIAL_VARIABLES {
+            let error =
+                ExecutorSecrets::from_env(env_of(vec![(variable, "custody".to_string())]), &file)
+                    .expect_err("the custody credential in the environment is refused");
+            let message = error.to_string();
+            assert!(message.contains(variable), "{message}");
+            assert!(message.contains("first line of stdin"), "{message}");
+            assert!(!message.contains("\"custody\""), "{message}");
+        }
 
         let path = |p: &PathBuf| p.to_string_lossy().into_owned();
         let secrets = ExecutorSecrets::from_env(

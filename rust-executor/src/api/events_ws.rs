@@ -47,6 +47,8 @@
 //! | `flow-state-changed`          | (inline)      | `agentDid` if it reads the perspective; else the main agent's to `Operator` | A flow instance's state moved on that agent's replica (#1424) |
 //! | `identity-fork`               | (inline)      | the local agents that speak for the identity | The key-log cache found two logs (a different valid event at a held seq) and kept its own (a store answering a shorter log raises none) |
 //! | `config-changed`              | (inline)      | the operator           | `runtime.setConfig` wrote keys to the config file; they take effect at the next start |
+//! | `link-ticket`                 | (inline)      | the operator on this machine | The executor claimed the offer a holder sent to an open `identity.prepareDevice`: the identity, the match code, and `needsAccept` (a first-run claim binds only after `identity.acceptJoin`) |
+//! | `inbox-message`               | (inline)      | the operator on this machine | A message waits in this executor's inbox (`{id, kind}`, never a body); for `master` the custody service calls `identity.takeMaster` |
 //!
 //! Every session also needs the event's capability (`Event::capability`).
 
@@ -144,6 +146,8 @@ pub fn event_specs() -> Vec<EventSpec> {
         EventSpec::of::<FlowStateChangedEvent>(FlowStateChanged, true),
         EventSpec::of::<crate::identity::types::IdentityForkEvent>(IdentityFork, false),
         EventSpec::of::<crate::config_rpc::ConfigChanged>(ConfigChanged, false),
+        EventSpec::of::<crate::identity::types::LinkTicketEvent>(LinkTicket, false),
+        EventSpec::of::<crate::identity::types::InboxMessageEvent>(InboxMessage, false),
     ]
 }
 
@@ -278,7 +282,9 @@ fn payload_key(topic: Topic) -> Option<&'static str> {
         | Topic::SfuSessionReplaced
         | Topic::FlowStateChanged
         | Topic::IdentityFork
-        | Topic::ConfigChanged => None,
+        | Topic::ConfigChanged
+        | Topic::LinkTicket
+        | Topic::InboxMessage => None,
     }
 }
 
@@ -2332,6 +2338,22 @@ mod event_spec_tests {
                     restart_pending: true,
                 }),
             ),
+            (
+                Topic::LinkTicket,
+                serde_json::to_value(crate::identity::types::LinkTicketEvent {
+                    did: "did:scid:coasys:1:Qm".into(),
+                    offer_id: "o".into(),
+                    match_code: "ABC DEF".into(),
+                    needs_accept: true,
+                }),
+            ),
+            (
+                Topic::InboxMessage,
+                serde_json::to_value(crate::identity::types::InboxMessageEvent {
+                    id: "m".into(),
+                    kind: crate::identity::types::InboxMessageType::Master,
+                }),
+            ),
         ];
         let unscoped: BTreeSet<&str> = event_specs()
             .iter()
@@ -2344,7 +2366,14 @@ mod event_spec_tests {
             "every unscoped topic has a payload here"
         );
         for (topic, payload) in payloads {
-            let event = Event::new(topic, Audience::Everyone, payload.unwrap());
+            let payload = payload.unwrap();
+            // A payload's fields sit beside the message's `type`, the event's name: a field
+            // of that name would be overwritten on the wire.
+            assert!(
+                super::payload_key(topic).is_some() || payload.get("type").is_none(),
+                "{topic} carries a `type` field"
+            );
+            let event = Event::new(topic, Audience::Everyone, payload);
             assert_eq!(event.perspective, None, "{topic}");
         }
     }

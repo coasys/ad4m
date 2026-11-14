@@ -777,3 +777,70 @@ the host drops it with the revocation; and its `coasys:store-request` signature 
 store request's own `expires` and `store` are not read. A host keeps at most 16 open requests
 per identity and 4 per posting key, so one device key cannot fill the box and keep the
 identity's other device keys out. A request changes no key and no log event by itself.
+
+**An executor as a device.** An AD4M executor is a device whose key is its wallet key. It
+reads its joined inbox when it starts, when its wallet unlocks, when its key joins an
+identity, and every 15 minutes, one read at a time. It reads a pre-join inbox only while a
+device string it showed is valid (until `exp`, five minutes), at most once a second; showing
+a new string ends the read of the last one.
+
+- A master key is the only body a joined inbox carries. An executor started without the
+  custody channel (a server, a host) keeps no master key: it deletes each message of its
+  joined inbox unopened and logs an error. Its claims never say `canKeepMaster`.
+- An executor with the custody channel (the desktop app's) opens each new message to learn
+  its type, wipes the plaintext, leaves the message at the host and tells the operator on its
+  machine (`inbox-message {id, kind}`, never a body). Its custody service then calls
+  `identity.takeMaster`: the executor opens the messages again, oldest first, checks each
+  against its refreshed copy of the log as above, and answers the first current master key
+  (`{messageId, did, index, secret}`) or `null`. A stale key, or one that fails a check, is
+  deleted. The message stays until the custody service acknowledges it
+  (`identity.inboxAck`, which on such an executor only the custody credential may call) after
+  storing the key. Only the custody credential (which only the
+  custody service holds) on a loopback listener of an executor started with
+  `--custody-channel` gets this answer. The custody service hands the executor that
+  credential as the first line of its stdin at start, and the executor keeps it in memory
+  only: never in its environment or on its command line, which other processes of the user
+  can read (`/proc/<pid>/environ`), as can the admin credential, which reads host files. An
+  executor with `AD4M_CUSTODY_CREDENTIAL` set refuses to start. The admin credential, an app,
+  a network listener, a device-key login and an operator without a credential are refused (403
+  `no-custody-channel`). The key reaches the answer only: no log line, event, store or
+  language, and the executor wipes its copy.
+- A master key in a pre-join inbox is dropped: a master key never travels before the device
+  joined. A valid offer ticket is claimed under the executor's first-link rule (a record
+  naming another identity refuses it; so does no record, except on a desktop's first run: an
+  executor with the custody channel, no record and no identity may claim any offer, and records
+  an identity as operator, `FirstRun`, only when its main agent joins it: the holder confirmed
+  the match code, the add listing the device key is in the log and the operator on this
+  machine accepted the claim; until then it may claim again, for the same or another
+  identity), with `canKeepMaster` exactly when the executor has the custody channel; only a
+  claim made shows the identity and the match code (`link-ticket`). The ticket is deleted
+  either way; one whose log cannot be read now waits for the next read.
+- Anyone who sees the device string can deliver a ticket, so a first-run claim is held:
+  `link-ticket` and `identity.claimOffer` answer `needsAccept: true`, and
+  `identity.joinStatus` answers `awaiting-accept` (the main agent is not bound, no record is
+  written) while the claim is claimed or spent and not accepted. The person at the computer
+  compares the identity and the match code and calls `identity.acceptJoin {offerId}` →
+  `{accepted: true}`, before or after the holder confirms; the next `joinStatus` that reads
+  `spent` binds the main agent and records `FirstRun`. A claim that sets no operator record
+  (the record already names the identity) has `needsAccept: false` and binds on `spent`
+  without accept. `identity.cancelJoin {offerId}` → `{cancelled: true}` cancels any claim:
+  it never binds, even if the holder confirms later, `joinStatus` answers `cancelled`, and a
+  later accept is refused (409 `cancelled`). Both calls are the operator's on this machine
+  (Operator, local only: an app, a network listener and a device-key login get 403), the
+  custody credential included; both repeat as no-ops. 404 when the executor holds no claim
+  on the offer (for `acceptJoin`: none awaiting accept); `cancelJoin` after the claim bound
+  answers 409 `already-joined`. The executor does not tell the store of a cancel: the
+  holder's add may still land in the log, listing a device key that never speaks for the
+  identity until the holder revokes it.
+- The decision on a claim holds on every path. A repeated `identity.claimOffer` (or ticket)
+  for the same offer keeps the claim as it is: it answers `needsAccept` as the claim stands,
+  a cancelled claim is refused (409 `cancelled`) and the offer named for another identity
+  is refused (409 `offer-conflict`), both before the store is asked. `identity.publish` of
+  the holder's add (or its replay after a 409) binds the main agent only as `joinStatus`
+  would: the add names the offer it spent, and while this executor's claim on that offer is
+  held or cancelled the head is answered but nothing is bound; an accepted first-run claim
+  binds and records `FirstRun` in one write. A key the main agent's own incept lists, and
+  the refresh of an identity it already speaks for, bind as before.
+- The executor never opens the private record. It passes the record and request-box calls
+  with a store request the caller signed with the master key, or signs one with its own key
+  (always for a post).

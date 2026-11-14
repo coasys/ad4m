@@ -5,7 +5,14 @@
 //! recorded operator may change it, through a `runtime.setOperator` call that does not exist
 //! yet). A claim for the main agent while its key is in no valid log runs
 //! [`first_link_check`] (in `ClaimService::claim_for_main`): only an offer of the recorded
-//! identity passes. While the key is valid in a log, `claim_for_main` refuses every offer
+//! identity passes. The one exception is a desktop app's executor at its first run
+//! (`--custody-channel`, no record, the main agent of no identity yet): the desktop never runs
+//! `init --operator` and does not know its person before the first offer arrives, so it may claim
+//! any offer, and the identity its main agent joins (the holder confirmed, the add landed, the
+//! operator on this machine accepted the claim with `identity.acceptJoin`:
+//! `ClaimService::join_status`) is recorded as the operator (`OperatorSetBy::FirstRun`). A claim
+//! that never completes, or is never accepted, records nothing. From then on the rule holds as for every executor.
+//! While the key is valid in a log, `claim_for_main` refuses every offer
 //! (`already-linked`).
 //!
 //! The same rule holds for a new identity: with an operator record the main key may speak only
@@ -20,7 +27,8 @@ use crate::db::{OperatorRecordRow, OperatorSetBy};
 /// Why a claim for the main agent is refused before it reaches the store.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum FirstLinkRefusal {
-    /// No operator record: a server started with no `--operator` opens no link route.
+    /// No operator record: a server started with no `--operator` opens no link route (a desktop
+    /// app's executor at its first run excepted: [`FirstLink::FirstRun`]).
     #[error("no-operator: this executor has no operator; start it with `ad4m-executor init --operator <did:scid>`")]
     NoOperator,
     /// The main key is in no log and the offer is not of the recorded operator's identity.
@@ -38,17 +46,34 @@ pub fn admits_first_link(record: Option<&OperatorRecordRow>, offer_did: &str) ->
     record.is_some_and(|r| r.scid == offer_did)
 }
 
+/// What the first-link rule lets a claim for the main agent do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FirstLink {
+    /// The offer is of the recorded operator.
+    Operator,
+    /// A desktop app's executor at its first run, with no record: the claim goes ahead, and the
+    /// identity the main agent joins through it becomes the operator (`OperatorSetBy::FirstRun`).
+    FirstRun,
+}
+
 /// The check `claim_for_main` runs before it claims, while the main key is in no valid log: an
-/// operator record must exist and the offer must be of the recorded identity.
+/// operator record must exist and the offer must be of the recorded identity. `desktop_first_run`
+/// (a `--custody-channel` executor whose main agent speaks for no identity yet) lets a claim
+/// with no record through as [`FirstLink::FirstRun`]; it changes nothing once a record exists.
 pub fn first_link_check(
     record: Option<&OperatorRecordRow>,
     offer_did: &str,
-) -> Result<(), FirstLinkRefusal> {
+    desktop_first_run: bool,
+) -> Result<FirstLink, FirstLinkRefusal> {
     let Some(record) = record else {
-        return Err(FirstLinkRefusal::NoOperator);
+        return if desktop_first_run {
+            Ok(FirstLink::FirstRun)
+        } else {
+            Err(FirstLinkRefusal::NoOperator)
+        };
     };
     if admits_first_link(Some(record), offer_did) {
-        return Ok(());
+        return Ok(FirstLink::Operator);
     }
     Err(FirstLinkRefusal::FirstLink {
         operator: record.scid.clone(),
@@ -136,11 +161,22 @@ mod tests {
 
     #[test]
     fn the_first_link_check_refuses_no_operator_and_a_stranger() {
-        assert_eq!(first_link_check(None, A), Err(FirstLinkRefusal::NoOperator));
-        assert_eq!(first_link_check(Some(&record(A)), A), Ok(()));
-        let refusal = first_link_check(Some(&record(A)), B).unwrap_err();
-        assert!(matches!(refusal, FirstLinkRefusal::FirstLink { .. }));
-        assert!(refusal.to_string().starts_with("first-link"));
+        for first_run in [false, true] {
+            assert_eq!(
+                first_link_check(Some(&record(A)), A, first_run),
+                Ok(FirstLink::Operator)
+            );
+            // Once a record exists, a desktop's first run changes nothing.
+            let refusal = first_link_check(Some(&record(A)), B, first_run).unwrap_err();
+            assert!(matches!(refusal, FirstLinkRefusal::FirstLink { .. }));
+            assert!(refusal.to_string().starts_with("first-link"));
+        }
+        assert_eq!(
+            first_link_check(None, A, false),
+            Err(FirstLinkRefusal::NoOperator)
+        );
+        // A desktop app's executor at its first run: any offer may be claimed; the join records.
+        assert_eq!(first_link_check(None, A, true), Ok(FirstLink::FirstRun));
     }
 
     #[test]

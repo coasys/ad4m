@@ -375,13 +375,15 @@ async fn publish_agent_updated(agent: &Agent) {
         .publish_event(Event::agent_updated(agent));
 }
 
-/// Publishes the main agent to the agent language without holding up the caller.
+/// Publishes the main agent to the agent language without holding up the caller, and wakes
+/// the read of its device inbox (the wallet is unlocked now).
 ///
 /// The publish is best-effort (a failure is only logged) and reaches a remote
 /// server, so awaiting it made generate/unlock take as long as that server took
 /// to answer or time out. `publish_agent_to_language` serializes publishes, so a
 /// profile update made right after this still wins.
 fn spawn_main_agent_publish() {
+    crate::identity::inbox::wake();
     tokio::spawn(async {
         if let Err(e) = AgentService::publish_agent_to_language(&AgentContext::main_agent()).await {
             log::warn!("Error publishing agent expression: {}", e);

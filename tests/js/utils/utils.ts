@@ -271,6 +271,8 @@ export async function startExecutor(dataPath: string,
     env: Record<string, string> = {},
     // Added to `ad4m-executor init`, e.g. `--operator <did:scid>`.
     initArgs: string[] = [],
+    // The first line of the executor's stdin: the custody credential of `--custody-channel`.
+    stdinFirstLine?: string,
 ): Promise<ChildProcess> {
     if (runHolochain && (!proxyUrl || !bootstrapUrl)) {
         const services = await ensureSharedLocalServices();
@@ -349,7 +351,7 @@ export async function startExecutor(dataPath: string,
     if (adminCredential) { args.push('--admin-credential', adminCredential); }
     else { args.push('--insecure-no-admin-credential'); }
 
-    return spawnExecutor(args, apiPort, { enableMcp, env });
+    return spawnExecutor(args, apiPort, { enableMcp, env, stdinFirstLine });
 }
 
 /** The `ad4m-executor` binary the suites run: `EXECUTOR_PATH` if set (as in
@@ -372,17 +374,26 @@ export async function spawnExecutor(
         env?: Record<string, string>;
         /** Receives every chunk of stdout and stderr from the start. */
         onOutput?: (text: string) => void;
+        /**
+         * Written to the executor's stdin as its first line, then stdin is closed: the custody
+         * credential of `--custody-channel`, which the executor reads only from there (never
+         * from its environment or command line, which other processes can read).
+         */
+        stdinFirstLine?: string;
     } = {},
 ): Promise<ChildProcess> {
-    const { enableMcp = false, env = {}, onOutput } = opts;
+    const { enableMcp = false, env = {}, onOutput, stdinFirstLine } = opts;
     const executorProcess = spawn(executorBinary(), args, {
-        stdio: ['ignore', 'pipe', 'pipe'],
+        stdio: [stdinFirstLine === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
         // AD4M_EXIT_WITH_PARENT: the executor ends with this process, however it ends. A
         // SIGKILLed or cancelled job, or mocha --exit past a test that never stopped its
         // executor, otherwise leaves it running on the runner. An executor too old to know the
         // variable ignores it.
         env: { ...process.env, AD4M_EXIT_WITH_PARENT: 'true', ...env },
     });
+    if (stdinFirstLine !== undefined) {
+        executorProcess.stdin!.end(`${stdinFirstLine}\n`);
+    }
     // Decode as a stream, so a multibyte character split across two chunks
     // survives in the startup-failure tail. Every data handler below gets strings.
     executorProcess.stdout!.setEncoding('utf8');

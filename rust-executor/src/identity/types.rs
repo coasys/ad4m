@@ -1,4 +1,5 @@
-//! The `identity.*` RPC contracts and the `identity-fork` event.
+//! The `identity.*` RPC contracts and the `identity-fork`, `link-ticket` and `inbox-message`
+//! events.
 //!
 //! The agent language speaks `ad4m_ldk::identity`'s wire types; these mirror the ones an RPC
 //! method carries, with `ts_rs` for the SDK, and serialise to the same JSON (camelCase,
@@ -297,6 +298,11 @@ pub struct ClaimOfferParams {
     #[ts(optional)]
     #[serde(default)]
     pub hint: Option<String>,
+    /// The claim says this device may keep the master key: only an executor started with
+    /// `--custody-channel` (the desktop app's) may say so. Default `false`.
+    #[ts(optional)]
+    #[serde(default)]
+    pub can_keep_master: Option<bool>,
 }
 
 /// An executor's device keys from its one wallet key: the `did:key` it signs with, and the
@@ -320,6 +326,10 @@ pub struct ClaimOfferResult {
     pub kind: OfferKind,
     #[ts(type = "number")]
     pub expires: u64,
+    /// The claim would make its identity this executor's operator (a desktop app's first run:
+    /// `--custody-channel`, no operator record): it binds only after `identity.acceptJoin`.
+    /// Until then `identity.joinStatus` answers `awaiting-accept`, even once the offer is spent.
+    pub needs_accept: bool,
 }
 
 /// `identity.joinStatus` params.
@@ -329,8 +339,43 @@ pub struct JoinStatusParams {
     pub offer_id: String,
 }
 
-/// `identity.joinStatus`: the offer's state for this executor's key. On `spent` the log lists
-/// the key and the agent speaks for `did`.
+/// `identity.acceptJoin` params: the offer of the claim to accept.
+#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct AcceptJoinParams {
+    pub offer_id: String,
+}
+
+/// `identity.acceptJoin`: the claim is accepted; the next `identity.joinStatus` that reads
+/// `spent` binds the main agent and records the operator.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct JoinAccepted {
+    #[ts(type = "true")]
+    pub accepted: bool,
+}
+
+/// `identity.cancelJoin` params: the offer of the claim to cancel.
+#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct CancelJoinParams {
+    pub offer_id: String,
+}
+
+/// `identity.cancelJoin`: the claim never binds, even if the holder confirms it later.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct JoinCancelled {
+    #[ts(type = "true")]
+    pub cancelled: bool,
+}
+
+/// `identity.joinStatus`: the claim's state for this executor's key. The store's offer
+/// states (`open`, `claimed`, `spent`, `expired`, `cancelled`, `contested`, `superseded`),
+/// and two of this executor's: `awaiting-accept` while a claim that needs accept
+/// (`ClaimOfferResult.needsAccept`) is claimed or spent and not yet accepted (nothing is
+/// bound), and `cancelled` once `identity.cancelJoin` cancelled the claim (it never binds).
+/// On `spent` the log lists the key and the agent speaks for `did`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct JoinStatus {
@@ -351,7 +396,8 @@ pub struct BotView {
 }
 
 /// One device key of the identity, from its log. Names, places and the master-key holders
-/// will come from the private record, which the executor does not have yet.
+/// are in the private record, which only an app opens (the executor never does): the app
+/// joins its entries to these by `keyId`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceView {
@@ -366,6 +412,308 @@ pub struct DeviceView {
     pub revoked_seq: Option<u64>,
     /// The key is this agent's device key.
     pub this_device: bool,
+}
+
+/// `identity.prepareDevice`: this executor's device string (`coasys:device:1:…`), shown as a QR
+/// code, and the keys it holds; the executor reads its pre-join inbox until `expires`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct PreparedDevice {
+    pub sign: String,
+    pub enc: String,
+    pub device: String,
+    #[ts(type = "number")]
+    pub expires: u64,
+}
+
+/// An inbox's address: before the device joins `{pre}`, after it `{scid, keyId}`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(untagged)]
+pub enum InboxAddress {
+    Pre {
+        pre: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    Joined {
+        scid: String,
+        key_id: String,
+    },
+}
+
+/// The bound offer a pre-join write is for.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct InboxBind {
+    pub scid: String,
+    pub offer_id: String,
+    pub sign: String,
+    pub r: String,
+}
+
+/// `identity.inboxPut` params: a sealed message and the master-signed request of the write
+/// (with `bind` for a pre-join address).
+#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct InboxPutParams {
+    pub address: InboxAddress,
+    pub sealed: String,
+    #[serde(default)]
+    #[ts(optional)]
+    pub bind: Option<InboxBind>,
+    pub request: SignedRequest,
+}
+
+/// `identity.inboxPut`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct InboxStored {
+    pub id: String,
+    #[ts(type = "number")]
+    pub expires: u64,
+}
+
+/// What a message of the device inbox carries; the type sits inside the seal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "kebab-case")]
+pub enum InboxMessageType {
+    /// A master key for the custody service (`identity.takeMaster`).
+    Master,
+    /// An offer to claim.
+    OfferTicket,
+}
+
+/// One message waiting in this executor's inbox (`identity.inbox`): its id and body type
+/// (`kind`, as in `inbox-message`), never its body.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct InboxEntry {
+    pub id: String,
+    pub kind: InboxMessageType,
+    #[ts(type = "number")]
+    pub stored_at: u64,
+    #[ts(type = "number")]
+    pub expires: u64,
+}
+
+/// `identity.inboxAck` params.
+#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct InboxAckParams {
+    pub id: String,
+}
+
+/// `identity.takeMaster`: the master key a holder sealed to this computer, for the custody
+/// service only. Wiped when dropped and never cloned: the executor keeps no copy.
+#[derive(PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct TakenMaster {
+    /// Acknowledge it (`identity.inboxAck`) once the key is stored.
+    pub message_id: String,
+    pub did: String,
+    /// The master key's number in the log.
+    pub index: u32,
+    /// The Ed25519 secret of master `index`, 32 bytes, base58btc.
+    pub secret: String,
+}
+
+impl Drop for TakenMaster {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.secret);
+    }
+}
+
+impl std::fmt::Debug for TakenMaster {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TakenMaster")
+            .field("message_id", &self.message_id)
+            .field("did", &self.did)
+            .field("index", &self.index)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The private details record as the store keeps it: the executor passes it and never
+/// opens it. Its writer signs the envelope (`signer`, `sig`), and a recovery key counts only
+/// with the current master's attestation (`ad4m_identity_core::record`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct SealedRecord {
+    #[ts(type = "number")]
+    pub version: u64,
+    /// Key id or `"recovery"` → the record key sealed to that reader.
+    pub wrapped: std::collections::BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub recovery_key: Option<String>,
+    /// The current master's attestation of `recovery_key`; present exactly when it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub recovery_attestation: Option<RecoveryAttestation>,
+    pub nonce: String,
+    pub ciphertext: String,
+    /// The writer's key id: a device key (`"d3"`) or the current master (`"m0"`).
+    pub signer: String,
+    /// That key's signature over the envelope, base58btc (`z…`).
+    pub sig: String,
+}
+
+/// A master key's attestation that a record's `recoveryKey` is the identity's recovery key.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoveryAttestation {
+    /// The master key's id (`"m0"`).
+    pub key_id: String,
+    /// base58btc (`z…`).
+    pub sig: String,
+}
+
+/// `identity.record` params: a request signed by a key of the identity, or none for one
+/// signed with this agent's device key.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordParams {
+    #[serde(default)]
+    #[ts(optional)]
+    pub request: Option<SignedRequest>,
+}
+
+/// `identity.recordPut` params.
+#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordPutParams {
+    pub record: SealedRecord,
+    #[serde(default)]
+    #[ts(optional)]
+    pub request: Option<SignedRequest>,
+}
+
+/// The store's word that it accepted a record write: its head key (`store`, a did:key) over
+/// `{scid, version, envelope, seq, store}` (domain `coasys:record-receipt`). `envelope` is the
+/// sha2-256 multihash of the signed envelope (with `sig`), `seq` the log's head the write was
+/// checked against: a reader checks the record's writer at `seq`
+/// (`ad4m_identity_core::record::open_record`). The executor passes it unchanged.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordReceipt {
+    pub scid: String,
+    #[ts(type = "number")]
+    pub version: u64,
+    /// sha2-256 multihash of the signed envelope, base58btc.
+    pub envelope: String,
+    #[ts(type = "number")]
+    pub seq: u64,
+    /// did:key of the store.
+    pub store: String,
+    /// The store's signature, base58btc (`z…`).
+    pub sig: String,
+}
+
+/// `identity.record`: the sealed record with the store's receipt for it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct StoredRecord {
+    pub record: SealedRecord,
+    pub receipt: RecordReceipt,
+}
+
+/// `identity.recordPut`: the version written and the store's receipt for it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordStored {
+    #[ts(type = "number")]
+    pub version: u64,
+    pub receipt: RecordReceipt,
+}
+
+/// What a device asks in the request box.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum DeviceRequestBody {
+    /// A device whose master key no longer counts asks for the current one.
+    SendMaster {},
+    /// An app without the master key asks one with it to sign a revocation.
+    #[serde(rename_all = "camelCase")]
+    ConfirmRevoke { key_ids: Vec<String>, rotate: bool },
+}
+
+/// `identity.postRequest` params. `expires` defaults to the longest a request lives. Only a
+/// device key posts (the store refuses a master key), so the agent's device key signs it.
+#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct PostRequestParams {
+    pub body: DeviceRequestBody,
+    #[serde(default)]
+    #[ts(optional, type = "number")]
+    pub expires: Option<u64>,
+}
+
+/// `identity.postRequest`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestPosted {
+    pub id: String,
+}
+
+/// `identity.requests` params.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestsParams {
+    /// Unix seconds: only requests made since then.
+    #[serde(default)]
+    #[ts(optional, type = "number")]
+    pub since: Option<u64>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub request: Option<SignedRequest>,
+}
+
+/// One request of the box; `signed` is the poster's own signed request, so a reader checks
+/// the poster without trusting the store.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceRequest {
+    pub id: String,
+    pub body: DeviceRequestBody,
+    /// The posting device key's id.
+    pub by: String,
+    #[ts(type = "number")]
+    pub created: u64,
+    #[ts(type = "number")]
+    pub expires: u64,
+    pub signed: SignedRequest,
+}
+
+/// `identity.deleteRequest` params.
+#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteRequestParams {
+    pub id: String,
+    #[serde(default)]
+    #[ts(optional)]
+    pub request: Option<SignedRequest>,
+}
+
+/// `link-ticket`: a holder sent this executor an offer bound to its key (`identity.prepareDevice`)
+/// and the executor claimed it; the device shows the identity and the claim's match code,
+/// which the holder shows too.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkTicketEvent {
+    pub did: String,
+    pub offer_id: String,
+    pub match_code: String,
+    /// The claim binds only after `identity.acceptJoin` (as `ClaimOfferResult.needsAccept`).
+    pub needs_accept: bool,
+}
+
+/// `inbox-message`: a message waits in this executor's inbox; for a `master` the custody
+/// service calls `identity.takeMaster` after the computer's unlock. The body type is `kind`:
+/// an event's `type` on the wire is its name.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct InboxMessageEvent {
+    pub id: String,
+    pub kind: InboxMessageType,
 }
 
 /// `identity-fork`: the cache found two different valid events at one seq of a log. It kept its
@@ -689,6 +1037,8 @@ pub enum SessionRole {
     Tenant,
     /// A grant on the main agent.
     App,
+    /// The custody service: the custody credential on a loopback listener.
+    Custody,
     Anonymous,
 }
 
@@ -737,7 +1087,7 @@ pub struct SessionInfo {
     pub grant_id: Option<String>,
     #[ts(type = "number | null")]
     pub expires_at: Option<u64>,
-    /// `credential`, `loopback` or `key`, for the operator.
+    /// `credential`, `loopback`, `key` or `custody`, for the operator.
     pub operator_source: Option<String>,
 }
 

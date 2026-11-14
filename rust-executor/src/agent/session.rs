@@ -53,6 +53,11 @@ pub enum Principal {
     Agent(AgentContext),
     /// No token: may request a capability, and sign up or log in when multi-user mode is on.
     Anonymous,
+    /// The custody credential on a loopback listener of an executor started with
+    /// `--custody-channel`: the custody service beside it. Not the operator: it holds no
+    /// capability, reaches only the custody calls (`identity::custody::CUSTODY_METHODS`) and
+    /// the events for the operator on this machine, and acts as the main agent there.
+    Custody,
 }
 
 /// How the operator proved it is the operator: where an operator session's role comes from.
@@ -160,6 +165,20 @@ impl Session {
         admin_credential: &Option<Secret>,
         reach: ListenerReach,
     ) -> Result<Session, AuthError> {
+        // The custody credential first: it differs from the admin credential (`run` refuses
+        // the two equal), and only an executor serving the custody channel has one. It is for
+        // the custody service on this machine: a listener the network reaches refuses it.
+        if crate::config::is_custody_credential(token) {
+            if reach != ListenerReach::Loopback {
+                return Err(AuthError::Invalid(
+                    "the custody credential works only on a loopback listener".into(),
+                ));
+            }
+            return Ok(Session {
+                reach,
+                ..Session::without_token(Principal::Custody, vec![])
+            });
+        }
         if is_admin_credential_token_on(token, admin_credential, reach) {
             let source = match admin_credential {
                 Some(_) => OperatorSource::Credential,
@@ -336,7 +355,15 @@ impl Session {
             && self.operator_source != Some(OperatorSource::Key)
     }
 
-    /// Whether the caller presented a credential: the operator or a grant on an agent.
+    /// Whether the caller is the custody service: the custody credential, on a loopback
+    /// listener (`Session::open` refuses it on any other). The one test of the custody channel
+    /// (`identity::custody::admit`) and of dispatch's custody allowlist.
+    pub fn is_custody(&self) -> bool {
+        self.principal == Principal::Custody && self.reach == ListenerReach::Loopback
+    }
+
+    /// Whether the caller presented a credential: the operator, the custody service or a
+    /// grant on an agent.
     pub fn is_authenticated(&self) -> bool {
         self.principal != Principal::Anonymous
     }
@@ -389,7 +416,9 @@ impl Session {
     pub fn acts_as(&self) -> AgentContext {
         match &self.principal {
             Principal::Agent(agent) => agent.clone(),
-            Principal::Operator | Principal::Anonymous => AgentContext::main_agent(),
+            Principal::Operator | Principal::Custody | Principal::Anonymous => {
+                AgentContext::main_agent()
+            }
         }
     }
 
@@ -431,9 +460,15 @@ impl Session {
     /// the main agent's events, not every agent's. The stream itself ends once
     /// [`Session::check`] fails.
     pub(crate) fn may_receive(&self, event: &Event) -> bool {
+        // The custody service holds no capability: it gets the events for the operator on
+        // this machine (`link-ticket`, `inbox-message`), which its calls follow, and no other.
+        if self.principal == Principal::Custody {
+            return self.is_custody() && event.audience == Audience::LocalOperator;
+        }
         let in_audience = match &event.audience {
             Audience::Everyone => true,
             Audience::Operator => self.is_operator(),
+            Audience::LocalOperator => self.is_operator_on_this_machine(),
             Audience::Dids(dids) => self.acts_as_did().is_some_and(|did| dids.contains(&did)),
         };
         in_audience && self.may(&event.capability)
@@ -514,6 +549,18 @@ impl Session {
     pub(crate) fn without_credential(self) -> Session {
         Session {
             operator_source: Some(OperatorSource::Loopback),
+            ..self
+        }
+    }
+
+    /// This session as the custody service's, as `Session::open` gives the custody credential
+    /// on this session's listener: no capability, no operator source.
+    pub(crate) fn as_custody(self) -> Session {
+        Session {
+            principal: Principal::Custody,
+            caps: vec![],
+            grant: None,
+            operator_source: None,
             ..self
         }
     }
@@ -648,6 +695,116 @@ mod resolution_tests {
         assert_eq!(key.operator_source(), Some(OperatorSource::Key));
         assert!(!key.is_operator_on_this_machine());
         assert!(!key.on_network().is_operator_on_this_machine());
+    }
+
+    /// The custody credential opens a custody session on a loopback listener, only on an
+    /// executor started with `--custody-channel`: not the operator, with no capability. A
+    /// listener the network reaches refuses it. The admin credential stays a credential
+    /// session there.
+    #[test]
+    fn the_custody_credential_opens_a_custody_session_only_with_the_channel() {
+        ensure_db();
+        // Without the channel the credential is read as a token, which needs the wallet.
+        setup_wallet();
+        let saved = crate::config::GLOBAL_AD4M_CONFIG
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let with = |channel: Option<bool>| {
+            crate::config::set_global_config(crate::Ad4mConfig {
+                custody_channel: channel,
+                admin_credential: admin(),
+                custody_credential: Some("custody-secret".into()),
+                ..Default::default()
+            })
+        };
+
+        with(Some(true));
+        let custody = Session::open("custody-secret", &admin(), ListenerReach::Loopback).unwrap();
+        let custody_remote = Session::open("custody-secret", &admin(), ListenerReach::Network);
+        let admin_local = Session::open(ADMIN, &admin(), ListenerReach::Loopback).unwrap();
+        with(None);
+        let no_channel = Session::open("custody-secret", &admin(), ListenerReach::Loopback);
+        *crate::config::GLOBAL_AD4M_CONFIG
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = saved;
+
+        assert_eq!(custody.principal, Principal::Custody);
+        assert!(custody.is_custody());
+        assert!(
+            !custody.is_operator(),
+            "the custody service is not the operator"
+        );
+        assert!(!custody.is_operator_on_this_machine());
+        assert_eq!(custody.operator_source(), None);
+        assert!(custody.capabilities().is_empty(), "it holds no capability");
+        assert_eq!(custody.acts_as(), AgentContext::main_agent());
+        // A listener the network reaches refuses the custody credential.
+        assert!(
+            matches!(custody_remote, Err(AuthError::Invalid(ref why)) if why.contains("loopback")),
+            "{custody_remote:?}"
+        );
+        assert_eq!(
+            admin_local.operator_source(),
+            Some(OperatorSource::Credential)
+        );
+        // Without the channel the custody credential is no credential: the token does not
+        // decode as a grant.
+        assert!(!no_channel.is_ok_and(|s| s.is_operator() || s.is_custody()));
+    }
+
+    /// The custody service gets the events for the operator on this machine (`link-ticket`,
+    /// `inbox-message`, which its calls follow), though it holds no capability, and no other.
+    #[test]
+    fn a_custody_session_receives_only_the_events_for_the_operator_on_this_machine() {
+        use crate::events::Topic;
+        let custody = Session::for_test(Principal::Operator).as_custody();
+        let event = |audience| Event::new(Topic::LinkTicket, audience, serde_json::Value::Null);
+        assert!(custody.may_receive(&event(Audience::LocalOperator)));
+        assert!(custody.may_receive(&Event::new(
+            Topic::InboxMessage,
+            Audience::LocalOperator,
+            serde_json::Value::Null
+        )));
+        assert!(!custody.may_receive(&event(Audience::Operator)));
+        assert!(!custody.may_receive(&event(Audience::Everyone)));
+        assert!(!custody
+            .clone()
+            .on_network()
+            .may_receive(&event(Audience::LocalOperator)));
+    }
+
+    /// Review coasys/ad4m#1635: the custody credential exists for the custody calls on this
+    /// machine. Today it opens a full operator (`ALL_CAPABILITY`) on any listener, network
+    /// included, so it is a second administrator. It must be refused off loopback and hold no
+    /// capability beyond the custody calls. Fails at 6e0ac329e.
+    #[test]
+    fn the_custody_credential_is_no_operator_off_loopback_or_outside_the_custody_calls() {
+        ensure_db();
+        let saved = crate::config::GLOBAL_AD4M_CONFIG
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        crate::config::set_global_config(crate::Ad4mConfig {
+            custody_channel: Some(true),
+            admin_credential: admin(),
+            custody_credential: Some("custody-secret".into()),
+            ..Default::default()
+        });
+        let remote = Session::open("custody-secret", &admin(), ListenerReach::Network);
+        let local = Session::open("custody-secret", &admin(), ListenerReach::Loopback).unwrap();
+        *crate::config::GLOBAL_AD4M_CONFIG
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = saved;
+
+        assert!(
+            !remote.is_ok_and(|s| s.is_operator()),
+            "the custody credential is an operator on a network listener"
+        );
+        assert!(
+            !local.may(&crate::agent::capabilities::AGENT_UPDATE_CAPABILITY),
+            "the custody session may update the agent (it holds every capability)"
+        );
     }
 
     #[test]

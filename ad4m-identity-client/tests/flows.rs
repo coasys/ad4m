@@ -393,6 +393,8 @@ impl ExecutorRpc for TestExecutor {
                     "matchCode": link::match_code(&offer.scid, &offer.offer_id, &self.device_key()),
                     "kind": body["kind"],
                     "expires": body["expires"],
+                    // An executor with an operator record: its claims need no accept.
+                    "needsAccept": false,
                 }))
             }
             "identity.joinStatus" => {
@@ -760,6 +762,7 @@ async fn link_adds_a_second_executor_with_one_unlock_and_one_match_code() {
         &vault,
         &did,
         OfferKind::Node,
+        None,
         STORE_URL,
         &SystemClock,
         &OsRandom,
@@ -796,6 +799,53 @@ async fn link_adds_a_second_executor_with_one_unlock_and_one_match_code() {
     assert_eq!(vault.unlocks(), vec![MasterUse::Link]);
 }
 
+/// An offer bound to a scanned device key: its ticket carries the offer string's fields and
+/// the signed offer bound to that key, another key's claim is refused, and the bound device
+/// links as with an unbound offer.
+#[tokio::test]
+async fn a_bound_offer_takes_only_its_device_and_gives_its_ticket() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let stranger = ViaExecutor::new(TestExecutor::new(&store, 3));
+    let vault = MemoryVault::new();
+    let did = create(&a, &vault, 8).await;
+
+    let device_key = b.rpc().device_key();
+    let flow = LinkFlow::open(
+        &a,
+        &vault,
+        &did,
+        OfferKind::Device,
+        Some(&device_key),
+        STORE_URL,
+        &SystemClock,
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    let ticket = flow.ticket();
+    assert_eq!(ticket.offer_string().encode(), flow.offer_string());
+    assert_eq!(
+        ticket.signed_offer.offer.device_key.as_deref(),
+        Some(device_key.as_str())
+    );
+    let chain = ad4m_identity_core::fold(&a.events(&did).await.unwrap()).unwrap();
+    let now = SystemClock.now();
+    link::verify_offer(&ticket.signed_offer, &chain, now).unwrap();
+
+    let refused = claim(&stranger, &flow.offer_string(), None)
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code, 403, "{}", refused.message);
+    let claimed_b = claim(&b, &flow.offer_string(), None).await.unwrap();
+    // The genuine device's claim passes the holder's bound check (`verify_claim_view`).
+    let claimed = flow.wait_for_claim().await.unwrap();
+    assert_eq!(claimed.device_key, device_key);
+    assert_eq!(claimed.match_code, claimed_b["matchCode"]);
+    assert_eq!(flow.confirm(&claimed).await.unwrap().seq, 1);
+}
+
 /// A confirm whose publish fails keeps the flow: confirming again, while the claim is still
 /// `claimed`, spends it under the same unlock.
 #[tokio::test]
@@ -810,6 +860,7 @@ async fn a_confirm_after_a_failed_publish_succeeds() {
         &vault,
         &did,
         OfferKind::Node,
+        None,
         STORE_URL,
         &SystemClock,
         &OsRandom,
@@ -857,6 +908,7 @@ async fn confirm_after_the_offers_expiry_within_the_grace_signs_the_add() {
         &vault,
         &did,
         OfferKind::Node,
+        None,
         STORE_URL,
         &clock,
         &OsRandom,
@@ -886,6 +938,7 @@ async fn waiting_past_the_offers_expiry_answers_expired_not_the_vault() {
         &vault,
         &did,
         OfferKind::Node,
+        None,
         STORE_URL,
         &clock,
         &OsRandom,
@@ -912,6 +965,7 @@ async fn revoke_ends_the_second_executors_key() {
         &vault,
         &did,
         OfferKind::Node,
+        None,
         STORE_URL,
         &SystemClock,
         &OsRandom,
@@ -950,6 +1004,7 @@ async fn revoke_ends_the_second_executors_key() {
         &vault,
         &did,
         OfferKind::Node,
+        None,
         STORE_URL,
         &SystemClock,
         &OsRandom,
@@ -973,6 +1028,7 @@ async fn a_swapped_claim_view_is_refused(entropy: u8, tamper: fn(&mut Value)) {
         &vault,
         &did,
         OfferKind::Node,
+        None,
         STORE_URL,
         &SystemClock,
         &OsRandom,
@@ -1025,6 +1081,7 @@ async fn a_link_without_the_master_key_never_opens_an_offer() {
             &empty,
             &did,
             OfferKind::Node,
+            None,
             STORE_URL,
             &SystemClock,
             &OsRandom
@@ -1068,6 +1125,7 @@ async fn an_open_offer_answer_for_another_offer_is_refused() {
         &vault,
         &did,
         OfferKind::Node,
+        None,
         STORE_URL,
         &SystemClock,
         &OsRandom,
@@ -1098,6 +1156,7 @@ async fn a_vault_key_that_is_not_the_current_master_opens_no_offer() {
         &wrong,
         &did,
         OfferKind::Node,
+        None,
         STORE_URL,
         &SystemClock,
         &OsRandom,

@@ -12,20 +12,17 @@
 //! The store admits it, the agent language answers it with `proof.record`, and
 //! `resolver::verify_expression` checks it at the anchor.
 
-use ad4m_hash_chain::{canonical_json, encode_proof_value, hash_bytes};
+use ad4m_hash_chain::encode_proof_value;
 use ad4m_identity_core::build::Signer;
-use ad4m_identity_core::{did_of, signing_bytes, AGENT_RECORD_DOMAIN, REQUEST_DOMAIN};
-use ad4m_ldk::identity::{AgentRecord, RequestBody, SignedHead, SignedRequest};
+use ad4m_identity_core::{signing_bytes, AGENT_RECORD_DOMAIN};
+use ad4m_ldk::identity::{AgentRecord, SignedHead, SignedRequest};
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json::{json, Value};
 
-use super::device::{device_key, WalletSigner};
-use super::service::{backend_error, cache_error, db, now, IdentityService};
+use super::device::{body_bytes, store_request, WalletSigner, REQUEST_TTL_S};
+use super::service::{backend_error, IdentityService};
 use crate::agent::AgentContext;
 use crate::api::ws_handler::WsRpcError;
-
-/// How long the signed request of a put stays valid (the store takes at most 300 s).
-const REQUEST_TTL_S: i64 = 60;
 
 /// The person's agent record and the signed request that writes it.
 pub struct PersonRecord {
@@ -88,28 +85,18 @@ pub fn person_record(
         signing_bytes(AGENT_RECORD_DOMAIN, &record.signed_value()).map_err(|e| e.to_string())?;
     record.sig = encode_proof_value(&signer.sign(&bytes));
 
-    // The agent language sends the record as its canonical JSON.
-    let body = serde_json::to_value(&record).map_err(|e| e.to_string())?;
-    let body = canonical_json(&body).map_err(|e| e.to_string())?;
-    let req = RequestBody {
-        did: did.to_string(),
-        store: head.store.clone(),
-        key_id: key_id.to_string(),
-        kel_seq: head.seq,
-        kel_hash: head.hash.clone(),
-        method: "PUT".into(),
-        path: format!("/v1/agents/{did}"),
-        body_hash: hash_bytes(body.as_bytes()),
-        nonce: bs58::encode(rand::random::<[u8; 16]>()).into_string(),
-        expires: u64::try_from(at.timestamp() + REQUEST_TTL_S).map_err(|e| e.to_string())?,
-    };
-    let bytes = signing_bytes(REQUEST_DOMAIN, &req).map_err(|e| e.to_string())?;
-    let sig = encode_proof_value(&signer.sign(&bytes));
+    let request = store_request(
+        signer,
+        did,
+        key_id,
+        head,
+        "PUT",
+        &format!("/v1/agents/{did}"),
+        &body_bytes(&record)?,
+        u64::try_from(at.timestamp()).map_err(|e| e.to_string())? + REQUEST_TTL_S,
+    )?;
     signer.check()?;
-    Ok(PersonRecord {
-        record,
-        request: SignedRequest { req, sig },
-    })
+    Ok(PersonRecord { record, request })
 }
 
 /// The version of a new agent record: `now_ms` (unix milliseconds), or one past `stored` (the
@@ -143,43 +130,37 @@ impl IdentityService {
         agent: &AgentContext,
         profile: &Value,
     ) -> Result<Option<String>, WsRpcError> {
-        let (agent_did, key) = device_key(agent).map_err(WsRpcError::internal)?;
-        let Some(scid) = db(|db| db.agent_identity(&agent_did))? else {
+        let Some(position) = self.device_position(agent).await? else {
             return Ok(None);
         };
-        let Some((chain, trusted)) = self.cache.trusted(&scid).await.map_err(cache_error)? else {
-            return Ok(None);
-        };
-        let state = chain.state();
-        let Some(key_id) = super::resolver::device_key_id(state, &key).filter(|id| {
-            state.bot_scope_at(id, trusted).is_none() && state.key_valid_at_time(id, trusted, now())
-        }) else {
-            return Ok(None);
-        };
-        let head = self
-            .cache
-            .accepted_head(&scid)
-            .map_err(cache_error)?
-            .filter(|head| head.seq == trusted)
-            .ok_or_else(|| WsRpcError::internal("the accepted head moved while publishing"))?;
-        let did = did_of(&scid);
         let signer = WalletSigner::new(agent).map_err(WsRpcError::internal)?;
         // The store's version of the record; when it cannot be read the clock decides, and a
         // put the store refuses as not newer fails as before.
-        let stored = match self.backend.agent_version(&did).await {
+        let stored = match self.backend.agent_version(&position.did).await {
             Ok(stored) => stored,
             Err(e) => {
-                log::warn!("identity: could not read the agent record of {did}: {e}");
+                log::warn!(
+                    "identity: could not read the agent record of {}: {e}",
+                    position.did
+                );
                 None
             }
         };
-        let put = person_record(&signer, &did, &key_id, &head, profile, Utc::now(), stored)
-            .map_err(WsRpcError::internal)?;
+        let put = person_record(
+            &signer,
+            &position.did,
+            &position.key_id,
+            &position.head,
+            profile,
+            Utc::now(),
+            stored,
+        )
+        .map_err(WsRpcError::internal)?;
         self.backend
             .put_agent(&put.record, Some(&put.request))
             .await
             .map_err(backend_error)?;
-        Ok(Some(did))
+        Ok(Some(position.did))
     }
 }
 
@@ -189,10 +170,11 @@ mod tests {
     use crate::agent::AgentService;
     use crate::identity::backend::IdentityBackend;
     use crate::identity::cache::tests::{accept_signed, trusting, FakeStore, TestLog};
-    use crate::identity::device::enc_key_of;
-    use ad4m_hash_chain::decode_proof_value;
+    use crate::identity::device::{device_key, enc_key_of};
+    use crate::identity::service::{db, now};
+    use ad4m_hash_chain::{canonical_json, decode_proof_value, hash_bytes};
     use ad4m_identity_core::build::{add_unsigned, cosign, revoke};
-    use ad4m_identity_core::verify_signed;
+    use ad4m_identity_core::{did_of, verify_signed, REQUEST_DOMAIN};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
@@ -256,6 +238,7 @@ mod tests {
                 cache,
                 store_url: None,
                 challenges: Default::default(),
+                inbox: Default::default(),
                 audiences: Default::default(),
                 store_keys_source: crate::identity::StoreSource::Config,
             };
