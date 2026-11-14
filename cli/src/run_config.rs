@@ -256,10 +256,10 @@ pub struct RunArgs {
         value_parser = non_empty(BoolValueParser::new())
     )]
     pub watch_stdin: Option<bool>,
-    /// Serve the custody channel: the desktop app's custody service, which keeps the master key
-    /// itself, reads the main agent's device keys with the admin credential on a loopback
-    /// listener. No master key passes through the executor. Refused together with multi-user
-    /// mode (exit 78).
+    /// Serve the custody channel: the desktop app's custody service, which keeps the master key,
+    /// reads the main agent's device keys and takes a master key sent to this computer (opened
+    /// from the executor's inbox and passed on, never stored), with the admin credential on a
+    /// loopback listener. Refused together with multi-user mode (exit 78).
     #[arg(
         long,
         num_args = 0..=1,

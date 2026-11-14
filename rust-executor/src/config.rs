@@ -145,10 +145,10 @@ pub struct Ad4mConfig {
     /// so the executor never outlives it (`--watch-stdin`).
     pub watch_stdin: Option<bool>,
     /// This executor serves the custody channel: the desktop app's custody service, which keeps
-    /// the master key itself, reads the main agent's device keys from it with the admin
-    /// credential on a loopback listener (`--custody-channel`). No master key passes through
-    /// the executor. Never together with multi-user mode
-    /// ([`refuse_custody_channel_with_multi_user`]).
+    /// the master key, reads the main agent's device keys from it and takes a master key sent to
+    /// this computer, which the executor opens from its inbox and passes on without storing it;
+    /// with the admin credential on a loopback listener (`--custody-channel`). Never together
+    /// with multi-user mode ([`refuse_custody_channel_with_multi_user`]).
     pub custody_channel: Option<bool>,
     /// The folder of the executor's own rotated log files (`--log-dir`). Unset: stdout.
     pub log_dir: Option<String>,
@@ -486,11 +486,10 @@ pub fn refuse_multi_user_from_db(
     Ok(())
 }
 
-/// The custody channel and multi-user mode never run together: the channel takes whoever holds
-/// the admin credential for the person's own custody service, and on a multi-user executor that
-/// is a host, not the person whose identity the main agent carries. The one place of this
-/// rule: the CLI (exit 78), `run` (with the mode read from the database) and
-/// `user.setMultiUserEnabled` all call it.
+/// The custody channel and multi-user mode never run together: the channel hands a master key
+/// to whoever holds the admin credential, and on a multi-user executor that is a host, not the
+/// person whose key it is. The one place of this rule: the CLI (exit 78), `run` (with the mode
+/// read from the database) and `user.setMultiUserEnabled` all call it.
 pub fn refuse_custody_channel_with_multi_user(
     custody_channel: bool,
     multi_user_on: bool,
@@ -503,9 +502,9 @@ pub fn refuse_custody_channel_with_multi_user(
 
 /// Why an executor refuses the custody channel with multi-user mode.
 pub const CUSTODY_CHANNEL_WITH_MULTI_USER_ERROR: &str =
-    "Refusing the custody channel with multi-user mode: the channel serves the person's own \
-     custody service through the admin credential, which on a multi-user executor belongs to \
-     a host, not to that person. Start without --custody-channel, or turn multi-user mode off.";
+    "Refusing the custody channel with multi-user mode: the channel gives a master key to the \
+     holder of the admin credential, which on a multi-user executor is not the key's owner. \
+     Start without --custody-channel, or turn multi-user mode off.";
 
 /// Why `run` refused to start; names both ways out.
 pub const NO_ADMIN_CREDENTIAL_ERROR: &str =
