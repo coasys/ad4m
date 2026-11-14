@@ -1,5 +1,6 @@
 use crate::identity::verdict::{replaces, InvalidReason, LinkVerdict};
 use crate::languages::literal::RFC3986_COMPONENT_ENCODE;
+use crate::membership::SpaceMembership;
 use crate::types::LinkStatus;
 use crate::types::{
     DecoratedExpressionProof, DecoratedLinkExpression, ExpressionProof, Link, LinkExpression,
@@ -826,18 +827,23 @@ fn make_reifier_iri(link: &LinkExpression) -> NamedNode {
     // the hash a pure function of the stored term, independent of how the
     // caller happened to format an equivalent value. This is a no-op for
     // every other target shape (NamedNode / number / boolean round-trip
-    // through `target_to_storage_term` unchanged).
+    // through `target_to_storage_term` unchanged). See [`link_hash`].
+    let hash = hex::encode(link_hash(link));
+    NamedNode::new_unchecked(format!("link:{}", &hash[..32]))
+}
+
+/// The full sha256 behind a link's reifier IRI ([`make_reifier_iri`] keeps its first half):
+/// the hash the membership replay orders links by.
+pub fn link_hash(link: &LinkExpression) -> [u8; 32] {
     let normalized_target =
         storage_term_to_target_string(&target_to_storage_term(&link.data.target));
-
     let mut hasher = Sha256::new();
     hasher.update(link.author.as_bytes());
     hasher.update(link.data.source.as_bytes());
     hasher.update(link.data.predicate.as_deref().unwrap_or("").as_bytes());
     hasher.update(normalized_target.as_bytes());
     hasher.update(link.timestamp.as_bytes());
-    let hash = hex::encode(hasher.finalize());
-    NamedNode::new_unchecked(format!("link:{}", &hash[..32]))
+    hasher.finalize().into()
 }
 
 /// Build the direct triple `(source, predicate, target)` for a link.
@@ -1010,13 +1016,15 @@ fn remove_link_quads(tx: &mut Transaction<'_>, link: &LinkExpression) -> Result<
 /// ([`crate::identity::check_signed_own`]). A link that arrives already signed — a peer's,
 /// one a caller hands in (`perspective.addLinkExpression`, an import), or a stored link
 /// judged again — is not `own`, whichever key signed them.
+/// `membership`: the space's read filter ([`SpaceMembership::overlay`]) on the verdict.
 fn write_link_quads(
     tx: &mut Transaction<'_>,
     link: &LinkExpression,
     status: &LinkStatus,
     own: bool,
+    membership: &SpaceMembership,
 ) -> Result<(), Error> {
-    write_link_quads_proof(tx, link, status, false, own)
+    write_link_quads_proof(tx, link, status, false, own, membership)
 }
 
 /// [`write_link_quads`], but with `repair` the whole proof is rewritten
@@ -1031,6 +1039,7 @@ fn write_link_quads_proof(
     status: &LinkStatus,
     repair: bool,
     own: bool,
+    membership: &SpaceMembership,
 ) -> Result<(), Error> {
     let (source_iri, predicate_iri, target_term) = make_direct_triple(link);
     let reifier_iri = make_reifier_iri(link);
@@ -1092,6 +1101,10 @@ fn write_link_quads_proof(
     } else {
         link.check_entered(entered)
     };
+    // Whether the proof verifies, before the read filter: a `notMember` link's proof does,
+    // and may replace an unverified one ([`proof_write`]).
+    let proof_verifies = checked.verdict.counts();
+    let checked = membership.overlay(link, Some(status), checked);
     // A stored `valid` is not replaced by `cantCheck` ([`replaces`]): the stored judgement
     // (`proofValid`, the verdict, the person) stays as it is, and with it the order above.
     let stored = counted_before.then_some(LinkVerdict::Valid);
@@ -1117,7 +1130,7 @@ fn write_link_quads_proof(
         proof_write(
             tx,
             &reifier_iri,
-            incoming_valid,
+            proof_verifies,
             proof,
             wire_target.as_deref(),
         )?
@@ -1355,6 +1368,9 @@ pub struct SparqlStore {
     store: Arc<Store>,
     /// Serializes link mutations and clear across every clone of this store.
     writer: Arc<Mutex<()>>,
+    /// The space's membership: replayed from the store's membership links when it opens,
+    /// kept by the owner gate, and the read filter of every write ([`SpaceMembership`]).
+    membership: Arc<SpaceMembership>,
     /// Test-only: every read query's text, in order, shared across clones, so a test can
     /// assert which store queries a pipeline ran (see [`SparqlStore::queries_run`]).
     #[cfg(test)]
@@ -1467,17 +1483,40 @@ impl SparqlStore {
             }
             None => Store::new()?,
         };
-        Ok(SparqlStore {
+        let sparql_store = SparqlStore {
             store: Arc::new(store),
             writer: Arc::new(Mutex::new(())),
+            membership: Arc::new(SpaceMembership::new()),
             #[cfg(test)]
             query_log: Arc::new(Mutex::new(Vec::new())),
-        })
+        };
+        sparql_store
+            .membership
+            .rebuild(&sparql_store.membership_links()?);
+        Ok(sparql_store)
     }
 
     /// Returns the number of quads in the store (for diagnostics).
     pub fn quad_count(&self) -> usize {
         self.store.len().unwrap_or(0)
+    }
+
+    /// The space's membership ([`SpaceMembership`]), shared by every clone of this store.
+    pub fn membership(&self) -> &Arc<SpaceMembership> {
+        &self.membership
+    }
+
+    /// Every membership link (`coasys://membership/…`) the store holds, with its stored
+    /// judgement.
+    pub fn membership_links(&self) -> Result<Vec<DecoratedLinkExpression>, Error> {
+        let query = decorated_links_query(
+            "",
+            &format!(
+                "STRSTARTS(STR(?predicate), {})",
+                sparql_string(ad4m_identity_core::membership::MEMBERSHIP_PREFIX)
+            ),
+        );
+        self.query_decorated_links(&EvalStop::none(), &query)
     }
 
     /// Returns true if the store contains any quads beyond the migration marker.
@@ -1537,7 +1576,7 @@ impl SparqlStore {
         if skip_local && is_stored_local(&tx, link)? {
             return Ok(false);
         }
-        write_link_quads(&mut tx, link, status, own)?;
+        write_link_quads(&mut tx, link, status, own, &self.membership)?;
         tx.commit()?;
         Ok(true)
     }
@@ -1694,7 +1733,7 @@ impl SparqlStore {
                 );
                 continue;
             };
-            write_link_quads(&mut tx, link, status, own)?;
+            write_link_quads(&mut tx, link, status, own, &self.membership)?;
         }
         tx.commit()?;
         Ok(())
@@ -1786,6 +1825,46 @@ impl SparqlStore {
                 after,
             ),
         );
+        self.query_decorated_links(&EvalStop::none(), &format!("{query} {}", page_order(limit)))
+    }
+
+    /// The links a membership change may turn on or off (`perspectives::Recheck::Members`),
+    /// membership links aside: those whose person or signing key is one of `persons`, and
+    /// every link stored `notMember`; with `all`, every link stored `valid` too (the space
+    /// just became governed). A page of at most `limit` in reifier order, after the reifier
+    /// `after`.
+    pub fn links_for_members(
+        &self,
+        persons: &[String],
+        all: bool,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<DecoratedLinkExpression>, Error> {
+        let mut wanted = vec![format!(
+            "?linkVerdict = {}",
+            sparql_string(&LinkVerdict::NotMember.stored())
+        )];
+        if all {
+            wanted.push(format!(
+                "?linkVerdict = {}",
+                sparql_string(&LinkVerdict::Valid.stored())
+            ));
+        }
+        if !persons.is_empty() {
+            let list = persons
+                .iter()
+                .map(|p| sparql_string(p))
+                .collect::<Vec<_>>()
+                .join(", ");
+            wanted.push(format!("?person IN ({list})"));
+            wanted.push(format!("?author IN ({list})"));
+        }
+        let filter = format!(
+            "!STRSTARTS(STR(?predicate), {}) && ({})",
+            sparql_string(ad4m_identity_core::membership::MEMBERSHIP_PREFIX),
+            wanted.join(" || ")
+        );
+        let query = decorated_links_query("", &after_reifier(&filter, after));
         self.query_decorated_links(&EvalStop::none(), &format!("{query} {}", page_order(limit)))
     }
 
@@ -2842,7 +2921,7 @@ impl SparqlStore {
             ));
         }
         for (link, status) in &restored {
-            write_link_quads_proof(&mut tx, link, status, true, false)?;
+            write_link_quads_proof(&mut tx, link, status, true, false, &self.membership)?;
         }
         tx.commit()?;
         Ok(metadata_links.len())
@@ -2866,7 +2945,13 @@ impl SparqlStore {
             .lock()
             .map_err(|_| anyhow!("SPARQL store writer lock poisoned"))?;
         let mut tx = self.store.start_transaction()?;
-        write_link_quads(&mut tx, link, link.status.as_ref().unwrap(), true)?;
+        write_link_quads(
+            &mut tx,
+            link,
+            link.status.as_ref().unwrap(),
+            true,
+            &self.membership,
+        )?;
         tx.commit()?;
         Ok(())
     }

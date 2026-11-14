@@ -195,6 +195,7 @@ static KEYS: LazyLock<RwLock<Vec<ConfigKeySpec>>> = LazyLock::new(|| {
                 class,
                 validator: None,
             })
+            .chain(crate::link_servers::config_key_specs())
             .collect(),
     )
 });
@@ -593,11 +594,16 @@ mod tests {
             local_ai_dir: Some("a".into()),
             local_ai_autostart: Some(true),
             local_ai_device: Some(crate::ai_service::local::hardware::Backend::Cpu),
+            link_server: Some(Default::default()),
         })
         .unwrap();
+        // A key is known whole, or through its nested keys (`link_server.url`).
         for key in file.as_object().unwrap().keys() {
-            assert!(class(key).is_some(), "{key} has no class");
+            let nested = infos.iter().any(|i| i.key.starts_with(&format!("{key}.")));
+            assert!(class(key).is_some() || nested, "{key} has no class");
         }
+        assert_eq!(class("link_server.url"), Some(KeyClass::Restart));
+        assert_eq!(class("link_server.platform_url"), Some(KeyClass::Machine));
     }
 
     #[tokio::test]
@@ -985,6 +991,62 @@ mod tests {
             class: KeyClass::Restart,
             validator: None,
         });
+    }
+
+    /// `link_server.url` is checked against the server before it is written: a protocol-1
+    /// link server is refused, a protocol-2 one is written under `link_server`, and an
+    /// operator session from another machine may write it (a restart key).
+    #[tokio::test]
+    async fn link_server_url_is_written_only_for_a_protocol_2_link_server() {
+        let old = crate::link_servers::test_server::serve("200 OK", r#"{"protocol":1}"#).await;
+        let new = crate::link_servers::test_server::serve("200 OK", r#"{"protocol":2}"#).await;
+        let (_dir, path) = config_file("{}");
+
+        let refused = set_config(
+            &started(Some(&path), &[]),
+            false,
+            set(json!({ "link_server.url": old })),
+            VALIDATOR_LIMIT,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            reasons(&refused),
+            vec![("link_server.url".to_string(), RefusalReason::Invalid)]
+        );
+        let detail = refused.refused[0].detail.clone().unwrap();
+        assert!(detail.contains("protocol 1"), "{detail}");
+        assert_eq!(read_values(&path).unwrap().get("link_server"), None);
+
+        let written = set_config(
+            &started(Some(&path), &[]),
+            false,
+            set(json!({ "link_server.url": new.clone() })),
+            VALIDATOR_LIMIT,
+        )
+        .await
+        .unwrap();
+        assert!(written.refused.is_empty(), "{written:?}");
+        assert_eq!(
+            read_values(&path).unwrap().get("link_server"),
+            Some(&json!({ "url": new }))
+        );
+
+        let platform = set_config(
+            &started(Some(&path), &[]),
+            false,
+            set(json!({ "link_server.platform_url": "https://link.platform.example" })),
+            VALIDATOR_LIMIT,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            reasons(&platform),
+            vec![(
+                "link_server.platform_url".to_string(),
+                RefusalReason::LocalOnly
+            )]
+        );
     }
 
     /// The limit: a validator that does not answer in time refuses its key.

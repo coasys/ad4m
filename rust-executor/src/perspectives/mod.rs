@@ -396,6 +396,13 @@ pub enum Recheck {
     Signers(std::collections::BTreeSet<String>),
     /// The links stored as `cantCheck`.
     CantCheck,
+    /// The links a membership change may turn on or off, in one perspective
+    /// ([`crate::membership`]): those of `persons` (person DIDs or bot keys) and every
+    /// `notMember` link; with `all`, every `valid` link too (the space just became governed).
+    Members {
+        persons: std::collections::BTreeSet<String>,
+        all: bool,
+    },
 }
 
 /// Judges the links of `scope` again in every perspective, from the key map, and rewrites
@@ -635,7 +642,9 @@ pub(crate) fn cached_perspective_handle(language_address: &str) -> Option<Perspe
         .cloned()
 }
 
-async fn perspective_by_link_language(language_address: String) -> Option<PerspectiveInstance> {
+pub(crate) async fn perspective_by_link_language(
+    language_address: String,
+) -> Option<PerspectiveInstance> {
     // Fast path: check cache first
     if let Some(handle) = cached_perspective_handle(&language_address) {
         if let Some(perspective) = get_perspective(&handle.uuid) {

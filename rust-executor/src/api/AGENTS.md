@@ -202,7 +202,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-265 methods: Cap 87, CapAnyPointer 1, Executor 48, Open 10, Operator 41, Owns 74, UserOrOperator 4. Local only (the operator on this machine): 16.
+280 methods: Cap 89, CapAnyPointer 2, Executor 48, Open 10, Operator 41, Owns 86, UserOrOperator 4. Local only (the operator on this machine): 16.
 
 | Method | Guard |
 |---|---|
@@ -225,6 +225,7 @@ the guard checked:
 | `agent.permitCapability` | `Owns(Request auth(JSON).requestId, agent:PERMIT)` |
 | `agent.removeApp` | `Owns(Grant id, agent:UPDATE)` |
 | `agent.requestCapability` | `Cap(agent:AUTHENTICATE)` |
+| `agent.revocationReach` | `Cap(agent:READ)` |
 | `agent.revokeToken` | `Owns(Grant token, agent:UPDATE)` |
 | `agent.sign` | `Cap(agent:SIGN)` |
 | `agent.signSessionStatement` | `Operator`, local only |
@@ -320,14 +321,26 @@ the guard checked:
 | `language.remove` | `Executor(language:DELETE)` |
 | `language.source` | `Cap(language:READ)` |
 | `language.writeSettings` | `Executor(language:UPDATE)` |
+| `neighbourhood.addBot` | `Owns(Perspective uuid, neighbourhood:UPDATE)` |
+| `neighbourhood.addMember` | `Owns(Perspective uuid, neighbourhood:UPDATE)` |
+| `neighbourhood.countByPerson` | `Owns(Perspective perspectiveUuid, neighbourhood:READ)` |
+| `neighbourhood.create` | `Owns(Perspective perspectiveUuid, neighbourhood:CREATE)` |
+| `neighbourhood.createInvite` | `Owns(Perspective uuid, neighbourhood:UPDATE)` |
 | `neighbourhood.hasTelepresence` | `Owns(Perspective uuid, neighbourhood:READ)` |
+| `neighbourhood.invites` | `Owns(Perspective uuid, neighbourhood:READ)` |
 | `neighbourhood.join` | `Cap(neighbourhood:READ)` |
+| `neighbourhood.leave` | `Owns(Perspective uuid, neighbourhood:UPDATE)` |
+| `neighbourhood.linkLanguageChoice` | `Owns(Perspective perspectiveUuid, neighbourhood:READ)` |
+| `neighbourhood.members` | `Owns(Perspective uuid, neighbourhood:READ)` |
 | `neighbourhood.onlineAgents` | `Owns(Perspective uuid, neighbourhood:READ)` |
 | `neighbourhood.otherAgents` | `Owns(Perspective uuid, neighbourhood:READ)` |
 | `neighbourhood.ownOnlineStatus` | `Owns(Perspective uuid, neighbourhood:READ)` |
 | `neighbourhood.publish` | `Owns(Perspective perspectiveUuid or perspectiveUUID, neighbourhood:CREATE)` |
+| `neighbourhood.removeBot` | `Owns(Perspective uuid, neighbourhood:UPDATE)` |
+| `neighbourhood.removeMember` | `Owns(Perspective uuid, neighbourhood:UPDATE)` |
 | `neighbourhood.sendBroadcast` | `Owns(Perspective uuid, neighbourhood:UPDATE)` |
 | `neighbourhood.sendSignal` | `Owns(Perspective uuid, neighbourhood:UPDATE)` |
+| `neighbourhood.setJoinMode` | `Owns(Perspective uuid, neighbourhood:UPDATE)` |
 | `neighbourhood.setOnlineStatus` | `Owns(Perspective uuid, neighbourhood:UPDATE)` |
 | `perspective.acceptFlowProposal` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.acceptInterpretation` | `Owns(Perspective uuid, perspective:UPDATE)` |
@@ -402,6 +415,7 @@ the guard checked:
 | `runtime.inbox` | `Cap(runtime.messages:READ)` |
 | `runtime.info` | `Open` |
 | `runtime.linkLanguageTemplates` | `Cap(runtime.known_link_languages:READ)` |
+| `runtime.linkServers` | `Cap(runtime.known_link_languages:READ)` |
 | `runtime.logTail` | `Operator` |
 | `runtime.networkMetrics` | `Cap(runtime.hc_agent_info:READ)` |
 | `runtime.notifications` | `Cap(agent:UPDATE)` |
@@ -448,6 +462,7 @@ the guard checked:
 | `sfu.startRoom` | `Cap(neighbourhood:UPDATE)` |
 | `sfu.status` | `Cap(neighbourhood:READ)` |
 | `sfu.stopRoom` | `Cap(neighbourhood:UPDATE)` |
+| `spaces.list` | `CapAnyPointer(perspective:READ)` |
 | `storage.keys` | `Operator` |
 | `storage.reencrypt` | `Operator`, local only |
 | `storage.rotatePersonKey` | `Operator` |

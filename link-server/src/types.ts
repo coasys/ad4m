@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { WireMembershipLink } from "./identity-core.js";
 
 /**
  * Shared types for the link-server.
@@ -87,6 +88,13 @@ export type ServerWsMessage =
   | { type: "peer-left"; did: string }
   | { type: "status-changed"; did: string; status: unknown }
   | { type: "keys-granted"; versions: number[] }
+  /** Membership links that counted, in order; `seq` is the last one's (`GET /membership?since=`). */
+  | { type: "membership"; links: WireMembershipLink[]; seq: number }
+  /**
+   * The room key must be rotated: someone joined, was removed, or a key's log revoked it.
+   * `removedKeys` are the keys that must not get the next key.
+   */
+  | { type: "rotate-needed"; reason: "joined" | "removed" | "revoked"; removedKeys: string[] }
   | { type: "auth-error"; error: string };
 
 /** Client -> server WebSocket messages. */
@@ -167,6 +175,11 @@ export interface AuthClaims {
   did: string;
   roomId: string;
   token: string;
+  /** The person the key speaks for; undefined for a device-only key. */
+  person?: string;
+  byBot: boolean;
+  /** Whether the key is admitted to the room now. */
+  admitted: boolean;
 }
 
 // Augment FastifyRequest so preValidation/preHandler hooks can stash verified

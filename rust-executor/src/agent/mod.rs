@@ -13,6 +13,7 @@ use crate::wallet::wallet_backend;
 pub mod capabilities;
 pub mod grants;
 pub mod rekey;
+pub mod room_key_seed;
 pub mod sealed_box;
 pub mod session;
 pub mod signatures;
@@ -309,6 +310,7 @@ pub fn did_for_context(context: &AgentContext) -> Result<String, AnyError> {
 }
 
 pub fn sign_for_context(payload: &[u8], context: &AgentContext) -> Result<Vec<u8>, AnyError> {
+    room_key_seed::refuse_room_key_seed_domain(payload)?;
     let backend = wallet_backend();
     let key_name = context.wallet_key_name()?;
     let signature = backend
@@ -408,6 +410,7 @@ pub fn sign_string_hex_for_context(
     data: String,
     context: &AgentContext,
 ) -> Result<String, AnyError> {
+    room_key_seed::refuse_room_key_seed_domain(data.as_bytes())?;
     let payload_bytes = signatures::hash_message(&data);
     let signature = sign_for_context(&payload_bytes, context)?;
     let sig_hex = hex::encode(signature);

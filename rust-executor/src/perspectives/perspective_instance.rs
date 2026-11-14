@@ -2005,6 +2005,30 @@ impl PerspectiveInstance {
         Ok(())
     }
 
+    /// The membership links the link language synced (A7): each through the owner gate as a
+    /// peer's link, one at a time (`persist_membership_links`), then what they changed
+    /// published as a local write's is. Membership links never come in a diff (R13).
+    pub async fn membership_links_from_link_language(
+        &self,
+        links: Vec<LinkExpression>,
+    ) -> Vec<crate::membership::MembershipLinkResult> {
+        crate::identity::prepare_link_signers(&links).await;
+        let (results, written) = self.persist_membership_links(links);
+        self.publish_membership_changes().await;
+        if !written.is_empty() {
+            let decorated = DecoratedPerspectiveDiff {
+                additions: written
+                    .into_iter()
+                    .map(|link| DecoratedLinkExpression::from((link, LinkStatus::Shared)))
+                    .collect(),
+                removals: vec![],
+            };
+            self.update_prolog_engines(decorated.clone()).await;
+            self.pubsub_publish_diff(&decorated).await;
+        }
+        results
+    }
+
     pub async fn telepresence_signal_from_link_language(
         &self,
         mut signal: PerspectiveExpression,
@@ -3315,7 +3339,7 @@ impl PerspectiveInstance {
         Ok(true)
     }
 
-    async fn ensure_prolog_engine_pool(&self) -> Result<(), AnyError> {
+    pub(crate) async fn ensure_prolog_engine_pool(&self) -> Result<(), AnyError> {
         // Prolog engine pools are only used in Pooled mode
         if PROLOG_MODE != PrologMode::Pooled {
             return Ok(());
@@ -4580,11 +4604,65 @@ impl PerspectiveInstance {
         // The store judges each link from the key map without I/O: fill it for the
         // signers first (the key index and their logs, through the agent language).
         crate::identity::prepare_link_signers(&diff.additions).await;
-        let _persisting = self
-            .persist_lock
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        self.write_link_diff(diff, own)
+        let effects = {
+            let _persisting = self
+                .persist_lock
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            self.write_link_diff(diff, own)?
+        };
+        self.publish_membership_changes().await;
+        Ok(effects)
+    }
+
+    /// What the membership links written since the last call changed
+    /// ([`crate::membership::SpaceMembership::take_changes`]): one
+    /// `neighbourhood-membership-changed` to the owners, and the links those changes turn on
+    /// or off judged again (`Recheck::Members`). A caller of [`Self::write_link_diff`] calls
+    /// it once `persist_lock` is released.
+    pub(crate) async fn publish_membership_changes(&self) {
+        let (changes, governed_now) = self.sparql_store.membership().take_changes();
+        if changes.is_empty() && !governed_now {
+            return;
+        }
+        if !changes.is_empty() {
+            let handle = self.persisted.lock().await.clone();
+            super::publish_to_owners(
+                Topic::NeighbourhoodMembershipChanged,
+                super::event_recipients(&handle),
+                crate::membership::NeighbourhoodMembershipChangedEvent {
+                    perspective_uuid: handle.uuid.clone(),
+                    changes: changes.iter().map(Into::into).collect(),
+                },
+            );
+        }
+        let scope = super::Recheck::Members {
+            persons: crate::membership::changed_persons(&changes),
+            all: governed_now,
+        };
+        if let Err(e) = self.recheck_links(&scope).await {
+            log::warn!("membership: re-check of the links a membership change touches failed: {e}");
+        }
+    }
+
+    /// A room key change the link language reports (`roomKeyEvent`): one
+    /// `neighbourhood-room-key-changed` to the owners.
+    /// The time also lands on the rows of the keys it shut out
+    /// ([`crate::membership::reach::note_room_key_event`], `agent.revocationReach`).
+    pub(crate) async fn publish_room_key_event(&self, event: crate::membership::RoomKeyEvent) {
+        let handle = self.persisted.lock().await.clone();
+        let now = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0);
+        crate::membership::reach::note_room_key_event(&handle, &event, now);
+        super::publish_to_owners(
+            Topic::NeighbourhoodRoomKeyChanged,
+            super::event_recipients(&handle),
+            crate::membership::NeighbourhoodRoomKeyChangedEvent {
+                perspective_uuid: handle.uuid.clone(),
+                kind: event.kind,
+                removed_keys: event.removed_keys,
+                version: event.version,
+            },
+        );
     }
 
     /// The store write of [`Self::persist_link_diff`], for a caller that holds `persist_lock`
@@ -4617,6 +4695,13 @@ impl PerspectiveInstance {
             .filter(|a| !effects.covers(a))
             .cloned()
             .collect();
+
+        // The owner gate (R18): a membership link the space's replay refuses refuses the
+        // whole diff, before anything is written.
+        self.sparql_store
+            .membership()
+            .gate(&additions, own)
+            .map_err(|e| deno_core::anyhow::anyhow!(e))?;
 
         // One store transaction for the whole diff, so a batch lands as one
         // write. On failure nothing was written; fall back to one link at a
@@ -4713,6 +4798,28 @@ impl PerspectiveInstance {
                     }
                 }
             }
+            super::Recheck::Members { persons, all } => {
+                let persons: Vec<String> = persons.iter().cloned().collect();
+                let mut after: Option<String> = None;
+                loop {
+                    let stored = self.sparql_store.links_for_members(
+                        &persons,
+                        *all,
+                        after.as_deref(),
+                        page,
+                    )?;
+                    let full = stored.len() == page;
+                    after = stored.last().map(super::sparql_store::reifier_of);
+                    let rewrites = self
+                        .rejudge(stored.into_iter().map(|link| (link, false)).collect())
+                        .await?;
+                    changed += rewrites.len();
+                    self.publish_rewrites(rewrites).await;
+                    if !full {
+                        break;
+                    }
+                }
+            }
             super::Recheck::CantCheck => {
                 let mut cursor = self.recheck_cursor.lock().await;
                 let stored = self
@@ -4794,6 +4901,11 @@ impl PerspectiveInstance {
             // key map: the one order the executor knows. The store judges the same way.
             let entered = (before.verdict == Some(LinkVerdict::Valid)).then_some(false);
             let now = link.check_entered(entered);
+            // The space's read filter, as the store writes it (`SpaceMembership::overlay`).
+            let now = self
+                .sparql_store
+                .membership()
+                .overlay(link, link.status.as_ref(), now);
             if now.verdict == LinkVerdict::CantCheck && stale {
                 continue;
             }

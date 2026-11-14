@@ -1,4 +1,4 @@
-// The operator admission page, served by operator.ts. Kept as strings so
+// The operator page, served by operator.ts. Kept as strings so
 // `tsc` ships it in dist/ with no copy step. The styles are a file of their
 // own (admin.css), because the page's CSP (default-src 'self') blocks inline
 // styles. The script builds every node with textContent: room ids and DIDs
@@ -10,28 +10,25 @@ export const OPERATOR_PAGE_HTML = `<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
-<title>Link server admission</title>
+<title>Link server rooms</title>
 <link rel="stylesheet" href="admin.css">
 </head>
 <body>
-<h1>Link server admission <span id="instance" class="tag instance"></span></h1>
+<h1>Link server rooms <span id="instance" class="tag instance"></span></h1>
 <div class="muted">Signed in as <span id="who">?</span></div>
 <p id="admission" class="note"></p>
-<p class="note">A room is a neighbourhood (the server link language's UID). Its first agent is the room admin.
-An added DID can sync once it reconnects. It can read and write encrypted links once a member
-holding the room keys has been online and sealed them to its DID.</p>
+<p class="note">A room is a space. Who belongs to it is the room's own signed membership: its
+creator is its first admin, and its admins add, remove and invite people. You cannot add or
+remove anyone here; you can suspend a room, which closes it to everyone until you resume it.</p>
 <div id="error" role="alert"></div>
 <h2>Rooms</h2>
-<table id="rooms"><thead><tr><th>Room</th><th>Admin</th><th>Members</th><th>Created</th></tr></thead><tbody></tbody></table>
+<table id="rooms"><thead><tr><th>Room</th><th>Creator</th><th>Members</th><th>Created</th><th>State</th></tr></thead><tbody></tbody></table>
 <section id="detail" hidden>
   <h2>Room <span id="detail-id" class="mono"></span></h2>
-  <form id="add-form">
-    <input id="add-did" type="text" placeholder="did:key:z6Mk..." autocomplete="off" spellcheck="false" required>
-    <button type="submit">Admit DID</button>
-  </form>
-  <table id="members"><thead><tr><th>Member</th><th>Added</th><th>Added by</th><th></th></tr></thead><tbody></tbody></table>
-  <h2>History</h2>
-  <table id="history"><thead><tr><th>When</th><th>Change</th><th>DID</th><th>By</th></tr></thead><tbody></tbody></table>
+  <p><span id="detail-state"></span> <button id="suspend" type="button"></button></p>
+  <table id="members"><thead><tr><th>Member</th><th>Role</th><th>Since</th></tr></thead><tbody></tbody></table>
+  <h2>Keys</h2>
+  <table id="keys"><thead><tr><th>Key</th><th>Speaks for</th><th>State</th><th>Last seen</th></tr></thead><tbody></tbody></table>
 </section>
 <h2>Logs <select id="log-level"><option value="30">info and up</option><option value="40">warn and up</option><option value="50">error and up</option></select></h2>
 <div id="log-lines" role="log"></div>
@@ -52,6 +49,7 @@ tr.room { cursor: pointer; }
 tr.room:hover, tr.room.selected { background: #f2f2f7; }
 .tag { display: inline-block; font-size: .75rem; padding: 0 .4rem; border-radius: .6rem; background: #e5e5ea; margin-right: .25rem; }
 .tag.admin { background: #ffe8a3; }
+.tag.suspended, .tag.revoked { background: #ffd1d1; }
 .tag.online { background: #c9f0d1; }
 .tag.instance { font-size: .9rem; background: #d6e4ff; vertical-align: middle; }
 form { display: flex; gap: .5rem; margin: .75rem 0; }
@@ -100,65 +98,76 @@ export const OPERATOR_PAGE_JS = `"use strict";
       if (data.rooms.length === 0) {
         var empty = el("tr");
         var cell = el("td", "No rooms yet.", "muted");
-        cell.colSpan = 4;
+        cell.colSpan = 5;
         empty.appendChild(cell);
         tbody.appendChild(empty);
       }
       data.rooms.forEach(function (room) {
         var row = el("tr", null, "room" + (room.id === selected ? " selected" : ""));
         row.appendChild(el("td", room.id, "mono"));
-        row.appendChild(el("td", room.admin, "mono"));
+        row.appendChild(el("td", room.creator, "mono"));
         row.appendChild(el("td", room.memberCount));
         row.appendChild(el("td", room.createdAt.slice(0, 16).replace("T", " ")));
+        row.appendChild(el("td", stateOf(room)));
         row.addEventListener("click", function () { selectRoom(room.id); });
         tbody.appendChild(row);
       });
     });
   }
 
+  function stateOf(room) {
+    return room.legacy ? "legacy (closed)" : room.suspended ? "suspended" : "open";
+  }
+
+  function when(iso) { return (iso || "").slice(0, 16).replace("T", " "); }
+
   function renderRoom(room) {
     document.getElementById("detail").hidden = false;
     document.getElementById("detail-id").textContent = room.id;
-    var tbody = document.querySelector("#members tbody");
-    tbody.replaceChildren();
+    document.getElementById("detail-state").textContent = "State: " + stateOf(room);
+    var toggle = document.getElementById("suspend");
+    toggle.hidden = !!room.legacy;
+    toggle.textContent = room.suspended ? "Resume room" : "Suspend room";
+    toggle.onclick = function () {
+      var action = room.suspended ? "resume" : "suspend";
+      if (action === "suspend" && !window.confirm("Suspend " + room.id + "? Everyone in it is disconnected.")) return;
+      showError("");
+      api("/rooms/" + encodeURIComponent(room.id) + "/" + action, {})
+        .then(renderRoom).then(loadRooms)
+        .catch(function (e) { showError(e.message); });
+    };
+
+    var members = document.querySelector("#members tbody");
+    members.replaceChildren();
     room.members.forEach(function (member) {
       var row = el("tr");
       var who = el("td", null, "mono");
-      if (member.did === room.admin) who.appendChild(el("span", "admin", "tag admin"));
       if (member.online) who.appendChild(el("span", "online", "tag online"));
-      who.appendChild(el("span", member.did, "mono"));
+      who.appendChild(el("span", member.person, "mono"));
       row.appendChild(who);
-      row.appendChild(el("td", (member.addedAt || "").slice(0, 16).replace("T", " ")));
-      row.appendChild(el("td", member.addedBy ? actorLabel(member.addedBy) : "", "mono"));
-      var action = el("td");
-      if (member.did !== room.admin) {
-        var remove = el("button", "Remove");
-        remove.addEventListener("click", function () {
-          if (!window.confirm("Remove " + member.did + " from " + room.id + "?")) return;
-          changeAcl("remove", member.did);
-        });
-        action.appendChild(remove);
-      }
-      row.appendChild(action);
-      tbody.appendChild(row);
+      var role = el("td");
+      role.appendChild(el("span", member.role, member.role === "admin" ? "tag admin" : "tag"));
+      if (member.botOf) role.appendChild(el("span", "of " + member.botOf, "mono"));
+      row.appendChild(role);
+      row.appendChild(el("td", when(member.since)));
+      members.appendChild(row);
     });
-    renderHistory(room);
-  }
 
-  function actorLabel(change) {
-    return change.source === "operator" ? change.actor : "room admin";
-  }
-
-  function renderHistory(room) {
-    var tbody = document.querySelector("#history tbody");
-    tbody.replaceChildren();
-    room.history.forEach(function (change) {
+    var keys = document.querySelector("#keys tbody");
+    keys.replaceChildren();
+    room.keys.forEach(function (key) {
       var row = el("tr");
-      row.appendChild(el("td", change.at.slice(0, 16).replace("T", " ")));
-      row.appendChild(el("td", change.action === "add" ? "admitted" : "removed"));
-      row.appendChild(el("td", change.did, "mono"));
-      row.appendChild(el("td", actorLabel(change), "mono"));
-      tbody.appendChild(row);
+      var who = el("td", null, "mono");
+      if (key.online) who.appendChild(el("span", "online", "tag online"));
+      who.appendChild(el("span", key.did, "mono"));
+      row.appendChild(who);
+      row.appendChild(el("td", key.person ? key.person + (key.byBot ? " (bot)" : "") : "no person", "mono"));
+      var state = el("td");
+      state.appendChild(el("span", key.revoked ? "revoked" : key.admitted ? "admitted" : "not admitted",
+        key.revoked ? "tag revoked" : "tag"));
+      row.appendChild(state);
+      row.appendChild(el("td", when(key.updatedAt)));
+      keys.appendChild(row);
     });
   }
 
@@ -167,21 +176,6 @@ export const OPERATOR_PAGE_JS = `"use strict";
     showError("");
     return api("/rooms/" + encodeURIComponent(id)).then(renderRoom).then(loadRooms).catch(function (e) { showError(e.message); });
   }
-
-  function changeAcl(action, did) {
-    showError("");
-    return api("/rooms/" + encodeURIComponent(selected) + "/acl", { action: action, did: did })
-      .then(renderRoom).then(loadRooms)
-      .catch(function (e) { showError(e.message); });
-  }
-
-  document.getElementById("add-form").addEventListener("submit", function (event) {
-    event.preventDefault();
-    var input = document.getElementById("add-did");
-    var did = input.value.trim();
-    if (!did) return;
-    changeAcl("add", did).then(function () { if (!errorBox.textContent) input.value = ""; });
-  });
 
   // Live logs (Server-Sent Events): the server's buffered lines, then each new
   // one. Every (re)connect resends the buffer, so the list starts over, and it
@@ -210,11 +204,11 @@ export const OPERATOR_PAGE_JS = `"use strict";
   api("/whoami").then(function (data) {
     document.getElementById("who").textContent = data.operator || "(no sign-in header)";
     document.getElementById("admission").textContent = data.admission === "auto"
-      ? "Admission: auto (--auto-admit). Every DID that proves its key joins any room."
-      : "Admission: allowlist (the default). A room's first DID is its admin; anyone else joins once the room admin or you admit their DID.";
+      ? "Admission: auto (--auto-admit, tests and development only). Every key that authenticates is admitted to any room."
+      : "Admission: membership (the default). A key is admitted while the person it speaks for is a member of the room.";
     if (data.instance) {
       document.getElementById("instance").textContent = data.instance;
-      document.title = "Link server admission: " + data.instance;
+      document.title = "Link server rooms: " + data.instance;
     }
   }).catch(function () {});
   loadRooms().catch(function (e) { showError(e.message); });

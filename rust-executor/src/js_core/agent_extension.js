@@ -3,7 +3,7 @@ import {
     agent_sign_string_hex, agent, agent_is_initialized, agent_is_unlocked,
     agent_create_signed_expression_stringified, agent_create_signed_expression_for_user,
     agent_did_for_user, agent_list_user_emails, agent_get_all_local_user_dids, agent_agent_for_user,
-    agent_open_sealed
+    agent_open_sealed, agent_room_key_seed
 } from 'ext:core/ops';
 
 ((globalThis) => {
@@ -52,6 +52,10 @@ import {
         },
         openSealed: (sealed) => {
             return agent_open_sealed(sealed);
+        },
+        // The 32-byte seed of the agent's room key X25519 key (agent/room_key_seed.rs).
+        roomKeySeed: () => {
+            return new Uint8Array(agent_room_key_seed());
         },
         agent: () => {
             return agent();

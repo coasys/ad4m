@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
 import { readdirSync } from "node:fs";
 import { test } from "node:test";
 import {
   authenticateAgent,
+  createRoom,
   createTestAgent,
   openAuthenticatedWs,
   startTestServer,
@@ -17,7 +17,7 @@ const fdCount = () => readdirSync("/proc/self/fd").length;
 test("descriptors stay flat across many WebSocket connects and disconnects", { skip: process.platform !== "linux" }, async () => {
   const server = await startTestServer();
   try {
-    const roomId = randomUUID();
+    const roomId = await createRoom(server.url);
     const admin = await createTestAgent();
     const token = await authenticateAgent(server.url, roomId, admin);
 

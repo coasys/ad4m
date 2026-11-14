@@ -7,6 +7,7 @@ import { ExpressionClient } from './expression/ExpressionClient'
 import { AIClient } from './ai/AIClient'
 import { IdentityClient } from './identity/IdentityClient'
 import { BotClient } from './bot/BotClient'
+import { SpacesClient } from './spaces/SpacesClient'
 import { ApiClient, EventFilter } from './apiClient'
 import type { EventMap, EventName } from './generated/api/Events'
 import { Ad4mModel } from './model/Ad4mModel'
@@ -35,6 +36,7 @@ export class Ad4mClient {
     #aiClient: AIClient
     #identityClient: IdentityClient
     #botClient: BotClient
+    #spacesClient: SpacesClient
 
     constructor(
         baseUrl: string,
@@ -56,6 +58,7 @@ export class Ad4mClient {
         this.#runtimeClient = new RuntimeClient(baseUrl, token, this.#apiClient)
         this.#identityClient = new IdentityClient(baseUrl, token, this.#apiClient)
         this.#botClient = new BotClient(baseUrl, token, this.#apiClient)
+        this.#spacesClient = new SpacesClient(baseUrl, token, this.#apiClient)
 
         // Register with AD4M DevTools if the bridge is installed (e.g. browser extension)
         try {
@@ -103,6 +106,11 @@ export class Ad4mClient {
     /** Bots that act for a person under the person's grant. */
     get bot(): BotClient {
         return this.#botClient
+    }
+
+    /** The spaces this session's person made or joined. */
+    get spaces(): SpacesClient {
+        return this.#spacesClient
     }
 
     /**

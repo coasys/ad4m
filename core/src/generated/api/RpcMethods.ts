@@ -17,6 +17,7 @@ import type { AgentAddEntanglementProofsParams } from "./AgentAddEntanglementPro
 import type { AgentByDidParams } from "./AgentByDidParams";
 import type { AgentRemoveAppParams } from "./AgentRemoveAppParams";
 import type { AgentReply } from "./AgentReply";
+import type { AgentRevocationReachParams } from "./AgentRevocationReachParams";
 import type { AgentRevokeTokenParams } from "./AgentRevokeTokenParams";
 import type { AgentSignature } from "./AgentSignature";
 import type { AgentStatus } from "./AgentStatus";
@@ -51,9 +52,12 @@ import type { ComputeLogEntry } from "./ComputeLogEntry";
 import type { CosignInceptParams } from "./CosignInceptParams";
 import type { CreateBotParams } from "./CreateBotParams";
 import type { CreateExpressionRequest } from "./CreateExpressionRequest";
+import type { CreateNeighbourhoodParams } from "./CreateNeighbourhoodParams";
+import type { CreateNeighbourhoodResult } from "./CreateNeighbourhoodResult";
 import type { CreatePerspectiveRequest } from "./CreatePerspectiveRequest";
 import type { CreateUserRequest } from "./CreateUserRequest";
 import type { CreatedBot } from "./CreatedBot";
+import type { CreatedInvite } from "./CreatedInvite";
 import type { DecoratedLinkExpression } from "./DecoratedLinkExpression";
 import type { DecoratedPerspective } from "./DecoratedPerspective";
 import type { DeleteRequestParams } from "./DeleteRequestParams";
@@ -93,6 +97,7 @@ import type { InboxEntry } from "./InboxEntry";
 import type { InboxPutParams } from "./InboxPutParams";
 import type { InboxStored } from "./InboxStored";
 import type { InteractionMeta } from "./InteractionMeta";
+import type { InviteInfo } from "./InviteInfo";
 import type { JoinAccepted } from "./JoinAccepted";
 import type { JoinCancelled } from "./JoinCancelled";
 import type { JoinNeighbourhoodRequest } from "./JoinNeighbourhoodRequest";
@@ -109,7 +114,10 @@ import type { LanguageListParams } from "./LanguageListParams";
 import type { LanguageMeta } from "./LanguageMeta";
 import type { LanguageRef } from "./LanguageRef";
 import type { LanguageWriteSettingsParams } from "./LanguageWriteSettingsParams";
+import type { LinkLanguageChoice } from "./LinkLanguageChoice";
+import type { LinkLanguageChoiceParams } from "./LinkLanguageChoiceParams";
 import type { LinkLanguageTemplatesRequest } from "./LinkLanguageTemplatesRequest";
+import type { LinkServerEntry } from "./LinkServerEntry";
 import type { LocalAiHardware } from "./LocalAiHardware";
 import type { LocalAiInstallParams } from "./LocalAiInstallParams";
 import type { LocalAiPlan } from "./LocalAiPlan";
@@ -120,10 +128,16 @@ import type { LogParams } from "./LogParams";
 import type { LogTail } from "./LogTail";
 import type { LogTailParams } from "./LogTailParams";
 import type { LoginWithKeyParams } from "./LoginWithKeyParams";
+import type { MemberInfo } from "./MemberInfo";
 import type { Model } from "./Model";
 import type { ModelStatus } from "./ModelStatus";
+import type { NeighbourhoodAddMemberParams } from "./NeighbourhoodAddMemberParams";
+import type { NeighbourhoodBotParams } from "./NeighbourhoodBotParams";
 import type { NeighbourhoodBroadcastParams } from "./NeighbourhoodBroadcastParams";
+import type { NeighbourhoodCreateInviteParams } from "./NeighbourhoodCreateInviteParams";
+import type { NeighbourhoodJoinModeParams } from "./NeighbourhoodJoinModeParams";
 import type { NeighbourhoodOnlineStatusParams } from "./NeighbourhoodOnlineStatusParams";
+import type { NeighbourhoodPersonParams } from "./NeighbourhoodPersonParams";
 import type { NeighbourhoodSignalParams } from "./NeighbourhoodSignalParams";
 import type { NeighbourhoodUuidParams } from "./NeighbourhoodUuidParams";
 import type { Notification } from "./Notification";
@@ -136,6 +150,8 @@ import type { OpenLinkRequest } from "./OpenLinkRequest";
 import type { OpenOfferParams } from "./OpenOfferParams";
 import type { OverlayView } from "./OverlayView";
 import type { PermitCapabilityRequest } from "./PermitCapabilityRequest";
+import type { PersonCount } from "./PersonCount";
+import type { PersonCountQuery } from "./PersonCountQuery";
 import type { PerspectiveAddAutoProcessorParams } from "./PerspectiveAddAutoProcessorParams";
 import type { PerspectiveAddLinkExpressionParams } from "./PerspectiveAddLinkExpressionParams";
 import type { PerspectiveAddLinkParams } from "./PerspectiveAddLinkParams";
@@ -204,6 +220,7 @@ import type { RequestPosted } from "./RequestPosted";
 import type { RequestsParams } from "./RequestsParams";
 import type { ResetLogParams } from "./ResetLogParams";
 import type { ResolveParams } from "./ResolveParams";
+import type { RevocationReach } from "./RevocationReach";
 import type { RunAgentRequest } from "./RunAgentRequest";
 import type { RunInterpretationRequest } from "./RunInterpretationRequest";
 import type { RunInterpretationWithHarnessRequest } from "./RunInterpretationWithHarnessRequest";
@@ -252,6 +269,7 @@ import type { SignMessageRequest } from "./SignMessageRequest";
 import type { SignSessionStatementParams } from "./SignSessionStatementParams";
 import type { SignedHead } from "./SignedHead";
 import type { SignedKeyStatement } from "./SignedKeyStatement";
+import type { SpaceHolding } from "./SpaceHolding";
 import type { StorageReencryptParams } from "./StorageReencryptParams";
 import type { StorageReencryptResult } from "./StorageReencryptResult";
 import type { StorageRotatePersonKeyParams } from "./StorageRotatePersonKeyParams";
@@ -303,6 +321,7 @@ export interface RpcMethods {
   "agent.permitCapability": { params: PermitCapabilityRequest; result: string };
   "agent.removeApp": { params: AgentRemoveAppParams; result: Array<Apps> };
   "agent.requestCapability": { params: RequestCapabilityRequest; result: string };
+  "agent.revocationReach": { params: AgentRevocationReachParams; result: Array<RevocationReach> };
   "agent.revokeToken": { params: AgentRevokeTokenParams; result: Array<Apps> };
   "agent.sign": { params: SignMessageRequest; result: AgentSignature };
   "agent.signSessionStatement": { params: SignSessionStatementParams; result: SignedKeyStatement };
@@ -400,14 +419,26 @@ export interface RpcMethods {
   "language.remove": { params: LanguageAddressParams; result: boolean };
   "language.source": { params: LanguageAddressParams; result: string };
   "language.writeSettings": { params: LanguageWriteSettingsParams; result: boolean };
+  "neighbourhood.addBot": { params: NeighbourhoodBotParams; result: null };
+  "neighbourhood.addMember": { params: NeighbourhoodAddMemberParams; result: null };
+  "neighbourhood.countByPerson": { params: PersonCountQuery; result: PersonCount };
+  "neighbourhood.create": { params: CreateNeighbourhoodParams; result: CreateNeighbourhoodResult };
+  "neighbourhood.createInvite": { params: NeighbourhoodCreateInviteParams; result: CreatedInvite };
   "neighbourhood.hasTelepresence": { params: NeighbourhoodUuidParams; result: boolean };
+  "neighbourhood.invites": { params: NeighbourhoodUuidParams; result: Array<InviteInfo> };
   "neighbourhood.join": { params: JoinNeighbourhoodRequest; result: PerspectiveHandle };
+  "neighbourhood.leave": { params: NeighbourhoodUuidParams; result: null };
+  "neighbourhood.linkLanguageChoice": { params: LinkLanguageChoiceParams; result: LinkLanguageChoice | null };
+  "neighbourhood.members": { params: NeighbourhoodUuidParams; result: Array<MemberInfo> };
   "neighbourhood.onlineAgents": { params: NeighbourhoodUuidParams; result: Array<OnlineAgent> };
   "neighbourhood.otherAgents": { params: NeighbourhoodUuidParams; result: Array<string> };
   "neighbourhood.ownOnlineStatus": { params: NeighbourhoodUuidParams; result: PerspectiveExpression | null };
   "neighbourhood.publish": { params: PublishNeighbourhoodRequest; result: string };
+  "neighbourhood.removeBot": { params: NeighbourhoodBotParams; result: null };
+  "neighbourhood.removeMember": { params: NeighbourhoodPersonParams; result: null };
   "neighbourhood.sendBroadcast": { params: NeighbourhoodBroadcastParams; result: boolean };
   "neighbourhood.sendSignal": { params: NeighbourhoodSignalParams; result: boolean };
+  "neighbourhood.setJoinMode": { params: NeighbourhoodJoinModeParams; result: null };
   "neighbourhood.setOnlineStatus": { params: NeighbourhoodOnlineStatusParams; result: boolean };
   "perspective.acceptFlowProposal": { params: PerspectiveFlowProposalParams; result: Array<FireOutcome> };
   "perspective.acceptInterpretation": { params: PerspectiveResolveInterpretationParams; result: boolean };
@@ -482,6 +513,7 @@ export interface RpcMethods {
   "runtime.inbox": { params: Record<string, never>; result: Array<PerspectiveExpression> };
   "runtime.info": { params: Record<string, never>; result: RuntimeInfo };
   "runtime.linkLanguageTemplates": { params: Record<string, never>; result: Array<LanguageMeta> };
+  "runtime.linkServers": { params: Record<string, never>; result: Array<LinkServerEntry> };
   "runtime.logTail": { params: LogTailParams; result: LogTail };
   "runtime.networkMetrics": { params: Record<string, never>; result: string };
   "runtime.notifications": { params: Record<string, never>; result: Array<Notification> };
@@ -528,6 +560,7 @@ export interface RpcMethods {
   "sfu.startRoom": { params: SfuRoomParams; result: SfuRoomInfo };
   "sfu.status": { params: Record<string, never>; result: SfuStatus };
   "sfu.stopRoom": { params: SfuRoomParams; result: boolean };
+  "spaces.list": { params: Record<string, never>; result: Array<SpaceHolding> };
   "storage.keys": { params: Record<string, never>; result: KeyringSummary };
   "storage.reencrypt": { params: StorageReencryptParams; result: StorageReencryptResult };
   "storage.rotatePersonKey": { params: StorageRotatePersonKeyParams; result: StorageRotatePersonKeyResult };
@@ -565,6 +598,7 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "agent.getEntanglementProofs",
   "agent.getTrustedAgents",
   "agent.isLocked",
+  "agent.revocationReach",
   "agent.status",
   "ai.detectEndpoints",
   "ai.discoverModels",
@@ -603,7 +637,11 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "language.get",
   "language.meta",
   "language.source",
+  "neighbourhood.countByPerson",
   "neighbourhood.hasTelepresence",
+  "neighbourhood.invites",
+  "neighbourhood.linkLanguageChoice",
+  "neighbourhood.members",
   "neighbourhood.onlineAgents",
   "neighbourhood.otherAgents",
   "neighbourhood.ownOnlineStatus",
@@ -636,6 +674,7 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "runtime.inbox",
   "runtime.info",
   "runtime.linkLanguageTemplates",
+  "runtime.linkServers",
   "runtime.logTail",
   "runtime.networkMetrics",
   "runtime.notifications",
@@ -656,6 +695,7 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "sfu.sfuPeerForNeighbourhood",
   "sfu.sfuPeersForNeighbourhood",
   "sfu.status",
+  "spaces.list",
   "storage.keys",
   "user.currentSession",
   "user.list",
@@ -678,6 +718,7 @@ export const LONG_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "bot.createAgent",
   "language.applyTemplate",
   "language.publish",
+  "neighbourhood.create",
   "neighbourhood.join",
   "neighbourhood.publish",
   "perspective.runAgent",

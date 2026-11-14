@@ -8,3 +8,6 @@ dist/
 data/
 *.log
 .DS_Store
+# Generated wasm bindings: ad4m-keyring/wasm/build.sh and ad4m-identity-core/build-node.sh
+keyring/
+identity-core/

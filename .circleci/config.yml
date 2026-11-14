@@ -164,9 +164,28 @@ commands:
             echo "Go: $(go version)"
             echo "pnpm: $(pnpm --version || echo 'not installed yet')"
 
+  locked_wasm_bindgen:
+    description: "Install the wasm-bindgen CLI Cargo.lock locks into target/wasm-tools (once per workdir)"
+    steps:
+      - run:
+          # The wasm bindings the link server and the server link language build
+          # (ad4m-identity-core/build-node.sh, ad4m-keyring/wasm/build.sh) need the
+          # wasm-bindgen CLI of Cargo.lock's version, which is not the one setup_env puts
+          # on PATH. Both scripts look in target/wasm-tools/bin first; the clippy job's
+          # wasm tests install the same one there.
+          name: Install the locked wasm-bindgen CLI
+          command: |
+            WASM_BINDGEN=$(grep -A1 '^name = "wasm-bindgen"$' Cargo.lock | sed -n 's/^version = "\(.*\)"$/\1/p')
+            if ! target/wasm-tools/bin/wasm-bindgen --version 2>/dev/null | grep -q " $WASM_BINDGEN\$"; then
+              cargo install wasm-bindgen-cli --version "$WASM_BINDGEN" --locked --root target/wasm-tools
+            fi
+            rustup target add wasm32-unknown-unknown
+          no_output_timeout: 30m
+
   build_adam:
     description: "Build the dapp, the Deno snapshot and the ADAM binaries (target/release/ad4m, ad4m-executor)"
     steps:
+      - locked_wasm_bindgen
       - run:
           # Install per-workspace `hc` + `kitsune2-bootstrap-srv` matching
           # Cargo.lock. Needed before build_integration_inputs because the bootstrap-languages
@@ -280,11 +299,12 @@ commands:
             # Drop the previous branch's outputs first (cross-branch shared
             # workdir) so nothing stale survives next to this SHA's files.
             rm -rf .turbo bootstrap-languages/*/.turbo bootstrap-languages/*/build \
-                   bootstrap-languages/local/dist ad4m-ldk/js/lib core/lib link-server/dist
+                   bootstrap-languages/local/dist ad4m-ldk/js/lib core/lib link-server/dist \
+                   link-server/identity-core
             tar -xf "$src"
             echo "restored $(tar -tf "$src" | wc -l) entries from $src"
             ls -l bootstrap-languages/*/build/bundle.js bootstrap-languages/local/dist/docker_seed.json \
-                  link-server/dist/index.js .hc-toolchain/bin/
+                  link-server/dist/index.js link-server/identity-core/ad4m_identity_core.js .hc-toolchain/bin/
 
   test_artifacts_dir:
     description: "Give this job an empty test-artifact directory, test-artifacts/ in the workdir, as $TEST_ARTIFACTS"
@@ -534,6 +554,10 @@ jobs:
           #   ad4m-ldk/js/lib                  ALDK, bundled into the languages
           #   core/lib                         @coasys/ad4m, linked from tests/js
           #   link-server/dist                 spawned by tests/js/utils/linkServer.ts
+          #   link-server/identity-core        the identity core's wasm binding link-server/dist
+          #                                    loads (ad4m-identity-core/build-node.sh, run by
+          #                                    the link-server build). The server link language's
+          #                                    keyring binding is inlined in its bundle.
           #   .hc-toolchain/bin + stamps       `hc` and `kitsune2-bootstrap-srv`,
           #                                    needed at test runtime
           #   bootstrap-languages/local/dist   #918's local-language seed + bundles
@@ -552,6 +576,7 @@ jobs:
               ad4m-ldk/js/lib \
               core/lib \
               link-server/dist \
+              link-server/identity-core \
               .hc-toolchain/bin/hc \
               .hc-toolchain/bin/kitsune2-bootstrap-srv \
               .hc-toolchain/.installed_rev \
@@ -671,8 +696,11 @@ jobs:
       - run:
           name: Install core dependencies
           command: cd ./core && pnpm install --no-frozen-lockfile
+      - locked_wasm_bindgen
       - run:
           # The root `pnpm test` minus the two cargo packages, which run in rust-tests.
+          # The link server's and the server link language's `pretest` build their wasm
+          # bindings (identity core, keyring) first.
           name: JS unit tests
           command: pnpm exec turbo run test --concurrency=1 --filter='!@coasys/rust-ad4m-executor' --filter='!@coasys/ad4m-cli'
           no_output_timeout: 30m

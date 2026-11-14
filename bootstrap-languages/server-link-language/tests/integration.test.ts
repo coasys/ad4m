@@ -1,18 +1,24 @@
 /**
  * Integration tests: server-link-language client modules against a real link-server.
  *
- * Wires the pure client modules (auth, api, sync, store, ws-client) against
- * a real link-server instance (booted per test from ../../link-server), with
- * real ed25519 signing matching the AD4M executor convention. No mocks of
- * the server. Closes the gap between "client logic works against mock
- * transport" and "client logic works against a real server."
+ * Wires the pure client modules (auth, api, sync, store, room-keys) against
+ * a real link-server instance (booted per test from ../../link-server, with its
+ * fake identity store), with real ed25519 signing matching the AD4M executor
+ * convention. No mocks of the server.
+ *
+ * Rooms are protocol 2: a room exists once its creator's genesis (`POST /membership`
+ * with `{creator, salt}` and the rules link) made it, and a key authenticates with
+ * one signed request carrying its X25519 key. The server auto-admits device-only
+ * keys (`startTestServer`'s default), so the sync tests use fresh keys; the
+ * membership tests sign with the fixture's persons.
  *
  * Tests validate:
- *   - Real DID challenge-response auth flow
+ *   - Protocol 2 auth, and the room's genesis through `commit`
+ *   - Membership links: `/membership`, never `/commit`; catch-up hands them to the executor
  *   - Commit → HTTP sync round-trip
- *   - Bootstrap (cold-start /render pull)
+ *   - Bootstrap (cold-start /render pull), paged render and tail
  *   - Catch-up sync (/sync?since=N)
- *   - Inbound WebSocket diff push
+ *   - Room keys sealed to members' X25519 keys, rotated and granted by any member
  *   - Two-agent sync through the same server
  */
 
@@ -21,7 +27,7 @@ import assert from "node:assert/strict";
 import { ed25519 } from "@noble/curves/ed25519";
 
 import type {
-  AgentAdapter,
+  RoomConfig,
   StorageAdapter,
   Transport,
   TransportResponse,
@@ -39,26 +45,33 @@ import {
   decryptLinkFromWire,
   encryptLinkForWire,
   generateRoomKey,
-  hexToBytes,
-  sealToDid,
+  linkHashKeyOf,
+  sealRoomKeyTo,
   type KeyRing,
 } from "../src/encryption.js";
+import { fromWireMembershipLink, roomIdOf as languageRoomIdOf } from "../src/room.js";
 import { grantMissingRoomKeys, rotateRoomKey } from "../src/room-keys.js";
-import type { LinkExpression, PerspectiveDiff, SealedBox, WireLinkExpression } from "../src/types.js";
+import type { LinkExpression, MembershipLinkResult, PerspectiveDiff, WireLinkExpression } from "../src/types.js";
 import { isEncryptedLinkData } from "../src/types.js";
-import { openSealed } from "./sealed-box.js";
+import { x25519Public } from "../keyring/keyring.js";
+import { TestAgent } from "./agent.js";
 
-// Link-server imports — test helpers to boot a real server, and auth
-// utilities for DID construction + the SHA-256 pre-hash convention.
+// Link-server imports — test helpers to boot a real server and make rooms the protocol 2 way.
 import {
+  createRoom,
   startTestServer,
   type TestServerHandle,
 } from "../../../link-server/tests/helpers.js";
-import { sha256Hex } from "../../../link-server/src/types.js";
 import {
-  publicKeyToDid,
-  hashMessageForVerify,
-} from "../../../link-server/src/auth.js";
+  links as membership,
+  newSalt,
+  personAgent,
+  personDid,
+  roomIdOf,
+  signLink,
+  type TestAgent as ServerTestAgent,
+} from "../../../link-server/tests/identity.js";
+import { sha256Hex } from "../../../link-server/src/types.js";
 
 // ---------------------------------------------------------------------------
 // Real adapters (no mocks — talk to the real server)
@@ -93,43 +106,19 @@ class MemoryStorage implements StorageAdapter {
   }
 }
 
-/** Real ed25519 agent that signs using the AD4M executor convention:
- *  sign(SHA-256(payload)), matching what the server verifies.
- *  Uses @noble/curves/ed25519 (sync API) — already a devDep of this package. */
-class RealAgent implements AgentAdapter {
-  readonly didValue: string;
-  private readonly privateKey: Uint8Array;
-
-  constructor(didValue: string, privateKey: Uint8Array) {
-    this.didValue = didValue;
-    this.privateKey = privateKey;
-  }
-
-  did(): string { return this.didValue; }
-
-  signStringHex(payload: string): string {
-    // The AD4M executor convention: sign(SHA-256(message)).
-    // hashMessageForVerify returns the SHA-256 digest as Uint8Array.
-    const hashed = hashMessageForVerify(payload);
-    const sig = ed25519.sign(hashed, this.privateKey);
-    return Buffer.from(sig).toString("hex");
-  }
-
-  /** The executor's `agentOpenSealed`, with this agent's key. */
-  openSealed(sealed: SealedBox): string {
-    return bytesToHex(openSealed(sealed, this.privateKey));
-  }
-
-  static create(): RealAgent {
-    const privateKey = ed25519.utils.randomPrivateKey();
-    const publicKey = ed25519.getPublicKey(privateKey);
-    const didValue = publicKeyToDid(publicKey);
-    return new RealAgent(didValue, privateKey);
-  }
+/** A fresh device-only key (no log lists it): the server auto-admits it. */
+function newAgent(): TestAgent {
+  return new TestAgent(ed25519.utils.randomPrivateKey());
 }
 
-/** No-op WS factory — the HTTP-only integration tests don't open WebSockets.
- *  A real WS test would import `ws` from the link-server's devDeps. */
+/** The language's agent for a fixture person's device key: same seed, so the same did:key. */
+function agentOf(key: ServerTestAgent): TestAgent {
+  const agent = new TestAgent(key.privateKey);
+  assert.equal(agent.did(), key.did);
+  return agent;
+}
+
+/** No-op WS factory — the HTTP-only integration tests don't open WebSockets. */
 class NullWsFactory implements WebSocketFactory {
   connect(_url: string): WSConnection {
     throw new Error("NullWsFactory: WebSocket not available in this test suite");
@@ -143,24 +132,30 @@ class NullWsFactory implements WebSocketFactory {
 let _server: TestServerHandle | null = null;
 const _cleanups: Array<() => void> = [];
 
-async function bootServer(): Promise<TestServerHandle> {
+async function bootServer(autoAdmit = true): Promise<TestServerHandle> {
   if (_server) await _server.close();
-  _server = await startTestServer({ autoAdmit: true });
+  _server = await startTestServer({ autoAdmit });
   return _server;
 }
 
-/** The room key every agent of these tests holds, as members do once the admin's rotation reached them.
- *  Rooms this language creates refuse plaintext, so every commit is encrypted. */
+/** A room alice made (genesis with open rules), for the sync tests. */
+function newRoom(server: TestServerHandle): Promise<string> {
+  return createRoom(server.url);
+}
+
+/** The room key every agent of these tests holds, as members do once a rotation reached them.
+ *  Rooms refuse plaintext, so every commit is encrypted. */
 const SHARED_RING: KeyRing = new Map([[1, generateRoomKey()]]);
 
 /** Wire the server-link-language adapters against a real server + agent. */
 function wireClient(
   serverUrl: string,
   roomId: string,
-  agent: RealAgent,
+  agent: TestAgent,
   storage: MemoryStorage = new MemoryStorage(),
   transport: Transport = new FetchTransport(),
   ring: KeyRing | null = SHARED_RING,
+  extra: { config?: Partial<RoomConfig>; membershipLinks?: (links: LinkExpression[]) => Promise<MembershipLinkResult[]> } = {},
 ): { emittedDiffs: PerspectiveDiff[]; syncStates: string[] } {
   resetAdapters();
   syncModule._resetRenderStateForTests();
@@ -168,24 +163,26 @@ function wireClient(
 
   const emittedDiffs: PerspectiveDiff[] = [];
   const syncStates: string[] = [];
+  const config: RoomConfig = { serverUrl, roomId, ...extra.config };
 
   initAdapters({
     storage,
     transport,
     agent,
     wsFactory: new NullWsFactory(),
-    config: { serverUrl, roomId },
+    config,
   });
 
   store.initStore(sha256Hex);
 
   syncModule.initSync({
-    config: { serverUrl, roomId },
+    config,
     getToken: () => auth.getValidToken(),
     invalidateToken: () => auth.invalidateSession(),
     emitDiff: (diff) => emittedDiffs.push(diff),
     emitSyncState: (state) => syncStates.push(state),
     getKeyRing: () => ring,
+    membershipLinks: extra.membershipLinks,
   });
 
   return { emittedDiffs, syncStates };
@@ -207,42 +204,123 @@ afterEach(async () => {
 // Tests
 // ---------------------------------------------------------------------------
 
-describe("integration: auth against real server", () => {
-  it("authenticate() returns a valid JWT via real DID challenge-response", async () => {
+describe("integration: auth against real server (protocol 2)", () => {
+  it("authenticate() returns a JWT and whether the room admits the key, and publishes its X25519 key", async () => {
     const server = await bootServer();
-    const agent = RealAgent.create();
-    wireClient(server.url, "auth-test-room", agent);
+    const roomId = await newRoom(server);
+    const agent = newAgent();
+    wireClient(server.url, roomId, agent);
 
     const session = await auth.authenticate();
 
-    assert.ok(session.token, "must receive a token");
     assert.ok(session.token.split(".").length === 3, "token must look like a JWT");
     assert.ok(session.expiresAt! > Date.now(), "token must expire in the future");
+    assert.equal(session.admitted, true, "the test server auto-admits a device-only key");
+    const members = await api.fetchMembers({ serverUrl: server.url, roomId }, session.token);
+    const mine = members.keys.find((k) => k.did === agent.did());
+    assert.equal(mine?.x25519PublicKey, bytesToHex(x25519Public(await agent.roomKeySeed())));
   });
 
   it("getValidToken() caches and returns the same token on subsequent calls", async () => {
     const server = await bootServer();
-    const agent = RealAgent.create();
-    wireClient(server.url, "cache-test-room", agent);
+    const roomId = await newRoom(server);
+    wireClient(server.url, roomId, newAgent());
 
     const t1 = await auth.getValidToken();
     const t2 = await auth.getValidToken();
     assert.equal(t1, t2, "cached token must match");
+  });
+
+  it("a room nobody made answers 404: auth never creates a room", async () => {
+    const server = await bootServer();
+    wireClient(server.url, roomIdOf(personDid("alice"), newSalt()), newAgent());
+    await assert.rejects(() => auth.getValidToken(), (e: unknown) => e instanceof api.ApiError && e.status === 404);
+  });
+});
+
+describe("integration: membership links (K5)", () => {
+  it("the creator's first commit makes the room through its genesis; a person joins; catch-up hands the links to the executor", async () => {
+    const server = await bootServer(false);
+    const salt = newSalt();
+    const creatorKey = personAgent("alice");
+    const roomId = languageRoomIdOf(creatorKey.person!, salt);
+    assert.equal(roomId, roomIdOf(creatorKey.person!, salt), "the language and the server agree on the room id");
+    const genesis = { config: { creator: creatorKey.person!, uid: salt } };
+    const rules = fromWireMembershipLink(signLink(creatorKey, membership.rules({ join: "open" })));
+    const plain: LinkExpression = {
+      author: creatorKey.did,
+      timestamp: new Date().toISOString(),
+      data: { source: "test://first", predicate: "test://p", target: "test://t" },
+      proof: { signature: "sig", key: `${creatorKey.did}#primary` },
+    };
+
+    // Alice's executor commits the rules link and a plain link in one diff, before the room exists.
+    wireClient(server.url, roomId, agentOf(creatorKey), new MemoryStorage(), new FetchTransport(), SHARED_RING, genesis);
+    await syncModule.commit({ additions: [rules, plain], removals: [] });
+    const aliceToken = await auth.getValidToken();
+    const render = await api.fetchRender({ serverUrl: server.url, roomId }, aliceToken, { limit: 500, next: null });
+    assert.equal(render.links.length, 1, "the plain link went to /commit");
+    assert.deepEqual(decryptLinkFromWire(render.links[0], SHARED_RING), plain);
+
+    // Bob, a person not yet admitted, joins the open room with his self-join.
+    const bobKey = personAgent("bob");
+    wireClient(server.url, roomId, agentOf(bobKey), new MemoryStorage(), new FetchTransport(), null, genesis);
+    assert.equal((await auth.authenticate()).admitted, false);
+    const join = fromWireMembershipLink(signLink(bobKey, membership.member(personDid("bob"))));
+    await syncModule.commit({ additions: [join], removals: [] });
+    auth.resetAuth();
+    assert.equal((await auth.authenticate()).admitted, true, "the self-join counted");
+
+    // Alice's executor, on a fresh store, reads the room's membership log: the rules and the join, in order.
+    const handed: LinkExpression[][] = [];
+    wireClient(server.url, roomId, agentOf(creatorKey), new MemoryStorage(), new FetchTransport(), SHARED_RING, {
+      ...genesis,
+      membershipLinks: async (links) => {
+        handed.push(links);
+        return links.map(() => ({ hash: "", counted: true }));
+      },
+    });
+    await syncModule.catchUp();
+    assert.deepEqual(handed.flat().map((l) => l.data.predicate), [
+      "coasys://membership/rules",
+      "coasys://membership/member",
+    ]);
+    assert.deepEqual(handed.flat()[1], join, "a link reaches the executor as it was signed");
+    assert.equal(store.getMembershipSeq(), 2);
+  });
+
+  it("a refused membership link is logged, not thrown, and nothing is counted", async () => {
+    const server = await bootServer(false);
+    const roomId = await createRoom(server.url, { join: "invite" });
+    const bobKey = personAgent("bob");
+    wireClient(server.url, roomId, agentOf(bobKey), new MemoryStorage(), new FetchTransport(), null);
+    const errors = mock.method(console, "error", () => undefined);
+    try {
+      await syncModule.commit({
+        additions: [fromWireMembershipLink(signLink(bobKey, membership.member(personDid("bob"))))],
+        removals: [],
+      });
+      assert.ok(errors.mock.calls.length >= 1, "the refusal is logged");
+    } finally {
+      errors.mock.restore();
+    }
+    auth.resetAuth();
+    assert.equal((await auth.authenticate()).admitted, false);
   });
 });
 
 describe("integration: a room is end-to-end encrypted from creation", () => {
   it("the server refuses plaintext before any key exists, and a member with no key commits nothing", async () => {
     const server = await bootServer();
-    const roomId = "e2e-from-creation-room";
-    const admin = RealAgent.create();
-    wireClient(server.url, roomId, admin, new MemoryStorage(), new FetchTransport(), null);
-    const adminToken = await auth.getValidToken();
+    const roomId = await newRoom(server);
+    const first = newAgent();
+    wireClient(server.url, roomId, first, new MemoryStorage(), new FetchTransport(), null);
+    const firstToken = await auth.getValidToken();
     // Plaintext sent straight to the server, past the language: refused before any key or commit exists.
     await assert.rejects(
-      () => api.commitDiff({ serverUrl: server.url, roomId }, adminToken, {
+      () => api.commitDiff({ serverUrl: server.url, roomId }, firstToken, {
         additions: [{
-          author: admin.did(),
+          author: first.did(),
           timestamp: new Date().toISOString(),
           data: { source: "test://plain", predicate: "test://p", target: "test://t" },
         }],
@@ -251,8 +329,8 @@ describe("integration: a room is end-to-end encrypted from creation", () => {
       (err) => err instanceof api.ApiError && err.status === 400,
     );
 
-    // A member signs in before the admin rotated a key in: it holds none.
-    const member = RealAgent.create();
+    // A member signs in before anyone rotated a key in: it holds none.
+    const member = newAgent();
     wireClient(server.url, roomId, member, new MemoryStorage(), new FetchTransport(), null);
     const memberToken = await auth.getValidToken();
     assert.deepEqual(await api.fetchRoomKeys({ serverUrl: server.url, roomId }, memberToken), { keys: [] });
@@ -273,8 +351,9 @@ describe("integration: a room is end-to-end encrypted from creation", () => {
 describe("integration: commit + HTTP sync", () => {
   it("committed links appear in /render and /sync", async () => {
     const server = await bootServer();
-    const agent = RealAgent.create();
-    const { emittedDiffs } = wireClient(server.url, "commit-sync-room", agent);
+    const agent = newAgent();
+    const roomId = await newRoom(server);
+    const { emittedDiffs } = wireClient(server.url, roomId, agent);
 
     const link: LinkExpression = {
       author: agent.did(),
@@ -290,7 +369,7 @@ describe("integration: commit + HTTP sync", () => {
     const token = await auth.getValidToken();
     const transport = new FetchTransport();
     const renderRes = await transport.fetch(
-      `${server.url}/rooms/commit-sync-room/render`,
+      `${server.url}/rooms/${roomId}/render`,
       "GET",
       { Authorization: `Bearer ${token}` },
       "",
@@ -308,8 +387,9 @@ describe("integration: a rejected session is replaced", () => {
   // instead of retrying the dead token until the executor restarts.
   it("commit and catchUp re-authenticate after the server revokes the session", async () => {
     const server = await bootServer();
-    const agent = RealAgent.create();
-    wireClient(server.url, "revoked-session-room", agent);
+    const agent = newAgent();
+    const roomId = await newRoom(server);
+    wireClient(server.url, roomId, agent);
 
     const link = (source: string): LinkExpression => ({
       author: agent.did(),
@@ -319,13 +399,13 @@ describe("integration: a rejected session is replaced", () => {
     });
 
     await syncModule.commit({ additions: [link("test://before")], removals: [] });
-    server.built.db.deleteSessionsForDid("revoked-session-room", agent.did());
+    server.built.db.deleteSessionsForDid(roomId, agent.did());
     await syncModule.commit({ additions: [link("test://after")], removals: [] });
 
-    server.built.db.deleteSessionsForDid("revoked-session-room", agent.did());
+    server.built.db.deleteSessionsForDid(roomId, agent.did());
     await syncModule.catchUp();
 
-    server.built.db.deleteSessionsForDid("revoked-session-room", agent.did());
+    server.built.db.deleteSessionsForDid(roomId, agent.did());
     await syncModule.bootstrap();
     const sources = store.allLinks().links.map((l) => (l.data as { source: string }).source).sort();
     assert.deepEqual(sources, ["test://after", "test://before"], "both commits must be on the server");
@@ -335,8 +415,8 @@ describe("integration: a rejected session is replaced", () => {
 describe("integration: bootstrap (cold-start /render pull)", () => {
   it("bootstrap() pulls existing links from a populated room", async () => {
     const server = await bootServer();
-    const agentA = RealAgent.create();
-    const roomId = "bootstrap-room";
+    const agentA = newAgent();
+    const roomId = await newRoom(server);
 
     // Agent A commits links
     wireClient(server.url, roomId, agentA);
@@ -353,7 +433,7 @@ describe("integration: bootstrap (cold-start /render pull)", () => {
     }
 
     // Agent B bootstraps into the same room
-    const agentB = RealAgent.create();
+    const agentB = newAgent();
     const { emittedDiffs: bDiffs } = wireClient(server.url, roomId, agentB);
 
     await syncModule.bootstrap();
@@ -374,8 +454,8 @@ describe("integration: bootstrap (cold-start /render pull)", () => {
 describe("integration: catch-up sync", () => {
   it("catchUp() fetches diffs committed after the stored sequence cursor", async () => {
     const server = await bootServer();
-    const agentA = RealAgent.create();
-    const roomId = "catchup-room";
+    const agentA = newAgent();
+    const roomId = await newRoom(server);
 
     // A commits 2 links
     wireClient(server.url, roomId, agentA);
@@ -399,7 +479,7 @@ describe("integration: catch-up sync", () => {
     });
 
     // B bootstraps (gets both links), then A commits a third
-    const agentB = RealAgent.create();
+    const agentB = newAgent();
     const bStorage = new MemoryStorage();
     wireClient(server.url, roomId, agentB, bStorage);
     await syncModule.bootstrap();
@@ -429,9 +509,9 @@ describe("integration: catch-up sync", () => {
 describe("integration: two-agent commit + sync through real server", () => {
   it("agent A commits, agent B syncs and sees A's links; B commits, A syncs and sees B's", async () => {
     const server = await bootServer();
-    const agentA = RealAgent.create();
-    const agentB = RealAgent.create();
-    const roomId = "two-agent-room";
+    const agentA = newAgent();
+    const agentB = newAgent();
+    const roomId = await newRoom(server);
 
     // A commits
     wireClient(server.url, roomId, agentA);
@@ -493,8 +573,9 @@ describe("integration: two-agent commit + sync through real server", () => {
 describe("integration: performSync", () => {
   it("performSync() reports Synced on success", async () => {
     const server = await bootServer();
-    const agent = RealAgent.create();
-    const { syncStates } = wireClient(server.url, "perfsync-room", agent);
+    const agent = newAgent();
+    const roomId = await newRoom(server);
+    const { syncStates } = wireClient(server.url, roomId, agent);
 
     const result = await syncModule.performSync();
     assert.deepEqual(result, { additions: [], removals: [] });
@@ -503,114 +584,155 @@ describe("integration: performSync", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Room keys: sealed to DIDs, rotated by the admin, granted by any member
+// Room keys: sealed to members' X25519 keys, rotated and granted by any member
 // ---------------------------------------------------------------------------
 
 describe("integration: room keys", () => {
-  const roomId = "room-keys-room";
+  let roomId = "";
+  const admitsAll = async () => true;
 
-  /** Authenticates `agent` as the language would, and returns its token. */
-  async function signIn(serverUrl: string, agent: RealAgent): Promise<string> {
+  /** Authenticates `agent` as the language would (publishing its X25519 key), and returns its token. */
+  async function signIn(serverUrl: string, agent: TestAgent): Promise<string> {
     wireClient(serverUrl, roomId, agent);
     return auth.getValidToken();
   }
 
-  async function admit(serverUrl: string, adminToken: string, did: string): Promise<void> {
-    const res = await fetch(`${serverUrl}/rooms/${roomId}/acl`, {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${adminToken}` },
-      body: JSON.stringify({ action: "add", did }),
-    });
-    assert.equal(res.status, 200);
-  }
-
-  async function ringOf(serverUrl: string, agent: RealAgent) {
+  async function ringOf(serverUrl: string, agent: TestAgent) {
     const token = await signIn(serverUrl, agent);
     const keys = await api.fetchRoomKeys({ serverUrl, roomId }, token);
-    return buildKeyRing(keys?.keys ?? [], agent).ring;
+    return buildKeyRing(keys?.keys ?? [], await agent.roomKeySeed(), roomId).ring;
   }
 
-  it("the admin seals a new version to every ACL member, including one that never connected", async () => {
+  async function boot(): Promise<{ server: TestServerHandle; config: RoomConfig }> {
     const server = await bootServer();
-    const admin = RealAgent.create();
-    const member = RealAgent.create();
-    const adminToken = await signIn(server.url, admin);
-    await admit(server.url, adminToken, member.did());
+    roomId = await newRoom(server);
+    return { server, config: { serverUrl: server.url, roomId } };
+  }
 
-    const rotated = await rotateRoomKey({ serverUrl: server.url, roomId }, adminToken);
-    assert.equal(rotated?.version, 1);
-    assert.deepEqual(rotated?.recipients.sort(), [admin.did(), member.did()].sort());
+  it("any member seals a new version to every admitted key, and each opens it with its own seed", async () => {
+    const { server, config } = await boot();
+    const first = newAgent();
+    const member = newAgent();
+    await signIn(server.url, member);
+    const firstToken = await signIn(server.url, first);
 
-    const adminRing = await ringOf(server.url, admin);
+    const rotated = await rotateRoomKey(config, firstToken, admitsAll);
+    assert.equal(rotated?.result.version, 1);
+    assert.deepEqual(rotated?.result.recipients.sort(), [first.did(), member.did()].sort());
+    assert.deepEqual(rotated?.skipped, []);
+
+    const firstRing = await ringOf(server.url, first);
     const memberRing = await ringOf(server.url, member);
     assert.deepEqual([...memberRing.keys()], [1]);
-    assert.deepEqual(memberRing.get(1), adminRing.get(1), "both hold the same room key");
+    assert.deepEqual(memberRing.get(1), firstRing.get(1), "both hold the same room key");
   });
 
-  it("a member who is not the admin grants the versions it holds, and only those", async () => {
-    const server = await bootServer();
-    const admin = RealAgent.create();
-    const bob = RealAgent.create();
-    const carol = RealAgent.create();
-    const config = { serverUrl: server.url, roomId };
+  it("a key the space does not admit gets no box, and the server refuses the rotation without it (409, then gives up)", async () => {
+    const { server, config } = await boot();
+    const first = newAgent();
+    const stranger = newAgent();
+    await signIn(server.url, stranger);
+    const firstToken = await signIn(server.url, first);
+    const errors = mock.method(console, "error", () => undefined);
+    const logs = mock.method(console, "log", () => undefined);
+    try {
+      await assert.rejects(
+        () => rotateRoomKey(config, firstToken, async (did) => did !== stranger.did()),
+        (e: unknown) => e instanceof api.RotateMismatch && e.missing.includes(stranger.did()),
+      );
+    } finally {
+      errors.mock.restore();
+      logs.mock.restore();
+    }
+    assert.deepEqual(await api.fetchRoomKeys(config, firstToken), { keys: [] }, "no version was made");
+  });
 
-    const adminToken = await signIn(server.url, admin);
-    await rotateRoomKey(config, adminToken); // version 1: the admin alone
-    await admit(server.url, adminToken, bob.did());
-    await rotateRoomKey(config, adminToken); // version 2: the admin and Bob
-    await admit(server.url, adminToken, carol.did()); // Carol: no version, never connected
+  it("a member grants the versions it holds, and only those", async () => {
+    const { server, config } = await boot();
+    const first = newAgent();
+    const bob = newAgent();
+    const carol = newAgent();
+
+    const firstToken = await signIn(server.url, first);
+    await rotateRoomKey(config, firstToken, admitsAll); // version 1: the first member alone
+    await signIn(server.url, bob);
+    await rotateRoomKey(config, await signIn(server.url, first), admitsAll); // version 2: the first member and Bob
+    await signIn(server.url, carol); // Carol: admitted, no version
 
     const bobRing = await ringOf(server.url, bob);
     assert.deepEqual([...bobRing.keys()], [2]);
     const bobToken = await signIn(server.url, bob);
-    const bobGrants = await grantMissingRoomKeys(config, bobToken, bobRing, bob.did());
+    const bobGrants = await grantMissingRoomKeys(config, bobToken, bobRing, bob.did(), admitsAll);
     assert.deepEqual(bobGrants, [{ did: carol.did(), versions: [2] }], "Bob grants Carol the version he holds");
 
-    const adminRing = await ringOf(server.url, admin);
-    const adminGrants = await grantMissingRoomKeys(config, await signIn(server.url, admin), adminRing, admin.did());
+    const firstRing = await ringOf(server.url, first);
+    const firstGrants = await grantMissingRoomKeys(config, await signIn(server.url, first), firstRing, first.did(), admitsAll);
     assert.deepEqual(
-      adminGrants.map((g) => [g.did, g.versions]).sort(),
+      firstGrants.map((g) => [g.did, g.versions]).sort(),
       [[bob.did(), [1]], [carol.did(), [1]]].sort(),
-      "the admin fills in version 1",
+      "the first member fills in version 1",
     );
 
     const carolRing = await ringOf(server.url, carol);
     assert.deepEqual([...carolRing.keys()].sort(), [1, 2]);
-    assert.deepEqual(carolRing.get(1), adminRing.get(1));
-    assert.deepEqual(carolRing.get(2), adminRing.get(2));
+    assert.deepEqual(carolRing.get(1), firstRing.get(1));
+    assert.deepEqual(carolRing.get(2), firstRing.get(2));
 
-    const again = await grantMissingRoomKeys(config, await signIn(server.url, bob), await ringOf(server.url, bob), bob.did());
+    const again = await grantMissingRoomKeys(config, await signIn(server.url, bob), await ringOf(server.url, bob), bob.did(), admitsAll);
     assert.deepEqual(again, [], "nobody lacks a version any more");
   });
 
   it("a wrong key a member grants is spoiled, dropped, and replaced by an honest grant", async () => {
-    const server = await bootServer();
-    const admin = RealAgent.create();
-    const mallory = RealAgent.create();
-    const late = RealAgent.create();
-    const config = { serverUrl: server.url, roomId };
+    const { server, config } = await boot();
+    const first = newAgent();
+    const mallory = newAgent();
+    const late = newAgent();
 
-    const adminToken = await signIn(server.url, admin);
-    await admit(server.url, adminToken, mallory.did());
-    await rotateRoomKey(config, adminToken); // version 1: the admin and Mallory
-    await admit(server.url, adminToken, late.did());
+    await signIn(server.url, mallory);
+    await rotateRoomKey(config, await signIn(server.url, first), admitsAll); // version 1: the first member and Mallory
+    const lateToken = await signIn(server.url, late);
+    const lateX25519 = bytesToHex(x25519Public(await late.roomKeySeed()));
 
     // Mallory holds version 1, so the server lets her grant it: she seals a key of her own.
     await api.grantKeys(config, await signIn(server.url, mallory), late.did(), [
-      { version: 1, encryptedKey: sealToDid(late.did(), generateRoomKey()) },
+      { version: 1, encryptedKey: sealRoomKeyTo(lateX25519, generateRoomKey(), roomId, 1) },
     ]);
-    const lateToken = await signIn(server.url, late);
-    const first = buildKeyRing((await api.fetchRoomKeys(config, lateToken))?.keys ?? [], late);
-    assert.equal(first.ring.size, 0, "the wrong key is not taken");
-    assert.deepEqual(first.spoiled, [1]);
+    const first1 = buildKeyRing((await api.fetchRoomKeys(config, lateToken))?.keys ?? [], await late.roomKeySeed(), roomId);
+    assert.equal(first1.ring.size, 0, "the wrong key is not taken");
+    assert.deepEqual(first1.spoiled, [1]);
 
-    await api.deleteRoomKey(config, lateToken, 1);
-    const adminRing = await ringOf(server.url, admin);
-    const grants = await grantMissingRoomKeys(config, await signIn(server.url, admin), adminRing, admin.did());
+    await api.deleteRoomKey(config, await signIn(server.url, late), 1);
+    const firstRing = await ringOf(server.url, first);
+    const grants = await grantMissingRoomKeys(config, await signIn(server.url, first), firstRing, first.did(), admitsAll);
     assert.deepEqual(grants, [{ did: late.did(), versions: [1] }], "the dropped version is missing again");
 
     const lateRing = await ringOf(server.url, late);
-    assert.deepEqual(lateRing.get(1), adminRing.get(1), "the newcomer now holds the room's key");
+    assert.deepEqual(lateRing.get(1), firstRing.get(1), "the newcomer now holds the room's key");
+  });
+
+  it("the room's own key sealed for another room or version is spoiled (K9)", async () => {
+    const { server, config } = await boot();
+    const first = newAgent();
+    const mallory = newAgent();
+    const late = newAgent();
+
+    await signIn(server.url, mallory);
+    await rotateRoomKey(config, await signIn(server.url, first), admitsAll); // version 1: the first member and Mallory
+    const malloryRing = await ringOf(server.url, mallory);
+    const lateToken = await signIn(server.url, late);
+    const lateX25519 = bytesToHex(x25519Public(await late.roomKeySeed()));
+
+    // The right key (it matches the commitment), sealed for another room: a box carried over from
+    // elsewhere does not open here.
+    for (const [room, version] of [["another-room", 1], [roomId, 2]] as const) {
+      await api.grantKeys(config, await signIn(server.url, mallory), late.did(), [
+        { version: 1, encryptedKey: sealRoomKeyTo(lateX25519, malloryRing.get(1)!, room, version) },
+      ]);
+      const built = buildKeyRing((await api.fetchRoomKeys(config, lateToken))?.keys ?? [], await late.roomKeySeed(), roomId);
+      assert.equal(built.ring.size, 0, `a box sealed for ${room}:${version} is not taken`);
+      assert.deepEqual(built.spoiled, [1]);
+      await api.deleteRoomKey(config, await signIn(server.url, late), 1);
+    }
   });
 });
 
@@ -630,7 +752,7 @@ class RecordingTransport extends FetchTransport {
   }
 }
 
-function linkOf(agent: RealAgent, source: string): LinkExpression {
+function linkOf(agent: TestAgent, source: string): LinkExpression {
   return {
     author: agent.did(),
     timestamp: new Date().toISOString(),
@@ -653,13 +775,13 @@ function activeSources(server: TestServerHandle, roomId: string): string[] {
 describe("integration: paged render, then tail", () => {
   it("loads a room larger than a page page by page, each emitted as its own diff, then tails /sync in pages", async () => {
     const server = await bootServer();
-    const agentA = RealAgent.create();
-    const roomId = "paged-render-room";
+    const agentA = newAgent();
+    const roomId = await newRoom(server);
     wireClient(server.url, roomId, agentA);
     await syncModule.commit({ additions: Array.from({ length: 23 }, (_, i) => linkOf(agentA, `bulk-${i}`)), removals: [] });
     for (let i = 0; i < 4; i++) await syncModule.commit({ additions: [linkOf(agentA, `one-${i}`)], removals: [] });
 
-    const agentB = RealAgent.create();
+    const agentB = newAgent();
     const transport = new RecordingTransport();
     const { emittedDiffs } = wireClient(server.url, roomId, agentB, new MemoryStorage(), transport);
     syncModule._setPageLimitsForTests(10, 2);
@@ -682,13 +804,13 @@ describe("integration: paged render, then tail", () => {
 
   it("a render cut off mid-way resumes at its stored cursor after a restart, and the tail brings what changed meanwhile", async () => {
     const server = await bootServer();
-    const agentA = RealAgent.create();
-    const roomId = "resume-render-room";
+    const agentA = newAgent();
+    const roomId = await newRoom(server);
     wireClient(server.url, roomId, agentA);
     const initial = Array.from({ length: 25 }, (_, i) => linkOf(agentA, `init-${i}`));
     await syncModule.commit({ additions: initial, removals: [] });
 
-    const agentB = RealAgent.create();
+    const agentB = newAgent();
     const bStorage = new MemoryStorage();
     const transport = new RecordingTransport();
     wireClient(server.url, roomId, agentB, bStorage, transport);
@@ -730,12 +852,12 @@ describe("integration: paged render, then tail", () => {
 
   it("catchUp does not tail while a render is pending; after the backoff it resumes the render, which then tails", async () => {
     const server = await bootServer();
-    const agentA = RealAgent.create();
-    const roomId = "catchup-resumes-render-room";
+    const agentA = newAgent();
+    const roomId = await newRoom(server);
     wireClient(server.url, roomId, agentA);
     await syncModule.commit({ additions: Array.from({ length: 15 }, (_, i) => linkOf(agentA, `r-${i}`)), removals: [] });
 
-    const agentB = RealAgent.create();
+    const agentB = newAgent();
     const transport = new RecordingTransport();
     wireClient(server.url, roomId, agentB, new MemoryStorage(), transport);
     syncModule._setPageLimitsForTests(10, 2);
@@ -768,12 +890,12 @@ describe("integration: paged render, then tail", () => {
 
   it("a link committed or pushed during the render ends in the store, and nothing is removed", async () => {
     const server = await bootServer();
-    const agentA = RealAgent.create();
-    const roomId = "commit-during-render-room";
+    const agentA = newAgent();
+    const roomId = await newRoom(server);
     wireClient(server.url, roomId, agentA);
     await syncModule.commit({ additions: Array.from({ length: 15 }, (_, i) => linkOf(agentA, `r-${i}`)), removals: [] });
 
-    const agentB = RealAgent.create();
+    const agentB = newAgent();
     const bStorage = new MemoryStorage();
     const transport = new RecordingTransport();
     wireClient(server.url, roomId, agentB, bStorage, transport);
@@ -783,7 +905,11 @@ describe("integration: paged render, then tail", () => {
 
     // B's own commit, and A's link arriving as a WebSocket push, while the render is unfinished.
     await syncModule.commit({ additions: [linkOf(agentB, "own")], removals: [] });
-    const pushed = encryptLinkForWire(linkOf(agentA, "pushed"), SHARED_RING.get(1)!, 1);
+    const pushed = encryptLinkForWire(linkOf(agentA, "pushed"), {
+      roomKey: SHARED_RING.get(1)!,
+      version: 1,
+      hashKey: linkHashKeyOf(SHARED_RING)!,
+    });
     const { sequence, revision } = server.built.db.applyDiffAndAppend(roomId, { additions: [pushed], removals: [] }, agentA.did());
     syncModule.applyInboundWireDiff({ additions: [pushed], removals: [] }, sequence, revision);
 
@@ -803,13 +929,13 @@ describe("integration: paged render, then tail", () => {
 
   it("a restart with a cursor above 0 sends no /render: it tails /sync from its cursor", async () => {
     const server = await bootServer();
-    const agentA = RealAgent.create();
-    const roomId = "restart-tails-room";
+    const agentA = newAgent();
+    const roomId = await newRoom(server);
     wireClient(server.url, roomId, agentA);
     const first = Array.from({ length: 12 }, (_, i) => linkOf(agentA, `first-${i}`));
     await syncModule.commit({ additions: first, removals: [] });
 
-    const agentB = RealAgent.create();
+    const agentB = newAgent();
     const bStorage = new MemoryStorage();
     wireClient(server.url, roomId, agentB, bStorage, new RecordingTransport());
     syncModule._setPageLimitsForTests(10, 2);
@@ -841,14 +967,14 @@ describe("integration: paged render, then tail", () => {
     // The staging state: the cursor is at the room's head, the store holds a
     // part of the room (a build before #1641 moved the cursor to every push).
     const server = await bootServer();
-    const agentA = RealAgent.create();
-    const roomId = "short-store-room";
+    const agentA = newAgent();
+    const roomId = await newRoom(server);
     wireClient(server.url, roomId, agentA);
     const all = Array.from({ length: 23 }, (_, i) => linkOf(agentA, `room-${i}`));
     await syncModule.commit({ additions: all, removals: [] });
     await syncModule.commit({ additions: [linkOf(agentA, "last")], removals: [] });
 
-    const agentB = RealAgent.create();
+    const agentB = newAgent();
     const bStorage = new MemoryStorage();
     wireClient(server.url, roomId, agentB, bStorage, new RecordingTransport());
     await syncModule.bootstrap();
@@ -876,12 +1002,12 @@ describe("integration: paged render, then tail", () => {
 
   it("catchUp reads a long diff log a page at a time", async () => {
     const server = await bootServer();
-    const agentA = RealAgent.create();
-    const roomId = "paged-sync-room";
+    const agentA = newAgent();
+    const roomId = await newRoom(server);
     wireClient(server.url, roomId, agentA);
     for (let i = 0; i < 5; i++) await syncModule.commit({ additions: [linkOf(agentA, `d-${i}`)], removals: [] });
 
-    const agentB = RealAgent.create();
+    const agentB = newAgent();
     const transport = new RecordingTransport();
     const { emittedDiffs } = wireClient(server.url, roomId, agentB, new MemoryStorage(), transport);
     syncModule._setPageLimitsForTests(10, 2);

@@ -7,13 +7,16 @@ public key (room keys, opened by one member's executor). No executor dependency;
 
 | File | What |
 |---|---|
-| `src/lib.rs` | re-exports; `tags` (`DEK_WRAP_V1`, `ROOM_KEY_SEAL_V1`) |
+| `src/lib.rs` | re-exports; `tags` (`DEK_WRAP_V1`, `ROOM_KEY_SEAL_V1`, `ROOM_KEY_SEAL_V2`, `LINK_HASH_V1`) |
 | `src/key.rs` | `SecretKey` (one heap buffer, zeroed before it is freed, no `Clone`, `Debug` without bytes), `random_key`, `hkdf_subkey`, `KEY_LEN` |
 | `src/wrap.rs` | `wrap` / `unwrap`, `SymWrap` (`alg`, `nonce`, `ct`; hex in JSON), `WrapAlg`, `WrapContext`, `KeyRef` |
-| `src/seal.rs` | the room-key seal: `seal_to_x25519`, `seal_to_x25519_with_rng`, `open_from_x25519`, `SealedEnvelope` (`{ephemeralPublicKey, nonce, ciphertext}`, hex); `x25519_public_of_ed25519`, `x25519_secret_of_ed25519` |
+| `src/seal.rs` | the room-key seal: v1 `seal_to_x25519`, `seal_to_x25519_with_rng`, `open_from_x25519`; v2, bound to a room and version, `seal_room_key`, `seal_room_key_with_rng`, `open_room_key`, `room_key_context`; `SealedEnvelope` (`{ephemeralPublicKey, nonce, ciphertext}`, hex); `x25519_public_of_ed25519`, `x25519_secret_of_ed25519` |
 | `src/version.rs` | `KeyVersion`, `VersionedKey<W>` |
 | `src/error.rs` | `KeyringError` |
-| `vectors/room-key-seal.json` | envelopes made by the server link language's `sealToDid`; read by `tests/seal.rs` and by `bootstrap-languages/server-link-language/tests/encryption.test.ts` |
+| `wasm/` | the JS binding (AR-08 K9), crate `ad4m-keyring-wasm`: `sealRoomKey(roomKey, recipient, context)`, `openRoomKey(sealed, secret, context)` and `roomKeyContext(roomId, version)` (seal v2), `x25519Public`, `linkHashKey` (HKDF of the room key's version 1 with `LINK_HASH_V1`), `randomRoomKey`; errors are thrown as `Error` with no key bytes. `wasm/tests/vectors.rs` runs the seal vectors through the exports on wasm32 |
+| `wasm/build.sh` | builds the binding twice from one wasm: `--target deno` into `bootstrap-languages/server-link-language/keyring/keyring.js` (one ES module, the wasm inlined as base64 by `wasm/inline.mjs`) and `--target nodejs` into `link-server/keyring/`. Both outputs are generated and gitignored |
+| `vectors/room-key-seal.json` | v1 envelopes made by the server link language's former `sealToDid`; read by `tests/seal.rs` |
+| `vectors/room-key-seal-v2.json` | v2 envelopes (with `roomId`, `version`, `context`) made by the noble reference `bootstrap-languages/server-link-language/tests/room-key-seal-reference.ts`; read by `tests/room_key_seal.rs`, `wasm/tests/vectors.rs` and the language's `tests/keyring.test.ts`, `tests/encryption.test.ts` |
 
 ## Rules
 
@@ -24,6 +27,14 @@ public key (room keys, opened by one member's executor). No executor dependency;
   drawn as ephemeral secret then nonce. Changing any of it makes every sealed room key
   unreadable. The vectors file is shared with the language's tests; add a vector there by
   running `sealToDid` with a fixed ephemeral secret and nonce, never by running this crate.
+- **A room key is sealed for one room and one version (seal v2, K9).** `seal_room_key` is v1's
+  construction with HKDF `info = "ad4m:room-key-seal:v2"` and the context
+  `coasys:room-key:<roomId>:<version>` (UTF-8) as the AES-GCM associated data; an empty
+  context is refused (`EmptyContext`). A box opens only under the context it was sealed for,
+  and a v1 box never opens as v2 nor the reverse, so a member cannot pass off another room's
+  key or an old version as the room's current key. The language and the link server use v2
+  only; v1 stays for its vectors. Add a v2 vector with the noble reference
+  (`room-key-seal-reference.ts`), never by running this crate.
 - **A wrap opens only in its place.** The AEAD key is HKDF of the wrapping key with
   `DEK_WRAP_V1` (never the raw key); the associated data is the tag, the keyring id, and the
   wrapped key and its wrapper as `(kind, id, version)`, each variable field length-prefixed.
@@ -48,4 +59,12 @@ cargo check --release -p ad4m-keyring --target wasm32-unknown-unknown
 CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner cargo test --release -p ad4m-keyring --target wasm32-unknown-unknown
 cargo clippy --release -p ad4m-keyring --all-targets
 cargo fmt -p ad4m-keyring --check
+# the JS binding: its tests on wasm32, then the two builds (wasm-bindgen-cli at the locked version,
+# looked up as $WASM_BINDGEN, target/wasm-tools/bin, then PATH)
+CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=$PWD/target/wasm-tools/bin/wasm-bindgen-test-runner \
+  cargo test --release -p ad4m-keyring-wasm --target wasm32-unknown-unknown
+bash ad4m-keyring/wasm/build.sh
 ```
+
+The language's `tests/keyring.test.ts` checks the deno build against the vectors byte for
+byte and against noble's X25519 and HKDF.

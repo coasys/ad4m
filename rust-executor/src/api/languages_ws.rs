@@ -207,45 +207,17 @@ async fn apply_template(params: Value, ctx: Arc<RequestContext>) -> Result<Value
         serde_json::from_str(&body.template_data)
             .map_err(|e| WsRpcError::bad_request(format!("Invalid template_data JSON: {}", e)))?;
 
-    let input = controller
-        .language_apply_template_on_source(&body.source_language_hash, template_map)
-        .await
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
-
-    let input_name = input.meta.name.clone();
-
-    let saving = span("applyTemplate.saveBundle");
-    let (hash, _bundle_path) = controller
-        .save_language_bundle(&input.bundle, None)
-        .map_err(|e| {
-            WsRpcError::internal(format!("Failed to save templated language bundle: {}", e))
-        })?;
-    drop(saving);
-
-    let language_language_address = {
-        let sys = controller.system_addresses.lock().await;
-        sys.language_language
-            .clone()
-            .ok_or_else(|| WsRpcError::internal("Language language address not available"))?
-    };
-
-    let content = serde_json::to_value(&input)
-        .map_err(|e| WsRpcError::internal(format!("Failed to serialize language input: {}", e)))?;
-
     // Users template link languages to create neighbourhoods, so this call stays open to
     // them. A user session publishes as the user, never as the main agent.
-    let publishing = span("applyTemplate.publish");
-    controller
-        .expression_create(&language_language_address, content, &ctx.acts_as())
+    let (hash, input_name) = controller
+        .publish_templated(&body.source_language_hash, template_map, &ctx.acts_as())
         .await
-        .map_err(|e| WsRpcError::internal(format!("Failed to publish language: {}", e)))?;
-    drop(publishing);
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     // Loading it starts a runtime and, for a Holochain link language, installs
     // and joins its app. Nothing here needs it loaded, so the caller gets the
     // address now; whatever uses the language next (a publish attaching it, a
     // `language.get`) waits for this install rather than starting another.
-    controller.set_language_name(&hash, &input_name).await;
     let address = hash.clone();
     tokio::spawn(async move {
         if let Err(e) = LanguageController::install_language(address).await {

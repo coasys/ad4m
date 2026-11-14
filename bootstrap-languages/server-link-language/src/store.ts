@@ -10,6 +10,7 @@
  *   links-by-pred/{predicate}/{hash} → link-hash
  *   revision                         → last known server revision hash
  *   sequence                         → last applied server sequence number
+ *   membership/seq                   → the room seq up to which GET /membership was read
  *   held/{link_hash}                 → {op, link}: an inbound wire link this
  *                                      agent holds no key for yet (see sync.ts)
  *   render/progress                  → {upto, next, page}: a fresh member's
@@ -213,6 +214,24 @@ export function getSequence(): number {
 export function setSequence(seq: number): void {
     if (!Number.isFinite(seq)) return;
     getStorage().put(SEQUENCE_KEY, String(seq));
+}
+
+const MEMBERSHIP_SEQ_KEY = "membership/seq";
+
+/**
+ * The room's sequence number up to which this instance has read `GET /membership` and handed
+ * the links to the executor (`membershipLinks`). 0 if never read.
+ */
+export function getMembershipSeq(): number {
+    const raw = getStorage().get(MEMBERSHIP_SEQ_KEY);
+    if (!raw) return 0;
+    const n = parseInt(raw, 10);
+    return Number.isFinite(n) ? n : 0;
+}
+
+export function setMembershipSeq(seq: number): void {
+    if (!Number.isFinite(seq)) return;
+    getStorage().put(MEMBERSHIP_SEQ_KEY, String(seq));
 }
 
 // ---------------------------------------------------------------------------

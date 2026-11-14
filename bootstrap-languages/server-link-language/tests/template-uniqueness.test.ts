@@ -4,9 +4,10 @@ import { readFileSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { initAdapters, getConfig, resetAdapters } from "../src/adapters.js";
-import { adminRotates, adminRotationStep, afterFailedKeyRead } from "../src/room-keys.js";
+import { resetAdapters } from "../src/adapters.js";
+import { afterFailedKeyRead } from "../src/room-keys.js";
 import { generateRoomKey } from "../src/encryption.js";
+import { roomIdOf } from "../src/room.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const bundlePath = resolve(__dirname, "..", "build", "bundle.js");
@@ -27,9 +28,9 @@ function extractPossibleTemplateParams(bundle: string): string[] {
 afterEach(() => resetAdapters());
 
 describe("template uniqueness", () => {
-    it("possibleTemplateParams contains only SERVER_URL and UID", () => {
+    it("possibleTemplateParams are SERVER_URL, UID and CREATOR", () => {
         const params = extractPossibleTemplateParams(readBundle());
-        assert.deepStrictEqual(params.sort(), ["SERVER_URL", "UID"]);
+        assert.deepStrictEqual(params.sort(), ["CREATOR", "SERVER_URL", "UID"]);
     });
 
     it("ROOM_ID does not appear as a template variable in the bundle", () => {
@@ -45,85 +46,43 @@ describe("template uniqueness", () => {
         }
     });
 
-    it("bundle has exactly two template variable markers", () => {
+    it("every template variable is unfilled: SERVER_URL has no default server", () => {
+        const lines = readBundle().split("\n");
+        const values = lines
+            .flatMap((line, i) => (line.includes("//!@ad4m-template-variable") ? [lines[i + 1] || ""] : []));
+        assert.strictEqual(values.length, 3);
+        for (const value of values) {
+            assert.match(value, /=\s*["']<to-be-filled>["']/, `a template variable has a default: ${value}`);
+        }
+        assert.ok(!readBundle().includes("link.ad4m.dev"), "the bundle names link.ad4m.dev");
+    });
+
+    it("bundle has exactly three template variable markers", () => {
         const markers = readBundle()
             .split("\n")
             .filter((line) => line.includes("//!@ad4m-template-variable"));
         assert.strictEqual(
             markers.length,
-            2,
-            `Expected 2 template markers (SERVER_URL, UID), found ${markers.length}`,
+            3,
+            `Expected 3 template markers (SERVER_URL, UID, CREATOR), found ${markers.length}`,
         );
     });
-
-    it("config.roomId maps to the UID value passed at init", () => {
-        const uid = "test-uid-abc-123";
-        initAdapters({ config: { serverUrl: "https://example.com", roomId: uid } });
-        assert.strictEqual(getConfig().roomId, uid);
-    });
-
-    it("same UID produces identical config.roomId across inits", () => {
-        const uid = "shared-uid-value";
-
-        initAdapters({ config: { serverUrl: "https://server-a.com", roomId: uid } });
-        const roomA = getConfig().roomId;
-        resetAdapters();
-
-        initAdapters({ config: { serverUrl: "https://server-a.com", roomId: uid } });
-        const roomB = getConfig().roomId;
-
-        assert.strictEqual(roomA, roomB);
-        assert.strictEqual(roomA, uid);
-    });
-
-    it("different UIDs produce different config.roomId values", () => {
-        initAdapters({ config: { serverUrl: "https://example.com", roomId: "uid-alpha" } });
-        const roomA = getConfig().roomId;
-        resetAdapters();
-
-        initAdapters({ config: { serverUrl: "https://example.com", roomId: "uid-beta" } });
-        const roomB = getConfig().roomId;
-
-        assert.notStrictEqual(roomA, roomB);
-    });
 });
 
-describe("adminRotates", () => {
-    it("rotates when the admin holds no room key it can open, as in the room it just created", () => {
-        assert.strictEqual(adminRotates("pending", false), true);
+describe("room id", () => {
+    it("is base58(sha256(CREATOR, 0x00, UID)), as the link server checks it at genesis", () => {
+        // From `roomIdOf` in link-server/src/membership.ts.
+        assert.strictEqual(roomIdOf("did:scid:coasys:1:QmCreator", "3f2a-uid"), "G6zF1MMHd8RamYLF7ZGBVpCbDhfigXNvt8mP9Dv5BBhY");
+        assert.strictEqual(roomIdOf("x", "\u0000a"), "7gZU8QszgaZypRYWkBoKuzeR7XWf4mjG8J2dUaV5C4SX");
     });
 
-    it("rotates at most once a run: if its own new box did not open, another version would not either", () => {
-        assert.strictEqual(adminRotates("pending", true), false);
-    });
-
-    it("does not rotate while it holds a key, or when the key ring errored", () => {
-        assert.strictEqual(adminRotates("ready", false), false);
-        assert.strictEqual(adminRotates("error", false), false);
-    });
-});
-
-describe("adminRotationStep", () => {
-    it("an admin without a key rotates without reading the ACL again", () => {
-        assert.strictEqual(adminRotationStep("pending", false, "admin"), "rotate");
-    });
-
-    it("re-reads the ACL when the read at init failed, so an admin that missed its role still rotates", () => {
-        assert.strictEqual(adminRotationStep("pending", false, "unknown"), "read-acl");
-        // After the re-read names it the admin, the same check rotates.
-        assert.strictEqual(adminRotationStep("pending", false, "admin"), "rotate");
-    });
-
-    it("does not re-read the ACL on every commit for a member the ACL already named", () => {
-        assert.strictEqual(adminRotationStep("pending", false, "member"), "none");
-    });
-
-    it("neither reads nor rotates while a key is held, after this run rotated, or when the key ring errored", () => {
-        for (const role of ["admin", "member", "unknown"] as const) {
-            assert.strictEqual(adminRotationStep("ready", false, role), "none");
-            assert.strictEqual(adminRotationStep("pending", true, role), "none");
-            assert.strictEqual(adminRotationStep("error", false, role), "none");
-        }
+    it("is the same for the same CREATOR and UID, and differs when either differs", () => {
+        const creator = "did:scid:coasys:1:QmCreator";
+        assert.strictEqual(roomIdOf(creator, "uid-alpha"), roomIdOf(creator, "uid-alpha"));
+        assert.notStrictEqual(roomIdOf(creator, "uid-alpha"), roomIdOf(creator, "uid-beta"));
+        assert.notStrictEqual(roomIdOf(creator, "uid-alpha"), roomIdOf("did:scid:coasys:1:QmOther", "uid-alpha"));
+        // The separator keeps ("ab", "c") and ("a", "bc") apart.
+        assert.notStrictEqual(roomIdOf("ab", "c"), roomIdOf("a", "bc"));
     });
 });
 

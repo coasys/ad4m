@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
 import { test } from "node:test";
 import {
   authenticateAgent,
   clientSideRotate,
+  createRoom,
   createTestAgent,
   getJson,
   postJson,
@@ -23,13 +23,12 @@ async function withServer(fn: (server: TestServerHandle) => Promise<void>): Prom
   }
 }
 
-test("client-side rotate seals the room key to every current ACL member", async () => {
+test("client-side rotate seals the room key to every admitted key", async () => {
   await withServer(async (server) => {
-    const roomId = randomUUID();
+    const roomId = await createRoom(server.url);
     const admin = await createTestAgent();
     const member = await createTestAgent();
     const adminToken = await authenticateAgent(server.url, roomId, admin);
-    await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: member.did }, adminToken);
     const memberToken = await authenticateAgent(server.url, roomId, member);
 
     const { version, recipients, roomKey } = await clientSideRotate(server.url, roomId, adminToken);
@@ -58,29 +57,25 @@ test("client-side rotate seals the room key to every current ACL member", async 
   });
 });
 
-test("only the admin can rotate the room key", async () => {
+test("any admitted key can rotate the room key, not only the room's creator", async () => {
   await withServer(async (server) => {
-    const roomId = randomUUID();
-    const admin = await createTestAgent();
+    const roomId = await createRoom(server.url);
+    const first = await createTestAgent();
     const member = await createTestAgent();
-    const adminToken = await authenticateAgent(server.url, roomId, admin);
-    await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: member.did }, adminToken);
+    const firstToken = await authenticateAgent(server.url, roomId, first);
     const memberToken = await authenticateAgent(server.url, roomId, member);
 
-    // Body content doesn't matter — preHandler rejects non-admin before
-    // the route handler inspects the body.
-    const res = await postJson<{ error: string }>(
-      `${server.url}/rooms/${roomId}/keys/rotate`,
-      { keys: [] },
-      memberToken
-    );
-    assert.equal(res.status, 403);
+    const { version, recipients } = await clientSideRotate(server.url, roomId, memberToken);
+    assert.equal(version, 1);
+    assert.deepEqual(new Set(recipients), new Set([first.did, member.did]));
+    const firstKeys = await getJson<{ keys: Array<{ version: number }> }>(`${server.url}/rooms/${roomId}/keys`, firstToken);
+    assert.deepEqual(firstKeys.body.keys.map((k) => k.version), [1]);
   });
 });
 
 test("agent with no granted key yet gets 200 and an empty list on GET /keys", async () => {
   await withServer(async (server) => {
-    const roomId = randomUUID();
+    const roomId = await createRoom(server.url);
     const admin = await createTestAgent();
     const adminToken = await authenticateAgent(server.url, roomId, admin);
 
@@ -92,14 +87,13 @@ test("agent with no granted key yet gets 200 and an empty list on GET /keys", as
 
 test("member added after a rotation has no key until the next rotation", async () => {
   await withServer(async (server) => {
-    const roomId = randomUUID();
+    const roomId = await createRoom(server.url);
     const admin = await createTestAgent();
     const lateMember = await createTestAgent();
     const adminToken = await authenticateAgent(server.url, roomId, admin);
 
     await clientSideRotate(server.url, roomId, adminToken);
 
-    await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: lateMember.did }, adminToken);
     const lateToken = await authenticateAgent(server.url, roomId, lateMember);
 
     const before = await getJson<{ keys: Array<unknown> }>(
@@ -121,7 +115,7 @@ test("member added after a rotation has no key until the next rotation", async (
 
 test("commit accepts fully-encrypted links (no author/timestamp/proof, only data+link_hash)", async () => {
   await withServer(async (server) => {
-    const roomId = randomUUID();
+    const roomId = await createRoom(server.url);
     const agent = await createTestAgent();
     const token = await authenticateAgent(server.url, roomId, agent);
 
@@ -149,7 +143,7 @@ test("commit accepts fully-encrypted links (no author/timestamp/proof, only data
 
 test("commit rejects encrypted links that lack a link_hash", async () => {
   await withServer(async (server) => {
-    const roomId = randomUUID();
+    const roomId = await createRoom(server.url);
     const agent = await createTestAgent();
     const token = await authenticateAgent(server.url, roomId, agent);
 
@@ -169,7 +163,7 @@ test("commit rejects encrypted links that lack a link_hash", async () => {
 
 test("encrypted link removal by link_hash removes the correct link from the active set", async () => {
   await withServer(async (server) => {
-    const roomId = randomUUID();
+    const roomId = await createRoom(server.url);
     const agent = await createTestAgent();
     const token = await authenticateAgent(server.url, roomId, agent);
 
@@ -204,11 +198,10 @@ test("encrypted link removal by link_hash removes the correct link from the acti
 
 test("any authenticated member can remove an encrypted link", async () => {
   await withServer(async (server) => {
-    const roomId = randomUUID();
+    const roomId = await createRoom(server.url);
     const alice = await createTestAgent();
     const bob = await createTestAgent();
     const aliceToken = await authenticateAgent(server.url, roomId, alice);
-    await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: bob.did }, aliceToken);
     const bobToken = await authenticateAgent(server.url, roomId, bob);
 
     // Alice adds an encrypted link
@@ -244,7 +237,7 @@ test("any authenticated member can remove an encrypted link", async () => {
 
 test("rotate response reports members missing historical key versions", async () => {
   await withServer(async (server) => {
-    const roomId = randomUUID();
+    const roomId = await createRoom(server.url);
     const admin = await createTestAgent();
     const adminToken = await authenticateAgent(server.url, roomId, admin);
 
@@ -253,7 +246,6 @@ test("rotate response reports members missing historical key versions", async ()
 
     // Add a late member
     const lateMember = await createTestAgent();
-    await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: lateMember.did }, adminToken);
     await authenticateAgent(server.url, roomId, lateMember);
 
     // Version 2 — late member now in ACL, gets version 2 but lacks version 1
@@ -271,7 +263,7 @@ test("rotate response reports members missing historical key versions", async ()
 
 test("admin can grant historical key versions to a late member", async () => {
   await withServer(async (server) => {
-    const roomId = randomUUID();
+    const roomId = await createRoom(server.url);
     const admin = await createTestAgent();
     const adminToken = await authenticateAgent(server.url, roomId, admin);
 
@@ -280,7 +272,6 @@ test("admin can grant historical key versions to a late member", async () => {
 
     // Add late member
     const lateMember = await createTestAgent();
-    await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: lateMember.did }, adminToken);
     const lateToken = await authenticateAgent(server.url, roomId, lateMember);
 
     // Rotate again (version 2) — late member gets version 2
@@ -321,15 +312,13 @@ test("admin can grant historical key versions to a late member", async () => {
 // dropping its own box lets an honest member grant the version again.
 test("a wrong key granted by a member is detected against the commitment and replaced after the box is dropped", async () => {
   await withServer(async (server) => {
-    const roomId = randomUUID();
+    const roomId = await createRoom(server.url);
     const admin = await createTestAgent();
     const adminToken = await authenticateAgent(server.url, roomId, admin);
     const mallory = await createTestAgent();
-    await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: mallory.did }, adminToken);
     const malloryToken = await authenticateAgent(server.url, roomId, mallory);
     const { roomKey } = await clientSideRotate(server.url, roomId, adminToken);
     const late = await createTestAgent();
-    await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: late.did }, adminToken);
     const lateToken = await authenticateAgent(server.url, roomId, late);
 
     // Mallory holds version 1 and grants the newcomer a different key under it.
@@ -373,7 +362,7 @@ test("a wrong key granted by a member is detected against the commitment and rep
 
 test("rotate refuses a rotation without a commitment to the new key", async () => {
   await withServer(async (server) => {
-    const roomId = randomUUID();
+    const roomId = await createRoom(server.url);
     const admin = await createTestAgent();
     const adminToken = await authenticateAgent(server.url, roomId, admin);
     const res = await postJson<{ error: string }>(
@@ -388,7 +377,7 @@ test("rotate refuses a rotation without a commitment to the new key", async () =
 
 test("grant refuses a version the granter does not hold, and stores nothing of the request", async () => {
   await withServer(async (server) => {
-    const roomId = randomUUID();
+    const roomId = await createRoom(server.url);
     const admin = await createTestAgent();
     const adminToken = await authenticateAgent(server.url, roomId, admin);
     const { roomKey: roomKeyV1 } = await clientSideRotate(server.url, roomId, adminToken);
@@ -396,10 +385,9 @@ test("grant refuses a version the granter does not hold, and stores nothing of t
     // The member joins after version 1 and gets version 2 only.
     const member = await createTestAgent();
     const carol = await createTestAgent();
-    await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: member.did }, adminToken);
     const memberToken = await authenticateAgent(server.url, roomId, member);
     const { roomKey: roomKeyV2 } = await clientSideRotate(server.url, roomId, adminToken);
-    await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: carol.did }, adminToken);
+    const carolToken = await authenticateAgent(server.url, roomId, carol);
 
     const res = await postJson<{ error: string }>(
       `${server.url}/rooms/${roomId}/keys/grant`,
@@ -415,7 +403,6 @@ test("grant refuses a version the granter does not hold, and stores nothing of t
     assert.equal(res.status, 403);
     assert.match(res.body.error, /version 1/);
 
-    const carolToken = await authenticateAgent(server.url, roomId, carol);
     const carolKeys = await getJson<{ keys: unknown[] }>(`${server.url}/rooms/${roomId}/keys`, carolToken);
     assert.deepEqual(carolKeys.body.keys, [], "a refused grant stores none of its versions");
 
@@ -430,9 +417,9 @@ test("grant refuses a version the granter does not hold, and stores nothing of t
   });
 });
 
-test("grant rejects when target is not a room member", async () => {
+test("grant rejects when the target is not a key admitted to the room", async () => {
   await withServer(async (server) => {
-    const roomId = randomUUID();
+    const roomId = await createRoom(server.url);
     const admin = await createTestAgent();
     const outsider = await createTestAgent();
     const adminToken = await authenticateAgent(server.url, roomId, admin);
@@ -444,17 +431,16 @@ test("grant rejects when target is not a room member", async () => {
       adminToken
     );
     assert.equal(res.status, 404);
-    assert.match(res.body.error, /not a member/);
+    assert.match(res.body.error, /not a key admitted/);
   });
 });
 
 test("grant is idempotent — already-stored versions are skipped", async () => {
   await withServer(async (server) => {
-    const roomId = randomUUID();
+    const roomId = await createRoom(server.url);
     const admin = await createTestAgent();
     const adminToken = await authenticateAgent(server.url, roomId, admin);
     const member = await createTestAgent();
-    await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: member.did }, adminToken);
     await authenticateAgent(server.url, roomId, member);
 
     // Rotate — both get version 1
@@ -476,7 +462,7 @@ test("grant is idempotent — already-stored versions are skipped", async () => 
 
 test("GET /keys/missing returns members missing historical key versions", async () => {
   await withServer(async (server) => {
-    const roomId = randomUUID();
+    const roomId = await createRoom(server.url);
     const admin = await createTestAgent();
     const adminToken = await authenticateAgent(server.url, roomId, admin);
 
@@ -485,7 +471,6 @@ test("GET /keys/missing returns members missing historical key versions", async 
 
     // Add late member
     const lateMember = await createTestAgent();
-    await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: lateMember.did }, adminToken);
     await authenticateAgent(server.url, roomId, lateMember);
 
     // Version 2 — late member gets version 2 but lacks version 1
@@ -504,15 +489,15 @@ test("GET /keys/missing returns members missing historical key versions", async 
 
 test("GET /keys/missing is open to any member and lists a member who never connected", async () => {
   await withServer(async (server) => {
-    const roomId = randomUUID();
+    const roomId = await createRoom(server.url);
     const admin = await createTestAgent();
     const member = await createTestAgent();
     const absent = await createTestAgent();
     const adminToken = await authenticateAgent(server.url, roomId, admin);
-    await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: member.did }, adminToken);
     const memberToken = await authenticateAgent(server.url, roomId, member);
     await clientSideRotate(server.url, roomId, adminToken);
-    await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: absent.did }, adminToken);
+    // absent signs in once, so its key is a member key, and opens no socket.
+    await authenticateAgent(server.url, roomId, absent);
 
     const res = await getJson<{ membersNeedingHistoricalKeys: Array<{ did: string; missingVersions: number[] }> }>(
       `${server.url}/rooms/${roomId}/keys/missing`,
@@ -525,11 +510,10 @@ test("GET /keys/missing is open to any member and lists a member who never conne
 
 test("GET /keys/missing returns empty when no members have missing keys", async () => {
   await withServer(async (server) => {
-    const roomId = randomUUID();
+    const roomId = await createRoom(server.url);
     const admin = await createTestAgent();
     const member = await createTestAgent();
     const adminToken = await authenticateAgent(server.url, roomId, admin);
-    await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: member.did }, adminToken);
     await authenticateAgent(server.url, roomId, member);
 
     // Both present before rotation — both get version 1
@@ -546,7 +530,7 @@ test("GET /keys/missing returns empty when no members have missing keys", async 
 
 test("encrypted links with key_version round-trip through sync unchanged", async () => {
   await withServer(async (server) => {
-    const roomId = randomUUID();
+    const roomId = await createRoom(server.url);
     const agent = await createTestAgent();
     const token = await authenticateAgent(server.url, roomId, agent);
 

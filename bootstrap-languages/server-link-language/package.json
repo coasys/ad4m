@@ -5,9 +5,10 @@
   "type": "module",
   "main": "index.ts",
   "scripts": {
-    "build": "deno run --allow-all esbuild.ts",
+    "build:keyring": "bash ../../ad4m-keyring/wasm/build.sh",
+    "build": "pnpm run build:keyring && deno run --allow-all esbuild.ts",
     "typecheck": "tsc --noEmit",
-    "pretest": "deno run --allow-all esbuild.ts",
+    "pretest": "pnpm run build && bash ../../ad4m-identity-core/build-node.sh",
     "test": "node --experimental-vm-modules --import tsx --test tests/*.test.ts"
   },
   "dependencies": {

@@ -739,6 +739,11 @@ async fn stub_not_impl(_params: Value, _ctx: Arc<RequestContext>) -> Result<Valu
     ))
 }
 
+async fn link_servers(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let directory = crate::link_servers::LinkServerDirectory::global();
+    Ok(serde_json::to_value(directory.all())?)
+}
+
 pub fn register_ws_handlers(map: &mut HandlerMap) {
     // Every caller may read it, with or without capabilities.
     map.method::<NoParams, RuntimeInfo>("runtime.info", get_runtime_info)
@@ -846,6 +851,16 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.method::<NoParams, Vec<LanguageMeta>>(
         "runtime.linkLanguageTemplates",
         get_link_language_templates,
+    )
+    .read()
+    .guard(Guard::Cap(
+        RUNTIME_KNOWN_LINK_LANGUAGES_READ_CAPABILITY.clone(),
+    ));
+    // The link servers a new space may sync through, the default (`neighbourhood.create`'s
+    // `default` choice) first: the operator's, the platform's, then the seed's.
+    map.method::<NoParams, Vec<crate::link_servers::LinkServerEntry>>(
+        "runtime.linkServers",
+        link_servers,
     )
     .read()
     .guard(Guard::Cap(
