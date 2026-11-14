@@ -19,6 +19,11 @@ import type { AgentMessage } from "../generated/api/AgentMessage";
 import type { AgentReply } from "../generated/api/AgentReply";
 import type { PerspectiveQueryLinksParams } from "../generated/api/PerspectiveQueryLinksParams";
 import type { JsonValue } from "../generated/api/serde_json/JsonValue";
+import type {
+    CollectionItemAdded, CollectionItemRemoved, InstanceAddToCollection, InstanceCreate,
+    InstanceCreated, InstanceRemove, InstanceRemoveFromCollection, InstanceRemoved,
+    InstanceUpdate, InstanceUpdated,
+} from "../generated/api";
 import type { AddAutoProcessorConfig, InterpretationOverlayInfo, RawScope, RunInterpretationObserveOptions } from "./AutoProcessor";
 // FlowInstance.ts owns the flow-proposal result types so they sit next to the
 // `proposeTransition()` API they describe. `import type` keeps this out of the
@@ -534,6 +539,37 @@ export class PerspectiveClient {
         return this.#apiClient.call(
             'perspective.removeSubject', { uuid, subjectClass, expressionAddress, batchId }
         )
+    }
+
+    /**
+     * Validated writes (`perspective.instance*`): the executor checks each against the class's
+     * SHACL shape (types, cardinality, required properties, `sh:in`) before writing anything.
+     * A refused write rejects with an `RpcError` whose `data` is an `InstanceError`; a shape
+     * violation is status 422 with `data.kind === 'validation'` and `data.errors` naming each
+     * property. With `batchId` the write goes into that open batch and lands on its commit.
+     */
+    async instanceCreate(uuid: string, body: InstanceCreate): Promise<InstanceCreated> {
+        return this.#apiClient.call('perspective.instanceCreate', { uuid, ...body })
+    }
+
+    /** Sets the given single-valued properties; the others stay. See {@link instanceCreate}. */
+    async instanceUpdate(uuid: string, body: InstanceUpdate): Promise<InstanceUpdated> {
+        return this.#apiClient.call('perspective.instanceUpdate', { uuid, ...body })
+    }
+
+    /** Removes the instance and every link to and from it. See {@link instanceCreate}. */
+    async instanceRemove(uuid: string, body: InstanceRemove): Promise<InstanceRemoved> {
+        return this.#apiClient.call('perspective.instanceRemove', { uuid, ...body })
+    }
+
+    /** Adds an item to a collection (a no-op when it is a member). See {@link instanceCreate}. */
+    async instanceAddToCollection(uuid: string, body: InstanceAddToCollection): Promise<CollectionItemAdded> {
+        return this.#apiClient.call('perspective.instanceAddToCollection', { uuid, ...body })
+    }
+
+    /** Removes an item's membership link from a collection. See {@link instanceCreate}. */
+    async instanceRemoveFromCollection(uuid: string, body: InstanceRemoveFromCollection): Promise<CollectionItemRemoved> {
+        return this.#apiClient.call('perspective.instanceRemoveFromCollection', { uuid, ...body })
     }
 
     async getSubjectData(uuid: string, subjectClass: string, expressionAddress: string): Promise<string> {
