@@ -727,7 +727,7 @@ async fn proof_valid_a_forged_value_does_not_pass_a_relation_where() {
 }
 
 /// #1113 across a publish: `ensure_public_links_are_shared` sends
-/// `sparql_store.get_all_links()` output to the link language, and every
+/// `sparql_store.get_all_links(&crate::perspectives::sparql_store::EvalStop::none(),)` output to the link language, and every
 /// joiner ingests those copies with `add_link`. This signs one property link
 /// per `(name, target)` on store A, copies A's read-back links into store B
 /// the same way, and reads A with the default and B with `include_unverified`.
@@ -768,7 +768,10 @@ async fn pv_withheld_after_read_back_with(
         }
     }
     let b = SparqlStore::new(None).unwrap();
-    for decorated in a.get_all_links().unwrap() {
+    for decorated in a
+        .get_all_links(&crate::perspectives::sparql_store::EvalStop::none())
+        .unwrap()
+    {
         b.add_link(&LinkExpression::from(decorated)).unwrap();
     }
 
