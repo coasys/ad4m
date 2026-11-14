@@ -196,6 +196,15 @@ This runs all four nightly jobs.
   canvas (not black; headless WebKit never plays a `<video>`, so not there).
   On the SFU, Chromium + Firefox also asserts the payload types differ per
   leg and each receiver gets its own numbers (#1684).
+- On a host with no audio server (CI's runner: no PulseAudio or PipeWire),
+  Firefox keeps every `AudioContext` `suspended` (`currentTime` 0) and its
+  analyser reads silence, though the audio arrives and decodes. No Firefox
+  pref fixes it (`media.cubeb.force_null_context` makes any host silent;
+  `media.cubeb.backend` does not help). So where the page's context does not
+  run, `audioPeak` is the receiver's `inbound-rtp` `audioLevel` instead
+  (`audioMeter: "rtp-stats"`, shown in the failure). To reproduce on a
+  desktop, run the suite with `XDG_RUNTIME_DIR` set to an empty directory
+  and `PULSE_SERVER=unix:/nonexistent PIPEWIRE_REMOTE=/nonexistent`.
 - The suite binds the SFU to the host's outbound IPv4
   (`AD4M_SFU_BIND_ADDR`), not loopback: Firefox gathers no loopback
   candidate and never pairs its LAN candidates with an SFU on 127.0.0.1

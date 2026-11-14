@@ -9,7 +9,7 @@ hardware are derived from the evidence and only from it.
 |---|---|
 | `matrix.json` | The cells: per provider and service, the models (a manifest `modelId` or the provider's own name) and the reason a provider cannot serve a service. |
 | `../rust-executor/src/ai_service/local/manifest.json` | Runtimes (llama-server, whisper-server, nemo-speech, sherpa-onnx builds per `<os>-<arch>-<backend>`) and model files, with URL, sha256, size, licence and memory. The executor's local AI setup will install from it; the wind tunnel installs from it the same way. |
-| (manifest `memoryBytes`) | What serving a model takes: the peak GPU memory (CPU-only servers: resident memory) measured on the reference run with the cell's `serverFlags` (llama-server: 8k context, 4 slots), rounded up to 0.1 GB. The fit rule and the local setup read it. The amd-igpu-uma-128 evidence of 2026-11-03 read amdgpu's `fdinfo` on kernel 7.0, which prints each region twice (`drm-resident-*` and its alias `drm-memory-*`), and summed both: its `peakGpuBytes` are twice what the server held, and the LLM, embedding and STT values here are half of them. |
+| (manifest `memoryBytes`) | What serving a model takes: the peak GPU memory (CPU-only servers: resident memory) measured on the reference run with the cell's `serverFlags` (llama-server: 8k context unless the cell sets `context`, 4 slots), rounded up to 0.1 GB. The fit rule and the local setup read it. The amd-igpu-uma-128 evidence of 2026-11-03 read amdgpu's `fdinfo` on kernel 7.0, which prints each region twice (`drm-resident-*` and its alias `drm-memory-*`), and summed both: its `peakGpuBytes` are twice what the server held, and the LLM, embedding and STT values here are half of them. |
 | `hardware-classes.json` | Ordered rules from a machine (OS, arch, RAM, GPUs, usable backends) to its hardware class. |
 | `hardware-class-fixtures.json` | Machines and the class each must get. Every classifier (TS here, Rust in the executor) runs them. |
 | `evidence/<class>/<date>-<fingerprint>.json` | One file per run: the fingerprint, every cell's status, checks and metrics. Schema v1. |
@@ -24,7 +24,7 @@ The code lives in `tests/js/helpers/ai-wind-tunnel/`; its unit tests in
 | | llm | completion | embeddings | stt | tts |
 |---|---|---|---|---|---|
 | **ollama** | qwen3.5 0.8b/2b/4b | qwen3.5:0.8b | nomic-embed-text | unsupported | unsupported |
-| **llama-server** (llama.cpp) | Qwen3.5 0.8B Q8_0, 2B/4B Q4_K_M | 0.8B | nomic-embed-text v1.5 Q8_0 | Qwen3-ASR 0.6B/1.7B Q8_0, Voxtral Mini 3B Q4_K_M (through a front) | unsupported (no speech route in b11669) |
+| **llama-server** (llama.cpp) | Qwen3.5 0.8B Q8_0, 2B/4B Q4_K_M; Qwen3.8 27B UD-Q4_K_M at a 64k context | 0.8B | nomic-embed-text v1.5 Q8_0 | Qwen3-ASR 0.6B/1.7B Q8_0, Voxtral Mini 3B Q4_K_M (through a front) | unsupported (no speech route in b11669) |
 | **vllm** | Qwen/Qwen3.5-0.8B | same | | | unsupported |
 | **whisper-server** (whisper.cpp) | unsupported | unsupported | unsupported | whisper base.en, small (q5_1) | unsupported |
 | **speaches** | unsupported | unsupported | unsupported | faster-whisper base.en, small | Kokoro 82M |

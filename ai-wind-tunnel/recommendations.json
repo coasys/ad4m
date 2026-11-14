@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-11-05T03:42:05.192Z",
+  "generatedAt": "2026-11-13T14:07:41.291Z",
   "rules": {
     "llm": {
       "floor": [
@@ -346,6 +346,89 @@
         ],
         "candidates": 2,
         "overFloor": 2
+      }
+    },
+    "nvidia-24gb": {
+      "llm": {
+        "provider": "llama-server",
+        "modelId": "qwen3.8-27b-ud-q4_k_m",
+        "runtimeBuild": "linux-x64-cuda",
+        "backend": "cuda",
+        "serverFlags": [
+          "-c",
+          "65536",
+          "-ngl",
+          "999",
+          "--reasoning",
+          "off"
+        ],
+        "metrics": {
+          "ttftMs": 333.5,
+          "decodeTps": 42.906,
+          "prefillTps": 1027.2,
+          "latencyMs": 375.3,
+          "throughputTpsC4": 87.137,
+          "firstRequestMs": 370,
+          "peakRssBytes": 9402601472,
+          "peakGpuBytes": 20984102912,
+          "executorOverheadMs": 29.8
+        },
+        "evidence": [
+          "ai-wind-tunnel/evidence/nvidia-24gb/2026-11-13-b6c87a0d.json"
+        ],
+        "candidates": 7,
+        "overFloor": 7
+      },
+      "completion": {
+        "provider": "llama-server",
+        "modelId": "qwen3.5-0.8b-q8_0",
+        "runtimeBuild": "linux-x64-cuda",
+        "backend": "cuda",
+        "serverFlags": [
+          "-c",
+          "8192",
+          "-ngl",
+          "999",
+          "--reasoning",
+          "off"
+        ],
+        "metrics": {
+          "latencyMs": 70.451,
+          "firstRequestMs": 164,
+          "executorOverheadMs": 2.8
+        },
+        "evidence": [
+          "ai-wind-tunnel/evidence/nvidia-24gb/2026-11-13-b6c87a0d.json"
+        ],
+        "candidates": 3,
+        "overFloor": 2
+      },
+      "embeddings": {
+        "provider": "llama-server",
+        "modelId": "nomic-embed-text-v1.5-q8_0",
+        "runtimeBuild": "linux-x64-cuda",
+        "backend": "cuda",
+        "serverFlags": [
+          "-c",
+          "8192",
+          "-ngl",
+          "999",
+          "--embeddings"
+        ],
+        "metrics": {
+          "textsPerSec": 734.4,
+          "batchLatencyMs": 43.573,
+          "singleLatencyMs": 5.461,
+          "dimension": 768,
+          "mrr": 1,
+          "peakRssBytes": 511217664,
+          "executorOverheadMs": 3.7
+        },
+        "evidence": [
+          "ai-wind-tunnel/evidence/nvidia-24gb/2026-11-13-b6c87a0d.json"
+        ],
+        "candidates": 3,
+        "overFloor": 3
       }
     }
   }

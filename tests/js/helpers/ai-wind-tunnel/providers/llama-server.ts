@@ -159,7 +159,7 @@ export const llamaServer: Driver = {
         // Transcription: one utterance per request (the executor sends a stream's utterances
         // one at a time), so one slot with a short context. An audio model hears through its
         // projector (`--mmproj`, recorded by file name).
-        const context = service === "stt" ? ["-c", "4096", "-np", "1"] : ["-c", "8192"];
+        const context = service === "stt" ? ["-c", "4096", "-np", "1"] : ["-c", String(model.context ?? 8192)];
         const flags = [...context, ...(gpu ? ["-ngl", "999"] : []), ...(service === "embeddings" ? ["--embeddings"] : ["--reasoning", "off"])];
         const args = ["-m", file, "--host", "127.0.0.1", "--port", String(port), "--alias", model.remoteModel, "-t", String(Math.min(16, os.cpus().length)), ...flags];
         if (files.mmproj) {
