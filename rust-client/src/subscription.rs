@@ -290,12 +290,16 @@ impl LiveQuery {
         let ws2 = inner.ws.clone();
         let ws3 = inner.ws.clone();
         let inner5 = inner.clone();
-        let inner6 = inner.clone();
+        // Weak: a registration that outlives the query — aborted between the
+        // push and the check below, or the last handle dropped — must not
+        // pin `Inner` alive forever. A dead query upgrades to nothing (R3).
+        let weak6 = Arc::downgrade(&inner);
         let reg = tokio::spawn(async move {
             let cb_id = ws2
                 .on_reconnect(move || {
-                    let inner7 = inner6.clone();
-                    tokio::spawn(async move { inner7.reopen().await });
+                    if let Some(inner7) = weak6.upgrade() {
+                        tokio::spawn(async move { inner7.reopen().await });
+                    }
                 })
                 .await;
             // A dispose landing while the registration was in flight must
@@ -976,6 +980,76 @@ mod tests {
             Ok(Err(broadcast::error::RecvError::Closed)) => {}
             other => panic!("a disposed query's stream must close, got {other:?}"),
         }
+        client.close().await;
+    }
+
+    /// R3: `dispose`/`terminate_stream` abort the registration task — and an
+    /// abort that lands between `on_reconnect()` pushing the callback and
+    /// the post-check leaves it in the Vec: `reconnect_cb` never stored,
+    /// `remove_on_reconnect` never called. With a strong `Arc<Inner>` inside,
+    /// that leaked callback pins the whole query alive forever; it must
+    /// hold a weak ref so a dead registration is an inert no-op.
+    #[tokio::test]
+    async fn an_aborted_registration_leaves_no_strong_callback() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let client = Arc::new(WsRpcClient::connect(fake.url(), "").await.unwrap());
+
+        let open: OpenFn = {
+            let ws = client.clone();
+            Arc::new(move || {
+                let ws = ws.clone();
+                Box::pin(async move {
+                    ws.call(
+                        "perspective.subscribeQuery",
+                        serde_json::json!({"uuid": "p1", "subscriptionId": "s1"}),
+                    )
+                    .await
+                    .map(|v| Subscribed {
+                        subscription_id: "s1".into(),
+                        result: v,
+                        revision: 0,
+                    })
+                })
+            })
+        };
+        let query = LiveQuery::new(client.clone(), "p1", open);
+
+        // Hold the state lock: the registration parks at the post-check's
+        // `state.lock().await` once `on_reconnect` has pushed the callback —
+        // the exact window an abort must not leak through.
+        let hold = query.inner.state.lock().await;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while client.reconnect_callback_count().await == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the reconnect callback never registered");
+        assert!(
+            query.inner.reconnect_cb.lock().unwrap().is_none(),
+            "the registration finished before the window was held open"
+        );
+
+        // What `dispose`/`terminate_stream` do — abort the registration.
+        // Parked at the state lock it dies with the callback registered.
+        let reg = query.inner.reg_task.lock().unwrap().take().unwrap();
+        reg.abort();
+        assert!(reg.await.unwrap_err().is_cancelled());
+        drop(hold);
+
+        // Take the listener's pin too and drop the handle — a strong
+        // callback would keep `Inner` alive forever.
+        if let Some(h) = query.inner.listener.lock().unwrap().take() {
+            h.abort();
+            let _ = h.await;
+        }
+        let weak = Arc::downgrade(&query.inner);
+        drop(query);
+        assert!(
+            weak.upgrade().is_none(),
+            "a callback outliving the query still holds a strong Inner"
+        );
         client.close().await;
     }
 

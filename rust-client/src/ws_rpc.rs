@@ -738,6 +738,13 @@ impl WsRpcClient {
         Self::handle_disconnect(&self.shared, true).await;
     }
 
+    /// How many `on_reconnect` callbacks are currently registered — a leak
+    /// shows up as a count that never returns to what the test installed.
+    #[cfg(test)]
+    pub(crate) async fn reconnect_callback_count(&self) -> usize {
+        self.shared.on_reconnect.lock().await.len()
+    }
+
     /// Wait for a socket (or permanent close), then send and await the reply.
     /// Times out as TS `ApiClient._request` does: 30 s, 20 min on a
     /// `LONG_METHODS` call; the budget covers reconnecting.
