@@ -393,7 +393,10 @@ export class SHACLShape {
     const statements = (source: string) => links
       .filter(l => l.source === source && l.predicate !== 'sh://property')
       .flatMap(l => l.predicate === 'sh://in'
-        ? [`sh:in ( ${JSON.parse(l.target.slice(15)).map((v: { value: string }) => str(v.value)).join(' ')} )`, `ad4m:in ${obj(l)}`]
+        ? [`sh:in ( ${JSON.parse(l.target.slice(15)).map((v: any) => {
+          const value = v !== null && typeof v === 'object' && 'value' in v ? v.value : v;
+          return typeof value === 'string' ? str(value) : JSON.stringify(value);
+        }).join(' ')} )`, `ad4m:in ${obj(l)}`]
         : [`${pred(l.predicate!)} ${obj(l)}`]);
 
     const properties = links
@@ -662,7 +665,8 @@ export class SHACLShape {
         });
       }
 
-      if (prop.in && prop.in.length > 0) {
+      // `in: []` is a deny-all constraint, not the absence of one — store it.
+      if (prop.in !== undefined) {
         links.push({
           source: propShapeId,
           predicate: "sh://in",

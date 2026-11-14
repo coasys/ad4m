@@ -2191,7 +2191,9 @@ export class PerspectiveProxy {
                 required: minCount > 0,
                 collection: isCollection,
                 writable,
-                ...(options && options.length > 0 ? { options } : {}),
+                // `options: []` means "allows nothing" — keep it distinct
+                // from an absent constraint.
+                ...(options !== undefined ? { options } : {}),
             };
         });
 
@@ -2241,7 +2243,7 @@ export class PerspectiveProxy {
         if (!shape) return {};
         const result: Record<string, Array<{ value: string; label?: string }>> = {};
         for (const prop of shape.properties) {
-            if (prop.options && prop.options.length > 0) {
+            if (prop.options !== undefined) {
                 result[prop.name] = prop.options;
             }
         }

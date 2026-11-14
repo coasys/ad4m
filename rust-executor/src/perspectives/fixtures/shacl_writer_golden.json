@@ -62,6 +62,20 @@
         "where_filter": { "colour": "red" },
         "where_predicates": { "colour": "zoo://colour" },
         "filter": false
+      },
+      {
+        "path": "zoo://grade",
+        "name": "grade",
+        "datatype": "xsd://string",
+        "max_count": 1,
+        "in": ["a", "b"]
+      },
+      {
+        "path": "zoo://locked",
+        "name": "locked",
+        "datatype": "xsd://string",
+        "max_count": 1,
+        "in": []
       }
     ]
   },
@@ -123,7 +137,19 @@
     {"source": "zoo://Dog.toys", "predicate": "ad4m://targetClassName", "target": "literal:string:Toy"},
     {"source": "zoo://Dog.toys", "predicate": "ad4m://whereFilter", "target": "literal:string:{\"colour\":\"red\"}"},
     {"source": "zoo://Dog.toys", "predicate": "ad4m://wherePredicates", "target": "literal:string:{\"colour\":\"zoo://colour\"}"},
-    {"source": "zoo://Dog.toys", "predicate": "ad4m://filter", "target": "literal:false"}
+    {"source": "zoo://Dog.toys", "predicate": "ad4m://filter", "target": "literal:false"},
+    {"source": "zoo://DogShape", "predicate": "sh://property", "target": "zoo://Dog.grade"},
+    {"source": "zoo://Dog.grade", "predicate": "rdf://type", "target": "sh://PropertyShape"},
+    {"source": "zoo://Dog.grade", "predicate": "sh://path", "target": "zoo://grade"},
+    {"source": "zoo://Dog.grade", "predicate": "sh://datatype", "target": "xsd://string"},
+    {"source": "zoo://Dog.grade", "predicate": "sh://maxCount", "target": "literal:1^^xsd:integer"},
+    {"source": "zoo://Dog.grade", "predicate": "sh://in", "target": "literal:string:[\"a\",\"b\"]"},
+    {"source": "zoo://DogShape", "predicate": "sh://property", "target": "zoo://Dog.locked"},
+    {"source": "zoo://Dog.locked", "predicate": "rdf://type", "target": "sh://PropertyShape"},
+    {"source": "zoo://Dog.locked", "predicate": "sh://path", "target": "zoo://locked"},
+    {"source": "zoo://Dog.locked", "predicate": "sh://datatype", "target": "xsd://string"},
+    {"source": "zoo://Dog.locked", "predicate": "sh://maxCount", "target": "literal:1^^xsd:integer"},
+    {"source": "zoo://Dog.locked", "predicate": "sh://in", "target": "literal:string:[]"}
   ]
 },
 {
