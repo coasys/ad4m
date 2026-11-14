@@ -32,6 +32,7 @@ pub(super) fn ctx_for(session: Session) -> RequestContext {
         connection_id: None,
         peer: None,
         reason: None,
+        query_slots: None,
     }
 }
 

@@ -552,7 +552,14 @@ mod tests {
         for (uuid, count) in [("uuid-a", 3), ("uuid-b", 5)] {
             let dir = restored.path().join("perspectives").join(uuid);
             let store = SparqlStore::new(Some(dir.to_str().unwrap())).unwrap();
-            assert_eq!(store.get_all_links().unwrap().len(), count, "{uuid}");
+            assert_eq!(
+                store
+                    .get_all_links(&crate::perspectives::sparql_store::EvalStop::none(),)
+                    .unwrap()
+                    .len(),
+                count,
+                "{uuid}"
+            );
         }
     }
 
@@ -790,7 +797,14 @@ mod tests {
         for (uuid, count) in [("uuid-a", 3), ("uuid-b", 4)] {
             let dir = restored.path().join("perspectives").join(uuid);
             let store = SparqlStore::new(Some(dir.to_str().unwrap())).unwrap();
-            assert_eq!(store.get_all_links().unwrap().len(), count, "{uuid}");
+            assert_eq!(
+                store
+                    .get_all_links(&crate::perspectives::sparql_store::EvalStop::none())
+                    .unwrap()
+                    .len(),
+                count,
+                "{uuid}"
+            );
         }
     }
 
@@ -838,7 +852,13 @@ mod tests {
         );
         let dir = data.path().join("perspectives/uuid-b");
         let store = std::sync::Arc::new(SparqlStore::new(Some(dir.to_str().unwrap())).unwrap());
-        assert_eq!(store.get_all_links().unwrap().len(), 4);
+        assert_eq!(
+            store
+                .get_all_links(&crate::perspectives::sparql_store::EvalStop::none())
+                .unwrap()
+                .len(),
+            4
+        );
 
         // The reseal: the sealed snapshot replaces the plain one.
         upload_sealed_snapshot(
