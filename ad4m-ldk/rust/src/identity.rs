@@ -347,6 +347,206 @@ pub struct OfferProgress {
     pub seq: Option<u64>,
 }
 
+/// An inbox's address: before the device joins, `{pre}` (the pre-join address of its device
+/// string); after, `{scid, keyId}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged, rename_all_fields = "camelCase")]
+pub enum InboxAddress {
+    Pre { pre: String },
+    Joined { scid: String, key_id: String },
+}
+
+/// The bound offer a pre-join write is for: only the holder that scanned the device string
+/// (it knows `r`) and holds the master key that opened the offer can write.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InboxBind {
+    pub scid: String,
+    pub offer_id: String,
+    /// The device string's signing key, the offer's bound key.
+    pub sign: String,
+    /// The device string's `r`.
+    pub r: String,
+}
+
+/// `PUT /v1/inbox/pre/{address}` (with `bind`) and `PUT /v1/inbox/{scid}/{keyId}` (without).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InboxWrite {
+    /// base64url HPKE ciphertext, at most 8 KiB.
+    pub sealed: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bind: Option<InboxBind>,
+}
+
+/// The answer of an inbox write.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InboxStored {
+    pub id: String,
+    pub expires: u64,
+}
+
+/// Who wrote an inbox message, as the store checked it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "kebab-case",
+    rename_all_fields = "camelCase"
+)]
+pub enum InboxWriter {
+    /// A pre-join message: the holder of the bound offer.
+    Offer { scid: String, offer_id: String },
+    /// A joined message: the master key `keyId` of the identity.
+    Master { scid: String, key_id: String },
+}
+
+/// One stored inbox message. The store reads only these outer fields.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InboxMessage {
+    /// 16 bytes, base58btc, set by the store.
+    pub id: String,
+    pub sealed: String,
+    pub writer: InboxWriter,
+    pub stored_at: u64,
+    pub expires: u64,
+}
+
+/// A pre-join read or acknowledgement: header `X-Coasys-Inbox` = base64url(JCS(PreInboxAuth)),
+/// signed by the device string's key under `coasys:inbox` over every field but `sig`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreInboxAuth {
+    pub address: String,
+    pub sign: String,
+    pub r: String,
+    /// did:key of the store the read is for, as a [`SignedRequest`]'s `store`: a store refuses
+    /// a read for another (`403 store`).
+    pub store: String,
+    pub method: String,
+    pub path: String,
+    pub nonce: String,
+    pub expires: u64,
+    pub sig: String,
+}
+
+/// How an inbox read authenticates: a signed request by the device key (joined), or a
+/// pre-join read.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum InboxAuth {
+    Request(SignedRequest),
+    Pre(PreInboxAuth),
+}
+
+/// `GET`/`PUT /v1/private/{scid}`: the private details record, encrypted; the store never
+/// reads it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SealedRecord {
+    pub version: u64,
+    /// Key id or `"recovery"` → the record key sealed to that reader.
+    pub wrapped: std::collections::BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_key: Option<String>,
+    /// The current master's attestation of `recovery_key`; present exactly when it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_attestation: Option<RecoveryAttestation>,
+    pub nonce: String,
+    pub ciphertext: String,
+    /// The writer's key id: a device key without the bot mark, or the current master.
+    pub signer: String,
+    /// That key over the envelope (`coasys:private-record`).
+    pub sig: String,
+}
+
+/// A master key over `{scid, recoveryKey, keyId}` (`coasys:recovery-key`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoveryAttestation {
+    /// The master key's id (`"m0"`).
+    pub key_id: String,
+    pub sig: String,
+}
+
+/// The store's word that it accepted a record write: its head key (`store`, a `did:key`) over
+/// `{scid, version, envelope, seq, store}` (`coasys:record-receipt`), where `envelope` is the
+/// hash of the signed envelope and `seq` the log's head the write was checked against. A reader
+/// checks the record's writer at `seq`, so a record outlives its writer's revocation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordReceipt {
+    pub scid: String,
+    pub version: u64,
+    /// sha2-256 multihash of the signed envelope, base58btc.
+    pub envelope: String,
+    pub seq: u64,
+    /// did:key of the store.
+    pub store: String,
+    pub sig: String,
+}
+
+/// `GET /v1/private/{scid}`: the stored record with the store's receipt for it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoredRecord {
+    pub record: SealedRecord,
+    pub receipt: RecordReceipt,
+}
+
+/// The answer of a record write: the version and the store's receipt for it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordStored {
+    pub version: u64,
+    pub receipt: RecordReceipt,
+}
+
+/// What a device asks in the request box.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "kebab-case",
+    rename_all_fields = "camelCase"
+)]
+pub enum DeviceRequestBody {
+    SendMaster {},
+    ConfirmRevoke { key_ids: Vec<String>, rotate: bool },
+}
+
+/// `POST /v1/requests/{scid}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PostedRequest {
+    pub body: DeviceRequestBody,
+    /// At most 7 days ahead.
+    pub expires: u64,
+}
+
+/// The answer of a request post.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestPosted {
+    pub id: String,
+}
+
+/// One request of the box. `signed` is the store request the device posted it with, whose
+/// `bodyHash` covers `JCS({body, expires})` (the only bytes a store takes), so a reader checks
+/// the poster itself with `ad4m_identity_core::requests::verify_posted` against its own copy
+/// of the log.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceRequest {
+    pub id: String,
+    pub body: DeviceRequestBody,
+    /// The posting device key's id.
+    pub by: String,
+    pub created: u64,
+    pub expires: u64,
+    pub signed: SignedRequest,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ForbiddenReason {
@@ -358,7 +558,7 @@ pub enum ForbiddenReason {
     Bound,
     Cosig,
     Writer,
-    /// A signed request for another store.
+    /// A signed request or a pre-join inbox read for another store.
     Store,
 }
 

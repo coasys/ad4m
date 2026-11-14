@@ -4,18 +4,30 @@
 //! agent language suites.
 #![allow(dead_code)]
 
-use ad4m_hash_chain::{encode_ed25519_multikey, encode_proof_value, hash_bytes, sha256};
+use ad4m_hash_chain::{
+    canonical_json, encode_ed25519_multikey, encode_proof_value, hash_bytes, sha256,
+};
 use ad4m_identity_core::build::{self, Signer};
+use ad4m_identity_core::inbox::{
+    open, pre_address, seal, sign_payload, sign_pre_auth, InboxAddress, InboxBody, InboxPayload,
+    OfferTicket, PreInboxAuth,
+};
 use ad4m_identity_core::link::{
     claim_view, make_claim, offer_commit, sign_offer, Claim, ClaimView, Offer, OfferKind, SignedBy,
     SignedOffer,
+};
+use ad4m_identity_core::record::{
+    attest_recovery_key, seal_record, DeviceEntry, DeviceKind, HoldsMaster, Place, PrivateRecord,
+    Recovery, SealedRecord,
 };
 use ad4m_identity_core::REQUEST_DOMAIN;
 use ad4m_identity_core::{
     commitment, did_of, encode_x25519_multikey, fold, signing_bytes, BotScope, DeviceKey, Event,
     KelChain, KelPolicy, KeyLife, Op,
 };
+use ad4m_identity_core::{x25519_secret_of_ed25519, X25519Secret};
 use ad4m_ldk::identity::{AgentRecord, RequestBody, SignedRequest};
+use base64::Engine;
 use ed25519_dalek::SigningKey;
 use identity_store::request::encode_header;
 use serde_json::Value;
@@ -81,6 +93,53 @@ impl Device {
     /// What the holder reads of this device's claim.
     pub fn view(&self, claim: &Claim, at: u64) -> ClaimView {
         claim_view(claim, at)
+    }
+
+    /// The X25519 secret of the device's `enc` (the Montgomery form of its key).
+    pub fn enc_secret(&self) -> X25519Secret {
+        x25519_secret_of_ed25519(&self.key)
+    }
+
+    /// The `r` of the device's string: 16 bytes from its key.
+    pub fn r(&self) -> String {
+        bs58::encode(&sha256(format!("r {}", self.sign_key()).as_bytes())[..16]).into_string()
+    }
+
+    /// The pre-join address of the device's string.
+    pub fn pre_address(&self) -> String {
+        pre_address(&self.sign_key(), &self.r()).unwrap()
+    }
+
+    /// A pre-join read of `method path` at the store whose `did:key` is `store`, by this device,
+    /// expiring at `expires`.
+    pub fn pre_auth_value(
+        &self,
+        store: &str,
+        method: &str,
+        path: &str,
+        expires: u64,
+    ) -> PreInboxAuth {
+        let nonce = bs58::encode(rand::random::<[u8; 16]>()).into_string();
+        sign_pre_auth(&self.r(), store, method, path, &nonce, expires, &self.key).unwrap()
+    }
+
+    /// The `X-Coasys-Inbox` header of a pre-join read of `method path` at the test store,
+    /// expiring at `expires`.
+    pub fn pre_auth(&self, method: &str, path: &str, expires: u64) -> String {
+        self.pre_auth_at(&test_store_did(), method, path, expires)
+    }
+
+    /// The `X-Coasys-Inbox` header of a pre-join read of `method path` at the store whose
+    /// `did:key` is `store`, expiring at `expires`.
+    pub fn pre_auth_at(&self, store: &str, method: &str, path: &str, expires: u64) -> String {
+        let auth = self.pre_auth_value(store, method, path, expires);
+        let text = canonical_json(&serde_json::to_value(&auth).unwrap()).unwrap();
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(text)
+    }
+
+    /// Opens a message sealed to this device's `enc` for `address`.
+    pub fn open(&self, address: &InboxAddress, sealed: &str) -> InboxPayload {
+        open(&self.enc_secret(), address, sealed).unwrap()
     }
 }
 
@@ -348,6 +407,120 @@ impl Person {
         record.sig = sign_record(&record, signer);
         record
     }
+
+    /// The joined inbox address of `key_id`.
+    pub fn joined(&self, key_id: &str) -> InboxAddress {
+        InboxAddress::Joined {
+            scid: self.scid(),
+            key_id: key_id.to_string(),
+        }
+    }
+
+    /// The current master key, sealed for the joined inbox of `key_id` (the `enc` the log
+    /// lists for it), signed by the current master at the head.
+    pub fn seal_master(&self, key_id: &str) -> String {
+        let record = &self.chain.state().keys[key_id];
+        let body = InboxBody::Master {
+            did: self.did(),
+            index: self.n,
+            secret: bs58::encode(self.current_master().to_bytes()).into_string(),
+        };
+        let payload = sign_payload(
+            record.sign.clone(),
+            body,
+            0,
+            self.signed_by(),
+            &self.current_master(),
+        )
+        .unwrap();
+        seal(
+            record.enc.as_deref().unwrap(),
+            &self.joined(key_id),
+            &payload,
+            &mut rand::rngs::OsRng,
+        )
+        .unwrap()
+    }
+
+    /// The ticket of the bound `offer` (secret `s`), sealed for `device`'s pre-join inbox.
+    pub fn seal_ticket(&self, device: &Device, offer: &SignedOffer, s: [u8; 32]) -> String {
+        let body = InboxBody::OfferTicket(Box::new(OfferTicket {
+            store: "https://store.example".into(),
+            scid: self.scid(),
+            offer_id: offer.offer.offer_id.clone(),
+            s: bs58::encode(s).into_string(),
+            signed_offer: offer.clone(),
+        }));
+        let payload = sign_payload(
+            device.sign_key(),
+            body,
+            0,
+            self.signed_by(),
+            &self.current_master(),
+        )
+        .unwrap();
+        seal(
+            &enc_of(&device.key),
+            &InboxAddress::Pre(device.pre_address()),
+            &payload,
+            &mut rand::rngs::OsRng,
+        )
+        .unwrap()
+    }
+
+    /// A private record of `version`, wrapped to the readers of the person's log at its head
+    /// (and to `recovery`, when given, attested by the current master), signed by d1.
+    pub fn sealed_record(&self, version: u64, recovery: Option<String>) -> SealedRecord {
+        let recovery = recovery.map(|key| self.attest_recovery(key));
+        self.sealed_record_by(version, recovery, &self.device_key(1))
+    }
+
+    /// `key` attested as the recovery key by the current master.
+    pub fn attest_recovery(&self, key: String) -> Recovery {
+        attest_recovery_key(&self.chain, key, &self.current_master()).unwrap()
+    }
+
+    /// [`Person::sealed_record`] carrying `recovery` as given, signed by `signer`, a device key
+    /// or a master key of the log.
+    pub fn sealed_record_by(
+        &self,
+        version: u64,
+        recovery: Option<Recovery>,
+        signer: &SigningKey,
+    ) -> SealedRecord {
+        let mut record = PrivateRecord::default();
+        record.devices.insert(
+            "d1".into(),
+            DeviceEntry {
+                name: RECORD_DEVICE_NAME.into(),
+                kind: DeviceKind::DesktopApp,
+                place: Some(Place::Computer),
+                address: None,
+                runs_executor: true,
+                holds_master: HoldsMaster::Yes,
+                operator: None,
+            },
+        );
+        seal_record(
+            &self.chain,
+            version,
+            &record,
+            recovery,
+            signer,
+            &mut rand::rngs::OsRng,
+        )
+        .unwrap()
+    }
+}
+
+/// The device name inside every [`Person::sealed_record`] (a scan proves the store never
+/// holds it in plaintext).
+pub const RECORD_DEVICE_NAME: &str = "Secret MacBook Name";
+
+/// The X25519 secret of the `enc` of a person's device key `d<n>` (as the person's #0 and
+/// [`Device`] make it: the Montgomery form of the signing key).
+pub fn person_enc_secret(person: &Person, n: u32) -> X25519Secret {
+    x25519_secret_of_ed25519(&person.device_key(n))
 }
 
 /// The timestamp of the profiles [`Person::agent_record`] signs.

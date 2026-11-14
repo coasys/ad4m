@@ -46,6 +46,15 @@ pub enum Capability {
     IdentityCancelOffer,
     IdentityClaimOffer,
     IdentityOfferState,
+    // The device inbox, the private record and the request box. Agent language only.
+    IdentityInboxPut,
+    IdentityInboxList,
+    IdentityInboxAck,
+    IdentityGetRecord,
+    IdentityPutRecord,
+    IdentityPostRequest,
+    IdentityListRequests,
+    IdentityDeleteRequest,
     // Token (interfaces only). Agent language only.
     TokenAssets,
     TokenBalance,
@@ -55,7 +64,7 @@ pub enum Capability {
 
 impl Capability {
     /// Every capability, in declaration order.
-    pub const ALL: [Capability; 31] = [
+    pub const ALL: [Capability; 39] = [
         Capability::ExpressionCreate,
         Capability::ExpressionGet,
         Capability::PerspectiveCommit,
@@ -83,6 +92,14 @@ impl Capability {
         Capability::IdentityCancelOffer,
         Capability::IdentityClaimOffer,
         Capability::IdentityOfferState,
+        Capability::IdentityInboxPut,
+        Capability::IdentityInboxList,
+        Capability::IdentityInboxAck,
+        Capability::IdentityGetRecord,
+        Capability::IdentityPutRecord,
+        Capability::IdentityPostRequest,
+        Capability::IdentityListRequests,
+        Capability::IdentityDeleteRequest,
         Capability::TokenAssets,
         Capability::TokenBalance,
         Capability::TokenSend,
@@ -119,6 +136,14 @@ impl Capability {
             Capability::IdentityCancelOffer => "identity-cancel-offer",
             Capability::IdentityClaimOffer => "identity-claim-offer",
             Capability::IdentityOfferState => "identity-offer-state",
+            Capability::IdentityInboxPut => "identity-inbox-put",
+            Capability::IdentityInboxList => "identity-inbox-list",
+            Capability::IdentityInboxAck => "identity-inbox-ack",
+            Capability::IdentityGetRecord => "identity-get-record",
+            Capability::IdentityPutRecord => "identity-put-record",
+            Capability::IdentityPostRequest => "identity-post-request",
+            Capability::IdentityListRequests => "identity-list-requests",
+            Capability::IdentityDeleteRequest => "identity-delete-request",
             Capability::TokenAssets => "token-assets",
             Capability::TokenBalance => "token-balance",
             Capability::TokenSend => "token-send",
@@ -158,6 +183,14 @@ impl Capability {
             Capability::IdentityCancelOffer => "identityCancelOffer",
             Capability::IdentityClaimOffer => "identityClaimOffer",
             Capability::IdentityOfferState => "identityOfferState",
+            Capability::IdentityInboxPut => "identityInboxPut",
+            Capability::IdentityInboxList => "identityInboxList",
+            Capability::IdentityInboxAck => "identityInboxAck",
+            Capability::IdentityGetRecord => "identityGetRecord",
+            Capability::IdentityPutRecord => "identityPutRecord",
+            Capability::IdentityPostRequest => "identityPostRequest",
+            Capability::IdentityListRequests => "identityListRequests",
+            Capability::IdentityDeleteRequest => "identityDeleteRequest",
             Capability::TokenAssets => "tokenAssets",
             Capability::TokenBalance => "tokenBalance",
             Capability::TokenSend => "tokenSend",
@@ -183,6 +216,14 @@ impl Capability {
                 | Capability::IdentityCancelOffer
                 | Capability::IdentityClaimOffer
                 | Capability::IdentityOfferState
+                | Capability::IdentityInboxPut
+                | Capability::IdentityInboxList
+                | Capability::IdentityInboxAck
+                | Capability::IdentityGetRecord
+                | Capability::IdentityPutRecord
+                | Capability::IdentityPostRequest
+                | Capability::IdentityListRequests
+                | Capability::IdentityDeleteRequest
                 | Capability::TokenAssets
                 | Capability::TokenBalance
                 | Capability::TokenSend
@@ -220,6 +261,14 @@ impl Capability {
             "identity-cancel-offer" => Some(Capability::IdentityCancelOffer),
             "identity-claim-offer" => Some(Capability::IdentityClaimOffer),
             "identity-offer-state" => Some(Capability::IdentityOfferState),
+            "identity-inbox-put" => Some(Capability::IdentityInboxPut),
+            "identity-inbox-list" => Some(Capability::IdentityInboxList),
+            "identity-inbox-ack" => Some(Capability::IdentityInboxAck),
+            "identity-get-record" => Some(Capability::IdentityGetRecord),
+            "identity-put-record" => Some(Capability::IdentityPutRecord),
+            "identity-post-request" => Some(Capability::IdentityPostRequest),
+            "identity-list-requests" => Some(Capability::IdentityListRequests),
+            "identity-delete-request" => Some(Capability::IdentityDeleteRequest),
             "token-assets" => Some(Capability::TokenAssets),
             "token-balance" => Some(Capability::TokenBalance),
             "token-send" => Some(Capability::TokenSend),
@@ -408,6 +457,46 @@ mod tests {
                 Capability::IdentityOfferState,
                 "identity-offer-state",
                 "identityOfferState",
+            ),
+            (
+                Capability::IdentityInboxPut,
+                "identity-inbox-put",
+                "identityInboxPut",
+            ),
+            (
+                Capability::IdentityInboxList,
+                "identity-inbox-list",
+                "identityInboxList",
+            ),
+            (
+                Capability::IdentityInboxAck,
+                "identity-inbox-ack",
+                "identityInboxAck",
+            ),
+            (
+                Capability::IdentityGetRecord,
+                "identity-get-record",
+                "identityGetRecord",
+            ),
+            (
+                Capability::IdentityPutRecord,
+                "identity-put-record",
+                "identityPutRecord",
+            ),
+            (
+                Capability::IdentityPostRequest,
+                "identity-post-request",
+                "identityPostRequest",
+            ),
+            (
+                Capability::IdentityListRequests,
+                "identity-list-requests",
+                "identityListRequests",
+            ),
+            (
+                Capability::IdentityDeleteRequest,
+                "identity-delete-request",
+                "identityDeleteRequest",
             ),
             (Capability::TokenAssets, "token-assets", "tokenAssets"),
             (Capability::TokenBalance, "token-balance", "tokenBalance"),
