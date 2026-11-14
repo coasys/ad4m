@@ -746,6 +746,17 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
         "agent.signSessionStatement",
         || json!({ "statement": { "v": 1, "purpose": "login", "executor": "did:key:z6Mk", "audience": "http://127.0.0.1:12000", "challenge": "c", "client": { "kind": "native" }, "issuedAt": 1 } }),
     ),
+    // Bots.
+    (
+        "bot.createAgent",
+        || json!({ "offer": "coasys:offer:1:x", "name": "helper" }),
+    ),
+    (
+        "bot.setGrant",
+        || json!({ "bot": "did:key:z6Mk", "spaces": [], "can": ["read"], "state": "active", "version": 1 }),
+    ),
+    ("bot.grant", || json!({ "bot": "did:key:z6Mk" })),
+    ("bot.log", || json!({ "bot": "did:key:z6Mk" })),
 ];
 
 fn signed_key_statement(purpose: &str) -> Value {
@@ -1963,4 +1974,382 @@ fn a_method_the_socket_handles_itself_takes_no_guard() {
     HandlerMap::new()
         .inline::<NoParams, bool>("test.inline")
         .guard(Guard::Cap(AGENT_AUTH_CAPABILITY.clone()));
+}
+
+// ── Bots ────────────────────────────────────────────────────────────────────────
+
+/// The matrix's bot: a managed agent the registry names as a bot, whose grant names the
+/// user's perspective. Its session holds every capability a guard asks for: the grant, not the
+/// token, bounds a bot.
+const BOT_DID: &str = "did:key:matrix-bot";
+
+/// The methods on a bot's own agent and session, beside the `Guard::Open` ones.
+const BOT_OWN: [&str; 2] = ["agent.get", "agent.status"];
+/// The reads of public data that name no space.
+const BOT_READS: [&str; 4] = [
+    "expression.get",
+    "expression.getMany",
+    "expression.getRaw",
+    "expression.interactions",
+];
+
+fn register_bot(world: &World, state: &str, can: &[&str]) {
+    crate::bots::remember(crate::db::BotRow {
+        did: BOT_DID.to_string(),
+        username: "bot-matrix@bots.ad4m".to_string(),
+        name: "matrix".to_string(),
+        owner: "matrix-scid".to_string(),
+        offer_id: "matrix-offer".to_string(),
+        created_at: 1,
+        grant: crate::db::BotGrantRow {
+            spaces: vec![world.users_own.clone()],
+            can: can.iter().map(|a| a.to_string()).collect(),
+            expires: None,
+            state: state.to_string(),
+            version: 1,
+            updated_at: 1,
+        },
+    });
+}
+
+/// Every method, called by the bot with the params the walk uses; a perspective method names
+/// `space`. Yields the method, its guard and the answer of the dispatcher's checks.
+async fn bot_calls(
+    map: &HandlerMap,
+    world: &World,
+    space: &str,
+) -> Vec<(String, Guard, Result<(), WsRpcError>)> {
+    let mut calls = Vec::new();
+    for (method, guard) in map.guards() {
+        let guard = guard.expect("every method has a guard").clone();
+        let (target, uuid_param) = match &guard {
+            Guard::Owns {
+                owner: Owner::Perspective,
+                ..
+            } => (Some(space.to_string()), true),
+            Guard::Owns { owner, .. } => (Some(world.id(*owner, Target::UsersOwn)), false),
+            _ => (None, false),
+        };
+        let ctx =
+            RequestContext::user_for_test(BOT_DID, guard.capability("*").into_iter().collect())
+                .with_reason("the matrix");
+        let params = params(method, target.as_deref(), uuid_param);
+        let answer = map.admit(method, &params, &ctx).await;
+        calls.push((method.to_string(), guard, answer));
+    }
+    calls
+}
+
+fn refused_with(answer: &Result<(), WsRpcError>, code: &str) -> bool {
+    matches!(answer, Err(e) if e.message.starts_with(&format!("{code}: ")))
+}
+
+fn bot_refusal(answer: &Result<(), WsRpcError>) -> bool {
+    matches!(answer, Err(e) if e.message.starts_with("bot-") || e.message.starts_with("not-in-can"))
+}
+
+/// A bot calls every method outside its grant and gets 403 `bot-grant`, whatever its token
+/// holds: every method but those on its own session, reading public expressions, and reading
+/// and writing the content of a perspective. Here each perspective method names a perspective
+/// outside the grant, so those answer `bot-grant` too.
+#[tokio::test]
+async fn every_method_outside_a_bots_grant_answers_bot_grant() {
+    let world = World::new().await;
+    register_bot(&world, "active", &["read", "write", "join"]);
+    let map = build_handler_map();
+    let calls = bot_calls(&map, &world, &world.main_agents).await;
+    world.remove().await;
+    let mut failures = Vec::new();
+    let mut refused = 0;
+    for (method, guard, answer) in &calls {
+        let inside = matches!(guard, Guard::Open)
+            || BOT_OWN.contains(&method.as_str())
+            || BOT_READS.contains(&method.as_str());
+        if inside {
+            if bot_refusal(answer) {
+                failures.push(format!("{method}: inside the grant, got {answer:?}"));
+            }
+        } else if refused_with(answer, crate::bots::BOT_GRANT)
+            && answer.as_ref().unwrap_err().code == 403
+        {
+            refused += 1;
+        } else {
+            failures.push(format!("{method}: expected 403 bot-grant, got {answer:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    assert!(refused > 200, "only {refused} methods refused");
+}
+
+/// In a space of its grant a bot reads and writes the perspective's content and nothing else
+/// of it; a paused bot does neither, a narrowed one only what is left, and a revoked one
+/// nothing at all, its own session included.
+#[tokio::test]
+async fn a_bots_grant_pauses_narrows_and_revokes_every_method_in_its_space() {
+    let world = World::new().await;
+    let map = build_handler_map();
+    let space = world.users_own.clone();
+
+    // Active, with every action: the grant lets the call on to the owner's log, which a
+    // test executor cannot read (no identity module): 503.
+    register_bot(&world, "active", &["read", "write", "join"]);
+    let active = bot_calls(&map, &world, &space).await;
+    let in_space: Vec<&str> = active
+        .iter()
+        .filter(|(_, _, answer)| refused_with(answer, "store-unavailable"))
+        .map(|(method, _, _)| method.as_str())
+        .collect();
+    for method in [
+        "perspective.addLink",
+        "perspective.queryLinks",
+        "perspective.removeLink",
+    ] {
+        assert!(
+            in_space.contains(&method),
+            "{method} not in the space: {in_space:?}"
+        );
+    }
+    for method in [
+        "perspective.remove",
+        "perspective.update",
+        "neighbourhood.publish",
+    ] {
+        assert!(!in_space.contains(&method), "{method} acts in the space");
+    }
+
+    let answers = |calls: &[(String, Guard, Result<(), WsRpcError>)], method: &str| {
+        calls
+            .iter()
+            .find(|(m, _, _)| m == method)
+            .map(|(_, _, answer)| outcome_text(answer))
+            .unwrap()
+    };
+
+    // Paused: every call in the space; its own session answers.
+    register_bot(&world, "paused", &["read", "write", "join"]);
+    let paused = bot_calls(&map, &world, &space).await;
+    for method in &in_space {
+        assert_eq!(answers(&paused, method), "403 bot-paused", "{method}");
+    }
+    assert!(!bot_refusal(
+        &paused.iter().find(|(m, ..)| m == "agent.get").unwrap().2
+    ));
+
+    // Narrowed to reading: the writes answer not-in-can, the reads go on.
+    register_bot(&world, "active", &["read"]);
+    let reader = bot_calls(&map, &world, &space).await;
+    let writes: Vec<&str> = in_space
+        .iter()
+        .copied()
+        .filter(|method| answers(&reader, method) == "403 not-in-can")
+        .collect();
+    assert!(writes.contains(&"perspective.addLink"), "{writes:?}");
+    assert_eq!(
+        answers(&reader, "perspective.queryLinks"),
+        "503 store-unavailable"
+    );
+    // Narrowed to writing: exactly the others answer not-in-can.
+    register_bot(&world, "active", &["write"]);
+    let writer = bot_calls(&map, &world, &space).await;
+    for method in &in_space {
+        let narrowed = answers(&writer, method) == "403 not-in-can";
+        assert_eq!(narrowed, !writes.contains(method), "{method}");
+    }
+
+    // Revoked: every method, its own session included.
+    register_bot(&world, "revoked", &["read", "write", "join"]);
+    let revoked = bot_calls(&map, &world, &space).await;
+    world.remove().await;
+    for (method, _, answer) in &revoked {
+        assert_eq!(outcome_text(answer), "403 bot-revoked", "{method}");
+    }
+}
+
+fn outcome_text(answer: &Result<(), WsRpcError>) -> String {
+    match answer {
+        Ok(()) => "ok".to_string(),
+        Err(e) => format!(
+            "{} {}",
+            e.code,
+            e.message.split(':').next().unwrap_or_default()
+        ),
+    }
+}
+
+/// The dispatcher logs a bot's refused call with the reason it gave; the dispatcher's checks
+/// alone (`admit`, which MCP runs before a tool) log nothing.
+#[tokio::test]
+async fn dispatch_logs_a_bots_refused_call_and_admit_does_not() {
+    let world = World::new().await;
+    register_bot(&world, "active", &["read", "write"]);
+    let map = build_handler_map();
+    let logged = || {
+        crate::db_backend::db_backend()
+            .bot_activity(BOT_DID, None, 1000)
+            .unwrap()
+    };
+    let before = logged().len();
+    let ctx = RequestContext::user_for_test(
+        BOT_DID,
+        vec![crate::agent::capabilities::ALL_CAPABILITY.clone()],
+    )
+    .with_reason("tidy the board");
+    let params = json!({ "uuid": world.main_agents, "link": link() });
+    let admitted = map.admit("perspective.addLink", &params, &ctx).await;
+    assert!(refused_with(&admitted, crate::bots::BOT_GRANT));
+    assert_eq!(logged().len(), before);
+    let dispatched = map
+        .dispatch("perspective.addLink", params, Arc::new(ctx))
+        .await
+        .unwrap_err();
+    world.remove().await;
+    assert!(dispatched.message.starts_with("bot-grant: "));
+    let entries = logged();
+    assert_eq!(entries.len(), before + 1);
+    let entry = &entries[0];
+    assert_eq!(entry.method, "perspective.addLink");
+    assert_eq!(entry.action.as_deref(), Some("write"));
+    assert_eq!(entry.reason.as_deref(), Some("tidy the board"));
+    assert_eq!(entry.outcome, crate::bots::BOT_GRANT);
+}
+
+/// Lal #1671: the log records what the call did, not what the bot check let through. A write
+/// the grant and the owner's log allow but the method's guard or handler then refuses is
+/// logged `failed:<status>`, after it ran.
+#[tokio::test]
+async fn dispatch_logs_a_bots_call_with_its_answer() {
+    use crate::identity::bot_key::BotKey;
+    use crate::identity::verdict::KeyVerdict;
+    let world = World::new().await;
+    register_bot(&world, "active", &["read", "write"]);
+    crate::bots::set_test_key(
+        BOT_DID,
+        Ok(BotKey {
+            key_id: "d2".into(),
+            verdict: KeyVerdict::Valid,
+            scope: Some(ad4m_identity_core::BotScope {
+                can: vec!["read".into(), "write".into()],
+                expires: u64::MAX,
+            }),
+        }),
+    );
+    let map = build_handler_map();
+    let logged = || {
+        crate::db_backend::db_backend()
+            .bot_activity(BOT_DID, None, 1000)
+            .unwrap()
+    };
+    let before = logged().len();
+    // The grant names the user's perspective, but the bot does not own it: the guard refuses.
+    let ctx = RequestContext::user_for_test(
+        BOT_DID,
+        vec![crate::agent::capabilities::ALL_CAPABILITY.clone()],
+    )
+    .with_reason("tidy the board");
+    let params = json!({ "uuid": world.users_own, "link": link() });
+    let dispatched = map
+        .dispatch("perspective.addLink", params, Arc::new(ctx))
+        .await
+        .unwrap_err();
+    crate::bots::set_test_key(
+        BOT_DID,
+        Err(crate::identity::bot_key::BotKeyError::StoreUnavailable),
+    );
+    let world_users_own = world.users_own.clone();
+    world.remove().await;
+    assert!(
+        !dispatched.message.starts_with("bot-") && !dispatched.message.starts_with("not-in-can"),
+        "the bot check let it through: {dispatched:?}"
+    );
+    let entries = logged();
+    assert_eq!(entries.len(), before + 1);
+    let entry = &entries[0];
+    assert_eq!(entry.method, "perspective.addLink");
+    assert_eq!(entry.action.as_deref(), Some("write"));
+    assert_eq!(entry.outcome, format!("failed:{}", dispatched.code));
+    assert_eq!(
+        entry.space.as_deref(),
+        Some(world_users_own.as_str()),
+        "a perspective without a neighbourhood is named by its UUID"
+    );
+}
+
+/// WE #1671: the log names every entry's space the way the owner's page knows it, by the
+/// neighbourhood URL when the perspective has one: a write in a shared perspective is logged
+/// under the URL a join of it is, not the perspective's local UUID. A refusal names it too.
+#[tokio::test]
+async fn the_log_names_a_shared_perspective_by_its_neighbourhood_url() {
+    use crate::identity::bot_key::BotKey;
+    use crate::identity::verdict::KeyVerdict;
+    let world = World::new().await;
+    let url = format!("neighbourhood://{}", uuid::Uuid::new_v4());
+    crate::perspectives::get_perspective(&world.users_own)
+        .expect("the user's perspective")
+        .persisted
+        .lock()
+        .await
+        .shared_url = Some(url.clone());
+    register_bot(&world, "active", &["read", "write"]);
+    crate::bots::set_test_key(
+        BOT_DID,
+        Ok(BotKey {
+            key_id: "d2".into(),
+            verdict: KeyVerdict::Valid,
+            scope: Some(ad4m_identity_core::BotScope {
+                can: vec!["read".into(), "write".into()],
+                expires: u64::MAX,
+            }),
+        }),
+    );
+    let map = build_handler_map();
+    let logged = || {
+        crate::db_backend::db_backend()
+            .bot_activity(BOT_DID, None, 1000)
+            .unwrap()
+    };
+    let before = logged().len();
+    let ctx = || {
+        Arc::new(
+            RequestContext::user_for_test(
+                BOT_DID,
+                vec![crate::agent::capabilities::ALL_CAPABILITY.clone()],
+            )
+            .with_reason("tidy the board"),
+        )
+    };
+    // Admitted (the guard then answers): logged after it ran.
+    let written = map
+        .dispatch(
+            "perspective.addLink",
+            json!({ "uuid": world.users_own, "link": link() }),
+            ctx(),
+        )
+        .await;
+    // Refused by the bot check (no reason given for a write).
+    let refused = map
+        .dispatch(
+            "perspective.addLink",
+            json!({ "uuid": world.users_own, "link": link() }),
+            Arc::new(RequestContext::user_for_test(
+                BOT_DID,
+                vec![crate::agent::capabilities::ALL_CAPABILITY.clone()],
+            )),
+        )
+        .await;
+    crate::bots::set_test_key(
+        BOT_DID,
+        Err(crate::identity::bot_key::BotKeyError::StoreUnavailable),
+    );
+    world.remove().await;
+    assert!(written.is_err() && refused.is_err());
+    let entries = logged();
+    assert_eq!(entries.len(), before + 2);
+    for entry in &entries[..2] {
+        assert_eq!(
+            entry.space.as_deref(),
+            Some(url.as_str()),
+            "{}",
+            entry.outcome
+        );
+    }
 }

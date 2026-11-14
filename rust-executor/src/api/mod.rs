@@ -21,6 +21,7 @@ pub mod agent_session_ws;
 pub mod agent_ws;
 pub mod ai_sessions_ws;
 pub mod ai_ws;
+pub mod bots_ws;
 pub mod config_ws;
 pub mod expressions_ws;
 pub mod hosting_ws;

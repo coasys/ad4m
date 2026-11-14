@@ -1119,7 +1119,8 @@ pub fn on_verdict_change(change: &VerdictChange) -> usize {
     if change.verdict == KeyVerdict::Valid {
         return 0;
     }
-    let mut ended = match Grants::global().revoke_key(&did_of(&change.scid), &change.key) {
+    let mut ended = end_revoked_bot(&change.scid, &change.key, change.verdict);
+    ended += match Grants::global().revoke_key(&did_of(&change.scid), &change.key) {
         Ok(ended) => {
             if ended > 0 {
                 log::info!(
@@ -1177,6 +1178,45 @@ pub fn on_verdict_change(change: &VerdictChange) -> usize {
     ended
 }
 
+/// Ends the sessions of the local bot whose key is `key` (a multikey) when its owner's log
+/// revoked the key (`verdict` [`KeyVerdict::Revoked`], or [`KeyVerdict::NotInLog`]: the log
+/// no longer lists it). `scid` is the identity whose log gave the verdict: only the bot's
+/// owner speaks for its key. One key can sit in more than one log this executor reads, and a
+/// revocation in another identity's log says nothing about the key in the owner's, where it may
+/// still be valid. A bot's token is not bound to its key (a bot's key never logs in), so
+/// [`Grants::revoke_key`] does not reach it; the bot's agent does. An expired key ends
+/// nothing here: its owner may extend the scope, and each call and event checks the key
+/// anyway (`crate::bots::decide_key`). Returns how many active grants ended.
+fn end_revoked_bot(scid: &str, key: &str, verdict: KeyVerdict) -> usize {
+    if !matches!(verdict, KeyVerdict::Revoked | KeyVerdict::NotInLog) {
+        return 0;
+    }
+    let did = format!("did:key:{key}");
+    let Some(bot) = crate::bots::registered(&did) else {
+        return 0;
+    };
+    // Owners and verdicts both name the identity by its bare SCID; comparing the bare forms
+    // keeps a DID-form name on either side from reading as another identity.
+    if scid_from(&bot.owner) != scid_from(scid) {
+        return 0;
+    }
+    match Grants::global().revoke_agent(&AgentContext::managed(did.clone())) {
+        Ok(ended) => {
+            if ended > 0 {
+                log::info!(
+                    "identity: ended {ended} session(s) of the bot {did}: its key is {verdict:?} in {}",
+                    did_of(scid_from(scid))
+                );
+            }
+            ended
+        }
+        Err(e) => {
+            log::error!("identity: ending the sessions of the bot {did}: {e}");
+            0
+        }
+    }
+}
+
 /// When each key's store read in a re-check last began, by `(scid, key)`: each pass reads
 /// the least-recently-attempted first — a read that stalls until its timeout moves its
 /// key to the back — and sizes its reads-at-once to the key count
@@ -1209,11 +1249,86 @@ impl RecheckAttempts {
     /// Drops the attempts of keys `live` does not hold: a key whose grants are gone leaves
     /// the map, which is then bounded by the keys now live, not by every key a pass ever
     /// marked.
-    fn retain(&self, live: &BTreeMap<(String, String), Vec<Arc<LiveGrant>>>) {
+    fn retain<V>(&self, live: &BTreeMap<(String, String), V>) {
         if let Ok(mut last) = self.0.lock() {
             last.retain(|key, _| live.contains_key(key));
         }
     }
+}
+
+/// Reads the key of every live bot of this executor in its owner's log again (at most
+/// [`KEY_RECHECK_INTERVAL`] old) and ends the sessions of each whose key was revoked: what a
+/// verdict change the subscription missed cannot end. A revoked bot holds no session already.
+/// An expired key scope ends the bot's live queries too: its reads are refused while the
+/// scope is out, so no query work keeps running for it.
+///
+/// One sweep, run by [`run_key_session_watch`] as its own task beside each pass — the pass
+/// does not await it, so a stalled owner's store holds neither the pass's end nor the next
+/// pass's start. The reads run together under one deadline — the interval, as the key-bound
+/// reads' — and in the same way: least-recently-attempted first (`attempts`: a read that
+/// stalls to its [`KEY_READ_TIMEOUT`] moves its bot to the back of the next sweep, so owners
+/// that stall cannot starve the registry's tail), `reads_at_once` at a time sized to the bot
+/// count ([`KEY_RECHECK_READS_AT_ONCE`] the least). A bot whose read the sweep does not
+/// reach counts as unread, as a timed-out one does — and, never marked, goes first next time.
+async fn recheck_bot_keys(service: &IdentityService, attempts: &RecheckAttempts) -> usize {
+    use futures::StreamExt;
+    let key_of = |bot: &crate::db::BotRow| {
+        bot.did
+            .strip_prefix("did:key:")
+            .unwrap_or(&bot.did)
+            .to_string()
+    };
+    let mut bots: Vec<crate::db::BotRow> = crate::bots::all()
+        .into_iter()
+        .filter(|bot| bot.grant.state != crate::bots::GrantState::Revoked.as_str())
+        .collect();
+    attempts.retain(
+        &bots
+            .iter()
+            .map(|bot| ((bot.owner.clone(), key_of(bot)), ()))
+            .collect::<BTreeMap<_, _>>(),
+    );
+    bots.sort_by_key(|bot| attempts.last(&bot.owner, &key_of(bot)));
+    // Sized to the bot count, as the key reads' is to the key count: with every read
+    // stalled, every live bot's read still starts within the sweep's one deadline.
+    let reads_at_once = KEY_RECHECK_READS_AT_ONCE.max(
+        (bots.len() * KEY_READ_TIMEOUT.as_secs() as usize)
+            .div_ceil(KEY_RECHECK_INTERVAL.as_secs() as usize),
+    );
+    let reads = futures::stream::iter(
+        bots.into_iter()
+            .map(|bot| async move {
+                let key = key_of(&bot);
+                attempts.mark(&bot.owner, &key);
+                let read =
+                    match tokio::time::timeout(KEY_READ_TIMEOUT, service.bot_key(&bot.owner, &key))
+                        .await
+                    {
+                        Ok(read) => read,
+                        Err(_) => Err(crate::identity::bot_key::BotKeyError::StoreUnavailable),
+                    };
+                (bot, key, read)
+            })
+            .collect::<Vec<_>>(),
+    )
+    .buffer_unordered(reads_at_once);
+    let mut reads = Box::pin(reads);
+    let mut ended = 0;
+    let _ = tokio::time::timeout(KEY_RECHECK_INTERVAL, async {
+        while let Some((bot, key, read)) = reads.next().await {
+            let Ok(found) = read else { continue };
+            if found.verdict == KeyVerdict::Expired {
+                for perspective in crate::perspectives::all_perspectives() {
+                    perspective
+                        .end_agent_subscriptions(&bot.did, crate::bots::BOT_EXPIRED)
+                        .await;
+                }
+            }
+            ended += end_revoked_bot(&bot.owner, &key, found.verdict);
+        }
+    })
+    .await;
+    ended
 }
 
 /// Revokes `grants`, ended on a verdict of `key` (or its outage-grace expiry).
@@ -1234,9 +1349,13 @@ fn end_on_verdict(grants: Vec<Arc<LiveGrant>>, key: &str) -> usize {
 
 /// Reads the key of every live key-bound grant again from the store, whatever the cache's age
 /// (a cached read up to an interval old would let a revocation the cache missed stand for two
-/// intervals): a key no longer valid, or a bot's, ends its grants; a valid one records the
+/// intervals): a key no longer valid ends its grants; a valid one records the
 /// check. While the store cannot be read, grants whose last valid check is
-/// [`STORE_OUTAGE_GRACE`] old end.
+/// [`STORE_OUTAGE_GRACE`] old end — those outage decisions do not wait on the bot sweep,
+/// which the watcher runs as its own task beside this pass, so a stalled owner's log holds
+/// neither them nor the next pass. The sessions of a local bot whose key was revoked end in
+/// that sweep ([`recheck_bot_keys`], under its own deadline, at a width sized to the bot
+/// count, least-recently-attempted first).
 /// Returns how many active grants ended.
 pub async fn recheck_key_grants(
     service: &IdentityService,
@@ -1337,6 +1456,9 @@ pub async fn recheck_key_grants(
         }
     })
     .await;
+    // The outage decisions do not wait on the bot sweep — a stalled owner's log must not
+    // hold them past the pass's deadline. The sweep is the watcher's own task beside this
+    // pass (`run_key_session_watch`), under its own deadline.
     for ((scid, key), grants) in by_key {
         // A read that did not answer in [`KEY_READ_TIMEOUT`], or that the pass did not
         // reach within it, counts as the outage it is: the grant's own last check
@@ -1441,8 +1563,15 @@ pub async fn run_key_session_watch(
     // is handled as it arrives. The first `due` is the interval's first tick, at once:
     // grants loaded at start are checked then.
     let mut rechecking: Option<tokio::task::JoinHandle<()>> = None;
+    // The bots' key sweep is its own task beside each pass — the pass does not await it,
+    // so a stalled owner's store holds neither the pass's end nor the next pass's start —
+    // and it never overlaps itself: a pass dispatched while one is still running starts
+    // none (the running one still covers every bot live at its start, and the next pass
+    // after it ends sweeps fresh).
+    let mut sweeping: Option<tokio::task::JoinHandle<()>> = None;
     let mut due = true;
     let attempts = Arc::new(RecheckAttempts::default());
+    let bot_attempts = Arc::new(RecheckAttempts::default());
     loop {
         tokio::select! {
             change = changes.recv() => match change {
@@ -1465,10 +1594,18 @@ pub async fn run_key_session_watch(
         }
         if due && rechecking.as_ref().is_none_or(|r| r.is_finished()) {
             due = false;
-            let (service, attempts) = (service.clone(), attempts.clone());
-            rechecking = Some(tokio::spawn(async move {
-                recheck_key_grants(&service, super::service::now(), &attempts).await;
+            rechecking = Some(tokio::spawn({
+                let (service, attempts) = (service.clone(), attempts.clone());
+                async move {
+                    recheck_key_grants(&service, super::service::now(), &attempts).await;
+                }
             }));
+            if sweeping.as_ref().is_none_or(|s| s.is_finished()) {
+                let (service, attempts) = (service.clone(), bot_attempts.clone());
+                sweeping = Some(tokio::spawn(async move {
+                    recheck_bot_keys(&service, &attempts).await;
+                }));
+            }
         }
     }
 }
@@ -2384,6 +2521,134 @@ mod tests {
         no_operator();
     }
 
+    // Lal #1671 P1: a bot's token is not bound to its key, so revoking the key in the owner's
+    // log ends the bot's sessions through its agent: when the cache publishes the change, and
+    // on the re-check when the subscription missed it.
+    #[tokio::test]
+    async fn revoking_a_bots_key_ends_the_bots_sessions() {
+        for (seed, via_recheck) in [(190u8, false), (195u8, true)] {
+            let mut world = world(seed).await;
+            let did = format!("did:key:{}", world.bot.key());
+            crate::bots::remember(crate::db::BotRow {
+                did: did.clone(),
+                username: format!("bot-{seed}@bots.ad4m"),
+                name: "revoked".into(),
+                owner: world.log.scid(),
+                offer_id: "offer".into(),
+                created_at: 1,
+                grant: crate::db::BotGrantRow {
+                    spaces: vec![],
+                    can: vec!["read".into()],
+                    expires: None,
+                    state: "active".into(),
+                    version: 1,
+                    updated_at: 1,
+                },
+            });
+            let (_, grant) = grants::mint(
+                AgentContext::managed(did.clone()),
+                crate::agent::capabilities::AuthInfo::default(),
+                None,
+                3600,
+            )
+            .unwrap();
+
+            // Valid: the re-check keeps it.
+            world.service.cache.note_refreshed(&world.log.scid(), 0);
+            recheck_bot_keys(&world.service, &RecheckAttempts::default()).await;
+            assert!(!grant.is_ended(), "a valid bot key keeps its sessions");
+
+            let bot_id = "d3".to_string();
+            let revoke_bot = revoke(&world.log.chain(), &world.log.master, &[bot_id]).unwrap();
+            world.log.events.push(revoke_bot);
+            if via_recheck {
+                *world.store.events.lock().unwrap() = world.log.events.clone();
+                // Stale for both the refresh and the session read, so the re-check reads the
+                // store again (#1617 counts only a successful read as fresh).
+                world.service.cache.note_refreshed(&world.log.scid(), 0);
+                world.service.cache.note_read(&world.log.scid(), 0);
+                assert_eq!(
+                    recheck_bot_keys(&world.service, &RecheckAttempts::default()).await,
+                    1
+                );
+            } else {
+                let mut changes = world.service.cache.subscribe();
+                accept_signed(&world.service.cache, &world.log.events).await;
+                let mut ended = 0;
+                while let Ok(change) = changes.try_recv() {
+                    ended += on_verdict_change(&change);
+                }
+                assert_eq!(ended, 1);
+            }
+            assert!(
+                grant.is_ended(),
+                "the bot's session ended (re-check: {via_recheck})"
+            );
+        }
+        no_operator();
+    }
+
+    // One key can sit in more than one log this executor reads. A revocation in
+    // another identity's log leaves the bot's sessions alone (the key may still be valid in
+    // its owner's); only the owner's verdict ends them, whichever form names the owner.
+    #[tokio::test]
+    async fn only_the_owners_verdict_ends_a_bots_sessions() {
+        let world = world(198).await;
+        let key = world.bot.key().to_string();
+        let did = format!("did:key:{key}");
+        let owner = world.log.scid();
+        crate::bots::remember(crate::db::BotRow {
+            did: did.clone(),
+            username: "bot-198@bots.ad4m".into(),
+            name: "shared key".into(),
+            owner: owner.clone(),
+            offer_id: "offer".into(),
+            created_at: 1,
+            grant: crate::db::BotGrantRow {
+                spaces: vec![],
+                can: vec!["read".into()],
+                expires: None,
+                state: "active".into(),
+                version: 1,
+                updated_at: 1,
+            },
+        });
+        let (_, grant) = grants::mint(
+            AgentContext::managed(did.clone()),
+            crate::agent::capabilities::AuthInfo::default(),
+            None,
+            3600,
+        )
+        .unwrap();
+
+        // Another identity's log that lists the same key: its verdicts name its own SCID.
+        let foreign = format!("{owner}x");
+        for verdict in [KeyVerdict::Revoked, KeyVerdict::NotInLog] {
+            for scid in [foreign.clone(), did_of(&foreign)] {
+                let change = VerdictChange {
+                    key: key.clone(),
+                    scid,
+                    verdict,
+                };
+                assert_eq!(on_verdict_change(&change), 0, "{verdict:?}");
+                assert!(
+                    !grant.is_ended(),
+                    "another identity's {verdict:?} leaves the bot's session alive"
+                );
+            }
+        }
+
+        // The owner, named as a DID: the same identity, so its revocation ends the bot.
+        let change = VerdictChange {
+            key: key.clone(),
+            scid: did_of(&owner),
+            verdict: KeyVerdict::Revoked,
+        };
+        assert_eq!(on_verdict_change(&change), 1, "the owner's revocation");
+        assert!(grant.is_ended(), "the owner's revocation ends the bot");
+        no_operator();
+    }
+
     // A revocation the persisted key log holds ends the grant at start even when no
     // grant-table write ever landed: the pending note and the revocation write both
     // failed, so the row reads active again — the cached verdict refuses the token
@@ -2626,8 +2891,8 @@ mod tests {
     }
 
     // The re-check reads each key again from the store: a revocation the subscription missed
-    // ends the session, however fresh the cache; a valid key records the check; a store outage ends only grants whose last
-    // valid check is an hour old.
+    // ends the session, however fresh the cache; a valid key records the check; a store
+    // outage ends only grants whose last valid check is an hour old.
     #[tokio::test]
     async fn the_recheck_ends_the_sessions_of_keys_no_longer_valid() {
         let mut world = world(180).await;
@@ -4029,6 +4294,323 @@ mod tests {
         }
         world.store.stall_for.lock().unwrap().clear();
         end_leftover_key_grants();
+        no_operator();
+    }
+
+    // Lal #1671 P3: the bot sweep is not ahead of the outage decisions and is not
+    // unbounded: bots whose owners' logs stall when read hold neither the key-bound
+    // decisions — a cached revocation ends the grant on time — nor the pass's end.
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_bot_sweep_delays_neither_the_outage_decisions_nor_the_pass() {
+        use tokio::sync::Notify;
+        let mut world = world(67).await;
+        world.operate();
+        let result = world.login_as(&world.phone).await.unwrap();
+        let session = open(&result.token).unwrap();
+        // Many bots whose owners' logs stall when read — more stalled owners than any
+        // sweep's width, so its second wave still runs when the pass's own work is done:
+        // each read is bounded, and the sweep itself answers by the deadline rather than
+        // reading them one by one.
+        for i in 0..4
+            * KEY_RECHECK_READS_AT_ONCE
+            * (KEY_RECHECK_INTERVAL.as_secs() / KEY_READ_TIMEOUT.as_secs()) as usize
+        {
+            crate::bots::remember(crate::db::BotRow {
+                did: format!("did:key:zBot{i}"),
+                username: format!("sweep-bot-{i}@bots.ad4m"),
+                name: "stalled".into(),
+                owner: format!("0-bot-owner-{i}"),
+                offer_id: "offer".into(),
+                created_at: 1,
+                grant: crate::db::BotGrantRow {
+                    spaces: vec![],
+                    can: vec!["read".into()],
+                    expires: None,
+                    state: "active".into(),
+                    version: 1,
+                    updated_at: 1,
+                },
+            });
+            world.store.stall_for.lock().unwrap().insert(
+                format!("did:scid:coasys:1:0-bot-owner-{i}"),
+                Arc::new(Notify::new()),
+            );
+        }
+        // The grant's own read stalls too, so its decision is the outage path's: a
+        // revocation the cache already holds ends it now, sweep or no sweep.
+        let revoke_phone =
+            revoke(&world.log.chain(), &world.log.master, &["d2".to_string()]).unwrap();
+        world.log.events.push(revoke_phone);
+        accept_signed(&world.service.cache, &world.log.events).await;
+        world
+            .store
+            .stall_for
+            .lock()
+            .unwrap()
+            .insert(world.did.clone(), Arc::new(Notify::new()));
+        world.service.cache.note_read(&world.log.scid(), 0);
+
+        let service = Arc::new(world.service);
+        let started = tokio::time::Instant::now();
+        let recheck = tokio::spawn({
+            let service = service.clone();
+            async move { recheck_key_grants(&service, now(), &RecheckAttempts::default()).await }
+        });
+        // The bots' sweep, run the way the watcher runs it: its own task beside the pass.
+        let sweep =
+            tokio::spawn(
+                async move { recheck_bot_keys(&service, &RecheckAttempts::default()).await },
+            );
+        // The order: one read timeout in, the grant's read has timed out and its outage
+        // decision ended it, while the sweep's stalled reads still run. A sweep ahead of
+        // the decisions would hold the grant open until its own reads time out — and the
+        // pass that awaited the sweep would still be open too.
+        while started.elapsed() < KEY_READ_TIMEOUT + Duration::from_secs(20) {
+            tokio::time::advance(Duration::from_secs(10)).await;
+            tokio::task::yield_now().await;
+        }
+        assert!(!sweep.is_finished(), "the sweep's stalled reads still run");
+        assert_eq!(
+            session.check(),
+            Err(AuthError::Revoked),
+            "the outage decision ran while the sweep runs"
+        );
+        assert!(
+            recheck.is_finished(),
+            "the pass ended without waiting for the sweep"
+        );
+        // The grant's stalled read times out and its outage decision runs; the sweep's
+        // stalled reads each time out under the sweep's own deadline — the pass ends on
+        // the key phase's deadline, the sweep on its own.
+        while !sweep.is_finished() && started.elapsed() <= KEY_RECHECK_INTERVAL + KEY_READ_TIMEOUT {
+            tokio::time::advance(Duration::from_secs(10)).await;
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            sweep.is_finished(),
+            "the sweep returned inside its deadline (elapsed {:?})",
+            started.elapsed()
+        );
+        assert!(
+            started.elapsed() <= KEY_RECHECK_INTERVAL + Duration::from_secs(30),
+            "the sweep took {:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            session.check(),
+            Err(AuthError::Revoked),
+            "the cached revocation ended the grant on time"
+        );
+        world.store.stall_for.lock().unwrap().clear();
+        no_operator();
+    }
+
+    // Lal #1671 P3-1: the bot sweep is the watcher's own task beside the pass, not a
+    // phase of it — the next pass starts on the next tick, not after the sweep's own
+    // budget. With stalled reads keeping both the key phase and the sweep busy, the
+    // pass ends on its key phase's deadline and the following pass reads the store
+    // again on schedule.
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_bot_sweep_does_not_hold_the_next_pass_back() {
+        use tokio::sync::Notify;
+        let world = world(201).await;
+        world.operate();
+        world.login_as(&world.phone).await.unwrap();
+        // A stalled read keeps the pass's key phase busy for its deadline; stalled
+        // owners' reads keep a sweep busy for its own — more than one wave's worth.
+        let stalled_scid = "0-next-pass-stall";
+        world.store.stall_for.lock().unwrap().insert(
+            format!("did:scid:coasys:1:{stalled_scid}"),
+            Arc::new(Notify::new()),
+        );
+        Grants::global()
+            .insert(
+                LiveGrant::for_test("next-pass-stall", AgentContext::main_agent(), now() + 3600)
+                    .operator_role()
+                    .bound_to(KeyBinding::new(
+                        stalled_scid.into(),
+                        format!("z6Mk{stalled_scid}"),
+                        "d1".into(),
+                        0,
+                        now(),
+                    )),
+            )
+            .unwrap();
+        for i in 0..4
+            * KEY_RECHECK_READS_AT_ONCE
+            * (KEY_RECHECK_INTERVAL.as_secs() / KEY_READ_TIMEOUT.as_secs()) as usize
+        {
+            crate::bots::remember(crate::db::BotRow {
+                did: format!("did:key:zNextPassStall{i}"),
+                username: format!("next-pass-stall-{i}@bots.ad4m"),
+                name: "stalled".into(),
+                owner: format!("0-next-pass-owner-{i}"),
+                offer_id: "offer".into(),
+                created_at: 1,
+                grant: crate::db::BotGrantRow {
+                    spaces: vec![],
+                    can: vec!["read".into()],
+                    expires: None,
+                    state: "active".into(),
+                    version: 1,
+                    updated_at: 1,
+                },
+            });
+            world.store.stall_for.lock().unwrap().insert(
+                format!("did:scid:coasys:1:0-next-pass-owner-{i}"),
+                Arc::new(Notify::new()),
+            );
+        }
+        // Each pass asks the stalled grant's log once more — its read stalls inside the
+        // call and times out under its own bound, leaving no backoff, so the count of
+        // `log` calls on it is the count of passes that ran.
+        let (store, stalled_did) = (
+            world.store.clone(),
+            format!("did:scid:coasys:1:{stalled_scid}"),
+        );
+        let passes = || {
+            store
+                .log_calls_for
+                .lock()
+                .unwrap()
+                .get(&stalled_did)
+                .copied()
+                .unwrap_or(0)
+        };
+        let before = passes();
+        let service = Arc::new(world.service);
+        let changes = service.cache.subscribe();
+        tokio::spawn(run_key_session_watch(
+            service,
+            changes,
+            crate::agent::agent_ready(),
+        ));
+        let started = tokio::time::Instant::now();
+        let mut second_pass_at = None;
+        while started.elapsed() < 2 * KEY_RECHECK_INTERVAL {
+            tokio::time::advance(Duration::from_secs(5)).await;
+            tokio::task::yield_now().await;
+            if passes() >= before + 2 {
+                second_pass_at = Some(started.elapsed());
+                break;
+            }
+        }
+        let at = second_pass_at.expect("a second pass ran");
+        assert!(
+            at <= KEY_RECHECK_INTERVAL + Duration::from_secs(30),
+            "the next pass started at {at:?} — it waited out the sweep's own budget"
+        );
+        world.store.stall_for.lock().unwrap().clear();
+        end_leftover_key_grants();
+        no_operator();
+    }
+
+    // Lal #1671 P3-2: a revoked bot marked least-recently-read — strictly last in the
+    // sweep's order — behind more stalled owners than a key-counted width could read
+    // still ends within a bounded number of sweeps: the sweep's width is sized to the
+    // bot count, so every live bot's read starts within the deadline.
+    #[tokio::test(start_paused = true)]
+    async fn a_revoked_bot_past_a_sweep_of_stalled_owners_is_reached() {
+        use tokio::sync::Notify;
+        let mut world = world(202).await;
+        world.operate();
+        let attempts = RecheckAttempts::default();
+        // More stalled owners than a sweep of [`KEY_RECHECK_READS_AT_ONCE`] reads at
+        // once could read within its deadline.
+        let stalled = 2
+            * KEY_RECHECK_READS_AT_ONCE
+            * (KEY_RECHECK_INTERVAL.as_secs() / KEY_READ_TIMEOUT.as_secs()) as usize;
+        for i in 0..stalled {
+            crate::bots::remember(crate::db::BotRow {
+                did: format!("did:key:zTailStall{i}"),
+                username: format!("tail-stall-{i}@bots.ad4m"),
+                name: "stalled".into(),
+                owner: format!("0-tail-owner-{i}"),
+                offer_id: "offer".into(),
+                created_at: 1,
+                grant: crate::db::BotGrantRow {
+                    spaces: vec![],
+                    can: vec!["read".into()],
+                    expires: None,
+                    state: "active".into(),
+                    version: 1,
+                    updated_at: 1,
+                },
+            });
+            world.store.stall_for.lock().unwrap().insert(
+                format!("did:scid:coasys:1:0-tail-owner-{i}"),
+                Arc::new(Notify::new()),
+            );
+            // Read before: never first in the sweep's least-recently-attempted order.
+            attempts.mark(&format!("0-tail-owner-{i}"), &format!("zTailStall{i}"));
+        }
+        // The revoked bot: the world's own bot key, revoked on the store without a
+        // verdict change reaching this executor — and marked most recently of all, so
+        // it is strictly the tail of the order.
+        let did = format!("did:key:{}", world.bot.key());
+        crate::bots::remember(crate::db::BotRow {
+            did: did.clone(),
+            username: "tail-bot@bots.ad4m".into(),
+            name: "revoked".into(),
+            owner: world.log.scid(),
+            offer_id: "offer".into(),
+            created_at: 1,
+            grant: crate::db::BotGrantRow {
+                spaces: vec![],
+                can: vec!["read".into()],
+                expires: None,
+                state: "active".into(),
+                version: 1,
+                updated_at: 1,
+            },
+        });
+        let (_, grant) = grants::mint(
+            AgentContext::managed(did.clone()),
+            crate::agent::capabilities::AuthInfo::default(),
+            None,
+            3600,
+        )
+        .unwrap();
+        let revoke_bot =
+            revoke(&world.log.chain(), &world.log.master, &["d3".to_string()]).unwrap();
+        world.log.events.push(revoke_bot);
+        *world.store.events.lock().unwrap() = world.log.events.clone();
+        world.service.cache.note_refreshed(&world.log.scid(), 0);
+        world.service.cache.note_read(&world.log.scid(), 0);
+        tokio::time::advance(Duration::from_secs(1)).await;
+        attempts.mark(&world.log.scid(), &world.bot.key());
+
+        let service = Arc::new(world.service);
+        let attempts = Arc::new(attempts);
+        let (service2, attempts2) = (service.clone(), attempts.clone());
+        let sweep = tokio::spawn(async move { recheck_bot_keys(&service2, &attempts2).await });
+        let at = tokio::time::Instant::now();
+        while !sweep.is_finished() && at.elapsed() <= 2 * KEY_RECHECK_INTERVAL {
+            tokio::time::advance(Duration::from_secs(10)).await;
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            sweep.is_finished(),
+            "the sweep returned inside its deadline"
+        );
+        sweep.await.unwrap();
+        // The tail was read in the one sweep, as every live bot was.
+        assert!(
+            grant.is_ended(),
+            "the revoked bot at the tail was reached in one sweep"
+        );
+        for bot in crate::bots::all() {
+            if bot.grant.state == crate::bots::GrantState::Revoked.as_str() {
+                continue;
+            }
+            let key = bot.did.strip_prefix("did:key:").unwrap_or(&bot.did);
+            assert!(
+                attempts.last(&bot.owner, key).is_some(),
+                "bot {} was read",
+                bot.did
+            );
+        }
+        world.store.stall_for.lock().unwrap().clear();
         no_operator();
     }
 

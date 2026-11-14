@@ -39,15 +39,21 @@ import type { AiUpdateTaskParams } from "./AiUpdateTaskParams";
 import type { AiUpstreamModelParams } from "./AiUpstreamModelParams";
 import type { ApplyTemplateRequest } from "./ApplyTemplateRequest";
 import type { Apps } from "./Apps";
+import type { BotActivity } from "./BotActivity";
+import type { BotAgent } from "./BotAgent";
+import type { BotLogParams } from "./BotLogParams";
+import type { BotParams } from "./BotParams";
 import type { CallSessionInfo } from "./CallSessionInfo";
 import type { CancelJoinParams } from "./CancelJoinParams";
 import type { ClaimOfferParams } from "./ClaimOfferParams";
 import type { ClaimOfferResult } from "./ClaimOfferResult";
 import type { ComputeLogEntry } from "./ComputeLogEntry";
 import type { CosignInceptParams } from "./CosignInceptParams";
+import type { CreateBotParams } from "./CreateBotParams";
 import type { CreateExpressionRequest } from "./CreateExpressionRequest";
 import type { CreatePerspectiveRequest } from "./CreatePerspectiveRequest";
 import type { CreateUserRequest } from "./CreateUserRequest";
+import type { CreatedBot } from "./CreatedBot";
 import type { DecoratedLinkExpression } from "./DecoratedLinkExpression";
 import type { DecoratedPerspective } from "./DecoratedPerspective";
 import type { DeleteRequestParams } from "./DeleteRequestParams";
@@ -217,6 +223,7 @@ import type { SessionChallenge } from "./SessionChallenge";
 import type { SessionInfo } from "./SessionInfo";
 import type { SetConfigParams } from "./SetConfigParams";
 import type { SetConfigResult } from "./SetConfigResult";
+import type { SetGrantParams } from "./SetGrantParams";
 import type { SetHostRatesRequest } from "./SetHostRatesRequest";
 import type { SetHotWalletAddressRequest } from "./SetHotWalletAddressRequest";
 import type { SetMultiUserRequest } from "./SetMultiUserRequest";
@@ -330,6 +337,11 @@ export interface RpcMethods {
   "ai.updateEndpoint": { params: AiUpdateEndpointParams; result: AiEndpoint };
   "ai.updateModel": { params: AiUpdateModelParams; result: boolean };
   "ai.updateTask": { params: AiUpdateTaskParams; result: AITask };
+  "bot.createAgent": { params: CreateBotParams; result: CreatedBot };
+  "bot.grant": { params: BotParams; result: BotAgent };
+  "bot.list": { params: Record<string, never>; result: Array<BotAgent> };
+  "bot.log": { params: BotLogParams; result: Array<BotActivity> };
+  "bot.setGrant": { params: SetGrantParams; result: BotAgent };
   "events.unwatch": { params: Record<string, never>; result: boolean };
   "events.watch": { params: Partial<Record<EventName, Array<string> | null>>; result: boolean };
   "expression.create": { params: CreateExpressionRequest; result: string };
@@ -551,6 +563,9 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "ai.sessionList",
   "ai.sessionMessages",
   "ai.tasks",
+  "bot.grant",
+  "bot.list",
+  "bot.log",
   "expression.get",
   "expression.getMany",
   "expression.getRaw",
@@ -642,6 +657,7 @@ export const LONG_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "ai.pullModel",
   "ai.removeEndpoint",
   "ai.updateEndpoint",
+  "bot.createAgent",
   "language.applyTemplate",
   "language.publish",
   "neighbourhood.join",

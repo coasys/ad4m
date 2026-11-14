@@ -4,7 +4,7 @@ use crate::types::DecoratedLinkExpression;
 // The proposal read (#1103): what `load_proposal_links` hands the fold
 // ---------------------------------------------------------------------------
 
-/// Each link as JSON, sorted, without `verdict` and `person`: those are this
+/// Each link as JSON, sorted, without `verdict`, `person` and `by_bot`: those are this
 /// executor's read view, which `get_links` adds and a `model_query` `__links`
 /// row does not carry. `proof.valid` stays, and says whether the verdict counts.
 fn sorted_keys(links: &[DecoratedLinkExpression]) -> Vec<String> {
@@ -14,6 +14,7 @@ fn sorted_keys(links: &[DecoratedLinkExpression]) -> Vec<String> {
             let mut l = l.clone();
             l.verdict = None;
             l.person = None;
+            l.by_bot = None;
             serde_json::to_string(&l).expect("a link serialises")
         })
         .collect();

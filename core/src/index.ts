@@ -46,6 +46,7 @@ export * from "./utils";
 export * from "./agent/AgentClient";
 export * from "./ai/AIClient"
 export * from "./identity/IdentityClient"
+export * from "./bot/BotClient"
 export * from "./ai/Tasks"
 export * from "./runtime/RuntimeTypes"
 // `Model` is the model decorator: the AI model is `AIModel`.

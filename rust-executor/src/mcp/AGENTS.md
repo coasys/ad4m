@@ -16,6 +16,10 @@ Model Context Protocol server exposing AD4M to LLM agents (`rmcp`). Transport in
   listener of an executor without an admin credential, anonymous otherwise. The
   listener's `ListenerReach` comes from the bound socket (`mcp_router` adds it as
   an extension); a request with a forwarding header reads as `Network`, as on RPC.
+- A bot's session (`bots::registered`) may call only `AUTH_TOOLS` and
+  `bots::BOT_MCP_TOOLS` (`bot-grant: ...` for any other tool); the tools it calls
+  dispatch through the map, where its grant applies. A tool call's `reason`
+  argument is the call's reason (`bots::MCP_REASON`), as `meta.reason` is on RPC.
 - `call_tool` resolves the caller on every call and refuses non-`AUTH_TOOLS`
   calls unless the session works and is not anonymous. Tools read it through
   `session()` / `get_agent_context()` and the perspective helpers, which run

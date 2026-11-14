@@ -1699,6 +1699,8 @@ pub(crate) mod tests {
         pub key: TestStoreKey,
         pub events: StdMutex<Vec<Event>>,
         pub log_calls: AtomicUsize,
+        /// `log` calls per DID asked.
+        pub log_calls_for: StdMutex<HashMap<String, usize>>,
         /// The key index's answer for every key, when set: a did:scid that need not list it.
         pub key_owner_override: StdMutex<Option<String>>,
         /// When set, the first `log` call notifies `.0`, then waits for `.1`.
@@ -1744,6 +1746,7 @@ pub(crate) mod tests {
                 key: store_key(),
                 events: StdMutex::new(events),
                 log_calls: AtomicUsize::new(0),
+                log_calls_for: StdMutex::new(HashMap::new()),
                 key_owner_override: StdMutex::new(None),
                 pause_store: StdMutex::new(None),
                 stall_for: StdMutex::new(HashMap::new()),
@@ -1824,6 +1827,12 @@ pub(crate) mod tests {
     impl IdentityBackend for FakeStore {
         async fn log(&self, _did: &str, from: u64) -> Result<Option<LogPage>, IdentityError> {
             self.log_calls.fetch_add(1, Ordering::SeqCst);
+            *self
+                .log_calls_for
+                .lock()
+                .unwrap()
+                .entry(_did.to_string())
+                .or_default() += 1;
             let stalled = self.stall_for.lock().unwrap().get(_did).cloned();
             if let Some(entered) = stalled {
                 entered.notify_one();

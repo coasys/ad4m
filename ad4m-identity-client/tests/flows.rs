@@ -1356,6 +1356,66 @@ async fn link_adds_a_second_executor_with_one_unlock_and_one_match_code() {
     assert_eq!(vault.unlocks(), vec![MasterUse::Link]);
 }
 
+/// A bot offer carries its scope: the executor's claim answers kind `bot`, and the add the
+/// holder confirms lists the claimed key with the bot mark and that scope. `open` refuses the
+/// bot kind, which needs a scope.
+#[tokio::test]
+async fn a_bot_offer_adds_the_claimed_key_with_the_bot_mark_and_its_scope() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let vault = MemoryVault::new();
+    let did = create(&a, &vault, 5).await;
+
+    let without_scope = LinkFlow::open(
+        &a,
+        &vault,
+        &did,
+        OfferKind::Bot,
+        None,
+        STORE_URL,
+        &SystemClock,
+        &OsRandom,
+    )
+    .await;
+    assert!(
+        matches!(&without_scope, Err(ClientError::Protocol(_))),
+        "{:?}",
+        without_scope.err()
+    );
+
+    let scope = ad4m_identity_core::BotScope {
+        can: vec!["read".into(), "write".into()],
+        expires: SystemClock.now() + 3600,
+    };
+    let flow = LinkFlow::open_bot(
+        &a,
+        &vault,
+        &did,
+        scope.clone(),
+        STORE_URL,
+        &SystemClock,
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    let claimed_b = claim(&b, &flow.link(), Some("bot")).await.unwrap();
+    assert_eq!(claimed_b["kind"], "bot");
+    let claimed = flow.wait_for_claim().await.unwrap();
+    assert_eq!(claimed.match_code, claimed_b["matchCode"]);
+    let linked = flow
+        .confirm(&claimed, entry("helper", DeviceKind::Bot), false)
+        .await
+        .unwrap();
+    assert_eq!(linked.key_id.as_str(), "d2");
+
+    let chain = ad4m_identity_core::fold(&a.events(&did).await.unwrap()).unwrap();
+    let state = chain.state();
+    assert_eq!(state.bot_scope_at("d2", linked.head.seq), Some(&scope));
+    // The executor's own key stays a standing key.
+    assert_eq!(state.bot_scope_at("d1", linked.head.seq), None);
+}
+
 /// An offer bound to a scanned device key: its ticket carries the offer string's fields and
 /// the signed offer bound to that key, another key's claim is refused, and the bound device
 /// links as with an unbound offer.

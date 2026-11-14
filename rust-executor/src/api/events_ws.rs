@@ -66,7 +66,7 @@ use crate::types::{
     Agent, AgentStatus, Apps, ExceptionInfo, HostingUserInfo, NeighbourhoodSignalFilter,
     NotificationTriggeredEvent, PerspectiveEvent, PerspectiveLinkEvent,
     PerspectiveLinkUpdatedEvent, PerspectiveRemovedEvent, PerspectiveStateFilter,
-    QuerySubscriptionUpdateEvent, TranscriptionTextFilter,
+    QuerySubscriptionUpdateEvent, SubscriptionEndedEvent, TranscriptionTextFilter,
 };
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -136,6 +136,7 @@ pub fn event_specs() -> Vec<EventSpec> {
         EventSpec::of::<crate::types::AiEndpointStatusEvent>(AiEndpointStatus, false),
         EventSpec::of::<crate::ai_service::local::ProgressEvent>(AiLocalProgress, false),
         EventSpec::of::<QuerySubscriptionUpdateEvent>(PerspectiveQuerySubscription, true),
+        EventSpec::of::<SubscriptionEndedEvent>(SubscriptionEnded, true),
         EventSpec::of::<AutoProcessorEvent>(AutoProcessorEvent, true),
         EventSpec::of::<AutoProcessorNeighbourhoodState>(AutoProcessorNeighbourhoodState, true),
         EventSpec::of::<crate::sfu::SfuCallRenegotiationOffer>(SfuCallRenegotiationOffer, false),
@@ -158,6 +159,10 @@ pub fn event_specs() -> Vec<EventSpec> {
 /// its grant revoked or removed, or its token expired, without waiting for another event),
 /// and at the first event after
 /// `session.check()` fails: expiry and revocation stop events as they stop requests.
+///
+/// A bot's socket gets an event only while its grant and its key let it read where the event
+/// happened, checked at each event ([`crate::bots::delivery`]); revoking the bot's key ends
+/// the stream.
 ///
 /// `connection_id` is the socket's RPC connection (`RequestContext::connection_id`). A live
 /// query update names the connection that opened the query (`Event::connection`): the
@@ -190,34 +195,94 @@ fn event_stream_of(
     // event the session may receive checks the token even when the socket does not want it.
     Box::pin(
         BroadcastStream::new(events)
-            .filter_map(move |r| {
-                ready(match r {
-                    Ok(event) => {
-                        if !for_connection(&event, connection_id.as_deref()) {
-                            None
-                        } else {
-                            session.may_receive(&event).then(|| {
-                                event_interest::wants(&interest, &event)
-                                    .then(|| wire_message(&event))
-                            })
-                        }
-                    }
-                    Err(BroadcastStreamRecvError::Lagged(n)) => {
-                        // The socket's receiver fell more than the channel's capacity behind
-                        // (a slow client), so these events are gone for this socket.
-                        log::warn!(
-                            "events: a socket's event stream lagged and dropped {n} event(s)"
-                        );
-                        connection_id
-                            .is_some()
-                            .then(|| Some(QUERY_UPDATES_LAGGED.to_string()))
-                    }
+            .then(move |r| {
+                let session = session.clone();
+                let interest = interest.clone();
+                let connection_id = connection_id.clone();
+                async move { step(r, &session, &interest, connection_id.as_deref()).await }
+            })
+            .take_while(move |step| {
+                ready(match step {
+                    Step::Skip => true,
+                    Step::End => false,
+                    Step::Quiet | Step::Send(_) => check.check().is_ok(),
                 })
             })
-            .take_while(move |_| ready(check.check().is_ok()))
-            .filter_map(ready)
+            .filter_map(|step| {
+                ready(match step {
+                    Step::Send(message) => Some(message),
+                    Step::Skip | Step::Quiet | Step::End => None,
+                })
+            })
             .take_until(over),
     )
+}
+
+/// What a socket's stream does with one received event.
+enum Step {
+    /// Not for this socket's session or connection: no check.
+    Skip,
+    /// For the session, but not sent (the socket does not want it, or a bot may not read
+    /// there now): the session is still checked.
+    Quiet,
+    /// The message to send.
+    Send(String),
+    /// The stream ends: the session's bot or its key was revoked.
+    End,
+}
+
+/// [`Step`] of the received `r` for a socket of `session` on `connection_id`.
+///
+/// A bot's event is a read of where it happened: [`crate::bots::delivery`] checks its grant
+/// and its key as they are now, at each event. One it may not read is not sent, and when it is
+/// a live query update, the bot's live queries on that perspective on this connection are
+/// disposed (the client resubscribes once the grant allows it again).
+async fn step(
+    r: Result<Arc<Event>, BroadcastStreamRecvError>,
+    session: &Session,
+    interest: &SharedInterest,
+    connection_id: Option<&str>,
+) -> Step {
+    let event = match r {
+        Ok(event) => event,
+        Err(BroadcastStreamRecvError::Lagged(n)) => {
+            // The socket's receiver fell more than the channel's capacity behind (a slow
+            // client), so these events are gone for this socket.
+            log::warn!("events: a socket's event stream lagged and dropped {n} event(s)");
+            return match connection_id {
+                Some(_) => Step::Send(QUERY_UPDATES_LAGGED.to_string()),
+                None => Step::Quiet,
+            };
+        }
+    };
+    if !for_connection(&event, connection_id) || !session.may_receive(&event) {
+        return Step::Skip;
+    }
+    if !event_interest::wants(interest, &event) {
+        return Step::Quiet;
+    }
+    if let Some(did) = session.managed_did() {
+        // `subscription-ended` is a control event of the socket's own queries, not a read
+        // of the perspective: it is sent even when the bot may not read there now.
+        if event.topic != Topic::SubscriptionEnded {
+            match crate::bots::delivery(did, event.perspective.as_deref()).await {
+                crate::bots::Delivery::Send => {}
+                crate::bots::Delivery::End => return Step::End,
+                crate::bots::Delivery::Drop(reason) => {
+                    if let (Some(connection), Some(uuid)) = (&event.connection, &event.perspective)
+                    {
+                        if let Some(perspective) = crate::perspectives::get_perspective(uuid) {
+                            perspective
+                                .end_connection_subscriptions(connection, reason)
+                                .await;
+                        }
+                    }
+                    return Step::Quiet;
+                }
+            }
+        }
+    }
+    Step::Send(wire_message(&event))
 }
 
 /// The message that tells a connection its stream dropped events, maybe updates of its live
@@ -273,6 +338,7 @@ fn payload_key(topic: Topic) -> Option<&'static str> {
         | Topic::AiEndpointStatus
         | Topic::AiLocalProgress
         | Topic::PerspectiveQuerySubscription
+        | Topic::SubscriptionEnded
         | Topic::AutoProcessorEvent
         | Topic::AutoProcessorNeighbourhoodState
         | Topic::SfuCallRenegotiationOffer
@@ -2002,6 +2068,127 @@ mod connection_routing_tests {
             .map(|m| serde_json::from_str::<Value>(&m).unwrap())
             .collect()
             .await
+    }
+
+    // Lal #1671 P1: an event is a read. A bot's open stream follows its grant and its key as
+    // they are at each event: pausing, narrowing, expiring the grant or the key's scope stop
+    // the events of a perspective (they come back with the grant), revoking the key ends the
+    // stream.
+    #[tokio::test]
+    async fn a_bots_open_stream_follows_its_current_grant_and_key() {
+        use crate::bots::{remember, set_test_key};
+        use crate::db::{BotGrantRow, BotRow};
+        use crate::identity::bot_key::BotKey;
+        use crate::identity::verdict::KeyVerdict;
+        use ad4m_identity_core::BotScope;
+
+        const BOT: &str = "did:key:stream-bot";
+        let row = |state: &str, spaces: &[&str], expires: Option<u64>| BotRow {
+            did: BOT.to_string(),
+            username: "stream-bot@bots.ad4m".to_string(),
+            name: "stream".to_string(),
+            owner: "scid-stream".to_string(),
+            offer_id: "offer-stream".to_string(),
+            created_at: 1,
+            grant: BotGrantRow {
+                spaces: spaces.iter().map(|s| s.to_string()).collect(),
+                can: vec!["read".to_string()],
+                expires,
+                state: state.to_string(),
+                version: 1,
+                updated_at: 1,
+            },
+        };
+        let key = |verdict: KeyVerdict, can: &[&str], expires: u64| {
+            set_test_key(
+                BOT,
+                Ok(BotKey {
+                    key_id: "d1".to_string(),
+                    verdict,
+                    scope: Some(BotScope {
+                        can: can.iter().map(|s| s.to_string()).collect(),
+                        expires,
+                    }),
+                }),
+            )
+        };
+        remember(row("active", &["p1"], None));
+        key(KeyVerdict::Valid, &["read"], u64::MAX);
+
+        let (tx, rx) = tokio::sync::broadcast::channel(64);
+        let session = user(BOT, get_user_default_capabilities());
+        let mut stream = event_stream_of(rx, session, event_interest::watching_all(), None);
+        let link = |p: &str| {
+            let payload = json!({ "perspectiveUuid": p, "link": { "data": { "source": p } } });
+            Arc::new(Event::new(
+                Topic::LinkAdded,
+                Audience::Dids(vec![BOT.into()]),
+                payload,
+            ))
+        };
+        let fence = || {
+            Arc::new(Event::new(
+                Topic::AgentUpdated,
+                Audience::Dids(vec![BOT.into()]),
+                json!({ "did": BOT }),
+            ))
+        };
+        // What the stream sends for a link added in `p`, then a fence of the bot's own agent.
+        let mut next = async |p: &str| -> Vec<String> {
+            tx.send(link(p)).unwrap();
+            tx.send(fence()).unwrap();
+            let mut types = Vec::new();
+            loop {
+                let message =
+                    tokio::time::timeout(std::time::Duration::from_secs(5), stream.next())
+                        .await
+                        .expect("the stream answers");
+                let Some(message) = message else {
+                    types.push("ended".to_string());
+                    return types;
+                };
+                let message: Value = serde_json::from_str(&message).unwrap();
+                let kind = message["type"].as_str().unwrap().to_string();
+                if kind == "agent-updated" {
+                    return types;
+                }
+                types.push(format!(
+                    "{kind}:{}",
+                    message["perspectiveUuid"].as_str().unwrap()
+                ));
+            }
+        };
+
+        assert_eq!(next("p1").await, ["link-added:p1"], "in the grant");
+        assert!(next("p2").await.is_empty(), "outside the grant's spaces");
+
+        remember(row("paused", &["p1"], None));
+        assert!(
+            next("p1").await.is_empty(),
+            "paused after the stream opened"
+        );
+
+        remember(row("active", &["p2"], None));
+        assert!(
+            next("p1").await.is_empty(),
+            "narrowed after the stream opened"
+        );
+        assert_eq!(next("p2").await, ["link-added:p2"]);
+
+        remember(row("active", &["p1"], Some(1)));
+        assert!(next("p1").await.is_empty(), "the grant expired");
+
+        remember(row("active", &["p1"], None));
+        key(KeyVerdict::Valid, &["read"], 1);
+        assert!(next("p1").await.is_empty(), "the key's scope expired");
+        key(KeyVerdict::Valid, &["join"], u64::MAX);
+        assert!(next("p1").await.is_empty(), "the key's scope lost read");
+
+        key(KeyVerdict::Valid, &["read"], u64::MAX);
+        assert_eq!(next("p1").await, ["link-added:p1"], "the grant is back");
+
+        key(KeyVerdict::Revoked, &["read"], u64::MAX);
+        assert_eq!(next("p1").await, ["ended"], "the key was revoked");
     }
 
     fn subscriptions(messages: &[Value]) -> Vec<&str> {

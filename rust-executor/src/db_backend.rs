@@ -33,8 +33,9 @@ use tokio::sync::OnceCell;
 
 use crate::ai_sessions::types::{AiSession, AiSessionMessage, AiSessionUpdate};
 use crate::db::{
-    Ad4mDb, Ad4mDbResult, ComputeLogEntry, FlowReplicaStateRow, GrantRow, JoinAccept, JoinAdded,
-    JoinCancel, JoinRow, OperatorRecordRow, OperatorSetBy, PaymentRequest,
+    Ad4mDb, Ad4mDbResult, BotActivityRow, BotGrantRow, BotRow, ComputeLogEntry,
+    FlowReplicaStateRow, GrantRow, JoinAccept, JoinAdded, JoinCancel, JoinRow, OperatorRecordRow,
+    OperatorSetBy, PaymentRequest,
 };
 use crate::secret::Secret;
 use crate::types::{
@@ -409,6 +410,16 @@ macro_rules! ad4m_db_methods {
             fn join(&self, offer_id: &str) -> Ad4mDbResult<Option<JoinRow>>;
             fn set_join_accept(&self, offer_id: &str, accept: JoinAccept) -> Ad4mDbResult<bool>;
             fn cancel_join(&self, offer_id: &str, agent_did: &str) -> Ad4mDbResult<JoinCancel>;
+
+            // Bots: the bot agents, their grants and their activity log (`db/bots.rs`)
+            fn add_bot(&self, bot: &BotRow) -> Ad4mDbResult<()>;
+            fn bot(&self, did: &str) -> Ad4mDbResult<Option<BotRow>>;
+            fn bots(&self) -> Ad4mDbResult<Vec<BotRow>>;
+            fn set_bot_grant(&self, did: &str, grant: &BotGrantRow, read_version: u64) -> Ad4mDbResult<bool>;
+            fn add_bot_activity(&self, entry: &BotActivityRow, keep: usize) -> Ad4mDbResult<i64>;
+            fn set_bot_activity_outcome(&self, id: i64, outcome: &str) -> Ad4mDbResult<bool>;
+            fn bot_activity(&self, did: &str, before: Option<i64>, limit: usize) -> Ad4mDbResult<Vec<BotActivityRow>>;
+            fn sweep_bot_activity(&self, cutoff: u64) -> Ad4mDbResult<usize>;
 
             // Re-key of the main agent: the rows that move to its new DID (`db/rekey.rs`)
             fn move_notification_owner(&self, old: &str, new: &str) -> Ad4mDbResult<usize>;

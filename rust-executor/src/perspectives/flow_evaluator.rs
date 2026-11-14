@@ -2921,6 +2921,7 @@ mod tests {
                 status: None,
                 verdict: None,
                 person: None,
+                by_bot: None,
             }
         }
 

@@ -316,6 +316,9 @@ pub struct CheckedLink {
     /// The `did:scid` of the signer's person (a bot's owner), only for a `Valid` link whose
     /// signer a log lists.
     pub person: Option<String>,
+    /// The signer's key is a bot key of `person`'s log (the bot mark): the link counts for
+    /// the person, authored by their bot. Only with `person`.
+    pub by_bot: bool,
 }
 
 /// Checks `expr` by what `map` holds, with no I/O: the signature (the bytes its proof names),
@@ -379,17 +382,21 @@ pub fn check_signed_with_provenance<T: serde::Serialize>(
         }
         _ => verdict,
     };
-    let person = match (&verdict, &lookup, signer) {
+    let (person, by_bot) = match (&verdict, &lookup, signer) {
         (LinkVerdict::Valid, KeyLookup::Listed { scid, log }, Some(key)) => {
             match author_in(scid, log, key) {
-                Author::Person { did, .. } => Some(did),
-                Author::Bot { owner, .. } => Some(owner),
-                Author::NoLog | Author::Unavailable => None,
+                Author::Person { did, .. } => (Some(did), false),
+                Author::Bot { owner, .. } => (Some(owner), true),
+                Author::NoLog | Author::Unavailable => (None, false),
             }
         }
-        _ => None,
+        _ => (None, false),
     };
-    CheckedLink { verdict, person }
+    CheckedLink {
+        verdict,
+        person,
+        by_bot,
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -3949,6 +3956,16 @@ mod link_check_tests {
         CheckedLink {
             verdict: LinkVerdict::Valid,
             person: did,
+            by_bot: false,
+        }
+    }
+
+    /// Valid, counted for `did`, authored by one of its bots.
+    fn valid_for_bot(did: String) -> CheckedLink {
+        CheckedLink {
+            verdict: LinkVerdict::Valid,
+            person: Some(did),
+            by_bot: true,
         }
     }
 
@@ -4187,6 +4204,131 @@ mod link_check_tests {
         );
     }
 
+    /// Adds a bot key that may do `can` until `expires` to `log` at the next seq; its secret.
+    // Lal #1671 P2: a bot's links anchor at its owner's trusted seq (the bot row names the
+    // owner; a bot is not in `identity_agents`). Without an anchor a reader judges the link
+    // at the key's add, so once the owner extends the scope past its first expiry, the bot's
+    // new links would all read `invalid:expired`.
+    #[tokio::test]
+    async fn a_bots_links_anchor_at_its_owners_trusted_seq() {
+        use ad4m_identity_core::BotScope;
+        let mut log = TestLog::new(67);
+        let bot = add_bot_key(&mut log, 68, &["read", "write"], 2_000);
+        let chain = log.chain();
+        let id = chain
+            .state()
+            .device_key_id_of(&bot.key().to_string())
+            .expect("the bot key is listed")
+            .clone();
+        let longer = BotScope {
+            can: vec!["read".into(), "write".into()],
+            expires: 4_000_000_000,
+        };
+        let extended = ad4m_identity_core::build::scope(&chain, &log.master, &id, &longer).unwrap();
+        log.events.push(extended);
+        let cache = cache_with(&log).await;
+
+        let bot_did = format!("did:key:{}", bot.key());
+        crate::bots::remember(crate::db::BotRow {
+            did: bot_did.clone(),
+            username: "anchor-bot@bots.ad4m".into(),
+            name: "anchor".into(),
+            owner: log.scid(),
+            offer_id: "offer".into(),
+            created_at: 1,
+            grant: crate::db::BotGrantRow {
+                spaces: vec![],
+                can: vec!["write".into()],
+                expires: None,
+                state: "active".into(),
+                version: 1,
+                updated_at: 1,
+            },
+        });
+        assert_eq!(
+            crate::identity::signer_identity(&bot_did),
+            Some(log.scid()),
+            "a bot signs for its owner"
+        );
+        let anchor = crate::identity::anchor_in(cache.key_map(), &bot_did, &log.scid());
+        assert_eq!(
+            anchor,
+            Some(2),
+            "the trusted seq, after the scope was extended"
+        );
+
+        let after_first_expiry = 3_000;
+        let anchored = signed_with(&bot, anchor);
+        assert_eq!(
+            check_signed_with(&anchored, cache.key_map(), None, after_first_expiry),
+            valid_for_bot(did_of(&log.scid())),
+            "counted for the owner, marked as their bot's"
+        );
+        let unanchored = signed_with(&bot, None);
+        assert_eq!(
+            check_signed_with(&unanchored, cache.key_map(), None, after_first_expiry).verdict,
+            LinkVerdict::Invalid(InvalidReason::Expired),
+            "judged at the key's add, the first scope"
+        );
+    }
+
+    fn add_bot_key(
+        log: &mut TestLog,
+        seed: u8,
+        can: &[&str],
+        expires: u64,
+    ) -> ed25519_dalek::SigningKey {
+        use ad4m_identity_core::build::{add_unsigned, cosign};
+        use ad4m_identity_core::{BotScope, DeviceKey, KeyLife};
+        let bot = ed25519_dalek::SigningKey::from_bytes(&[seed; 32]);
+        let chain = log.chain();
+        let device = DeviceKey {
+            id: chain.state().next_device_id(),
+            sign: bot.key(),
+            enc: ad4m_identity_core::encode_x25519_multikey(&[seed; 32]),
+            life: KeyLife::Bot(BotScope {
+                can: can.iter().map(|a| a.to_string()).collect(),
+                expires,
+            }),
+        };
+        let mut event = add_unsigned(&chain, device, "offer", "co-sig").unwrap();
+        cosign(&mut event, "m0", &log.master).unwrap();
+        log.events.push(event);
+        bot
+    }
+
+    /// A reader enforces the scope the owner's log gives a bot key: a link is a write, so a
+    /// key the log lets only read (or join) authors nothing, at its own seq or unanchored;
+    /// with `write` its link counts for the owner.
+    #[tokio::test]
+    async fn a_bot_key_without_write_authors_no_link_for_its_owner() {
+        let mut log = TestLog::new(72);
+        let reader = add_bot_key(&mut log, 73, &["read"], NOW + 1_000);
+        let joiner = add_bot_key(&mut log, 74, &["join"], NOW + 1_000);
+        let writer = add_bot_key(&mut log, 75, &["read", "write"], NOW + 1_000);
+        let cache = cache_with(&log).await;
+        for (bot, seq) in [(&reader, 1), (&joiner, 2)] {
+            for anchor in [Some(seq), Some(3), None] {
+                assert_eq!(
+                    check(&cache, &signed_with(bot, anchor)),
+                    CheckedLink {
+                        verdict: LinkVerdict::Invalid(InvalidReason::NotInScope),
+                        person: None,
+                        by_bot: false,
+                    },
+                    "anchor {anchor:?}"
+                );
+            }
+        }
+        for anchor in [Some(3), None] {
+            assert_eq!(
+                check(&cache, &signed_with(&writer, anchor)),
+                valid_for_bot(did_of(&log.scid())),
+                "anchor {anchor:?}"
+            );
+        }
+    }
+
     /// One batch asks the key index about at most `DISCOVERY_PER_BATCH` signers the key map
     /// does not know; the rest stay unknown (their links `CantCheck`) for the next batch or the
     /// re-check. Signers the map already knows do not count.
@@ -4301,6 +4443,7 @@ mod link_check_tests {
                 CheckedLink {
                     verdict: LinkVerdict::Flagged,
                     person: None,
+                    by_bot: false,
                 },
                 "signed after the revocation, anchor {anchor:?}"
             );
@@ -4348,6 +4491,7 @@ mod link_check_tests {
                 CheckedLink {
                     verdict: LinkVerdict::Flagged,
                     person: None,
+                    by_bot: false,
                 },
                 "stale head, anchor {anchor:?}"
             );

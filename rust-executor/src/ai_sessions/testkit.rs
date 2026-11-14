@@ -31,6 +31,7 @@ pub(super) fn ctx_for(session: Session) -> RequestContext {
         session: Arc::new(session),
         connection_id: None,
         peer: None,
+        reason: None,
         query_slots: None,
     }
 }

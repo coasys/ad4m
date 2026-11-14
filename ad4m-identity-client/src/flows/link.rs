@@ -26,7 +26,7 @@ use ad4m_identity_core::link::{
     self, ClaimView, DeviceString, Offer, OfferKind, OfferString, SignedOffer,
 };
 use ad4m_identity_core::record::{DeviceEntry, HoldsMaster, PrivateRecord};
-use ad4m_identity_core::{Event, KelChain, KeyId, Op};
+use ad4m_identity_core::{BotScope, Event, KelChain, KeyId, Op};
 use ad4m_ldk::identity::{InboxBind, InboxWrite, OfferState, SignedHead, SignedRequest};
 use serde_json::json;
 
@@ -109,6 +109,57 @@ impl<'a, R: ExecutorRpc> LinkFlow<'a, R> {
         clock: &'a dyn Clock,
         random: &'a dyn Random,
     ) -> Result<LinkFlow<'a, R>, ClientError> {
+        if kind == OfferKind::Bot {
+            return Err(ClientError::Protocol(
+                "a bot offer carries a scope: open it with LinkFlow::open_bot".into(),
+            ));
+        }
+        Self::open_with(
+            executor, vault, did, kind, device_key, None, store_url, clock, random,
+        )
+        .await
+    }
+
+    /// Opens a bot offer for the identity `did`: the bot's key joins with the bot mark and
+    /// `scope` (the actions it may take and until when, `expires` in seconds). An executor
+    /// claims it with `bot.createAgent`, and the add the holder confirms lists the key as a
+    /// bot's: it acts for the person within the scope and never speaks for them.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn open_bot(
+        executor: &'a ViaExecutor<R>,
+        vault: &'a dyn Vault,
+        did: &str,
+        scope: BotScope,
+        store_url: &str,
+        clock: &'a dyn Clock,
+        random: &'a dyn Random,
+    ) -> Result<LinkFlow<'a, R>, ClientError> {
+        Self::open_with(
+            executor,
+            vault,
+            did,
+            OfferKind::Bot,
+            None,
+            Some(scope),
+            store_url,
+            clock,
+            random,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn open_with(
+        executor: &'a ViaExecutor<R>,
+        vault: &'a dyn Vault,
+        did: &str,
+        kind: OfferKind,
+        device_key: Option<&str>,
+        bot: Option<BotScope>,
+        store_url: &str,
+        clock: &'a dyn Clock,
+        random: &'a dyn Random,
+    ) -> Result<LinkFlow<'a, R>, ClientError> {
         let scid = scid_of(did)?;
         let chain = chain_of(executor, did).await?;
         let store = store_of(executor, did).await?;
@@ -126,8 +177,9 @@ impl<'a, R: ExecutorRpc> LinkFlow<'a, R> {
             commit: link::offer_commit(secret.expose()),
             expires: now + link::OFFER_TTL_S,
             device_key: device_key.map(str::to_string),
-            bot: None,
+            bot,
         };
+        link::check_offer_shape(&offer).map_err(|e| ClientError::Protocol(e.to_string()))?;
         let signer = unlocked.signer(clock.now())?;
         let by = master_at_head(&chain, signer)?;
         let signed = link::sign_offer(offer.clone(), by, signer)?;

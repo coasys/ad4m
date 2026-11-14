@@ -37,6 +37,12 @@ export interface CallOptions {
      *  cancelled there when it times out, as when `signal` aborts it; any other
      *  call that times out still runs to its end. */
     timeoutMs?: number
+    /**
+     * Why the call is made, sent as `meta.reason` (at most 280 characters are kept). A bot's
+     * write or join needs one; its owner reads it in the bot's activity log. Overrides the
+     * client's {@link ApiClient.setReason}.
+     */
+    reason?: string
 }
 
 /** Narrows an {@link ApiClient.on} handler to one perspective's events. */
@@ -171,6 +177,16 @@ export class ApiClient {
 
     getBaseUrl(): string { return this.baseUrl }
     getToken(): string | undefined { return this.token }
+
+    /** The reason sent with every call that names none (`meta.reason`); see {@link CallOptions.reason}. */
+    private _reason: string | undefined
+
+    /**
+     * Sends `reason` as `meta.reason` with every call from now on, until set again;
+     * `undefined` stops. A bot's harness sets it before a write made through the SDK's
+     * clients, whose methods take no call options.
+     */
+    setReason(reason: string | undefined): void { this._reason = reason }
 
     /** Use `token` from now on: a renewed key session's, say. A socket opened
      *  with a different token is replaced — the session it carries is that
@@ -731,7 +747,10 @@ export class ApiClient {
         const timeoutMs = options?.timeoutMs ?? ((LONG_METHODS as ReadonlySet<string>).has(type) ? LONG_TIMEOUT_MS : DEFAULT_TIMEOUT_MS)
         const id = nextId()
         // Params go under "params" so they cannot clash with "id" and "type".
-        const message = JSON.stringify({ id, type, params: params || {} })
+        const reason = options?.reason ?? this._reason
+        const message = JSON.stringify(
+            reason === undefined ? { id, type, params: params || {} } : { id, type, params: params || {}, meta: { reason } }
+        )
 
         return new Promise<unknown>((resolve, reject) => {
             const settle = (fn: () => void) => {

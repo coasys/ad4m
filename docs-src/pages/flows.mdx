@@ -286,6 +286,8 @@ A vote on a listed proposal is also available directly: `instance.acceptProposal
 
 When two replicas mint proposals for the same transition concurrently — each not yet having seen the other's — one edge carries twin proposals. If quorum were counted per proposal, a flow with `n: 2` and two twins holding one vote each would sit at genesis forever, both one short. So the engine asks *"did this **edge** collect `n` distinct voters?"*, across every proposal for it. Twins converge, and each appears in the outcome's `contributingProposalUris`.
 
+A bot votes as its own `did:key`, never as its owner — so on an edge without a role gate a person and their bot can meet a 2-of-N quorum, as any `did:key` signer with no log can. On a `fromRole` edge eligibility is decided per DID, so the bot needs its own role grant; its owner's does not cover it.
+
 ### Reject is not cancel
 
 `rejectProposal` withdraws what **you** signed. It retracts only links this DID signed — your vote, or your whole proposal if you opened it — and returns how many links went. It never touches another agent's links. If you signed nothing on the proposal it errors instead of doing nothing silently. The retraction is a signed tombstone per link, not a removal; see [Flow links end only by tombstone](#flow-links-end-only-by-tombstone).

@@ -3,4 +3,4 @@
 /**
  * Why a link is `Invalid`.
  */
-export type InvalidReason = "badSignature" | "notListed" | "masterKey" | "notYetValid" | "revoked" | "expired";
+export type InvalidReason = "badSignature" | "notListed" | "masterKey" | "notYetValid" | "revoked" | "expired" | "notInScope";

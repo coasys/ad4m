@@ -73,8 +73,10 @@ map.method::<AiIdParams, bool>("ai.removeTask", remove_task)
 `Guard::perspective(cap)` builds `Guard::Owns { owner: Perspective }` on the `uuid` param.
 
 `HandlerMap::dispatch` runs, in order: find the method (404) → params deserialize into `P`
-(400) → the guard's capability (403) → the guard's rule (403, or 404 for a resource) → the
-handler. `HandlerMap::admit` runs the steps before the handler alone.
+(400) → for a session on a bot's agent, the bot's grant (`bots::admit`: 403 `bot-grant`,
+`bot-paused`, `not-in-can`, ...; see `src/bots/AGENTS.md`) → the guard's capability (403) →
+the guard's rule (403, or 404 for a resource) → the handler. `HandlerMap::admit` runs the
+steps before the handler alone; only `dispatch` writes the bot's activity log.
 
 | Guard | Rule after the capability |
 |---|---|
@@ -188,7 +190,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-254 methods: Cap 87, CapAnyPointer 1, Executor 43, Open 9, Operator 36, Owns 74, UserOrOperator 4. Local only (the operator on this machine): 13.
+259 methods: Cap 87, CapAnyPointer 1, Executor 48, Open 9, Operator 36, Owns 74, UserOrOperator 4. Local only (the operator on this machine): 13.
 
 | Method | Guard |
 |---|---|
@@ -255,6 +257,11 @@ the guard checked:
 | `ai.updateEndpoint` | `Executor(artificial intelligence:UPDATE)` |
 | `ai.updateModel` | `Executor(artificial intelligence:UPDATE)` |
 | `ai.updateTask` | `Owns(Task task.taskId, artificial intelligence:CREATE)` |
+| `bot.createAgent` | `Executor(agent:UPDATE)` |
+| `bot.grant` | `Executor(agent:READ)` |
+| `bot.list` | `Executor(agent:READ)` |
+| `bot.log` | `Executor(agent:READ)` |
+| `bot.setGrant` | `Executor(agent:UPDATE)` |
 | `expression.create` | `Cap(expression:CREATE)` |
 | `expression.get` | `Cap(expression:READ)` |
 | `expression.getMany` | `Cap(expression:READ)` |

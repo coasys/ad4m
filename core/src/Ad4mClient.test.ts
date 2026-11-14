@@ -46,6 +46,12 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'identity.log': (p: Record<string, unknown>) => ({ did: p.did, events: [], head: null, fork: null }),
     'identity.devices': [],
     'identity.rekey': { sign: 'did:key:z6MkNew', enc: 'z6LSNew' },
+    // ── Bots ──
+    'bot.createAgent': { did: 'did:key:z6MkBot', key: 'z6MkBot', owner: 'did:scid:coasys:1:QmTest', offerId: 'offer', matchCode: 'R7K Q2M', expires: 1, token: 'bot-token' },
+    'bot.grant': { did: 'did:key:z6MkBot', name: 'helper', owner: 'did:scid:coasys:1:QmTest', offerId: 'offer', createdAt: 1, grant: { spaces: ['neighbourhood://Qm1'], can: ['read', 'write'], expires: null, state: 'active', version: 3, updatedAt: 1 }, key: null },
+    'bot.setGrant': (p: Record<string, unknown>) => ({ did: p.bot, name: 'helper', owner: 'did:scid:coasys:1:QmTest', offerId: 'offer', createdAt: 1, grant: { spaces: p.spaces, can: p.can, expires: p.expires ?? null, state: p.state, version: (p.version as number) + 1, updatedAt: 2 }, key: null }),
+    'bot.list': [],
+    'bot.log': [{ id: 7, at: 1, method: 'perspective.addLink', action: 'write', space: 'p1', reason: 'tidy', outcome: 'allowed' }],
     'identity.custodyStatus': { sign: 'did:key:z6MkTest', enc: 'z6LSTest' },
     'identity.resolve': (p: Record<string, unknown>) => ({
         didDocument: { '@context': ['https://www.w3.org/ns/did/v1'], id: p.didUrl, controller: p.didUrl, verificationMethod: [], authentication: [], assertionMethod: [], keyAgreement: [], capabilityInvocation: [] },
@@ -296,7 +302,7 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
 // ===================== MOCK WEBSOCKET =====================
 
 /** Tracks the last RPC call for test assertions. */
-let lastRpcCall: { type: string; params: Record<string, unknown> } | null = null;
+let lastRpcCall: { type: string; params: Record<string, unknown>; meta?: Record<string, unknown> } | null = null;
 
 class MockWebSocket {
     static instances: MockWebSocket[] = [];
@@ -313,7 +319,7 @@ class MockWebSocket {
     closed = false;
     url: string;
     /** RPC calls sent on this socket. */
-    rpc: { type: string; params: Record<string, unknown> }[] = [];
+    rpc: { type: string; params: Record<string, unknown>; meta?: Record<string, unknown> }[] = [];
 
     close() {
         this.closed = true;
@@ -340,7 +346,7 @@ class MockWebSocket {
                 : {} as Record<string, unknown>;
 
             // Track for assertions
-            lastRpcCall = { type: msgType, params };
+            lastRpcCall = { type: msgType, params, meta: parsed.meta };
             this.rpc.push(lastRpcCall);
 
             const handler = MOCK_RESPONSES[msgType];
@@ -1295,6 +1301,61 @@ describe('RuntimeClient', () => {
 });
 
 // ===================== IDENTITY TESTS =====================
+// ===================== BOT TESTS =====================
+describe('BotClient', () => {
+    test('createAgent() sends the offer and the name', async () => {
+        const created = await ad4m.bot.createAgent('ad4m-offer:abc', 'helper');
+        expect(lastRpcCall!.type).toBe('bot.createAgent');
+        expect(lastRpcCall!.params).toEqual({ offer: 'ad4m-offer:abc', name: 'helper' });
+        expect(created.token).toBe('bot-token');
+    });
+
+    test('pause() reads the grant and sends it back paused, with the version read', async () => {
+        const paused = await ad4m.bot.pause('did:key:z6MkBot');
+        expect(lastRpcCall!.type).toBe('bot.setGrant');
+        expect(lastRpcCall!.params).toEqual({
+            bot: 'did:key:z6MkBot', spaces: ['neighbourhood://Qm1'], can: ['read', 'write'], state: 'paused', version: 3,
+        });
+        expect(paused.grant.version).toBe(4);
+    });
+
+    test('setGrant() sends only the grant input, so a grant read back can be passed', async () => {
+        const { grant } = await ad4m.bot.grant('did:key:z6MkBot');
+        expect(grant.updatedAt).toBeDefined();
+        await ad4m.bot.setGrant('did:key:z6MkBot', { ...grant, can: ['read'] });
+        expect(lastRpcCall!.type).toBe('bot.setGrant');
+        expect(Object.keys(lastRpcCall!.params).sort()).toEqual(['bot', 'can', 'spaces', 'state', 'version']);
+        expect(lastRpcCall!.params.can).toEqual(['read']);
+    });
+
+    test('log() sends the bot and the page', async () => {
+        const entries = await ad4m.bot.log('did:key:z6MkBot', { before: 9, limit: 5 });
+        expect(lastRpcCall!.params).toEqual({ bot: 'did:key:z6MkBot', before: 9, limit: 5 });
+        expect(entries[0].reason).toBe('tidy');
+    });
+
+    test('a reason goes with every call as meta.reason until it is cleared', async () => {
+        await ad4m.agent.status();
+        expect(lastRpcCall!.meta).toBeUndefined();
+        ad4m.setReason('sort the inbox');
+        await ad4m.agent.status();
+        expect(lastRpcCall!.meta).toEqual({ reason: 'sort the inbox' });
+        ad4m.setReason(undefined);
+        await ad4m.agent.status();
+        expect(lastRpcCall!.meta).toBeUndefined();
+    });
+
+    test("a call's own reason overrides the client's", async () => {
+        const api = new ApiClient('http://127.0.0.1:12000', 'test-token');
+        clients.push({ close: () => api.closeAll() });
+        api.setReason('the default');
+        await api.call('agent.status', {}, { reason: 'this write' });
+        expect(lastRpcCall!.meta).toEqual({ reason: 'this write' });
+        await api.call('agent.status', {});
+        expect(lastRpcCall!.meta).toEqual({ reason: 'the default' });
+    });
+});
+
 describe('IdentityClient', () => {
     test('status() calls identity.status', async () => {
         const status = await ad4m.identity.status();

@@ -325,6 +325,11 @@ pub struct DecoratedLinkExpression {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub person: Option<String>,
+    /// `true` when the signer's key is a bot key of `person`'s log (the bot mark): the link
+    /// counts for the person, and their bot wrote it. Only beside `person`; derived like it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub by_bot: Option<bool>,
 }
 
 impl DecoratedLinkExpression {
@@ -369,7 +374,7 @@ impl DecoratedLinkExpression {
         check(&link_expr)
     }
 
-    /// Sets `proof.valid`, the verdict and the person from [`DecoratedLinkExpression::check`].
+    /// Sets `proof.valid`, the verdict, the person and the bot mark from [`DecoratedLinkExpression::check`].
     pub fn verify_signature(&mut self) {
         let checked = self.check();
         self.set_judgement(checked);
@@ -380,6 +385,7 @@ impl DecoratedLinkExpression {
         self.proof.valid = Some(valid);
         self.proof.invalid = Some(!valid);
         self.verdict = Some(checked.verdict);
+        self.by_bot = checked.by_bot.then_some(true);
         self.person = checked.person;
     }
 }
@@ -396,6 +402,7 @@ impl From<(LinkExpression, LinkStatus)> for DecoratedLinkExpression {
             data: expr.data,
             status: Some(status),
             verdict: Some(checked.verdict),
+            by_bot: checked.by_bot.then_some(true),
             person: checked.person,
         }
     }

@@ -14,6 +14,9 @@ use ad4m_identity_core::KeyState;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+/// The bot scope action a link needs: a link is a write.
+const WRITE: &str = "write";
+
 /// Whether a link counts.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(tag = "kind", content = "reason", rename_all = "camelCase")]
@@ -49,6 +52,9 @@ pub enum InvalidReason {
     Revoked,
     /// A bot key's scope is past its `expires` by the executor's clock.
     Expired,
+    /// A bot key whose scope at the anchor does not include `write`: a link is a write, so the
+    /// key may not author it. Every reader enforces it from the owner's log.
+    NotInScope,
 }
 
 impl InvalidReason {
@@ -60,6 +66,7 @@ impl InvalidReason {
             InvalidReason::NotYetValid => "notYetValid",
             InvalidReason::Revoked => "revoked",
             InvalidReason::Expired => "expired",
+            InvalidReason::NotInScope => "notInScope",
         }
     }
 
@@ -71,6 +78,7 @@ impl InvalidReason {
             InvalidReason::NotYetValid,
             InvalidReason::Revoked,
             InvalidReason::Expired,
+            InvalidReason::NotInScope,
         ]
         .into_iter()
         .find(|r| r.name() == name)
@@ -154,7 +162,8 @@ pub struct LinkFacts<'a> {
 /// 4. With an anchor: no log lists the signer, `Invalid(NotListed)`; nothing known, or the
 ///    anchor past the trusted seq, `CantCheck`; a master key, `Invalid(MasterKey)`; the key not
 ///    added yet at the anchor, `Invalid(NotYetValid)`; revoked at or before it,
-///    `Invalid(Revoked)`; past an expiry, `Invalid(Expired)`.
+///    `Invalid(Revoked)`; past an expiry, `Invalid(Expired)`; a bot key whose scope at the
+///    anchor does not allow `write`, `Invalid(NotInScope)` (a link is a write).
 /// 5. Revoked after the anchor (at or below the trusted seq): `Valid` only when the link is
 ///    known to have entered the space's history before the revocation did
 ///    (`entered_after_revoke == Some(false)`), else `Flagged`. With no order known, whoever
@@ -201,6 +210,14 @@ pub fn judge(facts: &LinkFacts) -> LinkVerdict {
     }
     if !state.key_valid_at_time(id, at, facts.now) {
         return Invalid(InvalidReason::Expired);
+    }
+    // A link is a write: a bot key authors one only when the scope in force at the anchor
+    // allows `write`.
+    if state
+        .bot_scope_at(id, at)
+        .is_some_and(|scope| !scope.can.iter().any(|a| a == WRITE))
+    {
+        return Invalid(InvalidReason::NotInScope);
     }
     if revoked.is_some() && facts.entered_after_revoke != Some(false) {
         return Flagged;
@@ -469,6 +486,65 @@ mod tests {
         assert_eq!(judge(&late), LinkVerdict::Invalid(InvalidReason::Expired));
     }
 
+    /// A link is a write: a bot key whose scope at the anchor lacks `write` authors nothing,
+    /// anchored or not, whatever else its scope allows.
+    #[test]
+    fn a_bot_key_without_write_in_its_scope_authors_no_link() {
+        for can in [vec!["read"], vec!["join"], vec!["read", "join"], vec![]] {
+            let (mut state, device, _) = log_with(None);
+            state.keys.get_mut("d1").expect("d1").scopes = vec![(
+                0,
+                BotScope {
+                    can: can.iter().map(|a| a.to_string()).collect(),
+                    expires: NOW + 1,
+                },
+            )];
+            let listed = SignerLog::Listed {
+                state: &state,
+                trusted: 0,
+            };
+            for anchor in [Some(0), None] {
+                assert_eq!(
+                    judge(&facts(listed, &device, anchor)),
+                    LinkVerdict::Invalid(InvalidReason::NotInScope),
+                    "can {can:?}, anchor {anchor:?}"
+                );
+            }
+        }
+    }
+
+    /// The scope in force at the anchor decides: a `scope` that adds `write` later makes a link
+    /// anchored after it count, and one anchored before it still does not.
+    #[test]
+    fn the_scope_at_the_anchor_decides_whether_a_bot_may_write() {
+        let (mut state, device, _) = log_with(None);
+        state.keys.get_mut("d1").expect("d1").scopes = vec![
+            (
+                0,
+                BotScope {
+                    can: vec!["read".into()],
+                    expires: NOW + 1,
+                },
+            ),
+            (
+                1,
+                BotScope {
+                    can: vec!["read".into(), "write".into()],
+                    expires: NOW + 1,
+                },
+            ),
+        ];
+        let listed = SignerLog::Listed {
+            state: &state,
+            trusted: 1,
+        };
+        assert_eq!(
+            judge(&facts(listed, &device, Some(0))),
+            LinkVerdict::Invalid(InvalidReason::NotInScope)
+        );
+        assert_eq!(judge(&facts(listed, &device, Some(1))), LinkVerdict::Valid);
+    }
+
     /// A key that a log listed after it signed (a guest key claimed as `d1`): judged as
     /// anchored at the seq that added it.
     #[test]
@@ -502,6 +578,7 @@ mod tests {
             LinkVerdict::Invalid(InvalidReason::NotYetValid),
             LinkVerdict::Invalid(InvalidReason::Revoked),
             LinkVerdict::Invalid(InvalidReason::Expired),
+            LinkVerdict::Invalid(InvalidReason::NotInScope),
         ];
         for v in all {
             assert_eq!(LinkVerdict::from_stored(&v.stored()), Some(v.clone()));

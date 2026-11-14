@@ -24,12 +24,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 mod ai_sessions;
+mod bots;
 mod endpoints;
 pub(crate) mod grants;
 mod identity;
 mod model_migration;
 mod rekey;
 mod tasks;
+pub use bots::{BotActivityRow, BotGrantRow, BotRow};
 pub use endpoints::InvalidEndpoint;
 pub use grants::{GrantKeyRow, GrantRow};
 #[cfg(test)]
@@ -435,6 +437,8 @@ impl Ad4mDb {
         Self::create_grants_table(&conn)?;
         // The operator record and the identities local agents speak for: see identity::.
         Self::create_identity_tables(&conn)?;
+        // The bots and their activity log: see bots::.
+        Self::create_bot_tables(&conn)?;
 
         conn.execute(
             "CREATE TABLE IF NOT EXISTS email_verifications (

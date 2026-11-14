@@ -63,6 +63,9 @@ export class LinkExpression extends ExpressionGeneric(Link) {
      *  its owner), derived by the executor; only on a `valid` link. `author` stays
      *  the signing device key. */
     person?: string;
+    /** `true` when a bot key of `person`'s log signed the link (`person` is the bot's
+     *  owner); absent for a device's link. Derived by the executor, only with `person`. */
+    byBot?: boolean;
 
     /** Build a LinkExpression (with `hash()`) from the executor's wire shape. */
     static fromWire(wire: WireLinkExpression | DecoratedLinkExpression): LinkExpression {
@@ -70,6 +73,7 @@ export class LinkExpression extends ExpressionGeneric(Link) {
         if (wire.status) link.status = wire.status
         if ("verdict" in wire && wire.verdict) link.verdict = wire.verdict
         if ("person" in wire && wire.person) link.person = wire.person
+        if ("byBot" in wire && wire.byBot) link.byBot = true
         return link
     }
 };

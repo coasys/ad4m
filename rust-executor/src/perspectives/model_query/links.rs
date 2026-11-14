@@ -233,7 +233,7 @@ pub(super) async fn attach_links(
         // Required patterns before the first OPTIONAL: oxigraph does not reorder joins inside
         // an OPTIONAL chain that a required pattern follows, so they run as cartesian products.
         let sparql = format!(
-            r#"SELECT ?source ?predicate ?target ?wireTarget ?author ?timestamp ?proofKey ?proofSig ?proofAnchor ?proofValid ?person ?rowStatus WHERE {{
+            r#"SELECT ?source ?predicate ?target ?wireTarget ?author ?timestamp ?proofKey ?proofSig ?proofAnchor ?proofValid ?person ?byBot ?judgementVersion ?rowStatus WHERE {{
     {source_constraint}
     VALUES ?predicate {{ {predicate_values} }}
     ?source ?predicate ?target .
@@ -246,6 +246,8 @@ pub(super) async fn attach_links(
     OPTIONAL {{ ?_reifier <ad4m://ontology/proofValid> ?proofValid . }}
     OPTIONAL {{ ?_reifier <ad4m://ontology/wireTarget> ?wireTarget . }}
     OPTIONAL {{ ?_reifier <ad4m://ontology/person> ?person . }}
+    OPTIONAL {{ ?_reifier <ad4m://ontology/byBot> ?byBot . }}
+    OPTIONAL {{ ?_reifier <ad4m://ontology/judgementVersion> ?judgementVersion . }}
     OPTIONAL {{ ?_reifier <ad4m://ontology/status> ?rowStatus . }}
 {local_status}}}"#
         );
@@ -296,7 +298,8 @@ pub(super) async fn attach_links(
 
 /// One `__links` row from a result row binding `source`, `predicate`,
 /// `target`, `wireTarget`, `author`, `timestamp`, `proofKey`, `proofSig`,
-/// `proofAnchor` and `proofValid`, shaped as a `DecoratedLinkExpression`.
+/// `proofAnchor`, `proofValid`, `person`, `byBot` and `judgementVersion`, shaped as a
+/// `DecoratedLinkExpression`.
 pub(super) fn decorated_link(row: &Value) -> Value {
     let s = |var: &str| row[var].as_str().unwrap_or("").to_string();
     // Same decoding as `sparql_store::decode_proof_valid`: only a
@@ -331,12 +334,21 @@ pub(super) fn decorated_link(row: &Value) -> Value {
     if let Some(anchor) = s("proofAnchor").parse::<u64>().ok() {
         row["proof"]["anchor"] = json!(anchor);
     }
-    // The person the store derived for the signing device key, on a valid row only (as
-    // `perspective.get` returns it): a flow reader counts a device-signed vote or proposer
-    // link that names the person by it.
+    // The person the store derived for the signing key and the bot mark, as
+    // `perspective.get` returns them (`sparql_store::decode_proof`): the person on a valid
+    // row only, the bot mark only beside it. A flow reader counts a device-signed vote or
+    // proposer link that names the person by it, and never a bot's (`flow_person`), so a
+    // row without its bot mark would let a bot act as its owner. A signed row judged before
+    // the rules now in force may lack the mark its signer now gets: it is read
+    // unclassified, no person and no mark, until the re-check judges it again.
     let person = s("person");
-    if valid && !person.is_empty() {
+    let stale =
+        crate::perspectives::sparql_store::judgement_stale(&s("judgementVersion"), &s("proofSig"));
+    if valid && !stale && !person.is_empty() {
         row["person"] = json!(person);
+        if s("byBot") == "true" {
+            row["byBot"] = json!(true);
+        }
     }
     row
 }

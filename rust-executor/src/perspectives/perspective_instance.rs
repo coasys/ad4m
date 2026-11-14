@@ -215,6 +215,7 @@ mod inbound_touches_shacl_tests {
             status: Some(LinkStatus::Shared),
             verdict: None,
             person: None,
+            by_bot: None,
         }
     }
 
@@ -4673,6 +4674,12 @@ impl PerspectiveInstance {
     /// call, continuing after the last one, so links that stay unresolvable rotate to the
     /// back and every one is reached. The rewritten links go out as a remote diff does
     /// (`update_prolog_engines`): Prolog, notifications and subscriptions see the new verdict.
+    ///
+    /// [`super::Recheck::CantCheck`] also takes the rows judged before the rules now in
+    /// force (a stale or missing judgement version, e.g. bot links stored before the bot
+    /// mark and the scope check). A stale row is rewritten even when its judgement comes
+    /// out the same, so its version settles; one whose signer's log is unreadable yet
+    /// (`cantCheck`) stays stale for a later tick.
     pub async fn recheck_links(&self, scope: &super::Recheck) -> Result<usize, AnyError> {
         self.recheck_links_paged(scope, RECHECK_BATCH).await
     }
@@ -4696,7 +4703,9 @@ impl PerspectiveInstance {
                             .links_by_authors(&signers, after.as_deref(), page)?;
                     let full = stored.len() == page;
                     after = stored.last().map(super::sparql_store::reifier_of);
-                    let rewrites = self.rejudge(stored).await?;
+                    let rewrites = self
+                        .rejudge(stored.into_iter().map(|link| (link, false)).collect())
+                        .await?;
                     changed += rewrites.len();
                     self.publish_rewrites(rewrites).await;
                     if !full {
@@ -4706,13 +4715,11 @@ impl PerspectiveInstance {
             }
             super::Recheck::CantCheck => {
                 let mut cursor = self.recheck_cursor.lock().await;
-                let stored = self.sparql_store.links_with_verdict(
-                    &LinkVerdict::CantCheck,
-                    cursor.as_deref(),
-                    page,
-                )?;
+                let stored = self
+                    .sparql_store
+                    .links_to_rejudge(cursor.as_deref(), page)?;
                 *cursor = match stored.last() {
-                    Some(last) if stored.len() == page => {
+                    Some((last, _)) if stored.len() == page => {
                         Some(super::sparql_store::reifier_of(last))
                     }
                     _ => None,
@@ -4757,29 +4764,44 @@ impl PerspectiveInstance {
     }
 
     /// Judges `stored` links again and rewrites each whose verdict or person changed;
-    /// answers each rewritten link as `(as it was, as now stored)`. The rewrite holds
-    /// `persist_lock` and first reads the link back: one a write removed (or rewrote) since
-    /// the page was read is left as that write left it, not put back.
+    /// answers each rewritten link as `(as it was, as now stored)`. `stored` carries each
+    /// link's stale flag ([`SparqlStore::links_to_rejudge`], `false` for a `Signers` page): a
+    /// stale row is rewritten even when its judgement comes out the same, so its version
+    /// settles; one whose signer's log is unreadable yet (`cantCheck`) stays stale for a later
+    /// tick. Stale or not, a stored `valid` is never replaced by `cantCheck`
+    /// ([`crate::identity::verdict::replaces`]). The rewrite holds `persist_lock` and first reads the link back: one a write
+    /// removed (or rewrote) since the page was read is left as that write left it, not put back.
     async fn rejudge(
         &self,
-        stored: Vec<DecoratedLinkExpression>,
+        stored: Vec<(DecoratedLinkExpression, bool)>,
     ) -> Result<Vec<(DecoratedLinkExpression, DecoratedLinkExpression)>, AnyError> {
         if stored.is_empty() {
             return Ok(vec![]);
         }
-        let links: Vec<LinkExpression> = stored.iter().cloned().map(LinkExpression::from).collect();
+        let links: Vec<LinkExpression> = stored
+            .iter()
+            .cloned()
+            .map(|(link, _)| LinkExpression::from(link))
+            .collect();
         crate::identity::prepare_link_signers(&links).await;
         let _persisting = self
             .persist_lock
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         let mut rewritten = Vec::new();
-        for (before, link) in stored.into_iter().zip(&links) {
+        for ((before, stale), link) in stored.into_iter().zip(&links) {
             // A link this store already counted was here before the revocation reached the
             // key map: the one order the executor knows. The store judges the same way.
             let entered = (before.verdict == Some(LinkVerdict::Valid)).then_some(false);
             let now = link.check_entered(entered);
-            if before.verdict.as_ref() == Some(&now.verdict) && before.person == now.person {
+            if now.verdict == LinkVerdict::CantCheck && stale {
+                continue;
+            }
+            if !stale
+                && before.verdict.as_ref() == Some(&now.verdict)
+                && before.person == now.person
+                && before.by_bot == now.by_bot.then_some(true)
+            {
                 continue;
             }
             // A link that counts stays counted while its signer's log is not known: no
@@ -4816,6 +4838,7 @@ impl PerspectiveInstance {
             after.proof.invalid = Some(!counts);
             after.verdict = Some(now.verdict);
             after.person = now.person;
+            after.by_bot = now.by_bot.then_some(true);
             rewritten.push((before, after));
         }
         Ok(rewritten)
@@ -8811,6 +8834,520 @@ mod tests {
         map.forget(&log.scid());
     }
 
+    /// A valid link by a bot key of a person's log is stored with the person (the owner) and
+    /// the bot mark, and both read paths (the SPARQL query and the reifier scan) return
+    /// `by_bot`; a device's link of the same person carries none.
+    #[tokio::test]
+    async fn a_bots_link_is_stored_and_read_with_the_bot_mark() {
+        use crate::identity::cache::tests::TestLog;
+        use crate::identity::cache::{global_key_map, TrustedLog};
+        use ad4m_identity_core::build::{add_unsigned, cosign, Signer};
+        use ad4m_identity_core::{BotScope, DeviceKey, KeyLife};
+
+        let perspective = setup().await;
+        let mut log = TestLog::new(93);
+        let bot = ed25519_dalek::SigningKey::from_bytes(&[94; 32]);
+        let chain = log.chain();
+        let bot_key = DeviceKey {
+            id: chain.state().next_device_id(),
+            sign: bot.key(),
+            enc: ad4m_identity_core::encode_x25519_multikey(&[94; 32]),
+            life: KeyLife::Bot(BotScope {
+                can: vec!["write".into()],
+                expires: 4_000_000_000,
+            }),
+        };
+        let mut event = add_unsigned(&chain, bot_key, "offer", "co-sig").unwrap();
+        cosign(&mut event, "m0", &log.master).unwrap();
+        log.events.push(event);
+        let map = global_key_map();
+        map.publish(
+            &log.scid(),
+            TrustedLog {
+                state: log.chain().state().clone(),
+                trusted: 1,
+            },
+        );
+        // The store confirmed that head just now.
+        map.note_confirmed(&log.scid(), chrono::Utc::now().timestamp() as u64);
+        let person = ad4m_identity_core::did_of(&log.scid());
+        let signed = |signer: &ed25519_dalek::SigningKey, target: &str, anchor: u64| {
+            let key = signer.key();
+            let data = Link {
+                source: "ad4m://bot-mark".into(),
+                predicate: Some("ad4m://says".into()),
+                target: target.into(),
+            }
+            .normalize();
+            let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+            let bytes = crate::agent::signatures::anchored_signing_bytes(&data, &timestamp, anchor)
+                .unwrap();
+            LinkExpression {
+                author: format!("did:key:{key}"),
+                timestamp,
+                data,
+                proof: ExpressionProof {
+                    key: format!("did:key:{key}#{key}"),
+                    signature: hex::encode(signer.sign(&bytes)),
+                    anchor: Some(anchor),
+                },
+                status: Some(LinkStatus::Shared),
+            }
+        };
+        let by_bot = signed(&bot, "ad4m://by-bot", 1);
+        let by_device = signed(&log.device.clone(), "ad4m://by-device", 0);
+        perspective.sparql_store.add_link(&by_bot).unwrap();
+        perspective.sparql_store.add_link(&by_device).unwrap();
+
+        let marks = |links: Vec<DecoratedLinkExpression>| {
+            let mut marks: Vec<_> = links
+                .into_iter()
+                .map(|l| (l.data.target, l.verdict, l.person, l.by_bot))
+                .collect();
+            marks.sort_by(|a, b| a.0.cmp(&b.0));
+            marks
+        };
+        let expected = vec![
+            (
+                "ad4m://by-bot".to_string(),
+                Some(LinkVerdict::Valid),
+                Some(person.clone()),
+                Some(true),
+            ),
+            (
+                "ad4m://by-device".to_string(),
+                Some(LinkVerdict::Valid),
+                Some(person.clone()),
+                None,
+            ),
+        ];
+        let queried = marks(
+            perspective
+                .sparql_store
+                .get_all_links(&EvalStop::none())
+                .unwrap(),
+        );
+        assert_eq!(queried, expected, "the SPARQL read");
+        let scanned = marks(
+            perspective
+                .sparql_store
+                .query_shown_links_top_n_by_timestamp(
+                    &EvalStop::none(),
+                    Some("ad4m://bot-mark"),
+                    None,
+                    None,
+                    None,
+                    None,
+                    10,
+                    false,
+                )
+                .unwrap(),
+        );
+        assert_eq!(scanned, expected, "the reifier scan");
+        let json = serde_json::to_value(
+            &perspective
+                .sparql_store
+                .get_all_links(&EvalStop::none())
+                .unwrap(),
+        )
+        .unwrap();
+        let wire: Vec<_> = json
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| l.get("byBot").cloned())
+            .collect();
+        assert!(wire.contains(&Some(serde_json::Value::Bool(true))));
+        assert!(wire.contains(&None), "a device's link has no byBot field");
+
+        let signers = std::collections::BTreeSet::from([by_bot.author.clone()]);
+        assert_eq!(
+            perspective
+                .recheck_links(&crate::perspectives::Recheck::Signers(signers))
+                .await
+                .unwrap(),
+            0,
+            "a re-check of an unchanged bot link changes nothing"
+        );
+        map.forget(&log.scid());
+    }
+
+    /// A person's log with a bot device key of `can` scope, trusted at seq 1: the bot key
+    /// added at seq 1 by the incept cosigner.
+    #[cfg(test)]
+    fn bot_log(
+        seed: u8,
+        can: &[&str],
+    ) -> (
+        crate::identity::cache::tests::TestLog,
+        ed25519_dalek::SigningKey,
+    ) {
+        use crate::identity::cache::tests::TestLog;
+        use ad4m_identity_core::build::{add_unsigned, cosign, Signer};
+        use ad4m_identity_core::{BotScope, DeviceKey, KeyLife};
+
+        let mut log = TestLog::new(seed);
+        let bot = ed25519_dalek::SigningKey::from_bytes(&[seed.wrapping_add(1); 32]);
+        let chain = log.chain();
+        let bot_key = DeviceKey {
+            id: chain.state().next_device_id(),
+            sign: bot.key(),
+            enc: ad4m_identity_core::encode_x25519_multikey(&[seed; 32]),
+            life: KeyLife::Bot(BotScope {
+                can: can.iter().map(|a| a.to_string()).collect(),
+                expires: 4_000_000_000,
+            }),
+        };
+        let mut event = add_unsigned(&chain, bot_key, "offer", "co-sig").unwrap();
+        cosign(&mut event, "m0", &log.master).unwrap();
+        log.events.push(event);
+        (log, bot)
+    }
+
+    /// Publish `log` at trusted seq `trusted` into the global key map, as a head the store
+    /// confirmed just now (a new link's check admits on it).
+    #[cfg(test)]
+    fn publish_log(log: &crate::identity::cache::tests::TestLog, trusted: u64) {
+        use crate::identity::cache::{global_key_map, TrustedLog};
+        global_key_map().publish(
+            &log.scid(),
+            TrustedLog {
+                state: log.chain().state().clone(),
+                trusted,
+            },
+        );
+        global_key_map().note_confirmed(&log.scid(), chrono::Utc::now().timestamp() as u64);
+    }
+
+    /// A link `signer` signed, anchored at `anchor` (of its log).
+    #[cfg(test)]
+    fn anchored_link(
+        signer: &ed25519_dalek::SigningKey,
+        source: &str,
+        target: &str,
+        anchor: u64,
+    ) -> LinkExpression {
+        use ad4m_identity_core::build::Signer;
+        let key = signer.key();
+        let data = Link {
+            source: source.into(),
+            predicate: Some("ad4m://says".into()),
+            target: target.into(),
+        }
+        .normalize();
+        let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let bytes =
+            crate::agent::signatures::anchored_signing_bytes(&data, &timestamp, anchor).unwrap();
+        LinkExpression {
+            author: format!("did:key:{key}"),
+            timestamp,
+            data,
+            proof: ExpressionProof {
+                key: format!("did:key:{key}#{key}"),
+                signature: hex::encode(signer.sign(&bytes)),
+                anchor: Some(anchor),
+            },
+            status: Some(LinkStatus::Shared),
+        }
+    }
+
+    /// A bot link stored before the bot mark and the judgement version (no `byBot`, no
+    /// `judgementVersion`) is rejudged by the re-check: until then a read presents it
+    /// unclassified — no person, no byBot — then it carries the owner and the bot mark at
+    /// the current version.
+    #[tokio::test]
+    async fn an_old_judgement_is_rejudged_to_the_bot_mark() {
+        let perspective = setup().await;
+        let (log, bot) = bot_log(95, &["write"]);
+        publish_log(&log, 1);
+        let person = ad4m_identity_core::did_of(&log.scid());
+        let link = anchored_link(&bot, "ad4m://stale", "ad4m://old-bot", 1);
+        perspective.sparql_store.add_link(&link).unwrap();
+        // The row an earlier revision wrote: no bot mark, no judgement version.
+        perspective
+            .sparql_store
+            .remove_bot_mark_and_version(&link)
+            .unwrap();
+
+        let stored = perspective
+            .sparql_store
+            .get_all_links(&EvalStop::none())
+            .unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].verdict, Some(LinkVerdict::Valid));
+        assert_eq!(
+            stored[0].person, None,
+            "a stale judgement reads unclassified: no person"
+        );
+        assert_eq!(stored[0].by_bot, None, "and no byBot");
+
+        let to_rejudge = perspective.sparql_store.links_to_rejudge(None, 10).unwrap();
+        assert_eq!(to_rejudge.len(), 1);
+        assert!(to_rejudge[0].1, "its judgement is stale");
+
+        assert_eq!(
+            perspective
+                .recheck_links(&crate::perspectives::Recheck::CantCheck)
+                .await
+                .unwrap(),
+            1
+        );
+        let stored = perspective
+            .sparql_store
+            .get_all_links(&EvalStop::none())
+            .unwrap();
+        assert_eq!(stored[0].verdict, Some(LinkVerdict::Valid));
+        assert_eq!(stored[0].person.as_deref(), Some(person.as_str()));
+        assert_eq!(stored[0].by_bot, Some(true));
+        assert!(
+            perspective
+                .sparql_store
+                .links_to_rejudge(None, 10)
+                .unwrap()
+                .is_empty(),
+            "the judgement carries the current version"
+        );
+        map_cleanup(&log);
+    }
+
+    /// A bot link judged valid under the old rules whose key scope allows `read` only is
+    /// rejudged `invalid:notInScope`: the scope check of the current rules.
+    #[tokio::test]
+    async fn an_old_bot_link_loses_its_counted_verdict() {
+        let perspective = setup().await;
+        let (log, bot) = bot_log(96, &["read"]);
+        publish_log(&log, 1);
+        let link = anchored_link(&bot, "ad4m://stale", "ad4m://read-only", 1);
+        perspective.sparql_store.add_link(&link).unwrap();
+        perspective
+            .sparql_store
+            .remove_bot_mark_and_version(&link)
+            .unwrap();
+
+        assert_eq!(
+            perspective
+                .recheck_links(&crate::perspectives::Recheck::CantCheck)
+                .await
+                .unwrap(),
+            1
+        );
+        let stored = perspective
+            .sparql_store
+            .get_all_links(&EvalStop::none())
+            .unwrap();
+        assert_eq!(
+            stored[0].verdict,
+            Some(LinkVerdict::Invalid(
+                crate::identity::verdict::InvalidReason::NotInScope
+            ))
+        );
+        assert_eq!(stored[0].by_bot, None);
+        map_cleanup(&log);
+    }
+
+    /// A stale row whose signer's log is unavailable is not rejudged: it stays stale (the
+    /// re-check selects it again) until a later tick can judge it.
+    #[tokio::test]
+    async fn an_unavailable_log_leaves_a_stale_row_stale() {
+        use crate::identity::cache::global_key_map;
+
+        let perspective = setup().await;
+        let (log, bot) = bot_log(97, &["write"]);
+        publish_log(&log, 1);
+        let link = anchored_link(&bot, "ad4m://stale", "ad4m://pending", 1);
+        perspective.sparql_store.add_link(&link).unwrap();
+        perspective
+            .sparql_store
+            .remove_bot_mark_and_version(&link)
+            .unwrap();
+        // The log is gone: its judgement cannot be made again yet.
+        global_key_map().forget(&log.scid());
+
+        assert_eq!(
+            perspective
+                .recheck_links(&crate::perspectives::Recheck::CantCheck)
+                .await
+                .unwrap(),
+            0,
+            "an unavailable log leaves the row as stored"
+        );
+        assert_eq!(
+            perspective
+                .sparql_store
+                .links_to_rejudge(None, 10)
+                .unwrap()
+                .len(),
+            1,
+            "still stale: the next tick selects it again"
+        );
+        let stored = perspective
+            .sparql_store
+            .get_all_links(&EvalStop::none())
+            .unwrap();
+        assert_eq!(stored[0].person, None, "still unclassified");
+
+        publish_log(&log, 1);
+        assert_eq!(
+            perspective
+                .recheck_links(&crate::perspectives::Recheck::CantCheck)
+                .await
+                .unwrap(),
+            1
+        );
+        let stored = perspective
+            .sparql_store
+            .get_all_links(&EvalStop::none())
+            .unwrap();
+        assert_eq!(stored[0].by_bot, Some(true));
+        map_cleanup(&log);
+    }
+
+    /// The re-check takes at most its batch of stale rows a tick.
+    #[tokio::test]
+    async fn the_recheck_takes_a_batch_of_stale_rows() {
+        let perspective = setup().await;
+        let (log, bot) = bot_log(98, &["write"]);
+        publish_log(&log, 1);
+        for i in 0..3 {
+            let link = anchored_link(&bot, "ad4m://stale", &format!("ad4m://row-{i}"), 1);
+            perspective.sparql_store.add_link(&link).unwrap();
+            perspective
+                .sparql_store
+                .remove_bot_mark_and_version(&link)
+                .unwrap();
+        }
+        assert_eq!(
+            perspective
+                .sparql_store
+                .links_to_rejudge(None, 2)
+                .unwrap()
+                .len(),
+            2,
+            "the bound holds"
+        );
+        map_cleanup(&log);
+    }
+
+    #[cfg(test)]
+    fn map_cleanup(log: &crate::identity::cache::tests::TestLog) {
+        crate::identity::cache::global_key_map().forget(&log.scid());
+    }
+
+    /// Pausing a bot's grant ends its live queries: each connection hears one
+    /// `subscription-ended` (`{subscriptionIds, perspectiveUuid, reason}`) and no withheld
+    /// content, the subscriptions are gone, and after the grant resumes a resubscribe gets
+    /// a fresh full result.
+    #[tokio::test]
+    async fn pausing_a_grant_ends_the_bots_live_queries() {
+        use crate::bots::service::{set_grant, SetGrantParams};
+        use crate::bots::{BotAction, GrantState};
+        use crate::db::BotRow;
+        use crate::types::RequestContext;
+
+        let perspective = setup().await;
+        let uuid = perspective.uuid.clone();
+        crate::perspectives::register_perspective(uuid.clone(), perspective.clone());
+
+        let bot_did = "did:key:live-query-bot";
+        let row = BotRow {
+            did: bot_did.to_string(),
+            username: "bot@example.org".into(),
+            name: "bot".into(),
+            owner: "owner-scid".into(),
+            offer_id: "offer".into(),
+            created_at: 0,
+            grant: crate::db::BotGrantRow {
+                spaces: vec![uuid.clone()],
+                can: vec!["read".to_string()],
+                expires: None,
+                state: "active".to_string(),
+                version: 0,
+                updated_at: 0,
+            },
+        };
+        crate::db::Ad4mDb::with_global_instance(|db| db.add_bot(&row).unwrap());
+
+        let (subscription_id, _revision, _first) = perspective
+            .subscribe_and_query(
+                &EvalStop::none(),
+                "SELECT ?source ?predicate ?target WHERE { ?source ?predicate ?target . }"
+                    .to_string(),
+                "bot-live-1".to_string(),
+                "conn-1".to_string(),
+                Some(bot_did.to_string()),
+            )
+            .await
+            .unwrap();
+
+        let mut events = get_global_pubsub().await.subscribe_events();
+        let ctx = std::sync::Arc::new(RequestContext::operator_for_test());
+        set_grant(
+            SetGrantParams {
+                bot: bot_did.to_string(),
+                spaces: vec![uuid.clone()],
+                can: vec![BotAction::Read],
+                expires: None,
+                state: GrantState::Paused,
+                version: 0,
+            },
+            ctx.clone(),
+        )
+        .await
+        .unwrap();
+
+        let mut ended = None;
+        let mut content = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            match event.topic {
+                Topic::SubscriptionEnded => ended = Some(event),
+                Topic::PerspectiveQuerySubscription => content.push(event),
+                _ => {}
+            }
+        }
+        let ended = ended.expect("one subscription-ended arrived");
+        assert_eq!(ended.connection.as_deref(), Some("conn-1"));
+        assert_eq!(
+            ended.payload["subscriptionIds"],
+            serde_json::json!([subscription_id])
+        );
+        assert_eq!(ended.payload["perspectiveUuid"], serde_json::json!(uuid));
+        assert_eq!(ended.payload["reason"], serde_json::json!("not-authorized"));
+        assert!(content.is_empty(), "the withheld result is never sent");
+        assert!(
+            perspective.subscribed_queries.lock().await.is_empty(),
+            "the subscription is gone"
+        );
+
+        // Resumed, the bot's client resubscribes and gets a fresh full result.
+        set_grant(
+            SetGrantParams {
+                bot: bot_did.to_string(),
+                spaces: vec![uuid.clone()],
+                can: vec![BotAction::Read],
+                expires: None,
+                state: GrantState::Active,
+                version: 1,
+            },
+            ctx,
+        )
+        .await
+        .unwrap();
+        let (fresh_id, _revision, _result) = perspective
+            .subscribe_and_query(
+                &EvalStop::none(),
+                "SELECT ?source ?predicate ?target WHERE { ?source ?predicate ?target . }"
+                    .to_string(),
+                "bot-live-2".to_string(),
+                "conn-1".to_string(),
+                Some(bot_did.to_string()),
+            )
+            .await
+            .unwrap();
+        assert_ne!(fresh_id, subscription_id);
+        assert_eq!(perspective.subscribed_queries.lock().await.len(), 1);
+        crate::perspectives::remove_perspective(&uuid).await;
+    }
+
     /// A link that arrives while the signer's cached head is older than `ADMIT_FRESHNESS` is
     /// not counted, whatever its anchor: the store may hold a revocation the cache missed. Once
     /// a refresh brings that revocation, the re-check for the key flags the stored links.
@@ -9816,7 +10353,7 @@ mod tests {
         state.keys.get_mut("d1").unwrap().scopes = vec![(
             0,
             BotScope {
-                can: vec!["read".into()],
+                can: vec!["read".into(), "write".into()],
                 expires: start + 2,
             },
         )];
@@ -9932,7 +10469,10 @@ mod tests {
         let gone = LinkExpression::from(stored[0].clone());
         perspective.sparql_store.remove_link(&gone).unwrap();
         reach_seq_one(&log);
-        let rewrites = perspective.rejudge(stored).await.unwrap();
+        let rewrites = perspective
+            .rejudge(stored.into_iter().map(|link| (link, false)).collect())
+            .await
+            .unwrap();
         assert_eq!(rewrites.len(), 4, "the four links still stored");
         let held = perspective
             .sparql_store

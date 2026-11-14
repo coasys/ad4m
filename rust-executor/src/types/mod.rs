@@ -20,6 +20,6 @@ pub use domain::{
     PerspectiveLinkEvent, PerspectiveLinkUpdatedEvent, PerspectiveRemovedEvent, PerspectiveState,
     PerspectiveStateFilter, PerspectiveUnsignedInput, PromptOutput, QuerySubscription,
     QuerySubscriptionUpdate, QuerySubscriptionUpdateEvent, QueryUpdatesLagged, ReadinessStatus,
-    RequestContext, Resource, ResourceInput, RuntimeInfo, SentMessage, TranscriptionTextFilter,
-    UserCreationResult, UserStatistics, VerificationRequestResult,
+    RequestContext, Resource, ResourceInput, RuntimeInfo, SentMessage, SubscriptionEndedEvent,
+    TranscriptionTextFilter, UserCreationResult, UserStatistics, VerificationRequestResult,
 };

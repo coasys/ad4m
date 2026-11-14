@@ -5,6 +5,11 @@
 //! subscription registry without widening its visibility.
 
 use deno_core::error::AnyError;
+
+/// The error a subscribe answers when its subscription was ended while the first result was
+/// still computing: the client got `subscription-ended` for it, so no content under that id.
+pub const SUBSCRIPTION_ENDED_WHILE_OPENING: &str =
+    "subscription-ended: the subscription ended before its first result";
 use futures::future::BoxFuture;
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
@@ -108,7 +113,9 @@ impl PerspectiveInstance {
                 q.last_result = result.clone();
                 (id, 0, result)
             }
-            None => (id, 0, result),
+            // Ended while the first result computed (the grant paused, the connection closed):
+            // the client was told so, and content under a dead id would read as live.
+            None => return Err(anyhow::anyhow!("{SUBSCRIPTION_ENDED_WHILE_OPENING} ({id})")),
         })
     }
 
@@ -167,6 +174,79 @@ impl PerspectiveInstance {
     pub async fn dispose_connection_subscriptions(&self, connection_id: &str) -> usize {
         self.dispose_where(|_, q| q.connection == connection_id)
             .await
+    }
+
+    /// End every subscription `connection_id` opened on this perspective, telling the
+    /// connection with one `subscription-ended` event (`reason`): the executor withheld a
+    /// result its grant no longer admits, so a dead subscription id never stays live in a
+    /// client that resumes. The withheld result is never sent.
+    pub(crate) async fn end_connection_subscriptions(
+        &self,
+        connection_id: &str,
+        reason: &str,
+    ) -> usize {
+        self.end_subscriptions_where(|_, q| q.connection == connection_id, reason)
+            .await
+    }
+
+    /// End every subscription `subscriber` (a managed agent's DID) opened on this
+    /// perspective, telling each connection that held one with `subscription-ended`
+    /// (`reason`): its grant paused, narrowed or expired, so no query work keeps running
+    /// for it. Returns how many ended.
+    pub(crate) async fn end_agent_subscriptions(&self, subscriber: &str, reason: &str) -> usize {
+        self.end_subscriptions_where(|_, q| q.subscriber.as_deref() == Some(subscriber), reason)
+            .await
+    }
+
+    /// End the subscriptions `matches` selects, then publish one `subscription-ended`
+    /// event per connection that held any (`{subscriptionIds, perspectiveUuid, reason}`),
+    /// to that connection only ([`Event::for_connection`]). Answers how many ended.
+    async fn end_subscriptions_where(
+        &self,
+        matches: impl Fn(&str, &SubscribedQuery) -> bool,
+        reason: &str,
+    ) -> usize {
+        // The ids and the subscriber of each removed subscription, per connection.
+        let mut by_connection: HashMap<String, (Vec<String>, Option<String>)> = HashMap::new();
+        {
+            let mut queries = self.subscribed_queries.lock().await;
+            let ids: Vec<String> = queries
+                .iter()
+                .filter(|(id, q)| matches(id, q))
+                .map(|(id, _)| id.clone())
+                .collect();
+            for id in ids {
+                if let Some(q) = queries.remove(&id) {
+                    let (ended, subscriber) =
+                        by_connection.entry(q.connection.clone()).or_default();
+                    ended.push(id);
+                    *subscriber = q.subscriber.clone();
+                }
+            }
+        }
+        if by_connection.is_empty() {
+            return 0;
+        }
+        let ended: usize = by_connection.values().map(|(ids, _)| ids.len()).sum();
+        log::info!(
+            "🔗 {ended} subscription(s) ended ({reason}) [{}]",
+            self.uuid
+        );
+        for (connection, (subscription_ids, subscriber)) in by_connection {
+            let payload = crate::types::SubscriptionEndedEvent {
+                subscription_ids,
+                perspective_uuid: self.uuid.clone(),
+                reason: reason.to_string(),
+            };
+            let event = Event::new(
+                Topic::SubscriptionEnded,
+                Audience::Dids(subscriber.into_iter().collect()),
+                payload,
+            )
+            .for_connection(connection);
+            get_global_pubsub().await.publish_event(event);
+        }
+        ended
     }
 
     async fn dispose_where(&self, matches: impl Fn(&str, &SubscribedQuery) -> bool) -> usize {
@@ -842,6 +922,41 @@ mod tests {
         drop(opening);
         drop(held);
         tokio::time::sleep(short).await;
+        assert!(p.subscribed_queries.lock().await.is_empty());
+    }
+
+    /// The subscription is ended (a pause of the bot's grant, the connection closing) while
+    /// its first result is still computing: the entry is gone and the client was told it
+    /// ended, so the subscribe must not answer with content and a dead id. A terminal error
+    /// makes the client's `start()` reject instead of holding a live query nobody serves.
+    #[tokio::test]
+    async fn a_subscription_ended_while_its_first_result_computes_answers_an_error() {
+        let (p, _, _) = setup_perspective_no_llm(&[]).await;
+        let query = super::SubscribedQuery::new(
+            "SELECT ?s ?o WHERE { ?s <test://p> ?o }".into(),
+            "c".into(),
+            None,
+        );
+        let (computed, first_result) = tokio::sync::oneshot::channel();
+        let mut opening =
+            Box::pin(p.open_subscription(
+                "s".into(),
+                query,
+                async move { first_result.await.unwrap() },
+            ));
+        let short = std::time::Duration::from_millis(20);
+        assert!(tokio::time::timeout(short, opening.as_mut()).await.is_err());
+        assert_eq!(
+            p.dispose_connection_subscriptions("c").await,
+            1,
+            "ended while opening"
+        );
+        computed.send(Ok("[]".to_string())).unwrap();
+        let answer = opening.await;
+        assert!(
+            answer.is_err(),
+            "no content and no dead id for an ended subscription: {answer:?}"
+        );
         assert!(p.subscribed_queries.lock().await.is_empty());
     }
 

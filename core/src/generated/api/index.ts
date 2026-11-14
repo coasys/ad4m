@@ -110,6 +110,18 @@ export type { ModelState } from "./ModelState";
 export type { ModelStatus } from "./ModelStatus";
 export type { ModelStatusEvent } from "./ModelStatusEvent";
 export type { ModelType } from "./ModelType";
+// The bot calls (bot.*).
+export type { BotAction } from "./BotAction";
+export type { BotActivity } from "./BotActivity";
+export type { BotAgent } from "./BotAgent";
+export type { BotGrant } from "./BotGrant";
+export type { BotKeyState } from "./BotKeyState";
+export type { BotLogParams } from "./BotLogParams";
+export type { BotParams } from "./BotParams";
+export type { CreateBotParams } from "./CreateBotParams";
+export type { CreatedBot } from "./CreatedBot";
+export type { GrantState } from "./GrantState";
+export type { SetGrantParams } from "./SetGrantParams";
 // The identity calls (identity.*) and agent.get's answer.
 export type { AcceptJoinParams } from "./AcceptJoinParams";
 export type { AgentWithIdentity } from "./AgentWithIdentity";

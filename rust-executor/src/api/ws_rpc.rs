@@ -491,9 +491,32 @@ impl Connection {
         };
 
         let params = parsed.get("params").cloned().unwrap_or(json!({}));
+        // Why the caller makes the call (`meta.reason`): a bot's write needs one, and its
+        // activity log keeps it.
+        let reason = crate::bots::reason_of(&parsed);
 
         // `events.watch` / `events.unwatch` set this connection's event
-        // filter (see `event_interest`), so they are handled inline too.
+        // filter (see `event_interest`), so they are handled inline too. A bot's watch
+        // passes its grant first (`bots::admit_watch`): the handler map, and so
+        // `bots::admit`, never sees these frames.
+        if msg_type == event_interest::WATCH || msg_type == event_interest::UNWATCH {
+            if let Some(did) = self.ctx.session.managed_did() {
+                let admitted = match crate::bots::classify(did) {
+                    Ok(Some(bot)) => {
+                        crate::bots::admit_watch(&bot, &msg_type, &params, &self.ctx).await
+                    }
+                    Ok(None) => Ok(()),
+                    Err(e) => Err(e),
+                };
+                if let Err(e) = admitted {
+                    let _ = tx.send(
+                        json!({"id": id, "error": {"code": e.code, "message": e.message}})
+                            .to_string(),
+                    );
+                    return;
+                }
+            }
+        }
         if let Some(reply) = event_interest::handle_control(
             &msg_type,
             &Value::String(id.clone()),
@@ -614,6 +637,7 @@ impl Connection {
             // so handlers can clone it into long-running operations.
             let mut req_ctx = (*base_ctx).clone();
             req_ctx.cancel_token = Some(ctx_token.clone());
+            req_ctx.reason = reason;
             req_ctx.query_slots = Some(queries);
             let req_ctx = Arc::new(req_ctx);
 

@@ -37,6 +37,7 @@ pub enum Topic {
     AiEndpointStatus,
     AiLocalProgress,
     PerspectiveQuerySubscription,
+    SubscriptionEnded,
     AutoProcessorEvent,
     AutoProcessorNeighbourhoodState,
     SfuCallRenegotiationOffer,
@@ -53,7 +54,7 @@ pub enum Topic {
 
 impl Topic {
     /// Every topic, in the order of `events_ws::event_specs`.
-    pub const ALL: [Topic; 32] = [
+    pub const ALL: [Topic; 33] = [
         Topic::AiSessionChanged,
         Topic::AgentStatusChanged,
         Topic::AgentUpdated,
@@ -74,6 +75,7 @@ impl Topic {
         Topic::AiEndpointStatus,
         Topic::AiLocalProgress,
         Topic::PerspectiveQuerySubscription,
+        Topic::SubscriptionEnded,
         Topic::AutoProcessorEvent,
         Topic::AutoProcessorNeighbourhoodState,
         Topic::SfuCallRenegotiationOffer,
@@ -112,6 +114,7 @@ impl Topic {
             Topic::AiEndpointStatus => "ai-endpoint-status",
             Topic::AiLocalProgress => "ai-local-progress",
             Topic::PerspectiveQuerySubscription => "query-subscription-update",
+            Topic::SubscriptionEnded => "subscription-ended",
             Topic::AutoProcessorEvent => "auto-processor-event",
             Topic::AutoProcessorNeighbourhoodState => "auto-processor-neighbourhood-state",
             Topic::SfuCallRenegotiationOffer => "sfu-call-renegotiation-offer",
@@ -165,6 +168,7 @@ impl Topic {
             | Topic::LinkRemoved
             | Topic::LinkUpdated
             | Topic::PerspectiveQuerySubscription
+            | Topic::SubscriptionEnded
             | Topic::AutoProcessorEvent
             | Topic::AutoProcessorNeighbourhoodState
             // `perspective.flowStates` reads the same per-agent bookkeeping.

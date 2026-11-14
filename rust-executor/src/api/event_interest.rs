@@ -62,8 +62,13 @@ fn parse(params: &Value) -> Result<EventInterest, String> {
 }
 
 /// Should this socket forward `event`? Reads its topic and perspective; parses nothing.
+/// Live query updates and the `subscription-ended` that closes them are a connection's own
+/// traffic: they need no watch (the event's `connection` already names the socket).
 pub(crate) fn wants(interest: &SharedInterest, event: &Event) -> bool {
-    if event.topic == Topic::PerspectiveQuerySubscription {
+    if matches!(
+        event.topic,
+        Topic::PerspectiveQuerySubscription | Topic::SubscriptionEnded
+    ) {
         return true;
     }
     match interest
@@ -223,7 +228,10 @@ mod tests {
     fn each_kind_of_watch_narrows_every_topic() {
         for topic in Topic::ALL {
             let t = topic.as_str();
-            let query = topic == Topic::PerspectiveQuerySubscription;
+            let query = matches!(
+                topic,
+                Topic::PerspectiveQuerySubscription | Topic::SubscriptionEnded
+            );
             for (payload, about_a) in [
                 (json!({ "perspectiveUuid": "A" }), true),
                 (json!({}), false),
