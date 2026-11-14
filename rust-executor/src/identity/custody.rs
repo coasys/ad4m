@@ -1,8 +1,12 @@
-//! The custody channel: the path by which the desktop app's custody service takes a master key
-//! that arrived sealed to this computer's device key. It is no listener of its own: it is the
-//! admin credential on a loopback listener of an executor started with `--custody-channel`.
-//! [`admit`] is its one guard. `identity.custodyStatus` is its only call so far; the calls that
-//! carry a master key use the same guard.
+//! The custody channel: how the desktop app's custody service reaches the executor beside it.
+//! The custody service keeps the person's master key (`ad4m-identity-client`); the executor
+//! never stores one, and its main agent's key is its `main` wallet key, a device key. A master
+//! key sent to this computer arrives in the main agent's device inbox, sealed to its device key:
+//! the executor opens it in memory and hands it once to the custody service on this channel,
+//! then drops it (`identity.takeMaster`, which device linking adds). It is no listener of its
+//! own: it is the admin credential on a loopback listener of an executor started with
+//! `--custody-channel`. [`admit`] is its one guard. `identity.custodyStatus`, the main agent's
+//! public device keys, is its only call so far; `identity.takeMaster` uses the same guard.
 
 use ad4m_identity_core::Multikey;
 
