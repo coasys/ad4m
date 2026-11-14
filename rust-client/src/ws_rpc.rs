@@ -145,7 +145,11 @@ struct Shared {
     /// Auth refusal (close 1008) — do not reconnect, mirror TS.
     auth_failed: AtomicBool,
     reader: Mutex<Option<JoinHandle<()>>>,
-    reconnect: Mutex<Option<JoinHandle<()>>>,
+    /// The single task that ever dials again (spawned once at `connect`,
+    /// aborted by `close`). A socket dying while it restores leaves
+    /// `connected` false, which is exactly what it waits on — there is no
+    /// "reconnect in progress" guard a disconnect can hide behind.
+    supervisor: Mutex<Option<JoinHandle<()>>>,
 }
 
 /// Merge every named interest into the `events.watch` params: for each event
@@ -236,11 +240,13 @@ impl WsRpcClient {
             closed: AtomicBool::new(false),
             auth_failed: AtomicBool::new(false),
             reader: Mutex::new(None),
-            reconnect: Mutex::new(None),
+            supervisor: Mutex::new(None),
         });
 
         let reader = Self::spawn_reader(read, shared.clone());
         *shared.reader.lock().await = Some(reader);
+        let supervisor = Self::spawn_supervisor(shared.clone());
+        *shared.supervisor.lock().await = Some(supervisor);
 
         Ok(Self { shared })
     }
@@ -318,10 +324,12 @@ impl WsRpcClient {
         })
     }
 
-    /// The socket is gone: drain pending calls, mark the client disconnected,
-    /// and (unless closed/auth-refused) spawn the reconnect task.
-    /// `abort_reader` is `false` from the reader itself — aborting its own
-    /// handle would cancel the rest of this cleanup at the next yield.
+    /// The socket is gone: drain pending calls and mark the client
+    /// disconnected. Reconnecting is the supervisor's job — it watches the
+    /// `connected` flag, so a death can never hide behind a
+    /// "reconnect already running" guard. `abort_reader` is `false` from the
+    /// reader itself — aborting its own handle would cancel the rest of
+    /// this cleanup at the next yield.
     async fn handle_disconnect(shared: &Arc<Shared>, abort_reader: bool) {
         {
             let mut sink = shared.sink.lock().await;
@@ -343,21 +351,29 @@ impl WsRpcClient {
         for (_, tx) in map.drain() {
             let _ = tx.send(Err(anyhow!("WebSocket connection closed")));
         }
-        drop(map);
+    }
 
-        if shared.closed.load(Ordering::SeqCst) || shared.auth_failed.load(Ordering::SeqCst) {
-            return;
-        }
-
-        let mut guard = shared.reconnect.lock().await;
-        if guard.as_ref().is_some_and(|h| !h.is_finished()) {
-            return; // a reconnect task is already working
-        }
-        let shared2 = shared.clone();
-        *guard = Some(tokio::spawn(async move {
+    /// The one task that ever dials again. It sleeps on the `connected`
+    /// flag; a disconnect stores false there, the supervisor dials with
+    /// backoff, installs the socket, re-sends the watch and fires the
+    /// reconnect callbacks — then waits on the flag again. A socket that
+    /// dies mid-restore leaves the flag false, so the loop just dials the
+    /// next one (F6): ownership of reconnecting never lapses.
+    fn spawn_supervisor(shared: Arc<Shared>) -> JoinHandle<()> {
+        tokio::spawn(async move {
+            let mut conn = shared.connected.subscribe();
             let mut failures: u64 = 0;
             loop {
-                if shared2.closed.load(Ordering::SeqCst) {
+                // Wait for a dead socket: `borrow_and_update` after each
+                // restore absorbs a death that arrived while we were
+                // installing, so it is neither lost nor double-handled.
+                while *conn.borrow_and_update() {
+                    if conn.changed().await.is_err() {
+                        return;
+                    }
+                }
+                if shared.closed.load(Ordering::SeqCst) || shared.auth_failed.load(Ordering::SeqCst)
+                {
                     return;
                 }
                 failures += 1;
@@ -365,22 +381,22 @@ impl WsRpcClient {
                     backoff_delay_ms(failures, RECONNECT_BASE_DELAY_MS, RECONNECT_MAX_DELAY_MS);
                 tokio::time::sleep(Duration::from_millis(delay)).await;
 
-                match connect_async_with_config(&shared2.url, Some(ws_config()), false).await {
+                match connect_async_with_config(&shared.url, Some(ws_config()), false).await {
                     Ok((ws_stream, _)) => {
                         let (write, read) = ws_stream.split();
                         {
-                            let mut sink = shared2.sink.lock().await;
+                            let mut sink = shared.sink.lock().await;
                             *sink = Some(write);
                         }
-                        let reader = Self::spawn_reader(read, shared2.clone());
-                        *shared2.reader.lock().await = Some(reader);
-                        shared2.connected.send_replace(true);
+                        let reader = Self::spawn_reader(read, shared.clone());
+                        *shared.reader.lock().await = Some(reader);
+                        shared.connected.send_replace(true);
 
                         // Re-register interest first — subscription re-opens
                         // fired below need `query-subscription-update` watched.
-                        Self::send_watch(&shared2).await;
+                        Self::send_watch(&shared).await;
 
-                        let callbacks: Vec<ReconnectCb> = shared2
+                        let callbacks: Vec<ReconnectCb> = shared
                             .on_reconnect
                             .lock()
                             .await
@@ -388,16 +404,20 @@ impl WsRpcClient {
                             .map(|(_, cb)| cb.clone())
                             .collect();
                         for cb in callbacks {
-                            cb();
+                            // A panicking callback must not take the
+                            // supervisor down with it.
+                            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cb()));
                         }
-                        return;
+                        if *conn.borrow() {
+                            failures = 0;
+                        }
                     }
                     Err(e) => {
                         eprintln!("[ws-rpc] reconnect failed (attempt {failures}): {e}");
                     }
                 }
             }
-        }));
+        })
     }
 
     /// Merge the named interests and send `events.watch` — an empty map too:
@@ -488,7 +508,7 @@ impl WsRpcClient {
     /// Permanently close the client: socket down, no reconnect.
     pub async fn close(&self) {
         self.shared.closed.store(true, Ordering::SeqCst);
-        if let Some(h) = self.shared.reconnect.lock().await.take() {
+        if let Some(h) = self.shared.supervisor.lock().await.take() {
             h.abort();
         }
         if let Some(h) = self.shared.reader.lock().await.take() {
@@ -817,6 +837,64 @@ mod tests {
         // A permanent close reports disconnected too.
         client.close().await;
         assert!(!client.is_connected());
+    }
+
+    /// F6: a socket that dies *while the reconnect task is still restoring*
+    /// must still schedule the next dial. The reconnect task holds the
+    /// `reconnect` slot until it returns; a disconnect observed meanwhile
+    /// early-returns and nobody ever dials again. Multi-threaded: the
+    /// callback parks a worker on a `Barrier`; the test drives on another.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_disconnect_during_restore_still_reconnects() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let client = WsRpcClient::connect(fake.url(), "").await.unwrap();
+
+        // Park the reconnect task mid-restore: its callback blocks on a
+        // barrier the test holds until after socket 2 is dead.
+        let gate = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let cb_gate = gate.clone();
+        client
+            .on_reconnect(move || {
+                cb_gate.wait();
+            })
+            .await;
+
+        // Socket 1 dies; a drained in-flight call is the barrier that the
+        // disconnect path ran.
+        let caller = WsRpcClient {
+            shared: client.shared.clone(),
+        };
+        let c0 = tokio::spawn(async move { caller.call_value("x.y", serde_json::json!({})).await });
+        fake.next_request().await;
+        fake.drop_connection();
+        assert!(c0.await.unwrap().is_err());
+
+        // The reconnect lands; restoration starts (the watch goes out).
+        fake.connection(2).await;
+        let w = fake.next_request().await;
+        assert_eq!(w["type"], "events.watch");
+        fake.reply(&w, Value::Bool(true)).await;
+
+        // Give the task a beat to reach the parked callback... actually the
+        // callback runs right after send_watch; c1 riding socket 2 proves
+        // the socket is installed before we drop it under the parked task.
+        let caller = WsRpcClient {
+            shared: client.shared.clone(),
+        };
+        let c1 = tokio::spawn(async move { caller.call_value("x.z", serde_json::json!({})).await });
+        fake.next_request().await;
+        fake.drop_connection();
+        // socket 2's drain fails c1 — the barrier that ITS disconnect ran.
+        assert!(c1.await.unwrap().is_err());
+
+        // Let the parked callback finish. With the guard bug the task then
+        // exits and nobody ever dials again; a supervisor notices the dead
+        // socket and dials epoch 3.
+        gate.wait();
+        fake.connection(3).await;
+
+        client.close().await;
     }
 
     #[tokio::test]
