@@ -271,6 +271,13 @@ export interface SHACLPropertyShape {
    *  (`literal:string:true`) and read back on `ShapeProperty.identity`. */
   identity?: boolean;
 
+  /** SHACL `sh:disjoint`: paths of other properties on the same class whose
+   *  values may never overlap this one's — `source` and `target` of an edge
+   *  record, which must name two different nodes. Emitted as one
+   *  `sh://disjoint` link per path. The interpreter refuses to write an
+   *  instance that would break it. */
+  disjoint?: string[];
+
   /** AD4M-specific: the name this property answers to when its class is read
    *  through an abstract class, keyed by the abstract class's name:
    *  `{ TextContent: "text" }`. Emitted as one `ad4m://alias` link
@@ -662,6 +669,14 @@ export class SHACLShape {
         });
       }
 
+      for (const other of prop.disjoint ?? []) {
+        links.push({
+          source: propShapeId,
+          predicate: "sh://disjoint",
+          target: other
+        });
+      }
+
       if (prop.in && prop.in.length > 0) {
         links.push({
           source: propShapeId,
@@ -797,6 +812,7 @@ export class SHACLShape {
       const identity = str(id, "ad4m://identity");
       const transform = str(id, "ad4m://transform");
       const alias = str(id, "ad4m://alias");
+      const disjoint = links.filter(l => l.source === id && l.predicate === "sh://disjoint").map(l => l.target);
 
       const prop: SHACLPropertyShape = {
         name,
@@ -820,6 +836,7 @@ export class SHACLShape {
         getter: str(id, "ad4m://getter"),
         conformanceConditions: json(id, "ad4m://conformanceConditions"),
         class: target(id, "sh://class"),
+        disjoint: disjoint.length ? disjoint : undefined,
         in: json(id, "sh://in"),
         relationKind: ['hasMany', 'hasOne', 'belongsToOne', 'belongsToMany'].includes(relationKind!)
           ? relationKind as SHACLPropertyShape['relationKind'] : undefined,
@@ -871,6 +888,7 @@ export class SHACLShape {
         getter: p.getter,
         conformance_conditions: p.conformanceConditions,
         class: p.class,
+        disjoint: p.disjoint?.length ? p.disjoint : undefined,
         in: p.in,
         relation_kind: p.relationKind,
         collection: p.collection ?? (isCollection(p) || undefined),
@@ -930,6 +948,7 @@ export class SHACLShape {
         getter: p.getter,
         conformanceConditions: p.conformance_conditions,
         class: p.class,
+        disjoint: p.disjoint,
         in: p.in,
         relationKind: p.relation_kind,
         collection: p.collection,
