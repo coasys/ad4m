@@ -36,7 +36,11 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "futures-channel",
  "futures-util",
+ "getrandom 0.2.17",
+ "gloo-timers",
+ "js-sys",
  "maplit",
  "rand 0.8.5",
  "regex",
@@ -47,6 +51,10 @@ dependencies = [
  "tokio-tungstenite 0.21.0",
  "unicode-width 0.1.14",
  "urlencoding",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "wasm-bindgen-test",
+ "web-sys",
 ]
 
 [[package]]

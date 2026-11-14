@@ -17,8 +17,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, Mutex};
-use tokio::task::JoinHandle;
 
+use crate::rt::{self, Task};
 use crate::ws_rpc::WsRpcClient;
 
 /// Reply to `perspective.subscribeQuery` / `perspective.modelSubscribe`: the
@@ -168,8 +168,13 @@ pub fn apply_update(result: &Value, update: &QueryUpdate) -> Result<Value> {
 
 /// What one `open` call returns. The closure mints a fresh subscription id
 /// per call, so a re-open is a brand-new subscription on the executor.
+/// Send+Sync bounds are native-only — the browser transport types are
+/// single-threaded.
+#[cfg(not(target_arch = "wasm32"))]
 pub type OpenFn =
     Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<Subscribed>> + Send>> + Send + Sync>;
+#[cfg(target_arch = "wasm32")]
+pub type OpenFn = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<Subscribed>>>>>;
 
 struct State {
     id: Option<String>,
@@ -198,10 +203,10 @@ struct Inner {
     /// before the subscribe call goes out, so the executor's event filter
     /// is in place before the subscription it feeds exists (F4).
     watch_ready: tokio::sync::OnceCell<()>,
-    listener: std::sync::Mutex<Option<JoinHandle<()>>>,
+    listener: std::sync::Mutex<Option<Task>>,
     /// The detached `on_reconnect` registration — aborted on dispose so a
     /// dispose racing it can never leave a callback behind (F5).
-    reg_task: std::sync::Mutex<Option<JoinHandle<()>>>,
+    reg_task: std::sync::Mutex<Option<Task>>,
     reconnect_cb: std::sync::Mutex<Option<u64>>,
     /// Wakes a sleeping re-open retry early: `start` notifies on every
     /// attempt so an obsolete loop re-checks the generation and dies
@@ -258,7 +263,7 @@ impl LiveQuery {
         let inner2 = inner.clone();
         let mut events = inner.ws.events();
         let mut closed = inner.ws.closed();
-        let listener = tokio::spawn(async move {
+        let listener = rt::spawn(async move {
             loop {
                 tokio::select! {
                     event = events.recv() => match event {
@@ -291,11 +296,11 @@ impl LiveQuery {
         let ws3 = inner.ws.clone();
         let inner5 = inner.clone();
         let inner6 = inner.clone();
-        let reg = tokio::spawn(async move {
+        let reg = rt::spawn(async move {
             let cb_id = ws2
                 .on_reconnect(move || {
                     let inner7 = inner6.clone();
-                    tokio::spawn(async move { inner7.reopen().await });
+                    rt::spawn(async move { inner7.reopen().await });
                 })
                 .await;
             // A dispose landing while the registration was in flight must
@@ -409,7 +414,7 @@ impl LiveQuery {
         if let Some(old) = superseded {
             let ws = self.inner.ws.clone();
             let uuid = self.inner.uuid.clone();
-            tokio::spawn(async move {
+            rt::spawn(async move {
                 let _ = dispose_query(&ws, &uuid, &old).await;
             });
         }
@@ -551,7 +556,7 @@ impl Inner {
         let generation = state.generation;
         state.buffer = Some(Vec::new());
         let this = self.clone();
-        tokio::spawn(async move { this.resync_perform(generation, id).await });
+        rt::spawn(async move { this.resync_perform(generation, id).await });
     }
 
     /// Arm a resync for a lagged event (an executor `lagged` notice, or a
@@ -644,13 +649,13 @@ impl Inner {
                     expected = Some(before + 1);
                     let retry = reopen_delay(failures);
                     drop(state);
-                    eprintln!(
+                    rt::log(&format!(
                         "[live-query] re-open failed (attempt {failures}), retrying in {retry}ms: {e}"
-                    );
+                    ));
                     // A newer start wakes the sleep early — the generation
                     // check above then ends this loop (F10).
                     tokio::select! {
-                        _ = tokio::time::sleep(Duration::from_millis(retry)) => {}
+                        _ = rt::sleep(Duration::from_millis(retry)) => {}
                         _ = self.reopen_wake.notified() => {}
                     }
                 }
@@ -668,7 +673,7 @@ async fn dispose_query(ws: &Arc<WsRpcClient>, uuid: &str, subscription_id: &str)
     .await
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use serde_json::json;

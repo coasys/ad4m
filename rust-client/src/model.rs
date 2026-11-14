@@ -711,12 +711,12 @@ impl Instance {
 impl Drop for ModelSubscription {
     /// Dropping without `dispose()` still tears the subscription down —
     /// executor-side, and this client's watch and listener (F5). Async
-    /// teardown needs a runtime; off one, only `dispose().await` cleans up.
+    /// teardown needs a runtime; off one, only `dispose().await` cleans up
+    /// (native: no runtime in `Drop` context; browser: `spawn_local` always
+    /// has the event loop, see `rt::try_spawn`).
     fn drop(&mut self) {
-        if let Ok(rt) = tokio::runtime::Handle::try_current() {
-            let live = self.live.clone();
-            rt.spawn(async move { live.dispose().await });
-        }
+        let live = self.live.clone();
+        crate::rt::try_spawn(async move { live.dispose().await });
     }
 }
 
@@ -767,7 +767,7 @@ pub(crate) fn decode_timestamps_in_instance(instance: &mut Value) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use crate::subscription::{apply_update, QueryUpdate};

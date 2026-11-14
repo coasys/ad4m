@@ -29,12 +29,19 @@ fn generated_methods(source: &str) -> BTreeSet<String> {
 
 /// The first string literal of every `call`/`call_void`/`call_value`/`send_watch`
 /// invocation in `source`: the method name it wraps. Test code is excluded —
-/// the `#[cfg(test)]` block that starts it ends the file in this crate, so
-/// scanning the prefix keeps mock `test.*` calls out of the check.
+/// the test module's `#[cfg]` attribute (plain `#[cfg(test)]` or the
+/// target-gated `#[cfg(all(test, ...))]` used since the wasm port) ends the
+/// file in this crate, so scanning the prefix keeps mock `test.*` calls out
+/// of the check.
 fn called_methods(source: &str) -> BTreeSet<String> {
     let re =
         Regex::new(r#"call(?:_void|_value|_inner)?(?:\s*::<[^>]*>)?\s*\(\s*"([^"]+)""#).unwrap();
-    let production = source.split("#[cfg(test)]").next().unwrap_or(source);
+    let cut = ["#[cfg(test)]", "#[cfg(all(test,"]
+        .iter()
+        .filter_map(|attr| source.find(attr))
+        .min()
+        .unwrap_or(source.len());
+    let production = &source[..cut];
     re.captures_iter(production)
         .map(|c| c[1].to_string())
         .collect()

@@ -1,3 +1,9 @@
+// On wasm32 the whole client runs on one thread: the browser's `Closure`/
+// web-sys types aren't `Send`, so every `Arc` shared between the tasks trips
+// `arc_with_non_send_sync`. `Rc` cannot replace it — the same code must be
+// `Send` on native — and `Arc` on a single thread is sound and costs nothing.
+#![cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
+
 use std::sync::Arc;
 
 use agent::AgentClient;
@@ -26,15 +32,17 @@ pub mod model;
 pub mod neighbourhoods;
 pub mod perspective_proxy;
 pub mod perspectives;
+mod rt;
 pub mod runtime;
 pub mod subject_proxy;
 pub mod subscription;
+mod transport;
 pub mod types;
 pub mod ws_rpc;
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod drift;
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 pub(crate) mod testkit;
 
 pub struct Ad4mClient {

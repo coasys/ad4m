@@ -283,7 +283,7 @@ pub struct OnlineAgent {
     pub status: Option<serde_json::Value>,
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
 

@@ -1,0 +1,140 @@
+//! The small runtime seam between this crate and its async executor.
+//!
+//! Native targets run on tokio (`spawn`, `sleep`, `timeout` are the real
+//! ones). `wasm32-unknown-unknown` has no tokio runtime — a `spawn` or
+//! `tokio::time` call panics there — so the browser's event loop drives
+//! tasks (`wasm_bindgen_futures::spawn_local`) and `gloo_timers` drives
+//! timers. Everything above the transport — the RPC pending map, the
+//! reconnect supervisor, live queries — is written once against these
+//! functions.
+//!
+//! `tokio::sync` primitives (broadcast/watch/oneshot/Mutex/OnceCell/Notify)
+//! and `tokio::select!` compile for wasm32 and need no runtime — they are
+//! used directly on both targets. `std::time::Instant` never appears:
+//! `Duration` is all the timers need, and `Instant` is not the browser's
+//! clock.
+
+use std::future::Future;
+use std::time::Duration;
+
+/// A spawned task the owner can stop. Its completion is never awaited —
+/// the reader/supervisor/listener tasks only need `abort`.
+pub(crate) struct Task {
+    #[cfg(not(target_arch = "wasm32"))]
+    inner: tokio::task::JoinHandle<()>,
+    #[cfg(target_arch = "wasm32")]
+    abort: futures_util::future::AbortHandle,
+}
+
+impl Task {
+    /// Stop the task at its next yield point — the same contract as
+    /// `tokio::task::JoinHandle::abort` (the task's output is dropped).
+    pub(crate) fn abort(&self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.inner.abort();
+        #[cfg(target_arch = "wasm32")]
+        self.abort.abort();
+    }
+}
+
+/// `tokio::spawn` natively; `wasm_bindgen_futures::spawn_local` in the
+/// browser (single-threaded — no `Send` needed there). The returned
+/// [`Task`] aborts the work on either target.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn spawn<F>(fut: F) -> Task
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    Task {
+        inner: tokio::spawn(fut),
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn spawn<F>(fut: F) -> Task
+where
+    F: Future<Output = ()> + 'static,
+{
+    // `spawn_local` returns no handle, so wrap the future in an `Abortable`:
+    // `Task::abort` ends it at its next poll like a tokio abort.
+    let (abort, reg) = futures_util::future::AbortHandle::new_pair();
+    wasm_bindgen_futures::spawn_local(async move {
+        let _ = futures_util::future::Abortable::new(fut, reg).await;
+    });
+    Task { abort }
+}
+
+/// Fire-and-forget spawn for contexts that may run without an executor
+/// (e.g. `Drop`). Native: skipped silently outside a tokio runtime — the
+/// caller must await teardown itself there. Browser: `spawn_local` always
+/// has the event loop.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn try_spawn<F>(fut: F)
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    if let Ok(rt) = tokio::runtime::Handle::try_current() {
+        rt.spawn(fut);
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn try_spawn<F>(fut: F)
+where
+    F: Future<Output = ()> + 'static,
+{
+    wasm_bindgen_futures::spawn_local(fut);
+}
+
+/// `tokio::time::sleep` natively; a `setTimeout` future in the browser.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) async fn sleep(d: Duration) {
+    tokio::time::sleep(d).await
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) async fn sleep(d: Duration) {
+    gloo_timers::future::sleep(d).await
+}
+
+/// The deadline elapsed — `timeout`'s error on either target.
+#[derive(Debug)]
+pub(crate) struct Elapsed;
+
+impl std::fmt::Display for Elapsed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("deadline elapsed")
+    }
+}
+
+impl std::error::Error for Elapsed {}
+
+/// `tokio::time::timeout` natively; a race against `TimeoutFuture` in the
+/// browser. The losing future is dropped, matching tokio's timeout.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) async fn timeout<F: Future>(d: Duration, fut: F) -> Result<F::Output, Elapsed> {
+    tokio::time::timeout(d, fut).await.map_err(|_| Elapsed)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) async fn timeout<F: Future>(d: Duration, fut: F) -> Result<F::Output, Elapsed> {
+    use futures_util::future::Either;
+    let millis = d.as_millis().min(u32::MAX as u128) as u32;
+    let timer = gloo_timers::future::TimeoutFuture::new(millis);
+    match futures_util::future::select(std::pin::pin!(fut), timer).await {
+        Either::Left((v, _)) => Ok(v),
+        Either::Right(((), _)) => Err(Elapsed),
+    }
+}
+
+/// One log line — `eprintln` natively, `console.warn` in the browser (wasm
+/// stderr goes nowhere; the browser console is where failures surface).
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn log(line: &str) {
+    eprintln!("{line}");
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn log(line: &str) {
+    web_sys::console::warn_1(&line.into());
+}

@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Result};
-use futures_util::{SinkExt, StreamExt};
+use futures_util::StreamExt;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -8,12 +8,10 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::net::TcpStream;
 use tokio::sync::{broadcast, oneshot, watch, Mutex};
-use tokio::task::JoinHandle;
-use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
-use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::{connect_async_with_config, MaybeTlsStream, WebSocketStream};
+
+use crate::rt::{self, Task};
+use crate::transport::{self, InFrame, SendText, Socket, WsSink, WsStream};
 
 static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -124,6 +122,9 @@ const MAX_FAILED_CONNECTS: u8 = 3;
 /// Bound on an `events.watch` reply — a socket that stays up but never
 /// answers must not hold `watch_flush` or its pending entry forever (F12).
 const WATCH_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
+/// The WS close code the executor sends when it refuses the capability
+/// token (`close_refused`; tungstenite's `CloseCode::Policy`).
+const AUTH_REFUSAL_CLOSE_CODE: u16 = 1008;
 
 /// One RPC awaiting a reply — or still waiting for a socket to send on.
 /// `sent` flips only while `pending` and `sink` are held together, in that
@@ -141,18 +142,24 @@ struct PendingCall {
 }
 
 type PendingMap = Arc<Mutex<HashMap<String, PendingCall>>>;
-type WsSink = futures_util::stream::SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>;
-type WsSource = futures_util::stream::SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>;
 
 /// One named event interest. `spec` is the `events.watch` params fragment for
 /// this watcher: `{ "<event type>": null | ["uuid", ...] }`.
 type WatchMap = BTreeMap<String, Value>;
 /// A callback fired once a fresh socket is installed (post `events.watch`).
+/// The Send+Sync bound only exists natively — the browser socket types are
+/// single-threaded (`Closure` isn't Send), and wasm callbacks never leave
+/// the event loop anyway.
+#[cfg(not(target_arch = "wasm32"))]
 type ReconnectCb = Arc<dyn Fn() + Send + Sync>;
+#[cfg(target_arch = "wasm32")]
+type ReconnectCb = Arc<dyn Fn()>;
 
 struct Shared {
     /// The WS URL (token already inside) — needed by the reconnect task.
     url: String,
+    /// `url` without the token — printed inside dial errors.
+    display_url: String,
     sink: Mutex<Option<WsSink>>,
     pending: PendingMap,
     events: broadcast::Sender<Value>,
@@ -174,12 +181,12 @@ struct Shared {
     closed_tx: watch::Sender<bool>,
     /// Auth refusal (close 1008) — do not reconnect, mirror TS.
     auth_failed: AtomicBool,
-    reader: Mutex<Option<JoinHandle<()>>>,
+    reader: Mutex<Option<Task>>,
     /// The single task that ever dials again (spawned once at `connect`,
     /// aborted by `close`). A socket dying while it restores leaves
     /// `connected` false, which is exactly what it waits on — there is no
     /// "reconnect in progress" guard a disconnect can hide behind.
-    supervisor: Mutex<Option<JoinHandle<()>>>,
+    supervisor: Mutex<Option<Task>>,
 }
 
 /// Merge every named interest into the `events.watch` params: for each event
@@ -243,18 +250,15 @@ fn to_ws_url(executor_url: &str, token: &str) -> String {
     }
 }
 
-fn ws_config() -> WebSocketConfig {
-    WebSocketConfig {
-        max_message_size: Some(256 * 1024 * 1024),
-        max_frame_size: Some(64 * 1024 * 1024),
-        ..Default::default()
-    }
-}
-
 impl WsRpcClient {
     pub async fn connect(executor_url: &str, token: &str) -> Result<Self> {
         let url = to_ws_url(executor_url, token);
-        let (write, read) = Self::open_socket(&url, executor_url).await?;
+        // The token stays out of error strings: dial failures name this one.
+        let display_url = to_ws_url(executor_url, "");
+        let Socket {
+            sink: write,
+            stream: read,
+        } = transport::connect(&url, &display_url).await?;
 
         let (events_tx, _) = broadcast::channel::<Value>(512);
         let (connected_tx, _) = watch::channel(true);
@@ -262,6 +266,7 @@ impl WsRpcClient {
 
         let shared = Arc::new(Shared {
             url: url.clone(),
+            display_url,
             sink: Mutex::new(Some(write)),
             pending: Arc::new(Mutex::new(HashMap::new())),
             events: events_tx,
@@ -284,42 +289,24 @@ impl WsRpcClient {
         Ok(Self { shared })
     }
 
-    async fn open_socket(url: &str, executor_url_for_errors: &str) -> Result<(WsSink, WsSource)> {
-        let (ws_stream, _) = connect_async_with_config(url, Some(ws_config()), false)
-            .await
-            // Named without the token: callers print this error.
-            .map_err(|e| {
-                anyhow!(
-                    "WebSocket connection to {} failed: {}",
-                    to_ws_url(executor_url_for_errors, ""),
-                    e
-                )
-            })?;
-        Ok(ws_stream.split())
-    }
-
     /// Background reader: RPC replies go to pending callers, everything else
     /// to the event broadcast. On exit it drives the disconnect path.
-    fn spawn_reader(mut read: WsSource, shared: Arc<Shared>) -> JoinHandle<()> {
+    fn spawn_reader(mut read: WsStream, shared: Arc<Shared>) -> Task {
         let shared_reader = shared.clone();
-        tokio::spawn(async move {
+        rt::spawn(async move {
             let mut auth_failed = false;
-            while let Some(msg) = read.next().await {
-                let text = match msg {
-                    Ok(Message::Text(t)) => t,
-                    Ok(Message::Close(frame)) => {
-                        auth_failed = matches!(
-                            &frame,
-                            Some(f) if f.code == tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Policy
-                        );
-                        eprintln!("[ws-rpc] connection closed by server: {:?}", frame);
+            while let Some(frame) = read.next().await {
+                let text = match frame {
+                    InFrame::Text(t) => t,
+                    InFrame::Close(code) => {
+                        auth_failed = code == Some(AUTH_REFUSAL_CLOSE_CODE);
+                        rt::log(&format!("[ws-rpc] connection closed by server: {code:?}"));
                         break;
                     }
-                    Err(e) => {
-                        eprintln!("[ws-rpc] read error: {:?}", e);
+                    InFrame::Error(e) => {
+                        rt::log(&format!("[ws-rpc] read error: {e}"));
                         break;
                     }
-                    _ => continue,
                 };
 
                 let parsed: Value = match serde_json::from_str(&text) {
@@ -405,8 +392,8 @@ impl WsRpcClient {
     /// reconnect callbacks — then waits on the flag again. A socket that
     /// dies mid-restore leaves the flag false, so the loop just dials the
     /// next one (F6): ownership of reconnecting never lapses.
-    fn spawn_supervisor(shared: Arc<Shared>) -> JoinHandle<()> {
-        tokio::spawn(async move {
+    fn spawn_supervisor(shared: Arc<Shared>) -> Task {
+        rt::spawn(async move {
             let mut conn = shared.connected.subscribe();
             let mut failures: u64 = 0;
             loop {
@@ -425,11 +412,13 @@ impl WsRpcClient {
                 failures += 1;
                 let delay =
                     backoff_delay_ms(failures, RECONNECT_BASE_DELAY_MS, RECONNECT_MAX_DELAY_MS);
-                tokio::time::sleep(Duration::from_millis(delay)).await;
+                rt::sleep(Duration::from_millis(delay)).await;
 
-                match connect_async_with_config(&shared.url, Some(ws_config()), false).await {
-                    Ok((ws_stream, _)) => {
-                        let (write, read) = ws_stream.split();
+                match transport::connect(&shared.url, &shared.display_url).await {
+                    Ok(Socket {
+                        sink: write,
+                        stream: read,
+                    }) => {
                         {
                             let mut sink = shared.sink.lock().await;
                             *sink = Some(write);
@@ -441,7 +430,7 @@ impl WsRpcClient {
                         // Re-register interest first — subscription re-opens
                         // fired below need `query-subscription-update` watched.
                         if let Err(e) = Self::send_watch(&shared).await {
-                            eprintln!("[ws-rpc] watch restore failed: {e}");
+                            rt::log(&format!("[ws-rpc] watch restore failed: {e}"));
                         }
 
                         let callbacks: Vec<ReconnectCb> = shared
@@ -461,7 +450,9 @@ impl WsRpcClient {
                         }
                     }
                     Err(e) => {
-                        eprintln!("[ws-rpc] reconnect failed (attempt {failures}): {e}");
+                        rt::log(&format!(
+                            "[ws-rpc] reconnect failed (attempt {failures}): {e}"
+                        ));
                     }
                 }
             }
@@ -501,7 +492,7 @@ impl WsRpcClient {
         let sent = {
             let mut sink = shared.sink.lock().await;
             match sink.as_mut() {
-                Some(s) => Some(s.send(Message::Text(json)).await),
+                Some(s) => Some(s.send_text(json).await),
                 None => None,
             }
         };
@@ -520,7 +511,7 @@ impl WsRpcClient {
         // caller (F9). A live socket that never answers is bounded: on
         // timeout the pending entry is removed — just dropping the receiver
         // would leave it to linger until disconnect (F12).
-        match tokio::time::timeout(WATCH_REPLY_TIMEOUT, rx).await {
+        match rt::timeout(WATCH_REPLY_TIMEOUT, rx).await {
             Ok(reply) => reply
                 .map_err(|_| anyhow!("Response channel closed"))?
                 .map(|_| ()),
@@ -557,7 +548,22 @@ impl WsRpcClient {
 
     /// `callback` runs after each successful reconnect, once the watch was
     /// re-sent. Returns an id for `remove_on_reconnect`.
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn on_reconnect(&self, callback: impl Fn() + Send + Sync + 'static) -> u64 {
+        static CB_ID: AtomicU64 = AtomicU64::new(0);
+        let id = CB_ID.fetch_add(1, Ordering::Relaxed);
+        self.shared
+            .on_reconnect
+            .lock()
+            .await
+            .push((id, Arc::new(callback)));
+        id
+    }
+
+    /// The browser signature — `Closure`-holding client state is
+    /// single-threaded, so no Send+Sync bound exists there.
+    #[cfg(target_arch = "wasm32")]
+    pub async fn on_reconnect(&self, callback: impl Fn() + 'static) -> u64 {
         static CB_ID: AtomicU64 = AtomicU64::new(0);
         let id = CB_ID.fetch_add(1, Ordering::Relaxed);
         self.shared
@@ -644,7 +650,7 @@ impl WsRpcClient {
         } else {
             DEFAULT_TIMEOUT
         };
-        match tokio::time::timeout(timeout, self.call_inner(&id, msg_type, params)).await {
+        match rt::timeout(timeout, self.call_inner(&id, msg_type, params)).await {
             Ok(r) => r,
             Err(_) => {
                 // The pending entry would sit until a reply lands (or the
@@ -705,7 +711,7 @@ impl WsRpcClient {
                     if let Some(call) = pending.get_mut(id) {
                         call.sent = true;
                     }
-                    break s.send(Message::Text(json.clone())).await;
+                    break s.send_text(json.clone()).await;
                 }
                 drop(sink);
                 drop(pending);
@@ -743,9 +749,11 @@ impl WsRpcClient {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
+    use futures_util::SinkExt;
+    use tokio_tungstenite::tungstenite::Message;
 
     #[test]
     fn to_ws_url_converts_http_to_ws() {
