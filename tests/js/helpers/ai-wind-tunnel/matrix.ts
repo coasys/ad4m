@@ -10,7 +10,7 @@ import type { CellModel, PlannedCell, ProviderId, Service } from "./types.js";
  * fails the run before anything starts.
  */
 export function resolveModel(
-  entry: { modelId?: string; remoteModel?: string; sizeBytes?: number; license?: string; params?: string; source?: string; voice?: string; context?: number },
+  entry: { modelId?: string; remoteModel?: string; sizeBytes?: number; license?: string; params?: string; source?: string; voice?: string; context?: number; serverFlags?: string[] },
   manifest: Manifest,
 ): CellModel {
   if (entry.modelId) {
@@ -29,11 +29,12 @@ export function resolveModel(
       sha256: m.sha256,
       ...(entry.voice ? { voice: entry.voice } : {}),
       ...(entry.context ? { context: entry.context } : {}),
+      ...(entry.serverFlags ? { serverFlags: entry.serverFlags } : {}),
     };
   }
   if (!entry.remoteModel) throw new Error("a matrix.json model needs a modelId or a remoteModel");
   const model: CellModel = { remoteModel: entry.remoteModel };
-  for (const k of ["sizeBytes", "license", "params", "source", "voice", "context"] as const) {
+  for (const k of ["sizeBytes", "license", "params", "source", "voice", "context", "serverFlags"] as const) {
     if (entry[k] !== undefined) (model as any)[k] = entry[k];
   }
   // Without a measured footprint, the download is the floor of what serving takes.
