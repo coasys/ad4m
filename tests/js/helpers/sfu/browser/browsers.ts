@@ -172,8 +172,27 @@ export async function deviceIdOf(user: BrowserUser): Promise<string | null> {
   return user.page.evaluate(() => localStorage.getItem("v1/ad4m-sfu-device-id"));
 }
 
+/** How long a tab may take to report before it counts as hung. A report takes milliseconds. */
+export const REPORT_TIMEOUT_MS = 30_000;
+
+/**
+ * The tab's report. A tab whose page crashed or hung fails with the user
+ * and browser it was, instead of an anonymous "Target crashed" or the
+ * test's own timeout.
+ */
 export async function report(user: BrowserUser): Promise<PageReport> {
-  return user.page.evaluate(() => (window as any).__call.report());
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const hung = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`no report within ${REPORT_TIMEOUT_MS / 1000} s: the page is hung`)), REPORT_TIMEOUT_MS);
+  });
+  try {
+    return await Promise.race([user.page.evaluate(() => (window as any).__call.report()), hung]);
+  } catch (error) {
+    throw new Error(`${user.name}'s ${user.kind} tab: ${error instanceof Error ? error.message : String(error)}` +
+      `\n  console errors: ${JSON.stringify(user.consoleErrors.slice(-10))}`);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** Thresholds for "the media is real": a fake tone is far above 0.01; a fake camera's frame far above black. */

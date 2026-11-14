@@ -263,10 +263,10 @@ describe("SFU: calls in real browsers, mixed, through the SDK", function () {
       });
 
       it("a second device of firefox's user dies mid-call: it leaves everyone's list while the first stays", async function () {
-        // Not WebKit: in a mesh call, headless WebKit's tab crashed (Playwright's `crash` event)
-        // about 50 s after the death, while it still listed the dead device and repaired its
-        // connection to it. That ends this test before it sees the presence it is about.
-        const third = "chromium-2";
+        // WebKit lists the firefox user twice here, on one tile per session (see the call
+        // harness's `render`): one tile per agent swapped two streams on one video element at
+        // every render, and headless WebKit's tab hung or crashed on that.
+        const third = browsers.get("webkit")!.browser ? "webkit" : "chromium-2";
         requireBrowsers(this, ["chromium", "firefox"]);
         this.timeout(CONNECT_TIMEOUT_MS * 3 + GHOST_GONE_MS + 60_000);
         const users = [];
@@ -283,8 +283,9 @@ describe("SFU: calls in real browsers, mixed, through the SDK", function () {
           const counted: Record<string, number> = {};
           for (const [label, tab] of tabs) {
             if (!open.includes(tab)) continue;
+            // `report` names the user and browser; the label tells the firefox user's two tabs apart.
             const r = await report(tab).catch((error) => {
-              throw new Error(`${label}'s tab: ${error instanceof Error ? error.message : error}; its events: ${JSON.stringify(tab.consoleErrors.slice(-10))}`);
+              throw new Error(`${label}: ${error instanceof Error ? error.message : error}`);
             });
             counted[label] = r.participants.filter((did) => did === firefoxDid).length;
           }

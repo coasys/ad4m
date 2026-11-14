@@ -180,6 +180,13 @@ This runs all four nightly jobs.
   canvas (not black; headless WebKit never plays a `<video>`, so not there).
   On the SFU, Chromium + Firefox also asserts the payload types differ per
   leg and each receiver gets its own numbers (#1684).
+- The page keeps one muted `<video>` per session (`participantId`), as an
+  app keeps one tile per participant, and removes it when the session
+  leaves the list. Never one per agent DID: an agent listed twice (two
+  devices, or a lost tab beside its successor) then swaps two streams on
+  one element at every render, and headless WebKit's tab hangs or crashes
+  (`Target crashed`). A tab that crashes or does not report within 30 s
+  fails with its user, browser and last console errors.
 - On a host with no audio server (CI's runner: no PulseAudio or PipeWire),
   Firefox keeps every `AudioContext` `suspended` (`currentTime` 0) and its
   analyser reads silence, though the audio arrives and decodes. No Firefox
