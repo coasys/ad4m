@@ -16,10 +16,12 @@ extern crate tokio;
 extern crate urlencoding;
 
 pub mod agent;
+pub mod batch;
 pub mod expressions;
 pub mod instances;
 pub mod languages;
 pub mod literal;
+pub mod model;
 pub mod neighbourhoods;
 pub mod perspective_proxy;
 pub mod perspectives;
@@ -63,4 +65,10 @@ impl Ad4mClient {
         self.ws.watch_events(events).await
     }
 
+    /// The shared RPC socket — `Model`, `FlowApi` and `Batch` take it, so a
+    /// caller builds one client and hands pieces of it to each:
+    /// `Model::new(client.ws(), uuid, "Recipe")`.
+    pub fn ws(&self) -> &Arc<WsRpcClient> {
+        &self.ws
+    }
 }
