@@ -81,6 +81,7 @@
 //! | [`projection`] | Computing projection aggregations (counts and filtered lists) |
 //! | [`links`] | Per-link rows on request (`links` → `__links`), including undeclared predicates |
 //! | [`query`] | Top-level orchestrator that wires the whole pipeline together |
+//! | [`index_path`] | The id phase from the scope index, for the newest (or oldest) page of a flagged class |
 //! | [`union`] | One query over several classes: per-class rows, one classification, one sort and page over the union |
 //! | [`abstract_classes`] | Abstract classes: the concrete classes one reads, and the views it reads them through |
 //! | [`builtin_classes`] | Built-in abstract classes (`ad4m://TextContent`, `ad4m://Container`), addressed by URI and never stored |
@@ -95,6 +96,9 @@ mod eval_transform;
 mod filtering;
 mod getters;
 mod hydration;
+pub(crate) mod index_path;
+#[cfg(test)]
+mod index_path_tests;
 #[cfg(test)]
 mod integration_tests;
 mod link_author;

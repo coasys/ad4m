@@ -248,7 +248,13 @@ portpicker = "0.1.1"
 # leaving the op2-generated code seeing an unimplemented trait.
 deno_error = "0.7"
 thiserror = "2.0.12"
-oxigraph = { version = "0.5.13", features = ["rocksdb", "rdf-12"] }
+# coasys/oxigraph#1 (feat/aux-kv, on v0.5.13): the auxiliary key-value space
+# that holds the scope index (`perspectives/scope_index/`). Stores opened with
+# it cannot be opened by an oxigraph without the feature.
+oxigraph = { git = "https://github.com/coasys/oxigraph.git", rev = "4ccc00df2fed7a6f5622745ba147cefe37aa0f80", features = ["rocksdb", "rdf-12", "aux-kv"] }
+# Already in the lockfile as a transitive dependency: 128-bit scope and member
+# hashes of the scope index.
+blake3 = "1.8"
 ts-rs = { version = "12.0.1", features = ["serde-compat", "no-serde-warnings", "serde-json-impl", "chrono-impl", "url-impl"] }
 tower-service = "0.3"
 

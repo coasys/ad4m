@@ -13,6 +13,7 @@ use super::getters::evaluate_getters;
 use super::hydration::{
     filter_properties, group_results_by_source, hydrate_instances, ALWAYS_KEPT,
 };
+use super::index_path;
 use super::link_author::refuse_unanswerable_link_author;
 use super::links::{attach_links, resolve_link_keys};
 use super::projection::resolve_projections;
@@ -763,6 +764,8 @@ pub(super) async fn execute_model_query_inner(
     // Captures the source IRI order returned by the phase-1 pagination subquery
     // so we can restore it after hydration (which uses BTreeMap, alphabetical order).
     let mut pagination_source_order: Option<Vec<String>> = None;
+    // The scope's size when the scope index gave the page (see `index_path`).
+    let mut index_total: Option<usize> = None;
 
     let raw_results: Vec<Value> = match query_plan {
         InstanceQueryPlan::Single(sparql) => {
@@ -795,15 +798,29 @@ pub(super) async fn execute_model_query_inner(
                     .await?
                 }
                 _ => {
-                    let page_json = store.query_async(stop, &pagination_subquery).await?;
-                    let mut page_results: Vec<Value> = serde_json::from_str(&page_json)?;
-                    if let Some(n) = anchor_limit {
-                        slice_per_anchor(&mut page_results, n);
+                    // The scope index gives the page when the store applies the
+                    // window and the query is one it answers exactly; otherwise
+                    // the SPARQL id phase does.
+                    let indexed = match &sparql_pagination {
+                        Some(pg) if window_pushed && anchor_limit.is_none() && walk.is_none() => {
+                            index_path::index_page(stop, store, shape, query_input, pg)?
+                        }
+                        _ => None,
+                    };
+                    if let Some(page) = indexed {
+                        index_total = page.total;
+                        page.ids
+                    } else {
+                        let page_json = store.query_async(stop, &pagination_subquery).await?;
+                        let mut page_results: Vec<Value> = serde_json::from_str(&page_json)?;
+                        if let Some(n) = anchor_limit {
+                            slice_per_anchor(&mut page_results, n);
+                        }
+                        page_results
+                            .iter()
+                            .filter_map(|r| r["source"].as_str().map(|s| s.to_string()))
+                            .collect()
                     }
-                    page_results
-                        .iter()
-                        .filter_map(|r| r["source"].as_str().map(|s| s.to_string()))
-                        .collect()
                 }
             };
 
@@ -941,6 +958,8 @@ pub(super) async fn execute_model_query_inner(
     let total_count = if walk.is_some() {
         instances.len()
     } else if let Some(total) = page_total {
+        total
+    } else if let Some(total) = index_total {
         total
     } else if sparql_pagination.is_some() {
         if let Some(count_sparql) = build_count_sparql(shape, query_input, Some(resolver)) {
