@@ -128,6 +128,9 @@ type WatchMap = BTreeMap<String, Value>;
 /// A callback fired once a fresh socket is installed (post `events.watch`).
 type ReconnectCb = Arc<dyn Fn() + Send + Sync>;
 
+/// A callback fired once when the executor refuses the token (close 1008).
+type AuthFailedCb = Arc<dyn Fn(&str) + Send + Sync>;
+
 struct Shared {
     /// The WS URL (token already inside) — needed by the reconnect task.
     url: String,
@@ -141,9 +144,13 @@ struct Shared {
     /// `watch_events` replaces it; live queries register their own keys.
     watches: Mutex<WatchMap>,
     on_reconnect: Mutex<Vec<(u64, ReconnectCb)>>,
+    on_auth_failed: Mutex<Vec<(u64, AuthFailedCb)>>,
     closed: AtomicBool,
     /// Auth refusal (close 1008) — do not reconnect, mirror TS.
     auth_failed: AtomicBool,
+    /// The close frame's reason ("Unauthorized access", "… expired"), for
+    /// `on_auth_failed` listeners and the `call` fast-fail message.
+    auth_reason: Mutex<Option<String>>,
     reader: Mutex<Option<JoinHandle<()>>>,
     reconnect: Mutex<Option<JoinHandle<()>>>,
 }
@@ -233,8 +240,10 @@ impl WsRpcClient {
             connected: connected_tx,
             watches: Mutex::new(WatchMap::new()),
             on_reconnect: Mutex::new(Vec::new()),
+            on_auth_failed: Mutex::new(Vec::new()),
             closed: AtomicBool::new(false),
             auth_failed: AtomicBool::new(false),
+            auth_reason: Mutex::new(None),
             reader: Mutex::new(None),
             reconnect: Mutex::new(None),
         });
@@ -264,16 +273,17 @@ impl WsRpcClient {
     fn spawn_reader(mut read: WsSource, shared: Arc<Shared>) -> JoinHandle<()> {
         let shared_reader = shared.clone();
         tokio::spawn(async move {
-            let mut auth_failed = false;
+            let mut auth_reason: Option<String> = None;
             while let Some(msg) = read.next().await {
                 let text = match msg {
                     Ok(Message::Text(t)) => t,
                     Ok(Message::Close(frame)) => {
-                        auth_failed = matches!(
-                            &frame,
-                            Some(f) if f.code == tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Policy
-                        );
                         eprintln!("[ws-rpc] connection closed by server: {:?}", frame);
+                        auth_reason = frame.and_then(|f| {
+                            (f.code
+                                == tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Policy)
+                                .then(|| f.reason.to_string())
+                        });
                         break;
                     }
                     Err(e) => {
@@ -311,8 +321,19 @@ impl WsRpcClient {
                 }
             }
 
-            if auth_failed {
+            if let Some(reason) = auth_reason {
                 shared.auth_failed.store(true, Ordering::SeqCst);
+                *shared.auth_reason.lock().await = Some(reason.clone());
+                let callbacks: Vec<AuthFailedCb> = shared
+                    .on_auth_failed
+                    .lock()
+                    .await
+                    .iter()
+                    .map(|(_, cb)| cb.clone())
+                    .collect();
+                for cb in callbacks {
+                    cb(&reason);
+                }
             }
             Self::handle_disconnect(&shared, false).await;
         })
@@ -334,7 +355,10 @@ impl WsRpcClient {
                 reader.abort();
             }
         }
-        let _ = shared.connected.send(false);
+        // `send_modify` wakes `changed()` waiters even when the value was
+        // already false — e.g. a call parked mid-disconnect must loop and see
+        // `auth_failed` rather than wait out its timeout.
+        shared.connected.send_modify(|v| *v = false);
 
         // Fail every in-flight call — the executor can't answer them now.
         let mut map = shared.pending.lock().await;
@@ -472,6 +496,52 @@ impl WsRpcClient {
             .retain(|(cb_id, _)| *cb_id != id);
     }
 
+    /// `callback(reason)` runs once if the executor closes the socket refusing
+    /// the token (close code 1008): expired, revoked, or bad signature — like
+    /// TS `ApiClient.onAuthFailed`. No reconnect follows; `reason` is the
+    /// server's close reason. If the refusal already happened, the callback
+    /// fires at once. Returns an id for `remove_on_auth_failed`.
+    pub async fn on_auth_failed(&self, callback: impl Fn(&str) + Send + Sync + 'static) -> u64 {
+        static CB_ID: AtomicU64 = AtomicU64::new(0);
+        let id = CB_ID.fetch_add(1, Ordering::Relaxed);
+        if self.shared.auth_failed.load(Ordering::SeqCst) {
+            let reason = self
+                .shared
+                .auth_reason
+                .lock()
+                .await
+                .clone()
+                .unwrap_or_default();
+            callback(&reason);
+            return id;
+        }
+        self.shared
+            .on_auth_failed
+            .lock()
+            .await
+            .push((id, Arc::new(callback)));
+        id
+    }
+
+    pub async fn remove_on_auth_failed(&self, id: u64) {
+        self.shared
+            .on_auth_failed
+            .lock()
+            .await
+            .retain(|(cb_id, _)| *cb_id != id);
+    }
+
+    /// Whether the executor closed the socket refusing the token (close code
+    /// 1008). When true, no reconnect runs and new calls fail fast.
+    pub fn auth_failed(&self) -> bool {
+        self.shared.auth_failed.load(Ordering::SeqCst)
+    }
+
+    /// The close reason the server sent with the refusal, if any.
+    pub async fn auth_failed_reason(&self) -> Option<String> {
+        self.shared.auth_reason.lock().await.clone()
+    }
+
     /// Whether a socket is currently installed.
     pub fn is_connected(&self) -> bool {
         *self.shared.connected.borrow()
@@ -493,7 +563,7 @@ impl WsRpcClient {
             h.abort();
         }
         *self.shared.sink.lock().await = None;
-        let _ = self.shared.connected.send(false);
+        self.shared.connected.send_modify(|v| *v = false);
         let mut map = self.shared.pending.lock().await;
         for (_, tx) in map.drain() {
             let _ = tx.send(Err(anyhow!("WebSocket connection closed")));
@@ -565,6 +635,19 @@ impl WsRpcClient {
                 if self.shared.closed.load(Ordering::SeqCst) {
                     self.shared.pending.lock().await.remove(id);
                     return Err(anyhow!("WebSocket client is closed"));
+                }
+                if self.shared.auth_failed.load(Ordering::SeqCst) {
+                    // The token is dead and no reconnect is coming: fail now
+                    // rather than waiting out the call's timeout.
+                    self.shared.pending.lock().await.remove(id);
+                    let reason = self
+                        .shared
+                        .auth_reason
+                        .lock()
+                        .await
+                        .clone()
+                        .unwrap_or_else(|| "token refused".to_string());
+                    return Err(anyhow!("The executor refused the token: {}", reason));
                 }
                 let mut sink = self.shared.sink.lock().await;
                 if let Some(s) = sink.as_mut() {
@@ -946,6 +1029,122 @@ mod tests {
             .unwrap();
         assert_eq!(result, Value::Bool(true));
         drop(rx);
+        client.close().await;
+    }
+
+    /// Close 1008 = the token was refused: `auth_failed`, the callback fires
+    /// with the server's reason, calls fail fast, and no reconnect is tried.
+    #[tokio::test]
+    async fn a_policy_close_marks_auth_failed_and_stops_reconnecting() {
+        use std::sync::atomic::AtomicU64;
+        use tokio::net::TcpListener;
+        use tokio_tungstenite::accept_async;
+        use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+        use tokio_tungstenite::tungstenite::protocol::frame::CloseFrame;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let conns = Arc::new(AtomicU64::new(0));
+        let conns2 = conns.clone();
+
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                conns2.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let mut ws = accept_async(stream).await.unwrap();
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    let _ = ws
+                        .send(Message::Close(Some(CloseFrame {
+                            code: CloseCode::Policy,
+                            reason: "Unauthorized access".into(),
+                        })))
+                        .await;
+                });
+            }
+        });
+
+        let url = format!("http://127.0.0.1:{}", addr.port());
+        let client = WsRpcClient::connect(&url, "some-token").await.unwrap();
+
+        let (tx, rx) = oneshot::channel::<String>();
+        let tx = std::sync::Mutex::new(Some(tx));
+        client
+            .on_auth_failed(move |reason| {
+                if let Some(tx) = tx.lock().unwrap().take() {
+                    let _ = tx.send(reason.to_string());
+                }
+            })
+            .await;
+
+        let reason = tokio::time::timeout(Duration::from_secs(5), rx)
+            .await
+            .expect("on_auth_failed never fired")
+            .unwrap();
+        assert_eq!(reason, "Unauthorized access");
+        assert!(client.auth_failed());
+        assert_eq!(
+            client.auth_failed_reason().await.as_deref(),
+            Some("Unauthorized access")
+        );
+
+        // A call fails fast — not after its 30 s budget.
+        let started = std::time::Instant::now();
+        let err = client
+            .call::<Value>("test.method", serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(err.to_string().contains("refused the token"), "{err}");
+
+        // A refused token must not dial again: the first backoff is ~1 s, so
+        // a second accept inside ~2 s would mean a reconnect was tried.
+        tokio::time::sleep(Duration::from_millis(2200)).await;
+        assert_eq!(conns.load(Ordering::SeqCst), 1);
+        client.close().await;
+    }
+
+    /// Close 1013 = the wallet is locked: a retryable state, not a dead
+    /// token — `auth_failed` stays false and the reconnect task runs.
+    #[tokio::test]
+    async fn a_locked_close_reconnects_instead_of_failing_auth() {
+        use std::sync::atomic::AtomicU64;
+        use tokio::net::TcpListener;
+        use tokio_tungstenite::accept_async;
+        use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+        use tokio_tungstenite::tungstenite::protocol::frame::CloseFrame;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (second_conn_tx, mut second_conn_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+        let conns = Arc::new(AtomicU64::new(0));
+        let conns2 = conns.clone();
+
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                if conns2.fetch_add(1, Ordering::SeqCst) == 1 {
+                    let _ = second_conn_tx.send(());
+                }
+                tokio::spawn(async move {
+                    let mut ws = accept_async(stream).await.unwrap();
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    let _ = ws
+                        .send(Message::Close(Some(CloseFrame {
+                            code: CloseCode::from(1013u16),
+                            reason: "Executor is locked".into(),
+                        })))
+                        .await;
+                });
+            }
+        });
+
+        let url = format!("http://127.0.0.1:{}", addr.port());
+        let client = WsRpcClient::connect(&url, "some-token").await.unwrap();
+
+        tokio::time::timeout(Duration::from_secs(10), second_conn_rx.recv())
+            .await
+            .expect("the executor never saw a reconnect")
+            .unwrap();
+        assert!(!client.auth_failed());
         client.close().await;
     }
 }
