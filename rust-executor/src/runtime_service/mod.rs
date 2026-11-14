@@ -32,6 +32,22 @@ pub struct BootstrapSeed {
         skip_serializing_if = "Option::is_none"
     )]
     pub identity_store: Option<IdentityStoreSeed>,
+    /// The network's link servers, last in `runtime.linkServers` (after the operator's and the
+    /// platform's). Absent: the compiled-in seed's, as for `identityStore`.
+    #[serde(
+        rename = "linkServers",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub link_servers: Option<Vec<LinkServerSeed>>,
+}
+
+/// One of a seed's `linkServers`: a link server's base URL and the name a person sees.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkServerSeed {
+    pub url: String,
+    pub name: String,
 }
 
 /// A seed's `identityStore`: the store's base URL and the keys (bare Ed25519 multikeys, `z6Mk…`)
@@ -60,6 +76,11 @@ lazy_static! {
         serde_json::from_str::<BootstrapSeed>(crate::globals::MAINNET_JSON)
             .expect("the compiled-in mainnet_seed.json parses")
             .identity_store;
+    /// The link servers of the seed compiled in, as [`EMBEDDED_IDENTITY_STORE`].
+    static ref EMBEDDED_LINK_SERVERS: Option<Vec<LinkServerSeed>> =
+        serde_json::from_str::<BootstrapSeed>(crate::globals::MAINNET_JSON)
+            .expect("the compiled-in mainnet_seed.json parses")
+            .link_servers;
 }
 
 pub struct RuntimeService {
@@ -127,6 +148,27 @@ impl RuntimeService {
             .unwrap_or_else(|e| e.into_inner())
             .as_ref()
             .and_then(|service| service.identity_store())
+    }
+
+    /// The seed's link servers. A seed without `linkServers` means the compiled-in seed's, as
+    /// for [`RuntimeService::identity_store`]. Empty when neither names any.
+    pub fn link_servers(&self) -> Vec<LinkServerSeed> {
+        self.seed
+            .link_servers
+            .clone()
+            .or_else(|| EMBEDDED_LINK_SERVERS.clone())
+            .unwrap_or_default()
+    }
+
+    /// The loaded seed's link servers ([`RuntimeService::link_servers`]); the compiled-in
+    /// seed's when no seed is loaded.
+    pub fn seed_link_servers() -> Vec<LinkServerSeed> {
+        RUNTIME_INSTANCE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|service| service.link_servers())
+            .unwrap_or_else(|| EMBEDDED_LINK_SERVERS.clone().unwrap_or_default())
     }
 
     pub fn get_language_language_bundle(&self) -> String {
@@ -380,6 +422,44 @@ mod tests {
                 url: "https://other".into(),
                 keys: vec!["z6MkO".into()],
             })
+        );
+    }
+
+    /// The compiled-in seed names the network's link server; a seed file without
+    /// `linkServers` gets those, and a seed that names its own keeps them.
+    #[test]
+    fn the_seed_names_link_servers_and_an_old_seed_gets_the_compiled_in_ones() {
+        let embedded: BootstrapSeed = serde_json::from_str(crate::globals::MAINNET_JSON).unwrap();
+        let embedded = embedded
+            .link_servers
+            .expect("the compiled-in seed names link servers");
+        assert_eq!(
+            embedded,
+            vec![LinkServerSeed {
+                url: "https://link-staging.coasys.org".into(),
+                name: "Coasys staging".into(),
+            }]
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let load = |name: &str, seed: serde_json::Value| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, seed.to_string()).unwrap();
+            RuntimeService::new(path.to_str().unwrap()).unwrap()
+        };
+        let mut seed = serde_json::json!({
+            "trustedAgents": [], "knownLinkLanguages": [], "directMessageLanguage": "",
+            "agentLanguage": "", "perspectiveLanguage": "", "neighbourhoodLanguage": "",
+            "languageLanguageBundle": "",
+        });
+        assert_eq!(load("old.seed", seed.clone()).link_servers(), embedded);
+
+        seed["linkServers"] = serde_json::json!([{ "url": "https://link.other", "name": "Other" }]);
+        assert_eq!(
+            load("other.seed", seed).link_servers(),
+            vec![LinkServerSeed {
+                url: "https://link.other".into(),
+                name: "Other".into(),
+            }]
         );
     }
 }

@@ -1,0 +1,50 @@
+{
+  "description": "Room keys sealed with the room-key seal v2 (bound to the context coasys:room-key:<roomId>:<version>) by the noble reference in bootstrap-languages/server-link-language/tests/room-key-seal-reference.ts, with the ephemeral secret and nonce passed in. ad4m-keyring's seal_room_key must give the same envelope from the same inputs, and open it under the same context only. The keys, room keys, ephemeral secrets and nonces are those of room-key-seal.json.",
+  "vectors": [
+    {
+      "x25519Public": "1b1b58dd50ea14b60da17b790cd02754d970c9bab864ebb3c0f3016fe51d3f57",
+      "x25519Secret": "58e86efb75fa4e2c410f46e16de9f6acae1a1703528651b69bc176c088bef36e",
+      "roomKey": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "roomId": "8qTEjucJXFhuVFMAZR2FvNAW9JT4vFLcpvbcyk1CG5sR",
+      "version": 1,
+      "context": "coasys:room-key:8qTEjucJXFhuVFMAZR2FvNAW9JT4vFLcpvbcyk1CG5sR:1",
+      "ephemeralSecret": "0202020202020202020202020202020202020202020202020202020202020202",
+      "nonce": "030303030303030303030303",
+      "sealed": {
+        "ephemeralPublicKey": "ce8d3ad1ccb633ec7b70c17814a5c76ecd029685050d344745ba05870e587d59",
+        "nonce": "030303030303030303030303",
+        "ciphertext": "d68e1c528eb479e724bc1bd05bfcc938650216097e4939c2d69bce6f6e6614dd39745c3edbdd07b1559f6ab5fd286dd1"
+      }
+    },
+    {
+      "x25519Public": "55c0506c70233f01c32633ba683b9099c4d4adb209a046c3470b78788ec3c13f",
+      "x25519Secret": "f00a2613bdbcce990d0a124d6fc4bf97319d0cccf3f67a2c3fe575b5b9986452",
+      "roomKey": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "roomId": "8qTEjucJXFhuVFMAZR2FvNAW9JT4vFLcpvbcyk1CG5sR",
+      "version": 2,
+      "context": "coasys:room-key:8qTEjucJXFhuVFMAZR2FvNAW9JT4vFLcpvbcyk1CG5sR:2",
+      "ephemeralSecret": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "nonce": "000102030405060708090a0b",
+      "sealed": {
+        "ephemeralPublicKey": "8f40c5adb68f25624ae5b214ea767a6ec94d829d3d7b5e1ad1ba6f3e2138285f",
+        "nonce": "000102030405060708090a0b",
+        "ciphertext": "494286da1eac727b55f530243a15eb966ed47c7f232726fb69e4063d8cc4527e9c27b8f0f663ae66c565ddb65be62061"
+      }
+    },
+    {
+      "x25519Public": "f14b5173130a1b80687f273d49e8f4740a793a949b83b105837f2a61e8fee14f",
+      "x25519Secret": "6028d4276d036d787ba4df5803e7d15ae9165e486417ad3ae5e48b49290cd656",
+      "roomKey": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
+      "roomId": "GpcTD7Df4rqZRiDqX6TVQAhAL2W9BACfkQJMUgCvCvqE",
+      "version": 17,
+      "context": "coasys:room-key:GpcTD7Df4rqZRiDqX6TVQAhAL2W9BACfkQJMUgCvCvqE:17",
+      "ephemeralSecret": "fefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefe",
+      "nonce": "ffffffffffffffffffffffff",
+      "sealed": {
+        "ephemeralPublicKey": "823ffa5082d8cd43eff42af39423dd18fa9245c711e9ec38b863801490447a06",
+        "nonce": "ffffffffffffffffffffffff",
+        "ciphertext": "5b6767ade5884b04a7a6dda4dbaa54c2fa8511563aa9dc03a2e98e2073f845436f42b9e47e64feaf66c394cbf1f97d98"
+      }
+    }
+  ]
+}

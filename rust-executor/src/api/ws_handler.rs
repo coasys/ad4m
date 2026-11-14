@@ -675,6 +675,7 @@ pub fn build_handler_map() -> HandlerMap {
     super::expressions_ws::register_ws_handlers(&mut map);
     super::ai_ws::register_ws_handlers(&mut map);
     super::neighbourhoods_ws::register_ws_handlers(&mut map);
+    super::spaces_ws::register_ws_handlers(&mut map);
     super::users_ws::register_ws_handlers(&mut map);
     super::hosting_ws::register_ws_handlers(&mut map);
     super::sfu_ws::register_ws_handlers(&mut map);

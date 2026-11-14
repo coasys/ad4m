@@ -6,7 +6,7 @@ import type { LinkServerDB } from "./db.js";
 
 
 /**
- * DID key handling, ed25519 sign/verify, challenge-response and JWT session
+ * DID key handling, ed25519 sign/verify, the protocol 2 auth message and JWT session
  * issuance/verification.
  *
  * AD4M identities are `did:key:z...` strings. The multibase 'z' prefix means
@@ -93,59 +93,70 @@ export async function verifyHex(
   }
 }
 
-/** Random hex nonce used as a challenge in DID challenge-response auth. */
-export function generateChallenge(): string {
-  return nodeRandomBytes(32).toString("hex");
-}
+/** The tolerance of a protocol 2 auth timestamp against the server's clock (ms). */
+export const AUTH_SKEW_MS = 5 * 60_000;
 
-interface PendingChallenge {
-  challenge: string;
-  expiresAt: number;
+/** How long a used auth signature is remembered (ms): past the skew on both sides. */
+const AUTH_REPLAY_MS = 2 * AUTH_SKEW_MS;
+
+/**
+ * What a key signs to authenticate to a room of the server at `origin` (protocol 2). Like every
+ * executor signature, the signature is over SHA-256 of these bytes (`agentSignStringHex`). The
+ * origin (`publicOrigin`) binds the signature to this server: one made for another server, that
+ * a server could relay here within the clock window, names another origin and is refused.
+ */
+export function authMessage(origin: string, roomId: string, timestamp: number): string {
+  return `coasys-link-server:auth:2:${origin}:${roomId}:${timestamp}`;
 }
 
 /**
- * In-memory, single-use challenge store keyed by (roomId, did). Challenges
- * expire after `ttlMs` and are consumed (deleted) on first use whether
- * verification succeeds or fails, preventing replay.
+ * The origin of a server URL as the auth message names it: scheme, host and port, lower case,
+ * no trailing slash, the scheme's default port dropped (`https://links.example.org`,
+ * `http://127.0.0.1:3456`). Throws for anything but an http(s) origin: a path, query, fragment
+ * or user part is refused rather than dropped, so a configured value means what it says.
  */
-export class ChallengeStore {
-  private pending = new Map<string, PendingChallenge>();
-  private ttlMs: number;
+export function publicOrigin(value: string): string {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error(`not an origin: "${value}" (expected scheme://host[:port], e.g. https://links.example.org)`);
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") {
+    throw new Error(`not an http(s) origin: "${value}"`);
+  }
+  if (url.pathname !== "/" || url.search !== "" || url.hash !== "" || url.username !== "" || url.password !== "") {
+    throw new Error(`an origin has no path, query, fragment or user: "${value}"`);
+  }
+  // Lower-cases the scheme and host and drops the default port and the trailing slash.
+  return url.origin;
+}
+
+/**
+ * Remembers each (did, room, timestamp) an auth signature was accepted for, so a captured auth
+ * body cannot be sent again within the time it would still pass the clock check.
+ */
+export class AuthReplayGuard {
+  private seen = new Map<string, number>();
   private sweepTimer: NodeJS.Timeout;
 
-  constructor(ttlMs = 5 * 60_000) {
-    this.ttlMs = ttlMs;
-    this.sweepTimer = setInterval(() => this.sweep(), Math.min(ttlMs, 60_000));
+  constructor() {
+    this.sweepTimer = setInterval(() => this.sweep(), 60_000);
     this.sweepTimer.unref();
   }
 
-  private key(roomId: string, did: string): string {
-    return `${roomId}:${did}`;
-  }
-
-  create(roomId: string, did: string): string {
-    const challenge = generateChallenge();
-    this.pending.set(this.key(roomId, did), {
-      challenge,
-      expiresAt: Date.now() + this.ttlMs,
-    });
-    return challenge;
-  }
-
-  /** Consumes (removes) the pending challenge, returning whether it matched and was unexpired. */
-  consume(roomId: string, did: string, providedChallenge: string): boolean {
-    const k = this.key(roomId, did);
-    const entry = this.pending.get(k);
-    this.pending.delete(k);
-    if (!entry) return false;
-    if (Date.now() > entry.expiresAt) return false;
-    return entry.challenge === providedChallenge;
+  /** True the first time; false for a body already used. */
+  use(did: string, roomId: string, timestamp: number): boolean {
+    const key = `${did}\u0000${roomId}\u0000${timestamp}`;
+    if (this.seen.has(key)) return false;
+    this.seen.set(key, Date.now() + AUTH_REPLAY_MS);
+    return true;
   }
 
   private sweep(): void {
     const now = Date.now();
-    for (const [k, v] of this.pending) {
-      if (now > v.expiresAt) this.pending.delete(k);
+    for (const [k, until] of this.seen) {
+      if (now > until) this.seen.delete(k);
     }
   }
 
@@ -163,36 +174,75 @@ function ensureJwtSecret(db: LinkServerDB): Uint8Array {
   return new Uint8Array(secret);
 }
 
+/** A session: the key, whom it speaks for, and whether that admits it to the room now. */
+export interface Session {
+  did: string;
+  roomId: string;
+  token: string;
+  /** The person the key spoke for at auth; undefined for a device-only key. */
+  person?: string;
+  byBot: boolean;
+  admitted: boolean;
+}
+
 export type AuthResult =
-  | { ok: true; did: string; roomId: string; token: string }
-  | { ok: false; status: 401 | 403; error: string };
+  | ({ ok: true } & Session)
+  | { ok: false; status: 401 | 403 | 404 | 410 | 423; error: string };
+
+/**
+ * Whether a key is admitted to a room now: every key on an auto-admit server; otherwise a
+ * person's own key while the person is a current member, a bot key while the bot is one.
+ * Admission follows the membership: a session made before a join is admitted after it.
+ */
+export type Admission = (roomId: string, key: { did: string; person?: string; byBot: boolean }) => boolean;
 
 const DEFAULT_JWT_EXPIRY_SECONDS = 24 * 60 * 60;
 
-/** Issues and verifies JWT-backed room sessions, and enforces live ACL membership. */
+/** Issues and verifies JWT-backed room sessions; admission is read live from the membership. */
 export class AuthManager {
   private db: LinkServerDB;
   private secret: Uint8Array;
   private expirySeconds: number;
+  private admits: Admission;
 
-  constructor(db: LinkServerDB, opts: { jwtExpirySeconds?: number } = {}) {
+  constructor(db: LinkServerDB, admits: Admission, opts: { jwtExpirySeconds?: number } = {}) {
     this.db = db;
+    this.admits = admits;
     this.secret = ensureJwtSecret(db);
     this.expirySeconds = opts.jwtExpirySeconds ?? DEFAULT_JWT_EXPIRY_SECONDS;
   }
 
-  async issueSession(did: string, roomId: string): Promise<{ token: string; expiresAt: string }> {
+  async issueSession(
+    did: string,
+    roomId: string,
+    person?: string,
+    byBot = false
+  ): Promise<{ token: string; expiresAt: string }> {
     const expiresAt = new Date(Date.now() + this.expirySeconds * 1000).toISOString();
     const token = await new SignJWT({ did, roomId })
       .setProtectedHeader({ alg: "HS256" })
       .setIssuedAt()
+      .setJti(nodeRandomBytes(16).toString("hex"))
       .setExpirationTime(Math.floor(Date.now() / 1000) + this.expirySeconds)
       .sign(this.secret);
-    this.db.createSession(token, roomId, did, expiresAt);
+    this.db.createSession(token, roomId, did, expiresAt, person ?? null, byBot);
     return { token, expiresAt };
   }
 
-  async authenticate(token: string | undefined, roomId: string): Promise<AuthResult> {
+  /** Whether `key` is admitted to `roomId` now. */
+  admitted(roomId: string, key: { did: string; person?: string; byBot: boolean }): boolean {
+    return this.admits(roomId, key);
+  }
+
+  /**
+   * Checks a bearer token for a room: a valid JWT for it, a live session, a room that is not
+   * suspended and, unless `requireAdmitted` is false, a key admitted now.
+   */
+  async authenticate(
+    token: string | undefined,
+    roomId: string,
+    opts: { requireAdmitted?: boolean } = {}
+  ): Promise<AuthResult> {
     if (!token) {
       return { ok: false, status: 401, error: "missing bearer token" };
     }
@@ -217,12 +267,22 @@ export class AuthManager {
     if (!session || new Date(session.expires_at).getTime() < Date.now()) {
       return { ok: false, status: 401, error: "session expired or revoked" };
     }
-
-    if (!this.db.isMember(roomId, did)) {
-      return { ok: false, status: 403, error: "not authorized for this room" };
+    // A key revoked here (by the key refresh, or in this room) has no session left, whatever
+    // the session table says.
+    if (this.db.getMemberKey(roomId, did)?.revoked === 1) {
+      return { ok: false, status: 401, error: "this key is revoked" };
     }
+    const room = this.db.getRoom(roomId);
+    if (!room) return { ok: false, status: 404, error: "no such room" };
+    if (room.legacy) return { ok: false, status: 410, error: "this room predates protocol 2 and is closed" };
+    if (room.suspended) return { ok: false, status: 423, error: "this room is suspended" };
 
-    return { ok: true, did, roomId, token };
+    const key = { did, person: session.person ?? undefined, byBot: session.by_bot === 1 };
+    const admitted = this.admits(roomId, key);
+    if (opts.requireAdmitted !== false && !admitted) {
+      return { ok: false, status: 403, error: "not admitted to this room" };
+    }
+    return { ok: true, did, roomId, token, person: key.person, byBot: key.byBot, admitted };
   }
 
   revokeSessionsForDid(roomId: string, did: string): void {

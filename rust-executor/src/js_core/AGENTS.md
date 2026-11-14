@@ -41,6 +41,16 @@ as well. Split plan: spec item 9 (languages), item 1 (delete dead `main.js`).
   sealed to the runtime's agent context (`agent::sealed_box`) with the agent's secret
   inside the executor; no op hands a secret key to a language. Sealing needs only the
   recipient's DID, so languages seal themselves.
+- `agent_room_key_seed` (`agentRoomKeySeed`, `AGENT.roomKeySeed`) is the one secret a
+  language gets: the seed of the agent's room key X25519 key, HKDF of the signing seed
+  under `adam-server-link-language:x25519-seed:v1` (`agent::room_key_seed`). Every signing
+  path refuses a message equal to or starting with that domain (K8), so the seed signs
+  nothing.
+- `membership_extension.rs` (`globalThis.MEMBERSHIP`; `membershipLinks`,
+  `membershipAdmits`, `roomKeyEvent` in `host.js`) acts only on the perspective of the
+  isolate's own link language (`language_address`). Membership links go through the
+  space's owner gate one at a time, as a peer's; `roomKeyEvent` publishes
+  `neighbourhood-room-key-changed` to the owners.
 - Language code publishes no executor event directly (#1371): `PUBSUB.publish` always
   fails (`pubsub_extension.rs`). The events a language raises go through the dedicated ops
   in `languages_extension.rs` (perspective diff, sync state, telepresence signal), and the

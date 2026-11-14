@@ -2,13 +2,12 @@
  * Every room is end-to-end encrypted from creation.
  *
  * The commit route refuses plaintext links in every room, before any key
- * exists: no member can commit a plaintext link while the admin has not
+ * exists: no member can commit a plaintext link while no member has
  * rotated in the first key yet. `GET /keys` answers a member without a key
  * with an empty list, never a "no E2E" 404.
  */
 
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -18,6 +17,7 @@ import { LinkServerDB } from "../src/db.js";
 import {
   authenticateAgent,
   clientSideRotate,
+  createRoom,
   createSignedLink,
   createTestAgent,
   getJson,
@@ -55,14 +55,12 @@ async function plaintextCommit(server: TestServerHandle, roomId: string, agent: 
   );
 }
 
-/** Admin creates the room, admits `member`, and both sign in. */
+/** A room with two admitted keys (auto-admit), both signed in. */
 async function roomWithMember(server: TestServerHandle) {
-  const roomId = randomUUID();
+  const roomId = await createRoom(server.url);
   const admin = await createTestAgent();
   const member = await createTestAgent();
   const adminToken = await authenticateAgent(server.url, roomId, admin);
-  const acl = await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: member.did }, adminToken);
-  assert.equal(acl.status, 200);
   const memberToken = await authenticateAgent(server.url, roomId, member);
   return { roomId, admin, member, adminToken, memberToken };
 }
@@ -159,7 +157,7 @@ test("after the admin's first rotation the room accepts an encrypted commit", as
   });
 });
 
-test("a database file whose rooms table still has the e2e_enabled column opens and creates rooms", () => {
+test("a database file whose rooms table still has the e2e_enabled column opens, keeps its rooms as legacy, and creates rooms", () => {
   // SCHEMA is CREATE TABLE IF NOT EXISTS: a file from the earlier schema keeps the column the INSERT no longer names.
   const dir = mkdtempSync(path.join(tmpdir(), "link-server-schema-"));
   try {
@@ -172,15 +170,22 @@ test("a database file whose rooms table still has the e2e_enabled column opens a
       e2e_enabled INTEGER DEFAULT 0,
       revision TEXT
     )`);
+    earlier.prepare("INSERT INTO rooms (id, admin_did, created_at, revision) VALUES (?, ?, ?, ?)").run(
+      "old-room",
+      "did:key:z6MkOldAdmin",
+      new Date().toISOString(),
+      ""
+    );
     earlier.close();
 
     const db = new LinkServerDB(file);
     try {
-      const roomId = randomUUID();
-      db.createRoom(roomId, "did:key:z6MkAdmin");
-      const room = db.getRoom(roomId);
-      assert.equal(room?.admin_did, "did:key:z6MkAdmin");
-      assert.equal(db.listRooms().length, 1);
+      assert.equal(db.getRoom("old-room")?.legacy, 1, "a room from before protocol 2 is legacy");
+      assert.equal(db.createRoomWithMembership("new-room", "did:scid:coasys:1:zCreator", []), true);
+      const room = db.getRoom("new-room");
+      assert.equal(room?.admin_did, "did:scid:coasys:1:zCreator");
+      assert.equal(room?.legacy, 0);
+      assert.equal(db.listRooms().length, 2);
     } finally {
       db.close();
     }

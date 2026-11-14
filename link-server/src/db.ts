@@ -15,6 +15,8 @@ CREATE TABLE IF NOT EXISTS rooms (
   created_at TEXT NOT NULL,
   revision TEXT
 );
+-- Protocol 1's ACL (acl, acl_changes): no longer read or written. Kept so a database from
+-- before protocol 2 opens unchanged; its rooms are legacy and answer 410.
 CREATE TABLE IF NOT EXISTS acl (
   room_id TEXT,
   did TEXT,
@@ -67,7 +69,6 @@ CREATE INDEX IF NOT EXISTS idx_links_room_seq_hash ON links(room_id, sequence, l
 CREATE INDEX IF NOT EXISTS idx_diffs_room_seq ON diffs(room_id, sequence);
 CREATE INDEX IF NOT EXISTS idx_acl_room ON acl(room_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_room_did ON sessions(room_id, did);
--- Append-only record of ACL changes: who admitted or removed whom, and through which path.
 CREATE TABLE IF NOT EXISTS acl_changes (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   room_id TEXT NOT NULL,
@@ -78,30 +79,56 @@ CREATE TABLE IF NOT EXISTS acl_changes (
   at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_acl_changes_room ON acl_changes(room_id, id);
+-- Protocol 2: the counted membership links of a room, in the order they counted. judged is the
+-- identity core's JudgedLink JSON the replay takes; link the signed link as it arrived.
+CREATE TABLE IF NOT EXISTS membership_links (
+  room_id TEXT NOT NULL,
+  seq INTEGER NOT NULL,
+  hash TEXT NOT NULL,
+  link TEXT NOT NULL,
+  judged TEXT NOT NULL,
+  PRIMARY KEY (room_id, seq),
+  UNIQUE (room_id, hash)
+);
+-- Protocol 2: every key that authenticated to a room, whom it speaks for (from the identity
+-- store, at its last auth or refresh) and its signed X25519 key for room keys.
+CREATE TABLE IF NOT EXISTS room_member_keys (
+  room_id TEXT NOT NULL,
+  did TEXT NOT NULL,
+  person TEXT,
+  by_bot INTEGER NOT NULL DEFAULT 0,
+  x25519 TEXT NOT NULL,
+  x25519_sig TEXT NOT NULL,
+  revoked INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (room_id, did)
+);
+CREATE INDEX IF NOT EXISTS idx_room_member_keys_did ON room_member_keys(did);
 `;
 
 export interface RoomRow {
   id: string;
+  /** Protocol 2: the creator's person DID (the first admin). Protocol 1: the admin's did:key. */
   admin_did: string;
   created_at: string;
   revision: string | null;
+  /** 1 for a room made under protocol 1 (an ACL room): refused with 410. */
+  legacy: number;
+  /** 1 while the operator has suspended the room. */
+  suspended: number;
 }
 
-export interface AclRow {
+/** A key that authenticated to a room (protocol 2). */
+export interface MemberKeyRow {
   room_id: string;
   did: string;
-  added_at: string;
-}
-
-/** One row of the ACL audit trail. `source` is "operator" (actor = signed-in login) or "room-admin" (actor = admin DID). */
-export interface AclChangeRow {
-  id: number;
-  room_id: string;
-  did: string;
-  action: "add" | "remove";
-  actor: string;
-  source: "operator" | "room-admin";
-  at: string;
+  /** The person the key speaks for; null for a device-only key. */
+  person: string | null;
+  by_bot: number;
+  x25519: string;
+  x25519_sig: string;
+  revoked: number;
+  updated_at: string;
 }
 
 export interface LinkRow {
@@ -124,6 +151,9 @@ export interface SessionRow {
   room_id: string;
   did: string;
   expires_at: string;
+  /** The person the key spoke for at auth; null for a device-only key. */
+  person: string | null;
+  by_bot: number;
 }
 
 export interface RoomKeyRow {
@@ -163,35 +193,77 @@ export class LinkServerDB {
     this.raw.pragma("journal_mode = WAL");
     this.raw.pragma("foreign_keys = ON");
     this.raw.exec(SCHEMA);
+    this.migrate();
     this.stmts = this.prepareStatements();
+  }
+
+  /**
+   * Brings a database from before protocol 2 up to date. Every room it already holds was made
+   * under protocol 1 (an ACL room): it is marked legacy and answers 410 from now on.
+   */
+  private migrate(): void {
+    const columns = (table: string) =>
+      new Set((this.raw.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((c) => c.name));
+    const rooms = columns("rooms");
+    const run = this.raw.transaction(() => {
+      if (!rooms.has("legacy")) {
+        this.raw.exec("ALTER TABLE rooms ADD COLUMN legacy INTEGER NOT NULL DEFAULT 0");
+        this.raw.exec("UPDATE rooms SET legacy = 1");
+      }
+      if (!rooms.has("suspended")) {
+        this.raw.exec("ALTER TABLE rooms ADD COLUMN suspended INTEGER NOT NULL DEFAULT 0");
+      }
+      const sessions = columns("sessions");
+      if (!sessions.has("person")) this.raw.exec("ALTER TABLE sessions ADD COLUMN person TEXT");
+      if (!sessions.has("by_bot")) {
+        this.raw.exec("ALTER TABLE sessions ADD COLUMN by_bot INTEGER NOT NULL DEFAULT 0");
+      }
+    });
+    run();
   }
 
   private prepareStatements() {
     return {
       getRoom: this.raw.prepare("SELECT * FROM rooms WHERE id = ?"),
-      listRooms: this.raw.prepare(
-        `SELECT r.*, (SELECT COUNT(*) FROM acl a WHERE a.room_id = r.id) AS member_count
-         FROM rooms r ORDER BY r.created_at DESC`
-      ),
+      listRooms: this.raw.prepare("SELECT * FROM rooms ORDER BY created_at DESC"),
       createRoom: this.raw.prepare(
-        "INSERT INTO rooms (id, admin_did, created_at, revision) VALUES (?, ?, ?, ?)"
+        "INSERT OR IGNORE INTO rooms (id, admin_did, created_at, revision, legacy, suspended) VALUES (?, ?, ?, ?, 0, 0)"
       ),
       updateRevision: this.raw.prepare("UPDATE rooms SET revision = ? WHERE id = ?"),
+      setSuspended: this.raw.prepare("UPDATE rooms SET suspended = ? WHERE id = ?"),
 
-      getAcl: this.raw.prepare("SELECT * FROM acl WHERE room_id = ? ORDER BY added_at ASC"),
-      isMember: this.raw.prepare("SELECT 1 FROM acl WHERE room_id = ? AND did = ?"),
-      addAcl: this.raw.prepare("INSERT OR IGNORE INTO acl (room_id, did, added_at) VALUES (?, ?, ?)"),
-      removeAcl: this.raw.prepare("DELETE FROM acl WHERE room_id = ? AND did = ?"),
-      transferAdmin: this.raw.prepare("UPDATE rooms SET admin_did = ? WHERE id = ?"),
-      recordAclChange: this.raw.prepare(
-        "INSERT INTO acl_changes (room_id, did, action, actor, source, at) VALUES (?, ?, ?, ?, ?, ?)"
+      insertMembershipLink: this.raw.prepare(
+        "INSERT INTO membership_links (room_id, seq, hash, link, judged) VALUES (?, ?, ?, ?, ?)"
       ),
-      getAclChanges: this.raw.prepare(
-        "SELECT * FROM acl_changes WHERE room_id = ? ORDER BY id DESC LIMIT ?"
+      getMembershipSeq: this.raw.prepare(
+        "SELECT COALESCE(MAX(seq), 0) AS max FROM membership_links WHERE room_id = ?"
       ),
-      getLatestAdds: this.raw.prepare(
-        `SELECT * FROM acl_changes WHERE id IN
-           (SELECT MAX(id) FROM acl_changes WHERE room_id = ? AND action = 'add' GROUP BY did)`
+      hasMembershipLink: this.raw.prepare("SELECT 1 FROM membership_links WHERE room_id = ? AND hash = ?"),
+      getMembershipJudged: this.raw.prepare(
+        "SELECT judged FROM membership_links WHERE room_id = ? ORDER BY seq ASC"
+      ),
+      getMembershipSince: this.raw.prepare(
+        "SELECT seq, link FROM membership_links WHERE room_id = ? AND seq > ? ORDER BY seq ASC LIMIT ?"
+      ),
+
+      upsertMemberKey: this.raw.prepare(
+        `INSERT INTO room_member_keys (room_id, did, person, by_bot, x25519, x25519_sig, revoked, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, 0, ?)
+         ON CONFLICT (room_id, did) DO UPDATE SET person = excluded.person, by_bot = excluded.by_bot,
+           x25519 = excluded.x25519, x25519_sig = excluded.x25519_sig, revoked = 0, updated_at = excluded.updated_at`
+      ),
+      getMemberKeys: this.raw.prepare("SELECT * FROM room_member_keys WHERE room_id = ? ORDER BY did"),
+      getMemberKey: this.raw.prepare("SELECT * FROM room_member_keys WHERE room_id = ? AND did = ?"),
+      getKeysOfPerson: this.raw.prepare(
+        "SELECT * FROM room_member_keys WHERE room_id = ? AND ((person = ? AND by_bot = 0) OR did = ?)"
+      ),
+      getRoomsOfKey: this.raw.prepare("SELECT room_id FROM room_member_keys WHERE did = ? AND revoked = 0"),
+      getUnrevokedKeys: this.raw.prepare("SELECT DISTINCT did FROM room_member_keys WHERE revoked = 0 ORDER BY did"),
+      markKeyRevoked: this.raw.prepare(
+        "UPDATE room_member_keys SET revoked = 1, updated_at = ? WHERE did = ? AND revoked = 0"
+      ),
+      markKeyRevokedInRoom: this.raw.prepare(
+        "UPDATE room_member_keys SET revoked = 1, updated_at = ? WHERE room_id = ? AND did = ?"
       ),
 
       insertLink: this.raw.prepare(
@@ -220,10 +292,13 @@ export class LinkServerDB {
       ),
 
       createSession: this.raw.prepare(
-        "INSERT OR REPLACE INTO sessions (token, room_id, did, expires_at) VALUES (?, ?, ?, ?)"
+        `INSERT OR REPLACE INTO sessions (token, room_id, did, expires_at, person, by_bot)
+         VALUES (?, ?, ?, ?, ?, ?)`
       ),
       getSession: this.raw.prepare("SELECT * FROM sessions WHERE token = ?"),
       deleteSessionsForDid: this.raw.prepare("DELETE FROM sessions WHERE room_id = ? AND did = ?"),
+      deleteSessionsForKey: this.raw.prepare("DELETE FROM sessions WHERE did = ?"),
+      deleteSessionsForRoom: this.raw.prepare("DELETE FROM sessions WHERE room_id = ?"),
 
       addRoomKey: this.raw.prepare(
         `INSERT OR REPLACE INTO room_keys (room_id, did, encrypted_key, version)
@@ -277,16 +352,27 @@ export class LinkServerDB {
     return this.stmts.getRoom.get(roomId) as RoomRow | undefined;
   }
 
-  /** Every room with its ACL size, newest first. Operator listing only. */
-  listRooms(): Array<RoomRow & { member_count: number }> {
-    return this.stmts.listRooms.all() as Array<RoomRow & { member_count: number }>;
+  /** Every room, newest first. Operator listing only. */
+  listRooms(): RoomRow[] {
+    return this.stmts.listRooms.all() as RoomRow[];
   }
 
-  /** Every room is end-to-end encrypted: the commit route refuses plaintext links from creation. */
-  createRoom(roomId: string, adminDid: string): RoomRow {
-    const createdAt = new Date().toISOString();
-    this.stmts.createRoom.run(roomId, adminDid, createdAt, EMPTY_REVISION);
-    return { id: roomId, admin_did: adminDid, created_at: createdAt, revision: EMPTY_REVISION };
+  /**
+   * Creates a protocol 2 room with its first counted membership links, in one transaction.
+   * `creator` is the creator's person DID. False when the room already exists (nothing
+   * changes). Every room is end-to-end encrypted: the commit route refuses plaintext links.
+   */
+  createRoomWithMembership(
+    roomId: string,
+    creator: string,
+    links: Array<{ hash: string; link: string; judged: string }>
+  ): boolean {
+    const run = this.raw.transaction(() => {
+      const created = this.stmts.createRoom.run(roomId, creator, new Date().toISOString(), EMPTY_REVISION).changes > 0;
+      if (created) this.insertMembershipLinks(roomId, links);
+      return created;
+    });
+    return run();
   }
 
   /** Returns the revision for a room. Always present — set at creation and updated on every commit. */
@@ -295,44 +381,87 @@ export class LinkServerDB {
     return room?.revision ?? EMPTY_REVISION;
   }
 
-  // ---- acl ----
-
-  getAcl(roomId: string): AclRow[] {
-    return this.stmts.getAcl.all(roomId) as AclRow[];
+  /** Suspends or resumes a room; false when there is no such room. */
+  setSuspended(roomId: string, suspended: boolean): boolean {
+    return this.stmts.setSuspended.run(suspended ? 1 : 0, roomId).changes > 0;
   }
 
-  isMember(roomId: string, did: string): boolean {
-    return this.stmts.isMember.get(roomId, did) !== undefined;
+  // ---- membership links (protocol 2) ----
+
+  /** Appends counted links after the room's last seq, in one transaction: their seqs. */
+  insertMembershipLinks(roomId: string, links: Array<{ hash: string; link: string; judged: string }>): number[] {
+    const run = this.raw.transaction(() => {
+      let seq = this.getMembershipSeq(roomId);
+      return links.map((l) => {
+        seq += 1;
+        this.stmts.insertMembershipLink.run(roomId, seq, l.hash, l.link, l.judged);
+        return seq;
+      });
+    });
+    return run();
   }
 
-  /** Returns false when the DID was already a member. */
-  addAcl(roomId: string, did: string): boolean {
-    return this.stmts.addAcl.run(roomId, did, new Date().toISOString()).changes > 0;
+  /** The seq of the room's last counted membership link (0 for none). */
+  getMembershipSeq(roomId: string): number {
+    return (this.stmts.getMembershipSeq.get(roomId) as { max: number }).max;
   }
 
-  /** Returns false when the DID was not a member. */
-  removeAcl(roomId: string, did: string): boolean {
-    return this.stmts.removeAcl.run(roomId, did).changes > 0;
+  hasMembershipLink(roomId: string, hash: string): boolean {
+    return this.stmts.hasMembershipLink.get(roomId, hash) !== undefined;
   }
 
-  recordAclChange(
+  /** The JudgedLink JSON of every counted link, in the order they counted. */
+  getMembershipJudged(roomId: string): string[] {
+    return (this.stmts.getMembershipJudged.all(roomId) as Array<{ judged: string }>).map((r) => r.judged);
+  }
+
+  /** At most `limit` counted links after `since`, in seq order. */
+  getMembershipSince(roomId: string, since: number, limit: number): Array<{ seq: number; link: string }> {
+    return this.stmts.getMembershipSince.all(roomId, since, limit) as Array<{ seq: number; link: string }>;
+  }
+
+  // ---- keys of a room (protocol 2) ----
+
+  /** Records (or refreshes) a key that authenticated to a room: whom it speaks for and its X25519 key. */
+  upsertMemberKey(
     roomId: string,
     did: string,
-    action: AclChangeRow["action"],
-    actor: string,
-    source: AclChangeRow["source"]
+    person: string | null,
+    byBot: boolean,
+    x25519: string,
+    x25519Sig: string
   ): void {
-    this.stmts.recordAclChange.run(roomId, did, action, actor, source, new Date().toISOString());
+    this.stmts.upsertMemberKey.run(roomId, did, person, byBot ? 1 : 0, x25519, x25519Sig, new Date().toISOString());
   }
 
-  /** Newest first. */
-  getAclChanges(roomId: string, limit = 100): AclChangeRow[] {
-    return this.stmts.getAclChanges.all(roomId, limit) as AclChangeRow[];
+  getMemberKeys(roomId: string): MemberKeyRow[] {
+    return this.stmts.getMemberKeys.all(roomId) as MemberKeyRow[];
   }
 
-  /** The latest "add" per DID over the whole history: who admitted each current member. */
-  getLatestAdds(roomId: string): AclChangeRow[] {
-    return this.stmts.getLatestAdds.all(roomId) as AclChangeRow[];
+  getMemberKey(roomId: string, did: string): MemberKeyRow | undefined {
+    return this.stmts.getMemberKey.get(roomId, did) as MemberKeyRow | undefined;
+  }
+
+  /** The keys in a room that speak for `person` (not as a bot), or the bot key `person` itself. */
+  getKeysOfPerson(roomId: string, person: string): MemberKeyRow[] {
+    return this.stmts.getKeysOfPerson.all(roomId, person, person) as MemberKeyRow[];
+  }
+
+  /** The rooms a key (not revoked) authenticated to. */
+  getRoomsOfKey(did: string): string[] {
+    return (this.stmts.getRoomsOfKey.all(did) as Array<{ room_id: string }>).map((r) => r.room_id);
+  }
+
+  /** Every key that authenticated to some room and is not revoked there. */
+  getUnrevokedKeys(): string[] {
+    return (this.stmts.getUnrevokedKeys.all() as Array<{ did: string }>).map((r) => r.did);
+  }
+
+  /** Marks a key revoked in every room (`roomId` absent) or one room. */
+  markKeyRevoked(did: string, roomId?: string): void {
+    const at = new Date().toISOString();
+    if (roomId === undefined) this.stmts.markKeyRevoked.run(at, did);
+    else this.stmts.markKeyRevokedInRoom.run(at, roomId, did);
   }
 
   // ---- links (active OR-Set) ----
@@ -439,9 +568,11 @@ export class LinkServerDB {
     token: string,
     roomId: string,
     did: string,
-    expiresAt: string
+    expiresAt: string,
+    person: string | null = null,
+    byBot = false
   ): void {
-    this.stmts.createSession.run(token, roomId, did, expiresAt);
+    this.stmts.createSession.run(token, roomId, did, expiresAt, person, byBot ? 1 : 0);
   }
 
   getSession(token: string): SessionRow | undefined {
@@ -450,6 +581,15 @@ export class LinkServerDB {
 
   deleteSessionsForDid(roomId: string, did: string): void {
     this.stmts.deleteSessionsForDid.run(roomId, did);
+  }
+
+  /** Ends a key's sessions in every room. */
+  deleteSessionsForKey(did: string): void {
+    this.stmts.deleteSessionsForKey.run(did);
+  }
+
+  deleteSessionsForRoom(roomId: string): void {
+    this.stmts.deleteSessionsForRoom.run(roomId);
   }
 
   // ---- room keys (E2E) ----
@@ -500,12 +640,6 @@ export class LinkServerDB {
   addRoomKeyIfMissing(roomId: string, did: string, version: number, encryptedKey: string): boolean {
     const info = this.stmts.addRoomKeyIfMissing.run(roomId, did, encryptedKey, version);
     return info.changes > 0;
-  }
-
-  // ---- admin transfer ----
-
-  transferAdmin(roomId: string, newAdminDid: string): void {
-    this.stmts.transferAdmin.run(newAdminDid, roomId);
   }
 
   // ---- server identity ----

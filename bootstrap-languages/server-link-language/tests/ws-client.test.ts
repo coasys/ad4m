@@ -154,3 +154,69 @@ describe("ws-client: keys-granted", () => {
         assert.deepEqual(grants, [[1, 2]]);
     });
 });
+
+describe("ws-client: protocol 2 messages", () => {
+    async function connected(handlers: Partial<WsClientHandlers>, factory: MockFactory): Promise<MockConnection> {
+        client = new WsClient({
+            getUrl: async () => "wss://server.example/rooms/r/ws",
+            getToken: async () => "token-1",
+            handlers: { ...noopHandlers, ...handlers },
+            minBackoffMs: 1,
+            maxBackoffMs: 5,
+        });
+        await client.connect();
+        const conn = factory.connections[factory.connections.length - 1];
+        conn.open();
+        await until(() => conn.sent.length > 0, "auth frame");
+        conn.receive({ type: "online-agents", agents: [] });
+        return conn;
+    }
+
+    it("hands membership links and rotate-needed to their handlers", async () => {
+        const factory = new MockFactory();
+        initAdapters({ wsFactory: factory });
+        const membership: Array<{ links: unknown[]; seq: number }> = [];
+        const rotations: Array<{ reason: string; removedKeys: string[] }> = [];
+        const conn = await connected(
+            {
+                onMembership: (msg) => membership.push({ links: msg.links, seq: msg.seq }),
+                onRotateNeeded: (msg) => rotations.push({ reason: msg.reason, removedKeys: msg.removedKeys }),
+            },
+            factory,
+        );
+        const link = {
+            author: "did:key:zA",
+            timestamp: "2026-11-15T00:00:00.000Z",
+            data: { source: "did:scid:coasys:1:A", predicate: "coasys://membership/member", target: "coasys://membership/space" },
+            proof: { key: "did:key:zA", signature: "00" },
+        };
+        conn.receive({ type: "membership", links: [link], seq: 4 });
+        conn.receive({ type: "rotate-needed", reason: "removed", removedKeys: ["did:key:zGone"] });
+
+        assert.deepEqual(membership, [{ links: [link], seq: 4 }]);
+        assert.deepEqual(rotations, [{ reason: "removed", removedKeys: ["did:key:zGone"] }]);
+    });
+
+    it("on close 4005 (this key removed or revoked) reports it and does not reconnect", async () => {
+        const factory = new MockFactory();
+        initAdapters({ wsFactory: factory });
+        const dropped: Array<{ code: number; reason: string }> = [];
+        const conn = await connected({ onRoomClosed: (code, reason) => dropped.push({ code, reason }) }, factory);
+        conn.close(4005, "removed");
+
+        await new Promise((r) => setTimeout(r, 50));
+        assert.deepEqual(dropped, [{ code: 4005, reason: "removed" }]);
+        assert.equal(factory.connections.length, 1, "a removed key does not reconnect");
+    });
+
+    it("on close 4006 (room suspended) reports it and reconnects", async () => {
+        const factory = new MockFactory();
+        initAdapters({ wsFactory: factory });
+        const dropped: number[] = [];
+        const conn = await connected({ onRoomClosed: (code) => dropped.push(code) }, factory);
+        conn.close(4006, "suspended");
+
+        await until(() => factory.connections.length === 2, "reconnect after a suspension");
+        assert.deepEqual(dropped, [4006]);
+    });
+});

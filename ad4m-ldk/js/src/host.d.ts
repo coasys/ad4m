@@ -24,6 +24,10 @@ declare module "ad4m:host" {
     // the call runs for) and returns the plaintext as hex. Throws for a box
     // sealed to any other DID, or an altered one.
     export function agentOpenSealed(sealed: SealedBox): string;
+    // The 32-byte seed of the calling agent's room key X25519 key:
+    // HKDF-SHA256(agent signing seed, info "adam-server-link-language:x25519-seed:v1").
+    // No signing import signs a message equal to or starting with that info.
+    export function agentRoomKeySeed(): Promise<Uint8Array>;
     export function agentCreateSignedExpression(data: unknown): object;
     export function agentGetAllLocalUserDids(): string[];
     export function agentCreateSignedExpressionForUser(userEmail: string, data: unknown): object;
@@ -62,6 +66,33 @@ declare module "ad4m:host" {
     export function emitSyncStateChange(state: unknown): void;
     export function emitTelepresenceSignal(payload: unknown, recipientDid?: string): void;
     export function emitSignal(data: unknown): void;
+
+    // Membership (Spec section 7.5b)
+    // Why a space does not admit a key (the executor's JoinRefusalReason).
+    export type JoinRefusal =
+        | "not-a-member"
+        | "invite-only"
+        | "needs-identity"
+        | "invite-expired"
+        | "invite-used"
+        | "server-refused";
+    // What the space made of one membership link: its hash (hex sha256 of
+    // author, source, predicate, target and timestamp), whether it counts,
+    // and the replay's refusal ("notAdmin", "malformed", ...) when not.
+    export interface MembershipLinkResult {
+        hash: string;
+        counted: boolean;
+        reason?: string;
+    }
+    // Hands the membership links (`coasys://membership/...`) the language
+    // synced to its space's membership; a result per link, in order. They
+    // never go in a perspective diff.
+    export function membershipLinks(links: object[]): Promise<MembershipLinkResult[]>;
+    // Whether the language's space admits the key `didKey` now.
+    export function membershipAdmits(didKey: string): Promise<{ admitted: boolean; reason?: JoinRefusal }>;
+    // Reports a room key change to the space's owners
+    // (`neighbourhood-room-key-changed`).
+    export function roomKeyEvent(e: { kind: "dropped" | "rotated"; removedKeys: string[]; version?: number }): Promise<void>;
 
     // Storage KV -- CORE (Spec section 7.4)
     // Always available; every runtime implements this.

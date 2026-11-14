@@ -1,0 +1,59 @@
+{
+  "description": "A link whose source or target does not fit its row is malformed. A link whose predicate the replay does not read (the slice 4 guest row, or a predicate outside the membership prefix) changes nothing.",
+  "creator": "did:scid:coasys:1:Ada",
+  "steps": [
+    {
+      "link": {"hash": "0000000000000000000000000000000000000000000000000000000000000001", "source": "coasys://membership/space", "predicate": "coasys://membership/rules", "target": "literal:json:%7B%22add%22%3A%22admins%22%2C%22guests%22%3A%22no%22%2C%22join%22%3A%22open%22%7D", "authorKey": "did:key:zAda", "timestamp": 100, "verdict": {"kind": "valid"}, "person": "did:scid:coasys:1:Ada", "byBot": false},
+      "changes": [
+        {"kind": "joined", "person": "did:scid:coasys:1:Ada", "role": "admin", "botOf": null, "since": 100, "until": null},
+        {"kind": "joinChanged", "join": "open"}
+      ]
+    },
+    {
+      "link": {"hash": "0000000000000000000000000000000000000000000000000000000000000002", "source": "coasys://membership/space", "predicate": "coasys://membership/guest", "target": "did:key:zGuest", "authorKey": "did:key:zGuest", "timestamp": 200, "verdict": {"kind": "valid"}, "person": null, "byBot": false},
+      "changes": []
+    },
+    {
+      "link": {"hash": "0000000000000000000000000000000000000000000000000000000000000003", "source": "ad4m://self", "predicate": "ad4m://has_child", "target": "did:scid:coasys:1:Bea", "authorKey": "did:key:zAda", "timestamp": 300, "verdict": {"kind": "valid"}, "person": "did:scid:coasys:1:Ada", "byBot": false},
+      "changes": []
+    },
+    {
+      "link": {"hash": "0000000000000000000000000000000000000000000000000000000000000004", "source": "coasys://somewhere", "predicate": "coasys://membership/admin", "target": "coasys://membership/space", "authorKey": "did:key:zAda", "timestamp": 400, "verdict": {"kind": "valid"}, "person": "did:scid:coasys:1:Ada", "byBot": false},
+      "refused": "malformed"
+    },
+    {
+      "link": {"hash": "0000000000000000000000000000000000000000000000000000000000000005", "source": "did:scid:coasys:1:Bea", "predicate": "coasys://membership/member", "target": "invite://", "authorKey": "did:key:zBea", "timestamp": 500, "verdict": {"kind": "valid"}, "person": "did:scid:coasys:1:Bea", "byBot": false},
+      "refused": "malformed"
+    },
+    {
+      "link": {"hash": "0000000000000000000000000000000000000000000000000000000000000006", "source": "did:scid:coasys:1:", "predicate": "coasys://membership/member", "target": "coasys://membership/space", "authorKey": "did:key:zAda", "timestamp": 600, "verdict": {"kind": "valid"}, "person": "did:scid:coasys:1:Ada", "byBot": false},
+      "refused": "malformed"
+    },
+    {
+      "link": {"hash": "0000000000000000000000000000000000000000000000000000000000000007", "source": "coasys://membership/space", "predicate": "coasys://membership/join", "target": "literal:string:sometimes", "authorKey": "did:key:zAda", "timestamp": 700, "verdict": {"kind": "valid"}, "person": "did:scid:coasys:1:Ada", "byBot": false},
+      "refused": "malformed"
+    },
+    {
+      "link": {"hash": "0000000000000000000000000000000000000000000000000000000000000008", "source": "invite://abc", "predicate": "coasys://membership/invite", "target": "literal:json:%7B%7D", "authorKey": "did:key:zAda", "timestamp": 800, "verdict": {"kind": "valid"}, "person": "did:scid:coasys:1:Ada", "byBot": false},
+      "refused": "malformed"
+    },
+    {
+      "link": {"hash": "0000000000000000000000000000000000000000000000000000000000000009", "source": "did:scid:coasys:1:Bea", "predicate": "coasys://membership/bot", "target": "coasys://membership/space", "authorKey": "did:key:zAda", "timestamp": 900, "verdict": {"kind": "valid"}, "person": "did:scid:coasys:1:Ada", "byBot": false},
+      "refused": "malformed"
+    },
+    {
+      "link": {"hash": "000000000000000000000000000000000000000000000000000000000000000a", "source": "did:key:zBot", "predicate": "coasys://membership/approved-by", "target": "did:key:zAda", "authorKey": "did:key:zAda", "timestamp": 1000, "verdict": {"kind": "valid"}, "person": "did:scid:coasys:1:Ada", "byBot": false},
+      "refused": "malformed"
+    },
+    {
+      "link": {"hash": "000000000000000000000000000000000000000000000000000000000000000b", "source": "did:scid:coasys:1:Ada", "predicate": "coasys://membership/removed", "target": "coasys://elsewhere", "authorKey": "did:key:zAda", "timestamp": 1100, "verdict": {"kind": "valid"}, "person": "did:scid:coasys:1:Ada", "byBot": false},
+      "refused": "malformed"
+    }
+  ],
+  "rules": {"add": "admins", "join": "open"},
+  "join": "open",
+  "members": [
+    {"person": "did:scid:coasys:1:Ada", "role": "admin", "botOf": null, "since": 100, "until": null}
+  ],
+  "admits": []
+}

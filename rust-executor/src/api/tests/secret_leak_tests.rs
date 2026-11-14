@@ -205,6 +205,8 @@ fn params(method: &str, fx: &Fixture) -> Value {
         | "neighbourhood.ownOnlineStatus"
         | "neighbourhood.onlineAgents"
         | "neighbourhood.otherAgents"
+        | "neighbourhood.members"
+        | "neighbourhood.invites"
         | "perspective.get"
         | "perspective.getAllShacl"
         | "perspective.getShaclNames"
@@ -237,6 +239,7 @@ fn params(method: &str, fx: &Fixture) -> Value {
             json!({ "neighbourhoodUrl": "neighbourhood://leak" })
         }
         "sfu.servesAllMembers" => json!({ "uuid": uuid }),
+        "neighbourhood.linkLanguageChoice" => json!({ "perspectiveUuid": uuid }),
         "identity.log" => {
             json!({ "did": "did:scid:coasys:1:QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG" })
         }
@@ -246,6 +249,10 @@ fn params(method: &str, fx: &Fixture) -> Value {
         "identity.joinStatus" => json!({ "offerId": "leak-offer" }),
         "identity.keyOwner" => json!({ "key": "z6MkLeak" }),
         "bot.grant" | "bot.log" => json!({ "bot": fx.main_did }),
+        "neighbourhood.countByPerson" => {
+            json!({ "perspectiveUuid": uuid, "predicate": "leak://p" })
+        }
+        "agent.revocationReach" => json!({ "didKey": fx.main_did }),
         "identity.offers" => json!({ "request": {
             "req": {
                 "did": "did:scid:coasys:1:QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG",

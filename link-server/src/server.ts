@@ -2,12 +2,15 @@ import path from "node:path";
 import Fastify, { type FastifyInstance } from "fastify";
 import compressPlugin from "@fastify/compress";
 import websocketPlugin from "@fastify/websocket";
-import { AuthManager, ChallengeStore } from "./auth.js";
+import { AuthManager, AuthReplayGuard, publicOrigin, type Admission } from "./auth.js";
 import { LinkServerDB } from "./db.js";
 import { LogTail, teeDestination } from "./log-tail.js";
+import { MembershipRooms } from "./membership.js";
 import { buildOperatorApp, type OperatorOptions } from "./operator.js";
 import { SlidingWindowLimiter } from "./rate-limit.js";
 import { registerRoutes, type RouteContext } from "./routes.js";
+import { refreshKeys } from "./refresh.js";
+import { StoreClient } from "./store-client.js";
 import { TelepresenceManager } from "./telepresence.js";
 import { WsManager, type WsManagerOptions } from "./ws.js";
 
@@ -26,11 +29,36 @@ export interface ServerOptions {
    */
   logDestination?: { write(line: string): unknown };
   /**
-   * When true, any DID that passes the challenge-response flow gets
-   * auto-admitted to any room's ACL on first contact. Designed for
-   * testing (wind tunnel) and open-community deployments. Default false.
+   * When true, every key that authenticates is admitted to the room, member or not. For tests
+   * and development only: `index.ts` refuses it under `NODE_ENV=production`. Default false:
+   * a key is admitted while its person (or bot) is a member of the room.
    */
   autoAdmit?: boolean;
+  /** The server's name in `GET /.well-known/coasys-link-server`. Default "link-server". */
+  name?: string;
+  /**
+   * The origins clients reach this server at (`https://links.example.org`): an auth message
+   * names one of them, so a signature made for another server is refused. Normalised with
+   * `publicOrigin`; a value with a path, query or fragment stops the build. Required unless
+   * `hostOrigin` is on.
+   */
+  publicOrigins?: string[];
+  /**
+   * Development only: also take an auth signed for the origin each request's Host header names.
+   * `index.ts` turns it on only without `PUBLIC_ORIGIN` on a server marked for development
+   * (`ALLOW_AUTO_ADMIT_DEV=true`, never with `NODE_ENV=production`). Default false.
+   */
+  hostOrigin?: boolean;
+  /** The identity store's base URL: whom each key speaks for. Without it no person is admitted. */
+  storeUrl?: string;
+  /** Multikeys of the store keys whose signed heads the server trusts. */
+  storeHeadKeys?: string[];
+  /**
+   * How often the keys not revoked in some room (and keys with open sockets) are asked of the
+   * store again, so a key its log revoked loses its sessions and sockets (ms). Default 600 000
+   * (10 min).
+   */
+  refreshIntervalMs?: number;
   /**
    * Override the sliding-window rate limiter thresholds. Defaults match the
    * project brief exactly (100/min per-IP auth, 300/min per-JWT room
@@ -62,6 +90,8 @@ export interface BuiltServer {
   db: LinkServerDB;
   /** The recent log lines of both apps; present when `logger` is on. */
   logTail?: LogTail;
+  /** Runs one key refresh now (the timer runs it every `refreshIntervalMs`): the keys revoked. */
+  refreshKeys: () => Promise<string[]>;
   close: () => Promise<void>;
 }
 
@@ -72,6 +102,15 @@ export interface BuiltServer {
  * `close()` to tear everything down (used heavily by tests).
  */
 export async function buildServer(opts: ServerOptions): Promise<BuiltServer> {
+  // Checked before anything opens: a server that takes auth for no origin takes none.
+  const publicOrigins = new Set((opts.publicOrigins ?? []).map(publicOrigin));
+  const hostOrigin = opts.hostOrigin ?? false;
+  if (publicOrigins.size === 0 && !hostOrigin) {
+    throw new Error(
+      "no public origin: set PUBLIC_ORIGIN (or publicOrigins) to the origin clients reach this server at, e.g. https://links.example.org"
+    );
+  }
+
   const dbPath = opts.dataDir === ":memory:" ? ":memory:" : path.join(opts.dataDir, "data.sqlite");
   const db = new LinkServerDB(dbPath);
 
@@ -102,8 +141,17 @@ export async function buildServer(opts: ServerOptions): Promise<BuiltServer> {
     },
   });
 
-  const auth = new AuthManager(db, { jwtExpirySeconds: opts.jwtExpirySeconds });
-  const challenges = new ChallengeStore();
+  const autoAdmit = opts.autoAdmit ?? false;
+  const store = new StoreClient({ url: opts.storeUrl, headKeys: opts.storeHeadKeys ?? [] });
+  const rooms = new MembershipRooms(db);
+  // A person's own key while the person is a member; a bot key while the bot is one.
+  const admits: Admission = (roomId, key) => {
+    if (autoAdmit) return true;
+    if (key.byBot) return rooms.isMember(roomId, key.did);
+    return key.person !== undefined && rooms.isMember(roomId, key.person);
+  };
+  const auth = new AuthManager(db, admits, { jwtExpirySeconds: opts.jwtExpirySeconds });
+  const replayGuard = new AuthReplayGuard();
   const telepresence = new TelepresenceManager({ graceMs: opts.telepresenceGraceMs });
   const ws = new WsManager(auth, telepresence, opts.wsOptions);
 
@@ -123,21 +171,44 @@ export async function buildServer(opts: ServerOptions): Promise<BuiltServer> {
   };
 
   const ctx: RouteContext = {
-    db, auth, challenges, ws, telepresence, rateLimits,
-    autoAdmit: opts.autoAdmit ?? false,
+    db, auth, replayGuard, store, rooms, ws, telepresence, rateLimits, autoAdmit,
+    name: opts.name ?? "link-server",
+    publicOrigins,
+    hostOrigin,
   };
   registerRoutes(app, ctx);
   ws.register(app);
 
   const operatorApp = opts.operator
     ? await buildOperatorApp(
-        { db, auth, ws, telepresence, logTail, autoAdmit: opts.autoAdmit ?? false },
+        { db, auth, rooms, ws, telepresence, logTail, autoAdmit },
         { logger, ...opts.operator }
       )
     : undefined;
 
-  const admission = opts.autoAdmit ? "auto" : "allowlist";
+  const admission = autoAdmit ? "auto" : "membership";
   app.log.info({ admission }, `admission mode: ${admission}`);
+  if (publicOrigins.size > 0) {
+    app.log.info({ publicOrigins: [...publicOrigins] }, `auth is taken for: ${[...publicOrigins].join(", ")}`);
+  }
+  if (hostOrigin) {
+    app.log.warn("auth is also taken for the origin each request's Host header names (development only)");
+  }
+  if (!store.configured) app.log.warn("no identity store configured (STORE_URL, STORE_HEAD_KEYS): no person can be admitted");
+
+  // Keys not revoked in some room, and keys with open sockets, are asked of the store again: a
+  // key its log revoked loses its sessions and sockets (refreshKeys).
+  let refreshing = false;
+  const refreshInterval = setInterval(() => {
+    if (refreshing || !store.configured) return;
+    refreshing = true;
+    refreshKeys({ db, auth, ws, store, log: app.log })
+      .catch((err: unknown) => app.log.error({ err }, "key refresh failed"))
+      .finally(() => {
+        refreshing = false;
+      });
+  }, opts.refreshIntervalMs ?? 10 * 60 * 1000);
+  refreshInterval.unref();
 
   // Periodic sweep of expired JWT sessions from the DB.
   const sweepInterval = setInterval(() => {
@@ -147,12 +218,15 @@ export async function buildServer(opts: ServerOptions): Promise<BuiltServer> {
 
   app.addHook("onClose", async () => {
     clearInterval(sweepInterval);
-    challenges.close();
+    clearInterval(refreshInterval);
+    replayGuard.close();
     telepresence.close();
     rateLimits.authIp.close();
     rateLimits.roomJwt.close();
     rateLimits.commitJwt.close();
     ws.closeAll();
+    rooms.close();
+    store.close();
     db.close();
   });
 
@@ -161,6 +235,7 @@ export async function buildServer(opts: ServerOptions): Promise<BuiltServer> {
     operatorApp,
     db,
     logTail,
+    refreshKeys: () => refreshKeys({ db, auth, ws, store, log: app.log }),
     close: async () => {
       // The operator app shares the DB the public app's onClose closes.
       await operatorApp?.close();

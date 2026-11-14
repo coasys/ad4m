@@ -30,11 +30,17 @@ Run from this directory (turbo also drives `build`/`test` via
 `@coasys/server-link-language#build` / the root `pnpm test`):
 
 ```bash
-pnpm install                          # workspace install runs from the monorepo root
-deno run --allow-all esbuild.ts       # -> build/bundle.js
-node --experimental-vm-modules --import tsx --test tests/*.test.ts
-npx tsc --noEmit
+pnpm install            # workspace install runs from the monorepo root
+pnpm run build          # build:keyring (ad4m-keyring/wasm/build.sh -> keyring/keyring.js), then esbuild -> build/bundle.js
+pnpm test               # pretest: build, then ad4m-identity-core/build-node.sh (link-server/identity-core, for the integration test's link server)
+npx tsc --noEmit        # needs ad4m-ldk/js/lib (pnpm build there) and keyring/keyring.js
 ```
+
+Both wasm builds run `wasm-bindgen` at the version `Cargo.lock` locks; they look
+in `target/wasm-tools/bin` first (CI installs it there: `locked_wasm_bindgen` in
+`.circleci/config.yml`). turbo's `@coasys/server-link-language#build` takes
+`ad4m-keyring/**` and `Cargo.lock` as inputs, so a keyring change rebuilds the
+bundle.
 
 `AD4M_LDK_ENTRY` env var overrides the default `../../ad4m-ldk/js/lib/index.js`
 resolution (both in `esbuild.ts` and `tsconfig.json`'s `paths`) — same
@@ -55,9 +61,54 @@ src/ws-client.ts               — WebSocket lifecycle: typed dispatch, send que
 src/sync.ts                     — commit / catch-up / bootstrap; the ONE inbound path (openOrHold → applyAndEmit), held links (retryHeld)
 src/telepresence.ts              — online-agent roster + outbound signal/broadcast/status
 src/encryption.ts                 — room keys sealed to DIDs via the executor, key ring, AES-256-GCM link encryption
-src/room-keys.ts                   — admin rotation (seals to every ACL member) and any member's grants
+src/room.ts                        — protocol 2: room id (roomIdOf), auth message, the signed X25519 statement, membership links on the wire
+src/room-keys.ts                   — any member's rotation and grants, sealed only to keys the space admits (K1), mintsRoomKey (K2)
 tests/*.test.ts                    — node:test + tsx, one file per pure module, all use mock adapters (no real network/WS/Deno)
+keyring/keyring.js                 — generated, gitignored: ad4m-keyring's JS binding (--target deno, wasm inlined); ad4m-keyring/wasm/build.sh
 ```
+
+`src/encryption.ts` and `src/auth.ts` import `keyring/keyring.js` (seal, open,
+`x25519Public`), so `pnpm run build:keyring` must run before the tests and the
+bundle. `esbuild.ts` resolves a `.js` import to its `.ts` source only when one
+exists, so the generated `.js` is bundled as it is. The binding loads its wasm
+synchronously (`ad4m-keyring/wasm/inline.mjs`): the bundle's target (deno1.32.4)
+has no top-level await. `tests/keyring.test.ts` checks the binding against
+`ad4m-keyring/vectors/room-key-seal-v2.json` byte for byte and against the
+noble reference `tests/room-key-seal-reference.ts`.
+
+## Protocol 2: rooms, membership, room keys (slice 3.B)
+
+- **A room belongs to its creator.** Template params: `SERVER_URL`, `UID`,
+  `CREATOR` (the creator person's DID). The room id is
+  `roomIdOf(CREATOR, UID)` (src/room.ts), so a neighbourhood's address fixes
+  its creator. The link server makes the room on the creator's first
+  `POST /membership` with a genesis `{creator, salt}`; until then auth answers
+  404 and `init` logs "the room does not exist yet" and returns.
+- **The language holds no membership state.** Membership links
+  (`coasys://membership/...`) are synced apart from diffs: `commit` sends them
+  to `/membership` first (K5), and inbound ones (catch-up from the membership
+  log's own `seq`, and WS `membership` pushes) go to the executor through the
+  `membershipLinks` host import, which judges each one through the space's
+  `SpaceMembership`. A membership removal is dropped with a warning: the
+  membership log only grows.
+- **Host imports (ad4m:host):** `agentRoomKeySeed()` (the agent's room-key X25519
+  seed, derived from its key, never a signing key), `membershipLinks(links)`,
+  `membershipAdmits(didKey)` and `roomKeyEvent({kind, removedKeys, version?})`
+  (published to the perspective's owners as `neighbourhood-room-key-changed`).
+  The last three act on the perspective of the calling language only.
+- **Auth publishes a room key.** Each key sends its X25519 public key and a
+  statement signed under the `coasys:room-key` domain. `/keys` answers 403 to
+  a key the room does not admit: the ring stays `pending` and `admitted` false.
+- **Any admitted member rotates and grants.** A box goes only to a key whose
+  statement verifies and that `membershipAdmits` admits (K1). An admitted
+  member that holds no key mints one when the room has none (K2,
+  `mintsRoomKey`). A `rotate-needed` push (reasons `joined`, `removed`,
+  `revoked`) makes every member holding a key rotate (K3), after catching up on
+  membership; a rotation the server refuses with 409 (the admitted set moved)
+  is tried 3 times. Each rotation is reported with `roomKeyEvent`.
+- **WS close codes:** 4005 (this key was removed or revoked) drops the key ring,
+  reports `roomKeyEvent({kind: "dropped"})` and stops reconnecting until the
+  next `init`; 4006 (room suspended) is logged.
 
 ## Non-obvious conventions
 
@@ -216,30 +267,21 @@ tests/*.test.ts                    — node:test + tsx, one file per pure module
 ## Known limitations / follow-ups
 
 - **Rooms are E2E from creation — no plaintext mode.** The link server
-  refuses plaintext links in every room, before any key exists; the admin's
-  `init()` (or, failing that, its first commit) mints key version 1. Key
-  status is `pending | ready | error` (src/room-keys.ts); only `ready`
-  commits. `/keys` answers an empty list to an agent without a key; any error
-  status from it, 404 included, is an error (`api.fetchRoomKeys`). The ACL
-  read at `init()` sets `roomRole` (`admin | member | unknown`); only while
-  it is `unknown` (that read failed) and a key is missing does
-  `rotateIfAdminWithoutKey` read the ACL again (`adminRotationStep`), so an
-  admin whose startup read failed still rotates and a member is not re-read
-  on every commit. A role change after `init()` (an admin transfer) takes
-  effect at the next `init()`. Subsequent rotations require explicit admin
-  action.
-  `performRotation()` (admin only) generates a fresh room key client-side,
-  seals it to the DID of every ACL member, including members that never
-  connected, and POSTs only sealed boxes — the server never sees plaintext.
+  refuses plaintext links in every room, before any key exists; the first
+  admitted member without a key mints key version 1 (K2, at `init` or after a
+  membership commit that admits it). Key status is `pending | ready | error`
+  (src/room-keys.ts); only `ready` commits a diff (membership links do not
+  need a key). `performRotation()` generates a fresh room key client-side,
+  seals it to every admitted key (K1, above), including keys that are not
+  online, and POSTs only sealed boxes — the server never sees plaintext.
   It does NOT fire on presence events (`onPeerJoined` is reconnect/wake, not
-  ACL change — rotating there would mint a new version on every reconnect).
-  `performKeyGrants()` runs on every member that holds keys (at init, after
-  every sync, on `onPeerJoined`) and seals the versions it holds to ACL
-  members lacking them (idempotent; the server keeps the first box per member
-  and version and refuses versions the granter lacks). A member whose key
-  status is `pending` (no box it holds opens: no member holding a key has
-  been online since it joined, or its boxes are spoiled grants; an admin
-  in that state rotates, `adminRotationStep` in src/room-keys.ts) re-reads `/keys`
+  a membership change — rotating there would mint a new version on every
+  reconnect). `performKeyGrants()` runs on every member that holds keys (at
+  init, after every sync, on `onPeerJoined`) and seals the versions it holds
+  to admitted keys lacking them (idempotent; the server keeps the first box
+  per key and version and refuses versions the granter lacks). A member whose
+  key status is `pending` (no box it holds opens: no member holding a key has
+  been online since it joined, or its boxes are spoiled grants) re-reads `/keys`
   on a commit, on a `keys-granted` push, and on every sync while it holds
   links it cannot open. A version whose box does not open is left out of the
   ring (`buildKeyRing`), so one bad grant costs that version, not the room.
@@ -249,23 +291,35 @@ tests/*.test.ts                    — node:test + tsx, one file per pure module
 - **Signals are not encrypted.** Only links are E2E. Presence and
   telepresence signals (`src/telepresence.ts`) travel to the link server as
   sent.
-- **Room keys are sealed to DIDs.** A member's X25519 key is the Montgomery
-  form of the Ed25519 key in its `did:key`. The language seals itself
-  (`sealToDid`, src/encryption.ts) and opens with the `agentOpenSealed(box)`
-  host import (`AgentAdapter.openSealed`); it never holds an agent secret,
-  and auth sends no key. `tests/sealed-box.ts` is a noble reference of the
-  executor's opening for the mock agents; the test vector in
-  `tests/encryption.test.ts` is pinned in
-  `rust-executor/src/agent/sealed_box.rs` too: changing the format orphans
-  every sealed room key.
+- **Room keys are sealed to published X25519 keys.** Each key's X25519 key
+  comes from its room-key seed (`agentRoomKeySeed`, HKDF of the agent key in
+  the executor: `rust-executor/src/agent/room_key_seed.rs`) and is published
+  signed at auth. The language seals with the keyring binding
+  (`sealRoomKeyTo`) and opens with the seed (`openRoomKey`); the seed is used
+  only for room keys, and the executor's signing ops refuse its domain. The
+  format is `ad4m-keyring`'s seal v2, pinned by
+  `ad4m-keyring/vectors/room-key-seal-v2.json`: changing it orphans every sealed
+  room key.
+- **A box opens only for its room and version (K9).** The seal binds
+  `coasys:room-key:<roomId>:<version>` (`roomKeyContext`) as associated data.
+  `buildKeyRing(entries, seed, roomId)` opens each box under the version
+  `/keys` lists it at; one sealed for another room or version does not open and
+  is spoiled, so a member cannot hand another room's key, or an old one, as
+  this room's. A rotation seals for `latestKeyVersion + 1` (from `/members`),
+  sends that `version`, and throws if the server stored another.
+- **Auth names the server's origin.** The signed message is
+  `coasys-link-server:auth:2:<origin>:<roomId>:<timestamp>`, `<origin>` being
+  `serverOrigin(SERVER_URL)` (src/room.ts), also sent as `origin`. A link
+  server refuses an origin that is not its own, so a server cannot relay this
+  key's auth to another one.
 - **E2E encryption wire format is unified.** Both client and server use
   the same `EncryptedLinkData` shape (`{ciphertext, nonce}`) in the link's
   `data` field for encrypted rooms — no separate `encrypted` field. The
   server treats link data as opaque (no E2E validation at commit time)
   and stores only sealed `encryptedKey` boxes (the executor's sealed box:
   ephemeral X25519 ECDH + HKDF-SHA256 + AES-256-GCM). Key generation and
-  sealing happen exclusively client-side. The server stores no member keys:
-  the ACL is DIDs.
+  sealing happen exclusively client-side. The server stores each key's
+  published X25519 public key and statement, never a secret.
 - **E2E integration coverage via test matrix.** The integration suite
   (`tests/js/tests/integration.test.ts`) runs the full neighbourhood test
   battery for both `[holochain]` and `[server-link]` link-language

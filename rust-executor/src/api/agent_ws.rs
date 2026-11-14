@@ -980,6 +980,38 @@ async fn entanglement_proof_preflight(
 
 // ── Registration ────────────────────────────────────────────────────────────
 
+/// `agent.revocationReach` (A9): the spaces a revoked device key reached, from
+/// [`crate::membership::reach`]. Only the person whose log lists the key reads them (an agent
+/// bound to that identity), and the operator; anyone else reads none.
+async fn revocation_reach(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let body: AgentRevocationReachParams = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let key = crate::identity::resolver::multikey_of(&body.did_key).ok_or_else(|| {
+        WsRpcError::bad_request(format!("didKey is not a did:key: {}", body.did_key))
+    })?;
+    let reads = ctx.is_operator() || {
+        let owner = match crate::identity::cache::global_key_map().lookup(key) {
+            crate::identity::cache::KeyLookup::Listed { scid, .. } => Some(scid),
+            _ => None,
+        };
+        let caller = ctx
+            .session
+            .acts_as_did()
+            .and_then(|did| crate::db_backend::db_backend().agent_identity(&did).ok())
+            .flatten();
+        owner.is_some() && owner == caller
+    };
+    if !reads {
+        return Ok(serde_json::to_value(Vec::<
+            crate::membership::reach::RevocationReach,
+        >::new())?);
+    }
+    let now = chrono::Utc::now().timestamp_millis().max(0) as u64;
+    let rows = crate::membership::reach::reach_of(&format!("did:key:{key}"), now)
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    Ok(serde_json::to_value(rows)?)
+}
+
 /// Register all agent WS handlers.
 ///
 /// Message types match the client SDK's `apiClient.call()` type strings.
@@ -1091,6 +1123,13 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     )
     .read()
     .guard(Guard::Executor(AGENT_READ_CAPABILITY.clone()));
+    // A9: the spaces a revoked key reached; the handler answers only the key's person.
+    map.method::<AgentRevocationReachParams, Vec<crate::membership::reach::RevocationReach>>(
+        "agent.revocationReach",
+        revocation_reach,
+    )
+    .read()
+    .guard(Guard::Cap(AGENT_READ_CAPABILITY.clone()));
 }
 
 // ── Contracts ───────────────────────────────────────────────────────────────
@@ -1100,6 +1139,14 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
 #[ts(export)]
 pub struct AgentByDidParams {
     pub did: String,
+}
+
+/// `agent.revocationReach`: a revoked key, `did:key:<multikey>`.
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AgentRevocationReachParams {
+    pub did_key: String,
 }
 
 #[derive(Deserialize, TS)]

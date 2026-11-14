@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
 import { test } from "node:test";
 import { SlidingWindowLimiter } from "../src/rate-limit.js";
 import {
+  authAs,
   authenticateAgent,
+  createRoom,
   createTestAgent,
   getJson,
-  postJson,
   startTestServer,
   type TestServerHandle,
 } from "./helpers.js";
@@ -66,35 +66,32 @@ test("SlidingWindowLimiter allows again once the window has elapsed", async () =
 
 test("auth endpoint enforces the per-IP limiter and returns 429 with Retry-After", async () => {
   await withServer({ rateLimits: { authIp: { limit: 3, windowMs: 60_000 } } }, async (server) => {
-    const roomId = randomUUID();
-    let lastStatus = 0;
-    let retryAfterHeader: string | null = null;
-    for (let i = 0; i < 4; i++) {
-      const agent = await createTestAgent();
-      const res = await fetch(`${server.url}/rooms/${roomId}/auth`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ did: agent.did }),
-      });
-      lastStatus = res.status;
-      retryAfterHeader = res.headers.get("retry-after");
-    }
-    assert.equal(lastStatus, 429);
+    // The genesis POST /membership counts against the same per-IP budget: one slot.
+    const roomId = await createRoom(server.url);
+    const statuses: number[] = [];
+    for (let i = 0; i < 3; i++) statuses.push((await authAs(server.url, roomId, await createTestAgent())).status);
+    assert.deepEqual(statuses, [200, 200, 429]);
+
+    const res = await fetch(`${server.url}/rooms/${roomId}/auth`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ did: (await createTestAgent()).did }),
+    });
+    assert.equal(res.status, 429, "the limiter answers before the body is read");
+    const retryAfterHeader = res.headers.get("retry-after");
     assert.ok(retryAfterHeader && Number(retryAfterHeader) >= 1);
   });
 });
 
 test("room endpoints enforce the per-JWT limiter, independently per agent", async () => {
   await withServer({ rateLimits: { roomJwt: { limit: 3, windowMs: 60_000 } } }, async (server) => {
-    const roomId = randomUUID();
+    const roomId = await createRoom(server.url);
     const admin = await createTestAgent();
     const member = await createTestAgent();
     const adminToken = await authenticateAgent(server.url, roomId, admin);
-    await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: member.did }, adminToken);
     const memberToken = await authenticateAgent(server.url, roomId, member);
 
-    // admin's earlier acl POST already used one slot of the shared preHandler
-    // limiter; drive admin to exhaustion, then confirm member is unaffected.
+    // Drive admin past the limit of 3, then confirm member is unaffected.
     let adminLastStatus = 0;
     for (let i = 0; i < 4; i++) {
       const res = await getJson(`${server.url}/rooms/${roomId}/revision`, adminToken);
@@ -116,7 +113,7 @@ test("commit has its own stricter per-JWT limiter on top of the general room lim
       },
     },
     async (server) => {
-      const roomId = randomUUID();
+      const roomId = await createRoom(server.url);
       const agent = await createTestAgent();
       const token = await authenticateAgent(server.url, roomId, agent);
 

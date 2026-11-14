@@ -4,4 +4,4 @@ import type { InvalidReason } from "./InvalidReason";
 /**
  * Whether a link counts.
  */
-export type LinkVerdict = { "kind": "valid" } | { "kind": "invalid", "reason": InvalidReason } | { "kind": "cantCheck" } | { "kind": "flagged" };
+export type LinkVerdict = { "kind": "valid" } | { "kind": "invalid", "reason": InvalidReason } | { "kind": "cantCheck" } | { "kind": "flagged" } | { "kind": "notMember" };

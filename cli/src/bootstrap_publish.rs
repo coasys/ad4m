@@ -5,7 +5,7 @@ use std::fs;
 use std::process::exit;
 
 /// The seed type the executor reads, so a written seed always parses there.
-pub use rust_executor::runtime_service::{BootstrapSeed, IdentityStoreSeed};
+pub use rust_executor::runtime_service::{BootstrapSeed, IdentityStoreSeed, LinkServerSeed};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SeedProto {
@@ -36,6 +36,14 @@ pub struct SeedProto {
         skip_serializing_if = "Option::is_none"
     )]
     pub identity_store: Option<IdentityStoreSeed>,
+    /// The seed's `linkServers`: the network's link servers, copied into the seed as given.
+    /// Absent: the seed names none.
+    #[serde(
+        rename = "linkServers",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub link_servers: Option<Vec<LinkServerSeed>>,
 }
 
 fn default_seed_outputs() -> Vec<String> {
@@ -59,6 +67,7 @@ pub fn check_seed_outputs(outputs: &[String]) -> Result<(), String> {
 pub fn seed_text(proto: &SeedProto, published: &BootstrapSeed) -> String {
     let seed = BootstrapSeed {
         identity_store: proto.identity_store.clone(),
+        link_servers: proto.link_servers.clone(),
         ..published.clone()
     };
     serde_json::to_string_pretty(&seed).expect("a seed serialises")
@@ -154,6 +163,7 @@ pub async fn start_publishing(
         perspective_language: String::from(""),
         neighbourhood_language: String::from(""),
         identity_store: None,
+        link_servers: None,
     };
 
     //Publish the core bootstrap languages
@@ -290,6 +300,14 @@ mod tests {
                 .unwrap();
         assert_eq!(proto.trusted_agents, seed.trusted_agents);
         assert_eq!(proto.identity_store, seed.identity_store);
+        assert_eq!(proto.link_servers, seed.link_servers);
+        assert_eq!(
+            proto.link_servers,
+            Some(vec![LinkServerSeed {
+                url: "https://link-staging.coasys.org".into(),
+                name: "Coasys staging".into(),
+            }])
+        );
         assert_eq!(
             proto.identity_store,
             Some(IdentityStoreSeed {
@@ -314,6 +332,7 @@ mod tests {
         let committed = include_str!("../../rust-executor/src/mainnet_seed.json");
         let published = BootstrapSeed {
             identity_store: None,
+            link_servers: None,
             ..serde_json::from_str::<BootstrapSeed>(committed).unwrap()
         };
         assert_eq!(seed_text(&repo_proto(), &published), committed);

@@ -99,6 +99,14 @@ pub(crate) const FLOW_REPLICA_STATE: SealedTable = SealedTable {
     columns: &["current_state"],
 };
 
+/// A space's link-language choice: its server, room and creator (see `db::spaces`).
+pub(crate) const SPACE_CHOICE: SealedTable = SealedTable {
+    table: "space_choice",
+    key: &["perspective"],
+    owner: OwnerColumn::Perspective("perspective"),
+    columns: &["choice"],
+};
+
 pub(crate) const NOTIFICATIONS: SealedTable = SealedTable {
     table: "notifications",
     key: &["id"],
@@ -163,10 +171,11 @@ pub(crate) const AI_SESSIONS: SealedTable = SealedTable {
 
 /// Every table with sealed columns. `ai_messages` comes before `ai_sessions`: its owner is
 /// read through its session, so a person's messages are deleted before the sessions.
-pub(crate) const SEALED_TABLES: [&SealedTable; 9] = [
+pub(crate) const SEALED_TABLES: [&SealedTable; 10] = [
     &PERSPECTIVE_HANDLE,
     &PERSPECTIVE_DIFF,
     &FLOW_REPLICA_STATE,
+    &SPACE_CHOICE,
     &NOTIFICATIONS,
     &TASKS,
     &EXPRESSION,
@@ -810,6 +819,8 @@ mod tests {
         )
         .unwrap()
         .unwrap();
+        db.record_space_choice(&perspective, r#"{"kind":"linkServer"}"#)
+            .unwrap();
         perspective
     }
 
@@ -902,6 +913,11 @@ mod tests {
                 .unwrap()
                 .content["text"],
             SECRET_WORDS[7]
+        );
+
+        assert_eq!(
+            db.space_choice(&perspective).unwrap().as_deref(),
+            Some(r#"{"kind":"linkServer"}"#)
         );
 
         // A re-key reseals the flow state for its new row.

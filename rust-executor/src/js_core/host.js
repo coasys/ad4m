@@ -82,6 +82,10 @@ export function agentSigningKeyId() { return agent().signingKeyId(); }
 export function agentSign(payload) { return agent().sign(payload); }
 export function agentSignStringHex(payload) { return agent().signStringHex(payload); }
 export function agentOpenSealed(sealed) { return agent().openSealed(sealed); }
+// The 32-byte seed of the agent's room key X25519 key: HKDF-SHA256 of the agent's
+// signing seed with info "adam-server-link-language:x25519-seed:v1". No signing call
+// signs a message in that domain.
+export async function agentRoomKeySeed() { return agent().roomKeySeed(); }
 export function agentCreateSignedExpression(data) { return agent().createSignedExpression(data); }
 export function agentGetAllLocalUserDids() { return agent().getAllLocalUserDIDs(); }
 export function agentCreateSignedExpressionForUser(userEmail, data) {
@@ -328,6 +332,27 @@ export function emitSignal(data) {
     var lc = langCtrl();
     if (lc) lc.ad4mSignalEmitted(data, currentLanguageAddress());
 }
+
+// ============================================================================
+// Membership (Spec section 7.5b)
+// ============================================================================
+// A link language's way into its space's membership, through the runtime's
+// `MEMBERSHIP` global. Each call acts for the perspective of the calling link
+// language. Membership links (`coasys://membership/...`) never go in a
+// perspective diff: the language hands them over with membershipLinks.
+
+function membership() {
+    var m = globalThis.MEMBERSHIP;
+    if (!m) throw new Error("[ad4m:host] MEMBERSHIP is not installed by this runtime");
+    return m;
+}
+
+// links: LinkExpression[] -> Promise<[{ hash, counted, reason? }]>, in order.
+export function membershipLinks(links) { return membership().links(links); }
+// didKey: string -> Promise<{ admitted, reason? }>
+export function membershipAdmits(didKey) { return membership().admits(didKey); }
+// e: { kind: "dropped" | "rotated", removedKeys: string[], version? } -> Promise<void>
+export function roomKeyEvent(e) { return membership().roomKeyEvent(e); }
 
 // ============================================================================
 // Storage File I/O -- OPTIONAL EXTENSION (Spec section 7.6)
