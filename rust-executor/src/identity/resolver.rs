@@ -960,6 +960,24 @@ impl Resolver {
         }
     }
 
+    /// Reads the trusted log of each person in `people` (`did:scid`) the key map does not hold
+    /// back into it from the cache: no store or key index call. For the re-check of stored
+    /// links, whose person names the log their verdict came from, so a log the map's bound
+    /// dropped judges them again. A person whose log the cache no longer trusts is skipped.
+    pub async fn read_logs(&self, people: &[&str]) {
+        let map = self.cache.key_map();
+        let mut seen = std::collections::HashSet::new();
+        for person in people {
+            let scid = super::cache::scid_from(person);
+            if !seen.insert(scid) || map.log(scid).is_some() {
+                continue;
+            }
+            if let Err(e) = self.cache.trusted(scid).await {
+                log::warn!("identity: the cached log of {scid} is unreadable: {e}");
+            }
+        }
+    }
+
     /// Fills the key map for the signers of links about to be checked: each `(did:key,
     /// anchor)` once. A listed signer's log is refreshed from the store when it last was more
     /// than [`ADMIT_FRESHNESS`] ago, whatever the link's anchor: a cached head admits a key
@@ -3960,6 +3978,65 @@ mod link_check_tests {
         assert_eq!(
             check_signed_with(&waiting, resolver.cache.key_map(), None, NOW).verdict,
             LinkVerdict::CantCheck
+        );
+    }
+
+    /// A "no log" answer older than `NO_LOG_TTL` is no answer: the next prepare asks the key
+    /// index again, and when that lookup fails the signer waits. Its unanchored link is
+    /// `cantCheck`, never `valid` with no person on the strength of the expired answer.
+    #[tokio::test]
+    async fn a_failed_lookup_after_an_expired_no_log_answer_leaves_the_link_cant_check() {
+        let store = Arc::new(FakeStore::new(vec![]));
+        let resolver = resolver_on(store.clone());
+        let signer = TestSigner::generate();
+        let expr: Expression<Link> = signer.sign(link());
+        let map = resolver.cache.key_map();
+        map.note_no_log_at(
+            &signer.multikey(),
+            Instant::now() - super::super::cache::NO_LOG_TTL - Duration::from_secs(1),
+        );
+        assert!(matches!(map.lookup(&signer.multikey()), KeyLookup::Unknown));
+
+        store.key_index_down.store(true, Ordering::SeqCst);
+        resolver.prepare(&[(expr.author.clone(), None)]).await;
+        assert_eq!(
+            store.key_owner_calls.load(Ordering::SeqCst),
+            1,
+            "asked again"
+        );
+        assert_eq!(
+            check_signed_with(&expr, map, None, NOW).verdict,
+            LinkVerdict::CantCheck
+        );
+    }
+
+    /// The bound of the key map's pending marks never drops a mark a batch just made. One
+    /// prepare with more unknown signers than the bound, the key index down: every signer is
+    /// noted pending, the first one before the set fills. Its unanchored link is `cantCheck`,
+    /// and so is the link of the signer noted once the set was full: neither is a key no log
+    /// lists.
+    #[tokio::test]
+    async fn a_full_pending_set_keeps_its_marks_and_waits_for_the_rest() {
+        use super::super::cache::KEY_MAP_BOUND;
+        let store = Arc::new(FakeStore::new(vec![]));
+        store.key_index_down.store(true, Ordering::SeqCst);
+        let resolver = resolver_on(store.clone());
+        let first: Expression<Link> = TestSigner::generate().sign(link());
+        let last: Expression<Link> = TestSigner::generate().sign(link());
+        let mut signers = vec![(first.author.clone(), None)];
+        signers.extend((0..KEY_MAP_BOUND - 1).map(|_| (TestSigner::generate().did, None)));
+        signers.push((last.author.clone(), None));
+        resolver.prepare(&signers).await;
+        let map = resolver.cache.key_map();
+        assert_eq!(
+            check_signed_with(&first, map, None, NOW).verdict,
+            LinkVerdict::CantCheck,
+            "noted before the set filled"
+        );
+        assert_eq!(
+            check_signed_with(&last, map, None, NOW).verdict,
+            LinkVerdict::CantCheck,
+            "noted once the set was full"
         );
     }
 }
