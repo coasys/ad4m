@@ -8,7 +8,11 @@
 //! update) or writes its links one by one (a collection write, a remove's cascade). With
 //! `batch_id` it writes into the caller's open batch and leaves it open: nothing is visible
 //! until the caller commits. A failure part way through a write into the caller's batch leaves
-//! what it staged there; the caller discards the batch.
+//! what it staged there; the caller discards the batch (`perspective.discardBatch`) rather than
+//! commit it to keep the calls that succeeded — earlier calls' staged work is the caller's,
+//! not this write's, to throw away. Reads the write does of the links it manages see the
+//! batch's staged work (`get_links_effective`); instance existence still reads committed state
+//! only, so create-then-update / -remove of a new instance in one batch fails `notFound`.
 
 use super::validate::resolve_collection;
 use super::{
@@ -45,8 +49,10 @@ pub struct InstanceCreate {
     /// A node to put the new instance under, through the parent class's own `children` relation
     /// when it has one, else `ad4m://has_child`.
     pub parent: Option<String>,
-    /// An open batch (`perspective.createBatch`) to write into. Absent: the create commits on
-    /// its own.
+    /// An open batch (`perspective.createBatch`) to stage the write into; it lands on the
+    /// batch's commit. Absent: the create commits on its own. On a non-validation error the
+    /// batch may hold a partial write — discard it (`perspective.discardBatch`), don't commit
+    /// it.
     pub batch_id: Option<String>,
 }
 
@@ -61,6 +67,7 @@ pub struct InstanceUpdate {
     /// Values by property name, at least one; single-valued properties only.
     #[ts(type = "Record<string, unknown>")]
     pub properties: Map<String, Value>,
+    /// An open batch to stage the write into; see `InstanceCreate`'s `batchId`.
     pub batch_id: Option<String>,
 }
 
@@ -73,6 +80,7 @@ pub struct InstanceUpdate {
 pub struct InstanceRemove {
     pub class_name: String,
     pub base_uri: String,
+    /// An open batch to stage the write into; see `InstanceCreate`'s `batchId`.
     pub batch_id: Option<String>,
 }
 
@@ -87,6 +95,7 @@ pub struct InstanceAddToCollection {
     pub collection: String,
     /// The item, usually another instance's URI.
     pub item_uri: String,
+    /// An open batch to stage the write into; see `InstanceCreate`'s `batchId`.
     pub batch_id: Option<String>,
 }
 
@@ -101,6 +110,7 @@ pub struct InstanceRemoveFromCollection {
     pub collection: String,
     /// The item as a read of the instance lists it.
     pub item_uri: String,
+    /// An open batch to stage the write into; see `InstanceCreate`'s `batchId`.
     pub batch_id: Option<String>,
 }
 
@@ -141,7 +151,9 @@ pub struct InstanceUpdated {
 pub struct InstanceRemoved {
     pub class_name: String,
     pub base_uri: String,
-    /// The links removed; `None` through an abstract class, whose classes' destructors ran.
+    /// The links the cascade removed from the effective graph; `None` through an abstract
+    /// class, whose classes' destructors ran. Inside a caller's batch they are staged, not
+    /// committed — including staged additions the call cancelled.
     pub links_removed: Option<usize>,
 }
 
@@ -154,7 +166,7 @@ pub struct CollectionItemAdded {
     /// The collection's canonical name.
     pub collection: String,
     pub item_uri: String,
-    /// 0 when the item was in the collection already.
+    /// 0 when the item was in the collection already (as the batch's effective graph has it).
     pub links_added: usize,
     pub already_member: bool,
 }
@@ -167,7 +179,9 @@ pub struct CollectionItemRemoved {
     pub base_uri: String,
     pub collection: String,
     pub item_uri: String,
-    /// 0 when the item was not in the collection.
+    /// 0 when the item was not in the collection (as the batch's effective graph has it).
+    /// Inside a batch, a member that only the batch had added counts too — it leaves by
+    /// cancelling the staged addition.
     pub links_removed: usize,
 }
 
@@ -423,7 +437,8 @@ pub async fn create(
     })
 }
 
-/// Set single-valued properties of an existing instance, in one batch.
+/// Set single-valued properties of an existing instance, in one batch. "Existing" means
+/// committed: an instance created in the same batch is not found yet (`notFound`).
 pub async fn update(
     perspective: &mut PerspectiveInstance,
     agent: &AgentContext,
@@ -477,8 +492,10 @@ pub async fn update(
     })
 }
 
-/// Remove an instance and every link touching it. Refuses when no instance of the class lives
-/// at the URI, so a wrong class or URI cannot delete something else.
+/// Remove an instance and every link touching it — the committed ones and, in a caller's
+/// batch, the ones the batch itself staged. Refuses when no committed instance of the class
+/// lives at the URI (one created in the same batch is not found yet), so a wrong class or URI
+/// cannot delete something else.
 pub async fn remove(
     perspective: &mut PerspectiveInstance,
     agent: &AgentContext,
@@ -530,7 +547,8 @@ pub async fn remove(
 }
 
 /// Add an item to a collection property of an instance. Adding an item that is already in the
-/// collection writes nothing (`linksAdded: 0`).
+/// collection writes nothing (`linksAdded: 0`); membership is read on the batch's effective
+/// graph, so a member the same batch dropped reads as out and one it added reads as in.
 pub async fn add_to_collection(
     perspective: &mut PerspectiveInstance,
     agent: &AgentContext,
@@ -648,7 +666,8 @@ pub async fn add_to_collection(
 
 /// Remove an item from a collection property of an instance: only the membership link, the item
 /// itself is untouched. Removing an item that is not in the collection writes nothing
-/// (`linksRemoved: 0`).
+/// (`linksRemoved: 0`); membership is read on the batch's effective graph, and a member that
+/// exists only inside the batch leaves by cancelling its staged addition.
 pub async fn remove_from_collection(
     perspective: &mut PerspectiveInstance,
     _agent: &AgentContext,

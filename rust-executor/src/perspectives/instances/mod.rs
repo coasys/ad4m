@@ -2,8 +2,9 @@
 //! the `perspective.instance*` RPC methods.
 //!
 //! Every write is checked against the class's SHACL shape before anything is written
-//! ([`validate::validate_properties`]: types, cardinality, required properties, `sh:in`); a
-//! rejection carries every [`ValidationError`] as data. Accepted writes go through the same
+//! ([`validate::validate_properties`]: types, required properties, single- vs multi-valued,
+//! `sh:in`); a rejection carries every [`ValidationError`] as data and writes nothing. Accepted
+//! writes go through the same
 //! `create_subject` / `update_subject` / link paths the per-class tools use, in one batch (the
 //! caller's, when it names one).
 //!

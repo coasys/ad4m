@@ -15,7 +15,10 @@ Entry points take `(&mut PerspectiveInstance, &AgentContext, params)`; the agent
 caller's `acts_as()`.
 
 Invariants:
-- Validate before writing: a refused write writes no link.
+- Validate before writing: a refused call writes and stages no link (validation runs first).
+  A failure that is not a refusal — a store error mid-write — can leave part of the write
+  staged in the caller's batch; the core never discards a batch it does not own, so the
+  caller must (`perspective.discardBatch`), not commit it to keep earlier calls.
 - No text here. Errors and results are data; MCP (`mcp/tools/instances/validate.rs`,
   `*_error` in each tool file) and the RPC (`instance_error`) word them. A new
   `ValidationProblem` or `WriteStep` needs its text in both.
@@ -23,6 +26,13 @@ Invariants:
   writes and the remove cascade write directly. With `batch_id`: checked open
   (`BatchNotFound`) before writing, everything goes into it, nothing is committed, and the
   caller's batch is never discarded here.
+- In a caller's batch, the reads a write does of the links it manages — collection
+  membership, the remove cascade — see the batch's effective graph
+  (`get_links_effective` in `perspective_instance/batch_view.rs`: committed + staged
+  additions − staged removals); a link that exists only inside the batch is removed by
+  `cancel_batch_addition`, not `remove_link`. Instance existence (`fetch_instance`,
+  `require_instance`) still reads committed state: a create+update/-remove of a new instance
+  in one batch fails `notFound`.
 
 Do not: add MCP- or RPC-specific wording, or read the token: take the `AgentContext`.
 Known wart: still calls `crate::mcp::shacl` for class names, predicates and link status.

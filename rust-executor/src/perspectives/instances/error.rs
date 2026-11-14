@@ -28,7 +28,8 @@ pub enum InstanceError {
     EmptyProperties,
     /// The batch the caller named is not open.
     BatchNotFound { batch_id: String },
-    /// The write breaks the class's shape. Nothing was written.
+    /// The write breaks the class's shape. Validation runs before any link write, so the call
+    /// staged and wrote nothing.
     Validation {
         class_name: String,
         errors: Vec<ValidationError>,
@@ -53,8 +54,9 @@ pub enum InstanceError {
         language: String,
         members: Vec<String>,
     },
-    /// The store failed at `step`. Before the commit nothing was written in the write's own
-    /// batch; a write into the caller's batch may have added to it.
+    /// The store failed at `step`. A write in its own batch wrote nothing (the batch is
+    /// dropped). A write into the caller's batch may already have staged part of itself into
+    /// it: the caller discards or commits the batch — earlier calls in it stay either way.
     Failed {
         class_name: String,
         step: WriteStep,
@@ -62,7 +64,9 @@ pub enum InstanceError {
         #[ts(type = "string")]
         error: AnyError,
     },
-    /// A remove outside a batch stopped part way: `removed` links had gone already.
+    /// A remove's cascade stopped part way. `removed` is how far it got on the effective
+    /// graph: links deleted already with no batch, or staged for removal (staged additions
+    /// cancelled) inside one — where they sit until the caller discards or commits.
     PartiallyRemoved {
         class_name: String,
         base_uri: String,

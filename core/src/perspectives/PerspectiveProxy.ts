@@ -1635,10 +1635,13 @@ export class PerspectiveProxy {
 
     /**
      * Creates an instance of a subject class, validated by the executor against the class's
-     * SHACL shape before anything is written (types, cardinality, required properties,
-     * `sh:in`): the same check as the MCP `instance_create` tool. A refused write rejects with
-     * an `RpcError` whose `data` is an `InstanceError` (status 422 and `kind: 'validation'`
-     * for a shape violation, with one `ValidationError` per property).
+     * SHACL shape before anything is written (each property's type, which are required, which
+     * take a single value, `sh:in`): the same check as the MCP `instance_create` tool. A refused
+     * write rejects with an `RpcError` whose `data` is an `InstanceError` (status 422 and
+     * `kind: 'validation'` for a shape violation, with one `ValidationError` per property) and
+     * stages nothing. With `batchId` a non-validation failure can leave part of the write
+     * staged in the batch — discard it (`perspective.discardBatch`), don't commit it to keep
+     * earlier calls.
      *
      * @example
      * const { baseUri } = await perspective.instanceCreate({ className: "Task", properties: { title: "Write" } });
@@ -1649,28 +1652,28 @@ export class PerspectiveProxy {
         return created;
     }
 
-    /** Sets single-valued properties of an instance, validated; the others stay. */
+    /** Sets single-valued properties of an instance, validated; the others stay. See {@link instanceCreate}. */
     async instanceUpdate(body: InstanceUpdate): Promise<InstanceUpdated> {
         const updated = await this.#client.instanceUpdate(this.#handle.uuid, body);
         invalidatePerspectiveCache(this.#handle.uuid);
         return updated;
     }
 
-    /** Removes an instance and every link to and from it. */
+    /** Removes an instance and every link to and from it. See {@link instanceCreate}. */
     async instanceRemove(body: InstanceRemove): Promise<InstanceRemoved> {
         const removed = await this.#client.instanceRemove(this.#handle.uuid, body);
         invalidatePerspectiveCache(this.#handle.uuid);
         return removed;
     }
 
-    /** Adds an item to a collection of an instance, validated. */
+    /** Adds an item to a collection of an instance, validated. See {@link instanceCreate}. */
     async instanceAddToCollection(body: InstanceAddToCollection): Promise<CollectionItemAdded> {
         const added = await this.#client.instanceAddToCollection(this.#handle.uuid, body);
         invalidatePerspectiveCache(this.#handle.uuid);
         return added;
     }
 
-    /** Removes an item from a collection of an instance. */
+    /** Removes an item from a collection of an instance. See {@link instanceCreate}. */
     async instanceRemoveFromCollection(body: InstanceRemoveFromCollection): Promise<CollectionItemRemoved> {
         const removed = await this.#client.instanceRemoveFromCollection(this.#handle.uuid, body);
         invalidatePerspectiveCache(this.#handle.uuid);

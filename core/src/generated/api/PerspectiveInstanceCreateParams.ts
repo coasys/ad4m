@@ -21,7 +21,9 @@ baseUri?: string,
  */
 parent?: string, 
 /**
- * An open batch (`perspective.createBatch`) to write into. Absent: the create commits on
- * its own.
+ * An open batch (`perspective.createBatch`) to stage the write into; it lands on the
+ * batch's commit. Absent: the create commits on its own. On a non-validation error the
+ * batch may hold a partial write — discard it (`perspective.discardBatch`), don't commit
+ * it.
  */
 batchId?: string, };

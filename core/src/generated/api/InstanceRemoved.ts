@@ -2,6 +2,8 @@
 
 export type InstanceRemoved = { className: string, baseUri: string, 
 /**
- * The links removed; `None` through an abstract class, whose classes' destructors ran.
+ * The links the cascade removed from the effective graph; `None` through an abstract
+ * class, whose classes' destructors ran. Inside a caller's batch they are staged, not
+ * committed — including staged additions the call cancelled.
  */
 linksRemoved: number | null, };
