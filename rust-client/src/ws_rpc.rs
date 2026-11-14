@@ -1079,12 +1079,16 @@ mod tests {
             "lq:2".into(),
             serde_json::json!({"link-added": ["p2", "p1"]}),
         );
-        let merged = merge_watches(&watches);
-        assert_eq!(merged["perspective-added"], serde_json::Value::Null);
-        assert_eq!(merged["query-subscription-update"], serde_json::Value::Null);
-        let mut got: Vec<String> = serde_json::from_value(merged["link-added"].clone()).unwrap();
-        got.sort();
-        assert_eq!(got, vec!["p1".to_string(), "p2".to_string()]);
+        // The whole object: `merged[key] == Null` also holds for a key
+        // the merge dropped.
+        assert_eq!(
+            merge_watches(&watches),
+            serde_json::json!({
+                "perspective-added": null,
+                "query-subscription-update": null,
+                "link-added": ["p1", "p2"],
+            })
+        );
     }
 
     #[test]
@@ -1092,7 +1096,7 @@ mod tests {
         let mut watches = WatchMap::new();
         watches.insert("a".into(), serde_json::json!({"ev": ["p1"]}));
         watches.insert("b".into(), serde_json::json!({"ev": null}));
-        assert_eq!(merge_watches(&watches)["ev"], serde_json::Value::Null);
+        assert_eq!(merge_watches(&watches), serde_json::json!({"ev": null}));
     }
 
     #[test]
@@ -1879,7 +1883,10 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(first_watch["query-subscription-update"], Value::Null);
+        // The whole filter, not `w[key] == Null`: indexing an absent key
+        // also yields `Null`, so that form passes on an empty watch.
+        let filter = serde_json::json!({"query-subscription-update": null});
+        assert_eq!(first_watch, filter);
 
         let (reconnected_tx, reconnected_rx) = oneshot::channel::<()>();
         let reconnected_tx = std::sync::Mutex::new(Some(reconnected_tx));
@@ -1904,17 +1911,13 @@ mod tests {
             .expect("on_reconnect never fired")
             .unwrap();
 
-        // The watch must have been re-sent on the new socket.
-        let mut saw_watch = false;
-        while let Ok(Some(w)) =
-            tokio::time::timeout(Duration::from_secs(5), watches_rx.recv()).await
-        {
-            if w["query-subscription-update"] == Value::Null {
-                saw_watch = true;
-                break;
-            }
-        }
-        assert!(saw_watch, "events.watch was not re-sent after reconnect");
+        // The watch must have been re-sent on the new socket, with the
+        // same filter: the key present, every perspective (`null`).
+        let restored = tokio::time::timeout(Duration::from_secs(5), watches_rx.recv())
+            .await
+            .expect("events.watch was not re-sent after reconnect")
+            .unwrap();
+        assert_eq!(restored, filter, "the restored watch lost its filter");
 
         // A call on the reconnected socket answers.
         let result: Value = client
