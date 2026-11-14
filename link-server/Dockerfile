@@ -12,9 +12,10 @@ COPY tsconfig.json ./
 COPY src/ ./src/
 # The identity core's WASM binding (membership judgement, key logs). It is generated, not
 # committed: run ad4m-identity-core/build-node.sh (from the repo) before `docker build`, so
-# link-server/identity-core/ is in the build context.
+# link-server/identity-core/ is in the build context. `build:server` compiles the server
+# alone: the binding needs the repo and a Rust toolchain, which the image has neither of.
 COPY identity-core/ ./identity-core/
-RUN npm run build
+RUN npm run build:server
 # Strip devDependencies (typescript, tsx, @types/*) now that the build is
 # done, so the compiled native addon ships without dragging the toolchain
 # (or build-essential) into the runtime image.

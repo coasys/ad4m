@@ -8,8 +8,9 @@
   },
   "scripts": {
     "build:identity-core": "bash ../ad4m-identity-core/build-node.sh",
-    "build": "pnpm run build:identity-core && tsc && chmod +x dist/index.js",
-    "pretest": "pnpm run build:identity-core",
+    "build:server": "tsc && chmod +x dist/index.js",
+    "build": "npm run build:identity-core && npm run build:server",
+    "pretest": "npm run build:identity-core",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
     "test": "node --import tsx --test 'tests/!(acl|admin-transfer).test.ts'",
