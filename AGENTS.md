@@ -240,6 +240,15 @@ This runs all four nightly jobs.
   E18 makes the same cut, then fires `online` in the participant process
   (`Participant.networkChanged`). Both assert the call came back in place:
   u2 saw no departures, so no rebuild.
+- `@roamhq/wrtc` fires `iceconnectionstatechange` when libwebrtc's legacy
+  ICE state changes, but `iceConnectionState` returns the standardized
+  state, which libwebrtc changes just after. On a loaded host a listener
+  reads the old state, and no event comes for the new one: E17's cut read
+  "completed", the SDK did not restart ICE, and the call stayed silent.
+  `specPeerConnection` (`e2e/webrtc.ts`) looks at the state again 10 ms,
+  100 ms and 1 s after each event and fires one more event when it changed.
+  A browser fires the event for the state it reports. Do not take this out,
+  and do not read a state change from the binding's event alone.
 - A participant process killed by a signal nobody sent (the libwebrtc binding
   crashes rarely while closing) reruns the scenario once; an assertion failure
   never does.
