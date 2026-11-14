@@ -172,8 +172,8 @@ async fn rekey(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpc
     answer(crate::identity::rekey::rekey_main().await?)
 }
 
-/// `identity.custodyStatus`: the custody channel is open, and the device keys a master key
-/// for this computer is sealed to.
+/// `identity.custodyStatus`: the custody channel is open, and the main agent's device keys
+/// (public keys only).
 async fn custody_status(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     crate::identity::custody::admit(&ctx.session, crate::config::custody_channel_on())?;
     answer(crate::identity::custody::main_device_keys()?)
