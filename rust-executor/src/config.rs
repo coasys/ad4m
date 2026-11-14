@@ -168,11 +168,12 @@ pub struct Ad4mConfig {
     /// Stop gracefully (exit 0) when stdin reaches its end: a supervisor holds the pipe open,
     /// so the executor never outlives it (`--watch-stdin`).
     pub watch_stdin: Option<bool>,
-    /// This executor serves the custody channel: the desktop app's custody service takes a
-    /// master key that arrived sealed to this computer from it, with the custody credential on
-    /// a loopback listener (`--custody-channel`). Never together with multi-user mode
-    /// ([`refuse_custody_channel_with_multi_user`]), never without a custody credential
-    /// ([`refuse_custody_channel_without_its_credential`]).
+    /// This executor serves the custody channel: the desktop app's custody service, which keeps
+    /// the master key, reads the main agent's device keys from it and takes a master key sent to
+    /// this computer, which the executor opens from its inbox and passes on without storing it;
+    /// with the custody credential on a loopback listener (`--custody-channel`). Never together
+    /// with multi-user mode ([`refuse_custody_channel_with_multi_user`]), never without a custody
+    /// credential ([`refuse_custody_channel_without_its_credential`]).
     pub custody_channel: Option<bool>,
     /// The custody channel's own credential: the first line of stdin at start
     /// ([`read_custody_credential`]), never the environment or a flag, which other processes
