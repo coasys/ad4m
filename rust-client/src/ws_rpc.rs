@@ -334,7 +334,9 @@ impl WsRpcClient {
                 reader.abort();
             }
         }
-        let _ = shared.connected.send(false);
+        // `send_replace`, not `send`: with no live receivers `send` drops
+        // the value and `is_connected` keeps reporting the stale flag.
+        shared.connected.send_replace(false);
 
         // Fail every in-flight call — the executor can't answer them now.
         let mut map = shared.pending.lock().await;
@@ -372,7 +374,7 @@ impl WsRpcClient {
                         }
                         let reader = Self::spawn_reader(read, shared2.clone());
                         *shared2.reader.lock().await = Some(reader);
-                        let _ = shared2.connected.send(true);
+                        shared2.connected.send_replace(true);
 
                         // Re-register interest first — subscription re-opens
                         // fired below need `query-subscription-update` watched.
@@ -493,7 +495,7 @@ impl WsRpcClient {
             h.abort();
         }
         *self.shared.sink.lock().await = None;
-        let _ = self.shared.connected.send(false);
+        self.shared.connected.send_replace(false);
         let mut map = self.shared.pending.lock().await;
         for (_, tx) in map.drain() {
             let _ = tx.send(Err(anyhow!("WebSocket connection closed")));
@@ -779,6 +781,42 @@ mod tests {
         client.close().await;
         let result: Result<Value> = client.call("test.method", serde_json::json!({})).await;
         assert!(result.is_err());
+    }
+
+    /// F7: an idle close must flip `is_connected`. `watch::Sender::send`
+    /// drops the new value when no receiver is live — which is precisely
+    /// when nothing reads `is_connected` — so the flag must be stored with
+    /// `send_replace` instead.
+    #[tokio::test]
+    async fn an_idle_socket_close_marks_the_client_disconnected() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let client = WsRpcClient::connect(fake.url(), "").await.unwrap();
+        assert!(client.is_connected());
+
+        // A call in flight when the socket dies is failed by
+        // `handle_disconnect` — its error is the barrier that the whole
+        // disconnect path (flag included) ran.
+        let caller = WsRpcClient {
+            shared: client.shared.clone(),
+        };
+        let call =
+            tokio::spawn(async move { caller.call_value("x.y", serde_json::json!({})).await });
+        let req = fake.next_request().await;
+        assert_eq!(req["type"], "x.y");
+        fake.drop_connection();
+        assert!(call.await.unwrap().is_err());
+
+        // Reconnect cannot land for at least the first backoff (~500 ms),
+        // so this reads the flag during the provably-disconnected window.
+        assert!(
+            !client.is_connected(),
+            "is_connected stayed true after the socket died"
+        );
+
+        // A permanent close reports disconnected too.
+        client.close().await;
+        assert!(!client.is_connected());
     }
 
     #[tokio::test]
