@@ -66,9 +66,14 @@ const CHANGES_CAPACITY: usize = 1024;
 /// How long a "no log lists this key" answer holds: a device-only key can gain a log later (a
 /// guest's claim lists it as `d1`), so after this the next read asks the store again.
 pub const NO_LOG_TTL: Duration = Duration::from_secs(15 * 60);
-/// The most logs, and the most "no log" answers, the key map holds. Past it the map starts
-/// over and fills again from the cache and the store.
-const KEY_MAP_BOUND: usize = 16_384;
+/// How long a pending mark holds against the bound, and how long a full set of marks makes every
+/// key with no fresh answer count as pending after the last key it could not hold. Long enough
+/// for the batch that noted a key to judge its links; a later batch notes the key again.
+const PENDING_TTL: Duration = Duration::from_secs(15 * 60);
+/// The most logs, the most "no log" answers and the most pending marks the key map holds.
+/// Past it the logs and the "no log" answers start over and fill again from the cache and the
+/// store; the pending marks never do ([`KeyMap::note_pending`]).
+pub(crate) const KEY_MAP_BOUND: usize = 16_384;
 
 /// The trusted part of one log: its state and the seq of its accepted, store-signed head.
 /// Nothing past `trusted` counts.
@@ -99,8 +104,11 @@ struct KeyMapInner {
     /// Signing keys asked about and not answered yet: the key index not asked (a batch's
     /// discovery cap) or not answering, or a log that lists the key only past its
     /// store-signed head. An unanchored link by such a key is `CantCheck`, not `Valid` as
-    /// one by a key no log lists: the re-check asks again.
-    pending: HashSet<String>,
+    /// one by a key no log lists: the re-check asks again. Each with when it was last noted.
+    pending: HashMap<String, Instant>,
+    /// While set and in the future: the pending marks were full when a key was noted, so a
+    /// key with no fresh answer counts as pending ([`KeyMap::note_pending`]).
+    pending_full_until: Option<Instant>,
     /// The SCIDs of local identities (a row in `identity_agents`): the bound never drops them.
     pinned: HashSet<String>,
     /// SCID → when (unix seconds, this run) the configured store last confirmed its trusted
@@ -230,8 +238,25 @@ impl KeyMap {
         inner.no_log.insert(key.to_string(), Instant::now());
     }
 
+    /// Test-only: the store's "no log" for `key`, given at `at` (an answer that has expired).
+    #[cfg(test)]
+    pub(crate) fn note_no_log_at(&self, key: &str, at: Instant) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.pending.remove(key);
+            inner.no_log.insert(key.to_string(), at);
+        }
+    }
+
     /// Notes that `key` was asked about and has no answer yet ([`KeyMapInner::pending`]);
     /// cleared by the log that lists it or the store's "no log".
+    ///
+    /// The bound never drops a mark a batch just made: that would turn the unanchored link of
+    /// a key it noted from `cantCheck` into `valid` with no person, and nothing re-checks a
+    /// `valid` link of a key no log lists. A full set first drops the marks older than
+    /// [`PENDING_TTL`] (their batches judged long ago; a new batch notes its keys again).
+    /// When it is still full, the key is not held, and for [`PENDING_TTL`] from then every
+    /// key with no fresh answer is pending ([`KeyMap::is_pending`]): the map cannot tell the
+    /// keys it could not hold from the others.
     pub fn note_pending(&self, key: &str) {
         if let Ok(mut inner) = self.inner.lock() {
             // An expired "no log" answer is none: `lookup` already reads it
@@ -244,21 +269,41 @@ impl KeyMap {
             {
                 inner.no_log.remove(key);
             }
-            if !inner.keys.contains_key(key) && !inner.no_log.contains_key(key) {
-                if inner.pending.len() >= KEY_MAP_BOUND {
-                    inner.pending.clear();
-                }
-                inner.pending.insert(key.to_string());
+            if inner.keys.contains_key(key) || inner.no_log.contains_key(key) {
+                return;
             }
+            let now = Instant::now();
+            if inner.pending.len() >= KEY_MAP_BOUND && !inner.pending.contains_key(key) {
+                inner
+                    .pending
+                    .retain(|_, at| now.duration_since(*at) < PENDING_TTL);
+                if inner.pending.len() >= KEY_MAP_BOUND {
+                    inner.pending_full_until = Some(now + PENDING_TTL);
+                    return;
+                }
+            }
+            inner.pending.insert(key.to_string(), now);
         }
     }
 
-    /// Whether `key` is asked about and unanswered ([`KeyMap::note_pending`]).
+    /// Whether `key` is asked about and unanswered ([`KeyMap::note_pending`]): it holds a
+    /// mark, or the marks were full within [`PENDING_TTL`] and the map has no answer for it
+    /// (no log lists it, no fresh "no log").
     pub fn is_pending(&self, key: &str) -> bool {
-        self.inner
-            .lock()
-            .map(|inner| inner.pending.contains(key))
-            .unwrap_or(false)
+        let Ok(inner) = self.inner.lock() else {
+            return false;
+        };
+        if inner.pending.contains_key(key) {
+            return true;
+        }
+        inner
+            .pending_full_until
+            .is_some_and(|until| Instant::now() < until)
+            && !inner.keys.contains_key(key)
+            && inner
+                .no_log
+                .get(key)
+                .is_none_or(|at| at.elapsed() >= NO_LOG_TTL)
     }
 
     /// The keys of `state` (listed at or below `trusted`) that hold a "no log" answer, fresh or
@@ -273,7 +318,7 @@ impl KeyMap {
             .chain(state.keys.values())
             .filter(|r| {
                 r.added <= trusted
-                    && (inner.no_log.contains_key(&r.sign) || inner.pending.contains(&r.sign))
+                    && (inner.no_log.contains_key(&r.sign) || inner.pending.contains_key(&r.sign))
             })
             .map(|r| r.sign.clone())
             .collect()
@@ -1594,6 +1639,45 @@ pub(crate) mod tests {
             check_signed_with(&expr, &map, None, 1_000).verdict,
             LinkVerdict::CantCheck
         );
+    }
+
+    /// The bound on pending marks never drops one a batch just made. At capacity a key noted
+    /// before keeps its mark; one noted past the bound is pending too, as is any key with no
+    /// fresh answer while the set stays full; a key with a fresh "no log" is not. A full set
+    /// first makes room by dropping marks older than `PENDING_TTL`.
+    #[test]
+    fn a_full_set_of_pending_marks_drops_no_fresh_mark() {
+        let map = KeyMap::new();
+        map.note_pending("z6MkFirst");
+        for i in 1..KEY_MAP_BOUND {
+            map.note_pending(&format!("z6MkFill{i}"));
+        }
+        assert_eq!(map.inner.lock().unwrap().pending.len(), KEY_MAP_BOUND);
+        map.note_pending("z6MkPast");
+        assert!(map.is_pending("z6MkFirst"), "noted before the set filled");
+        assert!(map.is_pending("z6MkPast"), "noted once it was full");
+        assert!(
+            map.is_pending("z6MkNeverNoted"),
+            "no fresh answer while full"
+        );
+        map.note_no_log("z6MkAnswered");
+        assert!(!map.is_pending("z6MkAnswered"), "a fresh no-log answer");
+        assert_eq!(map.inner.lock().unwrap().pending.len(), KEY_MAP_BOUND);
+
+        // Marks older than the TTL make room; the fresh ones stay.
+        let map = KeyMap::new();
+        {
+            let mut inner = map.inner.lock().unwrap();
+            let old = Instant::now() - PENDING_TTL - Duration::from_secs(1);
+            for i in 0..KEY_MAP_BOUND - 1 {
+                inner.pending.insert(format!("z6MkOld{i}"), old);
+            }
+        }
+        map.note_pending("z6MkFresh");
+        map.note_pending("z6MkNext");
+        assert!(map.is_pending("z6MkFresh") && map.is_pending("z6MkNext"));
+        assert!(!map.is_pending("z6MkOld0"), "a stale mark went");
+        assert_eq!(map.inner.lock().unwrap().pending.len(), 2);
     }
 
     /// The store key [`FakeStore`] signs its heads with.

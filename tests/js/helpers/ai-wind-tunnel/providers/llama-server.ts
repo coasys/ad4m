@@ -14,8 +14,25 @@ import { postJson } from "../http.js";
 import { installModelFiles, installRuntime } from "../install.js";
 import { assertNotReserved, freePort, spawnLogged, waitForHttp } from "../procs.js";
 import { chatTranscriptionRequest, parseChatTranscript, startAudioFront, type AudioFront, type SttPrompt } from "./audio-front.js";
-import type { CellModel } from "../types.js";
+import type { CellModel, Service } from "../types.js";
 import { assertAttachedModel, envUrl, type Driver, type RunContext, type Served, type Session, type Variant } from "./types.js";
+
+/**
+ * Flags that shape serving, recorded with the cell and recommended with it.
+ * A matrix `serverFlags` list is the cell's flags, used as given: a value with spaces
+ * (a reasoning-budget message) stays one element, and `--reasoning off` is not appended
+ * beside a cell that already sets reasoning. Without that list, an LLM runs with thinking
+ * off — an app's `ai.prompt` cannot cap it, and a thinking model otherwise spends the
+ * context and answers nothing — embeddings are marked as such, and transcription is one
+ * short slot.
+ */
+export function llamaServerFlags(model: Pick<CellModel, "context" | "serverFlags">, service: Service, gpu: boolean): string[] {
+  if (model.serverFlags?.length) return [...model.serverFlags];
+  const context = service === "stt" ? ["-c", "4096", "-np", "1"] : ["-c", String(model.context ?? 8192)];
+  const offload = gpu ? ["-ngl", "999"] : [];
+  const role = service === "embeddings" ? ["--embeddings"] : ["--reasoning", "off"];
+  return [...context, ...offload, ...role];
+}
 
 /**
  * How an audio model is asked to transcribe. Qwen3-ASR only transcribes and takes the audio
@@ -153,14 +170,8 @@ export const llamaServer: Driver = {
         const { file, files } = await installModelFiles(ctx.manifest, model.modelId, ctx.log);
         if (service === "stt" && !files.mmproj) throw new Error(`manifest model ${model.modelId} has no 'mmproj' file: llama-server hears audio through its projector`);
         const port = await freePort();
-        // The flags that shape serving (recorded with the cell, and recommended with it).
-        // Thinking is off: an app's `ai.prompt` cannot turn it off or cap it, and a thinking
-        // model then spends the whole context thinking and answers nothing.
-        // Transcription: one utterance per request (the executor sends a stream's utterances
-        // one at a time), so one slot with a short context. An audio model hears through its
-        // projector (`--mmproj`, recorded by file name).
-        const context = service === "stt" ? ["-c", "4096", "-np", "1"] : ["-c", String(model.context ?? 8192)];
-        const flags = [...context, ...(gpu ? ["-ngl", "999"] : []), ...(service === "embeddings" ? ["--embeddings"] : ["--reasoning", "off"])];
+        // Transcription hears through its projector (`--mmproj`, recorded by file name).
+        const flags = llamaServerFlags(model, service, gpu);
         const args = ["-m", file, "--host", "127.0.0.1", "--port", String(port), "--alias", model.remoteModel, "-t", String(Math.min(16, os.cpus().length)), ...flags];
         if (files.mmproj) {
           args.push("--mmproj", files.mmproj);

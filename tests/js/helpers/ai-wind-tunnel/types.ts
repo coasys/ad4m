@@ -45,6 +45,11 @@ export interface CellModel {
   voice?: string;
   /** llama-server's context in tokens (`-c`); left out: 8192. A model meant for long prompts is measured at the context it is recommended with. */
   context?: number;
+  /**
+   * llama-server flags for this cell, used as given (a value with spaces is one element).
+   * Left out: the harness's defaults (8k context unless `context` is set, full offload on a GPU, thinking off for an LLM).
+   */
+  serverFlags?: string[];
 }
 
 /** One cell of the matrix before it runs. */

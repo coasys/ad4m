@@ -326,7 +326,11 @@ the offer's state).
   kept; the index is not asked again for 30 s (`BREAKER`). An unanchored link by an unknown
   key stays `valid` with no person; an anchored one is `cantCheck`. One `prepare` asks the
   index about at most `DISCOVERY_PER_BATCH` (64) signers the key map does not know; the
-  others stay unknown for that batch and are found by a later batch or the re-check.
+  others stay unknown for that batch and are found by a later batch or the re-check. A key
+  asked about and unanswered is `pending` (`KeyMap::note_pending`): its unanchored link is
+  `cantCheck`. The bound (`KEY_MAP_BOUND`) never drops a fresh mark: a full set drops marks
+  older than `PENDING_TTL`, and if still full, every key with no fresh answer counts as
+  pending for `PENDING_TTL` (`pending_full_until`).
 - **The person** is derived, never on the wire: the `did:scid` of the signer's log (a bot
   key: its owner), only for a `valid` link. The link store keeps it beside the verdict
   (`ad4m://ontology/person`, `ad4m://ontology/linkVerdict`) for SPARQL; `proofValid` is `true`
@@ -339,7 +343,12 @@ the offer's state).
   (`verdict::replaces`): the stored `valid` is the order the executor knows, and a log that
   is out of the key map for a while (before `load_held`, an eviction, `identity.resetLog`)
   must not cost it. `invalid` and `flagged` need no such guard: they are judged again from
-  the log alone once it is back. Reads page by
+  the log alone once it is back. Before judging, a re-check reads back from the cache the
+  log each stored person names when the map does not hold it (`identity::read_logs_of`, no
+  store or index call). When the change receiver lags (a start-up load past the bound
+  overflows `CHANGES_CAPACITY` while it evicts logs), `lag_scopes` re-checks the keys the map
+  lists and then every link stored with a person (`Recheck::Logged`), so a lost change of a
+  log already evicted is still made up for. Reads page by
   reifier IRI (`RECHECK_BATCH` rows): a key's links are read to the last page; the
   `cantCheck` pass reads one page per tick from `recheck_cursor` and wraps at the end, so
   links that stay unresolvable do not hide the ones after them. Rewritten links go through

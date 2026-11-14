@@ -294,7 +294,7 @@
       "sizeBytes": 16564259744,
       "license": "Apache-2.0",
       "params": "27B",
-      "memoryBytes": 21000000000
+      "memoryBytes": 21900000000
     },
     "nomic-embed-text-v1.5-q8_0": {
       "service": "embeddings",
