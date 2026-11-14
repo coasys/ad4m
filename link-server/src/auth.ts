@@ -100,11 +100,36 @@ export const AUTH_SKEW_MS = 5 * 60_000;
 const AUTH_REPLAY_MS = 2 * AUTH_SKEW_MS;
 
 /**
- * What a key signs to authenticate to a room (protocol 2). Like every executor signature, the
- * signature is over SHA-256 of these bytes (`agentSignStringHex`).
+ * What a key signs to authenticate to a room of the server at `origin` (protocol 2). Like every
+ * executor signature, the signature is over SHA-256 of these bytes (`agentSignStringHex`). The
+ * origin (`publicOrigin`) binds the signature to this server: one made for another server, that
+ * a server could relay here within the clock window, names another origin and is refused.
  */
-export function authMessage(roomId: string, timestamp: number): string {
-  return `coasys-link-server:auth:2:${roomId}:${timestamp}`;
+export function authMessage(origin: string, roomId: string, timestamp: number): string {
+  return `coasys-link-server:auth:2:${origin}:${roomId}:${timestamp}`;
+}
+
+/**
+ * The origin of a server URL as the auth message names it: scheme, host and port, lower case,
+ * no trailing slash, the scheme's default port dropped (`https://links.example.org`,
+ * `http://127.0.0.1:3456`). Throws for anything but an http(s) origin: a path, query, fragment
+ * or user part is refused rather than dropped, so a configured value means what it says.
+ */
+export function publicOrigin(value: string): string {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error(`not an origin: "${value}" (expected scheme://host[:port], e.g. https://links.example.org)`);
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") {
+    throw new Error(`not an http(s) origin: "${value}"`);
+  }
+  if (url.pathname !== "/" || url.search !== "" || url.hash !== "" || url.username !== "" || url.password !== "") {
+    throw new Error(`an origin has no path, query, fragment or user: "${value}"`);
+  }
+  // Lower-cases the scheme and host and drops the default port and the trailing slash.
+  return url.origin;
 }
 
 /**

@@ -106,6 +106,10 @@ export interface TestServerHandle {
  * encryption and sockets authenticate fresh device-only keys, which only auto-admit lets in.
  * The membership suites (`membership`, `rotate`, `revocation`, `admission`, `operator`) turn
  * it off and sign with the fixture's persons.
+ *
+ * The server takes auth signed for the origin a request names in its Host header
+ * (`hostOrigin`) unless `opts` says otherwise: the port is random, so `url` is known only once
+ * it listens. The origin suites set `publicOrigins` and turn it off.
  */
 export async function startTestServer(opts: Partial<ServerOptions> = {}): Promise<TestServerHandle> {
   const dataDir = mkdtempSync(path.join(tmpdir(), "link-server-test-"));
@@ -115,6 +119,7 @@ export async function startTestServer(opts: Partial<ServerOptions> = {}): Promis
     logger: false,
     telepresenceGraceMs: 300,
     autoAdmit: true,
+    hostOrigin: true,
     storeUrl: store.url,
     storeHeadKeys: [STORE_HEAD_KEY],
     ...opts,
@@ -176,7 +181,7 @@ export interface AuthAnswer {
 
 /** `POST /rooms/:roomId/auth` (protocol 2) for `agent`: the raw answer. */
 export async function authAs(serverUrl: string, roomId: string, agent: TestAgent): Promise<JsonResponse<AuthAnswer>> {
-  return postJson<AuthAnswer>(`${serverUrl}/rooms/${roomId}/auth`, authBody(agent, roomId));
+  return postJson<AuthAnswer>(`${serverUrl}/rooms/${roomId}/auth`, authBody(agent, serverUrl, roomId));
 }
 
 /**
@@ -348,14 +353,22 @@ export async function clientSideRotate(
 ): Promise<ClientRotateResult> {
   const roomKey = generateRoomKey();
 
-  const dids = await admittedKeys(serverUrl, roomId, adminToken);
+  const members = await getJson<{ keys: Array<{ did: string }>; latestKeyVersion: number }>(
+    `${serverUrl}/rooms/${roomId}/members`,
+    adminToken,
+  );
+  if (members.status !== 200) {
+    throw new Error(`members fetch failed: ${members.status} ${JSON.stringify(members.body)}`);
+  }
+  const dids = members.body.keys.map((k) => k.did);
+  const version = members.body.latestKeyVersion + 1;
   const keys = dids.map((did) => ({ did, encryptedKey: sealToDid(did, roomKey) }));
 
   const rotateRes = await postJson<{
     version: number;
     recipients: string[];
     membersNeedingHistoricalKeys?: Array<{ did: string; missingVersions: number[] }>;
-  }>(`${serverUrl}/rooms/${roomId}/keys/rotate`, { keys, commitment: roomKeyCommitment(roomKey) }, adminToken);
+  }>(`${serverUrl}/rooms/${roomId}/keys/rotate`, { keys, commitment: roomKeyCommitment(roomKey), version }, adminToken);
 
   if (rotateRes.status !== 200) {
     throw new Error(`rotate failed: ${rotateRes.status} ${JSON.stringify(rotateRes.body)}`);

@@ -4,17 +4,22 @@
 //!
 //! ```ts
 //! type SealedBox = { ephemeralPublicKey: string; nonce: string; ciphertext: string }; // hex
-//! function sealRoomKey(roomKey: Uint8Array, recipientX25519: Uint8Array): SealedBox;
-//! function openRoomKey(sealed: SealedBox, myX25519Secret: Uint8Array): Uint8Array;
+//! function roomKeyContext(roomId: string, version: number): string; // coasys:room-key:<roomId>:<version>
+//! function sealRoomKey(roomKey: Uint8Array, recipientX25519: Uint8Array, context: string): SealedBox;
+//! function openRoomKey(sealed: SealedBox, myX25519Secret: Uint8Array, context: string): Uint8Array;
 //! function x25519Public(secret: Uint8Array): Uint8Array;
 //! function linkHashKey(roomKeyV1: Uint8Array): Uint8Array;
 //! function randomRoomKey(): Uint8Array;
 //! ```
 //!
-//! The envelope is the language's `SealedBox` (`sealToDid`) byte for byte, so nothing on the
-//! wire changes; the seal binds no context (the language's seal has no associated data, and
-//! `vectors/room-key-seal.json` pins it). Every error is thrown as an `Error` whose message
-//! says what was wrong; none carries key bytes. Randomness comes from `crypto.getRandomValues`.
+//! The seal is the keyring's room-key seal v2 (`seal_room_key` / `open_room_key`): a room key
+//! version is bound to its room and version by the context
+//! `coasys:room-key:<roomId>:<version>` (`roomKeyContext`), the AES-GCM associated data, under
+//! its own HKDF tag (`ad4m:room-key-seal:v2`). A box opens only under the context it was sealed
+//! with, so a server cannot serve one room's box (or one version's) as another's. The envelope
+//! keeps the shape of the language's `SealedBox`; `vectors/room-key-seal-v2.json` pins the
+//! bytes. An empty context is refused. Every error is thrown as an `Error` whose message says
+//! what was wrong; none carries key bytes. Randomness comes from `crypto.getRandomValues`.
 //!
 //! # Where secret bytes live
 //!
@@ -40,8 +45,8 @@
 #![forbid(unsafe_code)]
 
 use ad4m_keyring::{
-    hkdf_subkey, open_from_x25519, random_key, seal_to_x25519, tags, KeyringError, SealedEnvelope,
-    SecretKey,
+    hkdf_subkey, open_room_key as open_bound, random_key, room_key_context as context_of,
+    seal_room_key as seal_bound, tags, KeyringError, SealedEnvelope, SecretKey,
 };
 use js_sys::Uint8Array;
 use wasm_bindgen::prelude::*;
@@ -75,23 +80,30 @@ fn to_js(secret: &[u8]) -> Uint8Array {
     Uint8Array::from(secret)
 }
 
-/// Seals the 32-byte `room_key` to the X25519 public key `recipient_x25519` with a fresh
-/// ephemeral key and nonce: the `SealedBox` object.
+/// Seals the 32-byte `room_key` to the X25519 public key `recipient_x25519`, bound to
+/// `context` (`roomKeyContext(roomId, version)`), with a fresh ephemeral key and nonce: the
+/// `SealedBox` object.
 #[wasm_bindgen(js_name = sealRoomKey)]
-pub fn seal_room_key(mut room_key: Vec<u8>, recipient_x25519: &[u8]) -> Result<JsValue, JsError> {
+pub fn seal_room_key(
+    mut room_key: Vec<u8>,
+    recipient_x25519: &[u8],
+    context: &str,
+) -> Result<JsValue, JsError> {
     let room_key = take_secret(&mut room_key).map_err(thrown)?;
     let key = SecretKey::from_slice(&*room_key).map_err(thrown)?;
     let recipient = bytes32(recipient_x25519).map_err(thrown)?;
-    let envelope = seal_to_x25519(&key, &recipient).map_err(thrown)?;
+    let envelope = seal_bound(&key, &recipient, context).map_err(thrown)?;
     let text = serde_json::to_string(&envelope).map_err(|e| JsError::new(&e.to_string()))?;
     js_sys::JSON::parse(&text).map_err(|_| JsError::new("the envelope has no JSON form"))
 }
 
-/// Opens a `SealedBox` sealed to the X25519 public key of `my_x25519_secret`: the room key.
+/// Opens a `SealedBox` sealed to the X25519 public key of `my_x25519_secret` under `context`:
+/// the room key. Throws for a box sealed for another room or version.
 #[wasm_bindgen(js_name = openRoomKey)]
 pub fn open_room_key(
     sealed: JsValue,
     mut my_x25519_secret: Vec<u8>,
+    context: &str,
 ) -> Result<Uint8Array, JsError> {
     let secret = take_secret(&mut my_x25519_secret).map_err(thrown)?;
     let text = js_sys::JSON::stringify(&sealed)
@@ -100,8 +112,14 @@ pub fn open_room_key(
         .ok_or_else(|| JsError::new("the sealed box is not JSON"))?;
     let envelope: SealedEnvelope =
         serde_json::from_str(&text).map_err(|e| JsError::new(&format!("not a sealed box: {e}")))?;
-    let key = open_from_x25519(&envelope, &secret).map_err(thrown)?;
+    let key = open_bound(&envelope, &secret, context).map_err(thrown)?;
     Ok(to_js(key.expose_secret()))
+}
+
+/// The context a room key version is sealed under: `coasys:room-key:<roomId>:<version>`.
+#[wasm_bindgen(js_name = roomKeyContext)]
+pub fn room_key_context(room_id: &str, version: u32) -> String {
+    context_of(room_id, version)
 }
 
 /// The X25519 public key of a 32-byte X25519 secret (clamped as X25519 clamps it).

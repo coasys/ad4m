@@ -2,8 +2,9 @@
  * Protocol 2 authentication against link-server, plus token-expiry tracking so callers can
  * request a guaranteed-fresh JWT without re-authenticating on every single call.
  *
- * One request: the agent's key signs `coasys-link-server:auth:2:<roomId>:<timestamp>`
- * (`agentSignStringHex`) and its room key statement: its X25519 key, the public half of
+ * One request: the agent's key signs `coasys-link-server:auth:2:<origin>:<roomId>:<timestamp>`
+ * (`agentSignStringHex`; `<origin>` is the server URL's origin, so the signature is good on this
+ * server only) and its room key statement: its X25519 key, the public half of
  * `agentRoomKeySeed`, signed raw over the identity core's `coasys:room-key` bytes (`agentSign`,
  * K7). The server answers a token and whether the room admits the key now.
  */
@@ -12,7 +13,7 @@ import { x25519Public } from "../keyring/keyring.js";
 import { getAgent, getConfig } from "./adapters.js";
 import * as api from "./api.js";
 import { bytesToHex } from "./encryption.js";
-import { authMessage, roomKeySigningBytes } from "./room.js";
+import { authMessage, roomKeySigningBytes, serverOrigin } from "./room.js";
 
 export interface AuthSession {
     token: string;
@@ -73,8 +74,9 @@ export async function authenticate(): Promise<AuthSession> {
     const did = agent.did();
     const { x25519PublicKey, x25519Signature } = await roomKeyIdentity();
     const timestamp = Date.now();
-    const signature = agent.signStringHex(authMessage(config.roomId, timestamp));
-    const res = await api.authenticate(config, { did, signature, timestamp, x25519PublicKey, x25519Signature });
+    const origin = serverOrigin(config.serverUrl);
+    const signature = agent.signStringHex(authMessage(origin, config.roomId, timestamp));
+    const res = await api.authenticate(config, { did, origin, signature, timestamp, x25519PublicKey, x25519Signature });
 
     const session: AuthSession = { token: res.token, expiresAt: parseJwtExpiryMs(res.token), admitted: res.admitted };
     _session = session;

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { publicOrigin } from "./auth.js";
 import { isLoopbackHost, readOperatorToken } from "./operator.js";
 import { buildServer } from "./server.js";
 
@@ -7,6 +8,9 @@ interface CliArgs {
   host: string;
   dataDir: string;
   autoAdmit: boolean;
+  /** The origins auth is signed for (normalised); empty on a development server taking Host's. */
+  publicOrigins: string[];
+  hostOrigin: boolean;
   name?: string;
   storeUrl?: string;
   storeHeadKeys: string[];
@@ -26,6 +30,15 @@ Options:
   --port <number>    Port to listen on (default: 3456)
   --data <dir>       Directory for the SQLite database (default: ./data)
   --host <address>   Address to bind (default: 0.0.0.0)
+  --public-origin <origin>
+                     The origin clients reach this server at, e.g.
+                     https://links.example.org (scheme, host and port; the
+                     default port and a trailing slash are dropped). Each auth
+                     signs it, so a signature made for another server is
+                     refused. Repeatable. Required, except on a development
+                     server (ALLOW_AUTO_ADMIT_DEV=true, not NODE_ENV=production),
+                     which without it takes the origin each request's Host
+                     header names
   --name <name>      The server's name in /.well-known/coasys-link-server
                      (default: link-server)
   --store-url <url>  The identity store's base URL: whom each key speaks for.
@@ -52,8 +65,8 @@ Options:
                      Instance name shown on the admission page (e.g. staging)
   -h, --help         Show this help
 
-Each option also reads an environment variable: PORT, DATA_DIR, HOST, NAME,
-STORE_URL, STORE_HEAD_KEYS (comma-separated), AUTO_ADMIT, OPERATOR_PORT,
+Each option also reads an environment variable: PORT, DATA_DIR, HOST,
+PUBLIC_ORIGIN (comma-separated), NAME, STORE_URL, STORE_HEAD_KEYS (comma-separated), AUTO_ADMIT, OPERATOR_PORT,
 OPERATOR_HOST, OPERATOR_TOKEN_FILE, OPERATOR_ORIGINS (comma-separated),
 OPERATOR_LABEL.
 `;
@@ -78,6 +91,7 @@ function parseArgs(argv: string[]): CliArgs {
   let host = process.env.HOST ?? "0.0.0.0";
   let dataDir = process.env.DATA_DIR ?? "./data";
   let autoAdmit = envBool("AUTO_ADMIT");
+  const origins = commaList(process.env.PUBLIC_ORIGIN);
   let name = process.env.NAME || undefined;
   let storeUrl = process.env.STORE_URL || undefined;
   let storeHeadKeys = commaList(process.env.STORE_HEAD_KEYS);
@@ -137,6 +151,9 @@ function parseArgs(argv: string[]): CliArgs {
       case "--auto-admit":
         autoAdmit = true;
         break;
+      case "--public-origin":
+        origins.push(requireValue("--public-origin", argv[++i]));
+        break;
       case "--name":
         name = requireValue("--name", argv[++i]);
         break;
@@ -171,6 +188,27 @@ function parseArgs(argv: string[]): CliArgs {
     process.exit(1);
   }
 
+  // The origin auth is signed for. Without one, only a server marked for development starts,
+  // taking the Host header's origin: fail closed, as for auto-admit.
+  const publicOrigins: string[] = [];
+  for (const origin of origins) {
+    try {
+      publicOrigins.push(publicOrigin(origin));
+    } catch (e) {
+      console.error(`PUBLIC_ORIGIN (--public-origin): ${(e as Error).message}`);
+      process.exit(1);
+    }
+  }
+  const devServer = envBool(ALLOW_AUTO_ADMIT_ENV) && process.env.NODE_ENV !== "production";
+  if (publicOrigins.length === 0 && !devServer) {
+    console.error(
+      "PUBLIC_ORIGIN (--public-origin) is required: the origin clients reach this server at, e.g. " +
+        `https://links.example.org. Only a development server (${ALLOW_AUTO_ADMIT_ENV}=true, not NODE_ENV=production) starts without it`
+    );
+    process.exit(1);
+  }
+  const hostOrigin = publicOrigins.length === 0;
+
   if (operatorPort !== undefined) {
     if (!operatorTokenFile) {
       console.error("--operator-port needs --operator-token-file (or OPERATOR_TOKEN_FILE)");
@@ -187,7 +225,7 @@ function parseArgs(argv: string[]): CliArgs {
   }
 
   return {
-    port, host, dataDir, autoAdmit, name, storeUrl, storeHeadKeys,
+    port, host, dataDir, autoAdmit, publicOrigins, hostOrigin, name, storeUrl, storeHeadKeys,
     operatorPort, operatorHost, operatorTokenFile, operatorOrigins, operatorLabel,
   };
 }
@@ -220,6 +258,8 @@ async function main(): Promise<void> {
   const { app, operatorApp } = await buildServer({
     dataDir: args.dataDir,
     autoAdmit: args.autoAdmit,
+    publicOrigins: args.publicOrigins,
+    hostOrigin: args.hostOrigin,
     name: args.name,
     storeUrl: args.storeUrl,
     storeHeadKeys: args.storeHeadKeys,

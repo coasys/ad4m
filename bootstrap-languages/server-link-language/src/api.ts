@@ -143,11 +143,18 @@ export async function fetchMembership(
     return res;
 }
 
-/** The room's members and the keys a room key is sealed to, each with its signed X25519 key. */
+/**
+ * The room's members, the keys a room key is sealed to (each with its signed X25519 key), and
+ * the room's latest key version (0 before the first rotation).
+ */
 export async function fetchMembers(config: RoomConfig, token: string): Promise<MembersResponse> {
     const res = await request<Partial<MembersResponse>>(roomUrl(config, "/members"), "GET", jsonHeaders(token));
     if (!Array.isArray(res?.keys)) throw new Error("link server answered /members without a keys list");
-    return { members: Array.isArray(res.members) ? res.members : [], keys: res.keys };
+    const latest = res.latestKeyVersion;
+    if (typeof latest !== "number" || !Number.isSafeInteger(latest) || latest < 0) {
+        throw new Error("link server answered /members without the room's latest key version");
+    }
+    return { members: Array.isArray(res.members) ? res.members : [], keys: res.keys, latestKeyVersion: latest };
 }
 
 // ---------------------------------------------------------------------------
@@ -234,9 +241,10 @@ export interface RotateResponse {
 }
 
 /**
- * A rotation the server refused because its boxes were not sealed to exactly the room's
- * admitted keys (409): `missing` are admitted keys without a box, `extra` boxes for keys that
- * are not admitted. The rotator refetches `/members` and seals again.
+ * A rotation the server refused (409): its boxes were not sealed to exactly the room's
+ * admitted keys (`missing` are admitted keys without a box, `extra` boxes for keys that are not
+ * admitted), or the room's latest version is no longer the one before the rotation's. The
+ * rotator refetches `/members` and seals again.
  */
 export class RotateMismatch extends ApiError {
     missing: string[];
@@ -258,21 +266,24 @@ export class RotateMismatch extends ApiError {
 /**
  * Rotates the room's E2E key (any member, K2). The caller generates the room key locally,
  * seals it to each admitted key's X25519 key, and sends only the sealed boxes and the key's
- * commitment (`roomKeyCommitment`). The server never touches the plaintext key. Throws
- * `RotateMismatch` when the boxes are not for exactly the admitted keys.
+ * commitment (`roomKeyCommitment`), as `version`: the version the boxes are sealed for (K9),
+ * the room's latest plus one. The server never touches the plaintext key. Throws
+ * `RotateMismatch` when the boxes are not for exactly the admitted keys or `version` is not
+ * the next one.
  */
 export async function rotateKeys(
     config: RoomConfig,
     token: string,
     keys: RotateKeyEntry[],
     commitment: string,
+    version: number,
 ): Promise<RotateResponse> {
     try {
         return await request<RotateResponse>(
             roomUrl(config, "/keys/rotate"),
             "POST",
             jsonHeaders(token),
-            JSON.stringify({ keys, commitment }),
+            JSON.stringify({ keys, commitment, version }),
         );
     } catch (e) {
         if (e instanceof ApiError && e.status === 409) throw new RotateMismatch(e.message);

@@ -73,8 +73,8 @@ bundle. `esbuild.ts` resolves a `.js` import to its `.ts` source only when one
 exists, so the generated `.js` is bundled as it is. The binding loads its wasm
 synchronously (`ad4m-keyring/wasm/inline.mjs`): the bundle's target (deno1.32.4)
 has no top-level await. `tests/keyring.test.ts` checks the binding against
-`ad4m-keyring/vectors/room-key-seal.json` byte for byte and against noble's
-X25519 and HKDF.
+`ad4m-keyring/vectors/room-key-seal-v2.json` byte for byte and against the
+noble reference `tests/room-key-seal-reference.ts`.
 
 ## Protocol 2: rooms, membership, room keys (slice 3.B)
 
@@ -297,9 +297,21 @@ X25519 and HKDF.
   signed at auth. The language seals with the keyring binding
   (`sealRoomKeyTo`) and opens with the seed (`openRoomKey`); the seed is used
   only for room keys, and the executor's signing ops refuse its domain. The
-  format is `ad4m-keyring`'s seal, pinned by
-  `ad4m-keyring/vectors/room-key-seal.json`: changing it orphans every sealed
+  format is `ad4m-keyring`'s seal v2, pinned by
+  `ad4m-keyring/vectors/room-key-seal-v2.json`: changing it orphans every sealed
   room key.
+- **A box opens only for its room and version (K9).** The seal binds
+  `coasys:room-key:<roomId>:<version>` (`roomKeyContext`) as associated data.
+  `buildKeyRing(entries, seed, roomId)` opens each box under the version
+  `/keys` lists it at; one sealed for another room or version does not open and
+  is spoiled, so a member cannot hand another room's key, or an old one, as
+  this room's. A rotation seals for `latestKeyVersion + 1` (from `/members`),
+  sends that `version`, and throws if the server stored another.
+- **Auth names the server's origin.** The signed message is
+  `coasys-link-server:auth:2:<origin>:<roomId>:<timestamp>`, `<origin>` being
+  `serverOrigin(SERVER_URL)` (src/room.ts), also sent as `origin`. A link
+  server refuses an origin that is not its own, so a server cannot relay this
+  key's auth to another one.
 - **E2E encryption wire format is unified.** Both client and server use
   the same `EncryptedLinkData` shape (`{ciphertext, nonce}`) in the link's
   `data` field for encrypted rooms — no separate `encrypted` field. The

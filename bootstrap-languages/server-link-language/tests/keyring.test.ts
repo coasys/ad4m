@@ -1,8 +1,9 @@
 /**
  * The keyring binding (AR-08 K9): `keyring/keyring.js`, the `--target deno` build of
  * `ad4m-keyring/wasm` with the wasm inlined (`ad4m-keyring/wasm/build.sh` writes it). It must
- * seal and open ad4m-keyring's vectors byte for byte, as `sealToDid` does, and its X25519 and
- * link-hash keys must equal noble's.
+ * seal and open ad4m-keyring's room-key seal v2 vectors byte for byte, as the noble reference
+ * (tests/room-key-seal-reference.ts) does, only under each box's context
+ * (`coasys:room-key:<roomId>:<version>`), and its X25519 and link-hash keys must equal noble's.
  *
  * The seal draws from `crypto.getRandomValues`; `serveRandom` makes the next draws hand out a
  * vector's ephemeral secret, then its nonce, so the export itself gives the vector's envelope.
@@ -15,15 +16,26 @@ import { x25519 } from "@noble/curves/ed25519";
 import { hkdf } from "@noble/hashes/hkdf";
 import { sha256 } from "@noble/hashes/sha256";
 
-import { linkHashKey, openRoomKey, randomRoomKey, sealRoomKey, x25519Public } from "../keyring/keyring.js";
+import {
+    linkHashKey,
+    openRoomKey,
+    randomRoomKey,
+    roomKeyContext,
+    sealRoomKey,
+    x25519Public,
+} from "../keyring/keyring.js";
 import { bytesToHex, hexToBytes } from "../src/encryption.js";
+import { referenceOpen, referenceSeal } from "./room-key-seal-reference.js";
 
-const file = new URL("../../../ad4m-keyring/vectors/room-key-seal.json", import.meta.url);
+const file = new URL("../../../ad4m-keyring/vectors/room-key-seal-v2.json", import.meta.url);
 const { vectors } = JSON.parse(readFileSync(file, "utf8")) as {
     vectors: {
         x25519Public: string;
         x25519Secret: string;
         roomKey: string;
+        roomId: string;
+        version: number;
+        context: string;
         ephemeralSecret: string;
         nonce: string;
         sealed: { ephemeralPublicKey: string; nonce: string; ciphertext: string };
@@ -54,17 +66,57 @@ afterEach(() => {
 describe("keyring binding: the room-key seal (K9)", () => {
     it("has vectors", () => assert.ok(vectors.length > 0));
 
-    it("seals every vector byte for byte", () => {
+    it("the vectors are the noble reference's envelopes", () => {
         for (const v of vectors) {
-            serveRandom(new Uint8Array([...hexToBytes(v.ephemeralSecret), ...hexToBytes(v.nonce)]));
-            assert.deepEqual(sealRoomKey(hexToBytes(v.roomKey), hexToBytes(v.x25519Public)), v.sealed);
+            const sealed = referenceSeal(
+                hexToBytes(v.roomKey),
+                hexToBytes(v.x25519Public),
+                v.context,
+                hexToBytes(v.ephemeralSecret),
+                hexToBytes(v.nonce),
+            );
+            assert.deepEqual(sealed, v.sealed);
+            assert.equal(bytesToHex(referenceOpen(v.sealed, hexToBytes(v.x25519Secret), v.context)), v.roomKey);
         }
     });
 
-    it("opens every vector to its room key", () => {
+    it("names the context coasys:room-key:<roomId>:<version>", () => {
+        for (const v of vectors) assert.equal(roomKeyContext(v.roomId, v.version), v.context);
+    });
+
+    it("seals every vector byte for byte", () => {
         for (const v of vectors) {
-            assert.equal(bytesToHex(openRoomKey(v.sealed, hexToBytes(v.x25519Secret))), v.roomKey);
+            serveRandom(new Uint8Array([...hexToBytes(v.ephemeralSecret), ...hexToBytes(v.nonce)]));
+            assert.deepEqual(sealRoomKey(hexToBytes(v.roomKey), hexToBytes(v.x25519Public), v.context), v.sealed);
         }
+    });
+
+    it("opens every vector to its room key under its context", () => {
+        for (const v of vectors) {
+            assert.equal(bytesToHex(openRoomKey(v.sealed, hexToBytes(v.x25519Secret), v.context)), v.roomKey);
+        }
+    });
+
+    it("opens no vector under another room, another version or no context", () => {
+        for (const v of vectors) {
+            const secret = hexToBytes(v.x25519Secret);
+            for (const wrong of [
+                roomKeyContext(`${v.roomId}x`, v.version),
+                roomKeyContext(v.roomId, v.version + 1),
+                roomKeyContext(v.roomId, v.version - 1),
+                "",
+            ]) {
+                assert.throws(() => openRoomKey(v.sealed, secret, wrong), undefined, wrong);
+            }
+        }
+    });
+
+    it("a fresh seal is the reference's to open, under the same context only", () => {
+        const v = vectors[0];
+        const roomKey = randomRoomKey();
+        const sealed = sealRoomKey(roomKey, hexToBytes(v.x25519Public), v.context);
+        assert.deepEqual(referenceOpen(sealed, hexToBytes(v.x25519Secret), v.context), roomKey);
+        assert.throws(() => referenceOpen(sealed, hexToBytes(v.x25519Secret), roomKeyContext(v.roomId, v.version + 1)));
     });
 
     it("gives the X25519 public key of a secret as noble does", () => {
@@ -79,15 +131,16 @@ describe("keyring binding: the room-key seal (K9)", () => {
         const [mine, theirs] = vectors;
         const roomKey = randomRoomKey();
         assert.equal(roomKey.length, 32);
-        const sealed = sealRoomKey(roomKey, hexToBytes(mine.x25519Public));
-        assert.deepEqual(openRoomKey(sealed, hexToBytes(mine.x25519Secret)), roomKey);
-        assert.throws(() => openRoomKey(sealed, hexToBytes(theirs.x25519Secret)));
+        const sealed = sealRoomKey(roomKey, hexToBytes(mine.x25519Public), mine.context);
+        assert.deepEqual(openRoomKey(sealed, hexToBytes(mine.x25519Secret), mine.context), roomKey);
+        assert.throws(() => openRoomKey(sealed, hexToBytes(theirs.x25519Secret), mine.context));
     });
 
     it("refuses keys that are not 32 bytes", () => {
         const v = vectors[0];
-        assert.throws(() => sealRoomKey(new Uint8Array(31), hexToBytes(v.x25519Public)), /32 bytes/);
-        assert.throws(() => openRoomKey(v.sealed, new Uint8Array(33)), /32 bytes/);
+        assert.throws(() => sealRoomKey(new Uint8Array(31), hexToBytes(v.x25519Public), v.context), /32 bytes/);
+        assert.throws(() => openRoomKey(v.sealed, new Uint8Array(33), v.context), /32 bytes/);
+        assert.throws(() => sealRoomKey(hexToBytes(v.roomKey), hexToBytes(v.x25519Public), ""), /context/);
         assert.throws(() => x25519Public(new Uint8Array(16)), /32 bytes/);
     });
 });

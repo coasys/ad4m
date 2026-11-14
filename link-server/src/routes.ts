@@ -4,6 +4,7 @@ import {
   authMessage,
   didToPublicKey,
   hashMessageForVerify,
+  publicOrigin,
   verifyHex,
   type AuthManager,
   type AuthReplayGuard,
@@ -51,6 +52,13 @@ export interface RouteContext {
   autoAdmit: boolean;
   /** The server's name, as the well-known document gives it. */
   name: string;
+  /** The origins (`publicOrigin`) an auth message may name: the server's own. */
+  publicOrigins: ReadonlySet<string>;
+  /**
+   * Development only: also take the origin the request's Host header names
+   * (`<protocol>://<host>`), for a server whose address is not known up front.
+   */
+  hostOrigin: boolean;
   rateLimits: {
     authIp: SlidingWindowLimiter;
     roomJwt: SlidingWindowLimiter;
@@ -178,6 +186,8 @@ const HEX = /^[0-9a-f]+$/i;
 /** The body of a protocol 2 auth request. */
 interface AuthRequest {
   did: string;
+  /** The server origin the signature is for (`publicOrigin` form). */
+  origin: string;
   signature: string;
   timestamp: number;
   x25519PublicKey: string;
@@ -186,8 +196,18 @@ interface AuthRequest {
 
 function parseAuthRequest(body: unknown): AuthRequest | string {
   const b = body as Partial<AuthRequest> | null;
-  if (!b || typeof b !== "object") return "body must be {did, signature, timestamp, x25519PublicKey, x25519Signature}";
+  if (!b || typeof b !== "object") return "body must be {did, origin, signature, timestamp, x25519PublicKey, x25519Signature}";
   if (typeof b.did !== "string") return "did is required";
+  if (typeof b.origin !== "string") return "origin is required: the server origin the signature is for";
+  let normalised: string | undefined;
+  try {
+    normalised = publicOrigin(b.origin);
+  } catch {
+    normalised = undefined;
+  }
+  if (normalised !== b.origin) {
+    return "origin must be scheme://host[:port], lower case, without a trailing slash or the default port";
+  }
   try {
     didToPublicKey(b.did);
   } catch {
@@ -200,6 +220,17 @@ function parseAuthRequest(body: unknown): AuthRequest | string {
   }
   if (typeof b.x25519Signature !== "string" || !HEX.test(b.x25519Signature)) return "x25519Signature must be hex";
   return b as AuthRequest;
+}
+
+/** Whether an auth message may name `origin`: a configured origin, or (dev) the Host header's. */
+function acceptsOrigin(ctx: RouteContext, request: FastifyRequest, origin: string): boolean {
+  if (ctx.publicOrigins.has(origin)) return true;
+  if (!ctx.hostOrigin || !request.headers.host) return false;
+  try {
+    return publicOrigin(`${request.protocol}://${request.headers.host}`) === origin;
+  } catch {
+    return false;
+  }
 }
 
 /** The predicate of a self-join: the only link a key not yet admitted may send. */
@@ -283,8 +314,12 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       if (Math.abs(Date.now() - body.timestamp) > AUTH_SKEW_MS) {
         return reply.code(401).send({ error: "timestamp is too far from the server's clock" });
       }
+      // A signature made for another server is no auth here, even when that server relays it.
+      if (!acceptsOrigin(ctx, request, body.origin)) {
+        return reply.code(401).send({ error: `origin ${body.origin} is not this server's (PUBLIC_ORIGIN)` });
+      }
       // Signed like every executor signature: over SHA-256 of the message.
-      const digest = hashMessageForVerify(authMessage(roomId, body.timestamp));
+      const digest = hashMessageForVerify(authMessage(body.origin, roomId, body.timestamp));
       if (!(await verifyHex(didToPublicKey(body.did), digest, body.signature))) {
         return reply.code(401).send({ error: "invalid signature" });
       }
@@ -439,6 +474,8 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
           x25519PublicKey: k.x25519,
           x25519Signature: k.x25519_sig,
         })),
+        // A rotation seals its boxes for the next version (K9) and names it.
+        latestKeyVersion: ctx.db.getLatestKeyVersion(claims.roomId),
       });
     }
   );
@@ -611,7 +648,8 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     }
   );
 
-  // Any admitted member rotates; the new key goes to exactly the keys admitted now.
+  // Any admitted member rotates; the new key goes to exactly the keys admitted now, as the version
+  // the boxes are sealed for (K9): the room's latest plus one.
   app.post(
     "/rooms/:roomId/keys/rotate",
     { preHandler: [requireAuth(ctx), jwtRateLimit(ctx.rateLimits.roomJwt)] },
@@ -620,6 +658,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       const body = request.body as {
         keys?: Array<{ did: string; encryptedKey: unknown }>;
         commitment?: unknown;
+        version?: unknown;
       } | null;
 
       if (!body || !Array.isArray(body.keys) || body.keys.length === 0) {
@@ -647,6 +686,12 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       if (typeof body.commitment !== "string" || !/^[0-9a-f]{64}$/.test(body.commitment)) {
         return reply.code(400).send({ error: "commitment is required: 64 hex characters committing to the new key" });
       }
+      // Each box is sealed for its room and version, so the server stores it as that version only.
+      if (!Number.isSafeInteger(body.version) || (body.version as number) < 1) {
+        return reply.code(400).send({
+          error: "version is required: the positive integer the boxes are sealed for (GET /members latestKeyVersion + 1)",
+        });
+      }
 
       // Exactly the admitted keys: none left out (a member who could not read), none extra (a
       // removed or revoked key that would read on).
@@ -661,7 +706,17 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
         });
       }
 
-      const version = ctx.db.getLatestKeyVersion(claims.roomId) + 1;
+      const latestKeyVersion = ctx.db.getLatestKeyVersion(claims.roomId);
+      const version = latestKeyVersion + 1;
+      if (body.version !== version) {
+        // Another rotation got there first: the boxes would open only as a version they are not.
+        return reply.code(409).send({
+          error: `the boxes are sealed for version ${body.version as number}; the next version is ${version}`,
+          latestKeyVersion,
+          missing: [],
+          extra: [],
+        });
+      }
       ctx.db.addKeyCommitment(claims.roomId, version, body.commitment);
       const recipients: string[] = [];
       for (const entry of body.keys) {

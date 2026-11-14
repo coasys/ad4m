@@ -2,7 +2,7 @@ import path from "node:path";
 import Fastify, { type FastifyInstance } from "fastify";
 import compressPlugin from "@fastify/compress";
 import websocketPlugin from "@fastify/websocket";
-import { AuthManager, AuthReplayGuard, type Admission } from "./auth.js";
+import { AuthManager, AuthReplayGuard, publicOrigin, type Admission } from "./auth.js";
 import { LinkServerDB } from "./db.js";
 import { LogTail, teeDestination } from "./log-tail.js";
 import { MembershipRooms } from "./membership.js";
@@ -36,6 +36,19 @@ export interface ServerOptions {
   autoAdmit?: boolean;
   /** The server's name in `GET /.well-known/coasys-link-server`. Default "link-server". */
   name?: string;
+  /**
+   * The origins clients reach this server at (`https://links.example.org`): an auth message
+   * names one of them, so a signature made for another server is refused. Normalised with
+   * `publicOrigin`; a value with a path, query or fragment stops the build. Required unless
+   * `hostOrigin` is on.
+   */
+  publicOrigins?: string[];
+  /**
+   * Development only: also take an auth signed for the origin each request's Host header names.
+   * `index.ts` turns it on only without `PUBLIC_ORIGIN` on a server marked for development
+   * (`ALLOW_AUTO_ADMIT_DEV=true`, never with `NODE_ENV=production`). Default false.
+   */
+  hostOrigin?: boolean;
   /** The identity store's base URL: whom each key speaks for. Without it no person is admitted. */
   storeUrl?: string;
   /** Multikeys of the store keys whose signed heads the server trusts. */
@@ -89,6 +102,15 @@ export interface BuiltServer {
  * `close()` to tear everything down (used heavily by tests).
  */
 export async function buildServer(opts: ServerOptions): Promise<BuiltServer> {
+  // Checked before anything opens: a server that takes auth for no origin takes none.
+  const publicOrigins = new Set((opts.publicOrigins ?? []).map(publicOrigin));
+  const hostOrigin = opts.hostOrigin ?? false;
+  if (publicOrigins.size === 0 && !hostOrigin) {
+    throw new Error(
+      "no public origin: set PUBLIC_ORIGIN (or publicOrigins) to the origin clients reach this server at, e.g. https://links.example.org"
+    );
+  }
+
   const dbPath = opts.dataDir === ":memory:" ? ":memory:" : path.join(opts.dataDir, "data.sqlite");
   const db = new LinkServerDB(dbPath);
 
@@ -151,6 +173,8 @@ export async function buildServer(opts: ServerOptions): Promise<BuiltServer> {
   const ctx: RouteContext = {
     db, auth, replayGuard, store, rooms, ws, telepresence, rateLimits, autoAdmit,
     name: opts.name ?? "link-server",
+    publicOrigins,
+    hostOrigin,
   };
   registerRoutes(app, ctx);
   ws.register(app);
@@ -164,6 +188,12 @@ export async function buildServer(opts: ServerOptions): Promise<BuiltServer> {
 
   const admission = autoAdmit ? "auto" : "membership";
   app.log.info({ admission }, `admission mode: ${admission}`);
+  if (publicOrigins.size > 0) {
+    app.log.info({ publicOrigins: [...publicOrigins] }, `auth is taken for: ${[...publicOrigins].join(", ")}`);
+  }
+  if (hostOrigin) {
+    app.log.warn("auth is also taken for the origin each request's Host header names (development only)");
+  }
   if (!store.configured) app.log.warn("no identity store configured (STORE_URL, STORE_HEAD_KEYS): no person can be admitted");
 
   // Keys not revoked in some room, and keys with open sockets, are asked of the store again: a

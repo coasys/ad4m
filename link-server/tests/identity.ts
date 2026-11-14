@@ -180,9 +180,12 @@ export class FakeStore {
 
 // ---- protocol 2 auth ----
 
-/** What a key signs to authenticate (`agentSignStringHex` signs SHA-256 of it). */
-export function authMessage(roomId: string, timestamp: number): string {
-  return `coasys-link-server:auth:2:${roomId}:${timestamp}`;
+/**
+ * What a key signs to authenticate to the server at `origin` (`agentSignStringHex` signs SHA-256
+ * of it). Written out here apart from `src/auth.ts`, so a change to either shows.
+ */
+export function authMessage(origin: string, roomId: string, timestamp: number): string {
+  return `coasys-link-server:auth:2:${origin}:${roomId}:${timestamp}`;
 }
 
 /** The agent's X25519 key for room keys: here its Ed25519 key in Montgomery form, as `sealToDid` seals. */
@@ -192,19 +195,24 @@ export function x25519Of(agent: TestAgent): string {
 
 export interface AuthBody {
   did: string;
+  origin: string;
   signature: string;
   timestamp: number;
   x25519PublicKey: string;
   x25519Signature: string;
 }
 
-/** The body of `POST /rooms/:roomId/auth` for `agent`. */
-export function authBody(agent: TestAgent, roomId: string, timestamp = Date.now()): AuthBody {
-  const digest = createHash("sha256").update(authMessage(roomId, timestamp)).digest();
+/**
+ * The body of `POST /rooms/:roomId/auth` for `agent`, signed for the server at `origin` (a server
+ * URL: its origin is taken).
+ */
+export function authBody(agent: TestAgent, origin: string, roomId: string, timestamp = Date.now()): AuthBody {
+  origin = new URL(origin).origin;
+  const digest = createHash("sha256").update(authMessage(origin, roomId, timestamp)).digest();
   const signature = bytesToHex(ed25519.sign(digest, agent.privateKey));
   const x25519PublicKey = x25519Of(agent);
   const x25519Signature = bytesToHex(ed25519.sign(roomKeySigningBytes(agent.did, x25519PublicKey), agent.privateKey));
-  return { did: agent.did, signature, timestamp, x25519PublicKey, x25519Signature };
+  return { did: agent.did, origin, signature, timestamp, x25519PublicKey, x25519Signature };
 }
 
 // ---- membership links ----

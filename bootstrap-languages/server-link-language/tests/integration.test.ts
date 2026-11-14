@@ -600,7 +600,7 @@ describe("integration: room keys", () => {
   async function ringOf(serverUrl: string, agent: TestAgent) {
     const token = await signIn(serverUrl, agent);
     const keys = await api.fetchRoomKeys({ serverUrl, roomId }, token);
-    return buildKeyRing(keys?.keys ?? [], await agent.roomKeySeed()).ring;
+    return buildKeyRing(keys?.keys ?? [], await agent.roomKeySeed(), roomId).ring;
   }
 
   async function boot(): Promise<{ server: TestServerHandle; config: RoomConfig }> {
@@ -695,9 +695,9 @@ describe("integration: room keys", () => {
 
     // Mallory holds version 1, so the server lets her grant it: she seals a key of her own.
     await api.grantKeys(config, await signIn(server.url, mallory), late.did(), [
-      { version: 1, encryptedKey: sealRoomKeyTo(lateX25519, generateRoomKey()) },
+      { version: 1, encryptedKey: sealRoomKeyTo(lateX25519, generateRoomKey(), roomId, 1) },
     ]);
-    const first1 = buildKeyRing((await api.fetchRoomKeys(config, lateToken))?.keys ?? [], await late.roomKeySeed());
+    const first1 = buildKeyRing((await api.fetchRoomKeys(config, lateToken))?.keys ?? [], await late.roomKeySeed(), roomId);
     assert.equal(first1.ring.size, 0, "the wrong key is not taken");
     assert.deepEqual(first1.spoiled, [1]);
 
@@ -708,6 +708,31 @@ describe("integration: room keys", () => {
 
     const lateRing = await ringOf(server.url, late);
     assert.deepEqual(lateRing.get(1), firstRing.get(1), "the newcomer now holds the room's key");
+  });
+
+  it("the room's own key sealed for another room or version is spoiled (K9)", async () => {
+    const { server, config } = await boot();
+    const first = newAgent();
+    const mallory = newAgent();
+    const late = newAgent();
+
+    await signIn(server.url, mallory);
+    await rotateRoomKey(config, await signIn(server.url, first), admitsAll); // version 1: the first member and Mallory
+    const malloryRing = await ringOf(server.url, mallory);
+    const lateToken = await signIn(server.url, late);
+    const lateX25519 = bytesToHex(x25519Public(await late.roomKeySeed()));
+
+    // The right key (it matches the commitment), sealed for another room: a box carried over from
+    // elsewhere does not open here.
+    for (const [room, version] of [["another-room", 1], [roomId, 2]] as const) {
+      await api.grantKeys(config, await signIn(server.url, mallory), late.did(), [
+        { version: 1, encryptedKey: sealRoomKeyTo(lateX25519, malloryRing.get(1)!, room, version) },
+      ]);
+      const built = buildKeyRing((await api.fetchRoomKeys(config, lateToken))?.keys ?? [], await late.roomKeySeed(), roomId);
+      assert.equal(built.ring.size, 0, `a box sealed for ${room}:${version} is not taken`);
+      assert.deepEqual(built.spoiled, [1]);
+      await api.deleteRoomKey(config, await signIn(server.url, late), 1);
+    }
   });
 });
 

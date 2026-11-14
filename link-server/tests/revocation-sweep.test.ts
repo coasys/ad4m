@@ -56,7 +56,7 @@ test("a revoked key with no socket is revoked by the refresh: its session ends a
     const roomKey = generateRoomKey();
     const rotated = await postJson<{ version: number }>(
       `${server.url}/rooms/${roomId}/keys/rotate`,
-      { keys: [{ did: alice.did, encryptedKey: sealToDid(alice.did, roomKey) }], commitment: roomKeyCommitment(roomKey) },
+      { keys: [{ did: alice.did, encryptedKey: sealToDid(alice.did, roomKey) }], commitment: roomKeyCommitment(roomKey), version: 1 },
       aliceToken
     );
     assert.equal(rotated.status, 200, JSON.stringify(rotated.body));

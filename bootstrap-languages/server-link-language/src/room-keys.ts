@@ -8,6 +8,10 @@
  * its word for either. The link server takes a rotation only when its boxes are for exactly
  * the keys it admits (409 otherwise), lets a member grant only versions it holds, and keeps
  * the first box stored per key and version.
+ *
+ * Each box is sealed for its room and version (K9, `sealRoomKeyTo`). A rotation seals for the
+ * version after the room's latest (`/members` names it) and asks the server to store it as that
+ * version (409 when another rotation got there first); a grant seals each version as itself.
  */
 
 import type { RoomConfig } from "./adapters.js";
@@ -117,13 +121,20 @@ export async function rotateRoomKey(
         const members = await api.fetchMembers(config, token);
         const { sealTo, skipped } = await sealable(members.keys, admits);
         if (sealTo.length === 0) return null;
+        const version = members.latestKeyVersion + 1;
         const roomKey = generateRoomKey();
         const keys: api.RotateKeyEntry[] = sealTo.map((key) => ({
             did: key.did,
-            encryptedKey: sealRoomKeyTo(key.x25519PublicKey, roomKey),
+            encryptedKey: sealRoomKeyTo(key.x25519PublicKey, roomKey, config.roomId, version),
         }));
         try {
-            const result = await api.rotateKeys(config, token, keys, roomKeyCommitment(roomKey));
+            const result = await api.rotateKeys(config, token, keys, roomKeyCommitment(roomKey), version);
+            if (result.version !== version) {
+                // The boxes open only as `version`: stored as another, no member could open them.
+                throw new Error(
+                    `the server stored the rotation as version ${result.version}, sealed for version ${version}`,
+                );
+            }
             return { result, skipped };
         } catch (err) {
             if (!(err instanceof api.RotateMismatch) || attempt >= ROTATE_ATTEMPTS) throw err;
@@ -170,7 +181,12 @@ export async function grantMissingRoomKeys(
             const keys: api.GrantKeyEntry[] = [];
             for (const version of member.missingVersions) {
                 const roomKey = ring.get(version);
-                if (roomKey) keys.push({ version, encryptedKey: sealRoomKeyTo(key.x25519PublicKey, roomKey) });
+                if (roomKey) {
+                    keys.push({
+                        version,
+                        encryptedKey: sealRoomKeyTo(key.x25519PublicKey, roomKey, config.roomId, version),
+                    });
+                }
             }
             const versions = await api.grantKeys(config, token, member.did, keys);
             if (versions.length > 0) grants.push({ did: member.did, versions });

@@ -122,12 +122,17 @@ describe("auth: authenticate (protocol 2)", () => {
         const session = await auth.authenticate();
         assert.deepEqual(
             Object.keys(body).sort(),
-            ["did", "signature", "timestamp", "x25519PublicKey", "x25519Signature"],
+            ["did", "origin", "signature", "timestamp", "x25519PublicKey", "x25519Signature"],
         );
         assert.equal(body.did, agent.did());
+        assert.equal(body.origin, "https://server.example", "the server's origin, as it is signed");
         const timestamp = body.timestamp as number;
         assert.ok(Number.isInteger(timestamp) && timestamp >= before && timestamp <= Date.now());
-        assert.deepEqual(agent.signed, [`coasys-link-server:auth:2:room-123:${timestamp}`], "the auth message, once");
+        assert.deepEqual(
+            agent.signed,
+            [`coasys-link-server:auth:2:https://server.example:room-123:${timestamp}`],
+            "the auth message, bound to the server's origin, once",
+        );
         const message = sha256(new TextEncoder().encode(agent.signed[0]));
         assert.ok(ed25519.verify(body.signature as string, message, ed25519.getPublicKey(agent.seed)));
 
@@ -138,6 +143,31 @@ describe("auth: authenticate (protocol 2)", () => {
 
         assert.equal(await auth.getValidToken(), session.token);
         assert.equal(transport.calls.length, 1, "no extra auth call for a cached token");
+    });
+
+    it("signs the origin of the server URL: scheme, host and port, lower case, without the default port", async () => {
+        for (const [serverUrl, origin] of [
+            ["HTTPS://Server.Example:443", "https://server.example"],
+            ["http://127.0.0.1:3456", "http://127.0.0.1:3456"],
+            ["http://links.example.org:80/", "http://links.example.org"],
+        ]) {
+            const transport = new MockTransport();
+            resetAdapters();
+            const agent = new TestAgent(5);
+            initAdapters({ transport, agent, config: { serverUrl, roomId: "room-123" } });
+            auth.resetAuth();
+            let body: Record<string, unknown> = {};
+            transport.route(
+                (url, method) => method === "POST" && url.endsWith("/rooms/room-123/auth"),
+                (raw) => {
+                    body = JSON.parse(raw) as Record<string, unknown>;
+                    return { status: 200, headers: {}, body: JSON.stringify({ token: makeJwt({}), admitted: true }) };
+                },
+            );
+            await auth.authenticate();
+            assert.equal(body.origin, origin, serverUrl);
+            assert.deepEqual(agent.signed, [`coasys-link-server:auth:2:${origin}:room-123:${body.timestamp}`], serverUrl);
+        }
     });
 
     it("reports a key the room does not admit", async () => {

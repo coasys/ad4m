@@ -355,10 +355,17 @@ test("isLoopbackHost accepts loopback names only", () => {
 });
 
 test("CLI refuses an operator port without a token file, or on a non-loopback address", () => {
+  // A public origin, so the CLI reaches the operator checks.
   const run = (args: string[]) =>
     spawnSync(process.execPath, ["--import", "tsx", path.join(here, "../src/index.ts"), ...args], {
       encoding: "utf8",
-      env: { ...process.env, OPERATOR_TOKEN_FILE: "", OPERATOR_PORT: "", OPERATOR_ORIGINS: "" },
+      env: {
+        ...process.env,
+        OPERATOR_TOKEN_FILE: "",
+        OPERATOR_PORT: "",
+        OPERATOR_ORIGINS: "",
+        PUBLIC_ORIGIN: "https://links.example.org",
+      },
       timeout: 30_000,
     });
   const ephemeral = run([

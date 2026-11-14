@@ -1,7 +1,8 @@
 /**
  * Room key rotation under protocol 2 (K3): any admitted key rotates, and the envelopes must go
  * to exactly the keys admitted now. A removal ends the removed person's sockets (4005) and tells
- * the room `rotate-needed`, naming the keys the next room key must leave out.
+ * the room `rotate-needed`, naming the keys the next room key must leave out. A rotation names
+ * the version its boxes are sealed for (K9): the room's latest plus one, as `GET /members` says.
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -47,11 +48,23 @@ async function join(server: TestServerHandle, roomId: string, agent: TestAgent, 
   return token;
 }
 
-function rotateTo(server: TestServerHandle, roomId: string, token: string, dids: string[]) {
+async function latestKeyVersion(server: TestServerHandle, roomId: string, token: string): Promise<number> {
+  const res = await getJson<{ latestKeyVersion: number }>(`${server.url}/rooms/${roomId}/members`, token);
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+  return res.body.latestKeyVersion;
+}
+
+/** A rotation sealed to `dids`, for `version` (default: the room's latest plus one). */
+async function rotateTo(server: TestServerHandle, roomId: string, token: string, dids: string[], version?: number) {
   const roomKey = generateRoomKey();
-  return postJson<{ error?: string; missing?: string[]; extra?: string[]; version?: number }>(
+  const forVersion = version ?? (await latestKeyVersion(server, roomId, token)) + 1;
+  return postJson<{ error?: string; missing?: string[]; extra?: string[]; version?: number; latestKeyVersion?: number }>(
     `${server.url}/rooms/${roomId}/keys/rotate`,
-    { keys: dids.map((did) => ({ did, encryptedKey: sealToDid(did, roomKey) })), commitment: roomKeyCommitment(roomKey) },
+    {
+      keys: dids.map((did) => ({ did, encryptedKey: sealToDid(did, roomKey) })),
+      commitment: roomKeyCommitment(roomKey),
+      version: forVersion,
+    },
     token
   );
 }
@@ -94,9 +107,62 @@ test("any member rotates, not only the room's creator; a key that is not admitte
     assert.deepEqual([...rotated.recipients].sort(), [alice.did, bob.did].sort());
 
     const frankToken = (await authAs(server.url, roomId, personAgent("frank"))).body.token!;
-    const outsider = await rotateTo(server, roomId, frankToken, [alice.did, bob.did]);
+    const outsider = await rotateTo(server, roomId, frankToken, [alice.did, bob.did], 2);
     assert.equal(outsider.status, 403);
     assert.equal(server.built.db.getLatestKeyVersion(roomId), 1);
+  });
+});
+
+test("GET /members names the room's latest key version, and a rotation is stored as the version it names (K9)", async () => {
+  await withServer(async (server) => {
+    const roomId = await createRoom(server.url, { join: "open" });
+    const aliceToken = await authenticateAgent(server.url, roomId, alice);
+    assert.equal(await latestKeyVersion(server, roomId, aliceToken), 0);
+
+    const first = await rotateTo(server, roomId, aliceToken, [alice.did], 1);
+    assert.equal(first.status, 200, JSON.stringify(first.body));
+    assert.equal(first.body.version, 1);
+    assert.equal(await latestKeyVersion(server, roomId, aliceToken), 1);
+
+    const second = await rotateTo(server, roomId, aliceToken, [alice.did], 2);
+    assert.equal(second.status, 200, JSON.stringify(second.body));
+    assert.equal(second.body.version, 2);
+    assert.equal(await latestKeyVersion(server, roomId, aliceToken), 2);
+  });
+});
+
+test("a rotation sealed for a version other than the next is refused with 409 and stores nothing (K9)", async () => {
+  await withServer(async (server) => {
+    const roomId = await createRoom(server.url, { join: "open" });
+    const aliceToken = await authenticateAgent(server.url, roomId, alice);
+    assert.equal((await rotateTo(server, roomId, aliceToken, [alice.did], 1)).status, 200);
+
+    // Another member's rotation got there first (sealed for 1 again), or one sealed ahead.
+    for (const version of [1, 3]) {
+      const res = await rotateTo(server, roomId, aliceToken, [alice.did], version);
+      assert.equal(res.status, 409, JSON.stringify(res.body));
+      assert.match(res.body.error!, /version/);
+      assert.equal(res.body.latestKeyVersion, 1);
+      assert.equal(server.built.db.getLatestKeyVersion(roomId), 1, "no key version was stored");
+    }
+  });
+});
+
+test("a rotation that does not name its version is refused with 400 (K9)", async () => {
+  await withServer(async (server) => {
+    const roomId = await createRoom(server.url, { join: "open" });
+    const aliceToken = await authenticateAgent(server.url, roomId, alice);
+    const roomKey = generateRoomKey();
+    for (const version of [undefined, 0, -1, 1.5, "1"]) {
+      const res = await postJson<{ error: string }>(
+        `${server.url}/rooms/${roomId}/keys/rotate`,
+        { keys: [{ did: alice.did, encryptedKey: sealToDid(alice.did, roomKey) }], commitment: roomKeyCommitment(roomKey), version },
+        aliceToken
+      );
+      assert.equal(res.status, 400, `${version}: ${JSON.stringify(res.body)}`);
+      assert.match(res.body.error, /version/);
+    }
+    assert.equal(server.built.db.getLatestKeyVersion(roomId), 0);
   });
 });
 

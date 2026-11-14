@@ -161,7 +161,9 @@ export interface PeersResponse {
 /** `POST /rooms/:roomId/auth` (protocol 2). */
 export interface AuthRequest {
     did: DID;
-    /** Hex: the key's signature over `coasys-link-server:auth:2:<roomId>:<timestamp>`, as `agentSignStringHex` signs. */
+    /** The server's origin the signature names (scheme, host and port; `serverOrigin`). */
+    origin: string;
+    /** Hex: the key's signature over `coasys-link-server:auth:2:<origin>:<roomId>:<timestamp>`, as `agentSignStringHex` signs. */
     signature: string;
     /** ms since epoch; the server allows 5 min of skew. */
     timestamp: number;
@@ -210,6 +212,8 @@ export interface MemberKey {
 export interface MembersResponse {
     members: unknown[];
     keys: MemberKey[];
+    /** The room's latest key version, 0 before the first rotation: a rotation seals for the next. */
+    latestKeyVersion: number;
 }
 
 export interface KeysResponseEntry {
@@ -260,10 +264,10 @@ export type ClientWsMessage =
 // ---------------------------------------------------------------------------
 
 /**
- * A room key version sealed to one member's DID by `sealToDid`
- * (src/encryption.ts: X25519 form of the DID's Ed25519 key, ECDH +
- * HKDF-SHA256 + AES-256-GCM; docs-src/host-contract.md "Sealed boxes").
- * Only that member's executor opens it (`agentOpenSealed`).
+ * A room key version sealed to one member's X25519 key by `sealRoomKeyTo` (src/encryption.ts:
+ * ad4m-keyring's room-key seal v2, ephemeral X25519 ECDH + HKDF-SHA256 + AES-256-GCM), bound
+ * to its room and version (`coasys:room-key:<roomId>:<version>` as associated data, K9). Only
+ * that member opens it, from its `agentRoomKeySeed`, and only as that room and version.
  */
 export interface SealedBox {
     /** Hex-encoded ephemeral X25519 public key used for this seal. */

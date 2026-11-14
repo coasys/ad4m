@@ -65,7 +65,9 @@ export async function startLinkServer(opts: LinkServerOptions = {}): Promise<Lin
     const port = await getFreePort();
     const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "link-server-test-"));
 
-    const args = [LINK_SERVER_ENTRY, "--port", String(port), "--data", dataDir];
+    const url = `http://127.0.0.1:${port}`;
+    // The origin auth is signed for: the URL the executors' server link language is given.
+    const args = [LINK_SERVER_ENTRY, "--port", String(port), "--data", dataDir, "--public-origin", url];
     if (opts.storeUrl) args.push("--store-url", opts.storeUrl);
     if (opts.storeHeadKeys?.length) args.push("--store-head-keys", opts.storeHeadKeys.join(","));
     // The server refuses AUTO_ADMIT under NODE_ENV=production, which a
@@ -89,8 +91,6 @@ export async function startLinkServer(opts: LinkServerOptions = {}): Promise<Lin
 
     proc.stdout?.on("data", (b) => process.stdout.write(`[link-server:${port}] ${b}`));
     proc.stderr?.on("data", (b) => process.stderr.write(`[link-server:${port}] ${b}`));
-
-    const url = `http://127.0.0.1:${port}`;
 
     // Track exit so kill() can await it deterministically. `child.killed`
     // flips as soon as the signal is delivered, not when the process

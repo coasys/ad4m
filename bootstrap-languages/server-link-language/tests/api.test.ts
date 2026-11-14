@@ -49,3 +49,31 @@ describe("api: fetchRoomKeys", () => {
         }
     });
 });
+
+describe("api: fetchMembers / rotateKeys (K9)", () => {
+    it("reads the room's latest key version from /members", async () => {
+        answering({ status: 200, headers: {}, body: JSON.stringify({ members: [], keys: [], latestKeyVersion: 3 }) });
+        assert.deepEqual(await api.fetchMembers(config, "token"), { members: [], keys: [], latestKeyVersion: 3 });
+    });
+
+    it("refuses /members without a latest key version: a rotation would not know what to seal for", async () => {
+        for (const latestKeyVersion of [undefined, -1, 1.5, "2"]) {
+            answering({ status: 200, headers: {}, body: JSON.stringify({ members: [], keys: [], latestKeyVersion }) });
+            await assert.rejects(() => api.fetchMembers(config, "token"), /latest key version/);
+            resetAdapters();
+        }
+    });
+
+    it("sends the version the boxes are sealed for with the rotation", async () => {
+        let sent: unknown;
+        const transport: Transport = {
+            fetch: async (_url, _method, _headers, body) => {
+                sent = JSON.parse(body);
+                return { status: 200, headers: {}, body: JSON.stringify({ version: 4, recipients: [] }) };
+            },
+        };
+        initAdapters({ transport, config });
+        await api.rotateKeys(config, "token", [], "c0", 4);
+        assert.deepEqual(sent, { keys: [], commitment: "c0", version: 4 });
+    });
+});

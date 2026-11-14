@@ -34,6 +34,8 @@ async function keyOf(agent: TestAgent, signer: TestAgent = agent): Promise<Membe
 class Server implements Transport {
     calls: Array<{ url: string; method: string; body: string }> = [];
     members: MemberKey[][] = [];
+    /** The room's latest key version, as `/members` names it. */
+    latestKeyVersion = 0;
     rotateAnswers: TransportResponse[] = [];
     missing: Array<{ did: string; missingVersions: number[] }> = [];
     grants: Array<{ targetDid: string; keys: Array<{ version: number; encryptedKey: SealedBox }> }> = [];
@@ -43,10 +45,11 @@ class Server implements Transport {
         const ok = (b: unknown): TransportResponse => ({ status: 200, headers: {}, body: JSON.stringify(b) });
         if (url.endsWith("/members")) {
             const keys = this.members.length > 1 ? this.members.shift()! : this.members[0];
-            return ok({ members: [], keys });
+            return ok({ members: [], keys, latestKeyVersion: this.latestKeyVersion });
         }
         if (url.endsWith("/keys/rotate")) {
-            return this.rotateAnswers.shift() ?? ok({ version: 1, recipients: [], membersNeedingHistoricalKeys: [] });
+            const { version } = JSON.parse(body);
+            return this.rotateAnswers.shift() ?? ok({ version, recipients: [], membersNeedingHistoricalKeys: [] });
         }
         if (url.endsWith("/keys/missing")) return ok({ membersNeedingHistoricalKeys: this.missing });
         if (url.endsWith("/keys/grant")) {
@@ -57,7 +60,7 @@ class Server implements Transport {
         throw new Error(`no route for ${method} ${url}`);
     }
 
-    rotations(): Array<{ keys: Array<{ did: string; encryptedKey: SealedBox }>; commitment: string }> {
+    rotations(): Array<{ keys: Array<{ did: string; encryptedKey: SealedBox }>; commitment: string; version: number }> {
         return this.calls.filter((c) => c.url.endsWith("/keys/rotate")).map((c) => JSON.parse(c.body));
     }
 }
@@ -66,6 +69,38 @@ function setup(server: Server): void {
     resetAdapters();
     initAdapters({ transport: server, config });
 }
+
+describe("room keys: each box is bound to its room and version (K9)", () => {
+    it("seals the next version for the room the server names, and the box opens only as that", async () => {
+        const alice = new TestAgent(1);
+        const server = new Server();
+        server.members = [[await keyOf(alice)]];
+        server.latestKeyVersion = 3;
+        setup(server);
+        const outcome = await rotateRoomKey(config, "token", async () => true);
+        assert.ok(outcome);
+        const [rotation] = server.rotations();
+        assert.equal(rotation.version, 4);
+        const box = rotation.keys[0].encryptedKey;
+        const seed = await alice.roomKeySeed();
+        assert.equal(rotation.commitment, roomKeyCommitment(openRoomKey(box, seed, config.roomId, 4)));
+        assert.throws(() => openRoomKey(box, seed, config.roomId, 3), "another version");
+        assert.throws(() => openRoomKey(box, seed, config.roomId, 5), "another version");
+        assert.throws(() => openRoomKey(box, seed, "room-2", 4), "another room");
+    });
+
+    it("refuses a rotation the server stored under another version than the one sealed for", async () => {
+        const alice = new TestAgent(1);
+        const server = new Server();
+        server.members = [[await keyOf(alice)]];
+        server.latestKeyVersion = 1;
+        server.rotateAnswers = [
+            { status: 200, headers: {}, body: JSON.stringify({ version: 7, recipients: [alice.did()] }) },
+        ];
+        setup(server);
+        await assert.rejects(() => rotateRoomKey(config, "token", async () => true), /version 7.*version 2/);
+    });
+});
 
 describe("room keys: who mints one (K2)", () => {
     const me = "did:key:zMe";
@@ -111,8 +146,12 @@ describe("room keys: rotation seals to verified, admitted keys only (K1)", () =>
         assert.ok(outcome);
         const [rotation] = server.rotations();
         assert.deepEqual(rotation.keys.map((k) => k.did), [alice.did(), bob.did()]);
+        assert.equal(rotation.version, 1, "the first version of a room with none");
+        assert.equal(outcome.result.version, 1);
         const opened = await Promise.all(
-            rotation.keys.map(async (k, i) => openRoomKey(k.encryptedKey, await [alice, bob][i].roomKeySeed())),
+            rotation.keys.map(async (k, i) =>
+                openRoomKey(k.encryptedKey, await [alice, bob][i].roomKeySeed(), config.roomId, 1),
+            ),
         );
         assert.deepEqual(opened[0], opened[1], "one room key for both");
         assert.equal(rotation.commitment, roomKeyCommitment(opened[0]));
@@ -180,7 +219,10 @@ describe("room keys: grants (K1)", () => {
         assert.equal(server.grants.length, 1);
         const [grant] = server.grants;
         assert.equal(grant.targetDid, bob.did());
-        assert.deepEqual(openRoomKey(grant.keys[0].encryptedKey, await bob.roomKeySeed()), ring.get(1));
+        const bobSeed = await bob.roomKeySeed();
+        assert.deepEqual(openRoomKey(grant.keys[0].encryptedKey, bobSeed, config.roomId, 1), ring.get(1));
+        assert.throws(() => openRoomKey(grant.keys[0].encryptedKey, bobSeed, config.roomId, 2), "bound to version 1");
+        assert.throws(() => openRoomKey(grant.keys[0].encryptedKey, bobSeed, "room-2", 1), "bound to its room");
     });
 
     it("reads nothing more when no member lacks a version", async () => {

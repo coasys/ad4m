@@ -39,12 +39,13 @@ docker compose up -d
 The server listens on port 3456 and stores data in a named Docker volume (`link-server-data`). Override settings with environment variables:
 
 ```bash
-PORT=4000 STORE_URL=https://store.example.org STORE_HEAD_KEYS=z6Mk... docker compose up -d
+PORT=4000 PUBLIC_ORIGIN=https://links.example.org STORE_URL=https://store.example.org STORE_HEAD_KEYS=z6Mk... docker compose up -d
 ```
 
 | Variable | Default | What it does |
 |---|---|---|
 | `PORT` | `3456` | Listen port (host and container) |
+| `PUBLIC_ORIGIN` | `http://localhost:$PORT` | The origin clients reach the server at, e.g. `https://links.example.org` (comma-separated for more than one). Each auth signs it; set it to the public URL's origin, or every client's auth is refused |
 | `NAME` | `link-server` | The server's name in `/.well-known/coasys-link-server` |
 | `STORE_URL` | none | The identity store's base URL |
 | `STORE_HEAD_KEYS` | none | Comma-separated multikeys of the store keys whose signed heads are trusted |
@@ -73,6 +74,7 @@ Control the server through environment variables or CLI flags:
 | `PORT` | `--port` | `3456` | Listen port |
 | `DATA_DIR` | `--data` | `./data` | Storage directory (SQLite database) |
 | `HOST` | `--host` | `0.0.0.0` | Listen address |
+| `PUBLIC_ORIGIN` (comma-separated) | `--public-origin` (repeatable) | none; required | The origin clients reach the server at: scheme, host and port, e.g. `https://links.example.org` (lower-cased, the default port and a trailing slash dropped; a path refused). Each auth signs it, and an auth signed for any other origin is refused (`401`). The server does not start without it, except a development server (`ALLOW_AUTO_ADMIT_DEV=true`, `NODE_ENV` not `production`), which then takes the origin of each request's `Host` header and says so at startup |
 | `NAME` | `--name` | `link-server` | The server's name in `/.well-known/coasys-link-server` |
 | `STORE_URL` | `--store-url` | none | The identity store's base URL (`/v1/keys/{multikey}`, `/v1/heads/{scid}`, `/v1/logs/{scid}`). Without it no person can be admitted |
 | `STORE_HEAD_KEYS` (comma-separated) | `--store-head-keys` | none | The store keys whose signed heads are trusted |
@@ -213,8 +215,10 @@ E2E encryption uses **true client-side key generation**: a member's language gen
 curl -X POST https://your-server:3456/rooms/YOUR_ROOM/keys/rotate \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"keys": [{"did": "did:key:z6Mk...", "encryptedKey": {"ephemeralPublicKey": "...", "nonce": "...", "ciphertext": "..."}}], "commitment": "<sha256 hex>"}'
+  -d '{"keys": [{"did": "did:key:z6Mk...", "encryptedKey": {"ephemeralPublicKey": "...", "nonce": "...", "ciphertext": "..."}}], "commitment": "<sha256 hex>", "version": 2}'
 ```
+
+Each box is sealed for one room and one version: the seal (`ad4m:room-key-seal:v2`) authenticates `coasys:room-key:<roomId>:<version>` as the AES-GCM associated data, and a member opens a box only under the room and version it is listed at. So a member cannot pass off one room's key, or an old version, as this room's current key. The client therefore names the version it sealed for: `GET /members` gives `latestKeyVersion`, and the rotation is `latestKeyVersion + 1` (`409` with `latestKeyVersion` when another rotation came first).
 
 A rotation must seal the new version to exactly the keys admitted now, including keys that are not connected; otherwise it is refused with `409 {missing, extra}`. Each key reads its box the next time it connects or refreshes its key ring. A member rotates when the room asks for it (`rotate-needed`): after a join, a removal or a revocation. Every room rejects plaintext commits, so a client without keys cannot write until it receives them.
 
@@ -225,7 +229,7 @@ The server cannot see inside a box, so a member could grant a key that opens but
 ## How it works
 
 - **Rooms** are independent link-sync spaces. A room's id commits to its creator and a salt (`base58(sha256(creator ‖ 0x00 ‖ salt))`), and the creator's genesis creates it.
-- **Auth** is one signed request: a device key signs `coasys-link-server:auth:2:<roomId>:<timestamp>` (within 5 minutes of the server's clock, each body good once) and its X25519 key, and receives a JWT scoped to `(did, roomId)` with `admitted` saying whether its person is a member.
+- **Auth** is one signed request: a device key signs `coasys-link-server:auth:2:<origin>:<roomId>:<timestamp>`, where `<origin>` is the server's origin (`PUBLIC_ORIGIN`; the server refuses any other, so it cannot relay a client's signature to another link server and sign in there as that key) (within 5 minutes of the server's clock, each body good once) and its X25519 key, and receives a JWT scoped to `(did, roomId)` with `admitted` saying whether its person is a member.
 - **Membership** gates every room endpoint: the room's signed membership links, replayed by the identity core, say who is a member; the identity store's key logs say which person a key speaks for.
 - **Links** are stored as an append-only diff log (`PerspectiveDiff` = additions/removals of signed `LinkExpression`s) plus a derived active-set table. The diff log is never pruned: it is what `/sync?since=N` answers from, and a member whose cursor is N gets every diff after N. Rooms on a server that ran an earlier version may already have lost early diffs to its pruning; their active set is complete, so `/render` still gives a member behind that gap the room's whole state. Compacting the log would need an answer that tells a client its cursor is too old, so that client re-renders; the server has none. Each commit adds one row, so a deployment's disk grows with its rooms' history: size the volume for it, since a write fails once SQLite cannot grow its file. The **revision** is a content hash of the active set's link hashes — order-independent, so two servers with the same active links converge to the same revision regardless of how they got there.
 - **WebSocket** push delivers committed diffs and telepresence events in real time.
@@ -239,16 +243,18 @@ Protocol 2. All room endpoints except `/rooms/:roomId/auth` and a genesis `POST 
 
 ```text
 GET  /.well-known/coasys-link-server -> { protocol: 2, name, membership: true }
-POST /rooms/:roomId/auth      { did, signature, timestamp, x25519PublicKey, x25519Signature }
+POST /rooms/:roomId/auth      { did, origin, signature, timestamp, x25519PublicKey, x25519Signature }
                                -> { token, expiresAt, admitted }
-                               (404 unknown room, nothing created; 401 bad signature, clock or replay;
+                               (400 origin not in normal form; 404 unknown room, nothing created;
+                                401 origin not this server's, bad signature, clock or replay;
                                 403 key revoked or expired; 503 identity store unavailable)
 POST /rooms/:roomId/membership { genesis?: {creator, salt}, links: WireMembershipLink[] }
                                -> { results: [{hash, counted, reason?}] }
                                (403 {reason, results} when no link counts; a link that does not count is not relayed)
 GET  /rooms/:roomId/membership ?since=<seq>[&limit=<n>] -> { links: WireMembershipLink[], seq }
 GET  /rooms/:roomId/members   -> { members: [{person, role, botOf, since, until: null}],
-                                   keys: [{did, person, byBot, x25519PublicKey, x25519Signature}] }   (the admitted keys)
+                                   keys: [{did, person, byBot, x25519PublicKey, x25519Signature}],   (the admitted keys)
+                                   latestKeyVersion }                                              (0 before the first key)
 POST /rooms/:roomId/commit    { additions: LinkExpression[], removals: LinkExpression[] } -> { sequence, revision }
                                (400 unless every link has data exactly { ciphertext, nonce } (strings; base64 by client convention, not checked) and a link_hash, and key_version, when sent, is a positive integer;
                                 400 for a membership predicate)
@@ -261,8 +267,10 @@ DELETE /rooms/:roomId/keys/:version -> { deleted }      (the caller's own box on
 GET  /rooms/:roomId/keys/missing  -> { membersNeedingHistoricalKeys: [{did, missingVersions}] }
 POST /rooms/:roomId/keys/grant    { targetDid, keys: [{version, encryptedKey}] } -> { granted }
                                    (any member; 403 for a version the caller does not hold)
-POST /rooms/:roomId/keys/rotate { keys, commitment } (any member) -> { version, recipients, membersNeedingHistoricalKeys }
-                                 (409 {missing, extra} unless the keys are exactly the admitted keys)
+POST /rooms/:roomId/keys/rotate { keys, commitment, version } (any member) -> { version, recipients, membersNeedingHistoricalKeys }
+                                 (400 version not a positive integer; 409 {latestKeyVersion, missing: [], extra: []}
+                                  unless version is latestKeyVersion + 1; 409 {missing, extra} unless the keys
+                                  are exactly the admitted keys)
 GET  /rooms/:roomId/ws              (WebSocket upgrade — first message must be {type:"auth",token:"<jwt>"})
 ```
 

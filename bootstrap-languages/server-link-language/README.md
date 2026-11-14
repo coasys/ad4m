@@ -115,16 +115,16 @@ Protocol 2; the full list is in the [link-server API](../../link-server/README.m
 
 | Method & path | Purpose |
 |---|---|
-| `POST /rooms/:roomId/auth` | `{did, signature, timestamp, x25519PublicKey, x25519Signature}` → `{token, expiresAt, admitted}`; 404 while the room does not exist |
+| `POST /rooms/:roomId/auth` | `{did, origin, signature, timestamp, x25519PublicKey, x25519Signature}` → `{token, expiresAt, admitted}`; the key signs `coasys-link-server:auth:2:<origin>:<roomId>:<timestamp>`, `<origin>` being `SERVER_URL`'s origin, and the server refuses an origin not its own (401); 404 while the room does not exist |
 | `POST /rooms/:roomId/membership` | Membership links (`coasys://membership/...`), plain and signed: `{genesis?, links}` → `{results}`. The creator's first call (with `genesis`) makes the room |
 | `GET /rooms/:roomId/membership?since=<seq>` | The membership log after `seq` → `{links, seq}`; each link goes to the executor (`membershipLinks`) |
-| `GET /rooms/:roomId/members` | The admitted keys, each with its X25519 key and signed statement |
+| `GET /rooms/:roomId/members` | The admitted keys, each with its X25519 key and signed statement, and `latestKeyVersion` |
 | `POST /rooms/:roomId/commit` | Push a `{additions, removals}` diff of encrypted links (base64 `{ciphertext, nonce}`); the server refuses a plaintext link and a membership predicate (400) |
 | `GET /rooms/:roomId/sync?since=<sequence>&limit=100` | Pull up to 100 diffs newer than `sequence` → `{diffs[] (each with its sequence), revision, sequence, next}` |
 | `GET /rooms/:roomId/render?limit=500[&next=<cursor>]` | One page of the snapshot pinned at `upto` → `{links[], revision, sequence, upto, next}` |
 | `GET /rooms/:roomId/peers` | Connected agent DIDs → `{peers: string[]}` |
 | `GET /rooms/:roomId/keys` | This key's sealed room key versions → `{keys: [{encryptedKey, version, commitment}]}`. Empty: this key waits for one; 403: the room does not admit this key |
-| `POST /rooms/:roomId/keys/rotate` | Any member: `{keys, commitment}`, a new version sealed to exactly the admitted keys (409 otherwise) |
+| `POST /rooms/:roomId/keys/rotate` | Any member: `{keys, commitment, version}`, version `latestKeyVersion + 1` sealed to exactly the admitted keys (409 otherwise) |
 | `DELETE /rooms/:roomId/keys/:version` | Any member: drops its own box for a version whose key does not match the commitment, so a holder grants it again |
 | `GET /rooms/:roomId/keys/missing` | Any member: `{membersNeedingHistoricalKeys: [{did, missingVersions}]}` |
 | `POST /rooms/:roomId/keys/grant` | Any member: `{targetDid, keys: [{version, encryptedKey}]}`, only versions the caller holds |
@@ -248,9 +248,12 @@ summary:
   comes from its room-key seed (the `agentRoomKeySeed` host import: an HKDF of
   the agent key, used for nothing else) and is published at auth with a
   statement the key signs. The language seals and opens with the
-  `ad4m-keyring` binding (ephemeral X25519 ECDH, HKDF-SHA256, AES-256-GCM, hex
+  `ad4m-keyring` binding's seal v2 (ephemeral X25519 ECDH, HKDF-SHA256,
+  AES-256-GCM with `coasys:room-key:<roomId>:<version>` as associated data, hex
   `{ephemeralPublicKey, nonce, ciphertext}`; vectors in
-  `ad4m-keyring/vectors/room-key-seal.json`).
+  `ad4m-keyring/vectors/room-key-seal-v2.json`). A box opens only for the room
+  and version it was sealed for, so a member cannot hand another room's key, or
+  an old version, as this room's key.
 - **Distribution.** Any admitted member seals each new version to every
   admitted key, including keys that never connected, and only to keys whose
   statement verifies and that the executor's membership admits

@@ -30,8 +30,11 @@ COPY --from=build /app/identity-core/ ./identity-core/
 RUN mkdir -p /data && chown -R node:node /data /app
 EXPOSE 3456
 VOLUME /data
-# PORT, DATA_DIR, AUTO_ADMIT, NAME, STORE_URL, STORE_HEAD_KEYS read from env vars
-# (see src/index.ts parseArgs). Defaults: port 3456, data ./data.
+# PORT, DATA_DIR, PUBLIC_ORIGIN, AUTO_ADMIT, NAME, STORE_URL, STORE_HEAD_KEYS read from env
+# vars (see src/index.ts parseArgs). Defaults: port 3456, data ./data.
+# PUBLIC_ORIGIN has no default and is required here: the origin clients reach the server at
+# (e.g. https://links.example.org; comma-separated for more than one). Each auth signs it, so
+# the server refuses a signature made for another server. Without it the container exits 1.
 ENV DATA_DIR=/data
 # A production image: AUTO_ADMIT is refused here (it also needs ALLOW_AUTO_ADMIT_DEV=true).
 ENV NODE_ENV=production

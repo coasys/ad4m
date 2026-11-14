@@ -1,6 +1,6 @@
 /**
  * Tests for src/encryption.ts: room keys sealed to members' X25519 keys with the keyring
- * binding (AR-08 K9), the HMAC link hash (K4), and AES-256-GCM link encryption. No mocking of
+ * binding, each box bound to its room and version (AR-08 K9), the HMAC link hash (K4), and AES-256-GCM link encryption. No mocking of
  * the crypto primitives: members open with the keyring binding from their own seed, so a
  * broken wire format or a swapped key fails the round trip.
  */
@@ -68,42 +68,65 @@ describe("encryption: hex helpers", () => {
 // Room keys sealed to X25519 keys (K9)
 // ---------------------------------------------------------------------------
 
+const ROOM = "8qTEjucJXFhuVFMAZR2FvNAW9JT4vFLcpvbcyk1CG5sR";
+
 describe("encryption: sealRoomKeyTo / openRoomKey", () => {
-    it("opens ad4m-keyring's vectors from the recipient's seed", () => {
+    it("opens ad4m-keyring's v2 vectors from the recipient's seed under their room and version", () => {
         // `ad4m-keyring` (Rust and its wasm build) seals and opens these same envelopes.
-        const file = new URL("../../../ad4m-keyring/vectors/room-key-seal.json", import.meta.url);
+        const file = new URL("../../../ad4m-keyring/vectors/room-key-seal-v2.json", import.meta.url);
         const { vectors } = JSON.parse(readFileSync(file, "utf8"));
         assert.ok(vectors.length > 0);
         for (const v of vectors) {
-            assert.equal(bytesToHex(openRoomKey(v.sealed, hexToBytes(v.x25519Secret))), v.roomKey);
+            const secret = hexToBytes(v.x25519Secret);
+            assert.equal(bytesToHex(openRoomKey(v.sealed, secret, v.roomId, v.version)), v.roomKey);
+            assert.throws(() => openRoomKey(v.sealed, secret, v.roomId, v.version + 1));
+            assert.throws(() => openRoomKey(v.sealed, secret, `${v.roomId}x`, v.version));
         }
     });
 
     it("seals a room key to a member's X25519 key, and the member opens it with its seed", () => {
         const m = member();
         const roomKey = generateRoomKey();
-        assert.deepEqual(openRoomKey(sealRoomKeyTo(m.x25519, roomKey), m.seed), roomKey);
+        assert.deepEqual(openRoomKey(sealRoomKeyTo(m.x25519, roomKey, ROOM, 1), m.seed, ROOM, 1), roomKey);
+    });
+
+    it("a box sealed for one room and version opens for no other (K9)", () => {
+        const m = member();
+        const sealed = sealRoomKeyTo(m.x25519, generateRoomKey(), ROOM, 3);
+        assert.throws(() => openRoomKey(sealed, m.seed, ROOM, 2));
+        assert.throws(() => openRoomKey(sealed, m.seed, ROOM, 4));
+        assert.throws(() => openRoomKey(sealed, m.seed, "another-room", 3));
     });
 
     it("produces a different box each time (fresh ephemeral key + nonce)", () => {
         const m = member();
         const roomKey = generateRoomKey();
-        const box1 = sealRoomKeyTo(m.x25519, roomKey);
-        const box2 = sealRoomKeyTo(m.x25519, roomKey);
+        const box1 = sealRoomKeyTo(m.x25519, roomKey, ROOM, 1);
+        const box2 = sealRoomKeyTo(m.x25519, roomKey, ROOM, 1);
         assert.notEqual(box1.ephemeralPublicKey, box2.ephemeralPublicKey);
         assert.notEqual(box1.ciphertext, box2.ciphertext);
-        assert.deepEqual(openRoomKey(box1, m.seed), roomKey);
-        assert.deepEqual(openRoomKey(box2, m.seed), roomKey);
+        assert.deepEqual(openRoomKey(box1, m.seed, ROOM, 1), roomKey);
+        assert.deepEqual(openRoomKey(box2, m.seed, ROOM, 1), roomKey);
     });
 
     it("another member cannot open it", () => {
-        const sealed = sealRoomKeyTo(member().x25519, generateRoomKey());
-        assert.throws(() => openRoomKey(sealed, member().seed));
+        const sealed = sealRoomKeyTo(member().x25519, generateRoomKey(), ROOM, 1);
+        assert.throws(() => openRoomKey(sealed, member().seed, ROOM, 1));
     });
 
     it("refuses an X25519 key that is not 32 bytes of hex", () => {
-        assert.throws(() => sealRoomKeyTo("11".repeat(31), generateRoomKey()));
-        assert.throws(() => sealRoomKeyTo("zz".repeat(32), generateRoomKey()));
+        assert.throws(() => sealRoomKeyTo("11".repeat(31), generateRoomKey(), ROOM, 1));
+        assert.throws(() => sealRoomKeyTo("zz".repeat(32), generateRoomKey(), ROOM, 1));
+    });
+
+    it("refuses a room id that is empty or a version that is not a positive integer", () => {
+        const m = member();
+        for (const [room, version] of [["", 1], [ROOM, 0], [ROOM, -1], [ROOM, 1.5], [ROOM, Number.NaN]] as const) {
+            assert.throws(() => sealRoomKeyTo(m.x25519, generateRoomKey(), room, version), /room id|version/);
+        }
+        const sealed = sealRoomKeyTo(m.x25519, generateRoomKey(), ROOM, 1);
+        assert.throws(() => openRoomKey(sealed, m.seed, "", 1), /room id/);
+        assert.throws(() => openRoomKey(sealed, m.seed, ROOM, 0), /version/);
     });
 
     it("generateRoomKey returns AES_KEY_BYTES (32) random bytes", () => {
@@ -283,8 +306,14 @@ describe("encryption: encryptLinkForWire / decryptLinkFromWire", () => {
 // ---------------------------------------------------------------------------
 
 describe("encryption: buildKeyRing / latestKeyVersion", () => {
-    const entry = (x25519: string, key: Uint8Array, version: number, committed = key): KeysResponseEntry => ({
-        encryptedKey: sealRoomKeyTo(x25519, key),
+    const entry = (
+        x25519: string,
+        key: Uint8Array,
+        version: number,
+        committed = key,
+        sealedFor: { room: string; version: number } = { room: ROOM, version },
+    ): KeysResponseEntry => ({
+        encryptedKey: sealRoomKeyTo(x25519, key, sealedFor.room, sealedFor.version),
         version,
         commitment: roomKeyCommitment(committed),
     });
@@ -293,7 +322,7 @@ describe("encryption: buildKeyRing / latestKeyVersion", () => {
         const me = member();
         const rk1 = generateRoomKey();
         const rk2 = generateRoomKey();
-        const { ring, spoiled } = buildKeyRing([entry(me.x25519, rk1, 1), entry(me.x25519, rk2, 2)], me.seed);
+        const { ring, spoiled } = buildKeyRing([entry(me.x25519, rk1, 1), entry(me.x25519, rk2, 2)], me.seed, ROOM);
         assert.equal(ring.size, 2);
         assert.deepEqual(ring.get(1), rk1);
         assert.deepEqual(ring.get(2), rk2);
@@ -306,6 +335,7 @@ describe("encryption: buildKeyRing / latestKeyVersion", () => {
         const { ring, spoiled } = buildKeyRing(
             [entry(me.x25519, rk1, 1), entry(member().x25519, generateRoomKey(), 2)],
             me.seed,
+            ROOM,
         );
         assert.deepEqual([...ring.keys()], [1]);
         assert.deepEqual(ring.get(1), rk1);
@@ -315,23 +345,44 @@ describe("encryption: buildKeyRing / latestKeyVersion", () => {
     it("spoils a version whose box opens to a key other than the committed one", () => {
         const me = member();
         // A member holding version 1 sealed a key of its own under it.
-        const { ring, spoiled } = buildKeyRing([entry(me.x25519, generateRoomKey(), 1, generateRoomKey())], me.seed);
+        const { ring, spoiled } = buildKeyRing([entry(me.x25519, generateRoomKey(), 1, generateRoomKey())], me.seed, ROOM);
         assert.equal(ring.size, 0);
         assert.deepEqual(spoiled, [1]);
+    });
+
+    it("spoils a box the server lists under another version or that was sealed for another room (K9)", () => {
+        const me = member();
+        const rk1 = generateRoomKey();
+        const rk2 = generateRoomKey();
+        const moved = generateRoomKey();
+        const { ring, spoiled } = buildKeyRing(
+            [
+                entry(me.x25519, rk1, 1),
+                // Sealed (and committed) as version 2, served as version 3.
+                entry(me.x25519, moved, 3, moved, { room: ROOM, version: 2 }),
+                // Sealed for another room under the same version number.
+                entry(me.x25519, rk2, 2, rk2, { room: "another-room", version: 2 }),
+            ],
+            me.seed,
+            ROOM,
+        );
+        assert.deepEqual([...ring.keys()], [1]);
+        assert.deepEqual(spoiled.sort(), [2, 3]);
     });
 
     it("spoils a version with no commitment", () => {
         const me = member();
         const { ring, spoiled } = buildKeyRing(
-            [{ encryptedKey: sealRoomKeyTo(me.x25519, generateRoomKey()), version: 1 }],
+            [{ encryptedKey: sealRoomKeyTo(me.x25519, generateRoomKey(), ROOM, 1), version: 1 }],
             me.seed,
+            ROOM,
         );
         assert.equal(ring.size, 0);
         assert.deepEqual(spoiled, [1]);
     });
 
     it("is empty when no version opens: the agent waits for a key", () => {
-        const { ring } = buildKeyRing([entry(member().x25519, generateRoomKey(), 1)], member().seed);
+        const { ring } = buildKeyRing([entry(member().x25519, generateRoomKey(), 1)], member().seed, ROOM);
         assert.equal(ring.size, 0);
     });
 

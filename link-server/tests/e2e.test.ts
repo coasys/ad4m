@@ -207,7 +207,7 @@ test("server rejects rotation containing a key not admitted to the room, naming 
 
     const res = await postJson<{ error: string; missing: string[]; extra: string[] }>(
       `${server.url}/rooms/${roomId}/keys/rotate`,
-      { keys, commitment: roomKeyCommitment(roomKey) },
+      { keys, commitment: roomKeyCommitment(roomKey), version: 1 },
       adminToken,
     );
     assert.equal(res.status, 409);
@@ -537,7 +537,7 @@ test("POST /keys/rotate request body contains zero plaintext key bytes — hex o
     const keys = dids.map((did) => ({ did, encryptedKey: sealToDid(did, roomKey) }));
 
     // Serialize — this exact string goes on the wire.
-    const body = { keys, commitment: roomKeyCommitment(roomKey) };
+    const body = { keys, commitment: roomKeyCommitment(roomKey), version: 1 };
     const wireBody = JSON.stringify(body);
 
     // The plaintext key must not appear in any encoding.
@@ -732,7 +732,7 @@ test("a member grants the versions it holds to a member lacking them, and its ro
     const newKey = generateRoomKey();
     const rotateAttempt = await postJson<{ missing: string[]; extra: string[] }>(
       `${server.url}/rooms/${roomId}/keys/rotate`,
-      { keys: [{ did: member.did, encryptedKey: sealToDid(member.did, newKey) }], commitment: roomKeyCommitment(newKey) },
+      { keys: [{ did: member.did, encryptedKey: sealToDid(member.did, newKey) }], commitment: roomKeyCommitment(newKey), version: 2 },
       memberToken,
     );
     assert.equal(rotateAttempt.status, 409);
@@ -752,13 +752,13 @@ test("auth stores the X25519 key only with its signature by the device key", asy
     const { authBody } = await import("./identity.js");
 
     // An X25519 key the device key did not sign is refused, and nothing is stored.
-    const forged = { ...authBody(agent, roomId), x25519PublicKey: "aa".repeat(32) };
+    const forged = { ...authBody(agent, server.url, roomId), x25519PublicKey: "aa".repeat(32) };
     const refused = await postJson<{ error: string }>(`${server.url}/rooms/${roomId}/auth`, forged);
     assert.equal(refused.status, 401);
     assert.match(refused.body.error, /x25519Signature/);
     assert.equal(server.built.db.getMemberKey(roomId, agent.did), undefined);
 
-    const ok = await postJson<{ token: string }>(`${server.url}/rooms/${roomId}/auth`, authBody(agent, roomId));
+    const ok = await postJson<{ token: string }>(`${server.url}/rooms/${roomId}/auth`, authBody(agent, server.url, roomId));
     assert.equal(ok.status, 200);
     const members = await getJson<{ keys: Array<{ did: string; x25519PublicKey: string }> }>(
       `${server.url}/rooms/${roomId}/members`,

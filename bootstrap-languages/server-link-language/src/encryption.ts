@@ -7,10 +7,15 @@
  * publishes an X25519 key, the public half of its `agentRoomKeySeed`, with the key's
  * signature over it (src/room.ts, K7). Whoever holds a version seals it to such a key with
  * the keyring binding's `sealRoomKey` (`keyring/keyring.js`, the wasm build of
- * `ad4m-keyring`: ephemeral X25519 ECDH, HKDF-SHA256, AES-256-GCM), and the member opens it
- * with `openRoomKey` from its own seed (K9). The rotator seals each new version to every
- * admitted key, and any member holding a version can grant it to a member lacking it. The
- * server stores and relays the boxes and never sees a room key.
+ * `ad4m-keyring`: the room-key seal v2, ephemeral X25519 ECDH, HKDF-SHA256, AES-256-GCM), and
+ * the member opens it with `openRoomKey` from its own seed (K9). The rotator seals each new
+ * version to every admitted key, and any member holding a version can grant it to a member
+ * lacking it. The server stores and relays the boxes and never sees a room key.
+ *
+ * Each box is bound to its room and version: the context `coasys:room-key:<roomId>:<version>`
+ * is the AEAD's associated data. A member opens a box only under the room it is in and the
+ * version the server lists the box at, so the server cannot serve a box made for another room,
+ * or for another version of this one, as this version: such a box does not open and is spoiled.
  *
  * ## The link hash (K4)
  *
@@ -36,6 +41,7 @@ import { hmac } from "@noble/hashes/hmac";
 import {
     linkHashKey,
     openRoomKey as keyringOpenRoomKey,
+    roomKeyContext as keyringRoomKeyContext,
     sealRoomKey as keyringSealRoomKey,
 } from "../keyring/keyring.js";
 import type {
@@ -221,18 +227,41 @@ export function roomKeyCommitment(roomKey: Uint8Array): string {
 
 const X25519_HEX = /^[0-9a-f]{64}$/;
 
-/** Seals `roomKey` to the X25519 key `x25519PublicKey` (64 lowercase hex characters). */
-export function sealRoomKeyTo(x25519PublicKey: string, roomKey: Uint8Array): SealedBox {
-    if (!X25519_HEX.test(x25519PublicKey)) throw new Error("an X25519 key is 32 bytes of lowercase hex");
-    return keyringSealRoomKey(roomKey, hexToBytes(x25519PublicKey)) as SealedBox;
+/**
+ * The context a box of room key `version` of room `roomId` is sealed under:
+ * `coasys:room-key:<roomId>:<version>`. Throws for an empty room id or a version that is not a
+ * positive integer (versions start at 1).
+ */
+export function roomKeyContext(roomId: string, version: number): string {
+    if (typeof roomId !== "string" || roomId.length === 0) throw new Error("a room key is sealed for a room id");
+    if (!Number.isSafeInteger(version) || version < 1 || version > 0xffff_ffff) {
+        throw new Error(`a room key version is a positive integer, not ${version}`);
+    }
+    return keyringRoomKeyContext(roomId, version);
 }
 
 /**
- * Opens a room key sealed to the X25519 key of `seed` (`agentRoomKeySeed`). Throws for a box
- * sealed to anyone else, an altered box, or a sealed value that is not a 32-byte key.
+ * Seals `roomKey` to the X25519 key `x25519PublicKey` (64 lowercase hex characters), bound to
+ * room `roomId` and key `version`: the box opens only under that room and version.
  */
-export function openRoomKey(sealed: SealedBox, seed: Uint8Array): Uint8Array {
-    const roomKey = keyringOpenRoomKey(sealed, seed);
+export function sealRoomKeyTo(
+    x25519PublicKey: string,
+    roomKey: Uint8Array,
+    roomId: string,
+    version: number,
+): SealedBox {
+    if (!X25519_HEX.test(x25519PublicKey)) throw new Error("an X25519 key is 32 bytes of lowercase hex");
+    const context = roomKeyContext(roomId, version);
+    return keyringSealRoomKey(roomKey, hexToBytes(x25519PublicKey), context) as SealedBox;
+}
+
+/**
+ * Opens room key `version` of room `roomId`, sealed to the X25519 key of `seed`
+ * (`agentRoomKeySeed`). Throws for a box sealed to anyone else, for another room or another
+ * version, an altered box, or a sealed value that is not a 32-byte key.
+ */
+export function openRoomKey(sealed: SealedBox, seed: Uint8Array, roomId: string, version: number): Uint8Array {
+    const roomKey = keyringOpenRoomKey(sealed, seed, roomKeyContext(roomId, version));
     if (roomKey.length !== AES_KEY_BYTES) {
         throw new Error(`a room key has ${AES_KEY_BYTES} bytes, the box held ${roomKey.length}`);
     }
@@ -252,18 +281,21 @@ export type KeyRing = Map<number, Uint8Array>;
  * granted a wrong one), is `spoiled`: left out with a log line, so it costs
  * that version, not the room, and the caller drops it so it is granted again.
  * When none opens, the ring is empty and the caller treats the agent as
- * holding no key ("pending"). `seed` is this agent's `agentRoomKeySeed`.
+ * holding no key ("pending"). `seed` is this agent's `agentRoomKeySeed`; each box opens only
+ * under `roomId` and the version it is listed at (K9), so a box the server moved from another
+ * room or version is spoiled too.
  */
 export function buildKeyRing(
     entries: KeysResponseEntry[],
     seed: Uint8Array,
+    roomId: string,
 ): { ring: KeyRing; spoiled: number[] } {
     const ring: KeyRing = new Map();
     const spoiled: number[] = [];
     const failures: string[] = [];
     for (const entry of entries) {
         try {
-            const key = openRoomKey(entry.encryptedKey, seed);
+            const key = openRoomKey(entry.encryptedKey, seed, roomId, entry.version);
             if (roomKeyCommitment(key) !== entry.commitment) {
                 throw new Error("the key does not match the rotation's commitment");
             }

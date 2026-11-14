@@ -5,7 +5,10 @@
  *   `base58(sha256(CREATOR ‖ 0x00 ‖ UID))`, as `roomIdOf` in `link-server/src/membership.ts`
  *   checks it at genesis. Two spaces with the same `UID` and different creators are two rooms.
  * - The auth message a key signs (with `agentSignStringHex`):
- *   `coasys-link-server:auth:2:<roomId>:<timestamp>`.
+ *   `coasys-link-server:auth:2:<origin>:<roomId>:<timestamp>`, where `<origin>` is the server's
+ *   origin (`serverOrigin`: scheme, host and port of the server URL, lower case, without the
+ *   default port). A server takes only its own origins, so it cannot relay a signature it was
+ *   given to another link server, which would admit the relayer as this key.
  * - The room key statement (K7): a device key signs its X25519 key, raw Ed25519 over the
  *   `coasys:room-key` signing bytes of `{x25519PublicKey, did}`, which are the identity core's
  *   `room_key_signing_bytes` (`ad4m-identity-core/src/wire.rs`): canonical JSON (JCS) of the
@@ -31,9 +34,22 @@ export function roomIdOf(creator: string, uid: string): string {
     return base58Encode(sha256(input));
 }
 
-/** What a key signs to authenticate to `roomId` at `timestamp` (ms). */
-export function authMessage(roomId: string, timestamp: number): string {
-    return `coasys-link-server:auth:2:${roomId}:${timestamp}`;
+/** What a key signs to authenticate to `roomId` on the server at `origin` (`serverOrigin`) at `timestamp` (ms). */
+export function authMessage(origin: string, roomId: string, timestamp: number): string {
+    return `coasys-link-server:auth:2:${origin}:${roomId}:${timestamp}`;
+}
+
+/**
+ * The origin of the server at `serverUrl`, as the auth message names it: scheme, host and port,
+ * lower case, without the default port or a trailing slash (the URL standard's origin). Throws
+ * for a URL that is not http(s).
+ */
+export function serverOrigin(serverUrl: string): string {
+    const url = new URL(serverUrl);
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
+        throw new Error(`the link server URL ${serverUrl} is not http(s)`);
+    }
+    return url.origin;
 }
 
 export const ROOM_KEY_DOMAIN = "coasys:room-key";

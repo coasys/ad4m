@@ -9,6 +9,10 @@ services:
       PORT: "${PORT:-3456}"
       DATA_DIR: /data
       AUTO_ADMIT: "${AUTO_ADMIT:-false}"
+      # The origin clients reach this server at (scheme, host and port; comma-separated for
+      # more than one), e.g. https://links.example.org. Each auth signs it; the server refuses
+      # an auth signed for another origin, and does not start without one.
+      PUBLIC_ORIGIN: "${PUBLIC_ORIGIN:-http://localhost:${PORT:-3456}}"
       # The server's name in /.well-known/coasys-link-server.
       NAME: "${NAME:-}"
       # The identity store that resolves keys to persons, and the keys its heads are signed

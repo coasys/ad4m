@@ -157,7 +157,7 @@ async function setupKeyRing(): Promise<void> {
         // Reading the seed throws while this executor cannot derive it (a locked agent):
         // then no box is judged spoiled, and the read is tried again later.
         const seed = await getAgent().roomKeySeed();
-        const { ring, spoiled } = buildKeyRing(keysRes.keys, seed);
+        const { ring, spoiled } = buildKeyRing(keysRes.keys, seed, config.roomId);
         // A spoiled box would block its version for good: drop it, and a member holding the
         // version grants it again.
         for (const version of spoiled) {
