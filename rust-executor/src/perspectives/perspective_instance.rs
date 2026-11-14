@@ -692,6 +692,9 @@ pub struct PerspectiveInstance {
     /// `propose`, the engine's mint-and-sweep, the sync-triggered sweep),
     /// never inside `run_flow_consensus_pass`, which those nest.
     pub(crate) flow_pass_lock: Arc<Mutex<()>>,
+    /// Resource counters of this perspective (`GET /metrics`). They go with the instance:
+    /// a removed perspective leaves the output.
+    pub metrics: Arc<crate::metrics::PerspectiveCounters>,
     /// Test-only fault injection for [`Self::add_link_expression`] (#981).
     /// Compiled out entirely in non-test builds — see [`Self::fail_next_add_link`].
     /// `0` means the *next* call returns an error instead of writing, then
@@ -814,6 +817,7 @@ impl PerspectiveInstance {
             abstract_cache: Arc::new(std::sync::RwLock::new(Default::default())),
             flow_pass_queue: Arc::new(std::sync::Mutex::new(Default::default())),
             flow_pass_lock: Arc::new(Mutex::new(())),
+            metrics: Arc::new(Default::default()),
             #[cfg(test)]
             fail_add_link_after: Arc::new(AtomicI64::new(-1)),
             #[cfg(test)]
@@ -4474,7 +4478,10 @@ impl PerspectiveInstance {
         // write. On failure nothing was written; fall back to one link at a
         // time.
         match self.sparql_store.apply_diff(&removals, &additions) {
-            Ok(()) => return Ok(effects),
+            Ok(()) => {
+                crate::metrics::record_link_writes(&self.metrics, additions.len(), removals.len());
+                return Ok(effects);
+            }
             Err(e) => log::warn!(
                 "Failed to apply link diff to SPARQL store in one transaction, \
                  writing links one by one: {:?}",
@@ -4483,17 +4490,22 @@ impl PerspectiveInstance {
         }
 
         // Removals first
+        let mut removed = 0;
         for removal in &removals {
-            if let Err(e) = self.sparql_store.remove_link(removal) {
-                log::warn!("Failed to remove link from SPARQL store: {:?}", e);
+            match self.sparql_store.remove_link(removal) {
+                Ok(_) => removed += 1,
+                Err(e) => log::warn!("Failed to remove link from SPARQL store: {:?}", e),
             }
         }
         // Additions after
+        let mut added = 0;
         for addition in &additions {
-            if let Err(e) = self.sparql_store.add_link(addition) {
-                log::warn!("Failed to add link to SPARQL store: {:?}", e);
+            match self.sparql_store.add_link(addition) {
+                Ok(_) => added += 1,
+                Err(e) => log::warn!("Failed to add link to SPARQL store: {:?}", e),
             }
         }
+        crate::metrics::record_link_writes(&self.metrics, added, removed);
 
         // EXPERIMENT: removed per-write flush. The fix-branch added a flush
         // call here to reclaim memtable memory, but flushing on EVERY single
@@ -6203,6 +6215,17 @@ impl PerspectiveInstance {
         Ok(format!("{{ {} }}", stringified))
     }
 
+    /// The subscriber of each live subscription (a managed agent's DID; `None` for the main
+    /// agent), for the gauges of `GET /metrics`.
+    pub(crate) async fn subscription_subscribers(&self) -> Vec<Option<String>> {
+        self.subscribed_queries
+            .lock()
+            .await
+            .values()
+            .map(|q| q.subscriber.clone())
+            .collect()
+    }
+
     /// Subscribe to a SPARQL query under `subscription_id` (the client's) for
     /// the RPC connection `connection_id`, as `subscriber` (a managed agent's
     /// DID, `None` for the main agent). Returns the subscription id and the
@@ -6471,6 +6494,9 @@ impl PerspectiveInstance {
         // held meanwhile. Each subscription runs at most once per pass and
         // passes run one after another, so the results compared below are
         // the newest.
+        self.metrics
+            .subscription_rechecks
+            .fetch_add(query_futures.len() as u64, Ordering::Relaxed);
         let results =
             subscriptions::run_rechecks(query_futures, &subscriptions::RECHECK_SLOTS).await;
 
