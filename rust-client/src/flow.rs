@@ -458,12 +458,13 @@ pub struct FlowApi {
 /// The hardwired `FlowInstance` class shape — identical bytes to the
 /// executor's `hardwired_sdna/flow_instance.json`, so registering it writes
 /// the shape the engine itself would (the TS/Rust parity tests lock these).
-const FLOW_INSTANCE_SDNA: &str =
-    include_str!("../../rust-executor/src/perspectives/hardwired_sdna/flow_instance.json");
-/// The hardwired `FlowTransitionProposal` class shape.
-const FLOW_TRANSITION_PROPOSAL_SDNA: &str = include_str!(
-    "../../rust-executor/src/perspectives/hardwired_sdna/flow_transition_proposal.json"
-);
+/// Bundled inside the crate: a published `ad4m-client` cannot reach the
+/// executor's file, and `sdna_matches_the_executor`s test keeps the copies
+/// in step where the repo is present.
+const FLOW_INSTANCE_SDNA: &str = include_str!("sdna/flow_instance.json");
+/// The hardwired `FlowTransitionProposal` class shape — bundled like
+/// [`FLOW_INSTANCE_SDNA`].
+const FLOW_TRANSITION_PROPOSAL_SDNA: &str = include_str!("sdna/flow_transition_proposal.json");
 
 impl FlowApi {
     pub fn new(ws: &Arc<WsRpcClient>, uuid: impl Into<String>) -> Self {
@@ -1282,5 +1283,33 @@ mod tests {
             assert!(is_missing_shape_error(msg), "{msg}");
         }
         assert!(!is_missing_shape_error("connection reset"));
+    }
+
+    /// The bundled hardwired class JSONs must stay byte-identical with the
+    /// executor's — both sides register the same shape, so any drift in
+    /// either direction changes what a perspective holds. Repo-only: in the
+    /// packaged crate the executor's tree is absent and the check is out of
+    /// place (the `include_str!`s above are what a publish compiles).
+    #[test]
+    fn bundled_sdna_matches_the_executors() {
+        let executor_sdna = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../rust-executor/src/perspectives/hardwired_sdna");
+        if !executor_sdna.is_dir() {
+            eprintln!("SKIP: executor tree not present (packaged crate)");
+            return;
+        }
+        for (bundled, executor_file) in [
+            (FLOW_INSTANCE_SDNA, "flow_instance.json"),
+            (
+                FLOW_TRANSITION_PROPOSAL_SDNA,
+                "flow_transition_proposal.json",
+            ),
+        ] {
+            let theirs = std::fs::read_to_string(executor_sdna.join(executor_file)).unwrap();
+            assert_eq!(
+                bundled, theirs,
+                "{executor_file}: bundled copy drifted from the executor's"
+            );
+        }
     }
 }

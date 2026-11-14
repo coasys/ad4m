@@ -2,17 +2,26 @@
 //! executor's generated contract, `core/src/generated/api/RpcMethods.ts`
 //! (itself generated from the executor's `HandlerMap`; `api/AGENTS.md`). A
 //! rename or removal on either side fails here.
+//!
+//! Repo-only by design: the contract lives outside the crate, so the
+//! packaged `ad4m-client` cannot see it — the tests skip there. A runtime
+//! read, not `include_str!`, is what keeps the publish compiling.
 
 use regex::Regex;
 use std::collections::BTreeSet;
 
-/// The generated contract — compiled in so a missing file fails the build.
-const RPC_METHODS_TS: &str = include_str!("../../core/src/generated/api/RpcMethods.ts");
+/// Read the generated contract off the repo tree; `None` when this is the
+/// packaged crate (no `core/` next to `rust-client/`).
+fn contract_source() -> Option<String> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../core/src/generated/api/RpcMethods.ts");
+    std::fs::read_to_string(path).ok()
+}
 
 /// Every `"<method>":` key of the `RpcMethods` interface.
-fn generated_methods() -> BTreeSet<String> {
+fn generated_methods(source: &str) -> BTreeSet<String> {
     let re = Regex::new(r#"^\s*"([a-zA-Z][a-zA-Z0-9]*\.[a-zA-Z0-9]+)"\s*:"#).unwrap();
-    RPC_METHODS_TS
+    source
         .lines()
         .filter_map(|line| re.captures(line).map(|c| c[1].to_string()))
         .collect()
@@ -33,7 +42,11 @@ fn called_methods(source: &str) -> BTreeSet<String> {
 
 #[test]
 fn every_wrapped_rpc_exists_in_the_generated_contract() {
-    let generated = generated_methods();
+    let Some(source) = contract_source() else {
+        eprintln!("SKIP: generated contract not present (packaged crate)");
+        return;
+    };
+    let generated = generated_methods(&source);
     assert!(
         generated.len() > 150,
         "expected the generated contract's ~230 methods, got {}",
@@ -90,7 +103,11 @@ fn every_wrapped_rpc_exists_in_the_generated_contract() {
 
 #[test]
 fn the_generated_contract_is_fresh_enough_to_name_new_methods() {
-    let generated = generated_methods();
+    let Some(source) = contract_source() else {
+        eprintln!("SKIP: generated contract not present (packaged crate)");
+        return;
+    };
+    let generated = generated_methods(&source);
     // The methods this task relies on — a spot check that the compiled-in
     // contract is new enough (a stale one fails loudly here first).
     for method in [
