@@ -964,6 +964,16 @@ export class PerspectiveProxy {
         invalidatePerspectiveCache(this.#handle.uuid);
         return result;
     }
+
+    /**
+     * Drops an open batch without committing it — the recovery for a failed batched call:
+     * a failed call does not roll back the calls before it and may have staged part of its
+     * own work, so discard rather than commit to keep the successful calls. Resolves `true`
+     * when the batch was open and is now dropped.
+     */
+    async discardBatch(batchId: string): Promise<boolean> {
+        return await this.#client.discardBatch(this.#handle.uuid, batchId)
+    }
     /**
      * Retrieves and renders an Expression referenced in this perspective.
      * 
@@ -1640,8 +1650,11 @@ export class PerspectiveProxy {
      * write rejects with an `RpcError` whose `data` is an `InstanceError` (status 422 and
      * `kind: 'validation'` for a shape violation, with one `ValidationError` per property) and
      * stages nothing. With `batchId` a non-validation failure can leave part of the write
-     * staged in the batch — discard it (`perspective.discardBatch`), don't commit it to keep
-     * earlier calls.
+     * staged in the batch — discard it ({@link discardBatch}), don't commit it to keep
+     * earlier calls. An instance created in the same batch is not found — existence reads
+     * committed state only — so a create followed by an update, remove or
+     * `instanceAddToCollection` of the new instance in one batch fails `notFound`; put a new
+     * instance's initial collection items on the create itself.
      *
      * @example
      * const { baseUri } = await perspective.instanceCreate({ className: "Task", properties: { title: "Write" } });

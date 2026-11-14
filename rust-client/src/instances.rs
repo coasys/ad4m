@@ -7,8 +7,10 @@
 //! nothing; [`validation_errors`] reads the per-property errors of a shape violation (status
 //! 422) from it. With `batch_id` a write is staged into that open batch
 //! (`perspective.createBatch`) and lands on its commit — where a non-validation failure can
-//! leave part of the write staged: discard it (`perspective.discardBatch`) then, don't commit
-//! it to keep earlier calls.
+//! leave part of the write staged: discard it ([`PerspectivesClient::discard_batch`]) then,
+//! don't commit it to keep earlier calls. An instance created in the same batch is not found —
+//! existence reads committed state only — so a create followed by an update, remove or
+//! `instance_add_to_collection` of the new instance in one batch fails `notFound`.
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};

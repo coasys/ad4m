@@ -167,6 +167,14 @@ it to keep the successful calls also commits whatever the failed call left behin
 violation is detected before any link is written — but a failure that is not a refusal, like
 a store error mid-write, can still leave a partial write staged.)
 
+**A new instance is found only after its batch commits.** The `perspective.instance*`
+existence checks read committed state, so within one batch an `instanceCreate` followed by
+an `instanceUpdate`, `instanceRemove`, `instanceAddToCollection` or
+`instanceRemoveFromCollection` of the new instance's URI fails `notFound`. Put a new
+instance's initial collection items on the create itself, or commit the create before
+adding to its collections. (The link reads a write does — collection membership, the remove
+cascade — do see the batch's own staged work.)
+
 Under the hood, `Ad4mModel.transaction()` calls `createBatch()` and `commitBatch()` for you.
 
 ## Technical Details
