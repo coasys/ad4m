@@ -578,9 +578,11 @@ them against those two guards.
   `core/src/generated/api/`, but not its `index.ts`: add the export line there by hand.
 - `crate::types::core` (domain) vs `crate::types::domain` (wire/input). Some duplicates,
   see spec item 5. Prefer `crate::types::X` re-exports.
-- `WsRpcError { code, message }` (`ws_handler.rs`): constructors `bad_request`,
+- `WsRpcError { code, message, data }` (`ws_handler.rs`): constructors `bad_request`,
   `unauthorized`, `forbidden`, `not_found`, `conflict`, `too_many_requests`,
-  `internal`, `not_implemented`. No `From` impls for domain errors yet.
+  `internal`, `not_implemented`; `.with_data(value)` adds structured detail, sent as
+  `error.data` (`to_wire`) and read by the SDK as `RpcError.data`. No `From` impls for domain
+  errors yet.
 
 ## openai_compat/
 
