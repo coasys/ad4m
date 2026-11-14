@@ -312,8 +312,10 @@ pub const RECHECK_EVERY: Duration = Duration::from_secs(60);
 /// The re-check of stored links: the links of each key whose verdict the cache changed (a
 /// revocation, a key a log lists for the first time), and every [`RECHECK_EVERY`] the links
 /// that could not be checked and those of each bot key whose scope expired since the last
-/// tick (since start on the first). Each re-check judges a link again from the key map and
-/// rewrites it only when its verdict or person changed, so it is idempotent.
+/// tick (since start on the first). When the receiver lags, the changes it missed are made up
+/// for by [`lag_scopes`], which does not rely on the key map still holding the changed log.
+/// Each re-check judges a link again from the key map and rewrites it only when its verdict or
+/// person changed, so it is idempotent.
 async fn run_recheck(
     service: Arc<IdentityService>,
     mut changes: tokio::sync::broadcast::Receiver<verdict::VerdictChange>,
@@ -334,10 +336,14 @@ async fn run_recheck(
     let mut expired_until = 0;
     // Signers whose re-check failed in some perspective: asked again on the next tick.
     let mut failed: BTreeSet<String> = BTreeSet::new();
+    // A lag recovery's sweep of the links stored with a person failed somewhere: run again on
+    // the next tick.
+    let mut logged_failed = false;
     loop {
         tokio::select! {
             change = changes.recv() => {
                 let mut signers = BTreeSet::new();
+                let mut lagged = false;
                 match change {
                     Ok(change) => {
                         signers.insert(format!("did:key:{}", change.key));
@@ -346,21 +352,29 @@ async fn run_recheck(
                                 Ok(change) => {
                                     signers.insert(format!("did:key:{}", change.key));
                                 }
-                                Err(TryRecvError::Lagged(_)) => {
-                                    signers.extend(listed_signers(&service));
-                                }
+                                Err(TryRecvError::Lagged(_)) => lagged = true,
                                 Err(TryRecvError::Empty) | Err(TryRecvError::Closed) => break,
                             }
                         }
                     }
-                    // Changes were missed: every key the map lists.
-                    Err(RecvError::Lagged(_)) => signers.extend(listed_signers(&service)),
+                    Err(RecvError::Lagged(_)) => lagged = true,
                     Err(RecvError::Closed) => return,
                 }
-                let scope = crate::perspectives::Recheck::Signers(signers);
-                if !crate::perspectives::recheck_links(&scope).await {
-                    if let crate::perspectives::Recheck::Signers(signers) = scope {
-                        failed.extend(signers);
+                let scopes = if lagged {
+                    lag_scopes(service.cache.key_map(), signers)
+                } else {
+                    vec![crate::perspectives::Recheck::Signers(signers)]
+                };
+                for scope in scopes {
+                    if !crate::perspectives::recheck_links(&scope).await {
+                        match scope {
+                            crate::perspectives::Recheck::Signers(signers) => {
+                                failed.extend(signers)
+                            }
+                            crate::perspectives::Recheck::Logged => logged_failed = true,
+                            crate::perspectives::Recheck::CantCheck
+                            | crate::perspectives::Recheck::Members { .. } => {}
+                        }
                     }
                 }
             }
@@ -377,6 +391,11 @@ async fn run_recheck(
                         }
                     }
                 }
+                if logged_failed {
+                    logged_failed =
+                        !crate::perspectives::recheck_links(&crate::perspectives::Recheck::Logged)
+                            .await;
+                }
                 crate::perspectives::recheck_links(&crate::perspectives::Recheck::CantCheck).await;
             }
         }
@@ -391,14 +410,24 @@ pub(crate) fn expired_signers(map: &cache::KeyMap, after: u64, upto: u64) -> BTr
         .collect()
 }
 
-fn listed_signers(service: &IdentityService) -> Vec<String> {
-    service
-        .cache
-        .key_map()
-        .listed_keys()
-        .into_iter()
-        .map(|key| format!("did:key:{key}"))
-        .collect()
+/// The re-checks after the receiver lagged (changes were missed): the links of `signers` (the
+/// changes it did receive) and of every key the map lists, then every link stored with a
+/// person. A lost change may belong to a log the map's bound dropped (a start-up load past the
+/// bound overflows the change buffer too), so the map's keys alone would miss it; a stored
+/// person names the log, which the re-check reads back from the cache ([`read_logs_of`]).
+pub(crate) fn lag_scopes(
+    map: &cache::KeyMap,
+    mut signers: BTreeSet<String>,
+) -> Vec<crate::perspectives::Recheck> {
+    signers.extend(
+        map.listed_keys()
+            .into_iter()
+            .map(|key| format!("did:key:{key}")),
+    );
+    vec![
+        crate::perspectives::Recheck::Signers(signers),
+        crate::perspectives::Recheck::Logged,
+    ]
 }
 
 /// The verdict of a signed expression (a link) and its person, from the executor's key map,
@@ -459,6 +488,23 @@ pub(crate) fn is_local_agent(did: &str) -> bool {
             .ok()
             .flatten()
             .is_some()
+}
+
+/// Puts the trusted logs of `people` (the persons stored links carry) back into the key map
+/// where its bound dropped them ([`Resolver::read_logs`]), before those links are judged again.
+pub async fn read_logs_of(people: &[&str]) {
+    if people.is_empty() {
+        return;
+    }
+    #[cfg(test)]
+    if let Ok(resolver) = TEST_RESOLVER.try_with(Arc::clone) {
+        resolver.read_logs(people).await;
+        return;
+    }
+    let Some(service) = SERVICE.get() else {
+        return;
+    };
+    service.resolver.read_logs(people).await;
 }
 
 /// Fills the key map for the signers of `links` before they are checked and stored: the key
