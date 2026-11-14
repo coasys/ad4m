@@ -1,345 +1,225 @@
 # Glossary
 
-One definition per term, in alphabetical order. Each entry gives the code name in brackets and the page that explains the term. "not: …" lists words that pages must not use for this concept.
+This file defines each ADAM term once, in alphabetical order. Each entry gives the term, its code names in brackets, the definition and the page that owns the term. "not: …" lists words that pages must not use for the term. General technical terms, such as DID, SPARQL, SHACL, WebRTC, SFU and Holochain, keep their usual meaning and have no entry.
 
-**Abstract class** (`model_query/abstract_classes.rs`, built-ins `ad4m://TextContent`, `ad4m://Mentioning`, `ad4m://Container` in `model_query/builtin_classes.rs`): A subject class that reads the instances of several concrete classes, sends each write to the record's own classes, and cannot be created. [Subject classes](perspectives/social-dna/subject-classes.md)
+**Abstract class** (`model_query/abstract_classes.rs`, built-ins `ad4m://TextContent`, `ad4m://Mentioning`, `ad4m://Container` in `model_query/builtin_classes.rs`): A subject class that reads the instances of several concrete classes and sends each write to the instance's own classes. No caller can create an instance of an abstract class. [Subject classes](perspectives/social-dna/subject-classes.md)
 
-**Access check** (`Guard` in `api/guards.rs`, `get_perspective_with_access`): The code in the method guard of an RPC method or MCP tool that applies a session's grant to one call: a capability check, an ownership check, or both. [Access checks](agents/access/checks.md); event delivery: [Events](agents/interfaces/events.md); language ops: [Signing and verification](agents/identity/signing-and-verification.md) — not: guard alone (a guard is a flow term; say method guard)
+**Access check** (`Guard` in `api/guards.rs`, `get_perspective_with_access`): The code in a method guard that applies a session's grant to one RPC call or MCP tool call. It checks a capability, an ownership, or both. [Access checks](agents/access/checks.md). Event delivery: [Events](agents/interfaces/events.md). Language calls: [Signing and verification](agents/identity/signing-and-verification.md) — not: guard (alone), which is a flow term
 
-**ACL** (`acl` table in `link-server/src/db.ts`): The list of DIDs admitted to one link-server room, checked on every request. [Link server](languages/link-languages/link-server.md)
-
-**Action** (`AD4MAction`, `Command`): A JSON list of commands stored on a subject class for its constructor, its destructor, or a property's setter, adder or remover. [Subject classes](perspectives/social-dna/subject-classes.md)
+**Action** (`AD4MAction`, `Command`): A JSON list of commands that a subject class stores for its constructor, its destructor, or the setter, adder or remover of a property. [Subject classes](perspectives/social-dna/subject-classes.md)
 
 **ad4m-connect** (`@coasys/ad4m-connect`, `connect/`): The browser and Node library that finds an executor, runs a login flow and gives an app an authenticated `Ad4mClient`. [ad4m-connect](agents/interfaces/typescript-sdk/ad4m-connect.md)
 
-**ad4m:host** (`rust-executor/src/js_core/host.js`): The ES module that every language imports to reach the executor's ops: agent, Holochain, HTTP, hash, language context, emit and storage functions. [Language isolates](languages/runtime/isolates.md)
+**ad4m:host** (`rust-executor/src/js_core/host.js`): The ES module that every language imports to call the executor: agent, Holochain, HTTP, hash, context, emit and storage functions. [Language isolates](languages/runtime/isolates.md)
 
-**Admin credential** (`Ad4mConfig.admin_credential`, `is_admin_credential_token_on`): The static secret token that makes a caller the operator; `run` refuses to start without one unless `insecure_no_admin_credential` is set. [Operator and main agent](agents/access/operator-and-main-agent.md)
+**Admin credential** (`Ad4mConfig.admin_credential`, `is_admin_credential_token_on`, `insecure_no_admin_credential`): The static secret token that makes a caller the operator. `run` does not start the executor without one, unless the config sets `insecure_no_admin_credential`. [Operator and main agent](agents/access/operator-and-main-agent.md)
 
-**Agent** (`AgentContext`): A DID with an Ed25519 key pair in the executor's wallet, on whose behalf the executor signs and stores data. [Agents](agents/README.md) — not: user (a user account is only the login of a managed agent)
+**Agent** (`AgentContext`, `did_for_context`): An Ed25519 key pair in the executor's wallet, named by its `did:key` DID. The executor signs and stores data on behalf of the agent. [Agents](agents/README.md) — not: user (a user account is only the login of a managed agent)
 
-**Agent context** (`AgentContext::{Main, Managed { did }}`): The value that names which agent a call acts as; the language runtime holds it in a thread-local while a call runs. [Identity](agents/identity/README.md)
+**Agent context** (`AgentContext::{Main, Managed { did }}`): The value that names the agent a call acts as. The executor keeps it in a thread-local while a language call runs. [Identity](agents/identity/README.md)
 
-**Agent language** (`LanguageController::get_agent_language`, `bootstrap-languages/centralized-agent-language/`): The expression language behind the `did` alias, whose expressions are agent profiles keyed by DID. [Agent languages](languages/other-kinds/agent-languages.md)
+**Agent language** (`LanguageController::get_agent_language`, `bootstrap-languages/centralized-agent-language/`): The expression language behind the `did` alias. Its expressions are agent profiles, keyed by DID. [Agent languages](languages/other-kinds/agent-languages.md)
 
-**Agent profile** (`Agent` in `types/domain.rs`): The public record of one agent: its DID, its public perspective and its direct-message language address. [Agent profiles](agents/identity/profiles.md) — not: public profile, `Agent` record
+**Agent profile** (`Agent` in `types/domain.rs`): The public record of one agent: its DID, its public perspective and the address of its direct-message language. [Agent profiles](agents/identity/profiles.md) — not: public profile, `Agent` record
 
-**Agent session** (`perspective.runAgent`, `run_agent_session`): A conversation with an LLM in one perspective, through the harness, over the perspective's static MCP reads and the writes the caller names, acting as the caller. [MCP server](agents/interfaces/mcp-server.md) — not: session (a `Session` is a connection's identity)
+**Agent session** (`perspective.runAgent`, `run_agent_session`): A conversation with an LLM in one perspective, which the harness runs as the caller. The LLM gets the perspective's static MCP reads and the writes that the caller names. [MCP server](agents/interfaces/mcp-server.md) — not: session (a `Session` is the identity of a connection)
 
-**AI service** (`AIService`, `rust-executor/src/ai_service/`): The executor service that runs local and remote LLMs, embedding models, transcription and AI tasks. [AI service](agents/executor/services/ai.md)
+**AI service** (`AIService`, `ai_service/endpoints/`, `ai_service/local/`): The executor service that sends LLM, embedding, transcription and speech requests to models on endpoints, which are model servers such as Ollama, llama-server or OpenAI. One-click local AI (`ai.localInstall`) installs model servers on the device and registers them as endpoints. [AI service](agents/executor/services/ai.md)
 
-**AI task** (`tasks` table, `AIService::add_task`): A stored system prompt with examples, bound to one model and owned by the agent that created it. [AI service](agents/executor/services/ai.md)
+**ALDK** (`ad4m-ldk/`, `defineLanguage`, `ad4m_language!`): The AD4M Language Development Kit. Developers use it to write languages in TypeScript or in Rust compiled to WASM. [Language interface](languages/runtime/interface.md)
 
-**ALDK** (`ad4m-ldk/`): The AD4M Language Development Kit, for writing languages in TypeScript (`defineLanguage`) or in Rust compiled to WASM (`ad4m_language!`). [Language interface](languages/runtime/interface.md)
+**Alias** (`LanguageController::language_aliases`): One of the names `did`, `lang`, `neighbourhood` and `perspective`, each of which stands for the address of a system language. [Language addresses](languages/expressions/addresses.md)
 
-**Alias** (`LanguageController::language_aliases`): One of the names `did`, `lang`, `neighbourhood` and `perspective` that stand for the address of a system language. [Language addresses](languages/expressions/addresses.md)
+**App grant** (`generate_capability_token`, `grants::mint`): The grant and the JWT that an app gets when the owner of an agent approves the app's capability request. [App grants](agents/access/app-grants.md) — not: cap token
 
-**Anonymous caller** (`Principal::Anonymous`, `anonymous_capabilities`): A session opened without a token, which may only request a capability and, in multi-user mode, sign up or log in. [Sessions](agents/access/sessions.md)
-
-**App data path** (`Ad4mConfig.app_data_path`, default `~/.ad4m`): The directory that holds all state of one executor. [Executor data](agents/executor/data.md)
-
-**App grant** (`generate_capability_token`, `grants::mint`): The grant, and its JWT, that an app gets after the owner of an agent approves the app's capability request. [App grants](agents/access/app-grants.md) — not: cap token
-
-**Audience** (`Audience` in `events.rs`): Who may receive one event: some DIDs, everyone, or the operator; the publisher names it. [Events](agents/interfaces/events.md)
-
-**Auto-processor** (`AutoProcessorConfig`, `auto_processor_supervisor`): A declared instance in a perspective that makes the executor run interpretation by itself on new messages in a scope. [Auto-processor](perspectives/social-dna/interpretation/auto-processor.md)
+**Auto-processor** (`AutoProcessorConfig`, `auto_processor_supervisor`): An instance in a perspective that makes the executor run interpretation on new messages in a scope, with no caller. [Auto-processor](perspectives/social-dna/interpretation/auto-processor.md)
 
 **Base** (`FlowInstance.subject`, `expression_address` in `create_subject`): The URI that an instance, an interpretation overlay or a flow instance is about. [Flows](perspectives/social-dna/flows/README.md) — not: base expression, base URI
 
-**Batch** (`create_batch`, `commit_batch`, `batch_store`): An in-memory set of link changes that the executor stores and commits as one diff. [Link write path](perspectives/links/write-path.md)
+**Batch** (`create_batch`, `commit_batch`, `batch_store`): A set of link changes in memory that the executor stores and commits as one perspective diff. [Link write path](perspectives/links/write-path.md)
 
-**Billing** (`rust-executor/src/billing.rs`): The charging of compute credits to managed agents for link writes and AI calls. [Billing and hosting](agents/executor/services/billing-and-hosting.md)
+**Billing** (`rust-executor/src/billing.rs`, `deduct_credits_and_log`, `host_rates` table, `get_free_hosting_enabled`): The charge of compute credits to a managed agent for link writes and AI calls, at the prices in `host_rates`. Free hosting is on by default and bills nothing. [Billing and hosting](agents/executor/services/billing-and-hosting.md)
 
-**Bootstrap languages** (`bootstrap-languages/`): The language packages that ship in the repository and that bootstrap seeds point at. [Bootstrap languages](languages/runtime/bootstrap-languages.md)
+**Bootstrap languages** (`bootstrap-languages/`, `bootstrap-languages/local/`): The language packages in this repository that bootstrap seeds point at. `bootstrap-languages/local/` holds plain JavaScript system languages that need no Holochain and no central service. [Bootstrap languages](languages/runtime/bootstrap-languages.md)
 
 **Bootstrap seed** (`BootstrapSeed`, `mainnet_seed.json`): The JSON file that gives an executor its language-language bundle, the system language addresses, the known link languages and the seed's trusted agents. [Bootstrap languages](languages/runtime/bootstrap-languages.md) — not: network seed (that is the Holochain DNA `network_seed`)
 
-**Broadcast** (`PerspectiveInstance::send_broadcast`, `neighbourhood.sendBroadcast`): An ephemeral signed payload sent to all agents of a neighbourhood. [Presence and signals](perspectives/neighbourhoods/presence-and-signals.md)
+**Broadcast** (`PerspectiveInstance::send_broadcast`, `neighbourhood.sendBroadcast`): A signed payload that the link language sends to all agents of a neighbourhood and does not store. [Presence and signals](perspectives/neighbourhoods/presence-and-signals.md)
 
-**Call** (SDK `Session` in `core/src/neighbourhood/Session.ts`, `createSession`): An audio and video connection among members of a neighbourhood, over mesh or the SFU. [Neighbourhood calls](perspectives/neighbourhoods/calls.md) — not: session (a session is the auth `Session`)
+**Call** (SDK `Session` in `core/src/neighbourhood/Session.ts`, `createSession`, `SessionTopology`): An audio and video connection among members of a neighbourhood. Media goes directly between the participants (mesh) or through the executor's SFU. [Neighbourhood calls](perspectives/neighbourhoods/calls.md) — not: session (a session is the auth `Session`)
 
-**Call policy** (`CallPolicy`, `SfuConfig`, link predicate `ad4m://sfu_config`): A neighbourhood's call mode (`mesh`, `designated`, `gateway`, `cascaded`) and mesh size, stored as a link authored by the neighbourhood's creator. [SFU](agents/executor/services/sfu.md)
+**Call policy** (`CallPolicy`, `SfuConfig`, link predicate `ad4m://sfu_config`): A link by the neighbourhood creator that sets the neighbourhood's call mode and mesh size. The call modes are `mesh`, `designated`, `gateway` and `cascaded`. [SFU](agents/executor/services/sfu.md)
 
-**Call topology** (`SessionTopology`: `mesh`, `sfu`, `auto`): The client-side choice of how one call connects: directly between participants, or through an SFU. [Neighbourhood calls](perspectives/neighbourhoods/calls.md)
+**Capability** (`Capability { with: Resource, can }` in `agent/capabilities/types.rs`): A domain, a list of pointers and a list of verbs that together name one kind of action a caller may take. [Capabilities](agents/access/capabilities.md). For languages, see Language capability.
 
-**Capability** (`Capability { with: Resource, can }` in `agent/capabilities/types.rs`): A domain, a list of pointers and a list of verbs that together name a kind of action a caller may take. [Capabilities](agents/access/capabilities.md). For languages, see Language capability.
+**Capability request** (`agent.requestCapability`, `agent.permitCapability`, `agent.generateJwt`): An app's request for a set of capabilities on one agent. The operator, or a session of that agent with `agent/PERMIT`, approves it, and the app redeems it with a six-digit code. [App grants](agents/access/app-grants.md)
 
-**Capability request** (`agent.requestCapability`, `agent.permitCapability`, `agent.generateJwt`): An app's request for a set of capabilities on one agent, approved by the operator or by a session of that agent with `agent/PERMIT`, and redeemed with a six-digit code. [App grants](agents/access/app-grants.md)
+**Consensus rule** (`ConsensusRule` in `shacl_parser.rs`, `ConsensusRule.from_role`): The number of different DIDs that must sign a transition proposal before the transition settles. An optional role is a model query that each voter must match at the time of the vote. [Flows](perspectives/social-dna/flows/README.md)
 
-**Cascade** (`rust-executor/src/sfu/cascade.rs`, `sfu/gossip/`): Several executors' SFUs that share load and pipe media between them. [SFU](agents/executor/services/sfu.md)
+**Entanglement proof** (`EntanglementProof`, `entanglement_service`): Two signatures, one in each direction, that link the main agent's DID to another key, such as a device key or a Holochain agent key. [Signing and verification](agents/identity/signing-and-verification.md)
 
-**Co-owner** (`PerspectiveHandle.owners`): One of several agents on one executor who joined the same neighbourhood and so share one perspective. [Publishing and joining](perspectives/neighbourhoods/publishing-and-joining.md)
+**Event** (`Event` and `Topic` in `events.rs`, `event_specs()`, `events.watch`): A typed message that the executor pushes to each socket that watches its type with `events.watch`. A socket gets it only when its session is in the audience that the publisher names and holds the event's capability. [Events](agents/interfaces/events.md) — not: subscription (that is a live query), notification
 
-**Compute credits** (`get_agent_credits`, `deduct_credits_and_log`): The balance that a managed agent spends on billed work, stored on its `users` row. [Billing and hosting](agents/executor/services/billing-and-hosting.md)
+**Executor** (crate `ad4m-executor`, `rust_executor::run`): The ADAM process that hosts agents, perspectives, language isolates, executor services and the APIs. [Executor](agents/executor/README.md) — not: node, ADAM node, conductor (that is Holochain's)
 
-**Conductor** (`HolochainService`): The embedded Holochain runtime inside the executor. [Holochain service](agents/executor/services/holochain.md)
+**Executor service** (`ai_service/`, `sfu/`, `holochain_service/`, `billing.rs`, `email_service.rs`): A Rust module in the executor that is not a language, such as AI, SFU, Holochain, billing, email or the runtime service. [Executor services](agents/executor/services/README.md)
 
-**Consensus rule** (`ConsensusRule` in `shacl_parser.rs`): The number of distinct DIDs, optionally holding a role, that must sign a flow transition before it settles. [Flows](perspectives/social-dna/flows/README.md)
+**Expression** (`Expression<T>`, `create_signed_expression`, `ExpressionProof`, `verify_expression_proof`): Data that an agent signs, in the form `{author, timestamp, data, proof}`. The executor that reads it marks the proof `valid` or `invalid`. [Expressions and addresses](languages/expressions/README.md)
 
-**Delta update** (`result_delta`, `send_delta_update`): The change of a live query's result since its previous revision, sent to the subscribing connection. [Live queries](perspectives/querying/live-queries.md)
+**Expression language** (`Capability::ExpressionGet`, `ExpressionCreate`): A language that stores one kind of expression and exports `expressionGet` and usually `expressionCreate`. [Other language kinds](languages/other-kinds/README.md)
 
-**Derived state** (`DerivedState`): A flow instance's state as the fold computes it from the links present now. [Flow consensus](perspectives/social-dna/flows/consensus.md)
+**Expression URL** (`ExpressionRef::try_from`, `parse_expr_url`): The address of one expression: `<language address or alias>://<expression address>`, a DID, or a `literal:` URL. [Expressions and addresses](languages/expressions/README.md)
 
-**DID** (`did_for_context`, `WalletBackend::get_did_document`): The identifier of an agent, on `dev` always a `did:key` that contains the Ed25519 public key. [Identity](agents/identity/README.md)
+**Flow** (`SHACLFlow`): A state machine that social DNA stores: states, transitions, guards and a consensus rule. [Flows](perspectives/social-dna/flows/README.md)
 
-**Direct-message language** (`Agent.direct_message_language`): The language address in an agent profile through which other agents would send that agent messages; direct messages are not implemented on `dev` ([Executor services](agents/executor/services/README.md)). [Agent profiles](agents/identity/profiles.md)
+**Flow instance** (`FlowInstance`, `run_flow_spawn_pass`): One run of a flow on one base. The flow spawn pass starts flow instances on the instances that an interpretation run creates. [Flows](perspectives/social-dna/flows/README.md)
 
-**Embedded mode** (ad4m-connect, `AD4M_CONFIG` message): The ad4m-connect mode in which a host page passes the executor URL and token to an app by `postMessage`. [ad4m-connect](agents/interfaces/typescript-sdk/ad4m-connect.md)
+**Flow receipt** (`FlowReceipt`): A content-addressed record of a finished flow instance. Any executor checks it by running the fold again. [Flow receipts](perspectives/social-dna/flows/receipts.md)
 
-**Entanglement proof** (`EntanglementProof`, `entanglement_service`): Signatures in both directions that link the main agent's DID to another key, such as a device key or a Holochain agent key. [Signing and verification](agents/identity/signing-and-verification.md)
+**Fold** (`fold`, `fold_read_set`, `ReadSet`, `DerivedState`): The pure function that computes the state of a flow instance. It walks the flow from its first state over the signed proposals, votes, role grants and role revocations. [Flow consensus](perspectives/social-dna/flows/consensus.md)
 
-**Event** (`Event` and `Topic` in `events.rs`, `event_specs()`): A typed message that the executor pushes on a socket that asked for it with `events.watch`, to the sessions in its audience that hold its capability. [Events](agents/interfaces/events.md) — not: subscription (that is a live query), notification
+**Grant** (`LiveGrant` in `agent/grants.rs`, table `grants`): The executor's record of one issued token: the agent it acts as, its capabilities and the app that holds it. A token works only while its grant is active and not expired. [App grants](agents/access/app-grants.md)
 
-**Event interest** (`events.watch`, `events.unwatch`, `EventInterest` in `api/event_interest.rs`): The event types, each optionally narrowed to some perspectives, that one socket asked for; a socket with no interest gets no events. [Events](agents/interfaces/events.md)
+**Guard** (`requires` on `FlowState`): A model query on a flow state. The executor proposes a transition into that state only when the query matches. [Flow spawn and guards](perspectives/social-dna/flows/spawn-and-guards.md) — not: method guard
 
-**Evidence seal** (`recompute_evidence_seal`): A hash over the content that a transition's guard cited, written by the proposer and checked again by each voter. [Flow consensus](perspectives/social-dna/flows/consensus.md)
+**Hard-wired class** (`hardwired_class.rs`, `hardwired_sdna/`): A subject class that the executor registers itself from bundled JSON, such as `FlowInstance`, `InterpretationRun` or `AutoProcessor`. [Social DNA](perspectives/social-dna/README.md) — not: built-in class (that is an abstract class that the executor declares and never stores, such as `ad4m://TextContent`)
 
-**Executor** (crate `ad4m-executor`, `rust_executor::run`): The ADAM process that hosts agents, perspectives, language runtimes, executor services and the APIs. [Executor](agents/executor/README.md) — not: node, ADAM node, conductor (that is Holochain's)
+**Harness** (`ai_service/harness/`, `run_with_tools`): The tool-calling LLM loop that runs agent sessions. Interpretation can use it in place of one prompt. [Interpretation](perspectives/social-dna/interpretation/README.md)
 
-**Executor service** (`ai_service/`, `sfu/`, `holochain_service/`, `billing.rs`): A Rust module inside the executor that is not a language, such as AI, SFU, Holochain, billing, email or the runtime service. [Executor services](agents/executor/services/README.md)
+**Holochain service** (`HolochainService`, `HolochainServiceInterface`): The executor service that runs the embedded Holochain conductor behind one actor channel. [Holochain service](agents/executor/services/holochain.md)
 
-**Expression** (`Expression<T>`, `create_signed_expression`): A piece of data signed by an agent: `{author, timestamp, data, proof}`. [Expressions and addresses](languages/expressions/README.md)
+**Hosted mode** (`wallet_backend = "shared"`, `db_backend = "shared"`, `SharedWallet`, `SharedDb`, `wallet_backend_url`, `db_backend_url`): An executor that reads its wallet, its users and the shared perspective metadata over HTTP from a hosting service. All other tables stay in the executor's own SQLite database. [Executor data](agents/executor/data.md) — not: shared mode
 
-**Expression language** (`Capability::ExpressionGet`, `ExpressionCreate`): A language that exports `expressionGet` and usually `expressionCreate`, and stores one kind of signed data. [Other language kinds](languages/other-kinds/README.md)
+**Installing (a language)** (`language_by_ref`, `install_language`, `install_language_from_address`): Getting a bundle by its address, checking its hash, saving it and loading it into a language isolate. [Installing languages](languages/runtime/installing/README.md)
 
-**Expression proof** (`ExpressionProof`, `verify_expression_proof`): The key and signature of an expression; the reading executor adds `valid` or `invalid`. [Signing and verification](agents/identity/signing-and-verification.md)
+**Instance** (`create_subject`, `update_subject`, MCP `instance_*` tools): A base whose links match the shape of a subject class. The full name is subject instance. [Subject classes](perspectives/social-dna/subject-classes.md) — not: record, item, subject (alone)
 
-**Expression URL** (`ExpressionRef::try_from`, `parse_expr_url`): `<language address or alias>://<expression address>`, a DID, or a `literal:` URL. [Expressions and addresses](languages/expressions/README.md)
+**Interpretation** (`run_interpretation`, `InterpretationRun`): An executor pass that sends a transcript and the perspective's subject classes to an LLM and writes what the LLM extracts as instances. Each run stores an `InterpretationRun` with the model, prompt version, time and sources. [Interpretation](perspectives/social-dna/interpretation/README.md)
 
-**File storage language** (`bootstrap-languages/file-storage/`, `centralized-file-storage/`): An expression language whose expressions are files. [File storage languages](languages/other-kinds/file-storage-languages.md)
+**Interpretation overlay** (`InterpretationOverlay`): A second instance on the same base that records the values the LLM inferred and the run that wrote them. A person uses it to accept or reject those values. [Interpretation overlay](perspectives/social-dna/interpretation/overlay.md)
 
-**Flow** (`SHACLFlow`): A state machine stored as social DNA: states, transitions, guards and a consensus rule. [Flows](perspectives/social-dna/flows/README.md)
+**Keystore** (`AgentStore.keystore`, `KeystoreEnvelope`): The encrypted form of all wallet keys in `agent.json`. [Wallet and keys](agents/identity/wallet-and-keys.md)
 
-**Flow evaluator** (`perspectives/flow_evaluator.rs`): The pass after interpretation that checks the guards of reachable states and writes a transition proposal for each guard that now holds. [Flow spawn and guards](perspectives/social-dna/flows/spawn-and-guards.md)
+**Language** (`rust-executor/src/languages/`): A JavaScript bundle that runs in its own language isolate. Each language capability it exports adds one job: create and get expressions, commit, sync, render and query links, list peers, or carry telepresence. [Languages](languages/README.md)
 
-**Flow instance** (`FlowInstance`): One run of a flow bound to one base. [Flows](perspectives/social-dna/flows/README.md)
+**Language address** (`calculate_language_hash`, op `hash`): The ID of a language: `Qm` followed by the base58btc string of a CIDv1, with codec `0x00`, over the SHA-256 of the bundle text. [Language addresses](languages/expressions/addresses.md)
 
-**Flow receipt** (`FlowReceipt`): A content-addressed record of a finished flow run that any executor can check by running the fold again. [Flow receipts](perspectives/social-dna/flows/receipts.md)
+**Language capability** (`Capability` in `languages/capability.rs`): One function group that a language exports. The executor detects it once at load, and the presence of the export is the capability. [Language interface](languages/runtime/interface.md) — not: capability (alone), which means the access capability
 
-**Flow spawn** (`run_flow_spawn_pass`): The automatic start of flow instances on instances that an interpretation run created. [Flow spawn and guards](perspectives/social-dna/flows/spawn-and-guards.md)
-
-**Fold** (`fold`, `fold_read_set`): The pure function that walks a flow from its first state over the read set and returns the derived state. [Flow consensus](perspectives/social-dna/flows/consensus.md)
-
-**Free hosting** (`get_free_hosting_enabled`): The executor setting, on by default, under which nothing is billed. [Billing and hosting](agents/executor/services/billing-and-hosting.md)
-
-**Grant** (`LiveGrant` in `agent/grants.rs`, table `grants`): The executor's record of one issued token: the agent it acts as, its capabilities and the app that holds it. A token works only while its grant is active and unexpired. [App grants](agents/access/app-grants.md)
-
-**Guard** (`requires` on `FlowState`): A model query on a flow state that must match before a transition into that state may be proposed. [Flow spawn and guards](perspectives/social-dna/flows/spawn-and-guards.md) — not: method guard
-
-**Hard-wired class** (`hardwired_class.rs`, `hardwired_sdna/`): A subject class that the executor registers itself from bundled JSON, such as `FlowInstance`, `InterpretationRun` or `AutoProcessor`. [Social DNA](perspectives/social-dna/README.md) — not: built-in class (that is an abstract class the executor declares and never stores, such as `ad4m://TextContent`)
-
-**Harness** (`ai_service/harness/`, `run_with_tools`): The tool-calling LLM loop that interpretation can use instead of a single prompt, and that agent sessions run. [Interpretation](perspectives/social-dna/interpretation/README.md)
-
-**Held link** (`held/<link_hash>` in `bootstrap-languages/server-link-language/src/store.ts`, `openOrHold`, `retryHeld`): An inbound link that the server link language cannot open yet, kept with its operation until a room key opens it. [Server link language](languages/link-languages/server-link-language.md)
-
-**Holochain service** (`HolochainService`, `HolochainServiceInterface`): The executor service that runs the conductor behind one actor channel. [Holochain service](agents/executor/services/holochain.md)
-
-**Host rates** (`host_rates` table, `bill_ai_operation`): The prices in HOT per billed operation or model name. [Billing and hosting](agents/executor/services/billing-and-hosting.md)
-
-**Hosted mode** (`wallet_backend = "shared"`, `db_backend = "shared"`, `SharedWallet`, `SharedDb`): An executor that reads its wallet, and the users and perspective metadata that executors share, from a hosting service over HTTP. Every other table stays in its own SQLite database. [Executor data](agents/executor/data.md) — not: shared mode
-
-**Hosting** (`api/hosting_ws.rs`): The executor's offer to managed agents: host rates, a hot wallet and credit top-ups. [Billing and hosting](agents/executor/services/billing-and-hosting.md)
-
-**Hosting service** (`wallet_backend_url`, `db_backend_url`, `INTERNAL_API_TOKEN`): The external service that serves keys, users and perspective metadata to executors in hosted mode and calls their `/health` and `/internal/shutdown` routes. [Executor data](agents/executor/data.md)
-
-**Installing (a language)** (`language_by_ref`, `install_language`, `install_language_from_address`): Getting a bundle by address, checking its hash, saving it and loading it into an isolate. [Installing languages](languages/runtime/installing/README.md)
-
-**Instance** (`create_subject`, `update_subject`, MCP `instance_*` tools): A base whose links satisfy a subject class's shape; in full, a subject instance. [Subject classes](perspectives/social-dna/subject-classes.md) — not: record, item, subject (alone)
-
-**Interaction** (`expression.interactions`, `expression.interact`, the language export `interactions`): A named action that a language offers on one of its expressions and that a caller can run through the executor. [Expressions and addresses](languages/expressions/README.md)
-
-**Interpretation** (`run_interpretation`): An executor pass that sends a transcript and the perspective's subject classes to an LLM and writes what it extracts as instances. [Interpretation](perspectives/social-dna/interpretation/README.md)
-
-**Interpretation overlay** (`InterpretationOverlay`): A second instance on the same base that records the LLM's inferred values and the run that wrote them, so a person can accept or reject them. [Interpretation overlay](perspectives/social-dna/interpretation/overlay.md)
-
-**Interpretation run** (`InterpretationRun`): The record of one run of interpretation: model, prompt version, time and sources. [Interpretation](perspectives/social-dna/interpretation/README.md)
-
-**JWT signing key** (`signing_key_name()`): The wallet key whose secret signs and checks JWTs: `main` on a local wallet, `platform` in hosted mode. [Wallet and keys](agents/identity/wallet-and-keys.md)
-
-**Key ring** (`KeyRing`, `buildKeyRing` in `bootstrap-languages/server-link-language/src/encryption.ts`): The room key versions that one agent's server link language has opened, by version number. [Server link language](languages/link-languages/server-link-language.md)
-
-**Keystore** (`AgentStore.keystore`, `KeystoreEnvelope`): The encrypted form of all wallet keys inside `agent.json`. [Wallet and keys](agents/identity/wallet-and-keys.md)
-
-**Known link languages** (`RuntimeService::get_know_link_languages`): The link language addresses from the bootstrap seed plus the database table `known_link_languages`; the executor loads them after the Holochain conductor starts. [Bootstrap languages](languages/runtime/bootstrap-languages.md)
-
-**Language** (`rust-executor/src/languages/`): A JavaScript bundle, loaded into its own isolate, that does some of these, one per language capability it exports: create and fetch expressions; commit, sync, render and query links; list peers; carry telepresence. [Languages](languages/README.md)
-
-**Language address** (`calculate_language_hash`, op `hash`): `"Qm"` followed by the base58btc multibase string of a CIDv1 (codec `0x00`) over the SHA-256 of the bundle text. [Language addresses](languages/expressions/addresses.md)
-
-**Language call deadline** (`LANGUAGE_CALL_DEADLINE`, 60 s): How long a language's running `Execute` may run before the calls queued behind it get an error instead of waiting; the running call itself is never interrupted. [Language isolates](languages/runtime/isolates.md)
-
-**Language capability** (`Capability` in `languages/capability.rs`): One function group that a language exports, detected once at load; the presence of the export is the capability. [Language interface](languages/runtime/interface.md) — not: capability (alone), which means the access capability
-
-**Language context** (`LanguageContext`): The data a language gets at load: main agent DID, signing key id, settings, storage directory and address. [Language runtime](languages/runtime/README.md)
-
-**Language controller** (`LanguageController`): The global registry of loaded languages and the only way Rust code calls into a language. [Language controller](languages/runtime/controller.md)
+**Language controller** (`LanguageController`): The global registry of loaded languages. Rust code calls a language only through it. [Language controller](languages/runtime/controller.md)
 
 **Language isolate** (`JsCore::new_for_language`, `LanguageRuntimeHandle`): One Deno worker, on its own OS thread, that runs one language bundle in a sandbox. [Language isolates](languages/runtime/isolates.md) — not: language instance
 
-**Language language** (`bootstrap-languages/language-language/`, alias `lang`): The system language that stores language bundles and their language meta. [Language language](languages/runtime/installing/language-language.md)
-
-**Language meta** (`LanguageMeta`): The signed record that the language language holds for a bundle: name, address, author and template fields. [Language language](languages/runtime/installing/language-language.md)
-
-**Language runtime** (`rust-executor/src/languages/`, `rust-executor/src/js_core/`): The part of the executor that loads and runs languages. [Language runtime](languages/runtime/README.md)
+**Language language** (`bootstrap-languages/language-language/`, alias `lang`, `LanguageMeta`): The system language that stores language bundles and their signed language meta: name, address, author and template fields. [Language language](languages/runtime/installing/language-language.md)
 
 **Launcher** (`ui/src-tauri`): The desktop application that embeds the executor, holds the admin credential and shows the operator's UI. [Executor](agents/executor/README.md)
 
 **Link** (`Link` in `types/core.rs`): A triple of source, optional predicate and target. [Links](perspectives/links/link-expressions.md)
 
-**Link expression** (`LinkExpression`, `DecoratedLinkExpression`): A link signed by its author, with a timestamp, a proof and a link status. [Links](perspectives/links/link-expressions.md)
+**Link expression** (`LinkExpression`, `DecoratedLinkExpression`): A link that its author signed, with a timestamp, a proof and a link status. [Links](perspectives/links/link-expressions.md)
 
-**Link language** (`Language::commit`, `Language::sync`): A language that holds and syncs the shared links of one neighbourhood and carries its telepresence. [Link languages](languages/link-languages/README.md)
+**Link language** (`Language::commit`, `Language::sync`): A language that stores and syncs the shared links of one neighbourhood and carries its telepresence. [Link languages](languages/link-languages/README.md)
 
 **Link server** (`link-server/`): A self-hosted Node.js server that stores the links of link-server rooms for the server link language. [Link server](languages/link-languages/link-server.md)
 
 **Link-server operator** (`link-server/src/operator.ts`): The person who runs a link server. [Link server](languages/link-languages/link-server.md) — not: operator (alone), which is the executor's administrator
 
-**Link-server room** (`/rooms/:roomId/*`): One neighbourhood's link store on a link server, named by the `UID` template value; its first authenticated DID is its admin. [Link server](languages/link-languages/link-server.md) — not: room (alone)
+**Link-server room** (`/rooms/:roomId/*`, `acl` table in `link-server/src/db.ts`): The link store of one neighbourhood on a link server, named by the `UID` template value. Its first authenticated DID is its admin, and the server checks each request against the room's list of admitted DIDs. [Link server](languages/link-languages/link-server.md) — not: room (alone)
 
-**Link status** (`LinkStatus`): Whether a link is `Shared` (committed to the neighbourhood) or `Local` (kept on this executor). [Local and shared links](perspectives/links/local-and-shared.md)
+**Link status** (`LinkStatus`): The status of a link: `Shared` when it is committed to the neighbourhood, `Local` when it stays on this executor. [Local and shared links](perspectives/links/local-and-shared.md)
 
-**Literal expression** (`Literal`, `literal_encode`, `literal_decode`): A value encoded in the URL itself: `literal:string:`, `literal:number:`, `literal:boolean:` or `literal:json:`. [Literal expressions](languages/expressions/literals.md) — not: literal target (a literal target is a literal expression in a link's target)
+**Literal expression** (`Literal`, `literal_encode`, `literal_decode`): A value that its URL holds in full: `literal:string:`, `literal:number:`, `literal:boolean:` or `literal:json:`. [Literal expressions](languages/expressions/literals.md) — not: literal target (a literal target is a literal expression in a link's target)
 
-**Live query** (`SubscribedQuery`, `perspective.subscribeQuery`, `perspective.modelSubscribe`): A SPARQL or model query that the executor runs again after relevant writes and whose delta updates go only to the RPC connection that opened it. [Live queries](perspectives/querying/live-queries.md) — not: query subscription, subscription
-
-**Local bootstrap languages** (`bootstrap-languages/local/`): Plain JavaScript system languages that run ADAM with no Holochain and no central service. [Local link language](languages/link-languages/local-link-language.md)
+**Live query** (`SubscribedQuery`, `perspective.subscribeQuery`, `perspective.modelSubscribe`): A SPARQL query or model query that the executor runs again after relevant writes. The executor sends each change of the result only to the RPC connection that opened the query. [Live queries](perspectives/querying/live-queries.md) — not: query subscription, subscription
 
 **Local link language** (`bootstrap-languages/local/link-language.js`): A link language with no peers that keeps links in the executor's key-value store. [Local link language](languages/link-languages/local-link-language.md)
 
-**Locked** (`AgentService::{lock, unlock}`, `AuthError::Locked`): The wallet state in which the keys are encrypted; nothing signs and no token is checked until the operator unlocks it. [Wallet and keys](agents/identity/wallet-and-keys.md)
+**Locked** (`AgentService::{lock, unlock}`, `AuthError::Locked`): The wallet state in which the keys are encrypted. The executor signs nothing and checks no token until the operator unlocks the wallet. [Wallet and keys](agents/identity/wallet-and-keys.md)
 
-**Main agent** (`AgentContext::Main`, wallet key `main`): Agent #0 of an executor, created by `agent.generate` and owned by the operator. [Operator and main agent](agents/access/operator-and-main-agent.md)
+**Main agent** (`AgentContext::Main`, wallet key `main`): Agent #0 of an executor, which `agent.generate` creates and the operator owns. [Operator and main agent](agents/access/operator-and-main-agent.md)
 
 **Managed agent** (`AgentContext::Managed { did }`): An agent other than the main agent that the executor hosts for a user account in multi-user mode. [Managed agents](agents/executor/managed-agents.md) — not: user, hosted agent
 
-**MCP server** (`rust-executor/src/mcp/server.rs`, `Ad4mMcpHandler`): The executor's Model Context Protocol server that exposes tools to AI agents. [MCP server](agents/interfaces/mcp-server.md)
+**MCP server** (`rust-executor/src/mcp/server.rs`, `Ad4mMcpHandler`): The executor's Model Context Protocol server, which gives AI agents the executor's tools. [MCP server](agents/interfaces/mcp-server.md)
 
-**Mesh** (`SfuConfig.mode == "mesh"`, `MeshManager`): A call in which every participant sends media to every other directly; the executor forwards none. [Neighbourhood calls](perspectives/neighbourhoods/calls.md)
-
-**Method guard** (`Guard` in `api/guards.rs`: `Open`, `Operator`, `Cap`, `Executor`, `Owns`): The rule that each RPC method registers for who may call it; dispatch checks its capability, then its rule, before the handler. [Access checks](agents/access/checks.md) — not: guard (a flow term)
+**Method guard** (`Guard` in `api/guards.rs`): The rule that each RPC method registers for who may call it. Dispatch checks the method's capability, then this rule, before the handler runs. [Access checks](agents/access/checks.md) — not: guard (alone), which is a flow term
 
 **Model class** (SDK `Ad4mModel`, `@Model` in `core/src/model/decorators.ts`): A TypeScript class whose decorators generate a subject class and whose methods run model queries. [Model classes](agents/interfaces/typescript-sdk/model-classes.md)
 
-**Model query** (`execute_model_query`, `ModelQueryInput`): A query for instances of subject classes, built from their SHACL shapes and run in the executor. [Model queries](perspectives/querying/model-queries.md)
+**Model query** (`execute_model_query`, `ModelQueryInput`, `ModelShape`): A query for the instances of subject classes, which the executor builds from their SHACL shapes and runs. [Model queries](perspectives/querying/model-queries.md)
 
-**Model shape** (`ModelShape`, `load_shape_from_store`): The parsed, cached form of a subject class's SHACL that model queries are built from. [Model queries](perspectives/querying/model-queries.md)
-
-**Monotonic predicate** (`MONOTONIC_PREDICATES`, `Ending` in `perspectives/monotonic.rs`): A predicate under which a `Shared` link is never removed by a diff; it ends only by a tombstone, by a revocation, or never. Everything under `ad4m://flow/` and `ad4m://acceptedBy` is one. [Link write path](perspectives/links/write-path.md)
+**Monotonic predicate** (`MONOTONIC_PREDICATES`, `Ending` in `perspectives/monotonic.rs`): A predicate, such as any predicate under `ad4m://flow/` and `ad4m://acceptedBy`, under which no diff removes a `Shared` link. Such a link ends only by a tombstone, by a revocation, or never. [Link write path](perspectives/links/write-path.md)
 
 **Multi-user mode** (`enable_multi_user`, `Ad4mDb::get_multi_user_enabled`): The executor setting that lets anonymous callers sign up and log in as managed agents. [Managed agents](agents/executor/managed-agents.md)
 
-**Neighbourhood** (`Neighbourhood`, `rust-executor/src/neighbourhoods.rs`): A perspective shared between agents through a link language, published at a `neighbourhood://` URL. [Neighbourhoods](perspectives/neighbourhoods/README.md)
+**Neighbourhood** (`Neighbourhood`, `rust-executor/src/neighbourhoods.rs`): A perspective that agents share through a link language, published at a `neighbourhood://` URL. [Neighbourhoods](perspectives/neighbourhoods/README.md)
 
-**Neighbourhood creator** (author of the neighbourhood expression): The agent who signed a neighbourhood's expression; the call policy trusts only this agent's links. [SFU](agents/executor/services/sfu.md) — not: neighbourhood owner (an owner is a local `owners` entry)
+**Neighbourhood creator** (author of the neighbourhood expression): The agent who signed a neighbourhood expression. The call policy trusts only the links of this agent. [SFU](agents/executor/services/sfu.md) — not: neighbourhood owner (an owner is a local `owners` entry)
 
-**Neighbourhood expression** (`NeighbourhoodExpression`, `DecoratedNeighbourhoodExpression`): The signed `Neighbourhood { link_language, meta }` stored in the neighbourhood language. [Neighbourhood and perspective languages](languages/other-kinds/neighbourhood-and-perspective-languages.md)
+**Neighbourhood expression** (`NeighbourhoodExpression`, `DecoratedNeighbourhoodExpression`, `bootstrap-languages/neighbourhood-language/`): The signed `Neighbourhood { link_language, meta }` that the system language with the alias `neighbourhood` stores. [Neighbourhood and perspective languages](languages/other-kinds/neighbourhood-and-perspective-languages.md)
 
-**Neighbourhood language** (`bootstrap-languages/neighbourhood-language/`, alias `neighbourhood`): The system language that stores neighbourhood expressions. [Neighbourhood and perspective languages](languages/other-kinds/neighbourhood-and-perspective-languages.md)
+**Notification** (`notification_check_loop`, `runtime_service/notification_access.rs`): A SPARQL trigger that an app registers. The executor sends each new match to the owner's events and to an optional webhook. [Live queries](perspectives/querying/live-queries.md)
 
-**Notification** (`notification_check_loop`, `runtime_service/notification_access.rs`): An app-registered SPARQL trigger whose new matches go to the owner's events and to an optional webhook. [Live queries](perspectives/querying/live-queries.md)
+**Operator** (`Principal::Operator`): The administrator role of the executor, which the caller who presents the admin credential holds. The operator is not an agent and acts as the main agent. [Operator and main agent](agents/access/operator-and-main-agent.md) — not: admin, owner (an owner is a perspective owner)
 
-**Online status** (`set_online_status`, `OnlineAgent`, `hosted_status.rs`): An agent's signed, ephemeral status in a neighbourhood. [Presence and signals](perspectives/neighbourhoods/presence-and-signals.md)
+**Owner** (`PerspectiveHandle.owners`, `is_owned_by`): An agent whose DID is in the `owners` list of a perspective, which lets the agent reach that perspective. Agents of one executor that join the same neighbourhood share one perspective as its owners. [Access checks](agents/access/checks.md)
 
-**Op** (`#[op2]` in `js_core/*_extension.rs`): A Rust function exposed to the JavaScript of a language isolate. [Language isolates](languages/runtime/isolates.md)
-
-**Operator** (`Principal::Operator`): The executor's administrator role, held by whoever presents the admin credential; it is not an agent and acts as the main agent. [Operator and main agent](agents/access/operator-and-main-agent.md) — not: admin, owner (an owner is a perspective owner)
-
-**Owner** (`PerspectiveHandle.owners`, `is_owned_by`): An agent whose DID is in a perspective's `owners` list and who may therefore reach that perspective. [Access checks](agents/access/checks.md)
-
-**Oxigraph store** (`SparqlStore` in `perspectives/sparql_store.rs`): The per-perspective Oxigraph RDF store on RocksDB that holds all of a perspective's links. [Oxigraph store](perspectives/links/oxigraph-store.md) — not: SPARQL store, link store
+**Oxigraph store** (`SparqlStore` in `perspectives/sparql_store.rs`, `make_reifier_iri`): The Oxigraph RDF store on RocksDB that holds all links of one perspective. For each link, an RDF 1.2 reifier holds the author, timestamp, proof, verdict and link status. [Oxigraph store](perspectives/links/oxigraph-store.md) — not: SPARQL store, link store
 
 **Peers (local, remote)** (`Language::set_local_agents`, `Language::others`): The agents on this executor that use a link language, and the other agents that the link language reports. [Link languages](languages/link-languages/README.md)
 
-**Pending diff** (`perspective_diff` table, `add_pending_diff`, `pending_diffs_loop`): A shared diff that the link language did not accept yet, queued in SQLite for retry. One that the language fails alone while it accepts the diffs after it is parked (`park_pending_diffs`): its row is kept but never sent again. [Neighbourhood sync](perspectives/neighbourhoods/sync.md)
+**Perspective** (`PerspectiveInstance`, `PerspectiveHandle`): A graph of signed links that the executor stores for one or more owners. [Perspectives](perspectives/README.md)
 
-**Perspective** (`PerspectiveInstance`, `PerspectiveHandle`): A graph of signed links that the executor stores for one or more owning agents. [Perspectives](perspectives/README.md)
+**Perspective diff** (`PerspectiveDiff`, `DecoratedPerspectiveDiff`): A set of link additions and link removals. [Links and store](perspectives/links/README.md)
 
-**Perspective diff** (`PerspectiveDiff`, `DecoratedPerspectiveDiff`): A set of link additions and removals. [Links and store](perspectives/links/README.md)
+**Perspective diff sync** (`bootstrap-languages/p-diff-sync/`): The Holochain link language that syncs perspective diffs as a revision graph. Only its scribe, the known peer with the lowest DID, makes merge commits. [Perspective diff sync](languages/link-languages/perspective-diff-sync.md) — short form: p-diff-sync
 
-**Perspective diff sync** (`bootstrap-languages/p-diff-sync/`): The Holochain link language that syncs diffs as a revision graph. [Perspective diff sync](languages/link-languages/perspective-diff-sync.md) — short form: p-diff-sync
+**Perspective state** (`PerspectiveState`): The stage that a perspective has reached with its neighbourhood: `Private`, `NeighbourhoodCreationInitiated`, `NeighbourhoodJoinInitiated`, `LinkLanguageFailedToInstall`, `LinkLanguageInstalledButNotSynced` or `Synced`. [Neighbourhood sync](perspectives/neighbourhoods/sync.md) — not: sync state
 
-**Perspective handle** (`PerspectiveHandle` in `types/domain.rs`): The stored description of a perspective: uuid, name, owners, neighbourhood and perspective state. [Perspectives](perspectives/README.md)
-
-**Perspective language** (`bootstrap-languages/perspective-language/`, alias `perspective`): The system language meant for perspective snapshots; a stub that stores nothing today. [Neighbourhood and perspective languages](languages/other-kinds/neighbourhood-and-perspective-languages.md)
-
-**Perspective state** (`PerspectiveState`): Where a perspective stands with its neighbourhood: `Private`, `NeighbourhoodCreationInitiated`, `NeighbourhoodJoinInitiated`, `LinkLanguageFailedToInstall`, `LinkLanguageInstalledButNotSynced` or `Synced`. [Neighbourhood sync](perspectives/neighbourhoods/sync.md) — not: sync state
-
-**Principal** (`Principal` in `agent/session.rs`): The kind of caller behind a session: operator, agent or anonymous. [Sessions](agents/access/sessions.md)
-
-**Processing claim** (`ProcessingClaim`, `try_claim`): A shared link that an executor writes before it runs an auto-processor batch, so that peers back off. [Auto-processor](perspectives/social-dna/interpretation/auto-processor.md)
-
-**Pub/sub topic** (`Topic` in `rust-executor/src/events.rs`, `PubSub`): The kind of an event, with its wire name. Executor code publishes each event once on the one in-process broadcast channel; every socket's event stream reads it. [Events](agents/interfaces/events.md)
-
-**Public perspective** (`Agent.perspective`): The signed links in an agent profile that describe the agent. [Agent profiles](agents/identity/profiles.md)
+**Principal** (`Principal` in `agent/session.rs`, `anonymous_capabilities`): The kind of caller behind a session: operator, agent or anonymous. An anonymous caller can only request a capability and, in multi-user mode, sign up or log in. [Sessions](agents/access/sessions.md)
 
 **Publishing (a language)** (`publish_language`, `apply_template`): Storing a bundle and its signed language meta in the language language. [Installing languages](languages/runtime/installing/README.md)
 
-**Publishing (a neighbourhood)** (`neighbourhood.publish`, `neighbourhood_publish_from_perspective_with_context`): Turning a perspective into a neighbourhood by storing a neighbourhood expression and recording its URL on the perspective. [Publishing and joining](perspectives/neighbourhoods/publishing-and-joining.md)
+**Publishing (a neighbourhood)** (`neighbourhood.publish`, `neighbourhood_publish_from_perspective_with_context`): Storing a neighbourhood expression for a perspective and recording its URL on that perspective. The perspective is then a neighbourhood. [Publishing and joining](perspectives/neighbourhoods/publishing-and-joining.md)
 
-**Read set** (`ReadSet`): All signed links that a flow state read uses: proposals, votes, role grants and role revocations. [Flow consensus](perspectives/social-dna/flows/consensus.md)
+**Revision** (`Language::current_revision`): The ID of the current state of a link language, such as a diff-entry hash in p-diff-sync or the XOR of the active link hashes on a link server. [Link languages](languages/link-languages/README.md)
 
-**Reifier** (`make_reifier_iri`): The RDF 1.2 node that carries a stored link's author, timestamp, proof, verdict and status. [Oxigraph store](perspectives/links/oxigraph-store.md)
+**RPC API** (`rust-executor/src/api/ws_rpc.rs`, `HandlerMap`): The executor's WebSocket at `/api/v1/ws`, which carries method calls, events and live-query updates. [RPC API](agents/interfaces/rpc-api.md) — not: GraphQL API (removed)
 
-**Replica state** (`FlowReplicaState`): Per-agent flow bookkeeping kept in SQLite outside the graph: last derived state and fired marks. [Flow consensus](perspectives/social-dna/flows/consensus.md)
+**Runtime service** (`RuntimeService`, `rust-executor/src/runtime_service/`, `runtime.*` RPC, `known_link_languages` table): The executor service that holds the bootstrap seed and the lists of trusted agents, known link languages and friends. Its `runtime.*` calls also cover notifications, export, import and quit. [Executor services](agents/executor/services/README.md)
 
-**Request context** (`RequestContext` in `types/domain.rs`): The value that each RPC handler receives: one `Arc<Session>`, a cancel token and the RPC connection id. [Sessions](agents/access/sessions.md)
+**Server link language** (`bootstrap-languages/server-link-language/`, `src/encryption.ts`): The link language that syncs through a link server and encrypts links end to end. Each link-server room has an AES-256-GCM room key, which the language seals to the DID of each member. [Server link language](languages/link-languages/server-link-language.md)
 
-**Revision** (`Language::current_revision`): A link language's name for its current state: in p-diff-sync a diff-entry hash, in the link server the XOR of the active link hashes. [Link languages](languages/link-languages/README.md)
+**Session** (`Session` in `agent/session.rs`): The identity of a connection: a principal, its capabilities and its grant. The executor checks it again on each request and each event. [Sessions](agents/access/sessions.md) — not: call (an SDK call object is also named `Session`), MCP session (an MCP session holds one `Session`)
 
-**Role gate** (`ConsensusRule.from_role`, `flow_instance/roles/`): A model query that a voter must match, as of the vote's time, for the vote to count. [Flow consensus](perspectives/social-dna/flows/consensus.md)
+**SFU room** (`SfuRoom`): One call on the executor's SFU, keyed by neighbourhood URL and room name. [SFU](agents/executor/services/sfu.md) — not: room (alone)
 
-**Room key** (`bootstrap-languages/server-link-language/src/encryption.ts`): The AES-256-GCM key that encrypts links in a link-server room, sealed to each member's DID as a sealed box. [Server link language](languages/link-languages/server-link-language.md)
+**Signal** (`PerspectiveInstance::send_signal`, `neighbourhood.sendSignal`): A signed payload that the link language sends to one agent of a neighbourhood and does not store. [Presence and signals](perspectives/neighbourhoods/presence-and-signals.md) — a Holochain signal is a different thing ([Holochain service](agents/executor/services/holochain.md))
 
-**RPC API** (`rust-executor/src/api/ws_rpc.rs`, `HandlerMap`): The executor's WebSocket at `/api/v1/ws` that carries method calls, events and live-query updates. [RPC API](agents/interfaces/rpc-api.md) — not: GraphQL API (removed)
+**Social DNA (SDNA)** (`add_sdna`, `SdnaType`): The subject class and flow definitions that a perspective stores as shared links. [Social DNA](perspectives/social-dna/README.md)
 
-**Runtime service** (`RuntimeService`, `rust-executor/src/runtime_service/`, `runtime.*` RPC): The executor service that holds the bootstrap seed and the trusted-agent, known-link-language and friend lists; its `runtime.*` calls also cover notifications, export and import, and quitting. [Executor services](agents/executor/services/README.md)
+**Subject class** (`SdnaType::SubjectClass`, `parse_shacl_to_links`): A named SHACL shape with actions, which a perspective stores. [Subject classes](perspectives/social-dna/subject-classes.md) — not: model (use model class for the SDK side)
 
-**Scribe** (`gossip()` in `bootstrap-languages/p-diff-sync/index.ts`): In p-diff-sync, the one agent (lowest DID among known peers) that may make merge commits. [Perspective diff sync](languages/link-languages/perspective-diff-sync.md)
+**System language** (`is_system_language`, `SystemLanguageAddresses`): A language that the bootstrap seed or the known link languages name. The executor loads it with extra file access. [Bootstrap languages](languages/runtime/bootstrap-languages.md) — not: core language
 
-**Sealed box** (`SealedBox`, `rust-executor/src/agent/sealed_box.rs`, `agentOpenSealed`): Data encrypted to an agent from its DID alone (X25519 = the Montgomery form of the Ed25519 key in the `did:key`), as hex `{ephemeralPublicKey, nonce, ciphertext}`; only the executor holding the agent's key opens it. [Signing and verification](agents/identity/signing-and-verification.md)
+**Telepresence** (`has_telepresence_adapter`, `Language::set_online_status`, `send_signal`, `send_broadcast`): The part of a neighbourhood that no executor stores: online status, signals and broadcasts. The link language carries it. [Presence and signals](perspectives/neighbourhoods/presence-and-signals.md) — not: presence (alone)
 
-**Server link language** (`bootstrap-languages/server-link-language/`): The link language that syncs through a link server, with end-to-end encryption. [Server link language](languages/link-languages/server-link-language.md)
+**Templated language** (`language_apply_template_on_source`, `//!@ad4m-template-variable`, `apply_template_data`): A language that the executor makes from a source language by replacing the constants that a template comment marks. Its language meta records `templateAppliedParams` and `templateSourceLanguageAddress`. [Language trust and templates](languages/runtime/installing/trust-and-templates.md)
 
-**Session** (`Session` in `agent/session.rs`): A connection's identity: a principal, its capabilities and its grant, checked again on each request and event. [Sessions](agents/access/sessions.md) — not: call (an SDK call object is also named `Session`), MCP session (an MCP session holds one `Session`)
+**Tombstone** (`ad4m://retracted`, `retraction_for`, `retraction_effects`): A signed link `<source> ad4m://retracted literal:string:<signature>` with which the author of a `Shared` link under a monotonic predicate ends that link. Each executor removes the named link from its store and stores no later copy of it. [Flows](perspectives/social-dna/flows/README.md) — not: removal
 
-**SFU** (`SfuService`, `rust-executor/src/sfu/`): The WebRTC selective forwarding unit inside the executor that relays call media. [SFU](agents/executor/services/sfu.md)
+**Tool bundle** (`tool_bundles/`, `BundleSandbox`, `tool_bundles::builtin`): The JavaScript of an app's agent tools, which the executor runs in a sandbox isolate with no access to the executor. The executor compiles in one tool bundle, WE's, behind `template_read` and `template_update`. [MCP server](agents/interfaces/mcp-server.md) — not: language
 
-**SFU room** (`SfuRoom`): One call on an SFU, keyed by neighbourhood URL and room name. [SFU](agents/executor/services/sfu.md) — not: room (alone)
+**Transition proposal** (`FlowTransitionProposal`): A set of signed links that proposes to move a flow instance to a state and carries the votes on it. [Flow consensus](perspectives/social-dna/flows/consensus.md)
 
-**SHACL shape** (`SHACLShape`): The W3C SHACL description of a subject class, stored as links. [Subject classes](perspectives/social-dna/subject-classes.md)
-
-**Signal** (`PerspectiveInstance::send_signal`, `neighbourhood.sendSignal`): An ephemeral signed payload sent to one agent of a neighbourhood. [Presence and signals](perspectives/neighbourhoods/presence-and-signals.md) — a Holochain signal is a different thing ([Holochain service](agents/executor/services/holochain.md))
-
-**Social DNA (SDNA)** (`add_sdna`, `SdnaType`): The subject class and flow definitions stored as shared links in a perspective. [Social DNA](perspectives/social-dna/README.md)
-
-**Source language** (`LanguageMeta::template_source_language_address`): The language that a templated language was made from. [Language trust and templates](languages/runtime/installing/trust-and-templates.md)
-
-**SPARQL query** (`SparqlStore::query_arbitrary`, `perspective.querySparql`): A read-only SPARQL 1.2 query over a perspective's Oxigraph store. [SPARQL queries](perspectives/querying/sparql.md)
-
-**Subject class** (`SdnaType::SubjectClass`, `parse_shacl_to_links`): A named SHACL shape with actions, stored in a perspective. [Subject classes](perspectives/social-dna/subject-classes.md) — not: model (use model class for the SDK side)
-
-**System language** (`is_system_language`, `SystemLanguageAddresses`): A language from the bootstrap seed or a known link language, loaded with extra file access. [Bootstrap languages](languages/runtime/bootstrap-languages.md) — not: core language
-
-**Telepresence** (`has_telepresence_adapter`, `Language::set_online_status`, `send_signal`, `send_broadcast`): The ephemeral, unstored side of a neighbourhood: online status, signals and broadcasts, carried by the link language. [Presence and signals](perspectives/neighbourhoods/presence-and-signals.md) — not: presence (alone)
-
-**Template variable** (`//!@ad4m-template-variable`, `apply_template_data`): A constant in a bundle, marked by a comment line, that templating replaces. [Language trust and templates](languages/runtime/installing/trust-and-templates.md)
-
-**Templated language** (`language_apply_template_on_source`): A language made by templating a source language; its meta carries `templateAppliedParams` and `templateSourceLanguageAddress`. [Language trust and templates](languages/runtime/installing/trust-and-templates.md)
-
-**Tombstone** (`ad4m://retracted`, `retraction_for`, `retraction_effects`): A signed link `<source> ad4m://retracted literal:string:<signature>` by which the author of a `Shared` link under a monotonic predicate ends it; every executor removes the named link from its own store and stores no later copy. [Flows](perspectives/social-dna/flows/README.md) — not: removal
-
-**Tool bundle** (`tool_bundles/`, `BundleSandbox`, `tool_bundles::builtin`): An app's JavaScript for its agents' tools, which the executor runs in a sandbox isolate that reaches no executor op. The one compiled in is WE's, behind `template_read` and `template_update`. [MCP server](agents/interfaces/mcp-server.md) — not: language
-
-**Transition proposal** (`FlowTransitionProposal`): A signed set of links that proposes moving a flow instance to a state and carries its votes. [Flow consensus](perspectives/social-dna/flows/consensus.md)
-
-**Trusted agent** (`RuntimeService::get_trusted_agents`): A DID whose languages this executor installs without a template check: the seed list, the main agent and the database list. [Language trust and templates](languages/runtime/installing/trust-and-templates.md)
+**Trusted agent** (`RuntimeService::get_trusted_agents`): A DID whose languages this executor installs with no template check. The list holds the seed's agents, the main agent and the agents in the database. [Language trust and templates](languages/runtime/installing/trust-and-templates.md)
 
 **TypeScript SDK** (`@coasys/ad4m`, `core/`, `Ad4mClient`, `ApiClient`): The TypeScript client of the RPC API, with the shared types and the model class decorators. [TypeScript SDK](agents/interfaces/typescript-sdk/README.md) — not: core (as a product name)
 
-**Unyt** (`rust-executor/src/unyt_service.rs`, alliance DNA): The Holochain currency DNA (mHOT) that pays for hosting. [Billing and hosting](agents/executor/services/billing-and-hosting.md)
+**Unyt** (`rust-executor/src/unyt_service.rs`, alliance DNA): The Holochain currency DNA whose mHOT pays for hosting. [Billing and hosting](agents/executor/services/billing-and-hosting.md)
 
 **User account** (`users` table, `user_management.rs`): The login of a managed agent: email, DID and password hash. [Managed agents](agents/executor/managed-agents.md) — not: user (for the agent itself)
 
-**User token** (`generate_user_jwt`): A JWT issued at login whose `sub` is a managed agent's DID; its grant holds the default user capabilities. [Managed agents](agents/executor/managed-agents.md) — not: user JWT, login JWT
+**User token** (`generate_user_jwt`): A JWT that the executor issues at login, with the DID of a managed agent as its `sub`. Its grant holds the default user capabilities. [Managed agents](agents/executor/managed-agents.md) — not: user JWT, login JWT
 
-**Wallet** (`WalletBackend`, `LocalWallet`, `SharedWallet`): The store of every Ed25519 key of the executor, by name, locked under the operator's passphrase. [Wallet and keys](agents/identity/wallet-and-keys.md). For the encrypted file form, see Keystore.
+**Wallet** (`WalletBackend`, `LocalWallet`, `SharedWallet`): The executor's store of all its Ed25519 keys, by name, which the operator's passphrase locks. The keystore is its encrypted form in a file. [Wallet and keys](agents/identity/wallet-and-keys.md)

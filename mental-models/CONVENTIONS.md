@@ -26,7 +26,7 @@ A reader must be able to stop at any level and hold a correct, if coarse, pictur
 - A page with children is a folder with a `README.md`: `agents/access/README.md`. A leaf is a file in its parent's folder: `agents/access/sessions.md`.
 - File and folder names are lowercase kebab-case: `wallet-and-keys.md`, `link-languages/`.
 - A name does not repeat its parent's name: `agents/executor/config.md`, not `agents/executor/executor-config.md`. The page title may still use the full name ("Executor config").
-- `GLOSSARY.md` defines every term a page uses. This file, `CONVENTIONS.md`, holds the rules.
+- `GLOSSARY.md` defines every ADAM term a page uses. General technical terms (DID, SPARQL, SFU) keep their usual meaning and have no entry. This file, `CONVENTIONS.md`, holds the rules.
 
 ## Links
 

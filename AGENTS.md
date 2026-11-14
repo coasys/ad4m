@@ -66,7 +66,7 @@ it in older docs.
   - State the code as it is after the PR: no plans, open questions, defects,
     PR numbers or history. Relative links to code, no line numbers.
   - Use the terms in `mental-models/GLOSSARY.md`; add a term there when a page
-    needs a new one.
+    needs a new ADAM term (general technical terms get no entry).
   - Before pushing, check that every relative link in the changed pages resolves.
 - **RPC contracts are generated.** Every executor method registers
   `map.method::<Params, Result>(name, handler)` (`.read()` for idempotent reads,
