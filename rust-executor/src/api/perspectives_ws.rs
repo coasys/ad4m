@@ -197,12 +197,12 @@ const DEFAULT_LINK_WRITE: f64 = 0.25;
 /// fire-and-forget deduction that logs on `InsufficientCredits` but
 /// doesn't halt the loop. A pass that ends with zero bases used to be
 /// free regardless of how many completions it burned.
-pub(super) struct WsHarnessCreditGate {
+pub(crate) struct WsHarnessCreditGate {
     agent_did: Option<String>,
 }
 
 impl WsHarnessCreditGate {
-    pub(super) fn new(agent_did: Option<String>) -> Self {
+    pub(crate) fn new(agent_did: Option<String>) -> Self {
         Self { agent_did }
     }
 }
@@ -275,10 +275,18 @@ async fn list_perspectives(_params: Value, ctx: Arc<RequestContext>) -> Result<V
         return Ok(serde_json::to_value(handles)?);
     }
 
+    // The guard admitted the caller for holding perspective READ on some pointer; when that
+    // is narrower than `*` — a session scoped to one perspective — the answer narrows to the
+    // pointers it names. `None` is `*`: every perspective, as before.
+    let readable = pointers_covered(&ctx.session.capabilities(), PERSPECTIVE, READ);
     let mut filtered: Vec<PerspectiveHandle> = Vec::new();
     for p in all {
         let handle = p.persisted.lock().await.clone();
-        if can_access_perspective_with_did(ctx.user_did(), &handle) {
+        if can_access_perspective_with_did(ctx.user_did(), &handle)
+            && readable
+                .as_ref()
+                .is_none_or(|allowed| allowed.contains(&handle.uuid))
+        {
             filtered.push(handle);
         }
     }
@@ -303,19 +311,23 @@ async fn get_perspective_handler(
     Ok(serde_json::to_value(handle)?)
 }
 
-async fn get_snapshot(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+async fn get_snapshot(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let perspective = guarded_perspective(&params).await?;
+    let gate = crate::perspectives::sparql_store::query_gate(&ctx).await;
     let links = perspective
-        .get_links(&LinkQuery {
-            source: None,
-            target: None,
-            predicate: None,
-            from_date: None,
-            until_date: None,
-            limit: None,
-        })
+        .get_links_stopped(
+            &gate.stop(),
+            &LinkQuery {
+                source: None,
+                target: None,
+                predicate: None,
+                from_date: None,
+                until_date: None,
+                limit: None,
+            },
+        )
         .await
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+        .map_err(query_eval_error_ws)?;
     Ok(serde_json::to_value(crate::types::domain::Perspective {
         links,
     })?)
@@ -327,7 +339,7 @@ async fn publish_snapshot(_params: Value, _ctx: Arc<RequestContext>) -> Result<V
     ))
 }
 
-async fn query_links(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+async fn query_links(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let perspective = guarded_perspective(&params).await?;
 
     let query = LinkQuery {
@@ -346,10 +358,11 @@ async fn query_links(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, 
             .map(|v| v as i32),
     };
 
+    let gate = crate::perspectives::sparql_store::query_gate(&ctx).await;
     let links = perspective
-        .get_links(&query)
+        .get_links_stopped(&gate.stop(), &query)
         .await
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+        .map_err(query_eval_error_ws)?;
     Ok(serde_json::to_value(links)?)
 }
 
@@ -597,8 +610,25 @@ async fn query_prolog(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
     Ok(serde_json::to_value(prolog_resolution_to_string(res))?)
 }
 
-/// Server-side timeout for SPARQL queries (seconds).
-const SPARQL_QUERY_TIMEOUT_SECS: u64 = 30;
+/// The wire answer for a stopped evaluation: a cancelled one is 499, the
+/// same as `ws_rpc` gives a raced call; one that hit the query deadline is
+/// 504 and its message says which deadline passed. Other errors are 500.
+fn query_eval_error_ws(e: deno_core::anyhow::Error) -> WsRpcError {
+    let msg = e.to_string();
+    if msg.contains("query cancelled") {
+        WsRpcError {
+            code: 499,
+            message: "Request cancelled by client".to_string(),
+        }
+    } else if msg.contains("SPARQL deadline") {
+        WsRpcError {
+            code: 504,
+            message: msg,
+        }
+    } else {
+        WsRpcError::internal(msg)
+    }
+}
 
 /// Timeout for `run_interpretation` — an LLM interpretation pass includes
 /// prompt build + model call + planning + writes. Longer than the SPARQL
@@ -625,60 +655,19 @@ async fn query_sparql(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
 
     match engine.as_str() {
         "sparql" => {
-            // Run the synchronous SPARQL query on a blocking thread with a
-            // hard timeout (so the executor doesn't hang indefinitely on
-            // a pathological query) and a soft cancellation token (so the
-            // client can abort with `request.cancel`).
-            //
-            // When `ctx.cancel_token` is present (always true under the
-            // WS dispatcher), we use `sparql_query_cancellable` which
-            // races the eval against `cancel.cancelled()`.  When it's
-            // None (internal callers / tests), fall back to the
-            // historical timeout + spawn_blocking shape.
-            let timeout = Duration::from_secs(SPARQL_QUERY_TIMEOUT_SECS);
-            let result = if let Some(cancel) = ctx.cancel_token.clone() {
-                tokio::time::timeout(timeout, perspective.sparql_query_cancellable(query, cancel))
-                    .await
-            } else {
-                let join = tokio::task::spawn_blocking(move || perspective.sparql_query(query));
-                tokio::time::timeout(timeout, async move {
-                    join.await
-                        .map_err(|e| deno_core::anyhow::anyhow!("Task join error: {}", e))?
-                })
+            // One gate per call: the configured query deadline, the
+            // request's cancel (`request.cancel`, or the connection closing
+            // — the call tokens are children of the connection's), one of
+            // the connection's running-query slots, and a stop the eval
+            // itself watches. Dropping the gate stops the eval too, so a
+            // call given up on does not keep its evaluation running.
+            let gate = crate::perspectives::sparql_store::query_gate(&ctx).await;
+            match perspective
+                .sparql_query_cancellable(gate.stop(), query)
                 .await
-            };
-
-            match result {
-                Ok(Ok(json)) => Ok(serde_json::to_value(json)?),
-                Ok(Err(e)) => {
-                    // Surface client cancellation as 499 so the dispatcher
-                    // doesn't have to special-case it — same wire shape as
-                    // the racing branch in `ws_rpc::handle_ws`.  Other
-                    // errors (anyhow string, including "query cancelled")
-                    // surface as 500 unless we recognise the cancel marker.
-                    let msg = e.to_string();
-                    if msg.contains("query cancelled") {
-                        Err(WsRpcError {
-                            code: 499,
-                            message: "Request cancelled by client".to_string(),
-                        })
-                    } else {
-                        Err(WsRpcError::internal(msg))
-                    }
-                }
-                Err(_) => {
-                    log::warn!(
-                        "SPARQL query timed out after {}s",
-                        SPARQL_QUERY_TIMEOUT_SECS
-                    );
-                    Err(WsRpcError {
-                        code: 408,
-                        message: format!(
-                            "SPARQL query timed out after {}s",
-                            SPARQL_QUERY_TIMEOUT_SECS
-                        ),
-                    })
-                }
+            {
+                Ok(json) => Ok(serde_json::to_value(json)?),
+                Err(e) => Err(query_eval_error_ws(e)),
             }
         }
         other => Err(WsRpcError::bad_request(format!(
@@ -821,8 +810,10 @@ async fn subscribe_query(params: Value, ctx: Arc<RequestContext>) -> Result<Valu
 
     let perspective = guarded_perspective(&params).await?;
 
+    let gate = crate::perspectives::sparql_store::query_gate(&ctx).await;
     let opened = perspective
         .subscribe_and_query(
+            &gate.stop(),
             body.query,
             client_subscription_id(body.subscription_id)?,
             connection_id.clone(),
@@ -878,7 +869,7 @@ async fn subscribed(
         if e.downcast_ref::<SubscriptionIdTaken>().is_some() {
             WsRpcError::conflict(e.to_string())
         } else {
-            WsRpcError::internal(e.to_string())
+            query_eval_error_ws(e)
         }
     })?;
     if ctx.cancel_token.as_ref().is_some_and(|t| t.is_cancelled()) {
@@ -1055,7 +1046,7 @@ async fn get_subject_data(params: Value, ctx: Arc<RequestContext>) -> Result<Val
 
 async fn subject_classes_of_handler(
     params: Value,
-    _ctx: Arc<RequestContext>,
+    ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
     // A malformed element cannot be dropped here. The result map omits URIs that
     // matched no class, so a silently discarded input would be indistinguishable
@@ -1075,69 +1066,45 @@ async fn subject_classes_of_handler(
 
     let perspective = guarded_perspective(&params).await?;
 
-    // Classification is synchronous SPARQL plus in-memory containment over every
-    // class × every URI, so it runs on a blocking thread with the same timeout as
-    // the other store-backed queries rather than holding a runtime worker.
-    let result = tokio::time::timeout(
-        Duration::from_secs(SPARQL_QUERY_TIMEOUT_SECS),
-        tokio::task::spawn_blocking(move || perspective.subject_classes_of(&uris)),
-    )
-    .await;
+    // The same gate every query call gets: deadline, cancel, connection
+    // close, one of the connection's running-query slots. Classification is
+    // synchronous SPARQL plus in-memory containment over every class × every
+    // URI, so it runs on a blocking thread under a clone of the gate's stop —
+    // a timeout here now ends the evaluation, not just the wait for it.
+    let gate = crate::perspectives::sparql_store::query_gate(&ctx).await;
+    let stop = gate.stop();
+    let result =
+        tokio::task::spawn_blocking(move || perspective.subject_classes_of_stopped(&stop, &uris))
+            .await;
 
     match result {
-        Ok(Ok(Ok(map))) => {
-            serde_json::to_value(map).map_err(|e| WsRpcError::internal(e.to_string()))
-        }
-        Ok(Ok(Err(e))) => Err(WsRpcError::internal(e.to_string())),
-        Ok(Err(e)) => Err(WsRpcError::internal(format!("Task join error: {}", e))),
-        Err(_) => {
-            log::warn!(
-                "Subject classification timed out after {}s",
-                SPARQL_QUERY_TIMEOUT_SECS
-            );
-            Err(WsRpcError {
-                code: 408,
-                message: format!(
-                    "Subject classification timed out after {}s",
-                    SPARQL_QUERY_TIMEOUT_SECS
-                ),
-            })
-        }
+        Ok(Ok(map)) => serde_json::to_value(map).map_err(|e| WsRpcError::internal(e.to_string())),
+        Ok(Err(e)) => Err(query_eval_error_ws(e)),
+        Err(e) => Err(WsRpcError::internal(format!("Task join error: {}", e))),
     }
 }
 
-async fn model_query_handler(
-    params: Value,
-    _ctx: Arc<RequestContext>,
-) -> Result<Value, WsRpcError> {
+async fn model_query_handler(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let classes = query_classes(&params)?;
     let query_json = params.require_str("query_json")?;
 
     let perspective = guarded_perspective(&params).await?;
 
-    // Run async model query with timeout
-    let result = tokio::time::timeout(
-        Duration::from_secs(SPARQL_QUERY_TIMEOUT_SECS),
-        perspective.model_query_classes(&classes, &query_json),
-    )
-    .await;
-
-    match result {
-        Ok(Ok(json)) => Ok(Value::String(json)),
-        Ok(Err(e)) => Err(WsRpcError::internal(e.to_string())),
-        Err(_) => {
-            log::warn!("Model query timed out after {}s", SPARQL_QUERY_TIMEOUT_SECS);
-            Err(WsRpcError {
-                code: 408,
-                message: format!("Model query timed out after {}s", SPARQL_QUERY_TIMEOUT_SECS),
-            })
-        }
+    // The same gate every query call gets: deadline, cancel, connection
+    // close, one of the connection's running-query slots.
+    let gate = crate::perspectives::sparql_store::query_gate(&ctx).await;
+    match perspective
+        .model_query_classes_stopped(&gate.stop(), &classes, &query_json)
+        .await
+    {
+        Ok(json) => Ok(Value::String(json)),
+        Err(e) => Err(query_eval_error_ws(e)),
     }
 }
 
 async fn evaluate_getters_handler(
     params: Value,
-    _ctx: Arc<RequestContext>,
+    ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
     let class_name = params.require_str("class_name")?;
 
@@ -1164,33 +1131,25 @@ async fn evaluate_getters_handler(
 
     let perspective = guarded_perspective(&params).await?;
 
-    // Run synchronous getter evaluation on a blocking thread with timeout
-    // to avoid blocking the async runtime.
-    let result = tokio::time::timeout(
-        Duration::from_secs(SPARQL_QUERY_TIMEOUT_SECS),
-        tokio::task::spawn_blocking(move || {
-            perspective.evaluate_getters(&class_name, &instance_ids, property_names.as_deref())
-        }),
-    )
+    // The same gate every query call gets. The eval runs on a blocking
+    // thread under a clone of its stop, which the gate still owns: a
+    // cancel, the deadline, or this call's future dropped ends the eval.
+    let gate = crate::perspectives::sparql_store::query_gate(&ctx).await;
+    let stop = gate.stop();
+    let result = tokio::task::spawn_blocking(move || {
+        perspective.evaluate_getters_stopped(
+            &stop,
+            &class_name,
+            &instance_ids,
+            property_names.as_deref(),
+        )
+    })
     .await;
 
     match result {
-        Ok(Ok(Ok(json))) => Ok(Value::String(json)),
-        Ok(Ok(Err(e))) => Err(WsRpcError::internal(e.to_string())),
-        Ok(Err(e)) => Err(WsRpcError::internal(format!("Task join error: {}", e))),
-        Err(_) => {
-            log::warn!(
-                "Getter evaluation timed out after {}s",
-                SPARQL_QUERY_TIMEOUT_SECS
-            );
-            Err(WsRpcError {
-                code: 408,
-                message: format!(
-                    "Getter evaluation timed out after {}s",
-                    SPARQL_QUERY_TIMEOUT_SECS
-                ),
-            })
-        }
+        Ok(Ok(json)) => Ok(Value::String(json)),
+        Ok(Err(e)) => Err(query_eval_error_ws(e)),
+        Err(e) => Err(WsRpcError::internal(format!("Task join error: {}", e))),
     }
 }
 
@@ -1205,8 +1164,10 @@ async fn model_subscribe_handler(
     let connection_id = connection_id(&ctx)?;
     let perspective = guarded_perspective(&params).await?;
 
+    let gate = crate::perspectives::sparql_store::query_gate(&ctx).await;
     let opened = perspective
         .model_subscribe_and_query(
+            &gate.stop(),
             classes,
             query_json,
             subscription_id,
@@ -2464,12 +2425,13 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     let query = || Guard::perspective(perspective_query_capability);
     let update = || Guard::perspective(perspective_update_capability);
 
-    // Neither names one perspective: `all` lists the caller's own, `create` makes one that the
-    // caller's user owns (no owner for the operator and apps).
+    // Neither names one perspective: `all` lists the ones the caller may read (a caller
+    // holding READ on some pointers gets only those), `create` makes one that the caller's
+    // user owns (no owner for the operator and apps).
     map.method::<NoParams, Vec<PerspectiveHandle>>("perspective.all", list_perspectives)
         .read()
-        .guard(Guard::Cap(perspective_query_capability(vec![
-            WILD_CARD.to_string()
+        .guard(Guard::CapAnyPointer(perspective_query_capability(vec![
+            WILD_CARD.to_string(),
         ])));
     map.method::<PerspectiveUuidParams, Option<PerspectiveHandle>>(
         "perspective.get",

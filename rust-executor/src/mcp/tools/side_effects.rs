@@ -136,12 +136,18 @@ pub(crate) const STATIC_TOOL_SIDE_EFFECTS: &[(&str, SideEffect)] = &[
     ("language_meta", SideEffect::Read),
 ];
 
-/// Look up the declared side-effect for a static `#[tool]` name, or
-/// classify a dynamic per-class tool by its verb suffix.
-///
-/// Static tools take precedence — an explicit table row always wins over
-/// suffix matching (defense in depth: a static tool renamed to collide
-/// with a dynamic pattern doesn't silently reclassify).
+/// The side-effect a static `#[tool]` name declares in
+/// [`STATIC_TOOL_SIDE_EFFECTS`], or `None` for a name the table does not
+/// know — a dynamic per-class name, or no tool at all.
+pub(crate) fn static_side_effect(name: &str) -> Option<SideEffect> {
+    STATIC_TOOL_SIDE_EFFECTS
+        .iter()
+        .find_map(|(n, se)| (*n == name).then_some(*se))
+}
+
+/// The side-effect a generated per-class tool name declares by its verb —
+/// `None` when the name carries no known verb (it is not a generated tool
+/// name, or one of a shape the generators learn later).
 ///
 /// Dynamic per-class tools follow the strict shape
 /// `<class_lower>_<verb>[_<prop_or_coll>]` emitted by the `dynamic.rs::make_*`
@@ -165,44 +171,43 @@ pub(crate) const STATIC_TOOL_SIDE_EFFECTS: &[(&str, SideEffect)] = &[
 /// at position 0 (ignored) and `query` at position 1 (Read). James
 /// Weir's 2026-08-25 false-positive example: fixed structurally by not
 /// consulting position-0 tokens.
-///
-/// Unknown shapes fall back to [`SideEffect::Read`] — the safer default.
-/// Propose-* wrappers (`<class>_create` / `<class>_propose_link_child`)
-/// declare their own side_effect at construction site
-/// (`ai_service::harness::propose`) and never come through this path.
-pub(crate) fn side_effect_of(name: &str) -> SideEffect {
-    if let Some(se) = STATIC_TOOL_SIDE_EFFECTS
-        .iter()
-        .find_map(|(n, se)| (*n == name).then_some(*se))
-    {
-        return se;
-    }
-    classify_dynamic_tool_by_verb_suffix(name)
-}
-
-/// Classify a dynamic per-class tool name by its position-1 verb.
-///
-/// The generators in `mcp/tools/dynamic.rs` always emit
-/// `<class_lower>_<verb>[…]`. This function ignores position 0 (the class
-/// name — user-controlled, can legitimately collide with the verb
-/// vocabulary) and reads only position 1. That's the structural fix for
-/// the `Signal` false-positive: `signal_query` → position 0 = `signal`
-/// (ignored), position 1 = `query` → Read.
-fn classify_dynamic_tool_by_verb_suffix(name: &str) -> SideEffect {
+pub(crate) fn dynamic_tool_side_effect(name: &str) -> Option<SideEffect> {
     let mut tokens = name.splitn(3, '_');
     let _class = tokens.next(); // position 0 — user-controlled, ignored
     let verb = tokens.next(); // position 1 — the classifier's only input
 
     match verb {
-        Some("query" | "list" | "get") => SideEffect::Read,
-        Some("create" | "delete" | "set" | "add" | "remove") => SideEffect::Write,
-        // No verb (single-token name) or unknown verb → default Read.
-        // An unknown-verb read never triggers an accidental mutation;
-        // the failure direction is "misses the read cut for a would-be
-        // legitimate tool the harness doesn't yet expose", not "silently
-        // writes when it shouldn't". Safer failure mode.
-        _ => SideEffect::Read,
+        Some("query" | "list" | "get") => Some(SideEffect::Read),
+        Some("create" | "delete" | "set" | "add" | "remove") => Some(SideEffect::Write),
+        // No verb (single-token name) or unknown verb → not a generated
+        // tool name this knows.
+        _ => None,
     }
+}
+
+/// Look up the declared side-effect for a static `#[tool]` name, or
+/// classify a dynamic per-class tool by its verb suffix.
+///
+/// Static tools take precedence — an explicit table row always wins over
+/// suffix matching (defense in depth: a static tool renamed to collide
+/// with a dynamic pattern doesn't silently reclassify).
+///
+/// Unknown shapes fall back to [`SideEffect::Read`] — the safer default for
+/// the read-only cut: an unknown-verb read never triggers an accidental
+/// mutation; the failure direction is "misses the read cut for a would-be
+/// legitimate tool the harness doesn't yet expose", not "silently writes
+/// when it shouldn't". Callers that need the conservative answer for a
+/// *flag* (`did this step write?`) take the [`Option`]-returning lookups
+/// and pick their own default — `agent_session::tool_writes` does.
+///
+/// Propose-* wrappers (`<class>_create` / `<class>_propose_link_child`)
+/// declare their own side_effect at construction site
+/// (`ai_service::harness::propose`) and never come through this path.
+pub(crate) fn side_effect_of(name: &str) -> SideEffect {
+    static_side_effect(name)
+        .or_else(|| dynamic_tool_side_effect(name))
+        // See above: unknown → Read, the safer default for the read cut.
+        .unwrap_or(SideEffect::Read)
 }
 
 #[cfg(test)]

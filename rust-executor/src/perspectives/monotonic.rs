@@ -363,10 +363,10 @@ impl PerspectiveInstance {
             .collect();
 
         for (tombstone, signature) in &tombstones {
-            for stored in self
-                .sparql_store
-                .get_links_by_source(&tombstone.data.source)?
-            {
+            for stored in self.sparql_store.get_links_by_source(
+                &crate::perspectives::sparql_store::EvalStop::none(),
+                &tombstone.data.source,
+            )? {
                 let link = LinkExpression::from(stored.clone());
                 if ends(tombstone, signature, &link) {
                     effects.retracted.push(stored);
@@ -388,6 +388,7 @@ impl PerspectiveInstance {
 
     fn stored_tombstone_ends(&self, link: &LinkExpression) -> Result<bool, AnyError> {
         let stored = self.sparql_store.query_links(
+            &crate::perspectives::sparql_store::EvalStop::none(),
             Some(&link.data.source),
             Some(RETRACTED_PREDICATE),
             None,

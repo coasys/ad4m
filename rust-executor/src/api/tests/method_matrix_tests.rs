@@ -19,9 +19,9 @@ use ts_rs::TS;
 
 use crate::agent::capabilities::pending::PendingRequests;
 use crate::agent::capabilities::{
-    anonymous_capabilities_when, capability_matches, perspective_query_capability, AuthInfo,
-    Capability, AGENT_AUTH_CAPABILITY, AGENT_READ_CAPABILITY, AGENT_UPDATE_CAPABILITY,
-    AI_PROMPT_CAPABILITY,
+    anonymous_capabilities_when, capability_matches, capability_matches_any_pointer,
+    perspective_query_capability, AuthInfo, Capability, AGENT_AUTH_CAPABILITY,
+    AGENT_READ_CAPABILITY, AGENT_UPDATE_CAPABILITY, AI_PROMPT_CAPABILITY,
 };
 use crate::agent::grants::{Grants, LiveGrant};
 use crate::agent::{AgentContext, AgentService};
@@ -80,8 +80,9 @@ pub(super) enum Expect {
 }
 
 /// What [`Caller::UserAppWithout`] holds: querying one perspective that no row names. No
-/// guard checks it: a perspective guard builds its capability from the row's uuid, and every
-/// other perspective capability names `*`, which a single pointer does not cover.
+/// other guard checks it: a perspective guard builds its capability from the row's uuid, and
+/// every other perspective capability names `*`, which a single pointer does not cover.
+/// `Guard::CapAnyPointer` does admit it — the capability on one pointer is what it admits.
 pub(super) fn unrelated_capability() -> Capability {
     perspective_query_capability(vec!["matrix-unrelated-perspective".to_string()])
 }
@@ -125,6 +126,32 @@ pub(super) fn resource_rows(guard: &Guard) -> Vec<(Caller, Expect)> {
             (
                 Anonymous,
                 if anonymous_holds(cap) {
+                    Granted
+                } else {
+                    Forbidden
+                },
+            ),
+        ],
+        // The capability on at least one pointer: `UserAppWithout` is the scoped grant
+        // (`unrelated_capability` is perspective READ on one pointer no row names) — the
+        // caller `perspective.all` now admits, whose answer the handler narrows.
+        Guard::CapAnyPointer(cap) => vec![
+            (Operator, Granted),
+            (AppWithout, Forbidden),
+            (AppWith, Granted),
+            (User, Granted),
+            (OtherUser, Granted),
+            (
+                UserAppWithout,
+                if capability_matches_any_pointer(&[unrelated_capability()], cap) {
+                    Granted
+                } else {
+                    Forbidden
+                },
+            ),
+            (
+                Anonymous,
+                if capability_matches_any_pointer(&anonymous_capabilities_when(true), cap) {
                     Granted
                 } else {
                     Forbidden
@@ -213,7 +240,7 @@ fn agent_resource_rows() -> &'static [(Caller, Target, Expect)] {
 pub(super) fn owns_rows(owner: Owner) -> &'static [(Caller, Target, Expect)] {
     match owner {
         Owner::Perspective => perspective_rows(),
-        Owner::Task | Owner::Grant | Owner::Request => agent_resource_rows(),
+        Owner::Task | Owner::Grant | Owner::Request | Owner::AiSession => agent_resource_rows(),
     }
 }
 
@@ -272,17 +299,35 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
     ),
     (
         "ai.discoverModels",
-        || json!({ "baseUrl": "https://api.example.org/v1" }),
+        || json!({ "kind": "OPEN_AI", "baseUrl": "https://api.example.org/v1" }),
     ),
     (
         "ai.addModel",
-        || json!({ "model": { "name": "m", "type": "LLM" } }),
+        || json!({ "model": { "name": "m", "modelType": "LLM", "endpointId": "e1", "remoteModel": "r" } }),
     ),
     (
         "ai.updateModel",
-        || json!({ "id": "m1", "model": { "name": "m", "type": "LLM" } }),
+        || json!({ "id": "m1", "model": { "name": "m", "modelType": "LLM", "endpointId": "e1", "remoteModel": "r" } }),
     ),
     ("ai.removeModel", || json!({ "id": "m1" })),
+    ("ai.modelStatus", || json!({ "id": "m1" })),
+    (
+        "ai.addEndpoint",
+        || json!({ "name": "e", "kind": "OLLAMA", "baseUrl": "http://127.0.0.1:11434" }),
+    ),
+    (
+        "ai.updateEndpoint",
+        || json!({ "id": "e1", "endpoint": { "name": "e", "kind": "VLLM", "baseUrl": "http://127.0.0.1:8000" } }),
+    ),
+    ("ai.removeEndpoint", || json!({ "id": "e1" })),
+    (
+        "ai.pullModel",
+        || json!({ "endpointId": "e1", "remoteModel": "qwen3:8b" }),
+    ),
+    (
+        "ai.deleteUpstreamModel",
+        || json!({ "endpointId": "e1", "remoteModel": "qwen3:8b" }),
+    ),
     ("ai.getDefaultModel", || json!({ "modelType": "LLM" })),
     ("ai.addTask", || json!({ "task": ai_task() })),
     ("ai.updateTask", || {
@@ -294,6 +339,16 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
     }),
     ("ai.removeTask", || json!({ "id": TARGET })),
     ("ai.prompt", || json!({ "taskId": TARGET, "prompt": "p" })),
+    // The AI sessions: `id` on the session methods, `sessionId` on the turn calls.
+    ("ai.session", || json!({ "id": TARGET })),
+    ("ai.sessionUpdate", || json!({ "id": TARGET })),
+    ("ai.sessionDelete", || json!({ "id": TARGET })),
+    (
+        "ai.sessionSend",
+        || json!({ "sessionId": TARGET, "text": "t" }),
+    ),
+    ("ai.sessionCancel", || json!({ "sessionId": TARGET })),
+    ("ai.sessionMessages", || json!({ "sessionId": TARGET })),
     ("ai.embed", || json!({ "modelId": "m1", "text": "t" })),
     ("ai.transcriptionOpen", || json!({ "modelId": "m1" })),
     ("ai.transcriptionClose", || json!({ "streamId": "s1" })),
@@ -781,6 +836,8 @@ pub(super) struct World {
     main_agents_grant: String,
     users_request: String,
     main_agents_request: String,
+    users_ai_session: String,
+    main_agents_ai_session: String,
 }
 
 impl World {
@@ -834,6 +891,24 @@ impl World {
             id
         };
         let user = || AgentContext::managed(USER_DID.to_string());
+        let ai_session = |name: &str, owner: Option<&str>| {
+            let id = format!("{run}-{name}-session");
+            crate::db::Ad4mDb::with_global_instance(|db| {
+                db.create_ai_session(&crate::ai_sessions::types::AiSession {
+                    id: id.clone(),
+                    owner_did: owner.map(str::to_string),
+                    title: "matrix".into(),
+                    model: None,
+                    default_perspective: None,
+                    library_perspective: None,
+                    capabilities: vec![],
+                    created_at: "2026-01-01T00:00:00Z".into(),
+                    updated_at: "2026-01-01T00:00:00Z".into(),
+                })
+            })
+            .expect("an AI session");
+            id
+        };
         let world = World {
             users_own: format!("{run}-users-own"),
             main_agents: format!("{run}-main-agents"),
@@ -844,6 +919,8 @@ impl World {
             main_agents_grant: grant("main", AgentContext::main_agent()),
             users_request: request("users", user()),
             main_agents_request: request("main", AgentContext::main_agent()),
+            users_ai_session: ai_session("users", Some(USER_DID)),
+            main_agents_ai_session: ai_session("main", None),
         };
         for (uuid, owners) in [
             (&world.users_own, Some(vec![USER_DID.to_string()])),
@@ -870,6 +947,7 @@ impl World {
             Owner::Task => (&self.users_task, &self.operators_task),
             Owner::Grant => (&self.users_grant, &self.main_agents_grant),
             Owner::Request => (&self.users_request, &self.main_agents_request),
+            Owner::AiSession => (&self.users_ai_session, &self.main_agents_ai_session),
         };
         match target {
             Target::UsersOwn => users.clone(),
@@ -885,6 +963,12 @@ impl World {
         }
         for task in [self.users_task, self.operators_task] {
             crate::db::Ad4mDb::with_global_instance(|db| db.remove_task(task)).unwrap();
+        }
+        for (owner, id) in [
+            (Some(USER_DID), self.users_ai_session),
+            (None, self.main_agents_ai_session),
+        ] {
+            crate::db::Ad4mDb::with_global_instance(|db| db.delete_ai_session(owner, &id)).unwrap();
         }
         // A test may have removed one already.
         for grant in [&self.users_grant, &self.main_agents_grant] {
@@ -1130,6 +1214,10 @@ async fn operator_methods_answer_everyone_else_admin_credential_required() {
     assert_eq!(
         operator_methods,
         vec![
+            "ai.localInstall",
+            "ai.localRemove",
+            "ai.localStart",
+            "ai.localStop",
             "identity.claimOffer",
             "identity.resetLog",
             "runtime.grantNotification",
@@ -1320,6 +1408,47 @@ async fn perspective_get_answers_null_and_query_links_404_for_another_users_pers
         "not the caller's answers as a missing one does"
     );
     world.remove().await;
+}
+
+/// `perspective.all` is `Guard::CapAnyPointer`: perspective READ on one pointer admits a
+/// caller (an AI session scoped to one perspective; the handler narrows its answer to the
+/// pointers it may read), `*` admits as before, and a caller with no perspective READ at
+/// all is refused, as it was under `Cap`.
+#[tokio::test]
+async fn perspective_all_admits_read_on_any_pointer_and_refuses_none() {
+    let map = build_handler_map();
+    let one = |pointer: &str| perspective_query_capability(vec![pointer.to_string()]);
+    for (who, caller) in [
+        (
+            "app scoped to one",
+            RequestContext::app_for_test(vec![one("some-uuid")]),
+        ),
+        (
+            "app holding `*`",
+            RequestContext::app_for_test(vec![one("*")]),
+        ),
+        (
+            "user scoped to one",
+            RequestContext::user_for_test(USER_DID, vec![one("some-uuid")]),
+        ),
+    ] {
+        assert!(
+            map.admit("perspective.all", &json!({}), &caller)
+                .await
+                .is_ok(),
+            "{who}"
+        );
+    }
+    for (who, caller) in [
+        ("app without it", RequestContext::app_for_test(vec![])),
+        ("anonymous", context(Caller::Anonymous, None)),
+    ] {
+        let refused = map
+            .admit("perspective.all", &json!({}), &caller)
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code, 403, "{who}: {}", refused.message);
+    }
 }
 
 /// D12, D14: a user approves and revokes the requests and grants of their own agent; another

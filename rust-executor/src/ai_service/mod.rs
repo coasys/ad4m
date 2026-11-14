@@ -1,47 +1,40 @@
 use self::error::AIServiceError;
-use crate::events::{Audience, Event, Topic};
-use crate::pubsub::get_global_pubsub;
-use crate::types::ModelInput;
 use crate::types::RequestContext;
-#[allow(unused_imports)]
-use crate::types::{AIModelLoadingStatus, AITaskInput, TranscriptionTextFilter};
-use crate::types::{AITask, LocalModel, ModelApi, ModelApiType, ModelType};
+use crate::types::{AITask, AITaskInput, Endpoint, Model, ModelInput, ModelType};
 use anyhow::{anyhow, Context};
-use candle_core::Device;
 use deno_core::error::AnyError;
-use futures::SinkExt;
-use holochain::test_utils::itertools::Itertools;
-use kalosm::language::*;
-use kalosm::sound::TextStream;
-use kalosm::sound::*;
 use std::collections::HashMap;
-use std::future::Future;
-use std::path::PathBuf;
-use std::pin::Pin;
 use std::sync::Arc;
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::time::sleep;
 
-mod default_embedding;
+use std::future::Future;
+use std::pin::Pin;
+
+pub mod endpoints;
 mod error;
 pub mod harness;
+pub mod local;
 pub mod providers;
+pub(crate) mod transcription;
+#[cfg(test)]
+mod transcription_e2e;
 use log::error;
 use providers::{ChatReply, ChatRequest, ChatTurn, RemoteChat, ToolSpec};
 
 pub type Result<T> = std::result::Result<T, AnyError>;
 
-/// Result of an LLM prompt call, with token counts for billing.
-/// Token counts are estimated (chars/4) with the current Kalosum backend.
-/// When Ollama is integrated, these will be exact from the API response.
+/// Result of an LLM prompt call, with token counts for billing (estimated, chars/4).
 #[derive(Debug, Clone)]
 pub struct PromptResult {
     pub text: String,
     pub prompt_tokens: usize,
     pub completion_tokens: usize,
     pub model_id: String,
+    /// Why generation stopped, when the provider said. `"length"` means the
+    /// reply was cut at the output cap or the window.
+    pub stop_reason: Option<String>,
 }
 
 /// Result of an embedding call, with token count for billing.
@@ -50,15 +43,19 @@ pub struct EmbedResult {
     pub token_count: usize,
 }
 
-/// Rough token count estimation (~4 chars per token for English text).
-/// Used by the Kalosum backend to populate PromptResult/EmbedResult.
-/// Will be replaced by exact counts when Ollama is integrated.
+/// The vectors of a batch, in input order, and the input tokens billed for it: the
+/// upstream's count when it reports one, else the estimate.
+pub struct EmbedBatch {
+    pub vectors: Vec<Vec<f32>>,
+    pub token_count: usize,
+}
+
+/// Rough token count estimation (~4 chars per token for English text), for the paths that
+/// bill without an upstream count.
 ///
-/// TODO(billing accuracy): materially off for non-English scripts (CJK,
-/// Arabic, Hindi tend to ~1 token/char → billing under-estimated ~4×),
-/// code/JSON (~2 chars/token → under-estimated ~2×), and repetitive text
-/// (BPE compresses well → over-estimated). Plumb real Kalosm token counts
-/// when the backend exposes them, or apply a per-model correction factor.
+/// Materially off for non-English scripts (CJK, Arabic, Hindi tend to ~1 token/char, so
+/// billing under-estimates ~4×), code/JSON (~2 chars/token) and repetitive text (BPE
+/// compresses well: over-estimated). `/v1` bills from the upstream's `usage` instead.
 ///
 /// `pub(crate)` so `api::openai_compat::tests` can lock in the current
 /// formula and catch accidental changes.
@@ -66,6 +63,47 @@ pub(crate) fn estimate_token_count(text: &str) -> usize {
     let chars = text.chars().count();
     (chars + 3) / 4
 }
+
+/// Estimated bytes one context token occupies once a chat request is
+/// rendered: serialized message JSON is denser than the prose
+/// [`estimate_token_count`] bills at (~4 chars/token) — tools, argument
+/// objects and the message envelope run closer to three.
+const CONTEXT_BYTES_PER_TOKEN: usize = 3;
+
+/// [`AIService::context_budget_bytes`] when the model's context window is
+/// not configured: ~64 KB of message list, inside every window the
+/// executor's endpoints are run at.
+const DEFAULT_CONTEXT_BUDGET_BYTES: usize = 64 * 1024;
+
+/// The bounds [`AIService::tool_result_max_bytes`] clamps one result to: a
+/// small window cannot starve a result to uselessness and a large one
+/// cannot unbound it.
+const TOOL_RESULT_CLAMP_MIN: usize = 4 * 1024;
+const TOOL_RESULT_CLAMP_MAX: usize = 64 * 1024;
+
+/// The room a result cap leaves in the request the result joins: the
+/// `tool` message's own JSON envelope plus the rest of a minimal request —
+/// the system prompt and the question it answers. A cap that reached the
+/// whole budget would let a result through that only fits alone, and the
+/// trim could then only elide it where a truncated copy would have fit.
+const TOOL_RESULT_OVERHEAD_BYTES: usize = 512;
+
+const fn clamp_tool_result_bytes(bytes: usize) -> usize {
+    if bytes < TOOL_RESULT_CLAMP_MIN {
+        TOOL_RESULT_CLAMP_MIN
+    } else if bytes > TOOL_RESULT_CLAMP_MAX {
+        TOOL_RESULT_CLAMP_MAX
+    } else {
+        bytes
+    }
+}
+
+/// [`AIService::tool_result_max_bytes`] when the model's context window is
+/// not configured — also [`crate::ai_service::harness::HarnessConfig`]'s
+/// default cap, so a caller with no model context at hand sizes a result
+/// exactly as the formula's unknown-window branch does.
+pub const DEFAULT_TOOL_RESULT_MAX_BYTES: usize =
+    clamp_tool_result_bytes(DEFAULT_CONTEXT_BUDGET_BYTES / 4);
 
 /// Truncate LLM prompt/response text for debug logging. LOGGING.md: debug
 /// level carries "prompt/response bodies (truncated)" — long enough to
@@ -82,168 +120,178 @@ pub(crate) fn truncate_for_log(text: &str) -> String {
     format!("{head}… [+{} more chars]", total - LOG_TEXT_PREVIEW_CHARS)
 }
 
-static WHISPER_MODEL: WhisperSource = WhisperSource::Small;
-static TRANSCRIPTION_TIMEOUT_SECS: u64 = 30; // 30 seconds (was 2 minutes)
+pub(crate) static TRANSCRIPTION_TIMEOUT_SECS: u64 = 30; // 30 seconds (was 2 minutes)
 static TRANSCRIPTION_CHECK_INTERVAL_SECS: u64 = 5; // 5 seconds (was 10)
 
 lazy_static! {
     static ref AI_SERVICE: Arc<Mutex<Option<AIService>>> = Arc::new(Mutex::new(None));
-    static ref PROGRESS_RATE_LIMITER: Arc<Mutex<HashMap<String, Instant>>> =
-        Arc::new(Mutex::new(HashMap::new()));
 }
 
+/// An open transcription stream. Removing it from the map closes it: its sender drops, and
+/// its worker ([`transcription::RemoteStream`]) ends once it has answered the utterances
+/// fed before.
 struct TranscriptionSession {
-    samples_tx: futures_channel::mpsc::UnboundedSender<Vec<f32>>,
-    drop_tx: oneshot::Sender<()>,
-    last_activity: Arc<Mutex<std::time::Instant>>,
-    /// Broadcast channel for streaming partial/final transcription text back
-    /// to the REST feed handler (SSE response).
-    text_broadcast_tx: tokio::sync::broadcast::Sender<String>,
-    // Billing context (used by the async whisper task via cloned values;
-    // stored here for potential close-stream reconciliation)
-    #[allow(dead_code)]
+    /// The worker's queue: it answers each utterance after the ones fed before it.
+    utterances: mpsc::UnboundedSender<transcription::Utterance>,
+    /// The model the stream transcribes with: a reload of it closes the stream, whose
+    /// worker holds the endpoint's URL and key as they were.
     model_id: String,
+    /// When the stream was last fed, or last answered an utterance.
+    last_activity: Arc<Mutex<tokio::time::Instant>>,
+    /// The utterances fed and not answered yet. A stream waiting for its upstream is not
+    /// idle, however long the upstream takes.
+    in_flight: Arc<std::sync::atomic::AtomicUsize>,
+    /// The stream's text, for `/v1/realtime`.
+    text_broadcast_tx: tokio::sync::broadcast::Sender<String>,
     /// The managed agent that opened the stream, by DID: it pays, and only it reaches the
     /// stream. `None`: the main agent.
     agent_did: Option<String>,
 }
 
-#[derive(Clone)]
-pub struct AIService {
-    embedding_channel: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<EmbeddingRequest>>>>,
-    llm_channel: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<LLMTaskRequest>>>>,
-    transcription_streams: Arc<Mutex<HashMap<String, TranscriptionSession>>>,
-    cleanup_task_shutdown: Arc<std::sync::Mutex<Option<oneshot::Sender<()>>>>,
-    /// Shared Whisper models - ONE model per size, shared across ALL streams using that size
-    /// Key = WhisperSource (Tiny/Small/Medium/Large), Value = Arc<Whisper>
-    /// Cloning Arc is cheap (just increments ref count), model weights stay in memory once
-    /// Saves 500MB-1.5GB per stream!
-    shared_whisper_models: Arc<Mutex<HashMap<String, Arc<Whisper>>>>,
-    default_embedding: Arc<default_embedding::DefaultEmbedding>,
+type TranscriptionStreams = Arc<Mutex<HashMap<String, TranscriptionSession>>>;
+
+/// One utterance of a stream in flight, for as long as it lives: until its feed has its
+/// answer, or is dropped (its caller went away). Its end counts as activity, so a stream's
+/// idle time starts at its last answer.
+struct InFlight {
+    count: Arc<std::sync::atomic::AtomicUsize>,
+    last_activity: Arc<Mutex<tokio::time::Instant>>,
 }
 
-impl Drop for AIService {
-    fn drop(&mut self) {
-        // Try to get the shutdown sender - using std::sync::Mutex so this works in Drop
-        if let Ok(mut shutdown) = self.cleanup_task_shutdown.lock() {
-            if let Some(sender) = shutdown.take() {
-                let _ = sender.send(());
-            }
+impl InFlight {
+    fn count(stream: &TranscriptionSession) -> Self {
+        stream
+            .in_flight
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        InFlight {
+            count: stream.in_flight.clone(),
+            last_activity: stream.last_activity.clone(),
         }
     }
 }
 
-struct EmbeddingRequest {
-    pub prompt: String,
-    pub result_sender: oneshot::Sender<Result<Vec<f32>>>,
-}
-
-#[allow(dead_code)]
-#[derive(Debug)]
-struct LLMTaskSpawnRequest {
-    pub task: AITask,
-    pub result_sender: oneshot::Sender<Result<()>>,
-}
-
-#[allow(dead_code)]
-struct LLMTaskPromptRequest {
-    pub task_id: String,
-    pub prompt: String,
-    /// Optional decoding constraint (a tool-call grammar).  `None` ⇒ normal
-    /// unconstrained generation, byte-for-byte the pre-tools behaviour.
-    /// Ignored on the remote path (upstream tool forwarding is a follow-up).
-    pub constraint: Option<ArcParser<()>>,
-    pub result_sender: oneshot::Sender<Result<String>>,
-}
-
-#[allow(dead_code)]
-#[derive(Debug)]
-struct LLMTaskRemoveRequest {
-    pub task_id: String,
-    pub result_sender: oneshot::Sender<()>,
-}
-
-#[allow(dead_code)]
-#[derive(Debug)]
-struct LLMTaskShutdownRequest {
-    pub result_sender: oneshot::Sender<()>,
-}
-
-/// Streaming-prompt variant for the OpenAI-compatible chat endpoint.
-///
-/// Identical to [`LLMTaskPromptRequest`] but instead of a oneshot reply
-/// the caller receives an async stream of token chunks.  Used by
-/// `prompt_messages_stream` to back `POST /v1/chat/completions` with
-/// `stream: true`.
-///
-/// The receiver side is an `mpsc::Receiver<String>` so each `Token` arm
-/// can push without awaiting consumer backpressure; the HTTP handler
-/// converts each token into one SSE `chat.completion.chunk`.
-///
-/// `done_sender` fires once the model has emitted its final token (or
-/// errored) and carries `PromptResult` for the closing chunk's `usage`.
-#[allow(dead_code)]
-struct LLMTaskPromptStreamRequest {
-    pub task_id: String,
-    pub prompt: String,
-    /// See [`LLMTaskPromptRequest::constraint`].
-    pub constraint: Option<ArcParser<()>>,
-    pub token_sender: mpsc::UnboundedSender<String>,
-    pub done_sender: oneshot::Sender<Result<PromptResult>>,
-}
-
-// Manual `Debug` — these structs hold a non-`Debug` `ArcParser` constraint.
-// `LLMTaskRequest` must stay `Debug` so that `SendError<LLMTaskRequest>`
-// converts into `anyhow::Error` via `?` at the channel send sites.
-impl std::fmt::Debug for LLMTaskPromptRequest {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("LLMTaskPromptRequest")
-            .field("task_id", &self.task_id)
-            .field("prompt", &self.prompt)
-            .field("constrained", &self.constraint.is_some())
-            .finish()
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        // Before the count drops, so the reaper cannot see the stream idle in between. When
+        // the reaper holds the lock, it sees the count above zero and keeps the stream.
+        if let Ok(mut last_activity) = self.last_activity.try_lock() {
+            *last_activity = tokio::time::Instant::now();
+        }
+        self.count.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
-impl std::fmt::Debug for LLMTaskPromptStreamRequest {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("LLMTaskPromptStreamRequest")
-            .field("task_id", &self.task_id)
-            .field("prompt", &self.prompt)
-            .field("constrained", &self.constraint.is_some())
-            .finish()
+/// What a feed answers, once its utterance is transcribed.
+pub type FeedAnswer = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
+
+#[cfg(test)]
+impl TranscriptionSession {
+    /// A session of `owner`, and the queue its worker would read.
+    fn for_test(owner: Option<&str>) -> (Self, mpsc::UnboundedReceiver<transcription::Utterance>) {
+        let (utterances, queue) = mpsc::unbounded_channel();
+        let (text_broadcast_tx, _) = tokio::sync::broadcast::channel(1);
+        let session = TranscriptionSession {
+            utterances,
+            model_id: "m".into(),
+            last_activity: Arc::new(Mutex::new(tokio::time::Instant::now())),
+            in_flight: Default::default(),
+            text_broadcast_tx,
+            agent_did: owner.map(str::to_string),
+        };
+        (session, queue)
     }
 }
 
-/// A prompt sent as a complete turn list, with tools handed over as
-/// definitions rather than rendered into the text.
-///
-/// Distinct from [`LLMTaskPromptRequest`] because it needs no ephemeral task:
-/// the turns are already the whole conversation, so there is no system prompt
-/// or example list for the worker to assemble one from.
-#[derive(Debug)]
-struct LLMTaskPromptTurnsRequest {
-    pub turns: Vec<ChatTurn>,
-    pub tools: Vec<ToolSpec>,
-    pub result_sender: oneshot::Sender<Result<ChatReply>>,
+/// The model id that names a type's default model: in tasks (LLM), `ai.embed` and
+/// `ai.transcriptionOpen`.
+pub const DEFAULT_MODEL: &str = "default";
+
+/// Every model the service runs is an upstream model on an endpoint: a client of the
+/// endpoint per model, held in a map by model id. A client is `Send + Sync` and takes
+/// concurrent requests; an endpoint's `max_concurrent` caps them.
+#[derive(Clone)]
+pub struct AIService {
+    /// The chat client of each LLM, keyed by model id.
+    llms: Arc<Mutex<HashMap<String, ChatModel>>>,
+    /// The embedding client of each embedding model, keyed by model id.
+    embedders: Arc<Mutex<HashMap<String, Embedder>>>,
+    transcription_streams: TranscriptionStreams,
+    /// True once the models of the database have their clients ([`AIService::load`] at
+    /// start). Local AI's autostart waits for it: a load after the runtimes register would
+    /// put back the clients of the endpoint settings from before.
+    loaded: Arc<tokio::sync::watch::Sender<bool>>,
 }
 
-#[allow(dead_code)]
-#[derive(Debug)]
-enum LLMTaskRequest {
-    Spawn(LLMTaskSpawnRequest),
-    Prompt(LLMTaskPromptRequest),
-    PromptTurns(LLMTaskPromptTurnsRequest),
-    PromptStream(LLMTaskPromptStreamRequest),
-    Remove(LLMTaskRemoveRequest),
-    Shutdown(LLMTaskShutdownRequest),
+/// What prompts one LLM: the client of its endpoint, and the id the endpoint knows the
+/// model by.
+#[derive(Clone)]
+struct ChatModel {
+    client: Arc<dyn RemoteChat>,
+    remote_model: String,
+    endpoint: Arc<Endpoint>,
 }
 
-enum LlmModel {
-    Local(Llama),
-    /// A remote endpoint and the model string to ask it for. Which wire
-    /// protocol is behind the trait — see `ai_service::providers`.
-    Remote((Box<dyn RemoteChat>, String)),
+impl ChatModel {
+    fn new(model: &Model, endpoint: Endpoint) -> Result<Self> {
+        Ok(ChatModel {
+            client: Arc::from(providers::chat_client(&endpoint)?),
+            remote_model: model.remote_model.clone(),
+            endpoint: Arc::new(endpoint),
+        })
+    }
+
+    /// One completion of `turns`, with `tools` as definitions and the reply constrained to
+    /// `json_schema` when given ([`ChatRequest::json_schema`]), within the endpoint's limits
+    /// ([`within_endpoint_limits`]).
+    async fn chat(
+        &self,
+        turns: Vec<ChatTurn>,
+        tools: Vec<ToolSpec>,
+        json_schema: Option<serde_json::Value>,
+        generation: Option<(bool, Option<u32>)>,
+    ) -> Result<ChatReply> {
+        let mut request = ChatRequest::new(self.remote_model.clone(), turns)
+            .with_tools(tools)
+            .with_json_schema(json_schema);
+        if let Some((disable_thinking, max_output_tokens)) = generation {
+            request = request.with_generation(disable_thinking, max_output_tokens);
+        }
+        let reply = within_endpoint_limits(&self.endpoint, false, self.client.chat(request)).await;
+        self.after(reply)
+    }
+
+    /// [`Self::chat`] with the text sent to `tokens` as the model writes it (in one chunk
+    /// from a provider that does not stream).
+    async fn chat_stream(
+        &self,
+        turns: Vec<ChatTurn>,
+        tokens: mpsc::UnboundedSender<String>,
+    ) -> Result<ChatReply> {
+        let request = ChatRequest::new(self.remote_model.clone(), turns);
+        let reply = within_endpoint_limits(
+            &self.endpoint,
+            true,
+            self.client.chat_stream(request, tokens),
+        )
+        .await;
+        self.after(reply)
+    }
+
+    /// `reply`, once a failure is acted on (`endpoints::after_failed_request`).
+    fn after(&self, reply: Result<ChatReply>) -> Result<ChatReply> {
+        reply.inspect_err(|e| {
+            endpoints::after_failed_request(&self.endpoint.id, &self.remote_model, e)
+        })
+    }
+}
+
+/// What embeds for one embedding model: the client of its endpoint, and the id the
+/// endpoint knows the model by.
+#[derive(Clone)]
+struct Embedder {
+    client: Arc<dyn providers::embed::RemoteEmbed>,
+    remote_model: String,
+    endpoint: Arc<Endpoint>,
 }
 
 /// Every part of one turn that reaches the wire.
@@ -296,119 +344,91 @@ fn estimate_reply_tokens(reply: &ChatReply) -> usize {
     estimate_token_count(&reply.text) + calls
 }
 
+/// One remote chat call of a model under the limits the operator set on its `endpoint`: a
+/// slot by `max_concurrent`, shared with the calls `/v1` forwards, and for an answer that
+/// is not a stream, `request_timeout_secs` (default [`CHAT_TIMEOUT`], 600 s), the wait for
+/// the slot included. A stream gets the slot but no timeout here: its wait for the slot is
+/// not bounded, and its call has only the provider client's own bound.
+async fn within_endpoint_limits<T>(
+    endpoint: &Endpoint,
+    stream: bool,
+    call: impl Future<Output = Result<T>>,
+) -> Result<T> {
+    let limited = async {
+        let _slot = endpoints::request_slot(endpoint).await;
+        call.await
+    };
+    if stream {
+        return limited.await;
+    }
+    let timeout = endpoints::request_timeout(endpoint, CHAT_TIMEOUT);
+    tokio::time::timeout(timeout, limited).await.map_err(|_| {
+        anyhow::Error::from(providers::http::UpstreamUnreachable {
+            url: endpoint.base_url.to_string(),
+            timed_out: true,
+            detail: format!("no answer within {}s", timeout.as_secs()),
+        })
+    })?
+}
+
+/// How long a remote chat answer of a model worker may take unless its endpoint sets
+/// `request_timeout_secs`: what the provider clients allow, as a long prompt on a local
+/// model can take minutes.
+const CHAT_TIMEOUT: std::time::Duration = providers::http::CHAT_REQUEST_TIMEOUT;
+
 /// The turn list for a task-shaped prompt: the task's system prompt, its
 /// examples as alternating user/assistant turns, then the live prompt.
-///
-/// Local models get this shape from kalosm's own task builder
-/// (`llama.task(system).with_examples(..)`); remote ones have to be handed
-/// it explicitly, which is what this builds. Shared by the `Prompt` and
-/// `PromptStream` remote arms, which differ only in how the reply comes back.
 fn turns_for_task(task: &AITask, prompt: String) -> Vec<ChatTurn> {
-    let mut turns = Vec::with_capacity(2 + task.prompt_examples.len() * 2);
-    turns.push(ChatTurn::system(task.system_prompt.clone()));
-    for example in task.prompt_examples.iter() {
+    turns_for(&task.system_prompt, &task.prompt_examples, prompt)
+}
+
+/// Tokens each message adds beyond its text once rendered: role markers and the chat template.
+const MESSAGE_OVERHEAD_TOKENS: usize = 8;
+/// What the template adds once per request (the generation prompt).
+const REQUEST_OVERHEAD_TOKENS: usize = 16;
+
+/// The estimated input tokens of a whole conversation: every turn's text
+/// ([`estimate_token_count`]) plus the per-message and per-request template overhead.
+fn estimate_turns_tokens(turns: &[ChatTurn]) -> usize {
+    REQUEST_OVERHEAD_TOKENS
+        + turns
+            .iter()
+            .map(|turn| estimate_token_count(&turn.content) + MESSAGE_OVERHEAD_TOKENS)
+            .sum::<usize>()
+}
+
+/// A reasoning reply that did not produce a usable answer: nothing came back,
+/// or the provider cut it at the output cap / window.
+fn interpretation_reply_needs_no_thinking(result: &PromptResult) -> bool {
+    result.text.trim().is_empty() || result.stop_reason.as_deref() == Some("length")
+}
+
+/// The server refused the request because it did not fit the context window.
+/// Our own pre-flight budget error is not that: retrying it cannot help.
+fn context_was_exceeded(error: &anyhow::Error) -> bool {
+    let text = error.to_string().to_ascii_lowercase();
+    if text.contains("context budget:") {
+        return false;
+    }
+    let about_context = text.contains("context") || text.contains("n_ctx");
+    let over = text.contains("exceed") || text.contains("too long") || text.contains("too large");
+    about_context && over
+}
+
+/// A system prompt, its examples as alternating user/assistant turns, then `prompt`.
+fn turns_for(
+    system_prompt: &str,
+    examples: &[crate::types::AIPromptExamples],
+    prompt: String,
+) -> Vec<ChatTurn> {
+    let mut turns = Vec::with_capacity(2 + examples.len() * 2);
+    turns.push(ChatTurn::system(system_prompt.to_string()));
+    for example in examples {
         turns.push(ChatTurn::user(example.input.clone()));
         turns.push(ChatTurn::assistant(example.output.clone()));
     }
     turns.push(ChatTurn::user(prompt));
     turns
-}
-
-async fn publish_model_status(
-    model_name: String,
-    progress: f32,
-    status: &str,
-    downloaded: bool,
-    loaded: bool,
-) {
-    let model = AIModelLoadingStatus {
-        model: model_name.clone(),
-        progress: progress as f64,
-        status: status.to_string(),
-        downloaded,
-        loaded,
-    };
-
-    let _ = crate::db_backend::db_backend().create_or_update_model_status(
-        &model.model,
-        model.progress,
-        &model.status,
-        model.downloaded,
-        model.loaded,
-    );
-
-    // Model names and progress only: every session sees them.
-    get_global_pubsub().await.publish_event(Event::new(
-        Topic::AiModelLoadingStatus,
-        Audience::Everyone,
-        &model,
-    ));
-}
-
-async fn handle_progress(model_id: String, loading: ModelLoadingProgress) {
-    let progress = loading.progress() * 100.0;
-
-    // Rate limiting: Only update every 100ms to prevent task thrashing
-    let now = Instant::now();
-    let should_update = {
-        let mut rate_limiter = PROGRESS_RATE_LIMITER.lock().await;
-
-        if let Some(last_update) = rate_limiter.get(&model_id) {
-            // If less than 100ms since last update, skip unless it's 100% completion
-            if now.duration_since(*last_update) < Duration::from_millis(100) && progress < 100.0 {
-                false
-            } else {
-                rate_limiter.insert(model_id.clone(), now);
-                true
-            }
-        } else {
-            // First update for this model
-            rate_limiter.insert(model_id.clone(), now);
-            true
-        }
-    };
-
-    if should_update {
-        let status = if progress < 100.0 {
-            "Loading".to_string()
-        } else {
-            "Loaded".to_string()
-        };
-
-        log::debug!(
-            "Publishing model status for {}: {}% - {}",
-            model_id,
-            progress,
-            status
-        );
-
-        // Clean up rate limiter entry when model is fully loaded
-        if progress >= 100.0 {
-            let mut rate_limiter = PROGRESS_RATE_LIMITER.lock().await;
-            rate_limiter.remove(&model_id);
-            log::debug!(
-                "Cleaned up rate limiter entry for completed model: {}",
-                model_id
-            );
-        }
-
-        publish_model_status(model_id.clone(), progress, &status, false, false).await;
-    } else {
-        log::trace!(
-            "Rate limited progress update for {}: {}%",
-            model_id,
-            progress
-        );
-    }
-}
-
-#[derive(Debug)]
-pub struct VoiceActivityParams {
-    pub start_threshold: Option<f32>,
-    pub start_window: Option<u64>,
-    pub end_threshold: Option<f32>,
-    pub end_window: Option<u64>,
-    pub time_before_speech: Option<u64>,
 }
 
 /// The owner of a new transcription stream: the managed agent's DID (billing, ownership;
@@ -427,166 +447,222 @@ fn transcription_stream_owner(
 
 impl AIService {
     pub fn new() -> Result<Self> {
-        Self::with_embedding_loader(Arc::new(|model| {
-            Box::pin(Self::load_embedding_worker(model))
-        }))
-    }
-
-    fn with_embedding_loader(loader: default_embedding::EmbeddingLoader) -> Result<Self> {
-        let service = AIService {
-            embedding_channel: Arc::new(Mutex::new(HashMap::new())),
-            llm_channel: Arc::new(Mutex::new(HashMap::new())),
-            transcription_streams: Arc::new(Mutex::new(HashMap::new())),
-            cleanup_task_shutdown: Arc::new(std::sync::Mutex::new(None)),
-            shared_whisper_models: Arc::new(Mutex::new(HashMap::new())), // Models loaded on demand per size
-            default_embedding: Arc::new(default_embedding::DefaultEmbedding::new(loader)),
-        };
+        let mut service = Self::empty();
+        service.loaded = Arc::new(tokio::sync::watch::channel(false).0);
 
         let clone = service.clone();
         tokio::spawn(async move {
             if let Err(e) = clone.load().await {
                 error!("AIService error while loading models: {:?}", e);
             }
+            clone.loaded.send_replace(true);
         });
 
-        // Create shutdown channel
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        if let Ok(mut shutdown) = service.cleanup_task_shutdown.lock() {
-            *shutdown = Some(shutdown_tx);
-        }
-
-        // Spawn background task to clean up timed out streams
-        let service_clone = service.clone();
-        tokio::spawn(async move {
-            tokio::select! {
-                _ = shutdown_rx => {
-                    log::info!("Shutting down transcription cleanup task");
-                }
-                _ = async {
-                    loop {
-                        sleep(Duration::from_secs(TRANSCRIPTION_CHECK_INTERVAL_SECS)).await;
-                        if let Err(e) = service_clone.cleanup_timed_out_streams().await {
-                            error!("Error cleaning up timed out streams: {:?}", e);
-                        }
-                    }
-                } => {}
-            }
-        });
-
+        service.start_stream_reaper();
         Ok(service)
     }
 
-    async fn cleanup_timed_out_streams(&self) -> Result<()> {
-        let mut map_lock = self.transcription_streams.lock().await;
-
-        let mut timed_out_streams = Vec::new();
-        for (id, stream) in map_lock.iter() {
-            let last_activity = stream.last_activity.lock().await;
-            if last_activity.elapsed() > Duration::from_secs(TRANSCRIPTION_TIMEOUT_SECS) {
-                timed_out_streams.push(id.clone());
-            }
+    /// A service with no models, no streams and no background tasks.
+    pub(crate) fn empty() -> Self {
+        AIService {
+            llms: Arc::new(Mutex::new(HashMap::new())),
+            embedders: Arc::new(Mutex::new(HashMap::new())),
+            transcription_streams: Arc::new(Mutex::new(HashMap::new())),
+            // Nothing to load.
+            loaded: Arc::new(tokio::sync::watch::channel(true).0),
         }
-
-        for id in timed_out_streams {
-            if let Some(stream) = map_lock.remove(&id) {
-                let _ = stream.drop_tx.send(());
-            }
-        }
-        Ok(())
     }
 
-    pub async fn load(&self) -> Result<()> {
-        // Get all models
-        let models = crate::db_backend::db_backend().get_models()?;
+    /// Returns when the start's load of the database's models has finished (at once for a
+    /// service that has none to load).
+    pub async fn wait_loaded(&self) {
+        let _ = self.loaded.subscribe().wait_for(|loaded| *loaded).await;
+    }
 
-        // Create a future for each, initialzing that model
-        let mut futures: Vec<Pin<Box<dyn Future<Output = ()> + Send>>> = vec![];
+    /// Close the streams nobody fed for [`TRANSCRIPTION_TIMEOUT_SECS`], every
+    /// [`TRANSCRIPTION_CHECK_INTERVAL_SECS`], for as long as the service lives.
+    ///
+    /// The task holds the stream map weakly: it ends when the last service holding the map
+    /// is gone, which for the global instance is never. A clone being dropped (one per
+    /// `global_instance()` call) does not end it.
+    fn start_stream_reaper(&self) {
+        let streams = Arc::downgrade(&self.transcription_streams);
+        tokio::spawn(async move {
+            loop {
+                sleep(Duration::from_secs(TRANSCRIPTION_CHECK_INTERVAL_SECS)).await;
+                let Some(streams) = streams.upgrade() else {
+                    log::info!("Transcription stream reaper stopped: the service is gone");
+                    return;
+                };
+                Self::close_idle_streams(&streams).await;
+            }
+        });
+    }
 
-        if models.is_empty() {
-            // No models configured: serve Bert for embeddings, loaded by the first embed call
-            self.enable_default_embedding().await;
-        } else {
-            for model in models.into_iter() {
-                futures.push(Box::pin(async move {
-                    if let Err(e) = self.init_model(model.clone()).await {
-                        error!("Error initializing model[{:?}]: {:?}", model, e);
-                    }
-                }));
+    async fn close_idle_streams(streams: &TranscriptionStreams) {
+        let mut map_lock = streams.lock().await;
+        let mut idle = Vec::new();
+        for (id, stream) in map_lock.iter() {
+            if stream.in_flight.load(std::sync::atomic::Ordering::SeqCst) == 0
+                && stream.last_activity.lock().await.elapsed()
+                    > Duration::from_secs(TRANSCRIPTION_TIMEOUT_SECS)
+            {
+                idle.push(id.clone());
             }
         }
+        for id in idle {
+            map_lock.remove(&id);
+            log::info!("Transcription stream {id} closed: idle");
+        }
+    }
 
-        // Wait for all initialization futures in parallel
-        futures::future::join_all(futures).await;
-
-        // Spawn tasks from the database. Individual failures (e.g. tasks that
-        // reference a model that has since been deleted, or per-model task
-        // rows keyed to a model id that no `add_model` call has yet
-        // registered) log and continue — one orphan task must not prevent
-        // other tasks from being registered with their LLM workers, or the
-        // race between `AIService::new()`'s background `load()` and any
-        // caller that just spawned a worker + Spawn'd a task into it can wipe
-        // that task_descriptions entry mid-flight when `load()` re-spawns
-        // the worker via `init_model` and then bails before re-registering.
-        let tasks = crate::db_backend::db_backend()
-            .get_tasks()
-            .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
-        for task in tasks {
-            let task_name = task.name.clone();
-            let task_id = task.task_id.clone();
-            if let Err(e) = self.spawn_task(task).await {
-                log::warn!(
-                    "AIService::load: skipping task '{task_name}' (task_id={task_id}): {e:#}"
+    /// Build the client of every model in the database. A fresh executor has none, and
+    /// loads none: AI features answer that no model is configured until the operator adds
+    /// one. A model whose client does not build logs why and stays without one.
+    pub async fn load(&self) -> Result<()> {
+        let models = crate::db_backend::db_backend().get_models()?;
+        for model in models {
+            if let Err(e) = self.init_model(&model).await {
+                error!(
+                    "AI model {:?} ({}) did not load: {e:#}",
+                    model.name, model.id
                 );
             }
         }
-
         Ok(())
     }
 
-    async fn init_model(&self, model: crate::types::Model) -> Result<()> {
+    /// Build `model`'s client from its endpoint, replacing the one it had. Transcription
+    /// streams and speech requests build theirs per stream and per request: nothing to hold.
+    async fn init_model(&self, model: &Model) -> Result<()> {
+        self.drop_clients(&model.id).await;
+        let endpoint = crate::db_backend::db_backend()
+            .get_endpoint(&model.endpoint_id)?
+            .ok_or_else(|| anyhow!("The endpoint of model {:?} is gone", model.name))?;
         match model.model_type {
-            ModelType::Llm => self.spawn_llm_model(model, None).await?,
-            ModelType::Embedding => self.spawn_embedding_model(model).await,
-            ModelType::Transcription => Self::load_transcriber_model(model.id.clone()).await,
-        };
+            ModelType::Llm => {
+                let chat = ChatModel::new(model, endpoint)?;
+                self.llms.lock().await.insert(model.id.clone(), chat);
+            }
+            ModelType::Embedding => {
+                let embedder = Embedder {
+                    client: Arc::from(providers::embed::embed_client(&endpoint)?),
+                    remote_model: model.remote_model.clone(),
+                    endpoint: Arc::new(endpoint),
+                };
+                self.embedders
+                    .lock()
+                    .await
+                    .insert(model.id.clone(), embedder);
+            }
+            // Nothing to hold, but the endpoint must serve it: a stream on it is refused.
+            ModelType::Transcription => {
+                providers::audio::require_transcription(&endpoint)?;
+                providers::audio::OpenAiTranscribe::for_endpoint(&endpoint)?;
+            }
+            ModelType::Speech => {}
+        }
         Ok(())
     }
 
-    pub async fn add_model(&self, model: ModelInput) -> Result<String> {
+    /// Build the client of the stored model `model_id` when `clients` has none. The start's
+    /// load builds them in a spawned task: a call that comes before it got to the model
+    /// builds that one itself rather than finding it not loaded. A model that is not stored,
+    /// or whose client does not build, stays without one: the caller says so.
+    async fn load_if_missing<C>(&self, model_id: &str, clients: &Mutex<HashMap<String, C>>) {
+        if clients.lock().await.contains_key(model_id) {
+            return;
+        }
+        let Ok(Some(model)) = crate::db_backend::db_backend().get_model(model_id.to_string())
+        else {
+            return;
+        };
+        if let Err(e) = self.init_model(&model).await {
+            error!(
+                "AI model {:?} ({}) did not load: {e:#}",
+                model.name, model.id
+            );
+        }
+    }
+
+    /// Forget the clients of model `model_id`, whatever its type was.
+    async fn drop_clients(&self, model_id: &str) {
+        self.llms.lock().await.remove(model_id);
+        self.embedders.lock().await.remove(model_id);
+    }
+
+    /// Add a model and build its client. A model its endpoint cannot serve (a transcription
+    /// model on Ollama, an embedding model on Anthropic) is refused before it is written, so
+    /// the endpoint does not gain the capability either.
+    pub async fn add_model(&self, input: ModelInput) -> Result<String> {
+        Self::check_endpoint_serves(&input)?;
         let db = crate::db_backend::db_backend();
         let model = db
-            .add_model(&model)
-            .and_then(|id| db.get_model(id))
-            .map_err(|e| anyhow::anyhow!("{}", e))?
-            .ok_or_else(|| anyhow::anyhow!("Model disappeared after add — concurrent removal?"))?;
-        self.init_model(model.clone()).await?;
+            .add_model(&input)
+            .and_then(|id| db.get_model(id))?
+            .ok_or_else(|| anyhow!("The model just added is gone"))?;
+        if let Err(e) = self.init_model(&model).await {
+            db.remove_model(&model.id)?;
+            return Err(crate::db::InvalidModel(format!("{e:#}")).into());
+        }
         Ok(model.id)
     }
 
-    pub async fn set_default_model(&self, model_type: ModelType, model_id: String) -> Result<()> {
-        // Every model type has a default. Only an LLM default has tasks to move.
-        crate::db_backend::db_backend().set_default_model(model_type.clone(), &model_id)?;
-
-        if ModelType::Llm == model_type {
-            // Respawn task on new default model
-            let tasks = crate::db_backend::db_backend()
-                .get_tasks()
-                .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
-
-            for task in tasks.into_iter().filter(|t| t.model_id == "default") {
-                self.spawn_task(task).await?;
-            }
+    /// Refuses `input` (as an [`InvalidModel`](crate::db::InvalidModel)) when its endpoint
+    /// has no route for the model's type, or would get a key over plain HTTP: the client the
+    /// model needs does not build. A missing endpoint is left to the database's refusal.
+    fn check_endpoint_serves(input: &ModelInput) -> Result<()> {
+        let Some(endpoint) = crate::db_backend::db_backend().get_endpoint(&input.endpoint_id)?
+        else {
+            return Ok(());
         };
-        Ok(())
+        let served = match input.model_type {
+            ModelType::Llm => providers::chat_client(&endpoint).map(drop),
+            ModelType::Embedding => providers::embed::embed_client(&endpoint).map(drop),
+            ModelType::Transcription => {
+                providers::audio::OpenAiTranscribe::for_endpoint(&endpoint).map(drop)
+            }
+            ModelType::Speech if endpoint.kind.protocol() == crate::types::ModelApiType::OpenAi => {
+                Ok(())
+            }
+            ModelType::Speech => Err(anyhow!(
+                "Endpoint '{}' ({:?}) serves no /v1/audio/speech",
+                endpoint.name,
+                endpoint.kind
+            )),
+        };
+        served.map_err(|e| crate::db::InvalidModel(format!("Model {:?}: {e:#}", input.name)).into())
     }
 
-    pub async fn model_status(model_id: String) -> Result<AIModelLoadingStatus> {
-        let status = crate::db_backend::db_backend()
-            .get_model_status(&model_id)
-            .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?
-            .ok_or(AIServiceError::ModelNotFound)?;
+    pub async fn set_default_model(&self, model_type: ModelType, model_id: String) -> Result<()> {
+        // Tasks on "default" resolve it when they are prompted: nothing to move.
+        crate::db_backend::db_backend().set_default_model(model_type, &model_id)
+    }
 
-        Ok(status)
+    /// Every model, as RPC results show it.
+    pub fn model_views() -> Result<Vec<crate::types::ModelView>> {
+        let db = crate::db_backend::db_backend();
+        // Two reads: a model whose endpoint is removed in between shows without a status.
+        let endpoints: HashMap<String, Endpoint> = db
+            .get_endpoints()?
+            .into_iter()
+            .map(|e| (e.id.clone(), e))
+            .collect();
+        Ok(db
+            .get_models()?
+            .iter()
+            .map(|m| m.view(endpoints.get(&m.endpoint_id)))
+            .collect())
+    }
+
+    /// Model `model_id`, as RPC results show it.
+    pub fn model_view(model_id: &str) -> Result<Option<crate::types::ModelView>> {
+        let db = crate::db_backend::db_backend();
+        let Some(model) = db.get_model(model_id.to_string())? else {
+            return Ok(None);
+        };
+        let endpoint = db.get_endpoint(&model.endpoint_id)?;
+        Ok(Some(model.view(endpoint.as_ref())))
     }
 
     pub async fn init_global_instance() -> Result<()> {
@@ -605,595 +681,6 @@ impl AIService {
     }
 
     // -------------------------------------
-    // LLM
-    // -------------------------------------
-
-    fn new_candle_device() -> Device {
-        if cfg!(feature = "cuda") {
-            log::info!("Using CUDA device");
-            let non_accelerated_message =
-                "Could not get accelerated CUDA device. Defaulting to CPU.";
-            Device::new_cuda(0).unwrap_or_else(|e| {
-                log::warn!("⚠️ 🤖 {} {:?}", non_accelerated_message, e);
-                Device::Cpu
-            })
-        } else if cfg!(feature = "metal") {
-            Device::new_metal(0).unwrap_or_else(|e| {
-                let non_accelerated_message =
-                    "Could not get accelerated Metal device. Defaulting to CPU.";
-                log::warn!("⚠️ 🤖 {} {:?}", non_accelerated_message, e);
-                Device::Cpu
-            })
-        } else {
-            log::warn!("Using CPU candle device");
-            Device::Cpu
-        }
-    }
-    async fn build_local_llama(model_id: String, model_config: LocalModel) -> Result<Llama> {
-        publish_model_status(model_id.clone(), 0.0, "Loading", false, false).await;
-        let llama = Llama::builder().with_source(match model_config.file_name.as_str() {
-            // First check model name shortcuts
-            "Qwen2.5.1-Coder-7B-Instruct" => LlamaSource::new(FileSource::huggingface(
-                "bartowski/Qwen2.5.1-Coder-7B-Instruct-GGUF".to_string(),
-                "main".to_string(),
-                "Qwen2.5.1-Coder-7B-Instruct-Q4_K_M.gguf".to_string(),
-            )),
-            "deephermes-3-llama-3-8b-Q4" => LlamaSource::new(FileSource::huggingface(
-                "NousResearch/DeepHermes-3-Llama-3-8B-Preview-GGUF".to_string(),
-                "main".to_string(),
-                "DeepHermes-3-Llama-3-8B-q4.gguf".to_string(),
-            ))
-            .with_override_stop_token_string("<|eot_id|>".to_string()),
-            "deephermes-3-llama-3-8b-Q6" => LlamaSource::new(FileSource::huggingface(
-                "NousResearch/DeepHermes-3-Llama-3-8B-Preview-GGUF".to_string(),
-                "main".to_string(),
-                "DeepHermes-3-Llama-3-8B-q6.gguf".to_string(),
-            ))
-            .with_override_stop_token_string("<|eot_id|>".to_string()),
-            "deephermes-3-llama-3-8b-Q8" => LlamaSource::new(FileSource::huggingface(
-                "NousResearch/DeepHermes-3-Llama-3-8B-Preview-GGUF".to_string(),
-                "main".to_string(),
-                "DeepHermes-3-Llama-3-8B-q8.gguf".to_string(),
-            ))
-            .with_override_stop_token_string("<|eot_id|>".to_string()),
-            "deepseek_r1_distill_qwen_1_5b" => LlamaSource::deepseek_r1_distill_qwen_1_5b(),
-            "deepseek_r1_distill_qwen_7b" => LlamaSource::deepseek_r1_distill_qwen_7b(),
-            "deepseek_r1_distill_qwen_14b" => LlamaSource::deepseek_r1_distill_qwen_14b(),
-            "deepseek_r1_distill_llama_8b" => LlamaSource::deepseek_r1_distill_llama_8b(),
-            "llama_tiny" => LlamaSource::tiny_llama_1_1b(),
-            "llama_tiny_1_1b_chat" => LlamaSource::tiny_llama_1_1b_chat(),
-            "llama_7b" => LlamaSource::llama_7b(),
-            "llama_7b_chat" => LlamaSource::llama_7b_chat(),
-            "llama_7b_code" => LlamaSource::llama_7b_code(),
-            "llama_8b" => LlamaSource::llama_8b(),
-            "llama_8b_chat" => LlamaSource::llama_8b_chat(),
-            "llama_3_1_8b_chat" => LlamaSource::llama_3_1_8b_chat(),
-            "llama_13b" => LlamaSource::llama_13b(),
-            "llama_13b_chat" => LlamaSource::llama_13b_chat(),
-            "llama_13b_code" => LlamaSource::llama_13b_code(),
-            "llama_34b_code" => LlamaSource::llama_34b_code(),
-            "llama_70b" => LlamaSource::llama_70b(),
-            "mistral_7b" => LlamaSource::mistral_7b(),
-            "mistral_7b_instruct" => LlamaSource::mistral_7b_instruct(),
-            "mistral_7b_instruct_2" => LlamaSource::mistral_7b_instruct_2(),
-            "solar_10_7b" => LlamaSource::solar_10_7b(),
-            "solar_10_7b_instruct" => LlamaSource::solar_10_7b_instruct(),
-
-            // Handle unknown models
-            _ => {
-                if let Some(repo) = model_config.huggingface_repo.clone() {
-                    log::info!(
-                        "Trying to load model from Huggingface:\n
-                        model_config.file_name: {:?}\n
-                        model_config.huggingface_repo: {:?}\n
-                        model_config.revision: {:?}",
-                        model_config.file_name,
-                        model_config.huggingface_repo,
-                        model_config.revision
-                    );
-                    let mut builder = LlamaSource::new(FileSource::huggingface(
-                        repo,
-                        model_config.revision.unwrap_or("main".to_string()),
-                        model_config.file_name,
-                    ));
-                    if let Some(tokenizer_source) = model_config.tokenizer_source {
-                        log::info!(
-                            "Trying to load tokenizer from Huggingface:\n
-                            tokenizer_source.repo: {:?}\n
-                            tokenizer_source.revision: {:?}\n
-                            tokenizer_source.file_name: {:?}",
-                            tokenizer_source.repo,
-                            tokenizer_source.revision,
-                            tokenizer_source.file_name
-                        );
-                        builder = builder.with_tokenizer(FileSource::huggingface(
-                            tokenizer_source.repo,
-                            tokenizer_source.revision,
-                            tokenizer_source.file_name,
-                        ));
-                    }
-                    builder
-                } else {
-                    // If no huggingface repo is set, treat as local file path
-                    log::info!(
-                        "Trying to load model from local file: {}",
-                        model_config.file_name
-                    );
-
-                    let model_path = PathBuf::from(&model_config.file_name);
-                    if !model_path.exists() {
-                        let error_msg =
-                            format!("Model file not found at path: {}", model_config.file_name);
-                        log::error!("{}", error_msg);
-                        return Err(anyhow!(error_msg));
-                    }
-
-                    let mut builder = LlamaSource::new(FileSource::local(model_path));
-
-                    // If a tokenizer is specified, add it
-                    if let Some(tokenizer_source) = model_config.tokenizer_source {
-                        if tokenizer_source.repo.is_empty() {
-                            // Empty repo means it's a local file path
-                            let tokenizer_path = PathBuf::from(&tokenizer_source.file_name);
-                            if !tokenizer_path.exists() {
-                                let error_msg = format!(
-                                    "Tokenizer file not found at path: {}",
-                                    tokenizer_source.file_name
-                                );
-                                log::error!("{}", error_msg);
-                                return Err(anyhow!(error_msg));
-                            }
-                            log::info!(
-                                "Loading tokenizer from local file: {}",
-                                tokenizer_source.file_name
-                            );
-                            builder = builder.with_tokenizer(FileSource::local(tokenizer_path));
-                        }
-                    }
-                    builder
-                }
-            }
-        });
-
-        // Build the local Llama model
-        let llama = llama
-            .with_device(Self::new_candle_device())
-            .build_with_loading_handler({
-                let model_id = model_id.clone();
-                move |progress| {
-                    tokio::spawn(handle_progress(model_id.clone(), progress));
-                }
-            })
-            .await?;
-
-        publish_model_status(model_id.clone(), 100.0, "Downloaded", true, false).await;
-
-        Ok(llama)
-    }
-
-    /// Build the provider client for a remote model.
-    ///
-    /// Which protocol is spoken is decided here, once, from the model's
-    /// `api_type` — everything downstream holds a `dyn RemoteChat` and does
-    /// not know or care. See `ai_service::providers`.
-    ///
-    /// Refuses a key that would cross the network in the clear. The WS
-    /// handlers refuse it too, but a model saved before they did still loads
-    /// through here, and would otherwise send its key with every completion.
-    /// The refusal fails this one model and shows in its status.
-    async fn build_remote_client(model_id: String, api: ModelApi) -> Result<Box<dyn RemoteChat>> {
-        if !api.api_key.is_empty() && !providers::http::is_transport_safe(&api.base_url) {
-            return Err(anyhow!(
-                "{} ({})",
-                providers::http::CLEARTEXT_KEY_REFUSAL,
-                api.base_url
-            ));
-        }
-
-        publish_model_status(model_id.clone(), 0.0, "Initializing", false, false).await;
-        // The provider client is the key's one receiver: it sends the key to the provider.
-        let api_key = api.api_key.expose_once();
-        let client: Box<dyn RemoteChat> = match api.api_type {
-            ModelApiType::OpenAi => {
-                Box::new(providers::openai::OpenAiChat::new(&api_key, api.base_url))
-            }
-            ModelApiType::Anthropic => Box::new(providers::anthropic::AnthropicChat::new(
-                &api_key,
-                api.base_url,
-            )),
-            ModelApiType::Ollama => Box::new(providers::ollama::OllamaChat::new(
-                &api_key,
-                api.base_url,
-                api.max_num_ctx,
-            )),
-        };
-        publish_model_status(model_id.clone(), 100.0, "Initializing", true, false).await;
-        Ok(client)
-    }
-
-    async fn spawn_llm_model(
-        &self,
-        model_config: crate::types::Model,
-        model_ready_sender: Option<oneshot::Sender<()>>,
-    ) -> Result<()> {
-        if model_config.local.is_none() && model_config.api.is_none() {
-            return Err(anyhow!(
-                "AI model definition {} doesn't have a body, nothing to spawn!",
-                model_config.name
-            ));
-        }
-
-        let (llama_tx, mut llama_rx) = mpsc::unbounded_channel::<LLMTaskRequest>();
-        self.llm_channel
-            .lock()
-            .await
-            .insert(model_config.id.clone(), llama_tx);
-        thread::spawn({
-            move || {
-                let model_id = model_config.id.clone();
-                let rt = tokio::runtime::Runtime::new().unwrap();
-                rt.block_on(publish_model_status(
-                    model_config.id.clone(),
-                    100.0,
-                    "Spawning model thread...",
-                    true,
-                    false,
-                ));
-                let maybe_model = rt
-                    .block_on(async {
-                        if let Some(local_model) = model_config.local {
-                            Self::build_local_llama(model_id, local_model)
-                                .await
-                                .map(LlmModel::Local)
-                        } else if let Some(api) = model_config.api {
-                            let model_string = api.model.clone();
-                            Self::build_remote_client(model_id, api)
-                                .await
-                                .map(|client| LlmModel::Remote((client, model_string)))
-                        } else {
-                            Err(anyhow!("AI model definition {} doesn't have a body, and this error should have been caught above", model_config.name))
-                        }
-                    });
-
-                let mut model = match maybe_model {
-                    Ok(m) => m,
-                    Err(e) => {
-                        error!("Failed to build LLM model: {}", e);
-                        rt.block_on(publish_model_status(
-                            model_config.id.clone(),
-                            100.0,
-                            &format!("Failed to build LLM model: {}", e),
-                            true,
-                            false,
-                        ));
-                        return;
-                    }
-                };
-
-                let mut tasks = HashMap::<String, Task<Llama>>::new();
-                let mut task_descriptions = HashMap::<String, AITask>::new();
-
-                rt.block_on(publish_model_status(
-                    model_config.id.clone(),
-                    100.0,
-                    "Ready",
-                    true,
-                    true,
-                ));
-
-                if let Some(model_ready_sender) = model_ready_sender {
-                    let _ = model_ready_sender.send(());
-                }
-
-                // Block on the channel — zero CPU while idle.
-                loop {
-                    match rt.block_on(llama_rx.recv()) {
-                        None => break,
-                        Some(task_request) => match task_request {
-                            LLMTaskRequest::Shutdown(shutdown_request) => {
-                                rt.block_on(publish_model_status(
-                                    model_config.id.clone(),
-                                    100.0,
-                                    "Shutting down",
-                                    true,
-                                    false,
-                                ));
-
-                                // Send confirmation before breaking
-                                let _ = shutdown_request.result_sender.send(());
-                                break;
-                            }
-                            LLMTaskRequest::Spawn(spawn_request) => match model {
-                                LlmModel::Remote(_) => {
-                                    task_descriptions.insert(
-                                        spawn_request.task.task_id.clone(),
-                                        spawn_request.task,
-                                    );
-                                    let _ = spawn_request.result_sender.send(Ok(()));
-                                }
-                                LlmModel::Local(ref mut llama) => {
-                                    rt.block_on(publish_model_status(
-                                        model_config.id.clone(),
-                                        100.0,
-                                        "Spawning task...",
-                                        true,
-                                        true,
-                                    ));
-                                    let task_description = spawn_request.task;
-
-                                    let task = llama
-                                        .task(task_description.system_prompt.clone())
-                                        .with_examples(
-                                            task_description
-                                                .prompt_examples
-                                                .clone()
-                                                .into_iter()
-                                                .map(|example| (example.input, example.output))
-                                                .collect::<Vec<(String, String)>>(),
-                                        );
-
-                                    rt.block_on(task.run("Test example prompt").all_text());
-
-                                    tasks.insert(task_description.task_id.clone(), task);
-                                    let _ = spawn_request.result_sender.send(Ok(()));
-
-                                    rt.block_on(publish_model_status(
-                                        model_config.id.clone(),
-                                        100.0,
-                                        "Ready",
-                                        true,
-                                        true,
-                                    ));
-                                }
-                            },
-
-                            LLMTaskRequest::PromptTurns(turns_request) => match model {
-                                LlmModel::Remote((ref mut remote_client, ref model_string)) => {
-                                    let request =
-                                        ChatRequest::new(model_string.clone(), turns_request.turns)
-                                            .with_tools(turns_request.tools);
-
-                                    let result = rt.block_on(remote_client.chat(request));
-                                    let _ = turns_request.result_sender.send(result);
-                                }
-                                LlmModel::Local(_) => {
-                                    // Unreachable in practice: the caller
-                                    // checks `api_type_supports_native_tools`
-                                    // first, and no local model answers true.
-                                    // Refuse loudly rather than silently
-                                    // dropping the tools if that check is ever
-                                    // got wrong.
-                                    let _ = turns_request.result_sender.send(Err(anyhow!(
-                                        "Model {} is local; native tool calling needs a provider whose wire format carries tools",
-                                        model_config.id
-                                    )));
-                                }
-                            },
-
-                            LLMTaskRequest::Prompt(prompt_request) => match model {
-                                LlmModel::Remote((ref mut remote_client, ref model_string)) => {
-                                    if let Some(task) =
-                                        task_descriptions.get(&prompt_request.task_id)
-                                    {
-                                        let request = ChatRequest::new(
-                                            model_string.clone(),
-                                            turns_for_task(task, prompt_request.prompt),
-                                        );
-
-                                        let result = rt
-                                            .block_on(remote_client.chat(request))
-                                            .map(|reply| reply.text);
-
-                                        let _ = prompt_request.result_sender.send(result);
-                                    } else {
-                                        let _ = prompt_request.result_sender.send(Err(anyhow!(
-                                            "Task with ID {} not spawned",
-                                            prompt_request.task_id
-                                        )));
-                                    }
-                                }
-                                LlmModel::Local(_) => {
-                                    if let Some(task) = tasks.get(&prompt_request.task_id) {
-                                        rt.block_on(publish_model_status(
-                                            model_config.id.clone(),
-                                            100.0,
-                                            "Running inference...",
-                                            true,
-                                            true,
-                                        ));
-
-                                        let result = rt.block_on(async {
-                                            match prompt_request.constraint.clone() {
-                                                // Tool-call grammar: constrain decoding and
-                                                // accumulate the (guaranteed on-grammar) text.
-                                                Some(parser) => {
-                                                    use futures::StreamExt;
-                                                    let mut stream = Box::pin(
-                                                        task.run(prompt_request.prompt.clone())
-                                                            .with_constraints(parser),
-                                                    );
-                                                    let mut acc = String::new();
-                                                    while let Some(token) = stream.next().await {
-                                                        acc.push_str(&token);
-                                                    }
-                                                    acc
-                                                }
-                                                // No tools: unchanged unconstrained path.
-                                                None => {
-                                                    task.run(prompt_request.prompt.clone())
-                                                        .all_text()
-                                                        .await
-                                                }
-                                            }
-                                        });
-
-                                        rt.block_on(publish_model_status(
-                                            model_config.id.clone(),
-                                            100.0,
-                                            "Ready",
-                                            true,
-                                            true,
-                                        ));
-
-                                        let _ = prompt_request.result_sender.send(Ok(result));
-                                    } else {
-                                        let _ = prompt_request.result_sender.send(Err(anyhow!(
-                                            "Task with ID {} not spawned",
-                                            prompt_request.task_id
-                                        )));
-                                    }
-                                }
-                            },
-
-                            LLMTaskRequest::PromptStream(stream_request) => match model {
-                                LlmModel::Remote((ref mut remote_client, ref model_string)) => {
-                                    // Whether this really streams is the
-                                    // provider's business: one that can
-                                    // pushes text as the model writes it,
-                                    // one that cannot answers in a single
-                                    // chunk through the trait's default. The
-                                    // SSE consumer sees the same protocol
-                                    // either way.
-                                    if let Some(task) =
-                                        task_descriptions.get(&stream_request.task_id)
-                                    {
-                                        let prompt_clone = stream_request.prompt.clone();
-                                        let request = ChatRequest::new(
-                                            model_string.clone(),
-                                            turns_for_task(task, prompt_clone.clone()),
-                                        );
-                                        let token_sender = stream_request.token_sender.clone();
-                                        match rt.block_on(
-                                            remote_client.chat_stream(request, token_sender),
-                                        ) {
-                                            Err(e) => {
-                                                let _ = stream_request.done_sender.send(Err(e));
-                                            }
-                                            Ok(reply) => {
-                                                // Tokens have already gone out
-                                                // through `token_sender`; the
-                                                // reply is here only so the
-                                                // closing usage event can be
-                                                // billed on the whole text.
-                                                let text = reply.text;
-                                                let prompt_tokens =
-                                                    estimate_token_count(&prompt_clone);
-                                                let completion_tokens = estimate_token_count(&text);
-                                                let _ = stream_request.done_sender.send(Ok(
-                                                    PromptResult {
-                                                        text,
-                                                        prompt_tokens,
-                                                        completion_tokens,
-                                                        model_id: model_config.id.clone(),
-                                                    },
-                                                ));
-                                            }
-                                        }
-                                    } else {
-                                        let _ = stream_request.done_sender.send(Err(anyhow!(
-                                            "Task with ID {} not spawned",
-                                            stream_request.task_id
-                                        )));
-                                    }
-                                }
-                                LlmModel::Local(_) => {
-                                    if let Some(task) = tasks.get(&stream_request.task_id) {
-                                        rt.block_on(publish_model_status(
-                                            model_config.id.clone(),
-                                            100.0,
-                                            "Running inference...",
-                                            true,
-                                            true,
-                                        ));
-
-                                        let prompt_clone = stream_request.prompt.clone();
-                                        let prompt_tokens = estimate_token_count(&prompt_clone);
-                                        let token_sender = stream_request.token_sender.clone();
-                                        // Forward each token through the
-                                        // mpsc back to the SSE handler.  We
-                                        // accumulate the full text so the
-                                        // closing event still carries a
-                                        // single concatenated string for
-                                        // billing + usage parity with the
-                                        // non-stream path.
-                                        let result = rt.block_on(async {
-                                            use futures::StreamExt;
-                                            // `task.run(...)` returns a
-                                            // `ChatResponseBuilder` which
-                                            // implements `Stream<Item=String>`;
-                                            // polling it yields one token
-                                            // chunk at a time.
-                                            let mut accumulated = String::new();
-                                            match stream_request.constraint.clone() {
-                                                // Tool-call grammar: constrained streaming.
-                                                Some(parser) => {
-                                                    let mut stream = Box::pin(
-                                                        task.run(prompt_clone.clone())
-                                                            .with_constraints(parser),
-                                                    );
-                                                    while let Some(token) = stream.next().await {
-                                                        accumulated.push_str(&token);
-                                                        if token_sender.send(token).is_err() {
-                                                            // consumer dropped — stop generating
-                                                            break;
-                                                        }
-                                                    }
-                                                }
-                                                // No tools: unchanged unconstrained streaming.
-                                                None => {
-                                                    let mut stream =
-                                                        Box::pin(task.run(prompt_clone.clone()));
-                                                    while let Some(token) = stream.next().await {
-                                                        accumulated.push_str(&token);
-                                                        if token_sender.send(token).is_err() {
-                                                            // consumer dropped — stop generating
-                                                            break;
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            accumulated
-                                        });
-
-                                        rt.block_on(publish_model_status(
-                                            model_config.id.clone(),
-                                            100.0,
-                                            "Ready",
-                                            true,
-                                            true,
-                                        ));
-
-                                        let completion_tokens = estimate_token_count(&result);
-                                        let _ = stream_request.done_sender.send(Ok(PromptResult {
-                                            text: result,
-                                            prompt_tokens,
-                                            completion_tokens,
-                                            model_id: model_config.id.clone(),
-                                        }));
-                                    } else {
-                                        let _ = stream_request.done_sender.send(Err(anyhow!(
-                                            "Task with ID {} not spawned",
-                                            stream_request.task_id
-                                        )));
-                                    }
-                                }
-                            },
-
-                            LLMTaskRequest::Remove(remove_request) => {
-                                let _ = tasks.remove(&remove_request.task_id);
-                                let _ = task_descriptions.remove(&remove_request.task_id);
-                                let _ = remove_request.result_sender.send(());
-                            }
-                        },
-                    }
-                }
-            }
-        });
-
-        Ok(())
-    }
-
-    // -------------------------------------
     // Tasks
     // -------------------------------------
 
@@ -1205,7 +692,10 @@ impl AIService {
     }
 
     /// `agent_did` is the owning managed agent's DID; `None` makes a task of the main agent.
+    /// Refused unless the task's model is a loaded LLM.
     pub async fn add_task(&self, task: AITaskInput, agent_did: Option<&str>) -> Result<AITask> {
+        self.chat_model(&Self::replace_model_variables(&task.model_id)?)
+            .await?;
         let task_id = crate::db_backend::db_backend()
             .add_task(
                 task.name.clone(),
@@ -1220,12 +710,9 @@ impl AIService {
             )
             .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
 
-        let task = crate::db_backend::db_backend()
+        Ok(crate::db_backend::db_backend()
             .get_task(task_id)?
-            .expect("to get task that we just created");
-
-        self.spawn_task(task.clone()).await?;
-        Ok(task)
+            .expect("to get task that we just created"))
     }
 
     fn replace_model_variables(model_id: &String) -> Result<String> {
@@ -1238,39 +725,25 @@ impl AIService {
         })
     }
 
-    /// Register an already-persisted task row with its LLM worker.
-    ///
-    /// Public entry point for tasks minted outside [`AIService::add_task`] —
-    /// notably the generic interpretation task, which `ensure_interpretation_task`
-    /// inserts via `Ad4mDb::add_task` directly (to stay idempotent-by-name).
-    /// Without this, such a task sits in the DB unspawned until the next
-    /// executor restart's `load()` sweep, so its first `prompt` fails with
-    /// "Task not spawned". Callers spawn it right after creation instead.
-    pub async fn spawn_registered_task(&self, task: AITask) -> Result<()> {
-        self.spawn_task(task).await
+    /// The client of the LLM `model_id` (an id, after `default` was resolved). None is the
+    /// caller's mistake (an [`InvalidModel`](crate::db::InvalidModel)): a task names a model
+    /// that is not an LLM, or none.
+    async fn chat_model(&self, model_id: &str) -> Result<ChatModel> {
+        self.load_if_missing(model_id, &self.llms).await;
+        self.llms
+            .lock()
+            .await
+            .get(model_id)
+            .cloned()
+            .ok_or_else(|| {
+                crate::db::InvalidModel(format!("No LLM with id '{model_id}' is loaded")).into()
+            })
     }
 
-    async fn spawn_task(&self, task: AITask) -> Result<()> {
-        let (tx, rx) = oneshot::channel();
-        let llm_channel = self.llm_channel.lock().await;
-        let model_id = Self::replace_model_variables(&task.model_id)?;
-
-        if let Some(sender) = llm_channel.get(&model_id) {
-            sender.send(LLMTaskRequest::Spawn(LLMTaskSpawnRequest {
-                task: task.clone(),
-                result_sender: tx,
-            }))?;
-        } else {
-            return Err(anyhow::anyhow!(
-                "Model '{}' not found in LLM channel",
-                task.model_id
-            ));
-        }
-
-        rx.await?
-    }
-
+    /// Rewrites a task. Refused unless its model is a loaded LLM.
     pub async fn update_task(&self, task: AITask) -> Result<AITask> {
+        self.chat_model(&Self::replace_model_variables(&task.model_id)?)
+            .await?;
         let task_id = task.task_id.clone();
         crate::db_backend::db_backend()
             .update_task(
@@ -1283,161 +756,84 @@ impl AIService {
             )
             .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
 
-        self.remove_task(task_id.clone()).await?;
-
-        let updated_task = crate::db_backend::db_backend()
-            .get_task(task_id.clone())
+        crate::db_backend::db_backend()
+            .get_task(task_id)
             .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?
-            .ok_or(AIServiceError::TaskNotFound)?;
-
-        self.spawn_task(updated_task.clone()).await?;
-
-        Ok(updated_task)
+            .ok_or_else(|| AIServiceError::TaskNotFound.into())
     }
 
     pub async fn delete_task(&self, task_id: String) -> Result<bool> {
-        self.remove_task(task_id.clone()).await?;
         crate::db_backend::db_backend()
             .remove_task(task_id)
             .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
         Ok(true)
     }
 
-    async fn remove_task(&self, task_id: String) -> Result<()> {
-        let (tx, rx) = oneshot::channel();
-        let llm_channel = self.llm_channel.lock().await;
-        let task = Self::get_tasks()?
-            .into_iter()
-            .find(|t| t.task_id == task_id)
-            .ok_or_else(|| anyhow!("Task with ID {} not found", task_id))?;
-        let model_id = Self::replace_model_variables(&task.model_id)?;
-
-        if let Some(sender) = llm_channel.get(&model_id) {
-            sender.send(LLMTaskRequest::Remove(LLMTaskRemoveRequest {
-                task_id,
-                result_sender: tx,
-            }))?;
-        } else {
-            return Err(anyhow::anyhow!("Model 'llama' not found in LLM channel"));
-        }
-
-        rx.await?;
-        Ok(())
-    }
-
-    /// Build an ephemeral, in-memory task from a list of `(system, user,
-    /// assistant)` messages and return its `task_id`.  Used by the
-    /// OpenAI-compatible `chat.completions` handler so each request is
-    /// stateless: spawn → prompt → remove.  Nothing touches the DB.
+    /// The turns of an OpenAI-style `(role, content)` message list, and the final user
+    /// message among them (the prompt, for logging and the estimate).
     ///
-    /// `messages` is in OpenAI order — system message(s) at the front,
-    /// then alternating user/assistant turns ending with a final user
-    /// message.  The final user message is returned separately so the
-    /// caller passes it as the prompt; everything before it becomes the
-    /// task's `system_prompt` + few-shot example pairs.
-    fn build_ephemeral_task(model_id: &str, messages: Vec<(String, String)>) -> (AITask, String) {
-        // Split: leading System messages → system_prompt; alternating
-        // User/Assistant pairs → examples; last User message → prompt.
+    /// Leading system messages join into one system turn; user/assistant pairs become the
+    /// examples; the last user message is the prompt. Tool and other roles are dropped:
+    /// the caller folded them into text before.
+    fn turns_for_messages(messages: Vec<(String, String)>) -> (Vec<ChatTurn>, String) {
         let mut system_prompt = String::new();
         let mut examples: Vec<crate::types::AIPromptExamples> = Vec::new();
         let mut current_user: Option<String> = None;
-        let mut final_prompt = String::new();
 
-        for (role, content) in &messages {
+        for (role, content) in messages {
             match role.as_str() {
                 "system" => {
                     if !system_prompt.is_empty() {
-                        system_prompt.push_str("\n");
+                        system_prompt.push('\n');
                     }
-                    system_prompt.push_str(content);
+                    system_prompt.push_str(&content);
                 }
                 "user" => {
-                    if let Some(prev_user) = current_user.take() {
-                        current_user = Some(format!("{}\n{}", prev_user, content));
-                    } else {
-                        current_user = Some(content.clone());
-                    }
+                    current_user = Some(match current_user.take() {
+                        Some(previous) => format!("{previous}\n{content}"),
+                        None => content,
+                    });
                 }
                 "assistant" => {
-                    if let Some(user_msg) = current_user.take() {
+                    if let Some(input) = current_user.take() {
                         examples.push(crate::types::AIPromptExamples {
-                            input: user_msg,
-                            output: content.clone(),
+                            input,
+                            output: content,
                         });
                     }
                 }
-                _ => { /* tool/function/developer — silently dropped */ }
+                _ => {}
             }
         }
-        if let Some(last_user) = current_user {
-            final_prompt = last_user;
-        }
-
-        let task_id = format!("openai-compat-{}", uuid::Uuid::new_v4());
-        let now = chrono::Utc::now().to_rfc3339();
-        let task = AITask {
-            name: format!("openai-compat-{}", &task_id[..8]),
-            task_id: task_id.clone(),
-            model_id: model_id.to_string(),
-            system_prompt,
-            prompt_examples: examples,
-            meta_data: None,
-            created_at: now.clone(),
-            updated_at: now,
-        };
-        (task, final_prompt)
+        let prompt = current_user.unwrap_or_default();
+        (turns_for(&system_prompt, &examples, prompt.clone()), prompt)
     }
 
-    /// Run a chat-style prompt on `model_id` with a stateless message
-    /// list and return the full response text + token counts.  Backs
-    /// `POST /v1/chat/completions`.
+    /// Run a chat-style prompt on `model_id` with a stateless message list and return the
+    /// full response text and token counts. Backs the `/v1/chat/completions` paths the
+    /// executor answers itself (Anthropic, the text tool fallback) and the harness.
+    ///
+    /// `json_schema` constrains the reply's text to JSON matching it, where the model's
+    /// server can decode against a schema ([`ChatRequest::json_schema`]); the caller
+    /// validates what comes back.
     pub async fn prompt_messages(
         &self,
         model_id: String,
         messages: Vec<(String, String)>,
         bill_to: Option<String>,
-        constraint: Option<ArcParser<()>>,
+        json_schema: Option<serde_json::Value>,
     ) -> Result<PromptResult> {
         let resolved = Self::replace_model_variables(&model_id)?;
-        let (task, final_prompt) = Self::build_ephemeral_task(&resolved, messages);
+        let chat = self.chat_model(&resolved).await?;
+        let (turns, final_prompt) = Self::turns_for_messages(messages);
 
-        // Spawn + prompt + remove.  We use the existing per-model thread
-        // command channels so model state stays local to its thread and
-        // we don't duplicate the build-llama machinery.
-        let task_id = task.task_id.clone();
-        let (spawn_tx, spawn_rx) = oneshot::channel();
-        {
-            let llm_channel = self.llm_channel.lock().await;
-            let sender = llm_channel
-                .get(&resolved)
-                .ok_or_else(|| anyhow!("Model '{}' not found in LLM channel", resolved))?;
-            sender.send(LLMTaskRequest::Spawn(LLMTaskSpawnRequest {
-                task,
-                result_sender: spawn_tx,
-            }))?;
-        }
-        spawn_rx.await??;
-
-        let (prompt_tx, prompt_rx) = oneshot::channel();
-        {
-            let llm_channel = self.llm_channel.lock().await;
-            let sender = llm_channel
-                .get(&resolved)
-                .ok_or_else(|| anyhow!("Model '{}' not found in LLM channel", resolved))?;
-            sender.send(LLMTaskRequest::Prompt(LLMTaskPromptRequest {
-                task_id: task_id.clone(),
-                prompt: final_prompt.clone(),
-                constraint,
-                result_sender: prompt_tx,
-            }))?;
-        }
         let prompt_tokens = estimate_token_count(&final_prompt);
         log::debug!(
             "🤖 prompt_messages input model={} text={:?}",
             resolved,
             truncate_for_log(&final_prompt)
         );
-        let text = prompt_rx.await??;
+        let text = chat.chat(turns, Vec::new(), json_schema, None).await?.text;
         let completion_tokens = estimate_token_count(&text);
         log::debug!(
             "🤖 prompt_messages output model={} text={:?}",
@@ -1445,22 +841,8 @@ impl AIService {
             truncate_for_log(&text)
         );
 
-        // Clean up the ephemeral task entry on the LLM thread.
-        let (remove_tx, _) = oneshot::channel();
-        {
-            let llm_channel = self.llm_channel.lock().await;
-            if let Some(sender) = llm_channel.get(&resolved) {
-                let _ = sender.send(LLMTaskRequest::Remove(LLMTaskRemoveRequest {
-                    task_id: task_id.clone(),
-                    result_sender: remove_tx,
-                }));
-            }
-        }
-
-        // Bill via the shared host_rates helper (matches transcription
-        // worker + WS-RPC pattern). Rate = 0 (unpriced model) makes this
-        // a no-op. InsufficientCredits is returned to the caller so /v1
-        // can propagate 429; other errors are logged and swallowed.
+        // Rate = 0 (unpriced model) makes this a no-op. Insufficient credits are checked
+        // before the call (the /v1 handler answers 429); here they only log.
         Self::bill_prompt_if_authed(
             bill_to.as_deref(),
             &resolved,
@@ -1473,42 +855,176 @@ impl AIService {
             prompt_tokens,
             completion_tokens,
             model_id: resolved,
+            stop_reason: None,
         })
     }
 
-    /// Whether this model's provider carries tools as definitions rather than
-    /// as text rendered into the prompt.
-    ///
-    /// Asked of the stored config rather than of a built client, because the
-    /// caller has to decide how to render tools before anything reaches a
-    /// worker thread. Local models are always false — they have no wire format
-    /// to carry a tool in.
+    /// Whether this model takes tools as definitions rather than as text rendered into the
+    /// prompt: its endpoint's protocol can, and its `native_tools` flag says it should.
+    /// False for a model that does not exist.
     pub fn model_supports_native_tools(model_id: &str) -> bool {
-        let resolved = match Self::replace_model_variables(&model_id.to_string()) {
-            Ok(resolved) => resolved,
-            Err(_) => return false,
+        let Ok(resolved) = Self::replace_model_variables(&model_id.to_string()) else {
+            return false;
         };
-
-        crate::db_backend::db_backend()
-            .get_model(resolved)
+        let db = crate::db_backend::db_backend();
+        let Ok(Some(model)) = db.get_model(resolved) else {
+            return false;
+        };
+        db.get_endpoint(&model.endpoint_id)
             .ok()
             .flatten()
-            .and_then(|model| model.api)
-            .map(|api| providers::api_type_supports_native_tools(&api.api_type))
-            .unwrap_or(false)
+            .is_some_and(|endpoint| model.uses_native_tools(&endpoint))
+    }
+
+    /// How many tokens an interpretation pass may generate, or `None` for no cap.
+    ///
+    /// Staging: a 34,700-token interpretation prompt on a 49,152 window let
+    /// qwen think until `n_tokens = 49151` (`truncated = 1`) and return an
+    /// empty answer. The first attempt leaves thinking on; this cap keeps that
+    /// from overflowing the window, and `think: false` is the retry when the
+    /// attempt comes back empty or cut off. The cap is the room the window
+    /// leaves after this prompt, so it scales with the model instead of being
+    /// a fixed constant: a floor keeps a prompt
+    /// that nearly fills the window from getting nothing, and a ceiling stops
+    /// a short prompt on a large window asking the server to generate a
+    /// window's worth of JSON it will not use.
+    ///
+    /// `window` is the one the request runs at ([`Self::resolved_context_tokens`]:
+    /// an Ollama client's resolved `num_ctx`, else the endpoint's `max_num_ctx`,
+    /// which is unset by default), not the endpoint's ceiling alone.
+    /// Without one nothing here knows the window, and a guess (the 16k context
+    /// budget fallback) would cap a 35k-token prompt at the floor and
+    /// truncate the JSON on every retry — so an unknown window sends no cap.
+    /// `prompt_tokens` is the chars/4 estimate the billing path uses.
+    ///
+    /// The cap never exceeds the room: input plus output over the window is
+    /// refused by servers that validate it, and sending the same request
+    /// again cannot fix that. When the room is under the smallest useful
+    /// answer, that is an error saying so, not a cap raised past the window.
+    pub fn interpretation_max_output_tokens(
+        window: Option<usize>,
+        prompt_tokens: usize,
+    ) -> Result<Option<u32>> {
+        const MIN_OUTPUT: usize = 512;
+        const MAX_OUTPUT: usize = 8_192;
+        let Some(window) = window else {
+            return Ok(None);
+        };
+        let room = window.saturating_sub(prompt_tokens);
+        if room < MIN_OUTPUT {
+            return Err(anyhow::anyhow!(
+                "context budget: the prompt is about {prompt_tokens} tokens and the model's \
+                 window is {window}, leaving {room}, under the {MIN_OUTPUT} an answer needs. \
+                 Shorten the input or raise the endpoint's max_num_ctx."
+            ));
+        }
+        Ok(Some(room.min(MAX_OUTPUT) as u32))
+    }
+
+    /// The context window the model's endpoint is run at (`max_num_ctx` on
+    /// the endpoint), in tokens, when the model and endpoint are known.
+    fn model_context_tokens(model_id: &str) -> Option<usize> {
+        let resolved = Self::replace_model_variables(&model_id.to_string()).ok()?;
+        let db = crate::db_backend::db_backend();
+        let model = db.get_model(resolved).ok()??;
+        db.get_endpoint(&model.endpoint_id)
+            .ok()??
+            .max_num_ctx
+            .map(|n| n as usize)
+    }
+
+    /// The context window the model's requests are actually run at, in
+    /// tokens: the `num_ctx` its chat client resolves for it — an Ollama
+    /// client's answer from `/api/show`, already capped at the endpoint's
+    /// `max_num_ctx` — when it resolves one, else the endpoint's configured
+    /// ceiling when it has one.
+    ///
+    /// A client can run the model far under the configured ceiling (the
+    /// model's native window is smaller, or its metadata could not be read
+    /// and it fell back to Ollama's 2,048), so the resolved answer is
+    /// asked first: it is the value the request itself is sent with.
+    async fn resolved_context_tokens(&self, model_id: &str) -> Option<usize> {
+        let resolved = Self::replace_model_variables(&model_id.to_string()).ok()?;
+        if let Ok(chat) = self.chat_model(&resolved).await {
+            // The probe is part of this call's path: an Ollama client's
+            // `num_ctx` resolution issues `/api/show`, which an endpoint
+            // that cannot answer would stall for the client build's whole
+            // 600 s — long past the request timeout the call itself runs
+            // under. Bound it the same way.
+            let timeout = endpoints::request_timeout(&chat.endpoint, CHAT_TIMEOUT);
+            match tokio::time::timeout(
+                timeout,
+                chat.client.context_window_tokens(&chat.remote_model),
+            )
+            .await
+            {
+                Ok(Some(tokens)) => return Some(tokens as usize),
+                Ok(None) => {}
+                // The completion resolves `num_ctx` the same way once the
+                // upstream recovers — and falls back to the same value when
+                // it cannot. Budget for the request the model will be sent,
+                // not a ceiling it will not see.
+                Err(_) => {
+                    if let Some(tokens) = chat.client.context_window_fallback_tokens() {
+                        log::warn!(
+                            "context window probe for {resolved} did not answer within {}s; \
+                             budgeting for the client's num_ctx fallback",
+                            timeout.as_secs()
+                        );
+                        return Some(tokens as usize);
+                    }
+                }
+            }
+        }
+        Self::model_context_tokens(model_id)
+    }
+
+    /// How many bytes of one outgoing request's message list the model's
+    /// context window leaves room for: the window estimated at ~3 bytes of
+    /// rendered chat JSON per token, halved — the other half is for the
+    /// tool definitions, the rendered template and the model's own answer
+    /// (a thinking model can spend a third of its window before any reply
+    /// text exists).
+    ///
+    /// The cap protects the one guarantee every chat template relies on:
+    /// the person's message reaches the model. A request whose rendered
+    /// prompt overruns `num_ctx` does not fail at the client — the model
+    /// server truncates oldest-first to fit, and the user turn is the
+    /// oldest message in it. Ollama answers the result with
+    /// `500 no user query found in messages`; an OpenAI-shaped server just
+    /// answers a question it never saw. When the model's window is unknown
+    /// the budget falls back to [`DEFAULT_CONTEXT_BUDGET_BYTES`].
+    pub async fn context_budget_bytes(&self, model_id: &str) -> usize {
+        match self.resolved_context_tokens(model_id).await {
+            Some(tokens) => tokens * CONTEXT_BYTES_PER_TOKEN / 2,
+            None => DEFAULT_CONTEXT_BUDGET_BYTES,
+        }
+    }
+
+    /// The largest tool result a `run_with_tools` loop should feed back to
+    /// this model, in bytes: a quarter of [`Self::context_budget_bytes`],
+    /// clamped so a small window cannot starve a result to uselessness and
+    /// a large one cannot unbound it — but never more than the budget
+    /// minus [`TOOL_RESULT_OVERHEAD_BYTES`], so the result still fits in
+    /// the request beside the question it answers. Without that second
+    /// bound the 4 KiB floor exceeded a 2,048-token window's 3,072-byte
+    /// budget: a result between the two went in whole and the trim, with
+    /// nothing else left to drop, could only replace it by the elision
+    /// stub — where a truncated copy would have fit.
+    ///
+    /// The full result still lands on the session's transcript row — this
+    /// bounds only what the model sees.
+    pub async fn tool_result_max_bytes(&self, model_id: &str) -> usize {
+        let budget = self.context_budget_bytes(model_id).await;
+        clamp_tool_result_bytes(budget / 4).min(budget.saturating_sub(TOOL_RESULT_OVERHEAD_BYTES))
     }
 
     /// Prompt a model with a complete turn list and tool definitions, getting
     /// back whatever text it wrote and any calls it wants dispatched.
     ///
-    /// The counterpart of [`Self::prompt_messages`] for providers whose wire
-    /// format carries tools. Gate it on [`Self::model_supports_native_tools`]:
-    /// a model that does not will refuse rather than silently drop the tools.
-    ///
-    /// No ephemeral task is spawned. `prompt_messages` needs one because it
-    /// has to reassemble a system prompt and examples out of a flattened
-    /// message list; here the turns *are* the conversation, so there is
-    /// nothing to rebuild and nothing to clean up afterwards.
+    /// The counterpart of [`Self::prompt_messages`] for models that take tools as
+    /// definitions. Gate it on [`Self::model_supports_native_tools`]: a client that does
+    /// not carry tools refuses rather than silently drops them.
     pub async fn prompt_with_tools(
         &self,
         model_id: String,
@@ -1517,6 +1033,7 @@ impl AIService {
         bill_to: Option<String>,
     ) -> Result<ChatReply> {
         let resolved = Self::replace_model_variables(&model_id)?;
+        let chat = self.chat_model(&resolved).await?;
 
         // Estimated before the turns are handed over, because everything below
         // goes on the wire and the caller is charged for all of it. Billing
@@ -1532,21 +1049,7 @@ impl AIService {
             }))
             .sum();
 
-        let (result_tx, result_rx) = oneshot::channel();
-        {
-            let llm_channel = self.llm_channel.lock().await;
-            let sender = llm_channel
-                .get(&resolved)
-                .ok_or_else(|| anyhow!("Model '{}' not found in LLM channel", resolved))?;
-            sender.send(LLMTaskRequest::PromptTurns(LLMTaskPromptTurnsRequest {
-                turns,
-                tools,
-                result_sender: result_tx,
-            }))?;
-        }
-
-        let reply = result_rx.await??;
-
+        let reply = chat.chat(turns, tools, None, None).await?;
         let completion_tokens = estimate_reply_tokens(&reply);
 
         log::debug!(
@@ -1566,94 +1069,38 @@ impl AIService {
         Ok(reply)
     }
 
-    /// Streaming variant of [`Self::prompt_messages`].  Returns a token
-    /// stream + a oneshot for the final [`PromptResult`] (carries the
-    /// full text + token counts for the closing SSE event).
-    ///
-    /// Billing happens when the stream completes: the worker's final
-    /// result is billed (on success only, matching
-    /// [`Self::prompt_messages`]) in a forwarder task before it reaches
-    /// the caller's `done_rx`.
+    /// Streaming variant of [`Self::prompt_messages`]. Returns the token stream, and a
+    /// oneshot for the final [`PromptResult`] (the full text and token counts, for the
+    /// closing SSE event). Billed when the stream completes, on success only.
     pub async fn prompt_messages_stream(
         &self,
         model_id: String,
         messages: Vec<(String, String)>,
         bill_to: Option<String>,
-        constraint: Option<ArcParser<()>>,
     ) -> Result<(
         mpsc::UnboundedReceiver<String>,
         oneshot::Receiver<Result<PromptResult>>,
     )> {
         let resolved = Self::replace_model_variables(&model_id)?;
-        let (task, final_prompt) = Self::build_ephemeral_task(&resolved, messages);
-
-        let task_id = task.task_id.clone();
-        let (spawn_tx, spawn_rx) = oneshot::channel();
-        {
-            let llm_channel = self.llm_channel.lock().await;
-            let sender = llm_channel
-                .get(&resolved)
-                .ok_or_else(|| anyhow!("Model '{}' not found in LLM channel", resolved))?;
-            sender.send(LLMTaskRequest::Spawn(LLMTaskSpawnRequest {
-                task,
-                result_sender: spawn_tx,
-            }))?;
-        }
-        spawn_rx.await??;
+        let chat = self.chat_model(&resolved).await?;
+        let (turns, final_prompt) = Self::turns_for_messages(messages);
 
         let (token_tx, token_rx) = mpsc::unbounded_channel::<String>();
-        // worker -> forwarder -> caller: the billing hook runs between the
-        // worker's final result and the caller's done_rx, so stream:true
-        // requests are charged like the non-stream path (success only).
-        let (worker_done_tx, worker_done_rx) = oneshot::channel::<Result<PromptResult>>();
         let (done_tx, done_rx) = oneshot::channel::<Result<PromptResult>>();
-        {
-            let llm_channel = self.llm_channel.lock().await;
-            let sender = llm_channel
-                .get(&resolved)
-                .ok_or_else(|| anyhow!("Model '{}' not found in LLM channel", resolved))?;
-            sender.send(LLMTaskRequest::PromptStream(LLMTaskPromptStreamRequest {
-                task_id: task_id.clone(),
-                prompt: final_prompt,
-                constraint,
-                token_sender: token_tx,
-                done_sender: worker_done_tx,
-            }))?;
-        }
-
-        let billing_model_id = resolved.clone();
         tokio::spawn(async move {
-            // The worker always sends Ok/Err; the Err arm only covers a
-            // dropped sender (worker panic).
-            let result = match worker_done_rx.await {
-                Ok(inner) => inner,
-                Err(_) => Err(anyhow!("LLM stream ended without a final result")),
-            };
-            Self::bill_and_forward_stream_result(bill_to, &billing_model_id, result, done_tx).await;
-        });
-
-        // Schedule a Remove for after the prompt completes — best-effort
-        // background cleanup so the caller doesn't have to await it.
-        let llm_channel_clone = self.llm_channel.clone();
-        let resolved_clone = resolved.clone();
-        tokio::spawn(async move {
-            // Wait a little for the prompt to finish before removing the
-            // task entry; if the model is local, the thread holds the
-            // task in its `tasks` map for the duration of the call, so
-            // removing too early would race the inference.
-            //
-            // We don't have a reliable signal here without restructuring
-            // the channel; the LLM thread serialises requests anyway, so
-            // a Remove queued immediately will run after the
-            // PromptStream completes.  No sleep needed.
-            let (remove_tx, _) = oneshot::channel();
-            let llm_channel = llm_channel_clone.lock().await;
-            if let Some(sender) = llm_channel.get(&resolved_clone) {
-                let _ = sender.send(LLMTaskRequest::Remove(LLMTaskRemoveRequest {
-                    task_id,
-                    result_sender: remove_tx,
-                }));
-            }
+            // Whether this really streams is the provider's business: one that can pushes
+            // text as the model writes it, one that cannot answers in a single chunk.
+            let result = chat
+                .chat_stream(turns, token_tx)
+                .await
+                .map(|reply| PromptResult {
+                    prompt_tokens: estimate_token_count(&final_prompt),
+                    completion_tokens: estimate_token_count(&reply.text),
+                    text: reply.text,
+                    model_id: resolved.clone(),
+                    stop_reason: reply.stop_reason,
+                });
+            Self::bill_and_forward_stream_result(bill_to, &resolved, result, done_tx).await;
         });
 
         Ok((token_rx, done_rx))
@@ -1665,9 +1112,84 @@ impl AIService {
         prompt: String,
         bill_to: Option<String>,
     ) -> Result<PromptResult> {
-        let (result_sender, rx) = oneshot::channel();
+        self.prompt_with(task_id, prompt, bill_to, None).await
+    }
 
-        // Retrieve the task to find the associated model_id
+    /// An interpretation pass. The first attempt leaves reasoning on and caps
+    /// output at the room the window leaves ([`Self::interpretation_max_output_tokens`]),
+    /// so thinking cannot overflow the window. A size problem — an empty answer,
+    /// a reply cut at the cap (`done_reason` / `finish_reason` `"length"`), or
+    /// the server reporting the context was exceeded — retries that same pass
+    /// once with reasoning off. Anything else is returned as-is.
+    pub async fn prompt_interpretation(
+        &self,
+        task_id: String,
+        prompt: String,
+    ) -> Result<PromptResult> {
+        self.prompt_interpretation_pass(task_id, prompt, None).await
+    }
+
+    /// [`Self::prompt_interpretation`] with a flag the parse loop shares.
+    /// Once a pass falls back to no reasoning, later calls that see the flag
+    /// stay there instead of spending another reasoning attempt.
+    pub(crate) async fn prompt_interpretation_pass(
+        &self,
+        task_id: String,
+        prompt: String,
+        stick_no_thinking: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<PromptResult> {
+        let task = crate::db_backend::db_backend()
+            .get_task(task_id.clone())
+            .map_err(|e| anyhow::anyhow!("Database error: {}", e))?
+            .ok_or_else(|| anyhow::anyhow!("Task not found for task_id: {}", task_id))?;
+        let model_id = Self::replace_model_variables(&task.model_id)?;
+        // The input is the whole conversation `prompt_with` sends: the task's
+        // system prompt and examples count against the window as much as the prompt.
+        let input_tokens = estimate_turns_tokens(&turns_for_task(&task, prompt.clone()));
+        let window = self.resolved_context_tokens(&model_id).await;
+        let cap = Self::interpretation_max_output_tokens(window, input_tokens)?;
+
+        let already_off =
+            stick_no_thinking.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed));
+        if already_off {
+            return self
+                .prompt_with(task_id, prompt, None, Some((true, cap)))
+                .await;
+        }
+
+        let first = self
+            .prompt_with(task_id.clone(), prompt.clone(), None, Some((false, cap)))
+            .await;
+        let size_problem = match &first {
+            Ok(result) => interpretation_reply_needs_no_thinking(&result),
+            Err(error) => context_was_exceeded(error),
+        };
+        if !size_problem {
+            return first;
+        }
+        if let Some(flag) = stick_no_thinking {
+            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        log::warn!(
+            "interpretation: reasoning reply was empty, cut at the cap, or exceeded \
+             the context; retrying once with thinking off"
+        );
+        self.prompt_with(task_id, prompt, None, Some((true, cap)))
+            .await
+    }
+
+    /// [`Self::prompt`] with a generation constraint. `disable_thinking` asks
+    /// the endpoint to leave the thinking channel off, where it accepts that;
+    /// the cap bounds generated tokens. `None` is today's prompt. Interpretation
+    /// sends the cap with thinking on first, and this constraint with thinking
+    /// off only when that attempt hits a size problem.
+    pub async fn prompt_with(
+        &self,
+        task_id: String,
+        prompt: String,
+        bill_to: Option<String>,
+        generation: Option<(bool, Option<u32>)>,
+    ) -> Result<PromptResult> {
         let task = crate::db_backend::db_backend()
             .get_task(task_id.clone())
             .map_err(|e| anyhow::anyhow!("Database error: {}", e))?
@@ -1698,30 +1220,16 @@ impl AIService {
 
         // Symmetry rule (see rust-executor/LOGGING.md): every `start` info
         // line gets exactly one companion — either `done` on success or a
-        // `failed` line on error. Wrap the fallible section so we can log
-        // the failure before propagating.
-        let text_result: Result<String> = async {
-            let llm_channel = self.llm_channel.lock().await;
-            if let Some(sender) = llm_channel.get(&model_id) {
-                sender.send(LLMTaskRequest::Prompt(LLMTaskPromptRequest {
-                    task_id,
-                    prompt,
-                    result_sender,
-                    constraint: None,
-                }))?;
-            } else {
-                return Err(anyhow::anyhow!(
-                    "Model '{}' not found in LLM channel",
-                    model_id
-                ));
-            }
-            drop(llm_channel);
-            Ok(rx.await??)
+        // `failed` line on error.
+        let reply_result: Result<ChatReply> = async {
+            let chat = self.chat_model(&model_id).await?;
+            chat.chat(turns_for_task(&task, prompt), Vec::new(), None, generation)
+                .await
         }
         .await;
 
-        let text = match text_result {
-            Ok(t) => t,
+        let reply = match reply_result {
+            Ok(reply) => reply,
             Err(e) => {
                 log::error!(
                     "❌ 🤖 prompt failed model={} latency={}ms tokens_in={} err={}",
@@ -1733,6 +1241,7 @@ impl AIService {
                 return Err(e);
             }
         };
+        let text = reply.text;
         let completion_tokens = estimate_token_count(&text);
         log::info!(
             "✅ 🤖 prompt done model={} latency={}ms tokens_in={} tokens_out={}",
@@ -1760,6 +1269,7 @@ impl AIService {
             prompt_tokens,
             completion_tokens,
             model_id,
+            stop_reason: reply.stop_reason,
         })
     }
 
@@ -1836,582 +1346,305 @@ impl AIService {
     // Embedding
     // -------------------------------------
 
-    async fn spawn_embedding_model(&self, model_config: crate::types::Model) {
-        let model_name = model_config.name.clone();
-        let (bert_tx, _ready) = Self::start_embedding_worker(model_config);
-        self.embedding_channel
-            .lock()
-            .await
-            .insert(model_name, bert_tx);
-    }
-
-    /// Starts a worker thread that loads the model, then answers embedding requests from
-    /// the returned channel. The receiver resolves once the model has loaded or failed to.
-    fn start_embedding_worker(
-        model_config: crate::types::Model,
-    ) -> (
-        mpsc::UnboundedSender<EmbeddingRequest>,
-        oneshot::Receiver<Result<()>>,
-    ) {
-        let (bert_tx, mut bert_rx) = mpsc::unbounded_channel::<EmbeddingRequest>();
-        let (ready_tx, ready_rx) = oneshot::channel();
-        thread::spawn({
-            let model_id = model_config.id.clone();
-            move || {
-                let rt = tokio::runtime::Runtime::new().unwrap();
-
-                let model = rt.block_on(async {
-                    publish_model_status(model_id.clone(), 0.0, "Loading", false, false).await;
-
-                    let bert = Bert::builder()
-                        .with_device(Self::new_candle_device())
-                        .build_with_loading_handler({
-                            let model_id = model_id.clone();
-                            move |progress| {
-                                tokio::spawn(handle_progress(model_id.clone(), progress));
-                            }
-                        })
-                        .await;
-
-                    bert
-                });
-                let model = match model {
-                    Ok(model) => {
-                        rt.block_on(publish_model_status(
-                            model_id.clone(),
-                            100.0,
-                            "Loaded",
-                            true,
-                            true,
-                        ));
-                        let _ = ready_tx.send(Ok(()));
-                        model
-                    }
-                    Err(e) => {
-                        error!("couldn't build Bert model {model_id}: {e:?}");
-                        rt.block_on(publish_model_status(
-                            model_id.clone(),
-                            0.0,
-                            "Not loaded",
-                            false,
-                            false,
-                        ));
-                        let _ = ready_tx.send(Err(anyhow!("couldn't build Bert model: {e:?}")));
-                        return;
-                    }
-                };
-
-                // Block on the channel — zero CPU while idle.
-                loop {
-                    match rt.block_on(bert_rx.recv()) {
-                        None => break,
-                        Some(request) => {
-                            let result: Result<Vec<f32>> = rt
-                                .block_on(async { model.embed(request.prompt).await })
-                                .map(|tensor| tensor.to_vec())
-                                .map_err(|bert_error| anyhow!(bert_error));
-                            let _ = request.result_sender.send(result);
-                        }
-                    }
-                }
-            }
-        });
-        (bert_tx, ready_rx)
-    }
-
+    /// Embed one text. See [`Self::embed_batch`].
     pub async fn embed(
         &self,
-        model_id: String,
+        model: String,
         text: String,
-        bill_to: Option<String>,
+        caller: Option<&RequestContext>,
     ) -> Result<EmbedResult> {
-        let token_count = estimate_token_count(&text);
-        let text_chars = text.chars().count();
-        // Per-call embed lines are debug: both real callers (dedup +
-        // openai_compat/embeddings) loop one embed() per input, so a
-        // batch of N would double N info lines. Batch-level info is
-        // emitted by the caller. See rust-executor/LOGGING.md.
+        let batch = self.embed_batch(&model, vec![text], caller).await?;
+        Ok(EmbedResult {
+            embeddings: batch.vectors.into_iter().next().unwrap_or_default(),
+            token_count: batch.token_count,
+        })
+    }
+
+    /// The id of the embedding model `requested` names: a model's id, else the name of an
+    /// embedding model; [`DEFAULT_MODEL`]: see [`Self::default_model`].
+    fn embedding_model_id(requested: &str, caller: Option<&RequestContext>) -> Result<String> {
+        if requested == DEFAULT_MODEL {
+            return Self::default_model(ModelType::Embedding, caller);
+        }
+        let models = crate::db_backend::db_backend().get_models()?;
+        models
+            .iter()
+            .find(|m| m.id == requested)
+            .or_else(|| {
+                models
+                    .iter()
+                    .find(|m| m.name == requested && m.model_type == ModelType::Embedding)
+            })
+            .map(|model| model.id.clone())
+            .ok_or_else(|| {
+                crate::db::InvalidModel(format!(
+                    "No EMBEDDING model has the id or name '{requested}' on this executor \
+                     ('{DEFAULT_MODEL}' names its default)"
+                ))
+                .into()
+            })
+    }
+
+    /// The model a caller gets by naming [`DEFAULT_MODEL`]: the default of `model_type`, else
+    /// the first model of that type. An executor with no model of the type answers an error
+    /// that says how to get one; nothing is downloaded or installed on a request (local AI
+    /// installs only through `ai.localInstall`, `ad4m-executor local-ai install` or the
+    /// Docker image's `INCLUDE_MODELS`). The operator (`caller`) is told to set up local AI
+    /// or register a model; any other caller, to ask the operator.
+    fn default_model(model_type: ModelType, caller: Option<&RequestContext>) -> Result<String> {
+        if let Some(id) = Self::default_or_first(&model_type)? {
+            return Ok(id);
+        }
+        let what = if caller.is_some_and(RequestContext::is_operator) {
+            "set up local AI (launcher Settings → AI, or ai.localInstall) or register a model on an endpoint"
+        } else {
+            "ask the operator to set up local AI"
+        };
+        Err(local::LocalAiRefused(format!(
+            "No default {model_type} model on this executor: {what}"
+        ))
+        .into())
+    }
+
+    /// The default model of `model_type`, else the first registered one.
+    fn default_or_first(model_type: &ModelType) -> Result<Option<String>> {
+        let models = crate::db_backend::db_backend().get_models()?;
+        let default = crate::db_backend::db_backend()
+            .get_default_model(model_type.clone())?
+            .filter(|id| {
+                models
+                    .iter()
+                    .any(|m| m.id == *id && m.model_type == *model_type)
+            });
+        Ok(default.or_else(|| {
+            models
+                .iter()
+                .find(|m| m.model_type == *model_type)
+                .map(|m| m.id.clone())
+        }))
+    }
+
+    /// Embed `texts` with the embedding model `model` (an id or a name), in one request to
+    /// its endpoint, and bill `caller`'s user for the input tokens. `None`: an internal
+    /// caller, billed nothing.
+    pub async fn embed_batch(
+        &self,
+        model: &str,
+        texts: Vec<String>,
+        caller: Option<&RequestContext>,
+    ) -> Result<EmbedBatch> {
+        let model_id = Self::embedding_model_id(model, caller)?;
+        let estimate: usize = texts.iter().map(|t| estimate_token_count(t)).sum();
         log::debug!(
-            "🤖 embed start model={} chars={} tokens_in={}",
+            "🤖 embed start model={} n={} tokens_in={}",
             model_id,
-            text_chars,
-            token_count
+            texts.len(),
+            estimate
         );
         let started = std::time::Instant::now();
-        self.ensure_default_embedding(&model_id).await?;
-        let (result_sender, rx) = oneshot::channel();
-        let embedding_channel = self.embedding_channel.lock().await;
-        if let Some(sender) = embedding_channel.get(&model_id) {
-            sender.send(EmbeddingRequest {
-                prompt: text,
-                result_sender,
-            })?;
-        } else {
-            return Err(anyhow::anyhow!(
-                "Model '{}' not found in embedding channel. We have: {}",
-                model_id,
-                embedding_channel.keys().join(",")
-            ));
+        self.load_if_missing(&model_id, &self.embedders).await;
+        let embedder = self
+            .embedders
+            .lock()
+            .await
+            .get(&model_id)
+            .cloned()
+            .ok_or_else(|| anyhow!("The embedding model '{model}' is not loaded"))?;
+        let count = texts.len();
+        let timeout =
+            endpoints::request_timeout(&embedder.endpoint, providers::embed::EMBED_TIMEOUT);
+        let call = async {
+            let _slot = endpoints::request_slot(&embedder.endpoint).await;
+            embedder.client.embed(&embedder.remote_model, &texts).await
+        };
+        let reply = match tokio::time::timeout(timeout, call).await {
+            Ok(reply) => reply,
+            Err(_) => Err(providers::http::UpstreamUnreachable {
+                url: embedder.endpoint.base_url.to_string(),
+                timed_out: true,
+                detail: format!("no answer within {}s", timeout.as_secs()),
+            }
+            .into()),
         }
-
-        let embeddings = rx.await??;
+        .inspect_err(|e| {
+            endpoints::after_failed_request(&embedder.endpoint.id, &embedder.remote_model, e)
+        })?;
+        let token_count = reply.prompt_tokens.map_or(estimate, |n| n as usize);
+        let vectors = reply.vectors;
         log::debug!(
-            "✅ 🤖 embed done model={} latency={}ms tokens_in={} dims={}",
+            "✅ 🤖 embed done model={} n={} latency={}ms tokens_in={}",
             model_id,
+            count,
             started.elapsed().as_millis(),
-            token_count,
-            embeddings.len()
+            token_count
         );
 
-        // Bill via the shared host_rates helper.
-        Self::bill_embed_if_authed(bill_to.as_deref(), &model_id, token_count);
+        Self::bill_embed_if_authed(
+            caller.and_then(RequestContext::user_did),
+            &model_id,
+            token_count,
+        );
 
-        Ok(EmbedResult {
-            embeddings,
+        Ok(EmbedBatch {
+            vectors,
             token_count,
         })
     }
 
     // -------------------------------------
-    // Whisper / Transcription
+    // Transcription
     // -------------------------------------
 
-    fn whisper_string_to_model(whisper_string: String) -> Result<WhisperSource> {
-        match whisper_string.as_str() {
-            "whisper_tiny" => Ok(WhisperSource::Tiny),
-            "whisper_tiny_quantized" => Ok(WhisperSource::QuantizedTiny),
-            "whisper_tiny_en" => Ok(WhisperSource::TinyEn),
-            "whisper_tiny_en_quantized" => Ok(WhisperSource::QuantizedTinyEn),
-            "whisper_base" => Ok(WhisperSource::Base),
-            "whisper_base_en" => Ok(WhisperSource::BaseEn),
-            "whisper_small" => Ok(WhisperSource::Small),
-            "whisper_small_en" => Ok(WhisperSource::SmallEn),
-            "whisper_medium" => Ok(WhisperSource::Medium),
-            "whisper_medium_en" => Ok(WhisperSource::MediumEn),
-            "whisper_medium_en_quantized_distil" => Ok(WhisperSource::QuantizedDistilMediumEn),
-            "whisper_large" => Ok(WhisperSource::Large),
-            "whisper_large_v2" => Ok(WhisperSource::LargeV2),
-            "whisper_distil_medium_en" => Ok(WhisperSource::DistilMediumEn),
-            "whisper_distil_large_v2" => Ok(WhisperSource::DistilLargeV2),
-            "whisper_distil_large_v3" => Ok(WhisperSource::DistilLargeV3),
-            "whisper_distil_large_v3_quantized" => Ok(WhisperSource::QuantizedDistilLargeV3),
-            "whisper_large_v3_turbo_quantized" => Ok(WhisperSource::QuantizedLargeV3Turbo),
-            _ => Err(anyhow!("Unknown whisper model: {}", whisper_string)),
-        }
-    }
-
-    fn get_whisper_model_size(model_id: String) -> Result<WhisperSource> {
-        // Try to treat string as model size string first
-        if let Ok(model) = Self::whisper_string_to_model(model_id.clone()) {
-            return Ok(model);
-        }
-
-        // Try to get model from DB by ID
-        if let Ok(Some(model)) = crate::db_backend::db_backend().get_model(model_id.clone()) {
-            if model.model_type != ModelType::Transcription {
-                return Err(anyhow!("Model '{}' is not a transcription model", model_id));
-            }
-            // Use filename from local model config
-            if let Some(local) = model.local {
-                return Self::whisper_string_to_model(local.file_name);
-            }
-        }
-
-        // if nothing above works, see if we have a transcription model in the DB and use that
-        // Try to find first transcription model in DB
-        if let Ok(models) = crate::db_backend::db_backend().get_models() {
-            if let Some(model) = models
-                .into_iter()
-                .find(|m| m.model_type == ModelType::Transcription)
-            {
-                if let Some(local) = model.local {
-                    return Self::whisper_string_to_model(local.file_name);
-                }
-            }
-        }
-
-        // Default to tiny if nothing found
-        Ok(WhisperSource::Tiny)
-    }
-
+    /// Open a stream on the transcription model `model_id`: each utterance fed goes to its
+    /// endpoint as one request.
     pub async fn open_transcription_stream(
         &self,
         model_id: String,
-        _params: Option<VoiceActivityParams>,
         caller: &RequestContext,
     ) -> Result<String> {
-        let model_size = Self::get_whisper_model_size(model_id.clone())?;
-        let (agent_did, user_did) = transcription_stream_owner(caller.acts_as())?;
-
-        // MEMORY OPTIMIZATION: Load each Whisper model size ONCE and share across all streams using that size
-        // Arc cloning is cheap (just increments ref count), saves 500MB-1.5GB per stream!
-        let whisper_model = {
-            let mut shared_models = self.shared_whisper_models.lock().await;
-            let model_key = format!("{:?}", model_size); // Use Debug format as key (e.g., "Small", "Medium")
-
-            if !shared_models.contains_key(&model_key) {
-                log::info!(
-                    "Loading shared Whisper model {} ({:?}) (ONE model per size, ~500MB-1.5GB)...",
-                    model_id,
-                    model_size
-                );
-
-                let model = WhisperBuilder::default()
-                    .with_source(model_size)
-                    .with_device(Self::new_candle_device())
-                    .build()
-                    .await?;
-
-                log::info!(
-                    "Shared Whisper model {:?} loaded! All streams using this size will reuse this model.",
-                    model_size
-                );
-                shared_models.insert(model_key.clone(), Arc::new(model));
-            } else {
-                log::info!(
-                    "Reusing existing shared Whisper model {:?} for new stream",
-                    model_size
-                );
-            }
-
-            // Clone the Arc - this is CHEAP! Just increments a reference count
-            shared_models.get(&model_key).unwrap().clone()
+        let model_id = if model_id == DEFAULT_MODEL {
+            Self::default_model(ModelType::Transcription, Some(caller))?
+        } else {
+            model_id
         };
+        let (client, remote_model, endpoint_id) = transcription::endpoint_transcriber(&model_id)?;
+        let (agent_did, user_did) = transcription_stream_owner(caller.acts_as())?;
+        Ok(self
+            .open_remote_stream(
+                model_id,
+                remote_model,
+                endpoint_id,
+                Arc::new(client),
+                agent_did,
+                user_did,
+            )
+            .await)
+    }
 
-        log::info!("Opening transcription stream with model {:?}", model_size);
-
+    /// Open a stream whose utterances `client` transcribes with the upstream model
+    /// `remote_model` on endpoint `endpoint_id`, billed as `model_id` to `agent_did`, its text
+    /// sent to `user_did`.
+    async fn open_remote_stream(
+        &self,
+        model_id: String,
+        remote_model: String,
+        endpoint_id: String,
+        client: Arc<dyn providers::audio::RemoteTranscribe>,
+        agent_did: Option<String>,
+        user_did: String,
+    ) -> String {
         let stream_id = uuid::Uuid::new_v4().to_string();
-        let stream_id_clone = stream_id.clone();
-        let (samples_tx, samples_rx) = futures_channel::mpsc::unbounded::<Vec<f32>>();
-        let (drop_tx, drop_rx) = oneshot::channel();
-        let last_activity = Arc::new(Mutex::new(std::time::Instant::now()));
+        let (utterances, queue) = mpsc::unbounded_channel();
         let (text_broadcast_tx, _) = tokio::sync::broadcast::channel::<String>(64);
-        let text_broadcast_tx_clone = text_broadcast_tx.clone();
-
-        // Clone billing context for the async task
-        let billing_agent = agent_did.clone();
-        let billing_model_id = model_id.clone();
-
-        let user_did = Some(user_did);
-
-        // Clone the streams map so the thread can remove itself on exit
-        let streams_map = self.transcription_streams.clone();
-        let stream_id_for_cleanup = stream_id.clone();
-
-        thread::spawn(move || {
-            let rt = tokio::runtime::Runtime::new().unwrap();
-
-            rt.block_on(async {
-
-                // Dereference the Arc to get the Whisper model
-                // The model weights stay shared in memory!
-                let whisper = (*whisper_model).clone();
-
-                // Build a Silero VAD model for server-side speech detection.
-                // This filters non-speech audio (coughs, sighs, keyboard noise)
-                // that the client-side energy-based VAD cannot distinguish from
-                // speech.  We run VAD inline on each feed rather than using the
-                // streaming pipeline (voice_activity_stream → rechunk) because
-                // the rechunker hangs: it relies on continuously polled samples,
-                // but the AudioStream returns Pending between feeds, so the
-                // rechunker never detects end-of-speech.
-                let vad = match voice_activity_detector::VoiceActivityDetector::builder()
-                    .sample_rate(16000)
-                    .chunk_size(512usize)
-                    .build()
-                {
-                    Ok(v) => v,
-                    Err(e) => {
-                        log::error!("Failed to build Silero VAD model for stream {}: {:?}", stream_id_clone, e);
-                        return;
-                    }
-                };
-                let vad = std::sync::Mutex::new(vad);
-
-                let mut samples_rx = samples_rx;
-
-                tokio::select! {
-                    _ = drop_rx => {},
-                    _ = async {
-                        while let Some(audio_chunk) = samples_rx.next().await {
-                            if audio_chunk.is_empty() {
-                                continue;
-                            }
-
-                            // Run Silero VAD: check what fraction of 512-sample
-                            // windows contain speech.  Thresholds chosen to
-                            // match the old Kalosm rechunker behaviour:
-                            //   per-window prob >= 0.6  (was start_threshold)
-                            //   >= 33% of windows       (reject transients)
-                            let speech_ratio = {
-                                let mut locked = vad.lock().unwrap();
-                                let mut speech_chunks = 0usize;
-                                let mut total_chunks = 0usize;
-                                for window in audio_chunk.chunks(512) {
-                                    if window.len() == 512 {
-                                        let prob = locked.predict(window.iter().copied());
-                                        total_chunks += 1;
-                                        if prob > 0.6 {
-                                            speech_chunks += 1;
-                                        }
-                                    }
-                                }
-                                if total_chunks == 0 {
-                                    0.0f32
-                                } else {
-                                    speech_chunks as f32 / total_chunks as f32
-                                }
-                            };
-
-                            if speech_ratio < 0.33 {
-                                log::trace!(
-                                    "🤖 VAD filtered non-speech audio for stream {} (speech_ratio={:.2})",
-                                    stream_id_clone,
-                                    speech_ratio
-                                );
-                                continue;
-                            }
-
-                            log::trace!(
-                                "🤖 VAD passed audio for stream {} ({} samples, speech_ratio={:.2})",
-                                stream_id_clone,
-                                audio_chunk.len(),
-                                speech_ratio
-                            );
-
-                            let buffer = rodio::buffer::SamplesBuffer::new(1, 16000, audio_chunk);
-                            match whisper.transcribe(buffer) {
-                                Ok(mut segments) => {
-                                    while let Some(segment) = segments.next().await {
-                            let text = segment.text().to_string();
-                            {
-                                let preview: String = text.chars().take(40).collect();
-                                let ellipsis = if text.chars().count() > 40 { "…" } else { "" };
-                                log::debug!(
-                                    "🤖 transcription segment stream={} chars={} preview={:?}{}",
-                                    stream_id_clone,
-                                    text.chars().count(),
-                                    preview,
-                                    ellipsis
-                                );
-                            }
-
-                            // Bill for transcribed words
-                            let word_count = text.split_whitespace().count();
-                            if word_count > 0 {
-                                if let Some(ref billed_did) = billing_agent {
-                                    let rate_key =
-                                        crate::db_backend::db_backend().get_model(billing_model_id.clone())
-                                        .ok()
-                                        .flatten()
-                                        .map(|m| m.name)
-                                        .unwrap_or_else(|| billing_model_id.clone());
-
-                                    let rate =
-                                        crate::db_backend::db_backend().get_host_rate(&rate_key)
-                                        .ok()
-                                        .flatten()
-                                        .unwrap_or(0.0);
-                                    let cost = word_count as f64 * rate;
-                                    match crate::billing::bill_compute(
-                                        billed_did,
-                                        cost,
-                                        "ai_transcription",
-                                        Some(&format!(
-                                            "{} words (model: {})",
-                                            word_count, billing_model_id,
-                                        )),
-                                    ) {
-                                        Err(
-                                            crate::billing::BillingError::InsufficientCredits,
-                                        ) => {
-                                            log::warn!("Transcription: insufficient credits for agent {} — delivering already-computed text, future feeds will be rejected", billed_did);
-                                        }
-                                        Err(e) => {
-                                            log::warn!(
-                                                "Transcription billing failed: {:?}",
-                                                e
-                                            );
-                                        }
-                                        Ok(()) => {}
-                                    }
-                                }
-                            }
-
-                            let text_for_pubsub = text.clone();
-                            let text_for_broadcast = text.clone();
-                            let broadcast_tx = text_broadcast_tx_clone.clone();
-                            let stream_id_for_pubsub = stream_id_clone.clone();
-                            let user_did_for_pubsub = user_did.clone();
-                            rt.spawn(async move {
-                                // The stream owner's sessions only.
-                                let audience = Audience::agent(user_did_for_pubsub.as_deref());
-                                let text = TranscriptionTextFilter {
-                                    stream_id: stream_id_for_pubsub,
-                                    text: text_for_pubsub,
-                                    user_did: user_did_for_pubsub,
-                                };
-                                get_global_pubsub().await.publish_event(Event::new(
-                                    Topic::AiTranscriptionText,
-                                    audience,
-                                    text,
-                                ));
-                            });
-
-                            // Also broadcast via per-stream channel for SSE feed responses
-                            let _ = broadcast_tx.send(text_for_broadcast);
-                                    }
-                                }
-                                Err(e) => {
-                                    log::error!(
-                                        "Transcription error for stream {}: {:?}",
-                                        stream_id_clone,
-                                        e
-                                    );
-                                }
-                            }
-                        }
-                    } => {}
-                }
-            });
-
-            // Clean up the stream entry so feed calls get StreamNotFound
-            // instead of "receiver is gone" errors looping forever
-            rt.block_on(async {
-                streams_map.lock().await.remove(&stream_id_for_cleanup);
-                log::info!("Transcription stream {} cleaned up", stream_id_for_cleanup);
-            });
-        });
+        log::info!("Opening transcription stream {stream_id} on model {model_id} ({remote_model})");
+        let worker = transcription::RemoteStream {
+            stream_id: stream_id.clone(),
+            model_id: model_id.clone(),
+            remote_model,
+            endpoint_id,
+            client,
+            agent_did: agent_did.clone(),
+            user_did,
+            listeners: text_broadcast_tx.clone(),
+            gate: Some(transcription::SpeechGate::new()),
+        };
+        tokio::spawn(worker.run(queue));
 
         self.transcription_streams.lock().await.insert(
             stream_id.clone(),
             TranscriptionSession {
-                samples_tx,
-                drop_tx,
-                last_activity,
+                utterances,
+                model_id,
+                last_activity: Arc::new(Mutex::new(tokio::time::Instant::now())),
+                in_flight: Default::default(),
                 text_broadcast_tx,
-                model_id: model_id.clone(),
                 agent_did,
             },
         );
-
-        Ok(stream_id)
+        stream_id
     }
 
+    /// Feed one utterance (16 kHz mono) to a stream.
+    ///
+    /// Answers once the utterance is transcribed and its text published, after every
+    /// utterance fed before it; an upstream failure is the error. The pieces a streaming
+    /// upstream sent before it failed stay published, and nothing more is.
     pub async fn feed_transcription_stream(
         &self,
         stream_id: &String,
         audio_samples: Vec<f32>,
         caller: &RequestContext,
     ) -> Result<()> {
-        let mut map_lock = self.transcription_streams.lock().await;
-
-        if let Some(stream) = map_lock.get_mut(stream_id) {
-            // Verify the caller owns this stream
-            Self::verify_stream_ownership(stream, caller)?;
-            // Update last activity time
-            *stream.last_activity.lock().await = std::time::Instant::now();
-            stream.samples_tx.send(audio_samples).await.map_err(|e| {
-                AIServiceError::CrazyError(format!("Failed to feed stream {}: {}", stream_id, e))
-            })?;
-            Ok(())
-        } else {
-            Err(AIServiceError::StreamNotFound.into())
-        }
+        self.queue_utterance(stream_id, audio_samples, caller)
+            .await?
+            .await
     }
 
-    /// Feed audio samples to a stream and return a broadcast receiver for
-    /// partial/final transcription text events (used by SSE feed response).
-    pub async fn feed_transcription_stream_with_broadcast(
+    /// Queue one utterance (16 kHz mono) on a stream, and answer what its feed answers
+    /// ([`Self::feed_transcription_stream`]) without waiting for it: utterances keep the
+    /// order they were queued in.
+    pub async fn queue_utterance(
         &self,
         stream_id: &String,
         audio_samples: Vec<f32>,
         caller: &RequestContext,
-    ) -> Result<tokio::sync::broadcast::Receiver<String>> {
-        let mut map_lock = self.transcription_streams.lock().await;
-
-        if let Some(stream) = map_lock.get_mut(stream_id) {
-            Self::verify_stream_ownership(stream, caller)?;
-            *stream.last_activity.lock().await = std::time::Instant::now();
-            let rx = stream.text_broadcast_tx.subscribe();
-            stream.samples_tx.send(audio_samples).await.map_err(|e| {
-                AIServiceError::CrazyError(format!("Failed to feed stream {}: {}", stream_id, e))
+    ) -> Result<FeedAnswer> {
+        let map_lock = self.transcription_streams.lock().await;
+        let stream = map_lock
+            .get(stream_id)
+            .ok_or(AIServiceError::StreamNotFound)?;
+        Self::verify_stream_ownership(stream, caller)?;
+        *stream.last_activity.lock().await = tokio::time::Instant::now();
+        // Queued while the map is locked: two feeds keep the order they arrived in.
+        let (done, outcome) = oneshot::channel();
+        stream
+            .utterances
+            .send(transcription::Utterance {
+                samples: audio_samples,
+                done,
+            })
+            .map_err(|e| {
+                AIServiceError::CrazyError(format!("Failed to feed stream {stream_id}: {e}"))
             })?;
-            Ok(rx)
-        } else {
-            Err(AIServiceError::StreamNotFound.into())
-        }
+        // Counted while the map is still locked, so the reaper never sees the utterance
+        // queued and not counted. The answer holds it: answered or dropped, it ends.
+        let in_flight = InFlight::count(stream);
+        let stream_id = stream_id.clone();
+        Ok(Box::pin(async move {
+            let _in_flight = in_flight;
+            outcome
+                .await
+                .map_err(|_| anyhow!("Transcription stream {stream_id} ended before it answered"))?
+        }))
     }
 
-    /// One-shot transcription: open a stream, feed the whole audio
-    /// buffer, drain the broadcast channel until idle, close.
-    ///
-    /// Backs `POST /v1/audio/transcriptions` (batch multipart upload).
-    /// The caller is responsible for decoding the upload to 16 kHz mono
-    /// `f32` samples — this method only handles the whisper-side
-    /// session lifecycle and assembly of the final transcript.
-    pub async fn transcribe_buffer(
+    /// The text of a stream, as it is published (`/v1/realtime`).
+    pub async fn subscribe_transcription_text(
         &self,
-        model_id: String,
-        samples: Vec<f32>,
+        stream_id: &String,
         caller: &RequestContext,
-    ) -> Result<String> {
-        let stream_id = self
-            .open_transcription_stream(model_id, None, caller)
-            .await?;
-
-        // Subscribe to the broadcast BEFORE feeding so we don't drop any
-        // partial events the whisper thread emits during the first
-        // window.
-        let mut rx = self
-            .feed_transcription_stream_with_broadcast(&stream_id, samples, caller)
-            .await?;
-
-        // Drain until the receiver lags or no message arrives within a
-        // short idle window.  Whisper emits one event per finalised
-        // segment; for a one-shot buffer the model usually emits 1-3
-        // segments and then goes quiet.
-        let mut transcript = String::new();
-        let idle = Duration::from_millis(2500);
-        loop {
-            match tokio::time::timeout(idle, rx.recv()).await {
-                Ok(Ok(text)) => {
-                    if !transcript.is_empty() && !text.is_empty() {
-                        transcript.push(' ');
-                    }
-                    transcript.push_str(&text);
-                }
-                Ok(Err(_)) => break, // sender dropped
-                Err(_) => break,     // idle timeout
-            }
-        }
-
-        let _ = self.close_transcription_stream(&stream_id, caller).await;
-        Ok(transcript)
+    ) -> Result<tokio::sync::broadcast::Receiver<String>> {
+        let map_lock = self.transcription_streams.lock().await;
+        let stream = map_lock
+            .get(stream_id)
+            .ok_or(AIServiceError::StreamNotFound)?;
+        Self::verify_stream_ownership(stream, caller)?;
+        Ok(stream.text_broadcast_tx.subscribe())
     }
 
+    /// Close a stream. Utterances already fed to a stream on an endpoint are still answered.
     pub async fn close_transcription_stream(
         &self,
         stream_id: &String,
         caller: &RequestContext,
     ) -> Result<()> {
         let mut map_lock = self.transcription_streams.lock().await;
-
-        // Verify ownership before removing
-        if let Some(stream) = map_lock.get(stream_id) {
-            Self::verify_stream_ownership(stream, caller)?;
-        }
-
-        if let Some(stream) = map_lock.remove(stream_id) {
-            stream.drop_tx.send(()).map_err(|_| {
-                anyhow!(AIServiceError::CrazyError(format!(
-                    "Failed to close stream {}: Whisper thread may have crashed",
-                    stream_id
-                )))
-            })
-        } else {
-            Err(AIServiceError::StreamNotFound.into())
-        }
+        let stream = map_lock
+            .get(stream_id)
+            .ok_or(AIServiceError::StreamNotFound)?;
+        Self::verify_stream_ownership(stream, caller)?;
+        map_lock.remove(stream_id);
+        Ok(())
     }
 
     /// Verify that the caller (the agent its request acts as) owns the given transcription
@@ -2445,165 +1678,52 @@ impl AIService {
         }
     }
 
-    async fn load_transcriber_model(model_id: String) {
-        publish_model_status(model_id.clone(), 0.0, "Loading", false, false).await;
-
-        let model_size = Self::get_whisper_model_size(model_id.clone())
-            .ok()
-            .unwrap_or(WHISPER_MODEL);
-
-        let _ = WhisperBuilder::default()
-            .with_source(model_size)
-            .with_device(Self::new_candle_device())
-            .build_with_loading_handler({
-                let name = model_id.clone();
-                move |progress| {
-                    tokio::spawn(handle_progress(name.clone(), progress));
-                }
-            })
-            .await;
-
-        publish_model_status(model_id.clone(), 100.0, "Loaded", true, false).await;
-    }
-
+    /// Rewrite model `model_id` and build its client again. A refused rewrite (an endpoint
+    /// that does not exist) changes nothing; a client that does not build is the error,
+    /// with the row already rewritten.
     pub async fn update_model(&self, model_id: String, model_config: ModelInput) -> Result<()> {
         log::info!("Updating model: {} with: {:?}", model_id, model_config);
-        // First get the existing model to determine its type
-        let existing_model = crate::db_backend::db_backend()
-            .get_model(model_id.clone())
-            .map_err(|e| anyhow!("Database error: {}", e))?
+        crate::db_backend::db_backend()
+            .get_model(model_id.clone())?
             .ok_or_else(|| anyhow!("Model not found: {}", model_id))?;
-
-        // Update the model in the database
-        // `context`, not a new error, so the API can still tell an `ApiKeyNotResent`.
+        Self::check_endpoint_serves(&model_config)?;
+        // `context`, not a new error, so the API can still tell an `InvalidModel`.
         crate::db_backend::db_backend()
             .update_model(&model_id, &model_config)
             .context("Failed to update model in database")?;
+        self.reload_model(model_id).await
+    }
 
-        // Get the updated model from the database
-        let updated_model = crate::db_backend::db_backend()
-            .get_model(model_id.clone())
-            .map_err(|e| anyhow!("Database error: {}", e))?
+    /// Close the streams on `model_id`: each one keeps the URL and key of the endpoint it
+    /// opened with. The utterances they already took are answered.
+    async fn close_streams_of(&self, model_id: &str) {
+        self.transcription_streams
+            .lock()
+            .await
+            .retain(|_, stream| stream.model_id != model_id);
+    }
+
+    /// Builds a model's client again from its stored row, after the row changed: an update
+    /// of the model, or of the endpoint it runs on.
+    pub(crate) async fn reload_model(&self, model_id: String) -> Result<()> {
+        let model = crate::db_backend::db_backend()
+            .get_model(model_id.clone())?
             .ok_or_else(|| anyhow!("Model not found after update: {}", model_id))?;
-
-        log::info!("Updated model in DB: {:?}", updated_model);
-
-        match existing_model.model_type {
-            ModelType::Llm => {
-                // Shutdown the existing model thread
-                {
-                    let mut llm_channel = self.llm_channel.lock().await;
-                    if let Some(sender) = llm_channel.get(&model_id) {
-                        log::info!("Shutting down LLM model thread for {}", model_id);
-                        let (tx, rx) = oneshot::channel();
-                        if let Ok(()) =
-                            sender.send(LLMTaskRequest::Shutdown(LLMTaskShutdownRequest {
-                                result_sender: tx,
-                            }))
-                        {
-                            // Wait for the thread to confirm shutdown
-                            let _ = rx.await;
-                            log::info!("LLM model thread for {} confirmed shutdown", model_id);
-                        }
-
-                        // Remove the channel from the map
-                        llm_channel.remove(&model_id);
-                    } else {
-                        log::info!(
-                            "LLM model thread for {} not found. Nothing to shutdown",
-                            model_id
-                        );
-                    }
-                }
-
-                // Spawn the model with new configuration
-                log::info!(
-                    "Spawning new LLM model thread for {} with updated config",
-                    model_id
-                );
-                let (model_ready_tx, model_ready_rx) = oneshot::channel();
-                self.spawn_llm_model(updated_model, Some(model_ready_tx))
-                    .await?;
-                model_ready_rx.await?;
-
-                // Respawn every task that runs on this model's worker: the ones
-                // naming it, and the ones naming a variable (`default`) that
-                // resolves to it. The new worker starts with no tasks.
-                let tasks = crate::db_backend::db_backend()
-                    .get_tasks()
-                    .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
-
-                for task in tasks.into_iter().filter(|t| {
-                    Self::replace_model_variables(&t.model_id).is_ok_and(|id| id == model_id)
-                }) {
-                    // One task that fails to spawn must not leave the rest unspawned.
-                    if let Err(e) = self.spawn_task(task.clone()).await {
-                        log::warn!(
-                            "AIService::update_model: task '{}' (task_id={}) not respawned on {}: {e:#}",
-                            task.name,
-                            task.task_id,
-                            model_id
-                        );
-                    }
-                }
-            }
-            ModelType::Embedding => {
-                // TODO: Handle embedding model updates
-            }
-            ModelType::Transcription => {
-                Self::load_transcriber_model(updated_model.id.clone()).await;
-            }
-        }
-
-        Ok(())
+        // A stream on the model keeps the client it opened with: closed, so no more audio
+        // goes to the endpoint as it was.
+        self.close_streams_of(&model_id).await;
+        self.init_model(&model).await
     }
 
     pub async fn remove_model(&self, model_id: String) -> Result<()> {
-        // First get the existing model to determine its type
-        let existing_model = crate::db_backend::db_backend()
-            .get_model(model_id.clone())
-            .map_err(|e| anyhow!("Database error: {}", e))?
+        crate::db_backend::db_backend()
+            .get_model(model_id.clone())?
             .ok_or_else(|| anyhow!("Model not found: {}", model_id))?;
-
-        match existing_model.model_type {
-            ModelType::Llm => {
-                log::info!("Shutting down LLM model thread for {}", model_id);
-                // Shutdown the existing model thread
-                let mut llm_channel = self.llm_channel.lock().await;
-                if let Some(sender) = llm_channel.get(&model_id) {
-                    let (tx, rx) = oneshot::channel();
-                    if let Ok(()) = sender.send(LLMTaskRequest::Shutdown(LLMTaskShutdownRequest {
-                        result_sender: tx,
-                    })) {
-                        // Wait for the thread to confirm shutdown
-                        let _ = rx.await;
-                    }
-
-                    log::info!("LLM model thread for {} confirmed shutdown", model_id);
-
-                    // Remove the channel from the map
-                    llm_channel.remove(&model_id);
-                } else {
-                    log::warn!(
-                        "LLM model thread for {} not found. Nothing to shutdown",
-                        model_id
-                    );
-                }
-            }
-            ModelType::Embedding => {
-                // TODO: Handle embedding model removal
-            }
-            ModelType::Transcription => {
-                // TODO: Handle transcription model removal
-            }
-        }
-
-        // Remove the model from the database
+        self.drop_clients(&model_id).await;
+        self.close_streams_of(&model_id).await;
         crate::db_backend::db_backend()
             .remove_model(&model_id)
-            .map_err(|e| anyhow!("Failed to remove model from database: {}", e))?;
-
-        Ok(())
+            .map_err(|e| anyhow!("Failed to remove model from database: {}", e))
     }
 }
 
@@ -2678,6 +1798,7 @@ mod tests {
             text: String::new(),
             tool_calls: calls,
             usage: Default::default(),
+            stop_reason: None,
         };
         let arguments = serde_json::json!({ "a": 1 });
         let expected = super::estimate_token_count("update_schema")
@@ -2690,29 +1811,1124 @@ mod tests {
     }
 
     use super::*;
-    use crate::types::{AIPromptExamplesInput, LocalModelInput};
-    use tokio::time::{sleep, Duration};
+    use crate::types::{AIPromptExamplesInput, EndpointKind};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    fn remote_at(base_url: &str, api_key: &str) -> ModelApi {
-        ModelApi {
-            base_url: url::Url::parse(base_url).expect("test URL parses"),
-            api_key: api_key.into(),
-            model: "claude-test".to_string(),
-            api_type: ModelApiType::Anthropic,
-            max_num_ctx: None,
+    /// A fresh service on a fresh in-memory database.
+    fn service() -> AIService {
+        Ad4mDb::init_global_instance(":memory:").expect("Ad4mDb to initialize");
+        AIService::empty()
+    }
+
+    /// A saved endpoint of `kind` at `url`, without a key.
+    fn saved_endpoint(kind: EndpointKind, url: &str) -> Endpoint {
+        let endpoint = Endpoint::for_test("upstream", kind, url, "");
+        Ad4mDb::with_global_instance(|db| db.insert_endpoint(&endpoint)).unwrap();
+        endpoint
+    }
+
+    fn model_on(endpoint: &Endpoint, model_type: ModelType, remote: &str) -> ModelInput {
+        ModelInput {
+            name: format!("{model_type}-model"),
+            model_type,
+            endpoint_id: endpoint.id.clone(),
+            remote_model: remote.into(),
+            native_tools: None,
         }
     }
 
     #[tokio::test]
-    async fn a_saved_model_with_a_key_over_plain_http_is_not_built() {
-        // The load path: a model saved before the WS handlers refused this
-        // reaches client construction without passing through them.
-        let error = match AIService::build_remote_client(
-            "m".to_string(),
-            remote_at("http://192.168.1.10:8080", "sk-ant"),
+    async fn a_fresh_executor_loads_no_model() {
+        let service = service();
+        service.load().await.unwrap();
+        assert!(service.llms.lock().await.is_empty());
+        assert!(service.embedders.lock().await.is_empty());
+        let error = match service
+            .embed("not-registered".into(), "text".into(), None)
+            .await
+        {
+            Ok(_) => panic!("no embedding model is configured"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("No EMBEDDING model"), "{error}");
+    }
+
+    /// A new service loads the database's models in the background and says when it is
+    /// done: local AI's autostart waits for that, so the load cannot overwrite the clients
+    /// the runtimes' registration builds.
+    #[tokio::test]
+    async fn a_new_service_says_when_its_models_are_loaded() {
+        Ad4mDb::init_global_instance(":memory:").expect("Ad4mDb to initialize");
+        let endpoint = saved_endpoint(EndpointKind::LlamaServer, "http://127.0.0.1:9");
+        let id = Ad4mDb::with_global_instance(|db| {
+            db.add_model(&model_on(&endpoint, ModelType::Llm, "m"))
+        })
+        .unwrap();
+        let service = AIService::new().unwrap();
+        tokio::time::timeout(Duration::from_secs(10), service.wait_loaded())
+            .await
+            .expect("the load ends");
+        assert!(service.llms.lock().await.contains_key(&id));
+    }
+
+    fn embeddings_answer(n: usize) -> String {
+        serde_json::json!({
+            "data": (0..n).map(|i| serde_json::json!({ "index": i, "embedding": [1.0, 2.0] })).collect::<Vec<_>>(),
+        })
+        .to_string()
+    }
+
+    // A request never installs local AI: the operator's embed on the default, on an executor
+    // with no embedding model, is an error that says how to get one, and it reaches no
+    // endpoint. Local AI installs only through its explicit paths (`ai.localInstall`).
+    #[tokio::test]
+    async fn without_an_embedding_model_the_default_is_an_error_that_says_how_to_get_one() {
+        let mut upstream = mockito::Server::new_async().await;
+        let embeds = upstream
+            .mock("POST", "/v1/embeddings")
+            .expect(0)
+            .create_async()
+            .await;
+        let service = service();
+        saved_endpoint(EndpointKind::LlamaServer, &upstream.url());
+
+        let operator = RequestContext::operator_for_test();
+        let error = match service
+            .embed(DEFAULT_MODEL.into(), "one".into(), Some(&operator))
+            .await
+        {
+            Ok(_) => panic!("no embedding model is registered"),
+            Err(error) => error,
+        };
+        assert!(
+            error.downcast_ref::<local::LocalAiRefused>().is_some(),
+            "{error}"
+        );
+        assert_eq!(
+            error.to_string(),
+            "No default EMBEDDING model on this executor: set up local AI (launcher Settings → \
+             AI, or ai.localInstall) or register a model on an endpoint"
+        );
+        assert!(service.embedders.lock().await.is_empty(), "nothing set up");
+        embeds.assert_async().await;
+    }
+
+    // A caller that names a model that is not there (`bert`, dev's default) gets an error
+    // that names the default, and nothing is set up for it: no alias.
+    #[tokio::test]
+    async fn a_missing_named_model_is_an_error_and_sets_nothing_up() {
+        let service = service();
+        saved_endpoint(EndpointKind::LlamaServer, "http://127.0.0.1:9");
+        let error = match service.embed("bert".into(), "text".into(), None).await {
+            Ok(_) => panic!("bert is not a model here"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("'default' names its default"),
+            "{error}"
+        );
+        assert!(service.embedders.lock().await.is_empty(), "nothing set up");
+    }
+
+    // With embedding models registered, the default is the default model, else the first.
+    #[tokio::test]
+    async fn the_default_is_the_types_default_model_else_its_first() {
+        let mut first_server = mockito::Server::new_async().await;
+        let mut second_server = mockito::Server::new_async().await;
+        let first_hits = first_server
+            .mock("POST", "/v1/embeddings")
+            .with_body(embeddings_answer(1))
+            .expect(1)
+            .create_async()
+            .await;
+        let second_hits = second_server
+            .mock("POST", "/v1/embeddings")
+            .with_body(embeddings_answer(1))
+            .expect(1)
+            .create_async()
+            .await;
+        let service = service();
+        let first = saved_endpoint(EndpointKind::LlamaServer, &first_server.url());
+        let second = Endpoint::for_test(
+            "second",
+            EndpointKind::LlamaServer,
+            &second_server.url(),
+            "",
+        );
+        Ad4mDb::with_global_instance(|db| db.insert_endpoint(&second)).unwrap();
+        service
+            .add_model(model_on(&first, ModelType::Embedding, "a"))
+            .await
+            .unwrap();
+        let mut on_second = model_on(&second, ModelType::Embedding, "b");
+        on_second.name = "second-model".into();
+        let second_id = service.add_model(on_second).await.unwrap();
+
+        // No default: the first.
+        service
+            .embed(DEFAULT_MODEL.into(), "x".into(), None)
+            .await
+            .unwrap();
+        first_hits.assert_async().await;
+        // The default.
+        service
+            .set_default_model(ModelType::Embedding, second_id)
+            .await
+            .unwrap();
+        service
+            .embed(DEFAULT_MODEL.into(), "x".into(), None)
+            .await
+            .unwrap();
+        second_hits.assert_async().await;
+    }
+
+    // ── the context budget ────────────────────────────────────────────────
+    //
+    // The budget one request's message list is trimmed to follows the
+    // context window the request itself is sent at — for an Ollama model
+    // the `num_ctx` its client resolves from `/api/show`, already capped at
+    // the endpoint's `max_num_ctx` — not the endpoint's configured ceiling
+    // alone. A model whose native window sits under the ceiling, or whose
+    // metadata cannot be read at all, runs at less than it.
+
+    /// A model on an Ollama endpoint whose `/api/show` answers `show_body`
+    /// (or not at all): the service and the model's id.
+    async fn ollama_model_at(upstream: &mockito::ServerGuard) -> (AIService, String) {
+        let service = service();
+        let endpoint = saved_endpoint(EndpointKind::Ollama, &upstream.url());
+        let model = service
+            .add_model(model_on(&endpoint, ModelType::Llm, "m"))
+            .await
+            .unwrap();
+        (service, model)
+    }
+
+    #[tokio::test]
+    async fn an_ollama_budget_is_sized_from_the_window_the_model_runs_at() {
+        // A native 4,096-token window under a configured 8,192 ceiling: the
+        // budget is sized from 4,096 — the `num_ctx` the request goes out
+        // with — not from the ceiling it merely respects.
+        let mut upstream = mockito::Server::new_async().await;
+        let show = upstream
+            .mock("POST", "/api/show")
+            .with_body(r#"{"model_info":{"qwen3.context_length":4096}}"#)
+            .create_async()
+            .await;
+        let service = service();
+        let mut endpoint =
+            Endpoint::for_test("upstream", EndpointKind::Ollama, &upstream.url(), "");
+        endpoint.max_num_ctx = Some(8_192);
+        Ad4mDb::with_global_instance(|db| db.insert_endpoint(&endpoint)).unwrap();
+        let model = service
+            .add_model(model_on(&endpoint, ModelType::Llm, "m"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            service.context_budget_bytes(&model).await,
+            4_096 * CONTEXT_BYTES_PER_TOKEN / 2
+        );
+        show.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn an_ollama_budget_without_a_configured_cap_uses_the_native_window() {
+        // No `max_num_ctx` at all used to mean the unknown-window default
+        // (64 KiB), whatever the model actually runs at. The client's
+        // resolved window — 8,192 here — is the real answer.
+        let mut upstream = mockito::Server::new_async().await;
+        upstream
+            .mock("POST", "/api/show")
+            .with_body(r#"{"model_info":{"qwen3.context_length":8192}}"#)
+            .create_async()
+            .await;
+        let (service, model) = ollama_model_at(&upstream).await;
+
+        assert_eq!(
+            service.context_budget_bytes(&model).await,
+            8_192 * CONTEXT_BYTES_PER_TOKEN / 2
+        );
+    }
+
+    #[tokio::test]
+    async fn an_ollama_budget_falls_back_to_the_clients_own_num_ctx_fallback() {
+        // `/api/show` refuses: the client sends its own 2,048 `num_ctx`
+        // fallback, so the budget follows it rather than the 64 KiB default
+        // or the endpoint's ceiling.
+        let mut upstream = mockito::Server::new_async().await;
+        upstream
+            .mock("POST", "/api/show")
+            .with_status(404)
+            .create_async()
+            .await;
+        let (service, model) = ollama_model_at(&upstream).await;
+
+        assert_eq!(
+            service.context_budget_bytes(&model).await,
+            2_048 * CONTEXT_BYTES_PER_TOKEN / 2
+        );
+    }
+
+    #[tokio::test]
+    async fn a_hung_window_probe_budgets_the_clients_fallback_inside_the_request_timeout() {
+        // `/api/show` holds the connection open forever: the probe is part
+        // of this call's path, so it is bounded by the endpoint's request
+        // timeout, not the provider client's 600 s. Its failure answers
+        // what the completion itself resolves on the same failure — the
+        // client's own 2,048 `num_ctx` fallback.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let _held = tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let service = service();
+        let mut endpoint = Endpoint::for_test(
+            "upstream",
+            EndpointKind::Ollama,
+            &format!("http://{address}"),
+            "",
+        );
+        endpoint.request_timeout_secs = Some(1);
+        Ad4mDb::with_global_instance(|db| db.insert_endpoint(&endpoint)).unwrap();
+        let model = service
+            .add_model(model_on(&endpoint, ModelType::Llm, "m"))
+            .await
+            .unwrap();
+
+        let budget = tokio::time::timeout(
+            Duration::from_secs(10),
+            service.context_budget_bytes(&model),
         )
         .await
+        .expect("the probe is bounded by the endpoint's request timeout");
+        assert_eq!(budget, 2_048 * CONTEXT_BYTES_PER_TOKEN / 2);
+    }
+
+    #[tokio::test]
+    async fn a_non_ollama_model_keeps_the_ceiling_and_the_unknown_fallback() {
+        // An endpoint that resolves no window of its own keeps the old
+        // answers: the configured `max_num_ctx` when it has one, the 64 KiB
+        // default when the model is unknown entirely.
+        let service = service();
+        let mut capped = Endpoint::for_test(
+            "capped",
+            EndpointKind::LlamaServer,
+            "http://127.0.0.1:9",
+            "",
+        );
+        capped.max_num_ctx = Some(8_192);
+        Ad4mDb::with_global_instance(|db| db.insert_endpoint(&capped)).unwrap();
+        let model = service
+            .add_model(model_on(&capped, ModelType::Llm, "m"))
+            .await
+            .unwrap();
+        assert_eq!(
+            service.context_budget_bytes(&model).await,
+            8_192 * CONTEXT_BYTES_PER_TOKEN / 2
+        );
+        assert_eq!(
+            service
+                .context_budget_bytes("a-model-nobody-registered")
+                .await,
+            DEFAULT_CONTEXT_BUDGET_BYTES
+        );
+    }
+
+    #[tokio::test]
+    async fn a_result_cap_never_outgrows_the_budget_it_feeds() {
+        // A 2,048-token window budgets 3,072 bytes of request — under the
+        // clamp's 4 KiB floor, which let a 3,200-byte result through whole:
+        // bigger than the request it joins, the trim could only elide it.
+        // The cap stays under the budget minus the message's overhead, so
+        // the result is truncated and keeps most of its data instead.
+        let service = service();
+        let mut small =
+            Endpoint::for_test("small", EndpointKind::LlamaServer, "http://127.0.0.1:9", "");
+        small.max_num_ctx = Some(2_048);
+        Ad4mDb::with_global_instance(|db| db.insert_endpoint(&small)).unwrap();
+        let model = service
+            .add_model(model_on(&small, ModelType::Llm, "m"))
+            .await
+            .unwrap();
+
+        let budget = service.context_budget_bytes(&model).await;
+        assert_eq!(budget, 2_048 * CONTEXT_BYTES_PER_TOKEN / 2);
+        let cap = service.tool_result_max_bytes(&model).await;
+        assert!(
+            cap <= budget - TOOL_RESULT_OVERHEAD_BYTES,
+            "the cap {cap} must leave room in the {budget}B request"
+        );
+
+        let result = "x".repeat(3_200);
+        let fed = harness::cap_tool_result(&result, cap);
+        assert!(
+            fed.contains("[truncated:"),
+            "truncated, not passed whole nor elided: {fed:?}"
+        );
+        assert!(
+            fed.chars().filter(|c| *c == 'x').count() > 1_000,
+            "most of the result's data kept: {fed:?}"
+        );
+    }
+
+    // A stream on the default, on an executor with no transcription model, opens nothing:
+    // the operator is told to set up local AI or register a model, and nothing installs.
+    #[tokio::test]
+    async fn without_a_transcription_model_the_default_stream_is_an_error_that_says_how() {
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        let service = service();
+        let error = match service
+            .open_transcription_stream(DEFAULT_MODEL.into(), &RequestContext::operator_for_test())
+            .await
         {
+            Ok(_) => panic!("no transcription model is registered"),
+            Err(error) => error,
+        };
+        assert!(
+            error.downcast_ref::<local::LocalAiRefused>().is_some(),
+            "{error}"
+        );
+        assert!(
+            error.to_string().contains(
+                "set up local AI (launcher Settings → AI, or ai.localInstall) or register a model"
+            ),
+            "{error}"
+        );
+        assert!(service.transcription_streams.lock().await.is_empty());
+    }
+
+    // Only the operator can set up local AI (`ai.localInstall`): an app or a user that names
+    // the default on an executor without the model is told to ask the operator.
+    #[tokio::test]
+    async fn a_caller_other_than_the_operator_is_told_to_ask_the_operator() {
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        let service = service();
+        let transcribe = vec![crate::agent::capabilities::AI_TRANSCRIBE_CAPABILITY.clone()];
+        for caller in [
+            RequestContext::app_for_test(transcribe.clone()),
+            RequestContext::user_for_test("did:key:z6MkUser", transcribe.clone()),
+        ] {
+            let error = match service
+                .open_transcription_stream(DEFAULT_MODEL.into(), &caller)
+                .await
+            {
+                Ok(_) => panic!("no transcription model is registered"),
+                Err(error) => error,
+            };
+            assert!(
+                error
+                    .to_string()
+                    .contains("ask the operator to set up local AI"),
+                "{error}"
+            );
+        }
+        // `ai.embed` and `/v1/embeddings` as an app, and the executor's own embeds (`None`).
+        let prompt = RequestContext::app_for_test(vec![
+            crate::agent::capabilities::AI_PROMPT_CAPABILITY.clone(),
+        ]);
+        for caller in [Some(&prompt), None] {
+            let error = match service
+                .embed(DEFAULT_MODEL.into(), "text".into(), caller)
+                .await
+            {
+                Ok(_) => panic!("no embedding model is registered"),
+                Err(error) => error,
+            };
+            assert_eq!(
+                error.to_string(),
+                "No default EMBEDDING model on this executor: ask the operator to set up \
+                 local AI"
+            );
+        }
+    }
+
+    // The default endpoint has no `max_num_ctx`. A 16k guess for its window would cap a
+    // 35k-token interpretation prompt at the floor and truncate the JSON on every retry.
+    #[tokio::test]
+    async fn an_interpretation_cap_needs_a_known_window_and_none_is_sent_without_one() {
+        let service = service();
+        let unset = saved_endpoint(EndpointKind::LlamaServer, "http://127.0.0.1:9");
+        let unset_model = service
+            .add_model(model_on(&unset, ModelType::Llm, "m"))
+            .await
+            .unwrap();
+        assert_eq!(
+            AIService::interpretation_max_output_tokens(
+                service.resolved_context_tokens(&unset_model).await,
+                35_000
+            )
+            .unwrap(),
+            None,
+            "an unknown window sends no cap"
+        );
+
+        let mut sized =
+            Endpoint::for_test("sized", EndpointKind::LlamaServer, "http://127.0.0.1:8", "");
+        sized.max_num_ctx = Some(49_152);
+        Ad4mDb::with_global_instance(|db| db.insert_endpoint(&sized)).unwrap();
+        let sized_model = service
+            .add_model(model_on(&sized, ModelType::Llm, "m"))
+            .await
+            .unwrap();
+        // Room after a 35k prompt is 14,152: the ceiling applies.
+        assert_eq!(
+            AIService::interpretation_max_output_tokens(
+                service.resolved_context_tokens(&sized_model).await,
+                35_000
+            )
+            .unwrap(),
+            Some(8_192)
+        );
+        // The cap is the room itself down to the smallest useful answer...
+        assert_eq!(
+            AIService::interpretation_max_output_tokens(
+                service.resolved_context_tokens(&sized_model).await,
+                48_640
+            )
+            .unwrap(),
+            Some(512)
+        );
+        // ...and below that it is an error, never a cap past the window.
+        let error = AIService::interpretation_max_output_tokens(
+            service.resolved_context_tokens(&sized_model).await,
+            48_900,
+        )
+        .expect_err("252 tokens of room cannot hold an answer");
+        assert!(error.to_string().contains("context budget"), "{error}");
+    }
+
+    // The cap is the room after everything the request carries: a 3,000-token system prompt
+    // and a 1,000-token prompt on an 8,192 window leave under 4,192, not the 7,192 the
+    // prompt alone would leave.
+    #[tokio::test]
+    async fn an_interpretation_cap_counts_the_system_prompt_and_examples() {
+        let service = service();
+        let mut upstream = mockito::Server::new_async().await;
+        let completion = upstream
+            .mock("POST", "/v1/chat/completions")
+            .match_request(|request| {
+                let body: serde_json::Value =
+                    serde_json::from_slice(request.body().unwrap()).unwrap();
+                let cap = body["max_tokens"].as_u64().unwrap_or(u64::MAX);
+                cap <= 8_192 - 4_000
+            })
+            .with_body(r#"{"choices":[{"message":{"content":"{}"}}]}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let mut endpoint =
+            Endpoint::for_test("sized", EndpointKind::LlamaServer, &upstream.url(), "");
+        endpoint.max_num_ctx = Some(8_192);
+        Ad4mDb::with_global_instance(|db| db.insert_endpoint(&endpoint)).unwrap();
+        let model_id = service
+            .add_model(model_on(&endpoint, ModelType::Llm, "m"))
+            .await
+            .unwrap();
+        let task = service
+            .add_task(
+                AITaskInput {
+                    name: "interpret".into(),
+                    model_id,
+                    system_prompt: "s".repeat(12_000),
+                    prompt_examples: vec![],
+                    meta_data: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        service
+            .prompt_interpretation(task.task_id, "p".repeat(4_000))
+            .await
+            .unwrap();
+        completion.assert_async().await;
+    }
+
+    // The cap is budgeted against the window the request runs at: a model whose own window
+    // is 4,096 under a 131,072 ceiling leaves 1,096 tokens after a 3,000-token prompt, not
+    // the 8,192 the ceiling would.
+    #[tokio::test]
+    async fn an_interpretation_cap_is_sized_from_the_resolved_window_not_the_ceiling() {
+        let service = service();
+        let mut upstream = mockito::Server::new_async().await;
+        let _show = upstream
+            .mock("POST", "/api/show")
+            .with_body(r#"{"model_info":{"qwen3.context_length":4096}}"#)
+            .create_async()
+            .await;
+        let chat = upstream
+            .mock("POST", "/api/chat")
+            .match_request(|request| {
+                let body: serde_json::Value =
+                    serde_json::from_slice(request.body().unwrap()).unwrap();
+                let cap = body["options"]["num_predict"].as_u64().unwrap_or(u64::MAX);
+                cap <= 1_096
+            })
+            .with_body(r#"{"message":{"role":"assistant","content":"{}"},"done":true}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let mut endpoint = Endpoint::for_test("ceiling", EndpointKind::Ollama, &upstream.url(), "");
+        endpoint.max_num_ctx = Some(131_072);
+        Ad4mDb::with_global_instance(|db| db.insert_endpoint(&endpoint)).unwrap();
+        let model_id = service
+            .add_model(model_on(&endpoint, ModelType::Llm, "m"))
+            .await
+            .unwrap();
+        let task = service
+            .add_task(
+                AITaskInput {
+                    name: "interpret".into(),
+                    model_id,
+                    system_prompt: "s".into(),
+                    prompt_examples: vec![],
+                    meta_data: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        service
+            .prompt_interpretation(task.task_id, "p".repeat(12_000))
+            .await
+            .unwrap();
+        chat.assert_async().await;
+    }
+
+    // From a stored task to the wire: an interpretation task on an OpenAI reasoning model
+    // sends `max_completion_tokens` (o-series reject `max_tokens`) and no thinking switch.
+    // A complete answer is not retried with thinking off.
+    #[tokio::test]
+    async fn an_interpretation_on_an_openai_o_series_model_sends_no_max_tokens() {
+        let service = service();
+        let mut upstream = mockito::Server::new_async().await;
+        let completion = upstream
+            .mock("POST", "/v1/chat/completions")
+            .match_request(|request| {
+                let body: serde_json::Value =
+                    serde_json::from_slice(request.body().unwrap()).unwrap();
+                body.get("max_tokens").is_none()
+                    && body["max_completion_tokens"].as_u64().is_some()
+                    && body.get("chat_template_kwargs").is_none()
+            })
+            .with_body(r#"{"choices":[{"message":{"content":"{}"},"finish_reason":"stop"}]}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let mut endpoint = Endpoint::for_test("o", EndpointKind::OpenAi, &upstream.url(), "k");
+        endpoint.max_num_ctx = Some(200_000);
+        Ad4mDb::with_global_instance(|db| db.insert_endpoint(&endpoint)).unwrap();
+        let model_id = service
+            .add_model(model_on(&endpoint, ModelType::Llm, "o3-mini"))
+            .await
+            .unwrap();
+        let task = service
+            .add_task(
+                AITaskInput {
+                    name: "interpret".into(),
+                    model_id,
+                    system_prompt: "s".into(),
+                    prompt_examples: vec![],
+                    meta_data: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        service
+            .prompt_interpretation(task.task_id, "p".into())
+            .await
+            .unwrap();
+        completion.assert_async().await;
+    }
+
+    #[test]
+    fn a_context_exceeded_error_is_a_size_problem_and_a_transport_error_is_not() {
+        let exceeded = anyhow::anyhow!("the request exceeds the available context size");
+        let length = anyhow::anyhow!("context_length_exceeded");
+        let budget = anyhow::anyhow!(
+            "context budget: the prompt is about 100 tokens and the model's window is 128"
+        );
+        let transport =
+            anyhow::anyhow!("Could not reach http://127.0.0.1:11434: connection refused");
+        assert!(super::context_was_exceeded(&exceeded));
+        assert!(super::context_was_exceeded(&length));
+        assert!(!super::context_was_exceeded(&budget));
+        assert!(!super::context_was_exceeded(&transport));
+    }
+
+    fn request_json(request: &mockito::Request) -> serde_json::Value {
+        serde_json::from_slice(request.body().unwrap()).unwrap()
+    }
+
+    async fn interpretation_task_on(service: &AIService, endpoint: &Endpoint) -> String {
+        let model_id = service
+            .add_model(model_on(endpoint, ModelType::Llm, "qwen3"))
+            .await
+            .unwrap();
+        service
+            .add_task(
+                AITaskInput {
+                    name: "interpret".into(),
+                    model_id,
+                    system_prompt: "s".into(),
+                    prompt_examples: vec![],
+                    meta_data: None,
+                },
+                None,
+            )
+            .await
+            .unwrap()
+            .task_id
+    }
+
+    // First attempt leaves thinking on and still sends the cap. A complete
+    // answer is not sent again with thinking off.
+    #[tokio::test]
+    async fn an_interpretation_starts_with_thinking_on_and_a_complete_reply_is_not_retried() {
+        let service = service();
+        let mut upstream = mockito::Server::new_async().await;
+        let _show = upstream
+            .mock("POST", "/api/show")
+            .with_body(
+                r#"{"capabilities":["completion","thinking"],"model_info":{"qwen3.context_length":8192}}"#,
+            )
+            .expect_at_least(1)
+            .create_async()
+            .await;
+        let first = upstream
+            .mock("POST", "/api/chat")
+            .match_request(|request| {
+                let body = request_json(request);
+                body.get("think").is_none() && body["options"]["num_predict"].as_u64().is_some()
+            })
+            .with_body(
+                r#"{"message":{"role":"assistant","content":"{}"},"done":true,"done_reason":"stop"}"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        let mut endpoint = Endpoint::for_test("ollama", EndpointKind::Ollama, &upstream.url(), "");
+        endpoint.max_num_ctx = Some(8_192);
+        Ad4mDb::with_global_instance(|db| db.insert_endpoint(&endpoint)).unwrap();
+        let task_id = interpretation_task_on(&service, &endpoint).await;
+
+        let result = service
+            .prompt_interpretation(task_id, "p".into())
+            .await
+            .unwrap();
+        assert_eq!(result.text, "{}");
+        first.assert_async().await;
+    }
+
+    // An empty or length-cut first reply is one size failure: exactly one
+    // retry, and that retry is the no-thinking request.
+    #[tokio::test]
+    async fn an_empty_or_length_cut_interpretation_retries_once_with_thinking_off() {
+        let service = service();
+        let mut upstream = mockito::Server::new_async().await;
+        let _show = upstream
+            .mock("POST", "/api/show")
+            .with_body(
+                r#"{"capabilities":["completion","thinking"],"model_info":{"qwen3.context_length":8192}}"#,
+            )
+            .expect_at_least(1)
+            .create_async()
+            .await;
+        // Created first, matched second: mockito tries the newest mock first.
+        let retry = upstream
+            .mock("POST", "/api/chat")
+            .match_request(|request| {
+                let body = request_json(request);
+                body["think"] == false && body["options"]["num_predict"].as_u64().is_some()
+            })
+            .with_body(
+                r#"{"message":{"role":"assistant","content":"{\"ok\":true}"},"done":true,"done_reason":"stop"}"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        let first = upstream
+            .mock("POST", "/api/chat")
+            .match_request(|request| {
+                let body = request_json(request);
+                body.get("think").is_none() && body["options"]["num_predict"].as_u64().is_some()
+            })
+            .with_body(
+                r#"{"message":{"role":"assistant","content":""},"done":true,"done_reason":"length"}"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        let mut endpoint = Endpoint::for_test("ollama", EndpointKind::Ollama, &upstream.url(), "");
+        endpoint.max_num_ctx = Some(8_192);
+        Ad4mDb::with_global_instance(|db| db.insert_endpoint(&endpoint)).unwrap();
+        let task_id = interpretation_task_on(&service, &endpoint).await;
+
+        let result = service
+            .prompt_interpretation(task_id, "p".into())
+            .await
+            .unwrap();
+        assert_eq!(result.text, "{\"ok\":true}");
+        first.assert_async().await;
+        retry.assert_async().await;
+    }
+
+    // llama-server: a reply cut at the cap (`finish_reason: length`) is the
+    // same size failure, even when some answer text came back.
+    #[tokio::test]
+    async fn a_length_cut_llama_server_interpretation_retries_once_with_thinking_off() {
+        let service = service();
+        let mut upstream = mockito::Server::new_async().await;
+        let retry = upstream
+            .mock("POST", "/v1/chat/completions")
+            .match_request(|request| {
+                let body = request_json(request);
+                body["chat_template_kwargs"]["enable_thinking"] == false
+                    && body["max_tokens"].as_u64().is_some()
+            })
+            .with_body(r#"{"choices":[{"message":{"content":"{}"},"finish_reason":"stop"}]}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let first = upstream
+            .mock("POST", "/v1/chat/completions")
+            .match_request(|request| {
+                let body = request_json(request);
+                body.get("chat_template_kwargs").is_none() && body["max_tokens"].as_u64().is_some()
+            })
+            .with_body(
+                r#"{"choices":[{"message":{"content":"{\"inst"},"finish_reason":"length"}]}"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        let mut endpoint =
+            Endpoint::for_test("llama", EndpointKind::LlamaServer, &upstream.url(), "");
+        endpoint.max_num_ctx = Some(8_192);
+        Ad4mDb::with_global_instance(|db| db.insert_endpoint(&endpoint)).unwrap();
+        let task_id = interpretation_task_on(&service, &endpoint).await;
+
+        let result = service
+            .prompt_interpretation(task_id, "p".into())
+            .await
+            .unwrap();
+        assert_eq!(result.text, "{}");
+        first.assert_async().await;
+        retry.assert_async().await;
+    }
+
+    // The server saying the context was exceeded is the same size failure.
+    #[tokio::test]
+    async fn a_context_exceeded_interpretation_retries_once_with_thinking_off() {
+        let service = service();
+        let mut upstream = mockito::Server::new_async().await;
+        let _show = upstream
+            .mock("POST", "/api/show")
+            .with_body(
+                r#"{"capabilities":["completion","thinking"],"model_info":{"qwen3.context_length":8192}}"#,
+            )
+            .expect_at_least(1)
+            .create_async()
+            .await;
+        let retry = upstream
+            .mock("POST", "/api/chat")
+            .match_request(|request| {
+                let body = request_json(request);
+                body["think"] == false && body["options"]["num_predict"].as_u64().is_some()
+            })
+            .with_body(
+                r#"{"message":{"role":"assistant","content":"{}"},"done":true,"done_reason":"stop"}"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        let first = upstream
+            .mock("POST", "/api/chat")
+            .match_request(|request| {
+                let body = request_json(request);
+                body.get("think").is_none() && body["options"]["num_predict"].as_u64().is_some()
+            })
+            .with_status(400)
+            .with_body(r#"{"error":"the request exceeds the available context size"}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let mut endpoint = Endpoint::for_test("ollama", EndpointKind::Ollama, &upstream.url(), "");
+        endpoint.max_num_ctx = Some(8_192);
+        Ad4mDb::with_global_instance(|db| db.insert_endpoint(&endpoint)).unwrap();
+        let task_id = interpretation_task_on(&service, &endpoint).await;
+
+        let result = service
+            .prompt_interpretation(task_id, "p".into())
+            .await
+            .unwrap();
+        assert_eq!(result.text, "{}");
+        first.assert_async().await;
+        retry.assert_async().await;
+    }
+
+    // Once a pass fell back, a later call on the same flag does not try reasoning again.
+    #[tokio::test]
+    async fn a_fallen_back_interpretation_pass_stays_without_thinking() {
+        let service = service();
+        let mut upstream = mockito::Server::new_async().await;
+        let _show = upstream
+            .mock("POST", "/api/show")
+            .with_body(
+                r#"{"capabilities":["completion","thinking"],"model_info":{"qwen3.context_length":8192}}"#,
+            )
+            .expect_at_least(1)
+            .create_async()
+            .await;
+        let no_thinking = upstream
+            .mock("POST", "/api/chat")
+            .match_request(|request| request_json(request)["think"] == false)
+            .with_body(
+                r#"{"message":{"role":"assistant","content":"{}"},"done":true,"done_reason":"stop"}"#,
+            )
+            .expect(2)
+            .create_async()
+            .await;
+        let reasoning = upstream
+            .mock("POST", "/api/chat")
+            .match_request(|request| request_json(request).get("think").is_none())
+            .with_body(
+                r#"{"message":{"role":"assistant","content":""},"done":true,"done_reason":"length"}"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        let mut endpoint = Endpoint::for_test("ollama", EndpointKind::Ollama, &upstream.url(), "");
+        endpoint.max_num_ctx = Some(8_192);
+        Ad4mDb::with_global_instance(|db| db.insert_endpoint(&endpoint)).unwrap();
+        let task_id = interpretation_task_on(&service, &endpoint).await;
+        let stick = std::sync::atomic::AtomicBool::new(false);
+
+        service
+            .prompt_interpretation_pass(task_id.clone(), "p".into(), Some(&stick))
+            .await
+            .unwrap();
+        assert!(stick.load(std::sync::atomic::Ordering::Relaxed));
+        // The next parse retry must not spend another reasoning attempt.
+        service
+            .prompt_interpretation_pass(task_id, "p".into(), Some(&stick))
+            .await
+            .unwrap();
+        reasoning.assert_async().await;
+        no_thinking.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn a_task_prompts_its_model_on_its_endpoint() {
+        let service = service();
+        let mut upstream = mockito::Server::new_async().await;
+        let completion = upstream
+            .mock("POST", "/v1/chat/completions")
+            .match_body(mockito::Matcher::PartialJson(serde_json::json!({
+                "model": "qwen3:8b",
+                "messages": [
+                    { "role": "system", "content": "Answer in French." },
+                    { "role": "user", "content": "hi" },
+                    { "role": "assistant", "content": "salut" },
+                    { "role": "user", "content": "thanks" }
+                ]
+            })))
+            .with_body(r#"{"choices":[{"message":{"content":"merci"}}]}"#)
+            .create_async()
+            .await;
+        let endpoint = saved_endpoint(EndpointKind::LlamaServer, &upstream.url());
+        let model_id = service
+            .add_model(model_on(&endpoint, ModelType::Llm, "qwen3:8b"))
+            .await
+            .unwrap();
+        let task = service
+            .add_task(
+                AITaskInput {
+                    name: "french".into(),
+                    model_id,
+                    system_prompt: "Answer in French.".into(),
+                    prompt_examples: vec![AIPromptExamplesInput {
+                        input: "hi".into(),
+                        output: "salut".into(),
+                    }],
+                    meta_data: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        let answer = service
+            .prompt(task.task_id, "thanks".into(), None)
+            .await
+            .unwrap();
+        assert_eq!(answer.text, "merci");
+        completion.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn a_task_on_a_model_that_is_not_loaded_is_refused() {
+        let service = service();
+        let refused = service
+            .add_task(
+                AITaskInput {
+                    name: "t".into(),
+                    model_id: "no-such-model".into(),
+                    system_prompt: String::new(),
+                    prompt_examples: vec![],
+                    meta_data: None,
+                },
+                None,
+            )
+            .await;
+        assert!(refused.is_err());
+        assert!(AIService::get_tasks().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_embedding_model_on_an_endpoint_without_embeddings_is_not_kept() {
+        let service = service();
+        let endpoint = saved_endpoint(EndpointKind::Anthropic, "https://api.anthropic.com");
+        assert!(service
+            .add_model(model_on(&endpoint, ModelType::Embedding, "claude"))
+            .await
+            .is_err());
+        assert!(Ad4mDb::with_global_instance(|db| db.get_models())
+            .unwrap()
+            .is_empty());
+    }
+
+    /// The capabilities `endpoint` has in the database now.
+    fn stored_capabilities(endpoint: &Endpoint) -> Vec<crate::types::AiCapability> {
+        Ad4mDb::with_global_instance(|db| db.get_endpoint(&endpoint.id))
+            .unwrap()
+            .unwrap()
+            .capabilities
+    }
+
+    #[tokio::test]
+    async fn an_audio_model_on_an_endpoint_without_an_audio_route_is_refused_and_leaves_it_as_it_was(
+    ) {
+        // Ollama has no /v1/audio routes: a transcription model on it used to be saved as
+        // READY, gave the endpoint the transcription capability, and failed only when a
+        // stream was opened.
+        let service = service();
+        let endpoint = saved_endpoint(EndpointKind::Ollama, "http://127.0.0.1:11434");
+        let before = stored_capabilities(&endpoint);
+        for model_type in [ModelType::Transcription, ModelType::Speech] {
+            let error = service
+                .add_model(model_on(&endpoint, model_type, "qwen3:8b"))
+                .await
+                .expect_err("Ollama serves no audio");
+            assert!(
+                error.downcast_ref::<crate::db::InvalidModel>().is_some(),
+                "a bad request, not an internal error: {error}"
+            );
+            assert!(error.to_string().contains("/v1/audio/"), "{error}");
+        }
+        assert!(Ad4mDb::with_global_instance(|db| db.get_models())
+            .unwrap()
+            .is_empty());
+        assert_eq!(stored_capabilities(&endpoint), before);
+    }
+
+    #[tokio::test]
+    async fn a_refused_embedding_model_does_not_give_its_endpoint_the_capability() {
+        let service = service();
+        let endpoint = saved_endpoint(EndpointKind::Anthropic, "https://api.anthropic.com");
+        let before = stored_capabilities(&endpoint);
+        assert!(service
+            .add_model(model_on(&endpoint, ModelType::Embedding, "claude"))
+            .await
+            .is_err());
+        assert_eq!(stored_capabilities(&endpoint), before);
+    }
+
+    #[tokio::test]
+    async fn an_audio_server_takes_transcription_and_speech_models() {
+        let service = service();
+        let endpoint = saved_endpoint(EndpointKind::OpenAiAudio, "http://127.0.0.1:8000");
+        for model_type in [ModelType::Transcription, ModelType::Speech] {
+            service
+                .add_model(model_on(
+                    &endpoint,
+                    model_type,
+                    "Systran/faster-whisper-small",
+                ))
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            Ad4mDb::with_global_instance(|db| db.get_models())
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn an_update_to_a_type_the_endpoint_cannot_serve_is_refused_and_keeps_the_model() {
+        let service = service();
+        let endpoint = saved_endpoint(EndpointKind::Ollama, "http://127.0.0.1:11434");
+        let id = service
+            .add_model(model_on(&endpoint, ModelType::Llm, "qwen3:8b"))
+            .await
+            .unwrap();
+        let error = service
+            .update_model(
+                id.clone(),
+                model_on(&endpoint, ModelType::Transcription, "qwen3:8b"),
+            )
+            .await
+            .expect_err("Ollama serves no transcription");
+        assert!(error.downcast_ref::<crate::db::InvalidModel>().is_some());
+        let model = Ad4mDb::with_global_instance(|db| db.get_model(id.clone()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(model.model_type, ModelType::Llm);
+        assert!(service.llms.lock().await.contains_key(&id));
+    }
+
+    #[tokio::test]
+    async fn a_model_updated_to_another_type_moves_to_that_types_clients() {
+        let service = service();
+        let endpoint = saved_endpoint(EndpointKind::Ollama, "http://127.0.0.1:11434");
+        let id = service
+            .add_model(model_on(&endpoint, ModelType::Llm, "qwen3:8b"))
+            .await
+            .unwrap();
+        assert!(service.llms.lock().await.contains_key(&id));
+
+        service
+            .update_model(
+                id.clone(),
+                model_on(&endpoint, ModelType::Embedding, "nomic-embed-text"),
+            )
+            .await
+            .unwrap();
+        assert!(!service.llms.lock().await.contains_key(&id));
+        let embedder = service.embedders.lock().await.get(&id).cloned().unwrap();
+        assert_eq!(embedder.remote_model, "nomic-embed-text");
+
+        service.remove_model(id.clone()).await.unwrap();
+        assert!(!service.embedders.lock().await.contains_key(&id));
+    }
+
+    #[test]
+    fn a_saved_endpoint_with_a_key_over_plain_http_builds_no_client() {
+        // The load path: an endpoint saved before the handlers refused this reaches client
+        // construction without passing through them.
+        let endpoint = Endpoint::for_test(
+            "lan",
+            EndpointKind::Anthropic,
+            "http://192.168.1.10:8080",
+            "sk-ant",
+        );
+        let error = match providers::chat_client(&endpoint) {
             Ok(_) => panic!("a key over plain http to a remote host is refused"),
             Err(error) => error,
         };
@@ -2723,369 +2939,237 @@ mod tests {
         );
     }
 
+    /// A client that counts the calls it is answering at once, and the most it saw.
+    #[derive(Default)]
+    struct Counting {
+        now: AtomicUsize,
+        most: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl RemoteChat for Counting {
+        async fn chat(&self, _request: ChatRequest) -> Result<ChatReply> {
+            let now = self.now.fetch_add(1, Ordering::SeqCst) + 1;
+            self.most.fetch_max(now, Ordering::SeqCst);
+            sleep(Duration::from_millis(20)).await;
+            self.now.fetch_sub(1, Ordering::SeqCst);
+            Ok(ChatReply {
+                text: "ok".into(),
+                ..Default::default()
+            })
+        }
+    }
+
+    // There is no per-model thread to serialise prompts any more: the endpoint's cap is what
+    // limits them, on the task and harness paths as on /v1.
     #[tokio::test]
-    async fn test_progress_rate_limiting() {
-        // Test the rate limiting functionality by directly testing the rate limiter
-        let model_id = "test_model".to_string();
-
-        // Clear any existing rate limiter state
-        {
-            let mut rate_limiter = PROGRESS_RATE_LIMITER.lock().await;
-            rate_limiter.clear();
-        }
-
-        // Test that rate limiter prevents rapid updates
-        let now = std::time::Instant::now();
-
-        // First update should set the timestamp
-        {
-            let mut rate_limiter = PROGRESS_RATE_LIMITER.lock().await;
-            rate_limiter.insert(model_id.clone(), now);
-        }
-
-        // Immediate check should indicate rate limiting
-        {
-            let rate_limiter = PROGRESS_RATE_LIMITER.lock().await;
-            let should_rate_limit = if let Some(last_update) = rate_limiter.get(&model_id) {
-                std::time::Instant::now().duration_since(*last_update) < Duration::from_millis(100)
-            } else {
-                false
+    async fn an_endpoints_concurrency_cap_holds_for_prompts_and_none_is_no_limit() {
+        for (cap, expected) in [(Some(1), 1), (None, 4)] {
+            let mut endpoint =
+                Endpoint::for_test("capped", EndpointKind::Vllm, "http://127.0.0.1:9", "");
+            endpoint.max_concurrent = cap;
+            let client = Arc::new(Counting::default());
+            let chat = ChatModel {
+                client: client.clone(),
+                remote_model: "m".into(),
+                endpoint: Arc::new(endpoint),
             };
-            assert!(should_rate_limit, "Should rate limit rapid updates");
-        }
-
-        // Wait for rate limit window to pass
-        sleep(Duration::from_millis(150)).await;
-
-        // Now updates should be allowed
-        {
-            let rate_limiter = PROGRESS_RATE_LIMITER.lock().await;
-            let should_rate_limit = if let Some(last_update) = rate_limiter.get(&model_id) {
-                std::time::Instant::now().duration_since(*last_update) < Duration::from_millis(100)
-            } else {
-                false
-            };
-            assert!(
-                !should_rate_limit,
-                "Should allow updates after rate limit window"
-            );
-        }
-
-        // Clean up
-        {
-            let mut rate_limiter = PROGRESS_RATE_LIMITER.lock().await;
-            rate_limiter.remove(&model_id);
+            let calls = (0..4).map(|_| chat.chat(vec![ChatTurn::user("hi")], vec![], None, None));
+            for reply in futures::future::join_all(calls).await {
+                assert_eq!(reply.unwrap().text, "ok");
+            }
+            assert_eq!(client.most.load(Ordering::SeqCst), expected, "cap {cap:?}");
         }
     }
 
-    // TODO: We ignore these tests because they need a GPU to not take ages to run
-    // BUT: the model lifecycle and update tests show another problem:
-    // We can't run them in parallel with each other or other tests because
-    // the one global DB gets reseted for each test.
-    // -> need to refactor this so that services like AIService or PerspectiveInstance
-    // get an DB reference passed in, so we can write proper unit tests.
-
-    #[ignore]
-    #[tokio::test]
-    async fn test_embedding() {
-        Ad4mDb::init_global_instance(":memory:").expect("Ad4mDb to initialize");
-        let service = AIService::new().expect("initialization to work");
-        let vector = service
-            .embed("bert".into(), "Test string".into(), None)
-            .await
-            .expect("embed to return a result");
-        assert!(vector.embeddings.len() > 300)
+    /// A loopback URL nothing listens on: a request to it is refused.
+    pub(super) fn dead_url() -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        format!("http://127.0.0.1:{port}")
     }
 
-    #[ignore]
-    #[tokio::test]
-    async fn test_prompt() {
-        Ad4mDb::init_global_instance(":memory:").expect("Ad4mDb to initialize");
-        let service = AIService::new().expect("initialization to work");
-
-        let task = service.add_task(AITaskInput {
-                name: "Test task".into(),
-                model_id: "llama".into(),
-                system_prompt: "You are inside a test for tasks. Please make sure to create any non-zero length output".into(),
-                prompt_examples: vec![AIPromptExamplesInput{
-                    input: "Test string".into(),
-                    output: "Yes, I'm working!".into()
-                }],
-                meta_data: None
-            }, None).await.expect("add_task to work without error");
-
-        let response = service
-            .prompt(task.task_id, "Test string".into(), None)
-            .await
-            .expect("prompt to return a result");
-        println!("Response: {}", response.text);
-        assert!(!response.text.is_empty())
+    /// An OpenAI endpoint at a dead URL whose last check found it up, serving `served`.
+    pub(super) fn endpoint_that_went_down(served: &str) -> Endpoint {
+        endpoint_of_kind_that_went_down(EndpointKind::OpenAi, served)
     }
 
-    #[ignore]
-    #[tokio::test]
-    async fn test_prompt_stress() {
-        Ad4mDb::init_global_instance(":memory:").expect("Ad4mDb to initialize");
-        let service = AIService::new().expect("initialization to work");
-
-        let task = service.add_task(AITaskInput {
-                name: "Test task".into(),
-                model_id: "llama".into(),
-                system_prompt: "You are inside a test for tasks. Please make sure to create any non-zero length output".into(),
-                meta_data: None,
-                prompt_examples: vec![AIPromptExamplesInput{
-                    input: "Test string".into(),
-                    output: "Yes, I'm working!".into()
-                },
-                AIPromptExamplesInput{
-                    input: "What's up?".into(),
-                    output: "Nothing, I'm working!".into()
-                },
-                AIPromptExamplesInput{
-                    input: "Is this a test".into(),
-                    output: "Yes, it's working!".into()
-                },
-                AIPromptExamplesInput{
-                    input: "Test string loong".into(),
-                    output: "Yes, I'm working! This is a longer response to test the system's ability to handle more extensive outputs. It's important to ensure that the AI can generate and process longer strings of text, as real-world applications often require more detailed and nuanced responses. By including this extended output, we're stress-testing the system's capacity and verifying its robustness in handling varied lengths of text.".into()
-                },
-                AIPromptExamplesInput{
-                    input: "Test string super loong".into(),
-                    output: "Yes, I'm working! This is an extremely long response to thoroughly test the system's capacity for handling extensive outputs. In real-world scenarios, AI models often need to generate lengthy and detailed responses to complex queries. This test string is designed to push the limits of our system, ensuring it can process and store large amounts of text without issues. It's crucial to verify that our AI service can maintain coherence and relevance even in prolonged responses. By including various sentence structures, punctuation, and a mix of short and long phrases, we're also testing the linguistic versatility of our model. Furthermore, this extended output allows us to assess the performance impact of processing large text blocks, which is essential for optimizing our system's efficiency. It's worth noting that in practical applications, responses of this length might be common in scenarios such as content generation, detailed explanations, or comprehensive analyses. Therefore, ensuring our system can handle such verbose outputs is paramount for its real-world applicability and robustness.".into()
-                }],
-        }, None).await.expect("add_task to work without error");
-
-        let futures = (0..10)
-            .map(|_| service.prompt(task.task_id.clone(), "Test string".into(), None))
-            .collect::<Vec<_>>();
-
-        let responses = futures::future::join_all(futures)
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>>>()
-            .expect("all prompts to return results");
-
-        let response = responses
-            .iter()
-            .map(|r| r.text.as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
-        println!("Responses: {}", response);
-        assert!(!response.is_empty())
-    }
-
-    #[ignore]
-    #[tokio::test]
-    async fn test_model_lifecycle() {
-        Ad4mDb::init_global_instance(":memory:").expect("Ad4mDb to initialize");
-        let service = AIService::new().expect("initialization to work");
-
-        // Add a model
-        let model_input = ModelInput {
-            name: "Test Model".into(),
-            model_type: ModelType::Llm,
-            local: Some(LocalModelInput {
-                file_name: "llama_tiny_1_1b_chat".into(),
-                tokenizer_source: None,
-                huggingface_repo: None,
-                revision: None,
-            }),
-            api: None,
+    fn endpoint_of_kind_that_went_down(kind: EndpointKind, served: &str) -> Endpoint {
+        let mut endpoint = Endpoint::for_test("went-down", kind, &dead_url(), "");
+        endpoint.health = crate::types::EndpointHealth {
+            state: crate::types::EndpointState::Reachable,
+            checked_at: Some(1),
+            detail: None,
+            served_models: vec![served.to_string()],
         };
+        Ad4mDb::with_global_instance(|db| db.insert_endpoint(&endpoint)).unwrap();
+        endpoint
+    }
 
+    /// Waits until the stored health of `endpoint` is no longer `REACHABLE` (a re-check ran).
+    pub(super) async fn rechecked(endpoint: &Endpoint) -> bool {
+        for _ in 0..100 {
+            let stored = Ad4mDb::with_global_instance(|db| db.get_endpoint(&endpoint.id))
+                .unwrap()
+                .unwrap();
+            if stored.health.state != crate::types::EndpointState::Reachable {
+                return true;
+            }
+            sleep(Duration::from_millis(50)).await;
+        }
+        false
+    }
+
+    // WE showed a model READY with its Ollama stopped: a failed `ai.prompt` left the status
+    // to the 60 s health loop, where a failed `/v1` request re-checks the endpoint at once.
+    #[tokio::test]
+    async fn a_failed_prompt_re_checks_its_endpoint() {
+        // Each chat client: a refused connection keeps its type, or nothing can tell it.
+        for kind in [
+            EndpointKind::OpenAi,
+            EndpointKind::Ollama,
+            EndpointKind::Anthropic,
+        ] {
+            let service = service();
+            let endpoint = endpoint_of_kind_that_went_down(kind, "qwen3");
+            let model_id = service
+                .add_model(model_on(&endpoint, ModelType::Llm, "qwen3"))
+                .await
+                .unwrap();
+            let task = service
+                .add_task(
+                    AITaskInput {
+                        name: "t".into(),
+                        model_id,
+                        system_prompt: String::new(),
+                        prompt_examples: vec![],
+                        meta_data: None,
+                    },
+                    None,
+                )
+                .await
+                .unwrap();
+
+            assert!(service
+                .prompt(task.task_id, "hi".into(), None)
+                .await
+                .is_err());
+            assert!(rechecked(&endpoint).await, "{kind:?}: not re-checked");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_embed_re_checks_its_endpoint() {
+        let service = service();
+        let endpoint = endpoint_that_went_down("bge-m3");
         let model_id = service
-            .add_model(model_input.clone())
+            .add_model(model_on(&endpoint, ModelType::Embedding, "bge-m3"))
             .await
-            .expect("model to be added");
+            .unwrap();
 
-        // Update the model
-        let updated_model = ModelInput {
-            name: "Updated Test Model".into(),
-            ..model_input.clone()
-        };
-        service
-            .update_model(model_id.clone(), updated_model)
-            .await
-            .expect("model to be updated");
-
-        // Verify the update
-        let model = crate::db_backend::db_backend()
-            .get_model(model_id.clone())
-            .expect("to get model");
-        assert_eq!(model.unwrap().name, "Updated Test Model");
-
-        // Remove the model
-        service
-            .remove_model(model_id.clone())
-            .await
-            .expect("model to be removed");
-
-        // Verify removal
-        let model = crate::db_backend::db_backend()
-            .get_model(model_id.clone())
-            .expect("to get model");
-        assert!(model.is_none());
+        assert!(service.embed(model_id, "text".into(), None).await.is_err());
+        assert!(
+            rechecked(&endpoint).await,
+            "the endpoint was not re-checked"
+        );
     }
 
-    #[ignore]
+    // `AIService::new` loads the stored models in a spawned task: a call that came before
+    // the load got to its model was refused as "not loaded" (the interpretation LLM-E2E's
+    // semantic dedup, embedding right after the service's start). `empty()` is a service
+    // whose load has not run yet.
     #[tokio::test]
-    async fn test_model_update_with_tasks() {
+    async fn an_embed_before_the_starts_load_uses_the_stored_model() {
         Ad4mDb::init_global_instance(":memory:").expect("Ad4mDb to initialize");
-        let service = AIService::new().expect("initialization to work");
+        let mut upstream = mockito::Server::new_async().await;
+        let embeddings = upstream
+            .mock("POST", "/v1/embeddings")
+            .with_body(r#"{"data":[{"index":0,"embedding":[1.0,0.0]}]}"#)
+            .create_async()
+            .await;
+        let endpoint = saved_endpoint(EndpointKind::LlamaServer, &upstream.url());
+        let input = model_on(&endpoint, ModelType::Embedding, "nomic-embed-text");
+        Ad4mDb::with_global_instance(|db| db.add_model(&input)).unwrap();
 
-        // Add a model
-        let model_input = ModelInput {
-            name: "Test Model".into(),
-            model_type: ModelType::Llm,
-            local: Some(LocalModelInput {
-                file_name: "llama_tiny_1_1b_chat".into(),
-                tokenizer_source: None,
-                huggingface_repo: None,
-                revision: None,
-            }),
-            api: None,
-        };
-
-        let model_id = service
-            .add_model(model_input.clone())
+        let service = AIService::empty();
+        let result = service
+            .embed(input.name.clone(), "text".into(), None)
             .await
-            .expect("model to be added");
+            .unwrap();
+        assert_eq!(result.embeddings, vec![1.0, 0.0]);
+        embeddings.assert_async().await;
+    }
 
-        // Create a task using this model
+    #[tokio::test]
+    async fn a_task_before_the_starts_load_uses_the_stored_model() {
+        Ad4mDb::init_global_instance(":memory:").expect("Ad4mDb to initialize");
+        let mut upstream = mockito::Server::new_async().await;
+        let completion = upstream
+            .mock("POST", "/v1/chat/completions")
+            .with_body(r#"{"choices":[{"message":{"content":"merci"}}]}"#)
+            .create_async()
+            .await;
+        let endpoint = saved_endpoint(EndpointKind::LlamaServer, &upstream.url());
+        let model_id = Ad4mDb::with_global_instance(|db| {
+            db.add_model(&model_on(&endpoint, ModelType::Llm, "qwen3:8b"))
+        })
+        .unwrap();
+
+        let service = AIService::empty();
         let task = service
             .add_task(
                 AITaskInput {
-                    name: "Test task".into(),
-                    model_id: model_id.clone(),
-                    system_prompt: "Test prompt".into(),
+                    name: "t".into(),
+                    model_id,
+                    system_prompt: String::new(),
                     prompt_examples: vec![],
                     meta_data: None,
                 },
                 None,
             )
             .await
-            .expect("task to be created");
+            .unwrap();
+        let answer = service
+            .prompt(task.task_id, "thanks".into(), None)
+            .await
+            .unwrap();
+        assert_eq!(answer.text, "merci");
+        completion.assert_async().await;
+    }
 
-        // Update the model
-        let updated_model = ModelInput {
-            name: "Updated Test Model".into(),
-            ..model_input.clone()
+    // The wrapper cut a chat call to an endpoint with no timeout of its own at 300 s, where
+    // the provider clients allow 600 s for a long prompt on a local model.
+    #[tokio::test(start_paused = true)]
+    async fn a_chat_call_runs_as_long_as_the_provider_client_allows_unless_the_endpoint_says() {
+        use crate::types::{Endpoint, EndpointHealth, EndpointKind};
+        use std::time::Duration;
+        let mut endpoint = Endpoint {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: "ollama".into(),
+            kind: EndpointKind::Ollama,
+            base_url: url::Url::parse("http://127.0.0.1:9932").unwrap(),
+            api_key: crate::secret::Secret::new(""),
+            capabilities: EndpointKind::Ollama.default_capabilities(),
+            max_num_ctx: None,
+            request_timeout_secs: None,
+            max_concurrent: None,
+            managed: false,
+            health: EndpointHealth::default(),
         };
-        service
-            .update_model(model_id.clone(), updated_model)
-            .await
-            .expect("model to be updated");
+        let answer_after = |secs: u64| async move {
+            tokio::time::sleep(Duration::from_secs(secs)).await;
+            anyhow::Ok(())
+        };
 
-        // Verify the task still works
-        let response = service
-            .prompt(task.task_id.clone(), "Test input".into(), None)
-            .await
-            .expect("prompt to work after model update");
-        assert!(!response.text.is_empty());
-    }
+        let long = super::within_endpoint_limits(&endpoint, false, answer_after(590));
+        assert!(long.await.is_ok(), "a 590 s answer is not cut");
+        let too_long = super::within_endpoint_limits(&endpoint, false, answer_after(610));
+        assert!(too_long.await.is_err());
 
-    /// Helper that replicates the server-side VAD gate logic so we can test
-    /// it without needing a running Whisper model or audio stream.
-    fn compute_speech_ratio(
-        vad: &mut voice_activity_detector::VoiceActivityDetector,
-        audio: &[f32],
-    ) -> f32 {
-        let mut speech_chunks = 0usize;
-        let mut total_chunks = 0usize;
-        for window in audio.chunks(512) {
-            if window.len() == 512 {
-                let prob = vad.predict(window.iter().copied());
-                total_chunks += 1;
-                if prob > 0.6 {
-                    speech_chunks += 1;
-                }
-            }
-        }
-        if total_chunks == 0 {
-            0.0
-        } else {
-            speech_chunks as f32 / total_chunks as f32
-        }
-    }
-
-    #[test]
-    fn test_vad_gate_rejects_silence() {
-        let mut vad = voice_activity_detector::VoiceActivityDetector::builder()
-            .sample_rate(16000)
-            .chunk_size(512usize)
-            .build()
-            .expect("VAD to build");
-
-        // Pure silence (zeros) — must be rejected
-        let silence = vec![0.0f32; 8000];
-        let ratio = compute_speech_ratio(&mut vad, &silence);
-        assert!(
-            ratio < 0.33,
-            "Silence should be rejected (ratio={ratio:.2})"
-        );
-    }
-
-    #[test]
-    fn test_vad_gate_rejects_sine_wave() {
-        let mut vad = voice_activity_detector::VoiceActivityDetector::builder()
-            .sample_rate(16000)
-            .chunk_size(512usize)
-            .build()
-            .expect("VAD to build");
-
-        // 440 Hz sine wave — not speech, should be rejected
-        let sine: Vec<f32> = (0..8000)
-            .map(|i| 0.5 * (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 16000.0).sin())
-            .collect();
-        let ratio = compute_speech_ratio(&mut vad, &sine);
-        assert!(
-            ratio < 0.33,
-            "Sine wave should be rejected (ratio={ratio:.2})"
-        );
-    }
-
-    #[test]
-    fn test_vad_gate_rejects_low_noise() {
-        let mut vad = voice_activity_detector::VoiceActivityDetector::builder()
-            .sample_rate(16000)
-            .chunk_size(512usize)
-            .build()
-            .expect("VAD to build");
-
-        // Low-level white noise — not speech, should be rejected
-        let noise: Vec<f32> = (0..8000).map(|i| (i as f32 * 17.3).sin() * 0.01).collect();
-        let ratio = compute_speech_ratio(&mut vad, &noise);
-        assert!(
-            ratio < 0.33,
-            "Low noise should be rejected (ratio={ratio:.2})"
-        );
-    }
-
-    #[test]
-    fn test_vad_gate_empty_audio() {
-        let mut vad = voice_activity_detector::VoiceActivityDetector::builder()
-            .sample_rate(16000)
-            .chunk_size(512usize)
-            .build()
-            .expect("VAD to build");
-
-        // Empty audio — ratio should be 0
-        let empty: Vec<f32> = vec![];
-        let ratio = compute_speech_ratio(&mut vad, &empty);
-        assert_eq!(ratio, 0.0, "Empty audio should give ratio=0");
-
-        // Sub-chunk audio (less than 512 samples)
-        let short = vec![0.1f32; 100];
-        let ratio = compute_speech_ratio(&mut vad, &short);
-        assert_eq!(ratio, 0.0, "Sub-chunk audio should give ratio=0");
-    }
-
-    #[test]
-    fn test_vad_gate_threshold_boundary() {
-        // Verify the 0.33 gate matches our code: < 0.33 is rejected, >= 0.33 passes
-        assert!(0.32 < 0.33, "Below threshold should be rejected");
-        assert!(!(0.33 < 0.33), "At threshold should pass");
-        assert!(!(0.50 < 0.33), "Above threshold should pass");
+        endpoint.request_timeout_secs = Some(10);
+        let past_own = super::within_endpoint_limits(&endpoint, false, answer_after(20));
+        assert!(past_own.await.is_err(), "the endpoint's own timeout wins");
     }
 }
 
@@ -3096,17 +3180,7 @@ mod stream_ownership_tests {
     use crate::test_utils::MultiUserMode;
 
     fn stream_of(owner: Option<&str>) -> TranscriptionSession {
-        let (samples_tx, _) = futures_channel::mpsc::unbounded();
-        let (drop_tx, _) = oneshot::channel();
-        let (text_broadcast_tx, _) = tokio::sync::broadcast::channel(1);
-        TranscriptionSession {
-            samples_tx,
-            drop_tx,
-            last_activity: Arc::new(Mutex::new(std::time::Instant::now())),
-            text_broadcast_tx,
-            model_id: "m".to_string(),
-            agent_did: owner.map(str::to_string),
-        }
+        TranscriptionSession::for_test(owner).0
     }
 
     // The operator's admin credential is not a JWT, so the old token decode refused it: in
@@ -3180,36 +3254,19 @@ mod stream_ownership_tests {
     async fn feed_and_close_refuse_a_main_agent_app_on_a_users_stream() {
         let _multi_user = MultiUserMode::on();
         // No models and no cleanup task: only the stream map is used.
-        let service = AIService {
-            embedding_channel: Arc::new(Mutex::new(HashMap::new())),
-            llm_channel: Arc::new(Mutex::new(HashMap::new())),
-            transcription_streams: Arc::new(Mutex::new(HashMap::new())),
-            cleanup_task_shutdown: Arc::new(std::sync::Mutex::new(None)),
-            shared_whisper_models: Arc::new(Mutex::new(HashMap::new())),
-            default_embedding: Arc::new(default_embedding::DefaultEmbedding::new(Arc::new(|_| {
-                Box::pin(async { Err(anyhow!("no embedding models in this test")) })
-            }))),
-        };
+        let service = AIService::empty();
         let alice = RequestContext::user_for_test("did:key:alice", vec![]);
         let app =
             RequestContext::app_for_test(vec![crate::agent::capabilities::ALL_CAPABILITY.clone()]);
-        // The stream's receivers stay alive, as the Whisper thread's would: a feed and a
-        // close by its owner reach them.
-        let (samples_tx, mut samples_rx) = futures_channel::mpsc::unbounded();
-        let (drop_tx, mut drop_rx) = oneshot::channel();
-        let (text_broadcast_tx, _) = tokio::sync::broadcast::channel(1);
+        // The stream's queue stays alive, as its worker's would: a feed and a close by its
+        // owner reach it.
+        let (session, mut queue) = TranscriptionSession::for_test(Some("did:key:alice"));
         let id = "alices-stream".to_string();
-        service.transcription_streams.lock().await.insert(
-            id.clone(),
-            TranscriptionSession {
-                samples_tx,
-                drop_tx,
-                last_activity: Arc::new(Mutex::new(std::time::Instant::now())),
-                text_broadcast_tx,
-                model_id: "m".to_string(),
-                agent_did: Some("did:key:alice".to_string()),
-            },
-        );
+        service
+            .transcription_streams
+            .lock()
+            .await
+            .insert(id.clone(), session);
 
         assert!(service
             .feed_transcription_stream(&id, vec![0.0], &app)
@@ -3218,25 +3275,673 @@ mod stream_ownership_tests {
         assert!(service.close_transcription_stream(&id, &app).await.is_err());
         assert!(service.transcription_streams.lock().await.contains_key(&id));
         assert!(
-            samples_rx.try_recv().is_err(),
+            queue.try_recv().is_err(),
             "the app's samples reached the user's stream"
         );
-        assert!(
-            drop_rx.try_recv().is_err(),
-            "the app closed the user's stream"
-        );
 
+        // The worker answers the user's utterance.
+        let worker = tokio::spawn(async move {
+            let utterance = queue.recv().await.expect("the user's utterance");
+            assert_eq!(utterance.samples, vec![0.5]);
+            let _ = utterance.done.send(Ok(()));
+            queue
+        });
         service
             .feed_transcription_stream(&id, vec![0.5], &alice)
             .await
             .expect("the user feeds their own stream");
-        assert_eq!(samples_rx.try_recv().unwrap(), vec![0.5]);
+        let mut queue = worker.await.unwrap();
         service
             .close_transcription_stream(&id, &alice)
             .await
             .expect("the user closes their own stream");
         assert!(!service.transcription_streams.lock().await.contains_key(&id));
-        assert!(drop_rx.try_recv().is_ok(), "the close reached the stream");
+        assert!(queue.recv().await.is_none(), "the close reached the stream");
+    }
+}
+
+#[cfg(test)]
+mod remote_stream_tests {
+    use super::providers::audio::{AudioFile, RemoteTranscribe, TranscribeReply};
+    use super::*;
+    use crate::billing::test_seam;
+    use crate::db::Ad4mDb;
+    use crate::events::{Audience, Topic};
+    use crate::pubsub::get_global_pubsub;
+
+    /// An upstream that takes a millisecond per sample, answers `<samples> samples`, and
+    /// fails an utterance of [`FAILS`] samples.
+    struct Upstream;
+
+    const FAILS: usize = 72_000;
+
+    /// The first `samples` of the speech recording: speech, so the gate lets it through.
+    fn utterance(samples: usize) -> Vec<f32> {
+        transcription::speech_fixture()[..samples].to_vec()
+    }
+
+    #[async_trait::async_trait]
+    impl RemoteTranscribe for Upstream {
+        async fn transcribe(
+            &self,
+            model: &str,
+            audio: AudioFile,
+            fields: Vec<(String, String)>,
+        ) -> Result<TranscribeReply> {
+            assert_eq!(model, "remote-model");
+            assert!(fields.is_empty());
+            let samples = (audio.bytes.len() - 44) / 2;
+            sleep(Duration::from_millis(samples as u64)).await;
+            if samples == FAILS {
+                return Err(providers::http::UpstreamStatus {
+                    url: "http://upstream/v1/audio/transcriptions".into(),
+                    status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                    body: "boom".into(),
+                    retry_after: None,
+                }
+                .into());
+            }
+            let text = format!("{samples} samples");
+            Ok(TranscribeReply {
+                body: text.clone().into_bytes(),
+                text,
+                content_type: "text/plain".into(),
+            })
+        }
+    }
+
+    async fn open(service: &AIService, agent_did: Option<&str>) -> String {
+        let _ = Ad4mDb::init_global_instance(":memory:");
+        service
+            .open_remote_stream(
+                "m".into(),
+                "remote-model".into(),
+                "e".into(),
+                Arc::new(Upstream),
+                agent_did.map(str::to_string),
+                "did:key:owner".into(),
+            )
+            .await
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn utterances_are_answered_in_the_order_they_were_fed() {
+        let service = AIService::empty();
+        let id = open(&service, None).await;
+        let operator = RequestContext::operator_for_test();
+        let mut text = service
+            .subscribe_transcription_text(&id, &operator)
+            .await
+            .unwrap();
+
+        // The first utterance takes longer upstream than the second.
+        let (slow, fast) = tokio::join!(
+            service.feed_transcription_stream(&id, utterance(78_000), &operator),
+            service.feed_transcription_stream(&id, utterance(64_000), &operator),
+        );
+        slow.unwrap();
+        fast.unwrap();
+        assert_eq!(text.recv().await.unwrap(), "78000 samples");
+        assert_eq!(text.recv().await.unwrap(), "64000 samples");
+    }
+
+    /// Moves the last activity of stream `id` back past the reaper's timeout.
+    async fn backdate(service: &AIService, id: &str) {
+        let streams = service.transcription_streams.lock().await;
+        *streams[id].last_activity.lock().await =
+            tokio::time::Instant::now() - Duration::from_secs(TRANSCRIPTION_TIMEOUT_SECS + 1);
+    }
+
+    async fn is_open(service: &AIService, id: &str) -> bool {
+        service.transcription_streams.lock().await.contains_key(id)
+    }
+
+    // A slow upstream (a long utterance on a big model, or a server that stalls until the
+    // request times out) kept a stream busy past the reaper's timeout, and the reaper closed
+    // it mid-call: the next feed got "stream not found".
+    #[tokio::test(start_paused = true)]
+    async fn a_stream_waiting_for_its_upstream_is_not_idle_and_its_answer_is_activity() {
+        let service = AIService::empty();
+        let id = open(&service, None).await;
+        let operator = RequestContext::operator_for_test();
+
+        let reaper = async {
+            // The utterance is upstream (64 s), and was fed longer ago than the timeout.
+            sleep(Duration::from_millis(100)).await;
+            backdate(&service, &id).await;
+            AIService::close_idle_streams(&service.transcription_streams).await;
+            assert!(
+                is_open(&service, &id).await,
+                "the reaper closed a stream that was waiting for its upstream"
+            );
+        };
+        let (fed, ()) = tokio::join!(
+            service.feed_transcription_stream(&id, utterance(64_000), &operator),
+            reaper
+        );
+        fed.unwrap();
+
+        AIService::close_idle_streams(&service.transcription_streams).await;
+        assert!(
+            is_open(&service, &id).await,
+            "a stream answered a moment ago is not idle"
+        );
+        service
+            .feed_transcription_stream(&id, utterance(64_000), &operator)
+            .await
+            .expect("the stream still takes utterances");
+
+        backdate(&service, &id).await;
+        AIService::close_idle_streams(&service.transcription_streams).await;
+        assert!(
+            !is_open(&service, &id).await,
+            "a stream idle past the timeout is still closed"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_feed_whose_caller_went_away_does_not_keep_its_stream_open() {
+        let service = AIService::empty();
+        let id = open(&service, None).await;
+        let operator = RequestContext::operator_for_test();
+        // The caller gives up while the utterance is upstream.
+        let gave_up = tokio::time::timeout(
+            Duration::from_millis(100),
+            service.feed_transcription_stream(&id, utterance(64_000), &operator),
+        )
+        .await;
+        assert!(gave_up.is_err());
+
+        backdate(&service, &id).await;
+        AIService::close_idle_streams(&service.transcription_streams).await;
+        assert!(!is_open(&service, &id).await);
+    }
+
+    // A feed set `last_activity` only when it started, and an endpoint answers an utterance
+    // only when its transcript is done: the reaper closed a stream whose upstream took longer
+    // than the idle timeout, and the next feed got `StreamNotFound`.
+    #[tokio::test(start_paused = true)]
+    async fn a_stream_is_not_idle_while_its_upstream_transcribes() {
+        let service = AIService::empty();
+        service.start_stream_reaper();
+        let id = open(&service, None).await;
+        let operator = RequestContext::operator_for_test();
+
+        // 78 s upstream, more than the idle timeout (30 s) and a reaper interval (5 s).
+        service
+            .feed_transcription_stream(&id, utterance(78_000), &operator)
+            .await
+            .unwrap();
+        service
+            .feed_transcription_stream(&id, utterance(64_000), &operator)
+            .await
+            .expect("the stream is still open after a slow utterance");
+
+        // Idle counts from the last answer: a stream nobody feeds is still closed.
+        sleep(Duration::from_secs(
+            TRANSCRIPTION_TIMEOUT_SECS + TRANSCRIPTION_CHECK_INTERVAL_SECS + 1,
+        ))
+        .await;
+        assert!(
+            !service.transcription_streams.lock().await.contains_key(&id),
+            "an idle stream stayed open"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_text_goes_to_the_owner_only() {
+        let service = AIService::empty();
+        let id = open(&service, None).await;
+        let operator = RequestContext::operator_for_test();
+        let mut events = get_global_pubsub().await.subscribe_events();
+
+        service
+            .feed_transcription_stream(&id, utterance(64_000), &operator)
+            .await
+            .unwrap();
+
+        let event = loop {
+            let event = events.recv().await.unwrap();
+            if event.topic == Topic::AiTranscriptionText {
+                break event;
+            }
+        };
+        assert_eq!(
+            event.audience,
+            Audience::Dids(vec!["did:key:owner".to_string()])
+        );
+        assert_eq!(event.payload["streamId"], id.as_str());
+        assert_eq!(event.payload["text"], "64000 samples");
+    }
+
+    // Not paused: the re-check is a real request to a dead port.
+    #[tokio::test]
+    async fn a_failed_utterance_re_checks_its_endpoint() {
+        let service = AIService::empty();
+        let _ = Ad4mDb::init_global_instance(":memory:");
+        let endpoint = super::tests::endpoint_that_went_down("whisper");
+        let client = providers::audio::OpenAiTranscribe::for_endpoint(&endpoint).unwrap();
+        let id = service
+            .open_remote_stream(
+                "m".into(),
+                "whisper".into(),
+                endpoint.id.clone(),
+                Arc::new(client),
+                None,
+                "did:key:owner".into(),
+            )
+            .await;
+
+        let operator = RequestContext::operator_for_test();
+        assert!(service
+            .feed_transcription_stream(&id, utterance(64_000), &operator)
+            .await
+            .is_err());
+        assert!(
+            super::tests::rechecked(&endpoint).await,
+            "the endpoint was not re-checked"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_upstream_failure_is_the_feeds_error_and_publishes_nothing() {
+        let service = AIService::empty();
+        let id = open(&service, None).await;
+        let operator = RequestContext::operator_for_test();
+        let mut text = service
+            .subscribe_transcription_text(&id, &operator)
+            .await
+            .unwrap();
+
+        let error = service
+            .feed_transcription_stream(&id, utterance(FAILS), &operator)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("failed (500"), "{error}");
+        assert!(!error.to_string().contains("http://upstream"), "{error}");
+        assert!(
+            text.try_recv().is_err(),
+            "a failed utterance published text"
+        );
+
+        // The stream carries on.
+        service
+            .feed_transcription_stream(&id, utterance(64_000), &operator)
+            .await
+            .unwrap();
+        assert_eq!(text.recv().await.unwrap(), "64000 samples");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_users_utterance_is_billed_once_and_a_closed_stream_takes_no_more() {
+        let service = AIService::empty();
+        let id = open(&service, Some("did:key:payer")).await;
+        Ad4mDb::with_global_instance(|db| db.set_host_rates(&[("m".to_string(), 0.5)])).unwrap();
+        test_seam::reset();
+        test_seam::force_result(test_seam::ForcedResult::Success);
+        let operator = RequestContext::operator_for_test();
+
+        service
+            .feed_transcription_stream(&id, utterance(64_000), &operator)
+            .await
+            .unwrap();
+
+        let calls = test_seam::calls();
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert_eq!(calls[0].agent_did, "did:key:payer");
+        assert_eq!(calls[0].operation, concat!("ai_", "transcription"));
+        assert_eq!(calls[0].amount, 1.0, "2 words at 0.5");
+        test_seam::reset();
+
+        service
+            .close_transcription_stream(&id, &operator)
+            .await
+            .unwrap();
+        assert!(service
+            .feed_transcription_stream(&id, vec![0.1; 7], &operator)
+            .await
+            .is_err());
+    }
+
+    // The credit check ran only when an utterance was fed. Commits queue (`/v1/realtime`
+    // does not wait for one before the next), so a user with a few credits left could queue
+    // any number of them, and each went upstream after the first bill emptied the account.
+    #[tokio::test(start_paused = true)]
+    async fn an_utterance_whose_user_has_no_credits_left_is_not_sent() {
+        let service = AIService::empty();
+        let id = open(&service, Some("did:key:broke")).await;
+        Ad4mDb::with_global_instance(|db| {
+            db.add_user("broke@example.com", "did:key:broke", "password")?;
+            db.set_user_credits("broke@example.com", 0.0)?;
+            db.set_free_hosting_enabled(false)
+        })
+        .unwrap();
+        let operator = RequestContext::operator_for_test();
+        let mut text = service
+            .subscribe_transcription_text(&id, &operator)
+            .await
+            .unwrap();
+
+        let error = service
+            .feed_transcription_stream(&id, utterance(64_000), &operator)
+            .await
+            .unwrap_err();
+        Ad4mDb::with_global_instance(|db| db.set_free_hosting_enabled(true)).unwrap();
+
+        assert!(error.to_string().contains("credits"), "{error}");
+        assert!(text.try_recv().is_err(), "the utterance was transcribed");
+    }
+}
+
+/// A stream on a real HTTP upstream (mockito): the speech gate before the request, and the
+/// text of a streaming upstream published piece by piece.
+#[cfg(test)]
+mod remote_stream_http_tests {
+    use super::providers::audio::OpenAiTranscribe;
+    use super::transcription::speech_fixture as speech;
+    use super::*;
+    use crate::billing::test_seam;
+    use crate::db::Ad4mDb;
+    use mockito::Matcher;
+
+    /// Deterministic white noise at `level`: keyboard and fan noise, not a voice.
+    fn noise(samples: usize, level: f32) -> Vec<f32> {
+        let mut state = 0x2545_f491_u32;
+        (0..samples)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                (state as f32 / u32::MAX as f32 * 2.0 - 1.0) * level
+            })
+            .collect()
+    }
+
+    async fn open(
+        service: &AIService,
+        server: &mockito::ServerGuard,
+        payer: Option<&str>,
+    ) -> String {
+        let _ = Ad4mDb::init_global_instance(":memory:");
+        service
+            .open_remote_stream(
+                "m".into(),
+                "remote-model".into(),
+                "e".into(),
+                Arc::new(OpenAiTranscribe::new(
+                    "",
+                    url::Url::parse(&server.url()).unwrap(),
+                )),
+                payer.map(str::to_string),
+                "did:key:owner".into(),
+            )
+            .await
+    }
+
+    fn asks_to_stream(request: &mockito::Request) -> bool {
+        request
+            .utf8_lossy_body()
+            .map(|body| body.contains("name=\"stream\"\r\n\r\ntrue"))
+            .unwrap_or(false)
+    }
+
+    fn texts(rx: &mut tokio::sync::broadcast::Receiver<String>) -> Vec<String> {
+        std::iter::from_fn(|| rx.try_recv().ok()).collect()
+    }
+
+    // dev scored every fed utterance with Silero (a window is speech above 0.6) and dropped
+    // one with under a third of its 32 ms windows speech: silence, noise and a click never
+    // reach the upstream, where a model without VAD makes up text for them.
+    #[tokio::test]
+    async fn silence_and_noise_are_not_sent_upstream() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/v1/audio/transcriptions")
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"text":"Thank you."}"#)
+            .expect(0)
+            .create_async()
+            .await;
+        let service = AIService::empty();
+        let id = open(&service, &server, None).await;
+        let operator = RequestContext::operator_for_test();
+        let mut text = service
+            .subscribe_transcription_text(&id, &operator)
+            .await
+            .unwrap();
+
+        for utterance in [
+            vec![0.0; 32_000],
+            noise(32_000, 0.3),
+            noise(32_000, 0.02),
+            vec![0.1; 300],
+        ] {
+            service
+                .feed_transcription_stream(&id, utterance, &operator)
+                .await
+                .expect("a dropped utterance is not an error");
+        }
+        mock.assert_async().await;
+        assert!(texts(&mut text).is_empty());
+    }
+
+    #[tokio::test]
+    async fn speech_is_sent_upstream() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/v1/audio/transcriptions")
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"text":"If you can read this, transcription is working."}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let service = AIService::empty();
+        let id = open(&service, &server, None).await;
+        let operator = RequestContext::operator_for_test();
+        let mut text = service
+            .subscribe_transcription_text(&id, &operator)
+            .await
+            .unwrap();
+
+        service
+            .feed_transcription_stream(&id, speech(), &operator)
+            .await
+            .unwrap();
+        mock.assert_async().await;
+        assert_eq!(
+            texts(&mut text),
+            vec!["If you can read this, transcription is working."]
+        );
+    }
+
+    // dev published each segment as Whisper decoded it. An upstream that streams
+    // (`stream=true`: speaches, OpenAI's gpt-4o-transcribe, vLLM) does the same here: each
+    // delta is one `transcription-text`, and the words are billed once, from the whole text.
+    #[tokio::test]
+    async fn a_streaming_upstream_publishes_each_piece_as_it_is_decoded() {
+        for (shape, sse) in [
+            (
+                "speaches / OpenAI",
+                concat!(
+                    "data: {\"type\":\"transcript.text.delta\",\"delta\":\"If you can read this,\"}\n\n",
+                    "data: {\"type\":\"transcript.text.delta\",\"delta\":\" transcription is working.\"}\n\n",
+                    "data: {\"type\":\"transcript.text.done\",\"text\":\"If you can read this, transcription is working.\"}\n\n",
+                    "data: [DONE]\n\n",
+                ),
+            ),
+            (
+                "vLLM",
+                concat!(
+                    "data: {\"object\":\"transcription.chunk\",\"choices\":[{\"delta\":{\"content\":\"If you can read this,\"}}]}\n\n",
+                    "data: {\"object\":\"transcription.chunk\",\"choices\":[{\"delta\":{\"content\":\" transcription is working.\"}}]}\n\n",
+                    "data: [DONE]\n\n",
+                ),
+            ),
+        ] {
+            let mut server = mockito::Server::new_async().await;
+            let mock = server
+                .mock("POST", "/v1/audio/transcriptions")
+                .match_body(Matcher::Regex("name=\"stream\"\r\n\r\ntrue".into()))
+                .with_header("content-type", "text/event-stream")
+                .with_body(sse)
+                .expect(1)
+                .create_async()
+                .await;
+            let service = AIService::empty();
+            let id = open(&service, &server, Some("did:key:payer")).await;
+            Ad4mDb::with_global_instance(|db| db.set_host_rates(&[("m".to_string(), 0.5)]))
+                .unwrap();
+            test_seam::reset();
+            test_seam::force_result(test_seam::ForcedResult::Success);
+            let operator = RequestContext::operator_for_test();
+            let mut text = service
+                .subscribe_transcription_text(&id, &operator)
+                .await
+                .unwrap();
+
+            service
+                .feed_transcription_stream(&id, speech(), &operator)
+                .await
+                .unwrap();
+            mock.assert_async().await;
+            assert_eq!(
+                texts(&mut text),
+                vec!["If you can read this,", " transcription is working."],
+                "{shape}"
+            );
+            let calls = test_seam::calls();
+            assert_eq!(calls.len(), 1, "{shape}: {calls:?}");
+            assert_eq!(calls[0].amount, 4.0, "{shape}: 8 words at 0.5");
+        }
+    }
+
+    // A piece that was only a space was not published, so a listener that joins the pieces
+    // ran the words on each side of it together.
+    #[tokio::test]
+    async fn a_piece_that_is_only_spacing_is_published() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("POST", "/v1/audio/transcriptions")
+            .with_header("content-type", "text/event-stream")
+            .with_body(concat!(
+                "data: {\"type\":\"transcript.text.delta\",\"delta\":\"Hello\"}\n\n",
+                "data: {\"type\":\"transcript.text.delta\",\"delta\":\" \"}\n\n",
+                "data: {\"type\":\"transcript.text.delta\",\"delta\":\"world\"}\n\n",
+                "data: [DONE]\n\n",
+            ))
+            .create_async()
+            .await;
+        let service = AIService::empty();
+        let id = open(&service, &server, None).await;
+        let operator = RequestContext::operator_for_test();
+        let mut text = service
+            .subscribe_transcription_text(&id, &operator)
+            .await
+            .unwrap();
+
+        service
+            .feed_transcription_stream(&id, speech(), &operator)
+            .await
+            .unwrap();
+        assert_eq!(texts(&mut text).concat(), "Hello world");
+    }
+
+    // A server that takes `stream` and answers JSON anyway (nemo-speech's transcription
+    // route, OpenAI's whisper-1) is answered per utterance, as before.
+    #[tokio::test]
+    async fn a_server_that_does_not_stream_is_answered_per_utterance() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/v1/audio/transcriptions")
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"text":"If you can read this, transcription is working."}"#)
+            .expect(2)
+            .create_async()
+            .await;
+        let service = AIService::empty();
+        let id = open(&service, &server, None).await;
+        let operator = RequestContext::operator_for_test();
+        let mut text = service
+            .subscribe_transcription_text(&id, &operator)
+            .await
+            .unwrap();
+        for _ in 0..2 {
+            service
+                .feed_transcription_stream(&id, speech(), &operator)
+                .await
+                .unwrap();
+        }
+        mock.assert_async().await;
+        assert_eq!(texts(&mut text).len(), 2);
+    }
+
+    // A server that refuses the field is asked again without it, and the stream does not
+    // ask it again.
+    #[tokio::test]
+    async fn a_server_that_refuses_stream_is_asked_without_it_from_then_on() {
+        let mut server = mockito::Server::new_async().await;
+        let refused = server
+            .mock("POST", "/v1/audio/transcriptions")
+            .match_request(asks_to_stream)
+            .with_status(422)
+            .with_body(r#"{"detail":"stream: extra fields not permitted"}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let plain = server
+            .mock("POST", "/v1/audio/transcriptions")
+            .match_request(|request| !asks_to_stream(request))
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"text":"If you can read this, transcription is working."}"#)
+            .expect(2)
+            .create_async()
+            .await;
+        let service = AIService::empty();
+        let id = open(&service, &server, None).await;
+        let operator = RequestContext::operator_for_test();
+        let mut text = service
+            .subscribe_transcription_text(&id, &operator)
+            .await
+            .unwrap();
+        for _ in 0..2 {
+            service
+                .feed_transcription_stream(&id, speech(), &operator)
+                .await
+                .unwrap();
+        }
+        refused.assert_async().await;
+        plain.assert_async().await;
+        assert_eq!(texts(&mut text).len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod stream_reaper_tests {
+    use super::*;
+
+    // D4: `global_instance()` hands out clones, and the clone `new()` gave the model load was
+    // dropped moments after start. Dropping any clone used to stop the reaper, so an abandoned
+    // stream lived until the process ended.
+    #[tokio::test(start_paused = true)]
+    async fn a_dropped_clone_does_not_stop_the_reaper() {
+        let service = AIService::empty();
+        service.start_stream_reaper();
+        drop(service.clone());
+
+        let (session, _queue) = TranscriptionSession::for_test(None);
+        *session.last_activity.lock().await =
+            tokio::time::Instant::now() - Duration::from_secs(TRANSCRIPTION_TIMEOUT_SECS + 1);
+        service
+            .transcription_streams
+            .lock()
+            .await
+            .insert("abandoned".to_string(), session);
+
+        sleep(Duration::from_secs(TRANSCRIPTION_CHECK_INTERVAL_SECS + 1)).await;
+        assert!(
+            service.transcription_streams.lock().await.is_empty(),
+            "the reaper stopped when a clone of the service was dropped"
+        );
     }
 }
 

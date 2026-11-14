@@ -75,35 +75,46 @@ async fn serve() -> Result<(), String> {
         .await
         .map_err(|e| format!("bind {listen}: {e}"))?;
     let addr = listener.local_addr().map_err(|e| e.to_string())?;
+    let shutdown = shutdown();
     println!(
         "identity-store listening on http://{addr} store-key {}",
         store.key.multikey()
     );
     axum::serve(listener, router(store))
-        .with_graceful_shutdown(shutdown())
+        .with_graceful_shutdown(shutdown)
         .await
         .map_err(|e| e.to_string())
 }
 
 /// Resolves on SIGINT, or on SIGTERM (what `docker stop` and service managers send).
-async fn shutdown() {
-    let interrupt = async {
-        let _ = tokio::signal::ctrl_c().await;
-    };
+///
+/// The handlers are registered when this is called, not when the future is first polled:
+/// `serve` calls it before it prints that it listens, so a signal sent from then on shuts it
+/// down cleanly instead of taking the default action.
+fn shutdown() -> impl std::future::Future<Output = ()> {
     #[cfg(unix)]
-    let terminate = async {
-        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            Ok(mut signal) => {
-                signal.recv().await;
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let interrupt = signal(SignalKind::interrupt());
+        let terminate = signal(SignalKind::terminate());
+        async move {
+            let wait = |stream: std::io::Result<tokio::signal::unix::Signal>| async move {
+                match stream {
+                    Ok(mut signal) => {
+                        signal.recv().await;
+                    }
+                    Err(_) => std::future::pending().await,
+                }
+            };
+            tokio::select! {
+                () = wait(interrupt) => {}
+                () = wait(terminate) => {}
             }
-            Err(_) => std::future::pending().await,
         }
-    };
+    }
     #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-    tokio::select! {
-        () = interrupt => {}
-        () = terminate => {}
+    async {
+        let _ = tokio::signal::ctrl_c().await;
     }
 }
 

@@ -110,6 +110,58 @@ between executors, the server-link suite (and, for p-diff-sync itself, the
 Holochain suite); such suites take a `LinkLangConfig` (`utils/linkLangConfig.ts`)
 so the same file runs on both link languages.
 
+### Nightly (`nightly-llm-e2e` workflow)
+
+A pipeline with `run-nightly-llm: true` runs only this workflow, on `coasys/marvin`
+(local Ollama). Each job has its own serial group. The jobs: `llm-e2e`,
+`integration-tests-sfu`, `integration-tests-sfu-browsers` (see below) and
+`coasys-spaces`.
+
+`coasys-spaces` runs WE's product suite (`pnpm --filter @we/app-web test:spaces`,
+WE `apps/we-web/tests/live/coasys-spaces/`): a Coasys space, a call, its
+transcript (executor Whisper), extraction on Ollama `qwen3.8-27b-48k` (the
+model staging and `llm-e2e` use, which Marvin keeps loaded), and flows.
+Ollama's OpenAI endpoint runs a model with the server's default context window
+and cuts a longer prompt silently. So when the model's own `num_ctx` is below
+`COASYS_SPACES_LLM_NUM_CTX` (16384), `llm-check` makes a variant such as
+`coasys-spaces-gemma3-12b:ctx16384` (`/api/create`) and the suite runs on it.
+A model with a large enough `num_ctx` (the 48k tag) runs as it is, so the GPU
+holds one load. It uses this commit's executor and SDK:
+
+- The executor is the one the `build` job published for the commit
+  (`$EXECUTOR_PUBLISH_DIR/<sha>/manifest.json`, sha256 checked). If there is none,
+  the job builds it.
+- `core` and `connect` are built and packed. WE's ad4m pin (root `pnpm.overrides`)
+  points at the two tarballs.
+- WE comes from the pipeline parameter `we-ref` (branch, tag or full commit;
+  default `dev`). WE installs with its own pnpm (10).
+
+The job halts green when the same ad4m commit, WE commit, tier and model already
+passed on the host (`~/.local/state/ad4m-ci/coasys-spaces/last-success`). Set
+`COASYS_SPACES_FORCE=1` to run anyway. A checkout with changes (a run by hand
+with local edits) runs, but neither skips nor records a pass. It shares the serial group
+`nightly-llm` with `llm-e2e`: both use the host's Ollama and GPU, so they run
+one after the other. Screenshots, traces and logs are under the
+job's artifacts, `coasys-spaces/`.
+
+Each step is a subcommand of `scripts/coasys-spaces.sh`. `bash
+scripts/coasys-spaces.sh all` runs the whole job on a machine with Ollama and the
+model (`COASYS_SPACES_TIER=stub` needs no model). `bash
+scripts/coasys-spaces.test.sh` tests the script.
+
+To run the workflow by hand on a branch, with another WE ref (the definition id
+is in Project Settings → Pipelines):
+
+```bash
+curl -X POST https://circleci.com/api/v2/project/circleci/VRkXSnZDyBKHhkHKBHTmLj/W84Q4MGGTeZwizersNwxB4/pipeline/run \
+  -H "Circle-Token: $CIRCLECI_TOKEN" -H 'content-type: application/json' \
+  -d '{"definition_id": "<definition id>",
+       "config": {"branch": "<branch>"}, "checkout": {"branch": "<branch>"},
+       "parameters": {"run-nightly-llm": true, "we-ref": "<WE branch>"}}'
+```
+
+This runs all four nightly jobs.
+
 ### SFU wind tunnel
 
 | Suite | Languages | CI |
@@ -128,6 +180,15 @@ so the same file runs on both link languages.
   canvas (not black; headless WebKit never plays a `<video>`, so not there).
   On the SFU, Chromium + Firefox also asserts the payload types differ per
   leg and each receiver gets its own numbers (#1684).
+- On a host with no audio server (CI's runner: no PulseAudio or PipeWire),
+  Firefox keeps every `AudioContext` `suspended` (`currentTime` 0) and its
+  analyser reads silence, though the audio arrives and decodes. No Firefox
+  pref fixes it (`media.cubeb.force_null_context` makes any host silent;
+  `media.cubeb.backend` does not help). So where the page's context does not
+  run, `audioPeak` is the receiver's `inbound-rtp` `audioLevel` instead
+  (`audioMeter: "rtp-stats"`, shown in the failure). To reproduce on a
+  desktop, run the suite with `XDG_RUNTIME_DIR` set to an empty directory
+  and `PULSE_SERVER=unix:/nonexistent PIPEWIRE_REMOTE=/nonexistent`.
 - The suite binds the SFU to the host's outbound IPv4
   (`AD4M_SFU_BIND_ADDR`), not loopback: Firefox gathers no loopback
   candidate and never pairs its LAN candidates with an SFU on 127.0.0.1
@@ -248,6 +309,36 @@ state swaps them during a rollback); the answerer holds its own first offer
 until the pair connects; `join` waits for the channel to listen before the
 session announces presence; the buffer for not-yet-listed peers never drops a
 description.
+
+### AI wind tunnel
+
+`pnpm run ai-wind-tunnel` (in `tests/js`) runs every cell of providers (Ollama,
+llama-server, vLLM, whisper-server, speaches) × services (llm, completion,
+embeddings, stt, tts) for real through a fresh executor, verifies each answer,
+measures it and writes `ai-wind-tunnel/evidence/<class>/<date>-<id>.json`;
+`pnpm run ai-wind-tunnel-recommend` derives `ai-wind-tunnel/recommendations.json`
+from all evidence. Not in any CI job (it needs real models); the unit tests
+(`pnpm run test-ai-wind-tunnel-unit`) are cheap. See `ai-wind-tunnel/README.md`.
+
+- Every measured call goes through the executor as an app's would: endpoints
+  and models registered with `ai.addEndpoint`/`ai.addModel` (Ollama models
+  pulled with `ai.pullModel`), requests over the SDK and `/v1`. Direct calls
+  to the provider only give the executor's overhead.
+- A cell is `pass`, `fail` (with the failed check), `unsupported` (the provider
+  cannot serve it: `ai-wind-tunnel/matrix.json`) or `skipped` (not available on
+  this machine). Never record timing without the checks.
+- Shared data the executor will read: the runtime/model manifest at
+  `rust-executor/src/ai_service/local/manifest.json`, the hardware-class rules
+  `ai-wind-tunnel/hardware-classes.json` with their fixtures
+  (`hardware-class-fixtures.json`, which a Rust classifier must pass too), and
+  `recommendations.json` (schema v1). Change their meaning only with a schema
+  version bump.
+- Recommendations cite evidence; a class without evidence has none. Never edit
+  `recommendations.json` by hand: add evidence and regenerate (a unit test
+  fails when it is stale).
+- The run binds free ports on 127.0.0.1 only, never the `AI_WT_RESERVED_PORTS`,
+  stops only processes it started and removes only `ai-wt-<run id>-*`
+  containers. ts-mocha needs Node 24 (it fails to load under Node 26).
 
 ### Port Conflicts
 

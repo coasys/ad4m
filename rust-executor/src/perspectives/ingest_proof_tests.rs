@@ -115,7 +115,11 @@ fn store_a_bad_proof_does_not_replace_a_verified_one() {
         let store = SparqlStore::new(None).unwrap();
         store.add_link(&genuine).unwrap();
         store.add_link(&forged).unwrap();
-        let row = only_link(store.get_all_links().unwrap());
+        let row = only_link(
+            store
+                .get_all_links(&crate::perspectives::sparql_store::EvalStop::none())
+                .unwrap(),
+        );
         assert_row_is(&row, &genuine);
     }
 }
@@ -134,12 +138,20 @@ fn store_a_valid_proof_upgrades_an_unverified_one() {
     let store = SparqlStore::new(None).unwrap();
     store.add_link(&first_bad).unwrap();
     store.add_link(&second_bad).unwrap();
-    let row = only_link(store.get_all_links().unwrap());
+    let row = only_link(
+        store
+            .get_all_links(&crate::perspectives::sparql_store::EvalStop::none())
+            .unwrap(),
+    );
     assert_eq!(row.proof.signature, first_bad.proof.signature);
     assert_eq!(row.proof.valid, Some(false));
 
     store.add_link(&genuine).unwrap();
-    let row = only_link(store.get_all_links().unwrap());
+    let row = only_link(
+        store
+            .get_all_links(&crate::perspectives::sparql_store::EvalStop::none())
+            .unwrap(),
+    );
     assert_row_is(&row, &genuine);
 }
 
@@ -163,7 +175,14 @@ fn store_a_replayed_signature_with_another_key_keeps_the_stored_key() {
         let store = SparqlStore::new(None).unwrap();
         store.add_link(&genuine).unwrap();
         store.add_link(&replay).unwrap();
-        assert_row_is(&only_link(store.get_all_links().unwrap()), &genuine);
+        assert_row_is(
+            &only_link(
+                store
+                    .get_all_links(&crate::perspectives::sparql_store::EvalStop::none())
+                    .unwrap(),
+            ),
+            &genuine,
+        );
     }
 }
 
@@ -182,7 +201,14 @@ fn store_an_equivalent_encoding_under_the_authors_signature_keeps_the_signed_byt
     let store = SparqlStore::new(None).unwrap();
     store.add_link(&genuine).unwrap();
     store.add_link(&forged).unwrap();
-    assert_row_is(&only_link(store.get_all_links().unwrap()), &genuine);
+    assert_row_is(
+        &only_link(
+            store
+                .get_all_links(&crate::perspectives::sparql_store::EvalStop::none())
+                .unwrap(),
+        ),
+        &genuine,
+    );
 }
 
 /// T3 in reverse: Alice signs the canonical target, so no `wireTarget` is
@@ -200,7 +226,14 @@ fn store_a_canonical_row_is_not_healed_by_an_unverified_encoding() {
     let store = SparqlStore::new(None).unwrap();
     store.add_link(&genuine).unwrap();
     store.add_link(&forged).unwrap();
-    assert_row_is(&only_link(store.get_all_links().unwrap()), &genuine);
+    assert_row_is(
+        &only_link(
+            store
+                .get_all_links(&crate::perspectives::sparql_store::EvalStop::none())
+                .unwrap(),
+        ),
+        &genuine,
+    );
 }
 
 /// Heal for rows written before #1141, which kept no `wireTarget`: the
@@ -216,7 +249,11 @@ fn store_the_same_signature_restores_a_missing_wire_target() {
     let store = SparqlStore::new(None).unwrap();
     store.add_link(&genuine).unwrap();
     store.remove_wire_target_annotation(&genuine).unwrap();
-    let pre_1141 = only_link(store.get_all_links().unwrap());
+    let pre_1141 = only_link(
+        store
+            .get_all_links(&crate::perspectives::sparql_store::EvalStop::none())
+            .unwrap(),
+    );
     assert_eq!(
         pre_1141.data.target, CANONICAL_TARGET,
         "setup: without wireTarget the row reads back the canonical rendering"
@@ -227,7 +264,14 @@ fn store_the_same_signature_restores_a_missing_wire_target() {
     );
 
     store.add_link(&genuine).unwrap();
-    assert_row_is(&only_link(store.get_all_links().unwrap()), &genuine);
+    assert_row_is(
+        &only_link(
+            store
+                .get_all_links(&crate::perspectives::sparql_store::EvalStop::none())
+                .unwrap(),
+        ),
+        &genuine,
+    );
 }
 
 /// Negative control for the heal: a different valid signature on the same
@@ -245,13 +289,24 @@ fn store_a_different_valid_signature_does_not_heal_or_replace() {
     let store = SparqlStore::new(None).unwrap();
     store.add_link(&canonical).unwrap();
     store.add_link(&raw).unwrap();
-    assert_row_is(&only_link(store.get_all_links().unwrap()), &canonical);
+    assert_row_is(
+        &only_link(
+            store
+                .get_all_links(&crate::perspectives::sparql_store::EvalStop::none())
+                .unwrap(),
+        ),
+        &canonical,
+    );
 
     let store = SparqlStore::new(None).unwrap();
     store.add_link(&raw).unwrap();
     store.remove_wire_target_annotation(&raw).unwrap();
     store.add_link(&canonical).unwrap();
-    let row = only_link(store.get_all_links().unwrap());
+    let row = only_link(
+        store
+            .get_all_links(&crate::perspectives::sparql_store::EvalStop::none())
+            .unwrap(),
+    );
     assert_eq!(
         row.proof.signature, raw.proof.signature,
         "the stored signature stays the first one"
@@ -282,7 +337,7 @@ async fn ingest(
 
 fn links_from(p: &PerspectiveInstance, source: &str) -> Vec<DecoratedLinkExpression> {
     p.sparql_store
-        .get_all_links()
+        .get_all_links(&crate::perspectives::sparql_store::EvalStop::none())
         .unwrap()
         .into_iter()
         .filter(|l| l.data.source == source)

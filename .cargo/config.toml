@@ -19,10 +19,6 @@ AWS_LC_SYS_PREBUILT_NASM = "1"
 # cmake. Explicit CMAKE_BUILDER=1 ensures the cmake path is taken directly.
 AWS_LC_SYS_CMAKE_BUILDER = "1"
 
-# CUDA compute capability for candle-kernels (A100 = sm_80).
-# Without this, bindgen_cuda panics when nvidia-smi isn't available.
-CUDA_COMPUTE_CAP = "80"
-
 [net]
 # Use system git instead of cargo's built-in libgit2.
 # Required because coasys/deno.git has heavy chromium submodules
@@ -34,7 +30,7 @@ git-fetch-with-cli = true
 # The binary exceeds ARM64's ±128MB B/BL limit (V8 + ONNX = ~140MB).
 # -fuse-ld= with explicit binary path because -ld_classic flag is
 # silently ignored on some Xcode/ld-prime versions.
-# CI must select Xcode 15.4 (has ld-classic binary).
+# The Command Line Tools ship ld-classic (still in Xcode 16.4's); CI checks it is there.
 [target.aarch64-apple-darwin]
 rustflags = [
     "-C", "link-arg=-fuse-ld=/Library/Developer/CommandLineTools/usr/bin/ld-classic",

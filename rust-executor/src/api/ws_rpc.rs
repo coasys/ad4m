@@ -33,15 +33,15 @@ use crate::types::RequestContext;
 
 use super::auth::AppState;
 use super::event_interest;
-use super::ws_handler::HandlerMap;
+use super::ws_handler::{HandlerMap, WsRpcError};
 
 /// Per-connection registry of in-flight request ids → cancellation
 /// tokens.  A client cancels an in-flight request by sending
 /// `{"id": "<some-cancel-id>", "type": "request.cancel",
 ///   "params": {"targetId": "<original-request-id>"}}`.
-/// The dispatcher cancels the matching token; the handler races its
-/// work against `token.cancelled()` and returns early.
-type InflightRegistry = Arc<Mutex<HashMap<String, CancellationToken>>>;
+/// The dispatcher cancels the matching tokens: `.0` drops the call's
+/// future, `.1` is its `ctx.cancel_token`, which stops its eval.
+type InflightRegistry = Arc<Mutex<HashMap<String, (CancellationToken, CancellationToken)>>>;
 
 // ── Auth query param ────────────────────────────────────────────────────────
 #[derive(Deserialize, Default)]
@@ -128,7 +128,8 @@ pub(crate) async fn close_refused(mut socket: WebSocket, code: u16, reason: Stri
 }
 
 /// Closes a socket whose token stopped working while it was open.
-pub(crate) async fn close_token_ended(socket: &mut WebSocket) {
+pub(crate) async fn close_token_ended<S: futures::Sink<Message> + Unpin>(socket: &mut S) {
+    use futures::SinkExt;
     let _ = socket.send(Message::Close(Some(token_ended_frame()))).await;
 }
 
@@ -384,21 +385,37 @@ pub(crate) struct Connection {
     interest: event_interest::SharedInterest,
     /// Dispatched calls still running.
     calls: std::sync::Mutex<tokio::task::JoinSet<()>>,
-    /// Fires when the connection closes (and with `session_over`, its parent). The calls that
-    /// open a live query race it: their first result has nobody left to receive it, and an
-    /// abandoned one kept a blocking thread busy for minutes (#1595). Other calls still
-    /// finish, so a write the client sent completes.
+    /// Fires when the connection closes (and with `session_over`, its parent). Every call's
+    /// `ctx.cancel_token` is a child of it, so closing the socket stops the eval of any
+    /// query still running — its first result has nobody left to receive it, and an
+    /// abandoned one kept a blocking thread busy for minutes (#1595). A call that opens
+    /// a live query drops with it; other calls still finish, so a write the client sent
+    /// completes, and a subscribe that lands after the close is swept as its call ends.
     closed: CancellationToken,
     /// Bounds how many calls that open a live query one connection runs at once; the rest
     /// wait their turn. A client that gives up on its subscribe call and asks again (the waker
     /// retried every 30 s) piled up one first-result computation per attempt: ~200 busy
     /// threads on staging (#1595).
     opening: Arc<tokio::sync::Semaphore>,
+    /// Bounds how many query-running calls one connection evaluates at once (#1736):
+    /// `perspective.querySparql`, `perspective.getLinks`, `perspective.modelQuery`,
+    /// `perspective.evaluateGetters`, `perspective.subscribeQuery` and
+    /// `perspective.modelSubscribe`. A call acquires one slot in
+    /// `sparql_store::query_gate`, which hangs the permit on the eval's stop:
+    /// the slot frees only when the blocking evaluation has actually ended,
+    /// not when the call's future ends.
+    queries: Arc<tokio::sync::Semaphore>,
 }
 
 /// How many calls that open a live query one connection runs at once (see
 /// [`Connection::opening`]).
 pub(crate) const MAX_OPENING_LIVE_QUERIES: usize = 8;
+
+/// How many SPARQL evaluations one connection runs at once (see
+/// [`Connection::queries`]): 8, the same bound the opening cap already set —
+/// each Oxigraph eval is a blocking thread, so 8 keeps one connection from
+/// taking every blocking slot the way 83 mention re-checks did on staging.
+pub(crate) const MAX_RUNNING_QUERIES_PER_CONNECTION: usize = 8;
 
 impl Connection {
     /// A connection whose replies and events go to `tx`.
@@ -421,6 +438,9 @@ impl Connection {
             calls: Default::default(),
             closed,
             opening: Arc::new(tokio::sync::Semaphore::new(MAX_OPENING_LIVE_QUERIES)),
+            queries: Arc::new(tokio::sync::Semaphore::new(
+                MAX_RUNNING_QUERIES_PER_CONNECTION,
+            )),
         }
     }
 
@@ -499,8 +519,9 @@ impl Connection {
                 .map(|s| s.to_string())
                 .unwrap_or_default();
             let mut guard = self.inflight.lock().await;
-            let cancelled = if let Some(token) = guard.remove(&target_id) {
-                token.cancel();
+            let cancelled = if let Some((drop_token, ctx_token)) = guard.remove(&target_id) {
+                drop_token.cancel();
+                ctx_token.cancel();
                 true
             } else {
                 false
@@ -516,24 +537,34 @@ impl Connection {
             return;
         }
 
-        // Allocate a CancellationToken for this request and stash it in
-        // the registry under the request id.  The handler races its
-        // work against `cancel_token.cancelled()`; if the client sends
-        // `request.cancel`, the racing future fires immediately and we
-        // reply with an `AbortError` (code 499). A child of `session_over`: a revocation or
-        // expiry cancels the calls in flight too. A call that opens a live query is a child
-        // of `closed`, so the connection closing cancels it as well (the methods flagged
-        // `.opens()` where they register).
+        // Allocate the request's CancellationTokens and stash them in
+        // the registry under the request id.  If the client sends
+        // `request.cancel`, the drop token's race fires immediately and we
+        // reply with an `AbortError` (code 499).
         let opens_live_query = self.handler_map.opens(&msg_type);
-        let cancel_token = if opens_live_query {
+        // Two tokens, two jobs:
+        // - `drop_token` drops the call's future in the select below, on
+        //   `request.cancel` or the session ending — and, for a call that
+        //   opens a live query, on the connection closing too (#1595: its
+        //   first result has nobody left to receive it). Other calls still
+        //   finish once the socket closes: their evals end on `ctx_token`,
+        //   and a subscribe that still completes is swept as the call ends
+        //   (the dispose loop in `serve`).
+        // - `ctx_token` (a `closed` child) rides `req_ctx` into the eval gate:
+        //   a `request.cancel`, the connection closing, a revocation or an
+        //   expiry stops the call's eval — for every query-running method, not
+        //   only live-query openers (#1736). `request.cancel` cancels both.
+        let drop_token = if opens_live_query {
             self.closed.child_token()
         } else {
             self.session_over.child_token()
         };
+        let ctx_token = self.closed.child_token();
         let opening = opens_live_query.then(|| self.opening.clone());
+        let queries = self.queries.clone();
         {
             let mut guard = self.inflight.lock().await;
-            guard.insert(id.clone(), cancel_token.clone());
+            guard.insert(id.clone(), (drop_token.clone(), ctx_token.clone()));
         }
 
         // An event that names a member twice, which `params` (a `Value`) no longer shows.
@@ -574,18 +605,21 @@ impl Connection {
             // Build a per-request context that carries the cancel token,
             // so handlers can clone it into long-running operations.
             let mut req_ctx = (*base_ctx).clone();
-            req_ctx.cancel_token = Some(cancel_token.clone());
+            req_ctx.cancel_token = Some(ctx_token.clone());
+            req_ctx.query_slots = Some(queries);
             let req_ctx = Arc::new(req_ctx);
 
-            // Race the handler against cancellation.  On cancel, we
-            // drop the handler future — the work it was doing (e.g.
-            // a `spawn_blocking` SPARQL eval inside Oxigraph) will
-            // continue to run because Rust can't cancel arbitrary
-            // CPU-bound work, but the network reply is skipped and
-            // the next select arm fires first.
+            // Race the handler against a `request.cancel` or the session
+            // ending.  On cancel, we drop the handler future — its eval
+            // gate's drop stops the work it was doing (e.g. a
+            // `spawn_blocking` SPARQL eval inside Oxigraph) — the network
+            // reply is skipped and the first select arm fires first.
+            // A socket that merely closed does not fire `drop_token`:
+            // `ctx_token` still stops the call's eval, and the call ends
+            // with it.
             let response = tokio::select! {
                 biased;
-                _ = cancel_token.cancelled() => {
+                _ = drop_token.cancelled() => {
                     if session_over.is_cancelled() {
                         json!({"id": id, "error": {"code": 401, "message": token_ended_frame().reason.as_str()}})
                     } else {
@@ -595,9 +629,23 @@ impl Connection {
                     }
                 }
                 result = async {
-                    // Waits for a turn, cancellably: the select drops it with the call.
+                    // Waits for a turn, cancellably: `request.cancel` drops the
+                    // wait with the call's future; the connection closing ends
+                    // it on `ctx_token` — a queued live query has nobody left
+                    // to receive its first result.
                     let _turn = match opening {
-                        Some(opening) => opening.acquire_owned().await.ok(),
+                        Some(opening) => match tokio::select! {
+                            p = opening.acquire_owned() => p.ok(),
+                            _ = ctx_token.cancelled() => None,
+                        } {
+                            Some(permit) => Some(permit),
+                            None => {
+                                return Err(WsRpcError {
+                                    code: 499,
+                                    message: "Request cancelled by client".to_string(),
+                                });
+                            }
+                        },
                         None => None,
                     };
                     match refused {
@@ -1086,7 +1134,7 @@ mod socket_tests {
         // Events reach a socket over its RPC connection once it watches them; the event
         // stream must end at expiry too, not keep the socket open.
         let watching = &mut sockets[1].1;
-        let watch = json!({ "model-loading-status": null, "perspective-added": null });
+        let watch = json!({ "model-status": null, "perspective-added": null });
         let reply = call_with(watching, "watch", "events.watch", watch).await;
         assert_eq!(reply["result"], true, "{reply}");
 
@@ -1307,7 +1355,7 @@ mod socket_tests {
         let mut admin = connect(addr, ADMIN).await;
         let mut anonymous = connect(addr, "").await;
         // Both sockets watch the event, so only the token gate can keep it from one.
-        let watch = json!({ "model-loading-status": null });
+        let watch = json!({ "model-status": null });
         for ws in [&mut admin, &mut anonymous] {
             let reply = call_with(ws, "watch", "events.watch", watch.clone()).await;
             assert_eq!(reply["result"], true, "{reply}");
@@ -1324,7 +1372,7 @@ mod socket_tests {
             loop {
                 get_global_pubsub().await.publish_event(Event {
                     capability: AGENT_AUTH_CAPABILITY.clone(),
-                    ..Event::new(Topic::AiModelLoadingStatus, Audience::Everyone, &event)
+                    ..Event::new(Topic::AiModelStatus, Audience::Everyone, &event)
                 });
                 if let Ok(Some(Ok(WsMessage::Text(text)))) =
                     tokio::time::timeout(Duration::from_millis(200), admin.next()).await

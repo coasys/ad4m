@@ -149,6 +149,72 @@ enum Domain {
         #[command(subcommand)]
         command: ConfigCommand,
     },
+    /// Local AI without a running executor
+    LocalAi {
+        #[command(subcommand)]
+        command: LocalAiCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum LocalAiCommand {
+    /// Download the runtimes and models `ai.localInstall` would, into a store, and keep the
+    /// selection in a state directory, starting nothing (the Docker image's INCLUDE_MODELS).
+    /// An executor with that store (`local_ai_dir`) and that state (`<app data>/local-ai`)
+    /// starts them with no download.
+    Install {
+        /// The store of runtimes and models.
+        #[arg(long)]
+        store: std::path::PathBuf,
+        /// Where the selection goes.
+        #[arg(long)]
+        state: std::path::PathBuf,
+        /// cpu, cuda, metal, vulkan or rocm. Default: the best one detected here.
+        #[arg(long, value_parser = parse_device)]
+        device: Option<rust_executor::ai_service::local::hardware::Backend>,
+        /// The services, comma-separated: llm, embeddings, stt. Default: every one the plan
+        /// offers.
+        #[arg(long, value_delimiter = ',', value_parser = parse_service)]
+        services: Option<Vec<rust_executor::ai_service::local::data::Service>>,
+    },
+}
+
+fn parse_device(
+    value: &str,
+) -> Result<rust_executor::ai_service::local::hardware::Backend, String> {
+    serde_json::from_value(serde_json::Value::String(value.to_string()))
+        .map_err(|_| format!("`{value}` is not a device: cpu, cuda, metal, vulkan or rocm"))
+}
+
+fn parse_service(value: &str) -> Result<rust_executor::ai_service::local::data::Service, String> {
+    serde_json::from_value(serde_json::Value::String(value.to_string()))
+        .map_err(|_| format!("`{value}` is not a service: llm, embeddings or stt"))
+}
+
+/// `local-ai install`: the download, its progress on stdout (one line per item per 10 %).
+async fn local_ai_install(
+    store: std::path::PathBuf,
+    state: std::path::PathBuf,
+    device: Option<rust_executor::ai_service::local::hardware::Backend>,
+    services: Option<Vec<rust_executor::ai_service::local::data::Service>>,
+) -> Result<()> {
+    let last = std::sync::Mutex::new(None::<(String, u64)>);
+    rust_executor::ai_service::local::install_into(store, state, device, services, move |step| {
+        let item = step.item.unwrap_or_default();
+        let percent = (step.item_done_bytes * 100)
+            .checked_div(step.item_total_bytes)
+            .unwrap_or(0);
+        let mut last = last.lock().unwrap_or_else(|p| p.into_inner());
+        if last
+            .as_ref()
+            .is_some_and(|(i, p)| *i == item && percent / 10 == p / 10)
+        {
+            return;
+        }
+        println!("local AI: {} {item} {percent}%", step.phase);
+        *last = Some((item, percent));
+    })
+    .await
 }
 
 #[derive(Debug, Subcommand)]
@@ -223,6 +289,24 @@ async fn main() -> Result<()> {
             "{}",
             serde_json::to_string_pretty(&resolved.redacted_json())?
         );
+        return Ok(());
+    }
+
+    if let Domain::LocalAi {
+        command:
+            LocalAiCommand::Install {
+                store,
+                state,
+                device,
+                services,
+            },
+    } = args.domain
+    {
+        if let Err(e) = local_ai_install(store, state, device, services).await {
+            eprintln!("Local AI install failed: {e:#}");
+            std::process::exit(1);
+        }
+        println!("Local AI installed.");
         return Ok(());
     }
 
