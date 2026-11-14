@@ -1163,10 +1163,20 @@ pub struct SparqlStore {
     store: Arc<Store>,
     /// Serializes link mutations and clear across every clone of this store.
     writer: Arc<Mutex<()>>,
+    /// The write generation: bumped after every committed write, shared
+    /// across clones. A reader that keeps a query result can reuse it while
+    /// the generation it read before the query is unchanged, and can wait for
+    /// the next write ([`Self::watch_writes`]) instead of polling.
+    writes: Arc<tokio::sync::watch::Sender<u64>>,
     /// Test-only: every read query's text, in order, shared across clones, so a test can
     /// assert which store queries a pipeline ran (see [`SparqlStore::queries_run`]).
     #[cfg(test)]
     query_log: Arc<Mutex<Vec<String>>>,
+    /// Test-only: how many index scans `query_links` and
+    /// `query_links_top_n_by_timestamp` ran, shared across clones. They do not
+    /// go through the query log.
+    #[cfg(test)]
+    link_scans: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// The SELECT behind [`SparqlStore::get_all_links`] and other link reads that
@@ -1229,9 +1239,29 @@ impl SparqlStore {
         Ok(SparqlStore {
             store: Arc::new(store),
             writer: Arc::new(Mutex::new(())),
+            writes: Arc::new(tokio::sync::watch::Sender::new(0)),
             #[cfg(test)]
             query_log: Arc::new(Mutex::new(Vec::new())),
+            #[cfg(test)]
+            link_scans: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         })
+    }
+
+    /// The current write generation. Read it *before* a query whose result
+    /// is kept: a write that lands during the query then shows as a newer
+    /// generation, and the result is read again.
+    pub(crate) fn write_generation(&self) -> u64 {
+        *self.writes.borrow()
+    }
+
+    /// A receiver that sees each new write generation.
+    pub(crate) fn watch_writes(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.writes.subscribe()
+    }
+
+    /// Call after a write committed (or may have).
+    fn note_write(&self) {
+        self.writes.send_modify(|g| *g = g.wrapping_add(1));
     }
 
     /// Returns the number of quads in the store (for diagnostics).
@@ -1291,6 +1321,7 @@ impl SparqlStore {
         }
         write_link_quads(&mut tx, link, status)?;
         tx.commit()?;
+        self.note_write();
         Ok(true)
     }
 
@@ -1350,6 +1381,7 @@ impl SparqlStore {
         for quad in &quads {
             self.store.remove(quad)?;
         }
+        self.note_write();
         Ok(())
     }
 
@@ -1377,6 +1409,7 @@ impl SparqlStore {
         }
         remove_link_quads(&mut tx, link)?;
         tx.commit()?;
+        self.note_write();
         Ok(true)
     }
 
@@ -1415,6 +1448,7 @@ impl SparqlStore {
             write_link_quads(&mut tx, link, status)?;
         }
         tx.commit()?;
+        self.note_write();
         Ok(())
     }
 
@@ -1480,6 +1514,8 @@ impl SparqlStore {
         limit: Option<usize>,
     ) -> Result<Vec<DecoratedLinkExpression>, Error> {
         use std::ops::ControlFlow;
+        #[cfg(test)]
+        self.count_link_scan();
         // Bail out early on the zero-page case: the closure below pushes first,
         // then checks `links.len() >= lim`, so without this guard `Some(0)`
         // would return one element instead of zero.
@@ -1524,6 +1560,8 @@ impl SparqlStore {
         use std::cmp::Reverse;
         use std::collections::BinaryHeap;
         use std::ops::ControlFlow;
+        #[cfg(test)]
+        self.count_link_scan();
 
         if limit == 0 {
             return Ok(Vec::new());
@@ -2204,7 +2242,9 @@ impl SparqlStore {
             .writer
             .lock()
             .map_err(|_| anyhow!("SPARQL store writer lock poisoned"))?;
-        self.store.clear()?;
+        let cleared = self.store.clear();
+        self.note_write();
+        cleared?;
         Ok(())
     }
 
@@ -2330,6 +2370,7 @@ impl SparqlStore {
             write_link_quads_proof(&mut tx, link, status, true)?;
         }
         tx.commit()?;
+        self.note_write();
         Ok(metadata_links.len())
     }
 
@@ -2340,6 +2381,18 @@ impl SparqlStore {
             .lock()
             .map(|log| log.clone())
             .unwrap_or_default()
+    }
+
+    /// Test-only: how many link index scans this store (and its clones) ran so far.
+    #[cfg(test)]
+    pub(crate) fn link_scans_run(&self) -> usize {
+        self.link_scans.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    fn count_link_scan(&self) {
+        self.link_scans
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Store `link` without refusing a link in the metadata vocabulary: the
@@ -2353,6 +2406,7 @@ impl SparqlStore {
         let mut tx = self.store.start_transaction()?;
         write_link_quads(&mut tx, link, link.status.as_ref().unwrap())?;
         tx.commit()?;
+        self.note_write();
         Ok(())
     }
 }
