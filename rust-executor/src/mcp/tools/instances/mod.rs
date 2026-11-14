@@ -201,6 +201,14 @@ impl<'a> PropView<'a> {
         self.prop.identity
     }
 
+    /// `sh:in` allowed values, in declared order — `None` when the property
+    /// is unconstrained. An empty list is present-and-empty: it allows
+    /// nothing. Entries are as written: `{value, label?}` objects or bare
+    /// values.
+    pub(crate) fn in_values(&self) -> Option<&'a [Value]> {
+        self.prop.in_values.as_deref()
+    }
+
     /// Declared `local: true` — this property's links are written with
     /// `LinkStatus::Local` and stay in this executor's store: never gossiped
     /// to the neighbourhood, invisible to remote agents, and not recoverable
@@ -261,6 +269,21 @@ impl<'a> PropView<'a> {
         }
         if let Some(hint) = self.interpretation_hint() {
             v["interpretation_hint"] = json!(hint);
+        }
+        if let Some(allowed) = self.in_values() {
+            v["allowed_values"] = Value::Array(
+                allowed
+                    .iter()
+                    .map(|entry| {
+                        let mut o = Map::new();
+                        o.insert("value".to_string(), validate::allowed_value(entry).clone());
+                        if let Some(label) = entry.get("label") {
+                            o.insert("label".to_string(), label.clone());
+                        }
+                        Value::Object(o)
+                    })
+                    .collect(),
+            );
         }
         if self.identity() {
             v["identity"] = json!(true);

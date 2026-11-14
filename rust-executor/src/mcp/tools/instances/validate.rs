@@ -76,6 +76,47 @@ pub(crate) fn describe_value(v: &Value) -> String {
     }
 }
 
+/// The value an `sh:in` entry stands for: its `value` key when it is an
+/// object, else the entry itself.
+pub(crate) fn allowed_value(entry: &Value) -> &Value {
+    entry.get("value").unwrap_or(entry)
+}
+
+/// A JSON value as the text `sh:in` compares on: strings by content,
+/// numbers and booleans by their JSON text (`"todo"` → `todo`, `3` → `3`,
+/// `true` → `true`). Anything else (objects, null) uses its JSON encoding.
+fn value_text(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Number(n) => n.to_string(),
+        Value::Bool(b) => b.to_string(),
+        other => serde_json::to_string(other).unwrap_or_default(),
+    }
+}
+
+/// Compare as the SDK writes them: the coerced candidate against one
+/// allowed value, both turned into text and compared exactly. No trimming,
+/// no case folding — WE writes option values with `String(v)` (W1), and a
+/// number property may still be sent as a number.
+fn matches_allowed(candidate: &Value, allowed: &Value) -> bool {
+    value_text(candidate) == value_text(allowed)
+}
+
+/// The allowed values for an error message: each `sh:in` entry's value in
+/// declared order, comma separated, at most 20 then "… and N more".
+fn describe_allowed(allowed: &[Value]) -> String {
+    let mut text = allowed
+        .iter()
+        .take(20)
+        .map(|entry| value_text(allowed_value(entry)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if allowed.len() > 20 {
+        text.push_str(&format!(" … and {} more", allowed.len() - 20));
+    }
+    text
+}
+
 /// Coerce one scalar value to the property's declared type, or explain why
 /// it can't be. Lenient where the intent is unambiguous ("true" for a
 /// boolean, "42" for an integer, 3 for a string), strict where it isn't.
@@ -115,7 +156,7 @@ pub(crate) fn coerce_scalar(info: &PropView<'_>, value: &Value) -> Result<Value,
         return Ok(value.clone());
     }
 
-    match info.type_name().as_str() {
+    let coerced = match info.type_name().as_str() {
         "boolean" => match value {
             Value::Bool(_) => Ok(value.clone()),
             Value::String(s) if s.eq_ignore_ascii_case("true") => Ok(json!(true)),
@@ -153,7 +194,25 @@ pub(crate) fn coerce_scalar(info: &PropView<'_>, value: &Value) -> Result<Value,
         },
         // Unknown / custom datatype: accept any single JSON value verbatim.
         _ => Ok(value.clone()),
+    }?;
+
+    // `sh:in`: the coerced value must match one declared entry. Runs after
+    // the type coercion so "42" for an integer property matches entry `42`;
+    // the relation and language-stored early returns above keep it off
+    // properties whose values are URIs or language expressions (no class in
+    // WE puts `options` on those). An empty list allows nothing.
+    if let Some(allowed) = info.in_values() {
+        if !allowed
+            .iter()
+            .any(|entry| matches_allowed(&coerced, allowed_value(entry)))
+        {
+            return Err(err(format!(
+                "not one of the allowed values: {}",
+                describe_allowed(allowed)
+            )));
+        }
     }
+    Ok(coerced)
 }
 
 /// Validate a `properties` map against a class shape.
