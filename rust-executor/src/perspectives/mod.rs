@@ -17,6 +17,7 @@ pub(crate) mod flow_spawn;
 pub(crate) mod hardwired_class;
 pub(crate) mod hosted_status;
 pub(crate) mod ingest;
+pub mod instances;
 pub mod interpretation;
 #[cfg(test)]
 mod interpretation_e2e;
