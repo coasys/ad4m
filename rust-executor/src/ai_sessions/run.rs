@@ -60,7 +60,10 @@ pub struct TurnDeps {
 }
 
 /// What the model is told at the head of the conversation.
-fn system_prompt(session: &AiSession) -> String {
+///
+/// `pub(crate)` so the request-trim tests in `harness_bridge` size their
+/// budgets against the prompt a session really sends, not a guess at it.
+pub(crate) fn system_prompt(session: &AiSession) -> String {
     let mut prompt = String::from(
         "You are an agent working inside an AD4M executor for the person you are talking \
          to, through the same tools an app would use. Tools that act on a perspective take \
@@ -339,7 +342,7 @@ pub(crate) async fn run_turn(
     // One tool result fed to the model is capped to a share of its context
     // window — a result bigger than the window made the model server drop
     // the person's question to fit. The transcript rows keep results whole.
-    let tool_result_max_bytes = crate::ai_service::AIService::tool_result_max_bytes(&model_id);
+    let tool_result_max_bytes = completions.tool_result_max_bytes(&model_id).await;
 
     // The transcript before this turn's running row: it is the last row, so the history
     // build's running-row skip drops it.
@@ -658,8 +661,8 @@ mod tests {
         let history = history(messages, 1_000);
         let tool = history.iter().find(|m| m["role"] == "tool").unwrap();
         let fed = tool["content"].as_str().unwrap();
-        assert!(fed.len() < 1_200, "the model reads the cap: {fed:?}");
-        assert!(fed.contains("truncated: 1000 of"));
+        assert!(fed.len() <= 1_000, "the model reads the cap: {fed:?}");
+        assert!(fed.contains("[truncated:") && fed.contains("of 10000 bytes"));
     }
 
     // The size cap drops oldest-first, but the question the new turn answers

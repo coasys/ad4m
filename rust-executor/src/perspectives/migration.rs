@@ -577,7 +577,9 @@ mod tests {
         assert_eq!(result.literal_conversions, 2);
 
         // Verify links in SPARQL store have converted URIs
-        let sparql_links = sparql.get_all_links().expect("Failed to get SPARQL links");
+        let sparql_links = sparql
+            .get_all_links(&crate::perspectives::sparql_store::EvalStop::none())
+            .expect("Failed to get SPARQL links");
         assert_eq!(sparql_links.len(), 2);
 
         // Find the converted link
@@ -654,7 +656,9 @@ mod tests {
         assert_eq!(result2.literal_conversions, 0);
 
         // SPARQL store should still have the link with converted URI
-        let sparql_links = sparql.get_all_links().expect("Failed to get SPARQL links");
+        let sparql_links = sparql
+            .get_all_links(&crate::perspectives::sparql_store::EvalStop::none())
+            .expect("Failed to get SPARQL links");
         assert!(
             sparql_links.len() >= 1,
             "Should have at least 1 link in SPARQL"
