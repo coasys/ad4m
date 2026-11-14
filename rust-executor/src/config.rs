@@ -144,10 +144,11 @@ pub struct Ad4mConfig {
     /// Stop gracefully (exit 0) when stdin reaches its end: a supervisor holds the pipe open,
     /// so the executor never outlives it (`--watch-stdin`).
     pub watch_stdin: Option<bool>,
-    /// This executor serves the custody channel: the desktop app's custody service takes a
-    /// master key that arrived sealed to this computer from it, with the admin credential on a
-    /// loopback listener (`--custody-channel`). Never together with multi-user mode
-    /// ([`refuse_custody_channel_with_multi_user`]).
+    /// This executor serves the custody channel: the desktop app's custody service, which keeps
+    /// the master key, reads the main agent's device keys from it and takes a master key sent to
+    /// this computer, which the executor opens from its inbox and passes on without storing it;
+    /// with the admin credential on a loopback listener (`--custody-channel`). Never together
+    /// with multi-user mode ([`refuse_custody_channel_with_multi_user`]).
     pub custody_channel: Option<bool>,
     /// The folder of the executor's own rotated log files (`--log-dir`). Unset: stdout.
     pub log_dir: Option<String>,
