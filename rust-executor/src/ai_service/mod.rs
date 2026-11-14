@@ -32,6 +32,9 @@ pub struct PromptResult {
     pub prompt_tokens: usize,
     pub completion_tokens: usize,
     pub model_id: String,
+    /// Why generation stopped, when the provider said. `"length"` means the
+    /// reply was cut at the output cap or the window.
+    pub stop_reason: Option<String>,
 }
 
 /// Result of an embedding call, with token count for billing.
@@ -245,10 +248,14 @@ impl ChatModel {
         turns: Vec<ChatTurn>,
         tools: Vec<ToolSpec>,
         json_schema: Option<serde_json::Value>,
+        generation: Option<(bool, Option<u32>)>,
     ) -> Result<ChatReply> {
-        let request = ChatRequest::new(self.remote_model.clone(), turns)
+        let mut request = ChatRequest::new(self.remote_model.clone(), turns)
             .with_tools(tools)
             .with_json_schema(json_schema);
+        if let Some((disable_thinking, max_output_tokens)) = generation {
+            request = request.with_generation(disable_thinking, max_output_tokens);
+        }
         let reply = within_endpoint_limits(&self.endpoint, false, self.client.chat(request)).await;
         self.after(reply)
     }
@@ -373,6 +380,39 @@ const CHAT_TIMEOUT: std::time::Duration = providers::http::CHAT_REQUEST_TIMEOUT;
 /// examples as alternating user/assistant turns, then the live prompt.
 fn turns_for_task(task: &AITask, prompt: String) -> Vec<ChatTurn> {
     turns_for(&task.system_prompt, &task.prompt_examples, prompt)
+}
+
+/// Tokens each message adds beyond its text once rendered: role markers and the chat template.
+const MESSAGE_OVERHEAD_TOKENS: usize = 8;
+/// What the template adds once per request (the generation prompt).
+const REQUEST_OVERHEAD_TOKENS: usize = 16;
+
+/// The estimated input tokens of a whole conversation: every turn's text
+/// ([`estimate_token_count`]) plus the per-message and per-request template overhead.
+fn estimate_turns_tokens(turns: &[ChatTurn]) -> usize {
+    REQUEST_OVERHEAD_TOKENS
+        + turns
+            .iter()
+            .map(|turn| estimate_token_count(&turn.content) + MESSAGE_OVERHEAD_TOKENS)
+            .sum::<usize>()
+}
+
+/// A reasoning reply that did not produce a usable answer: nothing came back,
+/// or the provider cut it at the output cap / window.
+fn interpretation_reply_needs_no_thinking(result: &PromptResult) -> bool {
+    result.text.trim().is_empty() || result.stop_reason.as_deref() == Some("length")
+}
+
+/// The server refused the request because it did not fit the context window.
+/// Our own pre-flight budget error is not that: retrying it cannot help.
+fn context_was_exceeded(error: &anyhow::Error) -> bool {
+    let text = error.to_string().to_ascii_lowercase();
+    if text.contains("context budget:") {
+        return false;
+    }
+    let about_context = text.contains("context") || text.contains("n_ctx");
+    let over = text.contains("exceed") || text.contains("too long") || text.contains("too large");
+    about_context && over
 }
 
 /// A system prompt, its examples as alternating user/assistant turns, then `prompt`.
@@ -793,7 +833,7 @@ impl AIService {
             resolved,
             truncate_for_log(&final_prompt)
         );
-        let text = chat.chat(turns, Vec::new(), json_schema).await?.text;
+        let text = chat.chat(turns, Vec::new(), json_schema, None).await?.text;
         let completion_tokens = estimate_token_count(&text);
         log::debug!(
             "🤖 prompt_messages output model={} text={:?}",
@@ -815,6 +855,7 @@ impl AIService {
             prompt_tokens,
             completion_tokens,
             model_id: resolved,
+            stop_reason: None,
         })
     }
 
@@ -833,6 +874,51 @@ impl AIService {
             .ok()
             .flatten()
             .is_some_and(|endpoint| model.uses_native_tools(&endpoint))
+    }
+
+    /// How many tokens an interpretation pass may generate, or `None` for no cap.
+    ///
+    /// Staging: a 34,700-token interpretation prompt on a 49,152 window let
+    /// qwen think until `n_tokens = 49151` (`truncated = 1`) and return an
+    /// empty answer. The first attempt leaves thinking on; this cap keeps that
+    /// from overflowing the window, and `think: false` is the retry when the
+    /// attempt comes back empty or cut off. The cap is the room the window
+    /// leaves after this prompt, so it scales with the model instead of being
+    /// a fixed constant: a floor keeps a prompt
+    /// that nearly fills the window from getting nothing, and a ceiling stops
+    /// a short prompt on a large window asking the server to generate a
+    /// window's worth of JSON it will not use.
+    ///
+    /// `window` is the one the request runs at ([`Self::resolved_context_tokens`]:
+    /// an Ollama client's resolved `num_ctx`, else the endpoint's `max_num_ctx`,
+    /// which is unset by default), not the endpoint's ceiling alone.
+    /// Without one nothing here knows the window, and a guess (the 16k context
+    /// budget fallback) would cap a 35k-token prompt at the floor and
+    /// truncate the JSON on every retry — so an unknown window sends no cap.
+    /// `prompt_tokens` is the chars/4 estimate the billing path uses.
+    ///
+    /// The cap never exceeds the room: input plus output over the window is
+    /// refused by servers that validate it, and sending the same request
+    /// again cannot fix that. When the room is under the smallest useful
+    /// answer, that is an error saying so, not a cap raised past the window.
+    pub fn interpretation_max_output_tokens(
+        window: Option<usize>,
+        prompt_tokens: usize,
+    ) -> Result<Option<u32>> {
+        const MIN_OUTPUT: usize = 512;
+        const MAX_OUTPUT: usize = 8_192;
+        let Some(window) = window else {
+            return Ok(None);
+        };
+        let room = window.saturating_sub(prompt_tokens);
+        if room < MIN_OUTPUT {
+            return Err(anyhow::anyhow!(
+                "context budget: the prompt is about {prompt_tokens} tokens and the model's \
+                 window is {window}, leaving {room}, under the {MIN_OUTPUT} an answer needs. \
+                 Shorten the input or raise the endpoint's max_num_ctx."
+            ));
+        }
+        Ok(Some(room.min(MAX_OUTPUT) as u32))
     }
 
     /// The context window the model's endpoint is run at (`max_num_ctx` on
@@ -963,7 +1049,7 @@ impl AIService {
             }))
             .sum();
 
-        let reply = chat.chat(turns, tools, None).await?;
+        let reply = chat.chat(turns, tools, None, None).await?;
         let completion_tokens = estimate_reply_tokens(&reply);
 
         log::debug!(
@@ -1012,6 +1098,7 @@ impl AIService {
                     completion_tokens: estimate_token_count(&reply.text),
                     text: reply.text,
                     model_id: resolved.clone(),
+                    stop_reason: reply.stop_reason,
                 });
             Self::bill_and_forward_stream_result(bill_to, &resolved, result, done_tx).await;
         });
@@ -1024,6 +1111,84 @@ impl AIService {
         task_id: String,
         prompt: String,
         bill_to: Option<String>,
+    ) -> Result<PromptResult> {
+        self.prompt_with(task_id, prompt, bill_to, None).await
+    }
+
+    /// An interpretation pass. The first attempt leaves reasoning on and caps
+    /// output at the room the window leaves ([`Self::interpretation_max_output_tokens`]),
+    /// so thinking cannot overflow the window. A size problem — an empty answer,
+    /// a reply cut at the cap (`done_reason` / `finish_reason` `"length"`), or
+    /// the server reporting the context was exceeded — retries that same pass
+    /// once with reasoning off. Anything else is returned as-is.
+    pub async fn prompt_interpretation(
+        &self,
+        task_id: String,
+        prompt: String,
+    ) -> Result<PromptResult> {
+        self.prompt_interpretation_pass(task_id, prompt, None).await
+    }
+
+    /// [`Self::prompt_interpretation`] with a flag the parse loop shares.
+    /// Once a pass falls back to no reasoning, later calls that see the flag
+    /// stay there instead of spending another reasoning attempt.
+    pub(crate) async fn prompt_interpretation_pass(
+        &self,
+        task_id: String,
+        prompt: String,
+        stick_no_thinking: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<PromptResult> {
+        let task = crate::db_backend::db_backend()
+            .get_task(task_id.clone())
+            .map_err(|e| anyhow::anyhow!("Database error: {}", e))?
+            .ok_or_else(|| anyhow::anyhow!("Task not found for task_id: {}", task_id))?;
+        let model_id = Self::replace_model_variables(&task.model_id)?;
+        // The input is the whole conversation `prompt_with` sends: the task's
+        // system prompt and examples count against the window as much as the prompt.
+        let input_tokens = estimate_turns_tokens(&turns_for_task(&task, prompt.clone()));
+        let window = self.resolved_context_tokens(&model_id).await;
+        let cap = Self::interpretation_max_output_tokens(window, input_tokens)?;
+
+        let already_off =
+            stick_no_thinking.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed));
+        if already_off {
+            return self
+                .prompt_with(task_id, prompt, None, Some((true, cap)))
+                .await;
+        }
+
+        let first = self
+            .prompt_with(task_id.clone(), prompt.clone(), None, Some((false, cap)))
+            .await;
+        let size_problem = match &first {
+            Ok(result) => interpretation_reply_needs_no_thinking(&result),
+            Err(error) => context_was_exceeded(error),
+        };
+        if !size_problem {
+            return first;
+        }
+        if let Some(flag) = stick_no_thinking {
+            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        log::warn!(
+            "interpretation: reasoning reply was empty, cut at the cap, or exceeded \
+             the context; retrying once with thinking off"
+        );
+        self.prompt_with(task_id, prompt, None, Some((true, cap)))
+            .await
+    }
+
+    /// [`Self::prompt`] with a generation constraint. `disable_thinking` asks
+    /// the endpoint to leave the thinking channel off, where it accepts that;
+    /// the cap bounds generated tokens. `None` is today's prompt. Interpretation
+    /// sends the cap with thinking on first, and this constraint with thinking
+    /// off only when that attempt hits a size problem.
+    pub async fn prompt_with(
+        &self,
+        task_id: String,
+        prompt: String,
+        bill_to: Option<String>,
+        generation: Option<(bool, Option<u32>)>,
     ) -> Result<PromptResult> {
         let task = crate::db_backend::db_backend()
             .get_task(task_id.clone())
@@ -1056,17 +1221,15 @@ impl AIService {
         // Symmetry rule (see rust-executor/LOGGING.md): every `start` info
         // line gets exactly one companion — either `done` on success or a
         // `failed` line on error.
-        let text_result: Result<String> = async {
+        let reply_result: Result<ChatReply> = async {
             let chat = self.chat_model(&model_id).await?;
-            Ok(chat
-                .chat(turns_for_task(&task, prompt), Vec::new(), None)
-                .await?
-                .text)
+            chat.chat(turns_for_task(&task, prompt), Vec::new(), None, generation)
+                .await
         }
         .await;
 
-        let text = match text_result {
-            Ok(t) => t,
+        let reply = match reply_result {
+            Ok(reply) => reply,
             Err(e) => {
                 log::error!(
                     "❌ 🤖 prompt failed model={} latency={}ms tokens_in={} err={}",
@@ -1078,6 +1241,7 @@ impl AIService {
                 return Err(e);
             }
         };
+        let text = reply.text;
         let completion_tokens = estimate_token_count(&text);
         log::info!(
             "✅ 🤖 prompt done model={} latency={}ms tokens_in={} tokens_out={}",
@@ -1105,6 +1269,7 @@ impl AIService {
             prompt_tokens,
             completion_tokens,
             model_id,
+            stop_reason: reply.stop_reason,
         })
     }
 
@@ -1633,6 +1798,7 @@ mod tests {
             text: String::new(),
             tool_calls: calls,
             usage: Default::default(),
+            stop_reason: None,
         };
         let arguments = serde_json::json!({ "a": 1 });
         let expected = super::estimate_token_count("update_schema")
@@ -2079,6 +2245,483 @@ mod tests {
         }
     }
 
+    // The default endpoint has no `max_num_ctx`. A 16k guess for its window would cap a
+    // 35k-token interpretation prompt at the floor and truncate the JSON on every retry.
+    #[tokio::test]
+    async fn an_interpretation_cap_needs_a_known_window_and_none_is_sent_without_one() {
+        let service = service();
+        let unset = saved_endpoint(EndpointKind::LlamaServer, "http://127.0.0.1:9");
+        let unset_model = service
+            .add_model(model_on(&unset, ModelType::Llm, "m"))
+            .await
+            .unwrap();
+        assert_eq!(
+            AIService::interpretation_max_output_tokens(
+                service.resolved_context_tokens(&unset_model).await,
+                35_000
+            )
+            .unwrap(),
+            None,
+            "an unknown window sends no cap"
+        );
+
+        let mut sized =
+            Endpoint::for_test("sized", EndpointKind::LlamaServer, "http://127.0.0.1:8", "");
+        sized.max_num_ctx = Some(49_152);
+        Ad4mDb::with_global_instance(|db| db.insert_endpoint(&sized)).unwrap();
+        let sized_model = service
+            .add_model(model_on(&sized, ModelType::Llm, "m"))
+            .await
+            .unwrap();
+        // Room after a 35k prompt is 14,152: the ceiling applies.
+        assert_eq!(
+            AIService::interpretation_max_output_tokens(
+                service.resolved_context_tokens(&sized_model).await,
+                35_000
+            )
+            .unwrap(),
+            Some(8_192)
+        );
+        // The cap is the room itself down to the smallest useful answer...
+        assert_eq!(
+            AIService::interpretation_max_output_tokens(
+                service.resolved_context_tokens(&sized_model).await,
+                48_640
+            )
+            .unwrap(),
+            Some(512)
+        );
+        // ...and below that it is an error, never a cap past the window.
+        let error = AIService::interpretation_max_output_tokens(
+            service.resolved_context_tokens(&sized_model).await,
+            48_900,
+        )
+        .expect_err("252 tokens of room cannot hold an answer");
+        assert!(error.to_string().contains("context budget"), "{error}");
+    }
+
+    // The cap is the room after everything the request carries: a 3,000-token system prompt
+    // and a 1,000-token prompt on an 8,192 window leave under 4,192, not the 7,192 the
+    // prompt alone would leave.
+    #[tokio::test]
+    async fn an_interpretation_cap_counts_the_system_prompt_and_examples() {
+        let service = service();
+        let mut upstream = mockito::Server::new_async().await;
+        let completion = upstream
+            .mock("POST", "/v1/chat/completions")
+            .match_request(|request| {
+                let body: serde_json::Value =
+                    serde_json::from_slice(request.body().unwrap()).unwrap();
+                let cap = body["max_tokens"].as_u64().unwrap_or(u64::MAX);
+                cap <= 8_192 - 4_000
+            })
+            .with_body(r#"{"choices":[{"message":{"content":"{}"}}]}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let mut endpoint =
+            Endpoint::for_test("sized", EndpointKind::LlamaServer, &upstream.url(), "");
+        endpoint.max_num_ctx = Some(8_192);
+        Ad4mDb::with_global_instance(|db| db.insert_endpoint(&endpoint)).unwrap();
+        let model_id = service
+            .add_model(model_on(&endpoint, ModelType::Llm, "m"))
+            .await
+            .unwrap();
+        let task = service
+            .add_task(
+                AITaskInput {
+                    name: "interpret".into(),
+                    model_id,
+                    system_prompt: "s".repeat(12_000),
+                    prompt_examples: vec![],
+                    meta_data: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        service
+            .prompt_interpretation(task.task_id, "p".repeat(4_000))
+            .await
+            .unwrap();
+        completion.assert_async().await;
+    }
+
+    // The cap is budgeted against the window the request runs at: a model whose own window
+    // is 4,096 under a 131,072 ceiling leaves 1,096 tokens after a 3,000-token prompt, not
+    // the 8,192 the ceiling would.
+    #[tokio::test]
+    async fn an_interpretation_cap_is_sized_from_the_resolved_window_not_the_ceiling() {
+        let service = service();
+        let mut upstream = mockito::Server::new_async().await;
+        let _show = upstream
+            .mock("POST", "/api/show")
+            .with_body(r#"{"model_info":{"qwen3.context_length":4096}}"#)
+            .create_async()
+            .await;
+        let chat = upstream
+            .mock("POST", "/api/chat")
+            .match_request(|request| {
+                let body: serde_json::Value =
+                    serde_json::from_slice(request.body().unwrap()).unwrap();
+                let cap = body["options"]["num_predict"].as_u64().unwrap_or(u64::MAX);
+                cap <= 1_096
+            })
+            .with_body(r#"{"message":{"role":"assistant","content":"{}"},"done":true}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let mut endpoint = Endpoint::for_test("ceiling", EndpointKind::Ollama, &upstream.url(), "");
+        endpoint.max_num_ctx = Some(131_072);
+        Ad4mDb::with_global_instance(|db| db.insert_endpoint(&endpoint)).unwrap();
+        let model_id = service
+            .add_model(model_on(&endpoint, ModelType::Llm, "m"))
+            .await
+            .unwrap();
+        let task = service
+            .add_task(
+                AITaskInput {
+                    name: "interpret".into(),
+                    model_id,
+                    system_prompt: "s".into(),
+                    prompt_examples: vec![],
+                    meta_data: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        service
+            .prompt_interpretation(task.task_id, "p".repeat(12_000))
+            .await
+            .unwrap();
+        chat.assert_async().await;
+    }
+
+    // From a stored task to the wire: an interpretation task on an OpenAI reasoning model
+    // sends `max_completion_tokens` (o-series reject `max_tokens`) and no thinking switch.
+    // A complete answer is not retried with thinking off.
+    #[tokio::test]
+    async fn an_interpretation_on_an_openai_o_series_model_sends_no_max_tokens() {
+        let service = service();
+        let mut upstream = mockito::Server::new_async().await;
+        let completion = upstream
+            .mock("POST", "/v1/chat/completions")
+            .match_request(|request| {
+                let body: serde_json::Value =
+                    serde_json::from_slice(request.body().unwrap()).unwrap();
+                body.get("max_tokens").is_none()
+                    && body["max_completion_tokens"].as_u64().is_some()
+                    && body.get("chat_template_kwargs").is_none()
+            })
+            .with_body(r#"{"choices":[{"message":{"content":"{}"},"finish_reason":"stop"}]}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let mut endpoint = Endpoint::for_test("o", EndpointKind::OpenAi, &upstream.url(), "k");
+        endpoint.max_num_ctx = Some(200_000);
+        Ad4mDb::with_global_instance(|db| db.insert_endpoint(&endpoint)).unwrap();
+        let model_id = service
+            .add_model(model_on(&endpoint, ModelType::Llm, "o3-mini"))
+            .await
+            .unwrap();
+        let task = service
+            .add_task(
+                AITaskInput {
+                    name: "interpret".into(),
+                    model_id,
+                    system_prompt: "s".into(),
+                    prompt_examples: vec![],
+                    meta_data: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        service
+            .prompt_interpretation(task.task_id, "p".into())
+            .await
+            .unwrap();
+        completion.assert_async().await;
+    }
+
+    #[test]
+    fn a_context_exceeded_error_is_a_size_problem_and_a_transport_error_is_not() {
+        let exceeded = anyhow::anyhow!("the request exceeds the available context size");
+        let length = anyhow::anyhow!("context_length_exceeded");
+        let budget = anyhow::anyhow!(
+            "context budget: the prompt is about 100 tokens and the model's window is 128"
+        );
+        let transport =
+            anyhow::anyhow!("Could not reach http://127.0.0.1:11434: connection refused");
+        assert!(super::context_was_exceeded(&exceeded));
+        assert!(super::context_was_exceeded(&length));
+        assert!(!super::context_was_exceeded(&budget));
+        assert!(!super::context_was_exceeded(&transport));
+    }
+
+    fn request_json(request: &mockito::Request) -> serde_json::Value {
+        serde_json::from_slice(request.body().unwrap()).unwrap()
+    }
+
+    async fn interpretation_task_on(service: &AIService, endpoint: &Endpoint) -> String {
+        let model_id = service
+            .add_model(model_on(endpoint, ModelType::Llm, "qwen3"))
+            .await
+            .unwrap();
+        service
+            .add_task(
+                AITaskInput {
+                    name: "interpret".into(),
+                    model_id,
+                    system_prompt: "s".into(),
+                    prompt_examples: vec![],
+                    meta_data: None,
+                },
+                None,
+            )
+            .await
+            .unwrap()
+            .task_id
+    }
+
+    // First attempt leaves thinking on and still sends the cap. A complete
+    // answer is not sent again with thinking off.
+    #[tokio::test]
+    async fn an_interpretation_starts_with_thinking_on_and_a_complete_reply_is_not_retried() {
+        let service = service();
+        let mut upstream = mockito::Server::new_async().await;
+        let _show = upstream
+            .mock("POST", "/api/show")
+            .with_body(
+                r#"{"capabilities":["completion","thinking"],"model_info":{"qwen3.context_length":8192}}"#,
+            )
+            .expect_at_least(1)
+            .create_async()
+            .await;
+        let first = upstream
+            .mock("POST", "/api/chat")
+            .match_request(|request| {
+                let body = request_json(request);
+                body.get("think").is_none() && body["options"]["num_predict"].as_u64().is_some()
+            })
+            .with_body(
+                r#"{"message":{"role":"assistant","content":"{}"},"done":true,"done_reason":"stop"}"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        let mut endpoint = Endpoint::for_test("ollama", EndpointKind::Ollama, &upstream.url(), "");
+        endpoint.max_num_ctx = Some(8_192);
+        Ad4mDb::with_global_instance(|db| db.insert_endpoint(&endpoint)).unwrap();
+        let task_id = interpretation_task_on(&service, &endpoint).await;
+
+        let result = service
+            .prompt_interpretation(task_id, "p".into())
+            .await
+            .unwrap();
+        assert_eq!(result.text, "{}");
+        first.assert_async().await;
+    }
+
+    // An empty or length-cut first reply is one size failure: exactly one
+    // retry, and that retry is the no-thinking request.
+    #[tokio::test]
+    async fn an_empty_or_length_cut_interpretation_retries_once_with_thinking_off() {
+        let service = service();
+        let mut upstream = mockito::Server::new_async().await;
+        let _show = upstream
+            .mock("POST", "/api/show")
+            .with_body(
+                r#"{"capabilities":["completion","thinking"],"model_info":{"qwen3.context_length":8192}}"#,
+            )
+            .expect_at_least(1)
+            .create_async()
+            .await;
+        // Created first, matched second: mockito tries the newest mock first.
+        let retry = upstream
+            .mock("POST", "/api/chat")
+            .match_request(|request| {
+                let body = request_json(request);
+                body["think"] == false && body["options"]["num_predict"].as_u64().is_some()
+            })
+            .with_body(
+                r#"{"message":{"role":"assistant","content":"{\"ok\":true}"},"done":true,"done_reason":"stop"}"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        let first = upstream
+            .mock("POST", "/api/chat")
+            .match_request(|request| {
+                let body = request_json(request);
+                body.get("think").is_none() && body["options"]["num_predict"].as_u64().is_some()
+            })
+            .with_body(
+                r#"{"message":{"role":"assistant","content":""},"done":true,"done_reason":"length"}"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        let mut endpoint = Endpoint::for_test("ollama", EndpointKind::Ollama, &upstream.url(), "");
+        endpoint.max_num_ctx = Some(8_192);
+        Ad4mDb::with_global_instance(|db| db.insert_endpoint(&endpoint)).unwrap();
+        let task_id = interpretation_task_on(&service, &endpoint).await;
+
+        let result = service
+            .prompt_interpretation(task_id, "p".into())
+            .await
+            .unwrap();
+        assert_eq!(result.text, "{\"ok\":true}");
+        first.assert_async().await;
+        retry.assert_async().await;
+    }
+
+    // llama-server: a reply cut at the cap (`finish_reason: length`) is the
+    // same size failure, even when some answer text came back.
+    #[tokio::test]
+    async fn a_length_cut_llama_server_interpretation_retries_once_with_thinking_off() {
+        let service = service();
+        let mut upstream = mockito::Server::new_async().await;
+        let retry = upstream
+            .mock("POST", "/v1/chat/completions")
+            .match_request(|request| {
+                let body = request_json(request);
+                body["chat_template_kwargs"]["enable_thinking"] == false
+                    && body["max_tokens"].as_u64().is_some()
+            })
+            .with_body(r#"{"choices":[{"message":{"content":"{}"},"finish_reason":"stop"}]}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let first = upstream
+            .mock("POST", "/v1/chat/completions")
+            .match_request(|request| {
+                let body = request_json(request);
+                body.get("chat_template_kwargs").is_none() && body["max_tokens"].as_u64().is_some()
+            })
+            .with_body(
+                r#"{"choices":[{"message":{"content":"{\"inst"},"finish_reason":"length"}]}"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        let mut endpoint =
+            Endpoint::for_test("llama", EndpointKind::LlamaServer, &upstream.url(), "");
+        endpoint.max_num_ctx = Some(8_192);
+        Ad4mDb::with_global_instance(|db| db.insert_endpoint(&endpoint)).unwrap();
+        let task_id = interpretation_task_on(&service, &endpoint).await;
+
+        let result = service
+            .prompt_interpretation(task_id, "p".into())
+            .await
+            .unwrap();
+        assert_eq!(result.text, "{}");
+        first.assert_async().await;
+        retry.assert_async().await;
+    }
+
+    // The server saying the context was exceeded is the same size failure.
+    #[tokio::test]
+    async fn a_context_exceeded_interpretation_retries_once_with_thinking_off() {
+        let service = service();
+        let mut upstream = mockito::Server::new_async().await;
+        let _show = upstream
+            .mock("POST", "/api/show")
+            .with_body(
+                r#"{"capabilities":["completion","thinking"],"model_info":{"qwen3.context_length":8192}}"#,
+            )
+            .expect_at_least(1)
+            .create_async()
+            .await;
+        let retry = upstream
+            .mock("POST", "/api/chat")
+            .match_request(|request| {
+                let body = request_json(request);
+                body["think"] == false && body["options"]["num_predict"].as_u64().is_some()
+            })
+            .with_body(
+                r#"{"message":{"role":"assistant","content":"{}"},"done":true,"done_reason":"stop"}"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        let first = upstream
+            .mock("POST", "/api/chat")
+            .match_request(|request| {
+                let body = request_json(request);
+                body.get("think").is_none() && body["options"]["num_predict"].as_u64().is_some()
+            })
+            .with_status(400)
+            .with_body(r#"{"error":"the request exceeds the available context size"}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let mut endpoint = Endpoint::for_test("ollama", EndpointKind::Ollama, &upstream.url(), "");
+        endpoint.max_num_ctx = Some(8_192);
+        Ad4mDb::with_global_instance(|db| db.insert_endpoint(&endpoint)).unwrap();
+        let task_id = interpretation_task_on(&service, &endpoint).await;
+
+        let result = service
+            .prompt_interpretation(task_id, "p".into())
+            .await
+            .unwrap();
+        assert_eq!(result.text, "{}");
+        first.assert_async().await;
+        retry.assert_async().await;
+    }
+
+    // Once a pass fell back, a later call on the same flag does not try reasoning again.
+    #[tokio::test]
+    async fn a_fallen_back_interpretation_pass_stays_without_thinking() {
+        let service = service();
+        let mut upstream = mockito::Server::new_async().await;
+        let _show = upstream
+            .mock("POST", "/api/show")
+            .with_body(
+                r#"{"capabilities":["completion","thinking"],"model_info":{"qwen3.context_length":8192}}"#,
+            )
+            .expect_at_least(1)
+            .create_async()
+            .await;
+        let no_thinking = upstream
+            .mock("POST", "/api/chat")
+            .match_request(|request| request_json(request)["think"] == false)
+            .with_body(
+                r#"{"message":{"role":"assistant","content":"{}"},"done":true,"done_reason":"stop"}"#,
+            )
+            .expect(2)
+            .create_async()
+            .await;
+        let reasoning = upstream
+            .mock("POST", "/api/chat")
+            .match_request(|request| request_json(request).get("think").is_none())
+            .with_body(
+                r#"{"message":{"role":"assistant","content":""},"done":true,"done_reason":"length"}"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        let mut endpoint = Endpoint::for_test("ollama", EndpointKind::Ollama, &upstream.url(), "");
+        endpoint.max_num_ctx = Some(8_192);
+        Ad4mDb::with_global_instance(|db| db.insert_endpoint(&endpoint)).unwrap();
+        let task_id = interpretation_task_on(&service, &endpoint).await;
+        let stick = std::sync::atomic::AtomicBool::new(false);
+
+        service
+            .prompt_interpretation_pass(task_id.clone(), "p".into(), Some(&stick))
+            .await
+            .unwrap();
+        assert!(stick.load(std::sync::atomic::Ordering::Relaxed));
+        // The next parse retry must not spend another reasoning attempt.
+        service
+            .prompt_interpretation_pass(task_id, "p".into(), Some(&stick))
+            .await
+            .unwrap();
+        reasoning.assert_async().await;
+        no_thinking.assert_async().await;
+    }
+
     #[tokio::test]
     async fn a_task_prompts_its_model_on_its_endpoint() {
         let service = service();
@@ -2331,7 +2974,7 @@ mod tests {
                 remote_model: "m".into(),
                 endpoint: Arc::new(endpoint),
             };
-            let calls = (0..4).map(|_| chat.chat(vec![ChatTurn::user("hi")], vec![], None));
+            let calls = (0..4).map(|_| chat.chat(vec![ChatTurn::user("hi")], vec![], None, None));
             for reply in futures::future::join_all(calls).await {
                 assert_eq!(reply.unwrap().text, "ok");
             }

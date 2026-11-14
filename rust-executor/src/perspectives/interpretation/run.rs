@@ -692,6 +692,9 @@ pub async fn run_interpretation_with_strategy_and_model(
         // succeeds is by construction the final (parse-successful) attempt.
         let debug_response_capture: std::sync::Arc<std::sync::Mutex<Option<String>>> =
             std::sync::Arc::new(std::sync::Mutex::new(None));
+        // One no-reasoning retry per pass. Once a pass falls back, later parse
+        // retries stay there instead of spending another reasoning attempt.
+        let stick_no_thinking = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let InterpretationOutput {
             instances,
             flow_proposals: llm_proposals,
@@ -701,6 +704,7 @@ pub async fn run_interpretation_with_strategy_and_model(
             let prompt = prompt.clone();
             let capture = debug_response_capture.clone();
             let emit_ctx_cloned = emit_ctx.cloned();
+            let stick_no_thinking = stick_no_thinking.clone();
             async move {
                 use crate::perspectives::auto_processor::events::{
                     emit, AutoProcessorEvent, AutoProcessorStep,
@@ -723,7 +727,9 @@ pub async fn run_interpretation_with_strategy_and_model(
 
                 let result = service
                     // Internal caller (interpretation runner) — no user auth context; billing skipped.
-                    .prompt(task_id, prompt, None)
+                    // Reasoning first, capped so thinking cannot overflow the window.
+                    // A size failure retries once with thinking off.
+                    .prompt_interpretation_pass(task_id, prompt, Some(stick_no_thinking.as_ref()))
                     .await
                     .map_err(|e| anyhow::anyhow!("AIService::prompt failed: {e:#}"))?;
 

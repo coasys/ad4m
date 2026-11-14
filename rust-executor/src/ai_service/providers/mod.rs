@@ -47,7 +47,7 @@ pub fn chat_client(endpoint: &Endpoint) -> Result<Box<dyn RemoteChat>> {
     let api_key = endpoint.api_key.expose();
     let base_url = endpoint.base_url.clone();
     Ok(match endpoint.kind.protocol() {
-        ModelApiType::OpenAi => Box::new(openai::OpenAiChat::new(api_key, base_url)),
+        ModelApiType::OpenAi => Box::new(openai::OpenAiChat::new(api_key, base_url, endpoint.kind)),
         ModelApiType::Anthropic => Box::new(anthropic::AnthropicChat::new(api_key, base_url)),
         ModelApiType::Ollama => Box::new(ollama::OllamaChat::new(
             api_key,
@@ -205,6 +205,15 @@ pub struct ChatRequest {
     /// request without it, so the caller validates the reply whatever answered.
     /// Ignored when `response_format` is set: the caller's own format wins.
     pub json_schema: Option<serde_json::Value>,
+    /// Ask the model not to spend the window on a thinking channel. Sent only
+    /// where the endpoint accepts it: Ollama's `think: false` when `/api/show`
+    /// lists the `thinking` capability, llama-server's
+    /// `chat_template_kwargs.enable_thinking`. A strict OpenAI endpoint gets
+    /// nothing.
+    pub disable_thinking: bool,
+    /// Cap on generated tokens (Ollama `options.num_predict`, OpenAI-shaped
+    /// `max_tokens`). `None` leaves the server's own default.
+    pub max_output_tokens: Option<u32>,
 }
 
 impl ChatRequest {
@@ -216,6 +225,8 @@ impl ChatRequest {
             tool_choice: None,
             response_format: None,
             json_schema: None,
+            disable_thinking: false,
+            max_output_tokens: None,
         }
     }
 
@@ -238,6 +249,19 @@ impl ChatRequest {
     /// Constrain the reply to JSON matching `schema` (see [`ChatRequest::json_schema`]).
     pub fn with_json_schema(mut self, schema: Option<serde_json::Value>) -> Self {
         self.json_schema = schema;
+        self
+    }
+
+    /// No thinking channel, and at most `max_output_tokens` generated
+    /// (`None` leaves the server's own length). See
+    /// [`ChatRequest::disable_thinking`].
+    pub fn with_generation(
+        mut self,
+        disable_thinking: bool,
+        max_output_tokens: Option<u32>,
+    ) -> Self {
+        self.disable_thinking = disable_thinking;
+        self.max_output_tokens = max_output_tokens;
         self
     }
 }
@@ -271,6 +295,9 @@ pub struct ChatReply {
     /// What the provider reported about token use. Empty when it reported
     /// nothing.
     pub usage: ChatUsage,
+    /// Why generation stopped, when the provider said. `"length"` means the
+    /// reply was cut at the output cap or the window. Absent when it did not say.
+    pub stop_reason: Option<String>,
 }
 
 /// A remote chat endpoint.
@@ -387,7 +414,11 @@ mod tests {
             ModelApiType::Ollama,
         ] {
             let client: Box<dyn RemoteChat> = match api_type {
-                ModelApiType::OpenAi => Box::new(openai::OpenAiChat::new("k", base.clone())),
+                ModelApiType::OpenAi => Box::new(openai::OpenAiChat::new(
+                    "k",
+                    base.clone(),
+                    crate::types::EndpointKind::OpenAi,
+                )),
                 ModelApiType::Anthropic => {
                     Box::new(anthropic::AnthropicChat::new("k", base.clone()))
                 }
