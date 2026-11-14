@@ -25,6 +25,7 @@ pub mod perspective_proxy;
 pub mod perspectives;
 pub mod runtime;
 pub mod subject_proxy;
+pub mod subscription;
 pub mod types;
 pub mod ws_rpc;
 
@@ -61,4 +62,5 @@ impl Ad4mClient {
     ) -> Result<tokio::sync::broadcast::Receiver<serde_json::Value>> {
         self.ws.watch_events(events).await
     }
+
 }
