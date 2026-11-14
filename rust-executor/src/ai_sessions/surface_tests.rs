@@ -266,6 +266,10 @@ fn perspective_calls(p: &str, class: &str, name: &str) -> Vec<(String, Value)> {
         ),
         ("template_update", json!({"base_uri": base})),
         (
+            "template_create",
+            json!({"name": "Planted", "place": "space"}),
+        ),
+        (
             "add_flow",
             json!({"flow_name": "planted", "shacl_json": "{}"}),
         ),
@@ -370,6 +374,21 @@ fn calls_naming_another_perspective(a: &str, b: &str, theirs: &str) -> Vec<(Stri
         (
             "execute_commands",
             json!({"perspective_id": a, "commands": command, "expression_address": theirs}),
+        ),
+        (
+            "template_read",
+            json!({"perspective_id": a, "library_perspective_id": b, "base_uri": theirs}),
+        ),
+        (
+            "template_update",
+            json!({"perspective_id": a, "library_perspective_id": b, "base_uri": theirs}),
+        ),
+        (
+            "template_create",
+            json!({
+                "perspective_id": a, "library_perspective_id": b,
+                "name": "Planted", "place": "library",
+            }),
         ),
     ]
     .into_iter()
@@ -591,6 +610,13 @@ async fn a_narrowed_sessions_tools_stay_inside_it(
     // Calls on A that name B wherever an argument takes a free value.
     let table = calls_naming_another_perspective(&a, &b, "item://inside-b");
     let (naming, _) = steps_of_calls(&session, &caller, &table).await;
+    // A template tool on A that names B as its library is refused: the session holds no
+    // capability on B, so the library is never read nor written.
+    for (step, (tool, arguments)) in naming.iter().zip(&table) {
+        if arguments.get("library_perspective_id").is_some() {
+            expect_failed(step, tool, NOT_HELD);
+        }
+    }
 
     // Nothing of B's reached the transcript, and B is as it was.
     for step in outside
