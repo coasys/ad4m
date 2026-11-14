@@ -23,7 +23,7 @@ use tokio::net::UdpSocket;
 use tokio::time::timeout_at;
 
 /// Outcome of the SFU reachability probe.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum SfuReachability {
     /// Bind IP matches the STUN server-reflexive address — publicly
     /// reachable.  Remote clients can send UDP directly to this IP.
@@ -271,7 +271,7 @@ pub async fn stun_reflexive(socket: &UdpSocket, stun_server: &str) -> Result<Soc
 }
 
 /// Where the SFU's advertised public address comes from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AdvertisedSource {
     /// `--sfu-public-addr` / `sfu_public_addr`.
     Flag,
@@ -290,7 +290,7 @@ impl std::fmt::Display for AdvertisedSource {
 
 /// The address the SFU offers callers as a server-reflexive candidate,
 /// next to its host candidate, when it binds a private address behind NAT.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Advertised {
     pub addr: SocketAddr,
     pub source: AdvertisedSource,

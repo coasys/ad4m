@@ -16,6 +16,8 @@ export interface JoinArgs {
   neighbourhoodUrl: string;
   room: string;
   name: string;
+  /** The fake camera's size; 320x240 when not given. */
+  video?: { width: number; height: number };
 }
 
 /** What a page received from one remote participant. */
@@ -167,7 +169,7 @@ export function installCallHarness(): void {
       session.on("error", (error: any) => { sessionErrors.push(String(error?.message ?? error)); });
       for (const event of ["participant-joined", "stream-added", "participant-updated"]) session.on(event, render);
       setInterval(render, 500);
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: { width: 320, height: 240 } });
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: args.video ?? { width: 320, height: 240 } });
       // Not awaited: a join that never completes shows in the reports, within the test's bound.
       session.join(stream).catch((error: any) => { joinError = String(error?.message ?? error); });
     } catch (error: any) {
