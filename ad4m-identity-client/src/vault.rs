@@ -9,6 +9,7 @@
 use ad4m_identity_core::build::Signer;
 use ad4m_identity_core::inbox::{seal, sign_payload, InboxAddress, InboxBody, InboxError};
 use ad4m_identity_core::link::SignedBy;
+use ad4m_identity_core::record::VaultId;
 use ad4m_identity_core::{Event, KeyId, Multikey};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
@@ -187,6 +188,50 @@ impl Unlocked {
 /// index or epoch the store cannot vouch for is an error or `None`, never a guess. The
 /// in-memory [`MemoryVault`] (tests) is exempt from durability and from the cross-process
 /// lock, since one process holds it.
+///
+/// **The custody note** ([`Vault::custody_note`], [`CustodyNote`]): one small, non-secret value
+/// per identity *and per device key* — the key id of the executor the app speaks through, the
+/// same key the record's device entry is keyed by. The key is shared by every app on the
+/// computer; the note is not: app A's release and app B's take on the same vault are two device
+/// entries in the record and two notes here, so neither overwrites the other. Apps that speak
+/// through one executor are one device and share its note, as they share its entry. The note
+/// is the device's own account of its custody decisions, the one thing the vault and the record
+/// cannot tell afterwards.
+///
+/// The note is a stack of layers. Each operation puts one layer on top, and that layer keeps
+/// the note below it (`restores`). Each layer carries the [`NoteToken`] of the operation that
+/// wrote it. An operation changes or removes only its own layer, so a take, a removal and a
+/// refresh of the same device never clear or put back a layer that another one wrote, even
+/// one that looks the same. The layers:
+///
+/// - [`CustodyNote::MarkOwed`] with `acquired: false` (an intent): this device will store or
+///   promote master `index`. A take, a promote and a rotation write it **before** they store
+///   or promote the key, and so before a take acknowledges its inbox message. An intent proves
+///   nothing: its store can fail, or another app can install the key. A mark never says
+///   `holdsMaster: true` from an intent, and a release below an intent stays in effect.
+/// - `MarkOwed` with `acquired: true` (a receipt): this operation's own
+///   [`Vault::store_master`] or [`Vault::promote_master`] answered [`Stored::Stored`]. Only a
+///   receipt lets a mark say `holdsMaster: true`, for its own `index`, and only while the vault
+///   keeps that index ([`CustodyNote::landed`]). The receipt is cleared once the fenced mark
+///   has met it. A crash, a cancelled unlock or a failed write after the receipt leaves the
+///   obligation here, never only in memory. Another holder re-attesting the record's recovery
+///   pair erases nothing of it.
+/// - [`CustodyNote::Released`]: this device chose to give its copy up. `remove_master` writes
+///   it **before** it publishes `holdsMaster: false`, and no refresh, repair or restart
+///   re-marks the device while it stands — though the shared vault may keep the key another
+///   app installed. A receipt of a new acquisition by this device defeats it: a release below
+///   the receipt, and a release above it whose epoch is not later than the receipt's intent.
+///   The store moved the custody epoch past such a release, so the removal's compare-and-delete
+///   forget cannot take the new key. A removal that finished removes the releases below its
+///   own: every operation that can remove its release removes them too, so no flow sees them
+///   again, and repeat removals keep one release, not one per removal.
+///
+/// The standing of a note ([`CustodyNote::standing`]) comes from the top layer down: open
+/// intents are passed over, and the first release or receipt decides. No note: nothing owed
+/// and nothing released.
+///
+/// The writes are compare-and-swap ([`Vault::swap_custody_note`]) on the whole note, all its
+/// layers included. The vault keeps the note as an opaque value: it never reads the layers.
 pub trait Vault: Send + Sync {
     /// Stores master `index` for `scid` as the kept key, under the never-go-back rule: a key
     /// kept at a *higher* index is never replaced by a lower one — the call answers
@@ -288,6 +333,277 @@ pub trait Vault: Send + Sync {
     /// Forgets the versions of `scid`'s record seen so far: a caller that means to read an
     /// older version on purpose resets the mark first.
     fn record_seen_reset(&self, scid: &str) -> Result<(), VaultError>;
+    /// The custody note of device `key_id` for `scid` ([`CustodyNote`]); `None` when it has
+    /// none. Not secret, needs no unlock. Kept per (`scid`, `key_id`), never per `scid` alone:
+    /// every app sharing the vault has its own.
+    ///
+    /// `key_id` is a device key id of the log (`d<n>`) or [`VAULT_NOTE`], the note of the
+    /// vault itself: the releases of removals that empty this vault, which every app sharing
+    /// it reads. Keep [`VAULT_NOTE`] like any other key id; no log key id is equal to it.
+    fn custody_note(&self, scid: &str, key_id: &str) -> Result<Option<CustodyNote>, VaultError>;
+    /// Sets the custody note of device `key_id` for `scid` to `note` (`None` clears it) only
+    /// while it is still `expected` (`None`: none kept), as one atomic step under the same
+    /// cross-process lock as the vault's other writes; answers whether it was set. "Still
+    /// `expected`" compares the whole note, every layer below the top included: keep the note
+    /// as its serde JSON and compare the values, never only the top layer. Durable when
+    /// it answers `true`: a take acknowledges its inbox message, and a removal publishes
+    /// `holdsMaster: false`, only after.
+    fn swap_custody_note(
+        &self,
+        scid: &str,
+        key_id: &str,
+        expected: Option<&CustodyNote>,
+        note: Option<&CustodyNote>,
+    ) -> Result<bool, VaultError>;
+    /// The id of this physical vault for `scid` ([`VaultId`]): the record's device entries name
+    /// it beside every `holdsMaster: true`, and the only-copy check counts distinct ids, so
+    /// two apps that share this vault are one copy, never two. The contract:
+    ///
+    /// - **Random.** 16 bytes from the OS's secure random source, drawn the first time it is
+    ///   asked for `scid`. Never derived from a device, a user, a path or a hardware id.
+    /// - **Per identity.** One id per (`vault`, `scid`): two identities on one vault get two
+    ///   unrelated ids, so the records of two identities never link them.
+    /// - **Shared by every device key on the vault.** Every app, every handle and every process
+    ///   on the same store gets the same id for the same `scid`. The draw and its keeping are
+    ///   one step under the vault's cross-process lock: two first asks at once keep one id.
+    /// - **Durable and stable.** Kept in the same store as the master key, and answered `Ok`
+    ///   only once it is durable. It never changes while the store keeps anything of `scid`. A
+    ///   forget of the master key keeps it.
+    /// - **Lost only with the keys.** A store that loses the id has lost the master key too
+    ///   (the same store, wiped or restored without it). A store that keeps a master key of
+    ///   `scid` but cannot read its id answers an error, never a fresh id: a fresh id beside a
+    ///   kept key would count that one copy twice.
+    ///
+    /// Not secret, needs no unlock.
+    fn vault_id(&self, scid: &str) -> Result<VaultId, VaultError>;
+}
+
+/// What one device has decided about its custody of an identity's master key, kept in the vault
+/// beside the key ([`Vault::custody_note`]); see the [`Vault`] docs for its lifecycle.
+///
+/// Every note carries the [`NoteToken`] of the operation that wrote it, drawn at random for
+/// that operation alone: two operations never write equal notes, even two removals of one
+/// device that read the same custody epoch.
+///
+/// **A note is a stack.** Each operation puts its note on top of the note in place and keeps
+/// that note below it (`restores`). An operation changes only its own layer, found by its
+/// token: it sets its own receipt, or it takes its own layer out wherever it is. So a failed
+/// operation never puts back a note that another operation owns, and it never removes a note
+/// that another operation wrote. The flows decide from the layers in order from the top
+/// ([`CustodyNote::standing`]).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "camelCase")]
+pub enum CustodyNote {
+    /// The device is acquiring master `index` (a take's store, a promote, a rotation's or a
+    /// restore's store) and owes the record its mark. Written **before** the store or promote
+    /// (an intent, `acquired: false`). `epoch` is the custody epoch read before the intent was
+    /// written. The operation sets `acquired` (the receipt) only after its own
+    /// [`Vault::store_master`] or [`Vault::promote_master`] answered [`Stored::Stored`].
+    /// Another device's store, a promote that another app made first, and
+    /// [`Stored::AlreadyNewer`] never set it. Only a receipt lets a mark say `holdsMaster:
+    /// true`. Cleared once the mark it owes has landed.
+    MarkOwed {
+        index: u32,
+        epoch: u64,
+        token: NoteToken,
+        /// The receipt: this operation's own store or promote of `index` landed.
+        #[serde(default)]
+        acquired: bool,
+        /// The note this one was written over.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        restores: Option<Box<CustodyNote>>,
+    },
+    /// The device released its copy (`remove_master`) after it read custody epoch `epoch`.
+    /// Its compare-and-delete forget is bound to that epoch. An acquisition that stores after
+    /// the release moves the epoch, so the forget can no longer take the new key.
+    Released {
+        epoch: u64,
+        token: NoteToken,
+        /// The note this one was written over.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        restores: Option<Box<CustodyNote>>,
+    },
+}
+
+/// What a [`CustodyNote`] says about this device's copy ([`CustodyNote::standing`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Standing {
+    /// A release is the first layer from the top that is not an open intent: the device gave
+    /// its copy up. The mark is `holdsMaster: false`.
+    Released,
+    /// A receipt for master `index` is the first such layer: this device's own store or
+    /// promote of `index` landed, and no release was written after it.
+    Acquired(u32),
+    /// Only open intents (no receipt yet): nothing proves that this device keeps a key.
+    Pending,
+}
+
+impl CustodyNote {
+    /// An owed mark for master `index`, the intent of an acquisition about to store or promote
+    /// it; `epoch` is the custody epoch read before it. A fresh token from `random`. No receipt
+    /// yet, nothing below it.
+    pub fn owed(index: u32, epoch: u64, random: &dyn Random) -> Self {
+        CustodyNote::MarkOwed {
+            index,
+            epoch,
+            token: NoteToken::new(random),
+            acquired: false,
+            restores: None,
+        }
+    }
+
+    /// A release by a removal that read custody epoch `epoch`. A fresh token from `random`.
+    pub fn released(epoch: u64, random: &dyn Random) -> Self {
+        CustodyNote::Released {
+            epoch,
+            token: NoteToken::new(random),
+            restores: None,
+        }
+    }
+
+    /// The token of the operation that wrote this layer.
+    pub fn token(&self) -> NoteToken {
+        match self {
+            CustodyNote::MarkOwed { token, .. } | CustodyNote::Released { token, .. } => *token,
+        }
+    }
+
+    /// The note this one was written over.
+    pub fn restores(&self) -> Option<&CustodyNote> {
+        match self {
+            CustodyNote::MarkOwed { restores, .. } | CustodyNote::Released { restores, .. } => {
+                restores.as_deref()
+            }
+        }
+    }
+
+    /// The layers from the top, each without the notes below it.
+    pub fn layers(&self) -> Vec<CustodyNote> {
+        let mut layers = Vec::new();
+        let mut next = Some(self);
+        while let Some(note) = next {
+            layers.push(note.bare());
+            next = note.restores();
+        }
+        layers
+    }
+
+    /// The note made of `layers` (from the top); `None` for no layer.
+    pub fn stacked(layers: Vec<CustodyNote>) -> Option<CustodyNote> {
+        layers
+            .into_iter()
+            .rev()
+            .fold(None, |below, layer| Some(layer.over(below)))
+    }
+
+    /// This layer written over `below`.
+    pub fn over(self, below: Option<CustodyNote>) -> CustodyNote {
+        let below = below.map(Box::new);
+        match self {
+            CustodyNote::MarkOwed {
+                index,
+                epoch,
+                token,
+                acquired,
+                ..
+            } => CustodyNote::MarkOwed {
+                index,
+                epoch,
+                token,
+                acquired,
+                restores: below,
+            },
+            CustodyNote::Released { epoch, token, .. } => CustodyNote::Released {
+                epoch,
+                token,
+                restores: below,
+            },
+        }
+    }
+
+    /// This layer alone, without the notes below it. Copies none of them, so [`Self::layers`]
+    /// is linear in the depth of the note.
+    fn bare(&self) -> CustodyNote {
+        match self {
+            CustodyNote::MarkOwed {
+                index,
+                epoch,
+                token,
+                acquired,
+                ..
+            } => CustodyNote::MarkOwed {
+                index: *index,
+                epoch: *epoch,
+                token: *token,
+                acquired: *acquired,
+                restores: None,
+            },
+            CustodyNote::Released { epoch, token, .. } => CustodyNote::Released {
+                epoch: *epoch,
+                token: *token,
+                restores: None,
+            },
+        }
+    }
+
+    /// What the note says, from the top layer down: open intents are passed over, and the
+    /// first release or receipt decides.
+    pub fn standing(&self) -> Standing {
+        let mut next = Some(self);
+        while let Some(note) = next {
+            match note {
+                CustodyNote::Released { .. } => return Standing::Released,
+                CustodyNote::MarkOwed {
+                    index,
+                    acquired: true,
+                    ..
+                } => return Standing::Acquired(*index),
+                CustodyNote::MarkOwed { .. } => next = note.restores(),
+            }
+        }
+        Standing::Pending
+    }
+
+    /// The receipt that decides [`CustodyNote::standing`], when it is one.
+    pub fn receipt(&self) -> Option<CustodyNote> {
+        let Standing::Acquired(_) = self.standing() else {
+            return None;
+        };
+        self.layers()
+            .into_iter()
+            .find(|layer| matches!(layer, CustodyNote::MarkOwed { acquired: true, .. }))
+    }
+
+    /// Whether this note proves that this device keeps the master key in `vault` for `scid`:
+    /// its standing is a receipt for an index, and the vault keeps exactly that index. `false`
+    /// for a release and for open intents. An intent is never proof: the key that the vault
+    /// keeps can be another device's acquisition on the same vault.
+    pub fn landed(&self, vault: &dyn Vault, scid: &str) -> Result<bool, VaultError> {
+        let Standing::Acquired(index) = self.standing() else {
+            return Ok(false);
+        };
+        Ok(vault.master_index(scid)? == Some(index))
+    }
+}
+
+/// The key under which [`Vault::custody_note`] keeps the note of the vault itself, not of one
+/// device key: the releases of the removals that empty this vault for an identity
+/// ([`crate::flows::master`]). Every app sharing the vault reads it before a holder mark. Log key
+/// ids are `m<n>` and `d<n>`, so no device key id is equal to it.
+pub const VAULT_NOTE: &str = "vault";
+
+/// The operation that wrote a [`CustodyNote`]: 16 random bytes, drawn once per take, promote,
+/// rotation, restore or removal. Not secret.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct NoteToken(pub [u8; 16]);
+
+impl NoteToken {
+    /// A fresh token from `random`.
+    pub fn new(random: &dyn Random) -> Self {
+        let mut bytes = [0u8; 16];
+        random.fill(&mut bytes);
+        NoteToken(bytes)
+    }
 }
 
 /// Who staged a master key ([`Vault::stage_master`]): an opaque token a rotating flow draws at
@@ -393,6 +709,10 @@ mod memory {
         pushes: Mutex<Vec<PendingPush>>,
         unlocks: Mutex<Vec<MasterUse>>,
         record_seen: Mutex<HashMap<String, u64>>,
+        /// Each (identity, device key id)'s custody note.
+        notes: Mutex<HashMap<(String, String), CustodyNote>>,
+        /// Each identity's vault id, drawn at its first ask.
+        ids: Mutex<HashMap<String, VaultId>>,
     }
 
     impl MemoryVault {
@@ -608,6 +928,47 @@ mod memory {
             self.record_seen.lock().map_err(poisoned)?.remove(scid);
             Ok(())
         }
+
+        fn custody_note(
+            &self,
+            scid: &str,
+            key_id: &str,
+        ) -> Result<Option<CustodyNote>, VaultError> {
+            Ok(self
+                .notes
+                .lock()
+                .map_err(poisoned)?
+                .get(&(scid.to_string(), key_id.to_string()))
+                .cloned())
+        }
+
+        fn swap_custody_note(
+            &self,
+            scid: &str,
+            key_id: &str,
+            expected: Option<&CustodyNote>,
+            note: Option<&CustodyNote>,
+        ) -> Result<bool, VaultError> {
+            let mut notes = self.notes.lock().map_err(poisoned)?;
+            let slot = (scid.to_string(), key_id.to_string());
+            if notes.get(&slot) != expected {
+                return Ok(false);
+            }
+            match note {
+                Some(note) => notes.insert(slot, note.clone()),
+                None => notes.remove(&slot),
+            };
+            Ok(true)
+        }
+
+        fn vault_id(&self, scid: &str) -> Result<VaultId, VaultError> {
+            let mut ids = self.ids.lock().map_err(poisoned)?;
+            Ok(*ids.entry(scid.to_string()).or_insert_with(|| {
+                let mut bytes = [0u8; 16];
+                crate::Random::fill(&crate::OsRandom, &mut bytes);
+                VaultId(bytes)
+            }))
+        }
     }
 
     #[cfg(test)]
@@ -806,6 +1167,136 @@ mod memory {
             assert_eq!(vault.record_seen("Qm2", 1).unwrap(), None);
             vault.record_seen_reset("Qm").unwrap();
             assert_eq!(vault.record_seen("Qm", 2).unwrap(), None);
+        }
+
+        /// The custody note is kept per device key, so two apps sharing the vault (two device
+        /// entries) never overwrite each other's; each write is a compare-and-swap, so a clear
+        /// never removes a note written since it was read.
+        #[test]
+        fn custody_notes_are_per_device_and_swapped_only_from_what_was_read() {
+            let vault = MemoryVault::new();
+            let owed = CustodyNote::MarkOwed {
+                index: 1,
+                epoch: 4,
+                token: NoteToken([1; 16]),
+                acquired: false,
+                restores: None,
+            };
+            let released = CustodyNote::Released {
+                epoch: 3,
+                token: NoteToken([2; 16]),
+                restores: None,
+            };
+            assert_eq!(vault.custody_note("Qm", "d1").unwrap(), None);
+            assert!(vault
+                .swap_custody_note("Qm", "d1", None, Some(&released))
+                .unwrap());
+            assert!(vault
+                .swap_custody_note("Qm", "d2", None, Some(&owed))
+                .unwrap());
+            assert_eq!(
+                vault.custody_note("Qm", "d1").unwrap(),
+                Some(released.clone())
+            );
+            assert_eq!(vault.custody_note("Qm", "d2").unwrap(), Some(owed.clone()));
+            assert_eq!(vault.custody_note("Qm2", "d1").unwrap(), None);
+            // A clear that expects the note it wrote leaves another one in place.
+            assert!(!vault
+                .swap_custody_note("Qm", "d1", Some(&owed), None)
+                .unwrap());
+            assert_eq!(
+                vault.custody_note("Qm", "d1").unwrap(),
+                Some(released.clone())
+            );
+            assert!(vault
+                .swap_custody_note("Qm", "d2", Some(&owed), None)
+                .unwrap());
+            assert_eq!(vault.custody_note("Qm", "d2").unwrap(), None);
+            // Two releases at one epoch by two operations are two notes: a rollback that
+            // expects the first never touches the second.
+            let again = CustodyNote::Released {
+                epoch: 3,
+                token: NoteToken([3; 16]),
+                restores: None,
+            };
+            assert!(vault
+                .swap_custody_note("Qm", "d1", Some(&released), Some(&again))
+                .unwrap());
+            assert!(!vault
+                .swap_custody_note("Qm", "d1", Some(&released), None)
+                .unwrap());
+            assert_eq!(vault.custody_note("Qm", "d1").unwrap(), Some(again));
+        }
+
+        /// Only a receipt lands, and only while the vault keeps exactly its index. An open
+        /// intent never lands, though the vault keeps its index (another device's store).
+        #[test]
+        fn only_a_receipt_for_the_kept_index_lands() {
+            let vault = MemoryVault::new();
+            let epoch = vault.custody_epoch("Qm").unwrap();
+            let intent = CustodyNote::MarkOwed {
+                index: 1,
+                epoch,
+                token: NoteToken([1; 16]),
+                acquired: false,
+                restores: None,
+            };
+            let receipt = CustodyNote::MarkOwed {
+                index: 1,
+                epoch,
+                token: NoteToken([1; 16]),
+                acquired: true,
+                restores: None,
+            };
+            assert!(!receipt.landed(&vault, "Qm").unwrap(), "nothing stored");
+            vault.store_master("Qm", 0, Secret::new([3; 32])).unwrap();
+            assert!(!receipt.landed(&vault, "Qm").unwrap(), "an older key");
+            vault.store_master("Qm", 1, Secret::new([4; 32])).unwrap();
+            assert!(receipt.landed(&vault, "Qm").unwrap());
+            assert!(
+                !intent.landed(&vault, "Qm").unwrap(),
+                "an intent proves nothing"
+            );
+            vault.store_master("Qm", 2, Secret::new([5; 32])).unwrap();
+            assert!(!receipt.landed(&vault, "Qm").unwrap(), "a later key");
+            let released = CustodyNote::released(0, &crate::OsRandom);
+            assert!(!released.landed(&vault, "Qm").unwrap());
+        }
+
+        /// The layers of a stacked note come back from the top, and the first release or
+        /// receipt from the top decides its standing; open intents above it change nothing.
+        #[test]
+        fn a_stacked_note_stands_on_its_first_release_or_receipt() {
+            let random = crate::OsRandom;
+            let older = CustodyNote::MarkOwed {
+                index: 0,
+                epoch: 1,
+                token: NoteToken([9; 16]),
+                acquired: true,
+                restores: None,
+            };
+            let release = CustodyNote::released(2, &random);
+            let intent = CustodyNote::owed(0, 2, &random);
+            let layers = vec![intent.clone(), release.clone(), older.clone()];
+            let note = CustodyNote::stacked(layers.clone()).unwrap();
+            assert_eq!(note.layers(), layers);
+            assert_eq!(note.standing(), Standing::Released);
+            assert_eq!(note.token(), intent.token());
+            let below = CustodyNote::stacked(vec![older.clone()]);
+            assert_eq!(note.restores().unwrap().restores().cloned(), below);
+            let no_release = CustodyNote::stacked(vec![intent.clone(), older.clone()]).unwrap();
+            assert_eq!(no_release.standing(), Standing::Acquired(0));
+            assert_eq!(no_release.receipt(), Some(older));
+            assert_eq!(intent.standing(), Standing::Pending);
+            assert_eq!(CustodyNote::stacked(Vec::new()), None);
+            // A note written before the stack (no `acquired`, no `restores`) still reads.
+            let old: CustodyNote = serde_json::from_value(serde_json::json!({
+                "state": "markOwed", "index": 0, "epoch": 1, "token": NoteToken([0; 16])
+            }))
+            .unwrap();
+            assert_eq!(old.standing(), Standing::Pending);
+            let json = serde_json::to_value(&note).unwrap();
+            assert_eq!(serde_json::from_value::<CustodyNote>(json).unwrap(), note);
         }
     }
 }

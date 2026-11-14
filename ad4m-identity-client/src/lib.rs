@@ -32,14 +32,23 @@ pub mod flows;
 pub mod record;
 mod request;
 pub mod secret;
+#[cfg(feature = "store")]
+pub mod store;
 pub mod vault;
 
+pub use ad4m_identity_core::record::VaultId;
 pub use executor::{ExecutorRpc, RpcError, ViaExecutor};
 pub use secret::Secret;
+#[cfg(feature = "store")]
+pub use store::{
+    Checkpoint, CheckpointError, EncKey, EncOpenError, HttpClient, HttpError, HttpRequest,
+    HttpResponse, LogCheckpoints, MemoryCheckpoints, SoftEncKey, StoreEndpoint, ViaStore,
+};
 #[cfg(any(test, feature = "test-vault"))]
 pub use vault::MemoryVault;
 pub use vault::{
-    Forgot, MasterSigner, MasterUse, PendingPush, StageToken, Stored, Unlocked, Vault, VaultError,
+    CustodyNote, Forgot, MasterSigner, MasterUse, NoteToken, PendingPush, StageToken, Standing,
+    Stored, Unlocked, Vault, VaultError, VAULT_NOTE,
 };
 
 /// Unix seconds, from the surface.
@@ -183,6 +192,12 @@ pub enum ClientError {
     /// head that the log lets keep it holds it (per the record). Removing it would leave only the 12 words.
     #[error("this device holds the only copy of the master key")]
     OnlyCopy,
+    /// Not written: this device's custody note ([`vault::CustodyNote`]) changed between the
+    /// decision to mark it and the record version the write built on — a removal released the
+    /// copy, or the owed mark landed and was cleared — so the repair that decided on the old
+    /// note writes nothing.
+    #[error("this device's custody note changed under the mark")]
+    CustodyNoteMoved,
     #[error("{0}")]
     Protocol(String),
 }

@@ -775,8 +775,60 @@ is version 1); a reader refuses a version lower than one it has read. A host can
 older version with its valid receipt, so that high-water mark is the reader's own state: the
 client keeps the highest version it has read per identity; the core functions keep none. A device entry's `holdsMaster` is `false`, `"offered"` or
 `true`; with `true` it carries `masterIndex`, the index *n* of the master key the device's
-vault keeps, written by the device (or the flow that put the key there). An entry without
-`masterIndex` (written before it existed) is read as an unknown index. A pending revocation's `reason` is `left-host` or `account-deleted`.
+vault keeps, written by the device (or the flow that put the key there), and `vault`, the id of
+the physical vault that keeps the key. A vault id is 16 random bytes in base58btc. The vault
+draws it the first time an identity asks and keeps it, one per identity, for every device key,
+app and process that uses that vault. A forget of the master key keeps the id; it goes only
+with the vault. Two apps on one shared vault are two device keys and one copy: their entries
+name the same vault id. An entry with `false` or `"offered"` carries no `vault`. When a device
+marks index *n* on vault V, every other `true` entry that names V with a lower index or no
+index moves to *n*, because V keeps one master key. The vault keeps a
+custody note per identity and device key. The note is a stack of layers: each operation puts
+one layer on top and keeps the note below it (`restores`). Each layer carries a random 16-byte
+token. An operation changes or removes only its own layer, found by its token, with a
+compare-and-swap on the whole note. It never puts back or removes a layer that another
+operation wrote, even one with the same index and epoch. There are three kinds of layer:
+
+- `MarkOwed {index, epoch, token, acquired: false}` is an intent. The device reads the vault's
+  custody epoch, writes the intent, and only then stores or promotes the key. An intent proves
+  nothing: the store can fail, or another app on the same vault can install the key.
+- `MarkOwed {…, acquired: true}` is a receipt. The operation writes it only when its own store
+  or promote answered that it installed the key. Then it acknowledges the inbox and writes
+  the mark. It clears the receipt, and the layers below it, once a mark has met it.
+- `Released {epoch, token}` is written before a removal forgets the key and publishes `false`.
+  The removal reads the custody epoch again after the release. When the epoch moved, a store
+  came between: it removes the release and starts again. It writes `false` only while its
+  release is still the top layer. A removal that fails removes only its own release. A
+  removal that finished retires the releases below its own: every operation that can remove
+  its release either removes them too or puts a receipt above them that supersedes them, so
+  no reader sees them again. Thus a repeated removal keeps one release, not one per removal.
+  It keeps the intents and receipts below it.
+
+The standing of the note comes from the top layer down: open intents are passed over, and the
+first release or receipt decides. A receipt defeats a release below it, and a release above it
+whose epoch is not later than the receipt's intent: the store moved the custody epoch past such
+a release, so its forget cannot take the new key. A device writes `holdsMaster: true` only
+from a receipt for the index its vault keeps, and only while no removal of the vault is
+pending (no release on the vault's own note holds the current custody epoch; see the removal
+below). It writes `false` when the note stands released
+or the vault keeps no key. Otherwise it leaves its holding as the record says: a key in a
+shared vault without a receipt of this device can be another device's. A device repairs its
+own entry only from its note: when the note is a `MarkOwed`, a later check of its custody
+first takes a master key still waiting in its inbox; else, when the note stands on a receipt
+for the index the vault keeps, it writes the mark (re-attesting a stale recovery pair with the
+master first). A note with open intents only (a crash before the receipt) it clears, and it
+writes nothing. When the note stands released it never writes `true`; with no note it repairs
+nothing, apart from a device the record already lists as holding the key on this vault (its
+entry names this vault's id), which re-attests a stale pair and keeps its mark. A device the record does not list, or one whose note stands
+released, is never asked to unlock its master for a repair. Every write of the device's
+`holdsMaster`, a rotation's hand-over included, reads the custody epoch, then the note and the
+vault's note, and re-reads them inside the record's version check. The record's versions order the writes: a
+removal that wrote `Released` before that check makes the write fail and retry with `false`,
+and one that wrote it after publishes its own `false` on a later version; a `false` never
+turns back to `true` without a new receipt. An entry without
+`masterIndex` (written before it existed) is read as an unknown index. A `true` entry without
+`vault` (written before it existed) names no vault and proves no copy; the device's next mark
+writes it. A pending revocation's `reason` is `left-host` or `account-deleted`.
 
 **The request box.** A device key without the bot mark posts `{body, expires}` with `body`
 `{kind: "send-master"}` or `{kind: "confirm-revoke", keyIds, rotate}`; `expires` lies at most 7
@@ -911,14 +963,34 @@ current master key:
   the device's entry (`false`) is written before the push, so a device that takes the key at
   once finds its entry to mark.
 - *Removes the master key from a device* only while another copy of the current master key
-  remains: another device valid at the head that the log lets keep it, listed `holdsMaster:
-  true` with `masterIndex` equal to the index of the log's current master. An entry offered,
-  without an index or with a replaced index, and the 12 words, are no copy. The app checks this
-  on the record version its write (this device `holdsMaster: false`) builds on, again on each
+  remains in another vault: another device valid at the head that the log lets keep it, listed
+  `holdsMaster: true` with `masterIndex` equal to the index of the log's current master and a
+  `vault` that is not this device's vault. An entry offered, without an index, with a replaced
+  index or without a vault id, an entry of another device key on this vault, and the 12 words,
+  are no copy. The app checks this on the record version its write builds on, again on each
   re-read after a stale version, and the vault forgets the key only after the write; of two
   devices removing it at once, the second write builds on the first's version and is refused.
+  The write marks this device `holdsMaster: false` and, while the custody epoch has not moved
+  since the release, every other entry that names this vault: the forget takes the vault's one
+  copy from all of them. When the epoch moved (a store came between), it marks this device
+  only. Before that write, the removal puts the same release on the vault's own note (the note
+  kept under the reserved key `vault`, not a device key id). Every holder mark through any
+  device key on the vault reads that note. While a release on it holds the current custody
+  epoch, a mark writes no `true` on the vault, whatever its own note says: so no entry of
+  another device key on the vault counts as a copy for another removal while this removal can
+  still forget the key. A store, a promote or a forget on the vault moves the epoch past the
+  release, and it no longer holds. The removal takes it out after the forget, and on every
+  failure. A removal cut off before that leaves it: marks on the vault under-claim until the
+  epoch moves, or until the same device's next removal retires it. After the forget, while the
+  vault keeps no key, the app writes `false` on the entries that still name this vault. When
+  the forget keeps a key installed after the release, the removal released nothing: the
+  entries of the other device keys on the vault that its write marked `false` are marked
+  `true` again with the index the vault keeps, unless the device's own note stands released,
+  or a removal of the vault is pending, or the entry is no longer listed or says `true`
+  already.
 - *Lists itself at creation.* The record's first version, written right after the `incept`
-  lands, lists the creating device as `d1` with `holdsMaster: true` and `masterIndex` 0, so it
+  lands, lists the creating device as `d1` with `holdsMaster: true`, `masterIndex` 0 and the
+  `vault` id of the vault that keeps master #0, so it
   counts as a copy and a rotation on another device sends it the new master key.
 - *Keeps a rotated master key before the rotation is public.* A rotation (from the 12 words,
   in a restore too) stages master *n*+1 in the vault before it publishes the `rotate`: staged,

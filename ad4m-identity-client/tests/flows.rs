@@ -23,8 +23,8 @@ use ad4m_identity_client::flows::revoke::{key_id_of, revoke, revoke_and_rotate};
 use ad4m_identity_client::flows::rotate::{rotate, MAX_TRIES};
 use ad4m_identity_client::record::{self, Change};
 use ad4m_identity_client::{
-    ClientError, Clock, ExecutorRpc, MasterUse, MemoryVault, OsRandom, PendingPush, Random,
-    RpcError, StageToken, SystemClock, Vault, ViaExecutor,
+    ClientError, Clock, CustodyNote, ExecutorRpc, MasterUse, MemoryVault, OsRandom, PendingPush,
+    Random, RpcError, StageToken, SystemClock, Vault, ViaExecutor,
 };
 use ad4m_identity_core::build::{self, cosign, Signer};
 use ad4m_identity_core::inbox::{
@@ -80,8 +80,9 @@ impl TestStore {
             Settings {
                 pow_bits: 8,
                 // A test makes an identity's writes (offers, inbox puts, record writes, posts)
-                // within a second; the store's bucket is not under test here.
-                identity_burst: 100,
+                // within a second (one test runs 200 removals); the store's bucket is not under
+                // test here.
+                identity_burst: 1000,
                 ..Settings::default()
             },
         );
@@ -1135,6 +1136,28 @@ impl Vault for RefusingVault {
     fn record_seen_reset(&self, scid: &str) -> Result<(), ad4m_identity_client::VaultError> {
         self.0.record_seen_reset(scid)
     }
+    fn custody_note(
+        &self,
+        scid: &str,
+        key_id: &str,
+    ) -> Result<Option<CustodyNote>, ad4m_identity_client::VaultError> {
+        self.0.custody_note(scid, key_id)
+    }
+    fn vault_id(
+        &self,
+        scid: &str,
+    ) -> Result<ad4m_identity_client::VaultId, ad4m_identity_client::VaultError> {
+        self.0.vault_id(scid)
+    }
+    fn swap_custody_note(
+        &self,
+        scid: &str,
+        key_id: &str,
+        expected: Option<&CustodyNote>,
+        note: Option<&CustodyNote>,
+    ) -> Result<bool, ad4m_identity_client::VaultError> {
+        self.0.swap_custody_note(scid, key_id, expected, note)
+    }
 }
 
 #[tokio::test]
@@ -2030,6 +2053,7 @@ fn entry(name: &str, kind: DeviceKind) -> DeviceEntry {
         runs_executor: true,
         holds_master: HoldsMaster::No,
         master_index: None,
+        vault: None,
         operator: None,
     }
 }
@@ -3622,6 +3646,7 @@ async fn a_holder_of_a_replaced_master_is_not_another_copy() {
         &[Change::Holds {
             key_id: d2.clone(),
             index: 0,
+            vault: vault_of(&desk_vault, &did),
         }],
         &OsRandom,
     )
@@ -4743,6 +4768,28 @@ impl Vault for PromotedFirst {
     fn record_seen_reset(&self, scid: &str) -> Result<(), ad4m_identity_client::VaultError> {
         self.0.record_seen_reset(scid)
     }
+    fn custody_note(
+        &self,
+        scid: &str,
+        key_id: &str,
+    ) -> Result<Option<CustodyNote>, ad4m_identity_client::VaultError> {
+        self.0.custody_note(scid, key_id)
+    }
+    fn vault_id(
+        &self,
+        scid: &str,
+    ) -> Result<ad4m_identity_client::VaultId, ad4m_identity_client::VaultError> {
+        self.0.vault_id(scid)
+    }
+    fn swap_custody_note(
+        &self,
+        scid: &str,
+        key_id: &str,
+        expected: Option<&CustodyNote>,
+        note: Option<&CustodyNote>,
+    ) -> Result<bool, ad4m_identity_client::VaultError> {
+        self.0.swap_custody_note(scid, key_id, expected, note)
+    }
 }
 
 /// A restore whose staged key another app promoted first: the enrolment still keeps #1.
@@ -5051,6 +5098,28 @@ impl Vault for LaggingIndex {
     fn record_seen_reset(&self, scid: &str) -> Result<(), ad4m_identity_client::VaultError> {
         self.inner.record_seen_reset(scid)
     }
+    fn custody_note(
+        &self,
+        scid: &str,
+        key_id: &str,
+    ) -> Result<Option<CustodyNote>, ad4m_identity_client::VaultError> {
+        self.inner.custody_note(scid, key_id)
+    }
+    fn vault_id(
+        &self,
+        scid: &str,
+    ) -> Result<ad4m_identity_client::VaultId, ad4m_identity_client::VaultError> {
+        self.inner.vault_id(scid)
+    }
+    fn swap_custody_note(
+        &self,
+        scid: &str,
+        key_id: &str,
+        expected: Option<&CustodyNote>,
+        note: Option<&CustodyNote>,
+    ) -> Result<bool, ad4m_identity_client::VaultError> {
+        self.inner.swap_custody_note(scid, key_id, expected, note)
+    }
 }
 
 /// From the review of #1667, adapted: after a rotation whose promote failed half way, the
@@ -5279,6 +5348,28 @@ impl Vault for SharedVault {
 
     fn record_seen_reset(&self, scid: &str) -> Result<(), ad4m_identity_client::VaultError> {
         self.0.record_seen_reset(scid)
+    }
+    fn custody_note(
+        &self,
+        scid: &str,
+        key_id: &str,
+    ) -> Result<Option<CustodyNote>, ad4m_identity_client::VaultError> {
+        self.0.custody_note(scid, key_id)
+    }
+    fn vault_id(
+        &self,
+        scid: &str,
+    ) -> Result<ad4m_identity_client::VaultId, ad4m_identity_client::VaultError> {
+        self.0.vault_id(scid)
+    }
+    fn swap_custody_note(
+        &self,
+        scid: &str,
+        key_id: &str,
+        expected: Option<&CustodyNote>,
+        note: Option<&CustodyNote>,
+    ) -> Result<bool, ad4m_identity_client::VaultError> {
+        self.0.swap_custody_note(scid, key_id, expected, note)
     }
 }
 
@@ -6092,14 +6183,24 @@ async fn a_take_of_an_older_master_keeps_the_newer_one() {
         taken.index, 2,
         "the take reports the index the vault keeps, not the taken key's"
     );
+    // #2 is the other app's acquisition, not this take's: the take's own store answered
+    // `AlreadyNewer`, so it has no receipt, and its mark does not say this device holds #2
+    // (Lal's review of #1673, P2a).
     let opened = record::read(&desk, &SharedVault(shared.clone()), &did)
         .await
         .unwrap()
         .unwrap();
+    let listed = &opened.record.devices[&d2];
+    assert_ne!(
+        listed.holds_master,
+        HoldsMaster::Yes,
+        "another app's key is not this device's"
+    );
+    assert_eq!(listed.master_index, None);
     assert_eq!(
-        opened.record.devices[&d2].master_index,
-        Some(2),
-        "the record names the index the vault keeps"
+        shared.custody_note(&scid, &d2).unwrap(),
+        None,
+        "the take's intent is gone"
     );
 }
 
@@ -6232,6 +6333,28 @@ impl Vault for InstallBeforeForget {
     fn record_seen_reset(&self, scid: &str) -> Result<(), ad4m_identity_client::VaultError> {
         self.inner.record_seen_reset(scid)
     }
+    fn custody_note(
+        &self,
+        scid: &str,
+        key_id: &str,
+    ) -> Result<Option<CustodyNote>, ad4m_identity_client::VaultError> {
+        self.inner.custody_note(scid, key_id)
+    }
+    fn vault_id(
+        &self,
+        scid: &str,
+    ) -> Result<ad4m_identity_client::VaultId, ad4m_identity_client::VaultError> {
+        self.inner.vault_id(scid)
+    }
+    fn swap_custody_note(
+        &self,
+        scid: &str,
+        key_id: &str,
+        expected: Option<&CustodyNote>,
+        note: Option<&CustodyNote>,
+    ) -> Result<bool, ad4m_identity_client::VaultError> {
+        self.inner.swap_custody_note(scid, key_id, expected, note)
+    }
 }
 
 /// Lal's review at 42de52d10, closed: `remove_master` decides to forget the kept key, and
@@ -6322,12 +6445,16 @@ async fn a_promote_never_replaces_a_newer_kept_key() {
         Some(2),
         "the newer kept key survives the older key's promotion"
     );
+    // #2 is the other app's acquisition: the promote kept nothing of its own, so it writes no
+    // receipt and its mark leaves d1 as the record had it, never `true` for #2 (Lal's review
+    // of #1673, P2a).
     let opened = record::read(&a, &vault, &did).await.unwrap().unwrap();
     assert_eq!(
         opened.record.devices["d1"].master_index,
-        Some(2),
-        "the record names the index the vault keeps"
+        Some(1),
+        "the promote does not claim another app's key"
     );
+    assert_eq!(vault.custody_note(&scid, "d1").unwrap(), None);
 }
 
 /// A store can serve back an older version with a receipt that still verifies: the read keeps
@@ -7015,6 +7142,995 @@ async fn a_take_while_the_record_waits_for_reattestation_keeps_the_key() {
     assert!(flow.devices().iter().any(|d| d.name.is_some()));
 }
 
+/// A device that took a master key while the record waited for re-attestation, its mark
+/// still owed: `a` created the identity and rotated to master #1, cut off before the record's
+/// re-attestation, then pushed #1 to `b` (the desk, `d2`), which took it with
+/// `record_pending`.
+struct PendingTake {
+    a: ViaExecutor<TestExecutor>,
+    vault: MemoryVault,
+    b: ViaExecutor<TestExecutor>,
+    b_vault: MemoryVault,
+    did: String,
+    d2: String,
+    scid: String,
+}
+
+async fn pending_take(seed: u8) -> PendingTake {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let vault = MemoryVault::new();
+    let b_vault = MemoryVault::new();
+    let did = create(&a, &vault, seed).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    let d2 = link_app(
+        &a,
+        &vault,
+        &did,
+        &b,
+        entry("Desk", DeviceKind::DesktopApp),
+        true,
+    )
+    .await;
+    let words = words::from_entropy(&[seed; 16]);
+    let cut = ViaExecutor::new(CutOffAfterPublish {
+        inner: a.rpc(),
+        published: Cell::new(false),
+    });
+    tokio::select! {
+        rotated = rotate(&cut, &vault, &did, &words, &[], &SystemClock, &OsRandom) => {
+            panic!("the rotation was not cut off: {rotated:?}")
+        }
+        _ = async {
+            while !cut.rpc().published.get() {
+                tokio::task::yield_now().await;
+            }
+        } => {}
+    }
+    vault.promote_master(&scid, 1).unwrap();
+    send_master(&a, &vault, &did, &d2, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    let taken = take_master(&b, &b_vault, &OsRandom)
+        .await
+        .unwrap()
+        .expect("the pushed master key waits in the inbox");
+    assert!(taken.record_pending, "{taken:?}");
+    assert_eq!(b_vault.master_index(&scid).unwrap(), Some(1));
+    PendingTake {
+        a,
+        vault,
+        b,
+        b_vault,
+        did,
+        d2,
+        scid,
+    }
+}
+
+impl PendingTake {
+    /// Whether the record marks the desk holding master #1 and its recovery key is attested by
+    /// master #1, as `b` reads it.
+    async fn marked(&self) -> (Option<(HoldsMaster, Option<u32>)>, Option<String>) {
+        let opened = record::read(&self.b, &self.b_vault, &self.did)
+            .await
+            .unwrap()
+            .unwrap();
+        (
+            opened
+                .record
+                .devices
+                .get(&self.d2)
+                .map(|e| (e.holds_master, e.master_index)),
+            opened.recovery.map(|r| r.attestation.key_id),
+        )
+    }
+}
+
+/// `inner`, whose `MasterUse::Record` unlocks are cancelled while `cancel` is set: the person
+/// dismissed the prompt.
+struct CancelRecordUnlock<'v> {
+    inner: &'v MemoryVault,
+    cancel: std::sync::atomic::AtomicBool,
+}
+
+impl Vault for CancelRecordUnlock<'_> {
+    fn store_master(
+        &self,
+        scid: &str,
+        index: u32,
+        secret: ad4m_identity_client::Secret<[u8; 32]>,
+    ) -> Result<ad4m_identity_client::Stored, ad4m_identity_client::VaultError> {
+        self.inner.store_master(scid, index, secret)
+    }
+    fn master_index(&self, scid: &str) -> Result<Option<u32>, ad4m_identity_client::VaultError> {
+        self.inner.master_index(scid)
+    }
+    fn stage_master(
+        &self,
+        scid: &str,
+        index: u32,
+        secret: ad4m_identity_client::Secret<[u8; 32]>,
+        owner: &StageToken,
+    ) -> Result<(), ad4m_identity_client::VaultError> {
+        self.inner.stage_master(scid, index, secret, owner)
+    }
+    fn staged_index(&self, scid: &str) -> Result<Option<u32>, ad4m_identity_client::VaultError> {
+        self.inner.staged_index(scid)
+    }
+    fn promote_master(
+        &self,
+        scid: &str,
+        index: u32,
+    ) -> Result<ad4m_identity_client::Stored, ad4m_identity_client::VaultError> {
+        self.inner.promote_master(scid, index)
+    }
+    fn discard_staged(
+        &self,
+        scid: &str,
+        index: u32,
+        owner: Option<&StageToken>,
+    ) -> Result<(), ad4m_identity_client::VaultError> {
+        self.inner.discard_staged(scid, index, owner)
+    }
+    fn forget_master(
+        &self,
+        scid: &str,
+        index: u32,
+    ) -> Result<ad4m_identity_client::Forgot, ad4m_identity_client::VaultError> {
+        self.inner.forget_master(scid, index)
+    }
+    fn custody_epoch(&self, scid: &str) -> Result<u64, ad4m_identity_client::VaultError> {
+        self.inner.custody_epoch(scid)
+    }
+    fn forget_master_at(
+        &self,
+        scid: &str,
+        epoch: u64,
+    ) -> Result<ad4m_identity_client::Forgot, ad4m_identity_client::VaultError> {
+        self.inner.forget_master_at(scid, epoch)
+    }
+    fn unlock(
+        &self,
+        scid: &str,
+        why: MasterUse,
+        now: u64,
+    ) -> Result<ad4m_identity_client::Unlocked, ad4m_identity_client::VaultError> {
+        if why == MasterUse::Record && self.cancel.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(ad4m_identity_client::VaultError::Cancelled);
+        }
+        self.inner.unlock(scid, why, now)
+    }
+    fn store_pending_incept(&self, incept: &Event) -> Result<(), ad4m_identity_client::VaultError> {
+        self.inner.store_pending_incept(incept)
+    }
+    fn pending_incepts(&self) -> Result<Vec<Event>, ad4m_identity_client::VaultError> {
+        self.inner.pending_incepts()
+    }
+    fn incept_published(&self, scid: &str) -> Result<(), ad4m_identity_client::VaultError> {
+        self.inner.incept_published(scid)
+    }
+    fn keep_push(&self, push: &PendingPush) -> Result<(), ad4m_identity_client::VaultError> {
+        self.inner.keep_push(push)
+    }
+    fn pending_pushes(&self) -> Result<Vec<PendingPush>, ad4m_identity_client::VaultError> {
+        self.inner.pending_pushes()
+    }
+    fn push_done(&self, push: &PendingPush) -> Result<(), ad4m_identity_client::VaultError> {
+        self.inner.push_done(push)
+    }
+    fn record_seen(
+        &self,
+        scid: &str,
+        version: u64,
+    ) -> Result<Option<u64>, ad4m_identity_client::VaultError> {
+        self.inner.record_seen(scid, version)
+    }
+    fn record_seen_reset(&self, scid: &str) -> Result<(), ad4m_identity_client::VaultError> {
+        self.inner.record_seen_reset(scid)
+    }
+    fn custody_note(
+        &self,
+        scid: &str,
+        key_id: &str,
+    ) -> Result<Option<CustodyNote>, ad4m_identity_client::VaultError> {
+        self.inner.custody_note(scid, key_id)
+    }
+    fn vault_id(
+        &self,
+        scid: &str,
+    ) -> Result<ad4m_identity_client::VaultId, ad4m_identity_client::VaultError> {
+        self.inner.vault_id(scid)
+    }
+    fn swap_custody_note(
+        &self,
+        scid: &str,
+        key_id: &str,
+        expected: Option<&CustodyNote>,
+        note: Option<&CustodyNote>,
+    ) -> Result<bool, ad4m_identity_client::VaultError> {
+        self.inner.swap_custody_note(scid, key_id, expected, note)
+    }
+}
+
+/// Lal's finding on the take's owed mark, (a): the completion's unlock is cancelled, so the
+/// mark stays owed with nothing in memory or in the inbox to recall it — only the desk's
+/// `MarkOwed` custody note, written before the ack. The next `refresh_master` makes the mark
+/// from that note and clears it: the record lists the desk holding #1 and its recovery key is
+/// attested by master #1 again.
+#[tokio::test]
+async fn a_cancelled_completion_of_a_pending_take_is_repaired_by_the_next_refresh() {
+    let w = pending_take(91).await;
+    let cancelling = CancelRecordUnlock {
+        inner: &w.b_vault,
+        cancel: std::sync::atomic::AtomicBool::new(true),
+    };
+    let cancelled = complete_pending_mark(&w.b, &cancelling, &w.did, &SystemClock, &OsRandom).await;
+    assert!(
+        matches!(
+            cancelled,
+            Err(ClientError::Vault(
+                ad4m_identity_client::VaultError::Cancelled
+            ))
+        ),
+        "{cancelled:?}"
+    );
+    assert_eq!(w.marked().await, (Some((HoldsMaster::No, None)), None));
+    assert!(
+        matches!(
+            note_of(&w.b_vault, &w.scid, &w.d2),
+            Some(CustodyNote::MarkOwed { index: 1, .. })
+        ),
+        "a cancelled completion keeps the note"
+    );
+
+    // The prompt is cancelled again on a refresh: the repair fails with the cancel and stays
+    // owed.
+    let refreshed = refresh_master(&w.b, &cancelling, &w.did, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    let Refreshed::Repaired {
+        index: 1,
+        record: Err(e),
+    } = refreshed
+    else {
+        panic!("expected the owed mark tried and cancelled: {refreshed:?}")
+    };
+    assert!(
+        matches!(
+            e,
+            ClientError::Vault(ad4m_identity_client::VaultError::Cancelled)
+        ),
+        "{e:?}"
+    );
+
+    // The person approves this time: the mark lands, re-attesting the recovery key.
+    cancelling
+        .cancel
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    let refreshed = refresh_master(&w.b, &cancelling, &w.did, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    let Refreshed::Repaired {
+        index: 1,
+        record: Ok(_),
+    } = refreshed
+    else {
+        panic!("expected the owed mark repaired: {refreshed:?}")
+    };
+    assert_eq!(
+        w.marked().await,
+        (Some((HoldsMaster::Yes, Some(1))), Some("m1".to_string()))
+    );
+
+    assert_eq!(note_of(&w.b_vault, &w.scid, &w.d2), None, "the note is met");
+
+    // Once repaired, the holder is current again, without another write or prompt.
+    let puts = w.b.rpc().record_puts.get();
+    let unlocks = w.b_vault.unlocks().len();
+    let refreshed = refresh_master(&w.b, &w.b_vault, &w.did, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    assert!(matches!(refreshed, Refreshed::Current), "{refreshed:?}");
+    assert_eq!(w.b.rpc().record_puts.get(), puts);
+    assert_eq!(w.b_vault.unlocks().len(), unlocks);
+}
+
+/// (b): the completion's record put fails once (the store is down); the note stays. The next
+/// refresh repairs the mark from it and clears it.
+#[tokio::test]
+async fn a_failed_put_of_a_pending_take_is_repaired_by_the_next_refresh() {
+    let w = pending_take(92).await;
+    w.b.rpc().refuse_record_puts.set(1);
+    let failed = complete_pending_mark(&w.b, &w.b_vault, &w.did, &SystemClock, &OsRandom).await;
+    assert!(
+        matches!(failed, Err(ClientError::Rpc(RpcError { code: 503, .. }))),
+        "{failed:?}"
+    );
+    assert_eq!(w.marked().await, (Some((HoldsMaster::No, None)), None));
+
+    let refreshed = refresh_master(&w.b, &w.b_vault, &w.did, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    let Refreshed::Repaired {
+        index: 1,
+        record: Ok(_),
+    } = refreshed
+    else {
+        panic!("expected the owed mark repaired: {refreshed:?}")
+    };
+    assert_eq!(
+        w.marked().await,
+        (Some((HoldsMaster::Yes, Some(1))), Some("m1".to_string()))
+    );
+    assert_eq!(note_of(&w.b_vault, &w.scid, &w.d2), None);
+}
+
+/// (c): the restart shape. The app stops after the take and before any completion: the
+/// `Taken` is gone, the inbox message is acked, and the vault keeps #1 and the desk's
+/// `MarkOwed` note (the vault is what survives a restart). The first refresh after the restart
+/// repairs the mark from that note and clears it.
+#[tokio::test]
+async fn a_restart_after_a_pending_take_is_repaired_by_the_first_refresh() {
+    let w = pending_take(93).await;
+    assert!(
+        take_master(&w.b, &w.b_vault, &OsRandom)
+            .await
+            .unwrap()
+            .is_none(),
+        "no inbox message is left to recall the owed mark"
+    );
+    assert!(matches!(
+        note_of(&w.b_vault, &w.scid, &w.d2),
+        Some(CustodyNote::MarkOwed { index: 1, .. })
+    ));
+    let unlocks = w.b_vault.unlocks().len();
+
+    let refreshed = refresh_master(&w.b, &w.b_vault, &w.did, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    let Refreshed::Repaired {
+        index: 1,
+        record: Ok(_),
+    } = refreshed
+    else {
+        panic!("expected the owed mark repaired: {refreshed:?}")
+    };
+    assert_eq!(
+        w.marked().await,
+        (Some((HoldsMaster::Yes, Some(1))), Some("m1".to_string()))
+    );
+    assert_eq!(note_of(&w.b_vault, &w.scid, &w.d2), None);
+    // The stale recovery pair needs the master: one record unlock.
+    assert_eq!(&w.b_vault.unlocks()[unlocks..], &[MasterUse::Record]);
+    // And the repaired holder now counts as another copy: the creator may remove its own.
+    let removed = remove_master(&w.a, &w.vault, &w.did, &OsRandom).await;
+    assert!(removed.is_ok(), "{removed:?}");
+    assert_eq!(w.vault.master_index(&w.scid).unwrap(), None);
+}
+
+/// A take whose own `holdsMaster` write failed for a passing reason (the store down), with
+/// the record's recovery pair current: no completion was ever owed by `record_pending`, but
+/// the note was, and the next refresh lands the mark from it as the device, without a prompt.
+#[tokio::test]
+async fn a_take_whose_mark_failed_is_marked_by_the_next_refresh_without_a_prompt() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let vault = MemoryVault::new();
+    let b_vault = MemoryVault::new();
+    let did = create(&a, &vault, 94).await;
+    let d2 = link_app(
+        &a,
+        &vault,
+        &did,
+        &b,
+        entry("Desk", DeviceKind::DesktopApp),
+        true,
+    )
+    .await;
+    send_master(&a, &vault, &did, &d2, &SystemClock, &OsRandom)
+        .await
+        .unwrap()
+        .record
+        .unwrap();
+    b.rpc().refuse_record_puts.set(1);
+    let taken = take_master(&b, &b_vault, &OsRandom)
+        .await
+        .unwrap()
+        .expect("the pushed master key waits in the inbox");
+    assert!(taken.record.is_err() && !taken.record_pending, "{taken:?}");
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    assert!(matches!(
+        note_of(&b_vault, &scid, &d2),
+        Some(CustodyNote::MarkOwed { index: 0, .. })
+    ));
+
+    let refreshed = refresh_master(&b, &b_vault, &did, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    let Refreshed::Repaired {
+        index: 0,
+        record: Ok(_),
+    } = refreshed
+    else {
+        panic!("expected the owed mark repaired: {refreshed:?}")
+    };
+    let opened = record::read(&b, &b_vault, &did).await.unwrap().unwrap();
+    let desk = &opened.record.devices[&d2];
+    assert_eq!(
+        (desk.holds_master, desk.master_index),
+        (HoldsMaster::Yes, Some(0))
+    );
+    assert!(b_vault.unlocks().is_empty(), "{:?}", b_vault.unlocks());
+    assert_eq!(note_of(&b_vault, &scid, &d2), None);
+}
+
+/// (d) and (e): a holder the record already marks stays `Current` with no record write and no
+/// prompt; a device that keeps no master key never writes the mark nor unlocks.
+#[tokio::test]
+async fn a_marked_holder_and_a_device_without_the_master_make_no_mark() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let vault = MemoryVault::new();
+    let b_vault = MemoryVault::new();
+    let did = create(&a, &vault, 95).await;
+    let d2 = link_app(
+        &a,
+        &vault,
+        &did,
+        &b,
+        entry("Desk", DeviceKind::DesktopApp),
+        true,
+    )
+    .await;
+    let opened = record::read(&a, &vault, &did).await.unwrap().unwrap();
+    let creator = &opened.record.devices[&a.status().await.unwrap().key_id.unwrap()];
+    assert_eq!(
+        (creator.holds_master, creator.master_index),
+        (HoldsMaster::Yes, Some(0))
+    );
+
+    let puts = a.rpc().record_puts.get();
+    let unlocks = vault.unlocks();
+    let refreshed = refresh_master(&a, &vault, &did, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    assert!(matches!(refreshed, Refreshed::Current), "{refreshed:?}");
+    assert_eq!(a.rpc().record_puts.get(), puts);
+    assert_eq!(vault.unlocks(), unlocks);
+
+    let refreshed = refresh_master(&b, &b_vault, &did, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    assert!(matches!(refreshed, Refreshed::Unknown), "{refreshed:?}");
+    assert_eq!(b.rpc().record_puts.get(), 0);
+    assert!(b_vault.unlocks().is_empty());
+    let opened = record::read(&b, &b_vault, &did).await.unwrap().unwrap();
+    assert_eq!(opened.record.devices[&d2].holds_master, HoldsMaster::No);
+}
+
+/// This device's custody note for `scid` in `vault`.
+fn note_of(vault: &dyn Vault, scid: &str, key_id: &str) -> Option<CustodyNote> {
+    vault.custody_note(scid, key_id).unwrap()
+}
+
+/// Lal's finding (1) at 08973ff97. B's take stores #1 and acks it, but its mark is refused
+/// while the recovery pair is stale, and its completion never runs. A then re-attests with #1:
+/// the pair is current, and B's entry still says `false`, so nothing in the record says B owes
+/// a mark. B's custody note does: B's next refresh enrols B as the device (no prompt) and clears
+/// the note.
+#[tokio::test]
+async fn a_failed_take_is_enrolled_by_its_refresh_after_another_device_reattested() {
+    let w = pending_take(96).await;
+    assert!(
+        matches!(
+            note_of(&w.b_vault, &w.scid, &w.d2),
+            Some(CustodyNote::MarkOwed { index: 1, .. })
+        ),
+        "the take noted its mark owed before the ack"
+    );
+    reattest_recovery(&w.a, &w.vault, &w.did, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    assert_eq!(
+        w.marked().await,
+        (Some((HoldsMaster::No, None)), Some("m1".to_string())),
+        "the pair is current again and B's entry does not say it holds #1"
+    );
+
+    let unlocks = w.b_vault.unlocks().len();
+    let refreshed = refresh_master(&w.b, &w.b_vault, &w.did, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    let Refreshed::Repaired {
+        index: 1,
+        record: Ok(_),
+    } = refreshed
+    else {
+        panic!("expected B enrolled from its note: {refreshed:?}")
+    };
+    assert_eq!(
+        w.marked().await,
+        (Some((HoldsMaster::Yes, Some(1))), Some("m1".to_string()))
+    );
+    assert_eq!(
+        w.b_vault.unlocks().len(),
+        unlocks,
+        "a device write needs no prompt"
+    );
+    assert_eq!(note_of(&w.b_vault, &w.scid, &w.d2), None, "the note is met");
+}
+
+/// Lal's finding (2) at 08973ff97. Two apps share one vault on a computer: A (`d1`, the
+/// creator) and B (`d2`); a third app keeps #0 on a vault of its own. B took #0 and then
+/// removed it (its note says released; the shared
+/// vault forgot the key). A rotates to #1 with the words; its hand-over write fails, so the
+/// record's recovery pair is stale and the shared vault keeps #1. B's refresh finds the vault
+/// keeping the current master and the pair stale: it must not re-mark B (nor prompt). A's own
+/// refresh enrols A from A's note.
+#[tokio::test]
+async fn a_released_app_on_a_shared_vault_is_not_marked_by_the_stale_pair() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let shared = Arc::new(MemoryVault::new());
+    let did = create(&a, &shared, 97).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    let d2 = link_app(
+        &a,
+        &shared,
+        &did,
+        &b,
+        entry("Other app", DeviceKind::DesktopApp),
+        true,
+    )
+    .await;
+    send_master(&a, &*shared, &did, &d2, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    let taken = take_master(&b, &SharedVault(shared.clone()), &OsRandom)
+        .await
+        .unwrap()
+        .expect("#0 waits in B's inbox");
+    taken.record.as_ref().unwrap();
+    // A copy on a vault of its own: the shared vault is not the only copy, so B may remove it.
+    let c = ViaExecutor::new(TestExecutor::new(&store, 3));
+    let c_vault = MemoryVault::new();
+    holding_app(
+        &a,
+        &shared,
+        &did,
+        &c,
+        &c_vault,
+        entry("Desk", DeviceKind::DesktopApp),
+    )
+    .await;
+    remove_master(&b, &SharedVault(shared.clone()), &did, &OsRandom)
+        .await
+        .unwrap();
+    assert_eq!(shared.master_index(&scid).unwrap(), None);
+    assert!(matches!(
+        note_of(&*shared, &scid, &d2),
+        Some(CustodyNote::Released { .. })
+    ));
+
+    let words = words::from_entropy(&[97; 16]);
+    a.rpc().refuse_record_puts.set(1);
+    let rotated = rotate(
+        &a,
+        &SharedVault(shared.clone()),
+        &did,
+        &words,
+        &[],
+        &SystemClock,
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    assert!(rotated.record.is_err(), "{:?}", rotated.record);
+    assert_eq!(shared.master_index(&scid).unwrap(), Some(1));
+    let opened = record::read(&b, &*shared, &did).await.unwrap().unwrap();
+    assert!(opened.recovery.is_none(), "the pair is stale");
+
+    let unlocks = shared.unlocks().len();
+    let puts = b.rpc().record_puts.get();
+    let refreshed = refresh_master(
+        &b,
+        &SharedVault(shared.clone()),
+        &did,
+        &SystemClock,
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(refreshed, Refreshed::Current), "{refreshed:?}");
+    assert_eq!(
+        shared.unlocks().len(),
+        unlocks,
+        "a released app was prompted"
+    );
+    assert_eq!(
+        b.rpc().record_puts.get(),
+        puts,
+        "a released app wrote the record"
+    );
+    let opened = record::read(&b, &*shared, &did).await.unwrap().unwrap();
+    assert_eq!(
+        opened.record.devices[&d2].holds_master,
+        HoldsMaster::No,
+        "the stale pair re-marked a released app"
+    );
+
+    // A's note owes A's mark: A's refresh re-attests and enrols A.
+    let refreshed = refresh_master(
+        &a,
+        &SharedVault(shared.clone()),
+        &did,
+        &SystemClock,
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    let Refreshed::Repaired {
+        index: 1,
+        record: Ok(_),
+    } = refreshed
+    else {
+        panic!("expected A enrolled from its note: {refreshed:?}")
+    };
+    let opened = record::read(&a, &*shared, &did).await.unwrap().unwrap();
+    let mine = &opened.record.devices["d1"];
+    assert_eq!(
+        (mine.holds_master, mine.master_index),
+        (HoldsMaster::Yes, Some(1))
+    );
+    assert_eq!(opened.recovery.unwrap().attestation.key_id, "m1");
+    assert_eq!(opened.record.devices[&d2].holds_master, HoldsMaster::No);
+    assert_eq!(note_of(&*shared, &scid, "d1"), None);
+}
+
+/// Lal's finding (3) at 08973ff97. A device the log lists but the record does not (its link's
+/// record write failed) takes the current master while the recovery pair is stale. Its
+/// refresh finds the vault keeping the current master and the pair stale: it owes nothing the
+/// record could show, so it answers `Current` with no prompt and no write.
+#[tokio::test]
+async fn an_unlisted_device_with_a_stale_pair_is_never_prompted() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let vault = MemoryVault::new();
+    let b_vault = MemoryVault::new();
+    let did = create(&a, &vault, 98).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    let flow = LinkFlow::open(
+        &a,
+        &vault,
+        &did,
+        OfferKind::Device,
+        None,
+        STORE_URL,
+        &SystemClock,
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    let claimed_b = b
+        .rpc()
+        .call(
+            "identity.claimOffer",
+            json!({ "offer": flow.offer_string(), "canKeepMaster": true }),
+        )
+        .await
+        .unwrap();
+    let claimed = flow.wait_for_claim().await.unwrap();
+    a.rpc().refuse_record_puts.set(2);
+    let linked = flow
+        .confirm(&claimed, entry("Desk", DeviceKind::DesktopApp), false)
+        .await
+        .unwrap();
+    a.rpc().refuse_record_puts.set(0);
+    assert!(linked.record.is_err(), "{:?}", linked.record);
+    join(&b, &claimed_b["offerId"]).await;
+    let d2 = linked.key_id;
+    // A later write by A wraps the record key for every device of the log, the desk included:
+    // the desk can open the record, which still lists no entry for it.
+    record::write(
+        &a,
+        &vault,
+        &did,
+        &[Change::Rename {
+            key_id: "d1".into(),
+            name: "Phone".into(),
+        }],
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+
+    // A's rotation lands and is cut off before its re-attestation; A sends #1 to the desk.
+    let words = words::from_entropy(&[98; 16]);
+    let cut = ViaExecutor::new(CutOffAfterPublish {
+        inner: a.rpc(),
+        published: Cell::new(false),
+    });
+    tokio::select! {
+        rotated = rotate(&cut, &vault, &did, &words, &[], &SystemClock, &OsRandom) => {
+            panic!("the rotation was not cut off: {rotated:?}")
+        }
+        _ = async {
+            while !cut.rpc().published.get() {
+                tokio::task::yield_now().await;
+            }
+        } => {}
+    }
+    vault.promote_master(&scid, 1).unwrap();
+    send_master(&a, &vault, &did, &d2, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    let taken = take_master(&b, &b_vault, &OsRandom)
+        .await
+        .unwrap()
+        .expect("#1 waits in the desk's inbox");
+    assert!(taken.record.is_err(), "{taken:?}");
+    assert_eq!(b_vault.master_index(&scid).unwrap(), Some(1));
+    let opened = record::read(&a, &vault, &did).await.unwrap().unwrap();
+    assert!(
+        !opened.record.devices.contains_key(&d2),
+        "the desk is unlisted"
+    );
+    assert!(opened.recovery.is_none(), "the pair is stale");
+
+    let puts = b.rpc().record_puts.get();
+    let refreshed = refresh_master(&b, &b_vault, &did, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    assert!(matches!(refreshed, Refreshed::Current), "{refreshed:?}");
+    assert!(
+        b_vault.unlocks().is_empty(),
+        "an unlisted device was prompted: {:?}",
+        b_vault.unlocks()
+    );
+    assert_eq!(b.rpc().record_puts.get(), puts);
+}
+
+/// An executor whose first `identity.recordPut` is preceded by another app on the same shared
+/// vault and device running `remove_master` to the end: its release, its `false`, its forget
+/// and its mark again. The put then lands on a stale version, and the write reads again.
+struct RemovalBeforeRecordPut<'a> {
+    inner: &'a TestExecutor,
+    other_vault: SharedVault,
+    did: String,
+    done: Cell<bool>,
+}
+
+#[async_trait(?Send)]
+impl ExecutorRpc for RemovalBeforeRecordPut<'_> {
+    async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        if method == "identity.recordPut" && !self.done.replace(true) {
+            remove_master(
+                &ViaExecutor::new(Yielding(self.inner)),
+                &self.other_vault,
+                &self.did,
+                &OsRandom,
+            )
+            .await
+            .unwrap();
+        }
+        self.inner.call(method, params).await
+    }
+}
+
+/// Lal's P3 at 08973ff97: B's removal runs between a refresh's re-mark decision and its put.
+/// A (`d1`) and C both hold #0; A's entry was lost and a duplicate take on A's shared vault
+/// noted the mark owed (its own mark failed). A's refresh decides the repair, reads the record
+/// and checks the note; another app on the same vault and device then removes the key —
+/// released, `false`, forgotten, `false` again — before the repair's put. The put is stale;
+/// the write reads again and finds the note released, so the repair writes nothing. The record
+/// ends `false` for A, matching the empty vault, and C's removal is refused `OnlyCopy`.
+#[tokio::test]
+async fn a_removal_inside_a_refresh_repair_leaves_no_stale_mark() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let c = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let shared = Arc::new(MemoryVault::new());
+    let c_vault = MemoryVault::new();
+    let did = create(&a, &shared, 99).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    holding_app(
+        &a,
+        &shared,
+        &did,
+        &c,
+        &c_vault,
+        entry("Desk", DeviceKind::DesktopApp),
+    )
+    .await;
+    record::write(
+        &a,
+        &*shared,
+        &did,
+        &[Change::HoldsMaster {
+            key_id: "d1".into(),
+            holds: HoldsMaster::No,
+        }],
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    send_master(&c, &c_vault, &did, "d1", &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    a.rpc().refuse_record_puts.set(1);
+    let taken = take_master(&a, &SharedVault(shared.clone()), &OsRandom)
+        .await
+        .unwrap()
+        .expect("the duplicate waits in the inbox");
+    assert!(taken.record.is_err(), "{taken:?}");
+    assert!(matches!(
+        note_of(&*shared, &scid, "d1"),
+        Some(CustodyNote::MarkOwed { index: 0, .. })
+    ));
+
+    let racing = ViaExecutor::new(RemovalBeforeRecordPut {
+        inner: a.rpc(),
+        other_vault: SharedVault(shared.clone()),
+        did: did.clone(),
+        done: Cell::new(false),
+    });
+    let refreshed = refresh_master(
+        &racing,
+        &SharedVault(shared.clone()),
+        &did,
+        &SystemClock,
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    assert!(racing.rpc().done.get(), "the removal ran inside the repair");
+    assert!(matches!(refreshed, Refreshed::Current), "{refreshed:?}");
+    assert_eq!(shared.master_index(&scid).unwrap(), None);
+    assert!(matches!(
+        note_of(&*shared, &scid, "d1"),
+        Some(CustodyNote::Released { .. })
+    ));
+
+    let opened = record::read(&a, &*shared, &did).await.unwrap().unwrap();
+    assert_eq!(
+        opened.record.devices["d1"].holds_master,
+        HoldsMaster::No,
+        "the repair's mark landed after the removal"
+    );
+    let refused = remove_master(&c, &c_vault, &did, &OsRandom).await;
+    assert!(
+        matches!(refused, Err(ClientError::OnlyCopy)),
+        "C removed the last copy on a stale mark: {refused:?}"
+    );
+    assert_eq!(c_vault.master_index(&scid).unwrap(), Some(0));
+}
+
+/// A pending take completed right away clears its note; the next refresh answers `Current`
+/// with no record write and no prompt, though nothing else changed.
+#[tokio::test]
+async fn a_note_cleared_after_its_mark_landed_answers_current() {
+    let w = pending_take(100).await;
+    complete_pending_mark(&w.b, &w.b_vault, &w.did, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    assert_eq!(note_of(&w.b_vault, &w.scid, &w.d2), None);
+    let puts = w.b.rpc().record_puts.get();
+    let unlocks = w.b_vault.unlocks().len();
+    let refreshed = refresh_master(&w.b, &w.b_vault, &w.did, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    assert!(matches!(refreshed, Refreshed::Current), "{refreshed:?}");
+    assert_eq!(w.b.rpc().record_puts.get(), puts);
+    assert_eq!(w.b_vault.unlocks().len(), unlocks);
+}
+
+/// A take on a shared vault whose note says another app released this device's copy before
+/// the take's store outranks that release: noted, marked, cleared. A release that read the
+/// store's epoch stands: no note, and the mark mirrors it (`false`).
+#[tokio::test]
+async fn a_take_outranks_an_older_release_and_never_a_newer_one() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let c = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let shared = Arc::new(MemoryVault::new());
+    let c_vault = MemoryVault::new();
+    let did = create(&a, &shared, 101).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    holding_app(
+        &a,
+        &shared,
+        &did,
+        &c,
+        &c_vault,
+        entry("Desk", DeviceKind::DesktopApp),
+    )
+    .await;
+    remove_master(&a, &SharedVault(shared.clone()), &did, &OsRandom)
+        .await
+        .unwrap();
+    assert!(matches!(
+        note_of(&*shared, &scid, "d1"),
+        Some(CustodyNote::Released { .. })
+    ));
+
+    // The person gives this computer the key again: the take is a new copy.
+    send_master(&c, &c_vault, &did, "d1", &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    let taken = take_master(&a, &SharedVault(shared.clone()), &OsRandom)
+        .await
+        .unwrap()
+        .expect("#0 waits in the inbox");
+    taken.record.as_ref().unwrap();
+    assert_eq!(note_of(&*shared, &scid, "d1"), None);
+    let opened = record::read(&a, &*shared, &did).await.unwrap().unwrap();
+    let mine = &opened.record.devices["d1"];
+    assert_eq!(
+        (mine.holds_master, mine.master_index),
+        (HoldsMaster::Yes, Some(0))
+    );
+
+    // A removal by another app on the same device, after this take's store (at its ack),
+    // stands: its release replaced the take's intent, it forgot the key, and the take's mark
+    // mirrors it (`false`), leaving the release in place.
+    send_master(&c, &c_vault, &did, "d1", &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    let racing = ViaExecutor::new(RemovalAt {
+        inner: a.rpc(),
+        method: "identity.inboxAck",
+        other_vault: SharedVault(shared.clone()),
+        did: did.clone(),
+        done: Cell::new(false),
+    });
+    let taken = take_master(&racing, &SharedVault(shared.clone()), &OsRandom)
+        .await
+        .unwrap()
+        .expect("#0 waits in the inbox");
+    assert!(racing.rpc().done.get(), "the removal ran at the ack");
+    taken.record.as_ref().unwrap();
+    assert!(matches!(
+        note_of(&*shared, &scid, "d1"),
+        Some(CustodyNote::Released { .. })
+    ));
+    assert_eq!(shared.master_index(&scid).unwrap(), None);
+    let opened = record::read(&a, &*shared, &did).await.unwrap().unwrap();
+    assert_eq!(opened.record.devices["d1"].holds_master, HoldsMaster::No);
+}
+
+/// An executor that, at its first call of `method`, runs another app's `remove_master` to the
+/// end on the same device and a vault sharing the caller's, then makes the call.
+struct RemovalAt<'a> {
+    inner: &'a TestExecutor,
+    method: &'static str,
+    other_vault: SharedVault,
+    did: String,
+    done: Cell<bool>,
+}
+
+#[async_trait(?Send)]
+impl ExecutorRpc for RemovalAt<'_> {
+    async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        if method == self.method && !self.done.replace(true) {
+            remove_master(
+                &ViaExecutor::new(Yielding(self.inner)),
+                &self.other_vault,
+                &self.did,
+                &OsRandom,
+            )
+            .await
+            .unwrap();
+        }
+        self.inner.call(method, params).await
+    }
+}
+
 /// An executor that checks, at the first `identity.inboxPut` of a rotation's hand-over,
 /// that the stored record's recovery key is already attested by the new master: the
 /// re-attesting write lands before any key is pushed.
@@ -7292,6 +8408,7 @@ impl ExecutorRpc for NewerGenerationBeforeAck<'_> {
                 &[Change::Holds {
                     key_id: self.own.clone(),
                     index: 1,
+                    vault: vault_of(&self.vault, &self.did),
                 }],
                 &OsRandom,
             )
@@ -7711,4 +8828,2879 @@ async fn a_pending_marks_repair_writes_back_no_when_a_removal_won() {
         Some(0),
         "no device holds the master key any more"
     );
+}
+
+/// A shared vault handle that stops where a crash would: right after a store or a promote
+/// landed (the call then fails, as when the process dies before its next step), right after
+/// an owed-mark intent was written, or before a forget. It can also make another app's
+/// custody change land right after a store (the same key stored again), and it keeps every
+/// owed-mark note written through it.
+struct FaultVault {
+    inner: Arc<MemoryVault>,
+    crash_after_store: std::sync::atomic::AtomicBool,
+    crash_after_promote: std::sync::atomic::AtomicBool,
+    crash_after_intent: std::sync::atomic::AtomicBool,
+    fail_forget: std::sync::atomic::AtomicBool,
+    again_after_store: std::sync::atomic::AtomicBool,
+    /// Master `.1` of `.0`, stored again right before the next release is written: another
+    /// app on the same device completes a take of the same key (stored, its note cleared, its
+    /// mark `true` already in the record) between the removal's epoch read and its release.
+    store_before_release: std::sync::Mutex<Option<(String, u32, [u8; 32])>>,
+    intents: std::sync::Mutex<Vec<CustodyNote>>,
+}
+
+impl FaultVault {
+    fn new(inner: Arc<MemoryVault>) -> Self {
+        FaultVault {
+            inner,
+            crash_after_store: false.into(),
+            crash_after_promote: false.into(),
+            crash_after_intent: false.into(),
+            fail_forget: false.into(),
+            again_after_store: false.into(),
+            store_before_release: std::sync::Mutex::new(None),
+            intents: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    fn crashed() -> ad4m_identity_client::VaultError {
+        ad4m_identity_client::VaultError::Unavailable("the app stopped here".into())
+    }
+}
+
+impl Vault for FaultVault {
+    fn custody_epoch(&self, scid: &str) -> Result<u64, ad4m_identity_client::VaultError> {
+        self.inner.custody_epoch(scid)
+    }
+    fn forget_master_at(
+        &self,
+        scid: &str,
+        epoch: u64,
+    ) -> Result<ad4m_identity_client::Forgot, ad4m_identity_client::VaultError> {
+        if self.fail_forget.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(Self::crashed());
+        }
+        self.inner.forget_master_at(scid, epoch)
+    }
+    fn store_master(
+        &self,
+        scid: &str,
+        index: u32,
+        secret: ad4m_identity_client::Secret<[u8; 32]>,
+    ) -> Result<ad4m_identity_client::Stored, ad4m_identity_client::VaultError> {
+        let bytes = *secret.expose();
+        let stored = self.inner.store_master(scid, index, secret)?;
+        if self
+            .again_after_store
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            self.inner
+                .store_master(scid, index, ad4m_identity_client::Secret::new(bytes))?;
+        }
+        if self
+            .crash_after_store
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(Self::crashed());
+        }
+        Ok(stored)
+    }
+    fn master_index(&self, scid: &str) -> Result<Option<u32>, ad4m_identity_client::VaultError> {
+        self.inner.master_index(scid)
+    }
+    fn forget_master(
+        &self,
+        scid: &str,
+        index: u32,
+    ) -> Result<ad4m_identity_client::Forgot, ad4m_identity_client::VaultError> {
+        self.inner.forget_master(scid, index)
+    }
+    fn stage_master(
+        &self,
+        scid: &str,
+        index: u32,
+        secret: ad4m_identity_client::Secret<[u8; 32]>,
+        owner: &StageToken,
+    ) -> Result<(), ad4m_identity_client::VaultError> {
+        self.inner.stage_master(scid, index, secret, owner)
+    }
+    fn staged_index(&self, scid: &str) -> Result<Option<u32>, ad4m_identity_client::VaultError> {
+        self.inner.staged_index(scid)
+    }
+    fn promote_master(
+        &self,
+        scid: &str,
+        index: u32,
+    ) -> Result<ad4m_identity_client::Stored, ad4m_identity_client::VaultError> {
+        let promoted = self.inner.promote_master(scid, index)?;
+        if self
+            .crash_after_promote
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(Self::crashed());
+        }
+        Ok(promoted)
+    }
+    fn discard_staged(
+        &self,
+        scid: &str,
+        index: u32,
+        owner: Option<&StageToken>,
+    ) -> Result<(), ad4m_identity_client::VaultError> {
+        self.inner.discard_staged(scid, index, owner)
+    }
+    fn unlock(
+        &self,
+        scid: &str,
+        why: MasterUse,
+        now: u64,
+    ) -> Result<ad4m_identity_client::Unlocked, ad4m_identity_client::VaultError> {
+        self.inner.unlock(scid, why, now)
+    }
+    fn store_pending_incept(&self, incept: &Event) -> Result<(), ad4m_identity_client::VaultError> {
+        self.inner.store_pending_incept(incept)
+    }
+    fn pending_incepts(&self) -> Result<Vec<Event>, ad4m_identity_client::VaultError> {
+        self.inner.pending_incepts()
+    }
+    fn incept_published(&self, scid: &str) -> Result<(), ad4m_identity_client::VaultError> {
+        self.inner.incept_published(scid)
+    }
+    fn keep_push(&self, push: &PendingPush) -> Result<(), ad4m_identity_client::VaultError> {
+        self.inner.keep_push(push)
+    }
+    fn pending_pushes(&self) -> Result<Vec<PendingPush>, ad4m_identity_client::VaultError> {
+        self.inner.pending_pushes()
+    }
+    fn push_done(&self, push: &PendingPush) -> Result<(), ad4m_identity_client::VaultError> {
+        self.inner.push_done(push)
+    }
+    fn record_seen(
+        &self,
+        scid: &str,
+        version: u64,
+    ) -> Result<Option<u64>, ad4m_identity_client::VaultError> {
+        self.inner.record_seen(scid, version)
+    }
+    fn record_seen_reset(&self, scid: &str) -> Result<(), ad4m_identity_client::VaultError> {
+        self.inner.record_seen_reset(scid)
+    }
+    fn custody_note(
+        &self,
+        scid: &str,
+        key_id: &str,
+    ) -> Result<Option<CustodyNote>, ad4m_identity_client::VaultError> {
+        self.inner.custody_note(scid, key_id)
+    }
+    fn vault_id(
+        &self,
+        scid: &str,
+    ) -> Result<ad4m_identity_client::VaultId, ad4m_identity_client::VaultError> {
+        self.inner.vault_id(scid)
+    }
+    fn swap_custody_note(
+        &self,
+        scid: &str,
+        key_id: &str,
+        expected: Option<&CustodyNote>,
+        note: Option<&CustodyNote>,
+    ) -> Result<bool, ad4m_identity_client::VaultError> {
+        if let Some(CustodyNote::Released { .. }) = note {
+            if let Some((scid, index, key)) = self.store_before_release.lock().unwrap().take() {
+                self.inner
+                    .store_master(&scid, index, ad4m_identity_client::Secret::new(key))?;
+            }
+        }
+        let swapped = self.inner.swap_custody_note(scid, key_id, expected, note)?;
+        if let Some(owed @ CustodyNote::MarkOwed { .. }) = note {
+            if swapped {
+                self.intents.lock().unwrap().push(owed.clone());
+                if self
+                    .crash_after_intent
+                    .swap(false, std::sync::atomic::Ordering::SeqCst)
+                {
+                    return Err(Self::crashed());
+                }
+            }
+        }
+        Ok(swapped)
+    }
+}
+
+/// A rotation on A whose hand-over meets another app's removal on A's device and shared vault:
+/// at the hand-over's first log read (after the rotation's promote), C keeps master #1 too
+/// (stored, the record re-attested by it, C marked holding #1), so the removal's only-copy
+/// check passes; the removal releases A's copy and writes `false`, then stops before its
+/// forget (its vault handle fails there).
+struct RemovalBeforeHandOver<'a> {
+    inner: &'a TestExecutor,
+    c: &'a ViaExecutor<TestExecutor>,
+    c_vault: &'a MemoryVault,
+    c_id: String,
+    shared: Arc<MemoryVault>,
+    did: String,
+    seed: words::Seed,
+    published: Cell<bool>,
+    done: Cell<bool>,
+}
+
+#[async_trait(?Send)]
+impl ExecutorRpc for RemovalBeforeHandOver<'_> {
+    async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        if method == "identity.log" && self.published.get() && !self.done.replace(true) {
+            let scid = ad4m_identity_core::scid_of(&self.did).unwrap().to_string();
+            let key = words::master_key(&self.seed, 1).unwrap();
+            self.c_vault
+                .store_master(&scid, 1, ad4m_identity_client::Secret::new(key.to_bytes()))
+                .unwrap();
+            reattest_recovery(self.c, self.c_vault, &self.did, &SystemClock, &OsRandom)
+                .await
+                .unwrap();
+            record::write(
+                self.c,
+                self.c_vault,
+                &self.did,
+                &[Change::Holds {
+                    key_id: self.c_id.clone(),
+                    index: 1,
+                    vault: vault_of(self.c_vault, &self.did),
+                }],
+                &OsRandom,
+            )
+            .await
+            .unwrap();
+            let stopped = FaultVault::new(self.shared.clone());
+            stopped
+                .fail_forget
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            let removed = remove_master(
+                &ViaExecutor::new(Yielding(self.inner)),
+                &stopped,
+                &self.did,
+                &OsRandom,
+            )
+            .await;
+            assert!(removed.is_err(), "the removal stopped before its forget");
+        }
+        let answer = self.inner.call(method, params).await;
+        if method == "identity.publish" {
+            self.published.set(true);
+        }
+        answer
+    }
+}
+
+/// Lal's P2 (hand_over asserts holding though a release won). A rotates to #1 on a vault it
+/// shares with another app; at the hand-over the other app removes A's copy (C keeps #1, so
+/// the check passes): released, `false` written, stopped before its forget. The hand-over's
+/// mark then goes through the note gate: under the release it writes `holdsMaster: false`,
+/// never `true`. The removal's forget lands afterwards, and C's removal is refused
+/// `OnlyCopy`: a copy is left.
+#[tokio::test]
+async fn a_hand_over_under_a_release_asserts_no_holding() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let c = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let shared = Arc::new(MemoryVault::new());
+    let c_vault = MemoryVault::new();
+    let did = create(&a, &shared, 110).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    let c_id = holding_app(
+        &a,
+        &shared,
+        &did,
+        &c,
+        &c_vault,
+        entry("Desk", DeviceKind::DesktopApp),
+    )
+    .await;
+    let words = words::from_entropy(&[110; 16]);
+    let racing = ViaExecutor::new(RemovalBeforeHandOver {
+        inner: a.rpc(),
+        c: &c,
+        c_vault: &c_vault,
+        c_id,
+        shared: shared.clone(),
+        did: did.clone(),
+        seed: words::seed(&words),
+        published: Cell::new(false),
+        done: Cell::new(false),
+    });
+    let rotated = rotate(
+        &racing,
+        &SharedVault(shared.clone()),
+        &did,
+        &words,
+        &[],
+        &SystemClock,
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    assert!(racing.rpc().done.get(), "the removal ran at the hand-over");
+    rotated.record.as_ref().unwrap();
+    let Some(CustodyNote::Released { epoch, .. }) = note_of(&*shared, &scid, "d1") else {
+        panic!("the release stands");
+    };
+    let opened = record::read(&c, &c_vault, &did).await.unwrap().unwrap();
+    assert_eq!(
+        opened.record.devices["d1"].holds_master,
+        HoldsMaster::No,
+        "the hand-over marked a copy the release gave up"
+    );
+
+    // The removal's forget lands now.
+    assert_eq!(
+        shared.forget_master_at(&scid, epoch).unwrap(),
+        ad4m_identity_client::Forgot::Forgot
+    );
+    let refused = remove_master(&c, &c_vault, &did, &OsRandom).await;
+    assert!(
+        matches!(refused, Err(ClientError::OnlyCopy)),
+        "C removed the last copy on the hand-over's mark: {refused:?}"
+    );
+    assert_eq!(c_vault.master_index(&scid).unwrap(), Some(1));
+}
+
+/// Which of two removals of one device an executor plays ([`Phased`]).
+#[derive(Clone, Copy)]
+enum Removal {
+    /// Released, then its log read waits for the other's `false` and fails.
+    First,
+    /// Waits for the first's release, then writes its `false` and waits before its forget.
+    Second,
+}
+
+/// Two removals of one device's copy (two apps on one device and shared vault), stepped by a
+/// shared phase: 1 once the first released, 2 once the second wrote `false`, 4 once the test
+/// let the second go on.
+struct Phased<'a> {
+    inner: &'a TestExecutor,
+    phase: &'a Cell<u8>,
+    role: Removal,
+    fired: Cell<bool>,
+}
+
+impl Phased<'_> {
+    async fn until(&self, phase: u8) {
+        while self.phase.get() < phase {
+            tokio::task::yield_now().await;
+        }
+    }
+}
+
+#[async_trait(?Send)]
+impl ExecutorRpc for Phased<'_> {
+    async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        match self.role {
+            Removal::First if method == "identity.log" && !self.fired.replace(true) => {
+                self.phase.set(1);
+                self.until(2).await;
+                Err(RpcError {
+                    code: 503,
+                    message: "the store went away".into(),
+                })
+            }
+            Removal::Second if method == "identity.status" && !self.fired.get() => {
+                self.until(1).await;
+                self.inner.call(method, params).await
+            }
+            Removal::Second if method == "identity.recordPut" && !self.fired.get() => {
+                let answer = self.inner.call(method, params).await;
+                if answer.is_ok() {
+                    self.fired.set(true);
+                    self.phase.set(2);
+                    self.until(4).await;
+                }
+                answer
+            }
+            _ => self.inner.call(method, params).await,
+        }
+    }
+}
+
+/// Lal's P2 (a rollback undoes a second, identical release). A's note is an owed mark; two
+/// apps on A's device remove A's copy at once and read the same custody epoch, so their
+/// releases look alike but for their tokens. The first fails after the second wrote its
+/// `false`: its rollback must leave the second's release in place. A refresh then owes
+/// nothing (no re-mark of A), C's removal is refused `OnlyCopy`, and the second removal
+/// finishes: A's copy forgotten, C's kept.
+#[tokio::test]
+async fn a_failed_removal_never_rolls_back_another_removals_release() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let c = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let shared = Arc::new(MemoryVault::new());
+    let c_vault = MemoryVault::new();
+    let did = create(&a, &shared, 111).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    holding_app(
+        &a,
+        &shared,
+        &did,
+        &c,
+        &c_vault,
+        entry("Desk", DeviceKind::DesktopApp),
+    )
+    .await;
+    // A's mark is owed: a duplicate take whose own mark failed.
+    record::write(
+        &a,
+        &*shared,
+        &did,
+        &[Change::HoldsMaster {
+            key_id: "d1".into(),
+            holds: HoldsMaster::No,
+        }],
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    send_master(&c, &c_vault, &did, "d1", &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    a.rpc().refuse_record_puts.set(1);
+    let taken = take_master(&a, &SharedVault(shared.clone()), &OsRandom)
+        .await
+        .unwrap()
+        .expect("the duplicate waits in the inbox");
+    assert!(taken.record.is_err(), "{taken:?}");
+    assert!(matches!(
+        note_of(&*shared, &scid, "d1"),
+        Some(CustodyNote::MarkOwed { index: 0, .. })
+    ));
+
+    let phase = Cell::new(0u8);
+    let first = ViaExecutor::new(Phased {
+        inner: a.rpc(),
+        phase: &phase,
+        role: Removal::First,
+        fired: Cell::new(false),
+    });
+    let second = ViaExecutor::new(Phased {
+        inner: a.rpc(),
+        phase: &phase,
+        role: Removal::Second,
+        fired: Cell::new(false),
+    });
+    let vault = SharedVault(shared.clone());
+    let ((failed, refreshed, by_c), removed) = tokio::join!(
+        async {
+            let failed = remove_master(&first, &vault, &did, &OsRandom).await;
+            let refreshed = refresh_master(&a, &vault, &did, &SystemClock, &OsRandom).await;
+            let by_c = remove_master(&c, &c_vault, &did, &OsRandom).await;
+            phase.set(4);
+            (failed, refreshed, by_c)
+        },
+        remove_master(&second, &vault, &did, &OsRandom),
+    );
+    assert!(failed.is_err(), "the first removal failed: {failed:?}");
+    let refreshed = refreshed.unwrap();
+    assert!(
+        matches!(refreshed, Refreshed::Current),
+        "the refresh re-marked a released copy: {refreshed:?}"
+    );
+    assert!(
+        matches!(by_c, Err(ClientError::OnlyCopy)),
+        "C removed the last copy: {by_c:?}"
+    );
+    removed.unwrap();
+    assert!(matches!(
+        note_of(&*shared, &scid, "d1"),
+        Some(CustodyNote::Released { .. })
+    ));
+    assert_eq!(shared.master_index(&scid).unwrap(), None);
+    assert_eq!(c_vault.master_index(&scid).unwrap(), Some(0));
+    let opened = record::read(&c, &c_vault, &did).await.unwrap().unwrap();
+    assert_eq!(opened.record.devices["d1"].holds_master, HoldsMaster::No);
+}
+
+/// A device B linked with the master key waiting in its inbox, and B's vault behind a
+/// [`FaultVault`]; answers the device key id of B and the identity's scid.
+async fn offered_device(
+    store: &Arc<TestStore>,
+    seed: u8,
+) -> (
+    ViaExecutor<TestExecutor>,
+    ViaExecutor<TestExecutor>,
+    MemoryVault,
+    Arc<MemoryVault>,
+    String,
+    String,
+    String,
+) {
+    let a = ViaExecutor::new(TestExecutor::new(store, 1));
+    let b = ViaExecutor::new(TestExecutor::new(store, 2));
+    let a_vault = MemoryVault::new();
+    let b_vault = Arc::new(MemoryVault::new());
+    let did = create(&a, &a_vault, seed).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    let b_id = link_app(
+        &a,
+        &a_vault,
+        &did,
+        &b,
+        entry("Desk", DeviceKind::DesktopApp),
+        true,
+    )
+    .await;
+    send_master(&a, &a_vault, &did, &b_id, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    (a, b, a_vault, b_vault, did, scid, b_id)
+}
+
+/// The restart after a take cut off: the refresh answers the take of the message that still
+/// waited, B marked holding #0, the note cleared, and no message left in the inbox.
+async fn assert_take_converged(
+    b: &ViaExecutor<TestExecutor>,
+    b_vault: &Arc<MemoryVault>,
+    did: &str,
+    scid: &str,
+    b_id: &str,
+) {
+    let restarted = SharedVault(b_vault.clone());
+    let refreshed = refresh_master(b, &restarted, did, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    let Refreshed::Taken(taken) = refreshed else {
+        panic!("the waiting message was not taken again: {refreshed:?}");
+    };
+    assert_eq!(taken.index, 0);
+    taken.record.unwrap();
+    assert_eq!(b_vault.master_index(scid).unwrap(), Some(0));
+    assert_eq!(note_of(&**b_vault, scid, b_id), None);
+    let opened = record::read(b, &**b_vault, did).await.unwrap().unwrap();
+    let mine = &opened.record.devices[b_id];
+    assert_eq!(
+        (mine.holds_master, mine.master_index),
+        (HoldsMaster::Yes, Some(0))
+    );
+    assert!(
+        take_master(b, &restarted, &OsRandom)
+            .await
+            .unwrap()
+            .is_none(),
+        "the inbox message was consumed"
+    );
+}
+
+/// Lal's P2 (a crash after the store, before the note). B's take stores the key and stops
+/// there (no note in the old order, no ack, no mark). The intent written before the store
+/// owes the mark: the restart's refresh takes the waiting message again and marks B.
+#[tokio::test]
+async fn a_take_cut_off_after_its_store_is_marked_by_the_restart() {
+    let store = TestStore::new();
+    let (_a, b, _a_vault, b_vault, did, scid, b_id) = offered_device(&store, 112).await;
+    let faulty = FaultVault::new(b_vault.clone());
+    faulty
+        .crash_after_store
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(take_master(&b, &faulty, &OsRandom).await.is_err());
+    assert_eq!(b_vault.master_index(&scid).unwrap(), Some(0), "stored");
+    assert_take_converged(&b, &b_vault, &did, &scid, &b_id).await;
+}
+
+/// A take cut off right after its intent (before its store): the restart takes the message
+/// and marks B. A stale intent never marks on its own.
+#[tokio::test]
+async fn a_take_cut_off_after_its_intent_is_taken_by_the_restart() {
+    let store = TestStore::new();
+    let (_a, b, _a_vault, b_vault, did, scid, b_id) = offered_device(&store, 113).await;
+    let faulty = FaultVault::new(b_vault.clone());
+    faulty
+        .crash_after_intent
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(take_master(&b, &faulty, &OsRandom).await.is_err());
+    assert_take_converged(&b, &b_vault, &did, &scid, &b_id).await;
+}
+
+/// A stale intent (its acquisition never landed) on a vault that keeps the current master
+/// another way is cleared by the refresh, which marks nothing.
+#[tokio::test]
+async fn a_stale_intent_marks_nothing_and_is_cleared() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let vault = MemoryVault::new();
+    let did = create(&a, &vault, 114).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    record::write(
+        &a,
+        &vault,
+        &did,
+        &[Change::HoldsMaster {
+            key_id: "d1".into(),
+            holds: HoldsMaster::No,
+        }],
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    let epoch = vault.custody_epoch(&scid).unwrap();
+    let stale = CustodyNote::owed(0, epoch, &OsRandom);
+    assert!(vault
+        .swap_custody_note(&scid, "d1", None, Some(&stale))
+        .unwrap());
+    let puts = a.rpc().record_puts.get();
+    let refreshed = refresh_master(&a, &vault, &did, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    assert!(matches!(refreshed, Refreshed::Current), "{refreshed:?}");
+    assert_eq!(a.rpc().record_puts.get(), puts, "nothing was marked");
+    assert_eq!(note_of(&vault, &scid, "d1"), None);
+}
+
+/// Lal's P2 (a crash after the promote, before the note), changed by the review of #1673
+/// (P2b): an intent proves no acquisition. A rotation on A (whose entry says `false`) is cut
+/// off after its publish; the refresh promotes the staged #1 and stops before its receipt. The
+/// next refresh cannot tell this promote from another app's on the shared vault: it clears
+/// the open intent and marks nothing. The key stays kept; A stays unmarked (an under-claim,
+/// never a copy the record names without proof).
+#[tokio::test]
+async fn a_promote_cut_off_before_its_receipt_is_not_marked_from_its_intent() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let shared = Arc::new(MemoryVault::new());
+    let did = create(&a, &shared, 115).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    record::write(
+        &a,
+        &*shared,
+        &did,
+        &[Change::HoldsMaster {
+            key_id: "d1".into(),
+            holds: HoldsMaster::No,
+        }],
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    let words = words::from_entropy(&[115; 16]);
+    let cut = ViaExecutor::new(CutOffAfterPublish {
+        inner: a.rpc(),
+        published: Cell::new(false),
+    });
+    let vault = SharedVault(shared.clone());
+    tokio::select! {
+        rotated = rotate(&cut, &vault, &did, &words, &[], &SystemClock, &OsRandom) => {
+            panic!("the rotation was not cut off: {rotated:?}")
+        }
+        _ = async {
+            while !cut.rpc().published.get() {
+                tokio::task::yield_now().await;
+            }
+        } => {}
+    }
+    assert_eq!(shared.staged_index(&scid).unwrap(), Some(1));
+
+    let faulty = FaultVault::new(shared.clone());
+    faulty
+        .crash_after_promote
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(refresh_master(&a, &faulty, &did, &SystemClock, &OsRandom)
+        .await
+        .is_err());
+    assert_eq!(shared.master_index(&scid).unwrap(), Some(1), "promoted");
+
+    let refreshed = refresh_master(&a, &vault, &did, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    assert!(matches!(refreshed, Refreshed::Current), "{refreshed:?}");
+    assert_eq!(
+        note_of(&*shared, &scid, "d1"),
+        None,
+        "the open intent is cleared"
+    );
+    assert_eq!(
+        shared.master_index(&scid).unwrap(),
+        Some(1),
+        "the key stays"
+    );
+    let opened = record::read(&a, &*shared, &did).await.unwrap().unwrap();
+    let mine = &opened.record.devices["d1"];
+    assert_eq!(mine.holds_master, HoldsMaster::No, "no receipt, no mark");
+}
+
+/// An executor that, at its first call of `method`, runs a whole take on the same device and
+/// shared vault (another app taking the key that waits in the device's inbox), then makes the
+/// call.
+struct TakeAt<'a> {
+    inner: &'a TestExecutor,
+    method: &'static str,
+    vault: SharedVault,
+    done: Cell<bool>,
+}
+
+#[async_trait(?Send)]
+impl ExecutorRpc for TakeAt<'_> {
+    async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        if method == self.method && !self.done.replace(true) {
+            let taken = take_master(
+                &ViaExecutor::new(Yielding(self.inner)),
+                &self.vault,
+                &OsRandom,
+            )
+            .await
+            .unwrap()
+            .expect("the key waits in the inbox");
+            taken.record.unwrap();
+        }
+        self.inner.call(method, params).await
+    }
+}
+
+/// Lal's P3 (a `Forgot::Kept` rollback erases a later take). A's removal releases its copy;
+/// before its `false` lands, another app on A's device takes the key again (stored, acked,
+/// marked `true`, its receipt and the release below it cleared). The removal finds its
+/// release gone and stops ([`ClientError::CustodyNoteMoved`]): it released nothing, and the
+/// record ends marking A holding #0, as its vault does.
+#[tokio::test]
+async fn a_removal_that_kept_a_later_take_leaves_it_marked() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let c = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let shared = Arc::new(MemoryVault::new());
+    let c_vault = MemoryVault::new();
+    let did = create(&a, &shared, 116).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    holding_app(
+        &a,
+        &shared,
+        &did,
+        &c,
+        &c_vault,
+        entry("Desk", DeviceKind::DesktopApp),
+    )
+    .await;
+    send_master(&c, &c_vault, &did, "d1", &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    let racing = ViaExecutor::new(TakeAt {
+        inner: a.rpc(),
+        method: "identity.log",
+        vault: SharedVault(shared.clone()),
+        done: Cell::new(false),
+    });
+    let removed = remove_master(&racing, &SharedVault(shared.clone()), &did, &OsRandom).await;
+    assert!(
+        matches!(removed, Err(ClientError::CustodyNoteMoved)),
+        "{removed:?}"
+    );
+    assert!(racing.rpc().done.get(), "the take ran inside the removal");
+    assert_eq!(shared.master_index(&scid).unwrap(), Some(0));
+    assert_eq!(note_of(&*shared, &scid, "d1"), None);
+    let opened = record::read(&a, &*shared, &did).await.unwrap().unwrap();
+    let mine = &opened.record.devices["d1"];
+    assert_eq!(
+        (mine.holds_master, mine.master_index),
+        (HoldsMaster::Yes, Some(0)),
+        "the take's copy is kept but not marked"
+    );
+}
+
+/// Lal's P3 (the owed mark's epoch read after the store). Another app's custody change lands
+/// right after B's store; the intent B noted names the epoch read before its store, never the
+/// later change.
+#[tokio::test]
+async fn a_takes_intent_names_the_epoch_before_its_store() {
+    let store = TestStore::new();
+    let (_a, b, _a_vault, b_vault, _did, scid, _b_id) = offered_device(&store, 117).await;
+    let before = b_vault.custody_epoch(&scid).unwrap();
+    let faulty = FaultVault::new(b_vault.clone());
+    faulty
+        .again_after_store
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let taken = take_master(&b, &faulty, &OsRandom)
+        .await
+        .unwrap()
+        .expect("#0 waits in the inbox");
+    taken.record.unwrap();
+    assert!(b_vault.custody_epoch(&scid).unwrap() > before + 1);
+    // The intent, and then its receipt: both name the epoch read before the store.
+    let intents = faulty.intents.lock().unwrap().clone();
+    assert!(
+        matches!(
+            intents.as_slice(),
+            [
+                CustodyNote::MarkOwed { epoch, acquired: false, token: intent, .. },
+                CustodyNote::MarkOwed { epoch: receipt, acquired: true, token, .. },
+            ] if *epoch == before && *receipt == before && token == intent
+        ),
+        "{intents:?}"
+    );
+}
+
+/// The device entry `key_id` of `did`'s record, as `(holdsMaster, masterIndex)`.
+async fn mark_of(
+    executor: &ViaExecutor<TestExecutor>,
+    vault: &dyn Vault,
+    did: &str,
+    key_id: &str,
+) -> (HoldsMaster, Option<u32>) {
+    let opened = record::read(executor, vault, did).await.unwrap().unwrap();
+    let entry = &opened.record.devices[key_id];
+    (entry.holds_master, entry.master_index)
+}
+
+/// Lal's P2a (an intent certifies another app's acquisition). A's entry says `false`; a
+/// rotation on A is cut off after its publish (#1 staged). A's refresh writes its intent and
+/// stops before its promote. Another app on the same vault, with another device key, then
+/// promotes #1. A's next refresh must not mark A holding #1 from its own intent: A never
+/// acquired the key, and a `true` for A next to the other app's counts one physical copy
+/// twice.
+#[tokio::test]
+async fn an_intent_never_certifies_another_apps_acquisition() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let shared = Arc::new(MemoryVault::new());
+    let did = create(&a, &shared, 120).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    record::write(
+        &a,
+        &*shared,
+        &did,
+        &[Change::HoldsMaster {
+            key_id: "d1".into(),
+            holds: HoldsMaster::No,
+        }],
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    let words = words::from_entropy(&[120; 16]);
+    let cut = ViaExecutor::new(CutOffAfterPublish {
+        inner: a.rpc(),
+        published: Cell::new(false),
+    });
+    let vault = SharedVault(shared.clone());
+    tokio::select! {
+        rotated = rotate(&cut, &vault, &did, &words, &[], &SystemClock, &OsRandom) => {
+            panic!("the rotation was not cut off: {rotated:?}")
+        }
+        _ = async {
+            while !cut.rpc().published.get() {
+                tokio::task::yield_now().await;
+            }
+        } => {}
+    }
+    assert_eq!(shared.staged_index(&scid).unwrap(), Some(1));
+
+    let faulty = FaultVault::new(shared.clone());
+    faulty
+        .crash_after_intent
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(refresh_master(&a, &faulty, &did, &SystemClock, &OsRandom)
+        .await
+        .is_err());
+    assert_eq!(shared.master_index(&scid).unwrap(), Some(0), "not promoted");
+    // Another app on this vault, with another device key, promotes #1.
+    shared.promote_master(&scid, 1).unwrap();
+
+    let refreshed = refresh_master(&a, &vault, &did, &SystemClock, &OsRandom).await;
+    let (holds, _) = mark_of(&a, &*shared, &did, "d1").await;
+    assert_ne!(
+        holds,
+        HoldsMaster::Yes,
+        "A's intent certified another app's promote: {refreshed:?}"
+    );
+    assert_eq!(
+        note_of(&*shared, &scid, "d1"),
+        None,
+        "the stale intent is cleared"
+    );
+}
+
+/// Lal's P2b, schedule 1 (an uncommitted intent opens the custody gate). C holds #0, and #0
+/// waits in A's inbox. R removes A's copy: released, `false` written, stopped before its
+/// forget. T takes the waiting key: its intent replaces R's release, then T stops before its
+/// store. H, a mark that was delayed, writes now. It must not write `true`: R's forget then
+/// lands, and C's removal would delete the only copy.
+#[tokio::test]
+async fn a_crashed_intent_never_opens_a_release() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let c = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let shared = Arc::new(MemoryVault::new());
+    let c_vault = MemoryVault::new();
+    let did = create(&a, &shared, 121).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    holding_app(
+        &a,
+        &shared,
+        &did,
+        &c,
+        &c_vault,
+        entry("Desk", DeviceKind::DesktopApp),
+    )
+    .await;
+    send_master(&c, &c_vault, &did, "d1", &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+
+    let stopped = FaultVault::new(shared.clone());
+    stopped
+        .fail_forget
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(remove_master(&a, &stopped, &did, &OsRandom).await.is_err());
+    let Some(CustodyNote::Released { epoch, .. }) = note_of(&*shared, &scid, "d1") else {
+        panic!("R's release stands");
+    };
+    let crashed = FaultVault::new(shared.clone());
+    crashed
+        .crash_after_intent
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(take_master(&a, &crashed, &OsRandom).await.is_err());
+    assert_eq!(
+        shared.custody_epoch(&scid).unwrap(),
+        epoch,
+        "T stored nothing"
+    );
+
+    // H's delayed mark.
+    let marked = complete_pending_mark(
+        &a,
+        &SharedVault(shared.clone()),
+        &did,
+        &SystemClock,
+        &OsRandom,
+    )
+    .await;
+    let (holds, _) = mark_of(&a, &*shared, &did, "d1").await;
+    assert_ne!(
+        holds,
+        HoldsMaster::Yes,
+        "an uncommitted intent let a mark assert a released copy: {marked:?}"
+    );
+
+    // R's forget lands now.
+    assert_eq!(
+        shared.forget_master_at(&scid, epoch).unwrap(),
+        ad4m_identity_client::Forgot::Forgot
+    );
+    let refused = remove_master(&c, &c_vault, &did, &OsRandom).await;
+    assert!(
+        matches!(refused, Err(ClientError::OnlyCopy)),
+        "C removed the last copy: {refused:?}"
+    );
+    assert_eq!(c_vault.master_index(&scid).unwrap(), Some(0));
+}
+
+/// A rotation on A whose acquisition finds #1 promoted already: right after A's publish lands,
+/// another app on A's vault promotes #1, C keeps #1 (stored, the record re-attested, C marked
+/// holding #1), and a removal of A's copy releases it, writes `false` and stops before its
+/// forget.
+struct RemovalAfterPublish<'a> {
+    inner: &'a TestExecutor,
+    c: &'a ViaExecutor<TestExecutor>,
+    c_vault: &'a MemoryVault,
+    c_id: String,
+    shared: Arc<MemoryVault>,
+    did: String,
+    seed: words::Seed,
+    done: Cell<bool>,
+}
+
+#[async_trait(?Send)]
+impl ExecutorRpc for RemovalAfterPublish<'_> {
+    async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        let answer = self.inner.call(method, params).await;
+        if method == "identity.publish" && answer.is_ok() && !self.done.replace(true) {
+            let scid = ad4m_identity_core::scid_of(&self.did).unwrap().to_string();
+            self.shared.promote_master(&scid, 1).unwrap();
+            let key = words::master_key(&self.seed, 1).unwrap();
+            self.c_vault
+                .store_master(&scid, 1, ad4m_identity_client::Secret::new(key.to_bytes()))
+                .unwrap();
+            reattest_recovery(self.c, self.c_vault, &self.did, &SystemClock, &OsRandom)
+                .await
+                .unwrap();
+            record::write(
+                self.c,
+                self.c_vault,
+                &self.did,
+                &[Change::Holds {
+                    key_id: self.c_id.clone(),
+                    index: 1,
+                    vault: vault_of(self.c_vault, &self.did),
+                }],
+                &OsRandom,
+            )
+            .await
+            .unwrap();
+            let stopped = FaultVault::new(self.shared.clone());
+            stopped
+                .fail_forget
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            let removed = remove_master(
+                &ViaExecutor::new(Yielding(self.inner)),
+                &stopped,
+                &self.did,
+                &OsRandom,
+            )
+            .await;
+            assert!(removed.is_err(), "the removal stopped before its forget");
+        }
+        answer
+    }
+}
+
+/// Lal's P2b, schedule 2 (the already-promoted fallback replaces a release). A's rotation
+/// writes its intent over R's release; its acquisition finds #1 promoted by another app and
+/// moves no epoch. The hand-over's mark must not write `true`: R's forget still lands, and
+/// C's removal would delete the only copy.
+#[tokio::test]
+async fn an_already_promoted_acquisition_never_opens_a_release() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let c = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let shared = Arc::new(MemoryVault::new());
+    let c_vault = MemoryVault::new();
+    let did = create(&a, &shared, 122).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    let c_id = holding_app(
+        &a,
+        &shared,
+        &did,
+        &c,
+        &c_vault,
+        entry("Desk", DeviceKind::DesktopApp),
+    )
+    .await;
+    let words = words::from_entropy(&[122; 16]);
+    let racing = ViaExecutor::new(RemovalAfterPublish {
+        inner: a.rpc(),
+        c: &c,
+        c_vault: &c_vault,
+        c_id,
+        shared: shared.clone(),
+        did: did.clone(),
+        seed: words::seed(&words),
+        done: Cell::new(false),
+    });
+    let rotated = rotate(
+        &racing,
+        &SharedVault(shared.clone()),
+        &did,
+        &words,
+        &[],
+        &SystemClock,
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    assert!(racing.rpc().done.get(), "the removal ran after the publish");
+    let (holds, _) = mark_of(&c, &c_vault, &did, "d1").await;
+    assert_ne!(
+        holds,
+        HoldsMaster::Yes,
+        "the fallback asserted a released copy: {:?}",
+        rotated.record
+    );
+
+    // R's forget lands now: its epoch is the custody epoch after the other app's promote.
+    let epoch = shared.custody_epoch(&scid).unwrap();
+    assert_eq!(
+        shared.forget_master_at(&scid, epoch).unwrap(),
+        ad4m_identity_client::Forgot::Forgot
+    );
+    let refused = remove_master(&c, &c_vault, &did, &OsRandom).await;
+    assert!(
+        matches!(refused, Err(ClientError::OnlyCopy)),
+        "C removed the last copy: {refused:?}"
+    );
+    assert_eq!(c_vault.master_index(&scid).unwrap(), Some(1));
+}
+
+/// Lal's P3a (r6 F5). R reads the custody epoch and stops before its release. Another app on
+/// A's device completes a take of the same key meanwhile (stored, its note cleared, its mark
+/// `true` in the record already). R then releases, writes `false` and forgets at the epoch it
+/// read. The record must end true to the vault: `holdsMaster: true` exactly when the vault
+/// keeps a key.
+#[tokio::test]
+async fn a_removal_after_a_completed_take_leaves_the_record_true_to_the_vault() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let c = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let shared = Arc::new(MemoryVault::new());
+    let c_vault = MemoryVault::new();
+    let did = create(&a, &shared, 123).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    holding_app(
+        &a,
+        &shared,
+        &did,
+        &c,
+        &c_vault,
+        entry("Desk", DeviceKind::DesktopApp),
+    )
+    .await;
+    let seed = words::seed(&words::from_entropy(&[123; 16]));
+    let faulty = FaultVault::new(shared.clone());
+    *faulty.store_before_release.lock().unwrap() = Some((
+        scid.clone(),
+        0,
+        words::master_key(&seed, 0).unwrap().to_bytes(),
+    ));
+    let removed = remove_master(&a, &faulty, &did, &OsRandom).await;
+    assert!(
+        faulty.store_before_release.lock().unwrap().is_none(),
+        "the take ran before the release"
+    );
+    let kept = shared.master_index(&scid).unwrap();
+    let (holds, _) = mark_of(&a, &*shared, &did, "d1").await;
+    assert_eq!(
+        holds == HoldsMaster::Yes,
+        kept.is_some(),
+        "the record says {holds:?} while the vault keeps {kept:?} (note {:?}): {removed:?}",
+        note_of(&*shared, &scid, "d1")
+    );
+}
+
+/// Two removals of one device nested ([`Nested`]), stepped by a shared phase: 1 once the
+/// outer one released, 2 once the inner one released over it, 3 once the outer one failed.
+struct Nested<'a> {
+    inner: &'a TestExecutor,
+    phase: &'a Cell<u8>,
+    outer: bool,
+    fired: Cell<bool>,
+}
+
+impl Nested<'_> {
+    async fn until(&self, phase: u8) {
+        while self.phase.get() < phase {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    fn gone() -> RpcError {
+        RpcError {
+            code: 503,
+            message: "the store went away".into(),
+        }
+    }
+}
+
+#[async_trait(?Send)]
+impl ExecutorRpc for Nested<'_> {
+    async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        match method {
+            "identity.log" if self.outer && !self.fired.replace(true) => {
+                self.phase.set(1);
+                self.until(2).await;
+                Err(Self::gone())
+            }
+            "identity.status" if !self.outer && !self.fired.get() => {
+                self.until(1).await;
+                self.inner.call(method, params).await
+            }
+            "identity.log" if !self.outer && !self.fired.replace(true) => {
+                self.phase.set(2);
+                self.until(3).await;
+                Err(Self::gone())
+            }
+            _ => self.inner.call(method, params).await,
+        }
+    }
+}
+
+/// Lal's P3b (nested rollback). A owes its mark for #0 (a take whose mark failed: note O).
+/// R1 releases over O; R2 releases over R1's release. R1 fails, then R2 fails. Nothing was
+/// released, so O must come back, and the next refresh marks A holding #0.
+#[tokio::test]
+async fn nested_failed_removals_restore_the_owed_mark() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let c = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let shared = Arc::new(MemoryVault::new());
+    let c_vault = MemoryVault::new();
+    let did = create(&a, &shared, 124).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    holding_app(
+        &a,
+        &shared,
+        &did,
+        &c,
+        &c_vault,
+        entry("Desk", DeviceKind::DesktopApp),
+    )
+    .await;
+    record::write(
+        &a,
+        &*shared,
+        &did,
+        &[Change::HoldsMaster {
+            key_id: "d1".into(),
+            holds: HoldsMaster::No,
+        }],
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    send_master(&c, &c_vault, &did, "d1", &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    a.rpc().refuse_record_puts.set(1);
+    let taken = take_master(&a, &SharedVault(shared.clone()), &OsRandom)
+        .await
+        .unwrap()
+        .expect("the duplicate waits in the inbox");
+    assert!(taken.record.is_err(), "{taken:?}");
+    assert!(matches!(
+        note_of(&*shared, &scid, "d1"),
+        Some(CustodyNote::MarkOwed { index: 0, .. })
+    ));
+
+    let phase = Cell::new(0u8);
+    let outer = ViaExecutor::new(Nested {
+        inner: a.rpc(),
+        phase: &phase,
+        outer: true,
+        fired: Cell::new(false),
+    });
+    let inner = ViaExecutor::new(Nested {
+        inner: a.rpc(),
+        phase: &phase,
+        outer: false,
+        fired: Cell::new(false),
+    });
+    let vault = SharedVault(shared.clone());
+    let (first, second) = tokio::join!(
+        async {
+            let failed = remove_master(&outer, &vault, &did, &OsRandom).await;
+            phase.set(3);
+            failed
+        },
+        remove_master(&inner, &vault, &did, &OsRandom),
+    );
+    assert!(first.is_err(), "R1 failed: {first:?}");
+    assert!(second.is_err(), "R2 failed: {second:?}");
+    assert!(
+        matches!(
+            note_of(&*shared, &scid, "d1"),
+            Some(CustodyNote::MarkOwed { index: 0, .. })
+        ),
+        "O was not restored: {:?}",
+        note_of(&*shared, &scid, "d1")
+    );
+    let refreshed = refresh_master(&a, &vault, &did, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    assert!(
+        matches!(refreshed, Refreshed::Repaired { index: 0, .. }),
+        "{refreshed:?}"
+    );
+    assert_eq!(
+        mark_of(&a, &*shared, &did, "d1").await,
+        (HoldsMaster::Yes, Some(0))
+    );
+    assert_eq!(note_of(&*shared, &scid, "d1"), None);
+}
+
+/// Asserts that `note` survives a serde JSON round trip unchanged (a vault keeps it as JSON).
+fn assert_round_trips(note: &CustodyNote) {
+    let json = serde_json::to_string(note).unwrap();
+    let back: CustodyNote = serde_json::from_str(&json).unwrap_or_else(|e| {
+        panic!(
+            "a note of {} layers does not decode: {e}",
+            note.layers().len()
+        )
+    });
+    assert_eq!(&back, note);
+}
+
+/// Lal's P3 (releases never retired). A removal on a vault that is already empty (a retry after
+/// an uncertain answer, the person pressing remove again) passes the another-copy check, and its
+/// release stays. The release of the earlier removal below it is retired, so the note stays one
+/// layer deep however many times the removal runs, and its JSON stays decodable.
+#[tokio::test]
+async fn repeat_removals_on_an_empty_vault_keep_one_release() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let desk = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let vault = MemoryVault::new();
+    let desk_vault = MemoryVault::new();
+    let did = create(&a, &vault, 125).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    holding_app(
+        &a,
+        &vault,
+        &did,
+        &desk,
+        &desk_vault,
+        entry("Desk", DeviceKind::DesktopApp),
+    )
+    .await;
+    remove_master(&a, &vault, &did, &OsRandom).await.unwrap();
+    assert_eq!(vault.master_index(&scid).unwrap(), None);
+    for round in 2..=200 {
+        remove_master(&a, &vault, &did, &OsRandom)
+            .await
+            .unwrap_or_else(|e| panic!("removal {round} failed: {e:?}"));
+        let note = note_of(&vault, &scid, "d1").expect("the release stays");
+        assert_eq!(
+            note.layers().len(),
+            1,
+            "removal {round} left {} layers",
+            note.layers().len()
+        );
+        assert!(matches!(note, CustodyNote::Released { .. }), "{note:?}");
+    }
+    let note = note_of(&vault, &scid, "d1").unwrap();
+    assert_round_trips(&note);
+    assert_eq!(mark_of(&a, &vault, &did, "d1").await.0, HoldsMaster::No);
+    let refreshed = refresh_master(&a, &vault, &did, &SystemClock, &OsRandom).await;
+    assert!(
+        !matches!(refreshed, Ok(Refreshed::Repaired { .. })),
+        "a refresh re-marked the released copy: {refreshed:?}"
+    );
+    assert_eq!(mark_of(&a, &vault, &did, "d1").await.0, HoldsMaster::No);
+    assert_eq!(note_of(&vault, &scid, "d1"), Some(note));
+}
+
+/// An intent cut off by a crash (its take wrote it, then stopped before its store) between
+/// repeat removals. The note cannot tell such an intent from one whose take is still in
+/// flight, so the removals keep every intent; only the releases below the newest one are
+/// retired. Each crash adds at most one layer, and the note still decodes.
+#[tokio::test]
+async fn repeat_removals_keep_open_intents_and_retire_older_releases() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let desk = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let vault = MemoryVault::new();
+    let desk_vault = MemoryVault::new();
+    let did = create(&a, &vault, 126).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    holding_app(
+        &a,
+        &vault,
+        &did,
+        &desk,
+        &desk_vault,
+        entry("Desk", DeviceKind::DesktopApp),
+    )
+    .await;
+    remove_master(&a, &vault, &did, &OsRandom).await.unwrap();
+    let mut intents = Vec::new();
+    for round in 1..=20 {
+        let below = note_of(&vault, &scid, "d1");
+        let epoch = vault.custody_epoch(&scid).unwrap();
+        let intent = CustodyNote::owed(0, epoch, &OsRandom);
+        let crashed = intent.clone().over(below.clone());
+        assert!(vault
+            .swap_custody_note(&scid, "d1", below.as_ref(), Some(&crashed))
+            .unwrap());
+        intents.insert(0, intent);
+        remove_master(&a, &vault, &did, &OsRandom)
+            .await
+            .unwrap_or_else(|e| panic!("removal {round} failed: {e:?}"));
+        let note = note_of(&vault, &scid, "d1").unwrap();
+        let layers = note.layers();
+        assert!(
+            matches!(layers[0], CustodyNote::Released { .. }),
+            "round {round}: {layers:?}"
+        );
+        assert_eq!(
+            layers[1..],
+            intents[..],
+            "round {round}: the intents changed, or a release stayed below the newest"
+        );
+        assert_round_trips(&note);
+    }
+}
+
+/// The vault id that `vault` gives the identity `did`.
+fn vault_of(vault: &dyn Vault, did: &str) -> ad4m_identity_client::VaultId {
+    vault
+        .vault_id(ad4m_identity_core::scid_of(did).unwrap())
+        .unwrap()
+}
+
+/// A device's whole entry in the record: its holding, its master index and its vault id.
+async fn holding_of(
+    executor: &ViaExecutor<TestExecutor>,
+    vault: &dyn Vault,
+    did: &str,
+    key_id: &str,
+) -> (
+    HoldsMaster,
+    Option<u32>,
+    Option<ad4m_identity_client::VaultId>,
+) {
+    let opened = record::read(executor, vault, did).await.unwrap().unwrap();
+    let entry = &opened.record.devices[key_id];
+    (entry.holds_master, entry.master_index, entry.vault)
+}
+
+/// Lal's root cause 1 (one deletable copy counted twice). Two apps on one computer speak
+/// through two executors (two device keys) and share one vault. Both take the master key and
+/// both are marked `holdsMaster: true`, each with the vault's id. They are one physical copy:
+/// a removal through either app is refused as the only copy, and the vault keeps the key.
+#[tokio::test]
+async fn two_apps_on_one_vault_are_one_copy() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let shared = Arc::new(MemoryVault::new());
+    let did = create(&a, &shared, 141).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    let d2 = holding_app(
+        &a,
+        &shared,
+        &did,
+        &b,
+        &shared,
+        entry("Other app", DeviceKind::DesktopApp),
+    )
+    .await;
+    let through_a = remove_master(&a, &*shared, &did, &OsRandom).await;
+    assert!(
+        matches!(through_a, Err(ClientError::OnlyCopy)),
+        "{through_a:?}"
+    );
+    let through_b = remove_master(&b, &theirs_again(&shared), &did, &OsRandom).await;
+    assert!(
+        matches!(through_b, Err(ClientError::OnlyCopy)),
+        "{through_b:?}"
+    );
+    assert_eq!(shared.master_index(&scid).unwrap(), Some(0));
+    let id = Some(vault_of(&*shared, &did));
+    assert_eq!(
+        holding_of(&a, &*shared, &did, "d1").await,
+        (HoldsMaster::Yes, Some(0), id)
+    );
+    assert_eq!(
+        holding_of(&a, &*shared, &did, &d2).await,
+        (HoldsMaster::Yes, Some(0), id)
+    );
+}
+
+/// One copy on a shared vault V1 (two apps' entries) and one on another vault V2. A removal
+/// through an app on V1 is allowed: V2 is another copy. It forgets V1's key, so every entry
+/// that named V1 is marked `false` with it, not only the removing app's: the record stays true
+/// to the vaults. V2 is then the only copy, and its removal is refused.
+#[tokio::test]
+async fn a_copy_on_another_vault_lets_a_shared_vault_go_with_all_its_entries() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let c = ViaExecutor::new(TestExecutor::new(&store, 3));
+    let shared = Arc::new(MemoryVault::new());
+    let c_vault = MemoryVault::new();
+    let did = create(&a, &shared, 142).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    let d2 = holding_app(
+        &a,
+        &shared,
+        &did,
+        &b,
+        &shared,
+        entry("Other app", DeviceKind::DesktopApp),
+    )
+    .await;
+    let d3 = holding_app(
+        &a,
+        &shared,
+        &did,
+        &c,
+        &c_vault,
+        entry("Desk", DeviceKind::DesktopApp),
+    )
+    .await;
+    remove_master(&a, &*shared, &did, &OsRandom).await.unwrap();
+    assert_eq!(shared.master_index(&scid).unwrap(), None);
+    assert_eq!(
+        holding_of(&c, &c_vault, &did, "d1").await,
+        (HoldsMaster::No, None, None)
+    );
+    assert_eq!(
+        holding_of(&c, &c_vault, &did, &d2).await,
+        (HoldsMaster::No, None, None),
+        "the other app on the emptied vault is still listed holding"
+    );
+    assert_eq!(
+        holding_of(&c, &c_vault, &did, &d3).await,
+        (HoldsMaster::Yes, Some(0), Some(vault_of(&c_vault, &did)))
+    );
+    let last = remove_master(&c, &c_vault, &did, &OsRandom).await;
+    assert!(matches!(last, Err(ClientError::OnlyCopy)), "{last:?}");
+    assert_eq!(c_vault.master_index(&scid).unwrap(), Some(0));
+}
+
+/// An entry that says `holdsMaster: true` with the current `masterIndex` but no vault id
+/// proves no copy, as one without `masterIndex`: the creator's removal is refused.
+#[tokio::test]
+async fn a_holder_entry_without_a_vault_id_proves_no_copy() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let vault = MemoryVault::new();
+    let did = create(&a, &vault, 143).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    let d2 = link_app(
+        &a,
+        &vault,
+        &did,
+        &b,
+        entry("Desk", DeviceKind::DesktopApp),
+        true,
+    )
+    .await;
+    record::write(
+        &a,
+        &vault,
+        &did,
+        &[Change::Device {
+            key_id: d2.clone(),
+            entry: DeviceEntry {
+                holds_master: HoldsMaster::Yes,
+                master_index: Some(0),
+                vault: None,
+                ..entry("Desk", DeviceKind::DesktopApp)
+            },
+        }],
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    let removed = remove_master(&a, &vault, &did, &OsRandom).await;
+    assert!(matches!(removed, Err(ClientError::OnlyCopy)), "{removed:?}");
+    assert_eq!(vault.master_index(&scid).unwrap(), Some(0));
+}
+
+/// The repair window of a listed `true` (`Gate::Repair(None)`). B is listed holding master #0
+/// on its own vault V2. A rotates on vault V1 to #1. B's app then runs on V1 (which keeps #1,
+/// A's key) with no note of its own. Its refresh must not carry B's listed `true` forward to
+/// V1's #1: the entry names V2, so V1's key is no acquisition of B. B's entry stays as it was.
+#[tokio::test]
+async fn a_listed_holder_is_carried_forward_only_on_the_vault_it_names() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let v1 = Arc::new(MemoryVault::new());
+    let v2 = MemoryVault::new();
+    let did = create(&a, &v1, 144).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    let d2 = holding_app(
+        &a,
+        &v1,
+        &did,
+        &b,
+        &v2,
+        entry("Desk", DeviceKind::DesktopApp),
+    )
+    .await;
+    let words = words::from_entropy(&[144; 16]);
+    rotate(&a, &*v1, &did, &words, &[], &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    assert_eq!(v1.master_index(&scid).unwrap(), Some(1));
+    let listed = (HoldsMaster::Yes, Some(0), Some(vault_of(&v2, &did)));
+    let mut b_entry = entry("Desk", DeviceKind::DesktopApp);
+    (b_entry.holds_master, b_entry.master_index, b_entry.vault) = listed;
+    record::write(
+        &a,
+        &*v1,
+        &did,
+        &[Change::Device {
+            key_id: d2.clone(),
+            entry: b_entry,
+        }],
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    let refreshed = refresh_master(&b, &theirs_again(&v1), &did, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    assert!(matches!(refreshed, Refreshed::Current), "{refreshed:?}");
+    assert_eq!(holding_of(&a, &*v1, &did, &d2).await, listed);
+}
+
+/// The window of a listed `true` whose shared vault now keeps a newer key. Apps A and B share
+/// vault V and both hold #0; C holds #0 on its own vault and rotates to #1, handing it over.
+/// B's late mark lands `true` with #0 after the hand-over. A then takes #1 into V. V keeps #1
+/// now, so B's entry, which names V, is carried to #1 with A's mark: no entry names an index
+/// that its vault no longer keeps. C's copy and V's copy are two; once C's goes, V's is the
+/// only one, through either app.
+#[tokio::test]
+async fn a_newer_key_on_a_shared_vault_carries_every_entry_on_it() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let c = ViaExecutor::new(TestExecutor::new(&store, 3));
+    let shared = Arc::new(MemoryVault::new());
+    let c_vault = MemoryVault::new();
+    let did = create(&a, &shared, 145).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    let d2 = holding_app(
+        &a,
+        &shared,
+        &did,
+        &b,
+        &shared,
+        entry("Other app", DeviceKind::DesktopApp),
+    )
+    .await;
+    holding_app(
+        &a,
+        &shared,
+        &did,
+        &c,
+        &c_vault,
+        entry("Desk", DeviceKind::DesktopApp),
+    )
+    .await;
+    let words = words::from_entropy(&[145; 16]);
+    rotate(&c, &c_vault, &did, &words, &[], &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    let id = Some(vault_of(&*shared, &did));
+    let mut late = entry("Other app", DeviceKind::DesktopApp);
+    (late.holds_master, late.master_index, late.vault) = (HoldsMaster::Yes, Some(0), id);
+    record::write(
+        &c,
+        &c_vault,
+        &did,
+        &[Change::Device {
+            key_id: d2.clone(),
+            entry: late,
+        }],
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    let refreshed = refresh_master(&a, &*shared, &did, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    assert!(matches!(refreshed, Refreshed::Taken(_)), "{refreshed:?}");
+    assert_eq!(shared.master_index(&scid).unwrap(), Some(1));
+    assert_eq!(
+        mark_of(&c, &c_vault, &did, &d2).await,
+        (HoldsMaster::Yes, Some(1)),
+        "B's entry names a key its vault no longer keeps"
+    );
+    assert_eq!(
+        holding_of(&c, &c_vault, &did, "d1").await,
+        (HoldsMaster::Yes, Some(1), id)
+    );
+    assert_eq!(
+        holding_of(&c, &c_vault, &did, &d2).await,
+        (HoldsMaster::Yes, Some(1), id)
+    );
+    remove_master(&c, &c_vault, &did, &OsRandom).await.unwrap();
+    for (app, vault) in [(&a, theirs_again(&shared)), (&b, theirs_again(&shared))] {
+        let removed = remove_master(app, &vault, &did, &OsRandom).await;
+        assert!(matches!(removed, Err(ClientError::OnlyCopy)), "{removed:?}");
+    }
+    assert_eq!(shared.master_index(&scid).unwrap(), Some(1));
+}
+
+/// A sibling's owed mark between a removal's write and its forget. Apps A and B share vault V
+/// and both hold #0 on it; C holds #0 on its own vault. B's take of #0 stored before A's
+/// removal read the custody epoch, and its mark has not landed yet (its receipt is in B's
+/// note). A's removal writes A and every other entry on V `false`; then, before the forget,
+/// B's owed mark runs. B's receipt is for the index V keeps and B has no release, but A's
+/// release on V's own note is pending at the current epoch: B's mark writes no `true`, and its
+/// receipt stays owed. The forget empties V. No entry claims the copy V no longer keeps, and
+/// the record is true to the vaults (V's entries `false`, C's copy the only one).
+#[tokio::test]
+async fn a_siblings_mark_while_its_vault_is_being_emptied_writes_no_true() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let c = ViaExecutor::new(TestExecutor::new(&store, 3));
+    let shared = Arc::new(MemoryVault::new());
+    let c_vault = MemoryVault::new();
+    let did = create(&a, &shared, 146).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    let d2 = holding_app(
+        &a,
+        &shared,
+        &did,
+        &b,
+        &shared,
+        entry("Other app", DeviceKind::DesktopApp),
+    )
+    .await;
+    let d3 = holding_app(
+        &a,
+        &shared,
+        &did,
+        &c,
+        &c_vault,
+        entry("Desk", DeviceKind::DesktopApp),
+    )
+    .await;
+    // B's take: its store of #0 landed (a receipt at the epoch read before it), its mark not.
+    let epoch = shared.custody_epoch(&scid).unwrap();
+    let mut receipt = CustodyNote::owed(0, epoch, &OsRandom);
+    if let CustodyNote::MarkOwed { acquired, .. } = &mut receipt {
+        *acquired = true;
+    }
+    assert!(shared
+        .swap_custody_note(&scid, &d2, None, Some(&receipt))
+        .unwrap());
+
+    let racing = ViaExecutor::new(MarkAfterRemovalWrite {
+        inner: a.rpc(),
+        marker: b.rpc(),
+        shared: theirs_again(&shared),
+        did: did.clone(),
+        done: Cell::new(false),
+    });
+    remove_master(&racing, &theirs_again(&shared), &did, &OsRandom)
+        .await
+        .unwrap();
+    assert!(
+        racing.rpc().done.get(),
+        "B's mark ran between the removal's write and its forget"
+    );
+    assert_eq!(
+        note_of(&*shared, &scid, &d2),
+        Some(receipt),
+        "B's mark wrote `true` while A's removal of V was pending, and met its receipt"
+    );
+    assert_eq!(
+        shared.master_index(&scid).unwrap(),
+        None,
+        "the removal emptied V"
+    );
+    assert_eq!(
+        note_of(&*shared, &scid, ad4m_identity_client::VAULT_NOTE),
+        None,
+        "the removal took its release on V's note out"
+    );
+
+    let id = Some(vault_of(&*shared, &did));
+    let opened = record::read(&c, &c_vault, &did).await.unwrap().unwrap();
+    for (key_id, listed) in &opened.record.devices {
+        assert!(
+            !(listed.holds_master == HoldsMaster::Yes && listed.vault == id),
+            "{key_id} claims the copy V no longer keeps: {listed:?}"
+        );
+    }
+    assert_eq!(
+        holding_of(&c, &c_vault, &did, "d1").await,
+        (HoldsMaster::No, None, None)
+    );
+    assert_eq!(
+        holding_of(&c, &c_vault, &did, &d2).await,
+        (HoldsMaster::No, None, None),
+        "B's late mark outlived the forget"
+    );
+    assert_eq!(
+        holding_of(&c, &c_vault, &did, &d3).await,
+        (HoldsMaster::Yes, Some(0), Some(vault_of(&c_vault, &did)))
+    );
+    // True to the vaults: C's copy is the only one, through C and through B.
+    let last = remove_master(&c, &c_vault, &did, &OsRandom).await;
+    assert!(matches!(last, Err(ClientError::OnlyCopy)), "{last:?}");
+    assert_eq!(c_vault.master_index(&scid).unwrap(), Some(0));
+}
+
+/// Runs a whole take on another app's executor (`taker`) and the shared vault, once: before
+/// the first `identity.recordPut` reaches the store (`after: false`), or right after it landed
+/// (`after: true`).
+struct TakeAroundRecordPut<'a> {
+    inner: &'a TestExecutor,
+    taker: &'a TestExecutor,
+    vault: SharedVault,
+    after: bool,
+    done: Cell<bool>,
+}
+
+impl TakeAroundRecordPut<'_> {
+    async fn take(&self) {
+        let taken = take_master(
+            &ViaExecutor::new(Yielding(self.taker)),
+            &self.vault,
+            &OsRandom,
+        )
+        .await
+        .unwrap()
+        .expect("the key waits in the taker's inbox");
+        taken.record.unwrap();
+    }
+}
+
+#[async_trait(?Send)]
+impl ExecutorRpc for TakeAroundRecordPut<'_> {
+    async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        let put = method == "identity.recordPut";
+        if put && !self.after && !self.done.replace(true) {
+            self.take().await;
+        }
+        let answer = self.inner.call(method, params).await;
+        if put && self.after && answer.is_ok() && !self.done.replace(true) {
+            self.take().await;
+        }
+        answer
+    }
+}
+
+/// `Forgot::Kept` on a shared vault. Apps A and B share vault V, which keeps #0; C rotates to
+/// #1 on its own vault and hands it to both. A removes V's copy of #0 (C's #1 is another
+/// copy); between A's release and its forget, B takes #1 into V — once before A's `false`
+/// write lands, once right after it. The forget finds #1 installed since and keeps it.
+///
+/// What is expected either way: V keeps #1 (the newer key is never deleted); B, whose take
+/// installed it, ends `true` with #1 on V once its own mark lands; C stays `true` with #1. A
+/// ends `false`: V keeps a key A's app can use, but A has no receipt for it, so its entry
+/// under-claims. That is accepted; an over-claim is not, so no entry says `true` for an index
+/// its vault does not keep. With V and C both holding #1, C may remove its copy; then V is the
+/// only one, and a removal through either app on V is refused.
+#[tokio::test]
+async fn a_newer_key_taken_into_a_shared_vault_during_a_removal_is_kept_and_marked() {
+    for (after, entropy) in [(false, 147), (true, 148)] {
+        let store = TestStore::new();
+        let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+        let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+        let c = ViaExecutor::new(TestExecutor::new(&store, 3));
+        let shared = Arc::new(MemoryVault::new());
+        let c_vault = MemoryVault::new();
+        let did = create(&a, &shared, entropy).await;
+        let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+        let d2 = holding_app(
+            &a,
+            &shared,
+            &did,
+            &b,
+            &shared,
+            entry("Other app", DeviceKind::DesktopApp),
+        )
+        .await;
+        let d3 = holding_app(
+            &a,
+            &shared,
+            &did,
+            &c,
+            &c_vault,
+            entry("Desk", DeviceKind::DesktopApp),
+        )
+        .await;
+        let words = words::from_entropy(&[entropy; 16]);
+        rotate(&c, &c_vault, &did, &words, &[], &SystemClock, &OsRandom)
+            .await
+            .unwrap();
+        assert_eq!(shared.master_index(&scid).unwrap(), Some(0));
+
+        let racing = ViaExecutor::new(TakeAroundRecordPut {
+            inner: a.rpc(),
+            taker: b.rpc(),
+            vault: theirs_again(&shared),
+            after,
+            done: Cell::new(false),
+        });
+        remove_master(&racing, &theirs_again(&shared), &did, &OsRandom)
+            .await
+            .unwrap_or_else(|e| panic!("after: {after}: {e:?}"));
+        assert!(racing.rpc().done.get(), "after: {after}: B's take ran");
+        assert_eq!(
+            shared.master_index(&scid).unwrap(),
+            Some(1),
+            "after: {after}: the removal deleted the newer key"
+        );
+        assert_eq!(
+            note_of(&*shared, &scid, "d1"),
+            None,
+            "after: {after}: the forget released nothing, so A's release is removed"
+        );
+
+        let id = Some(vault_of(&*shared, &did));
+        let c_id = Some(vault_of(&c_vault, &did));
+        let opened = record::read(&c, &c_vault, &did).await.unwrap().unwrap();
+        for (key_id, listed) in &opened.record.devices {
+            if listed.holds_master == HoldsMaster::Yes {
+                assert!(
+                    (listed.vault == id || listed.vault == c_id) && listed.master_index == Some(1),
+                    "after: {after}: {key_id} claims a copy that is not there: {listed:?}"
+                );
+            }
+        }
+        assert_eq!(
+            holding_of(&c, &c_vault, &did, &d2).await,
+            (HoldsMaster::Yes, Some(1), id),
+            "after: {after}: B's take of #1 is not marked"
+        );
+        assert_eq!(
+            holding_of(&c, &c_vault, &did, &d3).await,
+            (HoldsMaster::Yes, Some(1), c_id),
+            "after: {after}"
+        );
+        assert_eq!(
+            mark_of(&c, &c_vault, &did, "d1").await.0,
+            HoldsMaster::No,
+            "after: {after}: A has no receipt for #1, so it under-claims"
+        );
+
+        // True to the vaults: V and C's vault are two copies of #1.
+        remove_master(&c, &c_vault, &did, &OsRandom)
+            .await
+            .unwrap_or_else(|e| panic!("after: {after}: C's removal: {e:?}"));
+        assert_eq!(c_vault.master_index(&scid).unwrap(), None);
+        for app in [&a, &b] {
+            let removed = remove_master(app, &theirs_again(&shared), &did, &OsRandom).await;
+            assert!(
+                matches!(removed, Err(ClientError::OnlyCopy)),
+                "after: {after}: {removed:?}"
+            );
+        }
+        assert_eq!(shared.master_index(&scid).unwrap(), Some(1));
+    }
+}
+
+/// After a removal's first record write lands: runs a holder mark of another app on the shared
+/// vault (`marker`, through `complete_pending_mark`), then a removal on another vault
+/// (`remover` on `remover_vault`), once. The removal's answer is kept.
+struct MarkThenRemoveAfterRemovalWrite<'a> {
+    inner: &'a TestExecutor,
+    marker: &'a TestExecutor,
+    shared: SharedVault,
+    remover: &'a TestExecutor,
+    remover_vault: &'a MemoryVault,
+    did: String,
+    done: Cell<bool>,
+    removed: RefCell<Option<Result<u64, ClientError>>>,
+}
+
+#[async_trait(?Send)]
+impl ExecutorRpc for MarkThenRemoveAfterRemovalWrite<'_> {
+    async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        let answer = self.inner.call(method, params).await;
+        if method == "identity.recordPut" && answer.is_ok() && !self.done.replace(true) {
+            complete_pending_mark(
+                &ViaExecutor::new(Yielding(self.marker)),
+                &self.shared,
+                &self.did,
+                &SystemClock,
+                &OsRandom,
+            )
+            .await
+            .unwrap();
+            let removed = remove_master(
+                &ViaExecutor::new(Yielding(self.remover)),
+                self.remover_vault,
+                &self.did,
+                &OsRandom,
+            )
+            .await;
+            *self.removed.borrow_mut() = Some(removed);
+        }
+        answer
+    }
+}
+
+/// Lal's P1 at f7d898a53: a sibling's outstanding mark re-advertises a vault that a removal is
+/// about to empty. Device keys A and B are on vault V; C keeps the copy on vault W; all hold
+/// master #0.
+///
+/// 1. B's take of #0 on V landed: its receipt is in B's note. Its mark has not landed.
+/// 2. A removes: its release goes into A's note; the only-copy check accepts C; the write marks
+///    A and every entry on V `false`. A has not forgotten V yet.
+/// 3. B's mark runs on the new record version.
+/// 4. C removes.
+/// 5. A forgets V.
+///
+/// Both copies must never go: B's mark must not count as a copy on V while A's removal of V is
+/// pending, so C is refused `OnlyCopy` and W keeps the key.
+#[tokio::test]
+async fn a_siblings_mark_during_a_removal_of_its_vault_is_no_copy_for_another_removal() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let c = ViaExecutor::new(TestExecutor::new(&store, 3));
+    let shared = Arc::new(MemoryVault::new());
+    let c_vault = MemoryVault::new();
+    let did = create(&a, &shared, 149).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    let d2 = holding_app(
+        &a,
+        &shared,
+        &did,
+        &b,
+        &shared,
+        entry("Other app", DeviceKind::DesktopApp),
+    )
+    .await;
+    holding_app(
+        &a,
+        &shared,
+        &did,
+        &c,
+        &c_vault,
+        entry("Desk", DeviceKind::DesktopApp),
+    )
+    .await;
+    // Step 1: B's store of #0 landed (a receipt at the epoch read before it); its mark did not.
+    let epoch = shared.custody_epoch(&scid).unwrap();
+    let mut receipt = CustodyNote::owed(0, epoch, &OsRandom);
+    if let CustodyNote::MarkOwed { acquired, .. } = &mut receipt {
+        *acquired = true;
+    }
+    assert!(shared
+        .swap_custody_note(&scid, &d2, None, Some(&receipt))
+        .unwrap());
+
+    let racing = ViaExecutor::new(MarkThenRemoveAfterRemovalWrite {
+        inner: a.rpc(),
+        marker: b.rpc(),
+        shared: theirs_again(&shared),
+        remover: c.rpc(),
+        remover_vault: &c_vault,
+        did: did.clone(),
+        done: Cell::new(false),
+        removed: RefCell::new(None),
+    });
+    // Steps 2 and 5, with 3 and 4 between them.
+    let removed = remove_master(&racing, &theirs_again(&shared), &did, &OsRandom).await;
+    let c_removed = racing
+        .rpc()
+        .removed
+        .borrow_mut()
+        .take()
+        .expect("B's mark and C's removal ran between A's write and A's forget");
+    assert!(
+        shared.master_index(&scid).unwrap().is_some()
+            || c_vault.master_index(&scid).unwrap().is_some(),
+        "both copies of the master key are gone (A: {removed:?}, C: {c_removed:?})"
+    );
+    assert!(
+        matches!(c_removed, Err(ClientError::OnlyCopy)),
+        "C removed the last other copy on B's mark: {c_removed:?}"
+    );
+    assert_eq!(c_vault.master_index(&scid).unwrap(), Some(0));
+    removed.unwrap();
+    assert_eq!(shared.master_index(&scid).unwrap(), None, "A emptied V");
+    // No entry claims the copy V no longer keeps; C's is the only one.
+    let id = Some(vault_of(&*shared, &did));
+    let opened = record::read(&c, &c_vault, &did).await.unwrap().unwrap();
+    for (key_id, listed) in &opened.record.devices {
+        assert!(
+            !(listed.holds_master == HoldsMaster::Yes && listed.vault == id),
+            "{key_id} claims the copy V no longer keeps: {listed:?}"
+        );
+    }
+    let last = remove_master(&c, &c_vault, &did, &OsRandom).await;
+    assert!(matches!(last, Err(ClientError::OnlyCopy)), "{last:?}");
+}
+
+/// Before a removal's first record write reaches the store: another app on the shared vault
+/// (`storer`'s device key `storer_id`) stores master `index` again (a duplicate delivery: the
+/// custody epoch moves) and keeps its receipt. Right after that write lands: its owed mark
+/// (`complete_pending_mark`). Once.
+struct StoreAroundRemovalWrite<'a> {
+    inner: &'a TestExecutor,
+    storer: &'a TestExecutor,
+    storer_id: String,
+    shared: SharedVault,
+    did: String,
+    index: u32,
+    secret: [u8; 32],
+    stored: Cell<bool>,
+    marked: Cell<bool>,
+}
+
+#[async_trait(?Send)]
+impl ExecutorRpc for StoreAroundRemovalWrite<'_> {
+    async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        let put = method == "identity.recordPut";
+        if put && !self.stored.replace(true) {
+            let scid = ad4m_identity_core::scid_of(&self.did).unwrap().to_string();
+            let epoch = self.shared.custody_epoch(&scid).unwrap();
+            let stored = self
+                .shared
+                .store_master(
+                    &scid,
+                    self.index,
+                    ad4m_identity_client::Secret::new(self.secret),
+                )
+                .unwrap();
+            assert_eq!(stored, ad4m_identity_client::Stored::Stored);
+            let mut receipt = CustodyNote::owed(self.index, epoch, &OsRandom);
+            if let CustodyNote::MarkOwed { acquired, .. } = &mut receipt {
+                *acquired = true;
+            }
+            let before = self.shared.custody_note(&scid, &self.storer_id).unwrap();
+            assert!(self
+                .shared
+                .swap_custody_note(
+                    &scid,
+                    &self.storer_id,
+                    before.as_ref(),
+                    Some(&receipt.over(before.clone()))
+                )
+                .unwrap());
+        }
+        let answer = self.inner.call(method, params).await;
+        if put && answer.is_ok() && !self.marked.replace(true) {
+            complete_pending_mark(
+                &ViaExecutor::new(Yielding(self.storer)),
+                &self.shared,
+                &self.did,
+                &SystemClock,
+                &OsRandom,
+            )
+            .await
+            .unwrap();
+        }
+        answer
+    }
+}
+
+/// Lal's P3 at f7d898a53: an acquisition after the removal check left the other holders on the
+/// kept vault `false`. Device keys A, B and D are on vault V and listed `true` with #0, their
+/// receipts cleared; C keeps #0 on vault W. A's removal passes its check; then D stores #0 on V
+/// again (the custody epoch moves); A's write marks every entry on V `false`; D's own mark
+/// lands. A's forget finds the key installed since and keeps it.
+///
+/// V keeps #0, which B (and D) can use: B ends `true` with #0 on V again, as it was before A's
+/// removal, which released nothing. A, the device the person removed the key from, has no
+/// receipt for the key kept and stays `false` (an under-claim). No entry over-claims.
+#[tokio::test]
+async fn a_kept_forget_on_a_shared_vault_marks_the_siblings_it_cleared_again() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let c = ViaExecutor::new(TestExecutor::new(&store, 3));
+    let d = ViaExecutor::new(TestExecutor::new(&store, 4));
+    let shared = Arc::new(MemoryVault::new());
+    let c_vault = MemoryVault::new();
+    let entropy = 150;
+    let did = create(&a, &shared, entropy).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    let d2 = holding_app(
+        &a,
+        &shared,
+        &did,
+        &b,
+        &shared,
+        entry("Other app", DeviceKind::DesktopApp),
+    )
+    .await;
+    let d3 = holding_app(
+        &a,
+        &shared,
+        &did,
+        &c,
+        &c_vault,
+        entry("Desk", DeviceKind::DesktopApp),
+    )
+    .await;
+    let d4 = holding_app(
+        &a,
+        &shared,
+        &did,
+        &d,
+        &shared,
+        entry("Third app", DeviceKind::DesktopApp),
+    )
+    .await;
+    let id = Some(vault_of(&*shared, &did));
+    for key_id in ["d1", &d2, &d4] {
+        assert_eq!(note_of(&*shared, &scid, key_id), None, "{key_id}");
+        assert_eq!(
+            holding_of(&a, &*shared, &did, key_id).await,
+            (HoldsMaster::Yes, Some(0), id)
+        );
+    }
+    let seed = words::seed(&words::from_entropy(&[entropy; 16]));
+    let racing = ViaExecutor::new(StoreAroundRemovalWrite {
+        inner: a.rpc(),
+        storer: d.rpc(),
+        storer_id: d4.clone(),
+        shared: theirs_again(&shared),
+        did: did.clone(),
+        index: 0,
+        secret: words::master_key(&seed, 0).unwrap().to_bytes(),
+        stored: Cell::new(false),
+        marked: Cell::new(false),
+    });
+    remove_master(&racing, &theirs_again(&shared), &did, &OsRandom)
+        .await
+        .unwrap();
+    assert!(racing.rpc().marked.get(), "D's store and mark ran");
+    assert_eq!(
+        shared.master_index(&scid).unwrap(),
+        Some(0),
+        "the removal deleted the key D stored since"
+    );
+    assert_eq!(
+        holding_of(&c, &c_vault, &did, &d4).await,
+        (HoldsMaster::Yes, Some(0), id),
+        "D's store is not marked"
+    );
+    assert_eq!(
+        holding_of(&c, &c_vault, &did, &d2).await,
+        (HoldsMaster::Yes, Some(0), id),
+        "B stays `false` although V keeps the key it held"
+    );
+    assert_eq!(
+        holding_of(&c, &c_vault, &did, "d1").await.0,
+        HoldsMaster::No,
+        "A has no receipt for the key kept"
+    );
+    assert_eq!(
+        holding_of(&c, &c_vault, &did, &d3).await,
+        (HoldsMaster::Yes, Some(0), Some(vault_of(&c_vault, &did)))
+    );
+    // True to the vaults: V and W are two copies. C may remove W's; then V is the only one.
+    remove_master(&c, &c_vault, &did, &OsRandom).await.unwrap();
+    for app in [&a, &b, &d] {
+        let refused = remove_master(app, &theirs_again(&shared), &did, &OsRandom).await;
+        assert!(matches!(refused, Err(ClientError::OnlyCopy)), "{refused:?}");
+    }
+    assert_eq!(shared.master_index(&scid).unwrap(), Some(0));
+    assert_eq!(
+        note_of(&*shared, &scid, ad4m_identity_client::VAULT_NOTE),
+        None,
+        "a refused removal takes its release on the vault's note out"
+    );
+}
+
+/// A removal cut off after its write, before its forget: its release stays on A's note and on
+/// the note of vault V, which A and B share; the record lists every entry on V `false`; V
+/// keeps #0; C keeps #0 on vault W. While that release is pending at the custody epoch, B's
+/// owed mark writes no `true` on V (an under-claim, never a copy that a forget can still take).
+/// An acquisition on V moves the epoch past it: B's mark then lands. A's next removal retires
+/// the release it left on V's note with the one on its own note.
+#[tokio::test]
+async fn a_vault_release_left_by_a_cut_off_removal_holds_until_the_epoch_moves() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let c = ViaExecutor::new(TestExecutor::new(&store, 3));
+    let shared = Arc::new(MemoryVault::new());
+    let c_vault = MemoryVault::new();
+    let entropy = 151;
+    let did = create(&a, &shared, entropy).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    let d2 = holding_app(
+        &a,
+        &shared,
+        &did,
+        &b,
+        &shared,
+        entry("Other app", DeviceKind::DesktopApp),
+    )
+    .await;
+    holding_app(
+        &a,
+        &shared,
+        &did,
+        &c,
+        &c_vault,
+        entry("Desk", DeviceKind::DesktopApp),
+    )
+    .await;
+    let id = vault_of(&*shared, &did);
+    // A's removal, cut off: its releases, then its write; no forget.
+    let epoch = shared.custody_epoch(&scid).unwrap();
+    let cut_off = CustodyNote::released(epoch, &OsRandom);
+    for key_id in ["d1", ad4m_identity_client::VAULT_NOTE] {
+        assert!(shared
+            .swap_custody_note(&scid, key_id, None, Some(&cut_off))
+            .unwrap());
+    }
+    record::write(
+        &a,
+        &*shared,
+        &did,
+        &[
+            Change::HoldsMaster {
+                key_id: "d1".into(),
+                holds: HoldsMaster::No,
+            },
+            Change::VaultEmptied { vault: id },
+        ],
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    // B's receipt for #0, its mark owed.
+    let mut receipt = CustodyNote::owed(0, epoch, &OsRandom);
+    if let CustodyNote::MarkOwed { acquired, .. } = &mut receipt {
+        *acquired = true;
+    }
+    assert!(shared
+        .swap_custody_note(&scid, &d2, None, Some(&receipt))
+        .unwrap());
+    complete_pending_mark(&b, &*shared, &did, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    assert_eq!(
+        holding_of(&c, &c_vault, &did, &d2).await,
+        (HoldsMaster::No, None, None),
+        "B marked `true` while a removal of V was pending"
+    );
+    assert_eq!(note_of(&*shared, &scid, &d2), Some(receipt.clone()));
+    // A store on V moves the epoch past the release: it no longer holds.
+    let seed = words::seed(&words::from_entropy(&[entropy; 16]));
+    shared
+        .store_master(
+            &scid,
+            0,
+            ad4m_identity_client::Secret::new(words::master_key(&seed, 0).unwrap().to_bytes()),
+        )
+        .unwrap();
+    complete_pending_mark(&b, &*shared, &did, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    assert_eq!(
+        holding_of(&c, &c_vault, &did, &d2).await,
+        (HoldsMaster::Yes, Some(0), Some(id))
+    );
+    assert_eq!(
+        note_of(&*shared, &scid, &d2),
+        None,
+        "B's mark met its receipt"
+    );
+    // A's next removal (C and B are copies; B is on V, so C counts) retires what the cut-off
+    // one left.
+    remove_master(&a, &*shared, &did, &OsRandom).await.unwrap();
+    assert_eq!(
+        note_of(&*shared, &scid, ad4m_identity_client::VAULT_NOTE),
+        None,
+        "the cut-off removal's release on V's note outlived the next removal"
+    );
+    let left = note_of(&*shared, &scid, "d1").expect("A's release stands");
+    assert_eq!(left.layers().len(), 1, "{left:?}");
+    assert_eq!(shared.master_index(&scid).unwrap(), None);
+}
+
+/// A step of a [`Stepped`] executor: at the first call of `method` (before it, or after an ok
+/// answer when `after`), the shared phase is raised to `set`, then the call waits until the
+/// phase reaches `until`.
+struct Step {
+    method: &'static str,
+    after: bool,
+    set: u8,
+    until: u8,
+}
+
+/// An executor that runs its [`Step`]s in order, each once, against a phase shared by the flows
+/// a test runs at once ([`tokio::join!`]), and yields before each call.
+struct Stepped<'a> {
+    inner: &'a TestExecutor,
+    phase: &'a Cell<u8>,
+    steps: RefCell<std::collections::VecDeque<Step>>,
+}
+
+impl<'a> Stepped<'a> {
+    fn new(inner: &'a TestExecutor, phase: &'a Cell<u8>, steps: Vec<Step>) -> Self {
+        Stepped {
+            inner,
+            phase,
+            steps: RefCell::new(steps.into()),
+        }
+    }
+
+    async fn step(&self, method: &str, after: bool) {
+        let next = {
+            let mut steps = self.steps.borrow_mut();
+            match steps.front() {
+                Some(step) if step.method == method && step.after == after => steps.pop_front(),
+                _ => None,
+            }
+        };
+        if let Some(step) = next {
+            reach(self.phase, step.set);
+            until(self.phase, step.until).await;
+        }
+    }
+}
+
+#[async_trait(?Send)]
+impl ExecutorRpc for Stepped<'_> {
+    async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        tokio::task::yield_now().await;
+        self.step(method, false).await;
+        let answer = self.inner.call(method, params).await;
+        if answer.is_ok() {
+            self.step(method, true).await;
+        }
+        answer
+    }
+}
+
+/// Raises `phase` to `at` (never lowers it).
+fn reach(phase: &Cell<u8>, at: u8) {
+    if phase.get() < at {
+        phase.set(at);
+    }
+}
+
+/// Waits until `phase` reaches `at`.
+async fn until(phase: &Cell<u8>, at: u8) {
+    while phase.get() < at {
+        tokio::task::yield_now().await;
+    }
+}
+
+/// Device keys A and B on vault V and C on vault W, all listed `true` with #0; B's take of #0
+/// on V landed (a receipt in B's note at the custody epoch now), its mark is owed. Answers the
+/// did, the scid, B's key id and the epoch of B's receipt.
+async fn siblings_with_an_owed_mark(
+    a: &ViaExecutor<TestExecutor>,
+    b: &ViaExecutor<TestExecutor>,
+    c: &ViaExecutor<TestExecutor>,
+    shared: &Arc<MemoryVault>,
+    c_vault: &MemoryVault,
+    entropy: u8,
+) -> (String, String, String, u64) {
+    let did = create(a, shared, entropy).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    let d2 = holding_app(
+        a,
+        shared,
+        &did,
+        b,
+        shared,
+        entry("Other app", DeviceKind::DesktopApp),
+    )
+    .await;
+    holding_app(
+        a,
+        shared,
+        &did,
+        c,
+        c_vault,
+        entry("Desk", DeviceKind::DesktopApp),
+    )
+    .await;
+    let epoch = shared.custody_epoch(&scid).unwrap();
+    let mut receipt = CustodyNote::owed(0, epoch, &OsRandom);
+    if let CustodyNote::MarkOwed { acquired, .. } = &mut receipt {
+        *acquired = true;
+    }
+    assert!(shared
+        .swap_custody_note(&scid, &d2, None, Some(&receipt))
+        .unwrap());
+    (did, scid, d2, epoch)
+}
+
+/// The end state of a race between a removal of V and C's removal of W: at least one copy is
+/// left, C's removal was refused (W keeps #0), V is empty and no entry claims a copy on V.
+async fn one_copy_left(
+    c: &ViaExecutor<TestExecutor>,
+    shared: &Arc<MemoryVault>,
+    c_vault: &MemoryVault,
+    did: &str,
+    removed: &Result<u64, ClientError>,
+    c_removed: &Result<u64, ClientError>,
+) {
+    let scid = ad4m_identity_core::scid_of(did).unwrap().to_string();
+    assert!(
+        shared.master_index(&scid).unwrap().is_some()
+            || c_vault.master_index(&scid).unwrap().is_some(),
+        "both copies of the master key are gone (V's removal: {removed:?}, C: {c_removed:?})"
+    );
+    assert!(
+        matches!(c_removed, Err(ClientError::OnlyCopy)),
+        "C removed the last other copy on a stale mark: {c_removed:?}"
+    );
+    assert_eq!(c_vault.master_index(&scid).unwrap(), Some(0));
+    assert!(removed.is_ok(), "{removed:?}");
+    assert_eq!(shared.master_index(&scid).unwrap(), None, "V was emptied");
+    let id = Some(vault_of(&**shared, did));
+    let opened = record::read(c, c_vault, did).await.unwrap().unwrap();
+    for (key_id, listed) in &opened.record.devices {
+        assert!(
+            !(listed.holds_master == HoldsMaster::Yes && listed.vault == id),
+            "{key_id} claims the copy V no longer keeps: {listed:?}"
+        );
+    }
+}
+
+/// Lal's P1 at bd396608c, first variant: B's mark reads the custody epoch e, its receipt for
+/// #0, no removal of V pending and #0 kept; then A runs a whole removal of V (V is empty, at a
+/// later epoch, and A's release is off V's note again); then B's record write; then C removes W
+/// before B's check after its write.
+///
+/// The snapshot B decided on no longer holds on the version its write builds on: the epoch
+/// moved. B writes no `true` on V, so C is refused `OnlyCopy` and W keeps the key.
+#[tokio::test]
+async fn a_mark_that_read_custody_before_a_whole_removal_of_its_vault_writes_no_copy() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let c = ViaExecutor::new(TestExecutor::new(&store, 3));
+    let shared = Arc::new(MemoryVault::new());
+    let c_vault = MemoryVault::new();
+    let (did, scid, _, epoch) =
+        siblings_with_an_owed_mark(&a, &b, &c, &shared, &c_vault, 152).await;
+
+    let phase = Cell::new(0);
+    // 1: B read its snapshot; 2: A's removal is done; 3: B's write landed; 4: C's removal is
+    // done.
+    let by_a = ViaExecutor::new(Stepped::new(
+        a.rpc(),
+        &phase,
+        vec![Step {
+            method: "identity.status",
+            after: false,
+            set: 0,
+            until: 1,
+        }],
+    ));
+    let by_b = ViaExecutor::new(Stepped::new(
+        b.rpc(),
+        &phase,
+        vec![
+            Step {
+                method: "identity.record",
+                after: false,
+                set: 1,
+                until: 2,
+            },
+            Step {
+                method: "identity.recordPut",
+                after: true,
+                set: 3,
+                until: 4,
+            },
+        ],
+    ));
+    let by_c = ViaExecutor::new(Stepped::new(
+        c.rpc(),
+        &phase,
+        vec![Step {
+            method: "identity.status",
+            after: false,
+            set: 0,
+            until: 3,
+        }],
+    ));
+    let (removed, marked, c_removed) = tokio::join!(
+        async {
+            let removed = remove_master(&by_a, &theirs_again(&shared), &did, &OsRandom).await;
+            reach(&phase, 2);
+            removed
+        },
+        async {
+            let marked =
+                complete_pending_mark(&by_b, &theirs_again(&shared), &did, &SystemClock, &OsRandom)
+                    .await;
+            reach(&phase, 3);
+            marked
+        },
+        async {
+            let removed = remove_master(&by_c, &c_vault, &did, &OsRandom).await;
+            reach(&phase, 4);
+            removed
+        },
+    );
+    assert!(
+        shared.custody_epoch(&scid).unwrap() > epoch,
+        "A's forget moved the epoch"
+    );
+    marked.unwrap();
+    one_copy_left(&c, &shared, &c_vault, &did, &removed, &c_removed).await;
+}
+
+/// Lal's P1 at bd396608c, second variant: B's mark reads epoch e, its receipt for #0, no removal
+/// of V pending and #0 kept; then another app stores #0 on V again (epoch e+1) and A's removal
+/// of V starts at e+1 (its release on V's note reads e+1) and writes its `false`; then B's
+/// record write; then C removes W before B's check after its write; then A forgets V.
+///
+/// A release that read e+1 is no removal pending at e, so only the moved epoch tells B that its
+/// snapshot is stale. B writes no `true` on V, so C is refused `OnlyCopy` and W keeps the key.
+#[tokio::test]
+async fn a_mark_that_read_custody_before_a_store_and_a_removal_of_its_vault_writes_no_copy() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let c = ViaExecutor::new(TestExecutor::new(&store, 3));
+    let shared = Arc::new(MemoryVault::new());
+    let c_vault = MemoryVault::new();
+    let entropy = 153;
+    let (did, scid, _, epoch) =
+        siblings_with_an_owed_mark(&a, &b, &c, &shared, &c_vault, entropy).await;
+    let seed = words::seed(&words::from_entropy(&[entropy; 16]));
+
+    let phase = Cell::new(0);
+    // 1: B read its snapshot; 2: A's write landed; 3: B's write landed; 4: C's removal is done;
+    // 5: B's mark is done (A's forget waits for it: two apps reading the record of one vault at
+    // once can refuse each other's version, which is not what this test is about).
+    let by_a = ViaExecutor::new(Stepped::new(
+        a.rpc(),
+        &phase,
+        vec![Step {
+            method: "identity.recordPut",
+            after: true,
+            set: 2,
+            until: 5,
+        }],
+    ));
+    let by_b = ViaExecutor::new(Stepped::new(
+        b.rpc(),
+        &phase,
+        vec![
+            Step {
+                method: "identity.record",
+                after: false,
+                set: 1,
+                until: 2,
+            },
+            Step {
+                method: "identity.recordPut",
+                after: true,
+                set: 3,
+                until: 4,
+            },
+        ],
+    ));
+    let by_c = ViaExecutor::new(Stepped::new(
+        c.rpc(),
+        &phase,
+        vec![Step {
+            method: "identity.status",
+            after: false,
+            set: 0,
+            until: 3,
+        }],
+    ));
+    let (removed, marked, c_removed) = tokio::join!(
+        async {
+            until(&phase, 1).await;
+            // Another app on V stores #0 again: the epoch moves to e+1.
+            shared
+                .store_master(
+                    &scid,
+                    0,
+                    ad4m_identity_client::Secret::new(
+                        words::master_key(&seed, 0).unwrap().to_bytes(),
+                    ),
+                )
+                .unwrap();
+            assert_eq!(shared.custody_epoch(&scid).unwrap(), epoch + 1);
+            remove_master(&by_a, &theirs_again(&shared), &did, &OsRandom).await
+        },
+        async {
+            let marked =
+                complete_pending_mark(&by_b, &theirs_again(&shared), &did, &SystemClock, &OsRandom)
+                    .await;
+            reach(&phase, 3);
+            until(&phase, 4).await;
+            reach(&phase, 5);
+            marked
+        },
+        async {
+            let removed = remove_master(&by_c, &c_vault, &did, &OsRandom).await;
+            reach(&phase, 4);
+            removed
+        },
+    );
+    marked.unwrap();
+    one_copy_left(&c, &shared, &c_vault, &did, &removed, &c_removed).await;
+}
+
+/// A's removal of V (A, B and D on V, D listed without the key; C on W) whose forget keeps a key
+/// stored on V before its write ([`ad4m_identity_client::Forgot::Kept`]). Its write marked B
+/// `false`, so it marks B again. Before that mark's record read: D removes V whole (V is empty, at a later epoch).
+/// After that mark's write: C removes W.
+struct EmptiedUnderMarkAgain<'a> {
+    inner: &'a TestExecutor,
+    shared: SharedVault,
+    did: String,
+    secret: [u8; 32],
+    emptier: &'a TestExecutor,
+    remover: &'a TestExecutor,
+    remover_vault: &'a MemoryVault,
+    /// Record writes of A's removal that landed: the first is its `false`, the second its own
+    /// mark after the forget kept the key.
+    puts: Cell<u8>,
+    emptied: RefCell<Option<Result<u64, ClientError>>>,
+    removed: RefCell<Option<Result<u64, ClientError>>>,
+}
+
+#[async_trait(?Send)]
+impl ExecutorRpc for EmptiedUnderMarkAgain<'_> {
+    async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        let scid = ad4m_identity_core::scid_of(&self.did).unwrap().to_string();
+        let put = method == "identity.recordPut";
+        if put && self.puts.get() == 0 {
+            // Another app on V stores #0 again: A's forget keeps it.
+            self.shared
+                .store_master(&scid, 0, ad4m_identity_client::Secret::new(self.secret))
+                .unwrap();
+        }
+        if method == "identity.record" && self.puts.get() == 2 && self.emptied.borrow().is_none() {
+            let emptied = remove_master(
+                &ViaExecutor::new(Yielding(self.emptier)),
+                &self.shared,
+                &self.did,
+                &OsRandom,
+            )
+            .await;
+            *self.emptied.borrow_mut() = Some(emptied);
+        }
+        let answer = self.inner.call(method, params).await;
+        if put && answer.is_ok() {
+            self.puts.set(self.puts.get() + 1);
+            if self.puts.get() == 3 && self.removed.borrow().is_none() {
+                let removed = remove_master(
+                    &ViaExecutor::new(Yielding(self.remover)),
+                    self.remover_vault,
+                    &self.did,
+                    &OsRandom,
+                )
+                .await;
+                *self.removed.borrow_mut() = Some(removed);
+            }
+        }
+        answer
+    }
+}
+
+/// Lal's P1 at bd396608c, on the re-mark after a kept forget: it reads the custody epoch, the
+/// key V keeps and no removal of V pending; then D removes V whole (V is empty, at a later
+/// epoch, and D's release is off V's note again); then its record write; then C removes W before
+/// its check after the write.
+///
+/// The snapshot no longer holds on the version the write builds on: the epoch moved. B is not
+/// marked `true` on V, so C is refused `OnlyCopy` and W keeps the key.
+#[tokio::test]
+async fn a_re_mark_after_a_kept_forget_that_read_custody_before_a_whole_removal_writes_no_copy() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let c = ViaExecutor::new(TestExecutor::new(&store, 3));
+    let d = ViaExecutor::new(TestExecutor::new(&store, 4));
+    let shared = Arc::new(MemoryVault::new());
+    let c_vault = MemoryVault::new();
+    let entropy = 154;
+    let did = create(&a, &shared, entropy).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    for (app, vault, name) in [(&b, &*shared, "Other app"), (&c, &c_vault, "Desk")] {
+        holding_app(
+            &a,
+            &shared,
+            &did,
+            app,
+            vault,
+            entry(name, DeviceKind::DesktopApp),
+        )
+        .await;
+    }
+    // D shares V, listed without the key: no entry the removal clears, so its note is none
+    // that the re-mark reads.
+    link_app(
+        &a,
+        &shared,
+        &did,
+        &d,
+        entry("Third app", DeviceKind::DesktopApp),
+        false,
+    )
+    .await;
+    let seed = words::seed(&words::from_entropy(&[entropy; 16]));
+    let racing = ViaExecutor::new(EmptiedUnderMarkAgain {
+        inner: a.rpc(),
+        shared: theirs_again(&shared),
+        did: did.clone(),
+        secret: words::master_key(&seed, 0).unwrap().to_bytes(),
+        emptier: d.rpc(),
+        remover: c.rpc(),
+        remover_vault: &c_vault,
+        puts: Cell::new(0),
+        emptied: RefCell::new(None),
+        removed: RefCell::new(None),
+    });
+    let kept = remove_master(&racing, &theirs_again(&shared), &did, &OsRandom).await;
+    racing
+        .rpc()
+        .emptied
+        .borrow_mut()
+        .take()
+        .expect("D's removal ran before the re-mark's record read")
+        .unwrap();
+    // C's removal ran after the re-mark's write, or, when no write came, now.
+    let c_removed = match racing.rpc().removed.borrow_mut().take() {
+        Some(removed) => removed,
+        None => remove_master(&c, &c_vault, &did, &OsRandom).await,
+    };
+    assert_eq!(shared.master_index(&scid).unwrap(), None);
+    one_copy_left(&c, &shared, &c_vault, &did, &kept, &c_removed).await;
+}
+
+/// A removal that stops for good after its record write (the app is closed): its future is
+/// dropped there, with its releases on the device's note and on the vault's note.
+struct CutAfterWrite<'a> {
+    inner: &'a TestExecutor,
+    cut: Cell<bool>,
+}
+
+#[async_trait(?Send)]
+impl ExecutorRpc for CutAfterWrite<'_> {
+    async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        let answer = self.inner.call(method, params).await;
+        if method == "identity.recordPut" && answer.is_ok() {
+            self.cut.set(true);
+            std::future::pending::<()>().await;
+        }
+        answer
+    }
+}
+
+/// Lal's P3 at bd396608c: a removal cut off after its write leaves its release on A's note and
+/// on the note of vault V. A's next take clears A's note, so the next removal does not find
+/// that release below its own, and the release on V's note lost its last reference. Each
+/// cut-off-and-take cycle must not add a layer to V's note for good: a removal's release on V's
+/// note retires the releases there that read an older custody epoch.
+#[tokio::test]
+async fn cut_off_removals_between_takes_do_not_grow_the_vaults_note() {
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let c = ViaExecutor::new(TestExecutor::new(&store, 3));
+    let shared = Arc::new(MemoryVault::new());
+    let c_vault = MemoryVault::new();
+    let did = create(&a, &shared, 155).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    holding_app(
+        &a,
+        &shared,
+        &did,
+        &c,
+        &c_vault,
+        entry("Desk", DeviceKind::DesktopApp),
+    )
+    .await;
+    for cycle in 0..3 {
+        let cut = ViaExecutor::new(CutAfterWrite {
+            inner: a.rpc(),
+            cut: Cell::new(false),
+        });
+        tokio::select! {
+            removed = remove_master(&cut, &*shared, &did, &OsRandom) => {
+                panic!("cycle {cycle}: the removal was not cut off: {removed:?}")
+            }
+            () = async {
+                while !cut.rpc().cut.get() {
+                    tokio::task::yield_now().await;
+                }
+            } => {}
+        }
+        let layers = note_of(&*shared, &scid, ad4m_identity_client::VAULT_NOTE)
+            .expect("the cut-off removal's release is on V's note")
+            .layers();
+        assert_eq!(layers.len(), 1, "cycle {cycle}: {layers:?}");
+        // A takes #0 again from C: its store moves the epoch, and its receipt, once marked,
+        // clears A's note with the release in it.
+        send_master(&c, &c_vault, &did, "d1", &SystemClock, &OsRandom)
+            .await
+            .unwrap();
+        let taken = take_master(&a, &*shared, &OsRandom)
+            .await
+            .unwrap()
+            .expect("the master key waits in A's inbox");
+        taken.record.unwrap();
+        assert_eq!(note_of(&*shared, &scid, "d1"), None, "cycle {cycle}");
+    }
+    remove_master(&a, &*shared, &did, &OsRandom).await.unwrap();
+    assert_eq!(
+        note_of(&*shared, &scid, ad4m_identity_client::VAULT_NOTE),
+        None,
+        "a finished removal leaves no release on V's note"
+    );
+    assert_eq!(shared.master_index(&scid).unwrap(), None);
 }

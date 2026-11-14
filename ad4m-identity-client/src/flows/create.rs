@@ -183,6 +183,7 @@ pub async fn create_from_seed<R: ExecutorRpc>(
         entry: DeviceEntry {
             holds_master: HoldsMaster::Yes,
             master_index: Some(0),
+            vault: Some(vault.vault_id(&created.scid)?),
             ..this_device
         },
     };
@@ -218,7 +219,8 @@ pub async fn create_from_seed<R: ExecutorRpc>(
             &reader,
             random,
         )
-        .await;
+        .await
+        .map(|marked| marked.version);
     }
     created.record = Some(written);
     Ok(created)
