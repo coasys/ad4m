@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
 import { test } from "node:test";
 import type WebSocket from "ws";
 import {
   authenticateAgent,
   clientSideRotate,
   collectMessages,
+  createRoom,
   createSignedLink,
   createTestAgent,
   getJson,
@@ -40,8 +40,8 @@ function closeAll(...sockets: WebSocket[]): void {
 
 test("ws auth: sending an invalid token as the first message closes the socket with auth-error", async () => {
   await withServer(async (server) => {
-    const roomId = randomUUID();
-    // Create the room first so the roomId exists.
+    const roomId = await createRoom(server.url);
+    // A key signs in first, so the room has a session.
     const admin = await createTestAgent();
     await authenticateAgent(server.url, roomId, admin);
 
@@ -62,7 +62,7 @@ test("ws auth: sending an invalid token as the first message closes the socket w
 test("ws auth: no auth message within timeout closes the socket", async () => {
   const server = await startTestServer({ wsOptions: { authTimeoutMs: 200 } });
   try {
-    const roomId = randomUUID();
+    const roomId = await createRoom(server.url);
     const admin = await createTestAgent();
     await authenticateAgent(server.url, roomId, admin);
 
@@ -83,12 +83,11 @@ test("ws auth: no auth message within timeout closes the socket", async () => {
 
 test("on connect, agent receives an online-agents snapshot; a second connect triggers peer-joined", async () => {
   await withServer(async (server) => {
-    const roomId = randomUUID();
+    const roomId = await createRoom(server.url);
     const agentA = await createTestAgent();
     const agentB = await createTestAgent();
     const tokenA = await authenticateAgent(server.url, roomId, agentA);
 
-    await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: agentB.did }, tokenA);
     const tokenB = await authenticateAgent(server.url, roomId, agentB);
 
     const wsA = await openAuthenticatedWs(server.wsUrl, roomId, tokenA);
@@ -105,12 +104,11 @@ test("on connect, agent receives an online-agents snapshot; a second connect tri
 
 test("a key grant tells the grantee's sockets which versions it received", async () => {
   await withServer(async (server) => {
-    const roomId = randomUUID();
+    const roomId = await createRoom(server.url);
     const admin = await createTestAgent();
     const adminToken = await authenticateAgent(server.url, roomId, admin);
     const { roomKey } = await clientSideRotate(server.url, roomId, adminToken);
     const member = await createTestAgent();
-    await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: member.did }, adminToken);
     const memberToken = await authenticateAgent(server.url, roomId, member);
     const memberWs = await openAuthenticatedWs(server.wsUrl, roomId, memberToken);
     const memberMessages = collectMessages(memberWs);
@@ -128,11 +126,10 @@ test("a key grant tells the grantee's sockets which versions it received", async
 
 test("committing a diff over HTTP broadcasts it to other WS-connected agents, excluding the committer", async () => {
   await withServer(async (server) => {
-    const roomId = randomUUID();
+    const roomId = await createRoom(server.url);
     const agentA = await createTestAgent();
     const agentB = await createTestAgent();
     const tokenA = await authenticateAgent(server.url, roomId, agentA);
-    await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: agentB.did }, tokenA);
     const tokenB = await authenticateAgent(server.url, roomId, agentB);
 
     const wsA = await openAuthenticatedWs(server.wsUrl, roomId, tokenA);
@@ -164,13 +161,11 @@ test("committing a diff over HTTP broadcasts it to other WS-connected agents, ex
 
 test("telepresence-signal routes only to the target DID's sockets", async () => {
   await withServer(async (server) => {
-    const roomId = randomUUID();
+    const roomId = await createRoom(server.url);
     const agentA = await createTestAgent();
     const agentB = await createTestAgent();
     const agentC = await createTestAgent();
     const tokenA = await authenticateAgent(server.url, roomId, agentA);
-    await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: agentB.did }, tokenA);
-    await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: agentC.did }, tokenA);
     const tokenB = await authenticateAgent(server.url, roomId, agentB);
     const tokenC = await authenticateAgent(server.url, roomId, agentC);
 
@@ -194,13 +189,11 @@ test("telepresence-signal routes only to the target DID's sockets", async () => 
 
 test("telepresence-broadcast fans out to all other connected agents", async () => {
   await withServer(async (server) => {
-    const roomId = randomUUID();
+    const roomId = await createRoom(server.url);
     const agentA = await createTestAgent();
     const agentB = await createTestAgent();
     const agentC = await createTestAgent();
     const tokenA = await authenticateAgent(server.url, roomId, agentA);
-    await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: agentB.did }, tokenA);
-    await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: agentC.did }, tokenA);
     const tokenB = await authenticateAgent(server.url, roomId, agentB);
     const tokenC = await authenticateAgent(server.url, roomId, agentC);
 
@@ -223,11 +216,10 @@ test("telepresence-broadcast fans out to all other connected agents", async () =
 
 test("set-online-status broadcasts a status-changed delta (not the full roster)", async () => {
   await withServer(async (server) => {
-    const roomId = randomUUID();
+    const roomId = await createRoom(server.url);
     const agentA = await createTestAgent();
     const agentB = await createTestAgent();
     const tokenA = await authenticateAgent(server.url, roomId, agentA);
-    await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: agentB.did }, tokenA);
     const tokenB = await authenticateAgent(server.url, roomId, agentB);
 
     const wsA = await openAuthenticatedWs(server.wsUrl, roomId, tokenA);
@@ -254,11 +246,10 @@ test("disconnect marks an agent offline (peer-left) only after the grace period 
   // timer on loaded CI runners (default 300ms can be tight).
   const server = await startTestServer({ telepresenceGraceMs: 1000 });
   try {
-    const roomId = randomUUID();
+    const roomId = await createRoom(server.url);
     const agentA = await createTestAgent();
     const agentB = await createTestAgent();
     const tokenA = await authenticateAgent(server.url, roomId, agentA);
-    await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: agentB.did }, tokenA);
     const tokenB = await authenticateAgent(server.url, roomId, agentB);
 
     const wsA = await openAuthenticatedWs(server.wsUrl, roomId, tokenA);
@@ -290,11 +281,10 @@ test("reconnecting within the grace period does not trigger peer-left", async ()
   // the settle wait (500ms) fits comfortably inside the window.
   const server = await startTestServer({ telepresenceGraceMs: 1000 });
   try {
-    const roomId = randomUUID();
+    const roomId = await createRoom(server.url);
     const agentA = await createTestAgent();
     const agentB = await createTestAgent();
     const tokenA = await authenticateAgent(server.url, roomId, agentA);
-    await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: agentB.did }, tokenA);
     const tokenB = await authenticateAgent(server.url, roomId, agentB);
 
     const wsA1 = await openAuthenticatedWs(server.wsUrl, roomId, tokenA);
@@ -324,11 +314,10 @@ test("ws rate limiting: excess messages are silently dropped", async () => {
     wsOptions: { wsMessageLimit: 3, wsMessageWindowMs: 5000 },
   });
   try {
-    const roomId = randomUUID();
+    const roomId = await createRoom(server.url);
     const agentA = await createTestAgent();
     const agentB = await createTestAgent();
     const tokenA = await authenticateAgent(server.url, roomId, agentA);
-    await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: agentB.did }, tokenA);
     const tokenB = await authenticateAgent(server.url, roomId, agentB);
 
     const wsA = await openAuthenticatedWs(server.wsUrl, roomId, tokenA);
@@ -353,7 +342,7 @@ test("ws rate limiting: excess messages are silently dropped", async () => {
 
 test("commit rejects links missing required structural fields", async () => {
   await withServer(async (server) => {
-    const roomId = randomUUID();
+    const roomId = await createRoom(server.url);
     const agent = await createTestAgent();
     const token = await authenticateAgent(server.url, roomId, agent);
 
@@ -405,7 +394,7 @@ test("session sweep removes expired sessions from the database", async () => {
     sessionSweepIntervalMs: 100, // sweep every 100ms for test speed
   });
   try {
-    const roomId = randomUUID();
+    const roomId = await createRoom(server.url);
     const agent = await createTestAgent();
     await authenticateAgent(server.url, roomId, agent);
 
@@ -429,7 +418,7 @@ test("session sweep removes expired sessions from the database", async () => {
 
 test("render response includes sequence number", async () => {
   await withServer(async (server) => {
-    const roomId = randomUUID();
+    const roomId = await createRoom(server.url);
     const agent = await createTestAgent();
     const token = await authenticateAgent(server.url, roomId, agent);
 

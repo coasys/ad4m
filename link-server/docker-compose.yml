@@ -9,6 +9,12 @@ services:
       PORT: "${PORT:-3456}"
       DATA_DIR: /data
       AUTO_ADMIT: "${AUTO_ADMIT:-false}"
+      # The server's name in /.well-known/coasys-link-server.
+      NAME: "${NAME:-}"
+      # The identity store that resolves keys to persons, and the keys its heads are signed
+      # with (comma-separated multikeys). Without them no person can be admitted.
+      STORE_URL: "${STORE_URL:-}"
+      STORE_HEAD_KEYS: "${STORE_HEAD_KEYS:-}"
     restart: unless-stopped
 
 volumes:

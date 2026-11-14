@@ -31,7 +31,10 @@ request box), is informative.
 | `src/link.rs` | device linking: `Offer`, `SignedOffer`, `Claim`, `ClaimBody`, `ClaimView`, `OfferState`, `LinkError`; `offer_commit`, `sign_offer`/`verify_offer`, `make_claim`/`verify_claim`, `verify_claim_view` (the holder's check of the store's claim view before `add_claimed`), `check_secret`, `match_code`, `check_add` (conditions 2–5 of the store's claim check, `identity-store/AGENTS.md`), `may_keep_master` (whether the log lets a device key keep the master key: a standing key of the incept, or an `add` whose co-signature is over a claim that said `canKeepMaster`; never the record's kind), `OfferString` (offer string and link), `DeviceString` |
 | `src/build.rs` | feature `build`: `*_unsigned` builders, `signing_input`, `attach_proof`, `Signer`, `cosign`, `incept_human`, `add_claimed`, `revoke`, `scope`, `rotate`, `sign_domain` |
 | `src/words.rs` | feature `words`: `generate`, `parse`, `seed`, `master_key`, `salt`, `next_commitment`, `recovery_secret`, `derive_ed25519` |
-| `src/wasm.rs` | feature `wasm`: the `KelChain` class (`fold`, `import`) and `KelHandle` (`state`, `didDocument(version?, alsoKnownAs?)`); `MembershipReplay` (`apply`, `members`, `isMember`, `admits`; throws `{code: "refused", reason}` for a refused link) |
+| `src/wire.rs` | what a link server checks with no executor behind it: `WireLink` (`{author, timestamp, data, proof}`), `wire_link_hash`, `wire_signature_holds`, `judge_wire_link` (the executor's judgement, into a `JudgedLink`), `author_of` → `KeyAuthor` (the person a key speaks for at a trusted seq), `SignedHead` and `trusted_seq` (a store-signed head checked against the trusted store keys), `ROOM_KEY_DOMAIN`, `room_key_signing_bytes`, `verify_room_key` (a device key's signature on its X25519 key) |
+| `src/wasm.rs` | feature `wasm`: the `KelChain` class (`fold`, `import`) and `KelHandle` (`state`, `didDocument(version?, alsoKnownAs?)`, `trustedSeq`, `judgeLink`, `authorOf`); `MembershipReplay` (`apply`, `members`, `isMember`, `admits`; throws `{code: "refused", reason}` for a refused link); `judgeLinkWithoutLog`, `wireLinkHash`, `roomKeySigningBytes`, `verifyRoomKey` |
+| `build-node.sh` | builds the `wasm` exports `--target nodejs` into `link-server/identity-core/` (generated, gitignored), with `cargo rustc --crate-type cdylib` so the crate stays an rlib; run it before building or testing the link server |
+| `vectors/link-server-identities.json` | the logs, keys and signed heads of the link server's test identities (alice, bob, dave with a revoked key, a bot, ...), written by `tests/link_server_fixture.rs` |
 | `tests/common/mod.rs` | fixed keys, the `Log` builder, the refusal cases, the vector builders and checkers |
 
 ## Rules
@@ -165,3 +168,9 @@ proofs' presence and purpose still checked.
 `vectors/fold.json` holds `cases` (events as JSON values) and `textCases` (events as JSON text,
 for what a value cannot hold: a duplicate member name), from `refusal_cases()` and
 `text_refusal_cases()`.
+`tests/wire.rs` covers the wire link hash and signature, each judgement of `judge_wire_link`,
+`author_of`, `trusted_seq` (another store's key, another scid, a hash the log does not hold, a
+seq past the log, a forged signature) and the room-key signature; `tests/wire_wasm.rs` runs
+the exports on wasm32. `tests/link_server_fixture.rs` fails when
+`vectors/link-server-identities.json` is stale; regenerate with
+`AD4M_IDENTITY_WRITE_VECTORS=1 cargo test -p ad4m-identity-core --features build --test link_server_fixture`.

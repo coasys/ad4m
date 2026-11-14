@@ -13,12 +13,12 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
 import type WebSocket from "ws";
 
 import {
   startTestServer,
   createTestAgent,
+  createRoom,
   authenticateAgent,
   createSignedLink,
   openLink,
@@ -49,7 +49,7 @@ function closeAll(...sockets: WebSocket[]): void {
   for (const ws of sockets) ws.close();
 }
 
-/** Authenticate both agents against the same room (autoAdmit handles ACL). */
+/** Authenticate both agents against the same room (autoAdmit admits both). */
 async function authPair(
   url: string,
   roomId: string,
@@ -67,7 +67,7 @@ async function authPair(
 
 test("late joiner receives all prior links via /render bootstrap", async () => {
   await withServer(async (server) => {
-    const roomId = randomUUID();
+    const roomId = await createRoom(server.url);
     const agentA = await createTestAgent();
     const agentB = await createTestAgent();
 
@@ -116,7 +116,7 @@ test("late joiner receives all prior links via /render bootstrap", async () => {
 
 test("real-time WS push: A commits, B receives the diff via WebSocket", async () => {
   await withServer(async (server) => {
-    const roomId = randomUUID();
+    const roomId = await createRoom(server.url);
     const agentA = await createTestAgent();
     const agentB = await createTestAgent();
     const [tokenA, tokenB] = await authPair(server.url, roomId, agentA, agentB);
@@ -157,7 +157,7 @@ test("real-time WS push: A commits, B receives the diff via WebSocket", async ()
 
 test("bidirectional sync: both agents commit and receive each other's links", async () => {
   await withServer(async (server) => {
-    const roomId = randomUUID();
+    const roomId = await createRoom(server.url);
     const agentA = await createTestAgent();
     const agentB = await createTestAgent();
     const [tokenA, tokenB] = await authPair(server.url, roomId, agentA, agentB);
@@ -225,7 +225,7 @@ test("bidirectional sync: both agents commit and receive each other's links", as
 
 test("offline catch-up: B disconnects, A commits, B catches up via /sync?since=N", async () => {
   await withServer(async (server) => {
-    const roomId = randomUUID();
+    const roomId = await createRoom(server.url);
     const agentA = await createTestAgent();
     const agentB = await createTestAgent();
     const [tokenA, tokenB] = await authPair(server.url, roomId, agentA, agentB);
@@ -303,7 +303,7 @@ test("offline catch-up: B disconnects, A commits, B catches up via /sync?since=N
 
 test("OR-Set convergence: interleaved adds/removes from both agents yield same revision", async () => {
   await withServer(async (server) => {
-    const roomId = randomUUID();
+    const roomId = await createRoom(server.url);
     const agentA = await createTestAgent();
     const agentB = await createTestAgent();
     const [tokenA, tokenB] = await authPair(server.url, roomId, agentA, agentB);
@@ -374,7 +374,7 @@ test("OR-Set convergence: interleaved adds/removes from both agents yield same r
 
 test("WS push and HTTP sync return identical data for the same diffs", async () => {
   await withServer(async (server) => {
-    const roomId = randomUUID();
+    const roomId = await createRoom(server.url);
     const agentA = await createTestAgent();
     const agentB = await createTestAgent();
     const [tokenA, tokenB] = await authPair(server.url, roomId, agentA, agentB);
@@ -427,8 +427,8 @@ test("WS push and HTTP sync return identical data for the same diffs", async () 
 
 test("room isolation: commits in room-1 do not leak into room-2", async () => {
   await withServer(async (server) => {
-    const room1 = randomUUID();
-    const room2 = randomUUID();
+    const room1 = await createRoom(server.url);
+    const room2 = await createRoom(server.url);
     const agentA = await createTestAgent();
 
     // A authenticates in both rooms
@@ -481,7 +481,7 @@ test("room isolation: commits in room-1 do not leak into room-2", async () => {
 
 test("WS push reaches all connected agents except the committer", async () => {
   await withServer(async (server) => {
-    const roomId = randomUUID();
+    const roomId = await createRoom(server.url);
     const agentA = await createTestAgent();
     const agentB = await createTestAgent();
     const agentC = await createTestAgent();
@@ -530,7 +530,7 @@ test("WS push reaches all connected agents except the committer", async () => {
 
 test("burst commit: 50 links committed in rapid succession all sync correctly", async () => {
   await withServer(async (server) => {
-    const roomId = randomUUID();
+    const roomId = await createRoom(server.url);
     const agentA = await createTestAgent();
     const agentB = await createTestAgent();
     const [tokenA, tokenB] = await authPair(server.url, roomId, agentA, agentB);
@@ -568,7 +568,7 @@ test("burst commit: 50 links committed in rapid succession all sync correctly", 
 
 test("sequence numbers increase monotonically across interleaved commits from both agents", async () => {
   await withServer(async (server) => {
-    const roomId = randomUUID();
+    const roomId = await createRoom(server.url);
     const agentA = await createTestAgent();
     const agentB = await createTestAgent();
     const [tokenA, tokenB] = await authPair(server.url, roomId, agentA, agentB);
@@ -617,7 +617,7 @@ test("sequence numbers increase monotonically across interleaved commits from bo
 
 test("WS reconnect: second WS session receives diffs committed during the gap", async () => {
   await withServer(async (server) => {
-    const roomId = randomUUID();
+    const roomId = await createRoom(server.url);
     const agentA = await createTestAgent();
     const agentB = await createTestAgent();
     const [tokenA, tokenB] = await authPair(server.url, roomId, agentA, agentB);

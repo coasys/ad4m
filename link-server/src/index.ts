@@ -7,6 +7,9 @@ interface CliArgs {
   host: string;
   dataDir: string;
   autoAdmit: boolean;
+  name?: string;
+  storeUrl?: string;
+  storeHeadKeys: string[];
   operatorPort?: number;
   operatorHost: string;
   operatorTokenFile?: string;
@@ -23,7 +26,15 @@ Options:
   --port <number>    Port to listen on (default: 3456)
   --data <dir>       Directory for the SQLite database (default: ./data)
   --host <address>   Address to bind (default: 0.0.0.0)
-  --auto-admit       Admit every agent that authenticates (default: allowlist)
+  --name <name>      The server's name in /.well-known/coasys-link-server
+                     (default: link-server)
+  --store-url <url>  The identity store's base URL: whom each key speaks for.
+                     Without it no person can be admitted to a room
+  --store-head-keys <multikey,...>
+                     The store keys whose signed heads are trusted
+  --auto-admit       Admit every key that authenticates, member or not
+                     (tests and development only; refused when
+                     NODE_ENV=production). Default: by the room's membership
   --operator-port <number>
                      Also serve the operator admission UI and API on this
                      port (loopback only; off by default)
@@ -40,9 +51,10 @@ Options:
                      Instance name shown on the admission page (e.g. staging)
   -h, --help         Show this help
 
-Each option also reads an environment variable: PORT, DATA_DIR, HOST,
-AUTO_ADMIT, OPERATOR_PORT, OPERATOR_HOST, OPERATOR_TOKEN_FILE,
-OPERATOR_ORIGINS (comma-separated), OPERATOR_LABEL.
+Each option also reads an environment variable: PORT, DATA_DIR, HOST, NAME,
+STORE_URL, STORE_HEAD_KEYS (comma-separated), AUTO_ADMIT, OPERATOR_PORT,
+OPERATOR_HOST, OPERATOR_TOKEN_FILE, OPERATOR_ORIGINS (comma-separated),
+OPERATOR_LABEL.
 `;
 
 function envBool(key: string): boolean {
@@ -62,11 +74,14 @@ function parseArgs(argv: string[]): CliArgs {
   let host = process.env.HOST ?? "0.0.0.0";
   let dataDir = process.env.DATA_DIR ?? "./data";
   let autoAdmit = envBool("AUTO_ADMIT");
+  let name = process.env.NAME || undefined;
+  let storeUrl = process.env.STORE_URL || undefined;
+  let storeHeadKeys = commaList(process.env.STORE_HEAD_KEYS);
   // The operator port must be fixed: a reverse proxy points at it.
   let operatorPort = process.env.OPERATOR_PORT ? parsePort("OPERATOR_PORT", process.env.OPERATOR_PORT, 1) : undefined;
   let operatorHost = process.env.OPERATOR_HOST ?? "127.0.0.1";
   let operatorTokenFile = process.env.OPERATOR_TOKEN_FILE || undefined;
-  const operatorOrigins = (process.env.OPERATOR_ORIGINS ?? "").split(",").map((o) => o.trim()).filter(Boolean);
+  const operatorOrigins = commaList(process.env.OPERATOR_ORIGINS);
   let operatorLabel = process.env.OPERATOR_LABEL || undefined;
 
   for (let i = 0; i < argv.length; i++) {
@@ -118,6 +133,15 @@ function parseArgs(argv: string[]): CliArgs {
       case "--auto-admit":
         autoAdmit = true;
         break;
+      case "--name":
+        name = requireValue("--name", argv[++i]);
+        break;
+      case "--store-url":
+        storeUrl = requireValue("--store-url", argv[++i]);
+        break;
+      case "--store-head-keys":
+        storeHeadKeys = commaList(requireValue("--store-head-keys", argv[++i]));
+        break;
       case "-h":
       case "--help":
         console.log(USAGE);
@@ -128,6 +152,12 @@ function parseArgs(argv: string[]): CliArgs {
         console.log(USAGE);
         process.exit(1);
     }
+  }
+
+  // Auto-admit lets every key into every room: never on a production server.
+  if (autoAdmit && process.env.NODE_ENV === "production") {
+    console.error("AUTO_ADMIT (--auto-admit) is refused when NODE_ENV=production: it admits every key to every room");
+    process.exit(1);
   }
 
   if (operatorPort !== undefined) {
@@ -145,7 +175,14 @@ function parseArgs(argv: string[]): CliArgs {
     }
   }
 
-  return { port, host, dataDir, autoAdmit, operatorPort, operatorHost, operatorTokenFile, operatorOrigins, operatorLabel };
+  return {
+    port, host, dataDir, autoAdmit, name, storeUrl, storeHeadKeys,
+    operatorPort, operatorHost, operatorTokenFile, operatorOrigins, operatorLabel,
+  };
+}
+
+function commaList(value: string | undefined): string[] {
+  return (value ?? "").split(",").map((v) => v.trim()).filter(Boolean);
 }
 
 function parsePort(name: string, value: string | undefined, min = 0): number {
@@ -172,6 +209,9 @@ async function main(): Promise<void> {
   const { app, operatorApp } = await buildServer({
     dataDir: args.dataDir,
     autoAdmit: args.autoAdmit,
+    name: args.name,
+    storeUrl: args.storeUrl,
+    storeHeadKeys: args.storeHeadKeys,
     logger: true,
     operator:
       operatorToken !== undefined

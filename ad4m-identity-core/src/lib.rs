@@ -30,6 +30,7 @@ pub mod membership;
 pub mod pow;
 pub mod record;
 pub mod requests;
+pub mod wire;
 
 #[cfg(feature = "build")]
 pub mod build;

@@ -154,6 +154,15 @@ jobs:
           cache: npm
           cache-dependency-path: link-server/package-lock.json
 
+      # The identity core's WASM binding for Node (link-server/identity-core/, generated and
+      # gitignored): the server judges membership links with it, and the image ships it.
+      - name: Build the identity core binding
+        run: |
+          rustup target add wasm32-unknown-unknown
+          locked="$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/version = |"/, ""); print; exit }' Cargo.lock)"
+          cargo install wasm-bindgen-cli --version "$locked" --locked --root target/wasm-tools
+          bash ad4m-identity-core/build-node.sh
+
       - name: link-server tests
         working-directory: link-server
         run: |

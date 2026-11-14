@@ -10,6 +10,10 @@ COPY package*.json ./
 RUN npm ci
 COPY tsconfig.json ./
 COPY src/ ./src/
+# The identity core's WASM binding (membership judgement, key logs). It is generated, not
+# committed: run ad4m-identity-core/build-node.sh (from the repo) before `docker build`, so
+# link-server/identity-core/ is in the build context.
+COPY identity-core/ ./identity-core/
 RUN npm run build
 # Strip devDependencies (typescript, tsx, @types/*) now that the build is
 # done, so the compiled native addon ships without dragging the toolchain
@@ -21,10 +25,11 @@ WORKDIR /app
 COPY package*.json ./
 COPY --from=build /app/node_modules/ ./node_modules/
 COPY --from=build /app/dist/ ./dist/
+COPY --from=build /app/identity-core/ ./identity-core/
 RUN mkdir -p /data && chown -R node:node /data /app
 EXPOSE 3456
 VOLUME /data
-# PORT, DATA_DIR, AUTO_ADMIT read from env vars
+# PORT, DATA_DIR, AUTO_ADMIT, NAME, STORE_URL, STORE_HEAD_KEYS read from env vars
 # (see src/index.ts parseArgs). Defaults: port 3456, data ./data.
 ENV DATA_DIR=/data
 USER node
