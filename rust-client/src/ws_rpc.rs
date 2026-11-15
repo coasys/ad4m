@@ -13,7 +13,9 @@ use tokio::sync::{broadcast, oneshot, watch, Mutex};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::{connect_async_with_config, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{
+    client_async_with_config, connect_async_with_config, MaybeTlsStream, WebSocketStream,
+};
 
 static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -390,6 +392,22 @@ fn ws_config() -> WebSocketConfig {
     }
 }
 
+/// The loopback addresses to dial for a plain `ws://localhost` URL, so the
+/// name never goes to the resolver: `localhost` is exempt from the plaintext
+/// refusal by name (connect's `plaintext_remote`), so it must also be
+/// loopback by destination (N1). `None`: dial as usual.
+pub(crate) fn loopback_dial_addrs(url: &str) -> Option<Vec<std::net::SocketAddr>> {
+    let url = reqwest::Url::parse(url).ok()?;
+    if url.scheme() != "ws" || !url.host_str()?.eq_ignore_ascii_case("localhost") {
+        return None;
+    }
+    let port = url.port_or_known_default()?;
+    Some(vec![
+        std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port)),
+        std::net::SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, port)),
+    ])
+}
+
 impl WsRpcClient {
     pub async fn connect(executor_url: &str, token: &str) -> Result<Self> {
         let url = to_ws_url(executor_url, token);
@@ -436,8 +454,22 @@ impl WsRpcClient {
     }
 
     async fn open_socket(url: &str, executor_url_for_errors: &str) -> Result<(WsSink, WsSource)> {
-        let (ws_stream, _) = connect_async_with_config(url, Some(ws_config()), false)
-            .await
+        let opened = match loopback_dial_addrs(url) {
+            // The handshake keeps the URL (Host: localhost); only the TCP
+            // destination is pinned.
+            Some(addrs) => match TcpStream::connect(&addrs[..]).await {
+                Ok(tcp) => {
+                    client_async_with_config(url, MaybeTlsStream::Plain(tcp), Some(ws_config()))
+                        .await
+                        .map_err(|e| e.to_string())
+                }
+                Err(e) => Err(e.to_string()),
+            },
+            None => connect_async_with_config(url, Some(ws_config()), false)
+                .await
+                .map_err(|e| e.to_string()),
+        };
+        let (ws_stream, _) = opened
             // Named without the token: callers print this error.
             .map_err(|e| {
                 anyhow!(
@@ -2329,6 +2361,45 @@ mod tests {
             .unwrap();
         assert_eq!(result, Value::Bool(true));
         drop(rx);
+        client.close().await;
+    }
+
+    /// N1 (round 3): plain `ws://localhost` dials 127.0.0.1 and ::1, never
+    /// the resolver; other hosts and TLS dial as usual.
+    #[test]
+    fn localhost_dials_loopback_literals() {
+        use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+        let both = Some(vec![
+            SocketAddr::from((Ipv4Addr::LOCALHOST, 12000)),
+            SocketAddr::from((Ipv6Addr::LOCALHOST, 12000)),
+        ]);
+        assert_eq!(
+            loopback_dial_addrs("ws://localhost:12000/api/v1/ws?token=t"),
+            both
+        );
+        assert_eq!(loopback_dial_addrs("ws://LocalHost:12000/api/v1/ws"), both);
+        assert_eq!(
+            loopback_dial_addrs("ws://localhost/api/v1/ws"),
+            Some(vec![
+                SocketAddr::from((Ipv4Addr::LOCALHOST, 80)),
+                SocketAddr::from((Ipv6Addr::LOCALHOST, 80)),
+            ])
+        );
+        assert_eq!(loopback_dial_addrs("ws://localhost.evil.example:1/"), None);
+        assert_eq!(loopback_dial_addrs("ws://127.0.0.1:12000/"), None);
+        assert_eq!(loopback_dial_addrs("wss://localhost:12000/"), None);
+    }
+
+    /// N1: `http://localhost` reaches an executor on 127.0.0.1 through the
+    /// literal dial (and the Host header still names localhost).
+    #[tokio::test]
+    async fn a_localhost_url_connects_over_loopback() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let url = fake.url().replace("127.0.0.1", "localhost");
+        assert!(url.contains("localhost"), "{url}");
+        let client = WsRpcClient::connect(&url, "").await.unwrap();
+        assert!(client.is_connected());
         client.close().await;
     }
 

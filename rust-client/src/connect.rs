@@ -352,6 +352,16 @@ impl WsIo {
         Self {
             http: reqwest::Client::builder()
                 .timeout(HEALTH_TIMEOUT)
+                // `localhost` is loopback by destination, not by whatever the
+                // resolver says (N1); the WebSocket dial pins it the same way
+                // (`ws_rpc::loopback_dial_addrs`). Ports come from the URL.
+                .resolve_to_addrs(
+                    "localhost",
+                    &[
+                        (std::net::Ipv4Addr::LOCALHOST, 0).into(),
+                        (std::net::Ipv6Addr::LOCALHOST, 0).into(),
+                    ],
+                )
                 .build()
                 .expect("reqwest client"),
         }
@@ -602,7 +612,8 @@ pub fn normalize_base_url(url: &str) -> String {
 
 /// Whether credentials sent to `base_url` travel unencrypted off this
 /// machine: plain `http` (after `normalize_base_url`) to a host that is not
-/// loopback (`localhost`, 127.0.0.0/8, `::1`).
+/// loopback (`localhost`, 127.0.0.0/8, `::1`). `localhost` passes by name,
+/// so `WsIo` never resolves it: both its dials go to 127.0.0.1 / ::1.
 fn plaintext_remote(base_url: &str) -> bool {
     let Ok(url) = reqwest::Url::parse(base_url) else {
         return true; // unparsable: do not vouch for it
@@ -1687,6 +1698,32 @@ mod tests {
         ] {
             assert!(plaintext_remote(bad), "{bad}");
         }
+    }
+
+    /// N1 (round 3): `WsIo`'s health check reaches `localhost` on the
+    /// loopback literal it pins (an executor listening on 127.0.0.1 only).
+    #[tokio::test]
+    async fn the_health_check_dials_localhost_on_loopback() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let n = sock.read(&mut buf).await.unwrap();
+            let req = String::from_utf8_lossy(&buf[..n]).to_lowercase();
+            assert!(req.contains("host: localhost"), "{req}");
+            let body = r#"{"status":"ok"}"#;
+            let reply = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            sock.write_all(reply.as_bytes()).await.unwrap();
+        });
+        WsIo::new()
+            .healthy(&format!("http://localhost:{port}"))
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
