@@ -224,8 +224,13 @@ enum ConfigCommand {
     Print(RunArgs),
 }
 
-#[tokio::main(flavor = "multi_thread")]
-async fn main() -> Result<()> {
+/// The executor's main runtime has at most
+/// [`rust_executor::thread_pools::MAIN_RUNTIME_MAX_WORKERS`] workers, not one per CPU.
+fn main() -> Result<()> {
+    rust_executor::thread_pools::main_runtime()?.block_on(run_main())
+}
+
+async fn run_main() -> Result<()> {
     let args = ClapApp::parse();
 
     if let Domain::Dev { command } = args.domain {
