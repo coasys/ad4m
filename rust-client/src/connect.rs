@@ -2068,6 +2068,8 @@ mod tests {
     #[tokio::test]
     async fn multi_user_new_account_creates_then_logs_in() {
         let dir = tempfile::tempdir().unwrap();
+        let created = Arc::new(AtomicBool::new(false));
+        let created2 = created.clone();
         let io = FakeIo::new(move |token, method, params| match (token, method) {
             (_, "agent.status") if token.is_empty() => Err(rpc_err(403, "missing capability")),
             (_, "agent.status") => Ok(authed_status()),
@@ -2079,11 +2081,20 @@ mod tests {
                 "requiresPassword": true,
                 "isExistingUser": false,
             })),
-            (_, "user.create") => Ok(json!({
-                "did": "did:key:new-user", "success": true, "error": null,
-            })),
+            (_, "user.create") => {
+                assert_eq!(params["email"], "new@example.com");
+                assert_eq!(params["password"], "newpass");
+                created2.store(true, Ordering::SeqCst);
+                Ok(json!({
+                    "did": "did:key:new-user", "success": true, "error": null,
+                }))
+            }
             (_, "user.login") => {
                 assert_eq!(params["password"], "newpass");
+                // No such user until `user.create` ran.
+                if !created2.load(Ordering::SeqCst) {
+                    return Err(rpc_err(401, "Invalid credentials"));
+                }
                 Ok(Value::String("jwt-new".to_string()))
             }
             (_, other) => Err(rpc_err(404, &format!("unknown {other}"))),
@@ -2101,6 +2112,17 @@ mod tests {
         assert!(prompts
             .asked
             .contains(&"password:new@example.com:true".to_string()));
+        assert!(created.load(Ordering::SeqCst), "user.create never ran");
+        let methods: Vec<String> = s.io.rpcs.lock().unwrap()[0]
+            .0
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(m, _)| m.clone())
+            .filter(|m| m.starts_with("user.create") || m.starts_with("user.login"))
+            .collect();
+        assert_eq!(methods, ["user.create", "user.login"]);
     }
 
     #[tokio::test]
