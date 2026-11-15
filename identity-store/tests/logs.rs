@@ -830,7 +830,7 @@ async fn a_signed_request_of_one_identity_is_refused_on_another_identitys_route(
 }
 
 #[tokio::test]
-async fn a_new_log_with_no_note_passes_without_a_proof_and_a_sent_proof_must_meet_the_bits() {
+async fn a_new_log_with_no_note_needs_a_proof_that_meets_the_bits() {
     let t = TestStore::new();
     let alice = Person::new("alice");
     let path = format!("/v1/logs/{}/events", alice.scid());
@@ -843,13 +843,18 @@ async fn a_new_log_with_no_note_passes_without_a_proof_and_a_sent_proof_must_mee
     let reply = t.post(&path, &both).await;
     assert_eq!(reply.status, StatusCode::BAD_REQUEST);
     assert_eq!(reply.body["error"], "vouch-and-pow");
-    // A token: no vouching service exists yet, nothing committed.
+    // A token on a store with no `VOUCH_URL`: nothing committed.
     let reply = t
         .post(&path, &json!({ "events": events, "vouch": "tok" }))
         .await;
     assert_eq!(reply.status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(reply.body["error"], "vouch-unavailable");
     assert_eq!(t.count("chain_entries"), 0);
+    // No proof at all: 403 pow.
+    let reply = t.post(&path, &json!({ "events": events })).await;
+    assert_eq!(reply.status, StatusCode::FORBIDDEN, "{}", reply.body);
+    assert_eq!(reply.body["error"], "pow");
+    assert_eq!(t.count("logs"), 0);
     // A proof for another SCID: 403 pow.
     let bob = Person::new("bob");
     let wrong = pow::solve(&bob.scid(), 8);
@@ -893,10 +898,10 @@ async fn a_new_log_with_no_note_passes_without_a_proof_and_a_sent_proof_must_mee
         )
         .await;
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
-    // No proof at all: 200 (the store has no brake yet).
-    t.publish(&bob).await;
-    let page = t.get(&format!("/v1/logs/{}", bob.scid())).await.body;
+    let page = t.get(&format!("/v1/logs/{}", alice.scid())).await.body;
     assert_eq!(page["vouched"], false);
+    assert_eq!(page["note"], Value::Null);
+    assert_eq!(t.admitted_by(&alice.scid()), "brake");
     // A proof on a log that exists: 400.
     let reply = t
         .post(
@@ -940,7 +945,7 @@ async fn a_malformed_event_or_a_wrong_scid_is_400_and_an_unknown_log_is_404() {
     let reply = t
         .post(
             &format!("/v1/logs/{}/events", alice.scid()),
-            &json!({ "events": [unsigned] }),
+            &json!({ "events": [unsigned], "pow": t.pow_for(&alice.scid()) }),
         )
         .await;
     assert_eq!(reply.status, StatusCode::BAD_REQUEST);
@@ -975,7 +980,8 @@ async fn an_event_that_names_a_member_twice_is_400_duplicate_member_and_appends_
     );
     assert_eq!(t.count("chain_entries"), 0);
     // The same event once: stored.
-    let body = format!(r#"{{"events":[{text}]}}"#);
+    let pow = t.pow_for(&alice.scid());
+    let body = format!(r#"{{"events":[{text}],"pow":{pow}}}"#);
     let reply = t.send("POST", &path, Some(body.into_bytes()), None).await;
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
 }
@@ -1528,12 +1534,13 @@ async fn an_unknown_log_is_not_stored_by_caches() {
 #[tokio::test]
 async fn logs_and_heads_are_readable_from_any_origin_and_writes_only_from_the_configured_ones() {
     let t = TestStore::with_settings(Settings {
-        pow_bits: 8,
         cors_origins: vec!["https://app.example".into()],
-        ..Settings::default()
+        ..TestStore::settings()
     });
     let alice = Person::new("alice");
-    let incept = serde_json::to_vec(&json!({ "events": [alice.json(0)] })).unwrap();
+    let incept =
+        serde_json::to_vec(&json!({ "events": [alice.json(0)], "pow": t.pow_for(&alice.scid()) }))
+            .unwrap();
 
     // A write from another origin carries no CORS grant; the store still answers it.
     let write = t

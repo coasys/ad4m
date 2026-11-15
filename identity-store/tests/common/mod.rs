@@ -3,13 +3,16 @@
 #![allow(dead_code)]
 
 pub mod agent;
+pub mod vouch;
 
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use ad4m_identity_core::link::{Claim, ClaimView, OfferKind, SignedOffer};
 use ad4m_identity_core::Event;
 use axum::body::Body;
+use axum::extract::ConnectInfo;
 use axum::http::{Request, StatusCode};
 use axum::Router;
 use http_body_util::BodyExt;
@@ -37,6 +40,16 @@ pub fn verify_head(head: &ad4m_ldk::identity::SignedHead, trusted: &[String]) ->
 /// The store's clock at the start of every test.
 pub const T0: u64 = 1_800_000_000;
 
+/// The socket address every test request comes from unless it names its own (TEST-NET-1).
+pub const PEER: &str = "192.0.2.1:40000";
+
+/// The proof-of-work bits of the test stores (the default 22 costs seconds per log).
+pub const TEST_POW_BITS: u8 = 8;
+
+pub fn peer() -> SocketAddr {
+    PEER.parse().unwrap()
+}
+
 pub struct TestStore {
     pub store: Arc<Store>,
     pub router: Router,
@@ -57,12 +70,34 @@ impl TestStore {
         Self::with_settings(Self::settings())
     }
 
-    /// The settings every test store runs with unless a test gives its own.
-    fn settings() -> Settings {
+    /// The settings every test store runs with unless a test gives its own: the brake's
+    /// buckets out of the way (a test publishes many logs from one address), the proof at
+    /// [`TEST_POW_BITS`].
+    pub fn settings() -> Settings {
         Settings {
-            pow_bits: 8,
+            brake_global_per_hour: 1_000_000,
+            brake_addr_burst: 1_000_000,
+            ..Self::brake_settings()
+        }
+    }
+
+    /// The settings of the brake's tests: the default buckets, the proof at
+    /// [`TEST_POW_BITS`].
+    pub fn brake_settings() -> Settings {
+        Settings {
+            pow_bits: TEST_POW_BITS,
             feed_token: Some("mirror-token".into()),
             ..Settings::default()
+        }
+    }
+
+    /// [`Self::settings`] with the vouching service at `url`, trusting the test vouching key.
+    pub fn vouch_settings(url: &str) -> Settings {
+        Settings {
+            vouch_url: Some(url.to_string()),
+            vouch_credential: Some(identity_store::vouch::Credential(vouch::CREDENTIAL.into())),
+            vouch_keys: vec![vouch::vouching_multikey()],
+            ..Self::settings()
         }
     }
 
@@ -106,13 +141,19 @@ impl TestStore {
     /// The same store started again on its file, with the same key, clock and settings: it
     /// holds no fold, so the first use of each log is a miss.
     pub fn restarted(self) -> TestStore {
+        let settings = self.store.settings.clone();
+        self.restarted_with(settings)
+    }
+
+    /// The store started again on its file with `settings`.
+    pub fn restarted_with(self, settings: Settings) -> TestStore {
         let db = Db::open(self.dir.path().join("store.sqlite")).unwrap();
         let read = self.clock.clone();
         let store = Store::new(
             db,
             StoreKey::from_secret(agent::TEST_STORE_SECRET),
             Arc::new(move || read.load(Ordering::SeqCst)),
-            self.store.settings.clone(),
+            settings,
         );
         TestStore {
             router: router(store.clone()),
@@ -153,6 +194,20 @@ impl TestStore {
         signed: Option<String>,
         headers: &[(&str, &str)],
     ) -> Reply {
+        self.send_from(peer(), method, path, body, signed, headers)
+            .await
+    }
+
+    /// `send_with` over a connection from the socket address `from`.
+    pub async fn send_from(
+        &self,
+        from: SocketAddr,
+        method: &str,
+        path: &str,
+        body: Option<Vec<u8>>,
+        signed: Option<String>,
+        headers: &[(&str, &str)],
+    ) -> Reply {
         let mut request = Request::builder().method(method).uri(path);
         for (name, value) in headers {
             request = request.header(*name, *value);
@@ -163,9 +218,11 @@ impl TestStore {
         if let Some(header) = signed {
             request = request.header(REQUEST_HEADER, header);
         }
-        let request = request
+        let mut request = request
             .body(body.map(Body::from).unwrap_or_else(Body::empty))
             .unwrap();
+        // What `serve`'s `into_make_service_with_connect_info` records for each connection.
+        request.extensions_mut().insert(ConnectInfo(from));
         let response = self.router.clone().oneshot(request).await.unwrap();
         let status = response.status();
         let headers = response.headers().clone();
@@ -199,17 +256,42 @@ impl TestStore {
             .await
     }
 
-    /// `POST /v1/logs/{scid}/events` with `events`.
+    /// `POST /v1/logs/{scid}/events` with `events`. A #0 for a log the store does not hold
+    /// carries a proof of work at the store's bits, as a client's does.
     pub async fn append(&self, scid: &str, events: &[&Event]) -> Reply {
+        self.append_from(peer(), scid, events).await
+    }
+
+    /// `append` from the socket address `from`.
+    pub async fn append_from(&self, from: SocketAddr, scid: &str, events: &[&Event]) -> Reply {
+        let mut body = Self::append_body(events);
+        if events.first().is_some_and(|e| e.seq == 0) && self.store.head(scid).unwrap().is_none() {
+            body["pow"] = self.pow_for(scid);
+        }
+        self.send_from(
+            from,
+            "POST",
+            &format!("/v1/logs/{scid}/events"),
+            Some(serde_json::to_vec(&body).unwrap()),
+            None,
+            &[],
+        )
+        .await
+    }
+
+    /// `{events}` of an append, with no proof or token.
+    pub fn append_body(events: &[&Event]) -> Value {
         let events: Vec<Value> = events
             .iter()
             .map(|e| serde_json::to_value(e).unwrap())
             .collect();
-        self.post(
-            &format!("/v1/logs/{scid}/events"),
-            &json!({ "events": events }),
-        )
-        .await
+        json!({ "events": events })
+    }
+
+    /// A proof of work for `scid` at the store's current bits.
+    pub fn pow_for(&self, scid: &str) -> Value {
+        let bits = self.store.pow_params().bits;
+        serde_json::to_value(ad4m_identity_core::pow::solve(scid, bits)).unwrap()
     }
 
     /// Appends the person's #0 and checks the `200`.
@@ -313,6 +395,17 @@ impl TestStore {
         conn.query_row(&format!("SELECT COUNT(*) FROM \"{table}\""), [], |r| {
             r.get(0)
         })
+        .unwrap()
+    }
+
+    /// `logs.admitted_by` of `scid`.
+    pub fn admitted_by(&self, scid: &str) -> String {
+        let conn = self.store.db.lock().unwrap();
+        conn.query_row(
+            "SELECT admitted_by FROM logs WHERE scid = ?1",
+            [scid],
+            |r| r.get(0),
+        )
         .unwrap()
     }
 }

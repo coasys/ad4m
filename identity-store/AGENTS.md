@@ -16,11 +16,13 @@ workspace's `Cargo.lock`); rusqlite 0.40 on the system `libsqlite3`.
 
 | File | What |
 |---|---|
-| `src/main.rs` | `identity-store [serve]`, `identity-store keygen`; configuration from the environment |
-| `src/lib.rs` | `Store` (database, head key, clock, settings, the change signal for waits), `Settings`, `Clock`, `Fault` |
-| `src/db.rs` | the schema (the module's `chain_*` tables, type `coasys:kel`, and `logs`, `heads`, `keys`, `agents`, `nonces`, `feed`, `offers`, `claims`, `fork_signers`, `inbox`, `records`, `requests`, `buckets`), log replay, the key index (key rows with each master marked, the next-key commitment in `logs.next`) and its lookups |
+| `src/main.rs` | `identity-store [serve]`, `identity-store keygen`; configuration from the environment (`Settings::from_config`); `serve` records each socket's peer address (`ConnectInfo`) |
+| `src/lib.rs` | `Store` (database, head key, clock, settings, the published proof-of-work parameters, the HTTP client for the vouching service, the change signal for waits), `Settings` (`from_config` parses every key), `Clock`, `Fault` |
+| `src/db.rs` | the schema (the module's `chain_*` tables, type `coasys:kel`, and `logs`, `heads`, `keys`, `agents`, `nonces`, `feed`, `offers`, `claims`, `fork_signers`, `inbox`, `records`, `requests`, `buckets`, `brake`, `pow`, `notes`), log replay, the key index (key rows with each master marked, the next-key commitment in `logs.next`) and its lookups |
 | `src/held.rs` | `HeldLogs`: the folds of recently used logs at their stored heads, bounded, least recently used out; `Store::held_chain`; `fold_bytes_of` (a fold's whole heap and its live part, for the bound and the per-log budget); `state_before` (a log's state before a seq, rebuilt from a later state) |
-| `src/log.rs` | `POST …/events` with the admission checks (below), log pages, heads, the key index; `admit_new_log` (the brake's place) |
+| `src/log.rs` | `POST …/events` with the admission checks (below; `append` picks the brake or the vouch path, `append_admitted` runs the checks under an `Admission`), log pages (with the note and `vouched`), heads, the key index |
+| `src/brake.rs` | the brake on no-note logs: the sender's address (`Sender`, `client_ip`, `TRUSTED_PROXIES`, IPv6 by /64), the token buckets in `brake` (failure, global, address), the proof-of-work check with the previous bits' grace, `pow_params` (table `pow`), pruning of refilled rows, the `/v1/metrics` text |
+| `src/vouch.rs` | vouching notes: the redeem client of the platform's vouching service, the `notes` table (one note per log), `POST /v1/notes/{scid}`, `note_vouches` (the note under `VOUCH_KEYS`) |
 | `src/offers.rs` | the offer routes, the claim route, the device's state poll, the store's side of the claim check (`check_spend`, `spend`, `supersede`) |
 | `src/request.rs` | signed requests (`X-Coasys-Request`): checks, nonce replay guard (`take_nonce`, shared with pre-join reads), `percent_decode` |
 | `src/inbox.rs` | the device inbox: pre-join and joined writes, reads (`X-Coasys-Inbox` for a pre-join read) and acknowledgements; `purge_ended` and `drop_closed_offer_messages`, which the append and the offer state changes call in their transactions |
@@ -40,6 +42,8 @@ workspace's `Cargo.lock`); rusqlite 0.40 on the system `libsqlite3`.
 | `tests/held_memory.rs` | the heap a held fold takes per event (a counting allocator; the bound stated under "Held folds") |
 | `tests/miss.rs` | a miss in the held folds checks no stored signature (every stored proof replaced, the miss still folds; a new event is still checked); the per-log budget (`log-too-large`) on the live part and the whole fold, a `rotate` taken past either, the owner's recovery from a log a thief padded (rotate, revoke the thief's bot keys, add a device), and pad-revoke-pad stopped at the whole-fold bound |
 | `tests/miss_cost.rs` | ignored: the wall time of one signed request on a miss, on a full rotation log and on logs padded with repeated scope actions; of a late-failing batch on a log held at its budget; of a rival that does not replay on a held full rotation log (`-- --ignored --nocapture`, release) |
+| `tests/brake.rs` | the brake: the address bucket (a fourth no-note log from one address in a day, IPv6 by /64), the global ceiling, a full bucket before any signature check, the failure bucket, the previous bits for 10 minutes, trusted proxies, `/v1/metrics` (no addresses), pruning, the defaults |
+| `tests/notes.rs` | vouching notes against `tests/common/vouch.rs` (a vouching service on 127.0.0.1 with the redeem contract): a note with #0, a note beside a log, who may ask for one, the service's answers, `vouched` under `VOUCH_KEYS`, no note on a settled page |
 | `tests/serve.rs` | the `serve` process stops cleanly on SIGTERM and SIGINT |
 | `examples/test_agent.rs` | the test person over JSON lines, for the agent language suites |
 | `Dockerfile` | the container image (build from the repo root) |
@@ -48,12 +52,13 @@ workspace's `Cargo.lock`); rusqlite 0.40 on the system `libsqlite3`.
 
 | Route | Answers |
 |---|---|
-| `POST /logs/{scid}/events` `AppendRequest` | `200 {head}` · `400 {error}` (`malformed`, `too-many-events`, `log-full`, `log-too-large`, `vouch-and-pow`, `expires`, a `ChainError` or `FoldError` name; an event that does not parse names its `FormatError`, e.g. `DuplicateMember`) · `403 pow` · `403 claim` · `404` a first event that is not #0 · `409 {head}` · `409 forked {head, fork}` · `409 key-taken` · `413` · `503 vouch-unavailable` |
-| `GET /logs/{scid}?from=` (public host profile) | `200 LogPage` (≤ 256 events; `vouched: false`, no note, no pauses) · `404` |
+| `POST /logs/{scid}/events` `AppendRequest` | `200 {head}` · `400 {error}` (`malformed`, `too-many-events`, `log-full`, `log-too-large`, `vouch-and-pow`, `expires`, a `ChainError` or `FoldError` name; an event that does not parse names its `FormatError`, e.g. `DuplicateMember`) · `403 pow` · `403 claim` · `404` a first event that is not #0 · `409 {head}` · `409 forked {head, fork}` · `409 key-taken` · `413` · `403 vouch` (the service refused the token: spent, expired, or its email vouched another identity) · `409 {head}` a token for a log the store holds · `429 {error:"rate-limited", scope, retryAfter}` with `Retry-After` (`scope` `failure`, `global` or `address`) · `503 vouch-unavailable` |
+| `GET /logs/{scid}?from=` (public host profile) | `200 LogPage` (≤ 256 events; `note` and `vouched` on the page that holds the head, none on a settled page; no pauses) · `404` |
 | `GET /heads/{scid}` (public host profile) | `200 SignedHead` · `404` |
 | `GET /keys/{multikey}?wait=0..8` | `200 KeyIndexEntry` · `404` (at once, or at the timeout) · `400` wait > 8 |
-| `GET /pow` | `200 {bits, previousBits, changedAt}` |
-| `POST /notes/{scid}` `{token}` + signed request | `403 signer`/`store` · `503 vouch-unavailable` (no vouching service exists yet) |
+| `GET /pow` | `200 {bits, previousBits, changedAt}` (`POW_BITS`; the bits before the last change and when it was, kept in table `pow` across restarts) |
+| `GET /metrics` | `200 text/plain`: the global bucket's level; for the address and the failure buckets, how many are in use (not full), how many are empty and the lowest level. Unauthenticated, so it names no address |
+| `POST /notes/{scid}` `{token}` + signed request (a device key without the bot mark or the current master) | `201 VouchNote` · `400 malformed` · `403 signer`/`store` · `403 vouch` · `409 already-vouched` (checked before the redeem: no token is spent) · `503 vouch-unavailable` |
 | `GET /agents/{did}` | `200 AgentRecord` · `404` |
 | `PUT /agents/{did}` | `200` · `400 malformed`/`anchor`/`version` · `403 signer`/`writer`/`store` · `409 {version}` · `409 forked` |
 | `POST /offers/{scid}` `SignedOffer` | `201 {offerId}` · `400` · `403 signer` · `404` · `409 {head}` · `409 offer-exists` · `429 identity` (5 open offers, or the identity bucket) |
@@ -90,8 +95,9 @@ agent language never fetches a `src`: it talks only to its configured store.
   never change); `public, max-age=10` for the page that holds the head and for an empty page
   past it; `no-store` on `404`, so a log published a moment later is not hidden. A settled
   page's `head` is the head when it was served: a reader takes the current head from the last
-  page or `/heads`. When vouching notes come, the `note` field must leave settled pages (or
-  their cache header must change), since a note attached later would not reach a cached page.
+  page or `/heads`. A settled page carries no `note` and `vouched: false`: a note attached
+  later (or a voucher the store stops trusting) would never reach a cached copy, so a reader
+  takes the note from the page that holds the head, as it takes the head.
 
 ## Admission checks
 
@@ -103,8 +109,9 @@ tests name them by these names.
    `seq − 1` and `prev` are the head. It runs as `append_in` with `expect` taken from the
    request; a conflict answers `409` with the stored signed head.
 2. **The new-log admission.** A log's first event is #0 (`404` otherwise) and names the route's
-   SCID; `log::admit_new_log` decides whether a new log may start (proof of work, vouching
-   note; see "No brake yet" below).
+   SCID. Without a vouching token it passes the brake (below) before any signature of it is
+   checked; with one, the token is redeemed only once #0 has replayed (see "The brake" and
+   "Vouching notes" below).
 3. **The replay check.** Every event replays with the identity core (`KelPolicy`) on the stored
    state, so the store can withhold an event but never forge one. Each bot scope's `expires` in an
    `incept` or `add` lies in the future, by the store's clock, and at most 400 days ahead
@@ -193,12 +200,33 @@ tests name them by these names.
   key) and no hash (a hash only tells forked branches apart, and the store keeps one branch).
   The old four-field anchor object does not parse: `400 malformed`. Offers' `by` and signed
   requests keep `kelSeq`/`kelHash`: they prove freshness at the head, once per action.
-- **No brake yet**: a `#0` without a note is admitted with `admitted_by = 'brake'`; a `pow`
-  that is sent must meet `POW_BITS` (`403 pow` otherwise); no address or global buckets, no
-  `/metrics`. A vouching token answers `503 vouch-unavailable` and commits nothing. No pairing
-  routes, no vouching notes. The brake (per-address buckets, a store-wide ceiling, a required
-  proof of work) belongs in `log::admit_new_log`, which runs once event #0 has replayed and
-  before the rest of the append replays.
+- **The brake** (`brake.rs`): an append of #0 to a log the store does not hold, without a
+  vouching token, checks in order, before any signature: the sender address's failure bucket
+  (`FAILURES_PER_HOUR`, 30, refilled per hour; `429 failure`), the global bucket
+  (`BRAKE_GLOBAL_PER_HOUR`, refilled over an hour; `429 global`, and a warning on stderr), the
+  address bucket (`BRAKE_ADDR_BURST` at once, `BRAKE_ADDR_PER_DAY` per 24 h; `429 address`),
+  and the proof of work at `POW_BITS` (`403 pow`; the previous bits pass for `POW_GRACE_S`,
+  10 minutes, after a change). A full bucket answers `429` before any check of the events, so
+  a broken event gets `429`, not `400`. Only an admitted log takes from the global and the
+  address bucket, in the append's transaction (`admitted_by = 'brake'`). Any other `4xx` to a
+  log the store does not hold, on a request without a token, takes one token from the failure
+  bucket in a transaction of its own. Buckets refill continuously; table `brake` keeps each
+  level at its `updated_at` (no row: full). An address is the IPv4 address or the IPv6 /64
+  (an IPv4-mapped address counts as IPv4): the socket peer, or, when the peer is in
+  `TRUSTED_PROXIES`, `CF-Connecting-IP`, else the nearest `X-Forwarded-For` entry that is no
+  trusted proxy. Each admission or refusal deletes the rows of its kind's buckets that are full
+  again, so `brake` holds only the addresses seen within one refill.
+- **Vouching notes** (`vouch.rs`): `POST {VOUCH_URL}/api/vouch/redeem {token, did}` with
+  `Authorization: Bearer {VOUCH_CREDENTIAL}`, 10 s timeout. A `200` note for the identity that
+  `verify_note` passes under `VOUCH_KEYS` is taken; `409`/`410` are `403 vouch`; no
+  `VOUCH_URL`, an unreachable service, any other status, or a note that does not verify are
+  `503 vouch-unavailable`. On `POST …/events` a token (with no `pow`: `400 vouch-and-pow`)
+  takes nothing from the brake: #0 replays and every check runs without committing, then the
+  token is redeemed outside the database lock, then the append runs again and commits with
+  the note (`admitted_by = 'vouch'`); a log that appeared meanwhile is `409 {head}`. On
+  `POST /v1/notes/{scid}` the store refuses a second note (`409 already-vouched`) before it
+  redeems. `LogPage.vouched` is the stored note read under the current `VOUCH_KEYS`, so a
+  store that drops a voucher shows the note with `vouched: false`. No pairing routes yet.
 - The store reads the clock only through `Store::now` (tests inject it). A `wait` read
   watches one `Topic`: the identity's offers (`GET /offers/{scid}`, master-signed), the
   identity's offers for the device's unauthenticated state poll (`OfferState`, its own
@@ -408,8 +436,9 @@ tests name them by these names.
   limit use `TestStore::with_identity_burst(n)`; the agent language suite starts its store with
   `IDENTITY_BURST=1000`.
 - **Expiry.** Reads never answer an expired inbox message or request; `Store::sweep` deletes
-  them (and old nonces), and `serve` runs it every `SWEEP_EVERY_S` (60 s). Per-address limits
-  (long polls, writes per hour, failed claims) belong with the brake and do not exist yet.
+  them (and old nonces), and `serve` runs it every `SWEEP_EVERY_S` (60 s). The brake's
+  per-address buckets cover new no-note logs only; other per-address limits (long polls,
+  writes per hour, failed claims) do not exist yet.
 
 ## Configuration
 
@@ -418,7 +447,14 @@ tests name them by these names.
 | `IDENTITY_STORE_DB` | `identity-store.sqlite` | the SQLite file |
 | `IDENTITY_STORE_KEY` | `store-key` | the head key file (32-byte secret, base58btc); `serve` makes one when missing |
 | `IDENTITY_STORE_LISTEN` | `0.0.0.0:8080` | port 0 picks a free port |
-| `POW_BITS` | `22` | what `GET /v1/pow` publishes and a sent proof must meet |
+| `POW_BITS` | `22` | what `GET /v1/pow` publishes and a no-note #0 must meet; the previous bits pass for 10 minutes after a change |
+| `BRAKE_GLOBAL_PER_HOUR` | `120` | no-note logs store-wide per hour |
+| `BRAKE_ADDR_BURST` | `3` | no-note logs per address at once (IPv6 by /64) |
+| `BRAKE_ADDR_PER_DAY` | `3` | what the address bucket refills per 24 h |
+| `TRUSTED_PROXIES` | none | comma-separated proxy addresses or ranges (`10.0.0.0/8`) whose `CF-Connecting-IP` / `X-Forwarded-For` the brake reads |
+| `VOUCH_URL` | none | the vouching service's base URL; unset: every token is `503 vouch-unavailable` |
+| `VOUCH_CREDENTIAL` | none | the store's bearer credential at the vouching service |
+| `VOUCH_KEYS` | none | comma-separated Ed25519 multikeys of the trusted vouching keys (`GET {VOUCH_URL}/api/vouch/key` answers the current one) |
 | `CORS_ORIGINS` | none | comma-separated browser origins (all routes but the public host profile's, which allow any origin) |
 | `FEED_TOKEN` | none | the mirror token; without one the feed answers `401` |
 | `IDENTITY_BURST` | `10` | writes per identity at once (the identity bucket) |
