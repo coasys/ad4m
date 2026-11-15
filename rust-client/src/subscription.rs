@@ -206,7 +206,6 @@ struct Inner {
     listener: std::sync::Mutex<Option<Task>>,
     /// The detached `on_reconnect` registration — aborted on dispose so a
     /// dispose racing it can never leave a callback behind (F5).
-    reg_task: std::sync::Mutex<Option<Task>>,
     reconnect_cb: std::sync::Mutex<Option<u64>>,
     /// Wakes a sleeping re-open retry early: `start` notifies on every
     /// attempt so an obsolete loop re-checks the generation and dies
@@ -276,11 +275,28 @@ impl LiveQuery {
             watch_key,
             watch_ready: tokio::sync::OnceCell::new(),
             listener: std::sync::Mutex::new(None),
-            reg_task: std::sync::Mutex::new(None),
             reconnect_cb: std::sync::Mutex::new(None),
             reopen_wake: tokio::sync::Notify::new(),
             handles: AtomicUsize::new(1),
         });
+
+        // Reconnect → re-open (the executor's subscriptions died with the old
+        // socket, so `resyncSubscription` cannot help: a fresh subscribe).
+        // Weak: the callback must not pin `Inner` alive — a dead query
+        // upgrades to nothing (R3). Registered synchronously, its id stored
+        // before `new` returns: no registration task can be abandoned
+        // between the push and the store, leaving a callback nobody can
+        // remove (N6). Stored before the listener exists: a terminal
+        // teardown — which only the listener runs — always finds it (R4-2).
+        let weak = Arc::downgrade(&inner);
+        let cb_id = inner.ws.register_on_reconnect(Arc::new(move || {
+            if let Some(inner) = weak.upgrade() {
+                rt::spawn(async move { inner.reopen().await });
+            }
+        }));
+        *inner.reconnect_cb.lock().unwrap() = Some(cb_id);
+        #[cfg(all(test, not(target_arch = "wasm32")))]
+        inner.ws.test_sync_park("new:midway");
 
         // Event listener — filters update events, feeds `receive` IN ORDER:
         // the listener awaits each receive, so a resync or a revision gap
@@ -291,6 +307,12 @@ impl LiveQuery {
         let mut events = inner.ws.events();
         let mut closed = inner.ws.closed();
         let listener = rt::spawn(async move {
+            // `changed()` reports only values stored after the subscription:
+            // a close that came first is read here (R4-2).
+            if *closed.borrow_and_update() {
+                inner2.terminate_stream().await;
+                return;
+            }
             loop {
                 tokio::select! {
                     event = events.recv() => match event {
@@ -316,33 +338,6 @@ impl LiveQuery {
             }
         });
         *inner.listener.lock().unwrap() = Some(listener);
-
-        // Reconnect → re-open (the executor's subscriptions died with the old
-        // socket, so `resyncSubscription` cannot help: a fresh subscribe).
-        let ws2 = inner.ws.clone();
-        let ws3 = inner.ws.clone();
-        let inner5 = inner.clone();
-        // Weak: a registration that outlives the query — aborted between the
-        // push and the check below, or the last handle dropped — must not
-        // pin `Inner` alive forever. A dead query upgrades to nothing (R3).
-        let weak6 = Arc::downgrade(&inner);
-        let reg = rt::spawn(async move {
-            let cb_id = ws2
-                .on_reconnect(move || {
-                    if let Some(inner7) = weak6.upgrade() {
-                        rt::spawn(async move { inner7.reopen().await });
-                    }
-                })
-                .await;
-            // A dispose landing while the registration was in flight must
-            // not park a callback nobody will ever remove (F5).
-            if inner5.state.lock().await.disposed {
-                let _ = ws3.remove_on_reconnect(cb_id).await;
-            } else {
-                *inner5.reconnect_cb.lock().unwrap() = Some(cb_id);
-            }
-        });
-        *inner.reg_task.lock().unwrap() = Some(reg);
 
         Self { inner }
     }
@@ -407,7 +402,21 @@ impl Inner {
     /// `LiveQuery::start` on the shared inner — a re-open (or the
     /// last-handle teardown) must not mint a handle to call it: a handle
     /// dropping mid-teardown would run the teardown again (R4).
+    ///
+    /// One spawned task owns the whole open-to-install sequence: the
+    /// caller only awaits it. A caller cancelled after the open succeeded
+    /// — its reply queued but unread, or read but the id not yet in
+    /// `state` — leaves the task to install the id (or, on a disposed
+    /// query, release it), so the subscription is never stranded with
+    /// nobody holding its id (N3). This holds for any [`OpenFn`].
     async fn start(self: &Arc<Self>) -> Result<Value> {
+        let this = self.clone();
+        rt::spawn_detached(async move { this.start_owned().await })
+            .await
+            .map_err(|e| anyhow::anyhow!("live query start ended: {e}"))?
+    }
+
+    async fn start_owned(self: &Arc<Self>) -> Result<Value> {
         self.ensure_watch().await?;
         let generation = {
             let mut s = self.state.lock().await;
@@ -431,6 +440,8 @@ impl Inner {
             }
         };
 
+        #[cfg(all(test, not(target_arch = "wasm32")))]
+        self.ws.test_park("start:opened").await;
         let mut state = self.state.lock().await;
         if state.disposed || state.generation != generation {
             let dispose_id = subscribed.subscription_id.clone();
@@ -476,15 +487,9 @@ impl Inner {
         if let Some(h) = self.listener.lock().unwrap().take() {
             h.abort();
         }
-        if let Some(h) = self.reg_task.lock().unwrap().take() {
-            h.abort();
-        }
         // End every receiver's `recv()` — a disposed query's stream closes.
         self.results.lock().unwrap().take();
-        let cb = self.reconnect_cb.lock().unwrap().take();
-        if let Some(cb) = cb {
-            self.ws.remove_on_reconnect(cb).await;
-        }
+        self.unregister_reconnect();
         // An install still in flight must finish before the removal, or the
         // `events.watch` could land after its unwatch (F4).
         let _ = self.ensure_watch().await;
@@ -508,11 +513,19 @@ impl Inner {
             s.generation += 1;
             s.buffer = None;
         }
-        if let Some(h) = self.reg_task.lock().unwrap().take() {
-            h.abort();
-        }
+        // No socket comes back: the reconnect callback goes now, not when
+        // the handle is dropped (N6).
+        self.unregister_reconnect();
         // Dropping the sender ends every receiver's `recv()` (F5).
         self.results.lock().unwrap().take();
+    }
+
+    /// Remove this query's reconnect callback, once.
+    fn unregister_reconnect(&self) {
+        let cb = self.reconnect_cb.lock().unwrap().take();
+        if let Some(cb) = cb {
+            self.ws.unregister_on_reconnect(cb);
+        }
     }
 
     /// Take `result` at `revision`, then apply the updates buffered meanwhile.
@@ -722,6 +735,9 @@ pub(crate) async fn dispose_query(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Bound on a wait the fix makes immediate; a fallback would exceed it.
+    const PROMPT: Duration = Duration::from_millis(1_500);
 
     #[test]
     fn apply_update_replaces_on_full_result() {
@@ -1029,60 +1045,24 @@ mod tests {
         client.close().await;
     }
 
-    /// R3: `dispose`/`terminate_stream` abort the registration task — and an
-    /// abort that lands between `on_reconnect()` pushing the callback and
-    /// the post-check leaves it in the Vec: `reconnect_cb` never stored,
-    /// `remove_on_reconnect` never called. With a strong `Arc<Inner>` inside,
-    /// that leaked callback pins the whole query alive forever; it must
-    /// hold a weak ref so a dead registration is an inert no-op.
+    /// R3 + N6: the reconnect callback holds only a weak ref, so it can
+    /// never pin a dead query alive; and it is registered synchronously —
+    /// its id is stored before `new` returns, so no abort can land between
+    /// the push and the store (the old registration task's window). The
+    /// last handle's teardown removes it: the count returns to baseline.
     #[tokio::test]
-    async fn an_aborted_registration_leaves_no_strong_callback() {
+    async fn a_dropped_query_leaves_no_callback_and_no_strong_ref() {
         use crate::testkit::FakeExecutor;
         let fake = FakeExecutor::start().await;
         let client = Arc::new(WsRpcClient::connect(fake.url(), "").await.unwrap());
+        let baseline = client.reconnect_callback_count().await;
 
-        let open: OpenFn = {
-            let ws = client.clone();
-            Arc::new(move || {
-                let ws = ws.clone();
-                Box::pin(async move {
-                    ws.call(
-                        "perspective.subscribeQuery",
-                        serde_json::json!({"uuid": "p1", "subscriptionId": "s1"}),
-                    )
-                    .await
-                    .map(|v| Subscribed {
-                        subscription_id: "s1".into(),
-                        result: v,
-                        revision: 0,
-                    })
-                })
-            })
-        };
-        let query = LiveQuery::new(client.clone(), "p1", open);
-
-        // Hold the state lock: the registration parks at the post-check's
-        // `state.lock().await` once `on_reconnect` has pushed the callback —
-        // the exact window an abort must not leak through.
-        let hold = query.inner.state.lock().await;
-        tokio::time::timeout(Duration::from_secs(10), async {
-            while client.reconnect_callback_count().await == 0 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("the reconnect callback never registered");
+        let query = LiveQuery::new(client.clone(), "p1", scripted_open(&client));
         assert!(
-            query.inner.reconnect_cb.lock().unwrap().is_none(),
-            "the registration finished before the window was held open"
+            query.inner.reconnect_cb.lock().unwrap().is_some(),
+            "the callback id is not owned the moment `new` returns"
         );
-
-        // What `dispose`/`terminate_stream` do — abort the registration.
-        // Parked at the state lock it dies with the callback registered.
-        let reg = query.inner.reg_task.lock().unwrap().take().unwrap();
-        reg.abort();
-        assert!(reg.join().await.unwrap_err().is_cancelled());
-        drop(hold);
+        assert_eq!(client.reconnect_callback_count().await, baseline + 1);
 
         // Take the listener's pin too and drop the handle — a strong
         // callback would keep `Inner` alive forever.
@@ -1095,11 +1075,10 @@ mod tests {
         drop(query);
         // The last handle's drop runs the teardown detached: it legitimately
         // holds `Inner` until the executor RPCs finish, so serve them while
-        // it dies. A leaked strong callback would keep `Inner` pinned past
-        // that and time this out.
+        // it dies.
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                if weak.upgrade().is_none() {
+                if weak.upgrade().is_none() && client.reconnect_callback_count().await == baseline {
                     break;
                 }
                 match tokio::time::timeout(Duration::from_millis(200), fake.next_request()).await {
@@ -1109,7 +1088,7 @@ mod tests {
             }
         })
         .await
-        .expect("a callback outliving the query still holds a strong Inner");
+        .expect("the dropped query left its callback or a strong Inner behind");
         client.close().await;
     }
 
@@ -1255,5 +1234,151 @@ mod tests {
         assert!(lagged.lagged);
 
         assert!(QueryUpdate::from_event(&json!({"type": "other"})).is_none());
+    }
+
+    /// A scripted open on `client`: `perspective.subscribeQuery` answered
+    /// by the test, id `s1`.
+    fn scripted_open(client: &Arc<WsRpcClient>) -> OpenFn {
+        let ws = client.clone();
+        Arc::new(move || {
+            let ws = ws.clone();
+            Box::pin(async move {
+                ws.call(
+                    "perspective.subscribeQuery",
+                    serde_json::json!({"uuid": "p1", "subscriptionId": "s1"}),
+                )
+                .await
+                .map(|v| Subscribed {
+                    subscription_id: "s1".into(),
+                    result: v,
+                    revision: 0,
+                })
+            })
+        })
+    }
+
+    /// N6: terminal teardown (the client closed for good) must remove the
+    /// query's reconnect callback even while its handle stays alive: the
+    /// registry returns to its baseline.
+    #[tokio::test]
+    async fn terminal_teardown_removes_the_reconnect_callback() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let client = Arc::new(WsRpcClient::connect(fake.url(), "").await.unwrap());
+        let baseline = client.reconnect_callback_count().await;
+
+        let query = LiveQuery::new(client.clone(), "p1", scripted_open(&client));
+        let start = tokio::spawn({
+            let inner = query.inner.clone();
+            async move { inner.start().await }
+        });
+        let watch = fake.next_request().await;
+        assert_eq!(watch["type"], "events.watch");
+        fake.reply(&watch, json!(true)).await;
+        let sub = fake.next_request().await;
+        fake.reply(&sub, json!({"instances": []})).await;
+        start.await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while query.inner.reconnect_cb.lock().unwrap().is_none() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the reconnect callback was never recorded");
+        assert_eq!(client.reconnect_callback_count().await, baseline + 1);
+
+        // Terminal: the query's stream ends (its receiver reports Closed).
+        let mut results = query.results();
+        client.close().await;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !matches!(
+                results.recv().await,
+                Err(broadcast::error::RecvError::Closed)
+            ) {}
+        })
+        .await
+        .expect("the stream never ended on close");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while client.reconnect_callback_count().await != baseline {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("terminal teardown left the reconnect callback registered");
+        drop(query);
+    }
+
+    /// N6: create/dispose cycles leave no callback behind — the registry
+    /// returns to its baseline after every dispose.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn create_dispose_cycles_return_the_callback_count_to_baseline() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let client = Arc::new(WsRpcClient::connect(fake.url(), "").await.unwrap());
+        let baseline = client.reconnect_callback_count().await;
+        // Serve every teardown RPC (unwatch, dispose) as it comes.
+        let server = {
+            let fake = fake.clone();
+            tokio::spawn(async move {
+                loop {
+                    let req = fake.next_request().await;
+                    fake.reply(&req, json!(true)).await;
+                }
+            })
+        };
+        for _ in 0..50 {
+            let query = LiveQuery::new(client.clone(), "p1", scripted_open(&client));
+            query.dispose().await;
+        }
+        assert_eq!(client.reconnect_callback_count().await, baseline);
+        server.abort();
+        client.close().await;
+    }
+
+    /// R4-2: close lands while the constructor is between its two steps
+    /// (listener and callback registration). Whatever the order, the
+    /// terminal teardown must still remove the callback and end the
+    /// stream: a listener that already ran must not leave a callback the
+    /// constructor registers afterwards, and a listener started after the
+    /// close must see the `true` that predates it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_close_during_construction_still_removes_the_reconnect_callback() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let client = Arc::new(WsRpcClient::connect(fake.url(), "").await.unwrap());
+        let baseline = client.reconnect_callback_count().await;
+        let receivers = client.closed_receivers();
+
+        let (gate, mut parked) = client.park_at("new:midway");
+        let ctor = tokio::task::spawn_blocking({
+            let client = client.clone();
+            move || LiveQuery::new(client.clone(), "p1", scripted_open(&client))
+        });
+        parked.recv().await;
+        client.close().await;
+        // Every listener that exists has handled the close: it dropped its
+        // receiver of the terminal signal on the way out.
+        tokio::time::timeout(PROMPT, async {
+            while client.closed_receivers() > receivers {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("a running listener never handled the close");
+        gate.gate.add_permits(1);
+        let query = ctor.await.unwrap();
+
+        tokio::time::timeout(PROMPT, async {
+            while client.reconnect_callback_count().await != baseline {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("a close during construction left the reconnect callback registered");
+        let mut results = query.results();
+        let ended = tokio::time::timeout(PROMPT, results.recv())
+            .await
+            .expect("the stream of a query built across close never ended");
+        assert!(matches!(ended, Err(broadcast::error::RecvError::Closed)));
     }
 }

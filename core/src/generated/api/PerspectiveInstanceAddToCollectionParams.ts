@@ -4,4 +4,8 @@ export type PerspectiveInstanceAddToCollectionParams = { uuid: string, className
 /**
  * The item, usually another instance's URI.
  */
-itemUri: string, batchId?: string, };
+itemUri: string, 
+/**
+ * An open batch to stage the write into; see `InstanceCreate`'s `batchId`.
+ */
+batchId?: string, };

@@ -4,4 +4,8 @@
  * Remove an instance: every link from and to it. Through an abstract class (#1435), the
  * destructor of each of the record's classes it reads.
  */
-export type InstanceRemove = { className: string, baseUri: string, batchId?: string, };
+export type InstanceRemove = { className: string, baseUri: string, 
+/**
+ * An open batch to stage the write into; see `InstanceCreate`'s `batchId`.
+ */
+batchId?: string, };

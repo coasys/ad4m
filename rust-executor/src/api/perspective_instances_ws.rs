@@ -3,16 +3,28 @@
 //!
 //! Each calls the same function as the MCP tool of the same job
 //! ([`crate::perspectives::instances`]): the write is checked against the class's SHACL shape
-//! (types, cardinality, required properties, `sh:in`) before anything is written. Same guard as
-//! `perspective.createSubject`: `perspective:UPDATE` on the perspective, which the caller's agent
-//! must own (`Guard::perspective`). The agent that writes is `ctx.acts_as()`.
+//! before anything is written — each property's type, which are required, which take a single
+//! value, and `sh:in` (not arbitrary `minCount`/`maxCount` bounds). Same guard as
+//! `perspective.createSubject`: `perspective:UPDATE` on the perspective, which the caller's
+//! agent must own (`Guard::perspective`). The agent that writes is `ctx.acts_as()`.
 //!
 //! A refusal is a `WsRpcError` whose `data` is the [`InstanceError`] (camelCase, tagged by
 //! `kind`); see [`instance_error`] for the codes. A validation failure is 422 with
 //! `data = { kind: "validation", className, errors: ValidationError[] }`; each error names the
 //! `property`, the `problem` (`{ kind, … }`), `expectedType`, `cardinality` (`{ min, max }`),
 //! `allowedValues` (`sh:in`), `received` and, for a collection item, its index (`item`).
-//! Nothing is written when a write is refused.
+//!
+//! Batches and partial failure: with `batchId` the write is staged into that open batch and
+//! lands on its commit, and the link reads a write does of the state it manages (collection
+//! membership, the remove cascade) see the batch's own staged work. Existence reads still see
+//! committed state only: an instance created in the same batch is not found, so
+//! create-then-update / -remove of a new instance in one batch fails `notFound`.
+//! A *refused* call (a 422 or another 4xx) stages nothing — validation runs before any link
+//! write. A failure that is not a refusal — a store error mid-write, `failed` or
+//! `partiallyRemoved` — can leave part of the write staged in the caller's batch: discard it
+//! (`perspective.discardBatch`) instead of committing it to keep the calls that succeeded.
+//! Without a batch, a remove's cascade may have deleted some links already; `removed` counts
+//! deleted links with no batch, staged ones with one.
 
 use serde::Deserialize;
 use serde_json::Value;

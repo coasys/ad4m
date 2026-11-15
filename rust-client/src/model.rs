@@ -342,7 +342,10 @@ impl Model {
                                         .and_then(Value::as_u64)
                                         .unwrap_or(0),
                                 };
-                                if done_tx.send(Ok(subscribed)).is_err() {
+                                let sent = done_tx.send(Ok(subscribed));
+                                #[cfg(all(test, not(target_arch = "wasm32")))]
+                                ws.test_park("open:reply-queued").await;
+                                if sent.is_err() {
                                     // Open cancelled mid-call — nobody will
                                     // hold the subscription we just made.
                                     let _ = crate::subscription::dispose_query(
@@ -549,6 +552,11 @@ impl Model {
     }
 
     /// `Ad4mModel.transaction` — open a batch, run `f` against it, commit.
+    ///
+    /// Several writes to one instance in one batch need an executor that
+    /// resolves batched writes against the batch's effective graph: built
+    /// from `87ba32b90` or later. See [`Instance::save`] for what an older
+    /// one does.
     /// A failing `f` never commits: the batch is left unwritten (and
     /// `discard`ed best-effort, an executor-side no-op either way).
     pub async fn transaction<R, Fut>(&self, f: impl FnOnce(&Batch) -> Fut) -> Result<R>
@@ -737,6 +745,19 @@ impl Instance {
     /// surfaces an error and leaves the snapshot untouched — the writes
     /// are already committed, so a retry replays idempotent ops before
     /// re-reading.
+    ///
+    /// **Minimum executor for batched saves.** The optimistic snapshot is
+    /// right only if the executor resolves each batched `instance*` write
+    /// against the batch's effective graph: the committed links plus the
+    /// changes already staged in that batch. The executor gained this in
+    /// commits `06cd80b7f`, `c54e7267b` and `258af061c`
+    /// (`feat/validated-write-rpc`). The minimum is an executor built
+    /// from `87ba32b90` or a later commit, or the first release that
+    /// contains it. The version string does not tell them apart: builds
+    /// before and after report `0.13.1-staging.11`. Against an older
+    /// executor, two saves of one collection in one batch (`[]`, then
+    /// `[a]`, then `[]`) both succeed and snapshot clean, but the commit
+    /// writes `[a]`. The client cannot detect this.
     pub async fn save(&mut self, batch_id: Option<String>) -> Result<()> {
         let changed = self.changed_fields();
         if changed.is_empty() && batch_id.is_some() {
@@ -1351,6 +1372,85 @@ mod tests {
         }
         assert!(disposed, "the minted subscription was never released");
         ws.close().await;
+    }
+
+    /// Drive a `Model::subscribe` by hand to its `modelSubscribe` and answer
+    /// it, with `point` armed; drop the caller's future once the open parks
+    /// there, release it, then expect the minted subscription released.
+    /// `poll_caller`: keep polling the caller while waiting for the park
+    /// (the point is on the caller's own path); otherwise the caller is
+    /// never polled again after its request — a queued reply stays unread.
+    async fn cancel_at_and_expect_release(point: &'static str, poll_caller: bool) {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let ws = Arc::new(WsRpcClient::connect(fake.url(), "").await.unwrap());
+        let (gate, mut parked) = ws.park_at(point);
+        let model = Model::new(&ws, "p1", "Recipe");
+        let query = ModelQuery::default();
+        let mut subscribe = Box::pin(model.subscribe(&query));
+        let sub = loop {
+            let req = tokio::select! {
+                _ = &mut subscribe => panic!("subscribe resolved before its call was answered"),
+                req = fake.next_request() => req,
+            };
+            if req["type"] == "events.watch" {
+                fake.reply(&req, json!(true)).await;
+            } else {
+                break req;
+            }
+        };
+        assert_eq!(sub["type"], "perspective.modelSubscribe");
+        let minted = sub["params"]["subscriptionId"].clone();
+        fake.reply(&sub, json!({"result": {"instances": []}, "revision": 0}))
+            .await;
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            if poll_caller {
+                tokio::select! {
+                    _ = &mut subscribe => panic!("subscribe resolved past the park point"),
+                    _ = parked.recv() => {}
+                }
+            } else {
+                parked.recv().await;
+            }
+        })
+        .await
+        .expect("the open never reached the park point");
+        // Cancel the caller there, then let the open go on.
+        drop(subscribe);
+        gate.gate.add_permits(1);
+
+        let mut disposed = false;
+        while !disposed {
+            let Some(req) = fake.maybe_request(Duration::from_secs(2)).await else {
+                break;
+            };
+            if req["type"] == "perspective.disposeQuery" {
+                assert_eq!(req["params"]["subscriptionId"], minted);
+                disposed = true;
+            }
+            fake.reply(&req, json!(true)).await;
+        }
+        assert!(
+            disposed,
+            "the subscription cancelled at {point} was never released"
+        );
+        ws.close().await;
+    }
+
+    /// N3: the detached open's `done_tx.send` succeeded — the reply is
+    /// queued — but the caller is cancelled before it reads it. A queued
+    /// value is not a hand-off: the subscription must still be released.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_subscribe_cancelled_after_its_reply_was_queued_releases_it() {
+        cancel_at_and_expect_release("open:reply-queued", false).await;
+    }
+
+    /// N3: the caller read the reply but is cancelled before query state
+    /// owns the id (waiting for the state lock).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_subscribe_cancelled_before_state_owns_the_id_releases_it() {
+        cancel_at_and_expect_release("start:opened", true).await;
     }
 
     /// F5: a subscribe that fails must not leave the installed watch,

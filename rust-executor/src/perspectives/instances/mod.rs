@@ -2,8 +2,9 @@
 //! the `perspective.instance*` RPC methods.
 //!
 //! Every write is checked against the class's SHACL shape before anything is written
-//! ([`validate::validate_properties`]: types, cardinality, required properties, `sh:in`); a
-//! rejection carries every [`ValidationError`] as data. Accepted writes go through the same
+//! ([`validate::validate_properties`]: types, required properties, single- vs multi-valued,
+//! `sh:in`); a rejection carries every [`ValidationError`] as data and writes nothing. Accepted
+//! writes go through the same
 //! `create_subject` / `update_subject` / link paths the per-class tools use, in one batch (the
 //! caller's, when it names one).
 //!
@@ -42,7 +43,7 @@ use crate::mcp::shacl;
 use crate::perspectives::model_query::is_safe_iri_target;
 use crate::perspectives::model_query::types::{ModelShape, ShapeProperty, ShapeRelation};
 use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClassOption};
-use crate::types::LinkQuery;
+use crate::types::{LinkExpression, LinkQuery};
 use crate::utils::{normalize_legacy_literal, other_literal_spelling};
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -602,6 +603,12 @@ pub(crate) struct CascadeFailure {
 /// Remove every link touching `uri` (as source or target), in `batch_id` when given. Same
 /// cascade as `delete_subject` / `{class}_delete`.
 ///
+/// Enumerates the batch's effective graph (`get_links_effective`): a link the batch has
+/// already staged for removal is not staged again, and one that exists only inside the batch
+/// — an earlier call's staged addition touching `uri` — leaves by cancelling the addition
+/// (`remove_link` insists on a stored expression). `removed` counts effective links: staged
+/// removals and cancelled additions alike.
+///
 /// Stops at the first `get_links` / `remove_link` error and reports it together with the number
 /// of links already removed. `Ok` means the two queries and every removal succeeded.
 pub(crate) async fn remove_all_links_of(
@@ -610,6 +617,7 @@ pub(crate) async fn remove_all_links_of(
     batch_id: Option<&str>,
 ) -> Result<usize, CascadeFailure> {
     let mut removed = 0;
+    let mut seen = std::collections::HashSet::new();
     for query in [
         LinkQuery {
             source: Some(uri.to_string()),
@@ -620,7 +628,7 @@ pub(crate) async fn remove_all_links_of(
             ..Default::default()
         },
     ] {
-        let links = match perspective.get_links(&query).await {
+        let links = match perspective.get_links_effective(&query, batch_id).await {
             Ok(links) => links,
             Err(error) => {
                 return Err(CascadeFailure {
@@ -632,21 +640,36 @@ pub(crate) async fn remove_all_links_of(
                 })
             }
         };
-        for link in links {
+        for effective in links {
+            let link = LinkExpression::from(effective.link);
+            // A link naming `uri` both ways answers both queries; remove it once.
+            if !seen.insert(crate::db::link_identity(&link)) {
+                continue;
+            }
             let step = CascadeStep::Remove {
                 source: link.data.source.clone(),
                 predicate: link.data.predicate.clone(),
                 target: link.data.target.clone(),
             };
-            if let Err(error) = perspective
-                .remove_link(link.into(), batch_id.map(str::to_string))
-                .await
-            {
-                return Err(CascadeFailure {
-                    removed,
-                    step,
-                    error,
-                });
+            // Both presences can hold at once (`addLinkExpression` restages the stored
+            // expression verbatim): the staged copies drop, and the committed copy is
+            // staged for removal — one without the other would leave the link behind.
+            if effective.staged {
+                if let Some(batch_id) = batch_id {
+                    perspective.cancel_batch_addition(batch_id, &link).await;
+                }
+            }
+            if effective.committed {
+                if let Err(error) = perspective
+                    .remove_link(link, batch_id.map(str::to_string))
+                    .await
+                {
+                    return Err(CascadeFailure {
+                        removed,
+                        step,
+                        error,
+                    });
+                }
             }
             removed += 1;
         }

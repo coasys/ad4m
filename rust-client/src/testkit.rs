@@ -42,6 +42,9 @@ pub(crate) struct FakeExecutor {
     epoch: Arc<AtomicU64>,
     /// Signalled each time a socket is accepted, carrying the new epoch.
     accepted: Mutex<mpsc::UnboundedReceiver<u64>>,
+    /// Counts sockets whose serving task ended: the client's side of the
+    /// TCP stream is gone (or the test severed it).
+    ended: watch::Sender<u64>,
     url: String,
 }
 
@@ -54,6 +57,7 @@ impl FakeExecutor {
         let (drop_tx, _) = watch::channel((0u64, None));
         let (accepted_tx, accepted_rx) = mpsc::unbounded_channel();
         let epoch = Arc::new(AtomicU64::new(0));
+        let (ended_tx, _) = watch::channel(0u64);
 
         let server = Arc::new(Self {
             incoming: Mutex::new(incoming_rx),
@@ -61,6 +65,7 @@ impl FakeExecutor {
             drop_conn: drop_tx.clone(),
             epoch: epoch.clone(),
             accepted: Mutex::new(accepted_rx),
+            ended: ended_tx.clone(),
             url: format!("http://127.0.0.1:{port}"),
         });
 
@@ -72,13 +77,12 @@ impl FakeExecutor {
                 let (tx, rx) = mpsc::unbounded_channel();
                 *server2.outgoing.lock().await = Some(tx);
                 let _ = accepted_tx.send(e);
-                tokio::spawn(serve_conn(
-                    stream,
-                    incoming_tx.clone(),
-                    rx,
-                    drop_tx.clone(),
-                    e,
-                ));
+                let conn = serve_conn(stream, incoming_tx.clone(), rx, drop_tx.clone(), e);
+                let ended = ended_tx.clone();
+                tokio::spawn(async move {
+                    conn.await;
+                    ended.send_modify(|n| *n += 1);
+                });
             }
         });
         server
@@ -125,6 +129,18 @@ impl FakeExecutor {
         })
         .await
         .unwrap_or_else(|_| panic!("timed out waiting for socket epoch {n}"));
+    }
+
+    /// Wait until `n` sockets have ended server-side — the client released
+    /// its whole stream (both halves), or the test severed it. `false` when
+    /// that did not happen within `within`.
+    #[allow(dead_code)]
+    pub async fn sockets_ended(&self, n: u64, within: Duration) -> bool {
+        let mut rx = self.ended.subscribe();
+        let ended = tokio::time::timeout(within, rx.wait_for(|e| *e >= n))
+            .await
+            .is_ok_and(|r| r.is_ok());
+        ended
     }
 
     /// Write `frame` to the live socket. Dropped when no socket is up —

@@ -17,13 +17,15 @@
 use std::future::Future;
 use std::time::Duration;
 
-/// A spawned task the owner can stop. Its completion is never awaited —
-/// the reader/supervisor/listener tasks only need `abort`.
+/// A spawned task the owner can stop, and wait for.
 pub(crate) struct Task {
     #[cfg(not(target_arch = "wasm32"))]
     inner: tokio::task::JoinHandle<()>,
     #[cfg(target_arch = "wasm32")]
     abort: futures_util::future::AbortHandle,
+    /// Flips to `true` once the task finished or was aborted and dropped.
+    #[cfg(target_arch = "wasm32")]
+    done: tokio::sync::watch::Receiver<bool>,
 }
 
 impl Task {
@@ -36,11 +38,25 @@ impl Task {
         self.abort.abort();
     }
 
-    /// Await the task's end — tests only (aborted tasks report
-    /// `is_cancelled`), like awaiting a tokio `JoinHandle`.
-    #[cfg(all(test, not(target_arch = "wasm32")))]
+    /// Whether the task ended (ran out or was aborted).
+    pub(crate) fn is_finished(&self) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        return self.inner.is_finished();
+        #[cfg(target_arch = "wasm32")]
+        return *self.done.borrow();
+    }
+
+    /// Await the task's end, like awaiting a tokio `JoinHandle` (an
+    /// aborted task reports `is_cancelled`).
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) async fn join(self) -> Result<(), tokio::task::JoinError> {
         self.inner.await
+    }
+
+    /// Await the task's end: its future was dropped, finished or aborted.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) async fn join(mut self) {
+        let _ = self.done.wait_for(|d| *d).await;
     }
 }
 
@@ -65,10 +81,40 @@ where
     // `spawn_local` returns no handle, so wrap the future in an `Abortable`:
     // `Task::abort` ends it at its next poll like a tokio abort.
     let (abort, reg) = futures_util::future::AbortHandle::new_pair();
+    let (done_tx, done) = tokio::sync::watch::channel(false);
     wasm_bindgen_futures::spawn_local(async move {
         let _ = futures_util::future::Abortable::new(fut, reg).await;
+        // The future is dropped by now: what it owned is released.
+        done_tx.send_replace(true);
     });
-    Task { abort }
+    Task { abort, done }
+}
+
+/// Spawn work that runs to its end even if the caller stops awaiting, and
+/// hand the caller its output: `tokio::spawn(..).await` natively; in the
+/// browser a `spawn_local` that sends the output down a oneshot. The error
+/// is the task ending without an output (a native panic or abort).
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) async fn spawn_detached<T, F>(fut: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: Future<Output = T> + Send + 'static,
+{
+    tokio::spawn(fut).await.map_err(|e| e.to_string())
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) async fn spawn_detached<T, F>(fut: F) -> Result<T, String>
+where
+    T: 'static,
+    F: Future<Output = T> + 'static,
+{
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    wasm_bindgen_futures::spawn_local(async move {
+        let _ = tx.send(fut.await);
+    });
+    rx.await
+        .map_err(|_| "task ended without an output".to_string())
 }
 
 /// Fire-and-forget spawn for contexts that may run without an executor

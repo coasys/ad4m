@@ -2,6 +2,8 @@
 
 export type CollectionItemRemoved = { className: string, baseUri: string, collection: string, itemUri: string, 
 /**
- * 0 when the item was not in the collection.
+ * 0 when the item was not in the collection (as the batch's effective graph has it).
+ * Inside a batch, a member that only the batch had added counts too — it leaves by
+ * cancelling the staged addition.
  */
 linksRemoved: number, };

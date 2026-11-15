@@ -1,11 +1,16 @@
 //! Validated instance writes: `perspective.instanceCreate`, `.instanceUpdate`, `.instanceRemove`,
 //! `.instanceAddToCollection`, `.instanceRemoveFromCollection`.
 //!
-//! The executor checks each write against the class's SHACL shape (types, cardinality, required
-//! properties, `sh:in`) before writing anything. A refused write fails with an
-//! [`RpcCallError`] whose `data` is the executor's `InstanceError`; [`validation_errors`] reads
-//! the per-property errors of a shape violation (status 422) from it. With `batch_id` a write
-//! goes into that open batch (`perspective.createBatch`) and lands on its commit.
+//! The executor checks each write against the class's SHACL shape (each property's type, which
+//! are required, which take a single value, `sh:in`) before writing anything. A refused write
+//! fails with an [`RpcCallError`] whose `data` is the executor's `InstanceError` and stages
+//! nothing; [`validation_errors`] reads the per-property errors of a shape violation (status
+//! 422) from it. With `batch_id` a write is staged into that open batch
+//! (`perspective.createBatch`) and lands on its commit — where a non-validation failure can
+//! leave part of the write staged: discard it ([`PerspectivesClient::discard_batch`]) then,
+//! don't commit it to keep earlier calls. An instance created in the same batch is not found —
+//! existence reads committed state only — so a create followed by an update, remove or
+//! `instance_add_to_collection` of the new instance in one batch fails `notFound`.
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
