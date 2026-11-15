@@ -31,6 +31,13 @@ pub struct LinkDiff {
 
 /// An open batch. Cheap to clone (writes name it by id — a clone commits or
 /// discards the same batch).
+///
+/// **Minimum executor.** A write inside a batch must see the writes staged
+/// before it in the same batch (the batch's effective graph). An executor
+/// built from `87ba32b90` or a later commit does this; an older one reads
+/// only the committed graph, so two changes to one collection in one batch
+/// commit the wrong value without an error. The version string
+/// (`0.13.1-staging.11`) is the same on both. See the crate README.
 #[derive(Debug, Clone)]
 pub struct Batch {
     ws: Arc<WsRpcClient>,

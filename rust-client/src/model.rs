@@ -552,6 +552,11 @@ impl Model {
     }
 
     /// `Ad4mModel.transaction` — open a batch, run `f` against it, commit.
+    ///
+    /// Several writes to one instance in one batch need an executor that
+    /// resolves batched writes against the batch's effective graph: built
+    /// from `87ba32b90` or later. See [`Instance::save`] for what an older
+    /// one does.
     /// A failing `f` never commits: the batch is left unwritten (and
     /// `discard`ed best-effort, an executor-side no-op either way).
     pub async fn transaction<R, Fut>(&self, f: impl FnOnce(&Batch) -> Fut) -> Result<R>
@@ -740,6 +745,19 @@ impl Instance {
     /// surfaces an error and leaves the snapshot untouched — the writes
     /// are already committed, so a retry replays idempotent ops before
     /// re-reading.
+    ///
+    /// **Minimum executor for batched saves.** The optimistic snapshot is
+    /// right only if the executor resolves each batched `instance*` write
+    /// against the batch's effective graph: the committed links plus the
+    /// changes already staged in that batch. The executor gained this in
+    /// commits `06cd80b7f`, `c54e7267b` and `258af061c`
+    /// (`feat/validated-write-rpc`). The minimum is an executor built
+    /// from `87ba32b90` or a later commit, or the first release that
+    /// contains it. The version string does not tell them apart: builds
+    /// before and after report `0.13.1-staging.11`. Against an older
+    /// executor, two saves of one collection in one batch (`[]`, then
+    /// `[a]`, then `[]`) both succeed and snapshot clean, but the commit
+    /// writes `[a]`. The client cannot detect this.
     pub async fn save(&mut self, batch_id: Option<String>) -> Result<()> {
         let changed = self.changed_fields();
         if changed.is_empty() && batch_id.is_some() {
