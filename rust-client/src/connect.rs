@@ -207,6 +207,9 @@ pub enum ConnectStatus {
     /// The pending request died (expired, or five wrong codes); a fresh one
     /// is requested next.
     RequestExpired,
+    /// The emailed code was invalidated (five wrong codes); a new one is
+    /// requested next.
+    EmailCodeExpired,
 }
 
 /// The session's auth state (TS `AuthStates`).
@@ -1053,7 +1056,12 @@ impl<E: ExecutorIo> Ad4mConnect<E> {
                     }
                     // "Can't find permitted request" — not approved yet or a
                     // wrong code: show the prompt again.
-                    Err(_) => prompts.status(ConnectStatus::CodeRejected),
+                    Err(e) if says_rpc(&e, CODE_NOT_PERMITTED) => {
+                        prompts.status(ConnectStatus::CodeRejected)
+                    }
+                    // A dead socket, a policy refusal, anything else: another
+                    // code will not help.
+                    Err(e) => return Err(e),
                 }
             }
         }
@@ -1068,20 +1076,7 @@ impl<E: ExecutorIo> Ad4mConnect<E> {
             Some(email) => email.clone(),
             None => prompts.email().await?,
         };
-        let result = rpc
-            .call(
-                "user.requestVerification",
-                json!({ "email": email, "appInfo": { "appName": app.name } }),
-            )
-            .await?;
-        let res: VerificationRequestResult = serde_json::from_value(result)
-            .map_err(|e| anyhow!("bad user.requestVerification reply: {e}"))?;
-        if !res.success {
-            return Err(ConnectError::Refused {
-                message: res.message,
-            }
-            .into());
-        }
+        let res = self.request_verification(rpc, &email).await?;
 
         if res.requires_password {
             // New accounts (`createAccount` → `user.create` then `user.login`)
@@ -1145,9 +1140,48 @@ impl<E: ExecutorIo> Ad4mConnect<E> {
                         .ok_or_else(|| anyhow!("user.verifyEmail did not answer a string"))?
                         .to_string())
                 }
-                Err(_) => prompts.status(ConnectStatus::CodeRejected),
+                // A wrong code (the executor says the same for one past its
+                // expiry): ask again.
+                Err(e) if says_rpc(&e, EMAIL_CODE_INVALID) => {
+                    prompts.status(ConnectStatus::CodeRejected)
+                }
+                // Invalidated after five wrong codes: request a new one.
+                Err(e) if says_rpc(&e, EMAIL_CODE_GONE) => {
+                    prompts.status(ConnectStatus::EmailCodeExpired);
+                    self.request_verification(rpc, &email).await?;
+                    prompts.status(ConnectStatus::WaitingForEmailCode {
+                        email: email.clone(),
+                    });
+                }
+                // A dead socket, a policy refusal, anything else: another
+                // code will not help.
+                Err(e) => return Err(e),
             }
         }
+    }
+
+    /// `user.requestVerification`: sends the email code (or says a password
+    /// is needed); `success: false` is `ConnectError::Refused`.
+    async fn request_verification(
+        &self,
+        rpc: &E::Rpc,
+        email: &str,
+    ) -> Result<VerificationRequestResult> {
+        let result = rpc
+            .call(
+                "user.requestVerification",
+                json!({ "email": email, "appInfo": { "appName": self.opts.app.name } }),
+            )
+            .await?;
+        let res: VerificationRequestResult = serde_json::from_value(result)
+            .map_err(|e| anyhow!("bad user.requestVerification reply: {e}"))?;
+        if !res.success {
+            return Err(ConnectError::Refused {
+                message: res.message,
+            }
+            .into());
+        }
+        Ok(res)
     }
 }
 
@@ -1175,6 +1209,21 @@ fn refuses_token(err: &anyhow::Error) -> bool {
         }
         None => false,
     }
+}
+
+/// `agent.generateJwt` on a wrong code or a request not approved yet.
+const CODE_NOT_PERMITTED: &str = "Can't find permitted request";
+/// `user.verifyEmail` on a wrong code (and on one past its expiry: the
+/// executor deletes it and answers the same).
+const EMAIL_CODE_INVALID: &str = "Invalid verification code";
+/// `user.verifyEmail` once five wrong codes invalidated the challenge.
+const EMAIL_CODE_GONE: &str = "Please request a new code";
+
+/// Whether `err` is an executor RPC error (not a transport failure) whose
+/// message holds `text`.
+fn says_rpc(err: &anyhow::Error, text: &str) -> bool {
+    err.downcast_ref::<RpcCallError>()
+        .is_some_and(|e| e.message.contains(text))
 }
 
 /// Whether `agent.generateJwt` says the request is gone: expired, or five
@@ -1839,6 +1888,93 @@ mod tests {
             ]
         );
         assert!(prompts.statuses.contains(&ConnectStatus::RequestExpired));
+    }
+
+    /// The code loop re-asks only for a wrong code. A transport failure or
+    /// a policy refusal ends the flow with that error, after one prompt.
+    #[tokio::test]
+    async fn a_code_loop_ends_on_transport_and_policy_failures() {
+        for (failure, policy) in [
+            (anyhow!("WebSocket connection closed"), false),
+            (
+                rpc_err(403, "capability denied for agent.generateJwt"),
+                true,
+            ),
+        ] {
+            let failure = Arc::new(Mutex::new(Some(failure)));
+            let dir = tempfile::tempdir().unwrap();
+            let io = FakeIo::new(move |token, method, _| match (token, method) {
+                (_, "agent.status") if token.is_empty() => Err(rpc_err(403, "missing capability")),
+                (_, "agent.status") => Ok(authed_status()),
+                (_, "agent.isLocked") => Ok(Value::Bool(false)),
+                (_, "user.multiUserEnabled") => Ok(Value::Bool(false)),
+                (_, "agent.requestCapability") => Ok(Value::String("req-1".to_string())),
+                (_, "agent.generateJwt") => match failure.lock().unwrap().take() {
+                    Some(e) => Err(e),
+                    None => Ok(Value::String("jwt".to_string())),
+                },
+                (_, other) => Err(rpc_err(404, &format!("unknown {other}"))),
+            });
+            let mut s = session(dir.path(), io, opts());
+            let mut prompts = ScriptedPrompts {
+                cap_codes: ["111111".into(), "222222".into()].into(),
+                ..Default::default()
+            };
+            let err = s.connect(&mut prompts).await.unwrap_err();
+            assert_eq!(prompts.asked.len(), 1, "re-asked after {err}");
+            assert!(!prompts.statuses.contains(&ConnectStatus::CodeRejected));
+            assert_eq!(
+                err.downcast_ref::<RpcCallError>().is_some(),
+                policy,
+                "{err}"
+            );
+        }
+    }
+
+    /// An email challenge the executor invalidated (five wrong codes: "…
+    /// Please request a new code.") is not a wrong code: the flow requests
+    /// a new one and asks for that code.
+    #[tokio::test]
+    async fn an_invalidated_email_challenge_is_requested_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut o = opts();
+        o.email = Some("ada@example.com".to_string());
+        let requests = Arc::new(Mutex::new(0));
+        let requests2 = requests.clone();
+        let io = FakeIo::new(move |token, method, params| match (token, method) {
+            (_, "agent.status") if token.is_empty() => Err(rpc_err(403, "missing capability")),
+            (_, "agent.status") => Ok(authed_status()),
+            (_, "agent.isLocked") => Ok(Value::Bool(false)),
+            (_, "user.multiUserEnabled") => Ok(Value::Bool(true)),
+            (_, "user.requestVerification") => {
+                *requests2.lock().unwrap() += 1;
+                Ok(json!({
+                    "success": true, "message": "sent",
+                    "requiresPassword": false, "isExistingUser": true,
+                }))
+            }
+            (_, "user.verifyEmail") => {
+                if *requests2.lock().unwrap() == 1 {
+                    Err(rpc_err(500, "Verification code has been invalidated due to too many failed attempts. Please request a new code."))
+                } else {
+                    assert_eq!(params["code"], "222222");
+                    Ok(Value::String("jwt-mu".to_string()))
+                }
+            }
+            (_, other) => Err(rpc_err(404, &format!("unknown {other}"))),
+        });
+        let mut s = session(dir.path(), io, o);
+        let mut prompts = ScriptedPrompts {
+            email_codes: ["111111".into(), "222222".into()].into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            s.connect(&mut prompts).await.unwrap(),
+            AuthState::Authenticated
+        );
+        assert_eq!(*requests.lock().unwrap(), 2, "no new code was requested");
+        assert!(!prompts.statuses.contains(&ConnectStatus::CodeRejected));
+        assert!(prompts.statuses.contains(&ConnectStatus::EmailCodeExpired));
     }
 
     #[tokio::test]

@@ -101,6 +101,9 @@ impl ConnectPrompts for TermPrompts {
             ConnectStatus::RequestExpired => {
                 println!("The request expired; asking again…")
             }
+            ConnectStatus::EmailCodeExpired => {
+                println!("That code is no longer valid; sending a new one…")
+            }
         }
     }
 }
