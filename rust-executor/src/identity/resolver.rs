@@ -30,7 +30,7 @@ use serde_json::Value;
 use super::backend::{IdentityBackend, IdentityError};
 use super::cache::{
     fold_log, holding_rival, scid_from, CacheError, Ingested, KelCache, KeyLookup, KeyMap,
-    TrustedLog, MAX_PAGES, MAX_SRC_LOG_BYTES,
+    PendingHold, TrustedLog, MAX_PAGES, MAX_SRC_LOG_BYTES,
 };
 use super::src_fetch::{refuse_private_host, SrcFetch};
 use super::types::{
@@ -1087,9 +1087,12 @@ impl Resolver {
     /// back into it from the cache: no store or key index call. For the re-check of stored
     /// links, whose person names the log their verdict came from, so a log the map's bound
     /// dropped judges them again. A person whose log the cache no longer trusts is skipped.
-    pub async fn read_logs(&self, people: &[&str]) {
+    /// `Err` names the logs the cache could not read: their links are judged without them, so
+    /// the re-check is incomplete and must run again.
+    pub async fn read_logs(&self, people: &[&str]) -> Result<(), String> {
         let map = self.cache.key_map();
         let mut seen = std::collections::HashSet::new();
+        let mut unreadable = Vec::new();
         for person in people {
             let scid = super::cache::scid_from(person);
             if !seen.insert(scid) || map.log(scid).is_some() {
@@ -1097,7 +1100,17 @@ impl Resolver {
             }
             if let Err(e) = self.cache.trusted(scid).await {
                 log::warn!("identity: the cached log of {scid} is unreadable: {e}");
+                unreadable.push(format!("{scid}: {e}"));
             }
+        }
+        if unreadable.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "the cached key logs of {} stored people are unreadable ({})",
+                unreadable.len(),
+                unreadable.join("; ")
+            ))
         }
     }
 
@@ -1112,13 +1125,29 @@ impl Resolver {
     /// store is tried once per window per log, not on every batch; the periodic re-check
     /// of `cantCheck` links retries it. At most [`DISCOVERY_PER_BATCH`] signers the key map
     /// does not know are looked up per call; the others stay unknown until a later one.
-    pub async fn prepare(&self, signers: &[(String, Option<u64>)]) {
+    ///
+    /// The returned hold keeps every signer of the batch pending in the key map
+    /// ([`KeyMap::hold`]) until it drops: keep it until the batch's links are judged, so a key
+    /// the batch got no answer for is `CantCheck` however long the prepare took.
+    pub async fn prepare(&self, signers: &[(String, Option<u64>)]) -> PendingHold {
         self.prepare_at(signers, super::service::now()).await
     }
 
     /// [`Resolver::prepare`] at the unix time `now` (tests move the clock).
-    pub(crate) async fn prepare_at(&self, signers: &[(String, Option<u64>)], now: u64) {
+    pub(crate) async fn prepare_at(
+        &self,
+        signers: &[(String, Option<u64>)],
+        now: u64,
+    ) -> PendingHold {
         let map = self.cache.key_map();
+        // Held from the start: the batch's own record of what it asked about, which the
+        // bounded, aging pending marks below cannot take back before its links are judged.
+        let hold = map.hold(
+            signers
+                .iter()
+                .filter_map(|(did, _)| multikey_of(did))
+                .map(str::to_string),
+        );
         // Signers the key map does not know: each may cost the key index a call. Which of them
         // this pass asks about: those asked about longest ago first.
         let unknown: Vec<&str> = signers
@@ -1176,6 +1205,7 @@ impl Resolver {
                 }
             }
         }
+        hold
     }
 
     /// What the log of `scid` says about the device key `key` (a multikey) that asks for a
@@ -4213,7 +4243,7 @@ mod link_check_tests {
             check_signed_with(&expr, resolver.cache.key_map(), None, NOW).verdict,
             LinkVerdict::CantCheck
         );
-        resolver
+        let _hold = resolver
             .prepare(&[(expr.author.clone(), expr.proof.anchor)])
             .await;
         assert_eq!(
@@ -4357,7 +4387,7 @@ mod link_check_tests {
         let signers: Vec<(String, Option<u64>)> = (0..DISCOVERY_PER_BATCH + 36)
             .map(|_| (TestSigner::generate().did, Some(0)))
             .collect();
-        resolver.prepare(&signers).await;
+        let _hold = resolver.prepare(&signers).await;
         assert_eq!(
             store.key_owner_calls.load(Ordering::SeqCst),
             DISCOVERY_PER_BATCH
@@ -4373,7 +4403,7 @@ mod link_check_tests {
             .count();
         assert_eq!(unknown, 36);
 
-        resolver.prepare(&signers).await;
+        let _hold = resolver.prepare(&signers).await;
         assert_eq!(
             store.key_owner_calls.load(Ordering::SeqCst),
             DISCOVERY_PER_BATCH + 36
@@ -4397,7 +4427,7 @@ mod link_check_tests {
                 .collect()
         };
         let fresh = signed_with(&log.device, Some(0));
-        resolver
+        let _hold = resolver
             .prepare_at(&signers(std::slice::from_ref(&fresh)), now)
             .await;
         assert_eq!(
@@ -4425,7 +4455,7 @@ mod link_check_tests {
         );
 
         store.store_down.store(true, Ordering::SeqCst);
-        resolver.prepare_at(&signers(&links), later).await;
+        let _hold = resolver.prepare_at(&signers(&links), later).await;
         assert_eq!(
             verdicts(later),
             [LinkVerdict::CantCheck, LinkVerdict::CantCheck],
@@ -4434,7 +4464,7 @@ mod link_check_tests {
 
         store.store_down.store(false, Ordering::SeqCst);
         let after = later + ADMIT_FRESHNESS + 5;
-        resolver.prepare_at(&signers(&links), after).await;
+        let _hold = resolver.prepare_at(&signers(&links), after).await;
         assert_eq!(
             verdicts(after),
             [LinkVerdict::Flagged, LinkVerdict::Flagged]
@@ -4483,7 +4513,7 @@ mod link_check_tests {
         let judge =
             |expr: &Expression<Link>| check_signed_with(expr, resolver.cache.key_map(), None, NOW);
 
-        resolver.prepare_at(&[(device.clone(), Some(0))], now).await;
+        let _hold = resolver.prepare_at(&[(device.clone(), Some(0))], now).await;
         assert_eq!(judge(&signed_with(&log.device, Some(0))), valid_for(person));
 
         // Revoked in the store only; the cached head still lists the key.
@@ -4492,7 +4522,7 @@ mod link_check_tests {
 
         // Within the window the cached head answers, without another read of the store.
         let reads = store.log_calls.load(Ordering::SeqCst);
-        resolver
+        let _hold = resolver
             .prepare_at(&[(device.clone(), Some(0))], now + 5)
             .await;
         assert_eq!(store.log_calls.load(Ordering::SeqCst), reads);
@@ -4501,7 +4531,7 @@ mod link_check_tests {
         let later = now + ADMIT_FRESHNESS + 5;
         for anchor in [Some(0), None] {
             let expr = signed_with(&log.device, anchor);
-            resolver
+            let _hold = resolver
                 .prepare_at(&[(device.clone(), anchor)], later)
                 .await;
             assert_eq!(
@@ -4543,7 +4573,7 @@ mod link_check_tests {
         for _ in 0..3 {
             // The breaker's pause is over.
             *resolver.index_down_until.lock().unwrap() = None;
-            resolver.prepare(&signers).await;
+            let _hold = resolver.prepare(&signers).await;
             if matches!(
                 resolver.cache.key_map().lookup(&log.device.key()),
                 KeyLookup::Listed { .. }
@@ -4566,7 +4596,7 @@ mod link_check_tests {
             .collect();
         let link: Expression<Link> = TestSigner::generate().sign(link());
         signers.push((link.author.clone(), None));
-        resolver.prepare(&signers).await;
+        let _hold = resolver.prepare(&signers).await;
         let judge = || check_signed_with(&link, resolver.cache.key_map(), None, NOW);
         assert_eq!(
             judge().verdict,
@@ -4574,7 +4604,7 @@ mod link_check_tests {
             "not asked about yet"
         );
         // The next batch asks about it: no log, so it counts as before key logs.
-        resolver.prepare(&signers).await;
+        let _hold = resolver.prepare(&signers).await;
         assert_eq!(judge(), valid_for(None));
     }
 
@@ -4593,14 +4623,14 @@ mod link_check_tests {
             .collect();
         let past_cap: Expression<Link> = TestSigner::generate().sign(link());
         signers.push((past_cap.author.clone(), None));
-        resolver.prepare(&signers).await;
+        let _hold = resolver.prepare(&signers).await;
         assert_eq!(
             check_signed_with(&past_cap, resolver.cache.key_map(), None, NOW),
             valid_for(None),
             "past the cap, with no index to ask"
         );
         let first: Expression<Link> = TestSigner::generate().sign(link());
-        resolver.prepare(&[(first.author.clone(), None)]).await;
+        let _hold = resolver.prepare(&[(first.author.clone(), None)]).await;
         assert_eq!(
             check_signed_with(&first, resolver.cache.key_map(), None, NOW),
             valid_for(None),
@@ -4611,7 +4641,7 @@ mod link_check_tests {
         store.key_index_not_served.store(false, Ordering::SeqCst);
         store.key_index_down.store(true, Ordering::SeqCst);
         let waiting: Expression<Link> = TestSigner::generate().sign(link());
-        resolver.prepare(&[(waiting.author.clone(), None)]).await;
+        let _hold = resolver.prepare(&[(waiting.author.clone(), None)]).await;
         assert_eq!(
             check_signed_with(&waiting, resolver.cache.key_map(), None, NOW).verdict,
             LinkVerdict::CantCheck
@@ -4635,7 +4665,7 @@ mod link_check_tests {
         assert!(matches!(map.lookup(&signer.multikey()), KeyLookup::Unknown));
 
         store.key_index_down.store(true, Ordering::SeqCst);
-        resolver.prepare(&[(expr.author.clone(), None)]).await;
+        let _hold = resolver.prepare(&[(expr.author.clone(), None)]).await;
         assert_eq!(
             store.key_owner_calls.load(Ordering::SeqCst),
             1,
@@ -4663,7 +4693,7 @@ mod link_check_tests {
         let mut signers = vec![(first.author.clone(), None)];
         signers.extend((0..KEY_MAP_BOUND - 1).map(|_| (TestSigner::generate().did, None)));
         signers.push((last.author.clone(), None));
-        resolver.prepare(&signers).await;
+        let _hold = resolver.prepare(&signers).await;
         let map = resolver.cache.key_map();
         assert_eq!(
             check_signed_with(&first, map, None, NOW).verdict,
@@ -4675,5 +4705,42 @@ mod link_check_tests {
             LinkVerdict::CantCheck,
             "noted once the set was full"
         );
+    }
+
+    /// A batch's prepare leaves a signer unanswered (the key index down) and goes on refreshing
+    /// other signers past `PENDING_TTL` before its links are judged. Meanwhile other batches
+    /// fill the pending marks, and the prune drops this signer's aged mark. The batch still
+    /// judges its unanchored link `cantCheck`: the key it asked about and got no answer for is
+    /// held by the batch itself, not by the global mark. Once the batch is done, the hold goes.
+    #[tokio::test]
+    async fn a_slow_batch_judges_a_signer_whose_pending_mark_was_pruned_as_pending() {
+        use super::super::cache::{KEY_MAP_BOUND, PENDING_TTL};
+        let store = Arc::new(FakeStore::new(vec![]));
+        store.key_index_down.store(true, Ordering::SeqCst);
+        let resolver = resolver_on(store);
+        let link: Expression<Link> = TestSigner::generate().sign(link());
+        let key = multikey_of(&link.author).unwrap().to_string();
+        let hold = resolver.prepare(&[(link.author.clone(), None)]).await;
+        let map = resolver.cache.key_map();
+        assert!(map.has_pending_mark(&key), "the prepare noted the signer");
+
+        // The batch takes longer than `PENDING_TTL`; other batches fill the marks.
+        map.note_pending_at(&key, Instant::now() - PENDING_TTL - Duration::from_secs(1));
+        for i in 0..KEY_MAP_BOUND {
+            map.note_pending(&format!("z6MkOther{i}"));
+        }
+        assert!(
+            !map.has_pending_mark(&key),
+            "the prune dropped the aged mark"
+        );
+        assert!(matches!(map.lookup(&key), KeyLookup::Unknown));
+
+        assert_eq!(
+            check_signed_with(&link, map, None, NOW).verdict,
+            LinkVerdict::CantCheck,
+            "asked about and unanswered: the batch's own hold keeps it pending"
+        );
+        drop(hold);
+        assert!(!map.is_pending(&key), "the batch is done: its hold went");
     }
 }
