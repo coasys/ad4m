@@ -177,9 +177,10 @@ impl OllamaChat {
 
     /// Query `/api/show` for a model's context length.
     ///
-    /// Walks the `model_info` map looking for `<arch>.context_length`.  Falls
-    /// back to `FALLBACK_NUM_CTX` on any error — the request still goes out,
-    /// just with a conservative window.  Every path is capped at
+    /// The Modelfile's `num_ctx` (in `parameters`) when the tag sets one,
+    /// held to the `<arch>.context_length` in `model_info`; else that
+    /// `context_length`.  Falls back to `FALLBACK_NUM_CTX` on any error — the
+    /// request still goes out, just with a conservative window.  Every path is capped at
     /// `self.max_num_ctx`, including the fallback, so an operator's ceiling
     /// is never exceeded.
     async fn query_model_ctx(&self, model: &str) -> u32 {
@@ -231,39 +232,52 @@ impl OllamaChat {
             .is_some_and(|caps| caps.iter().any(|c| c.as_str() == Some("thinking")));
 
         // model_info contains architecture-specific keys like
-        // "qwen3.context_length", "llama.context_length", etc.
-        if let Some(info) = json.get("model_info").and_then(|v| v.as_object()) {
-            for (key, val) in info {
-                if key.ends_with(".context_length") {
-                    if let Some(ctx) = val.as_u64() {
-                        // Clamp before narrowing: `ctx as u32` wraps a
-                        // context_length above u32::MAX to a tiny window.
-                        let capped = ctx.min(u64::from(self.max_num_ctx)) as u32;
-                        log::info!(
-                            "Ollama model {model}: context_length={ctx}, using num_ctx={capped}"
-                        );
-                        return (Some(capped), Some(thinking));
-                    }
-                }
-            }
-        }
+        // "qwen3.context_length", "llama.context_length", etc.: the base
+        // model's trained window.
+        let context_length = json
+            .get("model_info")
+            .and_then(|v| v.as_object())
+            .and_then(|info| {
+                info.iter()
+                    .find(|(key, _)| key.ends_with(".context_length"))
+                    .and_then(|(_, val)| val.as_u64())
+            });
 
-        // Some Modelfiles set num_ctx in parameters directly.
-        if let Some(params) = json.get("parameters").and_then(|v| v.as_str()) {
-            for line in params.lines() {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 2 && parts[0] == "num_ctx" {
-                    if let Ok(ctx) = parts[1].parse::<u32>() {
-                        let capped = ctx.min(self.max_num_ctx);
-                        log::info!("Ollama model {model}: Modelfile num_ctx={ctx}, using {capped}");
-                        return (Some(capped), Some(thinking));
-                    }
-                }
-            }
-        }
+        // A tag made from a Modelfile (`PARAMETER num_ctx 49152`) lists its
+        // own window in `parameters`. It is the window the tag is meant to
+        // run at, and the one Ollama loads it at for a request without
+        // `num_ctx`. `model_info` keeps the base model's window, often far
+        // larger: sending that instead reloads the model with a bigger KV
+        // cache. So the Modelfile's value wins, held to the trained window.
+        let modelfile_num_ctx =
+            json.get("parameters")
+                .and_then(|v| v.as_str())
+                .and_then(|params| {
+                    params.lines().find_map(|line| {
+                        let mut parts = line.split_whitespace();
+                        match (parts.next(), parts.next()) {
+                            (Some("num_ctx"), Some(value)) => value.parse::<u64>().ok(),
+                            _ => None,
+                        }
+                    })
+                });
 
-        log::warn!("Could not determine context_length for {model}");
-        (None, Some(thinking))
+        let window = match (modelfile_num_ctx, context_length) {
+            (Some(tag), Some(trained)) => Some(tag.min(trained)),
+            (tag, trained) => tag.or(trained),
+        };
+        let Some(window) = window else {
+            log::warn!("Could not determine context_length for {model}");
+            return (None, Some(thinking));
+        };
+        // Clamp before narrowing: `window as u32` wraps a value above
+        // u32::MAX to a tiny window.
+        let capped = window.min(u64::from(self.max_num_ctx)) as u32;
+        log::info!(
+            "Ollama model {model}: context_length={context_length:?}, Modelfile \
+             num_ctx={modelfile_num_ctx:?}, using num_ctx={capped}"
+        );
+        (Some(capped), Some(thinking))
     }
 }
 
@@ -1253,6 +1267,88 @@ mod wire_tests {
             .expect("completion succeeds");
 
         mock.assert_async().await;
+    }
+
+    /// Mock `/api/show` for a tag made from a Modelfile (`FROM qwen3.8:27b`,
+    /// `PARAMETER num_ctx 49152`): `model_info` keeps the base model's window,
+    /// `parameters` holds the tag's own `num_ctx`.
+    async fn mock_show_modelfile_tag(
+        server: &mut mockito::ServerGuard,
+        base_window: u64,
+        tag_num_ctx: u32,
+    ) -> mockito::Mock {
+        server
+            .mock("POST", "/api/show")
+            .with_status(200)
+            .with_body(
+                json!({
+                    "parameters": format!(
+                        "num_ctx                        {tag_num_ctx}\nstop                           \"<|im_end|>\""
+                    ),
+                    "model_info": { "qwen3.context_length": base_window },
+                    "capabilities": ["completion", "tools", "thinking"],
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await
+    }
+
+    #[tokio::test]
+    async fn a_modelfile_num_ctx_wins_over_the_base_models_window() {
+        let mut server = mockito::Server::new_async().await;
+        let _show = mock_show_modelfile_tag(&mut server, 262_144, 49_152).await;
+        let mock = server
+            .mock("POST", "/api/chat")
+            .match_body(mockito::Matcher::PartialJson(json!({
+                "options": {"num_ctx": 49_152},
+            })))
+            .with_status(200)
+            .with_body(
+                json!({
+                    "message": {"role": "assistant", "content": "ok"},
+                    "done": true,
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        // No `max_num_ctx`: the default cap (131072) is above the tag's window.
+        let client = OllamaChat::new("", Url::parse(&server.url()).unwrap(), None);
+        assert_eq!(
+            client.context_window_tokens("qwen3.8-27b-48k").await,
+            Some(49_152),
+            "the budget is sized from the tag's own window"
+        );
+        client
+            .chat(ChatRequest::new("qwen3.8-27b-48k", turns()))
+            .await
+            .expect("completion succeeds");
+
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn a_modelfile_num_ctx_above_the_base_window_is_held_to_the_base_window() {
+        let mut server = mockito::Server::new_async().await;
+        let _show = mock_show_modelfile_tag(&mut server, 8_192, 32_768).await;
+        let client = OllamaChat::new("", Url::parse(&server.url()).unwrap(), None);
+        assert_eq!(
+            client.context_window_tokens("small-model-32k").await,
+            Some(8_192)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_modelfile_num_ctx_is_still_capped_at_max_num_ctx() {
+        let mut server = mockito::Server::new_async().await;
+        let _show = mock_show_modelfile_tag(&mut server, 262_144, 49_152).await;
+        let client = OllamaChat::new("", Url::parse(&server.url()).unwrap(), Some(16_384));
+        assert_eq!(
+            client.context_window_tokens("qwen3.8-27b-48k").await,
+            Some(16_384)
+        );
     }
 
     #[tokio::test]
