@@ -269,7 +269,7 @@ mod tests {
 
     fn peer_http() -> &'static str {
         option_env!("FAKE_PEER_URL")
-            .expect("FAKE_PEER_URL: run through scripts/test-wasm-client.sh")
+            .unwrap_or_else(|| panic!("FAKE_PEER_URL: run through scripts/test-wasm-client.sh"))
     }
 
     /// A `ws://` URL of the scripted peer.
@@ -423,7 +423,7 @@ mod tests {
     #[wasm_bindgen_test]
     async fn a_refused_connect_fails_without_an_uncaught_exception() {
         let trap = Uncaught::trap();
-        let port = option_env!("CLOSED_PORT").expect("CLOSED_PORT");
+        let port = option_env!("CLOSED_PORT").unwrap_or_else(|| panic!("CLOSED_PORT"));
         let url = format!("ws://127.0.0.1:{port}/");
         let err = match connect(&url, &url).await {
             Ok(_) => panic!("a connect to a closed port succeeded"),

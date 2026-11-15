@@ -39,7 +39,7 @@ fn executor_url() -> String {
 /// string must encode).
 fn admin_token() -> String {
     option_env!("ADMIN_TOKEN")
-        .expect("ADMIN_TOKEN: run through scripts/test-wasm-client.sh")
+        .unwrap_or_else(|| panic!("ADMIN_TOKEN: run through scripts/test-wasm-client.sh"))
         .to_string()
 }
 
@@ -112,12 +112,12 @@ async fn wasm_client_connects_authenticates_and_queries() {
 /// `cut()` drops them all without a close frame (a network loss).
 fn proxy_url() -> String {
     option_env!("EXECUTOR_PROXY_URL")
-        .expect("EXECUTOR_PROXY_URL: run through scripts/test-wasm-client.sh")
+        .unwrap_or_else(|| panic!("EXECUTOR_PROXY_URL: run through scripts/test-wasm-client.sh"))
         .to_string()
 }
 
 async fn peer_get(path: &str) -> Value {
-    let base = option_env!("FAKE_PEER_URL").expect("FAKE_PEER_URL");
+    let base = option_env!("FAKE_PEER_URL").unwrap_or_else(|| panic!("FAKE_PEER_URL"));
     let window = web_sys::window().unwrap();
     let resp = JsFuture::from(window.fetch_with_str(&format!("{base}/{path}")))
         .await
@@ -539,11 +539,14 @@ async fn a_panicking_reconnect_callback_does_not_stop_reconnects() {
 
 // ── item 4: explicit close and disconnect leave nothing behind ─────────
 
-/// Every exception that reaches the page uncaught (a handler that throws).
-fn trap_uncaught() -> (
+/// The uncaught exceptions so far, and the listener collecting them.
+type Uncaught = (
     Rc<std::cell::RefCell<Vec<String>>>,
     wasm_bindgen::closure::Closure<dyn FnMut(web_sys::Event)>,
-) {
+);
+
+/// Every exception that reaches the page uncaught (a handler that throws).
+fn trap_uncaught() -> Uncaught {
     let errors = Rc::new(std::cell::RefCell::new(Vec::new()));
     let handler = wasm_bindgen::closure::Closure::wrap(Box::new({
         let errors = errors.clone();
