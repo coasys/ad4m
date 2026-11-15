@@ -18,6 +18,38 @@
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! # Migrating from the first version of this module
+//!
+//! Source-breaking changes, with what a caller changes:
+//!
+//! - `TokenStore::token(url, app)` returns `Result<Option<String>>` (was
+//!   `Option<String>`): a store that cannot be read or parsed is an error,
+//!   no longer an empty store. Add `?` or handle the error.
+//! - The remembered URL is per app: `TokenStore::last_url(app)` returns
+//!   `Result<Option<RememberedUrl>>` (was `last_url()` returning
+//!   `Option<String>`) and `set_last_url(app, url, pinned)` takes the app and
+//!   whether the URL was chosen (`url`/`port`) rather than discovered (was
+//!   `set_last_url(url)`). The old global entry in `tokens.json` is ignored,
+//!   so each app discovers its executor once more.
+//! - New: `TokenStore::remove_token_if(url, app, token)`, which removes the
+//!   token only while it is still `token`.
+//! - New variant `ConnectError::InsecureTransport { url }`: plaintext
+//!   (`http://`/`ws://`) to an executor off loopback is now refused before
+//!   any token, password or code is sent. Opt in with
+//!   `ConnectOptions::allow_insecure_remote(true)`; code that builds
+//!   `ConnectOptions` as a struct literal must set the new `insecure_remote`
+//!   field (or use `ConnectOptions::new`).
+//! - New variant `ConnectStatus::EmailCodeExpired`: the email challenge is
+//!   no longer valid and a new code is requested (see its docs: it does not
+//!   detect expiry by time).
+//!
+//! Exhaustive `match`es on `ConnectError` or `ConnectStatus` need the new
+//! arms. Behaviour changes: `connect` can return `Ok(AuthState::Unauthenticated)`
+//! (see [`Ad4mConnect::connect`]); `disconnect` closes the socket and
+//! publishes `Unauthenticated` before it returns a store error; a
+//! `localhost` URL is dialled on 127.0.0.1 and ::1, never through the
+//! resolver.
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
@@ -202,13 +234,22 @@ pub enum ConnectStatus {
     WaitingForApproval { request_id: String },
     /// `email` was sent a sign-in code.
     WaitingForEmailCode { email: String },
-    /// The last code was refused — the prompt shows again.
+    /// The last code was refused — the prompt shows again. An emailed code
+    /// that expired by time also ends here, and so does every code after it:
+    /// see [`EmailCodeExpired`](Self::EmailCodeExpired).
     CodeRejected,
     /// The pending request died (expired, or five wrong codes); a fresh one
     /// is requested next.
     RequestExpired,
-    /// The emailed code was invalidated (five wrong codes); a new one is
-    /// requested next.
+    /// The emailed code's challenge is no longer valid: the executor
+    /// invalidated it after five wrong codes. A new code is requested next.
+    ///
+    /// Despite the name, this does not detect a code that expired by time.
+    /// The executor answers an expired code like a wrong one ("Invalid
+    /// verification code"), and deletes the challenge, so the flow reports
+    /// [`CodeRejected`](Self::CodeRejected) and asks again, and no later code
+    /// can succeed. The user ends that by cancelling (the prompt returns an
+    /// error) and running `connect` again, which emails a new code.
     EmailCodeExpired,
 }
 
@@ -425,6 +466,18 @@ pub fn default_executor_port_file() -> PathBuf {
 /// directory is forced to 0700 and the file is born 0600 (Unix). A store that
 /// cannot be read or parsed is an error, never an empty store; only a missing
 /// file reads as empty.
+///
+/// The directory must be trusted: private to the user, owned by them, with
+/// parents no one else can replace (the default `{config}/ad4m-connect` is,
+/// on an ordinary per-user setup). The store does not check ownership or
+/// ancestry, and follows symlinks when it creates the directory, takes the
+/// lock and reads the file; the 0700 chmod does not prove the directory is
+/// private. On Windows the files get no ACL of their own: they are as private
+/// as the directory's inherited ACL, which matters most for a custom
+/// `token_dir`. The lock serves cooperating processes (this store, in any
+/// process); a leftover `tokens.json.lock` is normal and must not be deleted
+/// to "clear" it. Replacement is atomic (old file or new), but the directory
+/// is not fsynced after the rename, so a power loss may lose the latest write.
 #[derive(Clone, Debug)]
 pub struct TokenStore {
     path: PathBuf,
@@ -714,7 +767,9 @@ impl<E: ExecutorIo> Ad4mConnect<E> {
     /// A receiver the app can `changed().await`: a mid-session token refusal
     /// (grant revoked, token expired) flips it to `Unauthenticated` and drops
     /// the stored token, so the app re-runs `connect` (TS `watchAuth` +
-    /// `discardToken`).
+    /// `discardToken`). The state changes even when the store cannot delete
+    /// the token (that store error is discarded): the deletion is not
+    /// guaranteed.
     pub fn watch_state(&self) -> watch::Receiver<AuthState> {
         self.state.subscribe()
     }
@@ -735,6 +790,12 @@ impl<E: ExecutorIo> Ad4mConnect<E> {
     /// stored works go through the capability handshake (single-user) or the
     /// email sign-in (multi-user). Returns the end state — `Locked` is not an
     /// error: the wallet must be unlocked, then run again.
+    ///
+    /// `Ok` means the flow completed, not that it authenticated: check the
+    /// returned state. It can be `Ok(AuthState::Unauthenticated)` when the
+    /// executor refused the new socket's token while `connect` was adopting
+    /// it, or when a newer session replaced it. And any socket can be
+    /// refused just after `connect` returns: follow `watch_state`.
     pub async fn connect(&mut self, prompts: &mut impl ConnectPrompts) -> Result<AuthState> {
         prompts.status(ConnectStatus::Connecting);
         let (url, pinned) = self.resolve_url().await?;
