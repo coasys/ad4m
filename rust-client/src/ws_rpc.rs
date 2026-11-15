@@ -652,9 +652,7 @@ impl WsRpcClient {
                             .map(|(_, cb)| cb.clone())
                             .collect();
                         for cb in callbacks {
-                            // A panicking callback must not take the
-                            // supervisor down with it.
-                            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cb()));
+                            Self::run_reconnect_callback(cb);
                         }
                         if *conn.borrow() {
                             failures = 0;
@@ -864,8 +862,32 @@ impl WsRpcClient {
         Ok(())
     }
 
+    /// Run one reconnect callback so that its panic cannot take the
+    /// supervisor (or the callbacks after it) down. Native: `catch_unwind`,
+    /// in place.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn run_reconnect_callback(cb: ReconnectCb) {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cb()));
+    }
+
+    /// wasm32-unknown-unknown has no unwinding: a panic is a trap that
+    /// abandons whatever task is being polled, and `catch_unwind` cannot
+    /// see it. So each callback runs in a task of its own (in order, after
+    /// the supervisor's current poll): a panic traps only that task, and
+    /// the supervisor and the other callbacks run on.
+    #[cfg(target_arch = "wasm32")]
+    fn run_reconnect_callback(cb: ReconnectCb) {
+        rt::try_spawn(async move { cb() });
+    }
+
     /// `callback` runs after each successful reconnect, once the watch was
     /// re-sent. Returns an id for `remove_on_reconnect`.
+    ///
+    /// A panicking callback does not stop reconnecting on either target.
+    /// In the browser, though, a panic does not unwind: the callback's own
+    /// task is abandoned mid-way with no destructors run, so state it was
+    /// changing (a lock it held, a half-written value) stays as it was.
+    /// Callbacks must not panic; the isolation only keeps the client alive.
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn on_reconnect(&self, callback: impl Fn() + Send + Sync + 'static) -> u64 {
         self.register_on_reconnect(Arc::new(callback))

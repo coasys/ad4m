@@ -500,3 +500,39 @@ async fn a_locked_wallet_closes_with_1013_and_the_same_token_recovers() {
     admin.ws().close().await;
     app.ws().close().await;
 }
+
+// ── A6-5: a panicking reconnect callback ───────────────────────────────
+
+/// A callback that panics (wasm has no unwinding: the panic traps the
+/// task that runs it) must not take the reconnect supervisor or the
+/// callbacks after it down: the next callback still runs, and a second
+/// outage is still redialled.
+#[wasm_bindgen_test]
+async fn a_panicking_reconnect_callback_does_not_stop_reconnects() {
+    let client = Ad4mClient::connect(proxy_url(), admin_token())
+        .await
+        .unwrap();
+    client
+        .ws()
+        .on_reconnect(|| panic!("a6-5: this reconnect callback panics on purpose"))
+        .await;
+    let reconnects = count_reconnects(&client).await;
+
+    cut().await;
+    until(Duration::from_secs(10), "the first reconnect", || {
+        reconnects.get() >= 1
+    })
+    .await;
+    cut().await;
+    until(Duration::from_secs(10), "the second reconnect", || {
+        reconnects.get() >= 2
+    })
+    .await;
+    assert!(client.ws().is_connected());
+    client
+        .agent
+        .status()
+        .await
+        .expect("a call after both reconnects");
+    client.ws().close().await;
+}
