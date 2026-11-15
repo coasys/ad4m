@@ -171,12 +171,15 @@ export class IdentityClient {
     /**
      * Ends the device string `device` (from `prepareDevice`), as Cancel on the code screen: the
      * executor stops reading for tickets, waits for a ticket it is taking, and cancels every
-     * claim it made, so a holder who confirms later links nothing. Answers
+     * claim it made, so a holder who confirms later binds nothing on this executor. The cancel
+     * is local, as `cancelJoin`'s: the identity store is not told and may still accept the
+     * holder's confirmation, but this executor never joins through those claims. Answers
      * `{ state: "ended", cancelled }` (the offers of the claims cancelled, none when no ticket
      * came), or `{ state: "already-joined", offerId, did }` when a claim already joined, which
-     * a cancel does not undo. Again answers the same. 404 for a device string this executor
-     * does not know (made before it restarted, or an hour past its expiry). The operator on
-     * this machine only.
+     * a cancel does not undo. The cancel goes on if this call is dropped, and every later call
+     * answers what the first one did. 404 for a device string this executor does not know:
+     * made before it restarted, an hour past its expiry, or 16 newer device strings ago. The
+     * operator on this machine only.
      */
     async endPrepared(device: string): Promise<PreparedEnded> {
         return this.#apiClient.call("identity.endPrepared", { device });

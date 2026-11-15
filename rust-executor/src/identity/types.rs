@@ -434,9 +434,10 @@ pub struct EndPreparedParams {
 }
 
 /// `identity.endPrepared`: how a device string's link ended. `ended`: its pre-join read is over
-/// and no claim it made binds; `cancelled` names those claims' offers (none when no ticket was
-/// taken). `already-joined`: a claim it made already bound the main agent to `did`, which a cancel
-/// does not undo.
+/// and no claim it made binds this executor; `cancelled` names those claims' offers (none when no
+/// ticket was taken). The cancel is local: the store may still accept the holder's confirmation.
+/// `already-joined`: a claim it made already bound the main agent to `did`, which a cancel does
+/// not undo. Every later call answers the same.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(tag = "state", rename_all = "kebab-case")]
 pub enum PreparedEnded {

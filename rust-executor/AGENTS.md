@@ -242,7 +242,8 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   channel keeps a master key message for `identity.takeMaster`, every other deletes it
   unopened. `identity.prepareDevice` (and `ad4m-executor link-code`) shows a device string and
   claims the ticket a holder pushes to its pre-join inbox (`link-ticket`); `identity.endPrepared`
-  ends that read and cancels its claims (Cancel on the code screen); the private record
+  ends that read and cancels its claims here (Cancel on the code screen; the store is not
+  told); the private record
   and the request box pass through `identity/record.rs`.
 
 ## Do / don't

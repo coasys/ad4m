@@ -209,8 +209,8 @@ async fn prepare_device(_params: Value, _ctx: Arc<RequestContext>) -> Result<Val
     )
 }
 
-/// `identity.endPrepared`: ends a device string's read and cancels every claim it made
-/// (`identity::inbox`).
+/// `identity.endPrepared`: ends a device string's read and cancels every claim it made, on
+/// this executor only (`identity::inbox`).
 async fn end_prepared(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let p: EndPreparedParams = parse(params)?;
     answer(crate::identity::service()?.end_prepared(&p.device).await?)
