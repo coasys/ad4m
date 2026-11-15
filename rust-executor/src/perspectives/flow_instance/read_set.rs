@@ -254,9 +254,10 @@ impl ReadSet {
     /// window against a head the store just confirmed; a replica that cannot
     /// read the store leaves the links `cantCheck` rather than counting them on
     /// a stale head. A receipt's read-set is bounded, so only its distinct
-    /// authors are prepared, under the resolver's own timeouts.
-    pub async fn prepare_carried_signers(&self) {
-        crate::identity::prepare_link_signers(&self.carried_links()).await;
+    /// authors are prepared, under the resolver's own timeouts. Keep the returned hold until
+    /// the read-set is folded: a signer with no answer stays pending until then.
+    pub async fn prepare_carried_signers(&self) -> crate::identity::cache::PendingHold {
+        crate::identity::prepare_link_signers(&self.carried_links()).await
     }
 }
 
