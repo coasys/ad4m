@@ -462,7 +462,8 @@ impl Ad4mDb {
 
     /// Cancels the claim on `offer_id` unless `agent_did` already speaks for its identity, in
     /// one transaction with that check: a binding written first wins, and one written after
-    /// is refused ([`Ad4mDb::set_agent_identity_of_join`]). Cancelling twice is `Cancelled`.
+    /// is refused ([`Ad4mDb::set_agent_identity_of_join`]). Cancelling twice is `Cancelled`, also
+    /// after the agent joined the claim's identity through another claim.
     pub fn cancel_join(&self, offer_id: &str, agent_did: &str) -> Ad4mDbResult<JoinCancel> {
         let tx = self.conn.unchecked_transaction()?;
         let scid: Option<String> = tx
@@ -475,6 +476,11 @@ impl Ad4mDb {
         let Some(scid) = scid else {
             return Ok(JoinCancel::NoClaim);
         };
+        // A cancelled claim never bound, so it stays `Cancelled` even once the agent joined
+        // the same identity through another claim.
+        if join_accept_in(&tx, offer_id)? == Some(JoinAccept::Cancelled) {
+            return Ok(JoinCancel::Cancelled);
+        }
         if agent_identity_in(&tx, agent_did)?.as_deref() == Some(scid.as_str()) {
             return Ok(JoinCancel::AlreadyJoined);
         }
@@ -696,7 +702,7 @@ mod tests {
 
     /// A claim's binding is refused once the claim is cancelled, or with no claim; a claim
     /// that needs no accept binds without one. A cancel after the binding is refused
-    /// `AlreadyJoined` and leaves the claim as it was.
+    /// `AlreadyJoined` and leaves the claim as it was; a claim cancelled before stays `Cancelled`.
     #[test]
     fn a_cancelled_claim_binds_nothing_and_a_bound_one_is_not_cancelled() {
         let (_dir, db) = db();
@@ -740,6 +746,12 @@ mod tests {
         assert_eq!(
             db.join("plain").unwrap().map(|j| j.accept),
             Some(JoinAccept::NotNeeded)
+        );
+        // The cancelled claim names the same identity, but the agent joined through another
+        // claim: it stays cancelled, not `AlreadyJoined`.
+        assert_eq!(
+            db.cancel_join("cancelled", "did:key:z6MkA").unwrap(),
+            JoinCancel::Cancelled
         );
         // Another agent's claim on the same identity is still cancelled.
         assert_eq!(

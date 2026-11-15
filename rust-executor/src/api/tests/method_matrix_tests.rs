@@ -718,6 +718,7 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
     ("identity.keyOwner", || json!({ "key": "z6Mk" })),
     ("identity.acceptJoin", || json!({ "offerId": "o" })),
     ("identity.cancelJoin", || json!({ "offerId": "o" })),
+    ("identity.endPrepared", || json!({ "device": "d" })),
     ("identity.inboxAck", || json!({ "id": "m" })),
     (
         "identity.inboxPut",
@@ -1250,6 +1251,7 @@ fn the_local_only_methods_are_the_ones_that_stay_on_this_machine() {
             "identity.acceptJoin",
             "identity.cancelJoin",
             "identity.custodyStatus",
+            "identity.endPrepared",
             "identity.inbox",
             "identity.inboxAck",
             "identity.prepareDevice",
@@ -1519,6 +1521,7 @@ async fn operator_methods_answer_everyone_else_admin_credential_required() {
             "identity.cancelJoin",
             "identity.claimOffer",
             "identity.custodyStatus",
+            "identity.endPrepared",
             "identity.inbox",
             "identity.inboxAck",
             "identity.prepareDevice",
