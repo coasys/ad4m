@@ -57,6 +57,19 @@ impl Drop for Owned {
 
 impl SendText for WsSink {
     async fn send_text(&mut self, text: String) -> Result<()> {
+        // `send` throws only in CONNECTING; in CLOSING/CLOSED the browser
+        // drops the data silently. Only an OPEN socket may report "sent".
+        let state = self.owned.ws.ready_state();
+        if state != WebSocket::OPEN {
+            return Err(anyhow!(
+                "WebSocket send failed: the socket is {}",
+                match state {
+                    WebSocket::CONNECTING => "still connecting",
+                    WebSocket::CLOSING => "closing",
+                    _ => "closed",
+                }
+            ));
+        }
         self.owned
             .ws
             .send_with_str(&text)
@@ -316,5 +329,30 @@ mod tests {
             trap.after(Duration::from_millis(300)).await,
             Vec::<String>::new()
         );
+    }
+
+    /// A6-4: the browser discards a send in CLOSING/CLOSED without
+    /// throwing; the adapter must report it as failed, not sent.
+    #[wasm_bindgen_test]
+    async fn a_send_while_closing_or_closed_fails() {
+        let Socket {
+            mut sink,
+            mut stream,
+        } = connect(&peer("echo/closing"), "echo").await.unwrap();
+        sink.send_text("before".into())
+            .await
+            .expect("a send while OPEN");
+        assert!(matches!(stream.next().await, Some(InFrame::Text(t)) if t == "before"));
+
+        sink.owned.ws.close().unwrap();
+        assert_eq!(sink.owned.ws.ready_state(), WebSocket::CLOSING);
+        let closing = sink.send_text("while closing".into()).await;
+        assert!(closing.is_err(), "a send while CLOSING reported success");
+
+        let closed = rt::timeout(Duration::from_secs(3), stream.next()).await;
+        assert!(matches!(closed, Ok(Some(InFrame::Close(_)))), "{closed:?}");
+        assert_eq!(sink.owned.ws.ready_state(), WebSocket::CLOSED);
+        let after = sink.send_text("after close".into()).await;
+        assert!(after.is_err(), "a send while CLOSED reported success");
     }
 }
