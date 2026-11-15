@@ -20,7 +20,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
-use web_sys::{CloseEvent, ErrorEvent, MessageEvent, WebSocket};
+use web_sys::{CloseEvent, Event, MessageEvent, WebSocket};
 
 /// The event queue — `mpsc` because the browser's event loop is the driver.
 pub(crate) type WsStream = futures_util::stream::LocalBoxStream<'static, InFrame>;
@@ -40,7 +40,7 @@ struct Owned {
     ws: WebSocket,
     _onopen: Closure<dyn FnMut()>,
     _onmessage: Closure<dyn FnMut(MessageEvent)>,
-    _onerror: Closure<dyn FnMut(ErrorEvent)>,
+    _onerror: Closure<dyn FnMut(Event)>,
     _onclose: Closure<dyn FnMut(CloseEvent)>,
 }
 
@@ -96,15 +96,15 @@ pub(crate) async fn connect(url: &str, display_url: &str) -> Result<Socket> {
     }) as Box<dyn FnMut()>);
     ws.set_onopen(Some(onopen.as_ref().unchecked_ref()));
 
+    // A WebSocket `error` is a plain `Event`: no message, no code (the
+    // browser hides network details from pages). Before open it fails the
+    // handshake; after open it only announces the `close` that always
+    // follows, and `onclose` owns the disconnect and its code.
     let onerror = Closure::wrap(Box::new({
-        let tx = tx.clone();
         let open_tx = open_tx.clone();
-        move |ev: ErrorEvent| {
-            let msg = ev.message();
+        move |_: Event| {
             if let Some(t) = open_tx.borrow_mut().take() {
-                let _ = t.send(Err(format!("error during handshake: {msg}")));
-            } else {
-                let _ = tx.unbounded_send(InFrame::Error(format!("WebSocket error: {msg}")));
+                let _ = t.send(Err("the handshake failed (network error)".to_string()));
             }
         }
     }) as Box<dyn FnMut(_)>);
@@ -293,6 +293,25 @@ mod tests {
         assert!(r.is_err(), "the hanging handshake resolved");
         assert_eq!(counts(key).await.0, 1, "the peer never saw the dial");
         assert_eq!(wait_closed(key, Duration::from_secs(3)).await, (1, 0));
+        assert_eq!(
+            trap.after(Duration::from_millis(300)).await,
+            Vec::<String>::new()
+        );
+    }
+
+    /// A6-1: a refused TCP connect fires `error` with a plain `Event` (no
+    /// `message`), then `close`. The handshake must fail with the URL in
+    /// the error and no handler may throw.
+    #[wasm_bindgen_test]
+    async fn a_refused_connect_fails_without_an_uncaught_exception() {
+        let trap = Uncaught::trap();
+        let port = option_env!("CLOSED_PORT").expect("CLOSED_PORT");
+        let url = format!("ws://127.0.0.1:{port}/");
+        let err = match connect(&url, &url).await {
+            Ok(_) => panic!("a connect to a closed port succeeded"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains(&url), "the error names the URL: {err}");
         assert_eq!(
             trap.after(Duration::from_millis(300)).await,
             Vec::<String>::new()

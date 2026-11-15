@@ -20,7 +20,9 @@ pub(crate) enum InFrame {
     Text(String),
     /// Server-initiated close; the code identifies an auth refusal (1008).
     Close(Option<u16>),
-    /// A dead-socket read error.
+    /// A dead-socket read error (native). The browser reports none: its
+    /// `error` event carries nothing, and `close` follows it.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     Error(String),
 }
 
