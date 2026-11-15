@@ -925,8 +925,11 @@ impl WsRpcClient {
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cb(&reason)));
     }
 
-    /// The browser: a task per callback, for the reason
-    /// [`run_reconnect_callback`](Self::run_reconnect_callback) gives.
+    /// The browser: a task per callback — the ones on the reader's list
+    /// when the refusal lands — for the reason
+    /// [`run_reconnect_callback`](Self::run_reconnect_callback) gives. A
+    /// registration that arrives later never comes through here:
+    /// `register_on_auth_failed` runs it inline instead.
     #[cfg(target_arch = "wasm32")]
     fn run_auth_failed_callback(cb: AuthFailedCb, reason: String) {
         rt::try_spawn(async move { cb(&reason) });
@@ -992,9 +995,10 @@ impl WsRpcClient {
     /// the token (close code 1008): expired, revoked, or bad signature — like
     /// TS `ApiClient.onAuthFailed`. No reconnect follows; `reason` is the
     /// server's close reason. If the refusal already happened, the callback
-    /// fires at once (on the caller's task). A callback that panics in the
-    /// reader does not stop the later callbacks or the terminal cleanup.
-    /// Returns an id for `remove_on_auth_failed`.
+    /// fires at once — inline on the caller's task, without the reader's
+    /// `catch_unwind`, so its panic is the caller's. A callback that panics
+    /// in the reader does not stop the later callbacks or the terminal
+    /// cleanup. Returns an id for `remove_on_auth_failed`.
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn on_auth_failed(&self, callback: impl Fn(&str) + Send + Sync + 'static) -> u64 {
         self.register_on_auth_failed(Arc::new(callback)).await
@@ -1003,10 +1007,16 @@ impl WsRpcClient {
     /// `callback(reason)` runs once if the executor closes the socket refusing
     /// the token (close code 1008). Returns an id for `remove_on_auth_failed`.
     ///
+    /// Where it runs depends on when it registers. A callback already on the
+    /// list when the refusal lands runs in a task of its own, so a panic
+    /// traps only that task and cannot stop the others. A callback that
+    /// registers after the refusal runs inline inside this call — on the
+    /// caller's poll with no task of its own, so a panic abandons that poll.
+    /// Either way a trap runs no destructors, so state a panicking callback
+    /// was changing stays as it was: callbacks must not panic.
+    ///
     /// The browser signature: no Send+Sync bound, as for
-    /// [`on_reconnect`](Self::on_reconnect). A panicking callback runs in a
-    /// task of its own there, so it cannot stop the others, but its own
-    /// state is left as it was: callbacks must not panic.
+    /// [`on_reconnect`](Self::on_reconnect).
     #[cfg(target_arch = "wasm32")]
     pub async fn on_auth_failed(&self, callback: impl Fn(&str) + 'static) -> u64 {
         self.register_on_auth_failed(Arc::new(callback)).await
@@ -1028,7 +1038,8 @@ impl WsRpcClient {
             }
         };
         // Refused before this registration: the reader already ran its
-        // list, so this one is ours to run — outside the lock.
+        // list, so this one is ours to run — outside the lock, and inline
+        // on the caller's poll: no catch_unwind, no task of its own.
         callback(&reason);
         id
     }
