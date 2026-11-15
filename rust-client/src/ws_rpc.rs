@@ -1645,6 +1645,54 @@ mod tests {
         assert!(!client.is_connected());
     }
 
+    /// N1 end to end: a `ws://localhost` connect — and the supervisor's
+    /// redial once the socket dies — must dial the loopback literals
+    /// `loopback_dial_addrs` hands them, never the resolver.
+    /// `transport::connect` records each dial's destination, so
+    /// this fails if the pin is removed (the records show resolver dials)
+    /// or if the reconnect path dials around `transport::connect` (no
+    /// second record at all).
+    #[tokio::test]
+    async fn localhost_connect_and_reconnect_dial_the_loopback_literals() {
+        use crate::testkit::FakeExecutor;
+        use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+        let fake = FakeExecutor::start().await;
+        // The same listener reached by name, so `to_ws_url` builds the
+        // `ws://localhost:…` URL the pin applies to.
+        let localhost = fake.url().replace("127.0.0.1", "localhost");
+        let port: u16 = localhost.rsplit(':').next().unwrap().parse().unwrap();
+        let ws_url = to_ws_url(&localhost, "");
+        let pinned = Some(vec![
+            SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
+            SocketAddr::from((Ipv6Addr::LOCALHOST, port)),
+        ]);
+
+        let client = WsRpcClient::connect(&localhost, "").await.unwrap();
+        // The first dial already happened — `connect` awaited it.
+        assert_eq!(
+            transport::dialed_addrs(&ws_url),
+            vec![pinned.clone()],
+            "the first ws://localhost connect did not dial the loopback literals"
+        );
+
+        // Socket 1 dies server-side; the supervisor redials through
+        // `transport::connect`. Its dial is recorded before the TCP connect,
+        // so the accept is the barrier that the record exists.
+        fake.drop_connection();
+        fake.connection(2).await;
+        assert_eq!(
+            transport::dialed_addrs(&ws_url),
+            vec![pinned.clone(), pinned],
+            "the supervisor's reconnect did not dial the loopback literals"
+        );
+
+        // Let the restore settle so close does not interrupt it.
+        let w = fake.next_request().await;
+        assert_eq!(w["type"], "events.watch");
+        fake.reply(&w, Value::Bool(true)).await;
+        client.close().await;
+    }
+
     /// F6: a socket that dies *while the reconnect task is still restoring*
     /// must still schedule the next dial. The reconnect task holds the
     /// `reconnect` slot until it returns; a disconnect observed meanwhile

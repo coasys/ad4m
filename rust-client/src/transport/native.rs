@@ -53,21 +53,59 @@ pub(crate) fn loopback_dial_addrs(url: &str) -> Option<Vec<std::net::SocketAddr>
     ])
 }
 
+/// Test hook: the destination every [`connect`] dial used, in order —
+/// `Some(addrs)` for a loopback-pinned dial (the literal SocketAddrs the
+/// TCP connect went to; the name never reached the resolver), `None` for
+/// a dial through the resolver. The reconnect test asserts both the first
+/// connect and the supervisor's redial take the pin: a dial that bypasses
+/// this function leaves no record at all.
+#[cfg(test)]
+static DIAL_LOG: std::sync::Mutex<Vec<(String, Option<Vec<std::net::SocketAddr>>)>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn record_dial(url: &str, addrs: Option<Vec<std::net::SocketAddr>>) {
+    DIAL_LOG.lock().unwrap().push((url.to_string(), addrs));
+}
+
+/// The dial records for `url` (each [`connect`] records against the URL it
+/// was given — token included), in the order they happened.
+#[cfg(test)]
+pub(crate) fn dialed_addrs(url: &str) -> Vec<Option<Vec<std::net::SocketAddr>>> {
+    DIAL_LOG
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(u, _)| u == url)
+        .map(|(_, addrs)| addrs.clone())
+        .collect()
+}
+
 /// Open the socket and split it. `display_url` is the same URL without the
 /// capability token — safe to print inside the error.
 pub(crate) async fn connect(url: &str, display_url: &str) -> Result<Socket> {
     let opened = match loopback_dial_addrs(url) {
         // The handshake keeps the URL (Host: localhost); only the TCP
         // destination is pinned.
-        Some(addrs) => match TcpStream::connect(&addrs[..]).await {
-            Ok(tcp) => client_async_with_config(url, MaybeTlsStream::Plain(tcp), Some(ws_config()))
+        Some(addrs) => {
+            #[cfg(test)]
+            record_dial(url, Some(addrs.clone()));
+            match TcpStream::connect(&addrs[..]).await {
+                Ok(tcp) => {
+                    client_async_with_config(url, MaybeTlsStream::Plain(tcp), Some(ws_config()))
+                        .await
+                        .map_err(|e| e.to_string())
+                }
+                Err(e) => Err(e.to_string()),
+            }
+        }
+        None => {
+            #[cfg(test)]
+            record_dial(url, None);
+            connect_async_with_config(url, Some(ws_config()), false)
                 .await
-                .map_err(|e| e.to_string()),
-            Err(e) => Err(e.to_string()),
-        },
-        None => connect_async_with_config(url, Some(ws_config()), false)
-            .await
-            .map_err(|e| e.to_string()),
+                .map_err(|e| e.to_string())
+        }
     };
     let (ws_stream, _) =
         opened.map_err(|e| anyhow!("WebSocket connection to {} failed: {}", display_url, e))?;

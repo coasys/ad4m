@@ -44,6 +44,8 @@ pub(crate) struct Socket {
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(crate) use native::dialed_addrs;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use native::{connect, WsSink, WsStream};
 
