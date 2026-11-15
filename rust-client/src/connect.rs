@@ -110,7 +110,10 @@ pub struct ConnectOptions {
     pub token_dir: Option<PathBuf>,
     /// `~/.ad4m/executor-port` (tests point it elsewhere).
     pub executor_port_file: Option<PathBuf>,
-    /// Whether a stored `last_url` may propose the executor (TS `ad4m-url`).
+    /// Whether this app's remembered URL may propose the executor (TS
+    /// `ad4m-url`). One the app or user chose (`url`/`port`) stays pinned
+    /// ahead of discovery; one found by discovery only comes after the
+    /// launcher's port file.
     pub use_stored_url: bool,
 }
 
@@ -394,10 +397,22 @@ pub struct TokenStore {
 
 #[derive(Default, Serialize, Deserialize)]
 struct StoreFile {
+    /// Per app (like `tokens`), the URL it last connected to. (A global
+    /// `last_url` from an older file is ignored.)
     #[serde(default)]
-    last_url: Option<String>,
+    urls: BTreeMap<String, RememberedUrl>,
     #[serde(default)]
     tokens: BTreeMap<String, String>,
+}
+
+/// The URL an app last connected to, and how it was found.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RememberedUrl {
+    pub url: String,
+    /// The app or user chose it (`ConnectOptions::url`/`port`): it stays
+    /// ahead of discovery. `false` = found by discovery (port file, default
+    /// port): the current port file comes first next time.
+    pub pinned: bool,
 }
 
 impl TokenStore {
@@ -528,15 +543,19 @@ impl TokenStore {
         })
     }
 
-    /// The URL last connected — TS `ad4m-url`.
-    pub fn last_url(&self) -> Result<Option<String>> {
-        Ok(self.load()?.last_url)
+    /// The URL `app` last connected to — TS `ad4m-url`, per app.
+    pub fn last_url(&self, app: &str) -> Result<Option<RememberedUrl>> {
+        Ok(self.load()?.urls.get(app).cloned())
     }
 
-    pub fn set_last_url(&self, url: &str) -> Result<()> {
+    pub fn set_last_url(&self, app: &str, url: &str, pinned: bool) -> Result<()> {
+        let entry = RememberedUrl {
+            url: url.to_string(),
+            pinned,
+        };
         self.transact(|store| {
-            let changed = store.last_url.as_deref() != Some(url);
-            store.last_url = Some(url.to_string());
+            let changed = store.urls.get(app) != Some(&entry);
+            store.urls.insert(app.to_string(), entry);
             (changed, ())
         })
     }
@@ -577,6 +596,9 @@ pub struct Ad4mConnect<E: ExecutorIo = WsIo> {
     io: E,
     store: TokenStore,
     url: Option<String>,
+    /// Whether `url` was chosen (explicit option or a pinned remembered
+    /// URL) rather than discovered — remembered that way.
+    pinned: bool,
     rpc: Option<E::Rpc>,
     state: watch::Sender<AuthState>,
     /// The generation of the adopted socket, bumped by every `adopt` and
@@ -610,6 +632,7 @@ impl<E: ExecutorIo> Ad4mConnect<E> {
             io,
             store: TokenStore::new(dir),
             url: None,
+            pinned: false,
             rpc: None,
             state,
             current: Arc::new(std::sync::Mutex::new(0)),
@@ -657,14 +680,15 @@ impl<E: ExecutorIo> Ad4mConnect<E> {
     /// error: the wallet must be unlocked, then run again.
     pub async fn connect(&mut self, prompts: &mut impl ConnectPrompts) -> Result<AuthState> {
         prompts.status(ConnectStatus::Connecting);
-        let url = self.resolve_url().await?;
+        let (url, pinned) = self.resolve_url().await?;
         self.url = Some(url.clone());
+        self.pinned = pinned;
 
         // A stored token answers `agent.status` in one call on a good session.
         if let Some(token) = self.store.token(&url, &self.opts.app.name)? {
             match self.open_and_read(&url, &token).await {
                 Ok((Reading::Authenticated, rpc)) => {
-                    let _ = self.store.set_last_url(&url);
+                    let _ = self.remember_url(&url);
                     let generation = self.adopt(rpc, &token).await;
                     return Ok(self.publish(generation, AuthState::Authenticated));
                 }
@@ -693,7 +717,7 @@ impl<E: ExecutorIo> Ad4mConnect<E> {
         let anon = self.io.rpc(&url, "").await?;
         match self.read_auth(&anon).await {
             Reading::Authenticated => {
-                let _ = self.store.set_last_url(&url);
+                let _ = self.remember_url(&url);
                 let generation = self.adopt(anon, "").await;
                 return Ok(self.publish(generation, AuthState::Authenticated));
             }
@@ -729,7 +753,7 @@ impl<E: ExecutorIo> Ad4mConnect<E> {
                 // A locked wallet is a state, not a bad token: keep it (TS
                 // stores the JWT before `connect()` re-checks the wallet).
                 self.store.set_token(&url, &self.opts.app.name, &jwt)?;
-                let _ = self.store.set_last_url(&url);
+                let _ = self.remember_url(&url);
                 let authed = matches!(r, Reading::Authenticated);
                 let generation = self.adopt(rpc, &jwt).await;
                 Ok(self.publish(
@@ -759,7 +783,8 @@ impl<E: ExecutorIo> Ad4mConnect<E> {
         }
         if let Some(url) = &self.url {
             self.store.remove_token(url, &self.opts.app.name)?;
-            self.store.set_last_url(url)?;
+            self.store
+                .set_last_url(&self.opts.app.name, url, self.pinned)?;
         }
         self.set_state(AuthState::Unauthenticated);
         Ok(())
@@ -820,25 +845,35 @@ impl<E: ExecutorIo> Ad4mConnect<E> {
         state
     }
 
-    /// Ordered candidates: explicit url → explicit port → stored last_url →
-    /// `~/.ad4m/executor-port` → the default port. First `/health` win.
-    fn candidates(&self) -> Result<Vec<String>> {
-        let mut out: Vec<String> = Vec::new();
-        let mut push = |u: String| {
-            if !out.contains(&u) {
-                out.push(u);
+    fn remember_url(&self, url: &str) -> Result<()> {
+        self.store
+            .set_last_url(&self.opts.app.name, url, self.pinned)
+    }
+
+    /// Ordered candidates, each with whether it was chosen (pinned) rather
+    /// than discovered: explicit url → explicit port → this app's pinned
+    /// remembered URL → `~/.ad4m/executor-port` → this app's discovered
+    /// remembered URL → the default port. First `/health` win.
+    fn candidates(&self) -> Result<Vec<(String, bool)>> {
+        let mut out: Vec<(String, bool)> = Vec::new();
+        let mut push = |u: String, pinned: bool| {
+            if !out.iter().any(|(seen, _)| *seen == u) {
+                out.push((u, pinned));
             }
         };
         if let Some(url) = &self.opts.url {
-            push(normalize_base_url(url));
+            push(normalize_base_url(url), true);
         }
         if let Some(port) = self.opts.port {
-            push(format!("http://127.0.0.1:{port}"));
+            push(format!("http://127.0.0.1:{port}"), true);
         }
-        if self.opts.use_stored_url {
-            if let Some(url) = self.store.last_url()? {
-                push(normalize_base_url(&url));
-            }
+        let remembered = if self.opts.use_stored_url {
+            self.store.last_url(&self.opts.app.name)?
+        } else {
+            None
+        };
+        if let Some(r) = remembered.as_ref().filter(|r| r.pinned) {
+            push(normalize_base_url(&r.url), true);
         }
         let port_file = self
             .opts
@@ -847,20 +882,23 @@ impl<E: ExecutorIo> Ad4mConnect<E> {
             .unwrap_or_else(default_executor_port_file);
         if let Ok(port) = std::fs::read_to_string(&port_file) {
             if let Ok(port) = port.trim().parse::<u16>() {
-                push(format!("http://127.0.0.1:{port}"));
+                push(format!("http://127.0.0.1:{port}"), false);
             }
         }
-        push(format!("http://127.0.0.1:{DEFAULT_PORT}"));
+        if let Some(r) = remembered.as_ref().filter(|r| !r.pinned) {
+            push(normalize_base_url(&r.url), false);
+        }
+        push(format!("http://127.0.0.1:{DEFAULT_PORT}"), false);
         Ok(out)
     }
 
-    async fn resolve_url(&self) -> Result<String> {
+    async fn resolve_url(&self) -> Result<(String, bool)> {
         let candidates = self.candidates()?;
         let mut tried = Vec::new();
-        for url in candidates {
+        for (url, pinned) in candidates {
             tried.push(url.clone());
             match self.io.healthy(&url).await {
-                Ok(()) => return Ok(url),
+                Ok(()) => return Ok((url, pinned)),
                 Err(e) => eprintln!("[ad4m-connect] {url} is not an AD4M executor: {e}"),
             }
         }
@@ -1381,24 +1419,102 @@ mod tests {
         std::fs::write(&port_file, "14444").unwrap();
         let store_dir = dir.path().join("tokens");
         let store = TokenStore::new(&store_dir);
-        store.set_last_url("ws://stored.example:9000/").unwrap();
+        store
+            .set_last_url("test-app", "ws://stored.example:9000/", true)
+            .unwrap();
+        // Another app's choice is not this app's.
+        store
+            .set_last_url("other-app", "http://other.example:1", true)
+            .unwrap();
 
         let mut o = opts();
         o.url = Some("http://explicit:1/".to_string());
         o.port = Some(2000);
         o.use_stored_url = true;
+        o.executor_port_file = Some(port_file.clone());
+        o.token_dir = Some(store_dir.clone());
+        let s: Ad4mConnect<FakeIo> = Ad4mConnect::with_io(o, FakeIo::unhealthy()).unwrap();
+        let urls = |s: &Ad4mConnect<FakeIo>| -> Vec<(String, bool)> { s.candidates().unwrap() };
+        assert_eq!(
+            urls(&s),
+            vec![
+                ("http://explicit:1".to_string(), true), // normalized (trailing /)
+                ("http://127.0.0.1:2000".to_string(), true), // explicit port
+                ("http://stored.example:9000".to_string(), true), // pinned, ws→http
+                ("http://127.0.0.1:14444".to_string(), false), // executor-port file
+                ("http://127.0.0.1:12000".to_string(), false), // default
+            ]
+        );
+
+        // Found by discovery last time: after the port file.
+        remember_discovered(&store, "http://127.0.0.1:14111");
+        let mut o = opts();
+        o.url = None;
+        o.use_stored_url = true;
         o.executor_port_file = Some(port_file);
         o.token_dir = Some(store_dir);
         let s: Ad4mConnect<FakeIo> = Ad4mConnect::with_io(o, FakeIo::unhealthy()).unwrap();
         assert_eq!(
-            s.candidates().unwrap(),
+            urls(&s),
             vec![
-                "http://explicit:1".to_string(),          // normalized (trailing /)
-                "http://127.0.0.1:2000".to_string(),      // explicit port
-                "http://stored.example:9000".to_string(), // stored, ws→http
-                "http://127.0.0.1:14444".to_string(),     // executor-port file
-                "http://127.0.0.1:12000".to_string(),     // default
+                ("http://127.0.0.1:14444".to_string(), false),
+                ("http://127.0.0.1:14111".to_string(), false),
+                ("http://127.0.0.1:12000".to_string(), false),
             ]
+        );
+    }
+
+    /// What a run that found `url` by discovery (not chosen) leaves behind.
+    fn remember_discovered(store: &TokenStore, url: &str) {
+        store.set_last_url("test-app", url, false).unwrap();
+    }
+
+    /// Q2: an automatically remembered local URL must not pin discovery.
+    /// A healthy executor still answers on the remembered port, but the
+    /// launcher's port file names another one: discovery picks the port file.
+    #[tokio::test]
+    async fn the_launcher_port_file_beats_an_auto_remembered_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let port_file = dir.path().join("executor-port");
+        std::fs::write(&port_file, "14555").unwrap();
+        let store_dir = dir.path().join("tokens");
+        // Remembered by an earlier run that found its executor by discovery.
+        remember_discovered(&TokenStore::new(&store_dir), "http://127.0.0.1:14111");
+
+        let mut o = opts();
+        o.url = None;
+        o.use_stored_url = true;
+        o.executor_port_file = Some(port_file);
+        // Both executors are up.
+        let io = FakeIo::new(|token, method, _| match (token, method) {
+            ("", "agent.status") => Ok(authed_status()),
+            (_, other) => Err(rpc_err(404, &format!("unexpected {other}"))),
+        });
+        let mut s = session(&store_dir, io, o);
+        s.connect(&mut NoPrompts).await.unwrap();
+        assert_eq!(s.url(), Some("http://127.0.0.1:14555"));
+        // Remembered as discovered again, for this app only.
+        assert_eq!(
+            TokenStore::new(&store_dir).last_url("test-app").unwrap(),
+            Some(RememberedUrl {
+                url: "http://127.0.0.1:14555".to_string(),
+                pinned: false
+            })
+        );
+
+        // An explicit URL is remembered pinned.
+        let io = FakeIo::new(|token, method, _| match (token, method) {
+            ("", "agent.status") => Ok(authed_status()),
+            (_, other) => Err(rpc_err(404, &format!("unexpected {other}"))),
+        });
+        let mut s = session(&store_dir, io, opts());
+        s.connect(&mut NoPrompts).await.unwrap();
+        assert_eq!(
+            TokenStore::new(&store_dir).last_url("test-app").unwrap(),
+            Some(RememberedUrl {
+                url: URL.to_string(),
+                pinned: true
+            })
         );
     }
 
@@ -1885,7 +2001,7 @@ mod tests {
         store.set_token("http://a:1", "app1", "tok-a1").unwrap();
         store.set_token("http://a:1", "app2", "tok-a2").unwrap();
         store.set_token("http://b:2", "app1", "tok-b1").unwrap();
-        store.set_last_url("http://b:2").unwrap();
+        store.set_last_url("app1", "http://b:2", true).unwrap();
 
         // A second store on the same dir reads the same tokens.
         let store2 = TokenStore::new(dir.path());
@@ -1901,7 +2017,14 @@ mod tests {
             store2.token("http://b:2", "app1").unwrap().as_deref(),
             Some("tok-b1")
         );
-        assert_eq!(store2.last_url().unwrap().as_deref(), Some("http://b:2"));
+        assert_eq!(
+            store2.last_url("app1").unwrap(),
+            Some(RememberedUrl {
+                url: "http://b:2".to_string(),
+                pinned: true
+            })
+        );
+        assert_eq!(store2.last_url("app2").unwrap(), None);
 
         #[cfg(unix)]
         {
