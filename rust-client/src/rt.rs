@@ -242,20 +242,62 @@ mod browser_tests {
         assert!(!fired.get(), "the timed-out future ran after its deadline");
     }
 
-    /// An aborted task's pending sleep never fires; `join` reports the end.
+    /// An aborted task whose sleep is pending (polled, not yet due) is
+    /// dropped: the sleep never fires, what the task owns is dropped
+    /// before `join` returns, and `join` reports the end.
     #[wasm_bindgen_test]
     async fn an_aborted_task_never_resumes_from_its_sleep() {
+        use futures_util::future::poll_fn;
+        use std::future::Future;
+        use std::task::Poll;
+
+        /// Owned by the task; records its drop.
+        struct Owned(Rc<Cell<bool>>);
+        impl Drop for Owned {
+            fn drop(&mut self) {
+                self.0.set(true);
+            }
+        }
+
         let fired = Rc::new(Cell::new(false));
-        let f = fired.clone();
-        let task = spawn(async move {
-            sleep(Duration::from_millis(100)).await;
-            f.set(true);
+        let pending = Rc::new(Cell::new(false));
+        let dropped = Rc::new(Cell::new(false));
+        let task = spawn({
+            let (fired, pending) = (fired.clone(), pending.clone());
+            let owned = Owned(dropped.clone());
+            async move {
+                let _owned = owned;
+                let mut nap = Box::pin(sleep(Duration::from_millis(100)));
+                // Poll the sleep once and record that it is pending; the
+                // await below then parks the task in it.
+                poll_fn(|cx| {
+                    pending.set(nap.as_mut().poll(cx).is_pending());
+                    Poll::Ready(())
+                })
+                .await;
+                nap.await;
+                fired.set(true);
+            }
         });
+        // Started: the task has run up to its pending sleep.
+        for _ in 0..100 {
+            if pending.get() {
+                break;
+            }
+            yield_now().await;
+        }
+        assert!(pending.get(), "the task never reached its sleep");
         assert!(!task.is_finished());
+        assert!(!dropped.get());
+
         task.abort();
         timeout(Duration::from_secs(1), task.join())
             .await
             .expect("an aborted task never ended");
+        assert!(
+            dropped.get(),
+            "join returned before the task's state was dropped"
+        );
         sleep(Duration::from_millis(300)).await;
         assert!(!fired.get(), "the aborted task resumed");
     }
