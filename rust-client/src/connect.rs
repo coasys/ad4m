@@ -110,6 +110,11 @@ pub struct ConnectOptions {
     pub token_dir: Option<PathBuf>,
     /// `~/.ad4m/executor-port` (tests point it elsewhere).
     pub executor_port_file: Option<PathBuf>,
+    /// Allow a plaintext (`http://`/`ws://`) executor that is not on
+    /// loopback. Off by default: the flow sends tokens (in the socket URL),
+    /// passwords and codes over it. Set with
+    /// [`allow_insecure_remote`](Self::allow_insecure_remote).
+    pub insecure_remote: bool,
     /// Whether this app's remembered URL may propose the executor (TS
     /// `ad4m-url`). One the app or user chose (`url`/`port`) stays pinned
     /// ahead of discovery; one found by discovery only comes after the
@@ -127,7 +132,16 @@ impl ConnectOptions {
             token_dir: None,
             executor_port_file: None,
             use_stored_url: true,
+            insecure_remote: false,
         }
+    }
+
+    /// Opt in to a plaintext executor off loopback (a trusted LAN, a TLS
+    /// proxy that terminates elsewhere): tokens, passwords and codes then
+    /// travel unencrypted.
+    pub fn allow_insecure_remote(mut self, allow: bool) -> Self {
+        self.insecure_remote = allow;
+        self
     }
 }
 
@@ -217,6 +231,9 @@ pub enum ConnectError {
     ExecutorNotFound { tried: Vec<String> },
     /// `user.requestVerification` or `user.create` answered `success: false`.
     Refused { message: String },
+    /// The executor is plaintext (`http://`/`ws://`) and not on loopback;
+    /// see `ConnectOptions::allow_insecure_remote`.
+    InsecureTransport { url: String },
 }
 
 impl std::fmt::Display for ConnectError {
@@ -226,6 +243,11 @@ impl std::fmt::Display for ConnectError {
                 write!(f, "no AD4M executor found (tried {})", tried.join(", "))
             }
             ConnectError::Refused { message } => write!(f, "{message}"),
+            ConnectError::InsecureTransport { url } => write!(
+                f,
+                "refusing to send credentials to {url} over plaintext: use https:// \
+                 (or allow_insecure_remote to accept it)"
+            ),
         }
     }
 }
@@ -575,6 +597,27 @@ pub fn normalize_base_url(url: &str) -> String {
         .unwrap_or_else(|| u.to_string())
 }
 
+/// Whether credentials sent to `base_url` travel unencrypted off this
+/// machine: plain `http` (after `normalize_base_url`) to a host that is not
+/// loopback (`localhost`, 127.0.0.0/8, `::1`).
+fn plaintext_remote(base_url: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(base_url) else {
+        return true; // unparsable: do not vouch for it
+    };
+    if url.scheme() != "http" {
+        return url.scheme() != "https";
+    }
+    let Some(host) = url.host_str() else {
+        return true;
+    };
+    if host.eq_ignore_ascii_case("localhost") {
+        return false;
+    }
+    let ip = host.trim_start_matches('[').trim_end_matches(']');
+    !ip.parse::<std::net::IpAddr>()
+        .is_ok_and(|ip| ip.is_loopback())
+}
+
 // ── The session ──
 
 /// The auth read — `readAuth` in TS.
@@ -681,6 +724,11 @@ impl<E: ExecutorIo> Ad4mConnect<E> {
     pub async fn connect(&mut self, prompts: &mut impl ConnectPrompts) -> Result<AuthState> {
         prompts.status(ConnectStatus::Connecting);
         let (url, pinned) = self.resolve_url().await?;
+        // Before any token goes out (it rides the socket URL) or any prompt
+        // is asked (F5).
+        if !self.opts.insecure_remote && plaintext_remote(&url) {
+            return Err(ConnectError::InsecureTransport { url }.into());
+        }
         self.url = Some(url.clone());
         self.pinned = pinned;
 
@@ -1516,6 +1564,68 @@ mod tests {
                 pinned: true
             })
         );
+    }
+
+    /// F5: a plaintext (`http://`/`ws://`) executor that is not on loopback
+    /// is refused before any token is sent or any prompt asked.
+    #[tokio::test]
+    async fn a_plaintext_remote_executor_is_refused_by_default() {
+        for url in ["http://192.168.1.20:12000", "ws://executor.example.com/"] {
+            let dir = tempfile::tempdir().unwrap();
+            TokenStore::new(dir.path())
+                .set_token(&normalize_base_url(url), "test-app", "jwt-stored")
+                .unwrap();
+            let mut o = opts();
+            o.url = Some(url.to_string());
+            let io = FakeIo::new(single_user_handler("jwt-stored"));
+            let mut s = session(dir.path(), io, o);
+            let err = s.connect(&mut NoPrompts).await.unwrap_err();
+            assert!(
+                s.io.opened().is_empty(),
+                "{url}: a socket was opened (token sent) over plaintext: {:?}",
+                s.io.opened()
+            );
+            assert!(err.to_string().contains("plaintext"), "{url}: {err}");
+            assert!(matches!(
+                err.downcast_ref::<ConnectError>(),
+                Some(ConnectError::InsecureTransport { .. })
+            ));
+            // The explicit opt-in lets it through.
+            let mut o = opts();
+            o.url = Some(url.to_string());
+            let o = o.allow_insecure_remote(true);
+            let io = FakeIo::new(single_user_handler("jwt-stored"));
+            let mut s = session(dir.path(), io, o);
+            assert_eq!(
+                s.connect(&mut NoPrompts).await.unwrap(),
+                AuthState::Authenticated
+            );
+        }
+    }
+
+    #[test]
+    fn plaintext_remote_spares_loopback_and_tls() {
+        for ok in [
+            "http://127.0.0.1:12000",
+            "http://127.8.0.1:1",
+            "http://localhost:12000",
+            "http://LOCALHOST",
+            "http://[::1]:12000",
+            "https://executor.example.com",
+            "https://10.0.0.5:443",
+        ] {
+            assert!(!plaintext_remote(ok), "{ok}");
+        }
+        for bad in [
+            "http://192.168.1.20:12000",
+            "http://executor.example.com",
+            "http://localhost.evil.example",
+            "http://[2001:db8::1]:12000",
+            "ftp://x",
+            "not a url",
+        ] {
+            assert!(plaintext_remote(bad), "{bad}");
+        }
     }
 
     #[tokio::test]
