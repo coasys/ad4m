@@ -15,6 +15,8 @@
     "test-integration": "ts-mocha -p tsconfig.json --timeout 1200000 --exit tests/integration.test.ts",
     "test-identity": "ts-mocha -p tsconfig.json --timeout 1200000 --exit tests/identity.test.ts",
     "test-integration-server-link": "ts-mocha -p tsconfig.json --timeout 1200000 --exit tests/integration-server-link.test.ts",
+    "test-main-spaces": "export LOCAL_MODE=true && node scripts/cleanTestingData.js && pnpm run prepare-test-local && node scripts/cleanup.js && pnpm run test-spaces && node scripts/cleanup.js && node scripts/cleanTestingData.js",
+    "test-spaces": "ts-mocha -p tsconfig.json --timeout 1200000 --exit tests/spaces.test.ts",
     "test-integration-local": "ts-mocha -p tsconfig.json --timeout 1200000 --exit tests/integration-local.test.ts",
     "test-app": "ts-mocha -p tsconfig.json --timeout 1200000 --exit tests/app.test.ts",
     "test-auth": "ts-mocha -p tsconfig.json --timeout 1200000 --exit tests/authentication.test.ts",

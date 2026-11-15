@@ -17,6 +17,7 @@ function runCli(args: string[], env: Record<string, string>) {
     delete base.AUTO_ADMIT;
     delete base.ALLOW_AUTO_ADMIT_DEV;
     delete base.PUBLIC_ORIGIN;
+    delete base.REFRESH_INTERVAL_MS;
     return spawnSync(process.execPath, ["--import", "tsx", "src/index.ts", "--data", dataDir, "--port", "0", ...args], {
       cwd: root,
       env: { ...base, ...env },
@@ -63,6 +64,7 @@ async function startsWith(args: string[], env: Record<string, string>): Promise<
   delete base.AUTO_ADMIT;
   delete base.ALLOW_AUTO_ADMIT_DEV;
   delete base.PUBLIC_ORIGIN;
+  delete base.REFRESH_INTERVAL_MS;
   const child = spawn(
     process.execPath,
     ["--import", "tsx", "src/index.ts", "--data", dataDir, "--port", "0", "--host", "127.0.0.1", ...args],
@@ -152,5 +154,35 @@ test("the usage names the identity store settings", () => {
   assert.equal(run.status, 0);
   for (const name of ["--store-url", "--store-head-keys", "--name", "STORE_URL", "STORE_HEAD_KEYS"]) {
     assert.ok(run.stdout.includes(name), `usage names ${name}`);
+  }
+});
+
+// ---- the key refresh interval ----
+
+test("a REFRESH_INTERVAL_MS or --refresh-interval-ms below 1000 or not a number exits 1", () => {
+  const origin = ["--public-origin", "https://links.example.org"];
+  for (const run of [
+    runCli(origin, { REFRESH_INTERVAL_MS: "500" }),
+    runCli(origin, { REFRESH_INTERVAL_MS: "soon" }),
+    runCli([...origin, "--refresh-interval-ms", "999"], {}),
+  ]) {
+    assert.equal(run.status, 1, run.stdout + run.stderr);
+    assert.match(run.stderr, /at least 1000/);
+    assert.doesNotMatch(run.stdout, /listening/);
+  }
+});
+
+test("a server with REFRESH_INTERVAL_MS or --refresh-interval-ms starts, and the usage names both", async () => {
+  const origin = ["--public-origin", "https://links.example.org"];
+  for (const [args, env] of [
+    [origin, { REFRESH_INTERVAL_MS: "2000" }],
+    [[...origin, "--refresh-interval-ms", "2000"], {}],
+  ] as Array<[string[], Record<string, string>]>) {
+    const { started, out } = await startsWith(args, env);
+    assert.ok(started, out);
+  }
+  const usage = runCli(["--help"], {});
+  for (const name of ["--refresh-interval-ms", "REFRESH_INTERVAL_MS"]) {
+    assert.ok(usage.stdout.includes(name), `usage names ${name}`);
   }
 });
