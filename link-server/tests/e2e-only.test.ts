@@ -107,6 +107,36 @@ test("a commit mixing an encrypted and a plaintext link is refused whole", async
   });
 });
 
+test("a membership link sent in a plain diff is refused, alone or beside an encrypted link (K5)", async () => {
+  await withServer(async (server) => {
+    const { roomId, member, adminToken, memberToken } = await roomWithMember(server);
+    const { roomKey } = await clientSideRotate(server.url, roomId, adminToken);
+    const membershipLink: LinkExpression = {
+      author: member.did,
+      timestamp: new Date().toISOString(),
+      data: { source: "did:scid:coasys:1:Ada", predicate: "coasys://membership/member", target: `coasys://membership/${roomId}` },
+    };
+    const encrypted = await createSignedLink(member, { source: "test://ok", predicate: "p", target: "t" }, undefined, roomKey);
+    for (const additions of [[membershipLink], [encrypted, membershipLink]]) {
+      const res = await postJson<{ error?: string }>(
+        `${server.url}/rooms/${roomId}/commit`,
+        { additions, removals: [] },
+        memberToken
+      );
+      assert.equal(res.status, 400);
+      assert.match(res.body.error ?? "", /membership links go to POST \/rooms\/:roomId\/membership/);
+    }
+    const removal = await postJson(
+      `${server.url}/rooms/${roomId}/commit`,
+      { additions: [], removals: [membershipLink] },
+      memberToken
+    );
+    assert.equal(removal.status, 400, "a membership link is no removal in a diff either");
+    const render = await getJson<{ links: unknown[] }>(`${server.url}/rooms/${roomId}/render`, memberToken);
+    assert.deepEqual(render.body.links, [], "nothing was stored");
+  });
+});
+
 test("an encrypted link carrying a plaintext key beside its ciphertext, or a bad key_version, is refused", async () => {
   await withServer(async (server) => {
     const { roomId, member, adminToken, memberToken } = await roomWithMember(server);

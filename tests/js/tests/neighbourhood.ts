@@ -1,7 +1,7 @@
 import { PerspectiveExpression, Link, Perspective, LinkExpression, ExpressionProof, LinkQuery, PerspectiveState, NeighbourhoodProxy, PerspectiveUnsignedInput, PerspectiveProxy, PerspectiveHandle } from "@coasys/ad4m";
 import { TestContext } from './test-context'
 import { assertStaysFalse, pollUntil, sleep } from "../utils/utils";
-import { LinkLangConfig, publishLinkLanguage } from "../utils/linkLangConfig";
+import { LinkLangConfig, shareNeighbourhood } from "../utils/linkLangConfig";
 import { expect } from "chai";
 
 let aliceP1: null | PerspectiveProxy = null;
@@ -21,28 +21,23 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                 expect(create.neighbourhood).to.be.null;
                 expect(create.state).to.be.equal(PerspectiveState.Private);
 
-                //Create unique perspective-diff-sync to simulate real scenario
-                const socialContext = await publishLinkLanguage(ad4mClient, getLinkLang(), "Alice's perspective-diff-sync");
-                expect(socialContext.name).to.be.equal("Alice's perspective-diff-sync");
-
                 let link = new LinkExpression()
                 link.author = "did:test";
                 link.timestamp = new Date().toISOString();
                 link.data = new Link({source: "ad4m://src", target: "test://target", predicate: "ad4m://pred"});
                 link.proof = new ExpressionProof("sig", "key");
-                const publishPerspective = await ad4mClient.neighbourhood.publishFromPerspective(create.uuid, socialContext.address,
-                    new Perspective(
-                        [link]
-                    )
-                );
+                // A unique link language per neighbourhood, as in a real scenario.
+                const cfg = getLinkLang();
+                const shared = await shareNeighbourhood(ad4mClient, cfg, create.uuid, "Alice's perspective-diff-sync", new Perspective([link]));
 
                 //Check that we got an ad4m url back
-                expect(publishPerspective.split("://").length).to.be.equal(2);
+                expect(shared.url.split("://").length).to.be.equal(2);
 
                 const perspective = await ad4mClient.perspective.byUUID(create.uuid);
                 expect(perspective?.neighbourhood).not.to.be.undefined;
-                expect(perspective?.neighbourhood!.data.linkLanguage).to.be.equal(socialContext.address);
-                expect(perspective?.neighbourhood!.data.meta.links.length).to.be.equal(1);
+                expect(perspective?.neighbourhood!.data.linkLanguage).to.be.equal(shared.linkLanguage);
+                // A server-link space is made by neighbourhood.create, which publishes no meta.
+                expect(perspective?.neighbourhood!.data.meta.links.length).to.be.equal(cfg.carriesMeta ? 1 : 0);
                 
                 // The perspective should have left Private state. A publish wakes the
                 // attach at once, so this poll can see any step on the way to Synced:
@@ -74,8 +69,7 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                 shared.on('sync-state-change', ({ state }) => { sharedStates.push(state); });
                 other.on('sync-state-change', ({ state }) => { otherStates.push(state); });
                 try {
-                    const socialContext = await publishLinkLanguage(alice, getLinkLang(), "Alice's sync-state listener test");
-                    await alice.neighbourhood.publishFromPerspective(shared.uuid, socialContext.address, new Perspective());
+                    await shareNeighbourhood(alice, getLinkLang(), shared.uuid, "Alice's sync-state listener test");
 
                     await pollUntil(() => sharedStates.length > 0, { timeoutMs: 30000, intervalMs: 500, label: "sync-state-change for the shared perspective" });
                     // Each state is a PerspectiveState value, not a JSON-encoded string.
@@ -92,9 +86,8 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                 const bob = testContext.bob
 
                 const aliceP1 = await alice.perspective.add("friends")
-                const socialContext = await publishLinkLanguage(alice, getLinkLang(), "Alice's neighbourhood with Bob");
-                expect(socialContext.name).to.be.equal("Alice's neighbourhood with Bob");
-                const neighbourhoodUrl = await alice.neighbourhood.publishFromPerspective(aliceP1.uuid, socialContext.address, new Perspective())
+                const socialContext = await shareNeighbourhood(alice, getLinkLang(), aliceP1.uuid, "Alice's neighbourhood with Bob");
+                const neighbourhoodUrl = socialContext.url
 
                 let bobP1 = await bob.neighbourhood.joinFromUrl(neighbourhoodUrl);
 
@@ -103,7 +96,7 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                 expect(bobP1!.name).not.to.be.undefined;
                 expect(bobP1!.sharedUrl).to.be.equal(neighbourhoodUrl)
                 expect(bobP1!.neighbourhood).not.to.be.undefined;;
-                expect(bobP1!.neighbourhood!.data.linkLanguage).to.be.equal(socialContext.address);
+                expect(bobP1!.neighbourhood!.data.linkLanguage).to.be.equal(socialContext.linkLanguage);
                 expect(bobP1!.neighbourhood!.data.meta.links.length).to.be.equal(0);
             })
 
@@ -112,8 +105,8 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                 const bob = testContext.bob
 
                 const aliceP1 = await alice.perspective.add("friends")
-                const socialContext = await publishLinkLanguage(alice, getLinkLang(), "Alice's neighbourhood with Bob test shared links");
-                const neighbourhoodUrl = await alice.neighbourhood.publishFromPerspective(aliceP1.uuid, socialContext.address, new Perspective())
+                const socialContext = await shareNeighbourhood(alice, getLinkLang(), aliceP1.uuid, "Alice's neighbourhood with Bob test shared links");
+                const neighbourhoodUrl = socialContext.url
 
                 let bobP1 = await bob.neighbourhood.joinFromUrl(neighbourhoodUrl);
 
@@ -161,8 +154,8 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                 const bob = testContext.bob
 
                 const aliceP = await alice.perspective.add("monotonic")
-                const socialContext = await publishLinkLanguage(alice, getLinkLang(), "Alice's neighbourhood with Bob test monotonic links");
-                const neighbourhoodUrl = await alice.neighbourhood.publishFromPerspective(aliceP.uuid, socialContext.address, new Perspective())
+                const socialContext = await shareNeighbourhood(alice, getLinkLang(), aliceP.uuid, "Alice's neighbourhood with Bob test monotonic links");
+                const neighbourhoodUrl = socialContext.url
                 const bobP = await bob.neighbourhood.joinFromUrl(neighbourhoodUrl);
 
                 await testContext.makeAllNodesKnown()
@@ -206,8 +199,8 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                 const bob = testContext.bob
 
                 aliceP1 = await alice.perspective.add("friends")
-                const socialContext = await publishLinkLanguage(alice, getLinkLang(), "Alice's neighbourhood with Bob test local links");
-                const neighbourhoodUrl = await alice.neighbourhood.publishFromPerspective(aliceP1.uuid, socialContext.address, new Perspective())
+                const socialContext = await shareNeighbourhood(alice, getLinkLang(), aliceP1.uuid, "Alice's neighbourhood with Bob test local links");
+                const neighbourhoodUrl = socialContext.url
                 console.log("neighbourhoodUrl", neighbourhoodUrl);
                 bobP1 = await bob.neighbourhood.joinFromUrl(neighbourhoodUrl);
 
@@ -246,8 +239,8 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                 const bob = testContext.bob
 
                 const aliceP = await alice.perspective.add("forged copy")
-                const socialContext = await publishLinkLanguage(alice, getLinkLang(), "Alice's neighbourhood with Bob test forged copy");
-                const neighbourhoodUrl = await alice.neighbourhood.publishFromPerspective(aliceP.uuid, socialContext.address, new Perspective())
+                const socialContext = await shareNeighbourhood(alice, getLinkLang(), aliceP.uuid, "Alice's neighbourhood with Bob test forged copy");
+                const neighbourhoodUrl = socialContext.url
                 const bobP = await bob.neighbourhood.joinFromUrl(neighbourhoodUrl);
 
                 await testContext.makeAllNodesKnown()
@@ -291,8 +284,8 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                 const bob = testContext.bob
 
                 aliceP1 = await alice.perspective.add("friends")
-                const socialContext = await publishLinkLanguage(alice, getLinkLang(), "Alice's neighbourhood with Bob stress test");
-                const neighbourhoodUrl = await alice.neighbourhood.publishFromPerspective(aliceP1.uuid, socialContext.address, new Perspective())
+                const socialContext = await shareNeighbourhood(alice, getLinkLang(), aliceP1.uuid, "Alice's neighbourhood with Bob stress test");
+                const neighbourhoodUrl = socialContext.url
                 console.log("neighbourhoodUrl", neighbourhoodUrl);
                 bobP1 = await bob.neighbourhood.joinFromUrl(neighbourhoodUrl);
 
@@ -466,8 +459,8 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                     const bob = testContext.bob
 
                     const aliceP1 = await alice.perspective.add("telepresence")
-                    const linkLang = await publishLinkLanguage(alice, getLinkLang(), "Alice's neighbourhood for Telepresence");
-                    const neighbourhoodUrl = await alice.neighbourhood.publishFromPerspective(aliceP1.uuid, linkLang.address, new Perspective())
+                    const linkLang = await shareNeighbourhood(alice, getLinkLang(), aliceP1.uuid, "Alice's neighbourhood for Telepresence");
+                    const neighbourhoodUrl = linkLang.url
 
                     // Wait for Alice's neighbourhood to have its link language
                     // (same reasoning as Bob's side below).

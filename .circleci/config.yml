@@ -848,6 +848,44 @@ jobs:
           path: test-artifacts
           destination: test-logs
 
+  # Spaces end to end on a protocol 2 link server with its identity store, in multi-user
+  # mode, no AUTO_ADMIT: open and invite-only joins, a second device, a bot, a device-only
+  # joiner, a revoked device (the server's 2 s refresh), membership links that never end.
+  integration-tests-spaces:
+    machine: true
+    resource_class: coasys/marvin-light
+    steps:
+      - setup_integration_test_environment:
+          local: true
+      - run:
+          # link-server/dist comes from build's stash (build-libs builds it);
+          # this only installs the native better-sqlite3 module its runtime needs.
+          name: Install link-server dependencies
+          command: pnpm --filter @coasys/link-server install
+      - run:
+          name: Run spaces integration tests (link server, multi-user executors)
+          command: |
+            mkdir -p "${TEST_ARTIFACTS:?}"
+            set -o pipefail
+            cd ./tests/js && pnpm run test-main-spaces 2>&1 | tee "$TEST_ARTIFACTS/mocha.log"
+          no_output_timeout: 30m
+      - run:
+          name: Collect logs on failure
+          when: always
+          command: |
+            mkdir -p "${TEST_ARTIFACTS:?}"
+            shopt -s nullglob
+            for ad4m_dir in tests/js/tst-tmp/agents/*/ad4m; do
+              agent_id="$(basename "$(dirname "$ad4m_dir")")"
+              mkdir -p "$TEST_ARTIFACTS/$agent_id"
+              cp -r "$ad4m_dir/logs" "$TEST_ARTIFACTS/$agent_id/" 2>/dev/null || true
+            done
+            lsof -i -P -n 2>/dev/null | grep LISTEN > "$TEST_ARTIFACTS/listening-ports.txt" || true
+      - store_artifacts:
+          when: always
+          path: test-artifacts
+          destination: test-logs
+
   # Identity end to end: a real identity-store and three executors (create, link,
   # first-link refusal, revoke, a store restored behind the cache, cache after restart).
   # No Holochain. The suite builds identity-store and the holder example with cargo.
@@ -1270,6 +1308,9 @@ workflows:
           requires:
             - build
       - integration-tests-multi-node-server-link:
+          requires:
+            - build
+      - integration-tests-spaces:
           requires:
             - build
       - integration-tests-identity:

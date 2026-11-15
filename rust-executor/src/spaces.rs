@@ -5,7 +5,8 @@
 //!   server-link language with `SERVER_URL` (the chosen link server), `UID` (a random salt)
 //!   and `CREATOR` (the caller's person), loads it (loading it first claims the room: the
 //!   creator's genesis makes it), writes the creator's `rules` link (`join: open` unless the
-//!   caller says otherwise, R56) and `admin` link, then publishes the neighbourhood. The
+//!   caller says otherwise, R56; it makes the creator the first admin, so no `admin` link is
+//!   written: [`membership::links::genesis`]), then publishes the neighbourhood. The
 //!   commit after publishing carries the membership links to the room's `/membership` with the
 //!   genesis. The [`LinkLanguageChoice`] is recorded once (R3): a second `create` on the same
 //!   perspective fails. Holochain is not offered yet: `coming-soon`.
@@ -481,14 +482,9 @@ pub async fn create(
         .await
         .map_err(|e| SpaceError::Failed(format!("loading the space's link language: {e}")))?;
 
-    let admin =
-        membership::links::add_member(&person, MemberRole::Admin).map_err(SpaceError::Failed)?;
     perspective
         .add_links(
-            vec![
-                membership::links::rules(params.rules.add.into(), params.rules.join),
-                admin,
-            ],
+            membership::links::genesis(params.rules.add.into(), params.rules.join),
             LinkStatus::Shared,
             None,
             ctx,

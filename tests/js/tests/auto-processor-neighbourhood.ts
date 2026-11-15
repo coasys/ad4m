@@ -23,7 +23,7 @@ import fs from "fs";
 import { v4 as uuidv4 } from "uuid";
 import { expect } from "chai";
 import { ConversationSubgroup } from "./model/auto-processor-models";
-import { LinkLangConfig, holochainLinkLang, publishLinkLanguage } from "../utils/linkLangConfig";
+import { LinkLangConfig, holochainLinkLang, shareNeighbourhood } from "../utils/linkLangConfig";
 
 const DIFF_SYNC_OFFICIAL = fs.readFileSync("./scripts/perspective-diff-sync-hash").toString();
 
@@ -95,12 +95,7 @@ export default function autoProcessorNeighbourhoodTests(
         await registerLlm(bob);
 
         const aliceHandle = await alice.perspective.add(`ap-channel-${processorId}`);
-        const socialContext = await publishLinkLanguage(alice, getLinkLang(), "auto-processor neighbourhood");
-        const url = await alice.neighbourhood.publishFromPerspective(
-          aliceHandle.uuid,
-          socialContext.address,
-          new Perspective(),
-        );
+        const { url } = await shareNeighbourhood(alice, getLinkLang(), aliceHandle.uuid, "auto-processor neighbourhood");
 
         const bobHandle = await bob.neighbourhood.joinFromUrl(url);
         await testContext.makeAllNodesKnown([alice, aliceHandle.uuid], [bob, bobHandle.uuid]);

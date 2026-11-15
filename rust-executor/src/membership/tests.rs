@@ -246,6 +246,41 @@ fn the_links_each_call_writes() {
     );
 }
 
+/// The links `neighbourhood.create` writes in one batch, so with one timestamp: whichever way
+/// their hashes sort, none is refused and the creator is the first admin. (A creator's `admin`
+/// link beside the `rules` link was refused `NotAdmin` whenever its hash sorted first.)
+#[test]
+fn the_genesis_links_count_in_any_hash_order() {
+    let creator = "did:scid:coasys:1:Ada";
+    let genesis = links::genesis(AddRule::Admins, JoinMode::Open);
+    let judged = |order: &[usize]| -> Vec<JudgedLink> {
+        genesis
+            .iter()
+            .zip(order)
+            .map(|(link, &rank)| JudgedLink {
+                hash: [rank as u8 + 1; 32],
+                source: link.source.clone(),
+                predicate: link.predicate.clone().unwrap_or_default(),
+                target: link.target.clone(),
+                author_key: "did:key:zAda".to_string(),
+                timestamp: 1_000,
+                verdict: LinkVerdict::Valid,
+                person: Some(creator.to_string()),
+                by_bot: false,
+            })
+            .collect()
+    };
+    let mut orders: Vec<Vec<usize>> = vec![(0..genesis.len()).collect()];
+    orders.push(orders[0].iter().rev().copied().collect());
+    for order in orders {
+        let links = judged(&order);
+        let (graph, refused) = MembershipGraph::replay(creator, &links);
+        assert!(refused.is_empty(), "hash order {order:?} refused {refused:?}");
+        assert_eq!(graph.role_of(creator), Some(Role::Admin), "hash order {order:?}");
+        assert!(graph.rules().is_some());
+    }
+}
+
 /// In an open space a person's own `member` link admits them; `neighbourhood.join` would
 /// write it, and a member already writes nothing.
 #[tokio::test]
