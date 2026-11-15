@@ -173,12 +173,20 @@ async fn single_user_handshake_token_reuse_and_reauth() {
         prompts2.requests.is_empty(),
         "a stored token must not ask again"
     );
-    session2.disconnect().await.unwrap();
+    // Close session2's socket only: `disconnect` would delete the shared
+    // url|app token and pre-satisfy the deletion check below (F7).
+    session2.rpc().unwrap().close().await;
+    drop(session2);
 
     // Revoking the grant closes the session socket with 1008: the session
     // flips to Unauthenticated and drops the stored token, and a fresh
     // connect re-runs the handshake.
     let mut watcher = session.watch_state();
+    let stored = session.store().token(&executor.url, "a5-it").unwrap();
+    assert!(
+        stored.is_some(),
+        "the token must still be stored right before the revocation"
+    );
     admin
         .ws()
         .call::<Value>("agent.removeApp", json!({ "id": request_id }))
