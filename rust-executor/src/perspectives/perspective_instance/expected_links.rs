@@ -181,7 +181,7 @@ impl PerspectiveInstance {
         let changed = !combined_diff.additions.is_empty() || !combined_diff.removals.is_empty();
         // The store judges each link from the key map without I/O: fill it for the
         // signers first, before taking `persist_lock`.
-        crate::identity::prepare_link_signers(&persist_diff.additions).await;
+        let _signers = crate::identity::prepare_link_signers(&persist_diff.additions).await;
 
         {
             let _persisting = self

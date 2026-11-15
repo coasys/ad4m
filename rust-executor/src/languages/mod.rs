@@ -2670,11 +2670,11 @@ impl LanguageController {
         let service = crate::identity::service().ok();
         // A `did:key` signer a log lists is checked from the key map, which admits it only on
         // a recently confirmed head: refresh it first, as a link's signers are before a write.
-        if let Some(service) = &service {
-            if let Some(signer) = did_key_signer(expr_json) {
-                service.resolver.prepare(&[signer]).await;
-            }
-        }
+        // The hold keeps the signer pending until the check below has judged it.
+        let _signer = match (&service, did_key_signer(expr_json)) {
+            (Some(service), Some(signer)) => Some(service.resolver.prepare(&[signer]).await),
+            _ => None,
+        };
         Self::verify_expression_proof_with(
             expr_json,
             service.as_deref().map(|s| s.cache.as_ref()),
@@ -3420,7 +3420,9 @@ mod agent_language_profile_tests {
         let resolver = &resolver;
         let prepare = |expr: &JsonValue| {
             let signers: Vec<(String, Option<u64>)> = did_key_signer(expr).into_iter().collect();
-            async move { resolver.prepare(&signers).await }
+            async move {
+                let _signers = resolver.prepare(&signers).await;
+            }
         };
 
         let fresh = crate::agent::signatures::TestSigner::generate();
