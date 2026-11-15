@@ -225,6 +225,16 @@ pub(crate) type ReconnectCb = Arc<dyn Fn() + Send + Sync>;
 /// A callback fired once when the executor refuses the token (close 1008).
 type AuthFailedCb = Arc<dyn Fn(&str) + Send + Sync>;
 
+/// The token refusal (close 1008) and who is waiting for it.
+#[derive(Default)]
+struct Refusal {
+    /// The close frame's reason ("Unauthorized access", "… expired");
+    /// `Some` once refused.
+    reason: Option<String>,
+    /// Listeners not yet run; the refusal takes them all.
+    callbacks: Vec<(u64, AuthFailedCb)>,
+}
+
 struct Shared {
     /// The WS URL (token already inside) — needed by the reconnect task.
     url: String,
@@ -259,17 +269,20 @@ struct Shared {
     /// Never held across an await: registration is synchronous, so a
     /// caller cannot be cancelled between registering and owning the id.
     on_reconnect: std::sync::Mutex<Vec<(u64, ReconnectCb)>>,
-    on_auth_failed: Mutex<Vec<(u64, AuthFailedCb)>>,
     closed: AtomicBool,
     /// Terminal signal — `true` once `close()` ran or auth was refused.
     /// Live queries end their streams on it; plain disconnects don't set
     /// it (those reconnect).
     closed_tx: watch::Sender<bool>,
-    /// Auth refusal (close 1008) — do not reconnect, mirror TS.
+    /// Auth refusal (close 1008) — do not reconnect, mirror TS. A fast
+    /// read of `refusal.reason.is_some()`; stored under the `refusal` lock.
     auth_failed: AtomicBool,
-    /// The close frame's reason ("Unauthorized access", "… expired"), for
-    /// `on_auth_failed` listeners and the `call` fast-fail message.
-    auth_reason: Mutex<Option<String>>,
+    /// The refusal and its listeners under one lock: the reader records
+    /// the reason and takes the list in one step, a registration checks
+    /// the reason and pushes in one step, so each callback runs exactly
+    /// once whichever comes first (F3). Never held across an await or a
+    /// callback.
+    refusal: std::sync::Mutex<Refusal>,
     reader: Mutex<Option<JoinHandle<()>>>,
     /// Aborted readers of sockets that were never published, kept until
     /// they finished: close joins them, so no reader still holds a socket
@@ -400,11 +413,10 @@ impl WsRpcClient {
             teardowns: AtomicU64::new(0),
             conn_guard: Mutex::new(()),
             on_reconnect: std::sync::Mutex::new(Vec::new()),
-            on_auth_failed: Mutex::new(Vec::new()),
             closed: AtomicBool::new(false),
             closed_tx,
             auth_failed: AtomicBool::new(false),
-            auth_reason: Mutex::new(None),
+            refusal: std::sync::Mutex::new(Refusal::default()),
             reader: Mutex::new(None),
             retired_readers: std::sync::Mutex::new(Vec::new()),
             supervisor: Mutex::new(None),
@@ -500,16 +512,13 @@ impl WsRpcClient {
             }
 
             if let Some(reason) = auth_reason {
-                shared.auth_failed.store(true, Ordering::SeqCst);
-                *shared.auth_reason.lock().await = Some(reason.clone());
-                let callbacks: Vec<AuthFailedCb> = shared
-                    .on_auth_failed
-                    .lock()
-                    .await
-                    .iter()
-                    .map(|(_, cb)| cb.clone())
-                    .collect();
-                for cb in callbacks {
+                let callbacks = {
+                    let mut refusal = shared.refusal.lock().unwrap();
+                    refusal.reason = Some(reason.clone());
+                    shared.auth_failed.store(true, Ordering::SeqCst);
+                    std::mem::take(&mut refusal.callbacks)
+                };
+                for (_, cb) in callbacks {
                     cb(&reason);
                 }
                 // Terminal, like `close`: no socket will ever come back.
@@ -933,30 +942,30 @@ impl WsRpcClient {
     pub async fn on_auth_failed(&self, callback: impl Fn(&str) + Send + Sync + 'static) -> u64 {
         static CB_ID: AtomicU64 = AtomicU64::new(0);
         let id = CB_ID.fetch_add(1, Ordering::Relaxed);
-        if self.shared.auth_failed.load(Ordering::SeqCst) {
-            let reason = self
-                .shared
-                .auth_reason
-                .lock()
-                .await
-                .clone()
-                .unwrap_or_default();
-            callback(&reason);
-            return id;
-        }
-        self.shared
-            .on_auth_failed
-            .lock()
-            .await
-            .push((id, Arc::new(callback)));
+        #[cfg(test)]
+        Self::park_point(&self.shared, "auth:register").await;
+        let reason = {
+            let mut refusal = self.shared.refusal.lock().unwrap();
+            match refusal.reason.clone() {
+                Some(reason) => reason,
+                None => {
+                    refusal.callbacks.push((id, Arc::new(callback)));
+                    return id;
+                }
+            }
+        };
+        // Refused before this registration: the reader already ran its
+        // list, so this one is ours to run — outside the lock.
+        callback(&reason);
         id
     }
 
     pub async fn remove_on_auth_failed(&self, id: u64) {
         self.shared
-            .on_auth_failed
+            .refusal
             .lock()
-            .await
+            .unwrap()
+            .callbacks
             .retain(|(cb_id, _)| *cb_id != id);
     }
 
@@ -968,7 +977,7 @@ impl WsRpcClient {
 
     /// The close reason the server sent with the refusal, if any.
     pub async fn auth_failed_reason(&self) -> Option<String> {
-        self.shared.auth_reason.lock().await.clone()
+        self.shared.refusal.lock().unwrap().reason.clone()
     }
 
     /// Whether a socket is currently installed.
@@ -1217,9 +1226,10 @@ impl WsRpcClient {
                 self.shared.pending.lock().await.remove(id);
                 let reason = self
                     .shared
-                    .auth_reason
+                    .refusal
                     .lock()
-                    .await
+                    .unwrap()
+                    .reason
                     .clone()
                     .unwrap_or_else(|| "token refused".to_string());
                 return Err(anyhow!(
@@ -2442,6 +2452,73 @@ mod tests {
     /// The prompt-unwind bound: a teardown that only finishes on a 5 s
     /// send/reply timeout (or a 30 s call budget) fails it.
     const PROMPT: Duration = Duration::from_millis(1_500);
+
+    /// F3: an `on_auth_failed` registration racing the refusal still runs
+    /// exactly once. The registration parks after it decided "not refused
+    /// yet"; the reader then records the 1008 and runs its callbacks (the
+    /// terminal signal is the barrier that it finished); the registration
+    /// resumes. Before the fix the callback landed in a list nobody would
+    /// ever read again.
+    #[tokio::test]
+    async fn an_auth_failed_registration_racing_the_refusal_runs_once() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let client = WsRpcClient::connect(fake.url(), "").await.unwrap();
+        let (gate, mut parked) = client.park_at("auth:register");
+
+        let runs = Arc::new(AtomicU64::new(0));
+        let (ran_tx, mut ran) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let registering = {
+            let c = WsRpcClient {
+                shared: client.shared.clone(),
+            };
+            let runs = runs.clone();
+            tokio::spawn(async move {
+                c.on_auth_failed(move |reason| {
+                    runs.fetch_add(1, Ordering::SeqCst);
+                    let _ = ran_tx.send(reason.to_string());
+                })
+                .await
+            })
+        };
+        // Parked: the registration has not stored its callback yet (or,
+        // fixed, is about to take the lock the reader's snapshot uses).
+        tokio::time::timeout(PROMPT, parked.recv())
+            .await
+            .expect("the registration never reached its park point");
+
+        let mut closed = client.shared.closed_tx.subscribe();
+        fake.drop_connection_with_code(1008);
+        tokio::time::timeout(PROMPT, closed.wait_for(|c| *c))
+            .await
+            .expect("the reader never recorded the refusal")
+            .unwrap();
+        assert!(client.auth_failed());
+
+        gate.gate.add_permits(1);
+        tokio::time::timeout(PROMPT, registering)
+            .await
+            .expect("the registration never returned")
+            .unwrap();
+        tokio::time::timeout(PROMPT, ran.recv())
+            .await
+            .expect("the callback registered across the refusal never ran");
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+
+        // A registration after the refusal runs at once, exactly once too
+        // (the park point stays armed: let it through).
+        gate.gate.add_permits(1);
+        let late = Arc::new(AtomicU64::new(0));
+        let late2 = late.clone();
+        client
+            .on_auth_failed(move |_| {
+                late2.fetch_add(1, Ordering::SeqCst);
+            })
+            .await;
+        assert_eq!(late.load(Ordering::SeqCst), 1);
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+        client.close().await;
+    }
 
     /// N1: a watch recorded after the restore's final revision check, but
     /// before publication, must still reach the executor. Before the fix
