@@ -39,6 +39,7 @@ import type { AiUpdateTaskParams } from "./AiUpdateTaskParams";
 import type { AiUpstreamModelParams } from "./AiUpstreamModelParams";
 import type { ApplyTemplateRequest } from "./ApplyTemplateRequest";
 import type { Apps } from "./Apps";
+import type { AttachNoteParams } from "./AttachNoteParams";
 import type { BotActivity } from "./BotActivity";
 import type { BotAgent } from "./BotAgent";
 import type { BotLogParams } from "./BotLogParams";
@@ -186,6 +187,7 @@ import type { PerspectiveUpdateSubjectParams } from "./PerspectiveUpdateSubjectP
 import type { PerspectiveUuidParams } from "./PerspectiveUuidParams";
 import type { PerspectiveVerifyFlowReceiptParams } from "./PerspectiveVerifyFlowReceiptParams";
 import type { PostRequestParams } from "./PostRequestParams";
+import type { PowParams } from "./PowParams";
 import type { PreparedDevice } from "./PreparedDevice";
 import type { PromptRequest } from "./PromptRequest";
 import type { ProposeOutcome } from "./ProposeOutcome";
@@ -281,6 +283,7 @@ import type { UsersVerifyEmailParams } from "./UsersVerifyEmailParams";
 import type { ValidOutput } from "./ValidOutput";
 import type { VerificationRequestResult } from "./VerificationRequestResult";
 import type { VerifySignatureRequest } from "./VerifySignatureRequest";
+import type { VouchNote } from "./VouchNote";
 
 /** Every executor RPC method: its params and result. */
 export interface RpcMethods {
@@ -366,6 +369,7 @@ export interface RpcMethods {
   "hosting.wallet": { params: Record<string, never>; result: HostingWalletResult };
   "hosting.walletHistory": { params: Record<string, never>; result: JsonValue };
   "identity.acceptJoin": { params: AcceptJoinParams; result: JoinAccepted };
+  "identity.attachNote": { params: AttachNoteParams; result: VouchNote };
   "identity.cancelJoin": { params: CancelJoinParams; result: JoinCancelled };
   "identity.claimOffer": { params: ClaimOfferParams; result: ClaimOfferResult };
   "identity.cosignIncept": { params: CosignInceptParams; result: JsonValue };
@@ -381,6 +385,7 @@ export interface RpcMethods {
   "identity.offers": { params: OffersParams; result: Array<OfferListing> };
   "identity.openOffer": { params: OpenOfferParams; result: OfferOpened };
   "identity.postRequest": { params: PostRequestParams; result: RequestPosted };
+  "identity.powParams": { params: Record<string, never>; result: PowParams };
   "identity.prepareDevice": { params: Record<string, never>; result: PreparedDevice };
   "identity.publish": { params: PublishParams; result: SignedHead };
   "identity.record": { params: RecordParams; result: StoredRecord | null };
@@ -595,6 +600,7 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "identity.keyOwner",
   "identity.log",
   "identity.offers",
+  "identity.powParams",
   "identity.record",
   "identity.requests",
   "identity.resolve",

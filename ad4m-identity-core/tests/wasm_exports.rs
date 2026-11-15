@@ -1,8 +1,10 @@
 //! The wasm-bindgen exports `KelChain.fold` and `KelChain.import` give the answers of the
-//! shared vectors (wasm32 + feature `wasm`).
+//! shared vectors, and `Pow.solve`, `Pow.solveRange` and `Pow.check` the answers of
+//! `ad4m_identity_core::pow` (wasm32 + feature `wasm`).
 #![cfg(all(target_arch = "wasm32", feature = "wasm"))]
 
-use ad4m_identity_core::wasm::KelChainJs;
+use ad4m_identity_core::pow;
+use ad4m_identity_core::wasm::{KelChainJs, PowJs};
 use serde_json::{json, Value};
 use wasm_bindgen::JsValue;
 use wasm_bindgen_test::wasm_bindgen_test;
@@ -102,4 +104,32 @@ fn import_export_appends_and_reports() {
     assert_eq!(err["code"], "policy");
     assert_eq!(err["reason"], "Format");
     assert_eq!(fresh.hashes().len(), 1);
+}
+
+const POW_SCID: &str = "QmZkP3wW4ytZVGAvdUSYQuKgnuqmC1xdqNx1MhLeD6V8Wq";
+
+#[wasm_bindgen_test]
+fn pow_exports_give_the_proofs_of_the_core() {
+    let solved = rust(&PowJs::solve(POW_SCID, 12).unwrap());
+    let native = pow::solve(POW_SCID, 12);
+    assert_eq!(solved, json!({ "nonce": native.nonce, "bits": 12 }));
+    assert!(PowJs::check(POW_SCID, js(&solved), 12));
+    assert!(!PowJs::check("QmAnotherScid", js(&solved), 12));
+    assert!(!PowJs::check(POW_SCID, js(&json!({ "nonce": 7 })), 12));
+    assert!(!PowJs::check(POW_SCID, JsValue::UNDEFINED, 0));
+
+    // In rounds from 0, the first round that holds the proof gives the same one.
+    let mut start = 0.0;
+    let found = loop {
+        let round = PowJs::solve_range(POW_SCID, 12, start, 1024.0).unwrap();
+        if !round.is_undefined() {
+            break rust(&round);
+        }
+        start += 1024.0;
+    };
+    assert_eq!(found, solved);
+    let err = rust(&PowJs::solve_range(POW_SCID, 12, -1.0, 1.0).err().unwrap());
+    assert_eq!(err["code"], "malformed");
+    let err = rust(&PowJs::solve_range(POW_SCID, 12, 0.0, 0.5).err().unwrap());
+    assert_eq!(err["code"], "malformed");
 }

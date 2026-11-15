@@ -129,11 +129,14 @@ async fn a_new_log_with_a_valid_token_is_200_and_vouched_and_a_used_token_is_403
     assert_eq!(t.count("logs"), 1);
     assert_eq!(t.count("notes"), 1);
 
-    // A token on an existing log: 400, nothing redeemed.
+    // A repeat of #0 with its token on the log the store holds: 409 with the head, as any
+    // repeat of #0, and nothing redeemed.
     let redeems = server.redeems();
     let reply = post_new(&t, &alice, json!({ "vouch": "t-alice" })).await;
-    assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.body);
+    assert_eq!(reply.status, StatusCode::CONFLICT, "{}", reply.body);
+    assert_eq!(reply.body["head"]["seq"], 0, "{}", reply.body);
     assert_eq!(server.redeems(), redeems);
+    assert_eq!(t.count("notes"), 1);
 }
 
 #[tokio::test]

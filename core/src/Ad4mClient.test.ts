@@ -39,7 +39,10 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'agent.get': { did: 'did:test:123', perspective: new Perspective(), directMessageLanguage: 'lang://dm', identity: 'did:scid:coasys:1:QmTest' },
     'agent.status': { did: 'did:test:123', didDocument: 'doc', isInitialized: true, isUnlocked: true, identity: 'did:scid:coasys:1:QmTest' },
     // ── Identity ──
-    'identity.status': { did: 'did:scid:coasys:1:QmTest', deviceKey: 'z6MkTest', deviceEnc: 'z6LSTest', keyId: 'd1', revoked: null, head: null, fork: null, storeBehind: null, store: { url: 'https://store.ad4m.dev', trusted: true } },
+    'identity.status': { did: 'did:scid:coasys:1:QmTest', deviceKey: 'z6MkTest', deviceEnc: 'z6LSTest', keyId: 'd1', revoked: null, head: null, fork: null, storeBehind: null, store: { url: 'https://store.ad4m.dev', trusted: true }, vouched: false },
+    'identity.publish': { seq: 0, hash: 'QmHead', time: 1, sig: 'z' },
+    'identity.powParams': { bits: 22, previousBits: 20, changedAt: 5 },
+    'identity.attachNote': (p: Record<string, unknown>) => ({ did: 'did:scid:coasys:1:QmTest', method: 'email', time: 1, voucher: 'did:key:z6MkVoucher', sig: String(p.token) }),
     'identity.claimOffer': (p: Record<string, unknown>) => ({ did: 'did:scid:coasys:1:QmTest', offerId: 'offer', matchCode: 'R7K Q2M', kind: 'node', expires: 1, needsAccept: false, echo: p }),
     'identity.acceptJoin': { accepted: true },
     'identity.cancelJoin': { cancelled: true },
@@ -1363,6 +1366,31 @@ describe('IdentityClient', () => {
         expect(status.did).toBe('did:scid:coasys:1:QmTest');
         expect(status.keyId).toBe('d1');
         expect(status.store).toEqual({ url: 'https://store.ad4m.dev', trusted: true });
+        expect(status.vouched).toBe(false);
+    });
+
+    test('publish() sends the events and the proof of work as given', async () => {
+        const pow = { nonce: '11111111111111111111112', bits: 22 };
+        await ad4m.identity.publish([{ seq: 0 }], pow);
+        expect(lastRpcCall!.type).toBe('identity.publish');
+        expect(lastRpcCall!.params).toEqual({ events: [{ seq: 0 }], pow });
+        await ad4m.identity.publish([{ seq: 1 }], null);
+        expect(lastRpcCall!.params).toEqual({ events: [{ seq: 1 }], pow: null });
+    });
+
+    test('powParams() calls identity.powParams', async () => {
+        const params = await ad4m.identity.powParams();
+        expect(lastRpcCall!.type).toBe('identity.powParams');
+        expect(lastRpcCall!.params).toEqual({});
+        expect(params).toEqual({ bits: 22, previousBits: 20, changedAt: 5 });
+    });
+
+    test('attachNote() sends the token and returns the note', async () => {
+        const note = await ad4m.identity.attachNote('tok-1');
+        expect(lastRpcCall!.type).toBe('identity.attachNote');
+        expect(lastRpcCall!.params).toEqual({ token: 'tok-1' });
+        expect(note.method).toBe('email');
+        expect(note.sig).toBe('tok-1');
     });
 
     test('claimOffer() sends the offer and the hint', async () => {

@@ -23,7 +23,7 @@ identity each local agent's device key speaks for, the key logs it checked, and 
 | `person.rs` | the person's profile: `person_record` (the agent record under the `did:scid` and its signed request, by the device key at the trusted head), `IdentityService::publish_person_profile` |
 | `claim.rs` | `ClaimService::claim_for_main` (`already-linked`, first-link rule, claim with the main wallet key; `canKeepMaster` as the caller says, which only the custody channel may: `custody::admit` on the RPC path, the channel itself on the ticket path; a repeated claim keeps the offer's row: 409 `cancelled`, 409 `offer-conflict`), `join_status` (the main agent's claims only; `awaiting-accept`, `cancelled`), `accept_join` (`identity.acceptJoin`), `cancel_join` (`identity.cancelJoin`). `claim_for_agent` is the claim itself for any agent of this executor: `claim_for_main` runs it after its rules and its join row, `bot.createAgent` claims a bot offer with a bot's key through it (no join row, no accept) |
 | `bot_key.rs` | `IdentityService::bot_key`: a bot's key in its owner's log (`BotKey`: verdict and bot scope at the trusted seq, the log read when older than `BOT_KEY_MAX_AGE`; `BotKeyError::StoreUnavailable` fails closed), read by `bots/` on every call a bot makes in a space |
-| `service.rs` | `IdentityService`: status, log, resetLog, cosignIncept, publish, openOffer, offers, devices, keyOwner (`identity.keyOwner`: the store's key index for a key, `null` when no log lists it; `agent:READ` like the logs); error mapping |
+| `service.rs` | `IdentityService`: status (with `vouched`), log, resetLog, cosignIncept, publish (passes `pow` to the store unchanged), powParams (the store's `GET /v1/pow`), attachNote (a vouching token redeemed for the agent's identity, the store request signed by its device key), openOffer, offers, devices, keyOwner (`identity.keyOwner`: the store's key index for a key, `null` when no log lists it; `agent:READ` like the logs); error mapping |
 | `types.rs` | the RPC contracts (ts-rs) mirroring `ad4m_ldk::identity`'s JSON, `IdentityForkEvent`, `AgentWithIdentity`; the key session contracts (`KeyStatement`, `SignedKeyStatement`, `SessionChallenge`, `KeySessionResult`, `SessionInfo`, ...) |
 
 Rows in `db/identity.rs`, reached through `db_backend()` (`service::db`): `operator_record`, `identity_agents` (agent `did:key` → SCID),
@@ -232,9 +232,21 @@ and answers `JoinAdded`, so a repeated claim keeps the first row's identity and 
   app token on the main agent; a user's session (or an app the user approved) for its own
   managed agent. `postRequest` and `deleteRequest` take the same guard: a post, and a
   deletion without a given request, are signed by the agent's device key alone, so they speak
-  for this device to the identity's other devices. `recordPut` keeps `Cap(agent:UPDATE)`: the
-  record's envelope is signed by a key of the identity, which the device's request only
+  for this device to the identity's other devices. `attachNote` takes it too: its store
+  request is signed by the agent's device key alone. `recordPut` keeps `Cap(agent:UPDATE)`:
+  the record's envelope is signed by a key of the identity, which the device's request only
   carries.
+- **The executor never builds event #0 and never solves a proof of work.** The party that
+  builds #0 (the custody service, an app through `ad4m-identity-client`) reads the cost with
+  `identity.powParams` (public, `agent:READ`), solves the proof for the incept's SCID, and
+  sends it as `pow` of `identity.publish`; the executor passes it to the agent language and the
+  store unchanged (`null` for every other append). The store refuses a new log with no note
+  and no proof (`403 pow`). A resumed create resends the same #0 and the same proof (the
+  solve is deterministic), and the store answers `409` with the head.
+- `identity.status.vouched` is the `vouched` of the head page of the cache's last read of the
+  log (`KelCache::vouched`); `attachNote` sets it at once when the store keeps the note. A
+  second note is `409 already-vouched`, a token the vouching service refuses `403 vouch`, a
+  store with no vouching service `503`.
 - The store's URL and keys (`IdentitySettings`) reach the agent language only through
   `write_agent_language_settings` (atomic: temp file + rename), as its `storeUrl` and
   `storeKeys` settings, on every start: no store or no keys removes the setting, so an earlier

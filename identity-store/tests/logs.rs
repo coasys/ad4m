@@ -902,14 +902,35 @@ async fn a_new_log_with_no_note_needs_a_proof_that_meets_the_bits() {
     assert_eq!(page["vouched"], false);
     assert_eq!(page["note"], Value::Null);
     assert_eq!(t.admitted_by(&alice.scid()), "brake");
-    // A proof on a log that exists: 400.
+    // A repeat of #0 with its proof (a resumed create): the conflict of any repeat, 409.
     let reply = t
         .post(
             &path,
             &json!({ "events": events, "pow": { "nonce": proof.nonce, "bits": 8 } }),
         )
         .await;
-    assert_eq!(reply.status, StatusCode::BAD_REQUEST);
+    assert_eq!(reply.status, StatusCode::CONFLICT, "{}", reply.body);
+    assert_eq!(reply.body["error"], "conflict");
+    assert_eq!(reply.body["head"]["seq"], 0);
+    // A proof with a later event: 400, before any replay.
+    let mut later = alice.json(0);
+    later["seq"] = json!(1);
+    let reply = t
+        .post(
+            &path,
+            &json!({ "events": [later], "pow": { "nonce": proof.nonce, "bits": 8 } }),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.body);
+    assert_eq!(reply.body["error"], "malformed");
+    assert!(
+        reply.body["detail"]
+            .as_str()
+            .is_some_and(|m| m.contains("only with event #0")),
+        "{}",
+        reply.body
+    );
+    assert_eq!(t.count("logs"), 1);
 
     let pow_params = t.get("/v1/pow").await.body;
     assert_eq!(pow_params["bits"], 8);

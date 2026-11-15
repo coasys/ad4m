@@ -460,7 +460,9 @@ impl Store {
                 // The log was created while the token was redeemed.
                 return Err(ApiError::conflict(&current_head(&tx, scid)?));
             }
-            if req.vouch.is_some() || req.pow.is_some() {
+            // A repeat of event #0 keeps its token or proof: a client that resumes a create
+            // resends its #0 as it was, and gets the same answer as any repeat (`409`).
+            if first.seq != 0 && (req.vouch.is_some() || req.pow.is_some()) {
                 return Err(ApiError::invalid(
                     "malformed",
                     "a vouching token or a proof of work comes only with event #0",

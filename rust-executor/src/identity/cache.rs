@@ -628,6 +628,10 @@ pub struct KelCache {
     /// The logs the configured store answers behind the cache ([`CacheError::Behind`]), in
     /// memory only, until a refresh succeeds ([`KelCache::store_behind`]).
     behind: StdMutex<HashMap<String, StoreBehind>>,
+    /// The logs whose page with the head, at the last read from the configured store, said
+    /// `vouched` (in memory only, at most [`REFRESHED_BOUND`]): `identity.status`'s `vouched`
+    /// ([`KelCache::vouched`]). A read that says `false` removes the log.
+    vouched: StdMutex<HashSet<String>>,
     store_keys: Vec<String>,
     on_fork: Option<ForkListener>,
     /// What every trusted log says, for synchronous readers (the link check).
@@ -855,6 +859,7 @@ impl KelCache {
             refreshed: StdMutex::new(HashMap::new()),
             read_ok: StdMutex::new(HashMap::new()),
             behind: StdMutex::new(HashMap::new()),
+            vouched: StdMutex::new(HashSet::new()),
             store_keys,
             on_fork: None,
             key_map,
@@ -1130,6 +1135,7 @@ impl KelCache {
             read_ok.remove(scid);
         }
         self.note_behind(scid, None);
+        self.note_vouched(scid, false);
         self.key_map.forget(scid);
         Ok(())
     }
@@ -1524,6 +1530,31 @@ impl KelCache {
         self.behind.lock().ok()?.get(scid).copied()
     }
 
+    /// Notes whether the configured store's page with `scid`'s head said `vouched`. At
+    /// [`REFRESHED_BOUND`] logs a new one takes the place of another, which shows as not vouched
+    /// until its next read.
+    pub(crate) fn note_vouched(&self, scid: &str, vouched: bool) {
+        let Ok(mut logs) = self.vouched.lock() else {
+            return;
+        };
+        if !vouched {
+            logs.remove(scid);
+            return;
+        }
+        if logs.len() >= REFRESHED_BOUND && !logs.contains(scid) {
+            if let Some(other) = logs.iter().next().cloned() {
+                logs.remove(&other);
+            }
+        }
+        logs.insert(scid.to_string());
+    }
+
+    /// Whether the configured store keeps a vouching note for `scid`, as its page with the head
+    /// said at the last read in this run of the executor (`LogPage.vouched`).
+    pub fn vouched(&self, scid: &str) -> bool {
+        self.vouched.lock().is_ok_and(|logs| logs.contains(scid))
+    }
+
     /// The store's events of `did` from seq 0 to `seq`, page after page (at most
     /// [`MAX_PAGES`] and [`MAX_STORE_LOG_BYTES`] of events served, copies included; past that the
     /// store is unavailable): the events a head at `seq` names. Fewer when the store's pages end
@@ -1604,6 +1635,9 @@ impl KelCache {
             };
             match reached {
                 Some(head) if head.seq >= page.head.seq => {
+                    // Only the page that holds the head carries the note (a settled page is
+                    // cached for long and says `false`).
+                    self.note_vouched(scid, page.vouched);
                     return self.chain(scid).await?.ok_or(CacheError::NotFound);
                 }
                 // A page holds at most PAGE events: read on from where it ended.
@@ -1955,6 +1989,9 @@ pub(crate) mod tests {
         /// How many times a page serves each of its events (1: once), as a store that pads its
         /// answers with copies.
         pub repeat: AtomicUsize,
+        /// The vouching note beside the log: the page with the head carries it and says
+        /// `vouched`; `attach_note` sets it once.
+        pub note: StdMutex<Option<ad4m_ldk::identity::VouchNote>>,
     }
 
     impl FakeStore {
@@ -1982,6 +2019,7 @@ pub(crate) mod tests {
                 requests: StdMutex::new(vec![]),
                 page_limit: StdMutex::new(None),
                 repeat: AtomicUsize::new(1),
+                note: StdMutex::new(None),
             }
         }
 
@@ -2029,12 +2067,20 @@ pub(crate) mod tests {
                     )
                 })
                 .collect();
+            // As the store: a settled page (its last event below the head) carries no note.
+            let at_head = page.is_empty()
+                || events
+                    .iter()
+                    .filter(|e| e.seq >= from)
+                    .take(self.page_limit.lock().unwrap().unwrap_or(usize::MAX))
+                    .any(|e| e.seq == head.seq);
+            let note = self.note.lock().unwrap().clone().filter(|_| at_head);
             Some(LogPage {
                 appended_at: vec![0; page.len()],
                 events: page,
                 head: self.key.sign_head(chain.id(), head.seq, &head.hash, 1),
-                note: None,
-                vouched: false,
+                vouched: note.is_some(),
+                note,
                 pauses: vec![],
             })
         }
@@ -2121,6 +2167,41 @@ pub(crate) mod tests {
         }
         async fn append(&self, _: &str, _: &AppendRequest) -> Result<SignedHead, IdentityError> {
             unimplemented_call("append")
+        }
+        async fn pow_params(&self) -> Result<ad4m_ldk::identity::PowParams, IdentityError> {
+            unimplemented_call("pow_params")
+        }
+        /// As the store with a vouching service that vouches for any token but `spent`: the
+        /// request is recorded, a second note is `already-vouched` (the agent language's
+        /// `Invalid` for the store's `409`).
+        async fn attach_note(
+            &self,
+            did: &str,
+            token: &str,
+            req: &SignedRequest,
+        ) -> Result<ad4m_ldk::identity::VouchNote, IdentityError> {
+            self.requests
+                .lock()
+                .unwrap()
+                .push(("attach_note", req.clone()));
+            if token == "spent" {
+                return Err(IdentityError::Forbidden(
+                    ad4m_ldk::identity::ForbiddenReason::Vouch,
+                ));
+            }
+            let mut held = self.note.lock().unwrap();
+            if held.is_some() {
+                return Err(IdentityError::Invalid("already-vouched".into()));
+            }
+            let note = ad4m_ldk::identity::VouchNote {
+                did: did.into(),
+                method: "email".into(),
+                time: 1,
+                voucher: "did:key:z6MkTestVoucher".into(),
+                sig: format!("sig-{token}"),
+            };
+            *held = Some(note.clone());
+            Ok(note)
         }
         async fn put_agent(
             &self,
@@ -2458,6 +2539,34 @@ pub(crate) mod tests {
         // Up to date: a second refresh changes nothing.
         cache.refresh(&store, &log.scid()).await.unwrap();
         assert_eq!(cache.stored_events(&log.scid(), 0).await.unwrap().len(), 2);
+    }
+
+    /// `vouched` follows the head page of the last read: false with no note, true once the
+    /// store keeps one, and a read of the up-to-date log takes it too.
+    #[tokio::test]
+    async fn vouched_follows_the_head_page_of_the_last_read() {
+        let log = TestLog::new(1);
+        let store = FakeStore::new(log.events.clone());
+        let cache = in_memory(vec![store.key.multikey()]);
+        let scid = log.scid();
+        assert!(!cache.vouched(&scid), "no read yet");
+        cache.refresh(&store, &scid).await.unwrap();
+        assert!(!cache.vouched(&scid));
+        *store.note.lock().unwrap() = Some(ad4m_ldk::identity::VouchNote {
+            did: format!("did:scid:coasys:1:{scid}"),
+            method: "email".into(),
+            time: 1,
+            voucher: "did:key:z6MkTestVoucher".into(),
+            sig: "sig".into(),
+        });
+        cache.refresh(&store, &scid).await.unwrap();
+        assert!(
+            cache.vouched(&scid),
+            "the up-to-date log's page says vouched"
+        );
+        *store.note.lock().unwrap() = None;
+        cache.refresh(&store, &scid).await.unwrap();
+        assert!(!cache.vouched(&scid), "a page without the note clears it");
     }
 
     #[tokio::test]

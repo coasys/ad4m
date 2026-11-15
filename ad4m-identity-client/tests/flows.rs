@@ -83,6 +83,10 @@ impl TestStore {
                 // within a second (one test runs 200 removals); the store's bucket is not under
                 // test here.
                 identity_burst: 1000,
+                // Every test's identities come from one address; the brake is not under test
+                // here, its proof of work is (`identity.powParams`, the create flow's solve).
+                brake_addr_burst: 100_000,
+                brake_global_per_hour: 100_000,
                 ..Settings::default()
             },
         );
@@ -396,8 +400,10 @@ impl ExecutorRpc for TestExecutor {
                 let scid = self.identity.borrow().clone();
                 let mut key_id = None;
                 let mut revoked = None;
+                let mut vouched = false;
                 if let Some(scid) = &scid {
                     let page = self.log(scid).await?;
+                    vouched = page["vouched"].as_bool().unwrap_or(false);
                     let events: Vec<Event> = page["events"]
                         .as_array()
                         .unwrap()
@@ -421,7 +427,15 @@ impl ExecutorRpc for TestExecutor {
                     "fork": null,
                     "storeBehind": null,
                     "store": { "url": STORE_URL, "trusted": true },
+                    "vouched": vouched,
                 }))
+            }
+            "identity.powParams" => {
+                let (code, body) = self.store.send("GET", "/v1/pow", None, None).await;
+                match code {
+                    200 => Ok(body),
+                    _ => Err(Self::refused(code, &body)),
+                }
             }
             "identity.cosignIncept" => {
                 if self.identity.borrow().is_some() {
@@ -482,7 +496,8 @@ impl ExecutorRpc for TestExecutor {
                     .send(
                         "POST",
                         &format!("/v1/logs/{scid}/events"),
-                        Some(&json!({ "events": p["events"] })),
+                        // As the executor does: the proof of work goes to the store unchanged.
+                        Some(&json!({ "events": p["events"], "pow": p["pow"] })),
                         None,
                     )
                     .await;
@@ -1239,6 +1254,48 @@ async fn create_finishes_with_the_same_words_after_a_lost_publish_answer() {
         Signer::key(kept.signer(0).unwrap()),
         Signer::key(&words::master_key(&seed, 0).unwrap())
     );
+}
+
+/// The brake: the store refuses a new log without a proof of work (`403 pow`), and a headless
+/// `create` solves one at the cost the store asks for (`identity.powParams`), so it passes.
+#[tokio::test]
+async fn create_solves_the_proof_of_work_the_store_asks_for() {
+    use ad4m_identity_core::{DeviceKey, KeyLife};
+    let store = TestStore::new();
+    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let params = a.pow_params().await.unwrap();
+    assert_eq!((params.bits, params.previous_bits), (8, 8));
+
+    // An incept published with no proof is refused, and nothing is stored.
+    let status = a.status().await.unwrap();
+    let master = SigningKey::from_bytes(&[91; 32]);
+    let next =
+        ad4m_identity_core::commitment(&Signer::key(&SigningKey::from_bytes(&[92; 32])), "salt");
+    let incept = ad4m_identity_core::build::incept_human(
+        &master,
+        next,
+        vec![DeviceKey {
+            id: "d1".into(),
+            sign: status.device_key.clone(),
+            enc: status.device_enc.clone(),
+            life: KeyLife::Standing,
+        }],
+    )
+    .unwrap();
+    let cosigned = a.cosign_incept(&incept).await.unwrap();
+    let bare = a.publish(std::slice::from_ref(&cosigned), None).await;
+    assert!(
+        matches!(&bare, Err(e) if e.code == 403 && e.message.contains("pow")),
+        "{bare:?}"
+    );
+    assert!(a.status().await.unwrap().did.is_none());
+
+    // A create solves the proof and passes the brake; no note, so not vouched.
+    let vault = MemoryVault::new();
+    let did = create(&a, &vault, 13).await;
+    let status = a.status().await.unwrap();
+    assert_eq!(status.did.as_deref(), Some(did.as_str()));
+    assert!(!status.vouched);
 }
 
 #[tokio::test]

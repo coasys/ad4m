@@ -15,8 +15,9 @@ use super::cache::{CacheError, KelCache};
 use super::device::{device_key, enc_key_of, WalletSigner};
 use super::operator::{main_incept_check, FirstLinkRefusal};
 use super::types::{
-    convert, BotView, DeviceView, ForkRecord, IdentityLog, IdentityStatus, KeyOwner, OfferListing,
-    OfferOpened, PublishParams, SignedHead, SignedOffer, SignedRequest, StoreInfo,
+    convert, AttachNoteParams, BotView, DeviceView, ForkRecord, IdentityLog, IdentityStatus,
+    KeyOwner, OfferListing, OfferOpened, PowParams, PublishParams, SignedHead, SignedOffer,
+    SignedRequest, StoreInfo, VouchNote,
 };
 use crate::agent::AgentContext;
 use crate::api::ws_handler::WsRpcError;
@@ -233,6 +234,7 @@ impl IdentityService {
             fork: None,
             store_behind: None,
             store: self.store_info(),
+            vouched: false,
         };
         let Some(scid) = db(|db| db.agent_identity(&agent_did))? else {
             return Ok(status);
@@ -252,6 +254,7 @@ impl IdentityService {
         }
         status.fork = first_fork(&self.cache.forks(&scid).await.map_err(cache_error)?);
         status.store_behind = self.cache.store_behind(&scid);
+        status.vouched = self.cache.vouched(&scid);
         Ok(status)
     }
 
@@ -591,10 +594,16 @@ impl IdentityService {
             let record = db(|db| db.operator_record())?;
             main_incept_check(record.as_ref(), &did).map_err(first_link_error)?;
         }
+        // The proof passes unchanged: the store checks it on event #0 of a log without a note.
         let request = ad4m_ldk::identity::AppendRequest {
             events: params.events.clone(),
             vouch: None,
-            pow: None,
+            pow: params
+                .pow
+                .as_ref()
+                .map(convert)
+                .transpose()
+                .map_err(|e| WsRpcError::bad_request(format!("invalid: pow ({e})")))?,
         };
         let head = match self.backend.append(&did, &request).await {
             Ok(head) => head,
@@ -624,6 +633,48 @@ impl IdentityService {
         }
         self.record_agent_if_listed(agent, &scid).await?;
         mirror_head(&head)
+    }
+
+    /// `identity.powParams`: the cost of a proof of work the configured store asks for now, so
+    /// the party that builds event #0 solves the proof for `identity.publish`.
+    pub async fn pow_params(&self) -> Result<PowParams, WsRpcError> {
+        let params = self.backend.pow_params().await.map_err(backend_error)?;
+        convert(&params).map_err(|e| WsRpcError::internal(e.to_string()))
+    }
+
+    /// `identity.attachNote`: redeems a vouching token for `agent`'s identity. The agent's device
+    /// key signs the store request over the body `{"token": token}`, and the agent language
+    /// takes it to the store (`POST /v1/notes/{scid}`), which redeems the token with the
+    /// vouching service and keeps the note beside the log. 409 `no-identity` while the agent
+    /// speaks for no identity, 409 `already-vouched` when the log has a note, 403
+    /// `forbidden: "vouch"` for a spent or unknown token, 503 while no vouching service answers.
+    pub async fn attach_note(
+        &self,
+        agent: &AgentContext,
+        params: &AttachNoteParams,
+    ) -> Result<VouchNote, WsRpcError> {
+        let position = self.bound_position(agent).await?;
+        let path = format!("/v1/notes/{}", position.scid);
+        let body = super::device::body_bytes(&serde_json::json!({ "token": params.token }))
+            .map_err(WsRpcError::internal)?;
+        let request = position.request("POST", &path, &body)?;
+        let note = self
+            .backend
+            .attach_note(&position.did, &params.token, &request)
+            .await
+            .map_err(|e| match e {
+                IdentityError::Invalid(reason) if reason == "already-vouched" => error(
+                    409,
+                    format!(
+                        "already-vouched: the store keeps a note for {} already",
+                        position.did
+                    ),
+                ),
+                e => backend_error(e),
+            })?;
+        // The store checked the note against its vouching keys before it kept it.
+        self.cache.note_vouched(&position.scid, true);
+        convert(&note).map_err(|e| WsRpcError::internal(e.to_string()))
     }
 
     /// After a `409`: the store's head when its log holds `events` at their seqs (same hashes),
@@ -1354,6 +1405,8 @@ mod tests {
         claim_error: std::sync::Mutex<Option<IdentityError>>,
         /// What `offer_state` answers for every offer.
         offer: std::sync::Mutex<String>,
+        /// The `pow` of each append, in order.
+        pows: std::sync::Mutex<Vec<Option<ad4m_ldk::identity::Pow>>>,
     }
 
     impl RecordingStore {
@@ -1365,6 +1418,7 @@ mod tests {
                 claims: std::sync::atomic::AtomicUsize::new(0),
                 claim_error: std::sync::Mutex::new(None),
                 offer: std::sync::Mutex::new("claimed".into()),
+                pows: std::sync::Mutex::new(vec![]),
             }
         }
     }
@@ -1413,6 +1467,7 @@ mod tests {
         ) -> Result<ad4m_ldk::identity::SignedHead, IdentityError> {
             self.appends
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.pows.lock().unwrap().push(req.pow.clone());
             if self.conflict {
                 let held = self.inner.events.lock().unwrap().clone();
                 let chain = ad4m_identity_core::fold(&held).unwrap();
@@ -1437,6 +1492,21 @@ mod tests {
                 .inner
                 .key
                 .sign_head(chain.id(), head.seq, &head.hash, 1))
+        }
+        async fn pow_params(&self) -> Result<ad4m_ldk::identity::PowParams, IdentityError> {
+            Ok(ad4m_ldk::identity::PowParams {
+                bits: 8,
+                previous_bits: 6,
+                changed_at: 1,
+            })
+        }
+        async fn attach_note(
+            &self,
+            did: &str,
+            token: &str,
+            req: &ad4m_ldk::identity::SignedRequest,
+        ) -> Result<ad4m_ldk::identity::VouchNote, IdentityError> {
+            self.inner.attach_note(did, token, req).await
         }
         async fn put_agent(
             &self,
@@ -1602,6 +1672,7 @@ mod tests {
                 &agent,
                 &PublishParams {
                     events: vec![cosigned],
+                    pow: None,
                 },
             )
             .await;
@@ -1659,6 +1730,7 @@ mod tests {
                 &main,
                 &PublishParams {
                     events: vec![cosigned],
+                    pow: None,
                 },
             )
             .await
@@ -1716,6 +1788,7 @@ mod tests {
                 &agent,
                 &PublishParams {
                     events: vec![serde_json::to_value(&incept).unwrap()],
+                    pow: None,
                 },
             )
             .await
@@ -2511,6 +2584,7 @@ mod tests {
                 &AgentContext::main_agent(),
                 &PublishParams {
                     events: vec![serde_json::to_value(add).unwrap()],
+                    pow: None,
                 },
             )
             .await
@@ -2687,6 +2761,7 @@ mod tests {
                     &main,
                     &PublishParams {
                         events: vec![incept.clone()],
+                        pow: None,
                     },
                 )
                 .await
@@ -2699,5 +2774,162 @@ mod tests {
         }
         drop(channel);
         Ad4mDb::with_global_instance(|db| db.clear_agent_identity_for_test(&main_did)).unwrap();
+    }
+
+    /// A managed agent bound to a new identity through `publish` (with `pow`), on `backend`.
+    async fn bound_agent(
+        backend: Arc<RecordingStore>,
+        seed: u8,
+    ) -> (IdentityService, AgentContext, String) {
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        let user = crate::test_utils::create_test_user(&format!(
+            "note-{}@example.org",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let agent = AgentContext::managed(user);
+        let service = service_on(backend);
+        let incept = service
+            .cosign_incept(&agent, &incept_listing(&agent, seed))
+            .await
+            .unwrap();
+        let scid = Event::from_json(&incept).unwrap().scid;
+        service
+            .publish(
+                &agent,
+                &PublishParams {
+                    events: vec![incept],
+                    pow: Some(crate::identity::types::Pow {
+                        nonce: "proof-nonce".into(),
+                        bits: 8,
+                    }),
+                },
+            )
+            .await
+            .unwrap();
+        (service, agent, scid)
+    }
+
+    /// `publish` gives the store the `pow` it was given, unchanged, and a malformed `pow` is
+    /// refused before the store is asked.
+    #[tokio::test]
+    async fn publish_passes_the_proof_of_work_to_the_store_unchanged() {
+        let backend = Arc::new(RecordingStore::new(vec![], false));
+        let (service, _agent, _) = bound_agent(backend.clone(), 81).await;
+        assert_eq!(
+            *backend.pows.lock().unwrap(),
+            vec![Some(ad4m_ldk::identity::Pow {
+                nonce: "proof-nonce".into(),
+                bits: 8,
+            })]
+        );
+        assert_eq!(
+            service.pow_params().await.unwrap(),
+            PowParams {
+                bits: 8,
+                previous_bits: 6,
+                changed_at: 1,
+            }
+        );
+    }
+
+    /// `attachNote` signs the store request with the agent's device key over `{"token"}` at
+    /// `POST /v1/notes/{scid}`, and `status` turns `vouched` from false to true. A second note
+    /// is `409 already-vouched`.
+    #[tokio::test]
+    async fn attach_note_signs_the_request_and_turns_vouched_true() {
+        let backend = Arc::new(RecordingStore::new(vec![], false));
+        let (service, agent, scid) = bound_agent(backend.clone(), 82).await;
+        assert!(!service.status(&agent).await.unwrap().vouched);
+
+        let note = service
+            .attach_note(
+                &agent,
+                &AttachNoteParams {
+                    token: "tok-1".into(),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(note.did, did_of(&scid));
+        assert_eq!(note.method, "email");
+        assert_eq!(note.sig, "sig-tok-1");
+        assert!(service.status(&agent).await.unwrap().vouched);
+
+        let requests = backend.inner.requests.lock().unwrap().clone();
+        let (call, request) = requests
+            .iter()
+            .find(|(call, _)| *call == "attach_note")
+            .expect("the note request");
+        assert_eq!(*call, "attach_note");
+        assert_eq!(request.req.method, "POST");
+        assert_eq!(request.req.path, format!("/v1/notes/{scid}"));
+        assert_eq!(request.req.did, did_of(&scid));
+        let body =
+            super::super::device::body_bytes(&serde_json::json!({ "token": "tok-1" })).unwrap();
+        assert_eq!(request.req.body_hash, ad4m_hash_chain::hash_bytes(&body));
+        // `incept_listing` lists the agent's device key as `d1`.
+        assert_eq!(request.req.key_id, "d1");
+        assert_eq!(request.req.kel_seq, 0);
+
+        let again = service
+            .attach_note(
+                &agent,
+                &AttachNoteParams {
+                    token: "tok-2".into(),
+                },
+            )
+            .await
+            .expect_err("a second note");
+        assert_eq!(again.code, 409, "{again:?}");
+        assert!(
+            again.message.starts_with("already-vouched"),
+            "{}",
+            again.message
+        );
+        assert!(service.status(&agent).await.unwrap().vouched);
+    }
+
+    /// A spent token is `403 forbidden: "vouch"` and leaves `vouched` false; an agent that speaks
+    /// for no identity gets `409 no-identity` and the store is not asked.
+    #[tokio::test]
+    async fn attach_note_refuses_a_spent_token_and_an_agent_with_no_identity() {
+        let backend = Arc::new(RecordingStore::new(vec![], false));
+        let (service, agent, _) = bound_agent(backend.clone(), 83).await;
+        let spent = service
+            .attach_note(
+                &agent,
+                &AttachNoteParams {
+                    token: "spent".into(),
+                },
+            )
+            .await
+            .expect_err("a spent token");
+        assert_eq!(spent.code, 403, "{spent:?}");
+        assert!(spent.message.contains("vouch"), "{}", spent.message);
+        assert!(!service.status(&agent).await.unwrap().vouched);
+
+        let user = crate::test_utils::create_test_user(&format!(
+            "unbound-{}@example.org",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let unbound = AgentContext::managed(user);
+        let before = backend.inner.requests.lock().unwrap().len();
+        let refused = service
+            .attach_note(
+                &unbound,
+                &AttachNoteParams {
+                    token: "tok".into(),
+                },
+            )
+            .await
+            .expect_err("no identity");
+        assert_eq!(refused.code, 409, "{refused:?}");
+        assert!(
+            refused.message.starts_with("no-identity"),
+            "{}",
+            refused.message
+        );
+        assert_eq!(backend.inner.requests.lock().unwrap().len(), before);
     }
 }

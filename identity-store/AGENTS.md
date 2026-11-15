@@ -46,6 +46,7 @@ workspace's `Cargo.lock`); rusqlite 0.40 on the system `libsqlite3`.
 | `tests/notes.rs` | vouching notes against `tests/common/vouch.rs` (a vouching service on 127.0.0.1 with the redeem contract): a note with #0, a note beside a log, who may ask for one, the service's answers, `vouched` under `VOUCH_KEYS`, no note on a settled page |
 | `tests/serve.rs` | the `serve` process stops cleanly on SIGTERM and SIGINT |
 | `examples/test_agent.rs` | the test person over JSON lines, for the agent language suites |
+| `examples/vouch_service.rs` | `tests/common/vouch.rs` as a process over JSON lines (`give`, `spend`, `redeems`), for the executor's identity suite (`tests/js/tests/identity.test.ts`); CI builds it with the store |
 | `Dockerfile` | the container image (build from the repo root) |
 
 ## Routes (base `/v1`)
@@ -215,7 +216,10 @@ tests name them by these names.
   (an IPv4-mapped address counts as IPv4): the socket peer, or, when the peer is in
   `TRUSTED_PROXIES`, `CF-Connecting-IP`, else the nearest `X-Forwarded-For` entry that is no
   trusted proxy. Each admission or refusal deletes the rows of its kind's buckets that are full
-  again, so `brake` holds only the addresses seen within one refill.
+  again, so `brake` holds only the addresses seen within one refill. On a log the store
+  holds, a repeat of #0 with its `pow` or token gets the same `409 {head}` as any repeat: a
+  client that resumes a create sends its #0 as it was. A `pow` or token on a request whose
+  first event is not #0 is `400 malformed`.
 - **Vouching notes** (`vouch.rs`): `POST {VOUCH_URL}/api/vouch/redeem {token, did}` with
   `Authorization: Bearer {VOUCH_CREDENTIAL}`, 10 s timeout. A `200` note for the identity that
   `verify_note` passes under `VOUCH_KEYS` is taken; `409`/`410` are `403 vouch`; no

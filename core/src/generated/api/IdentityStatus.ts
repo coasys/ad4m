@@ -46,4 +46,10 @@ storeBehind: StoreBehind | null,
  * The identity store this executor uses (the config's, else its network seed's), and
  * whether it trusts a key for it; `null` when it has none (a network without a store).
  */
-store: StoreInfo | null, };
+store: StoreInfo | null, 
+/**
+ * The store keeps a vouching note for the identity that verifies (`LogPage.vouched` of
+ * the page that holds the head, at the cache's last read from the store). `false` with no
+ * identity, and until a read sees the note.
+ */
+vouched: boolean, };
