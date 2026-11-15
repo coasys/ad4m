@@ -202,6 +202,7 @@ fn every_wrapped_rpc_exists_in_the_generated_contract() {
     let sources: &[(&str, &str)] = &[
         ("agent.rs", include_str!("agent.rs")),
         ("batch.rs", include_str!("batch.rs")),
+        ("connect.rs", include_str!("connect.rs")),
         ("expressions.rs", include_str!("expressions.rs")),
         ("flow.rs", include_str!("flow.rs")),
         ("instances.rs", include_str!("instances.rs")),

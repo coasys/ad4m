@@ -193,7 +193,10 @@ pub(crate) async fn connect(url: &str, display_url: &str) -> Result<Socket> {
             if let Some(t) = open_tx.borrow_mut().take() {
                 let _ = t.send(Err(format!("closed before open (code {})", ev.code())));
             }
-            let _ = tx.unbounded_send(InFrame::Close(Some(ev.code())));
+            let _ = tx.unbounded_send(InFrame::Close {
+                code: Some(ev.code()),
+                reason: ev.reason(),
+            });
         }
     }) as Box<dyn FnMut(_)>);
     ws.set_onclose(Some(onclose.as_ref().unchecked_ref()));
@@ -419,7 +422,7 @@ mod tests {
         drop(sink);
         let next = rt::timeout(Duration::from_secs(3), stream.next()).await;
         assert!(
-            matches!(next, Ok(None) | Ok(Some(InFrame::Close(_)))),
+            matches!(next, Ok(None) | Ok(Some(InFrame::Close { .. }))),
             "the stream did not end: {next:?}"
         );
         assert_eq!(
@@ -504,7 +507,10 @@ mod tests {
         assert!(closing.is_err(), "a send while CLOSING reported success");
 
         let closed = rt::timeout(Duration::from_secs(3), stream.next()).await;
-        assert!(matches!(closed, Ok(Some(InFrame::Close(_)))), "{closed:?}");
+        assert!(
+            matches!(closed, Ok(Some(InFrame::Close { .. }))),
+            "{closed:?}"
+        );
         assert_eq!(sink.owned.ws.ready_state(), WebSocket::CLOSED);
         let after = sink.send_text("after close".into()).await;
         assert!(after.is_err(), "a send while CLOSED reported success");
@@ -582,7 +588,7 @@ mod tests {
                     error = Some(e);
                     break;
                 }
-                InFrame::Close(_) => break,
+                InFrame::Close { .. } => break,
             }
         }
         assert!(texts <= MIB, "{texts} bytes were queued past the bound");

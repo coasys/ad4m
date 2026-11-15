@@ -283,6 +283,26 @@ pub struct OnlineAgent {
     pub status: Option<serde_json::Value>,
 }
 
+/// `user.requestVerification`'s reply: where the sign-in goes next
+/// (`VerificationRequestResult` executor-side).
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct VerificationRequestResult {
+    pub success: bool,
+    pub message: String,
+    pub requires_password: bool,
+    pub is_existing_user: bool,
+}
+
+/// `user.create`'s reply (`UserCreationResult` executor-side).
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct UserCreationResult {
+    pub did: String,
+    pub success: bool,
+    pub error: Option<String>,
+}
+
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;

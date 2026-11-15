@@ -37,6 +37,12 @@ maplit = "1"
 tokio = { version = "1.25.0", features = ["full"] }
 tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
 clap = { version = "4.0.8", features = ["derive"] }
+# `connect` (native only): executor discovery, `/health`, the token store
+# with a cross-process lock and atomic replace.
+dirs = "5"
+reqwest = { version = "0.11.20", features = ["json", "native-tls"] }
+fd-lock = "4"
+tempfile = "3"
 
 # Browser (wasm32-unknown-unknown): tokio's `sync` primitives and `select!`
 # compile for wasm — spawn/timers can't run, so they go through `rt.rs` onto
@@ -61,6 +67,12 @@ futures-channel = "0.3"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 tempfile = "3"
+# The connect example reads passwords and codes without echo.
+rpassword = "7"
+
+[target.'cfg(unix)'.dev-dependencies]
+# The connect example restores the terminal on ^C.
+libc = "0.2"
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 wasm-bindgen-test = "0.3"

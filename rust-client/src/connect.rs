@@ -1,0 +1,2594 @@
+//! The `ad4m-connect` flow for Rust apps (`connect/src/core.ts`): find the
+//! executor, authenticate — the capability handshake on a single-user
+//! executor, email sign-in on a multi-user one — and keep the token for the
+//! next run.
+//!
+//! ```no_run
+//! # async fn demo() -> anyhow::Result<()> {
+//! use ad4m_client::connect::{Ad4mConnect, AppInfo, ConnectOptions};
+//! # struct NoUi;
+//! # impl ad4m_client::connect::ConnectPrompts for NoUi {}
+//! # let mut ui = NoUi;
+//! let mut session = Ad4mConnect::new(ConnectOptions::new(AppInfo::new(
+//!     "My egui app",
+//!     "does things",
+//!     "https://example.com",
+//! )))?;
+//! session.connect(&mut ui).await?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Migrating from the first version of this module
+//!
+//! Source-breaking changes, with what a caller changes:
+//!
+//! - `TokenStore::token(url, app)` returns `Result<Option<String>>` (was
+//!   `Option<String>`): a store that cannot be read or parsed is an error,
+//!   no longer an empty store. Add `?` or handle the error.
+//! - The remembered URL is per app: `TokenStore::last_url(app)` returns
+//!   `Result<Option<RememberedUrl>>` (was `last_url()` returning
+//!   `Option<String>`) and `set_last_url(app, url, pinned)` takes the app and
+//!   whether the URL was chosen (`url`/`port`) rather than discovered (was
+//!   `set_last_url(url)`). The old global entry in `tokens.json` is ignored,
+//!   so each app discovers its executor once more.
+//! - New: `TokenStore::remove_token_if(url, app, token)`, which removes the
+//!   token only while it is still `token`.
+//! - New variant `ConnectError::InsecureTransport { url }`: plaintext
+//!   (`http://`/`ws://`) to an executor off loopback is now refused before
+//!   any token, password or code is sent. Opt in with
+//!   `ConnectOptions::allow_insecure_remote(true)`; code that builds
+//!   `ConnectOptions` as a struct literal must set the new `insecure_remote`
+//!   field (or use `ConnectOptions::new`).
+//! - New variant `ConnectStatus::EmailCodeExpired`: the email challenge is
+//!   no longer valid and a new code is requested (see its docs: it does not
+//!   detect expiry by time).
+//!
+//! Exhaustive `match`es on `ConnectError` or `ConnectStatus` need the new
+//! arms. Behaviour changes: `connect` can return `Ok(AuthState::Unauthenticated)`
+//! (see [`Ad4mConnect::connect`]); `disconnect` closes the socket and
+//! publishes `Unauthenticated` before it returns a store error; a
+//! `localhost` URL is dialled on 127.0.0.1 and ::1, never through the
+//! resolver.
+
+use anyhow::{anyhow, Result};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use std::collections::BTreeMap;
+use std::future::Future;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::watch;
+
+use crate::types::{CapabilityInput, ResourceInput, UserCreationResult, VerificationRequestResult};
+use crate::ws_rpc::{RpcCallError, WsRpcClient};
+use crate::Ad4mClient;
+
+/// The port `ad4m-executor run` listens on when nothing overrides it.
+pub const DEFAULT_PORT: u16 = 12000;
+/// `checkConnection`'s budget per candidate (TS `utils.ts` `checkConnection`).
+const HEALTH_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// What the executor says, in words, when a call needs keys a locked wallet
+/// cannot open (TS `LOCKED_WALLET`).
+const LOCKED_WALLET: &str = "Cannot extractByTags from a ciphered wallet. You must unlock first.";
+/// How the executor's close reason (code 1013) and 503 begin when its wallet
+/// is locked (TS `EXECUTOR_LOCKED`).
+const EXECUTOR_LOCKED: &str = "Executor is locked";
+/// The executor's words when a token itself does not hold: a bad signature,
+/// past its expiry, revoked (TS `DEAD_TOKEN`).
+const DEAD_TOKEN: [&str; 3] = [
+    "InvalidSignature",
+    "ExpiredSignature",
+    "Unauthorized access",
+];
+
+// ── Options ──
+
+/// The app as the capability request shows it (TS `AuthInfo`).
+#[derive(Debug, Clone)]
+pub struct AppInfo {
+    pub name: String,
+    pub description: String,
+    /// Sent as both `appDomain` and `appUrl` (TS `buildAppInfo`).
+    pub url: String,
+    pub icon_path: Option<String>,
+    /// What the request asks for. The executor requires a non-empty list; the
+    /// default is the wildcard the CLI asks for (`*:*` / `*`).
+    pub capabilities: Vec<CapabilityInput>,
+}
+
+impl AppInfo {
+    pub fn new(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        url: impl Into<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            description: description.into(),
+            url: url.into(),
+            icon_path: None,
+            capabilities: vec![CapabilityInput {
+                can: vec!["*".to_string()],
+                with: ResourceInput {
+                    domain: "*".to_string(),
+                    pointers: vec!["*".to_string()],
+                },
+            }],
+        }
+    }
+
+    /// Ask for narrower capabilities than the wildcard default.
+    pub fn capabilities(mut self, capabilities: Vec<CapabilityInput>) -> Self {
+        self.capabilities = capabilities;
+        self
+    }
+}
+
+/// `Ad4mConnect` inputs. Only `app` is required.
+#[derive(Debug, Clone)]
+pub struct ConnectOptions {
+    pub app: AppInfo,
+    /// An explicit executor URL (`http(s)://` or `ws(s)://` — the latter is
+    /// normalized like TS `wsUrlToHttpBase`); wins over every other source.
+    pub url: Option<String>,
+    /// An explicit port → `http://127.0.0.1:{port}`.
+    pub port: Option<u16>,
+    /// A multi-user sign-in email; `None` asks through `ConnectPrompts::email`.
+    pub email: Option<String>,
+    /// The directory holding `tokens.json`; `None` = `{config}/ad4m-connect`.
+    pub token_dir: Option<PathBuf>,
+    /// `~/.ad4m/executor-port` (tests point it elsewhere).
+    pub executor_port_file: Option<PathBuf>,
+    /// Allow a plaintext (`http://`/`ws://`) executor that is not on
+    /// loopback. Off by default: the flow sends tokens (in the socket URL),
+    /// passwords and codes over it. Set with
+    /// [`allow_insecure_remote`](Self::allow_insecure_remote).
+    pub insecure_remote: bool,
+    /// Whether this app's remembered URL may propose the executor (TS
+    /// `ad4m-url`). One the app or user chose (`url`/`port`) stays pinned
+    /// ahead of discovery; one found by discovery only comes after the
+    /// launcher's port file.
+    pub use_stored_url: bool,
+}
+
+impl ConnectOptions {
+    pub fn new(app: AppInfo) -> Self {
+        Self {
+            app,
+            url: None,
+            port: None,
+            email: None,
+            token_dir: None,
+            executor_port_file: None,
+            use_stored_url: true,
+            insecure_remote: false,
+        }
+    }
+
+    /// Opt in to a plaintext executor off loopback (a trusted LAN, a TLS
+    /// proxy that terminates elsewhere): tokens, passwords and codes then
+    /// travel unencrypted.
+    pub fn allow_insecure_remote(mut self, allow: bool) -> Self {
+        self.insecure_remote = allow;
+        self
+    }
+}
+
+// ── The UI seam ──
+
+/// What a frontend must show while `connect` runs (TS's views):
+/// the pending capability request, the emailed-code and password prompts, and
+/// a "waiting" status line. An `Err` answer cancels the connect.
+pub trait ConnectPrompts {
+    /// A capability request is pending approval (`request_id`): show it and
+    /// return the 6-digit code the user typed.
+    fn capability_code<'a>(
+        &'a mut self,
+        request_id: &'a str,
+        app: &'a AppInfo,
+    ) -> impl Future<Output = Result<String>> + Send + 'a {
+        let _ = (request_id, app);
+        async { Err(anyhow!("this frontend cannot ask for a capability code")) }
+    }
+
+    /// Ask the user's email for a multi-user sign-in (never called when
+    /// `ConnectOptions::email` is set).
+    fn email<'a>(&'a mut self) -> impl Future<Output = Result<String>> + Send + 'a {
+        async { Err(anyhow!("this frontend cannot ask for an email")) }
+    }
+
+    /// `email` was sent a sign-in code: return what the user typed.
+    fn email_code<'a>(
+        &'a mut self,
+        email: &'a str,
+    ) -> impl Future<Output = Result<String>> + Send + 'a {
+        let _ = email;
+        async { Err(anyhow!("this frontend cannot ask for an email code")) }
+    }
+
+    /// `email` needs a password: the new account's (`new_account = true`, the
+    /// executor emails a sign-up code too) or an existing user's login
+    /// password.
+    fn password<'a>(
+        &'a mut self,
+        email: &'a str,
+        new_account: bool,
+    ) -> impl Future<Output = Result<String>> + Send + 'a {
+        let _ = (email, new_account);
+        async { Err(anyhow!("this frontend cannot ask for a password")) }
+    }
+
+    /// A status line the frontend may display ("waiting for approval"…).
+    fn status(&mut self, _status: ConnectStatus) {}
+}
+
+/// A "waiting" state for `ConnectPrompts::status`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConnectStatus {
+    /// Checking candidates and opening the socket.
+    Connecting,
+    /// A capability request waits for approval in the user's AD4M UI.
+    WaitingForApproval { request_id: String },
+    /// `email` was sent a sign-in code.
+    WaitingForEmailCode { email: String },
+    /// The last code was refused — the prompt shows again. An emailed code
+    /// that expired by time also ends here, and so does every code after it:
+    /// see [`EmailCodeExpired`](Self::EmailCodeExpired).
+    CodeRejected,
+    /// The pending request died (expired, or five wrong codes); a fresh one
+    /// is requested next.
+    RequestExpired,
+    /// The emailed code's challenge is no longer valid: the executor
+    /// invalidated it after five wrong codes. A new code is requested next.
+    ///
+    /// Despite the name, this does not detect a code that expired by time.
+    /// The executor answers an expired code like a wrong one ("Invalid
+    /// verification code"), and deletes the challenge, so the flow reports
+    /// [`CodeRejected`](Self::CodeRejected) and asks again, and no later code
+    /// can succeed. The user ends that by cancelling (the prompt returns an
+    /// error) and running `connect` again, which emails a new code.
+    EmailCodeExpired,
+}
+
+/// The session's auth state (TS `AuthStates`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthState {
+    /// No working session. Re-run `connect` (the stored token, if any, was
+    /// dropped when the executor refused it).
+    Unauthenticated,
+    /// The executor's wallet is locked: the client stays — calls that need
+    /// keys fail until the operator unlocks. Re-run `connect` after.
+    Locked,
+    /// A working session (a token the executor accepts, or operator/anonymous
+    /// access that needs none).
+    Authenticated,
+}
+
+/// The failure `connect` returns inside its `anyhow::Error`
+/// (`err.downcast_ref::<ConnectError>()`).
+#[derive(Debug)]
+pub enum ConnectError {
+    /// No candidate URL answered `GET /health` as an AD4M executor.
+    ExecutorNotFound { tried: Vec<String> },
+    /// `user.requestVerification` or `user.create` answered `success: false`.
+    Refused { message: String },
+    /// The executor is plaintext (`http://`/`ws://`) and not on loopback;
+    /// see `ConnectOptions::allow_insecure_remote`.
+    InsecureTransport { url: String },
+}
+
+impl std::fmt::Display for ConnectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ConnectError::ExecutorNotFound { tried } => {
+                write!(f, "no AD4M executor found (tried {})", tried.join(", "))
+            }
+            ConnectError::Refused { message } => write!(f, "{message}"),
+            ConnectError::InsecureTransport { url } => write!(
+                f,
+                "refusing to send credentials to {url} over plaintext: use https:// \
+                 (or allow_insecure_remote to accept it)"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ConnectError {}
+
+// ── The wire seam (production + tests) ──
+
+/// The RPC surface `Ad4mConnect` drives — `WsRpcClient` in production,
+/// scripted fakes in tests.
+pub trait Rpc {
+    fn call<'a>(
+        &'a self,
+        method: &'a str,
+        params: Value,
+    ) -> impl Future<Output = Result<Value>> + Send + 'a;
+    /// True once the executor has closed the socket refusing the token.
+    fn auth_failed(&self) -> bool {
+        false
+    }
+    /// `cb(reason)` runs if the executor closes the socket refusing the token
+    /// mid-session (close 1008). Returns the registration's id.
+    fn on_auth_failed<'a>(
+        &'a self,
+        cb: Arc<dyn Fn(&str) + Send + Sync>,
+    ) -> impl Future<Output = u64> + Send + 'a {
+        let _ = cb;
+        async { 0 }
+    }
+    fn close<'a>(&'a self) -> impl Future<Output = ()> + Send + 'a {
+        async {}
+    }
+}
+
+/// Where the flow gets health checks and sockets from.
+pub trait ExecutorIo {
+    type Rpc: Rpc;
+    /// `Ok(())` only when `base_url` answers `GET /health` `{"status":"ok"}`.
+    fn healthy<'a>(&'a self, base_url: &'a str) -> impl Future<Output = Result<()>> + Send + 'a;
+    /// Open an RPC socket to `base_url`; `token` may be empty.
+    fn rpc<'a>(
+        &'a self,
+        base_url: &'a str,
+        token: &'a str,
+    ) -> impl Future<Output = Result<Self::Rpc>> + Send + 'a;
+}
+
+impl Rpc for WsRpcClient {
+    fn call<'a>(
+        &'a self,
+        method: &'a str,
+        params: Value,
+    ) -> impl Future<Output = Result<Value>> + Send + 'a {
+        self.call_value(method, params)
+    }
+    fn auth_failed(&self) -> bool {
+        WsRpcClient::auth_failed(self)
+    }
+    fn on_auth_failed<'a>(
+        &'a self,
+        cb: Arc<dyn Fn(&str) + Send + Sync>,
+    ) -> impl Future<Output = u64> + Send + 'a {
+        WsRpcClient::on_auth_failed(self, move |reason| cb(reason))
+    }
+    fn close<'a>(&'a self) -> impl Future<Output = ()> + Send + 'a {
+        WsRpcClient::close(self)
+    }
+}
+
+impl<T: Rpc + ?Sized> Rpc for Arc<T> {
+    fn call<'a>(
+        &'a self,
+        method: &'a str,
+        params: Value,
+    ) -> impl Future<Output = Result<Value>> + Send + 'a {
+        (**self).call(method, params)
+    }
+    fn auth_failed(&self) -> bool {
+        (**self).auth_failed()
+    }
+    fn on_auth_failed<'a>(
+        &'a self,
+        cb: Arc<dyn Fn(&str) + Send + Sync>,
+    ) -> impl Future<Output = u64> + Send + 'a {
+        (**self).on_auth_failed(cb)
+    }
+    fn close<'a>(&'a self) -> impl Future<Output = ()> + Send + 'a {
+        (**self).close()
+    }
+}
+
+/// The production `ExecutorIo`: `reqwest` for `/health`, `WsRpcClient` for RPC.
+pub struct WsIo {
+    http: reqwest::Client,
+}
+
+impl WsIo {
+    pub fn new() -> Self {
+        Self {
+            http: reqwest::Client::builder()
+                .timeout(HEALTH_TIMEOUT)
+                // `localhost` is loopback by destination, not by whatever the
+                // resolver says (N1); the WebSocket dial pins it the same way
+                // (`loopback_dial_addrs` in `transport/native.rs`). Ports come from the URL.
+                .resolve_to_addrs(
+                    "localhost",
+                    &[
+                        (std::net::Ipv4Addr::LOCALHOST, 0).into(),
+                        (std::net::Ipv6Addr::LOCALHOST, 0).into(),
+                    ],
+                )
+                .build()
+                .expect("reqwest client"),
+        }
+    }
+}
+
+impl Default for WsIo {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ExecutorIo for WsIo {
+    type Rpc = Arc<WsRpcClient>;
+
+    async fn healthy<'a>(&'a self, base_url: &'a str) -> Result<()> {
+        // TS `checkConnection`: 200 + `{status:"ok"}`.
+        let url = format!("{}/health", base_url.trim_end_matches('/'));
+        let res = self.http.get(&url).send().await?;
+        if !res.status().is_success() {
+            return Err(anyhow!("Health check returned {}", res.status()));
+        }
+        let body: Value = res.json().await?;
+        if body.get("status").and_then(Value::as_str) != Some("ok") {
+            return Err(anyhow!("Not an AD4M executor"));
+        }
+        Ok(())
+    }
+
+    async fn rpc<'a>(&'a self, base_url: &'a str, token: &'a str) -> Result<Arc<WsRpcClient>> {
+        WsRpcClient::connect(base_url, token).await.map(Arc::new)
+    }
+}
+
+// ── Token store ──
+
+/// The default token file's directory: `{config_dir}/ad4m-connect`.
+pub fn default_token_dir() -> PathBuf {
+    dirs::config_dir()
+        .or_else(|| dirs::home_dir().map(|h| h.join(".config")))
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("ad4m-connect")
+}
+
+/// `~/.ad4m/executor-port` — where the launcher-installed executor publishes
+/// its port (`cli/src/startup.rs`).
+pub fn default_executor_port_file() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".ad4m")
+        .join("executor-port")
+}
+
+/// Tokens in `tokens.json`, one per executor-URL + app pair. Mirrors TS's
+/// `ad4m-token`/`ad4m-url` localStorage keys.
+///
+/// Safe across processes (F1): every change is one transaction under an
+/// advisory lock on the sibling `tokens.json.lock` (read, modify, write), and
+/// the write goes to a temporary file in the same directory that atomically
+/// replaces `tokens.json`, so a reader sees the old file or the new one. The
+/// directory is forced to 0700 and the file is born 0600 (Unix). A store that
+/// cannot be read or parsed is an error, never an empty store; only a missing
+/// file reads as empty.
+///
+/// The directory must be trusted: private to the user, owned by them, with
+/// parents no one else can replace (the default `{config}/ad4m-connect` is,
+/// on an ordinary per-user setup). The store does not check ownership or
+/// ancestry, and follows symlinks when it creates the directory, takes the
+/// lock and reads the file; the 0700 chmod does not prove the directory is
+/// private. On Windows the files get no ACL of their own: they are as private
+/// as the directory's inherited ACL, which matters most for a custom
+/// `token_dir`. The lock serves cooperating processes (this store, in any
+/// process); a leftover `tokens.json.lock` is normal and must not be deleted
+/// to "clear" it. Replacement is atomic (old file or new), but the directory
+/// is not fsynced after the rename, so a power loss may lose the latest write.
+#[derive(Clone, Debug)]
+pub struct TokenStore {
+    path: PathBuf,
+}
+
+#[derive(Default, Serialize, Deserialize)]
+struct StoreFile {
+    /// Per app (like `tokens`), the URL it last connected to. (A global
+    /// `last_url` from an older file is ignored.)
+    #[serde(default)]
+    urls: BTreeMap<String, RememberedUrl>,
+    #[serde(default)]
+    tokens: BTreeMap<String, String>,
+}
+
+/// The URL an app last connected to, and how it was found.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RememberedUrl {
+    pub url: String,
+    /// The app or user chose it (`ConnectOptions::url`/`port`): it stays
+    /// ahead of discovery. `false` = found by discovery (port file, default
+    /// port): the current port file comes first next time.
+    pub pinned: bool,
+}
+
+impl TokenStore {
+    /// A store at `{dir}/tokens.json`.
+    pub fn new(dir: impl Into<PathBuf>) -> Self {
+        Self {
+            path: dir.into().join("tokens.json"),
+        }
+    }
+
+    pub fn path(&self) -> &PathBuf {
+        &self.path
+    }
+
+    fn key(url: &str, app: &str) -> String {
+        format!("{url}|{app}")
+    }
+
+    fn dir(&self) -> &std::path::Path {
+        self.path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+    }
+
+    /// The current file: missing = empty; unreadable or unparsable = error.
+    fn load(&self) -> Result<StoreFile> {
+        match std::fs::read_to_string(&self.path) {
+            Ok(s) => serde_json::from_str(&s)
+                .map_err(|e| anyhow!("token store {} is corrupt: {e}", self.path.display())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(StoreFile::default()),
+            Err(e) => Err(anyhow!(
+                "cannot read token store {}: {e}",
+                self.path.display()
+            )),
+        }
+    }
+
+    /// Create the directory if needed and force it private (0700 on Unix).
+    fn ensure_dir(&self) -> Result<()> {
+        let dir = self.dir();
+        std::fs::create_dir_all(dir)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).map_err(|e| {
+                anyhow!("cannot make token directory {} private: {e}", dir.display())
+            })?;
+        }
+        Ok(())
+    }
+
+    /// One read-modify-write under the cross-process lock. `change` returns
+    /// whether it changed anything; nothing changed = nothing written.
+    fn transact<R>(&self, change: impl FnOnce(&mut StoreFile) -> (bool, R)) -> Result<R> {
+        self.ensure_dir()?;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let lock_path = self.path.with_extension("json.lock");
+        let lock_file = opts
+            .open(&lock_path)
+            .map_err(|e| anyhow!("cannot open {}: {e}", lock_path.display()))?;
+        let mut lock = fd_lock::RwLock::new(lock_file);
+        let _guard = lock
+            .write()
+            .map_err(|e| anyhow!("cannot lock {}: {e}", lock_path.display()))?;
+        let mut store = self.load()?;
+        let (changed, out) = change(&mut store);
+        if changed {
+            self.replace(&store)?;
+        }
+        Ok(out)
+    }
+
+    /// Write `store` to a temporary file beside `tokens.json` (0600 from
+    /// birth), flush it to disk, then rename it over `tokens.json`.
+    fn replace(&self, store: &StoreFile) -> Result<()> {
+        use std::io::Write;
+        let mut tmp = tempfile::Builder::new()
+            .prefix(".tokens.")
+            .suffix(".tmp")
+            .tempfile_in(self.dir())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            tmp.as_file()
+                .set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
+        serde_json::to_writer_pretty(tmp.as_file_mut(), store)?;
+        tmp.as_file_mut().flush()?;
+        tmp.as_file().sync_all()?;
+        tmp.persist(&self.path)
+            .map_err(|e| anyhow!("cannot replace {}: {}", self.path.display(), e.error))?;
+        Ok(())
+    }
+
+    /// The stored token for this executor + app, if any.
+    pub fn token(&self, url: &str, app: &str) -> Result<Option<String>> {
+        Ok(self.load()?.tokens.get(&Self::key(url, app)).cloned())
+    }
+
+    pub fn set_token(&self, url: &str, app: &str, token: &str) -> Result<()> {
+        self.transact(|store| {
+            let old = store.tokens.insert(Self::key(url, app), token.to_string());
+            (old.as_deref() != Some(token), ())
+        })
+    }
+
+    pub fn remove_token(&self, url: &str, app: &str) -> Result<()> {
+        self.transact(|store| (store.tokens.remove(&Self::key(url, app)).is_some(), ()))
+    }
+
+    /// Remove the token for this executor + app only while it is still
+    /// `token`: a refused socket drops its own token, never a newer one
+    /// another session stored meanwhile. Returns whether it removed one.
+    pub fn remove_token_if(&self, url: &str, app: &str, token: &str) -> Result<bool> {
+        self.transact(|store| {
+            let key = Self::key(url, app);
+            if store.tokens.get(&key).map(String::as_str) != Some(token) {
+                return (false, false);
+            }
+            store.tokens.remove(&key);
+            (true, true)
+        })
+    }
+
+    /// The URL `app` last connected to — TS `ad4m-url`, per app.
+    pub fn last_url(&self, app: &str) -> Result<Option<RememberedUrl>> {
+        Ok(self.load()?.urls.get(app).cloned())
+    }
+
+    pub fn set_last_url(&self, app: &str, url: &str, pinned: bool) -> Result<()> {
+        let entry = RememberedUrl {
+            url: url.to_string(),
+            pinned,
+        };
+        self.transact(|store| {
+            let changed = store.urls.get(app) != Some(&entry);
+            store.urls.insert(app.to_string(), entry);
+            (changed, ())
+        })
+    }
+}
+
+// ── URL resolution ──
+
+/// `ws(s)://` → `http(s)://`, trailing `/` off (TS `wsUrlToHttpBase`).
+pub fn normalize_base_url(url: &str) -> String {
+    let u = url.trim().trim_end_matches('/');
+    u.strip_prefix("ws://")
+        .map(|rest| format!("http://{rest}"))
+        .or_else(|| {
+            u.strip_prefix("wss://")
+                .map(|rest| format!("https://{rest}"))
+        })
+        .unwrap_or_else(|| u.to_string())
+}
+
+/// Whether credentials sent to `base_url` travel unencrypted off this
+/// machine: plain `http` (after `normalize_base_url`) to a host that is not
+/// loopback (`localhost`, 127.0.0.0/8, `::1`). `localhost` passes by name,
+/// so `WsIo` never resolves it: both its dials go to 127.0.0.1 / ::1.
+fn plaintext_remote(base_url: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(base_url) else {
+        return true; // unparsable: do not vouch for it
+    };
+    if url.scheme() != "http" {
+        return url.scheme() != "https";
+    }
+    let Some(host) = url.host_str() else {
+        return true;
+    };
+    if host.eq_ignore_ascii_case("localhost") {
+        return false;
+    }
+    let ip = host.trim_start_matches('[').trim_end_matches(']');
+    !ip.parse::<std::net::IpAddr>()
+        .is_ok_and(|ip| ip.is_loopback())
+}
+
+// ── The session ──
+
+/// The auth read — `readAuth` in TS.
+enum Reading {
+    Authenticated,
+    Locked,
+    /// `refused`: the error named a dead token (401, or 403 matching
+    /// `DEAD_TOKEN`), or the socket itself closed 1008 — drop the token.
+    Unauthenticated {
+        refused: bool,
+    },
+}
+
+/// A connection's whole state, like TS `Ad4mConnect`: the resolved URL, the
+/// adopted socket, the auth state, and the stored token — re-runnable
+/// (`connect` again after `Unauthenticated`).
+pub struct Ad4mConnect<E: ExecutorIo = WsIo> {
+    opts: ConnectOptions,
+    io: E,
+    store: TokenStore,
+    url: Option<String>,
+    /// Whether `url` was chosen (explicit option or a pinned remembered
+    /// URL) rather than discovered — remembered that way.
+    pinned: bool,
+    rpc: Option<E::Rpc>,
+    state: watch::Sender<AuthState>,
+    /// The generation of the adopted socket, bumped by every `adopt` and
+    /// `disconnect`. A socket's refusal callback acts only while its own
+    /// generation is current, and the lock orders its publication against
+    /// `connect`'s final one (F4, TS `core.ts:255`).
+    current: Arc<std::sync::Mutex<u64>>,
+}
+
+impl Ad4mConnect<WsIo> {
+    /// A session over the real transport (`reqwest` + `WsRpcClient`).
+    pub fn new(opts: ConnectOptions) -> Result<Self> {
+        Self::with_io(opts, WsIo::new())
+    }
+
+    /// The `Ad4mClient` of the session's socket, once `connect` ran.
+    pub fn client(&self) -> Option<Ad4mClient> {
+        self.rpc
+            .as_ref()
+            .map(|rpc| Ad4mClient::from_ws(rpc.clone()))
+    }
+}
+
+impl<E: ExecutorIo> Ad4mConnect<E> {
+    /// A session over `io` — `WsIo` in production, fakes in tests.
+    pub fn with_io(opts: ConnectOptions, io: E) -> Result<Self> {
+        let dir = opts.token_dir.clone().unwrap_or_else(default_token_dir);
+        let (state, _) = watch::channel(AuthState::Unauthenticated);
+        Ok(Self {
+            opts,
+            io,
+            store: TokenStore::new(dir),
+            url: None,
+            pinned: false,
+            rpc: None,
+            state,
+            current: Arc::new(std::sync::Mutex::new(0)),
+        })
+    }
+
+    /// The resolved URL, once `connect` ran.
+    pub fn url(&self) -> Option<&str> {
+        self.url.as_deref()
+    }
+
+    /// The adopted socket.
+    pub fn rpc(&self) -> Option<&E::Rpc> {
+        self.rpc.as_ref()
+    }
+
+    /// The current auth state.
+    pub fn state(&self) -> AuthState {
+        *self.state.borrow()
+    }
+
+    /// A receiver the app can `changed().await`: a mid-session token refusal
+    /// (grant revoked, token expired) flips it to `Unauthenticated` and drops
+    /// the stored token, so the app re-runs `connect` (TS `watchAuth` +
+    /// `discardToken`). The state changes even when the store cannot delete
+    /// the token (that store error is discarded): the deletion is not
+    /// guaranteed.
+    pub fn watch_state(&self) -> watch::Receiver<AuthState> {
+        self.state.subscribe()
+    }
+
+    /// The token store (e.g. to drop credentials on sign-out).
+    pub fn store(&self) -> &TokenStore {
+        &self.store
+    }
+
+    fn set_state(&self, state: AuthState) -> AuthState {
+        // `send_replace`: `send` stores nothing while no receiver is alive,
+        // and `state()` would keep reporting the stale value (F2).
+        self.state.send_replace(state);
+        state
+    }
+
+    /// Run the flow: resolve the URL, try the stored token, and when nothing
+    /// stored works go through the capability handshake (single-user) or the
+    /// email sign-in (multi-user). Returns the end state — `Locked` is not an
+    /// error: the wallet must be unlocked, then run again.
+    ///
+    /// `Ok` means the flow completed, not that it authenticated: check the
+    /// returned state. It can be `Ok(AuthState::Unauthenticated)` when the
+    /// executor refused the new socket's token while `connect` was adopting
+    /// it, or when a newer session replaced it. And any socket can be
+    /// refused just after `connect` returns: follow `watch_state`.
+    pub async fn connect(&mut self, prompts: &mut impl ConnectPrompts) -> Result<AuthState> {
+        prompts.status(ConnectStatus::Connecting);
+        let (url, pinned) = self.resolve_url().await?;
+        // Before any token goes out (it rides the socket URL) or any prompt
+        // is asked (F5).
+        if !self.opts.insecure_remote && plaintext_remote(&url) {
+            return Err(ConnectError::InsecureTransport { url }.into());
+        }
+        self.url = Some(url.clone());
+        self.pinned = pinned;
+
+        // A stored token answers `agent.status` in one call on a good session.
+        if let Some(token) = self.store.token(&url, &self.opts.app.name)? {
+            match self.open_and_read(&url, &token).await {
+                Ok((Reading::Authenticated, rpc)) => {
+                    let _ = self.remember_url(&url);
+                    let generation = self.adopt(rpc, &token).await;
+                    return Ok(self.publish(generation, AuthState::Authenticated));
+                }
+                Ok((Reading::Locked, rpc)) => {
+                    let generation = self.adopt(rpc, &token).await;
+                    return Ok(self.publish(generation, AuthState::Locked));
+                }
+                Ok((Reading::Unauthenticated { refused }, rpc)) => {
+                    rpc.close().await;
+                    if refused {
+                        self.store
+                            .remove_token_if(&url, &self.opts.app.name, &token)?;
+                    }
+                }
+                Err(e) => {
+                    // The socket never opened: connectivity, not auth — the
+                    // token may still be good next time, so keep it.
+                    eprintln!("[ad4m-connect] stored-token connect failed: {e}");
+                }
+            }
+        }
+
+        // The anonymous socket: reads the mode and serves the auth calls.
+        // On an executor without an admin credential a loopback caller is the
+        // operator, so `agent.status` answers and there is nothing to mint.
+        let anon = self.io.rpc(&url, "").await?;
+        match self.read_auth(&anon).await {
+            Reading::Authenticated => {
+                let _ = self.remember_url(&url);
+                let generation = self.adopt(anon, "").await;
+                return Ok(self.publish(generation, AuthState::Authenticated));
+            }
+            Reading::Locked => {
+                let generation = self.adopt(anon, "").await;
+                return Ok(self.publish(generation, AuthState::Locked));
+            }
+            Reading::Unauthenticated { .. } => {}
+        }
+
+        // TS `isMultiUser`: a failure means single-user.
+        let multi_user = anon
+            .call("user.multiUserEnabled", json!({}))
+            .await
+            .ok()
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let jwt = if multi_user {
+            self.email_login(&anon, prompts).await
+        } else {
+            self.capability_handshake(&anon, prompts).await
+        };
+        // The anonymous socket is always closed — a dropped WsRpcClient keeps
+        // its reader (and reconnect task) alive.
+        anon.close().await;
+        let jwt = jwt?;
+
+        // The minted token opens the real session; it must read authenticated.
+        let rpc = self.io.rpc(&url, &jwt).await?;
+        match self.read_auth(&rpc).await {
+            r @ (Reading::Authenticated | Reading::Locked) => {
+                // A locked wallet is a state, not a bad token: keep it (TS
+                // stores the JWT before `connect()` re-checks the wallet).
+                if let Err(e) = self.store.set_token(&url, &self.opts.app.name, &jwt) {
+                    // Nothing adopts this socket, and dropping the handle
+                    // would leave its reader running (N3).
+                    rpc.close().await;
+                    return Err(e);
+                }
+                let _ = self.remember_url(&url);
+                let authed = matches!(r, Reading::Authenticated);
+                let generation = self.adopt(rpc, &jwt).await;
+                Ok(self.publish(
+                    generation,
+                    if authed {
+                        AuthState::Authenticated
+                    } else {
+                        AuthState::Locked
+                    },
+                ))
+            }
+            Reading::Unauthenticated { .. } => {
+                rpc.close().await;
+                Err(anyhow!(
+                    "the executor still refuses the token it just minted"
+                ))
+            }
+        }
+    }
+
+    /// Drop the session and the stored token (TS `disconnect`). The socket
+    /// is closed and `Unauthenticated` published even when the store fails;
+    /// the store's error is returned after.
+    pub async fn disconnect(&mut self) -> Result<()> {
+        // The closed socket's refusal, if one is still in flight, is stale.
+        *self.current.lock().unwrap() += 1;
+        if let Some(rpc) = self.rpc.take() {
+            rpc.close().await;
+        }
+        // The socket is gone whatever the store says: publish that first,
+        // then report the store's error (N3).
+        self.set_state(AuthState::Unauthenticated);
+        if let Some(url) = &self.url {
+            let removed = self.store.remove_token(url, &self.opts.app.name);
+            let remembered = self
+                .store
+                .set_last_url(&self.opts.app.name, url, self.pinned);
+            removed?;
+            remembered?;
+        }
+        Ok(())
+    }
+
+    /// Install `rpc` (opened with `token`) as the session's socket under a
+    /// new generation, closing the replaced one, and wire the mid-session
+    /// refusal: while this socket is still the session's, drop the token it
+    /// was opened with and go `Unauthenticated`. A replaced socket's late
+    /// refusal changes nothing. Returns the generation for `publish`.
+    async fn adopt(&mut self, rpc: E::Rpc, token: &str) -> u64 {
+        let generation = {
+            let mut current = self.current.lock().unwrap();
+            *current += 1;
+            *current
+        };
+        let store = self.store.clone();
+        let url = self.url.clone();
+        let app = self.opts.app.name.clone();
+        let token = token.to_string();
+        let state = self.state.clone();
+        let current = self.current.clone();
+        // If this socket was refused already, the callback runs right here,
+        // under its own (current) generation, and `publish` sees
+        // `auth_failed`.
+        rpc.on_auth_failed(Arc::new(move |reason| {
+            let current = current.lock().unwrap();
+            if *current != generation {
+                return; // a replaced socket: not the session's any more
+            }
+            eprintln!("[ad4m-connect] the executor refused the token: {reason}");
+            if let Some(url) = &url {
+                if !token.is_empty() {
+                    let _ = store.remove_token_if(url, &app, &token);
+                }
+            }
+            // `send_replace`: kept with no receiver alive (F2).
+            state.send_replace(AuthState::Unauthenticated);
+        }))
+        .await;
+        if let Some(old) = self.rpc.replace(rpc) {
+            old.close().await;
+        }
+        generation
+    }
+
+    /// `connect`'s final publication: `state` only while the socket adopted
+    /// under `generation` is still the session's and still accepted. A
+    /// refusal that won the race already published `Unauthenticated` (or
+    /// will, after this lock), so that is what `connect` reports.
+    fn publish(&self, generation: u64, state: AuthState) -> AuthState {
+        let current = self.current.lock().unwrap();
+        let refused = self.rpc.as_ref().is_none_or(|rpc| rpc.auth_failed());
+        if *current != generation || refused {
+            return AuthState::Unauthenticated;
+        }
+        self.state.send_replace(state);
+        state
+    }
+
+    fn remember_url(&self, url: &str) -> Result<()> {
+        self.store
+            .set_last_url(&self.opts.app.name, url, self.pinned)
+    }
+
+    /// Ordered candidates, each with whether it was chosen (pinned) rather
+    /// than discovered: explicit url → explicit port → this app's pinned
+    /// remembered URL → `~/.ad4m/executor-port` → this app's discovered
+    /// remembered URL → the default port. First `/health` win.
+    fn candidates(&self) -> Result<Vec<(String, bool)>> {
+        let mut out: Vec<(String, bool)> = Vec::new();
+        let mut push = |u: String, pinned: bool| {
+            if !out.iter().any(|(seen, _)| *seen == u) {
+                out.push((u, pinned));
+            }
+        };
+        if let Some(url) = &self.opts.url {
+            push(normalize_base_url(url), true);
+        }
+        if let Some(port) = self.opts.port {
+            push(format!("http://127.0.0.1:{port}"), true);
+        }
+        let remembered = if self.opts.use_stored_url {
+            self.store.last_url(&self.opts.app.name)?
+        } else {
+            None
+        };
+        if let Some(r) = remembered.as_ref().filter(|r| r.pinned) {
+            push(normalize_base_url(&r.url), true);
+        }
+        let port_file = self
+            .opts
+            .executor_port_file
+            .clone()
+            .unwrap_or_else(default_executor_port_file);
+        if let Ok(port) = std::fs::read_to_string(&port_file) {
+            if let Ok(port) = port.trim().parse::<u16>() {
+                push(format!("http://127.0.0.1:{port}"), false);
+            }
+        }
+        if let Some(r) = remembered.as_ref().filter(|r| !r.pinned) {
+            push(normalize_base_url(&r.url), false);
+        }
+        push(format!("http://127.0.0.1:{DEFAULT_PORT}"), false);
+        Ok(out)
+    }
+
+    async fn resolve_url(&self) -> Result<(String, bool)> {
+        let candidates = self.candidates()?;
+        let mut tried = Vec::new();
+        for (url, pinned) in candidates {
+            tried.push(url.clone());
+            match self.io.healthy(&url).await {
+                Ok(()) => return Ok((url, pinned)),
+                Err(e) => eprintln!("[ad4m-connect] {url} is not an AD4M executor: {e}"),
+            }
+        }
+        Err(ConnectError::ExecutorNotFound { tried }.into())
+    }
+
+    /// Open a socket with `token` and read its auth — a helper so a socket
+    /// failure is not confused with an auth one.
+    async fn open_and_read(&self, url: &str, token: &str) -> Result<(Reading, E::Rpc)> {
+        let rpc = self.io.rpc(url, token).await?;
+        let reading = self.read_auth(&rpc).await;
+        Ok((reading, rpc))
+    }
+
+    /// TS `readAuth`: `agent.status` first; `agent.isLocked` (open to
+    /// anonymous callers) tells a locked wallet from a refused token.
+    async fn read_auth(&self, rpc: &E::Rpc) -> Reading {
+        let status_err = match rpc.call("agent.status", json!({})).await {
+            Ok(v) => {
+                let initialized = v
+                    .get("isInitialized")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let unlocked = v
+                    .get("isUnlocked")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                return if initialized && unlocked {
+                    Reading::Authenticated
+                } else {
+                    Reading::Locked
+                };
+            }
+            Err(e) => e,
+        };
+        if says_locked(&status_err) {
+            return Reading::Locked;
+        }
+        // The socket may have closed 1008 before the reply: that is a refusal
+        // too, whatever the call's error says.
+        let refused = refuses_token(&status_err) || rpc.auth_failed();
+        match rpc.call("agent.isLocked", json!({})).await {
+            Ok(v) if v.as_bool() == Some(true) => return Reading::Locked,
+            Err(e) if says_locked(&e) => return Reading::Locked,
+            _ => {}
+        }
+        Reading::Unauthenticated {
+            refused: refused || rpc.auth_failed(),
+        }
+    }
+
+    /// `agent.requestCapability` → the code prompt → `agent.generateJwt`,
+    /// re-requesting when the request itself dies (TS `requestCapability` +
+    /// `verifyLocalAd4mCode`).
+    async fn capability_handshake(
+        &self,
+        rpc: &E::Rpc,
+        prompts: &mut impl ConnectPrompts,
+    ) -> Result<String> {
+        let app = &self.opts.app;
+        loop {
+            let result = rpc
+                .call(
+                    "agent.requestCapability",
+                    json!({
+                        "authInfo": {
+                            "appName": app.name,
+                            "appDesc": app.description,
+                            "appDomain": app.url,
+                            "appUrl": app.url,
+                            "appIconPath": app.icon_path,
+                            "capabilities": app.capabilities,
+                        }
+                    }),
+                )
+                .await?;
+            let request_id = result
+                .as_str()
+                .ok_or_else(|| anyhow!("agent.requestCapability did not answer a string"))?
+                .to_string();
+            prompts.status(ConnectStatus::WaitingForApproval {
+                request_id: request_id.clone(),
+            });
+            loop {
+                let code = prompts.capability_code(&request_id, app).await?;
+                match rpc
+                    .call(
+                        "agent.generateJwt",
+                        json!({ "requestId": request_id, "rand": code }),
+                    )
+                    .await
+                {
+                    Ok(v) => {
+                        return Ok(v
+                            .as_str()
+                            .ok_or_else(|| anyhow!("agent.generateJwt did not answer a string"))?
+                            .to_string())
+                    }
+                    // "…request access again" — expired or five wrong codes:
+                    // the request is gone, so ask for a fresh one.
+                    Err(e) if request_gone(&e) => {
+                        prompts.status(ConnectStatus::RequestExpired);
+                        break;
+                    }
+                    // "Can't find permitted request" — not approved yet or a
+                    // wrong code: show the prompt again.
+                    Err(e) if says_rpc(&e, CODE_NOT_PERMITTED) => {
+                        prompts.status(ConnectStatus::CodeRejected)
+                    }
+                    // A dead socket, a policy refusal, anything else: another
+                    // code will not help.
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+    }
+
+    /// `user.requestVerification` → email code (`user.verifyEmail`) or the
+    /// password path (`user.create` + `user.login`) — TS `submitEmail`,
+    /// `verifyEmailCode`, `loginWithPassword`, `createAccount`.
+    async fn email_login(&self, rpc: &E::Rpc, prompts: &mut impl ConnectPrompts) -> Result<String> {
+        let app = &self.opts.app;
+        let email = match &self.opts.email {
+            Some(email) => email.clone(),
+            None => prompts.email().await?,
+        };
+        let res = self.request_verification(rpc, &email).await?;
+
+        if res.requires_password {
+            // New accounts (`createAccount` → `user.create` then `user.login`)
+            // and existing users when no SMTP is configured both sign in by
+            // password.
+            let password = prompts.password(&email, !res.is_existing_user).await?;
+            if !res.is_existing_user {
+                let result = rpc
+                    .call(
+                        "user.create",
+                        json!({ "email": email, "password": password }),
+                    )
+                    .await?;
+                let created: UserCreationResult = serde_json::from_value(result)
+                    .map_err(|e| anyhow!("bad user.create reply: {e}"))?;
+                if !created.success {
+                    return Err(ConnectError::Refused {
+                        message: created
+                            .error
+                            .unwrap_or_else(|| "account creation failed".to_string()),
+                    }
+                    .into());
+                }
+            }
+            let result = rpc
+                .call(
+                    "user.login",
+                    json!({
+                        "email": email,
+                        "password": password,
+                        "appName": app.name,
+                    }),
+                )
+                .await?;
+            return Ok(result
+                .as_str()
+                .ok_or_else(|| anyhow!("user.login did not answer a string"))?
+                .to_string());
+        }
+
+        prompts.status(ConnectStatus::WaitingForEmailCode {
+            email: email.clone(),
+        });
+        loop {
+            let code = prompts.email_code(&email).await?;
+            match rpc
+                .call(
+                    "user.verifyEmail",
+                    json!({
+                        "email": email,
+                        "code": code,
+                        "verificationType": "login",
+                        "appName": app.name,
+                    }),
+                )
+                .await
+            {
+                Ok(v) => {
+                    return Ok(v
+                        .as_str()
+                        .ok_or_else(|| anyhow!("user.verifyEmail did not answer a string"))?
+                        .to_string())
+                }
+                // A wrong code (the executor says the same for one past its
+                // expiry): ask again.
+                Err(e) if says_rpc(&e, EMAIL_CODE_INVALID) => {
+                    prompts.status(ConnectStatus::CodeRejected)
+                }
+                // Invalidated after five wrong codes: request a new one.
+                Err(e) if says_rpc(&e, EMAIL_CODE_GONE) => {
+                    prompts.status(ConnectStatus::EmailCodeExpired);
+                    self.request_verification(rpc, &email).await?;
+                    prompts.status(ConnectStatus::WaitingForEmailCode {
+                        email: email.clone(),
+                    });
+                }
+                // A dead socket, a policy refusal, anything else: another
+                // code will not help.
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    /// `user.requestVerification`: sends the email code (or says a password
+    /// is needed); `success: false` is `ConnectError::Refused`.
+    async fn request_verification(
+        &self,
+        rpc: &E::Rpc,
+        email: &str,
+    ) -> Result<VerificationRequestResult> {
+        let result = rpc
+            .call(
+                "user.requestVerification",
+                json!({ "email": email, "appInfo": { "appName": self.opts.app.name } }),
+            )
+            .await?;
+        let res: VerificationRequestResult = serde_json::from_value(result)
+            .map_err(|e| anyhow!("bad user.requestVerification reply: {e}"))?;
+        if !res.success {
+            return Err(ConnectError::Refused {
+                message: res.message,
+            }
+            .into());
+        }
+        Ok(res)
+    }
+}
+
+// ── Error classification (TS `saysLocked` / `refusesToken`) ──
+
+fn error_text(err: &anyhow::Error) -> String {
+    err.downcast_ref::<RpcCallError>()
+        .map(|e| e.message.clone())
+        .unwrap_or_else(|| err.to_string())
+}
+
+/// Whether `err` says the executor's wallet is locked: a state of the
+/// executor, so the token stays.
+fn says_locked(err: &anyhow::Error) -> bool {
+    let text = error_text(err);
+    text == LOCKED_WALLET || text.starts_with(EXECUTOR_LOCKED)
+}
+
+/// Whether the executor refused the token itself (TS `refusesToken`): 401
+/// when it opens no session, 403 only when the reason names a dead token.
+fn refuses_token(err: &anyhow::Error) -> bool {
+    match err.downcast_ref::<RpcCallError>() {
+        Some(e) => {
+            e.code == 401 || (e.code == 403 && DEAD_TOKEN.iter().any(|s| e.message.contains(s)))
+        }
+        None => false,
+    }
+}
+
+/// `agent.generateJwt` on a wrong code or a request not approved yet.
+const CODE_NOT_PERMITTED: &str = "Can't find permitted request";
+/// `user.verifyEmail` on a wrong code (and on one past its expiry: the
+/// executor deletes it and answers the same).
+const EMAIL_CODE_INVALID: &str = "Invalid verification code";
+/// `user.verifyEmail` once five wrong codes invalidated the challenge.
+const EMAIL_CODE_GONE: &str = "Please request a new code";
+
+/// Whether `err` is an executor RPC error (not a transport failure) whose
+/// message holds `text`.
+fn says_rpc(err: &anyhow::Error, text: &str) -> bool {
+    err.downcast_ref::<RpcCallError>()
+        .is_some_and(|e| e.message.contains(text))
+}
+
+/// Whether `agent.generateJwt` says the request is gone: expired, or five
+/// wrong codes. "Can't find permitted request" is not here — that is a wrong
+/// code (or an unapproved request), which re-asks.
+fn request_gone(err: &anyhow::Error) -> bool {
+    error_text(err).contains("request access again")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::VecDeque;
+    use std::path::Path;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Mutex;
+
+    // ── Scripted socket + io ──
+
+    /// (token, method, params) → reply — the executor, scripted.
+    type Handler = Arc<dyn Fn(&str, &str, &Value) -> Result<Value> + Send + Sync>;
+    /// base_url → health verdict.
+    type HealthFn = Arc<dyn Fn(&str) -> Result<()> + Send + Sync>;
+    type AuthCb = Arc<dyn Fn(&str) + Send + Sync>;
+
+    struct FakeShared {
+        /// The token this socket was opened with — the handler dispatches on it.
+        token: String,
+        calls: Mutex<Vec<(String, Value)>>,
+        handler: Handler,
+        auth_failed: AtomicBool,
+        auth_cbs: Mutex<Vec<AuthCb>>,
+        closed: AtomicBool,
+        /// The executor closes this socket 1008 right after its first
+        /// `agent.status` reply (a grant revoked between read and adopt).
+        refuse_after_status: bool,
+    }
+
+    #[derive(Clone)]
+    struct FakeRpc(Arc<FakeShared>);
+
+    impl FakeRpc {
+        /// Simulate the executor closing the socket with 1008.
+        /// Like `WsRpcClient`: the flag and the list under one lock, each
+        /// callback once.
+        fn fail_auth(&self, reason: &str) {
+            let cbs = {
+                let mut cbs = self.0.auth_cbs.lock().unwrap();
+                if self.0.auth_failed.swap(true, Ordering::SeqCst) {
+                    return;
+                }
+                std::mem::take(&mut *cbs)
+            };
+            for cb in cbs {
+                cb(reason);
+            }
+        }
+    }
+
+    impl Rpc for FakeRpc {
+        fn call<'a>(
+            &'a self,
+            method: &'a str,
+            params: Value,
+        ) -> impl Future<Output = Result<Value>> + Send + 'a {
+            self.0
+                .calls
+                .lock()
+                .unwrap()
+                .push((method.to_string(), params.clone()));
+            let res = (self.0.handler)(&self.0.token, method, &params);
+            if method == "agent.status" && self.0.refuse_after_status {
+                self.fail_auth("Unauthorized access");
+            }
+            async move { res }
+        }
+        fn auth_failed(&self) -> bool {
+            self.0.auth_failed.load(Ordering::SeqCst)
+        }
+        /// Replays an already-seen refusal at once, as `WsRpcClient` does.
+        fn on_auth_failed<'a>(&'a self, cb: AuthCb) -> impl Future<Output = u64> + Send + 'a {
+            let mut cbs = self.0.auth_cbs.lock().unwrap();
+            if self.0.auth_failed.load(Ordering::SeqCst) {
+                drop(cbs);
+                cb("Unauthorized access");
+            } else {
+                cbs.push(cb);
+            }
+            async { 0 }
+        }
+        fn close<'a>(&'a self) -> impl Future<Output = ()> + Send + 'a {
+            self.0.closed.store(true, Ordering::SeqCst);
+            async {}
+        }
+    }
+
+    struct FakeIo {
+        healthy: HealthFn,
+        handler: Handler,
+        /// (base_url, token) of every socket the flow opened, in order.
+        opened: Arc<Mutex<Vec<(String, String)>>>,
+        rpcs: Arc<Mutex<Vec<FakeRpc>>>,
+        /// Sockets opened with this token get `refuse_after_status`.
+        refuse_after_status: Option<String>,
+    }
+
+    impl FakeIo {
+        fn new(
+            handler: impl Fn(&str, &str, &Value) -> Result<Value> + Send + Sync + 'static,
+        ) -> Self {
+            Self {
+                healthy: Arc::new(|_| Ok(())),
+                handler: Arc::new(handler),
+                opened: Arc::new(Mutex::new(vec![])),
+                rpcs: Arc::new(Mutex::new(vec![])),
+                refuse_after_status: None,
+            }
+        }
+        fn unhealthy() -> Self {
+            let mut io = Self::new(|_, _, _| Ok(Value::Null));
+            io.healthy = Arc::new(|_| Err(anyhow!("connection refused")));
+            io
+        }
+        fn opened(&self) -> Vec<(String, String)> {
+            self.opened.lock().unwrap().clone()
+        }
+        fn last_rpc(&self) -> FakeRpc {
+            self.rpcs.lock().unwrap().last().unwrap().clone()
+        }
+    }
+
+    impl ExecutorIo for FakeIo {
+        type Rpc = FakeRpc;
+        fn healthy<'a>(
+            &'a self,
+            base_url: &'a str,
+        ) -> impl Future<Output = Result<()>> + Send + 'a {
+            let res = (self.healthy)(base_url);
+            async move { res }
+        }
+        fn rpc<'a>(
+            &'a self,
+            base_url: &'a str,
+            token: &'a str,
+        ) -> impl Future<Output = Result<FakeRpc>> + Send + 'a {
+            self.opened
+                .lock()
+                .unwrap()
+                .push((base_url.to_string(), token.to_string()));
+            let rpc = FakeRpc(Arc::new(FakeShared {
+                token: token.to_string(),
+                calls: Mutex::new(vec![]),
+                handler: self.handler.clone(),
+                auth_failed: AtomicBool::new(false),
+                auth_cbs: Mutex::new(vec![]),
+                closed: AtomicBool::new(false),
+                refuse_after_status: self.refuse_after_status.as_deref() == Some(token),
+            }));
+            self.rpcs.lock().unwrap().push(rpc.clone());
+            async move { Ok(rpc) }
+        }
+    }
+
+    // ── Scripted prompts ──
+
+    #[derive(Default)]
+    struct ScriptedPrompts {
+        cap_codes: VecDeque<String>,
+        emails: VecDeque<String>,
+        email_codes: VecDeque<String>,
+        passwords: VecDeque<String>,
+        asked: Vec<String>,
+        statuses: Vec<ConnectStatus>,
+    }
+
+    impl ConnectPrompts for ScriptedPrompts {
+        fn capability_code<'a>(
+            &'a mut self,
+            request_id: &'a str,
+            _app: &'a AppInfo,
+        ) -> impl Future<Output = Result<String>> + Send + 'a {
+            self.asked.push(format!("capability_code:{request_id}"));
+            let next = self.cap_codes.pop_front();
+            async move { next.ok_or_else(|| anyhow!("no scripted capability code")) }
+        }
+        fn email<'a>(&'a mut self) -> impl Future<Output = Result<String>> + Send + 'a {
+            self.asked.push("email".to_string());
+            let next = self.emails.pop_front();
+            async move { next.ok_or_else(|| anyhow!("no scripted email")) }
+        }
+        fn email_code<'a>(
+            &'a mut self,
+            email: &'a str,
+        ) -> impl Future<Output = Result<String>> + Send + 'a {
+            self.asked.push(format!("email_code:{email}"));
+            let next = self.email_codes.pop_front();
+            async move { next.ok_or_else(|| anyhow!("no scripted email code")) }
+        }
+        fn password<'a>(
+            &'a mut self,
+            email: &'a str,
+            new_account: bool,
+        ) -> impl Future<Output = Result<String>> + Send + 'a {
+            self.asked.push(format!("password:{email}:{new_account}"));
+            let next = self.passwords.pop_front();
+            async move { next.ok_or_else(|| anyhow!("no scripted password")) }
+        }
+        fn status(&mut self, status: ConnectStatus) {
+            self.statuses.push(status);
+        }
+    }
+
+    /// A prompt that must never be asked (stored-token and operator paths).
+    struct NoPrompts;
+    impl ConnectPrompts for NoPrompts {
+        async fn capability_code<'a>(
+            &'a mut self,
+            _request_id: &'a str,
+            _app: &'a AppInfo,
+        ) -> Result<String> {
+            panic!("no prompt expected")
+        }
+        async fn email(&mut self) -> Result<String> {
+            panic!("no prompt expected")
+        }
+        async fn email_code<'a>(&'a mut self, _email: &'a str) -> Result<String> {
+            panic!("no prompt expected")
+        }
+        async fn password<'a>(&'a mut self, _email: &'a str, _new_account: bool) -> Result<String> {
+            panic!("no prompt expected")
+        }
+    }
+
+    // ── Helpers ──
+
+    const URL: &str = "http://127.0.0.1:14200";
+
+    fn opts() -> ConnectOptions {
+        let mut opts = ConnectOptions::new(AppInfo::new("test-app", "tests", "https://app"));
+        opts.url = Some(URL.to_string());
+        opts.use_stored_url = false;
+        opts
+    }
+
+    fn session(dir: &Path, io: FakeIo, mut opts: ConnectOptions) -> Ad4mConnect<FakeIo> {
+        opts.token_dir = Some(dir.to_path_buf());
+        Ad4mConnect::with_io(opts, io).unwrap()
+    }
+
+    fn authed_status() -> Value {
+        json!({
+            "did": "did:key:main",
+            "didDocument": null,
+            "error": null,
+            "isInitialized": true,
+            "isUnlocked": true,
+        })
+    }
+
+    fn rpc_err(code: i32, message: &str) -> anyhow::Error {
+        anyhow::Error::new(RpcCallError {
+            code,
+            message: message.to_string(),
+            data: None,
+        })
+    }
+
+    /// Anonymous calls fail `agent.status` 403 (executor has an admin
+    /// credential); the minted `jwt` succeeds and any other token is refused
+    /// — the single-user script.
+    fn single_user_handler(jwt: &'static str) -> impl Fn(&str, &str, &Value) -> Result<Value> {
+        move |token, method, _params| match (token, method) {
+            ("", "agent.status") => Err(rpc_err(403, "missing capability for method")),
+            (t, "agent.status") if t == jwt => Ok(authed_status()),
+            (_, "agent.status") => Err(rpc_err(401, "Unauthorized access")),
+            (_, "agent.isLocked") => Ok(Value::Bool(false)),
+            (_, "user.multiUserEnabled") => Ok(Value::Bool(false)),
+            (_, "agent.requestCapability") => Ok(Value::String("req-1".to_string())),
+            (_, "agent.generateJwt") => Ok(Value::String(jwt.to_string())),
+            (_, other) => Err(rpc_err(404, &format!("unknown method {other}"))),
+        }
+    }
+
+    // ── Tests ──
+
+    #[test]
+    fn candidates_run_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let port_file = dir.path().join("executor-port");
+        std::fs::write(&port_file, "14444").unwrap();
+        let store_dir = dir.path().join("tokens");
+        let store = TokenStore::new(&store_dir);
+        store
+            .set_last_url("test-app", "ws://stored.example:9000/", true)
+            .unwrap();
+        // Another app's choice is not this app's.
+        store
+            .set_last_url("other-app", "http://other.example:1", true)
+            .unwrap();
+
+        let mut o = opts();
+        o.url = Some("http://explicit:1/".to_string());
+        o.port = Some(2000);
+        o.use_stored_url = true;
+        o.executor_port_file = Some(port_file.clone());
+        o.token_dir = Some(store_dir.clone());
+        let s: Ad4mConnect<FakeIo> = Ad4mConnect::with_io(o, FakeIo::unhealthy()).unwrap();
+        let urls = |s: &Ad4mConnect<FakeIo>| -> Vec<(String, bool)> { s.candidates().unwrap() };
+        assert_eq!(
+            urls(&s),
+            vec![
+                ("http://explicit:1".to_string(), true), // normalized (trailing /)
+                ("http://127.0.0.1:2000".to_string(), true), // explicit port
+                ("http://stored.example:9000".to_string(), true), // pinned, ws→http
+                ("http://127.0.0.1:14444".to_string(), false), // executor-port file
+                ("http://127.0.0.1:12000".to_string(), false), // default
+            ]
+        );
+
+        // Found by discovery last time: after the port file.
+        remember_discovered(&store, "http://127.0.0.1:14111");
+        let mut o = opts();
+        o.url = None;
+        o.use_stored_url = true;
+        o.executor_port_file = Some(port_file);
+        o.token_dir = Some(store_dir);
+        let s: Ad4mConnect<FakeIo> = Ad4mConnect::with_io(o, FakeIo::unhealthy()).unwrap();
+        assert_eq!(
+            urls(&s),
+            vec![
+                ("http://127.0.0.1:14444".to_string(), false),
+                ("http://127.0.0.1:14111".to_string(), false),
+                ("http://127.0.0.1:12000".to_string(), false),
+            ]
+        );
+    }
+
+    /// What a run that found `url` by discovery (not chosen) leaves behind.
+    fn remember_discovered(store: &TokenStore, url: &str) {
+        store.set_last_url("test-app", url, false).unwrap();
+    }
+
+    /// Q2: an automatically remembered local URL must not pin discovery.
+    /// A healthy executor still answers on the remembered port, but the
+    /// launcher's port file names another one: discovery picks the port file.
+    #[tokio::test]
+    async fn the_launcher_port_file_beats_an_auto_remembered_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let port_file = dir.path().join("executor-port");
+        std::fs::write(&port_file, "14555").unwrap();
+        let store_dir = dir.path().join("tokens");
+        // Remembered by an earlier run that found its executor by discovery.
+        remember_discovered(&TokenStore::new(&store_dir), "http://127.0.0.1:14111");
+
+        let mut o = opts();
+        o.url = None;
+        o.use_stored_url = true;
+        o.executor_port_file = Some(port_file);
+        // Both executors are up.
+        let io = FakeIo::new(|token, method, _| match (token, method) {
+            ("", "agent.status") => Ok(authed_status()),
+            (_, other) => Err(rpc_err(404, &format!("unexpected {other}"))),
+        });
+        let mut s = session(&store_dir, io, o);
+        s.connect(&mut NoPrompts).await.unwrap();
+        assert_eq!(s.url(), Some("http://127.0.0.1:14555"));
+        // Remembered as discovered again, for this app only.
+        assert_eq!(
+            TokenStore::new(&store_dir).last_url("test-app").unwrap(),
+            Some(RememberedUrl {
+                url: "http://127.0.0.1:14555".to_string(),
+                pinned: false
+            })
+        );
+
+        // An explicit URL is remembered pinned.
+        let io = FakeIo::new(|token, method, _| match (token, method) {
+            ("", "agent.status") => Ok(authed_status()),
+            (_, other) => Err(rpc_err(404, &format!("unexpected {other}"))),
+        });
+        let mut s = session(&store_dir, io, opts());
+        s.connect(&mut NoPrompts).await.unwrap();
+        assert_eq!(
+            TokenStore::new(&store_dir).last_url("test-app").unwrap(),
+            Some(RememberedUrl {
+                url: URL.to_string(),
+                pinned: true
+            })
+        );
+    }
+
+    /// F5: a plaintext (`http://`/`ws://`) executor that is not on loopback
+    /// is refused before any token is sent or any prompt asked.
+    #[tokio::test]
+    async fn a_plaintext_remote_executor_is_refused_by_default() {
+        for url in ["http://192.168.1.20:12000", "ws://executor.example.com/"] {
+            let dir = tempfile::tempdir().unwrap();
+            TokenStore::new(dir.path())
+                .set_token(&normalize_base_url(url), "test-app", "jwt-stored")
+                .unwrap();
+            let mut o = opts();
+            o.url = Some(url.to_string());
+            let io = FakeIo::new(single_user_handler("jwt-stored"));
+            let mut s = session(dir.path(), io, o);
+            let err = s.connect(&mut NoPrompts).await.unwrap_err();
+            assert!(
+                s.io.opened().is_empty(),
+                "{url}: a socket was opened (token sent) over plaintext: {:?}",
+                s.io.opened()
+            );
+            assert!(err.to_string().contains("plaintext"), "{url}: {err}");
+            assert!(matches!(
+                err.downcast_ref::<ConnectError>(),
+                Some(ConnectError::InsecureTransport { .. })
+            ));
+            // The explicit opt-in lets it through.
+            let mut o = opts();
+            o.url = Some(url.to_string());
+            let o = o.allow_insecure_remote(true);
+            let io = FakeIo::new(single_user_handler("jwt-stored"));
+            let mut s = session(dir.path(), io, o);
+            assert_eq!(
+                s.connect(&mut NoPrompts).await.unwrap(),
+                AuthState::Authenticated
+            );
+        }
+    }
+
+    #[test]
+    fn plaintext_remote_spares_loopback_and_tls() {
+        for ok in [
+            "http://127.0.0.1:12000",
+            "http://127.8.0.1:1",
+            "http://localhost:12000",
+            "http://LOCALHOST",
+            "http://[::1]:12000",
+            "https://executor.example.com",
+            "https://10.0.0.5:443",
+        ] {
+            assert!(!plaintext_remote(ok), "{ok}");
+        }
+        for bad in [
+            "http://192.168.1.20:12000",
+            "http://executor.example.com",
+            "http://localhost.evil.example",
+            "http://[2001:db8::1]:12000",
+            "ftp://x",
+            "not a url",
+        ] {
+            assert!(plaintext_remote(bad), "{bad}");
+        }
+    }
+
+    /// N1 (round 3): `WsIo`'s health check reaches `localhost` on the
+    /// loopback literal it pins (an executor listening on 127.0.0.1 only).
+    #[tokio::test]
+    async fn the_health_check_dials_localhost_on_loopback() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let n = sock.read(&mut buf).await.unwrap();
+            let req = String::from_utf8_lossy(&buf[..n]).to_lowercase();
+            assert!(req.contains("host: localhost"), "{req}");
+            let body = r#"{"status":"ok"}"#;
+            let reply = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            sock.write_all(reply.as_bytes()).await.unwrap();
+        });
+        WsIo::new()
+            .healthy(&format!("http://localhost:{port}"))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn executor_not_found_reports_every_candidate() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = session(dir.path(), FakeIo::unhealthy(), opts());
+        let err = s.connect(&mut NoPrompts).await.unwrap_err();
+        let not_found = err.downcast_ref::<ConnectError>().expect("ConnectError");
+        match not_found {
+            ConnectError::ExecutorNotFound { tried } => {
+                assert!(tried.contains(&URL.to_string()), "{tried:?}");
+            }
+            other => panic!("expected ExecutorNotFound, got {other:?}"),
+        }
+        assert_eq!(s.state(), AuthState::Unauthenticated);
+    }
+
+    #[tokio::test]
+    async fn a_stored_token_authenticates_without_prompts() {
+        let dir = tempfile::tempdir().unwrap();
+        TokenStore::new(dir.path())
+            .set_token(URL, "test-app", "jwt-stored")
+            .unwrap();
+        let io = FakeIo::new(|_token, method, _| match method {
+            "agent.status" => Ok(authed_status()),
+            other => Err(rpc_err(404, &format!("unexpected {other}"))),
+        });
+        let mut s = session(dir.path(), io, opts());
+        let state = s.connect(&mut NoPrompts).await.unwrap();
+        assert_eq!(state, AuthState::Authenticated);
+        assert_eq!(
+            s.io.opened(),
+            vec![(URL.to_string(), "jwt-stored".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_stored_token_falls_back_to_the_handshake() {
+        let dir = tempfile::tempdir().unwrap();
+        TokenStore::new(dir.path())
+            .set_token(URL, "test-app", "dead-jwt")
+            .unwrap();
+        let io = FakeIo::new(single_user_handler("jwt-fresh"));
+        let mut s = session(dir.path(), io, opts());
+        let mut prompts = ScriptedPrompts {
+            cap_codes: ["123456".into()].into(),
+            ..Default::default()
+        };
+        let state = s.connect(&mut prompts).await.unwrap();
+        assert_eq!(state, AuthState::Authenticated);
+
+        // The stored token is gone; the minted one is stored in its place.
+        let store = TokenStore::new(dir.path());
+        assert_eq!(
+            store.token(URL, "test-app").unwrap().as_deref(),
+            Some("jwt-fresh")
+        );
+        assert_eq!(
+            s.io.opened(),
+            vec![
+                (URL.to_string(), "dead-jwt".to_string()),
+                (URL.to_string(), "".to_string()),
+                (URL.to_string(), "jwt-fresh".to_string()),
+            ]
+        );
+        assert_eq!(prompts.asked, vec!["capability_code:req-1".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn a_403_naming_a_dead_token_also_falls_back() {
+        let dir = tempfile::tempdir().unwrap();
+        TokenStore::new(dir.path())
+            .set_token(URL, "test-app", "expired-jwt")
+            .unwrap();
+        let io = FakeIo::new(|token, method, _| match (token, method) {
+            ("expired-jwt", "agent.status") => {
+                Err(rpc_err(403, "ExpiredSignature: the token has expired"))
+            }
+            (_, "agent.status") if token.is_empty() => {
+                Err(rpc_err(403, "missing capability for method"))
+            }
+            (_, "agent.status") => Ok(authed_status()),
+            (_, "agent.isLocked") => Ok(Value::Bool(false)),
+            (_, "user.multiUserEnabled") => Ok(Value::Bool(false)),
+            (_, "agent.requestCapability") => Ok(Value::String("req-9".to_string())),
+            (_, "agent.generateJwt") => Ok(Value::String("jwt-2".to_string())),
+            (_, other) => Err(rpc_err(404, &format!("unknown {other}"))),
+        });
+        let mut s = session(dir.path(), io, opts());
+        let mut prompts = ScriptedPrompts {
+            cap_codes: ["111111".into()].into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            s.connect(&mut prompts).await.unwrap(),
+            AuthState::Authenticated
+        );
+        assert_eq!(
+            TokenStore::new(dir.path())
+                .token(URL, "test-app")
+                .unwrap()
+                .as_deref(),
+            Some("jwt-2")
+        );
+    }
+
+    #[tokio::test]
+    async fn an_anonymous_operator_needs_no_token() {
+        // `--insecure-no-admin-credential`: the loopback anonymous session is
+        // the operator, `agent.status` just answers.
+        let dir = tempfile::tempdir().unwrap();
+        let io = FakeIo::new(|token, method, _| match (token, method) {
+            ("", "agent.status") => Ok(authed_status()),
+            (_, other) => Err(rpc_err(404, &format!("unexpected {other}"))),
+        });
+        let mut s = session(dir.path(), io, opts());
+        assert_eq!(
+            s.connect(&mut NoPrompts).await.unwrap(),
+            AuthState::Authenticated
+        );
+        assert_eq!(s.io.opened(), vec![(URL.to_string(), "".to_string())]);
+    }
+
+    #[tokio::test]
+    async fn a_locked_executor_reports_locked() {
+        let dir = tempfile::tempdir().unwrap();
+        let io = FakeIo::new(|token, method, _| match (token, method) {
+            ("", "agent.status") => Ok(json!({
+                "did": null, "didDocument": null, "error": null,
+                "isInitialized": false, "isUnlocked": false,
+            })),
+            (_, other) => Err(rpc_err(404, &format!("unexpected {other}"))),
+        });
+        let mut s = session(dir.path(), io, opts());
+        assert_eq!(s.connect(&mut NoPrompts).await.unwrap(), AuthState::Locked);
+    }
+
+    #[tokio::test]
+    async fn a_wrong_code_rejects_and_reasks() {
+        let dir = tempfile::tempdir().unwrap();
+        let attempts = Arc::new(Mutex::new(0));
+        let attempts2 = attempts.clone();
+        let io = FakeIo::new(move |token, method, params| match (token, method) {
+            (_, "agent.status") if token.is_empty() => Err(rpc_err(403, "missing capability")),
+            (_, "agent.status") => Ok(authed_status()),
+            (_, "agent.isLocked") => Ok(Value::Bool(false)),
+            (_, "user.multiUserEnabled") => Ok(Value::Bool(false)),
+            (_, "agent.requestCapability") => Ok(Value::String("req-1".to_string())),
+            (_, "agent.generateJwt") => {
+                *attempts2.lock().unwrap() += 1;
+                if params["rand"] == "123456" {
+                    Ok(Value::String("jwt-ok".to_string()))
+                } else {
+                    Err(rpc_err(500, "Can't find permitted request"))
+                }
+            }
+            (_, other) => Err(rpc_err(404, &format!("unknown {other}"))),
+        });
+        let mut s = session(dir.path(), io, opts());
+        let mut prompts = ScriptedPrompts {
+            cap_codes: ["000000".into(), "123456".into()].into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            s.connect(&mut prompts).await.unwrap(),
+            AuthState::Authenticated
+        );
+        assert_eq!(*attempts.lock().unwrap(), 2);
+        assert!(prompts.statuses.contains(&ConnectStatus::CodeRejected));
+    }
+
+    #[tokio::test]
+    async fn a_dead_request_is_requested_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let requests = Arc::new(Mutex::new(0));
+        let requests2 = requests.clone();
+        let io = FakeIo::new(move |token, method, _params| match (token, method) {
+            (_, "agent.status") if token.is_empty() => Err(rpc_err(403, "missing capability")),
+            (_, "agent.status") => Ok(authed_status()),
+            (_, "agent.isLocked") => Ok(Value::Bool(false)),
+            (_, "user.multiUserEnabled") => Ok(Value::Bool(false)),
+            (_, "agent.requestCapability") => {
+                let mut n = requests2.lock().unwrap();
+                *n += 1;
+                Ok(Value::String(format!("req-{}", *n)))
+            }
+            (_, "agent.generateJwt") => {
+                if *requests2.lock().unwrap() == 1 {
+                    Err(rpc_err(500, "This request expired; request access again"))
+                } else {
+                    Ok(Value::String("jwt-3".to_string()))
+                }
+            }
+            (_, other) => Err(rpc_err(404, &format!("unknown {other}"))),
+        });
+        let mut s = session(dir.path(), io, opts());
+        let mut prompts = ScriptedPrompts {
+            cap_codes: ["111111".into(), "222222".into()].into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            s.connect(&mut prompts).await.unwrap(),
+            AuthState::Authenticated
+        );
+        assert_eq!(*requests.lock().unwrap(), 2);
+        assert_eq!(
+            prompts.asked,
+            vec![
+                "capability_code:req-1".to_string(),
+                "capability_code:req-2".to_string()
+            ]
+        );
+        assert!(prompts.statuses.contains(&ConnectStatus::RequestExpired));
+    }
+
+    /// The code loop re-asks only for a wrong code. A transport failure or
+    /// a policy refusal ends the flow with that error, after one prompt.
+    #[tokio::test]
+    async fn a_code_loop_ends_on_transport_and_policy_failures() {
+        for (failure, policy) in [
+            (anyhow!("WebSocket connection closed"), false),
+            (
+                rpc_err(403, "capability denied for agent.generateJwt"),
+                true,
+            ),
+        ] {
+            let failure = Arc::new(Mutex::new(Some(failure)));
+            let dir = tempfile::tempdir().unwrap();
+            let io = FakeIo::new(move |token, method, _| match (token, method) {
+                (_, "agent.status") if token.is_empty() => Err(rpc_err(403, "missing capability")),
+                (_, "agent.status") => Ok(authed_status()),
+                (_, "agent.isLocked") => Ok(Value::Bool(false)),
+                (_, "user.multiUserEnabled") => Ok(Value::Bool(false)),
+                (_, "agent.requestCapability") => Ok(Value::String("req-1".to_string())),
+                (_, "agent.generateJwt") => match failure.lock().unwrap().take() {
+                    Some(e) => Err(e),
+                    None => Ok(Value::String("jwt".to_string())),
+                },
+                (_, other) => Err(rpc_err(404, &format!("unknown {other}"))),
+            });
+            let mut s = session(dir.path(), io, opts());
+            let mut prompts = ScriptedPrompts {
+                cap_codes: ["111111".into(), "222222".into()].into(),
+                ..Default::default()
+            };
+            let err = s.connect(&mut prompts).await.unwrap_err();
+            assert_eq!(prompts.asked.len(), 1, "re-asked after {err}");
+            assert!(!prompts.statuses.contains(&ConnectStatus::CodeRejected));
+            assert_eq!(
+                err.downcast_ref::<RpcCallError>().is_some(),
+                policy,
+                "{err}"
+            );
+        }
+    }
+
+    /// An email challenge the executor invalidated (five wrong codes: "…
+    /// Please request a new code.") is not a wrong code: the flow requests
+    /// a new one and asks for that code.
+    #[tokio::test]
+    async fn an_invalidated_email_challenge_is_requested_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut o = opts();
+        o.email = Some("ada@example.com".to_string());
+        let requests = Arc::new(Mutex::new(0));
+        let requests2 = requests.clone();
+        let io = FakeIo::new(move |token, method, params| match (token, method) {
+            (_, "agent.status") if token.is_empty() => Err(rpc_err(403, "missing capability")),
+            (_, "agent.status") => Ok(authed_status()),
+            (_, "agent.isLocked") => Ok(Value::Bool(false)),
+            (_, "user.multiUserEnabled") => Ok(Value::Bool(true)),
+            (_, "user.requestVerification") => {
+                *requests2.lock().unwrap() += 1;
+                Ok(json!({
+                    "success": true, "message": "sent",
+                    "requiresPassword": false, "isExistingUser": true,
+                }))
+            }
+            (_, "user.verifyEmail") => {
+                if *requests2.lock().unwrap() == 1 {
+                    Err(rpc_err(500, "Verification code has been invalidated due to too many failed attempts. Please request a new code."))
+                } else {
+                    assert_eq!(params["code"], "222222");
+                    Ok(Value::String("jwt-mu".to_string()))
+                }
+            }
+            (_, other) => Err(rpc_err(404, &format!("unknown {other}"))),
+        });
+        let mut s = session(dir.path(), io, o);
+        let mut prompts = ScriptedPrompts {
+            email_codes: ["111111".into(), "222222".into()].into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            s.connect(&mut prompts).await.unwrap(),
+            AuthState::Authenticated
+        );
+        assert_eq!(*requests.lock().unwrap(), 2, "no new code was requested");
+        assert!(!prompts.statuses.contains(&ConnectStatus::CodeRejected));
+        assert!(prompts.statuses.contains(&ConnectStatus::EmailCodeExpired));
+    }
+
+    #[tokio::test]
+    async fn multi_user_email_code_logs_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut o = opts();
+        o.email = Some("ada@example.com".to_string());
+        let io = FakeIo::new(move |token, method, params| match (token, method) {
+            (_, "agent.status") if token.is_empty() => Err(rpc_err(403, "missing capability")),
+            (_, "agent.status") => Ok(authed_status()),
+            (_, "agent.isLocked") => Ok(Value::Bool(false)),
+            (_, "user.multiUserEnabled") => Ok(Value::Bool(true)),
+            (_, "user.requestVerification") => {
+                assert_eq!(params["email"], "ada@example.com");
+                Ok(json!({
+                    "success": true,
+                    "message": "Verification code sent.",
+                    "requiresPassword": false,
+                    "isExistingUser": true,
+                }))
+            }
+            (_, "user.verifyEmail") => {
+                assert_eq!(params["code"], "654321");
+                assert_eq!(params["verificationType"], "login");
+                Ok(Value::String("jwt-mu".to_string()))
+            }
+            (_, other) => Err(rpc_err(404, &format!("unknown {other}"))),
+        });
+        let mut s = session(dir.path(), io, o);
+        let mut prompts = ScriptedPrompts {
+            email_codes: ["654321".into()].into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            s.connect(&mut prompts).await.unwrap(),
+            AuthState::Authenticated
+        );
+        assert_eq!(
+            TokenStore::new(dir.path())
+                .token(URL, "test-app")
+                .unwrap()
+                .as_deref(),
+            Some("jwt-mu")
+        );
+        assert!(prompts
+            .statuses
+            .iter()
+            .any(|st| matches!(st, ConnectStatus::WaitingForEmailCode { email } if email == "ada@example.com")));
+    }
+
+    #[tokio::test]
+    async fn multi_user_existing_user_logs_in_by_password() {
+        let dir = tempfile::tempdir().unwrap();
+        let io = FakeIo::new(move |token, method, params| match (token, method) {
+            (_, "agent.status") if token.is_empty() => Err(rpc_err(403, "missing capability")),
+            (_, "agent.status") => Ok(authed_status()),
+            (_, "agent.isLocked") => Ok(Value::Bool(false)),
+            (_, "user.multiUserEnabled") => Ok(Value::Bool(true)),
+            (_, "user.requestVerification") => Ok(json!({
+                "success": true,
+                "message": "Email not configured. Please log in with your password.",
+                "requiresPassword": true,
+                "isExistingUser": true,
+            })),
+            (_, "user.login") => {
+                assert_eq!(params["email"], "bob@example.com");
+                assert_eq!(params["password"], "hunter2");
+                Ok(Value::String("jwt-pw".to_string()))
+            }
+            (_, other) => Err(rpc_err(404, &format!("unknown {other}"))),
+        });
+        let mut s = session(dir.path(), io, opts());
+        let mut prompts = ScriptedPrompts {
+            emails: ["bob@example.com".into()].into(),
+            passwords: ["hunter2".into()].into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            s.connect(&mut prompts).await.unwrap(),
+            AuthState::Authenticated
+        );
+        assert_eq!(
+            prompts.asked,
+            vec![
+                "email".to_string(),
+                "password:bob@example.com:false".to_string()
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn multi_user_new_account_creates_then_logs_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let created = Arc::new(AtomicBool::new(false));
+        let created2 = created.clone();
+        let io = FakeIo::new(move |token, method, params| match (token, method) {
+            (_, "agent.status") if token.is_empty() => Err(rpc_err(403, "missing capability")),
+            (_, "agent.status") => Ok(authed_status()),
+            (_, "agent.isLocked") => Ok(Value::Bool(false)),
+            (_, "user.multiUserEnabled") => Ok(Value::Bool(true)),
+            (_, "user.requestVerification") => Ok(json!({
+                "success": true,
+                "message": "No account found yet. Provide a password to create one.",
+                "requiresPassword": true,
+                "isExistingUser": false,
+            })),
+            (_, "user.create") => {
+                assert_eq!(params["email"], "new@example.com");
+                assert_eq!(params["password"], "newpass");
+                created2.store(true, Ordering::SeqCst);
+                Ok(json!({
+                    "did": "did:key:new-user", "success": true, "error": null,
+                }))
+            }
+            (_, "user.login") => {
+                assert_eq!(params["password"], "newpass");
+                // No such user until `user.create` ran.
+                if !created2.load(Ordering::SeqCst) {
+                    return Err(rpc_err(401, "Invalid credentials"));
+                }
+                Ok(Value::String("jwt-new".to_string()))
+            }
+            (_, other) => Err(rpc_err(404, &format!("unknown {other}"))),
+        });
+        let mut s = session(dir.path(), io, opts());
+        let mut prompts = ScriptedPrompts {
+            emails: ["new@example.com".into()].into(),
+            passwords: ["newpass".into()].into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            s.connect(&mut prompts).await.unwrap(),
+            AuthState::Authenticated
+        );
+        assert!(prompts
+            .asked
+            .contains(&"password:new@example.com:true".to_string()));
+        assert!(created.load(Ordering::SeqCst), "user.create never ran");
+        let methods: Vec<String> = s.io.rpcs.lock().unwrap()[0]
+            .0
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(m, _)| m.clone())
+            .filter(|m| m.starts_with("user.create") || m.starts_with("user.login"))
+            .collect();
+        assert_eq!(methods, ["user.create", "user.login"]);
+    }
+
+    #[tokio::test]
+    async fn a_mid_session_refusal_drops_the_token() {
+        let dir = tempfile::tempdir().unwrap();
+        TokenStore::new(dir.path())
+            .set_token(URL, "test-app", "jwt-stored")
+            .unwrap();
+        let io = FakeIo::new(|_token, method, _| match method {
+            "agent.status" => Ok(authed_status()),
+            other => Err(rpc_err(404, &format!("unexpected {other}"))),
+        });
+        let mut s = session(dir.path(), io, opts());
+        assert_eq!(
+            s.connect(&mut NoPrompts).await.unwrap(),
+            AuthState::Authenticated
+        );
+        let mut watcher = s.watch_state();
+
+        s.io.last_rpc().fail_auth("Unauthorized access");
+        watcher.changed().await.unwrap();
+        assert_eq!(s.state(), AuthState::Unauthenticated);
+        assert_eq!(
+            TokenStore::new(dir.path()).token(URL, "test-app").unwrap(),
+            None
+        );
+    }
+
+    /// F2: the auth state is kept with no receiver alive. `connect` with
+    /// nobody watching, then `state()` and a fresh `watch_state()` must say
+    /// Authenticated; a refusal after the last receiver dropped must land too.
+    #[tokio::test]
+    async fn the_auth_state_is_retained_without_a_watcher() {
+        let dir = tempfile::tempdir().unwrap();
+        TokenStore::new(dir.path())
+            .set_token(URL, "test-app", "jwt-stored")
+            .unwrap();
+        let io = FakeIo::new(|_token, method, _| match method {
+            "agent.status" => Ok(authed_status()),
+            other => Err(rpc_err(404, &format!("unexpected {other}"))),
+        });
+        let mut s = session(dir.path(), io, opts());
+        s.connect(&mut NoPrompts).await.unwrap();
+        assert_eq!(s.state(), AuthState::Authenticated);
+        assert_eq!(*s.watch_state().borrow(), AuthState::Authenticated);
+
+        // Every receiver dropped (the one above is a temporary), then the
+        // executor refuses the token.
+        s.io.last_rpc().fail_auth("Unauthorized access");
+        assert_eq!(s.state(), AuthState::Unauthenticated);
+    }
+
+    /// F4: the grant is revoked after `read_auth` answered and before the
+    /// session adopted the socket. The refusal reaches the callback at
+    /// registration (replayed); `connect` must not then publish or return
+    /// Authenticated over it.
+    #[tokio::test]
+    async fn a_refusal_during_adoption_does_not_end_authenticated() {
+        let dir = tempfile::tempdir().unwrap();
+        TokenStore::new(dir.path())
+            .set_token(URL, "test-app", "jwt-stored")
+            .unwrap();
+        let mut io = FakeIo::new(|_token, method, _| match method {
+            "agent.status" => Ok(authed_status()),
+            other => Err(rpc_err(404, &format!("unexpected {other}"))),
+        });
+        io.refuse_after_status = Some("jwt-stored".to_string());
+        let mut s = session(dir.path(), io, opts());
+        let state = s.connect(&mut NoPrompts).await.unwrap();
+        assert_ne!(state, AuthState::Authenticated, "connect returned success");
+        assert_eq!(s.state(), AuthState::Unauthenticated);
+        assert_eq!(
+            TokenStore::new(dir.path()).token(URL, "test-app").unwrap(),
+            None
+        );
+    }
+
+    /// F4: a socket that is no longer the session's must not touch the
+    /// session. (1) After a repeat `connect` replaced the socket, the old
+    /// one's late refusal neither deletes the new token nor publishes
+    /// Unauthenticated. (2) The current socket's refusal deletes only the
+    /// token it was opened with, not a newer one another session stored
+    /// under the same URL and app (TS `core.ts:255` checks the client).
+    #[tokio::test]
+    async fn a_stale_socket_refusal_keeps_the_newer_token_and_state() {
+        let dir = tempfile::tempdir().unwrap();
+        TokenStore::new(dir.path())
+            .set_token(URL, "test-app", "jwt-old")
+            .unwrap();
+        let io = FakeIo::new(|_token, method, _| match method {
+            "agent.status" => Ok(authed_status()),
+            other => Err(rpc_err(404, &format!("unexpected {other}"))),
+        });
+        let mut s = session(dir.path(), io, opts());
+        assert_eq!(
+            s.connect(&mut NoPrompts).await.unwrap(),
+            AuthState::Authenticated
+        );
+        let old = s.io.last_rpc();
+
+        // A newer token arrives (a re-sign-in); the session reconnects on it.
+        TokenStore::new(dir.path())
+            .set_token(URL, "test-app", "jwt-new")
+            .unwrap();
+        assert_eq!(
+            s.connect(&mut NoPrompts).await.unwrap(),
+            AuthState::Authenticated
+        );
+        assert!(old.0.closed.load(Ordering::SeqCst), "old socket not closed");
+
+        // (1) The replaced socket's refusal arrives late.
+        old.fail_auth("Unauthorized access");
+        assert_eq!(s.state(), AuthState::Authenticated, "stale state published");
+        assert_eq!(
+            TokenStore::new(dir.path())
+                .token(URL, "test-app")
+                .unwrap()
+                .as_deref(),
+            Some("jwt-new"),
+            "the stale socket deleted the newer token"
+        );
+
+        // (2) Another session of the app stores a newer token; the current
+        // socket (opened with jwt-new) is refused: the newer one stays.
+        TokenStore::new(dir.path())
+            .set_token(URL, "test-app", "jwt-newer")
+            .unwrap();
+        s.io.last_rpc().fail_auth("Unauthorized access");
+        assert_eq!(s.state(), AuthState::Unauthenticated);
+        assert_eq!(
+            TokenStore::new(dir.path())
+                .token(URL, "test-app")
+                .unwrap()
+                .as_deref(),
+            Some("jwt-newer"),
+            "a refusal deleted a token it was not opened with"
+        );
+    }
+
+    /// Round 3 N3: the store breaks while the user authenticates; storing
+    /// the minted token fails. `connect` returns the error and closes the
+    /// socket it opened with that token: nothing adopts it, and a dropped
+    /// handle would keep its reader running.
+    #[tokio::test]
+    async fn a_store_error_after_minting_closes_the_new_socket() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tokens.json");
+        let handler = single_user_handler("jwt-minted");
+        let io = FakeIo::new(move |token, method, params| {
+            if method == "agent.generateJwt" {
+                std::fs::write(&path, "{ corrupt").unwrap();
+            }
+            handler(token, method, params)
+        });
+        let mut s = session(dir.path(), io, opts());
+        let mut prompts = ScriptedPrompts {
+            cap_codes: ["123456".into()].into(),
+            ..Default::default()
+        };
+        let err = s.connect(&mut prompts).await.unwrap_err();
+        assert!(format!("{err:#}").contains("tokens.json"), "{err:#}");
+        let minted = s.io.last_rpc();
+        assert_eq!(minted.0.token, "jwt-minted");
+        assert!(
+            minted.0.closed.load(Ordering::SeqCst),
+            "the minted token's socket was left open"
+        );
+        assert_eq!(s.state(), AuthState::Unauthenticated);
+    }
+
+    /// Round 3 N3: `disconnect` with a broken store still closes the socket
+    /// and publishes Unauthenticated, then returns the store error.
+    #[tokio::test]
+    async fn a_store_error_on_disconnect_still_publishes_unauthenticated() {
+        let dir = tempfile::tempdir().unwrap();
+        TokenStore::new(dir.path())
+            .set_token(URL, "test-app", "jwt-stored")
+            .unwrap();
+        let io = FakeIo::new(|_token, method, _| match method {
+            "agent.status" => Ok(authed_status()),
+            other => Err(rpc_err(404, &format!("unexpected {other}"))),
+        });
+        let mut s = session(dir.path(), io, opts());
+        assert_eq!(
+            s.connect(&mut NoPrompts).await.unwrap(),
+            AuthState::Authenticated
+        );
+        std::fs::write(dir.path().join("tokens.json"), "{ corrupt").unwrap();
+        assert!(
+            s.disconnect().await.is_err(),
+            "the store error was swallowed"
+        );
+        assert!(s.io.last_rpc().0.closed.load(Ordering::SeqCst));
+        assert_eq!(s.state(), AuthState::Unauthenticated);
+    }
+
+    #[test]
+    fn token_store_keeps_tokens_per_url_and_app_with_0600() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TokenStore::new(dir.path());
+        store.set_token("http://a:1", "app1", "tok-a1").unwrap();
+        store.set_token("http://a:1", "app2", "tok-a2").unwrap();
+        store.set_token("http://b:2", "app1", "tok-b1").unwrap();
+        store.set_last_url("app1", "http://b:2", true).unwrap();
+
+        // A second store on the same dir reads the same tokens.
+        let store2 = TokenStore::new(dir.path());
+        assert_eq!(
+            store2.token("http://a:1", "app1").unwrap().as_deref(),
+            Some("tok-a1")
+        );
+        assert_eq!(
+            store2.token("http://a:1", "app2").unwrap().as_deref(),
+            Some("tok-a2")
+        );
+        assert_eq!(
+            store2.token("http://b:2", "app1").unwrap().as_deref(),
+            Some("tok-b1")
+        );
+        assert_eq!(
+            store2.last_url("app1").unwrap(),
+            Some(RememberedUrl {
+                url: "http://b:2".to_string(),
+                pinned: true
+            })
+        );
+        assert_eq!(store2.last_url("app2").unwrap(), None);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(store2.path())
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600, "token file mode {mode:o}");
+        }
+
+        store2.remove_token("http://a:1", "app1").unwrap();
+        assert_eq!(store2.token("http://a:1", "app1").unwrap(), None);
+        assert_eq!(
+            store2.token("http://a:1", "app2").unwrap().as_deref(),
+            Some("tok-a2")
+        );
+    }
+
+    /// F1: two processes writing the same store, each its own keys: no
+    /// update may be lost and the file must stay parseable. Each writer is
+    /// this test binary, re-run as a child (`AD4M_CONNECT_STORE_CHILD`).
+    #[test]
+    fn two_processes_writing_the_store_lose_nothing() {
+        const N: usize = 40;
+        if let Ok(dir) = std::env::var("AD4M_CONNECT_STORE_CHILD") {
+            let who = std::env::var("AD4M_CONNECT_STORE_WHO").unwrap();
+            let store = TokenStore::new(dir);
+            for i in 0..N {
+                store
+                    .set_token(
+                        &format!("http://{who}:{i}"),
+                        "app",
+                        &format!("tok-{who}-{i}"),
+                    )
+                    .unwrap();
+            }
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let exe = std::env::current_exe().unwrap();
+        let spawn = |who: &str| {
+            std::process::Command::new(&exe)
+                .args([
+                    "--exact",
+                    "connect::tests::two_processes_writing_the_store_lose_nothing",
+                    "--test-threads=1",
+                ])
+                .env("AD4M_CONNECT_STORE_CHILD", dir.path())
+                .env("AD4M_CONNECT_STORE_WHO", who)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::inherit())
+                .spawn()
+                .unwrap()
+        };
+        let (mut a, mut b) = (spawn("a"), spawn("b"));
+        assert!(a.wait().unwrap().success(), "writer a failed");
+        assert!(b.wait().unwrap().success(), "writer b failed");
+
+        let raw = std::fs::read_to_string(dir.path().join("tokens.json")).unwrap();
+        let parsed: Value = serde_json::from_str(&raw).expect("the store is not JSON");
+        let tokens = parsed["tokens"].as_object().unwrap();
+        let mut lost = Vec::new();
+        for who in ["a", "b"] {
+            for i in 0..N {
+                let key = format!("http://{who}:{i}|app");
+                if tokens.get(&key).and_then(Value::as_str) != Some(&format!("tok-{who}-{i}")) {
+                    lost.push(key);
+                }
+            }
+        }
+        assert!(
+            lost.is_empty(),
+            "{} of {} updates lost: {lost:?}",
+            lost.len(),
+            2 * N
+        );
+    }
+
+    /// F1: an unreadable store is an error, never an empty one: a write on
+    /// top of it must fail and leave the file as it was (the old code read
+    /// garbage as empty and the next save erased every credential).
+    #[test]
+    fn a_corrupt_store_is_an_error_not_an_empty_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tokens.json");
+        std::fs::write(&path, "{\"tokens\": {\"http://a:1|app\": \"tok").unwrap();
+        let store = TokenStore::new(dir.path());
+        assert!(
+            store.set_token("http://b:2", "app", "tok-b").is_err(),
+            "a write over a corrupt store succeeded"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "{\"tokens\": {\"http://a:1|app\": \"tok"
+        );
+    }
+
+    /// F1: the store's directory is private (0700) even when it existed
+    /// with looser bits, and the file is 0600.
+    #[cfg(unix)]
+    #[test]
+    fn the_store_directory_is_forced_to_0700() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("ad4m-connect");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let store = TokenStore::new(&dir);
+        store.set_token("http://a:1", "app", "tok").unwrap();
+        let mode = std::fs::metadata(&dir).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700, "directory mode {mode:o}");
+        let mode = std::fs::metadata(store.path())
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600, "file mode {mode:o}");
+    }
+
+    #[test]
+    fn normalize_base_url_converts_ws_and_trims() {
+        assert_eq!(
+            normalize_base_url("ws://localhost:12000/"),
+            "http://localhost:12000"
+        );
+        assert_eq!(
+            normalize_base_url("wss://host.example/"),
+            "https://host.example"
+        );
+        assert_eq!(normalize_base_url("http://a/"), "http://a");
+    }
+}

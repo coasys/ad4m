@@ -8,8 +8,8 @@
 //! RPC/pending/reconnect/live-query code above it is one implementation.
 //!
 //! The browser needs no capability a native socket has and this interface
-//! lacks: text sends, a stream of text frames, and the close code (the
-//! executor's 1008 auth refusal). Ping/pong are answered by the transport
+//! lacks: text sends, a stream of text frames, and the close code and reason
+//! (the executor's 1008 auth refusal). Ping/pong are answered by the transport
 //! itself on both targets, so they never surface as frames.
 
 use anyhow::Result;
@@ -18,8 +18,13 @@ use anyhow::Result;
 #[derive(Debug)]
 pub(crate) enum InFrame {
     Text(String),
-    /// Server-initiated close; the code identifies an auth refusal (1008).
-    Close(Option<u16>),
+    /// Server-initiated close: the code identifies an auth refusal (1008),
+    /// the reason says why ("Unauthorized access", "… expired"; empty when
+    /// the server sent none).
+    Close {
+        code: Option<u16>,
+        reason: String,
+    },
     /// A dead-socket read error (native), or an inbound bound exceeded
     /// (browser: its `error` event carries nothing, `close` follows it).
     Error(String),

@@ -23,6 +23,10 @@ extern crate urlencoding;
 
 pub mod agent;
 pub mod batch;
+// Native only: executor discovery reads the filesystem, `/health` goes
+// through reqwest, and the token store is a locked file.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod connect;
 pub mod expressions;
 pub mod flow;
 pub mod instances;
@@ -58,8 +62,13 @@ pub struct Ad4mClient {
 impl Ad4mClient {
     pub async fn connect(executor_url: String, cap_token: String) -> Result<Self> {
         let ws = Arc::new(WsRpcClient::connect(&executor_url, &cap_token).await?);
+        Ok(Self::from_ws(ws))
+    }
 
-        Ok(Self {
+    /// A client over an already-open socket — e.g. one `connect::Ad4mConnect`
+    /// authenticated.
+    pub fn from_ws(ws: Arc<WsRpcClient>) -> Self {
+        Self {
             agent: AgentClient::new(ws.clone()),
             languages: LanguagesClient::new(ws.clone()),
             neighbourhoods: NeighbourhoodsClient::new(ws.clone()),
@@ -67,7 +76,7 @@ impl Ad4mClient {
             expressions: ExpressionsClient::new(ws.clone()),
             runtime: RuntimeClient::new(ws.clone()),
             ws,
-        })
+        }
     }
 
     /// Receive the server-push events named in `events` (event type →
