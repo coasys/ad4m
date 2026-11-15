@@ -959,6 +959,9 @@ pub struct ShapeProperty {
     /// property node.  `false` when the SDNA declared no identity — a class
     /// with no identity property is never deduplicated.
     pub(crate) identity: bool,
+    /// Allowed values from `sh:in`, in declared order. Entries are as
+    /// written: `{value, label?}` objects or bare values.
+    pub(crate) in_values: Option<Vec<serde_json::Value>>,
     /// Whether this property's links are written with `LinkStatus::Local`,
     /// read back from the `ad4m://local` link on the property node.  Local
     /// links stay in the executor's own store: they are never gossiped to the
