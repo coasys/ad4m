@@ -831,6 +831,11 @@ jobs:
       - setup_integration_test_environment:
           local: true
       - run:
+          # The revocation test syncs links through a link-server (link-server/dist from
+          # build's stash); this installs the native better-sqlite3 module its runtime needs.
+          name: Install link-server dependencies
+          command: pnpm --filter @coasys/link-server install
+      - run:
           name: Run identity integration tests (identity-store, three executors)
           command: |
             mkdir -p "${TEST_ARTIFACTS:?}"
