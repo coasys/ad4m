@@ -103,7 +103,7 @@ or writes the graph. Split plan: spec items 3, 7, 8.
   (60 s) after the first unflushed one under steady writes, then ends. The thread holds the
   store only while it flushes. The last clone's drop flushes what is left, unless the store's
   directory is gone (a removed perspective). The graceful exits (`clean_up_before_exit` on
-  SIGINT/SIGTERM/SIGHUP or `exit_with_parent`, `runtime.quit`, `/internal/shutdown`) call
+  SIGINT/SIGTERM/SIGHUP, `exit_with_parent` or `runtime.quit`, and `/internal/shutdown`) call
   `perspectives::flush_all_stores`. A new write path must call `wrote()` after its commit.
 
 ## Do / don't

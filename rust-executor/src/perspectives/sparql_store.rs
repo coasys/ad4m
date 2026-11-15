@@ -4260,7 +4260,17 @@ mod tests {
             .add_link(&make_link(&signer, "ad4m://gone", "ad4m://p", "ad4m://t"))
             .unwrap();
         let store_dir = dir.path().join("sparql_store");
-        std::fs::remove_dir_all(&store_dir).unwrap();
+        // RocksDB may still write a file into the open store's directory while it is
+        // removed ("Directory not empty"): retry.
+        let mut removed = std::fs::remove_dir_all(&store_dir);
+        for _ in 0..20 {
+            if removed.is_ok() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+            removed = std::fs::remove_dir_all(&store_dir);
+        }
+        removed.unwrap();
         assert!(!store.flush_unflushed().unwrap(), "flushed a removed store");
         drop(store);
         assert!(!store_dir.exists(), "closing wrote the store back");
