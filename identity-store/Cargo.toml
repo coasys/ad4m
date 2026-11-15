@@ -31,6 +31,8 @@ bs58 = "0.5.1"
 base64 = "0.22.1"
 rand = "0.8.5"
 thiserror = "2.0.12"
+# The redeem call to the vouching service (`VOUCH_URL`), over HTTPS with the webpki roots.
+reqwest = { version = "0.12.28", default-features = false, features = ["json", "rustls-tls"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"

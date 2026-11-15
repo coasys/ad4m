@@ -4,14 +4,15 @@
 //! One SQLite file holds the hash-chain module's tables (`chain_heads`, `chain_entries`,
 //! `chain_forks`, type `coasys:kel`) and the store's own (`logs`, `heads`, `keys`, `agents`,
 //! `nonces`, `feed`, `offers`, `claims`, `fork_signers`, `inbox`, `records`, `requests`,
-//! `buckets`). The store replays every event with the identity core before it appends, and
+//! `buckets`, `brake`, `pow`, `notes`). The store replays every event with the identity core before it appends, and
 //! commits each append with its head, key-index rows, feed items, the claim it spends and the
 //! inbox messages and requests it ends in one transaction (the one-transaction rule of
 //! `identity-store/AGENTS.md`). It can withhold an event, never forge one: every client checks
 //! the events' own signatures again. Of inbox messages and records it keeps only ciphertext.
 //!
-//! The store has no brake buckets, vouching notes or sign-up pairing yet:
-//! see [`log::admit_new_log`] for where the brake attaches.
+//! A new log is admitted by the brake (`brake.rs`: buckets per address and store-wide, a
+//! failure bucket and the proof of work, all before any signature replay) or by a vouching note
+//! the store redeems at the platform (`vouch.rs`). The store has no sign-up pairing yet.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -21,6 +22,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{watch, Notify};
 
 pub mod agents;
+pub mod brake;
 pub mod db;
 pub mod error;
 pub mod head;
@@ -33,6 +35,7 @@ pub mod private;
 pub mod request;
 pub mod request_box;
 pub mod routes;
+pub mod vouch;
 
 pub use error::ApiError;
 pub use head::StoreKey;
@@ -54,9 +57,31 @@ pub fn system_clock() -> Clock {
 /// What an operator configures.
 #[derive(Clone, Debug)]
 pub struct Settings {
-    /// `POW_BITS`: the proof-of-work cost published at `GET /v1/pow` (default 22). Without a
-    /// brake a new log needs no proof; a proof that is sent must meet it.
+    /// `POW_BITS`: the proof-of-work cost published at `GET /v1/pow` (default 22) that a new log
+    /// with no vouching note must meet (`brake.rs`). After a change the previous bits pass for
+    /// 10 minutes too.
     pub pow_bits: u8,
+    /// `BRAKE_GLOBAL_PER_HOUR`: no-note logs store-wide per hour, the global bucket's size and
+    /// hourly refill (default 120).
+    pub brake_global_per_hour: u32,
+    /// `BRAKE_ADDR_BURST`: no-note logs per address at once, the address bucket's size
+    /// (default 3).
+    pub brake_addr_burst: u32,
+    /// `BRAKE_ADDR_PER_DAY`: what the address bucket refills per 24 h (default 3).
+    pub brake_addr_per_day: u32,
+    /// `TRUSTED_PROXIES`: comma-separated addresses or ranges (`10.0.0.0/8`) of the proxies in
+    /// front of the store. Only a request whose socket peer is one of them is read for its
+    /// client's address from `CF-Connecting-IP`, else `X-Forwarded-For`. Default none.
+    pub trusted_proxies: Vec<brake::Cidr>,
+    /// `VOUCH_URL`: the vouching service's base URL (`POST {VOUCH_URL}/api/vouch/redeem`). None:
+    /// every token gets `503 vouch-unavailable`.
+    pub vouch_url: Option<String>,
+    /// `VOUCH_CREDENTIAL`: the store's own credential at the vouching service, sent as a bearer
+    /// token with every redeem.
+    pub vouch_credential: Option<vouch::Credential>,
+    /// `VOUCH_KEYS`: comma-separated multikeys of the vouching keys whose notes the store takes
+    /// and reads as `vouched` (`GET {VOUCH_URL}/api/vouch/key` answers the current one).
+    pub vouch_keys: Vec<String>,
     /// `FEED_TOKEN`: the mirror token of `GET /v1/feed`. None: the feed answers `401` to all.
     pub feed_token: Option<String>,
     /// `CORS_ORIGINS`: the origins allowed to call from a browser (the auth domain, the web app).
@@ -87,6 +112,13 @@ impl Default for Settings {
     fn default() -> Self {
         Settings {
             pow_bits: 22,
+            brake_global_per_hour: 120,
+            brake_addr_burst: 3,
+            brake_addr_per_day: 3,
+            trusted_proxies: Vec::new(),
+            vouch_url: None,
+            vouch_credential: None,
+            vouch_keys: Vec::new(),
             feed_token: None,
             cors_origins: Vec::new(),
             identity_burst: 10,
@@ -110,6 +142,77 @@ pub const DEFAULT_HELD_LOG_BYTES: usize = 256 << 20;
 pub const DEFAULT_LOG_FOLD_BYTES: usize = 16 << 20;
 
 impl Settings {
+    /// The settings of the configuration `get` reads (`std::env::var` for `serve`): each key
+    /// that is unset keeps its default (`Settings::default`). Refuses a value that does not
+    /// parse, and settings [`Settings::check`] refuses.
+    pub fn from_config(get: impl Fn(&str) -> Option<String>) -> Result<Settings, String> {
+        fn number<T: std::str::FromStr>(
+            get: &impl Fn(&str) -> Option<String>,
+            name: &str,
+            default: T,
+        ) -> Result<T, String> {
+            match get(name) {
+                Some(v) => v
+                    .trim()
+                    .parse::<T>()
+                    .map_err(|_| format!("{name}={v} is not a whole number in range")),
+                None => Ok(default),
+            }
+        }
+        let list = |name: &str| -> Vec<String> {
+            get(name)
+                .map(|v| {
+                    v.split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let text = |name: &str| {
+            get(name)
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+        };
+        let defaults = Settings::default();
+        let trusted_proxies = list("TRUSTED_PROXIES")
+            .iter()
+            .map(|s| {
+                s.parse::<brake::Cidr>()
+                    .map_err(|e| format!("TRUSTED_PROXIES: {e}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let vouch_keys = list("VOUCH_KEYS");
+        if let Some(bad) = vouch_keys
+            .iter()
+            .find(|k| !ad4m_identity_core::is_ed25519_multikey(k))
+        {
+            return Err(format!("VOUCH_KEYS: {bad} is no Ed25519 multikey"));
+        }
+        let settings = Settings {
+            pow_bits: number(&get, "POW_BITS", defaults.pow_bits)?,
+            brake_global_per_hour: number(
+                &get,
+                "BRAKE_GLOBAL_PER_HOUR",
+                defaults.brake_global_per_hour,
+            )?,
+            brake_addr_burst: number(&get, "BRAKE_ADDR_BURST", defaults.brake_addr_burst)?,
+            brake_addr_per_day: number(&get, "BRAKE_ADDR_PER_DAY", defaults.brake_addr_per_day)?,
+            trusted_proxies,
+            vouch_url: text("VOUCH_URL"),
+            vouch_credential: text("VOUCH_CREDENTIAL").map(vouch::Credential),
+            vouch_keys,
+            feed_token: text("FEED_TOKEN"),
+            cors_origins: list("CORS_ORIGINS"),
+            identity_burst: number(&get, "IDENTITY_BURST", defaults.identity_burst)?,
+            identity_refill_s: number(&get, "IDENTITY_REFILL_S", defaults.identity_refill_s)?,
+            held_log_bytes: number(&get, "HELD_LOG_BYTES", defaults.held_log_bytes)?,
+            log_fold_bytes: number(&get, "LOG_FOLD_BYTES", defaults.log_fold_bytes)?,
+        };
+        settings.check()?;
+        Ok(settings)
+    }
+
     /// Refuses settings under which an accepted log could not be held: a held bound below the
     /// per-log whole-fold bound (twice `LOG_FOLD_BYTES`) would fold such a log on every use.
     pub fn check(&self) -> Result<(), String> {
@@ -143,6 +246,10 @@ pub struct Store {
     pub settings: Settings,
     /// The folded logs held in memory (`held.rs`).
     pub held: held::HeldLogs,
+    /// The proof-of-work parameters it runs with (`GET /v1/pow`), fixed at the start.
+    pow: ad4m_ldk::identity::PowParams,
+    /// The client of the vouching service.
+    http: reqwest::Client,
     clock: Clock,
     started_at: u64,
     waits: Mutex<Waits>,
@@ -152,9 +259,27 @@ pub struct Store {
 impl Store {
     pub fn new(db: db::Db, key: StoreKey, clock: Clock, settings: Settings) -> Arc<Store> {
         let started_at = clock();
+        // The bits the database last ran with decide `previousBits` and `changedAt`. When that
+        // record cannot be read or written, the store runs without a grace window.
+        let pow = db
+            .lock()
+            .and_then(|conn| brake::pow_params(&conn, settings.pow_bits, started_at))
+            .unwrap_or_else(|e| {
+                eprintln!(
+                    "identity-store: the proof-of-work record failed: {:?}",
+                    e.body
+                );
+                ad4m_ldk::identity::PowParams {
+                    bits: settings.pow_bits,
+                    previous_bits: settings.pow_bits,
+                    changed_at: started_at,
+                }
+            });
         Arc::new(Store {
             db,
             key,
+            pow,
+            http: vouch::client(),
             held: held::HeldLogs::new(settings.held_log_bytes),
             settings,
             clock,
@@ -182,9 +307,21 @@ impl Store {
         (self.clock)()
     }
 
-    /// When the store started (the `changedAt` of `GET /v1/pow`).
+    /// When the store started.
     pub fn started_at(&self) -> u64 {
         self.started_at
+    }
+
+    /// The proof-of-work parameters of `GET /v1/pow`.
+    pub fn pow_params(&self) -> &ad4m_ldk::identity::PowParams {
+        &self.pow
+    }
+
+    /// `GET /v1/metrics`: each brake bucket's level, one per line (`brake::metrics`).
+    pub fn metrics(&self) -> Result<String, ApiError> {
+        let now = self.now();
+        let conn = self.db.lock()?;
+        brake::metrics(&conn, &self.settings, now)
     }
 
     /// Wakes the reads waiting on `topics` after a committed write that concerns them (the

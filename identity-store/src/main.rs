@@ -8,7 +8,14 @@
 //! | `IDENTITY_STORE_DB` | `identity-store.sqlite` | the SQLite file |
 //! | `IDENTITY_STORE_KEY` | `store-key` | the head key file; `serve` makes one when it is missing |
 //! | `IDENTITY_STORE_LISTEN` | `0.0.0.0:8080` | the listen address; port 0 picks a free port |
-//! | `POW_BITS` | `22` | the proof-of-work cost `GET /v1/pow` publishes |
+//! | `POW_BITS` | `22` | the proof-of-work cost `GET /v1/pow` publishes; the previous bits pass for 10 minutes after a change |
+//! | `BRAKE_GLOBAL_PER_HOUR` | `120` | new logs without a note store-wide per hour |
+//! | `BRAKE_ADDR_BURST` | `3` | new logs without a note per address at once (IPv6 by /64) |
+//! | `BRAKE_ADDR_PER_DAY` | `3` | what the address bucket refills per 24 h |
+//! | `TRUSTED_PROXIES` | none | comma-separated proxy addresses or ranges whose `CF-Connecting-IP` / `X-Forwarded-For` the brake reads |
+//! | `VOUCH_URL` | none | the vouching service's base URL; unset: tokens get `503 vouch-unavailable` |
+//! | `VOUCH_CREDENTIAL` | none | the store's bearer credential at the vouching service |
+//! | `VOUCH_KEYS` | none | comma-separated multikeys of the trusted vouching keys |
 //! | `CORS_ORIGINS` | none | comma-separated origins allowed from a browser |
 //! | `FEED_TOKEN` | none | the mirror token of `GET /v1/feed` |
 //! | `IDENTITY_BURST` | `10` | writes per identity at once (the identity bucket) |
@@ -28,37 +35,8 @@ fn env_or(name: &str, default: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| default.to_string())
 }
 
-fn number<T: std::str::FromStr>(name: &str, default: T) -> Result<T, String> {
-    match std::env::var(name) {
-        Ok(v) => v
-            .parse::<T>()
-            .map_err(|_| format!("{name}={v} is not a whole number")),
-        Err(_) => Ok(default),
-    }
-}
-
 fn settings() -> Result<Settings, String> {
-    let defaults = Settings::default();
-    let cors_origins = std::env::var("CORS_ORIGINS")
-        .map(|v| {
-            v.split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect()
-        })
-        .unwrap_or_default();
-    let feed_token = std::env::var("FEED_TOKEN").ok().filter(|t| !t.is_empty());
-    let settings = Settings {
-        pow_bits: number("POW_BITS", defaults.pow_bits)?,
-        feed_token,
-        cors_origins,
-        identity_burst: number("IDENTITY_BURST", defaults.identity_burst)?,
-        identity_refill_s: number("IDENTITY_REFILL_S", defaults.identity_refill_s)?,
-        held_log_bytes: number("HELD_LOG_BYTES", defaults.held_log_bytes)?,
-        log_fold_bytes: number("LOG_FOLD_BYTES", defaults.log_fold_bytes)?,
-    };
-    settings.check()?;
-    Ok(settings)
+    Settings::from_config(|name| std::env::var(name).ok())
 }
 
 async fn serve() -> Result<(), String> {
@@ -87,7 +65,9 @@ async fn serve() -> Result<(), String> {
             }
         }
     });
-    axum::serve(listener, router(store))
+    // The socket peer of each request: the brake's address (`brake.rs`).
+    let app = router(store).into_make_service_with_connect_info::<std::net::SocketAddr>();
+    axum::serve(listener, app)
         .with_graceful_shutdown(shutdown)
         .await
         .map_err(|e| e.to_string())

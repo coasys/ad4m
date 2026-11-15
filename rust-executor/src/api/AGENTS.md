@@ -202,7 +202,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-265 methods: Cap 87, CapAnyPointer 1, Executor 48, Open 10, Operator 41, Owns 74, UserOrOperator 4. Local only (the operator on this machine): 16.
+267 methods: Cap 88, CapAnyPointer 1, Executor 48, Open 10, Operator 41, Owns 74, UserOrOperator 5. Local only (the operator on this machine): 16.
 
 | Method | Guard |
 |---|---|
@@ -286,6 +286,7 @@ the guard checked:
 | `hosting.wallet` | `Executor(runtime.hosting:READ)` |
 | `hosting.walletHistory` | `Executor(runtime.hosting:READ)` |
 | `identity.acceptJoin` | `Operator`, local only |
+| `identity.attachNote` | `UserOrOperator(agent:UPDATE)` |
 | `identity.cancelJoin` | `Operator`, local only |
 | `identity.claimOffer` | `Operator` |
 | `identity.cosignIncept` | `UserOrOperator(agent:SIGN)` |
@@ -301,6 +302,7 @@ the guard checked:
 | `identity.offers` | `Cap(agent:READ)` |
 | `identity.openOffer` | `Cap(agent:UPDATE)` |
 | `identity.postRequest` | `UserOrOperator(agent:UPDATE)` |
+| `identity.powParams` | `Cap(agent:READ)` |
 | `identity.prepareDevice` | `Operator`, local only |
 | `identity.publish` | `UserOrOperator(agent:UPDATE)` |
 | `identity.record` | `Cap(agent:READ)` |

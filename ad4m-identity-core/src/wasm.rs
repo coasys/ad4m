@@ -7,6 +7,10 @@
 //!                   state(): KeyState;
 //!                   didDocument(version?: number, alsoKnownAs?: string[]):
 //!                     { didDocument: DidDocument, didDocumentMetadata: DocumentMetadata }; }
+//! class Pow { static solve(scid: string, bits: number): { nonce: string, bits: number };
+//!             static solveRange(scid: string, bits: number, start: number, tries: number):
+//!               { nonce: string, bits: number } | undefined;
+//!             static check(scid: string, pow: { nonce: string, bits: number }, bits: number): boolean; }
 //! ```
 //!
 //! Errors are thrown as a `ChainErrorCode` object. A KEL refusal is
@@ -144,5 +148,49 @@ impl KelChainJs {
         let outcome =
             crate::import_json(&mut handle.chain, &events).map_err(|e| thrown(error_code(&e)))?;
         json_of(&outcome)
+    }
+}
+
+/// The `Pow` namespace of the TypeScript surface: the brake's proof of work for event #0
+/// (`crate::pow`). The party that builds #0 solves it; the store checks it.
+#[wasm_bindgen(js_name = Pow)]
+pub struct PowJs {}
+
+#[wasm_bindgen(js_class = Pow)]
+impl PowJs {
+    /// The proof `{ nonce, bits }` for `scid` at `bits`. Deterministic. It does not return
+    /// until it finds a proof (about `2^bits` hashes), so call it in a web worker, and refuse
+    /// first a `bits` from a store that the surface cannot afford.
+    pub fn solve(scid: &str, bits: u8) -> Result<JsValue, JsValue> {
+        json_of(&crate::pow::solve(scid, bits))
+    }
+
+    /// Tries the nonces `start`, `start + 1`, … for at most `tries` of them: the first proof
+    /// `{ nonce, bits }` that meets `bits`, else `undefined`. A surface that shows progress calls
+    /// it in rounds (`start` grows by `tries` each round). `start` and `tries` are safe
+    /// integers; another number throws `{ code: "malformed" }`.
+    #[wasm_bindgen(js_name = solveRange)]
+    pub fn solve_range(scid: &str, bits: u8, start: f64, tries: f64) -> Result<JsValue, JsValue> {
+        let start = seq_of(start).ok_or_else(|| malformed("start must be a safe integer"))?;
+        let tries = seq_of(tries).ok_or_else(|| malformed("tries must be a safe integer"))?;
+        match crate::pow::solve_range(scid, bits, u128::from(start), tries) {
+            Some(pow) => json_of(&pow),
+            None => Ok(JsValue::UNDEFINED),
+        }
+    }
+
+    /// True when `pow` (`{ nonce, bits }`) meets `bits` for `scid`. `pow.bits` is not read;
+    /// a `pow` that is not that shape is false.
+    pub fn check(scid: &str, pow: JsValue, bits: u8) -> bool {
+        let Some(text) = js_sys::JSON::stringify(&pow)
+            .ok()
+            .and_then(|s| s.as_string())
+        else {
+            return false;
+        };
+        match serde_json::from_str::<crate::pow::Pow>(&text) {
+            Ok(pow) => crate::pow::check(scid, &pow, bits),
+            Err(_) => false,
+        }
     }
 }
