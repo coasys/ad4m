@@ -590,7 +590,7 @@ pub async fn verify_flow_receipt(
     receipt: &FlowReceipt,
 ) -> anyhow::Result<ReceiptVerdict> {
     let catalogue = load_shacl_flows(perspective).await?;
-    receipt.read_set.prepare_carried_signers().await;
+    let _signers = receipt.read_set.prepare_carried_signers().await;
     Ok(verify_receipt(&catalogue, receipt))
 }
 
@@ -606,13 +606,14 @@ pub async fn verify_flow_receipt(
 /// until the read's fold is done. The fold `put`s every miss into the same
 /// bounded LRU, so without the hold an earlier miss (or a concurrent read)
 /// could evict a skipped receipt's answer, and the receipt would be
-/// re-verified with its signers not refreshed.
+/// re-verified with its signers not refreshed. The carried signers stay
+/// pending in the key map as long ([`crate::identity::cache::PendingHold`]).
 #[must_use = "the held answers must outlive the read's fold"]
 pub(crate) async fn prepare_receipt_signers<'m>(
     catalogue: &HashMap<String, SHACLFlow>,
     receipts: &[FlowReceipt],
     memo: Option<&'m VerdictMemo>,
-) -> Option<HeldAnswers<'m>> {
+) -> (Option<HeldAnswers<'m>>, crate::identity::cache::PendingHold) {
     let mut held = memo.map(VerdictMemo::hold_for_read);
     let links: Vec<crate::types::LinkExpression> = receipts
         .iter()
@@ -623,10 +624,12 @@ pub(crate) async fn prepare_receipt_signers<'m>(
         })
         .flat_map(|receipt| receipt.read_set.carried_links())
         .collect();
-    if !links.is_empty() {
-        crate::identity::prepare_link_signers(&links).await;
-    }
-    held
+    let signers = if links.is_empty() {
+        crate::identity::cache::PendingHold::none()
+    } else {
+        crate::identity::prepare_link_signers(&links).await
+    };
+    (held, signers)
 }
 
 /// The verdict as the API reports it: the three-kind `outcome` a caller must
@@ -700,7 +703,7 @@ pub async fn mint_flow_receipt(
     // window: refresh their signers' key logs, so the person each vote
     // resolves to is the same on every replica that can read the logs and a
     // stale cached head cannot let a revoked key's vote count.
-    read_set.prepare_carried_signers().await;
+    let _signers = read_set.prepare_carried_signers().await;
 
     // The outputs the run committed to, read off the counted atoms of the
     // final settled edge. `mint` re-derives the fold and re-checks the hash,

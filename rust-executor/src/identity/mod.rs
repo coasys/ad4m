@@ -436,19 +436,20 @@ pub(crate) fn is_local_agent(did: &str) -> bool {
 
 /// Puts the trusted logs of `people` (the persons stored links carry) back into the key map
 /// where its bound dropped them ([`Resolver::read_logs`]), before those links are judged again.
-pub async fn read_logs_of(people: &[&str]) {
+/// `Err` when a log the cache holds could not be read: the links it names are judged without
+/// it, so the caller's re-check is incomplete and runs again.
+pub async fn read_logs_of(people: &[&str]) -> Result<(), String> {
     if people.is_empty() {
-        return;
+        return Ok(());
     }
     #[cfg(test)]
     if let Ok(resolver) = TEST_RESOLVER.try_with(Arc::clone) {
-        resolver.read_logs(people).await;
-        return;
+        return resolver.read_logs(people).await;
     }
     let Some(service) = SERVICE.get() else {
-        return;
+        return Ok(());
     };
-    service.resolver.read_logs(people).await;
+    service.resolver.read_logs(people).await
 }
 
 /// Fills the key map for the signers of `links` before they are checked and stored: the key
@@ -456,16 +457,19 @@ pub async fn read_logs_of(people: &[&str]) {
 /// A listed signer's log is also refreshed when the store last confirmed its head more than
 /// [`resolver::ADMIT_FRESHNESS`] ago, which is what the receipt paths lean on before they
 /// re-judge carried links under the same window a live write is admitted under.
-pub async fn prepare_link_signers(links: &[LinkExpression]) {
+///
+/// Keep the returned hold until `links` are judged: while it lives a signer the prepare got no
+/// answer for is pending ([`cache::KeyMap::hold`]), so its link is `CantCheck`, however long
+/// the prepare took.
+pub async fn prepare_link_signers(links: &[LinkExpression]) -> cache::PendingHold {
     #[cfg(test)]
     if let Ok(resolver) = TEST_RESOLVER.try_with(Arc::clone) {
-        resolver.prepare(&signers_to_prepare(links)).await;
-        return;
+        return resolver.prepare(&signers_to_prepare(links)).await;
     }
     let Some(service) = SERVICE.get() else {
-        return;
+        return cache::PendingHold::none();
     };
-    service.resolver.prepare(&signers_to_prepare(links)).await;
+    service.resolver.prepare(&signers_to_prepare(links)).await
 }
 
 #[cfg(test)]
