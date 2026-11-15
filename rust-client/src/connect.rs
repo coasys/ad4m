@@ -803,7 +803,12 @@ impl<E: ExecutorIo> Ad4mConnect<E> {
             r @ (Reading::Authenticated | Reading::Locked) => {
                 // A locked wallet is a state, not a bad token: keep it (TS
                 // stores the JWT before `connect()` re-checks the wallet).
-                self.store.set_token(&url, &self.opts.app.name, &jwt)?;
+                if let Err(e) = self.store.set_token(&url, &self.opts.app.name, &jwt) {
+                    // Nothing adopts this socket, and dropping the handle
+                    // would leave its reader running (N3).
+                    rpc.close().await;
+                    return Err(e);
+                }
                 let _ = self.remember_url(&url);
                 let authed = matches!(r, Reading::Authenticated);
                 let generation = self.adopt(rpc, &jwt).await;
@@ -825,19 +830,26 @@ impl<E: ExecutorIo> Ad4mConnect<E> {
         }
     }
 
-    /// Drop the session and the stored token (TS `disconnect`).
+    /// Drop the session and the stored token (TS `disconnect`). The socket
+    /// is closed and `Unauthenticated` published even when the store fails;
+    /// the store's error is returned after.
     pub async fn disconnect(&mut self) -> Result<()> {
         // The closed socket's refusal, if one is still in flight, is stale.
         *self.current.lock().unwrap() += 1;
         if let Some(rpc) = self.rpc.take() {
             rpc.close().await;
         }
-        if let Some(url) = &self.url {
-            self.store.remove_token(url, &self.opts.app.name)?;
-            self.store
-                .set_last_url(&self.opts.app.name, url, self.pinned)?;
-        }
+        // The socket is gone whatever the store says: publish that first,
+        // then report the store's error (N3).
         self.set_state(AuthState::Unauthenticated);
+        if let Some(url) = &self.url {
+            let removed = self.store.remove_token(url, &self.opts.app.name);
+            let remembered = self
+                .store
+                .set_last_url(&self.opts.app.name, url, self.pinned);
+            removed?;
+            remembered?;
+        }
         Ok(())
     }
 
@@ -2260,6 +2272,63 @@ mod tests {
             Some("jwt-newer"),
             "a refusal deleted a token it was not opened with"
         );
+    }
+
+    /// Round 3 N3: the store breaks while the user authenticates; storing
+    /// the minted token fails. `connect` returns the error and closes the
+    /// socket it opened with that token: nothing adopts it, and a dropped
+    /// handle would keep its reader running.
+    #[tokio::test]
+    async fn a_store_error_after_minting_closes_the_new_socket() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tokens.json");
+        let handler = single_user_handler("jwt-minted");
+        let io = FakeIo::new(move |token, method, params| {
+            if method == "agent.generateJwt" {
+                std::fs::write(&path, "{ corrupt").unwrap();
+            }
+            handler(token, method, params)
+        });
+        let mut s = session(dir.path(), io, opts());
+        let mut prompts = ScriptedPrompts {
+            cap_codes: ["123456".into()].into(),
+            ..Default::default()
+        };
+        let err = s.connect(&mut prompts).await.unwrap_err();
+        assert!(format!("{err:#}").contains("tokens.json"), "{err:#}");
+        let minted = s.io.last_rpc();
+        assert_eq!(minted.0.token, "jwt-minted");
+        assert!(
+            minted.0.closed.load(Ordering::SeqCst),
+            "the minted token's socket was left open"
+        );
+        assert_eq!(s.state(), AuthState::Unauthenticated);
+    }
+
+    /// Round 3 N3: `disconnect` with a broken store still closes the socket
+    /// and publishes Unauthenticated, then returns the store error.
+    #[tokio::test]
+    async fn a_store_error_on_disconnect_still_publishes_unauthenticated() {
+        let dir = tempfile::tempdir().unwrap();
+        TokenStore::new(dir.path())
+            .set_token(URL, "test-app", "jwt-stored")
+            .unwrap();
+        let io = FakeIo::new(|_token, method, _| match method {
+            "agent.status" => Ok(authed_status()),
+            other => Err(rpc_err(404, &format!("unexpected {other}"))),
+        });
+        let mut s = session(dir.path(), io, opts());
+        assert_eq!(
+            s.connect(&mut NoPrompts).await.unwrap(),
+            AuthState::Authenticated
+        );
+        std::fs::write(dir.path().join("tokens.json"), "{ corrupt").unwrap();
+        assert!(
+            s.disconnect().await.is_err(),
+            "the store error was swallowed"
+        );
+        assert!(s.io.last_rpc().0.closed.load(Ordering::SeqCst));
+        assert_eq!(s.state(), AuthState::Unauthenticated);
     }
 
     #[test]
