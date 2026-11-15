@@ -4,8 +4,12 @@
 //!
 //! ```sh
 //! cargo run -p ad4m-client --example connect -- \
-//!     [--url http://127.0.0.1:12000] [--port 12000] [--email you@example.com]
+//!     [--url http://127.0.0.1:12000] [--port 12000] [--email you@example.com] \
+//!     [--allow-insecure-remote]
 //! ```
+//!
+//! A plaintext (`http://`/`ws://`) executor off loopback is refused unless
+//! `--allow-insecure-remote` is given.
 
 use ad4m_client::connect::{
     default_token_dir, Ad4mConnect, AppInfo, AuthState, ConnectOptions, ConnectPrompts,
@@ -132,10 +136,12 @@ async fn main() -> Result<()> {
                         .ok_or_else(|| anyhow!("--email needs a value"))?,
                 )
             }
+            "--allow-insecure-remote" => opts = opts.allow_insecure_remote(true),
             _ => {
                 return Err(anyhow!(
-                "unknown argument {arg}\nusage: connect [--url URL] [--port PORT] [--email EMAIL]"
-            ))
+                    "unknown argument {arg}\nusage: connect [--url URL] [--port PORT] \
+                     [--email EMAIL] [--allow-insecure-remote]"
+                ))
             }
         }
     }
