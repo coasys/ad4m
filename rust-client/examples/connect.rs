@@ -37,7 +37,8 @@ fn ask(prompt: &str) -> Result<String> {
 
 /// A secret (password, approval or email code): read from the terminal with
 /// echo off. `rpassword` switches echo back on when the read ends, on an
-/// error too.
+/// error too; on ^C it raises SIGINT first, which `restore_terminal_on_interrupt`
+/// handles.
 fn ask_secret(prompt: &str) -> Result<String> {
     let answer = rpassword::prompt_password(prompt)?;
     match answer.trim() {
@@ -112,8 +113,39 @@ impl ConnectPrompts for TermPrompts {
     }
 }
 
+/// ^C during a hidden read: `rpassword` raises SIGINT before it puts the
+/// terminal back, so with the default disposition the shell would inherit a
+/// terminal without echo. Instead: save the terminal's settings now, and on
+/// SIGINT put them back and exit like an interrupted program (130). Not for
+/// uncatchable ends (SIGKILL).
+#[cfg(unix)]
+fn restore_terminal_on_interrupt() {
+    use std::os::fd::AsRawFd;
+    let saved = std::fs::File::open("/dev/tty").ok().and_then(|tty| {
+        let mut term = std::mem::MaybeUninit::<libc::termios>::uninit();
+        // SAFETY: a valid fd and a pointer to storage for one termios.
+        (unsafe { libc::tcgetattr(tty.as_raw_fd(), term.as_mut_ptr()) } == 0)
+            // SAFETY: tcgetattr succeeded, so it filled `term`.
+            .then(|| (tty, unsafe { term.assume_init() }))
+    });
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_err() {
+            return;
+        }
+        if let Some((tty, term)) = &saved {
+            // SAFETY: the fd is still open (`tty` lives here); `term` came
+            // from tcgetattr.
+            unsafe { libc::tcsetattr(tty.as_raw_fd(), libc::TCSANOW, term) };
+        }
+        println!();
+        std::process::exit(130);
+    });
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    #[cfg(unix)]
+    restore_terminal_on_interrupt();
     let mut opts = ConnectOptions::new(AppInfo::new(
         "ad4m-connect-example",
         "The Rust connect example",

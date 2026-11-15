@@ -40,3 +40,7 @@ tempfile = "3"
 [dev-dependencies]
 # The connect example reads passwords and codes without echo.
 rpassword = "7"
+
+[target.'cfg(unix)'.dev-dependencies]
+# The connect example restores the terminal on ^C.
+libc = "0.2"
