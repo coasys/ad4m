@@ -265,7 +265,7 @@ struct Shared {
 #[cfg(test)]
 pub(crate) struct SendBlocker {
     parked: tokio::sync::mpsc::UnboundedSender<()>,
-    gate: tokio::sync::Semaphore,
+    pub(crate) gate: tokio::sync::Semaphore,
 }
 
 /// Merge every named interest into the `events.watch` params: for each event
@@ -946,6 +946,13 @@ impl WsRpcClient {
             let _ = b.parked.send(());
             let _ = b.gate.acquire().await.map(|p| p.forget());
         }
+    }
+
+    /// [`park_point`](Self::park_point) for code outside this module that
+    /// holds the client (live queries, models).
+    #[cfg(test)]
+    pub(crate) async fn test_park(&self, name: &'static str) {
+        Self::park_point(&self.shared, name).await;
     }
 
     /// Wait for a socket (or permanent close), then send and await the reply.

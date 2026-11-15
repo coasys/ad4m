@@ -403,7 +403,21 @@ impl Inner {
     /// `LiveQuery::start` on the shared inner — a re-open (or the
     /// last-handle teardown) must not mint a handle to call it: a handle
     /// dropping mid-teardown would run the teardown again (R4).
+    ///
+    /// One spawned task owns the whole open-to-install sequence: the
+    /// caller only awaits it. A caller cancelled after the open succeeded
+    /// — its reply queued but unread, or read but the id not yet in
+    /// `state` — leaves the task to install the id (or, on a disposed
+    /// query, release it), so the subscription is never stranded with
+    /// nobody holding its id (N3). This holds for any [`OpenFn`].
     async fn start(self: &Arc<Self>) -> Result<Value> {
+        let this = self.clone();
+        tokio::spawn(async move { this.start_owned().await })
+            .await
+            .map_err(|e| anyhow::anyhow!("live query start ended: {e}"))?
+    }
+
+    async fn start_owned(self: &Arc<Self>) -> Result<Value> {
         self.ensure_watch().await?;
         let generation = {
             let mut s = self.state.lock().await;
@@ -427,6 +441,8 @@ impl Inner {
             }
         };
 
+        #[cfg(test)]
+        self.ws.test_park("start:opened").await;
         let mut state = self.state.lock().await;
         if state.disposed || state.generation != generation {
             let dispose_id = subscribed.subscription_id.clone();
