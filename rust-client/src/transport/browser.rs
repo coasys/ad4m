@@ -245,6 +245,9 @@ pub(crate) async fn connect(url: &str, display_url: &str) -> Result<Socket> {
     }) as Box<dyn FnMut(_)>);
     ws.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
 
+    #[cfg(test)]
+    tests::LAST_SOCKET.with(|s| *s.borrow_mut() = Some(ws.clone()));
+
     // Owned before the first await: every exit from here — open, failure,
     // or this future dropped mid-handshake — goes through `Owned::drop`.
     let owned = Owned {
@@ -285,6 +288,25 @@ mod tests {
     use wasm_bindgen_test::*;
 
     wasm_bindgen_test_configure!(run_in_browser);
+
+    thread_local! {
+        /// The socket `connect` built last, so a test can inspect one whose
+        /// `connect` future it already dropped.
+        pub(super) static LAST_SOCKET: RefCell<Option<WebSocket>> = const { RefCell::new(None) };
+    }
+
+    /// Every handler of `ws` is detached and it is closing or closed.
+    fn assert_released(ws: &WebSocket) {
+        assert!(ws.onopen().is_none(), "onopen still set");
+        assert!(ws.onmessage().is_none(), "onmessage still set");
+        assert!(ws.onerror().is_none(), "onerror still set");
+        assert!(ws.onclose().is_none(), "onclose still set");
+        assert!(
+            matches!(ws.ready_state(), WebSocket::CLOSING | WebSocket::CLOSED),
+            "readyState {}",
+            ws.ready_state()
+        );
+    }
 
     fn peer_http() -> &'static str {
         option_env!("FAKE_PEER_URL")
@@ -378,7 +400,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(counts(key).await, (1, 1));
+        let ws = LAST_SOCKET.with(|s| s.borrow_mut().take()).unwrap();
         drop(socket);
+        assert_released(&ws);
         assert_eq!(wait_closed(key, Duration::from_secs(3)).await, (1, 0));
         assert_eq!(
             trap.after(Duration::from_millis(300)).await,
@@ -415,6 +439,12 @@ mod tests {
         let r = rt::timeout(Duration::from_millis(300), connect(&url, "hang")).await;
         assert!(r.is_err(), "the hanging handshake resolved");
         assert_eq!(counts(key).await.0, 1, "the peer never saw the dial");
+        // On every browser: the dropped dial left no handler on its socket
+        // and asked the browser to close it.
+        let ws = LAST_SOCKET
+            .with(|s| s.borrow_mut().take())
+            .expect("connect built a socket");
+        assert_released(&ws);
         // Firefox keeps the TCP connection of a socket closed while
         // CONNECTING open until the peer answers or its own timeout: a raw
         // `WebSocket` closed the same way stays open at the peer for 10 s+
@@ -424,7 +454,7 @@ mod tests {
         if ua.contains("Firefox") {
             web_sys::console::warn_1(
                 &"Firefox: a socket closed while CONNECTING keeps its TCP connection; \
-                  the peer-side check runs in Chromium"
+                  handlers checked above, the peer-side check runs in Chromium"
                     .into(),
             );
         } else {
