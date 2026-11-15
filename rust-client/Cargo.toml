@@ -36,3 +36,7 @@ reqwest = { version = "0.11.20", features = ["json", "native-tls"] }
 # The connect token store: a cross-process lock and atomic replace.
 fd-lock = "4"
 tempfile = "3"
+
+[dev-dependencies]
+# The connect example reads passwords and codes without echo.
+rpassword = "7"

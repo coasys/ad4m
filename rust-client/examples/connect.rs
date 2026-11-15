@@ -16,7 +16,8 @@ use std::future::Future;
 use std::io::Write;
 
 /// Terminal `ConnectPrompts`: prints the request/wait states and reads the
-/// typed answers from stdin. An empty line cancels.
+/// typed answers: the email from stdin, passwords and codes from the
+/// terminal with echo off. An empty line cancels.
 struct TermPrompts;
 
 fn ask(prompt: &str) -> Result<String> {
@@ -25,6 +26,17 @@ fn ask(prompt: &str) -> Result<String> {
     let mut line = String::new();
     std::io::stdin().read_line(&mut line)?;
     match line.trim() {
+        "" => Err(anyhow!("cancelled")),
+        answer => Ok(answer.to_string()),
+    }
+}
+
+/// A secret (password, approval or email code): read from the terminal with
+/// echo off. `rpassword` switches echo back on when the read ends, on an
+/// error too.
+fn ask_secret(prompt: &str) -> Result<String> {
+    let answer = rpassword::prompt_password(prompt)?;
+    match answer.trim() {
         "" => Err(anyhow!("cancelled")),
         answer => Ok(answer.to_string()),
     }
@@ -41,7 +53,7 @@ impl ConnectPrompts for TermPrompts {
         async move {
             println!("\n\"{app_name}\" is asking for access (request {request_id}).");
             println!("Approve it in your AD4M UI, then type the 6-digit code.");
-            ask("code> ")
+            ask_secret("code> ")
         }
     }
 
@@ -56,7 +68,7 @@ impl ConnectPrompts for TermPrompts {
         let email = email.to_string();
         async move {
             println!("A sign-in code was emailed to {email}.");
-            ask("code> ")
+            ask_secret("code> ")
         }
     }
 
@@ -72,7 +84,7 @@ impl ConnectPrompts for TermPrompts {
             } else {
                 println!("This executor has no email configured; log in to {email} by password.");
             }
-            ask("password> ")
+            ask_secret("password> ")
         }
     }
 
