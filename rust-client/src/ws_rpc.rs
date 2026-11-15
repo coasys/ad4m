@@ -519,7 +519,9 @@ impl WsRpcClient {
                     std::mem::take(&mut refusal.callbacks)
                 };
                 for (_, cb) in callbacks {
-                    cb(&reason);
+                    // A panicking callback must not skip the later ones or
+                    // the terminal cleanup below (the list is already taken).
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cb(&reason)));
                 }
                 // Terminal, like `close`: no socket will ever come back.
                 shared.closed_tx.send_replace(true);
@@ -938,7 +940,9 @@ impl WsRpcClient {
     /// the token (close code 1008): expired, revoked, or bad signature — like
     /// TS `ApiClient.onAuthFailed`. No reconnect follows; `reason` is the
     /// server's close reason. If the refusal already happened, the callback
-    /// fires at once. Returns an id for `remove_on_auth_failed`.
+    /// fires at once (on the caller's task). A callback that panics in the
+    /// reader does not stop the later callbacks or the terminal cleanup.
+    /// Returns an id for `remove_on_auth_failed`.
     pub async fn on_auth_failed(&self, callback: impl Fn(&str) + Send + Sync + 'static) -> u64 {
         static CB_ID: AtomicU64 = AtomicU64::new(0);
         let id = CB_ID.fetch_add(1, Ordering::Relaxed);
@@ -2517,6 +2521,42 @@ mod tests {
             .await;
         assert_eq!(late.load(Ordering::SeqCst), 1);
         assert_eq!(runs.load(Ordering::SeqCst), 1);
+        client.close().await;
+    }
+
+    /// Round 3 N2: a panicking refusal callback must not skip the later
+    /// callbacks or the terminal cleanup (closed signal, disconnected).
+    #[tokio::test]
+    async fn a_panicking_auth_failed_callback_does_not_skip_the_rest() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let client = WsRpcClient::connect(fake.url(), "").await.unwrap();
+        client
+            .on_auth_failed(|_| panic!("the first refusal callback panics"))
+            .await;
+        let (ran_tx, mut ran) = tokio::sync::mpsc::unbounded_channel::<String>();
+        client
+            .on_auth_failed(move |reason| {
+                let _ = ran_tx.send(reason.to_string());
+            })
+            .await;
+
+        let mut closed = client.shared.closed_tx.subscribe();
+        let mut connected = client.shared.connected.subscribe();
+        fake.drop_connection_with_code(1008);
+        tokio::time::timeout(PROMPT, ran.recv())
+            .await
+            .expect("the callback after the panicking one never ran")
+            .expect("the callback after the panicking one was dropped unrun");
+        tokio::time::timeout(PROMPT, closed.wait_for(|c| *c))
+            .await
+            .expect("no terminal signal after the panicking callback")
+            .unwrap();
+        tokio::time::timeout(PROMPT, connected.wait_for(|c| !*c))
+            .await
+            .expect("the disconnect cleanup never ran")
+            .unwrap();
+        assert!(client.auth_failed());
         client.close().await;
     }
 
