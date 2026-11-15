@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
-# Browser (wasm32) smoke test for ad4m-client: starts a scratch
-# ad4m-executor and runs rust-client/tests/wasm_browser.rs in a real
-# browser through wasm-bindgen-test-runner.
+# Browser (wasm32) tests for ad4m-client: starts a scratch ad4m-executor
+# WITH an admin credential (a real token, one that needs URL encoding) and
+# the scripted peer scripts/wasm-test-server.py (fake WebSocket endpoints
+# plus a connection-counting proxy to the executor), then runs the crate's
+# in-browser unit tests (`--lib`, transport/browser.rs) and
+# rust-client/tests/wasm_browser.rs in a real browser through
+# wasm-bindgen-test-runner.
 #
 #   bash scripts/test-wasm-client.sh                    # headless Chromium
 #   DRIVER=firefox bash scripts/test-wasm-client.sh     # headless Firefox
@@ -37,16 +41,29 @@ PORT="${WASM_EXEC_PORT:-}"
 if [ -z "$PORT" ]; then
     PORT="$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()' 2>/dev/null || echo 12499)"
 fi
-"$EXEC" run \
+free_port() {
+    python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()'
+}
+# A real credential: random, with characters the query string must encode.
+ADMIN_TOKEN="wasm admin+$(python3 -c 'import secrets;print(secrets.token_hex(12))')/=&?%"
+AD4M_ADMIN_CREDENTIAL="$ADMIN_TOKEN" "$EXEC" run \
     --app-data-path "$DATA" \
     --port "$PORT" \
     --run-holochain false \
     --language-language-only true \
     --run-dapp-server false \
-    --insecure-no-admin-credential \
-    >/dev/null 2>&1 &
+    >"$DATA.executor.log" 2>&1 &
 EPID=$!
-cleanup() { kill "$EPID" 2>/dev/null || true; rm -rf "$DATA"; }
+CONTROL_PORT="$(free_port)"
+PROXY_PORT="$(free_port)"
+python3 -I scripts/wasm-test-server.py --control "$CONTROL_PORT" \
+    --proxy "$PROXY_PORT" --target "$PORT" &
+SPID=$!
+# Only the processes this script started; never by binary name.
+cleanup() {
+    kill "$EPID" "$SPID" 2>/dev/null || true
+    rm -rf "$DATA" "$DATA.executor.log"
+}
 [ "${KEEP:-0}" = "1" ] || trap cleanup EXIT
 
 echo "waiting for executor on :$PORT ..."
@@ -55,10 +72,17 @@ for i in $(seq 1 240); do
     if curl -sf "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then up=1; break; fi
     sleep 0.5
 done
-[ -n "$up" ] || { echo "executor never came up on :$PORT" >&2; exit 1; }
+[ -n "$up" ] || {
+    echo "executor never came up on :$PORT" >&2; tail -20 "$DATA.executor.log" >&2; exit 1; }
 
 # --- wasm test ----------------------------------------------------------------
 export EXECUTOR_URL="http://127.0.0.1:$PORT"
+export EXECUTOR_PROXY_URL="http://127.0.0.1:$PROXY_PORT"
+export FAKE_PEER_URL="http://127.0.0.1:$CONTROL_PORT"
+export ADMIN_TOKEN
+# A port nothing listens on: a refused TCP connect.
+CLOSED_PORT="$(free_port)"
+export CLOSED_PORT
 export CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER="${WASM_RUNNER:-wasm-bindgen-test-runner}"
 
 DRIVER="${DRIVER:-chromium}"
@@ -71,5 +95,7 @@ esac
 echo "wasm test in $DRIVER against $EXECUTOR_URL ..."
 # -p is required: run from the workspace root, cargo would otherwise build
 # every member for wasm32 (rust-executor's tokio/mio can't compile there).
+# The env above is read at compile time (`option_env!`): it changes per run,
+# so these test crates rebuild each time.
 cargo test -p ad4m-client --target wasm32-unknown-unknown \
-    --test wasm_browser
+    --lib --test wasm_browser "$@"

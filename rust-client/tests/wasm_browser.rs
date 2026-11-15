@@ -3,10 +3,12 @@
 //! real queries — the same calls the native integration test makes.
 //!
 //! Driven by `scripts/test-wasm-client.sh`, which starts a scratch
-//! executor (`--insecure-no-admin-credential`, no Holochain) and exports
-//! `EXECUTOR_URL` + the webdriver env. By hand:
+//! executor with an admin credential (no Holochain) and the scripted peer
+//! `scripts/wasm-test-server.py`, and exports `EXECUTOR_URL`,
+//! `EXECUTOR_PROXY_URL` (the counting proxy), `FAKE_PEER_URL`,
+//! `ADMIN_TOKEN` + the webdriver env. By hand:
 //!
-//!   EXECUTOR_URL=http://127.0.0.1:PORT \
+//!   EXECUTOR_URL=http://127.0.0.1:PORT ADMIN_TOKEN=... \
 //!   CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner \
 //!   CHROMEDRIVER=/snap/bin/chromium.chromedriver \
 //!   cargo test --target wasm32-unknown-unknown --test wasm_browser
@@ -25,29 +27,48 @@ fn executor_url() -> String {
         .to_string()
 }
 
+/// The executor's real admin credential (it contains characters a query
+/// string must encode).
+fn admin_token() -> String {
+    option_env!("ADMIN_TOKEN")
+        .expect("ADMIN_TOKEN: run through scripts/test-wasm-client.sh")
+        .to_string()
+}
+
+/// The admin client, with the main agent generated and unlocked whatever
+/// test runs first.
+async fn admin() -> Ad4mClient {
+    let client = Ad4mClient::connect(executor_url(), admin_token())
+        .await
+        .expect("connect to executor with the admin credential");
+    let status = client.agent.status().await.expect("agent.status");
+    if !status.is_initialized {
+        let status = client
+            .agent
+            .generate(PASSPHRASE.to_string())
+            .await
+            .expect("agent.generate");
+        assert!(status.is_unlocked);
+    } else if !status.is_unlocked {
+        client
+            .agent
+            .unlock(PASSPHRASE.to_string(), false)
+            .await
+            .expect("agent.unlock");
+    }
+    client
+}
+
+const PASSPHRASE: &str = "wasm-pass";
+
 #[wasm_bindgen_test]
 async fn wasm_client_connects_authenticates_and_queries() {
-    let client = Ad4mClient::connect(executor_url(), String::new())
-        .await
-        .expect("connect to executor");
+    // Auth: the executor runs with an admin credential, so this is a real
+    // authenticated session (agent.generate, when this test runs first, is
+    // a LONG_METHODS call whose reply crosses the browser socket).
+    let client = admin().await;
     assert!(client.ws().is_connected());
-
-    // A normal-timeout read first: proves the pending-map round trip.
-    let st0 = client.agent.status().await.expect("agent.status");
-    assert!(
-        !st0.is_initialized,
-        "fresh data dir must start uninitialised"
-    );
-
-    // Auth: --insecure-no-admin-credential accepts the empty token, so
-    // this is the real authenticated session — agent.generate mints the
-    // agent on the fresh data dir (a LONG_METHODS call — its reply must
-    // arrive over the browser socket, not a shim).
-    let status = client
-        .agent
-        .generate("wasm-pass".to_string())
-        .await
-        .expect("agent.generate");
+    let status = client.agent.status().await.expect("agent.status");
     assert!(status.is_unlocked);
     assert!(status.did.is_some());
 
