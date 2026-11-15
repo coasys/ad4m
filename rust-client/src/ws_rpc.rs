@@ -1269,6 +1269,8 @@ impl WsRpcClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::future::Future;
+    use std::task::Poll;
 
     #[test]
     fn to_ws_url_converts_http_to_ws() {
@@ -2271,33 +2273,38 @@ mod tests {
             .await
             .expect("the install never passed its final revision check");
 
-        // First live-query interest, between check and publication.
-        let caller = WsRpcClient {
-            shared: client.shared.clone(),
-        };
-        let mut watch = tokio::spawn(async move {
-            caller
-                .set_watch("q", serde_json::json!({"query-subscription-update": null}))
-                .await
-        });
-        // Let it run as far as it can while the install is parked (a
-        // fixed client blocks it; the buggy one lets it return).
-        let _ = tokio::time::timeout(Duration::from_millis(300), &mut watch).await;
+        // First live-query interest, between check and publication. The
+        // future is polled once by hand with this task's waker, not
+        // spawned: the install holds `watches`, so a fixed client cannot
+        // finish it now. The buggy one read `connected == false`, recorded
+        // the interest and returned Ready, with nothing left to flush it.
+        let watch = client.set_watch("q", serde_json::json!({"query-subscription-update": null}));
+        tokio::pin!(watch);
+        let first = std::future::poll_fn(|cx| Poll::Ready(watch.as_mut().poll(cx))).await;
+        assert!(
+            first.is_pending(),
+            "set_watch finished while the install held its final revision check: {first:?}"
+        );
         gate.gate.add_permits(1);
 
-        let frame = fake
-            .maybe_request(PROMPT)
+        // The same future, driven while the executor is served: it must
+        // send the interest itself once the socket is published.
+        let serve = async {
+            let frame = fake
+                .maybe_request(PROMPT)
+                .await
+                .expect("no events.watch ever installed the interest recorded before publication");
+            assert_eq!(frame["type"], "events.watch");
+            assert_eq!(
+                frame["params"],
+                serde_json::json!({"query-subscription-update": null})
+            );
+            fake.reply(&frame, Value::Bool(true)).await;
+        };
+        let (result, ()) = tokio::time::timeout(PROMPT, async { tokio::join!(watch, serve) })
             .await
-            .expect("no events.watch ever installed the interest recorded before publication");
-        assert_eq!(frame["type"], "events.watch");
-        assert_eq!(
-            frame["params"],
-            serde_json::json!({"query-subscription-update": null})
-        );
-        fake.reply(&frame, Value::Bool(true)).await;
-        if !watch.is_finished() {
-            watch.await.unwrap().unwrap();
-        }
+            .expect("set_watch never completed after publication");
+        result.unwrap();
         assert!(client.is_connected());
         client.close().await;
     }
