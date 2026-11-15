@@ -11,6 +11,7 @@
 #   DRIVER=firefox bash scripts/test-wasm-client.sh     # headless Firefox
 #   EXECUTOR_PATH=/path/ad4m-executor bash scripts/test-wasm-client.sh
 #   KEEP=1 ...                                          # keep the executor up
+#   WASM_TESTS=--lib bash scripts/test-wasm-client.sh [filter]  # one test crate
 #
 # Requires: wasm-bindgen-test-runner matching Cargo.lock's wasm-bindgen
 #   (cargo install wasm-bindgen-cli --version $(grep -A1 'name = "wasm-bindgen"'
@@ -97,5 +98,7 @@ echo "wasm test in $DRIVER against $EXECUTOR_URL ..."
 # every member for wasm32 (rust-executor's tokio/mio can't compile there).
 # The env above is read at compile time (`option_env!`): it changes per run,
 # so these test crates rebuild each time.
+# WASM_TESTS picks the test crates (default both); arguments filter tests.
+# shellcheck disable=SC2086
 cargo test -p ad4m-client --target wasm32-unknown-unknown \
-    --lib --test wasm_browser "$@"
+    ${WASM_TESTS:---lib --test wasm_browser} "$@"

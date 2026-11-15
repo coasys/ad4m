@@ -25,10 +25,18 @@ use web_sys::{CloseEvent, ErrorEvent, MessageEvent, WebSocket};
 /// The event queue — `mpsc` because the browser's event loop is the driver.
 pub(crate) type WsStream = futures_util::stream::LocalBoxStream<'static, InFrame>;
 
-/// The send half: the live `WebSocket`, plus the event closures registered
-/// on it. The closures must outlive the socket's use — they are stored
-/// here, so dropping the sink unregisters them and closes the socket.
+/// The send half: owns the live socket.
 pub(crate) struct WsSink {
+    owned: Owned,
+}
+
+/// A `WebSocket` and the four closures registered on it, owned from the
+/// moment the handlers are set — before the handshake ends. Dropping it
+/// (the sink dropped, a failed handshake, or a `connect` future cancelled
+/// before open) detaches every handler first, so the browser never calls
+/// a function whose Rust closure is gone, then closes the socket, so no
+/// connection outlives its owner.
+struct Owned {
     ws: WebSocket,
     _onopen: Closure<dyn FnMut()>,
     _onmessage: Closure<dyn FnMut(MessageEvent)>,
@@ -36,22 +44,30 @@ pub(crate) struct WsSink {
     _onclose: Closure<dyn FnMut(CloseEvent)>,
 }
 
+impl Drop for Owned {
+    fn drop(&mut self) {
+        self.ws.set_onopen(None);
+        self.ws.set_onmessage(None);
+        self.ws.set_onerror(None);
+        self.ws.set_onclose(None);
+        // Valid in CONNECTING too: the handshake is abandoned.
+        let _ = self.ws.close();
+    }
+}
+
 impl SendText for WsSink {
     async fn send_text(&mut self, text: String) -> Result<()> {
-        self.ws
+        self.owned
+            .ws
             .send_with_str(&text)
             .map_err(|e| anyhow!("WebSocket send failed: {e:?}"))
     }
 }
 
-impl Drop for WsSink {
-    /// Dropping the send half closes the socket — like dropping the native
-    /// write half (which closes the TCP stream executor-side). This is what
-    /// makes `disconnect_for_testing`/`close` sever a live browser socket.
-    fn drop(&mut self) {
-        let _ = self.ws.close();
-    }
-}
+// Dropping the send half closes the socket (`Owned`'s drop) — like dropping
+// the native write half, which closes the TCP stream executor-side. This is
+// what makes `disconnect_for_testing`/`close` sever a live browser socket.
+// The stream half then ends: the detached handlers held its only senders.
 
 /// Start the handshake and resolve once it ends — `Ok` on the open event,
 /// `Err` on a pre-open error or close. `display_url` is the token-less URL
@@ -113,20 +129,173 @@ pub(crate) async fn connect(url: &str, display_url: &str) -> Result<Socket> {
     }) as Box<dyn FnMut(_)>);
     ws.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
 
+    // Owned before the first await: every exit from here — open, failure,
+    // or this future dropped mid-handshake — goes through `Owned::drop`.
+    let owned = Owned {
+        ws,
+        _onopen: onopen,
+        _onmessage: onmessage,
+        _onerror: onerror,
+        _onclose: onclose,
+    };
+
     match open_rx.await {
         Ok(Ok(())) => Ok(Socket {
-            sink: WsSink {
-                ws,
-                _onopen: onopen,
-                _onmessage: onmessage,
-                _onerror: onerror,
-                _onclose: onclose,
-            },
+            sink: WsSink { owned },
             stream: rx.boxed_local(),
         }),
         Ok(Err(e)) => Err(anyhow!("WebSocket connection to {display_url} failed: {e}")),
         Err(_) => Err(anyhow!(
             "WebSocket connection to {display_url} failed: event handlers dropped"
         )),
+    }
+}
+
+/// In-browser tests of this transport against the scripted peer
+/// (`scripts/wasm-test-server.py`), run by `scripts/test-wasm-client.sh`.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rt;
+    use std::time::Duration;
+    use wasm_bindgen_futures::JsFuture;
+    use wasm_bindgen_test::*;
+
+    wasm_bindgen_test_configure!(run_in_browser);
+
+    fn peer_http() -> &'static str {
+        option_env!("FAKE_PEER_URL")
+            .expect("FAKE_PEER_URL: run through scripts/test-wasm-client.sh")
+    }
+
+    /// A `ws://` URL of the scripted peer.
+    fn peer(path: &str) -> String {
+        format!("{}/{path}", peer_http().replacen("http://", "ws://", 1))
+    }
+
+    /// The peer's `(accepted, open)` connection counts under `key`.
+    async fn counts(key: &str) -> (u64, u64) {
+        let window = web_sys::window().unwrap();
+        let resp = JsFuture::from(window.fetch_with_str(&format!("{}/count/{key}", peer_http())))
+            .await
+            .unwrap();
+        let resp: web_sys::Response = resp.dyn_into().unwrap();
+        let text = JsFuture::from(resp.text().unwrap()).await.unwrap();
+        let v: serde_json::Value = serde_json::from_str(&text.as_string().unwrap()).unwrap();
+        (v["accepted"].as_u64().unwrap(), v["open"].as_u64().unwrap())
+    }
+
+    /// Wait until the peer holds no open connection under `key`.
+    async fn wait_closed(key: &str, within: Duration) -> (u64, u64) {
+        let mut waited = Duration::ZERO;
+        loop {
+            let c = counts(key).await;
+            if c.1 == 0 || waited >= within {
+                return c;
+            }
+            rt::sleep(Duration::from_millis(50)).await;
+            waited += Duration::from_millis(50);
+        }
+    }
+
+    /// Records every exception that reaches the page uncaught — a browser
+    /// event handler that throws (a failed cast, a dropped closure) lands
+    /// here and nowhere else.
+    struct Uncaught {
+        errors: Rc<RefCell<Vec<String>>>,
+        handler: Closure<dyn FnMut(web_sys::Event)>,
+    }
+
+    impl Uncaught {
+        fn trap() -> Self {
+            let errors = Rc::new(RefCell::new(Vec::new()));
+            let handler = Closure::wrap(Box::new({
+                let errors = errors.clone();
+                move |ev: web_sys::Event| {
+                    let msg = js_sys::Reflect::get(&ev, &"message".into())
+                        .ok()
+                        .and_then(|m| m.as_string())
+                        .unwrap_or_else(|| ev.type_());
+                    errors.borrow_mut().push(msg);
+                }
+            }) as Box<dyn FnMut(_)>);
+            web_sys::window()
+                .unwrap()
+                .add_event_listener_with_callback("error", handler.as_ref().unchecked_ref())
+                .unwrap();
+            Self { errors, handler }
+        }
+
+        /// The exceptions caught so far, after letting queued events run.
+        async fn after(&self, settle: Duration) -> Vec<String> {
+            rt::sleep(settle).await;
+            self.errors.borrow().clone()
+        }
+    }
+
+    impl Drop for Uncaught {
+        fn drop(&mut self) {
+            let _ = web_sys::window()
+                .unwrap()
+                .remove_event_listener_with_callback(
+                    "error",
+                    self.handler.as_ref().unchecked_ref(),
+                );
+        }
+    }
+
+    /// A6-2: dropping a live socket (what `close`/`disconnect_for_testing`
+    /// do) closes it at the peer and leaves no handler behind for the
+    /// `close` event the browser fires afterwards.
+    #[wasm_bindgen_test]
+    async fn dropping_a_socket_closes_it_and_detaches_every_handler() {
+        let trap = Uncaught::trap();
+        let key = "drop-open";
+        let socket = connect(&peer(&format!("echo/{key}")), "echo")
+            .await
+            .unwrap();
+        assert_eq!(counts(key).await, (1, 1));
+        drop(socket);
+        assert_eq!(wait_closed(key, Duration::from_secs(3)).await, (1, 0));
+        assert_eq!(
+            trap.after(Duration::from_millis(300)).await,
+            Vec::<String>::new()
+        );
+    }
+
+    /// A6-2: the stream half outliving the sink still ends: the socket's
+    /// close is delivered, then nothing else (no handler fires later).
+    #[wasm_bindgen_test]
+    async fn a_dropped_sink_ends_its_stream() {
+        let trap = Uncaught::trap();
+        let Socket { sink, mut stream } = connect(&peer("echo/drop-sink"), "echo").await.unwrap();
+        drop(sink);
+        let next = rt::timeout(Duration::from_secs(3), stream.next()).await;
+        assert!(
+            matches!(next, Ok(None) | Ok(Some(InFrame::Close(_)))),
+            "the stream did not end: {next:?}"
+        );
+        assert_eq!(
+            trap.after(Duration::from_millis(300)).await,
+            Vec::<String>::new()
+        );
+    }
+
+    /// A6-2: a connect cancelled before the open event (the caller timed
+    /// out, or `close` aborted the reconnect supervisor mid-dial) closes
+    /// and releases its socket: the peer sees the connection end.
+    #[wasm_bindgen_test]
+    async fn a_handshake_cancelled_before_open_closes_its_socket() {
+        let trap = Uncaught::trap();
+        let key = "hang-cancel";
+        let url = peer(&format!("hang/{key}"));
+        let r = rt::timeout(Duration::from_millis(300), connect(&url, "hang")).await;
+        assert!(r.is_err(), "the hanging handshake resolved");
+        assert_eq!(counts(key).await.0, 1, "the peer never saw the dial");
+        assert_eq!(wait_closed(key, Duration::from_secs(3)).await, (1, 0));
+        assert_eq!(
+            trap.after(Duration::from_millis(300)).await,
+            Vec::<String>::new()
+        );
     }
 }
