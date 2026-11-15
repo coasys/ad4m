@@ -4,8 +4,10 @@ extern crate lazy_static;
 pub mod api;
 pub mod config;
 pub mod config_file;
+pub mod config_rpc;
 pub mod email_service;
 pub mod entanglement_service;
+pub mod exit;
 #[cfg(unix)]
 pub mod fd_limit;
 mod globals;
@@ -36,6 +38,7 @@ pub mod db_backend;
 mod events;
 pub mod init;
 pub mod languages;
+pub mod log_files;
 pub mod logging;
 mod neighbourhoods;
 mod pubsub;
@@ -49,7 +52,6 @@ use std::thread::JoinHandle;
 
 use deno_core::error::AnyError;
 use log::{error, info, warn};
-use tokio::sync::oneshot;
 
 use crate::prolog_service::init_prolog_service;
 use crate::{
@@ -299,13 +301,9 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
         }
     }
 
-    // Set up graceful shutdown channel.
-    // The sender is stored globally so runtime_quit and signal handlers can trigger shutdown.
-    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
-    {
-        let mut guard = crate::globals::SHUTDOWN_TX.lock().unwrap();
-        *guard = Some(shutdown_tx);
-    }
+    // The graceful stop: `runtime.quit`, `runtime.restart`, the signals and `--watch-stdin`
+    // start it (`exit::request_shutdown`), and it exits with the reason they give.
+    let shutdown_rx = exit::graceful_stop_channel();
 
     // Spawn a task that listens for OS signals (SIGTERM, SIGINT, SIGHUP) and triggers shutdown.
     // It is the process's only handler for them: the executor binaries install none of their
@@ -338,11 +336,9 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
                 _ = hangup(&mut sighup) => "SIGHUP",
             };
 
-            // Trigger shutdown via the global channel, before logging: a log write that blocks (a
-            // launcher that no longer drains stderr) must not hold up the cleanup.
-            if let Some(tx) = crate::globals::SHUTDOWN_TX.lock().unwrap().take() {
-                let _ = tx.send(());
-            }
+            // Start the graceful stop before logging: a log write that blocks (a launcher that
+            // no longer drains stderr) must not hold up the cleanup.
+            exit::request_shutdown(exit::ExitReason::Stopped);
             info!("Received {received}, initiating graceful shutdown...");
 
             // The cleanup must not keep the process alive: a second signal, or the deadline,
@@ -360,15 +356,43 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
         });
     }
 
-    // Spawn the shutdown handler that waits for the signal and cleans up
+    // Spawn the shutdown handler that waits for the signal and cleans up. It reads the PID
+    // file from here: a stop may come before the global config is set.
+    let pid_file = config.pid_file.clone();
     tokio::spawn(async move {
-        if shutdown_rx.await.is_ok() {
-            info!("Shutdown signal received, cleaning up...");
-            clean_up_before_exit().await;
-            info!("Graceful shutdown complete, exiting.");
-            std::process::exit(0);
+        if let Ok(reason) = shutdown_rx.await {
+            info!("Shutdown signal received ({reason:?}), cleaning up...");
+            clean_up_before_exit(pid_file.as_deref()).await;
+            info!(
+                "Graceful shutdown complete, exiting with {}.",
+                reason.code()
+            );
+            std::process::exit(reason.code());
         }
     });
+
+    // One executor per data folder, before anything in it is opened, and before the log
+    // rotation: a refused start must not rename the running executor's log. It reports to
+    // stdout.
+    if let Err(e) = exit::hold_data_folder(&config.data_folder()) {
+        crate::logging::init_cli_logging(config.log_config.as_ref());
+        return refused_start(e);
+    }
+
+    // Logging: to rotated files in `log_dir` when set, else to stdout. Respects RUST_LOG.
+    match config.log_dir.as_deref() {
+        Some(dir) => {
+            if let Err(e) = crate::logging::init_file_logging(
+                std::path::Path::new(dir),
+                config.log_config.as_ref(),
+            ) {
+                // No file logger: the reason goes to stdout.
+                crate::logging::init_cli_logging(config.log_config.as_ref());
+                return failed_start(format!("Cannot write the executor log in {dir}: {e}"));
+            }
+        }
+        None => crate::logging::init_cli_logging(config.log_config.as_ref()),
+    }
 
     // `exit_with_parent`: end with the process that started us, however it ended. A launcher
     // that is SIGKILLed, crashes or exits without stopping us (a cancelled CI job, a crashed
@@ -383,9 +407,8 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
                 while std::os::unix::process::parent_id() == parent {
                     std::thread::sleep(std::time::Duration::from_millis(500));
                 }
-                if let Some(tx) = crate::globals::SHUTDOWN_TX.lock().unwrap().take() {
-                    let _ = tx.send(());
-                }
+                // The parent going away is a stop (exit 0), through the run contract's one entry.
+                exit::request_shutdown(exit::ExitReason::Stopped);
                 // Nothing in this thread logs: a stderr nobody drains would block the write, and
                 // with it the forced exit below. The line goes out from a thread of its own.
                 std::thread::spawn(move || {
@@ -400,10 +423,6 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
             .expect("failed to start the parent-watch thread");
     }
 
-    // Initialize logging for CLI (stdout)
-    // Respects RUST_LOG environment variable if set
-    crate::logging::init_cli_logging(config.log_config.as_ref());
-
     // Before any perspective store or language opens files.
     #[cfg(unix)]
     crate::fd_limit::raise_fd_limit_at_startup();
@@ -415,6 +434,12 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
         panic!("{}", message);
     }
 
+    // The wallet's keys are in this process's memory once unlocked.
+    #[cfg(target_os = "linux")]
+    if let Err(e) = exit::forbid_core_dumps() {
+        warn!("Could not turn off core dumps for the executor: {e}");
+    }
+
     // Write PID file if requested via config.
     // Test harnesses can set pid_file to get a reliable PID for targeted cleanup.
     if let Some(ref pid_file) = config.pid_file {
@@ -424,6 +449,15 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
         } else {
             info!("Wrote PID {} to {}", pid, pid_file);
         }
+    }
+
+    // A supervisor's pipe: when it closes, the supervisor is gone and the executor stops.
+    // After the PID file, so the stop that removes it never comes before it is written.
+    if config.watch_stdin == Some(true) {
+        exit::stop_when_closed(std::io::stdin(), || {
+            info!("stdin closed (--watch-stdin): stopping");
+            exit::request_shutdown(exit::ExitReason::Stopped);
+        });
     }
 
     // Store config globally so services (e.g. agent mutation resolvers) can access it
@@ -611,11 +645,20 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
     }
     // `check_admin_credential` refused `--enable-multi-user` without a credential; the mode
     // may also be on in the database, from `user.setMultiUserEnabled` on an earlier run.
-    if let Err(reason) = crate::config::refuse_multi_user_from_db(
-        &config.admin_credential,
-        crate::user_management::is_multi_user_enabled(),
-    ) {
-        return failed_start(reason);
+    let multi_user_on = crate::user_management::is_multi_user_enabled();
+    if let Err(reason) =
+        crate::config::refuse_multi_user_from_db(&config.admin_credential, multi_user_on).and_then(
+            |()| {
+                crate::config::refuse_custody_channel_with_multi_user(
+                    config.custody_channel == Some(true),
+                    multi_user_on,
+                )
+            },
+        )
+    {
+        return refused_start(
+            exit::StartRefused::new(exit::ExitReason::ConfigRefused, reason).into(),
+        );
     }
 
     // Before the AI service loads, so the models the config file names start with it.
@@ -755,7 +798,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
     // Set app data path for perspectives module
     perspectives::set_app_data_path(config.app_data_path.clone().unwrap());
 
-    perspectives::initialize_from_db();
+    perspectives::open_at_start();
 
     // Start periodic perspective snapshots in shared mode.
     if config.wallet_backend.as_deref() == Some("shared") {
@@ -919,6 +962,11 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
         // in there would move `config`, which the API server thread below
         // still needs.
         let mcp_tls = config.tls.clone();
+        let mcp_host = mcp::server::host_following_localhost(
+            config.localhost.unwrap_or(true),
+            config.tls.is_some(),
+            std::env::var("MCP_HOST").ok().as_deref(),
+        );
 
         std::thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -932,7 +980,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
                 // The same certificate the RPC port terminates with. MCP has
                 // none of its own to issue or renew.
                 tls: mcp_tls,
-                ..Default::default()
+                host: mcp_host,
             };
             if let Err(e) = runtime.block_on(mcp::start_mcp_server(admin_credential, mcp_config)) {
                 error!("MCP server error: {:?}", e);
@@ -958,8 +1006,9 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
 
 /// What the executor's graceful shutdown (`SHUTDOWN_TX`, which a signal fires) cleans up before
 /// the process exits. The Holochain conductor and the local AI runtimes stop at once,
-/// not one after the other, so both fit in the deadline a signal leaves the shutdown.
-pub(crate) async fn clean_up_before_exit() {
+/// not one after the other, so both fit in the deadline a signal leaves the shutdown. `pid_file`
+/// is the one `run` was given: a stop may come before the global config is set.
+pub(crate) async fn clean_up_before_exit(pid_file: Option<&str>) {
     let holochain = async {
         if let Some(holochain_service) = holochain_service::maybe_get_holochain_service().await {
             info!("Shutting down Holochain conductor...");
@@ -972,7 +1021,7 @@ pub(crate) async fn clean_up_before_exit() {
     // The local AI runtimes are this executor's children: they stop with it.
     tokio::join!(holochain, ai_service::local::stop_on_exit());
 
-    if let Some(ref pid_file) = crate::config::get_global_config().pid_file {
+    if let Some(pid_file) = pid_file {
         let _ = std::fs::remove_file(pid_file);
         info!("Removed PID file: {}", pid_file);
     }
@@ -982,8 +1031,13 @@ pub(crate) async fn clean_up_before_exit() {
 /// a failed API does, so the launcher shows it and executor binaries exit through
 /// [`exit_when_api_fails`].
 fn failed_start(reason: String) -> JoinHandle<Result<(), AnyError>> {
-    error!("{reason}");
-    std::thread::spawn(move || Err(deno_core::anyhow::anyhow!(reason)))
+    refused_start(deno_core::anyhow::anyhow!(reason))
+}
+
+/// [`failed_start`] with the error itself, so a [`exit::StartRefused`] keeps its exit code.
+fn refused_start(error: AnyError) -> JoinHandle<Result<(), AnyError>> {
+    error!("{error}");
+    std::thread::spawn(move || Err(error))
 }
 
 /// Build the cascade-gossip transport based on the SFU-related fields
@@ -1044,8 +1098,8 @@ async fn build_sfu_gossip(config: &Ad4mConfig) -> std::sync::Arc<dyn crate::sfu:
     }
 }
 
-/// For executor binaries: exit with status 1 once the REST API thread from
-/// [`run`] fails or panics.
+/// For executor binaries: exit once the REST API thread from [`run`] fails or panics, with the
+/// code of a refused start ([`exit::ExitReason`]: 78, 79, 80) or 1.
 ///
 /// Without it, a failed API ends only its own thread and leaves a process
 /// running with no API. The JS test harness then waits for the
@@ -1053,13 +1107,13 @@ async fn build_sfu_gossip(config: &Ad4mConfig) -> std::sync::Arc<dyn crate::sfu:
 /// must outlive a failed API (the launcher) join the handle themselves.
 pub fn exit_when_api_fails(api_thread: JoinHandle<Result<(), AnyError>>) {
     std::thread::spawn(move || {
-        let reason = match api_thread.join() {
+        let (reason, code) = match api_thread.join() {
             Ok(Ok(())) => return,
-            Ok(Err(e)) => format!("{:?}", e),
-            Err(_) => String::from("the REST API thread panicked"),
+            Ok(Err(e)) => (format!("{:?}", e), exit::exit_code_of(&e)),
+            Err(_) => (String::from("the REST API thread panicked"), 1),
         };
-        error!("REST API server failed, exiting: {}", reason);
-        std::process::exit(1);
+        error!("REST API server failed, exiting with {code}: {reason}");
+        std::process::exit(code);
     });
 }
 
