@@ -10,8 +10,8 @@ use ad4m_identity_core::inbox::InboxAddress;
 use ad4m_identity_core::record::{RecordReceipt, SealedRecord, RECORD_KEY_LEN};
 use ad4m_identity_core::Event;
 use ad4m_ldk::identity::{
-    DeviceRequest, DeviceRequestBody, InboxBind, InboxStored, OfferListing, OfferOpened,
-    SignedHead, SignedOffer, SignedRequest,
+    DeviceRequest, DeviceRequestBody, InboxBind, InboxStored, OfferListing, OfferOpened, Pow,
+    PowParams, SignedHead, SignedOffer, SignedRequest, VouchNote,
 };
 use zeroize::Zeroize;
 
@@ -52,6 +52,9 @@ pub struct IdentityStatus {
     /// The identity store the executor uses (its config's, else its network seed's) and whether
     /// it trusts a key for it; `None` without a store.
     pub store: Option<StoreInfo>,
+    /// The store keeps a vouching note for the identity (`LogPage.vouched` at the executor's
+    /// last read of the log, or a note this executor attached); false with no identity.
+    pub vouched: bool,
 }
 
 /// The executor's identity store (`identity.status.store`): its base URL, and whether the
@@ -240,10 +243,33 @@ impl<R: ExecutorRpc> ViaExecutor<R> {
         })
     }
 
-    /// Appends signed events through the executor (no vouching token or proof of work:
-    /// the store has no brake yet and admits a new log without one).
-    pub async fn publish(&self, events: &[Event]) -> Result<SignedHead, RpcError> {
-        self.call("identity.publish", json!({ "events": json_of(&events)? }))
+    /// Appends signed events through the executor. `pow` is the proof of work for events that
+    /// start a log (`crate::pow::solve_for`): the store refuses a new log without one, `403
+    /// pow`. The executor gives it to the store unchanged. `None` for every later event.
+    pub async fn publish(
+        &self,
+        events: &[Event],
+        pow: Option<&Pow>,
+    ) -> Result<SignedHead, RpcError> {
+        self.call(
+            "identity.publish",
+            json!({ "events": json_of(&events)?, "pow": json_of(&pow)? }),
+        )
+        .await
+    }
+
+    /// `identity.powParams`: the cost of a proof of work the executor's store asks for now.
+    pub async fn pow_params(&self) -> Result<PowParams, RpcError> {
+        self.call("identity.powParams", json!({})).await
+    }
+
+    /// `identity.attachNote`: redeems a vouching token for the executor's identity. The
+    /// executor's device key signs the store request; the store redeems the token with the
+    /// vouching service and keeps the note beside the log, so `identity.status` says
+    /// `vouched: true`. `409 already-vouched` when the log has a note, `403` for a spent or
+    /// unknown token, `409 no-identity` while the executor speaks for no identity.
+    pub async fn attach_note(&self, token: &str) -> Result<VouchNote, RpcError> {
+        self.call("identity.attachNote", json!({ "token": token }))
             .await
     }
 

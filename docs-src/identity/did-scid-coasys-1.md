@@ -909,6 +909,17 @@ a new string ends the read of the last one.
   held or cancelled the head is answered but nothing is bound; an accepted first-run claim
   binds and records `FirstRun` in one write. A key the main agent's own incept lists, and
   the refresh of an identity it already speaks for, bind as before.
+- The executor never builds #0 and never solves a proof of work (section 14). The party that
+  builds #0 reads `identity.powParams` → `{bits, previousBits, changedAt}` (the store's
+  `GET /v1/pow`), solves the proof for the SCID, and calls `identity.publish {events, pow}`;
+  the executor sends `pow` to the store unchanged (`null` on every later event). A resumed
+  create sends the same #0 and the same proof, and gets the head. A client refuses to solve
+  above 28 bits. `identity.attachNote {token}` → `VouchNote` asks the store for a vouching
+  note for the main agent's identity, in a request the device key signs; it answers 409
+  `already-vouched` when the store keeps a note, 403 `vouch` when the vouching service
+  refuses the token, 503 `vouch-unavailable` when the store has no service, and 409
+  `no-identity` when the main agent speaks for no identity. `identity.status.vouched` is the
+  store's `vouched` on the page that holds the head.
 - The executor never opens the private record. It passes the record and request-box calls
   with a store request the caller signed with the master key, or signs one with its own key
   (always for a post). For the app on its machine whose device it is (the desktop's custody

@@ -6,6 +6,11 @@
 //! is the `HttpClient` a phone's surface implements.
 #![cfg(not(target_arch = "wasm32"))]
 
+// The identity store's test vouching service, so `identity.attachNote` runs against a real
+// redeem.
+#[path = "../../identity-store/tests/common/vouch.rs"]
+mod vouch;
+
 use ad4m_hash_chain::Multikey;
 use ad4m_identity_client::flows::create::{CreateFlow, CreateScreen};
 use ad4m_identity_client::flows::link::LinkFlow;
@@ -18,7 +23,7 @@ use ad4m_identity_client::store::{
     HttpResponse, LogCheckpoints, MemoryCheckpoints, SoftEncKey, StoreEndpoint, ViaStore,
 };
 use ad4m_identity_client::{
-    ClientError, ExecutorRpc, MemoryVault, OsRandom, Secret, SystemClock, Vault, ViaExecutor,
+    ClientError, Clock, ExecutorRpc, MemoryVault, OsRandom, Secret, SystemClock, Vault, ViaExecutor,
 };
 use ad4m_identity_core::inbox::{InboxAddress, InboxError, InboxPayload};
 use ad4m_identity_core::link::{DeviceString, OfferKind};
@@ -87,19 +92,46 @@ impl HttpClient for RouterHttp {
 
 /// A store router on a temp SQLite file (as `flows.rs`'s `TestStore`).
 fn store() -> (Router, tempfile::TempDir) {
+    store_with(test_settings())
+}
+
+/// The settings of [`store()`]: a cheap proof of work, and brake buckets that the tests do not
+/// empty (every new log here has no vouching note).
+fn test_settings() -> Settings {
+    Settings {
+        pow_bits: 8,
+        identity_burst: 100,
+        brake_addr_burst: 100_000,
+        brake_global_per_hour: 100_000,
+        ..Settings::default()
+    }
+}
+
+/// A store router with `settings` on a temp SQLite file.
+fn store_with(settings: Settings) -> (Router, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let db = Db::open(dir.path().join("store.sqlite")).unwrap();
     let store = Store::new(
         db,
         StoreKey::from_secret(STORE_SECRET),
         system_clock(),
-        Settings {
-            pow_bits: 8,
-            identity_burst: 100,
-            ..Settings::default()
-        },
+        settings,
     );
     (router(store), dir)
+}
+
+/// A store that redeems vouching tokens at the test vouching service (the identity store's
+/// own `tests/common/vouch.rs`, which implements the platform's redeem contract).
+async fn vouching_store() -> (Router, tempfile::TempDir, vouch::VouchServer) {
+    let now = SystemClock.now();
+    let server = vouch::VouchServer::start(now - 5).await;
+    let (router, dir) = store_with(Settings {
+        vouch_url: Some(server.url()),
+        vouch_credential: Some(identity_store::vouch::Credential(vouch::CREDENTIAL.into())),
+        vouch_keys: vec![vouch::vouching_multikey()],
+        ..test_settings()
+    });
+    (router, dir, server)
 }
 
 /// The store key's multikey, for `StoreEndpoint::keys`.
@@ -1801,4 +1833,60 @@ async fn a_checkpoint_port_that_fails_closes_the_read() {
         .call("identity.log", json!({ "did": did, "from": 0 }))
         .await
         .is_ok());
+}
+
+// The brake, through the phone: `identity.powParams` answers the store's `GET /v1/pow`, a
+// create with no vouching token solves the proof at those bits and the store takes the new log,
+// and the status says `vouched: false`. Then `identity.attachNote` redeems a token at the
+// vouching service, signed by the phone's device key: the note names the identity, and
+// `vouched` turns true. A second note for the same identity is `409 already-vouched`.
+#[tokio::test]
+async fn a_phone_creates_through_the_brake_then_attaches_a_vouching_note() {
+    let (router, _dir, server) = vouching_store().await;
+    let e = phone(&router, 1, None);
+    let params = e.pow_params().await.unwrap();
+    assert_eq!((params.bits, params.previous_bits), (8, 8));
+
+    let did = create(&e, &MemoryVault::new(), 91).await;
+    assert_eq!(status(&e).await["vouched"], false);
+    assert!(!e.status().await.unwrap().vouched);
+
+    server.give("tok-1", "person@example.org");
+    let note = e.attach_note("tok-1").await.unwrap();
+    assert_eq!(note.did, did);
+    assert_eq!(note.method, "email");
+    assert_eq!(server.redeems(), 1);
+    assert_eq!(status(&e).await["vouched"], true);
+    assert!(e.status().await.unwrap().vouched);
+
+    server.give("tok-2", "other@example.org");
+    let again = e.attach_note("tok-2").await.unwrap_err();
+    assert_eq!(again.code, 409, "{again}");
+    assert!(again.message.starts_with("already-vouched"), "{again}");
+}
+
+// A token the vouching service never gave is `403 forbidden: "vouch"`, and the identity stays
+// unvouched. A store with no vouching service answers `503` to every token. A phone with no
+// identity has nothing to attach a note to.
+#[tokio::test]
+async fn attach_note_refuses_a_bad_token_a_store_with_no_service_and_no_identity() {
+    let (router, _dir, server) = vouching_store().await;
+    let e = phone(&router, 1, None);
+    let none = e.attach_note("tok-0").await.unwrap_err();
+    assert_eq!(none.code, 409, "{none}");
+    assert!(none.message.contains("no-identity"), "{none}");
+    assert_eq!(server.redeems(), 0);
+
+    create(&e, &MemoryVault::new(), 92).await;
+    let bad = e.attach_note("never-given").await.unwrap_err();
+    assert_eq!(bad.code, 403, "{bad}");
+    assert!(bad.message.contains("vouch"), "{bad}");
+    assert_eq!(status(&e).await["vouched"], false);
+
+    let (plain, _plain_dir) = store();
+    let p = phone(&plain, 2, None);
+    create(&p, &MemoryVault::new(), 93).await;
+    let off = p.attach_note("tok-1").await.unwrap_err();
+    assert_eq!(off.code, 503, "{off}");
+    assert!(off.message.contains("vouch-unavailable"), "{off}");
 }

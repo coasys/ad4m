@@ -25,7 +25,7 @@ import {
     testStorageSecretEnv,
 } from "../utils/utils";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
-import { buildIdentityTools, ClaimCommand, Holder, IdentityStore } from "../helpers/identity";
+import { buildIdentityTools, ClaimCommand, Holder, IdentityStore, VouchService } from "../helpers/identity";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TEST_DIR = path.join(__dirname, "..", "tst-tmp");
@@ -56,6 +56,7 @@ describe("Identity: create, link, refuse a stranger, revoke, fork, restart", fun
     this.timeout(600_000);
 
     let store: IdentityStore;
+    let vouch: VouchService;
     let holder: Holder;
     const nodes: Node[] = [];
     let a: Node, b: Node, c: Node;
@@ -114,7 +115,8 @@ describe("Identity: create, link, refuse a stranger, revoke, fork, restart", fun
         buildIdentityTools();
         const [storePort] = await getFreePorts(1);
         registerPorts([storePort]);
-        store = await IdentityStore.start(path.join(TEST_DIR, "identity-store"), storePort);
+        vouch = await VouchService.start();
+        store = await IdentityStore.start(path.join(TEST_DIR, "identity-store"), storePort, { vouch });
         a = await startNode("a");
         holder = new Holder();
         await holder.send({ cmd: "connect", url: baseUrl(a.ports[0]), token: "" });
@@ -128,6 +130,7 @@ describe("Identity: create, link, refuse a stranger, revoke, fork, restart", fun
         }
         await store?.stop();
         if (store) deregisterPorts([store.port]);
+        await vouch?.stop();
     });
 
     it("creates an identity on A: the incept lists A's key as d1", async () => {
@@ -163,6 +166,49 @@ describe("Identity: create, link, refuse a stranger, revoke, fork, restart", fun
         expect(page.events).to.have.length(1);
         const log = await a.client.identity.log(did);
         expect(log.events).to.deep.equal(page.events);
+    });
+
+    it("passes the brake headless: the holder solves the proof of work the store asks for", async () => {
+        // The cost through the executor is the store's own `GET /v1/pow`.
+        const params = await a.client.identity.powParams();
+        const published = await (await fetch(`${store.url}/v1/pow`)).json();
+        expect(params).to.deep.equal(published);
+        expect(params.bits).to.equal(8);
+        // The holder created the identity above with no vouching token and no window: the
+        // store took its #0 because the holder solved the proof, so the log has no note.
+        const status = await a.client.identity.status();
+        expect(status.did).to.equal(did);
+        expect(status.vouched).to.equal(false);
+        const page = await (await fetch(`${store.url}/v1/logs/${did.split(":").pop()}`)).json();
+        expect(page.vouched).to.equal(false);
+    });
+
+    it("attaches a vouching note with A's device key: vouched turns true, a second note is refused", async () => {
+        const refused = await a.client.identity.attachNote("never-given").then(
+            () => null,
+            (e: Error) => e.message,
+        );
+        expect(refused).to.match(/vouch/);
+        expect((await a.client.identity.status()).vouched).to.equal(false);
+
+        await vouch.give("tok-a", "person-a@example.org");
+        const note = await a.client.identity.attachNote("tok-a");
+        expect(note.did).to.equal(did);
+        expect(note.method).to.equal("email");
+        expect(note.voucher).to.equal(`did:key:${vouch.key}`);
+        expect(await vouch.redeems()).to.equal(2);
+
+        expect((await a.client.identity.status()).vouched).to.equal(true);
+        const page = await (await fetch(`${store.url}/v1/logs/${did.split(":").pop()}`)).json();
+        expect(page.vouched).to.equal(true);
+        expect(page.note.did).to.equal(did);
+
+        await vouch.give("tok-b", "person-b@example.org");
+        const again = await a.client.identity.attachNote("tok-b").then(
+            () => null,
+            (e: Error) => e.message,
+        );
+        expect(again).to.match(/already-vouched/);
     });
 
     it("agent.lock and agent.unlock answer, and announce, the identity A speaks for", async () => {

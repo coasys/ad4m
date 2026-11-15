@@ -11,6 +11,9 @@ import type { JoinStatus } from "../generated/api/JoinStatus";
 import type { KeyOwner } from "../generated/api/KeyOwner";
 import type { OfferListing } from "../generated/api/OfferListing";
 import type { OfferOpened } from "../generated/api/OfferOpened";
+import type { Pow } from "../generated/api/Pow";
+import type { PowParams } from "../generated/api/PowParams";
+import type { VouchNote } from "../generated/api/VouchNote";
 import type { SignedHead } from "../generated/api/SignedHead";
 import type { SignedOffer } from "../generated/api/SignedOffer";
 import type { SignedRequest } from "../generated/api/SignedRequest";
@@ -96,10 +99,32 @@ export class IdentityClient {
 
     /**
      * Appends signed events through the agent language. For the main agent the admin
-     * credential only; a user's session for its own agent.
+     * credential only; a user's session for its own agent. `pow` is the proof of work for
+     * event #0 of a new log with no vouching note, solved by the caller at the bits of
+     * `powParams()` (the WASM `Pow.solve` of `ad4m-identity-core`); `null` for any other
+     * append. The executor passes it to the store unchanged.
      */
-    async publish(events: unknown[]): Promise<SignedHead> {
-        return this.#apiClient.call("identity.publish", { events: events as any[] });
+    async publish(events: unknown[], pow: Pow | null): Promise<SignedHead> {
+        return this.#apiClient.call("identity.publish", { events: events as any[], pow });
+    }
+
+    /**
+     * The proof-of-work cost the store asks for now (its `GET /v1/pow`): a proof at `bits`
+     * passes, and at `previousBits` too for 10 minutes after `changedAt`.
+     */
+    async powParams(): Promise<PowParams> {
+        return this.#apiClient.call("identity.powParams", {});
+    }
+
+    /**
+     * Redeems a vouching `token` (from the vouching service's check) for this agent's identity.
+     * The executor's device key signs the store request. The store keeps the note beside the
+     * log, and `status().vouched` is then true. An identity that has a note already gets
+     * `409 already-vouched`; a token the service refuses gets `403`. For the main agent the
+     * admin credential only; a user's session for its own agent.
+     */
+    async attachNote(token: string): Promise<VouchNote> {
+        return this.#apiClient.call("identity.attachNote", { token });
     }
 
     async openOffer(signedOffer: SignedOffer): Promise<OfferOpened> {
