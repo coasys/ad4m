@@ -426,6 +426,30 @@ pub struct PreparedDevice {
     pub expires: u64,
 }
 
+/// `identity.endPrepared` params: the device string `identity.prepareDevice` answered.
+#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct EndPreparedParams {
+    pub device: String,
+}
+
+/// `identity.endPrepared`: how a device string's link ended. `ended`: its pre-join read is over
+/// and no claim it made binds; `cancelled` names those claims' offers (none when no ticket was
+/// taken). `already-joined`: a claim it made already bound the main agent to `did`, which a cancel
+/// does not undo.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(tag = "state", rename_all = "kebab-case")]
+pub enum PreparedEnded {
+    Ended {
+        cancelled: Vec<String>,
+    },
+    #[serde(rename_all = "camelCase")]
+    AlreadyJoined {
+        offer_id: String,
+        did: String,
+    },
+}
+
 /// An inbox's address: before the device joins `{pre}`, after it `{scid, keyId}`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(untagged)]

@@ -43,6 +43,7 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'identity.claimOffer': (p: Record<string, unknown>) => ({ did: 'did:scid:coasys:1:QmTest', offerId: 'offer', matchCode: 'R7K Q2M', kind: 'node', expires: 1, needsAccept: false, echo: p }),
     'identity.acceptJoin': { accepted: true },
     'identity.cancelJoin': { cancelled: true },
+    'identity.endPrepared': { state: 'ended', cancelled: ['offer'] },
     'identity.log': (p: Record<string, unknown>) => ({ did: p.did, events: [], head: null, fork: null }),
     'identity.devices': [],
     'identity.rekey': { sign: 'did:key:z6MkNew', enc: 'z6LSNew' },
@@ -1322,6 +1323,13 @@ describe('IdentityClient', () => {
         expect(lastRpcCall!.type).toBe('identity.cancelJoin');
         expect(lastRpcCall!.params).toEqual({ offerId: 'offer' });
         expect(cancelled).toEqual({ cancelled: true });
+    });
+
+    test('endPrepared() sends the device string and answers how its link ended', async () => {
+        const ended = await ad4m.identity.endPrepared('coasys:device:1:abc');
+        expect(lastRpcCall!.type).toBe('identity.endPrepared');
+        expect(lastRpcCall!.params).toEqual({ device: 'coasys:device:1:abc' });
+        expect(ended).toEqual({ state: 'ended', cancelled: ['offer'] });
     });
 
     test('log() sends the did, from and fresh', async () => {

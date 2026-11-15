@@ -17,12 +17,13 @@ use crate::agent::capabilities::{
 use crate::agent::AgentContext;
 use crate::identity::types::{
     AcceptJoinParams, CancelJoinParams, ClaimOfferParams, ClaimOfferResult, CosignInceptParams,
-    DeleteRequestParams, DeviceKeys, DeviceRequest, DeviceView, DidResolutionResult, IdentityLog,
-    IdentityStatus, InboxAckParams, InboxEntry, InboxPutParams, InboxStored, JoinAccepted,
-    JoinCancelled, JoinStatus, JoinStatusParams, LogParams, OfferListing, OfferOpened,
-    OffersParams, OpenOfferParams, PostRequestParams, PreparedDevice, PublishParams, RecordKey,
-    RecordParams, RecordPutParams, RecordStored, RequestPosted, RequestsParams, ResetLogParams,
-    ResolveParams, SignedHead, StoredRecord, TakenMaster, UnwrapRecordKeyParams,
+    DeleteRequestParams, DeviceKeys, DeviceRequest, DeviceView, DidResolutionResult,
+    EndPreparedParams, IdentityLog, IdentityStatus, InboxAckParams, InboxEntry, InboxPutParams,
+    InboxStored, JoinAccepted, JoinCancelled, JoinStatus, JoinStatusParams, LogParams,
+    OfferListing, OfferOpened, OffersParams, OpenOfferParams, PostRequestParams, PreparedDevice,
+    PreparedEnded, PublishParams, RecordKey, RecordParams, RecordPutParams, RecordStored,
+    RequestPosted, RequestsParams, ResetLogParams, ResolveParams, SignedHead, StoredRecord,
+    TakenMaster, UnwrapRecordKeyParams,
 };
 use crate::types::RequestContext;
 
@@ -208,6 +209,13 @@ async fn prepare_device(_params: Value, _ctx: Arc<RequestContext>) -> Result<Val
     )
 }
 
+/// `identity.endPrepared`: ends a device string's read and cancels every claim it made
+/// (`identity::inbox`).
+async fn end_prepared(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let p: EndPreparedParams = parse(params)?;
+    answer(crate::identity::service()?.end_prepared(&p.device).await?)
+}
+
 async fn inbox_put(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let p: InboxPutParams = parse(params)?;
     answer(crate::identity::service()?.inbox_put(&p).await?)
@@ -380,6 +388,10 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.method::<NoParams, PreparedDevice>("identity.prepareDevice", prepare_device)
         .local_only()
         .guard(Guard::Operator);
+    // The person here cancelled the code screen: no claim of that device string binds.
+    map.method::<EndPreparedParams, PreparedEnded>("identity.endPrepared", end_prepared)
+        .local_only()
+        .guard(Guard::Operator);
     map.method::<NoParams, Vec<InboxEntry>>("identity.inbox", inbox)
         .read()
         .local_only()
@@ -527,6 +539,7 @@ mod tests {
                 user_or_operator(&AGENT_UPDATE_CAPABILITY),
             ),
             ("identity.devices", cap(&AGENT_READ_CAPABILITY)),
+            ("identity.endPrepared", format!("{:?}", Guard::Operator)),
             ("identity.inbox", format!("{:?}", Guard::Operator)),
             ("identity.inboxAck", format!("{:?}", Guard::Operator)),
             ("identity.inboxPut", cap(&AGENT_UPDATE_CAPABILITY)),
@@ -660,6 +673,7 @@ mod tests {
             ("identity.custodyStatus", serde_json::json!({})),
             ("identity.takeMaster", serde_json::json!({})),
             ("identity.prepareDevice", serde_json::json!({})),
+            ("identity.endPrepared", serde_json::json!({ "device": "d" })),
             ("identity.inbox", serde_json::json!({})),
             ("identity.inboxAck", serde_json::json!({ "id": "m1" })),
             (
@@ -944,6 +958,7 @@ mod tests {
             ("identity.acceptJoin", serde_json::json!({ "offerId": "o" })),
             ("identity.cancelJoin", serde_json::json!({ "offerId": "o" })),
             ("identity.prepareDevice", serde_json::json!({})),
+            ("identity.endPrepared", serde_json::json!({ "device": "d" })),
             ("identity.cosignIncept", serde_json::json!({ "event": {} })),
             ("identity.publish", serde_json::json!({ "events": [] })),
         ] {

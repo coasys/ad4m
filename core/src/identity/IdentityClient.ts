@@ -20,6 +20,7 @@ import type { InboxBind } from "../generated/api/InboxBind";
 import type { InboxEntry } from "../generated/api/InboxEntry";
 import type { InboxStored } from "../generated/api/InboxStored";
 import type { PreparedDevice } from "../generated/api/PreparedDevice";
+import type { PreparedEnded } from "../generated/api/PreparedEnded";
 import type { RecordStored } from "../generated/api/RecordStored";
 import type { RequestPosted } from "../generated/api/RequestPosted";
 import type { SealedRecord } from "../generated/api/SealedRecord";
@@ -165,6 +166,20 @@ export class IdentityClient {
      */
     async prepareDevice(): Promise<PreparedDevice> {
         return this.#apiClient.call("identity.prepareDevice", {});
+    }
+
+    /**
+     * Ends the device string `device` (from `prepareDevice`), as Cancel on the code screen: the
+     * executor stops reading for tickets, waits for a ticket it is taking, and cancels every
+     * claim it made, so a holder who confirms later links nothing. Answers
+     * `{ state: "ended", cancelled }` (the offers of the claims cancelled, none when no ticket
+     * came), or `{ state: "already-joined", offerId, did }` when a claim already joined, which
+     * a cancel does not undo. Again answers the same. 404 for a device string this executor
+     * does not know (made before it restarted, or an hour past its expiry). The operator on
+     * this machine only.
+     */
+    async endPrepared(device: string): Promise<PreparedEnded> {
+        return this.#apiClient.call("identity.endPrepared", { device });
     }
 
     /** Passes an inbox write the identity's current master key signed (`bind` for a pre-join address). */

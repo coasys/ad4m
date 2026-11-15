@@ -273,6 +273,7 @@ the guard checked:
 | `identity.custodyStatus` | `Operator`, local only |
 | `identity.deleteRequest` | `UserOrOperator(agent:UPDATE)` |
 | `identity.devices` | `Cap(agent:READ)` |
+| `identity.endPrepared` | `Operator`, local only |
 | `identity.inbox` | `Operator`, local only |
 | `identity.inboxAck` | `Operator`, local only |
 | `identity.inboxPut` | `Cap(agent:UPDATE)` |
