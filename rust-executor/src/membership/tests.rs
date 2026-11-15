@@ -275,8 +275,15 @@ fn the_genesis_links_count_in_any_hash_order() {
     for order in orders {
         let links = judged(&order);
         let (graph, refused) = MembershipGraph::replay(creator, &links);
-        assert!(refused.is_empty(), "hash order {order:?} refused {refused:?}");
-        assert_eq!(graph.role_of(creator), Some(Role::Admin), "hash order {order:?}");
+        assert!(
+            refused.is_empty(),
+            "hash order {order:?} refused {refused:?}"
+        );
+        assert_eq!(
+            graph.role_of(creator),
+            Some(Role::Admin),
+            "hash order {order:?}"
+        );
         assert!(graph.rules().is_some());
     }
 }
