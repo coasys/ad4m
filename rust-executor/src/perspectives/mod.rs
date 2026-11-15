@@ -124,6 +124,28 @@ pub struct SerializedPerspective {
     pub links: Vec<LinkExpression>,
 }
 
+/// Set once the start-up has opened every perspective in the database (`open_at_start`).
+static OPENED: std::sync::LazyLock<tokio::sync::watch::Sender<bool>> =
+    std::sync::LazyLock::new(|| tokio::sync::watch::channel(false).0);
+
+/// Opens every perspective in the database at start-up and marks them opened once all the
+/// tasks have ended, whether each opened or not (see [`opened`]).
+pub fn open_at_start() {
+    let tasks = initialize_from_db();
+    tokio::spawn(async move {
+        for task in tasks {
+            let _ = task.await;
+        }
+        OPENED.send_replace(true);
+    });
+}
+
+/// Waits until the start-up has opened the perspectives in the database (`open_at_start`).
+pub async fn opened() {
+    let mut opened = OPENED.subscribe();
+    let _ = opened.wait_for(|opened| *opened).await;
+}
+
 /// Open every perspective in the database, each in its own task. Returns the
 /// tasks, so a test can wait for them.
 pub fn initialize_from_db() -> Vec<tokio::task::JoinHandle<()>> {
