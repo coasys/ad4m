@@ -4535,3 +4535,289 @@ async fn a_property_stored_through_a_language_takes_the_value_the_language_does(
     );
     assert_eq!(on_a_file["success"], true, "{on_a_file}");
 }
+
+// ---- sh:in (allowed values) --------------------------------------------------
+//
+// WE writes property `options` as `sh://in` links (one JSON array per
+// property). The executor decodes them into `ShapeProperty.in_values` and
+// `coerce_scalar` enforces them on every validated write — instance_create,
+// instance_update, and collection items. A class with no `in` is
+// unconstrained, exactly as before (`instance_tools_round_trip_typed_data`
+// covers that: Channel has no `in` and every typed value passes).
+
+/// Task with `sh:in` on three properties: `status` (object entries, one
+/// labeled), `priority` (bare numbers), `locked` (present-and-empty: allows
+/// nothing), and `tags` (scalar collection of bare strings).
+const TASK_SDNA: &str = r#"{
+  "target_class": "ns://Task",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"rdf://type","target":"ns://Task"}
+  ],
+  "properties": [
+    {"path":"ns://task_title","name":"title","datatype":"xsd:string","min_count":1,"max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://task_title","target":"value"}]},
+    {"path":"ns://task_status","name":"status","datatype":"xsd:string","min_count":0,"max_count":1,"writable":true,
+     "in":[{"value":"todo"},{"value":"doing","label":"Doing"}],
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://task_status","target":"value"}]},
+    {"path":"ns://task_priority","name":"priority","datatype":"xsd:integer","min_count":0,"max_count":1,"writable":true,
+     "in":[1,2],
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://task_priority","target":"value"}]},
+    {"path":"ns://task_locked","name":"locked","datatype":"xsd:string","min_count":0,"max_count":1,"writable":true,
+     "in":[],
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://task_locked","target":"value"}]},
+    {"path":"ns://task_tag","name":"tags","collection":true,"datatype":"xsd:string","writable":true,
+     "in":["a","b"],
+     "adder":[{"action":"addLink","source":"this","predicate":"ns://task_tag","target":"value"}],
+     "remover":[{"action":"removeLink","source":"this","predicate":"ns://task_tag","target":"value"}]}
+  ]
+}"#;
+
+async fn setup_tasks() -> (Ad4mMcpHandler, String, PerspectiveGuard) {
+    setup_with(&[("Task", TASK_SDNA)], false).await
+}
+
+async fn create_task(
+    handler: &Ad4mMcpHandler,
+    uuid: &str,
+    properties: Map<String, Value>,
+) -> Value {
+    parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: uuid.to_string(),
+                class_name: "Task".into(),
+                properties: Some(properties),
+                base_uri: None,
+                parent: None,
+            }))
+            .await,
+    )
+}
+
+/// `sh:in` gates `instance_create`: a declared value passes, an undeclared
+/// one is refused, and the error names the allowed values in declared order.
+#[tokio::test(flavor = "multi_thread")]
+async fn in_list_gates_instance_create() {
+    let (handler, uuid, _guard) = setup_tasks().await;
+
+    let ok = create_task(
+        &handler,
+        &uuid,
+        props(&[("title", json!("t")), ("status", json!("doing"))]),
+    )
+    .await;
+    assert_eq!(ok["created"], true, "{ok}");
+
+    let bad = create_task(
+        &handler,
+        &uuid,
+        props(&[("title", json!("t")), ("status", json!("done"))]),
+    )
+    .await;
+    let err = bad["error"].as_str().expect("error field");
+    assert!(err.contains("status"), "{err}");
+    assert!(err.contains("todo, doing"), "{err}");
+
+    // The rejection wrote nothing: validation runs before any link is made.
+    let count = parse(
+        &handler
+            .instance_query(Parameters(InstanceQueryParams {
+                perspective_id: uuid.clone(),
+                class_name: "Task".into(),
+                filter: None,
+                parent: None,
+                limit: None,
+                offset: None,
+            }))
+            .await,
+    )["count"]
+        .as_u64()
+        .unwrap();
+    assert_eq!(count, 1, "only the accepted instance exists");
+}
+
+/// The same gate runs on `instance_update`.
+#[tokio::test(flavor = "multi_thread")]
+async fn in_list_gates_instance_update() {
+    let (handler, uuid, _guard) = setup_tasks().await;
+    let task = create_task(
+        &handler,
+        &uuid,
+        props(&[("title", json!("t")), ("status", json!("todo"))]),
+    )
+    .await;
+    let base_uri = task["base_uri"].as_str().expect("created").to_string();
+
+    let ok = parse(
+        &handler
+            .instance_update(Parameters(InstanceUpdateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Task".into(),
+                base_uri: base_uri.clone(),
+                properties: props(&[("status", json!("doing"))]),
+            }))
+            .await,
+    );
+    assert_eq!(ok["success"], true, "{ok}");
+
+    let bad = parse(
+        &handler
+            .instance_update(Parameters(InstanceUpdateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Task".into(),
+                base_uri,
+                properties: props(&[("status", json!("done"))]),
+            }))
+            .await,
+    );
+    let err = bad["error"].as_str().expect("error field");
+    assert!(err.contains("status"), "{err}");
+    assert!(err.contains("todo, doing"), "{err}");
+}
+
+/// Collection items pass through the same gate: `tags` declares `["a","b"]`,
+/// so `instance_add_to_collection` refuses `"c"` and the error names the
+/// allowed values.
+#[tokio::test(flavor = "multi_thread")]
+async fn in_list_gates_collection_items() {
+    let (handler, uuid, _guard) = setup_tasks().await;
+    let task = create_task(&handler, &uuid, props(&[("title", json!("t"))])).await;
+    let base_uri = task["base_uri"].as_str().expect("created").to_string();
+
+    let ok = parse(
+        &handler
+            .instance_add_to_collection(Parameters(InstanceAddToCollectionParams {
+                perspective_id: uuid.clone(),
+                class_name: "Task".into(),
+                base_uri: base_uri.clone(),
+                collection: "tags".into(),
+                item_uri: "a".into(),
+            }))
+            .await,
+    );
+    assert_eq!(ok["success"], true, "{ok}");
+
+    let bad = parse(
+        &handler
+            .instance_add_to_collection(Parameters(InstanceAddToCollectionParams {
+                perspective_id: uuid.clone(),
+                class_name: "Task".into(),
+                base_uri,
+                collection: "tags".into(),
+                item_uri: "c".into(),
+            }))
+            .await,
+    );
+    let err = bad["error"].as_str().expect("error field");
+    assert!(err.contains("tags"), "{err}");
+    assert!(err.contains("a, b"), "{err}");
+}
+
+/// Bare entries behave exactly like object entries: `in: ["a","b"]` accepts
+/// "b" and rejects "c" with the same error shape.
+#[tokio::test(flavor = "multi_thread")]
+async fn in_list_bare_entries_match_like_object_entries() {
+    let (handler, uuid, _guard) = setup_tasks().await;
+
+    let ok = create_task(
+        &handler,
+        &uuid,
+        props(&[("title", json!("t")), ("tags", json!(["b"]))]),
+    )
+    .await;
+    assert_eq!(ok["created"], true, "{ok}");
+
+    let bad = create_task(
+        &handler,
+        &uuid,
+        props(&[("title", json!("t")), ("tags", json!(["c"]))]),
+    )
+    .await;
+    let err = bad["error"].as_str().expect("error field");
+    assert!(err.contains("a, b"), "{err}");
+}
+
+/// A number property compares on the coerced value: `in: [1,2]` accepts 2
+/// (also passed as the string "2", which coerces to the same integer) and
+/// rejects 3.
+#[tokio::test(flavor = "multi_thread")]
+async fn in_list_compares_coerced_numbers() {
+    let (handler, uuid, _guard) = setup_tasks().await;
+
+    let ok = create_task(
+        &handler,
+        &uuid,
+        props(&[("title", json!("t")), ("priority", json!(2))]),
+    )
+    .await;
+    assert_eq!(ok["created"], true, "{ok}");
+
+    let ok_str = create_task(
+        &handler,
+        &uuid,
+        props(&[("title", json!("t")), ("priority", json!("2"))]),
+    )
+    .await;
+    assert_eq!(ok_str["created"], true, "{ok_str}");
+
+    let bad = create_task(
+        &handler,
+        &uuid,
+        props(&[("title", json!("t")), ("priority", json!(3))]),
+    )
+    .await;
+    let err = bad["error"].as_str().expect("error field");
+    assert!(err.contains("priority"), "{err}");
+    assert!(err.contains("1, 2"), "{err}");
+}
+
+/// `in: []` is present-and-empty: it allows nothing, not everything.
+#[tokio::test(flavor = "multi_thread")]
+async fn in_list_empty_rejects_every_value() {
+    let (handler, uuid, _guard) = setup_tasks().await;
+
+    let bad = create_task(
+        &handler,
+        &uuid,
+        props(&[("title", json!("t")), ("locked", json!("yes"))]),
+    )
+    .await;
+    let err = bad["error"].as_str().expect("error field");
+    assert!(err.contains("locked"), "{err}");
+    assert!(err.contains("allowed"), "{err}");
+
+    // An instance without `locked` still creates — the constraint binds the
+    // property's values, not its presence.
+    let ok = create_task(&handler, &uuid, props(&[("title", json!("t"))])).await;
+    assert_eq!(ok["created"], true, "{ok}");
+}
+
+/// `describe_perspective` exposes the allowed values as `allowed_values`:
+/// objects with `value`, `label` only where declared, in declared order.
+#[tokio::test(flavor = "multi_thread")]
+async fn describe_perspective_lists_allowed_values() {
+    let (handler, uuid, _guard) = setup_tasks().await;
+    let out = handler
+        .describe_perspective(Parameters(DescribePerspectiveParams {
+            perspective_id: uuid.clone(),
+        }))
+        .await;
+    let desc = parse(&out);
+    let task = find(desc["classes"].as_array().unwrap(), "Task");
+    let properties = task["properties"].as_array().unwrap();
+
+    let status = find(properties, "status");
+    assert_eq!(
+        status["allowed_values"],
+        json!([{"value": "todo"}, {"value": "doing", "label": "Doing"}]),
+        "declared order, label only where present"
+    );
+    assert_eq!(
+        find(properties, "priority")["allowed_values"],
+        json!([{"value": 1}, {"value": 2}])
+    );
+    // Present-and-empty: `in: []` still reports the (empty) constraint.
+    assert_eq!(find(properties, "locked")["allowed_values"], json!([]));
+    // No `in` declared: the key is absent, not null.
+    assert!(find(properties, "title").get("allowed_values").is_none());
+}
