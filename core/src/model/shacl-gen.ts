@@ -201,8 +201,10 @@ export function buildSHACL(
             propShape.hasValue = propMeta.initial;
         }
 
-        // sh:in — allowed values (enum constraint)
-        if (propMeta.options && propMeta.options.length > 0) {
+        // sh:in — allowed values (enum constraint). An explicit empty list
+        // is kept: it denies every value, which dropping would widen to
+        // unconstrained.
+        if (propMeta.options !== undefined) {
             propShape.in = propMeta.options;
         }
 
