@@ -23,6 +23,7 @@ pub mod agent_extension;
 pub mod error;
 mod futures;
 pub mod languages_extension;
+pub mod membership_extension;
 mod options;
 pub use options::ad4m_language_extensions;
 pub mod pubsub_extension;

@@ -21,6 +21,7 @@ import type { AuthInfoInput as AuthInfoWire } from "../generated/api/AuthInfoInp
 import type { EndedSessions } from "../generated/api/EndedSessions";
 import type { KeySessionResult } from "../generated/api/KeySessionResult";
 import type { RenewedSession } from "../generated/api/RenewedSession";
+import type { RevocationReach } from "../generated/api/RevocationReach";
 import type { SessionChallenge } from "../generated/api/SessionChallenge";
 import type { SessionInfo } from "../generated/api/SessionInfo";
 import type { SignedKeyStatement } from "../generated/api/SignedKeyStatement";
@@ -298,6 +299,16 @@ export class AgentClient {
 
   async isLocked(): Promise<boolean> {
     return this.#apiClient.call('agent.isLocked', {});
+  }
+
+  /**
+   * The spaces a revoked device key (`did:key:...`) reached, recorded in the last 30 days:
+   * when each space's server dropped it and its room key rotated past it. A space whose
+   * link language never says (Holochain) has neither time. Only the key's person reads them;
+   * anyone else gets none.
+   */
+  async revocationReach(didKey: string): Promise<RevocationReach[]> {
+    return this.#apiClient.call('agent.revocationReach', { didKey });
   }
 
   async signMessage(message: string): Promise<AgentSignature> {

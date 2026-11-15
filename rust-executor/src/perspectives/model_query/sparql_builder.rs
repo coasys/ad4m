@@ -596,7 +596,8 @@ fn distinct_vars(subject: &str, predicate: &str, object: &str) -> String {
 /// The [`LinkGuard::join`] for the one read that must admit the verdicts a
 /// *display* read shows rather than the ones that count: `valid`,
 /// `cantCheck`, `flagged` and a link with no verdict annotation at all —
-/// every stored verdict but `invalid:*`, where `proofValid` is not asked.
+/// every stored verdict but `invalid:*` and `notMember` (a non-member's link in a governed
+/// space, R15), where `proofValid` is not asked.
 /// `invalid` stays out: a forged declaration must never act for its victim.
 ///
 /// For `ad4m://local`, where locality fails toward Local: a `true` a peer
@@ -618,7 +619,8 @@ pub(crate) fn shown_link_join(
         " {reifier} <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> \
          <<( {subject} {predicate} {object} )>> . \
          OPTIONAL {{ {reifier} <ad4m://ontology/linkVerdict> {reifier}_lv . }} \
-         FILTER(!BOUND({reifier}_lv) || !STRSTARTS(STR({reifier}_lv), \"invalid:\"))"
+         FILTER(!BOUND({reifier}_lv) || (!STRSTARTS(STR({reifier}_lv), \"invalid:\") \
+         && STR({reifier}_lv) != \"notMember\"))"
     )
 }
 

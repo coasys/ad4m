@@ -6,9 +6,20 @@ import path from "node:path";
 import * as ed from "@noble/ed25519";
 import { gcm } from "@noble/ciphers/aes.js";
 import WebSocket from "ws";
-import { hashMessageForVerify, publicKeyToDid, signHex } from "../src/auth.js";
+import { publicKeyToDid, signHex } from "../src/auth.js";
 import { generateRoomKey, roomKeyCommitment, sealToDid } from "./sealed-box.js";
 import { buildServer, type ServerOptions } from "../src/server.js";
+import {
+  authBody,
+  FakeStore,
+  links as membershipLinks,
+  newSalt,
+  personAgent,
+  roomIdOf,
+  signLink,
+  STORE_HEAD_KEY,
+  type TestAgent,
+} from "./identity.js";
 import {
   canonicalLinkPayload,
   isEncryptedLinkData,
@@ -19,25 +30,17 @@ import {
 } from "../src/types.js";
 
 
-/** Everything needed to act as an AD4M agent in tests: identity + signing key. */
-export interface TestAgent {
-  did: string;
-  privateKey: Uint8Array;
-  publicKey: Uint8Array;
-}
+export type { TestAgent } from "./identity.js";
 
+/**
+ * A fresh device-only key: no log lists it, so it speaks for no person. On an auto-admit
+ * server (the `startTestServer` default) it is admitted to every room it authenticates to.
+ */
 export async function createTestAgent(): Promise<TestAgent> {
   const privateKey = ed.utils.randomPrivateKey();
   const publicKey = await ed.getPublicKeyAsync(privateKey);
   const did = publicKeyToDid(publicKey);
   return { did, privateKey, publicKey };
-}
-
-export async function signChallenge(agent: TestAgent, challenge: string): Promise<string> {
-  // The AD4M executor's agentSignStringHex signs SHA-256(message), not
-  // the raw message bytes. Match that convention so the server can verify.
-  const hashed = hashMessageForVerify(challenge);
-  return signHex(agent.privateKey, hashed);
 }
 
 /** The room key the helpers encrypt links with, for tests that do not rotate their own. The server never sees it. */
@@ -90,16 +93,35 @@ export interface TestServerHandle {
   wsUrl: string;
   dataDir: string;
   built: Built;
+  /** The fake identity store the server reads key logs from. */
+  store: FakeStore;
   close: () => Promise<void>;
 }
 
-/** Boots a fresh server on a random port with a temp data directory. Always call `close()`. */
+/**
+ * Boots a fresh server on a random port with a temp data directory and a fake identity store
+ * (`tests/identity.ts`). Always call `close()`.
+ *
+ * Auto-admit is on unless `opts.autoAdmit` says otherwise: the suites about sync, paging,
+ * encryption and sockets authenticate fresh device-only keys, which only auto-admit lets in.
+ * The membership suites (`membership`, `rotate`, `revocation`, `admission`, `operator`) turn
+ * it off and sign with the fixture's persons.
+ *
+ * The server takes auth signed for the origin a request names in its Host header
+ * (`hostOrigin`) unless `opts` says otherwise: the port is random, so `url` is known only once
+ * it listens. The origin suites set `publicOrigins` and turn it off.
+ */
 export async function startTestServer(opts: Partial<ServerOptions> = {}): Promise<TestServerHandle> {
   const dataDir = mkdtempSync(path.join(tmpdir(), "link-server-test-"));
+  const store = await FakeStore.start();
   const built = await buildServer({
     dataDir,
     logger: false,
     telepresenceGraceMs: 300,
+    autoAdmit: true,
+    hostOrigin: true,
+    storeUrl: store.url,
+    storeHeadKeys: [STORE_HEAD_KEY],
     ...opts,
   });
   await built.app.listen({ port: 0, host: "127.0.0.1" });
@@ -111,8 +133,10 @@ export async function startTestServer(opts: Partial<ServerOptions> = {}): Promis
     wsUrl,
     dataDir,
     built,
+    store,
     close: async () => {
       await built.close();
+      await store.close();
       rmSync(dataDir, { recursive: true, force: true });
     },
   };
@@ -148,28 +172,61 @@ export async function getJson<T = unknown>(url: string, token?: string): Promise
   return { status: res.status, body: (text ? JSON.parse(text) : undefined) as T };
 }
 
-/** Full DID challenge-response flow. Returns the issued JWT. Room is auto-created if this is the first agent. */
+export interface AuthAnswer {
+  token?: string;
+  expiresAt?: string;
+  admitted?: boolean;
+  error?: string;
+}
+
+/** `POST /rooms/:roomId/auth` (protocol 2) for `agent`: the raw answer. */
+export async function authAs(serverUrl: string, roomId: string, agent: TestAgent): Promise<JsonResponse<AuthAnswer>> {
+  return postJson<AuthAnswer>(`${serverUrl}/rooms/${roomId}/auth`, authBody(agent, serverUrl, roomId));
+}
+
+/**
+ * Authenticates `agent` to an existing room (protocol 2) and returns the token. Throws when the
+ * server refuses, or when `requireAdmitted` and the key is not admitted.
+ */
 export async function authenticateAgent(
   serverUrl: string,
   roomId: string,
-  agent: TestAgent
+  agent: TestAgent,
+  requireAdmitted = true
 ): Promise<string> {
-  const step1 = await postJson<{ challenge?: string; error?: string }>(
-    `${serverUrl}/rooms/${roomId}/auth`,
-    { did: agent.did }
-  );
-  if (step1.status !== 200 || !step1.body.challenge) {
-    throw new Error(`challenge request failed: ${step1.status} ${JSON.stringify(step1.body)}`);
+  const res = await authAs(serverUrl, roomId, agent);
+  if (res.status !== 200 || !res.body.token) {
+    throw new Error(`auth failed: ${res.status} ${JSON.stringify(res.body)}`);
   }
-  const signature = await signChallenge(agent, step1.body.challenge);
-  const step2 = await postJson<{ token?: string; error?: string }>(
-    `${serverUrl}/rooms/${roomId}/auth`,
-    { did: agent.did, challenge: step1.body.challenge, signature }
-  );
-  if (step2.status !== 200 || !step2.body.token) {
-    throw new Error(`auth verify failed: ${step2.status} ${JSON.stringify(step2.body)}`);
+  if (requireAdmitted && !res.body.admitted) {
+    throw new Error(`auth: ${agent.did} is not admitted to ${roomId}`);
   }
-  return step2.body.token;
+  return res.body.token;
+}
+
+export interface CreateRoomOptions {
+  /** The creator's device key (default alice's d1). */
+  creator?: TestAgent;
+  join?: "open" | "invite";
+  add?: "admins" | "members";
+  salt?: string;
+}
+
+/**
+ * Creates a room as protocol 2 does: the first `POST /membership` with `genesis` and the
+ * creator's `rules` link. Returns the room id, `base58(sha256(creator ‖ 0x00 ‖ salt))`.
+ */
+export async function createRoom(serverUrl: string, opts: CreateRoomOptions = {}): Promise<string> {
+  const creator = opts.creator ?? personAgent("alice");
+  if (!creator.person) throw new Error("createRoom: the creator must be a person's key");
+  const salt = opts.salt ?? newSalt();
+  const roomId = roomIdOf(creator.person, salt);
+  const res = await postJson(`${serverUrl}/rooms/${roomId}/membership`, {
+    genesis: { creator: creator.person, salt },
+    links: [signLink(creator, membershipLinks.rules({ join: opts.join ?? "open", add: opts.add }))],
+  });
+  if (res.status !== 200) throw new Error(`genesis failed: ${res.status} ${JSON.stringify(res.body)}`);
+  return roomId;
 }
 
 /**
@@ -274,9 +331,18 @@ export interface ClientRotateResult {
   membersNeedingHistoricalKeys?: Array<{ did: string; missingVersions: number[] }>;
 }
 
+/** The admitted keys of a room (`GET /members`): what a rotation seals to. */
+export async function admittedKeys(serverUrl: string, roomId: string, token: string): Promise<string[]> {
+  const res = await getJson<{ keys: Array<{ did: string }> }>(`${serverUrl}/rooms/${roomId}/members`, token);
+  if (res.status !== 200) {
+    throw new Error(`members fetch failed: ${res.status} ${JSON.stringify(res.body)}`);
+  }
+  return res.body.keys.map((k) => k.did);
+}
+
 /**
  * Performs a client-side key rotation: generates the room key locally,
- * seals it to the DID of every ACL member (whether or not it ever
+ * seals it to every admitted key of the room (whether or not it is
  * connected), and POSTs only the sealed boxes. The plaintext room key never
  * leaves this function's scope (returned for test assertions only).
  */
@@ -287,21 +353,22 @@ export async function clientSideRotate(
 ): Promise<ClientRotateResult> {
   const roomKey = generateRoomKey();
 
-  const aclRes = await getJson<{ admin: string; members: Array<{ did: string }> }>(
-    `${serverUrl}/rooms/${roomId}/acl`,
-    adminToken
+  const members = await getJson<{ keys: Array<{ did: string }>; latestKeyVersion: number }>(
+    `${serverUrl}/rooms/${roomId}/members`,
+    adminToken,
   );
-  if (aclRes.status !== 200) {
-    throw new Error(`ACL fetch failed: ${aclRes.status} ${JSON.stringify(aclRes.body)}`);
+  if (members.status !== 200) {
+    throw new Error(`members fetch failed: ${members.status} ${JSON.stringify(members.body)}`);
   }
-
-  const keys = aclRes.body.members.map((m) => ({ did: m.did, encryptedKey: sealToDid(m.did, roomKey) }));
+  const dids = members.body.keys.map((k) => k.did);
+  const version = members.body.latestKeyVersion + 1;
+  const keys = dids.map((did) => ({ did, encryptedKey: sealToDid(did, roomKey) }));
 
   const rotateRes = await postJson<{
     version: number;
     recipients: string[];
     membersNeedingHistoricalKeys?: Array<{ did: string; missingVersions: number[] }>;
-  }>(`${serverUrl}/rooms/${roomId}/keys/rotate`, { keys, commitment: roomKeyCommitment(roomKey) }, adminToken);
+  }>(`${serverUrl}/rooms/${roomId}/keys/rotate`, { keys, commitment: roomKeyCommitment(roomKey), version }, adminToken);
 
   if (rotateRes.status !== 200) {
     throw new Error(`rotate failed: ${rotateRes.status} ${JSON.stringify(rotateRes.body)}`);

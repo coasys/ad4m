@@ -16,7 +16,7 @@
  *   initAdapters({ storage: new MockStorage() });
  */
 
-import type { SealedBox } from "./types.js";
+import type { LinkExpression, MembershipLinkResult } from "./types.js";
 
 // ---------------------------------------------------------------------------
 // Transport (HTTP)
@@ -57,17 +57,20 @@ export interface StorageAdapter {
  * actually needs. Deliberately narrow — the language never signs
  * commits itself (the runtime signs diffs upstream before they reach
  * `commit()`); it only needs its own DID (for auth + peer filtering),
- * a signature primitive (for auth), and the executor's opening of boxes
- * sealed to it (room keys, see src/encryption.ts).
+ * the two signature primitives auth uses, and the seed of its room key
+ * X25519 key (room keys are sealed to that key, see src/encryption.ts).
  */
 export interface AgentAdapter {
     did(): string;
+    /** `agentSignStringHex`: Ed25519 over SHA-256 of the string, hex. */
     signStringHex(payload: string): string;
+    /** `agentSign`: Ed25519 over the bytes themselves. */
+    sign(payload: Uint8Array): Uint8Array;
     /**
-     * `agentOpenSealed`: opens a box sealed to this agent, returns hex.
-     * Throws for a box sealed to any other DID.
+     * `agentRoomKeySeed` (K8): the 32-byte secret of this agent's room key X25519 key. No
+     * signing import signs a message in its derivation's domain.
      */
-    openSealed(sealed: SealedBox): string;
+    roomKeySeed(): Promise<Uint8Array>;
 }
 
 // ---------------------------------------------------------------------------
@@ -78,6 +81,21 @@ export interface RuntimeAdapter {
     emitPerspectiveDiff(diff: unknown): void;
     emitSyncStateChange(state: string): void;
     emitTelepresenceSignal(payload: unknown, recipientDid?: string): void;
+    /**
+     * `membershipLinks`: the membership links the room counted, for the executor's membership
+     * of this space (the language keeps no membership state). A result per link, in order.
+     */
+    membershipLinks(links: LinkExpression[]): Promise<MembershipLinkResult[]>;
+    /** `membershipAdmits`: whether the space admits the key now, as the executor's membership says. */
+    membershipAdmits(didKey: string): Promise<{ admitted: boolean; reason?: string }>;
+    /** `roomKeyEvent`: the room key rotated, or the room dropped this agent's key. */
+    roomKeyEvent(event: RoomKeyEvent): Promise<void>;
+}
+
+export interface RoomKeyEvent {
+    kind: "dropped" | "rotated";
+    removedKeys: string[];
+    version?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -104,7 +122,12 @@ export interface WebSocketFactory {
 
 export interface RoomConfig {
     serverUrl: string;
+    /** `base58(sha256(creator ‖ 0x00 ‖ uid))` (src/room.ts `roomIdOf`). */
     roomId: string;
+    /** The person who made the space (template parameter `CREATOR`): the room's genesis. */
+    creator?: string;
+    /** The space's salt (template parameter `UID`): the room's genesis. */
+    uid?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -134,6 +157,8 @@ export function initAdapters(adapters: AdapterRegistry): void {
             config: {
                 serverUrl: adapters.config.serverUrl.replace(/\/+$/, ""),
                 roomId: adapters.config.roomId,
+                ...(adapters.config.creator !== undefined ? { creator: adapters.config.creator } : {}),
+                ...(adapters.config.uid !== undefined ? { uid: adapters.config.uid } : {}),
             },
         };
     }

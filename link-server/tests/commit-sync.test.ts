@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
 import { test } from "node:test";
 import {
+  authAs,
   authenticateAgent,
+  createRoom,
   createSignedLink,
   createTestAgent,
   getJson,
@@ -13,6 +14,7 @@ import {
   type TestServerHandle,
 } from "./helpers.js";
 import { EMPTY_REVISION, xorHex, type LinkExpression, type PerspectiveDiff } from "../src/types.js";
+import { links as membershipLinks, personAgent, personDid, signLink } from "./identity.js";
 
 /** Test helper: compute the XOR revision of a set of link hashes.
  * The server maintains this incrementally — this standalone version
@@ -36,7 +38,7 @@ async function withServer(fn: (server: TestServerHandle) => Promise<void>): Prom
 
 test("commit persists links; sync and render reflect them with a matching revision", async () => {
   await withServer(async (server) => {
-    const roomId = randomUUID();
+    const roomId = await createRoom(server.url);
     const agent = await createTestAgent();
     const token = await authenticateAgent(server.url, roomId, agent);
 
@@ -83,7 +85,7 @@ test("commit persists links; sync and render reflect them with a matching revisi
 
 test("removal (OR-Set) takes a link out of the active set but keeps history in the diff log", async () => {
   await withServer(async (server) => {
-    const roomId = randomUUID();
+    const roomId = await createRoom(server.url);
     const agent = await createTestAgent();
     const token = await authenticateAgent(server.url, roomId, agent);
 
@@ -116,7 +118,7 @@ test("removal (OR-Set) takes a link out of the active set but keeps history in t
 
 test("sync ?since=N only returns diffs after sequence N", async () => {
   await withServer(async (server) => {
-    const roomId = randomUUID();
+    const roomId = await createRoom(server.url);
     const agent = await createTestAgent();
     const token = await authenticateAgent(server.url, roomId, agent);
 
@@ -147,8 +149,8 @@ test("sync ?since=N only returns diffs after sequence N", async () => {
 
 test("revision converges regardless of add order (content hash, not sequence-dependent)", async () => {
   await withServer(async (server) => {
-    const roomA = randomUUID();
-    const roomB = randomUUID();
+    const roomA = await createRoom(server.url);
+    const roomB = await createRoom(server.url);
     const agent = await createTestAgent();
     const tokenA = await authenticateAgent(server.url, roomA, agent);
     const tokenB = await authenticateAgent(server.url, roomB, agent);
@@ -170,7 +172,7 @@ test("revision converges regardless of add order (content hash, not sequence-dep
 
 test("commit rejects entirely if any single link in the batch is invalid (atomic)", async () => {
   await withServer(async (server) => {
-    const roomId = randomUUID();
+    const roomId = await createRoom(server.url);
     const agent = await createTestAgent();
     const token = await authenticateAgent(server.url, roomId, agent);
 
@@ -190,15 +192,13 @@ test("commit rejects entirely if any single link in the batch is invalid (atomic
   });
 });
 
-test("a DID not on the room ACL cannot commit", async () => {
+test("a forged bearer token cannot commit", async () => {
   await withServer(async (server) => {
-    const roomId = randomUUID();
+    const roomId = await createRoom(server.url);
     const admin = await createTestAgent();
     await authenticateAgent(server.url, roomId, admin);
 
-    // A stranger's token doesn't exist since they can't auth (403) — simulate
-    // by forging a bearer with garbage; the important contract is the ACL
-    // check happens on every request, not just at login.
+    // The token is checked on every request, not just at login.
     const res = await postJson<{ error: string }>(
       `${server.url}/rooms/${roomId}/commit`,
       { additions: [], removals: [] },
@@ -208,34 +208,45 @@ test("a DID not on the room ACL cannot commit", async () => {
   });
 });
 
-test("removing a DID from the ACL revokes their access on subsequent requests", async () => {
-  await withServer(async (server) => {
-    const roomId = randomUUID();
-    const admin = await createTestAgent();
-    const friend = await createTestAgent();
-    const adminToken = await authenticateAgent(server.url, roomId, admin);
+test("removing a person from the membership revokes their access on the next request", async () => {
+  const server = await startTestServer({ autoAdmit: false });
+  try {
+    const alice = personAgent("alice");
+    const bob = personAgent("bob");
+    const roomId = await createRoom(server.url, { creator: alice });
+    const aliceToken = await authenticateAgent(server.url, roomId, alice);
+    const bobToken = (await authAs(server.url, roomId, bob)).body.token!;
+    const joined = await postJson(
+      `${server.url}/rooms/${roomId}/membership`,
+      { links: [signLink(bob, membershipLinks.member(personDid("bob")))] },
+      bobToken
+    );
+    assert.equal(joined.status, 200);
 
-    await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: friend.did }, adminToken);
-    const friendToken = await authenticateAgent(server.url, roomId, friend);
-
-    const before = await getJson(`${server.url}/rooms/${roomId}/revision`, friendToken);
+    const before = await getJson(`${server.url}/rooms/${roomId}/revision`, bobToken);
     assert.equal(before.status, 200);
 
-    await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "remove", did: friend.did }, adminToken);
+    const removed = await postJson(
+      `${server.url}/rooms/${roomId}/membership`,
+      { links: [signLink(alice, membershipLinks.removed(personDid("bob")))] },
+      aliceToken
+    );
+    assert.equal(removed.status, 200);
 
-    // ACL removal also revokes the removed DID's sessions immediately, so the
-    // very next request is rejected as "session revoked" (401) rather than
-    // waiting for a lazy ACL check (403) on an otherwise-still-valid JWT.
-    const after = await getJson<{ error: string }>(`${server.url}/rooms/${roomId}/revision`, friendToken);
+    // The removal ends the removed person's sessions at once: the very next request is
+    // refused as a revoked session (401), not left to a later admission check (403).
+    const after = await getJson<{ error: string }>(`${server.url}/rooms/${roomId}/revision`, bobToken);
     assert.equal(after.status, 401);
-  });
+  } finally {
+    await server.close();
+  }
 });
 
 // ---- Review item 6: applyDiffAndAppend ordering invariant ----
 
 test("applyDiffAndAppend processes additions before removals — simultaneous add+remove leaves link removed", async () => {
   await withServer(async (server) => {
-    const roomId = randomUUID();
+    const roomId = await createRoom(server.url);
     const agent = await createTestAgent();
     const token = await authenticateAgent(server.url, roomId, agent);
 
@@ -268,7 +279,7 @@ test("applyDiffAndAppend processes additions before removals — simultaneous ad
 
 test("sync from an early cursor returns every later diff, past 10,000 commits", async () => {
   await withServer(async (server) => {
-    const roomId = randomUUID();
+    const roomId = await createRoom(server.url);
     const agent = await createTestAgent();
     const token = await authenticateAgent(server.url, roomId, agent);
 
@@ -327,7 +338,7 @@ test("sync from an early cursor returns every later diff, past 10,000 commits", 
 
 test("render still returns the whole active set for a room whose early diffs were pruned before this change", async () => {
   await withServer(async (server) => {
-    const roomId = randomUUID();
+    const roomId = await createRoom(server.url);
     const agent = await createTestAgent();
     const token = await authenticateAgent(server.url, roomId, agent);
 

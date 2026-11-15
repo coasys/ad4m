@@ -46,7 +46,7 @@ import { v4 as uuidv4 } from "uuid";
 import { TestContext } from "../test-context";
 import { waitUntil } from "../../helpers/index";
 import { pollUntil } from "../../utils/utils";
-import { LinkLangConfig, holochainLinkLang, publishLinkLanguage } from "../../utils/linkLangConfig";
+import { LinkLangConfig, holochainLinkLang, shareNeighbourhood } from "../../utils/linkLangConfig";
 
 const DIFF_SYNC_OFFICIAL = fs.readFileSync("./scripts/perspective-diff-sync-hash").toString();
 
@@ -77,12 +77,7 @@ export default function flowReplicaJoinTests(
 
         // ── Alice: neighbourhood, flow, an instance with one settled edge ──
         const aliceHandle = await alice.perspective.add(`flow-join-${uuidv4()}`);
-        const socialContext = await publishLinkLanguage(alice, getLinkLang(), "flow replica join");
-        const url = await alice.neighbourhood.publishFromPerspective(
-          aliceHandle.uuid,
-          socialContext.address,
-          new Perspective(),
-        );
+        const { url } = await shareNeighbourhood(alice, getLinkLang(), aliceHandle.uuid, "flow replica join");
         const aliceP = (await alice.perspective.byUUID(aliceHandle.uuid)) as PerspectiveProxy;
 
         await aliceP.addFlow("JoinCatchUpFlow", makeFlow());

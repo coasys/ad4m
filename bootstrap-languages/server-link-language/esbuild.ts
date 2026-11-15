@@ -47,6 +47,13 @@ const tsResolverPlugin = {
             if (resolveDir.includes("/node_modules/") || resolveDir.endsWith("/node_modules")) return;
             const tsPath = args.path.replace(/\.js$/, ".ts");
             const resolved = resolve(resolveDir, tsPath);
+            // Generated JS with no .ts source (keyring/keyring.js, the keyring's wasm binding
+            // from ad4m-keyring/wasm/build.sh) resolves as the .js it is.
+            try {
+                Deno.statSync(resolved);
+            } catch {
+                return { path: resolve(resolveDir, args.path), namespace: "file" };
+            }
             return { path: resolved, namespace: "file" };
         });
     },

@@ -174,6 +174,12 @@ pub const MONOTONIC_PREDICATES: &[MonotonicPredicate] = &[
         predicate: PredicateMatch::Prefix(FLOW_NAMESPACE),
         ending: Ending::Tombstone,
     },
+    // Space membership (R12): the replay ends a membership with a `removed`
+    // link, never by taking a link away, so a removal would rewrite history.
+    MonotonicPredicate {
+        predicate: PredicateMatch::Prefix(ad4m_identity_core::membership::MEMBERSHIP_PREFIX),
+        ending: Ending::Never,
+    },
 ];
 
 /// How a Shared link under `predicate` may end, per `table`; `None` if it
@@ -467,6 +473,20 @@ mod tests {
             assert!(!is_retractable(Some(p)), "{p}");
         }
         assert!(!is_retractable(Some("test://likes")));
+    }
+
+    /// R12: a membership link never ends by a diff: the replay reads `removed` links instead.
+    #[test]
+    fn membership_links_never_end() {
+        for p in [
+            "coasys://membership/member",
+            "coasys://membership/removed",
+            "coasys://membership/rules",
+        ] {
+            assert_eq!(ending(Some(p)), Some(Ending::Never), "{p}");
+            assert!(!is_retractable(Some(p)), "{p}");
+        }
+        assert!(!is_monotonic(Some("coasys://membershipX")));
     }
 
     /// The lookup reads whatever table it is given: a new entry is all a

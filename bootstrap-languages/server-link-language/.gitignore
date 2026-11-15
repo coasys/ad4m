@@ -3,3 +3,5 @@ build/
 lib/
 deno.lock
 *.js.map
+# Generated wasm binding: ad4m-keyring/wasm/build.sh
+keyring/

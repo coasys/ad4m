@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import { randomBytes, randomUUID } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { get as httpGet, type ClientRequest } from "node:http";
 import { connect, type AddressInfo } from "node:net";
 import { test } from "node:test";
 import { LogTail } from "../src/log-tail.js";
 import { MAX_LOG_STREAMS } from "../src/operator.js";
-import { authenticateAgent, createTestAgent, startTestServer, type TestServerHandle } from "./helpers.js";
+import { authenticateAgent, createRoom, createTestAgent, startTestServer, type TestServerHandle } from "./helpers.js";
 
 const TOKEN = randomBytes(32).toString("hex");
 const ORIGIN = "https://prs.ad4m.dev";
@@ -114,7 +114,7 @@ test("the log stream needs the operator token and a signed-in user, and is not o
 
 test("the log stream sends the buffered lines, then each new line as it is logged", async () => {
   await withLogging(async ({ server, opUrl, stdout }) => {
-    const roomId = randomUUID();
+    const roomId = await createRoom(server.url);
     const admin = await createTestAgent();
     await authenticateAgent(server.url, roomId, admin);
 
@@ -125,21 +125,20 @@ test("the log stream sends the buffered lines, then each new line as it is logge
       // The public app's request lines from before the stream opened.
       await stream.until((events) => events.some((e) => e.data.req?.url === `/rooms/${roomId}/auth`));
 
-      const joiner = await createTestAgent();
-      const added = await fetch(`${opUrl}/api/rooms/${roomId}/acl`, {
+      const suspended = await fetch(`${opUrl}/api/rooms/${roomId}/suspend`, {
         method: "POST",
         headers: { ...SIGNED_IN, origin: ORIGIN, "content-type": "application/json" },
-        body: JSON.stringify({ action: "add", did: joiner.did }),
+        body: "{}",
       });
-      assert.equal(added.status, 200);
-      await stream.until((events) => events.some((e) => e.data.msg === "operator acl change"));
-      const change = stream.events.find((e) => e.data.msg === "operator acl change")!.data;
+      assert.equal(suspended.status, 200);
+      await stream.until((events) => events.some((e) => e.data.msg === "operator suspend"));
+      const change = stream.events.find((e) => e.data.msg === "operator suspend")!.data;
       assert.equal(change.operator, "lucksus");
-      assert.equal(change.did, joiner.did);
+      assert.equal(change.roomId, roomId);
       assert.equal(change.pid, undefined);
 
       assert.ok(!JSON.stringify(stream.events).includes(TOKEN), "the operator token is not in the stream");
-      assert.ok(stdout.some((line) => line.includes("operator acl change")), "lines still reach the destination");
+      assert.ok(stdout.some((line) => line.includes("operator suspend")), "lines still reach the destination");
     } finally {
       stream.close();
     }

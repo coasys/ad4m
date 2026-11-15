@@ -15,15 +15,20 @@ import {
     storageDelete,
     storageListKeys,
     agentDid,
+    agentSign,
     agentSignStringHex,
-    agentOpenSealed,
+    agentRoomKeySeed,
     emitPerspectiveDiff,
     emitSyncStateChange,
     emitTelepresenceSignal,
+    membershipAdmits,
+    membershipLinks,
+    roomKeyEvent,
 } from "@coasys/ad4m-ldk";
 
 import type {
     AgentAdapter,
+    RoomKeyEvent,
     RuntimeAdapter,
     StorageAdapter,
     Transport,
@@ -31,7 +36,7 @@ import type {
     WSConnection,
     WebSocketFactory,
 } from "./adapters.js";
-import type { SealedBox } from "./types.js";
+import type { LinkExpression, MembershipLinkResult } from "./types.js";
 
 export class DenoTransport implements Transport {
     async fetch(
@@ -103,8 +108,12 @@ export class DenoAgentAdapter implements AgentAdapter {
         return agentSignStringHex(payload);
     }
 
-    openSealed(sealed: SealedBox): string {
-        return agentOpenSealed(sealed);
+    sign(payload: Uint8Array): Uint8Array {
+        return agentSign(payload);
+    }
+
+    roomKeySeed(): Promise<Uint8Array> {
+        return agentRoomKeySeed();
     }
 }
 
@@ -119,6 +128,18 @@ export class DenoRuntimeAdapter implements RuntimeAdapter {
 
     emitTelepresenceSignal(payload: unknown, recipientDid?: string): void {
         emitTelepresenceSignal(payload, recipientDid);
+    }
+
+    membershipLinks(links: LinkExpression[]): Promise<MembershipLinkResult[]> {
+        return membershipLinks(links);
+    }
+
+    membershipAdmits(didKey: string): Promise<{ admitted: boolean; reason?: string }> {
+        return membershipAdmits(didKey);
+    }
+
+    roomKeyEvent(event: RoomKeyEvent): Promise<void> {
+        return roomKeyEvent(event);
     }
 }
 

@@ -10,8 +10,9 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 
 use ad4m_keyring::{
-    hkdf_subkey, open_from_x25519, seal_to_x25519, unwrap, wrap, x25519_public_of_ed25519,
-    x25519_secret_of_ed25519, KeyRef, SecretKey, WrapContext,
+    hkdf_subkey, open_from_x25519, open_room_key, room_key_context, seal_room_key, seal_to_x25519,
+    unwrap, wrap, x25519_public_of_ed25519, x25519_secret_of_ed25519, KeyRef, SecretKey,
+    WrapContext,
 };
 
 const WATCHED: usize = 4;
@@ -121,6 +122,11 @@ fn no_freed_buffer_holds_a_plaintext_key() {
         let sealed = seal_to_x25519(&room, &bob_public).unwrap();
         let opened_room = open_from_x25519(&sealed, &bob_secret).unwrap();
         assert_eq!(opened_room.expose_secret(), &ROOM);
+        let context = room_key_context("room", 1);
+        let bound = seal_room_key(&room, &bob_public, &context).unwrap();
+        let opened_bound = open_room_key(&bound, &bob_secret, &context).unwrap();
+        assert_eq!(opened_bound.expose_secret(), &ROOM);
+        drop(opened_bound);
         // Moving a key moves a pointer: no copy is left behind to free.
         let moved = vec![opened, subkey, opened_room];
         drop(moved);

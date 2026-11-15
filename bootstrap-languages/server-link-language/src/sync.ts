@@ -22,7 +22,9 @@ import * as api from "./api.js";
 import type { RoomConfig } from "./adapters.js";
 import type {
     LinkExpression,
+    MembershipLinkResult,
     PerspectiveDiff,
+    ServerWsMessage,
     RenderResponse,
     SyncDiffEntry,
     WireLinkExpression,
@@ -35,9 +37,11 @@ import {
     hexToBytes,
     encryptLinkForWire,
     latestKeyVersion,
+    linkHashKeyOf,
     wireLinkHash,
     type KeyRing,
 } from "./encryption.js";
+import { fromWireMembershipLink, isMembershipLink, toWireMembershipLink } from "./room.js";
 
 export interface SyncDeps {
     config: RoomConfig;
@@ -58,6 +62,9 @@ export interface SyncDeps {
      *  it to grant them to members lacking them — the periodic HTTP sync is
      *  the fallback discovery path when onPeerJoined never fires. */
     onPostSync?: () => Promise<void>;
+    /** The executor's `membershipLinks`: the room's membership links, for its membership of
+     *  the space (the language keeps none). Without it, membership catch-up does nothing. */
+    membershipLinks?: (links: LinkExpression[]) => Promise<MembershipLinkResult[]>;
 }
 
 let _deps: SyncDeps | null = null;
@@ -101,11 +108,16 @@ function toWireLink(link: LinkExpression): WireLinkExpression {
         throw new Error("toWireLink: no room key to encrypt with yet");
     }
     const version = latestKeyVersion(keyRing);
-    const key = keyRing.get(version);
-    if (!key) {
+    const roomKey = keyRing.get(version);
+    if (!roomKey) {
         throw new Error("toWireLink: key ring has no keys");
     }
-    return encryptLinkForWire(link, key, version);
+    // K4: every link_hash is keyed by version 1, so a link keeps its hash across rotations.
+    const hashKey = linkHashKeyOf(keyRing);
+    if (!hashKey) {
+        throw new Error("toWireLink: this agent holds no room key version 1 yet, which keys every link hash");
+    }
+    return encryptLinkForWire(link, { roomKey, version, hashKey });
 }
 
 /** A wire link the key it names does not open. */
@@ -170,7 +182,9 @@ function openOrHold(wireLink: WireLinkExpression, op: store.HeldOp): LinkExpress
         store.holdLink(heldId(wireLink), op, wireLink);
         return null;
     }
-    store.releaseHeld(wireLinkHash(link));
+    const keyRing = deps().getKeyRing();
+    const hashKey = keyRing ? linkHashKeyOf(keyRing) : null;
+    store.releaseHeld(hashKey ? wireLinkHash(link, hashKey) : heldId(wireLink));
     return link;
 }
 
@@ -286,18 +300,144 @@ export function retryHeld(): PerspectiveDiff {
  */
 export async function commit(diff: PerspectiveDiff): Promise<void> {
     const { config } = deps();
+    // K5: membership links go to /membership, plain and signed; the server refuses them on /commit.
+    const membership = diff.additions.filter(isMembershipLink);
+    const endedRemovals = diff.removals.filter(isMembershipLink);
+    const plain: PerspectiveDiff = {
+        additions: diff.additions.filter((l) => !isMembershipLink(l)),
+        removals: diff.removals.filter((l) => !isMembershipLink(l)),
+    };
+    if (endedRemovals.length > 0) {
+        // A membership is ended by a later link (a removal or revocation link), never by
+        // removing the link that made it: the room's membership log only grows.
+        console.warn(
+            `[server-link-language] dropping ${endedRemovals.length} membership link removal(s): ` +
+            "the room's membership log only grows",
+        );
+    }
+    if (membership.length > 0) await postMembershipLinks(membership);
+    if (plain.additions.length === 0 && plain.removals.length === 0) {
+        if (membership.length > 0 || endedRemovals.length > 0) return;
+    }
+
     console.log(
-        `[server-link-language] POST /commit: ${diff.additions.length} adds, ` +
-        `${diff.removals.length} removes → room=${config.roomId}`,
+        `[server-link-language] POST /commit: ${plain.additions.length} adds, ` +
+        `${plain.removals.length} removes → room=${config.roomId}`,
     );
-    const wire = toWireDiff(diff);
+    const wire = toWireDiff(plain);
     const res = await withToken((token) => api.commitDiff(config, token, wire));
-    store.applyDiff(diff);
+    store.applyDiff(plain);
     if (typeof res.sequence === "number" && res.sequence === store.getSequence() + 1) {
         store.setSequence(res.sequence);
         if (res.revision) store.setRevision(res.revision);
     }
     emitSyncStateSafe("Synced");
+}
+
+/**
+ * POSTs membership links (K5). While the room does not exist yet (auth answers 404), the
+ * request carries no token and the room's genesis (`{creator, salt}` from the template
+ * parameters `CREATOR` and `UID`): the creator's own links make the room. A room that exists
+ * ignores the genesis, so it always goes along when known.
+ *
+ * A refusal (the server counted none of the links: 403 with results) is logged and not thrown:
+ * the same links get the same answer, so the executor's retry would not change it. A network
+ * or server failure throws, so the executor keeps the diff and retries it; the server counts a
+ * link once, so resending one it counted does nothing.
+ */
+async function postMembershipLinks(links: LinkExpression[]): Promise<void> {
+    const d = deps();
+    const { config } = d;
+    const genesis = config.creator && config.uid ? { creator: config.creator, salt: config.uid } : undefined;
+    const wire = links.map(toWireMembershipLink);
+    let token: string | null;
+    try {
+        token = await d.getToken();
+    } catch (err) {
+        if (!(err instanceof api.ApiError) || err.status !== 404) throw err;
+        if (!genesis) {
+            throw new Error(
+                "the room does not exist yet, and this language has no genesis (CREATOR, UID) to make it",
+            );
+        }
+        token = null;
+    }
+    let res: api.MembershipPostResult;
+    try {
+        res = await api.postMembership(config, token, wire, genesis);
+    } catch (err) {
+        if (!(err instanceof api.ApiError) || err.status !== 401 || token === null || !d.invalidateToken) throw err;
+        d.invalidateToken();
+        res = await api.postMembership(config, await d.getToken(), wire, genesis);
+    }
+    const refused = res.results.filter((r) => !r.counted);
+    if (!res.accepted) {
+        console.error(
+            `[server-link-language] the room counted none of ${links.length} membership link(s): ` +
+            `${res.reason ?? "no reason given"}` +
+            (refused.length > 0 ? ` (${refused.map((r) => `${r.hash}: ${r.reason ?? "-"}`).join(", ")})` : ""),
+        );
+        return;
+    }
+    if (refused.length > 0) {
+        console.error(
+            `[server-link-language] the room did not count ${refused.length} of ${links.length} membership link(s): ` +
+            refused.map((r) => `${r.hash}: ${r.reason ?? "-"}`).join(", "),
+        );
+    }
+    console.log(`[server-link-language] POST /membership: ${links.length - refused.length} link(s) counted`);
+}
+
+// ---------------------------------------------------------------------------
+// Membership catch-up: the room's membership links, for the executor
+// ---------------------------------------------------------------------------
+
+/** Membership links per `GET /membership` page (the server's default; its maximum is 5000). */
+export const MEMBERSHIP_PAGE_LIMIT = 500;
+let _membershipPageLimit = MEMBERSHIP_PAGE_LIMIT;
+/** The membership catch-up in flight: runs queue behind it, so the cursor moves in order. */
+let _membershipRun: Promise<void> = Promise.resolve();
+
+/**
+ * Reads the room's membership log from the stored cursor, a page at a time, and hands each
+ * page to the executor (`membershipLinks`). The cursor moves only after the executor took the
+ * page, to the page's `seq` (the room's seq when the page is empty). The executor judges every
+ * link itself; the language keeps no membership state. Does nothing without `membershipLinks`.
+ */
+export function catchUpMembership(): Promise<void> {
+    const run = _membershipRun.catch(() => undefined).then(readMembership);
+    _membershipRun = run;
+    return run;
+}
+
+async function readMembership(): Promise<void> {
+    const d = deps();
+    const take = d.membershipLinks;
+    if (!take) return;
+    for (;;) {
+        const since = store.getMembershipSeq();
+        const limit = _membershipPageLimit;
+        const page = await withToken((token) => api.fetchMembership(d.config, token, since, limit));
+        if (page.links.length > 0) await take(page.links.map(fromWireMembershipLink));
+        if (page.seq > since) store.setMembershipSeq(page.seq);
+        if (page.links.length < limit) return;
+    }
+}
+
+/**
+ * A WebSocket `membership` push: the links go to the executor at once, then catch-up reads the
+ * log from the cursor (a push does not move it: a push can arrive out of order, and only the
+ * log says nothing lies between). Never throws: the next catch-up reads them again.
+ */
+export async function onMembershipPush(msg: Extract<ServerWsMessage, { type: "membership" }>): Promise<void> {
+    const take = deps().membershipLinks;
+    if (!take) return;
+    try {
+        if (msg.links.length > 0) await take(msg.links.map(fromWireMembershipLink));
+        await catchUpMembership();
+    } catch (err) {
+        console.error("[server-link-language] membership push not handed to the executor; catch-up reads it again:", err);
+    }
 }
 
 /**
@@ -444,9 +584,14 @@ let _renderPageLimit = RENDER_PAGE_LIMIT;
 let _syncPageLimit = SYNC_PAGE_LIMIT;
 
 /** Test-only: small pages, so a test room of a few links spans several. */
-export function _setPageLimitsForTests(render = RENDER_PAGE_LIMIT, sync = SYNC_PAGE_LIMIT): void {
+export function _setPageLimitsForTests(
+    render = RENDER_PAGE_LIMIT,
+    sync = SYNC_PAGE_LIMIT,
+    membership = MEMBERSHIP_PAGE_LIMIT,
+): void {
     _renderPageLimit = render;
     _syncPageLimit = sync;
+    _membershipPageLimit = membership;
 }
 
 async function renderPages(): Promise<void> {
@@ -505,7 +650,16 @@ async function renderPages(): Promise<void> {
  * render's last page is followed by the tail from its `upto`.
  */
 export async function catchUp(): Promise<PerspectiveDiff> {
-    const { config } = deps();
+    const { config, membershipLinks } = deps();
+
+    // Membership first: a link from a member the executor does not know yet is still its link.
+    if (membershipLinks) {
+        try {
+            await catchUpMembership();
+        } catch (err) {
+            console.error("[server-link-language] membership catch-up failed:", err);
+        }
+    }
 
     const emitted: PerspectiveDiff = { additions: [], removals: [] };
     const collect = (diff: PerspectiveDiff) => {
@@ -605,7 +759,10 @@ const SERVER_REVISION = /^[0-9a-f]{64}$/;
  * Null when a held link carries no `link_hash`.
  */
 function storeRevision(links: LinkExpression[]): string | null {
-    const hashes = new Set(links.map(wireLinkHash));
+    const keyRing = deps().getKeyRing();
+    const hashKey = keyRing ? linkHashKeyOf(keyRing) : null;
+    if (!hashKey) return null;
+    const hashes = new Set(links.map((link) => wireLinkHash(link, hashKey)));
     for (const held of store.heldLinks()) {
         if (!held.link.link_hash) return null;
         if (held.op === "add") hashes.add(held.link.link_hash);
@@ -645,9 +802,12 @@ function healIfShort(head: number): void {
     if (_mirrorChecked || _rendering || store.getRenderProgress() || head === 0) return;
     const revision = store.getRevision();
     if (!revision || !SERVER_REVISION.test(revision)) return;
-    _mirrorChecked = true;
     const links = store.allLinks().links;
-    if (storeRevision(links) === revision) return;
+    const own = storeRevision(links);
+    // Without room key version 1 no link hash can be computed: check once it is held.
+    if (own === null) return;
+    _mirrorChecked = true;
+    if (own === revision) return;
     console.warn(
         `[server-link-language] the store (${links.length} link(s) at sequence ${head}) does not ` +
         "hash to the room's revision; rendering the room again",

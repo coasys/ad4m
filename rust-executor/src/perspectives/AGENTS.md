@@ -23,6 +23,7 @@ or writes the graph. Split plan: spec items 3, 7, 8.
 | `hardwired_class.rs` | Registration of hard-wired subject classes (used by flows and overlay) |
 | `migration.rs` | rusqlite → SPARQL link migration and other one-shot data migrations |
 | `memory_diagnostics.rs` | Periodic memory stats |
+| `monotonic.rs`, `ingest.rs` | A membership link never ends: a removal of one is refused (`refuse_monotonic_removal`, R12); a link-language diff carrying one is dropped until the membership sync (A7) routes them (R13) |
 | `utils.rs` | Misnamed: Prolog `Term` → JSON marshalling only. Moving to `prolog_service/term_json.rs` (spec item 1) |
 | `*_e2e.rs`, `interpretation_test_support.rs` | Real-LLM e2e tests and their scaffolding. Not `#[ignore]`d yet |
 
@@ -35,6 +36,16 @@ or writes the graph. Split plan: spec items 3, 7, 8.
   typed event (`Topic::LinkAdded/LinkRemoved/LinkUpdated`, one event to all owners via
   `publish_to_owners`, the main agent if unowned) → commit to
   link language if `LinkStatus::Shared`. Use the same sequence; a helper `apply_diff` is planned.
+- **Membership (`crate::membership`).** `write_link_diff` runs `SpaceMembership::gate` on
+  the additions before it writes: a refused membership link refuses the whole diff and
+  nothing reaches the link language (the commit is spawned after the store write, under
+  `persist_lock`). Once a `rules` link counts the space is governed: `write_link_quads`
+  stores a Shared non-membership link whose person (a bot: whose key) is not a member as
+  `notMember` (no person, not counted, hidden from model queries). After the write,
+  `publish_membership_changes` publishes `neighbourhood-membership-changed` and re-judges
+  the links of the people whose membership changed (`Recheck::Members`; every link when
+  the space just became governed). The store rebuilds the replay from its membership
+  links when it opens.
 - SHACL triples are the source of truth for shapes. `shape_cache` on the instance is
   invalidated by `add_sdna_inner`. `get_shape(class)` → `Arc<ModelShape>`.
 - `get_subject_data` currently routes through Prolog and, while Prolog is disabled, returns only

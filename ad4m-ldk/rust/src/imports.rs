@@ -31,6 +31,11 @@ extern "C" {
     /// Fails for a box sealed to any other DID.
     #[wasm_bindgen(js_name = "agentOpenSealed", catch)]
     pub fn agent_open_sealed(sealed: JsValue) -> Result<String, JsValue>;
+    /// The 32-byte seed of the calling agent's room key X25519 key (a
+    /// `Uint8Array`): HKDF-SHA256 of its signing seed under
+    /// "adam-server-link-language:x25519-seed:v1".
+    #[wasm_bindgen(js_name = "agentRoomKeySeed", catch)]
+    pub async fn agent_room_key_seed() -> Result<JsValue, JsValue>;
     #[wasm_bindgen(js_name = "agentCreateSignedExpression", catch)]
     pub fn agent_create_signed_expression(data: JsValue) -> Result<JsValue, JsValue>;
 
@@ -92,6 +97,18 @@ extern "C" {
         body: &str,
         max_bytes: f64,
     ) -> Result<JsValue, JsValue>;
+
+    // ----- Membership (spec §7.5b) -----
+    /// Hands the membership links the language synced to its space's
+    /// membership: `[{ hash, counted, reason? }]`, in order.
+    #[wasm_bindgen(js_name = "membershipLinks", catch)]
+    pub async fn membership_links(links: JsValue) -> Result<JsValue, JsValue>;
+    /// Whether the language's space admits `did_key` now: `{ admitted, reason? }`.
+    #[wasm_bindgen(js_name = "membershipAdmits", catch)]
+    pub async fn membership_admits(did_key: &str) -> Result<JsValue, JsValue>;
+    /// Reports a room key change: `{ kind: "dropped" | "rotated", removedKeys, version? }`.
+    #[wasm_bindgen(js_name = "roomKeyEvent", catch)]
+    pub async fn room_key_event(event: JsValue) -> Result<JsValue, JsValue>;
 
     // ----- Language context (spec §7.3) -----
     #[wasm_bindgen(js_name = "languageAddress")]

@@ -30,9 +30,9 @@ async function get<T = any>(url: string): Promise<T> {
   return (await res.json()) as T;
 }
 
-test("whoami reports the admission mode: allowlist by default, auto with autoAdmit", async () => {
-  await withServer({}, async ({ opUrl }) => {
-    assert.equal((await get(`${opUrl}/api/whoami`)).admission, "allowlist");
+test("whoami reports the admission mode: membership without autoAdmit, auto with it", async () => {
+  await withServer({ autoAdmit: false }, async ({ opUrl }) => {
+    assert.equal((await get(`${opUrl}/api/whoami`)).admission, "membership");
   });
   await withServer({ autoAdmit: true }, async ({ opUrl }) => {
     assert.equal((await get(`${opUrl}/api/whoami`)).admission, "auto");
@@ -41,9 +41,9 @@ test("whoami reports the admission mode: allowlist by default, auto with autoAdm
 
 test("the server logs its admission mode at startup", async () => {
   const lines: string[] = [];
-  await withServer({ logger: true, logDestination: { write: (l: string) => lines.push(l) } }, async ({ server }) => {
+  await withServer({ autoAdmit: false, logger: true, logDestination: { write: (l: string) => lines.push(l) } }, async ({ server }) => {
     const entry = server.built.logTail!.lines().find((e) => e.msg?.startsWith("admission mode"));
     assert.ok(entry, "an admission mode line");
-    assert.equal(entry.admission, "allowlist");
+    assert.equal(entry.admission, "membership");
   });
 });

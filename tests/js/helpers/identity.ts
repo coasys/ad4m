@@ -3,11 +3,11 @@
 // and `ad4m-executor claim`. The store and the holder are built with cargo in the repo root,
 // as the agent language suites build the store (bootstrap-languages/centralized-agent-language).
 import { ChildProcess, execSync, spawn } from "child_process";
-import { copyFileSync, existsSync, mkdirSync, rmSync } from "fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import path from "path";
 import readline from "readline";
 import { fileURLToPath } from "url";
-import { executorBinary, stopChildProcess } from "../utils/utils";
+import { baseUrl, executorBinary, stopChildProcess } from "../utils/utils";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = path.resolve(__dirname, "..", "..", "..");
@@ -36,6 +36,22 @@ export function buildIdentityTools() {
             "--features ad4m-identity-client/ws,ad4m-identity-client/test-vault",
         opts,
     );
+}
+
+/**
+ * Checks that `identity-store` and the test holder are built, without building them: suites that
+ * only use them (the server-link suites) run on CI's stashed binaries and compile no Rust.
+ */
+export function requireIdentityTools() {
+    for (const binary of [storeBinary(), holderBinary()]) {
+        if (!existsSync(binary)) {
+            throw new Error(
+                `${binary} is missing: build it with \`cargo build --release -p ad4m -p identity-store ` +
+                    "-p ad4m-identity-client --bin identity-store --example holder " +
+                    "--features ad4m-identity-client/ws,ad4m-identity-client/test-vault` in the repo root",
+            );
+        }
+    }
 }
 
 /** A running identity-store. `restart` keeps its port, key and database file. */
@@ -200,4 +216,80 @@ export class ClaimCommand {
         }
         throw new Error(`claim printed no match code: ${this.output.join(" | ")}`);
     }
+}
+
+const TESTS_JS = path.resolve(__dirname, "..");
+
+/**
+ * Writes, at `to`, the local test seed (`tests/js/bootstrapSeed.json`) with what an executor
+ * needs to speak for a person and make spaces: the centralized agent language (which resolves a
+ * person through the identity store) as its agent language, and the server-link language among
+ * its known link languages (`neighbourhood.create` templates it). Both addresses come from
+ * `prepare-test-local` (`scripts/*-hash`). Returns `to`.
+ */
+export function writePersonSeed(to: string): string {
+    const read = (name: string) => {
+        const file = path.join(TESTS_JS, "scripts", name);
+        const hash = existsSync(file) ? readFileSync(file, "utf8").trim() : "";
+        if (!hash) throw new Error(`${file} is missing or empty: run prepare-test-local first`);
+        return hash;
+    };
+    const seed = JSON.parse(readFileSync(path.join(TESTS_JS, "bootstrapSeed.json"), "utf8"));
+    seed.agentLanguage = read("centralized-agent-language-hash");
+    const serverLink = read("server-link-language-hash");
+    seed.knownLinkLanguages = [...new Set([...(seed.knownLinkLanguages ?? []), serverLink])];
+    mkdirSync(path.dirname(to), { recursive: true });
+    writeFileSync(to, JSON.stringify(seed));
+    return to;
+}
+
+/** A person made on an executor by the test holder, which keeps the person's master keys. */
+export interface Person {
+    /** The person's DID (`did:scid:coasys:1:…`). */
+    did: string;
+    /** The holder with the person's master keys, connected to the executor it was made on. */
+    holder: Holder;
+}
+
+/**
+ * Gives the executor at `apiPort` a person: the test holder connects to it (with `token`, the
+ * admin credential or a user's token in multi-user mode) and runs the client's `create`, so the
+ * executor's agent (that session's agent) becomes the person's first device key, `d1`. The
+ * executor must run with an identity store (`IdentityStore.executorEnv()`) and an agent language
+ * that knows people (`writePersonSeed`). Stop `person.holder` when the test is done.
+ */
+export async function givePerson(apiPort: number, token = ""): Promise<Person> {
+    requireIdentityTools();
+    const holder = new Holder();
+    try {
+        await holder.send({ cmd: "connect", url: baseUrl(apiPort), token });
+        const created = await holder.send({ cmd: "create" });
+        if (!/^did:scid:coasys:1:/.test(created.did ?? "")) {
+            throw new Error(`the holder made no person: ${JSON.stringify(created)}`);
+        }
+        return { did: created.did, holder };
+    } catch (e) {
+        await holder.stop();
+        throw e;
+    }
+}
+
+/**
+ * Links a second executor (`apiPort`, started with the store's env, a person seed and the init
+ * argument `--operator <person.did>`, which a claim needs; no person yet) to `person` as its next
+ * device key, with `ad4m-executor claim`: the holder opens an
+ * offer, the executor claims it, the holder confirms. Returns the new key's id (`d2`, …).
+ */
+export async function linkDevice(person: Person, store: IdentityStore, apiPort: number): Promise<string> {
+    const opened = await person.holder.send({ cmd: "open", did: person.did, store: store.url });
+    const claim = new ClaimCommand(apiPort, opened.link, "second device");
+    await claim.matchCode();
+    await person.holder.send({ cmd: "waitClaim" });
+    await person.holder.send({ cmd: "confirm" });
+    const code = await claim.exited;
+    if (code !== 0) throw new Error(`ad4m-executor claim exited with ${code}: ${claim.output.join(" | ")}`);
+    const joined = claim.output.find((l) => l.startsWith(`Joined ${person.did} as `));
+    if (!joined) throw new Error(`claim did not join ${person.did}: ${claim.output.join(" | ")}`);
+    // "Joined <did> as d2 (event 1)."
+    return joined.slice(`Joined ${person.did} as `.length).trim().split(/\s+/)[0];
 }

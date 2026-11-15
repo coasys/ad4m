@@ -4,12 +4,12 @@
  * without `limit` gets a page of DEFAULT_PAGE_LIMIT.
  */
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
 import { get as httpGet } from "node:http";
 import { test } from "node:test";
 import { gunzipSync } from "node:zlib";
 import {
   authenticateAgent,
+  createRoom,
   createSignedLink,
   createTestAgent,
   getJson,
@@ -41,7 +41,7 @@ async function withRoom(
 ): Promise<void> {
   const server = await startTestServer();
   try {
-    const roomId = randomUUID();
+    const roomId = await createRoom(server.url);
     const agent = await createTestAgent();
     const token = await authenticateAgent(server.url, roomId, agent);
     await fn({ server, roomId, agent, token });

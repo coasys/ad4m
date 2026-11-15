@@ -193,12 +193,6 @@ impl PerspectiveInstance {
                     return Err(LinksChanged.into());
                 }
             }
-            // Commit to link language (SPARQL store is updated right after).
-            // Tombstone removals stay out of this diff: they are this replica's
-            // store effect only.
-            if let Some(diff) = &link_language_diff {
-                self.spawn_commit_and_handle_error(diff);
-            }
             // The SPARQL store must be updated first so any subscription re-checks
             // triggered by update_prolog_engines() see the committed batch state.
             if changed {
@@ -209,7 +203,15 @@ impl PerspectiveInstance {
                 combined_diff.additions =
                     self.stored_judgements(std::mem::take(&mut combined_diff.additions));
             }
+            // Commit to the link language once the store took the batch: a batch
+            // the owner gate refused (`crate::membership`) never leaves this replica.
+            // Tombstone removals stay out of this diff: they are this replica's
+            // store effect only.
+            if let Some(diff) = &link_language_diff {
+                self.spawn_commit_and_handle_error(diff);
+            }
         }
+        self.publish_membership_changes().await;
 
         // Only update subscription engines when there are changes.
         if changed {

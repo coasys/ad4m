@@ -10,7 +10,12 @@ COPY package*.json ./
 RUN npm ci
 COPY tsconfig.json ./
 COPY src/ ./src/
-RUN npm run build
+# The identity core's WASM binding (membership judgement, key logs). It is generated, not
+# committed: run ad4m-identity-core/build-node.sh (from the repo) before `docker build`, so
+# link-server/identity-core/ is in the build context. `build:server` compiles the server
+# alone: the binding needs the repo and a Rust toolchain, which the image has neither of.
+COPY identity-core/ ./identity-core/
+RUN npm run build:server
 # Strip devDependencies (typescript, tsx, @types/*) now that the build is
 # done, so the compiled native addon ships without dragging the toolchain
 # (or build-essential) into the runtime image.
@@ -21,12 +26,18 @@ WORKDIR /app
 COPY package*.json ./
 COPY --from=build /app/node_modules/ ./node_modules/
 COPY --from=build /app/dist/ ./dist/
+COPY --from=build /app/identity-core/ ./identity-core/
 RUN mkdir -p /data && chown -R node:node /data /app
 EXPOSE 3456
 VOLUME /data
-# PORT, DATA_DIR, AUTO_ADMIT read from env vars
-# (see src/index.ts parseArgs). Defaults: port 3456, data ./data.
+# PORT, DATA_DIR, PUBLIC_ORIGIN, AUTO_ADMIT, NAME, STORE_URL, STORE_HEAD_KEYS read from env
+# vars (see src/index.ts parseArgs). Defaults: port 3456, data ./data.
+# PUBLIC_ORIGIN has no default and is required here: the origin clients reach the server at
+# (e.g. https://links.example.org; comma-separated for more than one). Each auth signs it, so
+# the server refuses a signature made for another server. Without it the container exits 1.
 ENV DATA_DIR=/data
+# A production image: AUTO_ADMIT is refused here (it also needs ALLOW_AUTO_ADMIT_DEV=true).
+ENV NODE_ENV=production
 USER node
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
   CMD node -e "fetch('http://localhost:'+(process.env.PORT||3456)+'/health').then(r=>{if(!r.ok)throw r.status}).catch(()=>process.exit(1))"

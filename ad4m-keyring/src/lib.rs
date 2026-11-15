@@ -13,6 +13,11 @@
 //!   `bootstrap-languages/server-link-language/src/encryption.ts`) and of the executor's
 //!   `agent/sealed_box.rs`. [`x25519_public_of_ed25519`] and [`x25519_secret_of_ed25519`]
 //!   give the X25519 keys of a `did:key`'s Ed25519 key.
+//! - [`seal_room_key`] / [`open_room_key`]: the room-key seal v2, the same construction under
+//!   its own tag ([`tags::ROOM_KEY_SEAL_V2`]) with the context
+//!   `coasys:room-key:<roomId>:<version>` ([`room_key_context`]) as associated data, so a box
+//!   opens only as the room key version it was sealed for. The server link language seals
+//!   room keys with it (through `wasm/`).
 //! - [`VersionedKey`]: the versions of one key. Versions start at 1 and only grow; old
 //!   versions stay readable until their owner retires them.
 //!
@@ -30,8 +35,9 @@ mod wrap;
 pub use error::KeyringError;
 pub use key::{hkdf_subkey, random_key, SecretKey, KEY_LEN};
 pub use seal::{
-    open_from_x25519, seal_to_x25519, seal_to_x25519_with_rng, x25519_public_of_ed25519,
-    x25519_secret_of_ed25519, SealedEnvelope, SEAL_NONCE_LEN,
+    open_from_x25519, open_room_key, room_key_context, seal_room_key, seal_room_key_with_rng,
+    seal_to_x25519, seal_to_x25519_with_rng, x25519_public_of_ed25519, x25519_secret_of_ed25519,
+    SealedEnvelope, SEAL_NONCE_LEN,
 };
 pub use version::{KeyVersion, VersionedKey};
 pub use wrap::{unwrap, wrap, KeyRef, SymWrap, WrapAlg, WrapContext, WRAP_NONCE_LEN};
@@ -45,4 +51,10 @@ pub mod tags {
     /// HKDF `info` of the room-key seal: the server link language's `SEALED_BOX_INFO` and the
     /// executor's sealed boxes.
     pub const ROOM_KEY_SEAL_V1: &str = "ad4m:sealed-box:v1";
+    /// HKDF `info` of the room-key seal v2, the one bound to its room and version (its
+    /// context is the AES-GCM associated data): the server link language's room keys.
+    pub const ROOM_KEY_SEAL_V2: &str = "ad4m:room-key-seal:v2";
+    /// HKDF `info` (no salt) of a room's link-hash key, derived from the room key's version 1
+    /// (AR-08 K4): the key of the HMAC that names an encrypted link on the link server.
+    pub const LINK_HASH_V1: &str = "adam-server-link-language:link-hash:v1";
 }

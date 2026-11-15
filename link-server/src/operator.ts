@@ -1,20 +1,22 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
 import Fastify, { type FastifyInstance, type FastifyServerOptions } from "fastify";
-import { didToPublicKey, type AuthManager } from "./auth.js";
-import type { LinkServerDB } from "./db.js";
+import type { AuthManager } from "./auth.js";
+import type { LinkServerDB, RoomRow } from "./db.js";
 import type { LogEntry, LogTail } from "./log-tail.js";
 import { OPERATOR_PAGE_CSS, OPERATOR_PAGE_HTML, OPERATOR_PAGE_JS } from "./operator-page.js";
-import { removeMember } from "./routes.js";
+import type { MembershipRooms } from "./membership.js";
+import { admittedKeys } from "./room-events.js";
 import type { TelepresenceManager } from "./telepresence.js";
 import type { WsManager } from "./ws.js";
 
 /**
- * Operator admission listener: a second Fastify app, bound to loopback only,
- * that lets whoever runs this server list rooms and add or remove DIDs
- * without holding the room admin's DID key. It shares the database, sessions
- * and sockets with the public app, so a removal here ends access at once,
- * exactly like `POST /rooms/:roomId/acl`.
+ * Operator listener: a second Fastify app, bound to loopback only, that lets
+ * whoever runs this server see its rooms (members, keys, who is online) and
+ * suspend or resume a room. Who belongs to a room is the room's own signed
+ * membership: the operator cannot add or remove anyone. It shares the
+ * database, sessions and sockets with the public app, so a suspension ends
+ * access at once.
  *
  * Every `/api/*` call needs `Authorization: Bearer <operator token>`. The
  * token comes from a file (see index.ts), never argv or a URL, and the
@@ -39,11 +41,12 @@ export interface OperatorOptions {
 export interface OperatorContext {
   db: LinkServerDB;
   auth: AuthManager;
+  rooms: MembershipRooms;
   ws: WsManager;
   telepresence: TelepresenceManager;
   /** The server's recent log lines; without it, `GET /api/logs` answers 404 (logging is off). */
   logTail?: LogTail;
-  /** Whether the public app admits every authenticated DID (else allowlist). */
+  /** Whether the public app admits every authenticated key (else by membership). */
   autoAdmit: boolean;
 }
 
@@ -97,16 +100,6 @@ function tokenMatches(header: string | undefined, expected: Uint8Array): boolean
   return timingSafeEqual(digest(header.slice("Bearer ".length)), expected);
 }
 
-function isValidDid(did: unknown): did is string {
-  if (typeof did !== "string") return false;
-  try {
-    didToPublicKey(did);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 /** GitHub login syntax: what oauth2-proxy passes on as the signed-in user. */
 const LOGIN_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
 
@@ -142,26 +135,42 @@ function sameOriginRequest(headers: Record<string, unknown>, allowed: Set<string
   return false;
 }
 
+function roomSummary(ctx: OperatorContext, room: RoomRow) {
+  return {
+    id: room.id,
+    creator: room.admin_did,
+    createdAt: room.created_at,
+    legacy: room.legacy === 1,
+    suspended: room.suspended === 1,
+    memberCount: room.legacy ? 0 : ctx.rooms.members(room.id).length,
+  };
+}
+
 function roomDetail(ctx: OperatorContext, roomId: string) {
   const room = ctx.db.getRoom(roomId);
   if (!room) return undefined;
   const online = new Set(ctx.telepresence.getOnlineAgents(roomId).map((a) => a.did));
-  const history = ctx.db.getAclChanges(roomId);
-  // Over the whole history, not just the last 100 changes shown.
-  const addedBy = new Map(
-    ctx.db.getLatestAdds(roomId).map((c) => [c.did, { actor: c.actor, source: c.source, at: c.at }])
-  );
+  const keys = ctx.db.getMemberKeys(roomId);
+  const admitted = new Set(room.legacy ? [] : admittedKeys(ctx, roomId).map((k) => k.did));
+  const members = room.legacy ? [] : ctx.rooms.members(roomId);
   return {
-    id: room.id,
-    admin: room.admin_did,
-    createdAt: room.created_at,
-    members: ctx.db.getAcl(roomId).map((a) => ({
-      did: a.did,
-      addedAt: a.added_at,
-      online: online.has(a.did),
-      addedBy: addedBy.get(a.did) ?? null,
+    ...roomSummary(ctx, room),
+    members: members.map((m) => ({
+      person: m.person,
+      role: m.role,
+      botOf: m.botOf,
+      since: new Date(m.since).toISOString(),
+      online: keys.some((k) => online.has(k.did) && (k.did === m.person || (k.person === m.person && k.by_bot === 0))),
     })),
-    history: history.map((c) => ({ did: c.did, action: c.action, actor: c.actor, source: c.source, at: c.at })),
+    keys: keys.map((k) => ({
+      did: k.did,
+      person: k.person,
+      byBot: k.by_bot === 1,
+      revoked: k.revoked === 1,
+      admitted: admitted.has(k.did),
+      online: online.has(k.did),
+      updatedAt: k.updated_at,
+    })),
   };
 }
 
@@ -230,7 +239,7 @@ export async function buildOperatorApp(ctx: OperatorContext, opts: OperatorOptio
     api.get("/whoami", async (request) => ({
       operator: operatorOf(request.headers),
       instance: opts.label ?? null,
-      admission: ctx.autoAdmit ? "auto" : "allowlist",
+      admission: ctx.autoAdmit ? "auto" : "membership",
     }));
 
     // Live logs as Server-Sent Events: the buffered lines first, then each new
@@ -279,12 +288,7 @@ export async function buildOperatorApp(ctx: OperatorContext, opts: OperatorOptio
     });
 
     api.get("/rooms", async () => ({
-      rooms: ctx.db.listRooms().map((r) => ({
-        id: r.id,
-        admin: r.admin_did,
-        createdAt: r.created_at,
-        memberCount: r.member_count,
-      })),
+      rooms: ctx.db.listRooms().map((r) => roomSummary(ctx, r)),
     }));
 
     api.get("/rooms/:roomId", async (request, reply) => {
@@ -294,35 +298,27 @@ export async function buildOperatorApp(ctx: OperatorContext, opts: OperatorOptio
       return detail;
     });
 
-    api.post("/rooms/:roomId/acl", async (request, reply) => {
-      const { roomId } = request.params as { roomId: string };
-      const body = request.body as { action?: unknown; did?: unknown } | null;
-      if (body?.action !== "add" && body?.action !== "remove") {
-        return reply.code(400).send({ error: 'action must be "add" or "remove"' });
-      }
-      if (!isValidDid(body.did)) {
-        return reply.code(400).send({ error: "did must be a did:key" });
-      }
-      // Rooms are created by their first agent's challenge-response; the
-      // operator only manages rooms that exist.
-      const room = ctx.db.getRoom(roomId);
-      if (!room) return reply.code(404).send({ error: "no such room" });
-
-      if (body.action === "remove" && body.did === room.admin_did) {
-        return reply.code(400).send({ error: "the room admin cannot be removed" });
-      }
-      const changed = body.action === "remove" ? removeMember(ctx, roomId, body.did) : ctx.db.addAcl(roomId, body.did);
-      // A double submit or a stale page changes nothing: no history row, no log line.
-      if (changed) {
-        const operator = operatorOf(request.headers)!;
-        ctx.db.recordAclChange(roomId, body.did, body.action, operator, "operator");
-        request.log.info(
-          { operator, instance: opts.label ?? null, roomId, action: body.action, did: body.did },
-          "operator acl change"
-        );
-      }
-      return roomDetail(ctx, roomId);
-    });
+    // A suspended room answers 423 to every request and its sockets close (4006); resume undoes it.
+    for (const action of ["suspend", "resume"] as const) {
+      api.post(`/rooms/:roomId/${action}`, async (request, reply) => {
+        const { roomId } = request.params as { roomId: string };
+        const room = ctx.db.getRoom(roomId);
+        if (!room) return reply.code(404).send({ error: "no such room" });
+        const suspend = action === "suspend";
+        if ((room.suspended === 1) !== suspend) {
+          ctx.db.setSuspended(roomId, suspend);
+          if (suspend) {
+            ctx.db.deleteSessionsForRoom(roomId);
+            ctx.ws.closeRoom(roomId, 4006, "room suspended");
+          }
+          request.log.info(
+            { operator: operatorOf(request.headers), instance: opts.label ?? null, roomId, action },
+            `operator ${action}`
+          );
+        }
+        return roomDetail(ctx, roomId);
+      });
+    }
   }, { prefix: "/api" });
 
   return app;

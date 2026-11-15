@@ -273,6 +273,14 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
     ("agent.byDid", || json!({ "did": "did:key:z6Mk" })),
     ("agent.byDIDs", || json!({ "dids": ["did:key:z6Mk"] })),
     (
+        "agent.revocationReach",
+        || json!({ "didKey": "did:key:z6Mk" }),
+    ),
+    (
+        "neighbourhood.countByPerson",
+        || json!({ "perspectiveUuid": TARGET, "predicate": "ad4m://vote" }),
+    ),
+    (
         "agent.import",
         || json!({ "did": "did:key:z6Mk", "didDocument": "{}", "keystore": "k", "passphrase": "p" }),
     ),
@@ -450,6 +458,17 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
         "neighbourhood.publish",
         || json!({ "perspectiveUuid": TARGET, "linkLanguage": "QmLang", "meta": { "links": [] } }),
     ),
+    ("neighbourhood.create", || {
+        json!({
+            "perspectiveUuid": TARGET,
+            "sync": { "kind": "default" },
+            "rules": { "add": "admins", "join": "open" },
+        })
+    }),
+    (
+        "neighbourhood.linkLanguageChoice",
+        || json!({ "perspectiveUuid": TARGET }),
+    ),
     (
         "neighbourhood.sendBroadcast",
         || json!({ "uuid": "p", "payload": { "links": [] } }),
@@ -465,6 +484,30 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
     ("neighbourhood.hasTelepresence", || json!({ "uuid": "p" })),
     ("neighbourhood.onlineAgents", || json!({ "uuid": "p" })),
     ("neighbourhood.otherAgents", || json!({ "uuid": "p" })),
+    ("neighbourhood.members", || json!({ "uuid": "p" })),
+    ("neighbourhood.invites", || json!({ "uuid": "p" })),
+    (
+        "neighbourhood.addMember",
+        || json!({ "uuid": "p", "person": "did:scid:coasys:1:p", "role": "member" }),
+    ),
+    (
+        "neighbourhood.removeMember",
+        || json!({ "uuid": "p", "person": "did:scid:coasys:1:p" }),
+    ),
+    ("neighbourhood.leave", || json!({ "uuid": "p" })),
+    ("neighbourhood.createInvite", || json!({ "uuid": "p" })),
+    (
+        "neighbourhood.setJoinMode",
+        || json!({ "uuid": "p", "join": "invite" }),
+    ),
+    (
+        "neighbourhood.addBot",
+        || json!({ "uuid": "p", "botDid": "did:key:z6Mk" }),
+    ),
+    (
+        "neighbourhood.removeBot",
+        || json!({ "uuid": "p", "botDid": "did:key:z6Mk" }),
+    ),
     ("expression.get", || json!({ "url": "literal://string:x" })),
     (
         "expression.getRaw",
