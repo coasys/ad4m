@@ -33,6 +33,6 @@ regex = "1"
 maplit = "1"
 dirs = "5"
 reqwest = { version = "0.11.20", features = ["json", "native-tls"] }
-
-[dev-dependencies]
+# The connect token store: a cross-process lock and atomic replace.
+fd-lock = "4"
 tempfile = "3"

@@ -190,7 +190,7 @@ async fn single_user_handshake_token_reuse_and_reauth() {
         .unwrap();
     assert_eq!(session.state(), AuthState::Unauthenticated);
     assert_eq!(
-        session.store().token(&executor.url, "a5-it"),
+        session.store().token(&executor.url, "a5-it").unwrap(),
         None,
         "the refused token must be dropped"
     );

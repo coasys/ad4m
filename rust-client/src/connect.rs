@@ -377,8 +377,16 @@ pub fn default_executor_port_file() -> PathBuf {
         .join("executor-port")
 }
 
-/// Tokens in `tokens.json`, one per executor-URL + app pair, written with
-/// file mode 0600. Mirrors TS's `ad4m-token`/`ad4m-url` localStorage keys.
+/// Tokens in `tokens.json`, one per executor-URL + app pair. Mirrors TS's
+/// `ad4m-token`/`ad4m-url` localStorage keys.
+///
+/// Safe across processes (F1): every change is one transaction under an
+/// advisory lock on the sibling `tokens.json.lock` (read, modify, write), and
+/// the write goes to a temporary file in the same directory that atomically
+/// replaces `tokens.json`, so a reader sees the old file or the new one. The
+/// directory is forced to 0700 and the file is born 0600 (Unix). A store that
+/// cannot be read or parsed is an error, never an empty store; only a missing
+/// file reads as empty.
 #[derive(Clone, Debug)]
 pub struct TokenStore {
     path: PathBuf,
@@ -408,76 +416,129 @@ impl TokenStore {
         format!("{url}|{app}")
     }
 
-    fn load(&self) -> StoreFile {
-        std::fs::read_to_string(&self.path)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
+    fn dir(&self) -> &std::path::Path {
+        self.path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
     }
 
-    fn save(&self, store: &StoreFile) -> Result<()> {
-        if let Some(dir) = self.path.parent() {
-            std::fs::create_dir_all(dir)?;
+    /// The current file: missing = empty; unreadable or unparsable = error.
+    fn load(&self) -> Result<StoreFile> {
+        match std::fs::read_to_string(&self.path) {
+            Ok(s) => serde_json::from_str(&s)
+                .map_err(|e| anyhow!("token store {} is corrupt: {e}", self.path.display())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(StoreFile::default()),
+            Err(e) => Err(anyhow!(
+                "cannot read token store {}: {e}",
+                self.path.display()
+            )),
         }
-        // Create with 0600 from the start so the token file is never born
-        // readable; `set_permissions` covers a pre-existing loose file too.
+    }
+
+    /// Create the directory if needed and force it private (0700 on Unix).
+    fn ensure_dir(&self) -> Result<()> {
+        let dir = self.dir();
+        std::fs::create_dir_all(dir)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).map_err(|e| {
+                anyhow!("cannot make token directory {} private: {e}", dir.display())
+            })?;
+        }
+        Ok(())
+    }
+
+    /// One read-modify-write under the cross-process lock. `change` returns
+    /// whether it changed anything; nothing changed = nothing written.
+    fn transact<R>(&self, change: impl FnOnce(&mut StoreFile) -> (bool, R)) -> Result<R> {
+        self.ensure_dir()?;
         let mut opts = std::fs::OpenOptions::new();
-        opts.write(true).create(true).truncate(true);
+        opts.read(true).write(true).create(true).truncate(false);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
             opts.mode(0o600);
         }
-        let file = opts.open(&self.path)?;
+        let lock_path = self.path.with_extension("json.lock");
+        let lock_file = opts
+            .open(&lock_path)
+            .map_err(|e| anyhow!("cannot open {}: {e}", lock_path.display()))?;
+        let mut lock = fd_lock::RwLock::new(lock_file);
+        let _guard = lock
+            .write()
+            .map_err(|e| anyhow!("cannot lock {}: {e}", lock_path.display()))?;
+        let mut store = self.load()?;
+        let (changed, out) = change(&mut store);
+        if changed {
+            self.replace(&store)?;
+        }
+        Ok(out)
+    }
+
+    /// Write `store` to a temporary file beside `tokens.json` (0600 from
+    /// birth), flush it to disk, then rename it over `tokens.json`.
+    fn replace(&self, store: &StoreFile) -> Result<()> {
+        use std::io::Write;
+        let mut tmp = tempfile::Builder::new()
+            .prefix(".tokens.")
+            .suffix(".tmp")
+            .tempfile_in(self.dir())?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600));
+            tmp.as_file()
+                .set_permissions(std::fs::Permissions::from_mode(0o600))?;
         }
-        serde_json::to_writer_pretty(file, store)?;
+        serde_json::to_writer_pretty(tmp.as_file_mut(), store)?;
+        tmp.as_file_mut().flush()?;
+        tmp.as_file().sync_all()?;
+        tmp.persist(&self.path)
+            .map_err(|e| anyhow!("cannot replace {}: {}", self.path.display(), e.error))?;
         Ok(())
     }
 
     /// The stored token for this executor + app, if any.
-    pub fn token(&self, url: &str, app: &str) -> Option<String> {
-        self.load().tokens.get(&Self::key(url, app)).cloned()
+    pub fn token(&self, url: &str, app: &str) -> Result<Option<String>> {
+        Ok(self.load()?.tokens.get(&Self::key(url, app)).cloned())
     }
 
     pub fn set_token(&self, url: &str, app: &str, token: &str) -> Result<()> {
-        let mut store = self.load();
-        store.tokens.insert(Self::key(url, app), token.to_string());
-        self.save(&store)
+        self.transact(|store| {
+            let old = store.tokens.insert(Self::key(url, app), token.to_string());
+            (old.as_deref() != Some(token), ())
+        })
     }
 
     pub fn remove_token(&self, url: &str, app: &str) -> Result<()> {
-        let mut store = self.load();
-        store.tokens.remove(&Self::key(url, app));
-        self.save(&store)
+        self.transact(|store| (store.tokens.remove(&Self::key(url, app)).is_some(), ()))
     }
 
     /// Remove the token for this executor + app only while it is still
     /// `token`: a refused socket drops its own token, never a newer one
     /// another session stored meanwhile. Returns whether it removed one.
     pub fn remove_token_if(&self, url: &str, app: &str, token: &str) -> Result<bool> {
-        let mut store = self.load();
-        let key = Self::key(url, app);
-        if store.tokens.get(&key).map(String::as_str) != Some(token) {
-            return Ok(false);
-        }
-        store.tokens.remove(&key);
-        self.save(&store)?;
-        Ok(true)
+        self.transact(|store| {
+            let key = Self::key(url, app);
+            if store.tokens.get(&key).map(String::as_str) != Some(token) {
+                return (false, false);
+            }
+            store.tokens.remove(&key);
+            (true, true)
+        })
     }
 
     /// The URL last connected — TS `ad4m-url`.
-    pub fn last_url(&self) -> Option<String> {
-        self.load().last_url
+    pub fn last_url(&self) -> Result<Option<String>> {
+        Ok(self.load()?.last_url)
     }
 
     pub fn set_last_url(&self, url: &str) -> Result<()> {
-        let mut store = self.load();
-        store.last_url = Some(url.to_string());
-        self.save(&store)
+        self.transact(|store| {
+            let changed = store.last_url.as_deref() != Some(url);
+            store.last_url = Some(url.to_string());
+            (changed, ())
+        })
     }
 }
 
@@ -600,7 +661,7 @@ impl<E: ExecutorIo> Ad4mConnect<E> {
         self.url = Some(url.clone());
 
         // A stored token answers `agent.status` in one call on a good session.
-        if let Some(token) = self.store.token(&url, &self.opts.app.name) {
+        if let Some(token) = self.store.token(&url, &self.opts.app.name)? {
             match self.open_and_read(&url, &token).await {
                 Ok((Reading::Authenticated, rpc)) => {
                     let _ = self.store.set_last_url(&url);
@@ -761,7 +822,7 @@ impl<E: ExecutorIo> Ad4mConnect<E> {
 
     /// Ordered candidates: explicit url → explicit port → stored last_url →
     /// `~/.ad4m/executor-port` → the default port. First `/health` win.
-    fn candidates(&self) -> Vec<String> {
+    fn candidates(&self) -> Result<Vec<String>> {
         let mut out: Vec<String> = Vec::new();
         let mut push = |u: String| {
             if !out.contains(&u) {
@@ -775,7 +836,7 @@ impl<E: ExecutorIo> Ad4mConnect<E> {
             push(format!("http://127.0.0.1:{port}"));
         }
         if self.opts.use_stored_url {
-            if let Some(url) = self.store.last_url() {
+            if let Some(url) = self.store.last_url()? {
                 push(normalize_base_url(&url));
             }
         }
@@ -790,11 +851,11 @@ impl<E: ExecutorIo> Ad4mConnect<E> {
             }
         }
         push(format!("http://127.0.0.1:{DEFAULT_PORT}"));
-        out
+        Ok(out)
     }
 
     async fn resolve_url(&self) -> Result<String> {
-        let candidates = self.candidates();
+        let candidates = self.candidates()?;
         let mut tried = Vec::new();
         for url in candidates {
             tried.push(url.clone());
@@ -1330,7 +1391,7 @@ mod tests {
         o.token_dir = Some(store_dir);
         let s: Ad4mConnect<FakeIo> = Ad4mConnect::with_io(o, FakeIo::unhealthy()).unwrap();
         assert_eq!(
-            s.candidates(),
+            s.candidates().unwrap(),
             vec![
                 "http://explicit:1".to_string(),          // normalized (trailing /)
                 "http://127.0.0.1:2000".to_string(),      // explicit port
@@ -1392,7 +1453,10 @@ mod tests {
 
         // The stored token is gone; the minted one is stored in its place.
         let store = TokenStore::new(dir.path());
-        assert_eq!(store.token(URL, "test-app").as_deref(), Some("jwt-fresh"));
+        assert_eq!(
+            store.token(URL, "test-app").unwrap().as_deref(),
+            Some("jwt-fresh")
+        );
         assert_eq!(
             s.io.opened(),
             vec![
@@ -1436,6 +1500,7 @@ mod tests {
         assert_eq!(
             TokenStore::new(dir.path())
                 .token(URL, "test-app")
+                .unwrap()
                 .as_deref(),
             Some("jwt-2")
         );
@@ -1588,6 +1653,7 @@ mod tests {
         assert_eq!(
             TokenStore::new(dir.path())
                 .token(URL, "test-app")
+                .unwrap()
                 .as_deref(),
             Some("jwt-mu")
         );
@@ -1695,7 +1761,10 @@ mod tests {
         s.io.last_rpc().fail_auth("Unauthorized access");
         watcher.changed().await.unwrap();
         assert_eq!(s.state(), AuthState::Unauthenticated);
-        assert_eq!(TokenStore::new(dir.path()).token(URL, "test-app"), None);
+        assert_eq!(
+            TokenStore::new(dir.path()).token(URL, "test-app").unwrap(),
+            None
+        );
     }
 
     /// F2: the auth state is kept with no receiver alive. `connect` with
@@ -1741,7 +1810,10 @@ mod tests {
         let state = s.connect(&mut NoPrompts).await.unwrap();
         assert_ne!(state, AuthState::Authenticated, "connect returned success");
         assert_eq!(s.state(), AuthState::Unauthenticated);
-        assert_eq!(TokenStore::new(dir.path()).token(URL, "test-app"), None);
+        assert_eq!(
+            TokenStore::new(dir.path()).token(URL, "test-app").unwrap(),
+            None
+        );
     }
 
     /// F4: a socket that is no longer the session's must not touch the
@@ -1783,6 +1855,7 @@ mod tests {
         assert_eq!(
             TokenStore::new(dir.path())
                 .token(URL, "test-app")
+                .unwrap()
                 .as_deref(),
             Some("jwt-new"),
             "the stale socket deleted the newer token"
@@ -1798,6 +1871,7 @@ mod tests {
         assert_eq!(
             TokenStore::new(dir.path())
                 .token(URL, "test-app")
+                .unwrap()
                 .as_deref(),
             Some("jwt-newer"),
             "a refusal deleted a token it was not opened with"
@@ -1816,18 +1890,18 @@ mod tests {
         // A second store on the same dir reads the same tokens.
         let store2 = TokenStore::new(dir.path());
         assert_eq!(
-            store2.token("http://a:1", "app1").as_deref(),
+            store2.token("http://a:1", "app1").unwrap().as_deref(),
             Some("tok-a1")
         );
         assert_eq!(
-            store2.token("http://a:1", "app2").as_deref(),
+            store2.token("http://a:1", "app2").unwrap().as_deref(),
             Some("tok-a2")
         );
         assert_eq!(
-            store2.token("http://b:2", "app1").as_deref(),
+            store2.token("http://b:2", "app1").unwrap().as_deref(),
             Some("tok-b1")
         );
-        assert_eq!(store2.last_url().as_deref(), Some("http://b:2"));
+        assert_eq!(store2.last_url().unwrap().as_deref(), Some("http://b:2"));
 
         #[cfg(unix)]
         {
@@ -1840,11 +1914,111 @@ mod tests {
         }
 
         store2.remove_token("http://a:1", "app1").unwrap();
-        assert_eq!(store2.token("http://a:1", "app1"), None);
+        assert_eq!(store2.token("http://a:1", "app1").unwrap(), None);
         assert_eq!(
-            store2.token("http://a:1", "app2").as_deref(),
+            store2.token("http://a:1", "app2").unwrap().as_deref(),
             Some("tok-a2")
         );
+    }
+
+    /// F1: two processes writing the same store, each its own keys: no
+    /// update may be lost and the file must stay parseable. Each writer is
+    /// this test binary, re-run as a child (`AD4M_CONNECT_STORE_CHILD`).
+    #[test]
+    fn two_processes_writing_the_store_lose_nothing() {
+        const N: usize = 40;
+        if let Ok(dir) = std::env::var("AD4M_CONNECT_STORE_CHILD") {
+            let who = std::env::var("AD4M_CONNECT_STORE_WHO").unwrap();
+            let store = TokenStore::new(dir);
+            for i in 0..N {
+                store
+                    .set_token(
+                        &format!("http://{who}:{i}"),
+                        "app",
+                        &format!("tok-{who}-{i}"),
+                    )
+                    .unwrap();
+            }
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let exe = std::env::current_exe().unwrap();
+        let spawn = |who: &str| {
+            std::process::Command::new(&exe)
+                .args([
+                    "--exact",
+                    "connect::tests::two_processes_writing_the_store_lose_nothing",
+                    "--test-threads=1",
+                ])
+                .env("AD4M_CONNECT_STORE_CHILD", dir.path())
+                .env("AD4M_CONNECT_STORE_WHO", who)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::inherit())
+                .spawn()
+                .unwrap()
+        };
+        let (mut a, mut b) = (spawn("a"), spawn("b"));
+        assert!(a.wait().unwrap().success(), "writer a failed");
+        assert!(b.wait().unwrap().success(), "writer b failed");
+
+        let raw = std::fs::read_to_string(dir.path().join("tokens.json")).unwrap();
+        let parsed: Value = serde_json::from_str(&raw).expect("the store is not JSON");
+        let tokens = parsed["tokens"].as_object().unwrap();
+        let mut lost = Vec::new();
+        for who in ["a", "b"] {
+            for i in 0..N {
+                let key = format!("http://{who}:{i}|app");
+                if tokens.get(&key).and_then(Value::as_str) != Some(&format!("tok-{who}-{i}")) {
+                    lost.push(key);
+                }
+            }
+        }
+        assert!(
+            lost.is_empty(),
+            "{} of {} updates lost: {lost:?}",
+            lost.len(),
+            2 * N
+        );
+    }
+
+    /// F1: an unreadable store is an error, never an empty one: a write on
+    /// top of it must fail and leave the file as it was (the old code read
+    /// garbage as empty and the next save erased every credential).
+    #[test]
+    fn a_corrupt_store_is_an_error_not_an_empty_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tokens.json");
+        std::fs::write(&path, "{\"tokens\": {\"http://a:1|app\": \"tok").unwrap();
+        let store = TokenStore::new(dir.path());
+        assert!(
+            store.set_token("http://b:2", "app", "tok-b").is_err(),
+            "a write over a corrupt store succeeded"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "{\"tokens\": {\"http://a:1|app\": \"tok"
+        );
+    }
+
+    /// F1: the store's directory is private (0700) even when it existed
+    /// with looser bits, and the file is 0600.
+    #[cfg(unix)]
+    #[test]
+    fn the_store_directory_is_forced_to_0700() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("ad4m-connect");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let store = TokenStore::new(&dir);
+        store.set_token("http://a:1", "app", "tok").unwrap();
+        let mode = std::fs::metadata(&dir).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700, "directory mode {mode:o}");
+        let mode = std::fs::metadata(store.path())
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600, "file mode {mode:o}");
     }
 
     #[test]
