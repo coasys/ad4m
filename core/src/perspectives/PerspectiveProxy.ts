@@ -964,6 +964,16 @@ export class PerspectiveProxy {
         invalidatePerspectiveCache(this.#handle.uuid);
         return result;
     }
+
+    /**
+     * Drops an open batch without committing it — the recovery for a failed batched call:
+     * a failed call does not roll back the calls before it and may have staged part of its
+     * own work, so discard rather than commit to keep the successful calls. Resolves `true`
+     * when the batch was open and is now dropped.
+     */
+    async discardBatch(batchId: string): Promise<boolean> {
+        return await this.#client.discardBatch(this.#handle.uuid, batchId)
+    }
     /**
      * Retrieves and renders an Expression referenced in this perspective.
      * 
@@ -1635,10 +1645,16 @@ export class PerspectiveProxy {
 
     /**
      * Creates an instance of a subject class, validated by the executor against the class's
-     * SHACL shape before anything is written (types, cardinality, required properties,
-     * `sh:in`): the same check as the MCP `instance_create` tool. A refused write rejects with
-     * an `RpcError` whose `data` is an `InstanceError` (status 422 and `kind: 'validation'`
-     * for a shape violation, with one `ValidationError` per property).
+     * SHACL shape before anything is written (each property's type, which are required, which
+     * take a single value, `sh:in`): the same check as the MCP `instance_create` tool. A refused
+     * write rejects with an `RpcError` whose `data` is an `InstanceError` (status 422 and
+     * `kind: 'validation'` for a shape violation, with one `ValidationError` per property) and
+     * stages nothing. With `batchId` a non-validation failure can leave part of the write
+     * staged in the batch — discard it ({@link discardBatch}), don't commit it to keep
+     * earlier calls. An instance created in the same batch is not found — existence reads
+     * committed state only — so a create followed by an update, remove or
+     * `instanceAddToCollection` of the new instance in one batch fails `notFound`; put a new
+     * instance's initial collection items on the create itself.
      *
      * @example
      * const { baseUri } = await perspective.instanceCreate({ className: "Task", properties: { title: "Write" } });
@@ -1649,28 +1665,28 @@ export class PerspectiveProxy {
         return created;
     }
 
-    /** Sets single-valued properties of an instance, validated; the others stay. */
+    /** Sets single-valued properties of an instance, validated; the others stay. See {@link instanceCreate}. */
     async instanceUpdate(body: InstanceUpdate): Promise<InstanceUpdated> {
         const updated = await this.#client.instanceUpdate(this.#handle.uuid, body);
         invalidatePerspectiveCache(this.#handle.uuid);
         return updated;
     }
 
-    /** Removes an instance and every link to and from it. */
+    /** Removes an instance and every link to and from it. See {@link instanceCreate}. */
     async instanceRemove(body: InstanceRemove): Promise<InstanceRemoved> {
         const removed = await this.#client.instanceRemove(this.#handle.uuid, body);
         invalidatePerspectiveCache(this.#handle.uuid);
         return removed;
     }
 
-    /** Adds an item to a collection of an instance, validated. */
+    /** Adds an item to a collection of an instance, validated. See {@link instanceCreate}. */
     async instanceAddToCollection(body: InstanceAddToCollection): Promise<CollectionItemAdded> {
         const added = await this.#client.instanceAddToCollection(this.#handle.uuid, body);
         invalidatePerspectiveCache(this.#handle.uuid);
         return added;
     }
 
-    /** Removes an item from a collection of an instance. */
+    /** Removes an item from a collection of an instance. See {@link instanceCreate}. */
     async instanceRemoveFromCollection(body: InstanceRemoveFromCollection): Promise<CollectionItemRemoved> {
         const removed = await this.#client.instanceRemoveFromCollection(this.#handle.uuid, body);
         invalidatePerspectiveCache(this.#handle.uuid);

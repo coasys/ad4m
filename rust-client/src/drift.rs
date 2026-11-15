@@ -2,17 +2,49 @@
 //! executor's generated contract, `core/src/generated/api/RpcMethods.ts`
 //! (itself generated from the executor's `HandlerMap`; `api/AGENTS.md`). A
 //! rename or removal on either side fails here.
+//!
+//! Repo-only by design: the contract lives outside the crate, so the
+//! packaged `ad4m-client` cannot see it — the tests skip there, and only
+//! there: in a repo checkout a missing contract fails. A runtime
+//! read, not `include_str!`, is what keeps the publish compiling.
 
 use regex::Regex;
 use std::collections::BTreeSet;
 
-/// The generated contract — compiled in so a missing file fails the build.
-const RPC_METHODS_TS: &str = include_str!("../../core/src/generated/api/RpcMethods.ts");
+/// Read the generated contract off the repo tree; `None` when this is the
+/// packaged crate. Panics in a checkout whose contract cannot be read.
+fn contract_source() -> Option<String> {
+    contract_source_at(std::path::Path::new(env!("CARGO_MANIFEST_DIR")))
+        .unwrap_or_else(|e| panic!("{e}"))
+}
+
+/// `Ok(None)` only for the packaged crate: no workspace manifest next to the
+/// crate directory (`cargo package`'s verify dir, the registry, a vendor
+/// dir). In a checkout a read failure is an error, never a skip.
+fn contract_source_at(crate_dir: &std::path::Path) -> Result<Option<String>, String> {
+    let path = crate_dir.join("../core/src/generated/api/RpcMethods.ts");
+    match std::fs::read_to_string(&path) {
+        Ok(source) => Ok(Some(source)),
+        Err(e) => {
+            let in_checkout = std::fs::read_to_string(crate_dir.join("../Cargo.toml"))
+                .map(|m| m.contains("[workspace]"))
+                .unwrap_or(false);
+            if in_checkout {
+                Err(format!(
+                    "repo checkout, but the generated contract {} is unreadable: {e}",
+                    path.display()
+                ))
+            } else {
+                Ok(None)
+            }
+        }
+    }
+}
 
 /// Every `"<method>":` key of the `RpcMethods` interface.
-fn generated_methods() -> BTreeSet<String> {
+fn generated_methods(source: &str) -> BTreeSet<String> {
     let re = Regex::new(r#"^\s*"([a-zA-Z][a-zA-Z0-9]*\.[a-zA-Z0-9]+)"\s*:"#).unwrap();
-    RPC_METHODS_TS
+    source
         .lines()
         .filter_map(|line| re.captures(line).map(|c| c[1].to_string()))
         .collect()
@@ -33,7 +65,11 @@ fn called_methods(source: &str) -> BTreeSet<String> {
 
 #[test]
 fn every_wrapped_rpc_exists_in_the_generated_contract() {
-    let generated = generated_methods();
+    let Some(source) = contract_source() else {
+        eprintln!("SKIP: generated contract not present (packaged crate)");
+        return;
+    };
+    let generated = generated_methods(&source);
     assert!(
         generated.len() > 150,
         "expected the generated contract's ~230 methods, got {}",
@@ -91,7 +127,11 @@ fn every_wrapped_rpc_exists_in_the_generated_contract() {
 
 #[test]
 fn the_generated_contract_is_fresh_enough_to_name_new_methods() {
-    let generated = generated_methods();
+    let Some(source) = contract_source() else {
+        eprintln!("SKIP: generated contract not present (packaged crate)");
+        return;
+    };
+    let generated = generated_methods(&source);
     // The methods this task relies on — a spot check that the compiled-in
     // contract is new enough (a stale one fails loudly here first).
     for method in [
@@ -124,4 +164,26 @@ fn the_generated_contract_is_fresh_enough_to_name_new_methods() {
             "`{method}` missing from the generated contract"
         );
     }
+}
+
+/// Only the packaged crate may skip. In a checkout (the workspace manifest
+/// sits next to `rust-client/`) a contract that cannot be read is a broken
+/// tree, and the drift check must fail rather than pass by skipping.
+#[test]
+fn a_checkout_without_the_contract_fails_instead_of_skipping() {
+    let root = std::env::temp_dir().join(format!("ad4m-drift-{}", std::process::id()));
+    let crate_dir = root.join("rust-client");
+    std::fs::create_dir_all(&crate_dir).unwrap();
+
+    // Packaged layout: nothing beside the crate. Skipping is right.
+    assert_eq!(contract_source_at(&crate_dir), Ok(None));
+
+    // Checkout layout: the workspace manifest is there, the contract is not.
+    std::fs::write(root.join("Cargo.toml"), "[workspace]\n").unwrap();
+    let missing = contract_source_at(&crate_dir);
+    std::fs::remove_dir_all(&root).unwrap();
+    assert!(
+        missing.is_err(),
+        "a checkout with no readable contract must fail, got {missing:?}"
+    );
 }

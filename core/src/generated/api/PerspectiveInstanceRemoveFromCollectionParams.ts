@@ -4,4 +4,8 @@ export type PerspectiveInstanceRemoveFromCollectionParams = { uuid: string, clas
 /**
  * The item as a read of the instance lists it.
  */
-itemUri: string, batchId?: string, };
+itemUri: string, 
+/**
+ * An open batch to stage the write into; see `InstanceCreate`'s `batchId`.
+ */
+batchId?: string, };

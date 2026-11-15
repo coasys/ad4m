@@ -11,6 +11,12 @@ repository = "https://github.com/perspect3vism/ad4m"
 documentation = "https://docs.ad4m.dev"
 readme = "README.md"
 
+[features]
+# Build OpenSSL from source instead of linking a system one — the
+# tokio-tungstenite `native-tls-vendored` passthrough — for hosts that
+# have no OpenSSL development files (the CI machine runners).
+vendored = ["tokio-tungstenite/native-tls-vendored"]
+
 [dependencies]
 anyhow = "1.0.65"
 clap = { version = "4.0.8", features = ["derive"] }

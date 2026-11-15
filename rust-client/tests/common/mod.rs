@@ -15,7 +15,11 @@ use std::time::Duration;
 fn executor_binary() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("EXECUTOR_PATH") {
         let p = PathBuf::from(p);
-        return p.exists().then_some(p);
+        // An explicit path that doesn't resolve is a misspelled
+        // environment, not an absent executor — skipping here reports
+        // success without reaching an assertion (F11).
+        assert!(p.exists(), "EXECUTOR_PATH does not exist: {}", p.display());
+        return Some(p);
     }
     let mut candidates = Vec::new();
     if let Ok(dir) = std::env::var("CARGO_TARGET_DIR") {
@@ -35,7 +39,7 @@ pub fn require_binary() -> Option<PathBuf> {
         Some(p) => Some(p),
         None => {
             assert!(
-                std::env::var("AD4M_REQUIRE_EXECUTOR").is_err(),
+                !std::env::var("AD4M_REQUIRE_EXECUTOR").is_ok_and(|v| v != "0" && !v.is_empty()),
                 "AD4M_REQUIRE_EXECUTOR is set but no ad4m-executor binary was found \
                  (EXECUTOR_PATH, $CARGO_TARGET_DIR/release/ad4m-executor, \
                  target/release/ad4m-executor)"
@@ -57,6 +61,7 @@ fn free_port() -> u16 {
 pub struct Executor {
     child: Child,
     pub url: String,
+    pub port: u16,
     pub admin_credential: Option<String>,
     _data: tempfile::TempDir,
 }
@@ -133,6 +138,7 @@ fn start(admin_credential: Option<&str>) -> Option<Executor> {
     Some(Executor {
         child,
         url: format!("http://127.0.0.1:{port}"),
+        port,
         admin_credential: admin_credential.map(str::to_string),
         _data: data,
     })
