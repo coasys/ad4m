@@ -66,6 +66,7 @@ import type { DidResolutionResult } from "./DidResolutionResult";
 import type { DiscoveredModel } from "./DiscoveredModel";
 import type { EmbedRequest } from "./EmbedRequest";
 import type { EndAllSessionsParams } from "./EndAllSessionsParams";
+import type { EndPreparedParams } from "./EndPreparedParams";
 import type { EndedSessions } from "./EndedSessions";
 import type { EntanglementProof } from "./EntanglementProof";
 import type { EntanglementProofPreflightRequest } from "./EntanglementProofPreflightRequest";
@@ -189,6 +190,7 @@ import type { PerspectiveVerifyFlowReceiptParams } from "./PerspectiveVerifyFlow
 import type { PostRequestParams } from "./PostRequestParams";
 import type { PowParams } from "./PowParams";
 import type { PreparedDevice } from "./PreparedDevice";
+import type { PreparedEnded } from "./PreparedEnded";
 import type { PromptRequest } from "./PromptRequest";
 import type { ProposeOutcome } from "./ProposeOutcome";
 import type { PublishLanguageRequest } from "./PublishLanguageRequest";
@@ -376,6 +378,7 @@ export interface RpcMethods {
   "identity.custodyStatus": { params: Record<string, never>; result: DeviceKeys };
   "identity.deleteRequest": { params: DeleteRequestParams; result: boolean };
   "identity.devices": { params: Record<string, never>; result: Array<DeviceView> };
+  "identity.endPrepared": { params: EndPreparedParams; result: PreparedEnded };
   "identity.inbox": { params: Record<string, never>; result: Array<InboxEntry> };
   "identity.inboxAck": { params: InboxAckParams; result: boolean };
   "identity.inboxPut": { params: InboxPutParams; result: InboxStored };
