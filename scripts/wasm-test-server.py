@@ -117,22 +117,27 @@ async def control(reader, writer):
             for i in range(n):
                 writer.write(frame(0x1, (str(i % 10) * size).encode()))
                 await writer.drain()
-            await reader.read()
+            await echo(reader, writer)
         elif parts[0] == "echo":
-            while True:
-                op, data = await read_frame(reader)
-                if op == 0x8:
-                    writer.write(frame(0x8, data[:2]))
-                    await writer.drain()
-                    return
-                if op == 0x1:
-                    writer.write(frame(0x1, data))
-                    await writer.drain()
+            await echo(reader, writer)
     except (asyncio.IncompleteReadError, ConnectionError):
         pass
     finally:
         counts[key]["open"] -= 1
         writer.close()
+
+
+async def echo(reader, writer):
+    """Echo text frames; answer the browser's close frame."""
+    while True:
+        op, data = await read_frame(reader)
+        if op == 0x8:
+            writer.write(frame(0x8, data[:2]))
+            await writer.drain()
+            return
+        if op == 0x1:
+            writer.write(frame(0x1, data))
+            await writer.drain()
 
 
 async def proxy(target, reader, writer):

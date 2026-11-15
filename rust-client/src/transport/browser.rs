@@ -16,13 +16,44 @@ use super::{InFrame, SendText, Socket};
 use anyhow::{anyhow, Result};
 use futures_channel::{mpsc, oneshot};
 use futures_util::StreamExt;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::{CloseEvent, Event, MessageEvent, WebSocket};
 
-/// The event queue — `mpsc` because the browser's event loop is the driver.
+/// The largest message either way: the native transport's
+/// `max_message_size` (256 MiB). A bigger send is refused before it is
+/// queued; a bigger inbound message ends the stream with an error.
+#[cfg(not(test))]
+const MAX_MESSAGE_BYTES: usize = 256 << 20;
+/// `send` only queues (it never waits for the network), so a peer that
+/// stays connected but stops reading would grow `bufferedAmount` without
+/// limit. A send is refused once more than this is queued: the queue holds
+/// at most this plus one message. 16 MiB is many seconds of any normal RPC
+/// traffic, and the native write path has the same idea in its 30 s write
+/// budget (`CALL_SEND_TIMEOUT`).
+#[cfg(not(test))]
+const MAX_BUFFERED_BYTES: usize = 16 << 20;
+/// Inbound frames are queued between the browser's `message` events and
+/// the reader. The reader normally drains them at once; if it stalls, the
+/// queue holds at most this many bytes (each frame counted at least
+/// `FRAME_OVERHEAD`), then the stream ends with an error and the socket
+/// closes, so the client reconnects instead of growing without bound.
+#[cfg(not(test))]
+const MAX_INBOUND_BYTES: usize = 256 << 20;
+// The tests use small bounds, so they need no hundreds of MiB.
+#[cfg(test)]
+const MAX_MESSAGE_BYTES: usize = 1 << 20;
+#[cfg(test)]
+const MAX_BUFFERED_BYTES: usize = 1 << 20;
+#[cfg(test)]
+const MAX_INBOUND_BYTES: usize = 1 << 20;
+/// What a queued frame costs beyond its text (channel node, `String`).
+const FRAME_OVERHEAD: usize = 64;
+
+/// The event queue — `mpsc` because the browser's event loop is the driver;
+/// bounded in bytes by `onmessage` (`MAX_INBOUND_BYTES`).
 pub(crate) type WsStream = futures_util::stream::LocalBoxStream<'static, InFrame>;
 
 /// The send half: owns the live socket.
@@ -68,6 +99,19 @@ impl SendText for WsSink {
                     WebSocket::CLOSING => "closing",
                     _ => "closed",
                 }
+            ));
+        }
+        if text.len() > MAX_MESSAGE_BYTES {
+            return Err(anyhow!(
+                "WebSocket send failed: message too large ({} bytes, limit {MAX_MESSAGE_BYTES})",
+                text.len()
+            ));
+        }
+        let queued = self.owned.ws.buffered_amount() as usize;
+        if queued > MAX_BUFFERED_BYTES {
+            return Err(anyhow!(
+                "WebSocket send failed: {queued} bytes still queued, the peer is not reading \
+                 (limit {MAX_BUFFERED_BYTES})"
             ));
         }
         self.owned
@@ -135,9 +179,49 @@ pub(crate) async fn connect(url: &str, display_url: &str) -> Result<Socket> {
     }) as Box<dyn FnMut(_)>);
     ws.set_onclose(Some(onclose.as_ref().unchecked_ref()));
 
-    let onmessage = Closure::wrap(Box::new(move |ev: MessageEvent| {
-        if let Some(text) = ev.data().as_string() {
-            let _ = tx.unbounded_send(InFrame::Text(text));
+    // Bytes queued for the reader: added here, taken off as the stream
+    // yields each frame.
+    let queued = Rc::new(Cell::new(0usize));
+    let onmessage = Closure::wrap(Box::new({
+        let queued = queued.clone();
+        let ws = ws.clone();
+        let mut overflowed = false;
+        move |ev: MessageEvent| {
+            if overflowed {
+                return;
+            }
+            let Some(text) = ev.data().as_string() else {
+                return;
+            };
+            let cost = text.len().max(FRAME_OVERHEAD);
+            let error = if text.len() > MAX_MESSAGE_BYTES {
+                Some(format!(
+                    "WebSocket message too large ({} bytes, limit {MAX_MESSAGE_BYTES})",
+                    text.len()
+                ))
+            } else if queued.get() + cost > MAX_INBOUND_BYTES {
+                Some(format!(
+                    "WebSocket inbound queue full ({} bytes waiting for the reader, \
+                     limit {MAX_INBOUND_BYTES})",
+                    queued.get()
+                ))
+            } else {
+                None
+            };
+            match error {
+                Some(e) => {
+                    // The stream ends here: the reader disconnects on the
+                    // error, and nothing more is queued for it.
+                    overflowed = true;
+                    let _ = tx.unbounded_send(InFrame::Error(e));
+                    tx.close_channel();
+                    let _ = ws.close();
+                }
+                None => {
+                    queued.set(queued.get() + cost);
+                    let _ = tx.unbounded_send(InFrame::Text(text));
+                }
+            }
         }
     }) as Box<dyn FnMut(_)>);
     ws.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
@@ -155,7 +239,14 @@ pub(crate) async fn connect(url: &str, display_url: &str) -> Result<Socket> {
     match open_rx.await {
         Ok(Ok(())) => Ok(Socket {
             sink: WsSink { owned },
-            stream: rx.boxed_local(),
+            stream: rx
+                .map(move |frame| {
+                    if let InFrame::Text(t) = &frame {
+                        queued.set(queued.get() - t.len().max(FRAME_OVERHEAD));
+                    }
+                    frame
+                })
+                .boxed_local(),
         }),
         Ok(Err(e)) => Err(anyhow!("WebSocket connection to {display_url} failed: {e}")),
         Err(_) => Err(anyhow!(
@@ -354,5 +445,108 @@ mod tests {
         assert_eq!(sink.owned.ws.ready_state(), WebSocket::CLOSED);
         let after = sink.send_text("after close".into()).await;
         assert!(after.is_err(), "a send while CLOSED reported success");
+    }
+
+    /// The test build's bounds (1 MiB each; see the constants).
+    const MIB: usize = 1 << 20;
+
+    /// A6-3: a peer that stays connected but stops reading. Sends must
+    /// start failing with a clear error once the browser's queue is past
+    /// the bound, instead of queueing without limit; the socket still
+    /// shuts down at once.
+    #[wasm_bindgen_test]
+    async fn sends_to_a_peer_that_stops_reading_fail_at_the_bound() {
+        let Socket {
+            mut sink,
+            mut stream,
+        } = connect(&peer("silent/slow-peer"), "silent").await.unwrap();
+        let chunk = "x".repeat(256 * 1024);
+        let mut refused = None;
+        // 400 × 256 KiB = 100 MiB, far past any kernel buffer.
+        for i in 0..400 {
+            if let Err(e) = sink.send_text(chunk.clone()).await {
+                refused = Some((i, e.to_string()));
+                break;
+            }
+            rt::yield_now().await;
+        }
+        let queued = sink.owned.ws.buffered_amount() as usize;
+        let (i, err) =
+            refused.unwrap_or_else(|| panic!("400 sends queued, {queued} bytes buffered"));
+        assert!(
+            err.contains("not reading"),
+            "unclear error after {i} sends: {err}"
+        );
+        assert!(
+            queued <= MIB + chunk.len(),
+            "{queued} bytes queued past the bound"
+        );
+
+        drop(sink);
+        let ended = rt::timeout(Duration::from_secs(1), stream.next()).await;
+        assert!(matches!(ended, Ok(None)), "shutdown stalled: {ended:?}");
+    }
+
+    /// A6-3: a message over the size bound is refused before it is queued.
+    #[wasm_bindgen_test]
+    async fn an_oversized_send_is_refused_before_it_is_queued() {
+        let Socket { mut sink, .. } = connect(&peer("echo/oversized"), "echo").await.unwrap();
+        let err = sink
+            .send_text("y".repeat(MIB + 1))
+            .await
+            .expect_err("an oversized send was queued");
+        assert!(err.to_string().contains("too large"), "{err}");
+        assert_eq!(sink.owned.ws.buffered_amount(), 0);
+    }
+
+    /// A6-3: frames arriving faster than the reader takes them are queued
+    /// only up to the bound: past it the stream reports an error, then
+    /// ends, and the socket is closed.
+    #[wasm_bindgen_test]
+    async fn an_inbound_flood_past_the_bound_ends_the_stream() {
+        let key = "flood";
+        // 64 × 64 KiB = 4 MiB, sent while nobody reads the stream.
+        let Socket { sink, mut stream } = connect(&peer(&format!("flood/64/65536/{key}")), "flood")
+            .await
+            .unwrap();
+        rt::sleep(Duration::from_millis(1500)).await;
+        let mut texts = 0usize;
+        let mut error = None;
+        while let Ok(Some(frame)) = rt::timeout(Duration::from_secs(1), stream.next()).await {
+            match frame {
+                InFrame::Text(t) => texts += t.len(),
+                InFrame::Error(e) => {
+                    error = Some(e);
+                    break;
+                }
+                InFrame::Close(_) => break,
+            }
+        }
+        assert!(texts <= MIB, "{texts} bytes were queued past the bound");
+        let error = error.unwrap_or_else(|| panic!("no overflow error after {texts} bytes"));
+        assert!(error.contains("inbound"), "{error}");
+        assert_eq!(wait_closed(key, Duration::from_secs(3)).await.1, 0);
+        drop(sink);
+    }
+
+    /// A6-3: one inbound message over the size bound (native: 256 MiB) is
+    /// an error, not a queued frame.
+    #[wasm_bindgen_test]
+    async fn an_oversized_inbound_message_is_an_error() {
+        let Socket {
+            sink: _sink,
+            mut stream,
+        } = connect(&peer(&format!("flood/1/{}/big-inbound", MIB + 1)), "flood")
+            .await
+            .unwrap();
+        let first = rt::timeout(Duration::from_secs(3), stream.next()).await;
+        assert!(
+            matches!(&first, Ok(Some(InFrame::Error(e))) if e.contains("too large")),
+            "{:?}",
+            first.map(|f| f.map(|f| match f {
+                InFrame::Text(t) => format!("Text({} bytes)", t.len()),
+                other => format!("{other:?}"),
+            }))
+        );
     }
 }
