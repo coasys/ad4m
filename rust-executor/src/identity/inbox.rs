@@ -23,6 +23,12 @@
 //!   first-link rule; `canKeepMaster` exactly when the executor has the custody channel), and
 //!   a claim sends `link-ticket` (the identity and the match code). A master key never
 //!   travels before a device joins: one found there is dropped with an alarm.
+//! - **`identity.endPrepared`** ends one device string (the person cancelled the code screen):
+//!   its read stops after the round under way, and every claim the read made is cancelled
+//!   (`ClaimService::cancel_join`'s rule), so a holder who confirms later binds nothing here
+//!   (the store is not told: it may still accept the confirmation). A claim that bound already
+//!   answers `already-joined`. The end runs in its own task, so a dropped call still cancels
+//!   the claims, and its first answer is kept for every later call.
 //!
 //! The master key opens here only inside `identity.takeMaster`: it is written to no store,
 //! log, event or language, and the result wipes itself when dropped (`TakenMaster`).
@@ -45,13 +51,14 @@ use zeroize::Zeroize;
 use super::cache::CacheError;
 use super::device::{device_key, enc_key_of, WalletSigner, REQUEST_TTL_S};
 use super::record::DevicePosition;
-use super::service::{backend_error, cache_error, error, now, IdentityService};
+use super::service::{backend_error, cache_error, db, error, now, IdentityService};
 use super::types::{
     convert, InboxEntry, InboxMessageEvent, InboxMessageType, InboxPutParams, InboxStored,
-    LinkTicketEvent, PreparedDevice, TakenMaster,
+    LinkTicketEvent, PreparedDevice, PreparedEnded, TakenMaster,
 };
 use crate::agent::AgentContext;
 use crate::api::ws_handler::WsRpcError;
+use crate::db::JoinCancel;
 use crate::events::{Audience, Event, Topic};
 
 /// How often the joined inbox is read besides at start, unlock and binding.
@@ -73,8 +80,10 @@ pub struct Inbox {
     /// Held through one read of the joined inbox: the pull and `identity.inbox` take turns, so
     /// a message is opened and announced once.
     pulling: tokio::sync::Mutex<()>,
-    /// The open `identity.prepareDevice`: cancelling it ends its pre-join read.
-    prepared: Mutex<Option<CancellationToken>>,
+    /// The device strings `identity.prepareDevice` made, oldest first, each until
+    /// [`PREPARED_KEPT_S`] after it expires (dropped on the next access after that) or until
+    /// [`PREPARED_KEPT`] newer ones were made: `identity.endPrepared` ends one by its string.
+    prepared: Mutex<Vec<Arc<Prepared>>>,
     /// Wakes [`run_pull`].
     wake: Notify,
 }
@@ -82,6 +91,40 @@ pub struct Inbox {
 impl Inbox {
     fn seen(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, InboxEntry>> {
         self.seen.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The device strings still kept; one past [`PREPARED_KEPT_S`] after its expiry goes here.
+    fn prepared(&self) -> std::sync::MutexGuard<'_, Vec<Arc<Prepared>>> {
+        let mut all = self.prepared.lock().unwrap_or_else(|e| e.into_inner());
+        let at = now();
+        all.retain(|p| p.expires.saturating_add(PREPARED_KEPT_S) > at);
+        all
+    }
+}
+
+/// How long after a device string expires `identity.endPrepared` still knows it: a claim its
+/// read made stays open for its offer's life, after the string expired.
+pub const PREPARED_KEPT_S: u64 = 3600;
+/// The most device strings kept at once; the oldest goes first.
+const PREPARED_KEPT: usize = 16;
+
+/// One device string `identity.prepareDevice` made, and what its pre-join read did.
+struct Prepared {
+    device: String,
+    expires: u64,
+    /// Cancelled to end the pre-join read.
+    done: CancellationToken,
+    /// Held while the read takes the tickets of one round: `identity.endPrepared` waits for it.
+    turn: tokio::sync::Mutex<()>,
+    /// Every offer the read tried to claim, noted before the claim's row can go in.
+    offers: Mutex<Vec<String>>,
+    /// The answer of `identity.endPrepared`, once one was decided: every later call gives it.
+    ended: tokio::sync::OnceCell<PreparedEnded>,
+}
+
+impl Prepared {
+    fn offers(&self) -> std::sync::MutexGuard<'_, Vec<String>> {
+        self.offers.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
 
@@ -412,15 +455,23 @@ pub async fn prepare_device(
         store: store_url,
     }
     .encode();
-    let done = CancellationToken::new();
-    let earlier = service
-        .inbox
-        .prepared
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .replace(done.clone());
-    if let Some(earlier) = earlier {
-        earlier.cancel();
+    let prepared = Arc::new(Prepared {
+        device: device.clone(),
+        expires,
+        done: CancellationToken::new(),
+        turn: Default::default(),
+        offers: Default::default(),
+        ended: Default::default(),
+    });
+    {
+        let mut all = service.inbox.prepared();
+        for earlier in all.iter() {
+            earlier.done.cancel();
+        }
+        while all.len() >= PREPARED_KEPT {
+            all.remove(0);
+        }
+        all.push(prepared.clone());
     }
     let read = PreRead {
         agent,
@@ -430,7 +481,7 @@ pub async fn prepare_device(
         store,
         expires,
     };
-    tokio::spawn(read_pre_inbox(service.clone(), read, done, custody));
+    tokio::spawn(read_pre_inbox(service.clone(), read, prepared, custody));
     Ok(PreparedDevice {
         sign,
         enc,
@@ -474,14 +525,15 @@ impl PreRead {
     }
 }
 
-/// Reads the pre-join inbox of `read` until it expires, `done` is cancelled, or a ticket led
+/// Reads the pre-join inbox of `read` until it expires, `prepared` is ended, or a ticket led
 /// to a claim.
 async fn read_pre_inbox(
     service: Arc<IdentityService>,
     read: PreRead,
-    done: CancellationToken,
+    prepared: Arc<Prepared>,
     custody: bool,
 ) {
+    let done = prepared.done.clone();
     let address = InboxAddress::Pre {
         pre: read.address.clone(),
     };
@@ -501,14 +553,23 @@ async fn read_pre_inbox(
             vec![]
         });
         let mut claimed = false;
-        for message in &messages {
-            claimed = service.take_ticket(&read, message, custody).await;
-            if claimed {
-                break;
+        {
+            // `identity.endPrepared` cancels `done`, then waits for this turn: a round that
+            // began before it ends first, and one after it takes no ticket.
+            let _turn = prepared.turn.lock().await;
+            for message in &messages {
+                if done.is_cancelled() {
+                    break;
+                }
+                claimed = service
+                    .take_ticket(&read, &prepared, message, custody)
+                    .await;
+                if claimed {
+                    break;
+                }
             }
         }
         if claimed {
-            done.cancel();
             break;
         }
         // A message left waiting (a locked wallet, a log not readable now) comes back at once.
@@ -519,19 +580,7 @@ async fn read_pre_inbox(
             }
         }
     }
-    // Ours is over; a newer prepareDevice's token is not cancelled and stays.
     done.cancel();
-    let mut prepared = service
-        .inbox
-        .prepared
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    if prepared
-        .as_ref()
-        .is_some_and(CancellationToken::is_cancelled)
-    {
-        *prepared = None;
-    }
 }
 
 impl IdentityService {
@@ -557,7 +606,13 @@ impl IdentityService {
     /// claim sends `link-ticket`. True once a claim passed. Every message it acts on, or that is for
     /// no one here, is acknowledged; one whose identity's log cannot be read now waits for
     /// the next round.
-    async fn take_ticket(&self, read: &PreRead, message: &InboxMessage, custody: bool) -> bool {
+    async fn take_ticket(
+        &self,
+        read: &PreRead,
+        prepared: &Prepared,
+        message: &InboxMessage,
+        custody: bool,
+    ) -> bool {
         let sealed_at = SealedAt::Pre(read.address.clone());
         let opened = match open(&read.agent, &sealed_at, &message.sealed) {
             Ok(opened) => opened,
@@ -632,6 +687,13 @@ impl IdentityService {
         let mut offer = ticket.offer_string();
         ticket.s.zeroize();
         let did = did_of(&ticket.scid);
+        {
+            // Noted before the claim's row goes in, so `identity.endPrepared` cancels it.
+            let mut offers = prepared.offers();
+            if !offers.contains(&ticket.offer_id) {
+                offers.push(ticket.offer_id.clone());
+            }
+        }
         let claimed = self.claims().claim_for_main(&offer, custody, None).await;
         offer.s.zeroize();
         let taken = match claimed {
@@ -665,6 +727,70 @@ impl IdentityService {
         self.ack_pre(read, &message.id).await;
         taken
     }
+
+    /// `identity.endPrepared`: ends the device string `device`. Its pre-join read stops, a round that
+    /// is taking tickets finishes first, and every claim the read made is cancelled, so none binds
+    /// this executor when the holder confirms. The cancel is local, as `identity.cancelJoin`'s: the
+    /// store is not told and may still accept the holder's confirmation. `already-joined` (with the
+    /// offer and identity) when one bound already; a cancel does not undo it. The first answer is
+    /// kept: every later call gives it. The end runs in a task of its own, so a call dropped while
+    /// it waits (`request.cancel`, the session's end) still cancels the claims. `not-found` for a
+    /// string this executor did not make since it started, or no longer keeps: from
+    /// [`PREPARED_KEPT_S`] after it expired, or once [`PREPARED_KEPT`] newer ones were made.
+    pub async fn end_prepared(&self, device: &str) -> Result<PreparedEnded, WsRpcError> {
+        let prepared = self
+            .inbox
+            .prepared()
+            .iter()
+            .find(|p| p.device == device)
+            .cloned()
+            .ok_or_else(|| WsRpcError::not_found("not-found: no device string of this executor"))?;
+        prepared.done.cancel();
+        // Its own task: a dropped call stops waiting for it, not the cancel of the claims.
+        tokio::spawn(async move {
+            prepared
+                .ended
+                .get_or_try_init(|| end_claims(&prepared))
+                .await
+                .cloned()
+        })
+        .await
+        .map_err(|e| WsRpcError::internal(format!("ending the device string failed: {e}")))?
+    }
+}
+
+/// Waits for the round of `prepared`'s read under way (its `done` is cancelled, so no later
+/// round takes a ticket), then cancels every claim the read made: the answer of
+/// `identity.endPrepared`.
+async fn end_claims(prepared: &Prepared) -> Result<PreparedEnded, WsRpcError> {
+    drop(prepared.turn.lock().await);
+    let (agent_did, _) = device_key(&AgentContext::main_agent()).map_err(WsRpcError::internal)?;
+    let offers = prepared.offers().clone();
+    let (mut cancelled, mut joined) = (vec![], None);
+    for offer_id in offers {
+        match db(|db| db.cancel_join(&offer_id, &agent_did))? {
+            JoinCancel::Cancelled => cancelled.push(offer_id),
+            // The claim was refused before its row went in.
+            JoinCancel::NoClaim => {}
+            JoinCancel::AlreadyJoined => {
+                joined.get_or_insert(offer_id);
+            }
+        }
+    }
+    if let Some(offer_id) = joined {
+        let scid = db(|db| db.join(&offer_id))?
+            .map(|join| join.scid)
+            .ok_or_else(|| WsRpcError::internal("a joined claim has no row"))?;
+        return Ok(PreparedEnded::AlreadyJoined {
+            offer_id,
+            did: did_of(&scid),
+        });
+    }
+    log::info!(
+        "identity: the device string's link is ended; claims cancelled: {}",
+        cancelled.len()
+    );
+    Ok(PreparedEnded::Ended { cancelled })
 }
 
 /// Wakes the inbox pull (the wallet unlocked, or the main agent was bound to an identity).
@@ -1079,8 +1205,8 @@ mod tests {
     }
 
     fn ends(service: &IdentityService) {
-        if let Some(open) = service.inbox.prepared.lock().unwrap().take() {
-            open.cancel();
+        for open in service.inbox.prepared().drain(..) {
+            open.done.cancel();
         }
     }
 
@@ -1305,7 +1431,7 @@ mod tests {
         let log = TestLog::new(88);
         let (service, _store) = holder_store(&log);
         let first = prepare_device(&service, false).await.unwrap();
-        let first_read = service.inbox.prepared.lock().unwrap().clone().unwrap();
+        let first_read = service.inbox.prepared().last().unwrap().done.clone();
         let second = prepare_device(&service, false).await.unwrap();
         assert!(first_read.is_cancelled());
         assert_ne!(
@@ -1313,14 +1439,279 @@ mod tests {
             DeviceString::parse(&second.device).unwrap().r,
             "a fresh r"
         );
-        assert!(!service
-            .inbox
-            .prepared
-            .lock()
-            .unwrap()
-            .clone()
-            .unwrap()
-            .is_cancelled());
+        assert!(!service.inbox.prepared().last().unwrap().done.is_cancelled());
+        ends(&service);
+    }
+
+    /// The main agent bound to an identity for one test.
+    struct Joined(String);
+
+    impl Joined {
+        fn to(scid: &str) -> Self {
+            let (main_did, _) = device_key(&AgentContext::main_agent()).unwrap();
+            Ad4mDb::with_global_instance(|db| db.set_agent_identity(&main_did, scid, now()))
+                .unwrap();
+            Joined(main_did)
+        }
+    }
+
+    impl Drop for Joined {
+        fn drop(&mut self) {
+            let _ = Ad4mDb::with_global_instance(|db| db.clear_agent_identity_for_test(&self.0));
+        }
+    }
+
+    /// Cancel on the code screen before any ticket came: `identity.endPrepared` stops the read
+    /// and cancels nothing. A ticket the holder sends afterwards is not read, so it is never
+    /// claimed. Again answers the same; a device string this executor never made is 404.
+    #[tokio::test]
+    async fn ending_a_code_with_no_ticket_stops_its_read_and_takes_no_later_ticket() {
+        let log = TestLog::new(94);
+        let (service, store) = holder_store(&log);
+        let _record = OperatorRecord::set(&did_of(&log.scid()));
+        let prepared = prepare_device(&service, false).await.unwrap();
+        let device = DeviceString::parse(&prepared.device).unwrap();
+
+        let ended = service.end_prepared(&prepared.device).await.unwrap();
+        assert_eq!(ended, PreparedEnded::Ended { cancelled: vec![] });
+        assert!(service.inbox.prepared().last().unwrap().done.is_cancelled());
+
+        push_ticket(&log, &store, &device);
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert!(
+            store.claims.lock().unwrap().is_empty(),
+            "no claim after the end"
+        );
+        assert_eq!(
+            store.inbox.lock().unwrap().len(),
+            1,
+            "the ticket is not read"
+        );
+
+        assert_eq!(
+            service.end_prepared(&prepared.device).await.unwrap(),
+            PreparedEnded::Ended { cancelled: vec![] }
+        );
+        let unknown = service
+            .end_prepared("coasys:device:1:unknown")
+            .await
+            .unwrap_err();
+        assert_eq!(unknown.code, 404);
+        ends(&service);
+    }
+
+    /// A ticket being taken when the person cancels: `identity.endPrepared` waits for it, then
+    /// cancels the claim it made, so the claim never binds, and a later claim of that offer is
+    /// refused `cancelled`. Again answers the same.
+    #[tokio::test]
+    async fn ending_a_code_waits_for_the_ticket_being_taken_and_cancels_its_claim() {
+        let log = TestLog::new(95);
+        let (service, store) = holder_store(&log);
+        let _record = OperatorRecord::set(&did_of(&log.scid()));
+        let (entered, release) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+        *store.pause_store.lock().unwrap() = Some((entered.clone(), release.clone()));
+        let prepared = prepare_device(&service, false).await.unwrap();
+        let device = DeviceString::parse(&prepared.device).unwrap();
+        let offer_id = push_ticket(&log, &store, &device);
+        // The read opened the ticket and reads its identity's log.
+        tokio::time::timeout(Duration::from_secs(5), entered.notified())
+            .await
+            .expect("the ticket is being taken");
+
+        let ending = service.end_prepared(&prepared.device);
+        tokio::pin!(ending);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), &mut ending)
+                .await
+                .is_err(),
+            "the end waits for the ticket being taken"
+        );
+        release.notify_one();
+        let ended = ending.await.unwrap();
+        assert_eq!(
+            ended,
+            PreparedEnded::Ended {
+                cancelled: vec![offer_id.clone()]
+            }
+        );
+        assert_eq!(
+            store.claims.lock().unwrap()[0].0,
+            offer_id,
+            "it was claimed"
+        );
+        assert_eq!(
+            Ad4mDb::with_global_instance(|db| db.join(&offer_id))
+                .unwrap()
+                .map(|j| j.accept),
+            Some(crate::db::JoinAccept::Cancelled)
+        );
+
+        // A later claim of the offer (a second ticket, a pasted link) is refused.
+        let offer = link::OfferString {
+            scid: log.scid(),
+            offer_id: offer_id.clone(),
+            s: bs58::encode([5u8; 32]).into_string(),
+            store: "http://store.test".into(),
+        };
+        let again = service
+            .claims()
+            .claim_for_main(&offer, false, None)
+            .await
+            .unwrap_err();
+        assert_eq!(again.code, 409);
+        assert!(again.message.starts_with("cancelled"), "{}", again.message);
+        assert_eq!(store.claims.lock().unwrap().len(), 1);
+
+        assert_eq!(service.end_prepared(&prepared.device).await.unwrap(), ended);
+        ends(&service);
+    }
+
+    /// Cancel after the claim joined: `identity.endPrepared` does not undo it and answers
+    /// `already-joined` with the offer and the identity, again too.
+    #[tokio::test]
+    async fn ending_a_code_whose_claim_joined_answers_already_joined() {
+        let log = TestLog::new(96);
+        let (service, store) = holder_store(&log);
+        let _record = OperatorRecord::set(&did_of(&log.scid()));
+        let prepared = prepare_device(&service, false).await.unwrap();
+        let device = DeviceString::parse(&prepared.device).unwrap();
+        let offer_id = push_ticket(&log, &store, &device);
+        until("the claim", || !store.claims.lock().unwrap().is_empty()).await;
+        let _joined = Joined::to(&log.scid());
+
+        let joined = PreparedEnded::AlreadyJoined {
+            offer_id: offer_id.clone(),
+            did: did_of(&log.scid()),
+        };
+        assert_eq!(
+            service.end_prepared(&prepared.device).await.unwrap(),
+            joined
+        );
+        assert_ne!(
+            Ad4mDb::with_global_instance(|db| db.join(&offer_id))
+                .unwrap()
+                .map(|j| j.accept),
+            Some(crate::db::JoinAccept::Cancelled),
+            "a joined claim is not cancelled"
+        );
+        assert_eq!(
+            service.end_prepared(&prepared.device).await.unwrap(),
+            joined
+        );
+        ends(&service);
+    }
+
+    /// The call dropped (`request.cancel`, the session's end) while the end waits for the
+    /// ticket being taken: the claim the read makes is still cancelled, so accepting it is
+    /// refused and the holder's confirmation binds nothing.
+    #[tokio::test]
+    async fn an_end_dropped_while_a_ticket_is_taken_still_cancels_its_claim() {
+        let log = TestLog::new(97);
+        let (service, store) = holder_store(&log);
+        let _record = OperatorRecord::set(&did_of(&log.scid()));
+        let (entered, release) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+        *store.pause_store.lock().unwrap() = Some((entered.clone(), release.clone()));
+        let prepared = prepare_device(&service, false).await.unwrap();
+        let device = DeviceString::parse(&prepared.device).unwrap();
+        let offer_id = push_ticket(&log, &store, &device);
+        tokio::time::timeout(Duration::from_secs(5), entered.notified())
+            .await
+            .expect("the ticket is being taken");
+
+        let mut ending = Box::pin(service.end_prepared(&prepared.device));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), &mut ending)
+                .await
+                .is_err(),
+            "the end waits for the ticket being taken"
+        );
+        drop(ending);
+        release.notify_one();
+
+        let accept = || {
+            Ad4mDb::with_global_instance(|db| db.join(&offer_id))
+                .unwrap()
+                .map(|j| j.accept)
+        };
+        until("the claim's cancel", || {
+            accept() == Some(crate::db::JoinAccept::Cancelled)
+        })
+        .await;
+        assert_eq!(
+            store.claims.lock().unwrap()[0].0,
+            offer_id,
+            "it was claimed"
+        );
+        let refused = service
+            .claims()
+            .accept_join(&AgentContext::main_agent(), &offer_id)
+            .unwrap_err();
+        assert_eq!(refused.code, 409);
+        assert!(
+            refused.message.starts_with("cancelled"),
+            "{}",
+            refused.message
+        );
+        let (main_did, _) = device_key(&AgentContext::main_agent()).unwrap();
+        assert!(
+            Ad4mDb::with_global_instance(|db| {
+                db.set_agent_identity_of_join(&main_did, &log.scid(), now(), &offer_id)
+            })
+            .is_err(),
+            "the holder's confirmation binds nothing"
+        );
+        assert_eq!(
+            Ad4mDb::with_global_instance(|db| db.agent_identity(&main_did)).unwrap(),
+            None
+        );
+        assert_eq!(
+            service.end_prepared(&prepared.device).await.unwrap(),
+            PreparedEnded::Ended {
+                cancelled: vec![offer_id]
+            }
+        );
+        ends(&service);
+    }
+
+    /// End string A after its claim, then join the same identity through string B: ending A
+    /// again still answers `ended` with A's claim, and B's join is B's.
+    #[tokio::test]
+    async fn ending_a_code_again_after_another_code_joined_answers_the_same() {
+        let log = TestLog::new(98);
+        let (service, store) = holder_store(&log);
+        let _record = OperatorRecord::set(&did_of(&log.scid()));
+        let first = prepare_device(&service, false).await.unwrap();
+        let first_offer = push_ticket(&log, &store, &DeviceString::parse(&first.device).unwrap());
+        until("the first claim", || {
+            store.claims.lock().unwrap().len() == 1
+        })
+        .await;
+        let ended = PreparedEnded::Ended {
+            cancelled: vec![first_offer],
+        };
+        assert_eq!(service.end_prepared(&first.device).await.unwrap(), ended);
+
+        let second = prepare_device(&service, false).await.unwrap();
+        let second_offer = push_ticket(&log, &store, &DeviceString::parse(&second.device).unwrap());
+        until("the second claim", || {
+            store.claims.lock().unwrap().len() == 2
+        })
+        .await;
+        let (main_did, _) = device_key(&AgentContext::main_agent()).unwrap();
+        Ad4mDb::with_global_instance(|db| {
+            db.set_agent_identity_of_join(&main_did, &log.scid(), now(), &second_offer)
+        })
+        .unwrap();
+        let _joined = Joined(main_did);
+
+        assert_eq!(service.end_prepared(&first.device).await.unwrap(), ended);
+        assert_eq!(
+            service.end_prepared(&second.device).await.unwrap(),
+            PreparedEnded::AlreadyJoined {
+                offer_id: second_offer,
+                did: did_of(&log.scid()),
+            }
+        );
         ends(&service);
     }
 }
