@@ -156,7 +156,7 @@ This file defines each ADAM term once, in alphabetical order. Each entry gives t
 
 **Model query** (`execute_model_query`, `ModelQueryInput`, `ModelShape`): A query for the instances of subject classes, which the executor builds from their SHACL shapes and runs. [Model queries](perspectives/querying/model-queries.md)
 
-**Monotonic predicate** (`MONOTONIC_PREDICATES`, `Ending` in `perspectives/monotonic.rs`): A predicate, such as any predicate under `ad4m://flow/` and `ad4m://acceptedBy`, under which no diff removes a `Shared` link. Such a link ends only by a tombstone, by a revocation, or never. [Link write path](perspectives/links/write-path.md)
+**Monotonic predicate** (`MONOTONIC_PREDICATES`, `Ending` in `perspectives/monotonic.rs`): A predicate, such as any predicate under `ad4m://flow/` and `ad4m://acceptedBy`, under which no diff removes a `Shared` link. Such a link ends only by its author's tombstone (`is_retractable`), or never (`ad4m://retracted`, `ad4m://monotonic`, `ad4m://flow/role_grant_revoked`). [Link write path](perspectives/links/write-path.md)
 
 **Multi-user mode** (`enable_multi_user`, `Ad4mDb::get_multi_user_enabled`): The executor setting that lets anonymous callers sign up and log in as managed agents. [Managed agents](agents/executor/managed-agents.md)
 
@@ -168,7 +168,7 @@ This file defines each ADAM term once, in alphabetical order. Each entry gives t
 
 **Notification** (`notification_check_loop`, `runtime_service/notification_access.rs`): A SPARQL trigger that an app registers. The executor sends each new match to the owner's events and to an optional webhook. [Live queries](perspectives/querying/live-queries.md)
 
-**Operator** (`Principal::Operator`): The administrator role of the executor, which the caller who presents the admin credential holds. The operator is not an agent and acts as the main agent. [Operator and main agent](agents/access/operator-and-main-agent.md) — not: admin, owner (an owner is a perspective owner)
+**Operator** (`Principal::Operator`): The administrator role of the executor, which the caller who presents the admin credential holds. On an executor with no admin credential, a caller with no token on a loopback listener holds it. The operator is not an agent and acts as the main agent. [Operator and main agent](agents/access/operator-and-main-agent.md) — not: admin, owner (an owner is a perspective owner)
 
 **Owner** (`PerspectiveHandle.owners`, `is_owned_by`): An agent whose DID is in the `owners` list of a perspective, which lets the agent reach that perspective. Agents of one executor that join the same neighbourhood share one perspective as its owners. [Access checks](agents/access/checks.md)
 

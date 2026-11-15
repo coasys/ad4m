@@ -22,7 +22,7 @@ The **link server** is a self-hosted Node.js process, separate from the executor
 2. Other DIDs need an ACL entry (or `--auto-admit`). Removing a DID from the ACL deletes its sessions and closes its sockets.
 3. A removal resends the original `LinkExpression`, so its hash equals the addition's. The commit route refuses a link whose data is not exactly `{ciphertext, nonce}` or that has no `link_hash`; that client-supplied `link_hash` is the link's hash.
 4. `/render` and `/sync` always answer one page (`limit` 1 to 5000, default 500); `next` names the following page, `null` on the last. JSON answers over 1 kB are compressed (br or gzip) when the request sends `Accept-Encoding`.
-5. `--operator-port` with `--operator-token-file` starts a second, loopback-only app for the **link-server operator** (list rooms, change ACLs, audit log, the admission mode, live server logs). `GET /api/logs` streams the last 1000 log lines of both apps (`LogTail`), then each new one, as Server-Sent Events. The link-server operator is the person who runs the server; in the rest of ADAM, "operator" is the executor's administrator.
+5. `--operator-port` with `--operator-token-file` and at least one `--operator-origin` (or `OPERATOR_ORIGINS`; without one the process exits at start) starts a second, loopback-only app for the **link-server operator** (list rooms, change ACLs, audit log, the admission mode, live server logs). `GET /api/logs` streams the last 1000 log lines of both apps (`LogTail`), then each new one, as Server-Sent Events. The link-server operator is the person who runs the server; in the rest of ADAM, "operator" is the executor's administrator.
 
 </details>
 
