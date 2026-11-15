@@ -1030,9 +1030,10 @@ mod tests {
         // stays undecided — `cantCheck`, never a memoised refusal.
         map.note_confirmed(&log.scid(), now - ADMIT_FRESHNESS - 10);
         store.store_down.store(true, Ordering::SeqCst);
-        resolver.prepare(&signers).await;
+        let held = resolver.prepare(&signers).await;
         let catalogue = std::iter::once((flow.flow_uri(), flow)).collect();
         let verdict = verify_receipt(&catalogue, &receipt);
+        drop(held);
         assert!(
             !verdict.is_verified(),
             "the stale head must not count the vote: {verdict}"
@@ -1041,7 +1042,7 @@ mod tests {
         // The store answers on the next window: the refresh confirms the
         // head and the honest receipt verifies.
         store.store_down.store(false, Ordering::SeqCst);
-        resolver
+        let _held = resolver
             .prepare_at(&signers, now + ADMIT_FRESHNESS + 5)
             .await;
         let verdict = verify_receipt(&catalogue, &receipt);
