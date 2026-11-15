@@ -214,3 +214,49 @@ pub(crate) fn log(line: &str) {
 pub(crate) fn log(line: &str) {
     web_sys::console::warn_1(&line.into());
 }
+
+/// Browser probes of the wasm runtime shim's cancellation (review item 6):
+/// what a timeout or an abort drops never runs later.
+#[cfg(all(test, target_arch = "wasm32"))]
+mod browser_tests {
+    use super::*;
+    use std::cell::Cell;
+    use std::rc::Rc;
+    use wasm_bindgen_test::*;
+
+    wasm_bindgen_test_configure!(run_in_browser);
+
+    /// A future that lost its timeout race is dropped: its side effect,
+    /// due after the deadline, never happens.
+    #[wasm_bindgen_test]
+    async fn a_timed_out_future_never_runs_its_side_effect() {
+        let fired = Rc::new(Cell::new(false));
+        let f = fired.clone();
+        let r = timeout(Duration::from_millis(50), async move {
+            sleep(Duration::from_millis(200)).await;
+            f.set(true);
+        })
+        .await;
+        assert!(r.is_err());
+        sleep(Duration::from_millis(400)).await;
+        assert!(!fired.get(), "the timed-out future ran after its deadline");
+    }
+
+    /// An aborted task's pending sleep never fires; `join` reports the end.
+    #[wasm_bindgen_test]
+    async fn an_aborted_task_never_resumes_from_its_sleep() {
+        let fired = Rc::new(Cell::new(false));
+        let f = fired.clone();
+        let task = spawn(async move {
+            sleep(Duration::from_millis(100)).await;
+            f.set(true);
+        });
+        assert!(!task.is_finished());
+        task.abort();
+        timeout(Duration::from_secs(1), task.join())
+            .await
+            .expect("an aborted task never ended");
+        sleep(Duration::from_millis(300)).await;
+        assert!(!fired.get(), "the aborted task resumed");
+    }
+}

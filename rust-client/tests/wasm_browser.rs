@@ -536,3 +536,98 @@ async fn a_panicking_reconnect_callback_does_not_stop_reconnects() {
         .expect("a call after both reconnects");
     client.ws().close().await;
 }
+
+// ── item 4: explicit close and disconnect leave nothing behind ─────────
+
+/// Every exception that reaches the page uncaught (a handler that throws).
+fn trap_uncaught() -> (
+    Rc<std::cell::RefCell<Vec<String>>>,
+    wasm_bindgen::closure::Closure<dyn FnMut(web_sys::Event)>,
+) {
+    let errors = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let handler = wasm_bindgen::closure::Closure::wrap(Box::new({
+        let errors = errors.clone();
+        move |ev: web_sys::Event| {
+            let msg = js_sys::Reflect::get(&ev, &"message".into())
+                .ok()
+                .and_then(|m| m.as_string())
+                .unwrap_or_else(|| ev.type_());
+            errors.borrow_mut().push(msg);
+        }
+    }) as Box<dyn FnMut(_)>);
+    web_sys::window()
+        .unwrap()
+        .add_event_listener_with_callback("error", handler.as_ref().unchecked_ref())
+        .unwrap();
+    (errors, handler)
+}
+
+async fn open_proxied() -> u64 {
+    peer_get("count/proxy").await["open"].as_u64().unwrap()
+}
+
+/// `disconnect_for_testing` and `close` sever the real socket (the proxy
+/// sees it end), raise no uncaught exception from a handler of the
+/// dropped socket, and `close` leaves no redial behind.
+#[wasm_bindgen_test]
+async fn close_and_disconnect_release_the_socket_without_uncaught_errors() {
+    let (errors, handler) = trap_uncaught();
+    let open_before = open_proxied().await;
+    let client = Ad4mClient::connect(proxy_url(), admin_token())
+        .await
+        .unwrap();
+    let reconnects = count_reconnects(&client).await;
+
+    client.ws().disconnect_for_testing().await;
+    until(
+        Duration::from_secs(10),
+        "the reconnect after a disconnect",
+        || reconnects.get() == 1,
+    )
+    .await;
+    client
+        .agent
+        .status()
+        .await
+        .expect("a call after the reconnect");
+
+    let dials_at_close = dials().await;
+    client.ws().close().await;
+    assert!(!client.ws().is_connected());
+    within(Duration::from_secs(5), "the proxied socket to end", async {
+        while open_proxied().await > open_before {
+            sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+    sleep(NO_REDIAL_WINDOW).await;
+    assert_eq!(dials().await, dials_at_close, "a redial after close");
+    assert!(client.agent.status().await.is_err(), "a call after close");
+    assert_eq!(*errors.borrow(), Vec::<String>::new());
+    web_sys::window()
+        .unwrap()
+        .remove_event_listener_with_callback("error", handler.as_ref().unchecked_ref())
+        .unwrap();
+}
+
+// ── item 6: live query disposal in the browser ─────────────────────────
+
+/// A disposed live query ends its stream at once, and later writes reach
+/// no result; a live query opened next to it still updates.
+#[wasm_bindgen_test]
+async fn a_disposed_live_query_ends_and_a_sibling_keeps_updating() {
+    let client = admin().await;
+    let model = note_model(&client, "wasm-dispose").await;
+    let mut gone = model.subscribe(&ModelQuery::default()).await.unwrap();
+    let mut kept = model.subscribe(&ModelQuery::default()).await.unwrap();
+    within(Duration::from_secs(10), "the first result", gone.next()).await;
+    within(Duration::from_secs(10), "the first result", kept.next()).await;
+
+    gone.dispose().await;
+    assert!(gone.id().await.is_none(), "the disposed query kept its id");
+    create_note(&model, "after-dispose").await;
+    until_note(&mut kept, "after-dispose").await;
+    let after = within(Duration::from_secs(5), "the disposed stream", gone.next()).await;
+    assert!(after.is_none(), "a disposed live query delivered {after:?}");
+    client.ws().close().await;
+}
