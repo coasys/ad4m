@@ -455,6 +455,20 @@ impl TokenStore {
         self.save(&store)
     }
 
+    /// Remove the token for this executor + app only while it is still
+    /// `token`: a refused socket drops its own token, never a newer one
+    /// another session stored meanwhile. Returns whether it removed one.
+    pub fn remove_token_if(&self, url: &str, app: &str, token: &str) -> Result<bool> {
+        let mut store = self.load();
+        let key = Self::key(url, app);
+        if store.tokens.get(&key).map(String::as_str) != Some(token) {
+            return Ok(false);
+        }
+        store.tokens.remove(&key);
+        self.save(&store)?;
+        Ok(true)
+    }
+
     /// The URL last connected — TS `ad4m-url`.
     pub fn last_url(&self) -> Option<String> {
         self.load().last_url
@@ -504,6 +518,11 @@ pub struct Ad4mConnect<E: ExecutorIo = WsIo> {
     url: Option<String>,
     rpc: Option<E::Rpc>,
     state: watch::Sender<AuthState>,
+    /// The generation of the adopted socket, bumped by every `adopt` and
+    /// `disconnect`. A socket's refusal callback acts only while its own
+    /// generation is current, and the lock orders its publication against
+    /// `connect`'s final one (F4, TS `core.ts:255`).
+    current: Arc<std::sync::Mutex<u64>>,
 }
 
 impl Ad4mConnect<WsIo> {
@@ -532,6 +551,7 @@ impl<E: ExecutorIo> Ad4mConnect<E> {
             url: None,
             rpc: None,
             state,
+            current: Arc::new(std::sync::Mutex::new(0)),
         })
     }
 
@@ -584,17 +604,18 @@ impl<E: ExecutorIo> Ad4mConnect<E> {
             match self.open_and_read(&url, &token).await {
                 Ok((Reading::Authenticated, rpc)) => {
                     let _ = self.store.set_last_url(&url);
-                    self.adopt(rpc).await;
-                    return Ok(self.set_state(AuthState::Authenticated));
+                    let generation = self.adopt(rpc, &token).await;
+                    return Ok(self.publish(generation, AuthState::Authenticated));
                 }
                 Ok((Reading::Locked, rpc)) => {
-                    self.adopt(rpc).await;
-                    return Ok(self.set_state(AuthState::Locked));
+                    let generation = self.adopt(rpc, &token).await;
+                    return Ok(self.publish(generation, AuthState::Locked));
                 }
                 Ok((Reading::Unauthenticated { refused }, rpc)) => {
                     rpc.close().await;
                     if refused {
-                        self.store.remove_token(&url, &self.opts.app.name)?;
+                        self.store
+                            .remove_token_if(&url, &self.opts.app.name, &token)?;
                     }
                 }
                 Err(e) => {
@@ -612,12 +633,12 @@ impl<E: ExecutorIo> Ad4mConnect<E> {
         match self.read_auth(&anon).await {
             Reading::Authenticated => {
                 let _ = self.store.set_last_url(&url);
-                self.adopt(anon).await;
-                return Ok(self.set_state(AuthState::Authenticated));
+                let generation = self.adopt(anon, "").await;
+                return Ok(self.publish(generation, AuthState::Authenticated));
             }
             Reading::Locked => {
-                self.adopt(anon).await;
-                return Ok(self.set_state(AuthState::Locked));
+                let generation = self.adopt(anon, "").await;
+                return Ok(self.publish(generation, AuthState::Locked));
             }
             Reading::Unauthenticated { .. } => {}
         }
@@ -649,12 +670,15 @@ impl<E: ExecutorIo> Ad4mConnect<E> {
                 self.store.set_token(&url, &self.opts.app.name, &jwt)?;
                 let _ = self.store.set_last_url(&url);
                 let authed = matches!(r, Reading::Authenticated);
-                self.adopt(rpc).await;
-                Ok(self.set_state(if authed {
-                    AuthState::Authenticated
-                } else {
-                    AuthState::Locked
-                }))
+                let generation = self.adopt(rpc, &jwt).await;
+                Ok(self.publish(
+                    generation,
+                    if authed {
+                        AuthState::Authenticated
+                    } else {
+                        AuthState::Locked
+                    },
+                ))
             }
             Reading::Unauthenticated { .. } => {
                 rpc.close().await;
@@ -667,6 +691,8 @@ impl<E: ExecutorIo> Ad4mConnect<E> {
 
     /// Drop the session and the stored token (TS `disconnect`).
     pub async fn disconnect(&mut self) -> Result<()> {
+        // The closed socket's refusal, if one is still in flight, is stale.
+        *self.current.lock().unwrap() += 1;
         if let Some(rpc) = self.rpc.take() {
             rpc.close().await;
         }
@@ -678,25 +704,59 @@ impl<E: ExecutorIo> Ad4mConnect<E> {
         Ok(())
     }
 
-    /// Install `rpc` as the session's socket, closing the replaced one, and
-    /// wire the mid-session refusal: drop the stored token and go
-    /// `Unauthenticated`.
-    async fn adopt(&mut self, rpc: E::Rpc) {
+    /// Install `rpc` (opened with `token`) as the session's socket under a
+    /// new generation, closing the replaced one, and wire the mid-session
+    /// refusal: while this socket is still the session's, drop the token it
+    /// was opened with and go `Unauthenticated`. A replaced socket's late
+    /// refusal changes nothing. Returns the generation for `publish`.
+    async fn adopt(&mut self, rpc: E::Rpc, token: &str) -> u64 {
+        let generation = {
+            let mut current = self.current.lock().unwrap();
+            *current += 1;
+            *current
+        };
         let store = self.store.clone();
         let url = self.url.clone();
         let app = self.opts.app.name.clone();
+        let token = token.to_string();
         let state = self.state.clone();
+        let current = self.current.clone();
+        // If this socket was refused already, the callback runs right here,
+        // under its own (current) generation, and `publish` sees
+        // `auth_failed`.
         rpc.on_auth_failed(Arc::new(move |reason| {
+            let current = current.lock().unwrap();
+            if *current != generation {
+                return; // a replaced socket: not the session's any more
+            }
             eprintln!("[ad4m-connect] the executor refused the token: {reason}");
             if let Some(url) = &url {
-                let _ = store.remove_token(url, &app);
+                if !token.is_empty() {
+                    let _ = store.remove_token_if(url, &app, &token);
+                }
             }
+            // `send_replace`: kept with no receiver alive (F2).
             state.send_replace(AuthState::Unauthenticated);
         }))
         .await;
         if let Some(old) = self.rpc.replace(rpc) {
             old.close().await;
         }
+        generation
+    }
+
+    /// `connect`'s final publication: `state` only while the socket adopted
+    /// under `generation` is still the session's and still accepted. A
+    /// refusal that won the race already published `Unauthenticated` (or
+    /// will, after this lock), so that is what `connect` reports.
+    fn publish(&self, generation: u64, state: AuthState) -> AuthState {
+        let current = self.current.lock().unwrap();
+        let refused = self.rpc.as_ref().is_none_or(|rpc| rpc.auth_failed());
+        if *current != generation || refused {
+            return AuthState::Unauthenticated;
+        }
+        self.state.send_replace(state);
+        state
     }
 
     /// Ordered candidates: explicit url → explicit port → stored last_url →
@@ -1001,6 +1061,9 @@ mod tests {
         auth_failed: AtomicBool,
         auth_cbs: Mutex<Vec<AuthCb>>,
         closed: AtomicBool,
+        /// The executor closes this socket 1008 right after its first
+        /// `agent.status` reply (a grant revoked between read and adopt).
+        refuse_after_status: bool,
     }
 
     #[derive(Clone)]
@@ -1008,9 +1071,17 @@ mod tests {
 
     impl FakeRpc {
         /// Simulate the executor closing the socket with 1008.
+        /// Like `WsRpcClient`: the flag and the list under one lock, each
+        /// callback once.
         fn fail_auth(&self, reason: &str) {
-            self.0.auth_failed.store(true, Ordering::SeqCst);
-            for cb in self.0.auth_cbs.lock().unwrap().iter() {
+            let cbs = {
+                let mut cbs = self.0.auth_cbs.lock().unwrap();
+                if self.0.auth_failed.swap(true, Ordering::SeqCst) {
+                    return;
+                }
+                std::mem::take(&mut *cbs)
+            };
+            for cb in cbs {
                 cb(reason);
             }
         }
@@ -1028,13 +1099,23 @@ mod tests {
                 .unwrap()
                 .push((method.to_string(), params.clone()));
             let res = (self.0.handler)(&self.0.token, method, &params);
+            if method == "agent.status" && self.0.refuse_after_status {
+                self.fail_auth("Unauthorized access");
+            }
             async move { res }
         }
         fn auth_failed(&self) -> bool {
             self.0.auth_failed.load(Ordering::SeqCst)
         }
+        /// Replays an already-seen refusal at once, as `WsRpcClient` does.
         fn on_auth_failed<'a>(&'a self, cb: AuthCb) -> impl Future<Output = u64> + Send + 'a {
-            self.0.auth_cbs.lock().unwrap().push(cb);
+            let mut cbs = self.0.auth_cbs.lock().unwrap();
+            if self.0.auth_failed.load(Ordering::SeqCst) {
+                drop(cbs);
+                cb("Unauthorized access");
+            } else {
+                cbs.push(cb);
+            }
             async { 0 }
         }
         fn close<'a>(&'a self) -> impl Future<Output = ()> + Send + 'a {
@@ -1049,6 +1130,8 @@ mod tests {
         /// (base_url, token) of every socket the flow opened, in order.
         opened: Arc<Mutex<Vec<(String, String)>>>,
         rpcs: Arc<Mutex<Vec<FakeRpc>>>,
+        /// Sockets opened with this token get `refuse_after_status`.
+        refuse_after_status: Option<String>,
     }
 
     impl FakeIo {
@@ -1060,6 +1143,7 @@ mod tests {
                 handler: Arc::new(handler),
                 opened: Arc::new(Mutex::new(vec![])),
                 rpcs: Arc::new(Mutex::new(vec![])),
+                refuse_after_status: None,
             }
         }
         fn unhealthy() -> Self {
@@ -1100,6 +1184,7 @@ mod tests {
                 auth_failed: AtomicBool::new(false),
                 auth_cbs: Mutex::new(vec![]),
                 closed: AtomicBool::new(false),
+                refuse_after_status: self.refuse_after_status.as_deref() == Some(token),
             }));
             self.rpcs.lock().unwrap().push(rpc.clone());
             async move { Ok(rpc) }
@@ -1635,6 +1720,88 @@ mod tests {
         // executor refuses the token.
         s.io.last_rpc().fail_auth("Unauthorized access");
         assert_eq!(s.state(), AuthState::Unauthenticated);
+    }
+
+    /// F4: the grant is revoked after `read_auth` answered and before the
+    /// session adopted the socket. The refusal reaches the callback at
+    /// registration (replayed); `connect` must not then publish or return
+    /// Authenticated over it.
+    #[tokio::test]
+    async fn a_refusal_during_adoption_does_not_end_authenticated() {
+        let dir = tempfile::tempdir().unwrap();
+        TokenStore::new(dir.path())
+            .set_token(URL, "test-app", "jwt-stored")
+            .unwrap();
+        let mut io = FakeIo::new(|_token, method, _| match method {
+            "agent.status" => Ok(authed_status()),
+            other => Err(rpc_err(404, &format!("unexpected {other}"))),
+        });
+        io.refuse_after_status = Some("jwt-stored".to_string());
+        let mut s = session(dir.path(), io, opts());
+        let state = s.connect(&mut NoPrompts).await.unwrap();
+        assert_ne!(state, AuthState::Authenticated, "connect returned success");
+        assert_eq!(s.state(), AuthState::Unauthenticated);
+        assert_eq!(TokenStore::new(dir.path()).token(URL, "test-app"), None);
+    }
+
+    /// F4: a socket that is no longer the session's must not touch the
+    /// session. (1) After a repeat `connect` replaced the socket, the old
+    /// one's late refusal neither deletes the new token nor publishes
+    /// Unauthenticated. (2) The current socket's refusal deletes only the
+    /// token it was opened with, not a newer one another session stored
+    /// under the same URL and app (TS `core.ts:255` checks the client).
+    #[tokio::test]
+    async fn a_stale_socket_refusal_keeps_the_newer_token_and_state() {
+        let dir = tempfile::tempdir().unwrap();
+        TokenStore::new(dir.path())
+            .set_token(URL, "test-app", "jwt-old")
+            .unwrap();
+        let io = FakeIo::new(|_token, method, _| match method {
+            "agent.status" => Ok(authed_status()),
+            other => Err(rpc_err(404, &format!("unexpected {other}"))),
+        });
+        let mut s = session(dir.path(), io, opts());
+        assert_eq!(
+            s.connect(&mut NoPrompts).await.unwrap(),
+            AuthState::Authenticated
+        );
+        let old = s.io.last_rpc();
+
+        // A newer token arrives (a re-sign-in); the session reconnects on it.
+        TokenStore::new(dir.path())
+            .set_token(URL, "test-app", "jwt-new")
+            .unwrap();
+        assert_eq!(
+            s.connect(&mut NoPrompts).await.unwrap(),
+            AuthState::Authenticated
+        );
+        assert!(old.0.closed.load(Ordering::SeqCst), "old socket not closed");
+
+        // (1) The replaced socket's refusal arrives late.
+        old.fail_auth("Unauthorized access");
+        assert_eq!(s.state(), AuthState::Authenticated, "stale state published");
+        assert_eq!(
+            TokenStore::new(dir.path())
+                .token(URL, "test-app")
+                .as_deref(),
+            Some("jwt-new"),
+            "the stale socket deleted the newer token"
+        );
+
+        // (2) Another session of the app stores a newer token; the current
+        // socket (opened with jwt-new) is refused: the newer one stays.
+        TokenStore::new(dir.path())
+            .set_token(URL, "test-app", "jwt-newer")
+            .unwrap();
+        s.io.last_rpc().fail_auth("Unauthorized access");
+        assert_eq!(s.state(), AuthState::Unauthenticated);
+        assert_eq!(
+            TokenStore::new(dir.path())
+                .token(URL, "test-app")
+                .as_deref(),
+            Some("jwt-newer"),
+            "a refusal deleted a token it was not opened with"
+        );
     }
 
     #[test]
