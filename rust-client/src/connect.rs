@@ -564,7 +564,9 @@ impl<E: ExecutorIo> Ad4mConnect<E> {
     }
 
     fn set_state(&self, state: AuthState) -> AuthState {
-        let _ = self.state.send(state);
+        // `send_replace`: `send` stores nothing while no receiver is alive,
+        // and `state()` would keep reporting the stale value (F2).
+        self.state.send_replace(state);
         state
     }
 
@@ -689,7 +691,7 @@ impl<E: ExecutorIo> Ad4mConnect<E> {
             if let Some(url) = &url {
                 let _ = store.remove_token(url, &app);
             }
-            let _ = state.send(AuthState::Unauthenticated);
+            state.send_replace(AuthState::Unauthenticated);
         }))
         .await;
         if let Some(old) = self.rpc.replace(rpc) {
@@ -1609,6 +1611,30 @@ mod tests {
         watcher.changed().await.unwrap();
         assert_eq!(s.state(), AuthState::Unauthenticated);
         assert_eq!(TokenStore::new(dir.path()).token(URL, "test-app"), None);
+    }
+
+    /// F2: the auth state is kept with no receiver alive. `connect` with
+    /// nobody watching, then `state()` and a fresh `watch_state()` must say
+    /// Authenticated; a refusal after the last receiver dropped must land too.
+    #[tokio::test]
+    async fn the_auth_state_is_retained_without_a_watcher() {
+        let dir = tempfile::tempdir().unwrap();
+        TokenStore::new(dir.path())
+            .set_token(URL, "test-app", "jwt-stored")
+            .unwrap();
+        let io = FakeIo::new(|_token, method, _| match method {
+            "agent.status" => Ok(authed_status()),
+            other => Err(rpc_err(404, &format!("unexpected {other}"))),
+        });
+        let mut s = session(dir.path(), io, opts());
+        s.connect(&mut NoPrompts).await.unwrap();
+        assert_eq!(s.state(), AuthState::Authenticated);
+        assert_eq!(*s.watch_state().borrow(), AuthState::Authenticated);
+
+        // Every receiver dropped (the one above is a temporary), then the
+        // executor refuses the token.
+        s.io.last_rpc().fail_auth("Unauthorized access");
+        assert_eq!(s.state(), AuthState::Unauthenticated);
     }
 
     #[test]
