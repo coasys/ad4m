@@ -114,10 +114,11 @@ impl SendText for WsSink {
                  (limit {MAX_BUFFERED_BYTES})"
             ));
         }
+        // The exception's text is not copied: errors stay fixed strings.
         self.owned
             .ws
             .send_with_str(&text)
-            .map_err(|e| anyhow!("WebSocket send failed: {e:?}"))
+            .map_err(|_| anyhow!("WebSocket send failed: the browser refused the send"))
     }
 }
 
@@ -126,12 +127,30 @@ impl SendText for WsSink {
 // what makes `disconnect_for_testing`/`close` sever a live browser socket.
 // The stream half then ends: the detached handlers held its only senders.
 
+/// A fixed description of a `new WebSocket(url)` exception. Its message
+/// quotes the URL it was given, query token included, so only the
+/// exception's name (a DOMException category) picks the text.
+fn constructor_error(e: &JsValue) -> &'static str {
+    let name = js_sys::Reflect::get(e, &"name".into())
+        .ok()
+        .and_then(|n| n.as_string());
+    match name.as_deref() {
+        Some("SyntaxError") => "the browser rejected the URL as invalid",
+        Some("SecurityError") => "the browser blocked the URL (port or page security policy)",
+        _ => "the browser refused to open the socket",
+    }
+}
+
 /// Start the handshake and resolve once it ends — `Ok` on the open event,
 /// `Err` on a pre-open error or close. `display_url` is the token-less URL
 /// for error text.
 pub(crate) async fn connect(url: &str, display_url: &str) -> Result<Socket> {
-    let ws = WebSocket::new(url)
-        .map_err(|e| anyhow!("WebSocket connection to {display_url} failed: {e:?}"))?;
+    let ws = WebSocket::new(url).map_err(|e| {
+        anyhow!(
+            "WebSocket connection to {display_url} failed: {}",
+            constructor_error(&e)
+        )
+    })?;
     // The server only speaks text; accept and ignore binary by not wiring
     // it (binaryType set so a stray binary frame can't become a Blob we
     // would have to read out).

@@ -294,6 +294,42 @@ async fn a_real_credential_authenticates_calls_and_receives_events() {
     client.ws().close().await;
 }
 
+// ── R2-1: a constructor failure never echoes the token ────────────────
+
+/// `new WebSocket(url)` throws for a malformed URL, and the browser's
+/// message quotes the URL it was given — query token included. The
+/// returned error (Display, alternate Display, Debug) carries neither the
+/// token nor its encoded form.
+#[wasm_bindgen_test]
+async fn a_constructor_failure_does_not_disclose_the_token() {
+    let token = "r2-secret token+/=&?%";
+    let encoded = urlencoding::encode(token).into_owned();
+    // Port 99999 makes the URL unparseable: the constructor throws.
+    let err =
+        match Ad4mClient::connect("http://127.0.0.1:99999".to_string(), token.to_string()).await {
+            Ok(_) => panic!("a connect to an invalid URL succeeded"),
+            Err(e) => e,
+        };
+    for text in [format!("{err}"), format!("{err:#}"), format!("{err:?}")] {
+        for secret in [token, encoded.as_str(), "r2-secret"] {
+            assert!(
+                !text.contains(secret),
+                "the error discloses {secret:?}: {text}"
+            );
+        }
+    }
+    assert!(
+        format!("{err}").contains("ws://127.0.0.1:99999/api/v1/ws"),
+        "the error names the token-free URL: {err}"
+    );
+    // A fixed diagnostic, not the browser's exception text.
+    assert!(
+        format!("{err:?}").contains("rejected the URL as invalid")
+            && !format!("{err:?}").contains("Failed to construct"),
+        "{err:?}"
+    );
+}
+
 // ── item 1: server-driven 1008 ─────────────────────────────────────────
 
 /// An invalid token: the executor completes the upgrade, then closes with
