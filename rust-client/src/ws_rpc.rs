@@ -202,7 +202,7 @@ struct Watches {
 }
 
 /// A callback fired once a fresh socket is installed (post `events.watch`).
-type ReconnectCb = Arc<dyn Fn() + Send + Sync>;
+pub(crate) type ReconnectCb = Arc<dyn Fn() + Send + Sync>;
 
 struct Shared {
     /// The WS URL (token already inside) — needed by the reconnect task.
@@ -228,7 +228,9 @@ struct Shared {
     /// epoch-check-and-publish, so a `true` can never land over a `false`
     /// a close already stored (R1).
     conn_guard: Mutex<()>,
-    on_reconnect: Mutex<Vec<(u64, ReconnectCb)>>,
+    /// Never held across an await: registration is synchronous, so a
+    /// caller cannot be cancelled between registering and owning the id.
+    on_reconnect: std::sync::Mutex<Vec<(u64, ReconnectCb)>>,
     closed: AtomicBool,
     /// Terminal signal — `true` once `close()` ran or auth was refused.
     /// Live queries end their streams on it; plain disconnects don't set
@@ -359,7 +361,7 @@ impl WsRpcClient {
             watch_flush: Mutex::new(()),
             disconnects: AtomicU64::new(0),
             conn_guard: Mutex::new(()),
-            on_reconnect: Mutex::new(Vec::new()),
+            on_reconnect: std::sync::Mutex::new(Vec::new()),
             closed: AtomicBool::new(false),
             closed_tx,
             auth_failed: AtomicBool::new(false),
@@ -602,7 +604,7 @@ impl WsRpcClient {
                         let callbacks: Vec<ReconnectCb> = shared
                             .on_reconnect
                             .lock()
-                            .await
+                            .unwrap()
                             .iter()
                             .map(|(_, cb)| cb.clone())
                             .collect();
@@ -808,21 +810,32 @@ impl WsRpcClient {
     /// `callback` runs after each successful reconnect, once the watch was
     /// re-sent. Returns an id for `remove_on_reconnect`.
     pub async fn on_reconnect(&self, callback: impl Fn() + Send + Sync + 'static) -> u64 {
+        self.register_on_reconnect(Arc::new(callback))
+    }
+
+    pub async fn remove_on_reconnect(&self, id: u64) {
+        self.unregister_on_reconnect(id);
+    }
+
+    /// [`on_reconnect`](Self::on_reconnect) without an await: the id is the
+    /// caller's the moment the callback is in, with no cancellation point
+    /// between (N6).
+    pub(crate) fn register_on_reconnect(&self, callback: ReconnectCb) -> u64 {
         static CB_ID: AtomicU64 = AtomicU64::new(0);
         let id = CB_ID.fetch_add(1, Ordering::Relaxed);
         self.shared
             .on_reconnect
             .lock()
-            .await
-            .push((id, Arc::new(callback)));
+            .unwrap()
+            .push((id, callback));
         id
     }
 
-    pub async fn remove_on_reconnect(&self, id: u64) {
+    pub(crate) fn unregister_on_reconnect(&self, id: u64) {
         self.shared
             .on_reconnect
             .lock()
-            .await
+            .unwrap()
             .retain(|(cb_id, _)| *cb_id != id);
     }
 
@@ -886,7 +899,7 @@ impl WsRpcClient {
     /// shows up as a count that never returns to what the test installed.
     #[cfg(test)]
     pub(crate) async fn reconnect_callback_count(&self) -> usize {
-        self.shared.on_reconnect.lock().await.len()
+        self.shared.on_reconnect.lock().unwrap().len()
     }
 
     /// Install a [`SendBlocker`]: socket writes now park inside their
