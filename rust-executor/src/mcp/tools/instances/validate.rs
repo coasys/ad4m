@@ -76,6 +76,64 @@ pub(crate) fn describe_value(v: &Value) -> String {
     }
 }
 
+/// The value an `sh:in` entry stands for: its `value` key when it is an
+/// object, else the entry itself.
+pub(crate) fn allowed_value(entry: &Value) -> &Value {
+    entry.get("value").unwrap_or(entry)
+}
+
+/// A JSON value as the text `sh:in` compares on: strings by content,
+/// numbers and booleans by their JSON text (`"todo"` → `todo`, `3` → `3`,
+/// `true` → `true`). Anything else (objects, null) uses its JSON encoding.
+fn value_text(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Number(n) => number_text(n),
+        Value::Bool(b) => b.to_string(),
+        other => serde_json::to_string(other).unwrap_or_default(),
+    }
+}
+
+/// A number as JavaScript's `String(n)` writes it: a whole float is printed
+/// without a fraction (`3.0` -> `3`), so a `number` property coerced from the
+/// text `"3"` matches the option `3` that WE writes with `String(3)`.
+fn number_text(n: &serde_json::Number) -> String {
+    match n.as_f64() {
+        Some(f)
+            if n.is_f64()
+                && f.is_finite()
+                && f.fract() == 0.0
+                && f.abs() < 9_007_199_254_740_992.0 =>
+        {
+            format!("{}", f as i64)
+        }
+        _ => n.to_string(),
+    }
+}
+
+/// Compare as the SDK writes them: the coerced candidate against one
+/// allowed value, both turned into text and compared exactly. No trimming,
+/// no case folding — WE writes option values with `String(v)` (W1), and a
+/// number property may still be sent as a number.
+fn matches_allowed(candidate: &Value, allowed: &Value) -> bool {
+    value_text(candidate) == value_text(allowed)
+}
+
+/// The allowed values for an error message: each `sh:in` entry's value in
+/// declared order, comma separated, at most 20 then "… and N more".
+fn describe_allowed(allowed: &[Value]) -> String {
+    let mut text = allowed
+        .iter()
+        .take(20)
+        .map(|entry| value_text(allowed_value(entry)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if allowed.len() > 20 {
+        text.push_str(&format!(" … and {} more", allowed.len() - 20));
+    }
+    text
+}
+
 /// Coerce one scalar value to the property's declared type, or explain why
 /// it can't be. Lenient where the intent is unambiguous ("true" for a
 /// boolean, "42" for an integer, 3 for a string), strict where it isn't.
@@ -115,7 +173,7 @@ pub(crate) fn coerce_scalar(info: &PropView<'_>, value: &Value) -> Result<Value,
         return Ok(value.clone());
     }
 
-    match info.type_name().as_str() {
+    let coerced = match info.type_name().as_str() {
         "boolean" => match value {
             Value::Bool(_) => Ok(value.clone()),
             Value::String(s) if s.eq_ignore_ascii_case("true") => Ok(json!(true)),
@@ -153,7 +211,25 @@ pub(crate) fn coerce_scalar(info: &PropView<'_>, value: &Value) -> Result<Value,
         },
         // Unknown / custom datatype: accept any single JSON value verbatim.
         _ => Ok(value.clone()),
+    }?;
+
+    // `sh:in`: the coerced value must match one declared entry. Runs after
+    // the type coercion so "42" for an integer property matches entry `42`;
+    // the relation and language-stored early returns above keep it off
+    // properties whose values are URIs or language expressions (no class in
+    // WE puts `options` on those). An empty list allows nothing.
+    if let Some(allowed) = info.in_values() {
+        if !allowed
+            .iter()
+            .any(|entry| matches_allowed(&coerced, allowed_value(entry)))
+        {
+            return Err(err(format!(
+                "not one of the allowed values: {}",
+                describe_allowed(allowed)
+            )));
+        }
     }
+    Ok(coerced)
 }
 
 /// Validate a `properties` map against a class shape.
@@ -354,4 +430,23 @@ pub(crate) fn normalize_filter(
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// A whole float compares like JavaScript prints it: `3.0` matches `3`
+    /// and `"3"`; a real fraction does not.
+    #[test]
+    fn whole_floats_compare_like_js_numbers() {
+        let three_f = Value::Number(serde_json::Number::from_f64(3.0).unwrap());
+        assert!(matches_allowed(&three_f, &json!(3)));
+        assert!(matches_allowed(&three_f, &json!("3")));
+        assert!(matches_allowed(&json!(3), &three_f));
+        let frac = Value::Number(serde_json::Number::from_f64(3.5).unwrap());
+        assert!(matches_allowed(&frac, &json!("3.5")));
+        assert!(!matches_allowed(&frac, &json!(3)));
+    }
 }
