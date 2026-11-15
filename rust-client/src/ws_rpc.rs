@@ -893,8 +893,18 @@ impl WsRpcClient {
         self.register_on_reconnect(Arc::new(callback))
     }
 
-    /// The browser signature — `Closure`-holding client state is
-    /// single-threaded, so no Send+Sync bound exists there.
+    /// `callback` runs after each successful reconnect, once the watch was
+    /// re-sent. Returns an id for `remove_on_reconnect`.
+    ///
+    /// A panicking callback does not stop reconnecting: each callback runs
+    /// in a task of its own. But a panic in the browser does not unwind:
+    /// the callback's task is abandoned mid-way with no destructors run, so
+    /// state it was changing (a lock it held, a half-written value) stays
+    /// as it was. Callbacks must not panic; the isolation only keeps the
+    /// client alive.
+    ///
+    /// The browser signature: client state there is single-threaded, so
+    /// there is no Send+Sync bound.
     #[cfg(target_arch = "wasm32")]
     pub async fn on_reconnect(&self, callback: impl Fn() + 'static) -> u64 {
         self.register_on_reconnect(Arc::new(callback))
