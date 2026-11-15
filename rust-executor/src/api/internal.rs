@@ -48,6 +48,9 @@ pub async fn internal_shutdown(headers: HeaderMap) -> Result<Json<serde_json::Va
     tokio::spawn(async {
         log::info!("Graceful shutdown initiated by platform");
 
+        // Before the snapshot, so its checkpoint holds SST files and no write-ahead log.
+        crate::perspectives::flush_all_stores().await;
+
         // Run backup in a blocking context (uses reqwest::blocking)
         let config = crate::config::get_global_config();
         let backup_result = tokio::task::spawn_blocking(move || {

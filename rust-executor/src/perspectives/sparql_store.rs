@@ -1138,6 +1138,122 @@ pub const SPARQL_STORE_MAX_OPEN_FILES: u32 = 266;
 /// (#1462) raises it.
 pub const SPARQL_STORE_FD_BUDGET: usize = 274;
 
+/// A persistent store flushes its memtables this long after its last write.
+///
+/// Oxigraph gives each of its column families a write buffer of up to
+/// 128 MiB and sets no global cap, so RocksDB itself never flushes a
+/// perspective's memtables: every write stays in the write-ahead log, and
+/// each open replays the whole log (3 s for 50k links, and twice the memory
+/// of a flushed open). A flush writes the memtables to SST files and starts a
+/// new log; the next open replays only that one and deletes the old ones
+/// (oxigraph keeps up to 10 old logs for reuse while the store is open).
+pub const SPARQL_STORE_FLUSH_QUIET: Duration = Duration::from_secs(5);
+
+/// A persistent store that keeps getting writes (a sync) flushes at the
+/// latest this long after its first unflushed write.
+pub const SPARQL_STORE_FLUSH_MAX_DELAY: Duration = Duration::from_secs(60);
+
+/// Unflushed writes of one persistent store.
+struct Pending {
+    /// When the oldest write not yet flushed committed; `None`: none.
+    since: Option<Instant>,
+    /// When the latest write committed.
+    last: Instant,
+    /// Whether a `sparql-flush` thread is waiting to flush this store.
+    worker: bool,
+}
+
+/// Flush bookkeeping of one persistent store.
+struct FlushState {
+    /// The store's directory. A flush is skipped once it is gone: the
+    /// perspective was removed.
+    path: std::path::PathBuf,
+    quiet: Duration,
+    max_delay: Duration,
+    pending: Mutex<Pending>,
+}
+
+impl FlushState {
+    fn pending(&self) -> std::sync::MutexGuard<'_, Pending> {
+        self.pending.lock().unwrap_or_else(|p| p.into_inner())
+    }
+}
+
+/// The oxigraph store and, for a persistent one, its flush bookkeeping.
+/// Shared by every clone of a [`SparqlStore`]. When the last clone goes, a
+/// store with unflushed writes flushes before it closes.
+struct StoreHandle {
+    store: Store,
+    flush: Option<FlushState>,
+}
+
+impl std::ops::Deref for StoreHandle {
+    type Target = Store;
+    fn deref(&self) -> &Store {
+        &self.store
+    }
+}
+
+impl StoreHandle {
+    /// Flush the memtables if this store has unflushed writes and its
+    /// directory still exists. Returns whether it flushed.
+    fn flush_unflushed(&self) -> Result<bool, Error> {
+        let Some(state) = &self.flush else {
+            return Ok(false);
+        };
+        if state.pending().since.take().is_none() || !state.path.exists() {
+            return Ok(false);
+        }
+        self.store
+            .flush()
+            .map_err(|e| anyhow!("SPARQL store flush failed: {}", e))?;
+        Ok(true)
+    }
+}
+
+impl Drop for StoreHandle {
+    fn drop(&mut self) {
+        if let Err(e) = self.flush_unflushed() {
+            log::warn!("SPARQL store flush on close failed: {}", e);
+        }
+    }
+}
+
+/// The body of a `sparql-flush` thread: wait until the store has had no write
+/// for `quiet` (or its oldest unflushed write is `max_delay` old), flush it,
+/// and end once no write came in during the flush. Holds the store only
+/// while it flushes, so a closed store is not kept open.
+fn flush_when_idle(handle: std::sync::Weak<StoreHandle>) {
+    loop {
+        let Some(strong) = handle.upgrade() else {
+            return;
+        };
+        let Some(state) = &strong.flush else {
+            return;
+        };
+        let wait = {
+            let mut pending = state.pending();
+            let Some(since) = pending.since else {
+                pending.worker = false;
+                return;
+            };
+            let due = (pending.last + state.quiet).min(since + state.max_delay);
+            due.checked_duration_since(Instant::now())
+        };
+        match wait {
+            Some(wait) if !wait.is_zero() => {
+                drop(strong);
+                std::thread::sleep(wait);
+            }
+            _ => {
+                if let Err(e) = strong.flush_unflushed() {
+                    log::warn!("{}", e);
+                }
+            }
+        }
+    }
+}
+
 /// Oxigraph-backed SPARQL store for AD4M link data.
 /// Uses RDF 1.2 reifiers: direct triples in default graph with metadata
 /// attached via `rdf:reifies` triple terms.
@@ -1158,9 +1274,16 @@ pub const SPARQL_STORE_FD_BUDGET: usize = 274;
 /// Reads use Oxigraph snapshots. Clones share a writer lock held across each
 /// link transaction: RocksDB repeatable-read transactions do not validate
 /// reference-check conflicts when committing their write batches.
+///
+/// # Flushing
+/// A persistent store flushes its memtables [`SPARQL_STORE_FLUSH_QUIET`]
+/// after its last write (at the latest [`SPARQL_STORE_FLUSH_MAX_DELAY`]
+/// after the first unflushed one), on a `sparql-flush` thread, and when its
+/// last clone is dropped. So its write-ahead log stays small and an open does
+/// not replay it. [`SparqlStore::flush_unflushed`] flushes at once (shutdown).
 #[derive(Clone)]
 pub struct SparqlStore {
-    store: Arc<Store>,
+    store: Arc<StoreHandle>,
     /// Serializes link mutations and clear across every clone of this store.
     writer: Arc<Mutex<()>>,
     /// Test-only: every read query's text, in order, shared across clones, so a test can
@@ -1201,6 +1324,16 @@ impl SparqlStore {
     /// If `data_path` is `Some`, opens a persistent RocksDB-backed store at that path.
     /// If `data_path` is `None`, creates an in-memory store (useful for tests).
     pub fn new(data_path: Option<&str>) -> Result<Self, Error> {
+        Self::open(
+            data_path,
+            SPARQL_STORE_FLUSH_QUIET,
+            SPARQL_STORE_FLUSH_MAX_DELAY,
+        )
+    }
+
+    /// [`Self::new`] with the flush delays given.
+    fn open(data_path: Option<&str>, quiet: Duration, max_delay: Duration) -> Result<Self, Error> {
+        let mut flush = None;
         let store = match data_path {
             Some(path) => {
                 let store_path = std::path::PathBuf::from(path).join("sparql_store");
@@ -1212,6 +1345,16 @@ impl SparqlStore {
                     )
                 })?;
                 log::info!("Opening persistent SPARQL store at {:?}", store_path);
+                flush = Some(FlushState {
+                    path: store_path.clone(),
+                    quiet,
+                    max_delay,
+                    pending: Mutex::new(Pending {
+                        since: None,
+                        last: Instant::now(),
+                        worker: false,
+                    }),
+                });
                 Store::open_with_options(
                     &store_path,
                     StoreOptions::default().with_max_open_files(SPARQL_STORE_MAX_OPEN_FILES),
@@ -1227,7 +1370,7 @@ impl SparqlStore {
             None => Store::new()?,
         };
         Ok(SparqlStore {
-            store: Arc::new(store),
+            store: Arc::new(StoreHandle { store, flush }),
             writer: Arc::new(Mutex::new(())),
             #[cfg(test)]
             query_log: Arc::new(Mutex::new(Vec::new())),
@@ -1249,6 +1392,30 @@ impl SparqlStore {
                     .map(|quad| quad.subject != migration_subj.into())
                     .unwrap_or(false)
             })
+    }
+
+    /// Record a committed write: a persistent store gets a `sparql-flush`
+    /// thread, unless one already waits, which flushes it once the writes
+    /// stop (see [`SparqlStore`], "Flushing").
+    fn wrote(&self) {
+        let Some(state) = &self.store.flush else {
+            return;
+        };
+        let mut pending = state.pending();
+        let now = Instant::now();
+        pending.last = now;
+        pending.since.get_or_insert(now);
+        if pending.worker {
+            return;
+        }
+        let handle = Arc::downgrade(&self.store);
+        match std::thread::Builder::new()
+            .name("sparql-flush".to_string())
+            .spawn(move || flush_when_idle(handle))
+        {
+            Ok(_) => pending.worker = true,
+            Err(e) => log::warn!("Could not start the SPARQL store flush thread: {}", e),
+        }
     }
 
     /// Write all quads of one link in a single transaction: a failure, or a
@@ -1291,6 +1458,7 @@ impl SparqlStore {
         }
         write_link_quads(&mut tx, link, status)?;
         tx.commit()?;
+        self.wrote();
         Ok(true)
     }
 
@@ -1350,6 +1518,7 @@ impl SparqlStore {
         for quad in &quads {
             self.store.remove(quad)?;
         }
+        self.wrote();
         Ok(())
     }
 
@@ -1377,6 +1546,7 @@ impl SparqlStore {
         }
         remove_link_quads(&mut tx, link)?;
         tx.commit()?;
+        self.wrote();
         Ok(true)
     }
 
@@ -1415,6 +1585,7 @@ impl SparqlStore {
             write_link_quads(&mut tx, link, status)?;
         }
         tx.commit()?;
+        self.wrote();
         Ok(())
     }
 
@@ -2205,16 +2376,38 @@ impl SparqlStore {
             .lock()
             .map_err(|_| anyhow!("SPARQL store writer lock poisoned"))?;
         self.store.clear()?;
+        self.wrote();
         Ok(())
     }
 
     /// Flush pending writes to disk.
     /// This ensures RocksDB memtable data is written to SST files,
-    /// allowing the memtable memory to be reclaimed.
+    /// allowing the memtable memory to be reclaimed and the write-ahead log
+    /// to be deleted.
     pub fn flush(&self) -> Result<(), Error> {
+        if let Some(state) = &self.store.flush {
+            state.pending().since = None;
+        }
         self.store
+            .store
             .flush()
             .map_err(|e| anyhow!("SPARQL store flush failed: {}", e))
+    }
+
+    /// Flush now if this store has writes not yet flushed (and its directory
+    /// still exists). Returns whether it flushed. Blocks: call it off the
+    /// async workers.
+    pub fn flush_unflushed(&self) -> Result<bool, Error> {
+        self.store.flush_unflushed()
+    }
+
+    /// Test-only: whether this store has committed writes not yet flushed.
+    #[cfg(test)]
+    pub(crate) fn has_unflushed_writes(&self) -> bool {
+        self.store
+            .flush
+            .as_ref()
+            .is_some_and(|state| state.pending().since.is_some())
     }
 
     /// Write a consistent point-in-time copy of this store to `target`, which
@@ -2330,6 +2523,7 @@ impl SparqlStore {
             write_link_quads_proof(&mut tx, link, status, true)?;
         }
         tx.commit()?;
+        self.wrote();
         Ok(metadata_links.len())
     }
 
@@ -2353,6 +2547,7 @@ impl SparqlStore {
         let mut tx = self.store.start_transaction()?;
         write_link_quads(&mut tx, link, link.status.as_ref().unwrap())?;
         tx.commit()?;
+        self.wrote();
         Ok(())
     }
 }
@@ -3876,6 +4071,234 @@ mod tests {
         assert_eq!(
             mention_rows(&p.sparql_store, &old.me.did),
             only_the_writers_mention(&old.writer)
+        );
+    }
+
+    // ── Flushing ──
+
+    /// The write-ahead log files (`<number>.log`) of the store under `path`,
+    /// as (number, bytes), oldest first.
+    fn wal_files(path: &std::path::Path) -> Vec<(u64, u64)> {
+        let mut files: Vec<(u64, u64)> = std::fs::read_dir(path.join("sparql_store"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let path = entry.path();
+                if path.extension()? != "log" {
+                    return None;
+                }
+                let number = path.file_stem()?.to_str()?.parse().ok()?;
+                Some((number, entry.metadata().ok()?.len()))
+            })
+            .collect();
+        files.sort();
+        files
+    }
+
+    /// Bytes in the live write-ahead log: the newest log file, the one a
+    /// reopen replays. A flush starts a new log; oxigraph keeps the older
+    /// ones for reuse (`recycle_log_file_num`) until the next open deletes
+    /// them, so the total of all log files does not show a flush.
+    fn wal_bytes(path: &std::path::Path) -> u64 {
+        wal_files(path).last().map_or(0, |&(_, bytes)| bytes)
+    }
+
+    /// Bytes in all log files of the store under `path`.
+    fn all_wal_bytes(path: &std::path::Path) -> u64 {
+        wal_files(path).iter().map(|&(_, bytes)| bytes).sum()
+    }
+
+    /// Reopen the store under `path` once its last holder has closed it. A
+    /// `sparql-flush` thread that is flushing holds the store (and its LOCK)
+    /// until the flush ends, so the first attempt may find it still open.
+    fn reopen(path: &str) -> SparqlStore {
+        let start = Instant::now();
+        loop {
+            match SparqlStore::new(Some(path)) {
+                Ok(store) => return store,
+                Err(e) if start.elapsed() > Duration::from_secs(5) => panic!("reopen: {e}"),
+                Err(_) => std::thread::sleep(Duration::from_millis(20)),
+            }
+        }
+    }
+
+    /// Whether `condition` holds within `timeout`, checked every 20 ms.
+    fn within(timeout: Duration, condition: impl Fn() -> bool) -> bool {
+        let start = Instant::now();
+        while start.elapsed() < timeout {
+            if condition() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        condition()
+    }
+
+    /// `count` links from one signer, each with its own source.
+    fn many_links(signer: &TestSigner, prefix: &str, count: usize) -> Vec<LinkExpression> {
+        (0..count)
+            .map(|i| {
+                make_link(
+                    signer,
+                    &format!("ad4m://{prefix}/{i}"),
+                    "ad4m://p",
+                    "ad4m://t",
+                )
+            })
+            .collect()
+    }
+
+    /// A log this small holds no links: what a flush leaves.
+    const FLUSHED_WAL: u64 = 16 * 1024;
+
+    const AN_HOUR: Duration = Duration::from_secs(3600);
+
+    /// Writes stay in the write-ahead log until the store has been quiet for
+    /// the quiet delay; then a `sparql-flush` thread flushes them, the log is
+    /// deleted, and the store reopens with every link.
+    #[test]
+    fn a_store_flushes_its_writes_once_they_stop() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+        let store = SparqlStore::open(Some(path), Duration::from_millis(300), AN_HOUR).unwrap();
+        let signer = TestSigner::generate();
+        for link in many_links(&signer, "quiet", 300) {
+            store.add_link(&link).unwrap();
+        }
+        assert!(store.has_unflushed_writes());
+        let logged = wal_bytes(dir.path());
+        assert!(logged > FLUSHED_WAL, "writes go to the log first: {logged}");
+
+        assert!(
+            within(Duration::from_secs(10), || !store.has_unflushed_writes()
+                && wal_bytes(dir.path()) < FLUSHED_WAL),
+            "not flushed: log holds {} bytes",
+            wal_bytes(dir.path())
+        );
+        drop(store);
+        let reopened = reopen(path);
+        assert_eq!(
+            reopened.get_all_links(&EvalStop::none()).unwrap().len(),
+            300,
+            "a flushed store keeps every link"
+        );
+        assert!(
+            all_wal_bytes(dir.path()) < FLUSHED_WAL,
+            "the reopen kept the old logs: {:?}",
+            wal_files(dir.path())
+        );
+    }
+
+    /// A store that never goes quiet still flushes, by the max delay after
+    /// its first unflushed write: its log holds only the latest writes.
+    #[test]
+    fn a_store_under_steady_writes_flushes_by_the_max_delay() {
+        let signer = TestSigner::generate();
+        let links = many_links(&signer, "steady", 300);
+        let write_steadily = |max_delay: Duration| {
+            let dir = tempfile::tempdir().unwrap();
+            let store =
+                SparqlStore::open(Some(dir.path().to_str().unwrap()), AN_HOUR, max_delay).unwrap();
+            for link in &links {
+                store.add_link(link).unwrap();
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let logged = wal_bytes(dir.path());
+            store.flush().unwrap();
+            logged
+        };
+        let unflushed = write_steadily(AN_HOUR);
+        let flushed = write_steadily(Duration::from_millis(200));
+        assert!(
+            flushed * 2 < unflushed,
+            "max delay did not flush: {flushed} vs {unflushed} bytes"
+        );
+    }
+
+    /// When its last clone is dropped, a store flushes what the quiet delay
+    /// has not, so it reopens without replaying a log.
+    #[test]
+    fn closing_a_store_flushes_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+        let store = SparqlStore::open(Some(path), AN_HOUR, AN_HOUR).unwrap();
+        let clone = store.clone();
+        let signer = TestSigner::generate();
+        for link in many_links(&signer, "close", 200) {
+            store.add_link(&link).unwrap();
+        }
+        drop(store);
+        assert!(clone.has_unflushed_writes(), "a clone keeps the store open");
+        drop(clone);
+        assert!(
+            within(Duration::from_secs(5), || wal_bytes(dir.path())
+                < FLUSHED_WAL),
+            "closed with {} bytes in the log",
+            wal_bytes(dir.path())
+        );
+        let reopened = reopen(path);
+        assert_eq!(
+            reopened.get_all_links(&EvalStop::none()).unwrap().len(),
+            200
+        );
+        assert!(
+            all_wal_bytes(dir.path()) < FLUSHED_WAL,
+            "the reopen kept the old logs: {:?}",
+            wal_files(dir.path())
+        );
+    }
+
+    /// A store whose directory was removed (its perspective was removed)
+    /// does not flush, so closing it does not write a store back.
+    #[test]
+    fn a_removed_store_does_not_flush() {
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            SparqlStore::open(Some(dir.path().to_str().unwrap()), AN_HOUR, AN_HOUR).unwrap();
+        let signer = TestSigner::generate();
+        store
+            .add_link(&make_link(&signer, "ad4m://gone", "ad4m://p", "ad4m://t"))
+            .unwrap();
+        let store_dir = dir.path().join("sparql_store");
+        std::fs::remove_dir_all(&store_dir).unwrap();
+        assert!(!store.flush_unflushed().unwrap(), "flushed a removed store");
+        drop(store);
+        assert!(!store_dir.exists(), "closing wrote the store back");
+    }
+
+    /// An in-memory store has nothing to flush and starts no flush thread.
+    #[test]
+    fn an_in_memory_store_has_nothing_to_flush() {
+        let store = new_service();
+        let signer = TestSigner::generate();
+        store
+            .add_link(&make_link(&signer, "ad4m://m", "ad4m://p", "ad4m://t"))
+            .unwrap();
+        assert!(!store.has_unflushed_writes());
+        assert!(!store.flush_unflushed().unwrap());
+    }
+
+    /// The executor's graceful exits flush every open perspective store
+    /// with unflushed writes, before its quiet delay.
+    #[tokio::test]
+    async fn flush_all_stores_flushes_open_perspectives() {
+        let old = OldStore::new(|_| vec![]);
+        let p = old.start().await.expect("the perspective opens");
+        let signer = TestSigner::generate();
+        for link in many_links(&signer, "shutdown", 200) {
+            p.sparql_store.add_link(&link).unwrap();
+        }
+        let store_dir = old._dir.path().join("perspectives").join(&old.uuid);
+        assert!(p.sparql_store.has_unflushed_writes());
+        assert!(wal_bytes(&store_dir) > FLUSHED_WAL);
+
+        assert!(crate::perspectives::flush_all_stores().await >= 1);
+        assert!(!p.sparql_store.has_unflushed_writes());
+        assert!(
+            within(Duration::from_secs(5), || wal_bytes(&store_dir)
+                < FLUSHED_WAL),
+            "log holds {} bytes after the shutdown flush",
+            wal_bytes(&store_dir)
         );
     }
 

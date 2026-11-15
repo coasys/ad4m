@@ -49,8 +49,12 @@ async fn get_runtime_info(_params: Value, _ctx: Arc<RequestContext>) -> Result<V
 async fn quit_runtime(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     tokio::spawn(async {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        // The local AI runtimes are this executor's children: they stop with it.
-        crate::ai_service::local::stop_on_exit().await;
+        // The local AI runtimes are this executor's children: they stop with it. The
+        // perspective stores flush, so the next start does not replay their logs.
+        tokio::join!(
+            crate::ai_service::local::stop_on_exit(),
+            crate::perspectives::flush_all_stores()
+        );
         std::process::exit(0);
     });
 

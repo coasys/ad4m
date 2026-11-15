@@ -94,6 +94,17 @@ or writes the graph. Split plan: spec items 3, 7, 8.
   `sparql_store_fd_tests.rs` (Linux, `/proc/self/fd`) pins the option through the OPTIONS
   file, measures a typical store against the budget, and checks the release on drop. Never open a second `SparqlStore` on a path that
   is already open: RocksDB's LOCK refuses it, and `PerspectiveInstance::new` panics.
+- **Flushing.** Oxigraph sets 128 MiB write buffers per column family and no global cap, so
+  RocksDB never flushes a perspective's memtables by itself: without a flush, every write stays
+  in the write-ahead log and each open replays all of it (3 s and twice the memory for 50k
+  links). A persistent `SparqlStore` therefore flushes itself: every committed write calls
+  `wrote()`, which starts one `sparql-flush` thread per store if none waits; the thread flushes
+  `SPARQL_STORE_FLUSH_QUIET` (5 s) after the last write, or `SPARQL_STORE_FLUSH_MAX_DELAY`
+  (60 s) after the first unflushed one under steady writes, then ends. The thread holds the
+  store only while it flushes. The last clone's drop flushes what is left, unless the store's
+  directory is gone (a removed perspective). The graceful exits (`clean_up_before_exit` on
+  SIGINT/SIGTERM/SIGHUP or `exit_with_parent`, `runtime.quit`, `/internal/shutdown`) call
+  `perspectives::flush_all_stores`. A new write path must call `wrote()` after its commit.
 
 ## Do / don't
 

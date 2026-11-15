@@ -380,6 +380,34 @@ pub(crate) fn unregister_perspective(uuid: &str) {
     PERSPECTIVES.write().unwrap().remove(uuid);
 }
 
+/// Flush every open perspective store that has writes not yet flushed, on a
+/// blocking thread, so the next start does not replay their write-ahead logs.
+/// The executor's graceful exits call it. Returns how many stores it flushed.
+pub async fn flush_all_stores() -> usize {
+    let stores: Vec<_> = all_perspectives()
+        .into_iter()
+        .map(|perspective| perspective.sparql_store.clone())
+        .collect();
+    let flushed = tokio::task::spawn_blocking(move || {
+        stores
+            .iter()
+            .filter(|store| {
+                store.flush_unflushed().unwrap_or_else(|e| {
+                    log::warn!("{}", e);
+                    false
+                })
+            })
+            .count()
+    })
+    .await
+    .unwrap_or_else(|e| {
+        log::warn!("Flushing the perspective stores failed: {}", e);
+        0
+    });
+    log::info!("Flushed {flushed} perspective stores");
+    flushed
+}
+
 pub fn get_perspective(uuid: &str) -> Option<PerspectiveInstance> {
     PERSPECTIVES
         .read()

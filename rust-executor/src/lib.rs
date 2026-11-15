@@ -957,8 +957,9 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
 }
 
 /// What the executor's graceful shutdown (`SHUTDOWN_TX`, which a signal fires) cleans up before
-/// the process exits. The Holochain conductor and the local AI runtimes stop at once,
-/// not one after the other, so both fit in the deadline a signal leaves the shutdown.
+/// the process exits. The Holochain conductor and the local AI runtimes stop, and the
+/// perspective stores flush, at once, not one after the other, so all fit in the deadline a
+/// signal leaves the shutdown.
 pub(crate) async fn clean_up_before_exit() {
     let holochain = async {
         if let Some(holochain_service) = holochain_service::maybe_get_holochain_service().await {
@@ -970,7 +971,11 @@ pub(crate) async fn clean_up_before_exit() {
         }
     };
     // The local AI runtimes are this executor's children: they stop with it.
-    tokio::join!(holochain, ai_service::local::stop_on_exit());
+    tokio::join!(
+        holochain,
+        ai_service::local::stop_on_exit(),
+        perspectives::flush_all_stores()
+    );
 
     if let Some(ref pid_file) = crate::config::get_global_config().pid_file {
         let _ = std::fs::remove_file(pid_file);
