@@ -377,7 +377,12 @@ and answers `JoinAdded`, so a repeated claim keeps the first row's identity and 
   asked about and unanswered is `pending` (`KeyMap::note_pending`): its unanchored link is
   `cantCheck`. The bound (`KEY_MAP_BOUND`) never drops a fresh mark: a full set drops marks
   older than `PENDING_TTL`, and if still full, every key with no fresh answer counts as
-  pending for `PENDING_TTL` (`pending_full_until`).
+  pending for `PENDING_TTL` (`pending_full_until`). Those marks serve later checks only. The
+  batch that asked keeps its own record: `prepare` returns a `PendingHold` (`KeyMap::hold`,
+  refcounted, outside the bound) naming every signer it prepared, and each caller keeps it
+  until the batch's links are judged. A held key with no answer at judgment is pending
+  whatever the marks did meanwhile (a prune past `PENDING_TTL`, a lapsed full window), since
+  nothing bounds how long a prepare's serial refreshes take.
 - **The person** is derived, never on the wire: the `did:scid` of the signer's log (a bot
   key: its owner), only for a `valid` link. The link store keeps it beside the verdict
   (`ad4m://ontology/person`, `ad4m://ontology/linkVerdict`) for SPARQL; `proofValid` is `true`
@@ -400,7 +405,9 @@ and answers `JoinAdded`, so a repeated claim keeps the first row's identity and 
   must not cost it. `invalid` and `flagged` need no such guard: they are judged again from
   the log alone once it is back. Before judging, a re-check reads back from the cache the
   log each stored person names when the map does not hold it (`identity::read_logs_of`, no
-  store or index call). When the change receiver lags (a start-up load past the bound
+  store or index call). A log the cache cannot read then leaves the re-check incomplete:
+  its links keep their stored verdict for now, and the scope answers failure, so
+  `run_recheck` runs it again on the next tick (`failed` signers, `logged_failed`). When the change receiver lags (a start-up load past the bound
   overflows `CHANGES_CAPACITY` while it evicts logs), `lag_scopes` re-checks the keys the map
   lists and then every link stored with a person (`Recheck::Logged`), so a lost change of a
   log already evicted is still made up for. Reads page by
