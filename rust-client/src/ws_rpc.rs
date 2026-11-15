@@ -991,6 +991,32 @@ impl WsRpcClient {
         }
     }
 
+    /// A park point for synchronous code (a constructor): it blocks the
+    /// calling thread until a permit arrives, so call it only from a
+    /// thread that may block (`spawn_blocking`, a blocked reader's worker
+    /// in a multi-thread runtime).
+    #[cfg(test)]
+    pub(crate) fn test_sync_park(&self, name: &'static str) {
+        let blocker = self.shared.park_points.lock().unwrap().get(name).cloned();
+        if let Some(b) = blocker {
+            let _ = b.parked.send(());
+            loop {
+                if let Ok(p) = b.gate.try_acquire() {
+                    p.forget();
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+    }
+
+    /// How many receivers of the terminal signal exist: a listener that
+    /// handled the close dropped its own.
+    #[cfg(test)]
+    pub(crate) fn closed_receivers(&self) -> usize {
+        self.shared.closed_tx.receiver_count()
+    }
+
     /// [`park_point`](Self::park_point) for code outside this module that
     /// holds the client (live queries, models).
     #[cfg(test)]
