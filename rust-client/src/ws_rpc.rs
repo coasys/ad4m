@@ -138,20 +138,37 @@ const CALL_SEND_TIMEOUT: Duration = DEFAULT_TIMEOUT;
 /// A reader task that is not installed yet: dropping the guard aborts it.
 /// The supervisor holds its fresh socket's reader in one until publication
 /// — aborting the supervisor (close) then aborts the reader too, and with
-/// it the read half, instead of detaching it (N4).
-struct AbortOnDrop(Option<JoinHandle<()>>);
+/// it the read half, instead of detaching it (N4). An abort only takes
+/// effect at the task's next poll, so the handle is not dropped but
+/// handed to `retired_readers`, where close joins it (R4-3).
+struct AbortOnDrop {
+    handle: Option<JoinHandle<()>>,
+    shared: Arc<Shared>,
+}
 
 impl AbortOnDrop {
+    fn new(handle: JoinHandle<()>, shared: Arc<Shared>) -> Self {
+        Self {
+            handle: Some(handle),
+            shared,
+        }
+    }
+
     /// Hand the task over to whoever installs it; the guard is disarmed.
     fn disarm(mut self) -> JoinHandle<()> {
-        self.0.take().expect("reader handle present until disarmed")
+        self.handle
+            .take()
+            .expect("reader handle present until disarmed")
     }
 }
 
 impl Drop for AbortOnDrop {
     fn drop(&mut self) {
-        if let Some(h) = self.0.take() {
+        if let Some(h) = self.handle.take() {
             h.abort();
+            if let Ok(mut retired) = self.shared.retired_readers.lock() {
+                retired.push(h);
+            }
         }
     }
 }
@@ -247,6 +264,10 @@ struct Shared {
     /// Auth refusal (close 1008) — do not reconnect, mirror TS.
     auth_failed: AtomicBool,
     reader: Mutex<Option<JoinHandle<()>>>,
+    /// Aborted readers of sockets that were never published, kept until
+    /// they finished: close joins them, so no reader still holds a socket
+    /// half once close returns (R4-3). The supervisor prunes finished ones.
+    retired_readers: std::sync::Mutex<Vec<JoinHandle<()>>>,
     /// The single task that ever dials again (spawned once at `connect`,
     /// aborted by `close`). A socket dying while it restores leaves
     /// `connected` false, which is exactly what it waits on — there is no
@@ -376,6 +397,7 @@ impl WsRpcClient {
             closed_tx,
             auth_failed: AtomicBool::new(false),
             reader: Mutex::new(None),
+            retired_readers: std::sync::Mutex::new(Vec::new()),
             supervisor: Mutex::new(None),
             send_abort: tokio::sync::Notify::new(),
             #[cfg(test)]
@@ -414,7 +436,16 @@ impl WsRpcClient {
             let mut auth_failed = false;
             while let Some(msg) = read.next().await {
                 let text = match msg {
-                    Ok(Message::Text(t)) => t,
+                    Ok(Message::Text(t)) => {
+                        // Blocks this worker mid-poll: an abort cannot
+                        // end the task until the park is released.
+                        #[cfg(test)]
+                        WsRpcClient {
+                            shared: shared_reader.clone(),
+                        }
+                        .test_sync_park("reader:frame");
+                        t
+                    }
                     Ok(Message::Close(frame)) => {
                         auth_failed = matches!(
                             &frame,
@@ -546,6 +577,11 @@ impl WsRpcClient {
                 {
                     return;
                 }
+                shared
+                    .retired_readers
+                    .lock()
+                    .unwrap()
+                    .retain(|h| !h.is_finished());
                 failures += 1;
                 let delay =
                     backoff_delay_ms(failures, RECONNECT_BASE_DELAY_MS, RECONNECT_MAX_DELAY_MS);
@@ -559,7 +595,10 @@ impl WsRpcClient {
                         // this — a close landing while we restore is always
                         // caught at the guarded publish below (R1).
                         let epoch = shared.teardowns.load(Ordering::SeqCst);
-                        let reader = AbortOnDrop(Some(Self::spawn_reader(read, shared.clone())));
+                        let reader = AbortOnDrop::new(
+                            Self::spawn_reader(read, shared.clone()),
+                            shared.clone(),
+                        );
                         // Restore interest *before* publishing: `connected`
                         // flips only once the executor acknowledged
                         // `events.watch`, so a call that waited out the
@@ -894,11 +933,20 @@ impl WsRpcClient {
         Self::park_point(&self.shared, "close:notified").await;
         // Abort, then wait for the task to end: an aborted supervisor drops
         // its install state — an unpublished socket's reader guard and
-        // write half included — so no task holds the socket once close
-        // returns (N4). The locks are released before the wait: the
-        // tasks' own teardown takes them.
+        // write half included (N4). The guard aborts that reader and
+        // retires its handle; the reader is joined below with the rest,
+        // so no task holds the socket once close returns (R4-3). The
+        // locks are released before the wait: the tasks' own teardown
+        // takes them.
         let supervisor = self.shared.supervisor.lock().await.take();
         if let Some(h) = supervisor {
+            h.abort();
+            let _ = h.await;
+        }
+        let retired = std::mem::take(&mut *self.shared.retired_readers.lock().unwrap());
+        #[cfg(test)]
+        Self::park_point(&self.shared, "close:readers").await;
+        for h in retired {
             h.abort();
             let _ = h.await;
         }
@@ -2518,5 +2566,54 @@ mod tests {
         };
         let err = result.unwrap().unwrap_err();
         assert!(err.to_string().contains("closing"), "{err}");
+    }
+
+    /// R4-3: close must not return while the unpublished socket's reader
+    /// still runs. The reader of socket 2 (restore reply withheld) is
+    /// mid-poll on another worker when close aborts the supervisor: the
+    /// abort cannot take effect until that poll ends, so only a join
+    /// proves the reader (and its socket half) is gone.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn close_returns_only_after_the_unpublished_reader_ended() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let client = WsRpcClient::connect(fake.url(), "").await.unwrap();
+
+        client.disconnect_for_testing().await;
+        fake.connection(2).await;
+        let restore = fake.next_request().await;
+        assert_eq!(restore["type"], "events.watch");
+        // The reply is withheld; socket 2's reader gets a frame and parks
+        // its worker inside the poll.
+        let (reader_gate, mut reader_parked) = client.park_at("reader:frame");
+        fake.send(serde_json::json!({"type": "noise"})).await;
+        reader_parked.recv().await;
+
+        let (close_gate, mut close_parked) = client.park_at("close:readers");
+        let closer = WsRpcClient {
+            shared: client.shared.clone(),
+        };
+        let mut close = tokio::spawn(async move { closer.close().await });
+        let returned = tokio::time::timeout(PROMPT, async {
+            tokio::select! {
+                r = &mut close => { r.unwrap(); true }
+                _ = close_parked.recv() => false,
+            }
+        })
+        .await
+        .expect("close neither returned nor reached the reader join");
+        let holders = Arc::strong_count(&client.shared);
+        reader_gate.gate.add_permits(1);
+        assert!(
+            !returned,
+            "close returned while the unpublished reader still ran ({holders} holders of the shared state)"
+        );
+        close_gate.gate.add_permits(1);
+        tokio::time::timeout(PROMPT, close)
+            .await
+            .expect("close never finished after the reader was released")
+            .unwrap();
+        assert_eq!(Arc::strong_count(&client.shared), 1);
+        assert!(fake.sockets_ended(2, PROMPT).await, "socket 2 stayed open");
     }
 }
