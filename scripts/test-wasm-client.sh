@@ -85,6 +85,9 @@ export ADMIN_TOKEN
 CLOSED_PORT="$(free_port)"
 export CLOSED_PORT
 export CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER="${WASM_RUNNER:-wasm-bindgen-test-runner}"
+# The runner's default budget for a whole test crate is 20 s; the reconnect
+# tests wait out backoffs and no-redial windows.
+export WASM_BINDGEN_TEST_TIMEOUT="${WASM_BINDGEN_TEST_TIMEOUT:-300}"
 
 DRIVER="${DRIVER:-chromium}"
 case "$DRIVER" in
