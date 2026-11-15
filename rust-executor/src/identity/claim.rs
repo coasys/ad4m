@@ -296,7 +296,8 @@ impl ClaimService<'_> {
 
     /// `identity.cancelJoin`: the claim never binds, even if the holder confirms it later
     /// (any claim, first-run or not). Again once cancelled is a no-op. `not-found` for no claim
-    /// of the main agent; `already-joined` once the main agent speaks for the claim's identity.
+    /// of the main agent; `already-joined` once the main agent speaks for the claim's identity
+    /// (a claim cancelled before stays cancelled: the agent joined through another claim).
     /// The executor does not tell the store: the holder's add may still list the key in the
     /// log, but this executor never binds to it through this claim.
     pub fn cancel_join(
