@@ -87,7 +87,7 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   credential required" for a caller without the credential); the admin credential on a
   network listener gets 403 `local-only`. It is on `agent.unlock`,
   `agent.signSessionStatement`, `identity.rekey`, `identity.custodyStatus`,
-  `identity.takeMaster`, `identity.prepareDevice`, `identity.inbox`, `identity.inboxAck`,
+  `identity.takeMaster`, `identity.prepareDevice`, `identity.endPrepared`, `identity.inbox`, `identity.inboxAck`,
   `identity.acceptJoin`, `identity.cancelJoin`, `runtime.quit` and `runtime.restart`, and `runtime.setConfig`
   refuses its `machine` keys the same way (the guard table in `api/AGENTS.md` marks them).
   An operator from a key login is never on this machine, so these refuse it too; it calls
@@ -240,7 +240,8 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   inbox is read at start, unlock, binding and every 15 minutes; an executor with the custody
   channel keeps a master key message for `identity.takeMaster`, every other deletes it
   unopened. `identity.prepareDevice` (and `ad4m-executor link-code`) shows a device string and
-  claims the ticket a holder pushes to its pre-join inbox (`link-ticket`); the private record
+  claims the ticket a holder pushes to its pre-join inbox (`link-ticket`); `identity.endPrepared`
+  ends that read and cancels its claims (Cancel on the code screen); the private record
   and the request box pass through `identity/record.rs`.
 
 ## Do / don't

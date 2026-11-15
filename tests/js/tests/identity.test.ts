@@ -827,6 +827,16 @@ describe("Identity: the device inbox, a ticket in the pre-join inbox and a maste
         const joined = await desk.client.identity.status();
         expect(joined.did).to.equal(did);
         expect(joined.keyId).to.equal("d2");
+
+        // Ending the code now (a Cancel too late) does not undo the join, and says so each time.
+        for (let i = 0; i < 2; i++) {
+            expect(await desk.client.identity.endPrepared(prepared.device)).to.deep.equal({
+                state: "already-joined",
+                offerId: pushed.offerId,
+                did,
+            });
+        }
+        expect((await desk.client.identity.status()).did).to.equal(did);
     });
 
     it("hands the master key sealed to the desktop to its custody service only, until the custody service acknowledges it", async () => {

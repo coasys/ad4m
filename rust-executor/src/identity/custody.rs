@@ -48,6 +48,7 @@ pub const CUSTODY_METHODS: &[&str] = &[
     "identity.acceptJoin",
     "identity.cancelJoin",
     "identity.prepareDevice",
+    "identity.endPrepared",
     "identity.inbox",
     "identity.inboxAck",
     "identity.inboxPut",
