@@ -592,6 +592,15 @@ pub mod links {
         )
     }
 
+    /// The membership links `neighbourhood.create` writes: the creator's `rules` link alone,
+    /// which makes the creator the space's first admin (on the room's genesis too). An `admin`
+    /// link for the creator written beside it would share its timestamp and, sorting before it
+    /// by hash about half the time, be refused (`NotAdmin`): the replay orders links by
+    /// timestamp, then hash.
+    pub fn genesis(add: AddRule, join: JoinMode) -> Vec<Link> {
+        vec![rules(add, join)]
+    }
+
     /// `neighbourhood.addMember`: `admin` for an admin, else `member`.
     pub fn add_member(person: &str, role: MemberRole) -> Result<Link, String> {
         match role {

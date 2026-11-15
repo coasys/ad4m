@@ -191,7 +191,10 @@ async fn create(
     }))
 }
 
-#[tokio::main(flavor = "current_thread")]
+// Several threads: `main` blocks on stdin between commands, and on one thread that
+// stalls the client's reader task too. It then answers none of the executor's pings,
+// and the executor ends a socket it has not heard from for 60 s.
+#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() {
     let vault = MemoryVault::new();
     let stdin = std::io::stdin();

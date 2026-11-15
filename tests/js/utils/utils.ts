@@ -273,6 +273,8 @@ export async function startExecutor(dataPath: string,
     initArgs: string[] = [],
     // The first line of the executor's stdin: the custody credential of `--custody-channel`.
     stdinFirstLine?: string,
+    // Added to `ad4m-executor run`, e.g. `--enable-multi-user true`.
+    runArgs: string[] = [],
 ): Promise<ChildProcess> {
     if (runHolochain && (!proxyUrl || !bootstrapUrl)) {
         const services = await ensureSharedLocalServices();
@@ -350,6 +352,7 @@ export async function startExecutor(dataPath: string,
     // that this is a test run; the empty token is then the operator.
     if (adminCredential) { args.push('--admin-credential', adminCredential); }
     else { args.push('--insecure-no-admin-credential'); }
+    args.push(...runArgs);
 
     return spawnExecutor(args, apiPort, { enableMcp, env, stdinFirstLine });
 }

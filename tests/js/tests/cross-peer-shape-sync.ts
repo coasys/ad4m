@@ -26,7 +26,7 @@ import { waitUntil } from "../helpers/index";
 import fs from "fs";
 import { v4 as uuidv4 } from "uuid";
 import { expect } from "chai";
-import { LinkLangConfig, holochainLinkLang, publishLinkLanguage } from "../utils/linkLangConfig";
+import { LinkLangConfig, holochainLinkLang, shareNeighbourhood } from "../utils/linkLangConfig";
 
 const DIFF_SYNC_OFFICIAL = fs.readFileSync("./scripts/perspective-diff-sync-hash").toString();
 
@@ -60,12 +60,7 @@ export default function crossPeerShapeSyncTests(
         // cross-peer barrier so we're not measuring carry-over from
         // any prior test's shared perspective.
         const aliceHandle = await alice.perspective.add(`shape-sync-${uuidv4()}`);
-        const socialContext = await publishLinkLanguage(alice, getLinkLang(), "cross-peer shape sync");
-        const url = await alice.neighbourhood.publishFromPerspective(
-          aliceHandle.uuid,
-          socialContext.address,
-          new Perspective(),
-        );
+        const { url } = await shareNeighbourhood(alice, getLinkLang(), aliceHandle.uuid, "cross-peer shape sync");
         const bobHandle = await bob.neighbourhood.joinFromUrl(url);
         await testContext.makeAllNodesKnown([alice, aliceHandle.uuid], [bob, bobHandle.uuid]);
 

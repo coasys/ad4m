@@ -1,7 +1,13 @@
 // Test lifecycle helper for the link-server used by the server-link-language
-// integration matrix. Spawns `link-server` from its built entrypoint on an
-// OS-assigned free port with a temp data dir, waits for the /health endpoint
-// to become ready, and returns a handle with `{url, kill}`.
+// integration suites. Starts an identity-store (helpers/identity.ts) unless the
+// caller passes one, then spawns `link-server` (protocol 2) from its built
+// entrypoint on a free port with a temp data dir, pointed at that store
+// (`STORE_URL`, `STORE_HEAD_KEYS`), and waits for /health. No AUTO_ADMIT: a
+// key gets into a room only as a member, as on a production server.
+//
+// Executors that use the server must speak for a person in the same store:
+// start them with `handle.store.executorEnv()` and give them a person with
+// `givePerson` (helpers/identity.ts).
 //
 // Modelled on runHcLocalServices in utils.ts — same shape so it slots into
 // the existing test before()/after() hooks without new conventions.
@@ -11,7 +17,8 @@ import fs from "fs-extra";
 import os from "os";
 import path from "path";
 import { fileURLToPath } from "url";
-import { getFreePort } from "../helpers/ports.js";
+import { getFreePort, getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
+import { IdentityStore, requireIdentityTools } from "../helpers/identity";
 import { sleep } from "./utils";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -25,41 +32,61 @@ export interface LinkServerHandle {
     port: number;
     dataDir: string;
     process: ChildProcess;
+    /** The identity store the server asks whom each key speaks for. */
+    store: IdentityStore;
+    /** Stops the server, and the store when `startLinkServer` started it. */
     kill: () => Promise<void>;
 }
 
 export interface LinkServerOptions {
     /**
-     * The identity store whose key logs say which person each key speaks for
-     * (`--store-url`). Without it the server admits no person, and only
-     * `autoAdmit` lets a key in.
+     * The identity store whose key logs say which person each key speaks for. Without one,
+     * `startLinkServer` starts a store of its own in a temp directory and stops it on `kill`.
      */
-    storeUrl?: string;
-    /** The store keys whose signed heads the server trusts (`--store-head-keys`). */
-    storeHeadKeys?: string[];
-    /** Admit every key that authenticates (default true). */
-    autoAdmit?: boolean;
+    store?: IdentityStore;
+    /**
+     * How often the server asks the store again about every key it admitted (ms): a key its
+     * log revoked loses its sockets (`4005`) at the next refresh. The server's default is 10
+     * minutes; a test of revocation sets a few seconds (`REFRESH_INTERVAL_MS`).
+     */
+    refreshIntervalMs?: number;
     readyTimeoutMs?: number;
 }
 
 /**
- * Spawn a link-server (protocol 2) on a free port. Waits up to `readyTimeoutMs`
- * for the server's /health endpoint to respond 200.
+ * Spawn a link-server (protocol 2) on a free port, with its identity store. Waits up to
+ * `readyTimeoutMs` for the server's /health endpoint to respond 200.
  *
  * A room exists only once its creator's first membership commit made it
  * (genesis: the `CREATOR` and `UID` template parameters of the server link
- * language); auth to any other room answers 404. `autoAdmit` admits every key
- * that authenticates to a room that exists; it does not make rooms.
+ * language, filled in by `neighbourhood.create`); auth to any other room
+ * answers 404. A key is admitted only when the store says it speaks for a
+ * person the room's membership links list.
  *
  * Callers should invoke `handle.kill()` in an `after()` hook.
  */
 export async function startLinkServer(opts: LinkServerOptions = {}): Promise<LinkServerHandle> {
     const readyTimeoutMs = opts.readyTimeoutMs ?? 15000;
-    const autoAdmit = opts.autoAdmit ?? true;
     if (!fs.existsSync(LINK_SERVER_ENTRY)) {
         throw new Error(
             `link-server entry not found at ${LINK_SERVER_ENTRY} — run \`pnpm --filter @coasys/link-server build\` first`,
         );
+    }
+
+    let store = opts.store;
+    let ownStore: { store: IdentityStore; port: number } | null = null;
+    if (!store) {
+        requireIdentityTools();
+        const [storePort] = await getFreePorts(1);
+        registerPorts([storePort]);
+        const storeDir = await fs.mkdtemp(path.join(os.tmpdir(), "link-server-store-"));
+        try {
+            store = await IdentityStore.start(storeDir, storePort);
+        } catch (e) {
+            deregisterPorts([storePort]);
+            throw e;
+        }
+        ownStore = { store, port: storePort };
     }
 
     const port = await getFreePort();
@@ -68,11 +95,12 @@ export async function startLinkServer(opts: LinkServerOptions = {}): Promise<Lin
     const url = `http://127.0.0.1:${port}`;
     // The origin auth is signed for: the URL the executors' server link language is given.
     const args = [LINK_SERVER_ENTRY, "--port", String(port), "--data", dataDir, "--public-origin", url];
-    if (opts.storeUrl) args.push("--store-url", opts.storeUrl);
-    if (opts.storeHeadKeys?.length) args.push("--store-head-keys", opts.storeHeadKeys.join(","));
-    // The server refuses AUTO_ADMIT under NODE_ENV=production, which a
-    // developer shell may set: the test server is never production.
-    const { NODE_ENV: _nodeEnv, ...env } = process.env;
+    args.push("--store-url", store.url, "--store-head-keys", store.key);
+    // Nothing auto-admits: whatever a developer shell or CI sets, the server
+    // runs as a production one would (its own NODE_ENV aside).
+    const {
+        AUTO_ADMIT: _autoAdmit, ALLOW_AUTO_ADMIT_DEV: _allowAutoAdmit, REFRESH_INTERVAL_MS: _refresh, ...env
+    } = process.env;
     const proc = spawn(
         process.execPath,
         args,
@@ -81,9 +109,7 @@ export async function startLinkServer(opts: LinkServerOptions = {}): Promise<Lin
                 ...env,
                 PORT: String(port),
                 DATA_DIR: dataDir,
-                AUTO_ADMIT: autoAdmit ? "true" : "false",
-                // The server starts with AUTO_ADMIT only when marked a development one.
-                ALLOW_AUTO_ADMIT_DEV: autoAdmit ? "true" : "false",
+                ...(opts.refreshIntervalMs ? { REFRESH_INTERVAL_MS: String(opts.refreshIntervalMs) } : {}),
             },
             stdio: ["ignore", "pipe", "pipe"],
         },
@@ -113,6 +139,12 @@ export async function startLinkServer(opts: LinkServerOptions = {}): Promise<Lin
             }
         }
         try { await fs.remove(dataDir); } catch { /* best-effort — CI cleans /tmp anyway */ }
+        if (ownStore) {
+            await ownStore.store.stop();
+            deregisterPorts([ownStore.port]);
+            try { await fs.remove(ownStore.store.dir); } catch { /* best-effort */ }
+            ownStore = null;
+        }
     }
 
     // Readiness loop with a bounded per-request timeout so a hung fetch
@@ -139,6 +171,7 @@ export async function startLinkServer(opts: LinkServerOptions = {}): Promise<Lin
         port,
         dataDir,
         process: proc,
+        store,
         kill: killAndCleanup,
     };
 }

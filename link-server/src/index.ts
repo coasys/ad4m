@@ -14,6 +14,8 @@ interface CliArgs {
   name?: string;
   storeUrl?: string;
   storeHeadKeys: string[];
+  /** How often admitted keys are asked of the store again (ms); the server's default when unset. */
+  refreshIntervalMs?: number;
   operatorPort?: number;
   operatorHost: string;
   operatorTokenFile?: string;
@@ -45,6 +47,10 @@ Options:
                      Without it no person can be admitted to a room
   --store-head-keys <multikey,...>
                      The store keys whose signed heads are trusted
+  --refresh-interval-ms <number>
+                     How often every admitted key is asked of the store
+                     again, so a revoked key loses its sockets (4005)
+                     (default: 600000, 10 minutes; at least 1000)
   --auto-admit       Admit every key that authenticates, member or not
                      (tests and development only: refused unless
                      ALLOW_AUTO_ADMIT_DEV=true, and always with
@@ -66,7 +72,8 @@ Options:
   -h, --help         Show this help
 
 Each option also reads an environment variable: PORT, DATA_DIR, HOST,
-PUBLIC_ORIGIN (comma-separated), NAME, STORE_URL, STORE_HEAD_KEYS (comma-separated), AUTO_ADMIT, OPERATOR_PORT,
+PUBLIC_ORIGIN (comma-separated), NAME, STORE_URL, STORE_HEAD_KEYS (comma-separated),
+REFRESH_INTERVAL_MS, AUTO_ADMIT, OPERATOR_PORT,
 OPERATOR_HOST, OPERATOR_TOKEN_FILE, OPERATOR_ORIGINS (comma-separated),
 OPERATOR_LABEL.
 `;
@@ -95,6 +102,9 @@ function parseArgs(argv: string[]): CliArgs {
   let name = process.env.NAME || undefined;
   let storeUrl = process.env.STORE_URL || undefined;
   let storeHeadKeys = commaList(process.env.STORE_HEAD_KEYS);
+  let refreshIntervalMs = process.env.REFRESH_INTERVAL_MS
+    ? parseRefreshInterval("REFRESH_INTERVAL_MS", process.env.REFRESH_INTERVAL_MS)
+    : undefined;
   // The operator port must be fixed: a reverse proxy points at it.
   let operatorPort = process.env.OPERATOR_PORT ? parsePort("OPERATOR_PORT", process.env.OPERATOR_PORT, 1) : undefined;
   let operatorHost = process.env.OPERATOR_HOST ?? "127.0.0.1";
@@ -163,6 +173,9 @@ function parseArgs(argv: string[]): CliArgs {
       case "--store-head-keys":
         storeHeadKeys = commaList(requireValue("--store-head-keys", argv[++i]));
         break;
+      case "--refresh-interval-ms":
+        refreshIntervalMs = parseRefreshInterval("--refresh-interval-ms", argv[++i]);
+        break;
       case "-h":
       case "--help":
         console.log(USAGE);
@@ -225,7 +238,7 @@ function parseArgs(argv: string[]): CliArgs {
   }
 
   return {
-    port, host, dataDir, autoAdmit, publicOrigins, hostOrigin, name, storeUrl, storeHeadKeys,
+    port, host, dataDir, autoAdmit, publicOrigins, hostOrigin, name, storeUrl, storeHeadKeys, refreshIntervalMs,
     operatorPort, operatorHost, operatorTokenFile, operatorOrigins, operatorLabel,
   };
 }
@@ -238,6 +251,17 @@ function parsePort(name: string, value: string | undefined, min = 0): number {
   const parsed = Number(value ?? "");
   if (!Number.isInteger(parsed) || parsed < min || parsed > 65535) {
     console.error(`Invalid ${name} value: ${value} (must be an integer ${min}-65535)`);
+    process.exit(1);
+  }
+  return parsed;
+}
+
+/** A refresh interval in ms, at least 1000 (a shorter one would ask the store for every key
+ * many times a second). */
+function parseRefreshInterval(name: string, value: string | undefined): number {
+  const parsed = Number(value ?? "");
+  if (!Number.isInteger(parsed) || parsed < 1000) {
+    console.error(`Invalid ${name} value: ${value} (must be an integer number of milliseconds, at least 1000)`);
     process.exit(1);
   }
   return parsed;
@@ -263,6 +287,7 @@ async function main(): Promise<void> {
     name: args.name,
     storeUrl: args.storeUrl,
     storeHeadKeys: args.storeHeadKeys,
+    refreshIntervalMs: args.refreshIntervalMs,
     logger: true,
     operator:
       operatorToken !== undefined
