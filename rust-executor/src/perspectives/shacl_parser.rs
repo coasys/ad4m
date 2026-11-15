@@ -2093,7 +2093,10 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
             });
         }
 
-        if let Some(in_values) = prop.in_values.as_ref().filter(|v| !v.is_empty()) {
+        // `sh:in` is stored even when the list is empty: an empty list is a
+        // deny-all constraint, not the absence of one, so dropping it would
+        // silently widen "allows nothing" to "allows anything".
+        if let Some(in_values) = prop.in_values.as_ref() {
             links.push(Link {
                 source: prop_shape_uri.clone(),
                 predicate: Some("sh://in".to_string()),
