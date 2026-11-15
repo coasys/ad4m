@@ -653,7 +653,7 @@ pub async fn caller(
         target: SPACE.to_string(),
     };
     let link = LinkExpression::from(crate::agent::create_signed_link(probe, ctx)?);
-    crate::identity::prepare_link_signers(std::slice::from_ref(&link)).await;
+    let _signer = crate::identity::prepare_link_signers(std::slice::from_ref(&link)).await;
     Ok(link.check_own_entered(None))
 }
 
@@ -760,9 +760,11 @@ pub async fn membership_admits(
     perspective: &crate::perspectives::perspective_instance::PerspectiveInstance,
     did_key: &str,
 ) -> MembershipAdmission {
-    if crate::identity::resolver::multikey_of(did_key).is_some() {
-        crate::identity::prepare_signer(did_key).await;
-    }
+    // Held until the admission below has judged the key.
+    let _signer = match crate::identity::resolver::multikey_of(did_key) {
+        Some(_) => crate::identity::prepare_signer(did_key).await,
+        None => crate::identity::cache::PendingHold::none(),
+    };
     admission(
         perspective.sparql_store.membership(),
         did_key,
