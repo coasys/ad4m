@@ -163,7 +163,8 @@ enum Attempt {
     Gone,
     /// `close` ran: seen under the locks.
     Closed,
-    /// No socket installed: wait for the next one.
+    /// No socket installed, or the installed one is being torn down
+    /// (its stamp is stale): wait for the next one.
     NoSocket,
     /// Close or disconnect signalled `send_abort` mid-attempt.
     Aborted,
@@ -207,7 +208,10 @@ pub(crate) type ReconnectCb = Arc<dyn Fn() + Send + Sync>;
 struct Shared {
     /// The WS URL (token already inside) — needed by the reconnect task.
     url: String,
-    sink: Mutex<Option<WsSink>>,
+    /// The installed write half, stamped with the `teardowns` value it
+    /// was published under. A stamp that no longer matches means a
+    /// teardown of this socket has begun: writers refuse it (R4-1).
+    sink: Mutex<Option<(u64, WsSink)>>,
     pending: PendingMap,
     events: broadcast::Sender<Value>,
     /// `true` while a socket is installed and callable.
@@ -220,10 +224,14 @@ struct Shared {
     /// gate, so a slower flush can never write its older union over a newer
     /// one on the wire (F9).
     watch_flush: Mutex<()>,
-    /// How many disconnects have run. The supervisor samples it before
-    /// spawning a socket's reader; under `conn_guard` a changed value means
-    /// the socket died mid-install and its disconnect owns the flag (R1).
-    disconnects: AtomicU64,
+    /// How many teardowns (disconnects and closes) have begun. Bumped
+    /// *before* `send_abort` is notified, so it is the persistent half of
+    /// that transient signal: a writer that registers its waiter after the
+    /// notify still finds the bumped value under the sink lock and refuses
+    /// the stamped sink (R4-1). The supervisor samples it before spawning
+    /// a socket's reader; under `conn_guard` a changed value means the
+    /// socket died mid-install and its disconnect owns the flag (R1).
+    teardowns: AtomicU64,
     /// Serializes a disconnect's flag write against an install's
     /// epoch-check-and-publish, so a `true` can never land over a `false`
     /// a close already stored (R1).
@@ -247,7 +255,9 @@ struct Shared {
     /// `notify_waiters` unwinds every send parked on a socket write: a
     /// backpressured peer can hold `sink` (and `pending`/`watch_flush`
     /// behind it) indefinitely, and the disconnect/close paths need those
-    /// locks — so they signal this *before* waiting on them (R5).
+    /// locks — so they signal this *before* waiting on them (R5). A
+    /// notify reaches only waiters already registered; `teardowns` is
+    /// what excludes a writer that registers later (R4-1).
     send_abort: tokio::sync::Notify,
     /// Test hook: when set, socket writes park inside their critical
     /// section — held locks stay held — until aborted or released, like a
@@ -350,7 +360,7 @@ impl WsRpcClient {
 
         let shared = Arc::new(Shared {
             url: url.clone(),
-            sink: Mutex::new(Some(write)),
+            sink: Mutex::new(Some((0, write))),
             pending: Arc::new(Mutex::new(HashMap::new())),
             events: events_tx,
             connected: connected_tx,
@@ -359,7 +369,7 @@ impl WsRpcClient {
                 rev: 0,
             }),
             watch_flush: Mutex::new(()),
-            disconnects: AtomicU64::new(0),
+            teardowns: AtomicU64::new(0),
             conn_guard: Mutex::new(()),
             on_reconnect: std::sync::Mutex::new(Vec::new()),
             closed: AtomicBool::new(false),
@@ -466,15 +476,19 @@ impl WsRpcClient {
     async fn handle_disconnect(shared: &Arc<Shared>, abort_reader: bool) {
         // Unwind writes parked on this socket FIRST: a backpressured send
         // holds `sink` (and `pending`/`watch_flush` behind it) — the
-        // locks this path takes next (R5).
+        // locks this path takes next (R5). The epoch moves before the
+        // notify: a writer registering after it still sees the teardown
+        // under the sink lock (R4-1).
+        shared.teardowns.fetch_add(1, Ordering::SeqCst);
         shared.send_abort.notify_waiters();
+        #[cfg(test)]
+        Self::park_point(shared, "disconnect:notified").await;
         {
             // `conn_guard` makes the disconnect's flag write atomic against
             // an install's epoch-check-and-publish: whichever holds it last
             // wins, and a publish that loses the race sees the bumped epoch
             // and refuses to overwrite this `false` (R1).
             let _guard = shared.conn_guard.lock().await;
-            shared.disconnects.fetch_add(1, Ordering::SeqCst);
             {
                 let mut sink = shared.sink.lock().await;
                 *sink = None; // drop whatever half remains
@@ -541,10 +555,10 @@ impl WsRpcClient {
                     Ok((ws_stream, _)) => {
                         let (mut write, read) = ws_stream.split();
                         // The epoch this install owns: the reader does not
-                        // exist yet, so `disconnects` can only move after
+                        // exist yet, so `teardowns` can only move after
                         // this — a close landing while we restore is always
                         // caught at the guarded publish below (R1).
-                        let epoch = shared.disconnects.load(Ordering::SeqCst);
+                        let epoch = shared.teardowns.load(Ordering::SeqCst);
                         let reader = AbortOnDrop(Some(Self::spawn_reader(read, shared.clone())));
                         // Restore interest *before* publishing: `connected`
                         // flips only once the executor acknowledged
@@ -576,7 +590,7 @@ impl WsRpcClient {
                         {
                             let _guard = shared.conn_guard.lock().await;
                             if shared.closed.load(Ordering::SeqCst)
-                                || shared.disconnects.load(Ordering::SeqCst) != epoch
+                                || shared.teardowns.load(Ordering::SeqCst) != epoch
                             {
                                 // Died while we restored: its disconnect
                                 // already ran and owns the flag. Drop what
@@ -585,7 +599,7 @@ impl WsRpcClient {
                                 drop(reader);
                                 continue;
                             }
-                            *shared.sink.lock().await = Some(write);
+                            *shared.sink.lock().await = Some((epoch, write));
                             *shared.reader.lock().await = Some(reader.disarm());
                             shared.connected.send_replace(true);
                         }
@@ -690,6 +704,8 @@ impl WsRpcClient {
     async fn send_watch(shared: &Arc<Shared>) -> Result<()> {
         let _gate = shared.watch_flush.lock().await;
         let (_rev, id, json, rx) = Self::watch_frame_parts(shared).await?;
+        #[cfg(test)]
+        Self::park_point(shared, "watch:built").await;
         // The send — lock acquisition included — is bounded and
         // abortable: a peer that stops reading must not hold `sink` (and
         // `watch_flush` behind it) while disconnect or close waits on
@@ -698,26 +714,36 @@ impl WsRpcClient {
         let abort = shared.send_abort.notified();
         tokio::pin!(abort);
         abort.as_mut().enable();
+        // `None` inside: no socket. `Some(None)`: a teardown began before
+        // the sink was taken (the notify may have come before this waiter
+        // registered), so the stamped sink is refused (R4-1).
         let sent = tokio::select! {
             r = tokio::time::timeout(WATCH_SEND_TIMEOUT, async {
                 let mut sink = shared.sink.lock().await;
-                #[cfg(test)]
-                Self::park_for_send_test(shared).await;
                 match sink.as_mut() {
-                    Some(s) => Some(s.send(Message::Text(json)).await),
+                    Some((epoch, _)) if *epoch != shared.teardowns.load(Ordering::SeqCst) => {
+                        Some(None)
+                    }
+                    Some((_, s)) => {
+                        #[cfg(test)]
+                        Self::park_for_send_test(shared).await;
+                        Some(Some(s.send(Message::Text(json)).await))
+                    }
                     None => None,
                 }
             }) => Some(r),
             _ = &mut abort => None,
         };
         match sent {
-            Some(Ok(Some(Ok(())))) => Self::await_watch_reply(shared, &id, rx).await,
+            Some(Ok(Some(Some(Ok(()))))) => Self::await_watch_reply(shared, &id, rx).await,
             other => {
                 shared.pending.lock().await.remove(&id);
                 Err(match other {
-                    Some(Ok(Some(Err(e)))) => anyhow!("Failed to send events.watch: {e}"),
+                    Some(Ok(Some(Some(Err(e))))) => anyhow!("Failed to send events.watch: {e}"),
                     Some(Err(_)) => anyhow!("events.watch send timed out"),
-                    None => anyhow!("events.watch send aborted: socket is closing"),
+                    None | Some(Ok(Some(None))) => {
+                        anyhow!("events.watch send aborted: socket is closing")
+                    }
                     _ => anyhow!("events.watch: no socket"),
                 })
             }
@@ -859,9 +885,13 @@ impl WsRpcClient {
     /// Permanently close the client: socket down, no reconnect.
     pub async fn close(&self) {
         self.shared.closed.store(true, Ordering::SeqCst);
-        // Same first move as the disconnect: unwind parked socket writes
-        // before this path waits on the locks they hold (R5).
+        // Same first moves as the disconnect: mark the teardown, then
+        // unwind parked socket writes before this path waits on the locks
+        // they hold (R5, R4-1).
+        self.shared.teardowns.fetch_add(1, Ordering::SeqCst);
         self.shared.send_abort.notify_waiters();
+        #[cfg(test)]
+        Self::park_point(&self.shared, "close:notified").await;
         // Abort, then wait for the task to end: an aborted supervisor drops
         // its install state — an unpublished socket's reader guard and
         // write half included — so no task holds the socket once close
@@ -1067,8 +1097,17 @@ impl WsRpcClient {
                 if self.shared.closed.load(Ordering::SeqCst) {
                     return Attempt::Closed;
                 }
-                let Some(s) = sink.as_mut() else {
-                    return Attempt::NoSocket;
+                let s = match sink.as_mut() {
+                    // A teardown began: the notify may have come before
+                    // this attempt registered, so only the epoch tells.
+                    // Nothing was written; the call waits (R4-1).
+                    Some((epoch, _)) if *epoch != self.shared.teardowns.load(Ordering::SeqCst) => {
+                        #[cfg(test)]
+                        Self::park_point(&self.shared, "call:refused").await;
+                        return Attempt::NoSocket;
+                    }
+                    Some((_, s)) => s,
+                    None => return Attempt::NoSocket,
                 };
                 if let Some(call) = pending.get_mut(id) {
                     call.sent = true;
@@ -1455,11 +1494,11 @@ mod tests {
         let parked = client.shared.watch_flush.lock().await;
         fake.connection(2).await;
 
-        // `disconnects` reaching 2 is the barrier that socket 2's whole
-        // disconnect ran — its flag write included — before we release.
+        // `teardowns` reaching 2 is the barrier that socket 2's disconnect
+        // began before we release: the publish must refuse from then on.
         fake.drop_connection();
         tokio::time::timeout(Duration::from_secs(10), async {
-            while client.shared.disconnects.load(Ordering::SeqCst) < 2 {
+            while client.shared.teardowns.load(Ordering::SeqCst) < 2 {
                 tokio::task::yield_now().await;
             }
         })
@@ -2212,10 +2251,10 @@ mod tests {
 
         // Socket 2 dies, acknowledged but unpublished; its disconnect has
         // run once the epoch moved.
-        let before = client.shared.disconnects.load(Ordering::SeqCst);
+        let before = client.shared.teardowns.load(Ordering::SeqCst);
         fake.drop_connection();
         tokio::time::timeout(PROMPT, async {
-            while client.shared.disconnects.load(Ordering::SeqCst) == before {
+            while client.shared.teardowns.load(Ordering::SeqCst) == before {
                 tokio::task::yield_now().await;
             }
         })
@@ -2337,5 +2376,121 @@ mod tests {
         // Nothing but the client itself still holds the shared state: no
         // reader (or supervisor) task outlived close.
         assert_eq!(Arc::strong_count(&client.shared), 1);
+    }
+
+    /// R4-1, call path: a disconnect has notified `send_abort` but not yet
+    /// cleared the sink. A call that registers its waiter only now (a new
+    /// call, or an unsent one retrying after the first abort) must not
+    /// start a write on the socket being torn down: that write would hold
+    /// `sink` and `pending` while the disconnect waits on them.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_call_admitted_after_the_disconnect_notified_never_writes_on_the_old_socket() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let client = WsRpcClient::connect(fake.url(), "").await.unwrap();
+
+        let (_blocker, mut send_parked) = client.park_sends().await;
+        let (disconnect_gate, mut disconnect_parked) = client.park_at("disconnect:notified");
+        let (refused_gate, mut refused) = client.park_at("call:refused");
+        refused_gate.gate.add_permits(1000);
+        let disconnector = WsRpcClient {
+            shared: client.shared.clone(),
+        };
+        let disconnect = tokio::spawn(async move { disconnector.disconnect_for_testing().await });
+        disconnect_parked.recv().await;
+
+        // The disconnect notified and paused before it takes the sink.
+        let caller = WsRpcClient {
+            shared: client.shared.clone(),
+        };
+        let call =
+            tokio::spawn(async move { caller.call_value("x.y", serde_json::json!({})).await });
+        let wrote = tokio::time::timeout(PROMPT, async {
+            tokio::select! {
+                _ = send_parked.recv() => true,
+                _ = refused.recv() => false,
+            }
+        })
+        .await
+        .expect("the late call neither wrote nor was refused");
+        disconnect_gate.gate.add_permits(1);
+        tokio::time::timeout(PROMPT, disconnect)
+            .await
+            .expect("the disconnect waited behind a write admitted after its notify")
+            .unwrap();
+        assert!(
+            !wrote,
+            "a call admitted after the notify wrote on the old socket"
+        );
+
+        // Never sent, so the call rides the next socket.
+        *client.shared.send_block.lock().await = None;
+        fake.connection(2).await;
+        let restore = fake.next_request().await;
+        assert_eq!(restore["type"], "events.watch");
+        fake.reply(&restore, Value::Bool(true)).await;
+        let frame = fake.next_request().await;
+        assert_eq!(frame["type"], "x.y");
+        fake.reply(&frame, serde_json::json!(7)).await;
+        let result = tokio::time::timeout(PROMPT, call)
+            .await
+            .expect("the call never completed on socket 2")
+            .unwrap()
+            .unwrap();
+        assert_eq!(result, serde_json::json!(7));
+        client.close().await;
+    }
+
+    /// R4-1, watch path: a watch flush has built its pending entry but not
+    /// registered its waiter when close stores `closed` and notifies. The
+    /// flush then reaches the old sink before close clears it; it must
+    /// refuse, not start a write close then waits behind.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_watch_flush_admitted_after_close_notified_never_writes() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let client = WsRpcClient::connect(fake.url(), "").await.unwrap();
+
+        let (_blocker, mut send_parked) = client.park_sends().await;
+        let (built_gate, mut built) = client.park_at("watch:built");
+        let (close_gate, mut close_parked) = client.park_at("close:notified");
+        let caller = WsRpcClient {
+            shared: client.shared.clone(),
+        };
+        let mut watch =
+            tokio::spawn(
+                async move { caller.set_watch("t", serde_json::json!({"e": null})).await },
+            );
+        built.recv().await;
+
+        let closer = WsRpcClient {
+            shared: client.shared.clone(),
+        };
+        let close = tokio::spawn(async move { closer.close().await });
+        close_parked.recv().await;
+        // Close notified and paused before it takes the sink; the flush
+        // registers its waiter only now.
+        built_gate.gate.add_permits(1);
+        let ended = tokio::time::timeout(PROMPT, async {
+            tokio::select! {
+                _ = send_parked.recv() => None,
+                r = &mut watch => Some(r),
+            }
+        })
+        .await
+        .expect("the late watch flush neither wrote nor ended");
+        close_gate.gate.add_permits(1);
+        tokio::time::timeout(PROMPT, close)
+            .await
+            .expect("close waited behind a watch write admitted after its notify")
+            .unwrap();
+        let result = match ended {
+            Some(r) => r,
+            None => tokio::time::timeout(PROMPT, watch)
+                .await
+                .expect("the late watch flush outlived close"),
+        };
+        let err = result.unwrap().unwrap_err();
+        assert!(err.to_string().contains("closing"), "{err}");
     }
 }
