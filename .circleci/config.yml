@@ -500,8 +500,12 @@ jobs:
             # mktemp makes the directory 700. nginx reads it as www-data.
             chmod 755 "$dest"
             chmod 644 "$dest"/*
-            find "$root" -mindepth 1 -maxdepth 1 -regextype posix-extended -regex '.*/[0-9a-f]{40}' -mtime +35 -exec rm -rf {} +
-            find "$root" -mindepth 1 -maxdepth 1 \( -name '.staging.*' -o -name '.old.*' \) -mmin +60 -exec rm -rf {} +
+            # Cleanup only: the publish above is done. Builds publish here at the same time,
+            # and another build's .staging/.old dir can go away while find reads the dir.
+            # find then exits 1 (-ignore_readdir_race does not cover it). The next build
+            # removes whatever this one skipped.
+            find "$root" -mindepth 1 -maxdepth 1 -regextype posix-extended -regex '.*/[0-9a-f]{40}' -mtime +35 -exec rm -rf {} + || true
+            find "$root" -mindepth 1 -maxdepth 1 \( -name '.staging.*' -o -name '.old.*' \) -mmin +60 -exec rm -rf {} + || true
             echo "published https://executor.ad4m.dev/$CIRCLE_SHA1/manifest.json"
             ls -l "$dest" && cat "$dest/manifest.json"
       - run:
