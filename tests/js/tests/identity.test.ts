@@ -1,13 +1,16 @@
 /**
  * Identity end to end (create, link, the person's profile, login with a device key, the first-link refusal,
- * revoke and the end of the revoked key's sessions, DID resolution on an executor that never saw the log, fork,
- * restart): executors
+ * revoke, the links of the revoked key on a reader and the end of the revoked key's sessions, DID resolution on
+ * an executor that never saw the log, fork, restart): executors
  * with no Holochain, a real identity-store this suite starts on a temp file, and the
  * centralized agent language seeded as every executor's agent language.
  *
  * The holder is ad4m-identity-client's `holder` example: the client's create, link and revoke
  * flows, with master keys in a MemoryVault, against executor A over its RPC. Executor B joins
  * with `ad4m-executor init --operator` and `ad4m-executor claim <link>`.
+ *
+ * The revocation test shares a neighbourhood between B, A and a reader on the server link
+ * language, through a link server this suite starts (`link-server/dist`).
  *
  * Needs `pnpm run prepare-test-local` first (it publishes the centralized agent language and
  * writes its address to scripts/centralized-agent-language-hash).
@@ -17,7 +20,10 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { ChildProcess, execSync } from "child_process";
-import { Ad4mClient, ExpressionProof, Link, LinkExpression, Perspective } from "@coasys/ad4m";
+import {
+    Ad4mClient, Ad4mModel, ExpressionProof, Flag, Link, LinkExpression, LinkQuery, Model, Perspective,
+    PerspectiveState,
+} from "@coasys/ad4m";
 import WebSocket from "ws";
 import { v4 as uuidv4 } from "uuid";
 import {
@@ -25,6 +31,8 @@ import {
 } from "../utils/utils";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import { buildIdentityTools, ClaimCommand, Holder, IdentityStore } from "../helpers/identity";
+import { LinkServerHandle, startLinkServer } from "../utils/linkServer";
+import { publishLinkLanguage, serverLinkLang } from "../utils/linkLangConfig";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TEST_DIR = path.join(__dirname, "..", "tst-tmp");
@@ -41,6 +49,24 @@ function writeIdentitySeed(): string {
     seed.agentLanguage = agentLanguage;
     fs.writeFileSync(SEED_PATH, JSON.stringify(seed));
     return agentLanguage;
+}
+
+/**
+ * A note: a subject with the flag `rev://type` → `rev://note`. A model read is a logic read, so
+ * it counts only the links whose verdict is `valid`.
+ */
+@Model({ name: "RevocationNote" })
+class RevocationNote extends Ad4mModel {
+    @Flag({ through: "rev://type", value: "rev://note" })
+    type = "rev://note";
+}
+
+/** The server link language that prepare-test-local published. */
+function serverLinkLanguageHash(): string {
+    const file = path.join(__dirname, "..", "scripts", "server-link-language-hash");
+    const hash = fs.existsSync(file) ? fs.readFileSync(file, "utf8").trim() : "";
+    if (!hash) throw new Error("run prepare-test-local first: no server link language");
+    return hash;
 }
 
 interface Node {
@@ -61,6 +87,22 @@ describe("Identity: create, link, refuse a stranger, revoke, fork, restart", fun
     let did = "";
     let agentLanguage = "";
     const storeCopy = path.join(TEST_DIR, "identity-store-before-revoke.sqlite");
+    let linkServer: LinkServerHandle | null = null;
+    let revoking: Promise<any> | null = null;
+
+    /**
+     * Revokes B's key (d2) one time, through the holder. Before the revoke, it keeps a copy of
+     * the store's log (incept, add) for the fork test. Each later call gets the same answer.
+     */
+    function revokeD2(): Promise<any> {
+        revoking ??= (async () => {
+            await store.stop();
+            store.saveDb(storeCopy);
+            await store.restart();
+            return holder.send({ cmd: "revoke", did, keyIds: ["d2"] });
+        })();
+        return revoking;
+    }
 
     /**
      * Starts an executor on `seedPath` (the suite's seed by default), pointed at the store by
@@ -127,6 +169,7 @@ describe("Identity: create, link, refuse a stranger, revoke, fork, restart", fun
         }
         await store?.stop();
         if (store) deregisterPorts([store.port]);
+        await linkServer?.kill();
     });
 
     it("creates an identity on A: the incept lists A's key as d1", async () => {
@@ -389,13 +432,127 @@ describe("Identity: create, link, refuse a stranger, revoke, fork, restart", fun
         expect((await c.client.identity.status()).did).to.be.null;
     });
 
-    it("revokes B's key: B reports it revoked", async () => {
-        // Keep the store's log as it is now (incept, add) for the fork test.
-        await store.stop();
-        store.saveDb(storeCopy);
-        await store.restart();
+    it("keeps a link that a device key signed before its revocation, and does not count a link that the key signs after it", async () => {
+        // B (d2) makes a neighbourhood on the server link language. A (d1) and a reader with
+        // no identity join it. The links go through a link server.
+        linkServer = await startLinkServer();
+        const linkLanguage = serverLinkLang(serverLinkLanguageHash(), linkServer.url);
+        const reader = await startNode("reader");
+        const onB = await b.client.perspective.add("revocation");
+        const language = await publishLinkLanguage(b.client, linkLanguage, "Identity revocation");
+        const url = await b.client.neighbourhood.publishFromPerspective(onB.uuid, language.address, new Perspective());
+        const onA = await a.client.neighbourhood.joinFromUrl(url);
+        const onReader = await reader.client.neighbourhood.joinFromUrl(url);
+        for (const [client, uuid] of [[b.client, onB.uuid], [a.client, onA.uuid], [reader.client, onReader.uuid]] as const) {
+            await pollUntil(async () => {
+                const state = (await client.perspective.byUUID(uuid))?.state;
+                return state === PerspectiveState.LinkLanguageInstalledButNotSynced || state === PerspectiveState.Synced;
+            }, { timeoutMs: 60_000, intervalMs: 500, label: `link language attached for ${uuid}` });
+        }
+        const readerProxy = (await reader.client.perspective.byUUID(onReader.uuid))!;
+        await RevocationNote.register(readerProxy);
 
-        const revoked = await holder.send({ cmd: "revoke", did, keyIds: ["d2"] });
+        const note = (id: string) => ({ source: `rev://${id}`, predicate: "rev://type", target: "rev://note" });
+        /** The reader's copy of the note link `id`, whatever its verdict. */
+        const onReaderLink = async (id: string): Promise<LinkExpression | undefined> => {
+            const links = await reader.client.perspective.queryLinks(
+                onReader.uuid,
+                new LinkQuery({ source: `rev://${id}`, predicate: "rev://type", includeUnverified: true }),
+            );
+            return links[0];
+        };
+        /** Waits until the reader has the note link `id` with a verdict other than cantCheck. */
+        const judgedOnReader = async (id: string): Promise<LinkExpression> => {
+            let link: LinkExpression | undefined;
+            await pollUntil(async () => {
+                link = await onReaderLink(id);
+                return !!link?.verdict && link.verdict.kind !== "cantCheck";
+            }, { timeoutMs: 90_000, intervalMs: 500, label: `the reader judges rev://${id}` });
+            return link!;
+        };
+        /** The notes that a logic read on the reader counts. */
+        const counted = async () => (await RevocationNote.findAll(readerProxy)).map((n) => n.id).sort();
+        const shown = async () =>
+            (await RevocationNote.findAll(readerProxy, { includeUnverified: true })).map((n) => n.id).sort();
+
+        // 1. d2 signs L1 before the revocation. The reader counts it, for the person.
+        await b.client.perspective.addLink(onB.uuid, note("l1"));
+        let l1 = await judgedOnReader("l1");
+        expect(l1.verdict).to.deep.equal({ kind: "valid" });
+        expect(l1.proof.anchor).to.equal(1);
+        expect(l1.person).to.equal(did);
+        expect(await counted()).to.deep.equal(["rev://l1"]);
+        // d2 also signs a link that stays on B for now (local).
+        const lateLink = await b.client.perspective.addLink(onB.uuid, note("late"), "local");
+        expect(lateLink.proof.anchor).to.equal(1);
+
+        // 2. A revokes d2.
+        const revoked = await revokeD2();
+        expect(revoked.seq).to.equal(2);
+
+        // 3. The revocation gets to the reader's key map. L1 entered before it: it stays valid
+        // and counted.
+        await pollUntil(
+            async () => (await reader.client.identity.log(did, 0, true)).head?.seq === 2,
+            { timeoutMs: 30_000, intervalMs: 500, label: "the reader has the revoke" },
+        );
+        l1 = (await onReaderLink("l1"))!;
+        expect(l1.verdict).to.deep.equal({ kind: "valid" });
+        expect(await counted()).to.deep.equal(["rev://l1"]);
+
+        // 4. A link that d2 signed before the revocation, but that gets to the reader only after
+        // it (a copy of the key can do this too): the reader does not know that it entered
+        // before the revoke, so it is flagged. A display read shows it; a logic read does not
+        // count it.
+        const late = await reader.client.perspective.addLinkExpression(onReader.uuid, lateLink, "local");
+        expect(late.proof.anchor).to.equal(1);
+        expect(late.verdict).to.deep.equal({ kind: "flagged" });
+        const lateShown = await reader.client.perspective.queryLinks(onReader.uuid, new LinkQuery({ source: "rev://late" }));
+        expect(lateShown.map((l) => l.verdict)).to.deep.equal([{ kind: "flagged" }]);
+        expect(await counted()).to.deep.equal(["rev://l1"]);
+
+        // 5. B reads its log again (identity.status does), so the revocation gets to B's key
+        // map and B anchors its next link at the revoke. agent.status reads no store.
+        await pollUntil(
+            async () => (await b.client.identity.status()).revoked === 2
+                && (await b.client.agent.status()).identity === null,
+            { timeoutMs: 30_000, intervalMs: 500, label: "B's key no longer speaks for the person" },
+        );
+        // B still holds the revoked key and signs L2 with it. The anchor is at the revoke, so L2
+        // is invalid (revoked) on B.
+        const l2OnB = await b.client.perspective.addLink(onB.uuid, note("l2"), "local");
+        expect(l2OnB.proof.anchor).to.equal(2);
+        expect(l2OnB.verdict).to.deep.equal({ kind: "invalid", reason: "revoked" });
+        // The test gives L2, as B signed it, to the reader directly. (Through the link language,
+        // the reader does not store a remote link that is invalid, so no read shows it.) The
+        // reader also finds L2 invalid (revoked): a display read does not show it, and a logic
+        // read does not count it.
+        const l2 = await reader.client.perspective.addLinkExpression(onReader.uuid, l2OnB, "local");
+        expect(l2.proof.anchor).to.equal(2);
+        expect(l2.verdict).to.deep.equal({ kind: "invalid", reason: "revoked" });
+        expect(l2.proof.valid).to.equal(false);
+        expect(l2.person ?? null).to.be.null;
+        const l2Shown = await reader.client.perspective.queryLinks(onReader.uuid, new LinkQuery({ source: "rev://l2" }));
+        expect(l2Shown).to.have.length(0);
+        expect(await counted()).to.deep.equal(["rev://l1"]);
+
+        // 6. A's device d1 is not revoked: its link L3, signed after the revocation, counts.
+        await a.client.perspective.addLink(onA.uuid, note("l3"));
+        const l3 = await judgedOnReader("l3");
+        expect(l3.verdict).to.deep.equal({ kind: "valid" });
+        expect(l3.proof.anchor).to.equal(2);
+        expect(l3.person).to.equal(did);
+
+        // 7. At the end, the logic read counts L1 and L3, not the late link or L2. L1 is still
+        // valid. With includeUnverified, the late link and L2 are there too.
+        expect((await onReaderLink("l1"))!.verdict).to.deep.equal({ kind: "valid" });
+        expect(await counted()).to.deep.equal(["rev://l1", "rev://l3"]);
+        expect(await shown()).to.deep.equal(["rev://l1", "rev://l2", "rev://l3", "rev://late"]);
+    });
+
+    it("revokes B's key: B reports it revoked", async () => {
+        // The test before revoked it (revokeD2 revokes one time).
+        const revoked = await revokeD2();
         expect(revoked.seq).to.equal(2);
         const bStatus = await b.client.identity.status();
         expect(bStatus.did).to.equal(did);
