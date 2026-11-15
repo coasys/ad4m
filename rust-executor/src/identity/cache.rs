@@ -67,9 +67,11 @@ const CHANGES_CAPACITY: usize = 1024;
 /// guest's claim lists it as `d1`), so after this the next read asks the store again.
 pub const NO_LOG_TTL: Duration = Duration::from_secs(15 * 60);
 /// How long a pending mark holds against the bound, and how long a full set of marks makes every
-/// key with no fresh answer count as pending after the last key it could not hold. Long enough
-/// for the batch that noted a key to judge its links; a later batch notes the key again.
-const PENDING_TTL: Duration = Duration::from_secs(15 * 60);
+/// key with no fresh answer count as pending after the last key it could not hold. The marks serve
+/// the checks after the batch that made them (a later write, a re-check), and a later batch notes
+/// the key again; the batch itself judges against its own hold ([`KeyMap::hold`]), which no TTL
+/// or bound takes away.
+pub(crate) const PENDING_TTL: Duration = Duration::from_secs(15 * 60);
 /// The most logs, the most "no log" answers and the most pending marks the key map holds.
 /// Past it the logs and the "no log" answers start over and fill again from the cache and the
 /// store; the pending marks never do ([`KeyMap::note_pending`]).
@@ -109,6 +111,11 @@ struct KeyMapInner {
     /// While set and in the future: the pending marks were full when a key was noted, so a
     /// key with no fresh answer counts as pending ([`KeyMap::note_pending`]).
     pending_full_until: Option<Instant>,
+    /// The signing keys of batches being judged now, each with how many [`PendingHold`]s name
+    /// it: one of them with no answer at judgment is pending, whatever became of its mark
+    /// (pruned past [`PENDING_TTL`], or never held while the marks were full). Outside the
+    /// bound: it holds only the keys of batches in flight, and each batch drops its own.
+    held: HashMap<String, usize>,
     /// The SCIDs of local identities (a row in `identity_agents`): the bound never drops them.
     pinned: HashSet<String>,
     /// SCID → when (unix seconds, this run) the configured store last confirmed its trusted
@@ -126,6 +133,44 @@ struct KeyMapInner {
 #[derive(Default)]
 pub struct KeyMap {
     inner: StdMutex<KeyMapInner>,
+}
+
+/// The signing keys of one batch, held as pending while its links are judged
+/// ([`KeyMap::hold`]). Keep it until the last link of the batch is judged; dropping it lets the
+/// keys go. `PendingHold::none()` holds nothing (no key map to hold them in).
+#[must_use = "the batch's keys are pending only while the hold lives: keep it until its links are judged"]
+pub struct PendingHold {
+    map: Option<Arc<KeyMap>>,
+    keys: Vec<String>,
+}
+
+impl PendingHold {
+    /// A hold of no key.
+    pub fn none() -> Self {
+        PendingHold {
+            map: None,
+            keys: Vec::new(),
+        }
+    }
+}
+
+impl Drop for PendingHold {
+    fn drop(&mut self) {
+        let Some(map) = self.map.take() else {
+            return;
+        };
+        let Ok(mut inner) = map.inner.lock() else {
+            return;
+        };
+        for key in self.keys.drain(..) {
+            if let Some(count) = inner.held.get_mut(&key) {
+                *count -= 1;
+                if *count == 0 {
+                    inner.held.remove(&key);
+                }
+            }
+        }
+    }
 }
 
 impl KeyMap {
@@ -250,10 +295,11 @@ impl KeyMap {
     /// Notes that `key` was asked about and has no answer yet ([`KeyMapInner::pending`]);
     /// cleared by the log that lists it or the store's "no log".
     ///
-    /// The bound never drops a mark a batch just made: that would turn the unanchored link of
-    /// a key it noted from `cantCheck` into `valid` with no person, and nothing re-checks a
-    /// `valid` link of a key no log lists. A full set first drops the marks older than
-    /// [`PENDING_TTL`] (their batches judged long ago; a new batch notes its keys again).
+    /// The bound never drops a fresh mark: that would turn the unanchored link of a key it
+    /// noted from `cantCheck` into `valid` with no person, and nothing re-checks a `valid` link
+    /// of a key no log lists. A full set first drops the marks older than [`PENDING_TTL`] (a
+    /// new batch notes its keys again; a batch still judging holds its keys itself,
+    /// [`KeyMap::hold`], so a slow batch loses nothing to the prune).
     /// When it is still full, the key is not held, and for [`PENDING_TTL`] from then every
     /// key with no fresh answer is pending ([`KeyMap::is_pending`]): the map cannot tell the
     /// keys it could not hold from the others.
@@ -286,14 +332,14 @@ impl KeyMap {
         }
     }
 
-    /// Whether `key` is asked about and unanswered ([`KeyMap::note_pending`]): it holds a
-    /// mark, or the marks were full within [`PENDING_TTL`] and the map has no answer for it
-    /// (no log lists it, no fresh "no log").
+    /// Whether `key` is asked about and unanswered ([`KeyMap::note_pending`]): a batch being
+    /// judged holds it ([`KeyMap::hold`]), it holds a mark, or the marks were full within
+    /// [`PENDING_TTL`] and the map has no answer for it (no log lists it, no fresh "no log").
     pub fn is_pending(&self, key: &str) -> bool {
         let Ok(inner) = self.inner.lock() else {
             return false;
         };
-        if inner.pending.contains_key(key) {
+        if inner.held.contains_key(key) || inner.pending.contains_key(key) {
             return true;
         }
         inner
@@ -304,6 +350,47 @@ impl KeyMap {
                 .no_log
                 .get(key)
                 .is_none_or(|at| at.elapsed() >= NO_LOG_TTL)
+    }
+
+    /// Holds `keys` (signing multikeys) as pending for one batch until the returned hold drops:
+    /// a key of them the map has no answer for when the batch's links are judged is pending
+    /// ([`KeyMap::is_pending`]), so its unanchored link is `CantCheck`, not `Valid` as one by a
+    /// key no log lists. The marks of [`KeyMap::note_pending`] are bounded and age out after
+    /// [`PENDING_TTL`]; nothing bounds how long a batch takes between its prepare and its
+    /// judgment (each signer's refresh waits on the store), so the batch keeps its own.
+    pub fn hold(self: &Arc<Self>, keys: impl IntoIterator<Item = String>) -> PendingHold {
+        let keys: Vec<String> = keys
+            .into_iter()
+            .collect::<HashSet<String>>()
+            .into_iter()
+            .collect();
+        if let Ok(mut inner) = self.inner.lock() {
+            for key in &keys {
+                *inner.held.entry(key.clone()).or_insert(0) += 1;
+            }
+        }
+        PendingHold {
+            map: Some(self.clone()),
+            keys,
+        }
+    }
+
+    /// Test-only: ages the pending mark of `key` to `at` (as if noted then).
+    #[cfg(test)]
+    pub(crate) fn note_pending_at(&self, key: &str, at: Instant) {
+        if let Ok(mut inner) = self.inner.lock() {
+            if let Some(mark) = inner.pending.get_mut(key) {
+                *mark = at;
+            }
+        }
+    }
+
+    /// Test-only: whether `key` holds a pending mark of its own (not a batch's hold).
+    #[cfg(test)]
+    pub(crate) fn has_pending_mark(&self, key: &str) -> bool {
+        self.inner
+            .lock()
+            .is_ok_and(|inner| inner.pending.contains_key(key))
     }
 
     /// The keys of `state` (listed at or below `trusted`) that hold a "no log" answer, fresh or
@@ -1700,6 +1787,42 @@ pub(crate) mod tests {
         assert!(map.is_pending("z6MkFresh") && map.is_pending("z6MkNext"));
         assert!(!map.is_pending("z6MkOld0"), "a stale mark went");
         assert_eq!(map.inner.lock().unwrap().pending.len(), 2);
+    }
+
+    /// A batch's hold keeps its keys pending whatever the marks do: a key noted once the set
+    /// was full holds no mark, and when the full window lapses before the batch judges, the
+    /// hold still answers pending. Two batches holding a key keep it until both drop; a hold of
+    /// a key with an answer changes nothing.
+    #[test]
+    fn a_batch_hold_keeps_its_keys_pending_past_the_full_window() {
+        let map = Arc::new(KeyMap::new());
+        {
+            let mut inner = map.inner.lock().unwrap();
+            for i in 0..KEY_MAP_BOUND {
+                inner.pending.insert(format!("z6MkFill{i}"), Instant::now());
+            }
+        }
+        let first = map.hold(["z6MkOverflow".to_string(), "z6MkOverflow".to_string()]);
+        let second = map.hold(["z6MkOverflow".to_string()]);
+        map.note_pending("z6MkOverflow");
+        assert!(!map.has_pending_mark("z6MkOverflow"), "the set was full");
+        // The full window lapses before the batch judges.
+        map.inner.lock().unwrap().pending_full_until =
+            Some(Instant::now() - Duration::from_secs(1));
+        assert!(
+            !map.is_pending("z6MkNeverHeld"),
+            "no hold, no mark, no full set"
+        );
+        assert!(map.is_pending("z6MkOverflow"), "held by both batches");
+        drop(first);
+        assert!(map.is_pending("z6MkOverflow"), "still held by the second");
+        drop(second);
+        assert!(!map.is_pending("z6MkOverflow"), "both batches are done");
+        assert!(map.inner.lock().unwrap().held.is_empty());
+
+        map.note_no_log("z6MkAnswered");
+        let _hold = map.hold(["z6MkAnswered".to_string()]);
+        assert!(matches!(map.lookup("z6MkAnswered"), KeyLookup::NoLog));
     }
 
     /// The store key [`FakeStore`] signs its heads with.
