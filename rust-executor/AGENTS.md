@@ -118,7 +118,7 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   credential required" for a caller without the credential); the admin credential on a
   network listener gets 403 `local-only`. It is on `agent.unlock`,
   `agent.signSessionStatement`, `identity.rekey`, `identity.custodyStatus`,
-  `identity.takeMaster`, `identity.prepareDevice`, `identity.endPrepared`, `identity.inbox`,
+  `identity.inboxSealed`, `identity.prepareDevice`, `identity.endPrepared`, `identity.inbox`,
   `identity.inboxAck`, `identity.unwrapRecordKey`, `identity.acceptJoin`, `identity.cancelJoin`,
   `storage.unlock`,
   `runtime.quit` and `runtime.restart`, and `runtime.setConfig`
@@ -233,7 +233,8 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
 - **Identity** (`identity/`): an agent's device key (the wallet key) may speak
   for a `did:scid` whose log lists it; the 12 words never reach the executor and the master key
   rests in none (apps hold them through `ad4m-identity-client`; a master key sealed to the
-  desktop app's computer opens only inside `identity.takeMaster`, for its custody service). The configured store's logs come through the
+  desktop app's computer is sealed to its custody service's own key, which the custody service
+  reads still sealed through `identity.inboxSealed`: the executor never opens it). The configured store's logs come through the
   agent language (`Capability::Identity*`, refused on any other language); a DID URL's foreign
   `src` is read by the executor itself (`identity/src_fetch.rs`, public addresses only at
   connect). The configured store's logs are kept after `fold` in `KelCache`; a foreign `src`
@@ -265,7 +266,7 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   `ad4m-executor rekey`) gives the main agent a new wallet key and moves the places that hold
   its DID (`identity/rekey.rs`); tokens signed with the old key stop working. A perspective
   that is not open at the time keeps the retired DID as owner until a later unlock moves it.
-  `identity.custodyStatus` and `identity.takeMaster` are the custody channel
+  `identity.custodyStatus` and `identity.inboxSealed` are the custody channel
   (`identity/custody.rs`): only the custody credential (a session with
   `Principal::Custody`) on a loopback listener opens it, never the admin credential,
   which an app's window may hold. The custody credential is no operator: off a loopback
@@ -277,8 +278,9 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   reads, can open (`/proc/<pid>/environ`, `/proc/<pid>/cmdline`). `AD4M_CUSTODY_CREDENTIAL`
   (or `_FILE`) set refuses the start, exit 78. Do not add another way in. The device inbox (`identity/inbox.rs`): the main agent's joined
   inbox is read at start, unlock, binding and every 15 minutes; an executor with the custody
-  channel keeps a master key message for `identity.takeMaster`, every other deletes it
-  unopened. `identity.prepareDevice` (and `ad4m-executor link-code`) shows a device string and
+  channel keeps each message, unopened, for `identity.inboxSealed` (the device key's `enc` is
+  the custody service's own key: a claim with `canKeepMaster` carries it, and only the custody
+  credential passes it); every other executor deletes each message unopened. `identity.prepareDevice` (and `ad4m-executor link-code`) shows a device string and
   claims the ticket a holder pushes to its pre-join inbox (`link-ticket`); `identity.endPrepared`
   ends that read and cancels its claims here (Cancel on the code screen; the store is not
   told); the private record

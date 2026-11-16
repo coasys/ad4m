@@ -16,8 +16,10 @@
 //! start and unlock, pushes what is left again until the store takes it or the key is no longer
 //! a device of the log.
 //!
-//! The device's side ([`take_master`]): its custody service takes the key its executor opened
-//! (`identity.takeMaster`), checks it against its own fold of the log, notes the mark it owes
+//! The device's side ([`take_master`]): its custody service opens the key with its own enc key
+//! (`identity.takeMaster`, answered by [`crate::WithEncKey`] from the sealed inbox, or on a
+//! phone by `ViaStore` from the store's inbox, both through one `take_from`; the executor
+//! opens nothing), checks it against its own fold of the log, notes the mark it owes
 //! (an intent, before the key exists), keeps it in the vault — under the vault's
 //! never-go-back rule, so an older key taken late never replaces a newer one already kept —
 //! acknowledges the message, and marks itself
@@ -519,10 +521,11 @@ fn retry_entry(key_id: &str) -> DeviceEntry {
     }
 }
 
-/// The device's side, after its own unlock: takes the master key its executor opened
-/// (`identity.takeMaster`, the custody channel), checks that it is the current master of the
-/// log as this app folds it, puts its intent on the custody note ([`CustodyNote::MarkOwed`]
-/// with the custody epoch read before it), keeps the key in `vault`, makes the intent a
+/// The device's side, after its own unlock: takes the master key sealed to its enc key
+/// (`identity.takeMaster`, which [`crate::WithEncKey`] answers, or a phone's `ViaStore`; never
+/// the executor), checks that it is the current master of the log as this app folds it, puts
+/// its intent on the custody note ([`CustodyNote::MarkOwed`] with the custody epoch read
+/// before it), keeps the key in `vault`, makes the intent a
 /// receipt when this store answered [`Stored::Stored`] ([`settle`]; else the intent is
 /// removed: a newer key that the vault keeps is another acquisition), acknowledges the
 /// message, marks this device in the record ([`hold_mark`], fenced by the custody epoch and
