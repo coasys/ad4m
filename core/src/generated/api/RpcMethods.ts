@@ -178,6 +178,7 @@ import type { PerspectiveUpdateSubjectParams } from "./PerspectiveUpdateSubjectP
 import type { PerspectiveUuidParams } from "./PerspectiveUuidParams";
 import type { PerspectiveVerifyFlowReceiptParams } from "./PerspectiveVerifyFlowReceiptParams";
 import type { PostRequestParams } from "./PostRequestParams";
+import type { PrepareDeviceParams } from "./PrepareDeviceParams";
 import type { PreparedDevice } from "./PreparedDevice";
 import type { PreparedEnded } from "./PreparedEnded";
 import type { PromptRequest } from "./PromptRequest";
@@ -211,6 +212,7 @@ import type { RuntimeSetFreeHostingEnabledParams } from "./RuntimeSetFreeHosting
 import type { RuntimeUnytSendHotParams } from "./RuntimeUnytSendHotParams";
 import type { RuntimeUnytWalletHistoryParams } from "./RuntimeUnytWalletHistoryParams";
 import type { RuntimeUpdateNotificationParams } from "./RuntimeUpdateNotificationParams";
+import type { SealedInboxMessage } from "./SealedInboxMessage";
 import type { SentMessage } from "./SentMessage";
 import type { SessionChallenge } from "./SessionChallenge";
 import type { SessionInfo } from "./SessionInfo";
@@ -244,7 +246,6 @@ import type { SignSessionStatementParams } from "./SignSessionStatementParams";
 import type { SignedHead } from "./SignedHead";
 import type { SignedKeyStatement } from "./SignedKeyStatement";
 import type { StoredRecord } from "./StoredRecord";
-import type { TakenMaster } from "./TakenMaster";
 import type { TrustedAgentsWrapper } from "./TrustedAgentsWrapper";
 import type { UnlockAgentRequest } from "./UnlockAgentRequest";
 import type { UnytVersionInfo } from "./UnytVersionInfo";
@@ -352,12 +353,13 @@ export interface RpcMethods {
   "identity.inbox": { params: Record<string, never>; result: Array<InboxEntry> };
   "identity.inboxAck": { params: InboxAckParams; result: boolean };
   "identity.inboxPut": { params: InboxPutParams; result: InboxStored };
+  "identity.inboxSealed": { params: Record<string, never>; result: Array<SealedInboxMessage> };
   "identity.joinStatus": { params: JoinStatusParams; result: JoinStatus };
   "identity.log": { params: LogParams; result: IdentityLog };
   "identity.offers": { params: OffersParams; result: Array<OfferListing> };
   "identity.openOffer": { params: OpenOfferParams; result: OfferOpened };
   "identity.postRequest": { params: PostRequestParams; result: RequestPosted };
-  "identity.prepareDevice": { params: Record<string, never>; result: PreparedDevice };
+  "identity.prepareDevice": { params: PrepareDeviceParams; result: PreparedDevice };
   "identity.publish": { params: PublishParams; result: SignedHead };
   "identity.record": { params: RecordParams; result: StoredRecord | null };
   "identity.recordPut": { params: RecordPutParams; result: RecordStored };
@@ -366,7 +368,6 @@ export interface RpcMethods {
   "identity.resetLog": { params: ResetLogParams; result: boolean };
   "identity.resolve": { params: ResolveParams; result: DidResolutionResult };
   "identity.status": { params: Record<string, never>; result: IdentityStatus };
-  "identity.takeMaster": { params: Record<string, never>; result: TakenMaster | null };
   "language.all": { params: LanguageListParams; result: Array<LanguageHandle> };
   "language.applyTemplate": { params: ApplyTemplateRequest; result: LanguageRef };
   "language.get": { params: LanguageAddressParams; result: LanguageHandle };
@@ -558,6 +559,7 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "identity.custodyStatus",
   "identity.devices",
   "identity.inbox",
+  "identity.inboxSealed",
   "identity.log",
   "identity.offers",
   "identity.record",

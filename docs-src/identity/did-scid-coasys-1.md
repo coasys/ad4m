@@ -654,8 +654,9 @@ signature against its own copy of the log.
 **Seals.** One construction for every sealed value: HPKE (RFC 9180) base mode, single shot,
 DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, ChaCha20-Poly1305, empty AAD. A sealed text is
 `base64url(enc ‖ ciphertext)` without padding (32-byte encapsulated key, then the ciphertext
-with its 16-byte tag). The recipient is an X25519 key: a device key's `enc` in the log (for an
-executor's key, the Montgomery form of its Ed25519 key), or the recovery key (section 15).
+with its 16-byte tag). The recipient is an X25519 key: a device key's `enc` in the log (for a
+desktop computer, the custody service's own X25519 key; for a server, the Montgomery form of its
+Ed25519 key), or the recovery key (section 15).
 
 **Inbox addresses.** Before a device joins, its device string gives the pre-join address
 `base58btc(sha256(signing_bytes("coasys:inbox", {"sign": sign, "r": r})))` (raw digest), written
@@ -787,15 +788,16 @@ a new string ends the read of the last one.
 - A master key is the only body a joined inbox carries. An executor started without the
   custody channel (a server, a host) keeps no master key: it deletes each message of its
   joined inbox unopened and logs an error. Its claims never say `canKeepMaster`.
-- An executor with the custody channel (the desktop app's) opens each new message to learn
-  its type, wipes the plaintext, leaves the message at the host and tells the operator on its
-  machine (`inbox-message {id, kind}`, never a body). Its custody service then calls
-  `identity.takeMaster`: the executor opens the messages again, oldest first, checks each
-  against its refreshed copy of the log as above, and answers the first current master key
-  (`{messageId, did, index, secret}`) or `null`. A stale key, or one that fails a check, is
-  deleted. The message stays until the custody service acknowledges it
-  (`identity.inboxAck`, which on such an executor only the custody credential may call) after
-  storing the key. Only the custody credential (which only the
+- On an executor with the custody channel (the desktop app's), the device key's `enc` in the
+  log is the custody service's own X25519 key, so the executor cannot open a joined message
+  and never tries. It leaves each message at the host and tells the operator on its machine of
+  a new one once (`inbox-message {id}`, never a body). Its custody service then calls
+  `identity.inboxSealed`, which answers each joined message as the host holds it, oldest first:
+  `{id, sealed, scid, keyId, storedAt, expires}`. The custody service opens each with its own
+  key, checks it against its copy of the log as above, stores a current master key and drops
+  a stale one. A message stays until the custody service acknowledges it
+  (`identity.inboxAck`, which on such an executor only the custody credential may call). Only
+  the custody credential (which only the
   custody service holds) on a loopback listener of an executor started with
   `--custody-channel` gets this answer. The custody service hands the executor that
   credential as the first line of its stdin at start, and the executor keeps it in memory
@@ -803,8 +805,7 @@ a new string ends the read of the last one.
   can read (`/proc/<pid>/environ`), as can the admin credential, which reads host files. An
   executor with `AD4M_CUSTODY_CREDENTIAL` set refuses to start. The admin credential, an app,
   a network listener, a device-key login and an operator without a credential are refused (403
-  `no-custody-channel`). The key reaches the answer only: no log line, event, store or
-  language, and the executor wipes its copy.
+  `no-custody-channel`). No master key is ever in the executor's memory.
 - A master key in a pre-join inbox is dropped: a master key never travels before the device
   joined. A valid offer ticket is claimed under the executor's first-link rule (a record
   naming another identity refuses it; so does no record, except on a desktop's first run: an
@@ -812,7 +813,10 @@ a new string ends the read of the last one.
   an identity as operator, `FirstRun`, only when its main agent joins it: the holder confirmed
   the match code, the add listing the device key is in the log and the operator on this
   machine accepted the claim; until then it may claim again, for the same or another
-  identity), with `canKeepMaster` exactly when the executor has the custody channel; only a
+  identity), with `canKeepMaster` and the custody service's key as the claim's `enc` exactly
+  when the custody service showed the device string with that key (`identity.prepareDevice
+  {enc}`, the custody credential only); otherwise with the wallet's key and without
+  `canKeepMaster`. Only a
   claim made shows the identity and the match code (`link-ticket`). The ticket is deleted
   either way; one whose log cannot be read now waits for the next read.
 - Anyone who sees the device string can deliver a ticket, so a first-run claim is held:

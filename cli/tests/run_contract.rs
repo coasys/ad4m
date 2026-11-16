@@ -573,7 +573,7 @@ async fn the_custody_channel_answers_only_the_custody_credential_on_loopback_wit
         .call("agent.generate", json!({ "passphrase": "run-contract" }))
         .await
         .unwrap();
-    for method in ["identity.custodyStatus", "identity.takeMaster"] {
+    for method in ["identity.custodyStatus", "identity.inboxSealed"] {
         let refused = refusal(admin.call::<Value>(method, json!({})).await);
         assert!(
             refused.starts_with("RPC error 403: no-custody-channel"),

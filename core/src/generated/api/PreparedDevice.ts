@@ -2,6 +2,7 @@
 
 /**
  * `identity.prepareDevice`: this executor's device string (`coasys:device:1:…`), shown as a QR
- * code, and the keys it holds; the executor reads its pre-join inbox until `expires`.
+ * code, and the keys it holds; the executor reads its pre-join inbox until `expires`. `enc` is
+ * the string's: the wallet's X25519 key, which opens the pre-join ticket.
  */
 export type PreparedDevice = { sign: string, enc: string, device: string, expires: number, };

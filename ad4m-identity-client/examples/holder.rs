@@ -12,6 +12,8 @@
 //! {"cmd":"revoke","did":"did:scid:…","keyIds":["d2"]}            -> {"seq"}
 //! {"cmd":"sealMaster","did":"did:scid:…","keyId":"d1"}          -> {"id","secret"}
 //! {"cmd":"openBound","did":"…","store":"http://…","device":"coasys:device:1:…"} -> {"offerId","messageId"}
+//! {"cmd":"custodyKey"}                                          -> {"enc"}
+//! {"cmd":"openSealed","did":"…","message":{…}}                    -> {"did","index","secret"}
 //! ```
 //!
 //! `sealMaster` seals the current master key to the device `keyId`'s `enc` key in the log and
@@ -19,6 +21,10 @@
 //! secret so a test can compare what the device takes. `openBound` opens an offer bound to the
 //! device string's key and pushes its ticket into the device's pre-join inbox; `waitClaim` and
 //! `confirm` then follow it as for `open`.
+//!
+//! `custodyKey` and `openSealed` play a desktop's custody service: a new X25519 key of its own,
+//! then a message from `identity.inboxSealed` opened with that key and checked against the log,
+//! answering the master key it holds.
 //!
 //! Build: `cargo build -p ad4m-identity-client --example holder --features ws,test-vault`.
 
@@ -32,9 +38,13 @@ use ad4m_identity_client::flows::link::{Claimed, LinkFlow};
 use ad4m_identity_client::flows::revoke::revoke;
 use ad4m_identity_client::{Clock, ExecutorRpc, MemoryVault, OsRandom, SystemClock, ViaExecutor};
 use ad4m_identity_core::build::Signer;
-use ad4m_identity_core::inbox::{pre_address, seal, sign_payload, InboxAddress, InboxBody};
+use ad4m_identity_core::inbox::{
+    check_payload, open, pre_address, seal, sign_payload, Accept, InboxAddress, InboxBody,
+};
 use ad4m_identity_core::link::{DeviceString, OfferKind, SignedBy};
-use ad4m_identity_core::{signing_bytes, words, KelChain, REQUEST_DOMAIN};
+use ad4m_identity_core::{
+    signing_bytes, words, x25519_multikey_of, KelChain, X25519Secret, REQUEST_DOMAIN,
+};
 use ad4m_ldk::identity::{InboxBind, InboxWrite, RequestBody, SignedRequest};
 use ed25519_dalek::SigningKey;
 use serde_json::{json, Value};
@@ -208,6 +218,40 @@ async fn seal_master(
     Ok(json!({ "id": stored["id"], "secret": secret }))
 }
 
+/// `openSealed`: opens `message` (one entry of `identity.inboxSealed`) with the custody key, as
+/// the custody service does, checks it against `did`'s log and answers the master key in it.
+async fn open_sealed(
+    executor: &ViaExecutor<WsRpcClient>,
+    custody: &X25519Secret,
+    did: &str,
+    message: &Value,
+) -> Result<Value, String> {
+    let scid = field(message, "scid")?;
+    let key_id = field(message, "keyId")?;
+    let address = InboxAddress::Joined {
+        scid: scid.to_string(),
+        key_id: key_id.to_string(),
+    };
+    let payload = open(custody, &address, field(message, "sealed")?).map_err(|e| e.to_string())?;
+    let (chain, _) = log_of(executor, did).await?;
+    let me = chain
+        .state()
+        .keys
+        .get(key_id)
+        .ok_or("the log lists no such key")?
+        .sign
+        .clone();
+    match check_payload(&payload, &me, &chain, CLOCK.now()).map_err(|e| e.to_string())? {
+        Accept::KeepMaster { .. } => match payload.body {
+            InboxBody::Master { did, index, secret } => {
+                Ok(json!({ "did": did, "index": index, "secret": secret }))
+            }
+            _ => Err("the message holds no master key".into()),
+        },
+        other => Err(format!("the message is no current master key: {other:?}")),
+    }
+}
+
 /// Pushes `flow`'s ticket into the pre-join inbox of the device string `device`.
 async fn push_ticket(
     executor: &ViaExecutor<WsRpcClient>,
@@ -295,6 +339,7 @@ async fn main() {
     let mut link: Option<LinkFlow<'_, WsRpcClient>> = None;
     let mut claimed: Option<Claimed> = None;
     let mut masters = Masters::new();
+    let mut custody: Option<X25519Secret> = None;
 
     for line in lines {
         let Ok(line) = line else { return };
@@ -312,6 +357,22 @@ async fn main() {
                     let did = field(&command, "did")?;
                     let key_id = field(&command, "keyId")?;
                     seal_master(&executor, &masters, did, key_id).await
+                }
+                .await
+            }
+            Some("custodyKey") => {
+                let mut bytes = [0u8; 32];
+                rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut bytes);
+                let secret = X25519Secret::from(bytes);
+                let enc = x25519_multikey_of(&secret);
+                custody = Some(secret);
+                Ok(json!({ "enc": enc }))
+            }
+            Some("openSealed") => {
+                async {
+                    let key = custody.as_ref().ok_or("make a custody key first")?;
+                    let did = field(&command, "did")?;
+                    open_sealed(&executor, key, did, &command["message"]).await
                 }
                 .await
             }

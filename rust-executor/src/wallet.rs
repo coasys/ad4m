@@ -437,6 +437,12 @@ pub const KEY_NAME_PLATFORM: &str = "platform";
 
 // ── WalletBackend trait ─────────────────────────────────────────────────────
 
+/// Every address [`WalletBackend::open_sealed`] was asked to open, by any wallet: a test shows
+/// with it that an inbox the executor must not open never was.
+#[cfg(test)]
+pub(crate) static OPENED_FOR_TEST: Mutex<Vec<ad4m_identity_core::inbox::InboxAddress>> =
+    Mutex::new(Vec::new());
+
 /// Abstracts key operations so different wallet implementations can coexist.
 /// `Send + Sync` required — accessed from multiple Deno worker threads.
 pub trait WalletBackend: Send + Sync {
@@ -544,6 +550,11 @@ pub trait WalletBackend: Send + Sync {
         address: &ad4m_identity_core::inbox::InboxAddress,
         sealed: &str,
     ) -> Result<ad4m_identity_core::inbox::InboxPayload, AnyError> {
+        #[cfg(test)]
+        OPENED_FOR_TEST
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(address.clone());
         let secret = Zeroizing::new(
             self.get_secret_key(name)
                 .ok_or_else(|| anyhow!("{name} key not found"))?,

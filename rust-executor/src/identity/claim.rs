@@ -1,6 +1,7 @@
 //! `ClaimService`: the executor's side of a link. It answers an offer with one of
-//! its wallet keys and that key's `enc` key, co-signs the claim, and follows the offer until the
-//! holder's `add` lists the key.
+//! its wallet keys and that key's `enc` key (on a desktop app's computer, the custody service's
+//! own X25519 key instead, with `canKeepMaster`), co-signs the claim, and follows the offer
+//! until the holder's `add` lists the key.
 //!
 //! `claim_for_main` claims with the main wallet key and first runs the first-link rule
 //! (`operator::first_link_check`): every path that claims for the main agent calls it, the
@@ -74,13 +75,21 @@ impl ClaimService<'_> {
     /// `--custody-channel` executor whose main agent speaks for no identity (a desktop app's
     /// first run) the claim goes ahead, records nothing and is held for accept
     /// (`needs_accept`): the operator is recorded only when the main agent joins (`join_status`)
-    /// after `identity.acceptJoin`. `can_keep_master` goes into the claim the main key co-signs.
+    /// after `identity.acceptJoin`. `custody_enc` is the custody service's own X25519 key: with
+    /// it the claim the main key co-signs says `canKeepMaster` and carries that key, so a master
+    /// key is sealed to the custody service; without it the claim says neither and carries the
+    /// wallet's X25519 key.
     pub async fn claim_for_main(
         &self,
         offer: &OfferString,
-        can_keep_master: bool,
+        custody_enc: Option<&str>,
         hint: Option<String>,
     ) -> Result<ClaimOfferResult, WsRpcError> {
+        if custody_enc.is_some_and(|enc| !ad4m_identity_core::is_x25519_multikey(enc)) {
+            return Err(WsRpcError::bad_request(
+                "invalid: enc is not an X25519 multikey",
+            ));
+        }
         self.identity.refuse_without_store_keys()?;
         let offer_did = did_of(&offer.scid);
         let record = db(|db| db.operator_record())?;
@@ -108,7 +117,10 @@ impl ClaimService<'_> {
         let secret = link::decode_secret(&offer.s)
             .ok_or_else(|| WsRpcError::bad_request("invalid: the offer's secret is malformed"))?;
         let (_, key) = device_key(&main).map_err(WsRpcError::internal)?;
-        let enc = enc_key_of(&key).map_err(WsRpcError::internal)?;
+        let enc = match custody_enc {
+            Some(enc) => enc.to_string(),
+            None => enc_key_of(&key).map_err(WsRpcError::internal)?,
+        };
         let signer = WalletSigner::new(&main).map_err(WsRpcError::internal)?;
         let claim = link::make_claim(
             &offer.scid,
@@ -116,7 +128,7 @@ impl ClaimService<'_> {
             secret,
             &signer,
             enc,
-            can_keep_master,
+            custody_enc.is_some(),
             hint,
         )
         .map_err(|e| WsRpcError::bad_request(format!("invalid: {e}")))?;
