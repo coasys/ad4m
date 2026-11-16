@@ -1,9 +1,11 @@
-//! The custody channel: the path by which the desktop app's custody service takes a master key
-//! that arrived sealed to this computer's device key. The custody service keeps the person's
-//! master key (`ad4m-identity-client`); the executor never stores one, and its main agent's key
-//! is its `main` wallet key, a device key. A master key sent to this computer arrives in the main
-//! agent's device inbox: the executor opens it in memory, hands it once to the custody service
-//! on this channel, then drops it (`identity.takeMaster`). It is no listener of its own: it is the
+//! The custody channel: the path by which the desktop app's custody service reads a master key
+//! sent to this computer. The custody service keeps the person's master key
+//! (`ad4m-identity-client`); the executor never holds one, and its main agent's key is its
+//! `main` wallet key, a device key. The log lists the custody service's own X25519 key as this
+//! device key's `enc` (the custody service passes it with `identity.claimOffer` or
+//! `identity.prepareDevice`), so a master key sent here is sealed to a key the executor does not
+//! hold: it waits in the main agent's device inbox, and the custody service reads it still
+//! sealed on this channel (`identity.inboxSealed`). It is no listener of its own: it is the
 //! custody credential on a loopback listener of an executor started with `--custody-channel`.
 //! The credential arrives as the first line of stdin
 //! ([`read_custody_credential`](crate::config::read_custody_credential)), never in the
@@ -14,8 +16,10 @@
 //! it call only [`CUSTODY_METHODS`] ([`admit_call`]), whatever the methods' own guards say. The
 //! admin credential never opens the channel: an app's window may hold that one, and must not
 //! take a master key. [`admit`] is the channel's own guard, for `identity.custodyStatus`,
-//! `identity.takeMaster`, a claim that keeps the master key (`identity.claimOffer` with
-//! `canKeepMaster`) and, on a `--custody-channel` executor, `identity.inboxAck`.
+//! `identity.inboxSealed`, a claim that keeps the master key (`identity.claimOffer` with
+//! `canKeepMaster` and `enc`, `identity.prepareDevice` with `enc`), the custody service's key
+//! in an incept (`identity.cosignIncept`) and, on a `--custody-channel` executor,
+//! `identity.inboxAck`.
 //!
 //! [`Principal::Custody`]: crate::agent::session::Principal::Custody
 
@@ -52,7 +56,7 @@ pub const CUSTODY_METHODS: &[&str] = &[
     "identity.inbox",
     "identity.inboxAck",
     "identity.inboxPut",
-    "identity.takeMaster",
+    "identity.inboxSealed",
     "identity.custodyStatus",
     "identity.record",
     "identity.recordPut",
@@ -158,7 +162,7 @@ mod tests {
         assert!(refused.message.starts_with(NOT_A_CUSTODY_CALL));
 
         let remote = custody.on_network();
-        let refused = admit_call("identity.takeMaster", &remote).unwrap_err();
+        let refused = admit_call("identity.inboxSealed", &remote).unwrap_err();
         assert_eq!(refused.code, 403);
         assert!(refused.message.starts_with(NO_CUSTODY_CHANNEL));
     }

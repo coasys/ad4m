@@ -298,11 +298,18 @@ pub struct ClaimOfferParams {
     #[ts(optional)]
     #[serde(default)]
     pub hint: Option<String>,
-    /// The claim says this device may keep the master key: only an executor started with
-    /// `--custody-channel` (the desktop app's) may say so. Default `false`.
+    /// The claim says this device may keep the master key: only the custody service of an
+    /// executor started with `--custody-channel` (the desktop app's) may say so, with `enc`.
+    /// Default `false`.
     #[ts(optional)]
     #[serde(default)]
     pub can_keep_master: Option<bool>,
+    /// The custody service's own X25519 key (`z6LS…`): the claim carries it as `encKey`, so the
+    /// log lists it and a master key is sealed to it, never to a key this executor opens.
+    /// Required with `canKeepMaster: true` (`no-custody-enc`), refused without it.
+    #[ts(optional)]
+    #[serde(default)]
+    pub enc: Option<String>,
 }
 
 /// An executor's device keys from its one wallet key: the `did:key` it signs with, and the
@@ -415,7 +422,8 @@ pub struct DeviceView {
 }
 
 /// `identity.prepareDevice`: this executor's device string (`coasys:device:1:…`), shown as a QR
-/// code, and the keys it holds; the executor reads its pre-join inbox until `expires`.
+/// code, and the keys it holds; the executor reads its pre-join inbox until `expires`. `enc` is
+/// the string's: the wallet's X25519 key, which opens the pre-join ticket.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct PreparedDevice {
@@ -424,6 +432,18 @@ pub struct PreparedDevice {
     pub device: String,
     #[ts(type = "number")]
     pub expires: u64,
+}
+
+/// `identity.prepareDevice` params.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct PrepareDeviceParams {
+    /// The custody service's own X25519 key (custody channel only). With it a ticket's claim
+    /// says `canKeepMaster: true` and carries this key; without it the claim says `false` and
+    /// carries the wallet's X25519 key.
+    #[ts(optional)]
+    #[serde(default)]
+    pub enc: Option<String>,
 }
 
 /// `identity.endPrepared` params: the device string `identity.prepareDevice` answered.
@@ -497,23 +517,29 @@ pub struct InboxStored {
     pub expires: u64,
 }
 
-/// What a message of the device inbox carries; the type sits inside the seal.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "kebab-case")]
-pub enum InboxMessageType {
-    /// A master key for the custody service (`identity.takeMaster`).
-    Master,
-    /// An offer to claim.
-    OfferTicket,
-}
-
-/// One message waiting in this executor's inbox (`identity.inbox`): its id and body type
-/// (`kind`, as in `inbox-message`), never its body.
+/// One message waiting in this executor's joined inbox (`identity.inbox`): its id and times,
+/// never its body or its type (the executor opens no joined message).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct InboxEntry {
     pub id: String,
-    pub kind: InboxMessageType,
+    #[ts(type = "number")]
+    pub stored_at: u64,
+    #[ts(type = "number")]
+    pub expires: u64,
+}
+
+/// `identity.inboxSealed`: one joined message of the main agent, as the store keeps it. The
+/// custody channel's call: the executor does not open it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct SealedInboxMessage {
+    pub id: String,
+    /// base64url HPKE text, sealed to the enc key the log lists for this device key.
+    pub sealed: String,
+    /// The address the seal's `info` binds: `{scid, keyId}`.
+    pub scid: String,
+    pub key_id: String,
     #[ts(type = "number")]
     pub stored_at: u64,
     #[ts(type = "number")]
@@ -525,36 +551,6 @@ pub struct InboxEntry {
 #[serde(rename_all = "camelCase")]
 pub struct InboxAckParams {
     pub id: String,
-}
-
-/// `identity.takeMaster`: the master key a holder sealed to this computer, for the custody
-/// service only. Wiped when dropped and never cloned: the executor keeps no copy.
-#[derive(PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-pub struct TakenMaster {
-    /// Acknowledge it (`identity.inboxAck`) once the key is stored.
-    pub message_id: String,
-    pub did: String,
-    /// The master key's number in the log.
-    pub index: u32,
-    /// The Ed25519 secret of master `index`, 32 bytes, base58btc.
-    pub secret: String,
-}
-
-impl Drop for TakenMaster {
-    fn drop(&mut self) {
-        zeroize::Zeroize::zeroize(&mut self.secret);
-    }
-}
-
-impl std::fmt::Debug for TakenMaster {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TakenMaster")
-            .field("message_id", &self.message_id)
-            .field("did", &self.did)
-            .field("index", &self.index)
-            .finish_non_exhaustive()
-    }
 }
 
 /// The private details record as the store keeps it: the executor passes it and never
@@ -759,14 +755,12 @@ pub struct LinkTicketEvent {
     pub needs_accept: bool,
 }
 
-/// `inbox-message`: a message waits in this executor's inbox; for a `master` the custody
-/// service calls `identity.takeMaster` after the computer's unlock. The body type is `kind`:
-/// an event's `type` on the wire is its name.
+/// `inbox-message`: a message waits in this executor's joined inbox; the custody service reads
+/// it with `identity.inboxSealed` and opens it itself.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct InboxMessageEvent {
     pub id: String,
-    pub kind: InboxMessageType,
 }
 
 /// `identity-fork`: the cache found two different valid events at one seq of a log. It kept its

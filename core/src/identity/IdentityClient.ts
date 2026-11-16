@@ -23,9 +23,9 @@ import type { PreparedDevice } from "../generated/api/PreparedDevice";
 import type { PreparedEnded } from "../generated/api/PreparedEnded";
 import type { RecordStored } from "../generated/api/RecordStored";
 import type { RequestPosted } from "../generated/api/RequestPosted";
+import type { SealedInboxMessage } from "../generated/api/SealedInboxMessage";
 import type { SealedRecord } from "../generated/api/SealedRecord";
 import type { StoredRecord } from "../generated/api/StoredRecord";
-import type { TakenMaster } from "../generated/api/TakenMaster";
 
 /**
  * The executor's `did:scid:coasys:1` calls.
@@ -113,13 +113,21 @@ export class IdentityClient {
 
     /**
      * Claims an offer link for this executor (the operator only). `canKeepMaster` says this
-     * device keeps the master key, which only an executor started with `--custody-channel`
-     * may say (403 `no-custody-channel` otherwise). Claiming the same offer again keeps the
-     * claim as it is (`needsAccept` as it stands): 409 `cancelled` once cancelled, 409
-     * `offer-conflict` when the offer was claimed for another identity.
+     * device keeps the master key, and `enc` is the custody service's own X25519 key, which
+     * the claim carries so a master key is sealed to it. Only the custody service of an
+     * executor started with `--custody-channel` passes them (403 `no-custody-channel`
+     * otherwise), and only together (400 `no-custody-enc` for `canKeepMaster` without `enc`,
+     * 400 for `enc` without `canKeepMaster`). Claiming the same offer again keeps the claim as
+     * it is (`needsAccept` as it stands): 409 `cancelled` once cancelled, 409 `offer-conflict`
+     * when the offer was claimed for another identity.
      */
-    async claimOffer(offer: string, hint?: string, canKeepMaster?: boolean): Promise<ClaimOfferResult> {
-        return this.#apiClient.call("identity.claimOffer", { offer, hint, canKeepMaster });
+    async claimOffer(
+        offer: string,
+        hint?: string,
+        canKeepMaster?: boolean,
+        enc?: string,
+    ): Promise<ClaimOfferResult> {
+        return this.#apiClient.call("identity.claimOffer", { offer, hint, canKeepMaster, enc });
     }
 
     /**
@@ -162,10 +170,11 @@ export class IdentityClient {
      * This executor's device string (`coasys:device:1:…`), to show as a QR code. Until it
      * expires (5 minutes) the executor reads its pre-join inbox; a holder's ticket raises
      * `link-ticket` (the identity and the match code) once the executor claimed it. The operator
-     * on this machine only.
+     * on this machine only. With `enc`, the custody service's own X25519 key (custody channel
+     * only, 403 otherwise), the claim says `canKeepMaster` and carries that key.
      */
-    async prepareDevice(): Promise<PreparedDevice> {
-        return this.#apiClient.call("identity.prepareDevice", {});
+    async prepareDevice(enc?: string): Promise<PreparedDevice> {
+        return this.#apiClient.call("identity.prepareDevice", { enc });
     }
 
     /**
@@ -195,20 +204,21 @@ export class IdentityClient {
         return this.#apiClient.call("identity.inboxPut", { address, sealed, request, bind });
     }
 
-    /** This executor's waiting inbox messages, by id and body type (`kind`) only. The operator on this machine only. */
+    /** This executor's waiting inbox messages, by id and times only. The operator on this machine only. */
     async inbox(): Promise<InboxEntry[]> {
         return this.#apiClient.call("identity.inbox", {});
     }
 
     /**
-     * The custody channel: the master key a holder sealed to this computer, checked against
-     * the log, or `null`. Only the custody credential (the first line of the executor's stdin) on a loopback
-     * listener of an executor started with `--custody-channel`; any other caller, the admin
-     * credential included, gets 403. Acknowledge the message
-     * (`inboxAck`) once the key is stored.
+     * The custody channel: this computer's joined inbox messages, still sealed to the custody
+     * service's own key, with the address each was sealed for (`scid`, `keyId`). The executor
+     * opens none; the custody service opens each, checks it against the log, and acknowledges
+     * it (`inboxAck`) once stored. Only the custody credential (the first line of the
+     * executor's stdin) on a loopback listener of an executor started with
+     * `--custody-channel`; any other caller, the admin credential included, gets 403.
      */
-    async takeMaster(): Promise<TakenMaster | null> {
-        return this.#apiClient.call("identity.takeMaster", {});
+    async inboxSealed(): Promise<SealedInboxMessage[]> {
+        return this.#apiClient.call("identity.inboxSealed", {});
     }
 
     /** Deletes inbox message `id` at the store. The operator on this machine only. */

@@ -16,9 +16,9 @@ identity each local agent's device key speaks for, the key logs it checked, and 
 | `head.rs` | `verify_head` (`ad4m_identity_core::HeadStatement` under a key of `identity.storeKeys`) |
 | `device.rs` | the agent's device key, its X25519 `enc` key (`did_key`, no second secret), `WalletSigner`, `store_request` (a store request signed by a device key at a store-signed head) and `body_bytes` (the JCS bytes its `bodyHash` covers) |
 | `operator.rs` | `admits_first_link`, `first_link_check`, `main_incept_check`, `record_operator_at_init` (`ad4m-executor init --operator`) |
-| `custody.rs` | The custody channel's guard `admit` (the custody credential = `Principal::Custody`, on a loopback listener of an executor started with `--custody-channel`; the admin credential and every other caller get 403 `no-custody-channel`) and `CUSTODY_METHODS` with `admit_call`: the custody credential is no operator and holds no capability; dispatch lets it reach only the calls on that list (403 `not-a-custody-call` for any other), and `Session::open` refuses it off a loopback listener. The credential is the first line of stdin at start (`config::read_custody_credential`), held in memory only and wiped on drop: never the environment or a flag, which `/proc/<pid>/environ` and `/proc/<pid>/cmdline` show to other processes and to the admin credential's host file reads. `run` exits 78 without the line, with an empty line, with the admin credential's value, or with `AD4M_CUSTODY_CREDENTIAL`/`_FILE` set, and `main_device_keys`; its calls are `identity.custodyStatus`, `identity.takeMaster`, a `identity.claimOffer` with `canKeepMaster`, and `identity.acceptJoin` / `identity.cancelJoin` (the desktop's first-run claim), `identity.prepareDevice` / `identity.endPrepared` (the code screen) |
-| `inbox.rs` | The device inbox: `Inbox` (the joined messages opened here, by id and type, never a body; one read of the joined inbox at a time; the open pre-join read; the pull's wake-up), `pull_inbox` (`identity.inbox`), `take_master` (`identity.takeMaster`), `inbox_ack`, `inbox_put`, `prepare_device` (`identity.prepareDevice`: the device string and the pre-join read; `take_ticket` claims and, once claimed, sends `link-ticket`), `end_prepared` (`identity.endPrepared`: ends a device string's read and cancels its claims here, in its own task `end_claims`; the first answer kept in `Prepared::ended`), `run_pull` / `run_schedule` / `wake` (at start, at unlock and binding, every 15 minutes) |
-| `record.rs` | `DevicePosition` (an agent's device key at its log's trusted seq: what a store request it signs names; `device_position`, `bound_position`), and the private record and request box calls (`identity.record`, `recordPut`, `unwrapRecordKey`, `requests`, `postRequest`, `deleteRequest`): the request the caller's master key signed, or one the agent's device key signs; a post is the device key's only |
+| `custody.rs` | The custody channel's guard `admit` (the custody credential = `Principal::Custody`, on a loopback listener of an executor started with `--custody-channel`; the admin credential and every other caller get 403 `no-custody-channel`) and `CUSTODY_METHODS` with `admit_call`: the custody credential is no operator and holds no capability; dispatch lets it reach only the calls on that list (403 `not-a-custody-call` for any other), and `Session::open` refuses it off a loopback listener. The credential is the first line of stdin at start (`config::read_custody_credential`), held in memory only and wiped on drop: never the environment or a flag, which `/proc/<pid>/environ` and `/proc/<pid>/cmdline` show to other processes and to the admin credential's host file reads. `run` exits 78 without the line, with an empty line, with the admin credential's value, or with `AD4M_CUSTODY_CREDENTIAL`/`_FILE` set, and `main_device_keys`; its calls are `identity.custodyStatus`, `identity.inboxSealed`, a `identity.claimOffer` with `canKeepMaster` and `enc`, a `identity.cosignIncept` listing the custody service's key, a `identity.prepareDevice` with `enc`, and `identity.acceptJoin` / `identity.cancelJoin` (the desktop's first-run claim), `identity.prepareDevice` / `identity.endPrepared` (the code screen) |
+| `inbox.rs` | The device inbox: `Inbox` (the joined messages seen here, by id and times, never a body; one read of the joined inbox at a time; the open pre-join read; the pull's wake-up), `pull_inbox` (`identity.inbox`), `inbox_sealed` (`identity.inboxSealed`), `inbox_ack`, `inbox_put`, `prepare_device` (`identity.prepareDevice`: the device string and the pre-join read; `take_ticket` claims and, once claimed, sends `link-ticket`), `end_prepared` (`identity.endPrepared`: ends a device string's read and cancels its claims here, in its own task `end_claims`; the first answer kept in `Prepared::ended`), `run_pull` / `run_schedule` / `wake` (at start, at unlock and binding, every 15 minutes) |
+| `record.rs` | `DevicePosition` (an agent's device key at its log's trusted seq: what a store request it signs names; `device_position`, `bound_position`), and the private record and request box calls (`identity.record`, `recordPut`, `unwrapRecordKey` (with the wallet enc key; a custody service unwraps with its own key and does not call it), `requests`, `postRequest`, `deleteRequest`): the request the caller's master key signed, or one the agent's device key signs; a post is the device key's only |
 | `rekey.rs` | `identity.rekey` (`.local_only()`): a new main wallet key, nothing in a log; the table of every place that holds the main agent's DID and how each moves. One re-key at a time, in its own task (a dropped caller does not stop it); owners move from every retired main key, so the next re-key repairs what an earlier one left |
 | `person.rs` | the person's profile: `person_record` (the agent record under the `did:scid` and its signed request, by the device key at the trusted head), `IdentityService::publish_person_profile` |
 | `claim.rs` | `ClaimService::claim_for_main` (`already-linked`, first-link rule, claim with the main wallet key; `canKeepMaster` as the caller says, which only the custody channel may: `custody::admit` on the RPC path, the channel itself on the ticket path; a repeated claim keeps the offer's row: 409 `cancelled`, 409 `offer-conflict`), `join_status` (the main agent's claims only; `awaiting-accept`, `cancelled`), `accept_join` (`identity.acceptJoin`), `cancel_join` (`identity.cancelJoin`) |
@@ -494,35 +494,43 @@ Spec: `docs-src/identity/did-scid-coasys-1.md`, sections 8 (Resolution), 9 (DID 
 
 ## The device inbox (`inbox.rs`, spec section 17)
 
-- A message is sealed to the device's `enc` key, the X25519 form of its wallet key: only
-  `WalletBackend::open_sealed` opens it (the secret and its X25519 form stay in that call), and
-  every opened payload (`Opened`) wipes its secret (a master key, an offer's `s`) on drop. A
-  locked wallet opens nothing and deletes nothing.
+- A message is sealed to the device's `enc` key in the log. On a server that is the X25519
+  form of its wallet key: only `WalletBackend::open_sealed` opens it (the secret and its X25519
+  form stay in that call), and every opened payload (`Opened`) wipes its secret (an offer's
+  `s`) on drop. On a desktop (the custody channel) it is the custody service's own X25519
+  key, which the executor never holds: it opens no joined message there. A pre-join message
+  is always sealed to the wallet's key (the device string's `enc`). A locked wallet opens
+  nothing and deletes nothing.
 - **The joined inbox** of the main agent is read at start, at each `inbox::wake` (the wallet
   unlocked: `agent.generate`/`agent.unlock`; the main agent bound to an identity) and every
   15 minutes (`run_pull`), and by `identity.inbox`; one read at a time (`Inbox::pulling`).
-  **With the custody channel** each new message is opened for its body type, wiped at once,
-  left in the store, and announced once (`inbox-message {id, kind}`, audience
-  `Audience::LocalOperator`); one that does not open is deleted. **Without it** (a server, a
+  **With the custody channel** each message is listed by id and times, left in the store
+  unopened, and announced once (`inbox-message {id}`, audience `Audience::LocalOperator`); the
+  pull deletes nothing (only the custody service, which can open it, judges it). **Without it** (a server, a
   host, Coasys cloud) the executor keeps no master key, and a master key is the only body a
   joined inbox carries, so each message is deleted at the pull unopened, with an error in the
   log, and nothing is listed or announced.
-- **`identity.takeMaster`** (custody channel, `custody::admit`) refreshes the log, opens the
-  joined messages oldest first and runs `check_payload` against the cached log: `KeepMaster`
-  answers `TakenMaster {messageId, did, index, secret}` (wiped when dropped, never cloned,
-  `Debug` without the secret) and leaves the message for `identity.inboxAck`, which with the
-  custody channel on also passes `custody::admit` (only the custody service, which stored the
-  key, says it may go; the admin credential gets 403 `no-custody-channel`); `Stale` and a
-  failed check are deleted and the next one is tried; none answers `null`; a locked wallet is
-  503 `unavailable`. The secret goes into the RPC answer only: no store, log line, event or
-  language sees it.
+- **`identity.inboxSealed`** (custody channel, `custody::admit`, `.read()`) answers the joined
+  messages as the store holds them, oldest first: `SealedInboxMessage {id, sealed, scid, keyId,
+  storedAt, expires}`, the address the seal's `info` names. It opens, checks and deletes
+  nothing; the custody service opens each with its own key, runs `check_payload` and
+  acknowledges it with `identity.inboxAck`, which with the custody channel on also passes
+  `custody::admit` (only the custody service, which stored the key, says it may go; the admin
+  credential gets 403 `no-custody-channel`). A test (`a_custody_executor_never_opens_a_joined_message`)
+  pins that no executor path asks the wallet to open a joined message with the channel on.
 - **`identity.prepareDevice`** makes the main key's device string (`sign`, `enc`, a fresh
   `r`, `exp` 5 minutes ahead, `identity.storeUrl`) and reads `Pre(a)` with pre-join reads
   (`sign_pre_auth` by the device key, for the first key of `identity.storeKeys`) until `exp`,
   at most one read a second; a new call ends the last read. `claim_for_main` (the first-link
   rule) claims a ticket that passes `check_payload` (its signed offer checked against the
-  identity's log, refreshed from the store) with `canKeepMaster` exactly when the custody
-  channel is on; a claim sends `link-ticket {did, offerId, matchCode, needsAccept}` to the operator on this
+  identity's log, refreshed from the store). With `{enc}` (the custody service's own X25519
+  key; the custody credential only, `custody::admit`, 403 otherwise; 400 for a key that is no
+  X25519 multikey) the claim says `canKeepMaster` and carries that key as its `enc`; without,
+  the wallet's key and no `canKeepMaster`. `identity.claimOffer` takes the same pair:
+  `canKeepMaster` without `enc` is 400 `no-custody-enc`, `enc` without `canKeepMaster` 400,
+  either from another caller 403. `identity.cosignIncept` co-signs an incept listing another
+  X25519 key than the wallet's only for the custody credential (the custody service's key);
+  any other caller gets 400 `wrong-enc`. A claim sends `link-ticket {did, offerId, matchCode, needsAccept}` to the operator on this
   machine, a refused one sends nothing; the message is deleted either way. A ticket whose log
   cannot be read now waits for the next round; a store that is behind (`Behind`, `Conflict`)
   is no such case: the cached log at its trusted seq checks the ticket. A master key in a pre-join inbox is dropped
@@ -568,8 +576,9 @@ Spec: `docs-src/identity/did-scid-coasys-1.md`, sections 8 (Resolution), 9 (DID 
 
 ## Do not
 
-- Do not read the words here, or a master key outside `identity.takeMaster`: the executor
-  holds device keys only; a master key opens here only inside that call and is never kept.
+- Do not read the words here, or open a master key: the executor holds device keys only. A
+  desktop's master key is sealed to the custody service's key and reaches the custody service
+  still sealed (`identity.inboxSealed`); a server deletes its joined messages unopened.
 - Do not trust a store's hash or head: `import`/`fold` and `verify_head` decide.
 - Do not pass a `src` to the backend (the agent language reads only its store), and do not
   read a foreign host with another client than `SrcFetch`.

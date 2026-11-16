@@ -1,37 +1,36 @@
 //! The executor's side of the device inbox (spec section 17): its own joined inbox, the
-//! pre-join inbox an `identity.prepareDevice` reads, and `identity.takeMaster`.
+//! pre-join inbox an `identity.prepareDevice` reads, and `identity.inboxSealed`.
 //!
-//! A message is sealed to the device's `enc` key, the X25519 form of its wallet key; only the
-//! wallet opens it (`WalletBackend::open_sealed`), and every opened payload is wiped when it
-//! drops ([`Opened`]). Its type sits inside the seal.
+//! The executor opens only pre-join messages: they are sealed to the device string's `enc`
+//! key, the X25519 form of its wallet key, and only the wallet opens them
+//! (`WalletBackend::open_sealed`); every opened payload is wiped when it drops ([`Opened`]).
+//! A joined message is sealed to the `enc` key the log lists for this device key. On a desktop
+//! computer that is the custody service's own X25519 key, which the executor never holds, so
+//! the executor opens no joined message and never holds a master key, also not in memory.
 //!
 //! - **The joined inbox** of the main agent is read at start, whenever the wallet unlocks or
 //!   the agent is bound to an identity ([`wake`]), and every [`PULL_EVERY`]
-//!   ([`run_pull`]). On an executor with the custody channel each new message is opened to
-//!   learn its type, the plaintext wiped at once, the message left in the store, and
-//!   `inbox-message {id, kind}` sent to the operator on this machine. Every other executor
-//!   keeps no master key (a master key must not rest on a server), and the only message a
-//!   joined inbox carries is a master key, so it deletes each message unopened and logs an
-//!   alarm.
-//! - **`identity.takeMaster`** (custody channel only) opens the oldest master message, checks
-//!   it against the log (`check_payload`) and hands the key to the custody service; the
-//!   custody service acknowledges it (`identity.inboxAck`) once stored. A master key that no
-//!   longer counts, or one that fails the check, is acknowledged and dropped.
+//!   ([`run_pull`]). On an executor with the custody channel each message stays in the store
+//!   and `inbox-message {id}` goes to the operator on this machine once per message. Every
+//!   other executor keeps no master key (a master key must not rest on a server), and the
+//!   only message a joined inbox carries is a master key, so it deletes each message unopened
+//!   and logs an alarm.
+//! - **`identity.inboxSealed`** (custody channel only) answers the joined messages as the
+//!   store keeps them. The custody service opens each with its own key, checks it against
+//!   the log, and acknowledges it (`identity.inboxAck`).
 //! - **`identity.prepareDevice`** makes the main key's device string with a fresh `r` and
 //!   reads the pre-join inbox `Pre(a)` until the string expires (one at a time; a new one
 //!   ends the last). `ClaimService::claim_for_main` claims a valid offer ticket (the
-//!   first-link rule; `canKeepMaster` exactly when the executor has the custody channel), and
-//!   a claim sends `link-ticket` (the identity and the match code). A master key never
-//!   travels before a device joins: one found there is dropped with an alarm.
+//!   first-link rule). With the custody service's key (`enc`, custody channel only) the claim
+//!   says `canKeepMaster` and carries that key; without it, neither. A claim sends
+//!   `link-ticket` (the identity and the match code). A master key never travels before a
+//!   device joins: one found there is dropped with an alarm.
 //! - **`identity.endPrepared`** ends one device string (the person cancelled the code screen):
 //!   its read stops after the round under way, and every claim the read made is cancelled
 //!   (`ClaimService::cancel_join`'s rule), so a holder who confirms later binds nothing here
 //!   (the store is not told: it may still accept the confirmation). A claim that bound already
 //!   answers `already-joined`. The end runs in its own task, so a dropped call still cancels
 //!   the claims, and its first answer is kept for every later call.
-//!
-//! The master key opens here only inside `identity.takeMaster`: it is written to no store,
-//! log, event or language, and the result wipes itself when dropped (`TakenMaster`).
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -51,10 +50,10 @@ use zeroize::Zeroize;
 use super::cache::CacheError;
 use super::device::{device_key, enc_key_of, WalletSigner, REQUEST_TTL_S};
 use super::record::DevicePosition;
-use super::service::{backend_error, cache_error, db, error, now, IdentityService};
+use super::service::{backend_error, db, error, now, IdentityService};
 use super::types::{
-    convert, InboxEntry, InboxMessageEvent, InboxMessageType, InboxPutParams, InboxStored,
-    LinkTicketEvent, PreparedDevice, PreparedEnded, TakenMaster,
+    convert, InboxEntry, InboxMessageEvent, InboxPutParams, InboxStored, LinkTicketEvent,
+    PreparedDevice, PreparedEnded, SealedInboxMessage,
 };
 use crate::agent::AgentContext;
 use crate::api::ws_handler::WsRpcError;
@@ -75,10 +74,10 @@ const PRE_MIN_ROUND: Duration = Duration::from_secs(1);
 /// What the executor holds of its inbox: never a body.
 #[derive(Default)]
 pub struct Inbox {
-    /// The joined messages opened on this executor, by id: their type and times.
+    /// The joined messages announced on this executor, by id: their times.
     seen: Mutex<BTreeMap<String, InboxEntry>>,
     /// Held through one read of the joined inbox: the pull and `identity.inbox` take turns, so
-    /// a message is opened and announced once.
+    /// a message is announced once.
     pulling: tokio::sync::Mutex<()>,
     /// The device strings `identity.prepareDevice` made, oldest first, each until
     /// [`PREPARED_KEPT_S`] after it expires (dropped on the next access after that) or until
@@ -141,15 +140,6 @@ impl Drop for Opened {
     }
 }
 
-impl Opened {
-    fn kind(&self) -> InboxMessageType {
-        match self.0.body {
-            InboxBody::Master { .. } => InboxMessageType::Master,
-            InboxBody::OfferTicket(_) => InboxMessageType::OfferTicket,
-        }
-    }
-}
-
 /// Why a message did not open.
 enum Unopened {
     /// The wallet is locked or lacks the key: try again later, keep the message.
@@ -180,13 +170,9 @@ fn publish(topic: Topic, payload: impl serde::Serialize) {
     ));
 }
 
-fn joined(position: &DevicePosition) -> (InboxAddress, SealedAt, String) {
+fn joined(position: &DevicePosition) -> (InboxAddress, String) {
     (
         InboxAddress::Joined {
-            scid: position.scid.clone(),
-            key_id: position.key_id.clone(),
-        },
-        SealedAt::Joined {
             scid: position.scid.clone(),
             key_id: position.key_id.clone(),
         },
@@ -199,7 +185,7 @@ impl IdentityService {
         &self,
         position: &DevicePosition,
     ) -> Result<Vec<InboxMessage>, WsRpcError> {
-        let (address, _, path) = joined(position);
+        let (address, path) = joined(position);
         let auth = InboxAuth::Request(position.request("GET", &path, b"")?);
         self.backend
             .inbox_list(&address, &auth, 0)
@@ -210,20 +196,13 @@ impl IdentityService {
     /// Deletes joined message `id` at the store and forgets it. One that is gone already
     /// counts as deleted.
     async fn ack_joined(&self, position: &DevicePosition, id: &str) -> Result<(), WsRpcError> {
-        let (address, _, path) = joined(position);
+        let (address, path) = joined(position);
         let auth = InboxAuth::Request(position.request("DELETE", &format!("{path}/{id}"), b"")?);
         self.inbox.seen().remove(id);
         match self.backend.inbox_ack(&address, id, &auth).await {
             Ok(()) | Err(super::backend::IdentityError::NotFound) => Ok(()),
             Err(e) => Err(backend_error(e)),
         }
-    }
-
-    /// Acknowledges a message this executor will not act on, logging why; a failure to
-    /// acknowledge is logged too (the next read tries again).
-    async fn drop_joined(&self, position: &DevicePosition, id: &str, why: &str) {
-        log::warn!("identity: inbox message {id}: {why}; deleting it");
-        self.delete_joined(position, id).await;
     }
 
     /// Deletes joined message `id`; a failure is logged (the next read tries again).
@@ -236,9 +215,10 @@ impl IdentityService {
         }
     }
 
-    /// Reads `agent`'s joined inbox: the messages waiting, by id and type, never a body. With
-    /// `custody` (the custody channel) each new message is opened for its type, wiped, kept in
-    /// the store and announced (`inbox-message`); without it each message is deleted unopened.
+    /// Reads `agent`'s joined inbox: the messages waiting, by id and times, never a body.
+    /// With `custody` (the custody channel) each message stays in the store and a new one is
+    /// announced (`inbox-message`) once; the executor opens none, as none is sealed to a key
+    /// it holds. Without it each message is deleted unopened.
     pub(crate) async fn pull_inbox(
         &self,
         agent: &AgentContext,
@@ -248,7 +228,6 @@ impl IdentityService {
             return Ok(vec![]);
         };
         let _turn = self.inbox.pulling.lock().await;
-        let (_, sealed_at, _) = joined(&position);
         let mut entries = vec![];
         for message in self.list_joined(&position).await? {
             if !custody {
@@ -264,18 +243,8 @@ impl IdentityService {
                 entries.push(entry);
                 continue;
             }
-            let kind = match open(agent, &sealed_at, &message.sealed) {
-                Ok(opened) => opened.kind(),
-                Err(Unopened::NoKey) => continue,
-                Err(Unopened::Sealed(why)) => {
-                    self.drop_joined(&position, &message.id, &format!("does not open ({why})"))
-                        .await;
-                    continue;
-                }
-            };
             let entry = InboxEntry {
                 id: message.id.clone(),
-                kind,
                 stored_at: message.stored_at,
                 expires: message.expires,
             };
@@ -284,7 +253,6 @@ impl IdentityService {
                 Topic::InboxMessage,
                 InboxMessageEvent {
                     id: entry.id.clone(),
-                    kind,
                 },
             );
             entries.push(entry);
@@ -296,73 +264,29 @@ impl IdentityService {
         Ok(entries)
     }
 
-    /// `identity.takeMaster` for `agent` (the custody channel admitted the caller): the oldest
-    /// master key that passes `check_payload` against the refreshed log, or `None`.
-    /// A stale master key and one that fails the check are acknowledged and dropped. The
-    /// message stays until the custody service acknowledges it.
-    pub(crate) async fn take_master(
+    /// `identity.inboxSealed` for `agent` (the custody channel admitted the caller): its joined
+    /// messages as the store keeps them, sealed. The executor opens none; the custody service
+    /// opens each with its own key and acknowledges it (`identity.inboxAck`).
+    pub(crate) async fn inbox_sealed(
         &self,
         agent: &AgentContext,
-    ) -> Result<Option<TakenMaster>, WsRpcError> {
+    ) -> Result<Vec<SealedInboxMessage>, WsRpcError> {
         let Some(position) = self.device_position(agent).await? else {
-            return Ok(None);
+            return Ok(vec![]);
         };
-        self.refreshed_or_cached(&position.scid).await?;
-        let (chain, _) = self
-            .cache
-            .trusted(&position.scid)
-            .await
-            .map_err(cache_error)?
-            .ok_or_else(|| cache_error(CacheError::NotFound))?;
-        let (_, sealed_at, _) = joined(&position);
-        for message in self.list_joined(&position).await? {
-            let mut opened = match open(agent, &sealed_at, &message.sealed) {
-                Ok(opened) => opened,
-                Err(Unopened::NoKey) => {
-                    return Err(error(
-                        503,
-                        "unavailable: the wallet is locked, so the inbox does not open",
-                    ))
-                }
-                Err(Unopened::Sealed(why)) => {
-                    self.drop_joined(&position, &message.id, &format!("does not open ({why})"))
-                        .await;
-                    continue;
-                }
-            };
-            if opened.kind() != InboxMessageType::Master {
-                continue;
-            }
-            match check_payload(&opened.0, &position.key, &chain, now()) {
-                Ok(Accept::KeepMaster { index }) => {
-                    let InboxBody::Master { did, secret, .. } = &mut opened.0.body else {
-                        continue;
-                    };
-                    return Ok(Some(TakenMaster {
-                        message_id: message.id,
-                        did: did.clone(),
-                        index,
-                        secret: std::mem::take(secret),
-                    }));
-                }
-                Ok(Accept::Stale) => {
-                    drop(opened);
-                    self.drop_joined(&position, &message.id, "a master key that no longer counts")
-                        .await;
-                }
-                Ok(Accept::ClaimOffer(_)) => {}
-                Err(e) => {
-                    drop(opened);
-                    self.drop_joined(
-                        &position,
-                        &message.id,
-                        &format!("a master key that fails the check ({})", e.name()),
-                    )
-                    .await;
-                }
-            }
-        }
-        Ok(None)
+        Ok(self
+            .list_joined(&position)
+            .await?
+            .into_iter()
+            .map(|message| SealedInboxMessage {
+                id: message.id,
+                sealed: message.sealed,
+                scid: position.scid.clone(),
+                key_id: position.key_id.clone(),
+                stored_at: message.stored_at,
+                expires: message.expires,
+            })
+            .collect())
     }
 
     /// `identity.inboxAck`: deletes `agent`'s joined message `id`.
@@ -422,11 +346,19 @@ impl IdentityService {
 
 /// `identity.prepareDevice`: the main key's device string with a fresh `r`, valid
 /// [`DEVICE_STRING_TTL_S`]; its pre-join inbox is read until then (and the last one's read
-/// ends). `custody` (the custody channel) is the claim's `canKeepMaster`.
+/// ends). `custody_enc` (the custody service's X25519 key, passed only through the custody
+/// channel) goes into the claim with `canKeepMaster`; without it the claim says neither.
 pub async fn prepare_device(
     service: &Arc<IdentityService>,
-    custody: bool,
+    custody_enc: Option<String>,
 ) -> Result<PreparedDevice, WsRpcError> {
+    if let Some(enc) = &custody_enc {
+        if !ad4m_identity_core::is_x25519_multikey(enc) {
+            return Err(WsRpcError::bad_request(
+                "invalid: enc is not an X25519 multikey",
+            ));
+        }
+    }
     let store_url = service.store_url.clone().ok_or_else(|| {
         error(
             503,
@@ -481,7 +413,7 @@ pub async fn prepare_device(
         store,
         expires,
     };
-    tokio::spawn(read_pre_inbox(service.clone(), read, prepared, custody));
+    tokio::spawn(read_pre_inbox(service.clone(), read, prepared, custody_enc));
     Ok(PreparedDevice {
         sign,
         enc,
@@ -531,7 +463,7 @@ async fn read_pre_inbox(
     service: Arc<IdentityService>,
     read: PreRead,
     prepared: Arc<Prepared>,
-    custody: bool,
+    custody_enc: Option<String>,
 ) {
     let done = prepared.done.clone();
     let address = InboxAddress::Pre {
@@ -562,7 +494,7 @@ async fn read_pre_inbox(
                     break;
                 }
                 claimed = service
-                    .take_ticket(&read, &prepared, message, custody)
+                    .take_ticket(&read, &prepared, message, custody_enc.as_deref())
                     .await;
                 if claimed {
                     break;
@@ -611,7 +543,7 @@ impl IdentityService {
         read: &PreRead,
         prepared: &Prepared,
         message: &InboxMessage,
-        custody: bool,
+        custody_enc: Option<&str>,
     ) -> bool {
         let sealed_at = SealedAt::Pre(read.address.clone());
         let opened = match open(&read.agent, &sealed_at, &message.sealed) {
@@ -694,7 +626,10 @@ impl IdentityService {
                 offers.push(ticket.offer_id.clone());
             }
         }
-        let claimed = self.claims().claim_for_main(&offer, custody, None).await;
+        let claimed = self
+            .claims()
+            .claim_for_main(&offer, custody_enc, None)
+            .await;
         offer.s.zeroize();
         let taken = match claimed {
             Ok(claim) => {
@@ -926,75 +861,100 @@ mod tests {
         }
     }
 
-    /// With the custody channel the pull opens a new message for its type only: the inbox
-    /// lists it by id and type, never a body, the message stays in the store, and
-    /// `inbox-message` goes to the operator on this machine once. A message that does not open
-    /// with this device's key is deleted.
+    /// The custody service's own X25519 key: a key the executor does not hold.
+    fn custody_key(seed: u8) -> (ad4m_identity_core::X25519Secret, String) {
+        let secret = ad4m_identity_core::X25519Secret::from([seed; 32]);
+        let enc = ad4m_identity_core::x25519_multikey_of(&secret);
+        (secret, enc)
+    }
+
+    /// With the custody channel the pull lists each message by id and times, never a body,
+    /// leaves it in the store and sends `inbox-message {id}` to the operator on this machine
+    /// once. It deletes nothing, also a message no key opens.
     #[tokio::test]
-    async fn with_the_custody_channel_the_inbox_lists_a_master_key_by_id_and_type_only() {
+    async fn with_the_custody_channel_the_inbox_lists_and_keeps_each_message() {
         let world = Bound::new(82).await;
         let (address, sealed_at) = joined_of(&world);
-        let enc = enc_key_of(&world.key).unwrap();
+        let (_, custody_enc) = custody_key(41);
         let secret = world.log.master.to_bytes();
         let master = sealed(
             &world.log,
             &world.key,
-            &enc,
+            &custody_enc,
             &sealed_at,
             master_body(&world.log, 0, &secret),
         );
         world.store.deliver(address.clone(), "m1", master);
-        let elsewhere = sealed(
-            &world.log,
-            &world.key,
-            &enc,
-            &SealedAt::Pre("elsewhere".into()),
-            master_body(&world.log, 0, &secret),
-        );
-        world.store.deliver(address, "m2", elsewhere);
+        world
+            .store
+            .deliver(address, "m2", "not a sealed message".into());
         let mut events = crate::pubsub::get_global_pubsub().await.subscribe_events();
 
         let listed = world.service.pull_inbox(&world.agent, true).await.unwrap();
-        assert_eq!(listed.len(), 1);
-        assert_eq!(
-            (listed[0].id.as_str(), listed[0].kind),
-            ("m1", InboxMessageType::Master)
-        );
+        let ids: Vec<&str> = listed.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, ["m1", "m2"]);
         let json = serde_json::to_value(&listed).unwrap();
         let mut fields: Vec<&String> = json[0].as_object().unwrap().keys().collect();
         fields.sort();
-        assert_eq!(fields, ["expires", "id", "kind", "storedAt"]);
-        assert_eq!(json[0]["kind"], "master");
-        let secret_text = bs58::encode(secret).into_string();
-        assert!(!json.to_string().contains(&secret_text));
-        assert_eq!(*world.store.acks.lock().unwrap(), vec!["m2".to_string()]);
-        assert_eq!(world.store.inbox.lock().unwrap().len(), 1, "m1 waits");
+        assert_eq!(fields, ["expires", "id", "storedAt"]);
+        assert!(world.store.acks.lock().unwrap().is_empty());
+        assert_eq!(world.store.inbox.lock().unwrap().len(), 2, "both wait");
 
         let announced = inbox_events(&mut events);
-        assert_eq!(announced.len(), 1);
+        assert_eq!(announced.len(), 2);
         assert_eq!(announced[0].audience, Audience::LocalOperator);
-        assert_eq!(
-            announced[0].payload,
-            serde_json::json!({ "id": "m1", "kind": "master" })
-        );
+        assert_eq!(announced[0].payload, serde_json::json!({ "id": "m1" }));
+        assert_eq!(announced[1].payload, serde_json::json!({ "id": "m2" }));
 
-        // A second read lists it again and announces nothing new.
+        // A second read lists them again and announces nothing new.
         let again = world.service.pull_inbox(&world.agent, true).await.unwrap();
         assert_eq!(again, listed);
         assert!(inbox_events(&mut events).is_empty());
+        assert!(world.store.acks.lock().unwrap().is_empty());
     }
 
-    /// The pull and `identity.inbox` take turns: two reads at once open and announce a new
-    /// message once.
+    /// The executor of a custody computer opens no joined message, also one sealed to its own
+    /// wallet's key: neither the pull nor `identity.inboxSealed` asks the wallet to open it.
+    #[tokio::test]
+    async fn a_custody_executor_never_opens_a_joined_message() {
+        let world = Bound::new(102).await;
+        let (address, sealed_at) = joined_of(&world);
+        let wallet_enc = enc_key_of(&world.key).unwrap();
+        let master = sealed(
+            &world.log,
+            &world.key,
+            &wallet_enc,
+            &sealed_at,
+            master_body(&world.log, 0, &world.log.master.to_bytes()),
+        );
+        world.store.deliver(address, "m1", master);
+
+        world.service.pull_inbox(&world.agent, true).await.unwrap();
+        world.service.inbox_sealed(&world.agent).await.unwrap();
+        world.service.pull_inbox(&world.agent, true).await.unwrap();
+
+        let opened = crate::wallet::OPENED_FOR_TEST
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        assert!(
+            !opened.contains(&sealed_at),
+            "the wallet opened a joined message"
+        );
+        assert_eq!(world.store.inbox.lock().unwrap().len(), 1);
+    }
+
+    /// The pull and `identity.inbox` take turns: two reads at once announce a new message
+    /// once.
     #[tokio::test]
     async fn two_reads_at_once_announce_a_message_once() {
         let world = Bound::new(89).await;
         let (address, sealed_at) = joined_of(&world);
-        let enc = enc_key_of(&world.key).unwrap();
+        let (_, custody_enc) = custody_key(42);
         let master = sealed(
             &world.log,
             &world.key,
-            &enc,
+            &custody_enc,
             &sealed_at,
             master_body(&world.log, 0, &world.log.master.to_bytes()),
         );
@@ -1009,56 +969,49 @@ mod tests {
         assert_eq!(inbox_events(&mut events).len(), 1);
     }
 
-    /// `identity.takeMaster`'s work: the current master key, checked against the log, in the
-    /// answer only; the message waits for the acknowledgement. A master key whose secret is
-    /// not the log's is deleted and never returned.
+    /// `identity.inboxSealed`'s work: each joined message as the store keeps it, with the
+    /// address it was sealed for. The custody service's key opens it to the master key; the
+    /// message waits for the acknowledgement.
     #[tokio::test]
-    async fn take_master_returns_the_checked_master_key_and_drops_a_false_one() {
+    async fn inbox_sealed_answers_each_joined_message_unchanged() {
         let world = Bound::new(83).await;
         let (address, sealed_at) = joined_of(&world);
-        let enc = enc_key_of(&world.key).unwrap();
-        let wrong = sealed(
-            &world.log,
-            &world.key,
-            &enc,
-            &sealed_at,
-            master_body(&world.log, 0, &[9; 32]),
-        );
-        world.store.deliver(address.clone(), "m1", wrong);
+        let (custody_secret, custody_enc) = custody_key(43);
         let secret = world.log.master.to_bytes();
-        let right = sealed(
+        let master = sealed(
             &world.log,
             &world.key,
-            &enc,
+            &custody_enc,
             &sealed_at,
             master_body(&world.log, 0, &secret),
         );
-        world.store.deliver(address, "m2", right);
+        world.store.deliver(address, "m1", master.clone());
         let mut events = crate::pubsub::get_global_pubsub().await.subscribe_events();
 
-        let taken = world
-            .service
-            .take_master(&world.agent)
-            .await
-            .unwrap()
-            .expect("the current master key");
-        assert_eq!(taken.message_id, "m2");
-        assert_eq!(taken.did, did_of(&world.log.scid()));
-        assert_eq!(taken.index, 0);
-        assert_eq!(taken.secret, bs58::encode(secret).into_string());
-        assert!(!format!("{taken:?}").contains(&taken.secret));
-        assert_eq!(*world.store.acks.lock().unwrap(), vec!["m1".to_string()]);
+        let answered = world.service.inbox_sealed(&world.agent).await.unwrap();
+        assert_eq!(answered.len(), 1);
+        let message = &answered[0];
+        assert_eq!(message.id, "m1");
+        assert_eq!(message.sealed, master);
+        assert_eq!(message.scid, world.log.scid());
+        assert_eq!(message.key_id, "d2");
+        let at = SealedAt::Joined {
+            scid: message.scid.clone(),
+            key_id: message.key_id.clone(),
+        };
+        let payload = ad4m_identity_core::inbox::open(&custody_secret, &at, &message.sealed)
+            .expect("the custody key opens it");
+        assert_eq!(payload.body, master_body(&world.log, 0, &secret));
+        assert!(world.store.acks.lock().unwrap().is_empty());
         assert!(inbox_events(&mut events).is_empty(), "no event carries it");
-        drop(taken);
 
-        assert!(world.service.inbox_ack(&world.agent, "m2").await.unwrap());
-        assert!(world.store.inbox.lock().unwrap().is_empty());
+        assert!(world.service.inbox_ack(&world.agent, "m1").await.unwrap());
         assert!(world
             .service
-            .take_master(&world.agent)
+            .inbox_sealed(&world.agent)
             .await
             .unwrap()
-            .is_none());
+            .is_empty());
     }
 
     /// The pull runs at once, at each wake-up, and every period after the last run (a wake-up
@@ -1210,10 +1163,10 @@ mod tests {
         }
     }
 
-    /// `identity.prepareDevice`'s device string names the main key, its `enc` key and the
-    /// store; the main key claims a ticket in its pre-join inbox with its `enc` key and, with
-    /// the custody channel, `canKeepMaster`, and the claim sends `link-ticket` with the match
-    /// code the holder shows. The reads are the device key's pre-join reads for this store.
+    /// `identity.prepareDevice`'s device string names the main key, its wallet's `enc` key and
+    /// the store; with the custody service's key the main key claims a ticket in its pre-join
+    /// inbox with that key and `canKeepMaster`, and the claim sends `link-ticket` with the
+    /// match code the holder shows. The reads are the device key's pre-join reads for this store.
     #[tokio::test]
     async fn a_ticket_in_the_pre_join_inbox_is_announced_and_claimed() {
         let log = TestLog::new(84);
@@ -1221,7 +1174,10 @@ mod tests {
         let _record = OperatorRecord::set(&did_of(&log.scid()));
         let mut events = crate::pubsub::get_global_pubsub().await.subscribe_events();
 
-        let prepared = prepare_device(&service, true).await.unwrap();
+        let (_, custody_enc) = custody_key(44);
+        let prepared = prepare_device(&service, Some(custody_enc.clone()))
+            .await
+            .unwrap();
         let device = DeviceString::parse(&prepared.device).unwrap();
         let (_, main_key) = device_key(&AgentContext::main_agent()).unwrap();
         assert_eq!(
@@ -1237,8 +1193,10 @@ mod tests {
         let (claimed, claim) = store.claims.lock().unwrap()[0].clone();
         assert_eq!(claimed, offer_id);
         assert_eq!(claim.device_key, main_key);
-        assert_eq!(claim.enc_key, device.enc);
+        assert_eq!(claim.enc_key, custody_enc);
         assert!(claim.can_keep_master);
+        let core: link::Claim = convert(&claim).unwrap();
+        link::verify_claim(&log.scid(), &core).unwrap();
         until("the acknowledgement", || {
             !store.acks.lock().unwrap().is_empty()
         })
@@ -1291,13 +1249,29 @@ mod tests {
             service.cache.refresh(store.as_ref(), &log.scid()).await,
             Err(CacheError::Behind { store: None, .. })
         ));
-        let prepared = prepare_device(&service, false).await.unwrap();
+        let prepared = prepare_device(&service, None).await.unwrap();
         let device = DeviceString::parse(&prepared.device).unwrap();
         let offer_id = push_ticket(&log, &store, &device);
 
         until("the claim", || !store.claims.lock().unwrap().is_empty()).await;
-        assert_eq!(store.claims.lock().unwrap()[0].0, offer_id);
+        let (claimed, claim) = store.claims.lock().unwrap()[0].clone();
+        assert_eq!(claimed, offer_id);
+        // Without the custody service's key the claim keeps no master key: it carries the
+        // wallet's `enc` key, the device string's.
+        assert_eq!(claim.enc_key, device.enc);
+        assert!(!claim.can_keep_master);
         ends(&service);
+    }
+
+    /// A custody key that is no X25519 key is refused before a device string is made.
+    #[tokio::test]
+    async fn a_device_string_with_an_enc_that_is_no_x25519_key_is_refused() {
+        let log = TestLog::new(103);
+        let (service, _store) = holder_store(&log);
+        let (_, main_key) = device_key(&AgentContext::main_agent()).unwrap();
+        let refused = prepare_device(&service, Some(main_key)).await.unwrap_err();
+        assert_eq!(refused.code, 400);
+        assert!(service.inbox.prepared().is_empty());
     }
 
     /// On the ticket path the first-link rule holds as on the RPC path: with an operator record
@@ -1309,7 +1283,7 @@ mod tests {
         let (service, store) = holder_store(&log);
         let _record = OperatorRecord::set(&did_of(&TestLog::new(86).scid()));
         let mut events = crate::pubsub::get_global_pubsub().await.subscribe_events();
-        let prepared = prepare_device(&service, false).await.unwrap();
+        let prepared = prepare_device(&service, None).await.unwrap();
         let device = DeviceString::parse(&prepared.device).unwrap();
         push_ticket(&log, &store, &device);
 
@@ -1338,7 +1312,9 @@ mod tests {
         let _record = OperatorRecord;
         let _channel = crate::config::CustodyChannelForTest::on();
         let mut events = crate::pubsub::get_global_pubsub().await.subscribe_events();
-        let prepared = prepare_device(&service, true).await.unwrap();
+        let prepared = prepare_device(&service, Some(custody_key(44).1))
+            .await
+            .unwrap();
         let device = DeviceString::parse(&prepared.device).unwrap();
         let offer_id = push_ticket(&log, &store, &device);
 
@@ -1367,7 +1343,9 @@ mod tests {
         // is claimed, not refused `first-link`.
         let other = TestLog::new(89);
         *store.events.lock().unwrap() = other.events.clone();
-        let prepared = prepare_device(&service, true).await.unwrap();
+        let prepared = prepare_device(&service, Some(custody_key(44).1))
+            .await
+            .unwrap();
         let device = DeviceString::parse(&prepared.device).unwrap();
         let second = push_ticket(&other, &store, &device);
         until("the second claim", || {
@@ -1386,7 +1364,7 @@ mod tests {
     async fn a_ticket_left_waiting_does_not_spin_the_pre_join_read() {
         let log = TestLog::new(90);
         let (service, store) = holder_store(&log);
-        let prepared = prepare_device(&service, false).await.unwrap();
+        let prepared = prepare_device(&service, None).await.unwrap();
         let device = DeviceString::parse(&prepared.device).unwrap();
         push_ticket(&TestLog::new(91), &store, &device);
 
@@ -1404,7 +1382,9 @@ mod tests {
         let log = TestLog::new(87);
         let (service, store) = holder_store(&log);
         let mut events = crate::pubsub::get_global_pubsub().await.subscribe_events();
-        let prepared = prepare_device(&service, true).await.unwrap();
+        let prepared = prepare_device(&service, Some(custody_key(44).1))
+            .await
+            .unwrap();
         let device = DeviceString::parse(&prepared.device).unwrap();
         let address = pre_address(&device.sign, &device.r).unwrap();
         let text = sealed(
@@ -1430,9 +1410,9 @@ mod tests {
     async fn a_new_device_string_ends_the_last_ones_read() {
         let log = TestLog::new(88);
         let (service, _store) = holder_store(&log);
-        let first = prepare_device(&service, false).await.unwrap();
+        let first = prepare_device(&service, None).await.unwrap();
         let first_read = service.inbox.prepared().last().unwrap().done.clone();
-        let second = prepare_device(&service, false).await.unwrap();
+        let second = prepare_device(&service, None).await.unwrap();
         assert!(first_read.is_cancelled());
         assert_ne!(
             DeviceString::parse(&first.device).unwrap().r,
@@ -1469,7 +1449,7 @@ mod tests {
         let log = TestLog::new(94);
         let (service, store) = holder_store(&log);
         let _record = OperatorRecord::set(&did_of(&log.scid()));
-        let prepared = prepare_device(&service, false).await.unwrap();
+        let prepared = prepare_device(&service, None).await.unwrap();
         let device = DeviceString::parse(&prepared.device).unwrap();
 
         let ended = service.end_prepared(&prepared.device).await.unwrap();
@@ -1510,7 +1490,7 @@ mod tests {
         let _record = OperatorRecord::set(&did_of(&log.scid()));
         let (entered, release) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
         *store.pause_store.lock().unwrap() = Some((entered.clone(), release.clone()));
-        let prepared = prepare_device(&service, false).await.unwrap();
+        let prepared = prepare_device(&service, None).await.unwrap();
         let device = DeviceString::parse(&prepared.device).unwrap();
         let offer_id = push_ticket(&log, &store, &device);
         // The read opened the ticket and reads its identity's log.
@@ -1555,7 +1535,7 @@ mod tests {
         };
         let again = service
             .claims()
-            .claim_for_main(&offer, false, None)
+            .claim_for_main(&offer, None, None)
             .await
             .unwrap_err();
         assert_eq!(again.code, 409);
@@ -1573,7 +1553,7 @@ mod tests {
         let log = TestLog::new(96);
         let (service, store) = holder_store(&log);
         let _record = OperatorRecord::set(&did_of(&log.scid()));
-        let prepared = prepare_device(&service, false).await.unwrap();
+        let prepared = prepare_device(&service, None).await.unwrap();
         let device = DeviceString::parse(&prepared.device).unwrap();
         let offer_id = push_ticket(&log, &store, &device);
         until("the claim", || !store.claims.lock().unwrap().is_empty()).await;
@@ -1611,7 +1591,7 @@ mod tests {
         let _record = OperatorRecord::set(&did_of(&log.scid()));
         let (entered, release) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
         *store.pause_store.lock().unwrap() = Some((entered.clone(), release.clone()));
-        let prepared = prepare_device(&service, false).await.unwrap();
+        let prepared = prepare_device(&service, None).await.unwrap();
         let device = DeviceString::parse(&prepared.device).unwrap();
         let offer_id = push_ticket(&log, &store, &device);
         tokio::time::timeout(Duration::from_secs(5), entered.notified())
@@ -1680,7 +1660,7 @@ mod tests {
         let log = TestLog::new(98);
         let (service, store) = holder_store(&log);
         let _record = OperatorRecord::set(&did_of(&log.scid()));
-        let first = prepare_device(&service, false).await.unwrap();
+        let first = prepare_device(&service, None).await.unwrap();
         let first_offer = push_ticket(&log, &store, &DeviceString::parse(&first.device).unwrap());
         until("the first claim", || {
             store.claims.lock().unwrap().len() == 1
@@ -1691,7 +1671,7 @@ mod tests {
         };
         assert_eq!(service.end_prepared(&first.device).await.unwrap(), ended);
 
-        let second = prepare_device(&service, false).await.unwrap();
+        let second = prepare_device(&service, None).await.unwrap();
         let second_offer = push_ticket(&log, &store, &DeviceString::parse(&second.device).unwrap());
         until("the second claim", || {
             store.claims.lock().unwrap().len() == 2
