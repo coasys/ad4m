@@ -141,8 +141,10 @@ only, so a remote operator (a key login, or the admin credential on a network li
 move the whole data folder. `agent.import` is not local only either — but it is not
 implemented: its handler answers "Agent import not yet implemented". The guard table marks
 the local-only methods "local only". `runtime.setConfig` is not local only as a whole: it refuses each `machine` key to a caller
-off this machine (`config_rpc`). `identity.custodyStatus`, `identity.takeMaster` (the one
-call whose answer carries a master key) and, with the channel on, `identity.inboxAck` add the
+off this machine (`config_rpc`). `identity.custodyStatus`, `identity.inboxSealed` (the
+joined inbox still sealed to the custody service's key), the custody key in
+`identity.claimOffer`, `identity.prepareDevice` and `identity.cosignIncept`, and, with the
+channel on, `identity.inboxAck` add the
 custody channel's own check (`identity::custody::admit`: the custody credential on a loopback
 listener of an executor started with `--custody-channel`); every other caller, the admin
 credential included, gets 403 `no-custody-channel`. The custody credential is its own
@@ -297,6 +299,7 @@ the guard checked:
 | `identity.inbox` | `Operator`, local only |
 | `identity.inboxAck` | `Operator`, local only |
 | `identity.inboxPut` | `Cap(agent:UPDATE)` |
+| `identity.inboxSealed` | `Operator`, local only |
 | `identity.joinStatus` | `Cap(agent:READ)` |
 | `identity.keyOwner` | `Cap(agent:READ)` |
 | `identity.log` | `Cap(agent:READ)` |
@@ -313,7 +316,6 @@ the guard checked:
 | `identity.resetLog` | `Operator` |
 | `identity.resolve` | `Cap(agent:READ)` |
 | `identity.status` | `Cap(agent:READ)` |
-| `identity.takeMaster` | `Operator`, local only |
 | `identity.unwrapRecordKey` | `Operator`, local only |
 | `language.all` | `Cap(language:READ)` |
 | `language.applyTemplate` | `Cap(language:CREATE)` |
