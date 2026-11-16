@@ -499,8 +499,13 @@ Spec: `docs-src/identity/did-scid-coasys-1.md`, sections 8 (Resolution), 9 (DID 
   form stay in that call), and every opened payload (`Opened`) wipes its secret (an offer's
   `s`) on drop. On a desktop (the custody channel) it is the custody service's own X25519
   key, which the executor never holds: it opens no joined message there. A pre-join message
-  is always sealed to the wallet's key (the device string's `enc`). A locked wallet opens
-  nothing and deletes nothing.
+  is always sealed to the wallet's key (the device string's `enc`); a master key found there
+  is opened, wiped and dropped. A locked wallet opens nothing and deletes nothing. The custody
+  enc key passed to `identity.claimOffer`, `identity.prepareDevice` or a custody
+  `identity.cosignIncept` must not be the wallet's own X25519 key (400 `wrong-enc`,
+  `claim::check_custody_enc`). A desktop linked before its log listed the custody key cannot
+  open what was sealed to its old key: revoke it and link it again (the executor never falls
+  back to opening it).
 - **The joined inbox** of the main agent is read at start, at each `inbox::wake` (the wallet
   unlocked: `agent.generate`/`agent.unlock`; the main agent bound to an identity) and every
   15 minutes (`run_pull`), and by `identity.inbox`; one read at a time (`Inbox::pulling`).

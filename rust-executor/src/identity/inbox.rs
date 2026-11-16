@@ -6,7 +6,9 @@
 //! (`WalletBackend::open_sealed`); every opened payload is wiped when it drops ([`Opened`]).
 //! A joined message is sealed to the `enc` key the log lists for this device key. On a desktop
 //! computer that is the custody service's own X25519 key, which the executor never holds, so
-//! the executor opens no joined message and never holds a master key, also not in memory.
+//! the executor opens no joined message and a master key sent after the join is never in its
+//! memory. A pre-join message is opened before its type is known: a master key found there is
+//! wiped and dropped (`take_ticket`).
 //!
 //! - **The joined inbox** of the main agent is read at start, whenever the wallet unlocks or
 //!   the agent is bound to an identity ([`wake`]), and every [`PULL_EVERY`]
@@ -352,12 +354,10 @@ pub async fn prepare_device(
     service: &Arc<IdentityService>,
     custody_enc: Option<String>,
 ) -> Result<PreparedDevice, WsRpcError> {
+    let agent = AgentContext::main_agent();
+    let (_, sign) = device_key(&agent).map_err(WsRpcError::internal)?;
     if let Some(enc) = &custody_enc {
-        if !ad4m_identity_core::is_x25519_multikey(enc) {
-            return Err(WsRpcError::bad_request(
-                "invalid: enc is not an X25519 multikey",
-            ));
-        }
+        super::claim::check_custody_enc(enc, &sign)?;
     }
     let store_url = service.store_url.clone().ok_or_else(|| {
         error(
@@ -372,8 +372,6 @@ pub async fn prepare_device(
         .first()
         .map(|key| format!("did:key:{key}"))
         .ok_or_else(|| WsRpcError::internal("identity.storeKeys is empty"))?;
-    let agent = AgentContext::main_agent();
-    let (_, sign) = device_key(&agent).map_err(WsRpcError::internal)?;
     let enc = enc_key_of(&sign).map_err(WsRpcError::internal)?;
     let r = bs58::encode(rand::random::<[u8; link::DEVICE_R_LEN]>()).into_string();
     let expires = now() + DEVICE_STRING_TTL_S;
@@ -1002,6 +1000,13 @@ mod tests {
         let payload = ad4m_identity_core::inbox::open(&custody_secret, &at, &message.sealed)
             .expect("the custody key opens it");
         assert_eq!(payload.body, master_body(&world.log, 0, &secret));
+        assert!(
+            matches!(
+                open(&world.agent, &at, &message.sealed),
+                Err(Unopened::Sealed(_))
+            ),
+            "the executor's wallet key does not open a message sealed to the custody key"
+        );
         assert!(world.store.acks.lock().unwrap().is_empty());
         assert!(inbox_events(&mut events).is_empty(), "no event carries it");
 
@@ -1269,8 +1274,23 @@ mod tests {
         let log = TestLog::new(103);
         let (service, _store) = holder_store(&log);
         let (_, main_key) = device_key(&AgentContext::main_agent()).unwrap();
-        let refused = prepare_device(&service, Some(main_key)).await.unwrap_err();
+        let refused = prepare_device(&service, Some(main_key.clone()))
+            .await
+            .unwrap_err();
         assert_eq!(refused.code, 400);
+        assert!(service.inbox.prepared().is_empty());
+
+        // The executor's own X25519 key is an X25519 key, but no custody key.
+        let own = enc_key_of(&main_key).unwrap();
+        let refused = prepare_device(&service, Some(own)).await.unwrap_err();
+        assert_eq!(refused.code, 400);
+        assert!(
+            refused
+                .message
+                .starts_with("wrong-enc: enc is the executor's own key"),
+            "{}",
+            refused.message
+        );
         assert!(service.inbox.prepared().is_empty());
     }
 

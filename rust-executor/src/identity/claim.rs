@@ -85,10 +85,10 @@ impl ClaimService<'_> {
         custody_enc: Option<&str>,
         hint: Option<String>,
     ) -> Result<ClaimOfferResult, WsRpcError> {
-        if custody_enc.is_some_and(|enc| !ad4m_identity_core::is_x25519_multikey(enc)) {
-            return Err(WsRpcError::bad_request(
-                "invalid: enc is not an X25519 multikey",
-            ));
+        let main = AgentContext::main_agent();
+        let (_, key) = device_key(&main).map_err(WsRpcError::internal)?;
+        if let Some(enc) = custody_enc {
+            check_custody_enc(enc, &key)?;
         }
         self.identity.refuse_without_store_keys()?;
         let offer_did = did_of(&offer.scid);
@@ -99,7 +99,6 @@ impl ClaimService<'_> {
                 "already-linked: this executor's key speaks for an identity already",
             ));
         }
-        let main = AgentContext::main_agent();
         let desktop_first_run = record.is_none() && crate::config::custody_channel_on() && {
             let (main_did, _) = device_key(&main).map_err(WsRpcError::internal)?;
             db(|db| db.agent_identity(&main_did))?.is_none()
@@ -116,7 +115,6 @@ impl ClaimService<'_> {
         }
         let secret = link::decode_secret(&offer.s)
             .ok_or_else(|| WsRpcError::bad_request("invalid: the offer's secret is malformed"))?;
-        let (_, key) = device_key(&main).map_err(WsRpcError::internal)?;
         let enc = match custody_enc {
             Some(enc) => enc.to_string(),
             None => enc_key_of(&key).map_err(WsRpcError::internal)?,
@@ -331,4 +329,20 @@ impl ClaimService<'_> {
             )),
         }
     }
+}
+
+/// A custody service's enc key must be an X25519 key, and its own: the X25519 form of the
+/// executor's device key `key` would point master-key transfers at a key the executor holds.
+pub(crate) fn check_custody_enc(enc: &str, key: &str) -> Result<(), WsRpcError> {
+    if !ad4m_identity_core::is_x25519_multikey(enc) {
+        return Err(WsRpcError::bad_request(
+            "invalid: enc is not an X25519 multikey",
+        ));
+    }
+    if enc == enc_key_of(key).map_err(WsRpcError::internal)? {
+        return Err(WsRpcError::bad_request(
+            "wrong-enc: enc is the executor's own key, not the custody service's",
+        ));
+    }
+    Ok(())
 }
