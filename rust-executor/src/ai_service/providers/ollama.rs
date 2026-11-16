@@ -256,7 +256,10 @@ impl OllamaChat {
                     params.lines().find_map(|line| {
                         let mut parts = line.split_whitespace();
                         match (parts.next(), parts.next()) {
-                            (Some("num_ctx"), Some(value)) => value.parse::<u64>().ok(),
+                            // A zero window is no window: fall back to the trained one.
+                            (Some("num_ctx"), Some(value)) => {
+                                value.parse::<u64>().ok().filter(|&n| n > 0)
+                            }
                             _ => None,
                         }
                     })
@@ -1348,6 +1351,17 @@ mod wire_tests {
         assert_eq!(
             client.context_window_tokens("qwen3.8-27b-48k").await,
             Some(16_384)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_modelfile_num_ctx_of_zero_falls_back_to_the_base_window() {
+        let mut server = mockito::Server::new_async().await;
+        let _show = mock_show_modelfile_tag(&mut server, 8_192, 0).await;
+        let client = OllamaChat::new("", Url::parse(&server.url()).unwrap(), None);
+        assert_eq!(
+            client.context_window_tokens("zero-ctx-tag").await,
+            Some(8_192)
         );
     }
 
