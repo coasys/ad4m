@@ -82,8 +82,8 @@ master key for the person.
   `i`, `false` for `Released` or no key kept, and otherwise leaves the holding unchanged (a key
   in a shared vault without this device's receipt can be another device's). While the vault's
   release holds (`vault_emptying`), it never writes `true`: a sibling's receipt does not
-  re-advertise a vault that another device key's removal is about to empty (Lal's P1 at
-  f7d898a53: the removal on another vault would count it and forget the last other copy). It
+  re-advertise a vault that another device key's removal is about to empty (the
+  removal on another vault would count it and forget the last other copy). It
   reads the epoch, then the note and the vault's note, and its precondition re-reads both
   inside the record's version check (`record::write_as_if`). The record's versions order the writes, so a removal racing
   a mark either wrote its release before the mark's check (the mark writes `false`) or after
