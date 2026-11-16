@@ -10,7 +10,13 @@
 //! - [`flows::link`] also links with the holder scanning a device string: an offer bound to
 //!   the device's key, its ticket in the device's pre-join inbox.
 //! - [`flows::master`]: the master key sealed to a device that keeps it, the retry list of
-//!   pushes that failed, and the device's side that takes it from its executor.
+//!   pushes that failed, and the device's side that takes it from its inbox.
+//! - [`enc`]: the device's enc key, held by the app, and [`WithEncKey`], which opens the
+//!   inbox and the record key here: the executor passes only sealed text.
+//! - `store` (feature `store`): `ViaStore`, the identity store's routes as an
+//!   [`executor::ExecutorRpc`] for a device with no executor (the phone), with its own
+//!   [`EncKey`]; its `identity.takeMaster` runs the same open, check and choice as
+//!   [`WithEncKey`] (`enc`'s `take_from`).
 //! - [`flows::revoke`]: a `revoke` signed by the current master key, published; or, with the
 //!   12 words, a `rotate` that revokes the keys too ("Also replace my master key").
 //! - [`flows::rotate`]: master *n*+1 from the 12 words, rebuilt on the new head when another
@@ -27,6 +33,7 @@
 //! clock, randomness or network of its own: [`Clock`], [`Random`] and [`executor::ExecutorRpc`]
 //! come in from the surface, so the same code runs natively and in WASM.
 
+pub mod enc;
 pub mod executor;
 pub mod flows;
 pub mod record;
@@ -37,12 +44,13 @@ pub mod store;
 pub mod vault;
 
 pub use ad4m_identity_core::record::VaultId;
+pub use enc::{EncKey, EncOpenError, SealedInboxMessage, SoftEncKey, WithEncKey};
 pub use executor::{ExecutorRpc, RpcError, ViaExecutor};
 pub use secret::Secret;
 #[cfg(feature = "store")]
 pub use store::{
-    Checkpoint, CheckpointError, EncKey, EncOpenError, HttpClient, HttpError, HttpRequest,
-    HttpResponse, LogCheckpoints, MemoryCheckpoints, SoftEncKey, StoreEndpoint, ViaStore,
+    Checkpoint, CheckpointError, HttpClient, HttpError, HttpRequest, HttpResponse, LogCheckpoints,
+    MemoryCheckpoints, StoreEndpoint, ViaStore,
 };
 #[cfg(any(test, feature = "test-vault"))]
 pub use vault::MemoryVault;

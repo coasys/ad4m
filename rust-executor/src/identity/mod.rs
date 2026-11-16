@@ -3,9 +3,9 @@
 //! `identity.*` calls. See `AGENTS.md` in this directory.
 //!
 //! The executor holds device keys only (the wallet key `main`, one per managed user); master
-//! keys and the 12 words stay with the apps (`ad4m-identity-client`). A master key sealed to
-//! the desktop app's computer opens here only inside `identity.takeMaster`, for its custody
-//! service ([`inbox`]). Logs arrive only through the agent language ([`backend`]) and are
+//! keys and the 12 words stay with the apps (`ad4m-identity-client`). A master key sent to the
+//! desktop app's computer is sealed to its custody service's own key and never opens here: the
+//! custody service reads it sealed (`identity.inboxSealed`, [`inbox`]). Logs arrive only through the agent language ([`backend`]) and are
 //! kept, after `fold`, in the executor database ([`cache`]).
 
 pub mod backend;
