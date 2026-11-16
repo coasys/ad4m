@@ -588,8 +588,9 @@ Spec: `docs-src/identity/did-scid-coasys-1.md`, sections 8 (Resolution), 9 (DID 
   `DevicePosition`; `identity.postRequest` always signs with the device key (the store refuses
   a master key's post). The executor never decrypts the record, so `identity.devices` has no
   names: the app joins the opened record's entries by key id. The record key is wrapped to
-  this executor's `enc` key, and an app whose device is this executor (the desktop's custody
-  service) has no `enc` key of its own: **`identity.unwrapRecordKey`** (operator, local only)
+  the `enc` key the log lists for the device. The desktop's custody service opens its entry
+  with its own X25519 key when the log lists that key (`WithEncKey` in the client). Where the
+  log lists this executor's own `enc` key, **`identity.unwrapRecordKey`** (operator, local only)
   opens the record key of the main agent's entry in the wallet (`WalletBackend::unwrap_record_key`,
   the secret stays in that call) and answers it (`RecordKey`, wiped on drop); the app decrypts
   the record with it (`record::decrypt_record`, which verifies the envelope against the log
