@@ -654,8 +654,10 @@ signature against its own copy of the log.
 **Seals.** One construction for every sealed value: HPKE (RFC 9180) base mode, single shot,
 DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, ChaCha20-Poly1305, empty AAD. A sealed text is
 `base64url(enc ‖ ciphertext)` without padding (32-byte encapsulated key, then the ciphertext
-with its 16-byte tag). The recipient is an X25519 key: a device key's `enc` in the log (for an
-executor's key, the Montgomery form of its Ed25519 key), or the recovery key (section 15).
+with its 16-byte tag). The recipient is an X25519 key: a device key's `enc` in the log (for a
+desktop computer whose custody service may keep the master key, the custody service's own X25519
+key; for any other executor's key, the Montgomery form of its Ed25519 key), or the recovery key
+(section 15).
 
 **Inbox addresses.** Before a device joins, its device string gives the pre-join address
 `base58btc(sha256(signing_bytes("coasys:inbox", {"sign": sign, "r": r})))` (raw digest), written
