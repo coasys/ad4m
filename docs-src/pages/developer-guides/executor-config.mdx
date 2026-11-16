@@ -298,9 +298,13 @@ A supervisor (the desktop app, systemd, a host) reads the exit code:
   the run before), and a file stops at 50 MiB. `runtime.logTail { lines }`
   (operator, at most 2000) returns its newest lines.
 - **`--custody-channel`**: this executor serves the custody channel
-  (`identity.custodyStatus`, `identity.takeMaster`, and `identity.inboxAck`,
+  (`identity.custodyStatus`, `identity.inboxSealed`, and `identity.inboxAck`,
   which with the channel on only the custody service may call) to the custody
-  credential on a loopback listener only. The custody credential is a second
+  credential on a loopback listener only. The custody service links this
+  computer with its own X25519 key (`identity.prepareDevice { enc }` or
+  `identity.claimOffer` with `canKeepMaster` and `enc`), so a master key is
+  sealed to that key, and `identity.inboxSealed` hands it the message still
+  sealed: the executor never opens a master key. The custody credential is a second
   secret, given only to the custody service. It is not an operator: on a
   network listener it opens no session at all, and on a loopback listener it
   reaches only the identity calls the custody service makes (no

@@ -38,6 +38,12 @@ pub(crate) async fn log_of<R: ExecutorRpc>(
 ) -> Result<(Vec<Event>, KelChain), ClientError> {
     let events = executor.events(did).await?;
     let chain = fold(&events)?;
+    if chain.state().did != did {
+        return Err(ClientError::Protocol(format!(
+            "the executor served the log of {} for {did}",
+            chain.state().did
+        )));
+    }
     Ok((events, chain))
 }
 
