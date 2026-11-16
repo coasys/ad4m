@@ -10,7 +10,9 @@
 //! - [`flows::link`] also links with the holder scanning a device string: an offer bound to
 //!   the device's key, its ticket in the device's pre-join inbox.
 //! - [`flows::master`]: the master key sealed to a device that keeps it, the retry list of
-//!   pushes that failed, and the device's side that takes it from its executor.
+//!   pushes that failed, and the device's side that takes it from its inbox.
+//! - [`enc`]: the device's enc key, held by the app, and [`WithEncKey`], which opens the
+//!   inbox and the record key here: the executor passes only sealed text.
 //! - [`flows::revoke`]: a `revoke` signed by the current master key, published.
 //! - [`flows::requests`]: the holder's answer to a device's request (send the master key,
 //!   confirm a revocation).
@@ -20,6 +22,7 @@
 //! clock, randomness or network of its own: [`Clock`], [`Random`] and [`executor::ExecutorRpc`]
 //! come in from the surface, so the same code runs natively and in WASM.
 
+pub mod enc;
 pub mod executor;
 pub mod flows;
 pub mod record;
@@ -27,6 +30,7 @@ mod request;
 pub mod secret;
 pub mod vault;
 
+pub use enc::{EncKey, EncOpenError, SealedInboxMessage, SoftEncKey, WithEncKey};
 pub use executor::{ExecutorRpc, RpcError, ViaExecutor};
 pub use secret::Secret;
 #[cfg(any(test, feature = "test-vault"))]

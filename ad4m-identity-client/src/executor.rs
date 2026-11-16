@@ -102,8 +102,9 @@ pub struct StoredRecord {
     pub receipt: RecordReceipt,
 }
 
-/// `identity.takeMaster`: a master key sealed to this device, opened by its executor for the
-/// custody service. The secret is wiped when this drops.
+/// `identity.takeMaster`: a master key sealed to this device's enc key, opened by
+/// [`crate::WithEncKey`] with that key, never by the executor. The secret is wiped when this
+/// drops.
 pub struct TakenMaster {
     /// Acknowledge it (`identity.inboxAck`) once the vault keeps the key.
     pub message_id: String,
@@ -266,8 +267,9 @@ impl<R: ExecutorRpc> ViaExecutor<R> {
         self.call("identity.inboxPut", params).await
     }
 
-    /// The custody channel's call: the oldest current master key sealed to this device, opened
-    /// by the executor; `None` when none waits.
+    /// The oldest current master key sealed to this device; `None` when none waits. Only
+    /// [`crate::WithEncKey`] answers it: it reads the sealed inbox (`identity.inboxSealed`, the
+    /// custody channel's call) and opens it with the device's enc key. The executor does not.
     pub async fn take_master(&self) -> Result<Option<TakenMaster>, RpcError> {
         const METHOD: &str = "identity.takeMaster";
         let mut value = self.rpc.call(METHOD, json!({})).await?;
@@ -320,7 +322,8 @@ impl<R: ExecutorRpc> ViaExecutor<R> {
     }
 
     /// The record key that `wrapped` (the executor's entry of a record's `wrapped`) seals to
-    /// the executor's device key, opened in its wallet.
+    /// the enc key the log lists for the executor's device key. Over [`crate::WithEncKey`] the
+    /// app opens it with that key.
     pub async fn unwrap_record_key(
         &self,
         wrapped: &str,

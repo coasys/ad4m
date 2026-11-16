@@ -16,8 +16,9 @@
 //! start and unlock, pushes what is left again until the store takes it or the key is no longer
 //! a device of the log.
 //!
-//! The device's side ([`take_master`]): its custody service takes the key its executor opened
-//! (`identity.takeMaster`), checks it against its own fold of the log, keeps it in the vault,
+//! The device's side ([`take_master`]): its custody service opens the key with its own enc key
+//! (`identity.takeMaster`, answered by [`crate::WithEncKey`] from the sealed inbox; the executor
+//! opens nothing), checks it against its own fold of the log, keeps it in the vault,
 //! acknowledges the message, and marks itself `holdsMaster: true` in the record.
 
 use ad4m_identity_core::build::Signer;
@@ -355,8 +356,8 @@ fn retry_entry(key_id: &str) -> DeviceEntry {
     }
 }
 
-/// The device's side, after its own unlock: takes the master key its executor opened
-/// (`identity.takeMaster`, the custody channel), checks that it is the current master of the
+/// The device's side, after its own unlock: takes the master key sealed to its enc key
+/// (`identity.takeMaster`, which only [`crate::WithEncKey`] answers), checks that it is the current master of the
 /// log as this app folds it, keeps it in `vault`, acknowledges the message, and marks this
 /// device `holdsMaster: true` in the record. `None` when no master key waits. A key that does
 /// not check, or a vault that refuses it, leaves the message for the next try.
