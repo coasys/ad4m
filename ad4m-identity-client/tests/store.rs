@@ -14,11 +14,12 @@ use ad4m_identity_client::flows::requests::{answer, ask_for_master, check_poster
 use ad4m_identity_client::flows::revoke::revoke;
 use ad4m_identity_client::record::{self, Change};
 use ad4m_identity_client::store::{
-    Checkpoint, CheckpointError, EncKey, EncOpenError, HttpClient, HttpError, HttpRequest,
-    HttpResponse, LogCheckpoints, MemoryCheckpoints, SoftEncKey, StoreEndpoint, ViaStore,
+    Checkpoint, CheckpointError, HttpClient, HttpError, HttpRequest, HttpResponse, LogCheckpoints,
+    MemoryCheckpoints, StoreEndpoint, ViaStore,
 };
 use ad4m_identity_client::{
-    ClientError, ExecutorRpc, MemoryVault, OsRandom, Secret, SystemClock, Vault, ViaExecutor,
+    ClientError, EncKey, EncOpenError, ExecutorRpc, MemoryVault, OsRandom, Secret, SoftEncKey,
+    SystemClock, Vault, ViaExecutor,
 };
 use ad4m_identity_core::inbox::{InboxAddress, InboxError, InboxPayload};
 use ad4m_identity_core::link::{DeviceString, OfferKind};

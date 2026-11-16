@@ -13,7 +13,7 @@
 //!   read, and a claim's co-signature. The seed stays behind the trait.
 //! - [`EncKey`]: the X25519 key a device string carries as `enc`. It opens inbox messages
 //!   (`identity.inbox`, `identity.takeMaster`, a pre-join ticket's claim) and unwraps the
-//!   record key (`identity.unwrapRecordKey`). [`SoftEncKey`] is the software version. An
+//!   record key (`identity.unwrapRecordKey`). [`crate::SoftEncKey`] is the software version. An
 //!   `EncOpenError::Unavailable` (a locked keystore) keeps the message and answers 503; a
 //!   `Sealed` drops it.
 //! - `clock` and `random`: a signed request's `expires` and `nonce`, and a device string's
@@ -73,16 +73,14 @@ use std::rc::Rc;
 use ad4m_hash_chain::{canonical_json, encode_proof_value, hash_bytes, Multikey};
 use ad4m_identity_core::build::{cosign, Signer};
 use ad4m_identity_core::inbox::{
-    check_payload, pre_address, sign_pre_auth, Accept, InboxAddress, InboxBody, InboxError,
-    InboxPayload, PreInboxAuth,
+    check_payload, pre_address, sign_pre_auth, Accept, InboxAddress, InboxBody, InboxPayload,
+    PreInboxAuth,
 };
 use ad4m_identity_core::link::{decode_secret, make_claim, match_code, DeviceString, OfferString};
-use ad4m_identity_core::record::{
-    envelope_signing_bytes, RecordError, SealedRecord, RECORD_KEY_LEN,
-};
+use ad4m_identity_core::record::{envelope_signing_bytes, SealedRecord};
 use ad4m_identity_core::{
-    did_of, is_ed25519_multikey, scid_of, signing_bytes, x25519_multikey_of,
-    x25519_secret_of_ed25519, Event, HeadStatement, KelChain, Op, X25519Secret, REQUEST_DOMAIN,
+    did_of, is_ed25519_multikey, scid_of, signing_bytes, Event, HeadStatement, KelChain, Op,
+    REQUEST_DOMAIN,
 };
 use ad4m_ldk::identity::{
     InboxAddress as RouteAddress, InboxBind, InboxWrite, LogPage, PostedRequest, RequestBody,
@@ -93,9 +91,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use zeroize::Zeroize;
 
+use crate::enc::{take_from, EncKey, EncOpenError, SealedInboxMessage};
 use crate::executor::{ExecutorRpc, RpcError};
 use crate::request::REQUEST_TTL_S;
-use crate::secret::Secret;
 use crate::{Clock, Random};
 
 /// `X-Coasys-Request`: base64url(JCS(SignedRequest)), on every signed route.
@@ -368,86 +366,6 @@ pub struct HttpError(pub String);
 #[async_trait(?Send)]
 pub trait HttpClient {
     async fn send(&self, request: HttpRequest) -> Result<HttpResponse, HttpError>;
-}
-
-/// Why [`EncKey::open`] or [`EncKey::unwrap_record_key`] gave no answer, split as the
-/// executor's `Unopened` is: `Unavailable` is transient — the keystore is locked or the open
-/// failed in between — so the message is kept and the call answers `unavailable` (503);
-/// `Sealed` is final — the bytes do not open with this device's key at this address — so the
-/// message is for no one here and the caller drops it.
-#[derive(Debug, thiserror::Error)]
-pub enum EncOpenError<E> {
-    /// The key cannot open right now: a locked keystore, an I/O failure. Try again later.
-    #[error("{0}")]
-    Unavailable(String),
-    /// It does not open with this device's key: it is for no one here.
-    #[error("{0}")]
-    Sealed(E),
-}
-
-/// The device's X25519 key, kept behind the port: `enc` opens inbox messages and unwraps the
-/// record's key for this device's entry. A phone's keystore implementation holds the secret;
-/// [`SoftEncKey`] is the software version for tests and callers without one.
-pub trait EncKey {
-    /// The `enc` multikey a claim or device string carries.
-    fn enc(&self) -> Multikey;
-    /// Opens a message sealed for `address` (`coasys:inbox` + address is the seal's `info`, so
-    /// a seal for one inbox never opens at another). `Unavailable` keeps the message for the
-    /// next try; `Sealed` drops it.
-    fn open(
-        &self,
-        address: &InboxAddress,
-        sealed: &str,
-    ) -> Result<InboxPayload, EncOpenError<InboxError>>;
-    /// The record key that `wrapped` (this device's entry of a record's `wrapped`) seals for
-    /// `scid`'s record — the same two error cases as `open`.
-    fn unwrap_record_key(
-        &self,
-        scid: &str,
-        wrapped: &str,
-    ) -> Result<Secret<[u8; RECORD_KEY_LEN]>, EncOpenError<RecordError>>;
-}
-
-/// A software [`EncKey`] holding the X25519 secret in memory.
-pub struct SoftEncKey {
-    secret: X25519Secret,
-}
-
-impl SoftEncKey {
-    /// An `EncKey` over `secret`.
-    pub fn new(secret: X25519Secret) -> Self {
-        Self { secret }
-    }
-
-    /// The `enc` of a device key kept in one Ed25519 secret (as an executor's wallet derives
-    /// it): `x25519_secret_of_ed25519`.
-    pub fn from_ed25519(key: &ed25519_dalek::SigningKey) -> Self {
-        Self::new(x25519_secret_of_ed25519(key))
-    }
-}
-
-impl EncKey for SoftEncKey {
-    fn enc(&self) -> Multikey {
-        x25519_multikey_of(&self.secret)
-    }
-
-    fn open(
-        &self,
-        address: &InboxAddress,
-        sealed: &str,
-    ) -> Result<InboxPayload, EncOpenError<InboxError>> {
-        ad4m_identity_core::inbox::open(&self.secret, address, sealed).map_err(EncOpenError::Sealed)
-    }
-
-    fn unwrap_record_key(
-        &self,
-        scid: &str,
-        wrapped: &str,
-    ) -> Result<Secret<[u8; RECORD_KEY_LEN]>, EncOpenError<RecordError>> {
-        ad4m_identity_core::record::unwrap_key(wrapped, scid, &self.secret)
-            .map(|key| Secret::new(*key))
-            .map_err(EncOpenError::Sealed)
-    }
 }
 
 /// Where the store sits and which keys' signed heads count.
@@ -1594,7 +1512,10 @@ impl ViaStore {
     }
 
     /// `identity.takeMaster`: the oldest waiting master key sealed to this device, opened by
-    /// `enc` and checked against the fresh log; `null` when none waits.
+    /// `enc` and checked against the fresh log ([`take_from`], the same open, check and choice
+    /// as a desktop's [`crate::WithEncKey`]); `null` when none waits. Each message that does
+    /// not open, is stale or fails the check is acknowledged (`DELETE`); a locked keystore
+    /// answers 503 and keeps them all.
     async fn take_master(&self) -> Result<Value, RpcError> {
         let Some(position) = self.maybe_position().await? else {
             return Ok(Value::Null);
@@ -1607,49 +1528,40 @@ impl ViaStore {
         }
         let listed: Vec<Value> = serde_json::from_slice(&body)
             .map_err(|e| bad_reply(format!("the store served {e}")))?;
-        let sealed_at = InboxAddress::Joined {
-            scid: position.scid.clone(),
-            key_id: position.key_id.clone(),
-        };
-        for message in listed {
-            let id = message["id"].as_str().unwrap_or_default().to_string();
-            let payload = match self
-                .enc
-                .open(&sealed_at, message["sealed"].as_str().unwrap_or_default())
-            {
-                Ok(payload) => Opened(payload),
-                Err(EncOpenError::Sealed(_)) => {
-                    self.drop_joined(&position, &id).await;
-                    continue;
-                }
-                Err(EncOpenError::Unavailable(_)) => return Err(unavailable(ENC_UNAVAILABLE)),
-            };
-            if !matches!(payload.body, InboxBody::Master { .. }) {
-                continue;
-            }
-            match check_payload(&payload, &self.device.key(), &chain, self.clock.now()) {
-                Ok(Accept::KeepMaster { .. }) => {
-                    let InboxBody::Master { did, index, .. } = &payload.body else {
-                        continue;
-                    };
-                    let out = json!({
-                        "messageId": id,
-                        "did": did,
-                        "index": index,
-                        "secret": match &payload.body {
-                            InboxBody::Master { secret, .. } => secret.clone(),
-                            _ => String::new(),
-                        },
-                    });
-                    return Ok(out);
-                }
-                Ok(Accept::Stale) | Err(_) => {
-                    self.drop_joined(&position, &id).await;
-                }
-                Ok(Accept::ClaimOffer(_)) => {}
-            }
+        let messages: Vec<SealedInboxMessage> = listed
+            .iter()
+            .map(|message| SealedInboxMessage {
+                id: message["id"].as_str().unwrap_or_default().to_string(),
+                sealed: message["sealed"].as_str().unwrap_or_default().to_string(),
+                scid: position.scid.clone(),
+                key_id: position.key_id.clone(),
+                stored_at: message["storedAt"].as_u64().unwrap_or_default(),
+                expires: message["expires"].as_u64().unwrap_or_default(),
+            })
+            .collect();
+        let taken = take_from(
+            self.enc.as_ref(),
+            &messages,
+            &self.device.key(),
+            &chain,
+            self.clock.now(),
+        )
+        .map_err(|e| match e {
+            EncOpenError::Unavailable(_) => unavailable(ENC_UNAVAILABLE),
+            EncOpenError::Sealed(e) => bad_request(format!("open: {e}")),
+        })?;
+        for id in &taken.drop {
+            self.drop_joined(&position, id).await;
         }
-        Ok(Value::Null)
+        Ok(match taken.master {
+            Some(master) => json!({
+                "messageId": master.message_id,
+                "did": master.did,
+                "index": master.index,
+                "secret": bs58::encode(master.secret.expose()).into_string(),
+            }),
+            None => Value::Null,
+        })
     }
 
     /// `identity.inboxAck`: `DELETE` of message `id` of the joined inbox, signed by `device`;

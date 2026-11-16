@@ -23,8 +23,9 @@ use ad4m_identity_client::flows::revoke::{key_id_of, revoke, revoke_and_rotate};
 use ad4m_identity_client::flows::rotate::{rotate, MAX_TRIES};
 use ad4m_identity_client::record::{self, Change};
 use ad4m_identity_client::{
-    ClientError, Clock, CustodyNote, ExecutorRpc, MasterUse, MemoryVault, OsRandom, PendingPush,
-    Random, RpcError, StageToken, SystemClock, Vault, ViaExecutor,
+    ClientError, Clock, CustodyNote, EncKey, ExecutorRpc, MasterUse, MemoryVault, OsRandom,
+    PendingPush, Random, RpcError, SoftEncKey, StageToken, SystemClock, Vault, ViaExecutor,
+    WithEncKey,
 };
 use ad4m_identity_core::build::{self, cosign, Signer};
 use ad4m_identity_core::inbox::{
@@ -35,7 +36,9 @@ use ad4m_identity_core::record::{
     self as record_core, DeviceEntry, DeviceKind, HoldsMaster, PendingRevocation, RevocationReason,
 };
 use ad4m_identity_core::words;
-use ad4m_identity_core::{did_of, signing_bytes, Event, KelChain, Op, REQUEST_DOMAIN};
+use ad4m_identity_core::{
+    did_of, signing_bytes, Event, KelChain, Op, X25519Secret, REQUEST_DOMAIN,
+};
 use ad4m_ldk::identity::{DeviceRequestBody, RequestBody, SignedRequest};
 use async_trait::async_trait;
 use axum::body::Body;
@@ -202,6 +205,8 @@ struct TestExecutor {
     swap_incept: Cell<bool>,
     /// `identity.openOffer` answers another offer id.
     other_offer_id: Cell<bool>,
+    /// Each call that reached this executor: its method, params and answer, as JSON text.
+    seen: RefCell<Vec<String>>,
 }
 
 impl TestExecutor {
@@ -223,7 +228,17 @@ impl TestExecutor {
             tamper_claim: Cell::new(None),
             swap_incept: Cell::new(false),
             other_offer_id: Cell::new(false),
+            seen: RefCell::new(Vec::new()),
         }
+    }
+
+    /// The methods of the calls that reached this executor.
+    fn methods(&self) -> Vec<String> {
+        self.seen
+            .borrow()
+            .iter()
+            .map(|s| s.split(' ').next().unwrap().to_string())
+            .collect()
     }
 
     fn device_key(&self) -> String {
@@ -342,9 +357,11 @@ impl TestExecutor {
     }
 
     /// What this executor does while its device string `r` shows (`identity.prepareDevice`):
-    /// reads its pre-join inbox, opens the ticket, checks it against the log, and claims it
-    /// (saying it may keep the master key, as the desktop's executor does). Answers the claim.
-    async fn take_ticket(&self, r: &str) -> Result<Value, RpcError> {
+    /// reads its pre-join inbox, opens the ticket with its wallet enc key (the device string's),
+    /// checks it against the log, and claims it. With the custody enc key `enc` (the custody
+    /// service's `prepareDevice {enc}`) the claim carries it and says it may keep the master key;
+    /// without, it carries the wallet enc key and says not. Answers the claim.
+    async fn take_ticket(&self, r: &str, enc: Option<&str>) -> Result<Value, RpcError> {
         let address = pre_address(&self.device_key(), r).unwrap();
         let path = format!("/v1/inbox/pre/{address}");
         let mut nonce = [0u8; 16];
@@ -380,17 +397,35 @@ impl TestExecutor {
         let Accept::ClaimOffer(ticket) = accept else {
             panic!("expected a ticket to claim");
         };
-        self.call(
-            "identity.claimOffer",
-            json!({ "offer": ticket.offer_string().encode(), "canKeepMaster": true }),
-        )
-        .await
+        let mut params = json!({
+            "offer": ticket.offer_string().encode(),
+            "canKeepMaster": enc.is_some(),
+        });
+        if let Some(enc) = enc {
+            params["enc"] = json!(enc);
+        }
+        self.call("identity.claimOffer", params).await
     }
 }
 
 #[async_trait(?Send)]
 impl ExecutorRpc for TestExecutor {
     async fn call(&self, method: &str, p: Value) -> Result<Value, RpcError> {
+        let params = p.to_string();
+        let answer = self.answer(method, p).await;
+        let shown = match &answer {
+            Ok(value) => value.to_string(),
+            Err(e) => e.to_string(),
+        };
+        self.seen
+            .borrow_mut()
+            .push(format!("{method} {params} {shown}"));
+        answer
+    }
+}
+
+impl TestExecutor {
+    async fn answer(&self, method: &str, p: Value) -> Result<Value, RpcError> {
         match method {
             "identity.status" => {
                 let scid = self.identity.borrow().clone();
@@ -437,14 +472,16 @@ impl ExecutorRpc for TestExecutor {
                         message: "not an incept".into(),
                     });
                 };
+                // The custody service names its own enc key for this device key (the real
+                // executor takes it only from the custody credential).
                 let listed = add
                     .iter()
-                    .find(|d| d.sign == self.device_key() && d.enc == self.device_enc())
+                    .find(|d| d.sign == self.device_key())
                     .ok_or(RpcError {
                         code: 400,
                         message: "not-listed".into(),
                     })?;
-                let id = listed.id.clone();
+                let (id, enc) = (listed.id.clone(), listed.enc.clone());
                 if self.swap_incept.get() {
                     use ad4m_identity_core::{DeviceKey, KeyLife};
                     let master = SigningKey::from_bytes(&[77; 32]);
@@ -452,7 +489,7 @@ impl ExecutorRpc for TestExecutor {
                     let device = DeviceKey {
                         id: id.clone(),
                         sign: self.device_key(),
-                        enc: self.device_enc(),
+                        enc,
                         life: KeyLife::Standing,
                     };
                     event = ad4m_identity_core::build::incept_human(&master, next, vec![device])
@@ -580,14 +617,33 @@ impl ExecutorRpc for TestExecutor {
                 let offer = OfferString::parse_link(p["offer"].as_str().unwrap())
                     .or_else(|_| OfferString::parse(p["offer"].as_str().unwrap()))
                     .unwrap();
+                // As a custody executor: a claim that may keep the master key carries the
+                // custody enc key, and only such a claim names one.
+                let can_keep_master = p["canKeepMaster"].as_bool().unwrap_or(false);
+                let enc = match (can_keep_master, p["enc"].as_str()) {
+                    (true, Some(enc)) => enc.to_string(),
+                    (true, None) => {
+                        return Err(RpcError {
+                            code: 400,
+                            message: "no-custody-enc".into(),
+                        })
+                    }
+                    (false, Some(_)) => {
+                        return Err(RpcError {
+                            code: 400,
+                            message: "enc: only with canKeepMaster".into(),
+                        })
+                    }
+                    (false, None) => self.device_enc(),
+                };
                 let s = link::decode_secret(&offer.s).unwrap();
                 let claim = link::make_claim(
                     &offer.scid,
                     &offer.offer_id,
                     s,
                     &self.device,
-                    self.device_enc(),
-                    p["canKeepMaster"].as_bool().unwrap_or(false),
+                    enc,
+                    can_keep_master,
                     p["hint"].as_str().map(str::to_string),
                 )
                 .unwrap();
@@ -682,32 +738,29 @@ impl ExecutorRpc for TestExecutor {
                 }
                 Ok(body)
             }
-            // As the executor with the custody channel: the oldest current master key of its
-            // joined inbox, checked against the log; a stale one is deleted.
-            "identity.takeMaster" => {
-                let (scid, key_id, chain, _) = self.position().await?;
-                let inbox = format!("/v1/inbox/{scid}/{key_id}");
-                let (_, messages) = self.as_device("GET", &inbox, None).await?;
-                let address = InboxAddress::Joined { scid, key_id };
-                for message in messages.as_array().unwrap() {
-                    let id = message["id"].as_str().unwrap();
-                    let sealed = message["sealed"].as_str().unwrap();
-                    let payload = inbox::open(&self.enc_secret(), &address, sealed).unwrap();
-                    let accept =
-                        check_payload(&payload, &self.device_key(), &chain, SystemClock.now());
-                    if let (
-                        Ok(Accept::KeepMaster { index }),
-                        InboxBody::Master { did, secret, .. },
-                    ) = (accept, &payload.body)
-                    {
-                        return Ok(
-                            json!({ "messageId": id, "did": did, "index": index, "secret": secret }),
-                        );
-                    }
-                    self.as_device("DELETE", &format!("{inbox}/{id}"), None)
-                        .await?;
-                }
-                Ok(Value::Null)
+            // As the executor with the custody channel: its joined inbox as the store keeps it,
+            // opened by no one here.
+            "identity.inboxSealed" => {
+                let (scid, key_id, ..) = self.position().await?;
+                let (_, messages) = self
+                    .as_device("GET", &format!("/v1/inbox/{scid}/{key_id}"), None)
+                    .await?;
+                let messages = messages.as_array().cloned().unwrap_or_default();
+                Ok(Value::Array(
+                    messages
+                        .iter()
+                        .map(|m| {
+                            json!({
+                                "id": m["id"],
+                                "sealed": m["sealed"],
+                                "scid": scid,
+                                "keyId": key_id,
+                                "storedAt": m["storedAt"],
+                                "expires": m["expires"],
+                            })
+                        })
+                        .collect(),
+                ))
             }
             "identity.inboxAck" => {
                 let (scid, key_id, _, _) = self.position().await?;
@@ -868,6 +921,52 @@ impl ExecutorRpc for TestExecutor {
     }
 }
 
+/// The test executor under the custody service's adapter: the calls that need the device's
+/// enc key run in the app with the custody enc key, a key of its own (not the wallet's).
+type Adapted = WithEncKey<TestExecutor>;
+
+/// A desktop computer: its custody service over its executor.
+type Custody = ViaExecutor<Adapted>;
+
+/// The custody enc key of executor `seed`.
+fn custody_enc(seed: u8) -> SoftEncKey {
+    SoftEncKey::new(X25519Secret::from([seed.wrapping_add(100); 32]))
+}
+
+/// The custody service's adapter over executor `seed` on `store`.
+fn adapted(store: &Arc<TestStore>, seed: u8) -> Adapted {
+    WithEncKey::new(
+        TestExecutor::new(store, seed),
+        Box::new(custody_enc(seed)),
+        Box::new(SystemClock),
+    )
+}
+
+/// The desktop computer with executor `seed` on `store`.
+fn custody(store: &Arc<TestStore>, seed: u8) -> Custody {
+    ViaExecutor::new(adapted(store, seed))
+}
+
+/// The test executor under a custody service.
+trait Fake {
+    fn fake(&self) -> &TestExecutor;
+}
+
+impl Fake for Custody {
+    fn fake(&self) -> &TestExecutor {
+        self.rpc().rpc()
+    }
+}
+
+/// The desktop's executor takes the ticket of its device string `r`, as after the custody
+/// service's `identity.prepareDevice {enc}`: its claim may keep the master key.
+async fn take_ticket(device: &Custody, r: &str) -> Result<Value, RpcError> {
+    device
+        .fake()
+        .take_ticket(r, Some(&device.rpc().enc()))
+        .await
+}
+
 /// A `Random` that counts up, so word positions are known.
 struct Counting(RefCell<u8>);
 
@@ -889,11 +988,7 @@ fn shown(screen: CreateScreen) -> Vec<String> {
 }
 
 /// `identity.claimOffer` on the joining executor (the operator's call; the CLI makes it).
-async fn claim(
-    b: &ViaExecutor<TestExecutor>,
-    offer: &str,
-    hint: Option<&str>,
-) -> Result<Value, RpcError> {
+async fn claim(b: &Custody, offer: &str, hint: Option<&str>) -> Result<Value, RpcError> {
     b.rpc()
         .call(
             "identity.claimOffer",
@@ -903,7 +998,7 @@ async fn claim(
 }
 
 /// `identity.joinStatus` on the joining executor.
-async fn join(b: &ViaExecutor<TestExecutor>, offer_id: &Value) -> Value {
+async fn join(b: &Custody, offer_id: &Value) -> Value {
     b.rpc()
         .call("identity.joinStatus", json!({ "offerId": offer_id }))
         .await
@@ -923,7 +1018,7 @@ fn confirmed(entropy: u8) -> CreateFlow {
 }
 
 /// `create` on `executor` with fixed words; answers the identity.
-async fn create(executor: &ViaExecutor<TestExecutor>, vault: &MemoryVault, entropy: u8) -> String {
+async fn create(executor: &Custody, vault: &MemoryVault, entropy: u8) -> String {
     confirmed(entropy)
         .finish(executor, vault, this_computer(), &SystemClock, &OsRandom)
         .await
@@ -934,7 +1029,7 @@ async fn create(executor: &ViaExecutor<TestExecutor>, vault: &MemoryVault, entro
 #[tokio::test]
 async fn create_makes_an_identity_that_lists_the_executor_as_d1() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let a = custody(&store, 1);
     let vault = MemoryVault::new();
 
     let (mut flow, screen) = CreateFlow::start(&Counting(RefCell::new(3)));
@@ -967,7 +1062,7 @@ async fn create_makes_an_identity_that_lists_the_executor_as_d1() {
     assert_eq!(created.device_key_id, "d1");
     assert_eq!(created.head.seq, 0);
     assert!(vault.pending_incepts().unwrap().is_empty());
-    assert_eq!(a.rpc().publishes.get(), 1);
+    assert_eq!(a.fake().publishes.get(), 1);
     let status = a.status().await.unwrap();
     assert_eq!(status.did.as_deref(), Some(created.did.as_str()));
     assert_eq!(status.key_id.as_deref(), Some("d1"));
@@ -1163,7 +1258,7 @@ impl Vault for RefusingVault {
 #[tokio::test]
 async fn create_publishes_nothing_when_the_vault_cannot_keep_the_master_key() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let a = custody(&store, 1);
 
     let refused = confirmed(6)
         .finish(
@@ -1183,7 +1278,7 @@ async fn create_publishes_nothing_when_the_vault_cannot_keep_the_master_key() {
         ),
         "{refused:?}"
     );
-    assert_eq!(a.rpc().publishes.get(), 0, "nothing reached the store");
+    assert_eq!(a.fake().publishes.get(), 0, "nothing reached the store");
     assert_eq!(a.status().await.unwrap().did, None);
     let refusing = RefusingVault(MemoryVault::new());
     let _ = confirmed(6)
@@ -1204,11 +1299,11 @@ async fn create_publishes_nothing_when_the_vault_cannot_keep_the_master_key() {
 #[tokio::test]
 async fn create_finishes_with_the_same_words_after_a_lost_publish_answer() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let a = custody(&store, 1);
     let vault = MemoryVault::new();
 
     // The store takes the incept and the executor records it, but the answer never arrives.
-    a.rpc().lose_publish_answer.set(true);
+    a.fake().lose_publish_answer.set(true);
     let lost = confirmed(8)
         .finish(&a, &vault, this_computer(), &SystemClock, &OsRandom)
         .await;
@@ -1244,12 +1339,12 @@ async fn create_finishes_with_the_same_words_after_a_lost_publish_answer() {
 #[tokio::test]
 async fn resume_finishes_a_create_from_the_vault_alone() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let a = custody(&store, 1);
     let vault = MemoryVault::new();
     assert!(resume(&a, &vault).await.unwrap().is_none());
 
     // The publish answer is lost and the flow (with the words) is gone.
-    a.rpc().lose_publish_answer.set(true);
+    a.fake().lose_publish_answer.set(true);
     assert!(confirmed(10)
         .finish(&a, &vault, this_computer(), &SystemClock, &OsRandom)
         .await
@@ -1277,7 +1372,7 @@ async fn resume_finishes_a_create_from_the_vault_alone() {
     );
     assert_eq!(created.head.seq, 0);
     assert_eq!(a.events(&did).await.unwrap().len(), 1);
-    assert_eq!(a.rpc().publishes.get(), 2);
+    assert_eq!(a.fake().publishes.get(), 2);
     assert!(vault.unlock(&created.scid, MasterUse::Link, 0).is_ok());
     // Done: nothing left to resume, and another create is refused as before.
     assert!(resume(&a, &vault).await.unwrap().is_none());
@@ -1290,10 +1385,10 @@ async fn resume_finishes_a_create_from_the_vault_alone() {
 #[tokio::test]
 async fn resume_publishes_an_incept_whose_publish_never_reached_the_store() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let a = custody(&store, 1);
     let vault = MemoryVault::new();
 
-    a.rpc().refuse_publish.set(true);
+    a.fake().refuse_publish.set(true);
     let failed = confirmed(12)
         .finish(&a, &vault, this_computer(), &SystemClock, &OsRandom)
         .await;
@@ -1316,8 +1411,8 @@ async fn resume_publishes_an_incept_whose_publish_never_reached_the_store() {
 #[tokio::test]
 async fn link_adds_a_second_executor_with_one_unlock_and_one_match_code() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let b = custody(&store, 2);
     let vault = MemoryVault::new();
     let did = create(&a, &vault, 5).await;
 
@@ -1348,7 +1443,7 @@ async fn link_adds_a_second_executor_with_one_unlock_and_one_match_code() {
     // The holder sees the claim and the same code, then confirms.
     let claimed = flow.wait_for_claim().await.unwrap();
     assert_eq!(claimed.match_code, claimed_b["matchCode"]);
-    assert_eq!(claimed.device_key, b.rpc().device_key());
+    assert_eq!(claimed.device_key, b.fake().device_key());
     assert_eq!(claimed.hint.as_deref(), Some("server"));
     assert!(!claimed.can_keep_master && !flow.may_keep(&claimed));
     // A node's claim offers no master key.
@@ -1385,8 +1480,8 @@ async fn link_adds_a_second_executor_with_one_unlock_and_one_match_code() {
 #[tokio::test]
 async fn a_bot_offer_adds_the_claimed_key_with_the_bot_mark_and_its_scope() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let b = custody(&store, 2);
     let vault = MemoryVault::new();
     let did = create(&a, &vault, 5).await;
 
@@ -1445,13 +1540,13 @@ async fn a_bot_offer_adds_the_claimed_key_with_the_bot_mark_and_its_scope() {
 #[tokio::test]
 async fn a_bound_offer_takes_only_its_device_and_gives_its_ticket() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
-    let stranger = ViaExecutor::new(TestExecutor::new(&store, 3));
+    let a = custody(&store, 1);
+    let b = custody(&store, 2);
+    let stranger = custody(&store, 3);
     let vault = MemoryVault::new();
     let did = create(&a, &vault, 8).await;
 
-    let device_key = b.rpc().device_key();
+    let device_key = b.fake().device_key();
     let flow = LinkFlow::open(
         &a,
         &vault,
@@ -1495,8 +1590,8 @@ async fn a_bound_offer_takes_only_its_device_and_gives_its_ticket() {
 #[tokio::test]
 async fn a_confirm_after_a_failed_publish_succeeds() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let b = custody(&store, 2);
     let vault = MemoryVault::new();
     let did = create(&a, &vault, 6).await;
     let flow = LinkFlow::open(
@@ -1514,7 +1609,7 @@ async fn a_confirm_after_a_failed_publish_succeeds() {
     let claimed_b = claim(&b, &flow.link(), None).await.unwrap();
     let claimed = flow.wait_for_claim().await.unwrap();
 
-    a.rpc().refuse_publish.set(true);
+    a.fake().refuse_publish.set(true);
     flow.confirm(&claimed, entry("node.example", DeviceKind::Server), false)
         .await
         .expect_err("the publish failed");
@@ -1545,8 +1640,8 @@ async fn a_confirm_after_a_failed_publish_succeeds() {
 #[tokio::test]
 async fn a_retried_confirm_pushes_the_master_key_and_writes_the_record_once() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let desk = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let desk = custody(&store, 2);
     let vault = MemoryVault::new();
     let did = create(&a, &vault, 14).await;
     let device = device_string(&desk, STORE_URL, SystemClock.now() + 300);
@@ -1562,10 +1657,10 @@ async fn a_retried_confirm_pushes_the_master_key_and_writes_the_record_once() {
     )
     .await
     .unwrap();
-    let claimed_desk = desk.rpc().take_ticket(&device.r).await.unwrap();
+    let claimed_desk = take_ticket(&desk, &device.r).await.unwrap();
     let claimed = flow.wait_for_claim().await.unwrap();
 
-    a.rpc().refuse_publish.set(true);
+    a.fake().refuse_publish.set(true);
     flow.confirm(&claimed, entry("Desk", DeviceKind::DesktopApp), true)
         .await
         .expect_err("the publish failed");
@@ -1622,8 +1717,8 @@ async fn a_retried_confirm_pushes_the_master_key_and_writes_the_record_once() {
 #[tokio::test]
 async fn a_confirm_whose_publish_answer_was_lost_pushes_and_writes_on_its_retry() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let desk = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let desk = custody(&store, 2);
     let vault = MemoryVault::new();
     let did = create(&a, &vault, 14).await;
     let device = device_string(&desk, STORE_URL, SystemClock.now() + 300);
@@ -1639,15 +1734,15 @@ async fn a_confirm_whose_publish_answer_was_lost_pushes_and_writes_on_its_retry(
     )
     .await
     .unwrap();
-    let claimed_desk = desk.rpc().take_ticket(&device.r).await.unwrap();
+    let claimed_desk = take_ticket(&desk, &device.r).await.unwrap();
     let claimed = flow.wait_for_claim().await.unwrap();
 
-    a.rpc().lose_publish_answer.set(true);
-    let publishes = a.rpc().publishes.get();
+    a.fake().lose_publish_answer.set(true);
+    let publishes = a.fake().publishes.get();
     flow.confirm(&claimed, entry("Desk", DeviceKind::DesktopApp), true)
         .await
         .expect_err("the publish answer was lost");
-    assert_eq!(a.rpc().publishes.get(), publishes + 1);
+    assert_eq!(a.fake().publishes.get(), publishes + 1);
     assert_eq!(
         join(&desk, &claimed_desk["offerId"]).await["state"],
         "spent"
@@ -1667,7 +1762,7 @@ async fn a_confirm_whose_publish_answer_was_lost_pushes_and_writes_on_its_retry(
         .confirm(&claimed, entry("Desk", DeviceKind::DesktopApp), true)
         .await
         .unwrap();
-    assert_eq!(a.rpc().publishes.get(), publishes + 1, "no second publish");
+    assert_eq!(a.fake().publishes.get(), publishes + 1, "no second publish");
     assert_eq!((linked.head.seq, linked.key_id.as_str()), (1, "d2"));
     assert!(matches!(&linked.master, Some(Ok(_))), "{:?}", linked.master);
     // Version 2 lists the device, version 3 marks it offered after the push.
@@ -1715,9 +1810,9 @@ async fn a_confirm_whose_publish_answer_was_lost_pushes_and_writes_on_its_retry(
 #[tokio::test]
 async fn a_confirm_of_a_spent_offer_whose_add_is_another_claim_is_refused() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
-    let c = ViaExecutor::new(TestExecutor::new(&store, 3));
+    let a = custody(&store, 1);
+    let b = custody(&store, 2);
+    let c = custody(&store, 3);
     let vault = MemoryVault::new();
     let did = create(&a, &vault, 8).await;
     let open = || {
@@ -1739,7 +1834,7 @@ async fn a_confirm_of_a_spent_offer_whose_add_is_another_claim_is_refused() {
     let claimed_b = flow_b.wait_for_claim().await.unwrap();
     let claimed_c = flow_c.wait_for_claim().await.unwrap();
 
-    a.rpc().lose_publish_answer.set(true);
+    a.fake().lose_publish_answer.set(true);
     flow_b
         .confirm(&claimed_b, entry("b.example", DeviceKind::Server), false)
         .await
@@ -1793,8 +1888,8 @@ impl Clock for Ahead {
 #[tokio::test]
 async fn confirm_after_the_offers_expiry_within_the_grace_signs_the_add() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let b = custody(&store, 2);
     let vault = MemoryVault::new();
     let did = create(&a, &vault, 13).await;
     let clock = Ahead(Cell::new(0));
@@ -1828,7 +1923,7 @@ async fn confirm_after_the_offers_expiry_within_the_grace_signs_the_add() {
 #[tokio::test]
 async fn waiting_past_the_offers_expiry_answers_expired_not_the_vault() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let a = custody(&store, 1);
     let vault = MemoryVault::new();
     let did = create(&a, &vault, 14).await;
     let clock = Ahead(Cell::new(0));
@@ -1855,8 +1950,8 @@ async fn waiting_past_the_offers_expiry_answers_expired_not_the_vault() {
 #[tokio::test]
 async fn revoke_ends_the_second_executors_key() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let b = custody(&store, 2);
     let vault = MemoryVault::new();
     let did = create(&a, &vault, 6).await;
     let flow = LinkFlow::open(
@@ -1878,7 +1973,7 @@ async fn revoke_ends_the_second_executors_key() {
         .unwrap();
     join(&b, &claimed_b["offerId"]).await;
 
-    let d2 = key_id_of(&a, &did, &b.rpc().device_key())
+    let d2 = key_id_of(&a, &did, &b.fake().device_key())
         .await
         .unwrap()
         .unwrap();
@@ -1969,8 +2064,8 @@ async fn revoke_ends_the_second_executors_key() {
 /// `wait_for_claim`, so the master signs nothing and the log stays at the incept.
 async fn a_swapped_claim_view_is_refused(entropy: u8, tamper: fn(&mut Value)) {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let b = custody(&store, 2);
     let vault = MemoryVault::new();
     let did = create(&a, &vault, entropy).await;
     let flow = LinkFlow::open(
@@ -1986,15 +2081,15 @@ async fn a_swapped_claim_view_is_refused(entropy: u8, tamper: fn(&mut Value)) {
     .await
     .unwrap();
     claim(&b, &flow.link(), None).await.unwrap();
-    let publishes = a.rpc().publishes.get();
-    a.rpc().tamper_claim.set(Some(tamper));
+    let publishes = a.fake().publishes.get();
+    a.fake().tamper_claim.set(Some(tamper));
 
     let refused = flow.wait_for_claim().await;
     assert!(
         matches!(refused, Err(ClientError::Link(link::LinkError::CoSig))),
         "{refused:?}"
     );
-    assert_eq!(a.rpc().publishes.get(), publishes);
+    assert_eq!(a.fake().publishes.get(), publishes);
     let log = a.log(&did, 0, true).await.unwrap();
     assert_eq!(log.events.len(), 1);
 }
@@ -2021,7 +2116,7 @@ async fn a_claim_view_with_a_swapped_can_keep_master_is_never_signed() {
 #[tokio::test]
 async fn a_link_without_the_master_key_never_opens_an_offer() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let a = custody(&store, 1);
     let vault = MemoryVault::new();
     let did = create(&a, &vault, 7).await;
     let empty = MemoryVault::new();
@@ -2064,12 +2159,12 @@ fn this_computer() -> DeviceEntry {
 }
 
 /// The device string `device` shows (`identity.prepareDevice`).
-fn device_string(device: &ViaExecutor<TestExecutor>, store: &str, exp: u64) -> DeviceString {
+fn device_string(device: &Custody, store: &str, exp: u64) -> DeviceString {
     let mut r = [0u8; 16];
     OsRandom.fill(&mut r);
     DeviceString {
-        sign: device.rpc().device_key(),
-        enc: device.rpc().device_enc(),
+        sign: device.fake().device_key(),
+        enc: device.fake().device_enc(),
         r: bs58::encode(r).into_string(),
         exp,
         hint: Some("Desk".into()),
@@ -2080,10 +2175,10 @@ fn device_string(device: &ViaExecutor<TestExecutor>, store: &str, exp: u64) -> D
 /// `a` links `b` with an unbound `device` offer and `entry`, without the master key; `b`'s
 /// claim says `can_keep_master`. Answers the new key's id.
 async fn link_app(
-    a: &ViaExecutor<TestExecutor>,
+    a: &Custody,
     vault: &MemoryVault,
     did: &str,
-    b: &ViaExecutor<TestExecutor>,
+    b: &Custody,
     entry: DeviceEntry,
     can_keep_master: bool,
 ) -> String {
@@ -2121,8 +2216,8 @@ async fn link_app(
 #[tokio::test]
 async fn a_holder_scans_a_device_string_and_gives_the_master_key_to_the_desktop() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let desk = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let desk = custody(&store, 2);
     let vault = MemoryVault::new();
     let did = create(&a, &vault, 13).await;
     let now = SystemClock.now();
@@ -2167,10 +2262,10 @@ async fn a_holder_scans_a_device_string_and_gives_the_master_key_to_the_desktop(
     )
     .await
     .unwrap();
-    let claimed_desk = desk.rpc().take_ticket(&device.r).await.unwrap();
+    let claimed_desk = take_ticket(&desk, &device.r).await.unwrap();
     let claimed: Claimed = flow.wait_for_claim().await.unwrap();
     assert_eq!(claimed.match_code, claimed_desk["matchCode"]);
-    assert_eq!(claimed.device_key, desk.rpc().device_key());
+    assert_eq!(claimed.device_key, desk.fake().device_key());
     assert!(claimed.can_keep_master && flow.may_keep(&claimed));
 
     let linked = flow
@@ -2237,8 +2332,8 @@ fn swap_whole_claim(claim: &mut Value) {
 #[tokio::test]
 async fn a_scanned_offer_refuses_a_claim_by_another_whole_key() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let desk = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let desk = custody(&store, 2);
     let other = TestExecutor::new(&store, 3);
     let vault = MemoryVault::new();
     let did = create(&a, &vault, 18).await;
@@ -2256,7 +2351,7 @@ async fn a_scanned_offer_refuses_a_claim_by_another_whole_key() {
     )
     .await
     .unwrap();
-    desk.rpc().take_ticket(&device.r).await.unwrap();
+    take_ticket(&desk, &device.r).await.unwrap();
 
     // Another device's claim on this offer id, signed by that device: valid on its own.
     let swapped = link::make_claim(
@@ -2272,15 +2367,15 @@ async fn a_scanned_offer_refuses_a_claim_by_another_whole_key() {
     link::verify_claim(&scid, &swapped).unwrap();
     SWAPPED_VIEW
         .with(|v| *v.borrow_mut() = Some(json!(link::claim_view(&swapped, SystemClock.now()))));
-    let publishes = a.rpc().publishes.get();
-    a.rpc().tamper_claim.set(Some(swap_whole_claim));
+    let publishes = a.fake().publishes.get();
+    a.fake().tamper_claim.set(Some(swap_whole_claim));
 
     let refused = flow.wait_for_claim().await;
     assert!(
         matches!(refused, Err(ClientError::Link(link::LinkError::Bound))),
         "{refused:?}"
     );
-    assert_eq!(a.rpc().publishes.get(), publishes);
+    assert_eq!(a.fake().publishes.get(), publishes);
     assert_eq!(a.log(&did, 0, true).await.unwrap().events.len(), 1);
     assert_eq!(vault.unlocks(), vec![MasterUse::Link]);
 }
@@ -2289,8 +2384,8 @@ async fn a_scanned_offer_refuses_a_claim_by_another_whole_key() {
 #[tokio::test]
 async fn a_claim_without_can_keep_master_gets_no_master_key() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let b = custody(&store, 2);
     let vault = MemoryVault::new();
     let did = create(&a, &vault, 14).await;
     let flow = LinkFlow::open(
@@ -2323,8 +2418,8 @@ async fn a_claim_without_can_keep_master_gets_no_master_key() {
 #[tokio::test]
 async fn a_failed_push_stays_on_the_retry_list_until_it_passes() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let desk = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let desk = custody(&store, 2);
     let vault = MemoryVault::new();
     let did = create(&a, &vault, 15).await;
     let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
@@ -2345,7 +2440,7 @@ async fn a_failed_push_stays_on_the_retry_list_until_it_passes() {
     assert!(idle.pushes.is_empty() && idle.record.is_none());
     assert_eq!(vault.unlocks(), vec![MasterUse::Link]);
 
-    a.rpc().refuse_inbox_put.set(true);
+    a.fake().refuse_inbox_put.set(true);
     let failed = send_master(&a, &vault, &did, &d2, &SystemClock, &OsRandom).await;
     assert!(
         matches!(&failed, Err(ClientError::Rpc(e)) if e.code == 503),
@@ -2394,7 +2489,7 @@ async fn a_failed_push_stays_on_the_retry_list_until_it_passes() {
 
 /// An executor whose record writes always meet a newer version (as the agent language
 /// passes the store's `409 {version}`).
-struct AlwaysStale<'a>(&'a TestExecutor);
+struct AlwaysStale<'a>(&'a Adapted);
 
 #[async_trait(?Send)]
 impl ExecutorRpc for AlwaysStale<'_> {
@@ -2415,8 +2510,8 @@ impl ExecutorRpc for AlwaysStale<'_> {
 #[tokio::test]
 async fn record_writes_merge_into_the_newest_version() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let desk = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let desk = custody(&store, 2);
     let vault = MemoryVault::new();
     let did = create(&a, &vault, 16).await;
     let d2 = link_app(
@@ -2441,8 +2536,8 @@ async fn record_writes_merge_into_the_newest_version() {
     )
     .await
     .unwrap();
-    a.rpc().stale_record_put.set(true);
-    let puts = a.rpc().record_puts.get();
+    a.fake().stale_record_put.set(true);
+    let puts = a.fake().record_puts.get();
     let version = record::write(
         &a,
         &vault,
@@ -2456,7 +2551,7 @@ async fn record_writes_merge_into_the_newest_version() {
     .await
     .unwrap();
     assert_eq!(version, 4);
-    assert_eq!(a.rpc().record_puts.get(), puts + 1);
+    assert_eq!(a.fake().record_puts.get(), puts + 1);
     let opened = record::read(&a, &vault, &did).await.unwrap().unwrap();
     assert_eq!(opened.record.devices[&d2].name, "Studio Mac");
     assert_eq!(
@@ -2477,8 +2572,8 @@ async fn record_writes_merge_into_the_newest_version() {
 #[tokio::test]
 async fn a_conditional_write_checks_every_version_it_builds_on() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let desk = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let desk = custody(&store, 2);
     let vault = MemoryVault::new();
     let did = create(&a, &vault, 19).await;
     let d2 = link_app(
@@ -2516,16 +2611,16 @@ async fn a_conditional_write_checks_every_version_it_builds_on() {
         3
     );
     // The check failed on the version read: nothing is written.
-    let puts = a.rpc().record_puts.get();
+    let puts = a.fake().record_puts.get();
     let refused =
         record::write_if(&a, &vault, &did, &[rename("Den")], &desk_named, &OsRandom).await;
     assert!(matches!(refused, Err(ClientError::Step(_))), "{refused:?}");
-    assert_eq!(a.rpc().record_puts.get(), puts);
+    assert_eq!(a.fake().record_puts.get(), puts);
 
     // It held on the version first read, the put met a newer one, and it fails there.
     struct RenamedFirst<'a> {
-        inner: &'a TestExecutor,
-        desk: &'a ViaExecutor<TestExecutor>,
+        inner: &'a Adapted,
+        desk: &'a Custody,
         vault: &'a MemoryVault,
         did: &'a str,
         d2: &'a str,
@@ -2577,7 +2672,7 @@ async fn a_conditional_write_checks_every_version_it_builds_on() {
 /// between (the push and its `"offered"` race the device's take). `pushed` is set when the
 /// store took the push.
 struct HeldAfterPush<'a> {
-    inner: &'a TestExecutor,
+    inner: &'a Adapted,
     pushed: &'a Cell<bool>,
     released: &'a Cell<bool>,
     held: Cell<bool>,
@@ -2602,7 +2697,7 @@ impl ExecutorRpc for HeldAfterPush<'_> {
 /// The device's side of the race: once the push landed, it takes the master key (its record
 /// write `holdsMaster: true` lands first), then lets the holder's write go.
 async fn take_when_pushed(
-    device: &ViaExecutor<TestExecutor>,
+    device: &Custody,
     pushed: &Cell<bool>,
     released: &Cell<bool>,
     offer_id: Option<&Value>,
@@ -2627,8 +2722,8 @@ async fn take_when_pushed(
 #[tokio::test]
 async fn a_late_offered_leaves_a_device_that_took_the_master_key() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let desk = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let desk = custody(&store, 2);
     let vault = MemoryVault::new();
     let did = create(&a, &vault, 23).await;
     let d2 = link_app(
@@ -2668,8 +2763,8 @@ async fn a_late_offered_leaves_a_device_that_took_the_master_key() {
 #[tokio::test]
 async fn a_device_that_takes_the_master_key_at_once_at_its_link_ends_holding_it() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let desk = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let desk = custody(&store, 2);
     let vault = MemoryVault::new();
     let did = create(&a, &vault, 24).await;
     let (pushed, released) = (Cell::new(false), Cell::new(false));
@@ -2725,9 +2820,9 @@ async fn a_device_that_takes_the_master_key_at_once_at_its_link_ends_holding_it(
 #[tokio::test]
 async fn a_retry_marks_offered_only_the_devices_that_do_not_hold_the_master_key() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let desk = ViaExecutor::new(TestExecutor::new(&store, 2));
-    let laptop = ViaExecutor::new(TestExecutor::new(&store, 3));
+    let a = custody(&store, 1);
+    let desk = custody(&store, 2);
+    let laptop = custody(&store, 3);
     let vault = MemoryVault::new();
     let did = create(&a, &vault, 25).await;
     let d2 = link_app(
@@ -2790,8 +2885,8 @@ async fn a_retry_marks_offered_only_the_devices_that_do_not_hold_the_master_key(
 #[tokio::test]
 async fn the_holder_answers_a_devices_send_master_request() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let desk = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let desk = custody(&store, 2);
     let vault = MemoryVault::new();
     let did = create(&a, &vault, 17).await;
     let d2 = link_app(
@@ -2875,8 +2970,8 @@ async fn the_holder_answers_a_devices_send_master_request() {
 #[tokio::test]
 async fn a_server_that_asks_for_the_master_key_gets_none() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let server = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let server = custody(&store, 2);
     let vault = MemoryVault::new();
     let did = create(&a, &vault, 18).await;
     let d2 = link_app(
@@ -2916,8 +3011,8 @@ async fn a_server_that_asks_for_the_master_key_gets_none() {
 #[tokio::test]
 async fn a_device_the_record_calls_an_app_but_the_log_does_not_let_keep_gets_no_master_key() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let device = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let device = custody(&store, 2);
     let vault = MemoryVault::new();
     let did = create(&a, &vault, 21).await;
     let d2 = link_app(
@@ -2974,8 +3069,8 @@ async fn a_device_the_record_calls_an_app_but_the_log_does_not_let_keep_gets_no_
 #[tokio::test]
 async fn a_device_the_log_lets_keep_gets_the_master_key_whatever_the_record_says() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let device = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let device = custody(&store, 2);
     let vault = MemoryVault::new();
     let did = create(&a, &vault, 22).await;
     let d2 = link_app(
@@ -3010,8 +3105,8 @@ async fn a_device_the_log_lets_keep_gets_the_master_key_whatever_the_record_says
 #[tokio::test]
 async fn an_expired_request_is_refused() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let desk = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let desk = custody(&store, 2);
     let vault = MemoryVault::new();
     let did = create(&a, &vault, 20).await;
     link_app(
@@ -3052,9 +3147,9 @@ async fn an_expired_request_is_refused() {
 #[tokio::test]
 async fn the_holder_answers_a_confirm_revoke_request() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let phone = ViaExecutor::new(TestExecutor::new(&store, 2));
-    let host = ViaExecutor::new(TestExecutor::new(&store, 3));
+    let a = custody(&store, 1);
+    let phone = custody(&store, 2);
+    let host = custody(&store, 3);
     let vault = MemoryVault::new();
     let did = create(&a, &vault, 19).await;
     link_app(
@@ -3114,8 +3209,8 @@ async fn the_holder_answers_a_confirm_revoke_request() {
 #[tokio::test]
 async fn a_swapped_co_signed_incept_is_never_kept_or_published() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    a.rpc().swap_incept.set(true);
+    let a = custody(&store, 1);
+    a.fake().swap_incept.set(true);
     let vault = MemoryVault::new();
     let refused = confirmed(15)
         .finish(&a, &vault, this_computer(), &SystemClock, &OsRandom)
@@ -3124,7 +3219,7 @@ async fn a_swapped_co_signed_incept_is_never_kept_or_published() {
         matches!(&refused, Err(ClientError::Protocol(_))),
         "{refused:?}"
     );
-    assert_eq!(a.rpc().publishes.get(), 0);
+    assert_eq!(a.fake().publishes.get(), 0);
     assert!(vault.pending_incepts().unwrap().is_empty());
     assert_eq!(a.status().await.unwrap().did, None);
 }
@@ -3134,10 +3229,10 @@ async fn a_swapped_co_signed_incept_is_never_kept_or_published() {
 #[tokio::test]
 async fn an_open_offer_answer_for_another_offer_is_refused() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let a = custody(&store, 1);
     let vault = MemoryVault::new();
     let did = create(&a, &vault, 16).await;
-    a.rpc().other_offer_id.set(true);
+    a.fake().other_offer_id.set(true);
     let refused = LinkFlow::open(
         &a,
         &vault,
@@ -3161,7 +3256,7 @@ async fn an_open_offer_answer_for_another_offer_is_refused() {
 #[tokio::test]
 async fn a_vault_key_that_is_not_the_current_master_opens_no_offer() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let a = custody(&store, 1);
     let vault = MemoryVault::new();
     let did = create(&a, &vault, 17).await;
     let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
@@ -3200,10 +3295,10 @@ fn a_create_screen_never_shows_the_words_in_debug_output() {
 /// `a` answers, and `b`'s vault takes the key (the record marks it holding). Answers `b`'s key
 /// id.
 async fn holding_app(
-    a: &ViaExecutor<TestExecutor>,
+    a: &Custody,
     vault: &MemoryVault,
     did: &str,
-    b: &ViaExecutor<TestExecutor>,
+    b: &Custody,
     b_vault: &MemoryVault,
     entry: DeviceEntry,
 ) -> String {
@@ -3259,8 +3354,8 @@ fn assert_words_derive(events: &[Event], seed: &words::Seed) -> u32 {
 #[tokio::test]
 async fn a_rotation_reveals_the_next_master_and_hands_it_to_the_kept_holder() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let desk = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let desk = custody(&store, 2);
     let vault = MemoryVault::new();
     let desk_vault = MemoryVault::new();
     let did = create(&a, &vault, 23).await;
@@ -3330,8 +3425,8 @@ async fn a_rotation_reveals_the_next_master_and_hands_it_to_the_kept_holder() {
 #[tokio::test]
 async fn a_stale_holder_gets_the_new_master_through_send_master() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let phone = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let phone = custody(&store, 2);
     let vault = MemoryVault::new();
     let phone_vault = MemoryVault::new();
     let did = create(&a, &vault, 24).await;
@@ -3347,7 +3442,7 @@ async fn a_stale_holder_gets_the_new_master_through_send_master() {
     .await;
     let words = words::from_entropy(&[24; 16]);
 
-    a.rpc().refuse_inbox_put.set(true);
+    a.fake().refuse_inbox_put.set(true);
     let rotated = rotate(&a, &vault, &did, &words, &[], &SystemClock, &OsRandom)
         .await
         .unwrap();
@@ -3392,8 +3487,8 @@ async fn a_stale_holder_gets_the_new_master_through_send_master() {
 #[tokio::test]
 async fn removing_the_master_key_is_refused_on_its_only_holder() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let desk = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let desk = custody(&store, 2);
     let vault = MemoryVault::new();
     let desk_vault = MemoryVault::new();
     let did = create(&a, &vault, 28).await;
@@ -3431,7 +3526,7 @@ async fn removing_the_master_key_is_refused_on_its_only_holder() {
 /// An executor whose first `identity.recordPut` waits until every executor sharing `arrived`
 /// reached its own: the writers have all read the same record version before any writes.
 struct Gated<'a> {
-    inner: &'a TestExecutor,
+    inner: &'a Adapted,
     arrived: &'a Cell<usize>,
     writers: usize,
     waited: Cell<bool>,
@@ -3456,9 +3551,9 @@ impl ExecutorRpc for Gated<'_> {
 #[tokio::test]
 async fn two_holders_removing_the_master_key_at_once_leave_one_copy() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let desk = ViaExecutor::new(TestExecutor::new(&store, 2));
-    let phone = ViaExecutor::new(TestExecutor::new(&store, 3));
+    let a = custody(&store, 1);
+    let desk = custody(&store, 2);
+    let phone = custody(&store, 3);
     let vault = MemoryVault::new();
     let desk_vault = MemoryVault::new();
     let phone_vault = MemoryVault::new();
@@ -3524,7 +3619,7 @@ async fn two_holders_removing_the_master_key_at_once_leave_one_copy() {
 
 /// An executor that yields to the scheduler before each call, so two flows that run at once
 /// interleave at every RPC boundary (as two devices on a network do).
-struct Yielding<'a>(&'a TestExecutor);
+struct Yielding<'a>(&'a Adapted);
 
 #[async_trait(?Send)]
 impl ExecutorRpc for Yielding<'_> {
@@ -3540,9 +3635,9 @@ impl ExecutorRpc for Yielding<'_> {
 #[tokio::test]
 async fn two_holders_removing_at_once_leave_at_least_one_copy() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let desk = ViaExecutor::new(TestExecutor::new(&store, 2));
-    let phone = ViaExecutor::new(TestExecutor::new(&store, 3));
+    let a = custody(&store, 1);
+    let desk = custody(&store, 2);
+    let phone = custody(&store, 3);
     let vault = MemoryVault::new();
     let desk_vault = MemoryVault::new();
     let phone_vault = MemoryVault::new();
@@ -3616,8 +3711,8 @@ async fn two_holders_removing_at_once_leave_at_least_one_copy() {
 #[tokio::test]
 async fn a_holder_of_a_replaced_master_is_not_another_copy() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let desk = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let desk = custody(&store, 2);
     let vault = MemoryVault::new();
     let desk_vault = MemoryVault::new();
     let did = create(&a, &vault, 31).await;
@@ -3684,8 +3779,8 @@ async fn a_holder_of_a_replaced_master_is_not_another_copy() {
 #[tokio::test]
 async fn a_device_the_log_does_not_let_keep_the_master_key_is_no_holder() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let desk = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let desk = custody(&store, 2);
     let vault = MemoryVault::new();
     let did = create(&a, &vault, 29).await;
     let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
@@ -3750,7 +3845,7 @@ enum Race {
 /// An executor where another app's event lands on the head just before each of the next
 /// publishes, so they meet a `409`.
 struct Racing<'a> {
-    inner: &'a TestExecutor,
+    inner: &'a Adapted,
     seed: words::Seed,
     races: RefCell<Vec<Race>>,
 }
@@ -3761,8 +3856,9 @@ impl ExecutorRpc for Racing<'_> {
         let race = (method == "identity.publish" && !self.races.borrow().is_empty())
             .then(|| self.races.borrow_mut().remove(0));
         if let Some(race) = race {
-            let scid = self.inner.identity.borrow().clone().unwrap();
-            let chain = fold_page(&self.inner.log(&scid).await?);
+            let fake = self.inner.rpc();
+            let scid = fake.identity.borrow().clone().unwrap();
+            let chain = fold_page(&fake.log(&scid).await?);
             let n = (chain.state().masters.len() - 1) as u32;
             let event = match race {
                 Race::Rotate => {
@@ -3794,10 +3890,10 @@ impl ExecutorRpc for Racing<'_> {
 #[tokio::test]
 async fn a_rotation_that_meets_a_409_is_built_again_on_the_new_head() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let host = ViaExecutor::new(TestExecutor::new(&store, 2));
-    let server = ViaExecutor::new(TestExecutor::new(&store, 3));
-    let extra = ViaExecutor::new(TestExecutor::new(&store, 4));
+    let a = custody(&store, 1);
+    let host = custody(&store, 2);
+    let server = custody(&store, 3);
+    let extra = custody(&store, 4);
     let vault = MemoryVault::new();
     let did = create(&a, &vault, 25).await;
     let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
@@ -3862,13 +3958,13 @@ async fn a_rotation_that_meets_a_409_is_built_again_on_the_new_head() {
     assert_eq!(server.status().await.unwrap().revoked, Some(5));
 
     // The rotation landed but its answer was lost: found in the log, not published again.
-    a.rpc().lose_publish_answer.set(true);
-    let publishes = a.rpc().publishes.get();
+    a.fake().lose_publish_answer.set(true);
+    let publishes = a.fake().publishes.get();
     let rotated = rotate(&a, &vault, &did, &words, &[], &SystemClock, &OsRandom)
         .await
         .unwrap();
     assert_eq!((rotated.index, rotated.tries), (4, 1));
-    assert_eq!(a.rpc().publishes.get(), publishes + 1);
+    assert_eq!(a.fake().publishes.get(), publishes + 1);
     assert_eq!(rotated.head.seq, 7);
 
     // Another app with the same words made the very same rotation first: the store holds
@@ -3896,7 +3992,7 @@ async fn a_rotation_that_meets_a_409_is_built_again_on_the_new_head() {
         false,
     )
     .await;
-    let publishes = a.rpc().publishes.get();
+    let publishes = a.fake().publishes.get();
     let busy = rotate(
         &racing((0..MAX_TRIES).map(|_| Race::Rotate).collect()),
         &vault,
@@ -3908,7 +4004,7 @@ async fn a_rotation_that_meets_a_409_is_built_again_on_the_new_head() {
     )
     .await;
     assert!(matches!(busy, Err(ClientError::LogBusy)), "{busy:?}");
-    assert_eq!(a.rpc().publishes.get(), publishes + 2 * MAX_TRIES);
+    assert_eq!(a.fake().publishes.get(), publishes + 2 * MAX_TRIES);
     assert_eq!(vault.master_index(&scid).unwrap(), Some(5), "nothing kept");
 
     let events = a.events(&did).await.unwrap();
@@ -3924,9 +4020,9 @@ async fn a_rotation_that_meets_a_409_is_built_again_on_the_new_head() {
 #[tokio::test]
 async fn a_revocation_with_a_rotation_needs_the_words() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let phone = ViaExecutor::new(TestExecutor::new(&store, 2));
-    let host = ViaExecutor::new(TestExecutor::new(&store, 3));
+    let a = custody(&store, 1);
+    let phone = custody(&store, 2);
+    let host = custody(&store, 3);
     let vault = MemoryVault::new();
     let did = create(&a, &vault, 26).await;
     let d2 = link_app(
@@ -4043,10 +4139,10 @@ async fn a_revocation_with_a_rotation_needs_the_words() {
 #[tokio::test]
 async fn the_words_restore_the_identity_on_a_new_device() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let desk = ViaExecutor::new(TestExecutor::new(&store, 2));
-    let host = ViaExecutor::new(TestExecutor::new(&store, 3));
-    let new = ViaExecutor::new(TestExecutor::new(&store, 4));
+    let a = custody(&store, 1);
+    let desk = custody(&store, 2);
+    let host = custody(&store, 3);
+    let new = custody(&store, 4);
     let vault = MemoryVault::new();
     let desk_vault = MemoryVault::new();
     let new_vault = MemoryVault::new();
@@ -4182,8 +4278,8 @@ async fn the_words_restore_the_identity_on_a_new_device() {
 #[tokio::test]
 async fn the_creating_computer_counts_as_a_holder() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let desk = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let desk = custody(&store, 2);
     let vault = MemoryVault::new();
     let desk_vault = MemoryVault::new();
     let did = create(&a, &vault, 49).await;
@@ -4244,8 +4340,8 @@ async fn the_creating_computer_counts_as_a_holder() {
 #[tokio::test]
 async fn a_rotation_whose_vault_refuses_the_stage_publishes_nothing() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let desk = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let desk = custody(&store, 2);
     let vault = MemoryVault::new();
     let desk_vault = MemoryVault::new();
     let did = create(&a, &vault, 42).await;
@@ -4260,7 +4356,7 @@ async fn a_rotation_whose_vault_refuses_the_stage_publishes_nothing() {
     )
     .await;
     let words = words::from_entropy(&[42; 16]);
-    let publishes = a.rpc().publishes.get();
+    let publishes = a.fake().publishes.get();
 
     let refusing = RefusingVault(vault);
     let failed = rotate(&a, &refusing, &did, &words, &[], &SystemClock, &OsRandom).await;
@@ -4274,7 +4370,7 @@ async fn a_rotation_whose_vault_refuses_the_stage_publishes_nothing() {
         "{failed:?}"
     );
     let vault = refusing.0;
-    assert_eq!(a.rpc().publishes.get(), publishes, "nothing published");
+    assert_eq!(a.fake().publishes.get(), publishes, "nothing published");
     let chain = ad4m_identity_core::fold(&a.events(&did).await.unwrap()).unwrap();
     assert_eq!(chain.state().masters.len(), 1, "master #0 is still current");
     assert_eq!(vault.master_index(&scid).unwrap(), Some(0));
@@ -4310,7 +4406,7 @@ async fn a_rotation_whose_vault_refuses_the_stage_publishes_nothing() {
 }
 
 /// An executor that refuses `identity.publish` for good (a `400`: the store will not take it).
-struct RefusingPublish<'a>(&'a TestExecutor);
+struct RefusingPublish<'a>(&'a Adapted);
 
 #[async_trait(?Send)]
 impl ExecutorRpc for RefusingPublish<'_> {
@@ -4330,8 +4426,8 @@ impl ExecutorRpc for RefusingPublish<'_> {
 #[tokio::test]
 async fn a_rotation_whose_publish_fails_discards_the_staged_key() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let desk = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let desk = custody(&store, 2);
     let vault = MemoryVault::new();
     let did = create(&a, &vault, 46).await;
     let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
@@ -4375,7 +4471,7 @@ async fn a_rotation_whose_publish_fails_discards_the_staged_key() {
 /// An executor whose `identity.publish` reaches the store, after which the flow is cut off:
 /// the call never answers (the app quit, the machine slept).
 struct CutOffAfterPublish<'a> {
-    inner: &'a TestExecutor,
+    inner: &'a Adapted,
     published: Cell<bool>,
 }
 
@@ -4397,7 +4493,7 @@ impl ExecutorRpc for CutOffAfterPublish<'_> {
 #[tokio::test]
 async fn a_rotation_cut_off_after_its_publish_is_promoted_by_refresh() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let a = custody(&store, 1);
     let vault = MemoryVault::new();
     let did = create(&a, &vault, 47).await;
     let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
@@ -4540,7 +4636,7 @@ impl ExecutorRpc for HeldPublish<'_> {
 #[tokio::test]
 async fn a_refresh_while_a_rotation_publishes_keeps_its_staged_key() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let a = custody(&store, 1);
     let vault = MemoryVault::new();
     let did = create(&a, &vault, 48).await;
     let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
@@ -4591,7 +4687,7 @@ async fn a_refresh_while_a_rotation_publishes_keeps_its_staged_key() {
 #[tokio::test]
 async fn a_refresh_that_promotes_first_leaves_the_rotation_kept() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let a = custody(&store, 1);
     let vault = MemoryVault::new();
     let did = create(&a, &vault, 49).await;
     let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
@@ -4632,7 +4728,7 @@ async fn a_refresh_that_promotes_first_leaves_the_rotation_kept() {
 #[tokio::test]
 async fn a_key_staged_behind_the_log_is_discarded_by_refresh() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let a = custody(&store, 1);
     let vault = MemoryVault::new();
     let did = create(&a, &vault, 50).await;
     let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
@@ -4796,8 +4892,8 @@ impl Vault for PromotedFirst {
 #[tokio::test]
 async fn a_restore_whose_staged_key_was_promoted_first_enrols() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let new = ViaExecutor::new(TestExecutor::new(&store, 4));
+    let a = custody(&store, 1);
+    let new = custody(&store, 4);
     let vault = MemoryVault::new();
     let did = create(&a, &vault, 51).await;
     let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
@@ -4824,9 +4920,9 @@ async fn a_restore_whose_staged_key_was_promoted_first_enrols() {
 #[tokio::test]
 async fn a_restore_whose_vault_refuses_after_the_publish_is_recovered_by_the_words() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let desk = ViaExecutor::new(TestExecutor::new(&store, 2));
-    let new = ViaExecutor::new(TestExecutor::new(&store, 4));
+    let a = custody(&store, 1);
+    let desk = custody(&store, 2);
+    let new = custody(&store, 4);
     let vault = MemoryVault::new();
     let desk_vault = MemoryVault::new();
     let did = create(&a, &vault, 43).await;
@@ -4895,7 +4991,7 @@ async fn a_restore_whose_vault_refuses_after_the_publish_is_recovered_by_the_wor
 /// An executor that refuses `identity.claimOffer` while `refuse` is set (the link of the
 /// restoring computer fails after the rotation landed).
 struct RefusingClaim<'a> {
-    inner: &'a TestExecutor,
+    inner: &'a Adapted,
     refuse: Cell<bool>,
 }
 
@@ -4919,8 +5015,8 @@ impl ExecutorRpc for RefusingClaim<'_> {
 #[tokio::test]
 async fn a_restore_whose_link_fails_after_the_publish_holds_a_key_it_cannot_use() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let new_rpc = TestExecutor::new(&store, 4);
+    let a = custody(&store, 1);
+    let new_rpc = adapted(&store, 4);
     let vault = MemoryVault::new();
     let new_vault = MemoryVault::new();
     let did = create(&a, &vault, 44).await;
@@ -5129,7 +5225,7 @@ impl Vault for LaggingIndex {
 #[tokio::test]
 async fn a_refresh_that_trusts_a_stale_index_forgets_the_current_master() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let a = custody(&store, 1);
     let inner = MemoryVault::new();
     let did = create(&a, &inner, 45).await;
     let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
@@ -5172,7 +5268,7 @@ async fn a_refresh_that_trusts_a_stale_index_forgets_the_current_master() {
 }
 
 /// An executor that refuses `identity.deleteRequest` (the store did not answer).
-struct RefusingDelete<'a>(&'a TestExecutor);
+struct RefusingDelete<'a>(&'a Adapted);
 
 #[async_trait(?Send)]
 impl ExecutorRpc for RefusingDelete<'_> {
@@ -5192,9 +5288,9 @@ impl ExecutorRpc for RefusingDelete<'_> {
 #[tokio::test]
 async fn answering_with_words_reports_a_failed_delete_with_the_rotation() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let phone = ViaExecutor::new(TestExecutor::new(&store, 2));
-    let host = ViaExecutor::new(TestExecutor::new(&store, 3));
+    let a = custody(&store, 1);
+    let phone = custody(&store, 2);
+    let host = custody(&store, 3);
     let vault = MemoryVault::new();
     let did = create(&a, &vault, 48).await;
     let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
@@ -5378,8 +5474,8 @@ impl Vault for SharedVault {
 /// on the shared vault (we's `refresh_stale` calls it whenever a key is staged). Then the
 /// publish goes through.
 struct ReadBeforePublish<'a> {
-    inner: &'a TestExecutor,
-    other: &'a ViaExecutor<TestExecutor>,
+    inner: &'a Adapted,
+    other: &'a Custody,
     other_vault: SharedVault,
     did: String,
     /// What the other app's read answered, once it ran.
@@ -5413,8 +5509,8 @@ impl ExecutorRpc for ReadBeforePublish<'_> {
 #[tokio::test]
 async fn a_custody_read_between_the_stage_and_the_publish_leaves_the_staged_key_alone() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let other_app = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let other_app = custody(&store, 2);
     let shared = Arc::new(MemoryVault::new());
     let mine = SharedVault(shared.clone());
     let theirs = SharedVault(shared.clone());
@@ -5499,8 +5595,8 @@ fn theirs_again(shared: &Arc<MemoryVault>) -> SharedVault {
 #[tokio::test]
 async fn two_apps_rotating_at_once_keep_the_key_of_the_one_that_landed() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let b = custody(&store, 2);
     let shared = Arc::new(MemoryVault::new());
     let did = create(&a, &shared, 52).await;
     let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
@@ -5588,8 +5684,8 @@ async fn two_apps_rotating_at_once_keep_the_key_of_the_one_that_landed() {
 #[tokio::test]
 async fn removing_the_master_key_discards_a_key_staged_at_the_current_master() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let desk = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let desk = custody(&store, 2);
     let vault = MemoryVault::new();
     let desk_vault = MemoryVault::new();
     let did = create(&a, &vault, 54).await;
@@ -5643,9 +5739,9 @@ async fn removing_the_master_key_discards_a_key_staged_at_the_current_master() {
 #[tokio::test]
 async fn removing_the_master_key_leaves_a_rotation_in_flight_in_another_app() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let other_app = ViaExecutor::new(TestExecutor::new(&store, 2));
-    let desk = ViaExecutor::new(TestExecutor::new(&store, 3));
+    let a = custody(&store, 1);
+    let other_app = custody(&store, 2);
+    let desk = custody(&store, 3);
     let shared = Arc::new(MemoryVault::new());
     let desk_vault = MemoryVault::new();
     let did = create(&a, &shared, 55).await;
@@ -5759,9 +5855,9 @@ impl ExecutorRpc for GatedPublishes<'_> {
 #[tokio::test]
 async fn a_rotation_whose_staged_key_another_rebuild_replaced_still_keeps_the_landed_key() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
-    let host = ViaExecutor::new(TestExecutor::new(&store, 3));
+    let a = custody(&store, 1);
+    let b = custody(&store, 2);
+    let host = custody(&store, 3);
     let shared = Arc::new(MemoryVault::new());
     let did = create(&a, &shared, 53).await;
     let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
@@ -5872,8 +5968,8 @@ async fn a_rotation_whose_staged_key_another_rebuild_replaced_still_keeps_the_la
 #[tokio::test]
 async fn a_restored_device_is_a_keeper_in_the_log() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let new = ViaExecutor::new(TestExecutor::new(&store, 4));
+    let a = custody(&store, 1);
+    let new = custody(&store, 4);
     let vault = MemoryVault::new();
     let new_vault = MemoryVault::new();
     let did = create(&a, &vault, 54).await;
@@ -5914,9 +6010,9 @@ async fn a_restored_device_is_a_keeper_in_the_log() {
 #[tokio::test]
 async fn a_late_rotation_answer_does_not_overwrite_a_newer_kept_key() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
-    let host = ViaExecutor::new(TestExecutor::new(&store, 3));
+    let a = custody(&store, 1);
+    let b = custody(&store, 2);
+    let host = custody(&store, 3);
     let shared = Arc::new(MemoryVault::new());
     let did = create(&a, &shared, 55).await;
     let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
@@ -6011,10 +6107,11 @@ async fn a_late_rotation_answer_does_not_overwrite_a_newer_kept_key() {
     assert!(matches!(&by_b.record, Err(ClientError::Protocol(m)) if m.contains("current master")));
 }
 
-/// An executor whose `identity.takeMaster` is preceded by another app installing master #1 in
-/// the shared vault (its own take or promote landing), as a refresh in this app awaits the call.
+/// A custody service whose `identity.takeMaster` (its adapter's: the sealed inbox, opened here)
+/// is preceded by another app installing master #1 in the shared vault (its own take or promote
+/// landing), as a refresh in this app awaits the call.
 struct InstallDuringTake<'a> {
-    inner: &'a TestExecutor,
+    inner: &'a Adapted,
     other_vault: SharedVault,
     scid: String,
     key: [u8; 32],
@@ -6039,8 +6136,8 @@ impl ExecutorRpc for InstallDuringTake<'_> {
 #[tokio::test]
 async fn a_refresh_forgets_only_the_key_it_decided_on() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let desk = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let desk = custody(&store, 2);
     let shared = Arc::new(MemoryVault::new());
     let desk_vault = MemoryVault::new();
     let did = create(&a, &shared, 56).await;
@@ -6056,7 +6153,7 @@ async fn a_refresh_forgets_only_the_key_it_decided_on() {
     .await;
     let words = words::from_entropy(&[56; 16]);
     // The desk rotates to #1; its push of #1 to d1 fails, so d1's inbox stays empty.
-    desk.rpc().refuse_inbox_put.set(true);
+    desk.fake().refuse_inbox_put.set(true);
     let rotated = rotate(
         &desk,
         &desk_vault,
@@ -6106,7 +6203,7 @@ async fn a_refresh_forgets_only_the_key_it_decided_on() {
 /// master (#2) in the shared vault (its own take or promote landing while the take was in
 /// flight).
 struct InstallNewerInStatus<'a> {
-    inner: &'a TestExecutor,
+    inner: &'a Adapted,
     other_vault: SharedVault,
     scid: String,
     secret: [u8; 32],
@@ -6136,8 +6233,8 @@ impl ExecutorRpc for InstallNewerInStatus<'_> {
 #[tokio::test]
 async fn a_take_of_an_older_master_keeps_the_newer_one() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let desk = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let desk = custody(&store, 2);
     let vault = MemoryVault::new();
     let shared = Arc::new(MemoryVault::new());
     let did = create(&a, &vault, 57).await;
@@ -6363,8 +6460,8 @@ impl Vault for InstallBeforeForget {
 #[tokio::test]
 async fn a_remove_never_forgets_a_key_installed_after_the_check() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let desk = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let desk = custody(&store, 2);
     let inner = MemoryVault::new();
     let desk_vault = MemoryVault::new();
     let did = create(&a, &inner, 58).await;
@@ -6406,7 +6503,7 @@ async fn a_remove_never_forgets_a_key_installed_after_the_check() {
 #[tokio::test]
 async fn a_promote_never_replaces_a_newer_kept_key() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let a = custody(&store, 1);
     let vault = MemoryVault::new();
     let did = create(&a, &vault, 59).await;
     let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
@@ -6463,8 +6560,8 @@ async fn a_promote_never_replaces_a_newer_kept_key() {
 #[tokio::test]
 async fn a_store_serving_back_an_older_record_is_refused() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let desk = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let desk = custody(&store, 2);
     let vault = MemoryVault::new();
     let did = create(&a, &vault, 27).await;
     let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
@@ -6493,7 +6590,7 @@ async fn a_store_serving_back_an_older_record_is_refused() {
     .await
     .unwrap();
 
-    *a.rpc().serve_record.borrow_mut() = Some(served_v1);
+    *a.fake().serve_record.borrow_mut() = Some(served_v1);
     let refused = record::read(&a, &vault, &did).await;
     assert!(
         matches!(
@@ -6514,8 +6611,8 @@ async fn a_store_serving_back_an_older_record_is_refused() {
 #[tokio::test]
 async fn what_the_revoked_device_wrote_last_survives_the_revokes_record_write() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let b = custody(&store, 2);
     let vault = MemoryVault::new();
     let did = create(&a, &vault, 28).await;
     let flow = LinkFlow::open(
@@ -6536,7 +6633,7 @@ async fn what_the_revoked_device_wrote_last_survives_the_revokes_record_write() 
         .await
         .unwrap();
     join(&b, &claimed_b["offerId"]).await;
-    let d2 = key_id_of(&a, &did, &b.rpc().device_key())
+    let d2 = key_id_of(&a, &did, &b.fake().device_key())
         .await
         .unwrap()
         .unwrap();
@@ -6583,8 +6680,8 @@ async fn what_the_revoked_device_wrote_last_survives_the_revokes_record_write() 
 #[tokio::test]
 async fn a_retry_does_not_overwrite_an_entry_that_landed_holding_the_master_key() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let desk = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let desk = custody(&store, 2);
     let vault = MemoryVault::new();
     let did = create(&a, &vault, 24).await;
     let flow = LinkFlow::open(
@@ -6609,7 +6706,7 @@ async fn a_retry_does_not_overwrite_an_entry_that_landed_holding_the_master_key(
         .unwrap();
     let claimed = flow.wait_for_claim().await.unwrap();
     // The entry write and its fallback both fail: no entry, the push waits on the retry list.
-    a.rpc().refuse_record_puts.set(2);
+    a.fake().refuse_record_puts.set(2);
     let linked = flow
         .confirm(&claimed, entry("Desk", DeviceKind::DesktopApp), true)
         .await
@@ -6645,8 +6742,8 @@ async fn a_retry_does_not_overwrite_an_entry_that_landed_holding_the_master_key(
 /// inside the retry) it first has `a` write the desk's entry as holding the master key (the
 /// desk's own device cannot open the record yet: its key is not in `wrapped`).
 struct EntryLandsBetween<'a> {
-    inner: &'a TestExecutor,
-    a: &'a ViaExecutor<TestExecutor>,
+    inner: &'a Adapted,
+    a: &'a Custody,
     did: &'a str,
     key_id: &'a str,
     reads: Cell<usize>,
@@ -6687,8 +6784,8 @@ impl ExecutorRpc for EntryLandsBetween<'_> {
 #[tokio::test]
 async fn a_store_answering_no_record_after_a_version_was_read_is_refused() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let desk = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let desk = custody(&store, 2);
     let vault = MemoryVault::new();
     let did = create(&a, &vault, 27).await;
     let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
@@ -6714,7 +6811,7 @@ async fn a_store_answering_no_record_after_a_version_was_read_is_refused() {
     .await
     .unwrap();
 
-    *a.rpc().serve_record.borrow_mut() = Some(Value::Null);
+    *a.fake().serve_record.borrow_mut() = Some(Value::Null);
     let refused = record::read(&a, &vault, &did).await;
     assert!(
         matches!(
@@ -6736,8 +6833,8 @@ async fn a_store_answering_no_record_after_a_version_was_read_is_refused() {
 #[tokio::test]
 async fn a_failed_entry_write_holds_the_master_key_back() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let desk = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let desk = custody(&store, 2);
     let vault = MemoryVault::new();
     let did = create(&a, &vault, 24).await;
     let flow = LinkFlow::open(
@@ -6762,7 +6859,7 @@ async fn a_failed_entry_write_holds_the_master_key_back() {
         .unwrap();
     let claimed = flow.wait_for_claim().await.unwrap();
     // The entry write, the first `recordPut` of this confirm, fails before the store.
-    a.rpc().refuse_record_put.set(true);
+    a.fake().refuse_record_put.set(true);
     let linked = flow
         .confirm(&claimed, entry("Desk", DeviceKind::DesktopApp), true)
         .await
@@ -6804,8 +6901,8 @@ async fn a_failed_entry_write_holds_the_master_key_back() {
 #[tokio::test]
 async fn a_retried_push_writes_the_devices_entry_before_the_key_goes() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let desk = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let desk = custody(&store, 2);
     let vault = MemoryVault::new();
     let did = create(&a, &vault, 25).await;
     let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
@@ -6831,7 +6928,7 @@ async fn a_retried_push_writes_the_devices_entry_before_the_key_goes() {
         .unwrap();
     let claimed = flow.wait_for_claim().await.unwrap();
     // Both writes of the entry fail: the one before the push and the confirm's fallback.
-    a.rpc().refuse_record_puts.set(2);
+    a.fake().refuse_record_puts.set(2);
     let linked = flow
         .confirm(&claimed, entry("Desk", DeviceKind::DesktopApp), true)
         .await
@@ -6878,9 +6975,9 @@ async fn a_retried_push_writes_the_devices_entry_before_the_key_goes() {
 #[tokio::test]
 async fn a_retry_batch_with_an_entry_less_device_still_marks_the_others() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let desk = ViaExecutor::new(TestExecutor::new(&store, 2));
-    let laptop = ViaExecutor::new(TestExecutor::new(&store, 3));
+    let a = custody(&store, 1);
+    let desk = custody(&store, 2);
+    let laptop = custody(&store, 3);
     let vault = MemoryVault::new();
     let did = create(&a, &vault, 26).await;
     let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
@@ -6915,7 +7012,7 @@ async fn a_retry_batch_with_an_entry_less_device_still_marks_the_others() {
         .await
         .unwrap();
     let claimed = flow.wait_for_claim().await.unwrap();
-    a.rpc().refuse_record_puts.set(2);
+    a.fake().refuse_record_puts.set(2);
     let linked = flow
         .confirm(&claimed, entry("Laptop", DeviceKind::DesktopApp), true)
         .await
@@ -6930,7 +7027,7 @@ async fn a_retry_batch_with_an_entry_less_device_still_marks_the_others() {
 
     // The retry's entry write for the laptop fails too: its push is skipped and stays on the
     // retry list; the desk's push goes and is marked.
-    a.rpc().refuse_record_puts.set(1);
+    a.fake().refuse_record_puts.set(1);
     let retried = retry_pushes(&a, &vault, &did, &SystemClock, &OsRandom)
         .await
         .unwrap();
@@ -6963,7 +7060,7 @@ async fn a_retry_batch_with_an_entry_less_device_still_marks_the_others() {
 #[tokio::test]
 async fn a_device_write_after_a_rotation_keeps_the_words_access_to_the_record() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let a = custody(&store, 1);
     let vault = MemoryVault::new();
     let did = create(&a, &vault, 57).await;
     let words = words::from_entropy(&[57; 16]);
@@ -7021,7 +7118,7 @@ async fn a_device_write_after_a_rotation_keeps_the_words_access_to_the_record() 
     assert_eq!(recovery.attestation.key_id, "m1");
 
     // The computer is lost; the words on a fresh executor.
-    let new = ViaExecutor::new(TestExecutor::new(&store, 4));
+    let new = custody(&store, 4);
     let new_vault = MemoryVault::new();
     let flow = RestoreFlow::start(&new, &new_vault, words.phrase(), &SystemClock, &OsRandom)
         .await
@@ -7047,8 +7144,8 @@ async fn a_device_write_after_a_rotation_keeps_the_words_access_to_the_record() 
 #[tokio::test]
 async fn a_take_while_the_record_waits_for_reattestation_keeps_the_key() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let b = custody(&store, 2);
     let vault = MemoryVault::new();
     let b_vault = MemoryVault::new();
     let did = create(&a, &vault, 62).await;
@@ -7129,7 +7226,7 @@ async fn a_take_while_the_record_waits_for_reattestation_keeps_the_key() {
     );
 
     // The words still open the record on a fresh executor.
-    let new = ViaExecutor::new(TestExecutor::new(&store, 3));
+    let new = custody(&store, 3);
     let new_vault = MemoryVault::new();
     let flow = RestoreFlow::start(&new, &new_vault, words.phrase(), &SystemClock, &OsRandom)
         .await
@@ -7147,9 +7244,9 @@ async fn a_take_while_the_record_waits_for_reattestation_keeps_the_key() {
 /// re-attestation, then pushed #1 to `b` (the desk, `d2`), which took it with
 /// `record_pending`.
 struct PendingTake {
-    a: ViaExecutor<TestExecutor>,
+    a: Custody,
     vault: MemoryVault,
-    b: ViaExecutor<TestExecutor>,
+    b: Custody,
     b_vault: MemoryVault,
     did: String,
     d2: String,
@@ -7158,8 +7255,8 @@ struct PendingTake {
 
 async fn pending_take(seed: u8) -> PendingTake {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let b = custody(&store, 2);
     let vault = MemoryVault::new();
     let b_vault = MemoryVault::new();
     let did = create(&a, &vault, seed).await;
@@ -7427,13 +7524,13 @@ async fn a_cancelled_completion_of_a_pending_take_is_repaired_by_the_next_refres
     assert_eq!(note_of(&w.b_vault, &w.scid, &w.d2), None, "the note is met");
 
     // Once repaired, the holder is current again, without another write or prompt.
-    let puts = w.b.rpc().record_puts.get();
+    let puts = w.b.fake().record_puts.get();
     let unlocks = w.b_vault.unlocks().len();
     let refreshed = refresh_master(&w.b, &w.b_vault, &w.did, &SystemClock, &OsRandom)
         .await
         .unwrap();
     assert!(matches!(refreshed, Refreshed::Current), "{refreshed:?}");
-    assert_eq!(w.b.rpc().record_puts.get(), puts);
+    assert_eq!(w.b.fake().record_puts.get(), puts);
     assert_eq!(w.b_vault.unlocks().len(), unlocks);
 }
 
@@ -7442,7 +7539,7 @@ async fn a_cancelled_completion_of_a_pending_take_is_repaired_by_the_next_refres
 #[tokio::test]
 async fn a_failed_put_of_a_pending_take_is_repaired_by_the_next_refresh() {
     let w = pending_take(92).await;
-    w.b.rpc().refuse_record_puts.set(1);
+    w.b.fake().refuse_record_puts.set(1);
     let failed = complete_pending_mark(&w.b, &w.b_vault, &w.did, &SystemClock, &OsRandom).await;
     assert!(
         matches!(failed, Err(ClientError::Rpc(RpcError { code: 503, .. }))),
@@ -7516,8 +7613,8 @@ async fn a_restart_after_a_pending_take_is_repaired_by_the_first_refresh() {
 #[tokio::test]
 async fn a_take_whose_mark_failed_is_marked_by_the_next_refresh_without_a_prompt() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let b = custody(&store, 2);
     let vault = MemoryVault::new();
     let b_vault = MemoryVault::new();
     let did = create(&a, &vault, 94).await;
@@ -7535,7 +7632,7 @@ async fn a_take_whose_mark_failed_is_marked_by_the_next_refresh_without_a_prompt
         .unwrap()
         .record
         .unwrap();
-    b.rpc().refuse_record_puts.set(1);
+    b.fake().refuse_record_puts.set(1);
     let taken = take_master(&b, &b_vault, &OsRandom)
         .await
         .unwrap()
@@ -7572,8 +7669,8 @@ async fn a_take_whose_mark_failed_is_marked_by_the_next_refresh_without_a_prompt
 #[tokio::test]
 async fn a_marked_holder_and_a_device_without_the_master_make_no_mark() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let b = custody(&store, 2);
     let vault = MemoryVault::new();
     let b_vault = MemoryVault::new();
     let did = create(&a, &vault, 95).await;
@@ -7593,20 +7690,20 @@ async fn a_marked_holder_and_a_device_without_the_master_make_no_mark() {
         (HoldsMaster::Yes, Some(0))
     );
 
-    let puts = a.rpc().record_puts.get();
+    let puts = a.fake().record_puts.get();
     let unlocks = vault.unlocks();
     let refreshed = refresh_master(&a, &vault, &did, &SystemClock, &OsRandom)
         .await
         .unwrap();
     assert!(matches!(refreshed, Refreshed::Current), "{refreshed:?}");
-    assert_eq!(a.rpc().record_puts.get(), puts);
+    assert_eq!(a.fake().record_puts.get(), puts);
     assert_eq!(vault.unlocks(), unlocks);
 
     let refreshed = refresh_master(&b, &b_vault, &did, &SystemClock, &OsRandom)
         .await
         .unwrap();
     assert!(matches!(refreshed, Refreshed::Unknown), "{refreshed:?}");
-    assert_eq!(b.rpc().record_puts.get(), 0);
+    assert_eq!(b.fake().record_puts.get(), 0);
     assert!(b_vault.unlocks().is_empty());
     let opened = record::read(&b, &b_vault, &did).await.unwrap().unwrap();
     assert_eq!(opened.record.devices[&d2].holds_master, HoldsMaster::No);
@@ -7674,8 +7771,8 @@ async fn a_failed_take_is_enrolled_by_its_refresh_after_another_device_reatteste
 #[tokio::test]
 async fn a_released_app_on_a_shared_vault_is_not_marked_by_the_stale_pair() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let b = custody(&store, 2);
     let shared = Arc::new(MemoryVault::new());
     let did = create(&a, &shared, 97).await;
     let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
@@ -7697,7 +7794,7 @@ async fn a_released_app_on_a_shared_vault_is_not_marked_by_the_stale_pair() {
         .expect("#0 waits in B's inbox");
     taken.record.as_ref().unwrap();
     // A copy on a vault of its own: the shared vault is not the only copy, so B may remove it.
-    let c = ViaExecutor::new(TestExecutor::new(&store, 3));
+    let c = custody(&store, 3);
     let c_vault = MemoryVault::new();
     holding_app(
         &a,
@@ -7718,7 +7815,7 @@ async fn a_released_app_on_a_shared_vault_is_not_marked_by_the_stale_pair() {
     ));
 
     let words = words::from_entropy(&[97; 16]);
-    a.rpc().refuse_record_puts.set(1);
+    a.fake().refuse_record_puts.set(1);
     let rotated = rotate(
         &a,
         &SharedVault(shared.clone()),
@@ -7736,7 +7833,7 @@ async fn a_released_app_on_a_shared_vault_is_not_marked_by_the_stale_pair() {
     assert!(opened.recovery.is_none(), "the pair is stale");
 
     let unlocks = shared.unlocks().len();
-    let puts = b.rpc().record_puts.get();
+    let puts = b.fake().record_puts.get();
     let refreshed = refresh_master(
         &b,
         &SharedVault(shared.clone()),
@@ -7753,7 +7850,7 @@ async fn a_released_app_on_a_shared_vault_is_not_marked_by_the_stale_pair() {
         "a released app was prompted"
     );
     assert_eq!(
-        b.rpc().record_puts.get(),
+        b.fake().record_puts.get(),
         puts,
         "a released app wrote the record"
     );
@@ -7799,8 +7896,8 @@ async fn a_released_app_on_a_shared_vault_is_not_marked_by_the_stale_pair() {
 #[tokio::test]
 async fn an_unlisted_device_with_a_stale_pair_is_never_prompted() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let b = custody(&store, 2);
     let vault = MemoryVault::new();
     let b_vault = MemoryVault::new();
     let did = create(&a, &vault, 98).await;
@@ -7826,12 +7923,12 @@ async fn an_unlisted_device_with_a_stale_pair_is_never_prompted() {
         .await
         .unwrap();
     let claimed = flow.wait_for_claim().await.unwrap();
-    a.rpc().refuse_record_puts.set(2);
+    a.fake().refuse_record_puts.set(2);
     let linked = flow
         .confirm(&claimed, entry("Desk", DeviceKind::DesktopApp), false)
         .await
         .unwrap();
-    a.rpc().refuse_record_puts.set(0);
+    a.fake().refuse_record_puts.set(0);
     assert!(linked.record.is_err(), "{:?}", linked.record);
     join(&b, &claimed_b["offerId"]).await;
     let d2 = linked.key_id;
@@ -7883,7 +7980,7 @@ async fn an_unlisted_device_with_a_stale_pair_is_never_prompted() {
     );
     assert!(opened.recovery.is_none(), "the pair is stale");
 
-    let puts = b.rpc().record_puts.get();
+    let puts = b.fake().record_puts.get();
     let refreshed = refresh_master(&b, &b_vault, &did, &SystemClock, &OsRandom)
         .await
         .unwrap();
@@ -7893,14 +7990,14 @@ async fn an_unlisted_device_with_a_stale_pair_is_never_prompted() {
         "an unlisted device was prompted: {:?}",
         b_vault.unlocks()
     );
-    assert_eq!(b.rpc().record_puts.get(), puts);
+    assert_eq!(b.fake().record_puts.get(), puts);
 }
 
 /// An executor whose first `identity.recordPut` is preceded by another app on the same shared
 /// vault and device running `remove_master` to the end: its release, its `false`, its forget
 /// and its mark again. The put then lands on a stale version, and the write reads again.
 struct RemovalBeforeRecordPut<'a> {
-    inner: &'a TestExecutor,
+    inner: &'a Adapted,
     other_vault: SharedVault,
     did: String,
     done: Cell<bool>,
@@ -7933,8 +8030,8 @@ impl ExecutorRpc for RemovalBeforeRecordPut<'_> {
 #[tokio::test]
 async fn a_removal_inside_a_refresh_repair_leaves_no_stale_mark() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let c = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let c = custody(&store, 2);
     let shared = Arc::new(MemoryVault::new());
     let c_vault = MemoryVault::new();
     let did = create(&a, &shared, 99).await;
@@ -7963,7 +8060,7 @@ async fn a_removal_inside_a_refresh_repair_leaves_no_stale_mark() {
     send_master(&c, &c_vault, &did, "d1", &SystemClock, &OsRandom)
         .await
         .unwrap();
-    a.rpc().refuse_record_puts.set(1);
+    a.fake().refuse_record_puts.set(1);
     let taken = take_master(&a, &SharedVault(shared.clone()), &OsRandom)
         .await
         .unwrap()
@@ -8020,13 +8117,13 @@ async fn a_note_cleared_after_its_mark_landed_answers_current() {
         .await
         .unwrap();
     assert_eq!(note_of(&w.b_vault, &w.scid, &w.d2), None);
-    let puts = w.b.rpc().record_puts.get();
+    let puts = w.b.fake().record_puts.get();
     let unlocks = w.b_vault.unlocks().len();
     let refreshed = refresh_master(&w.b, &w.b_vault, &w.did, &SystemClock, &OsRandom)
         .await
         .unwrap();
     assert!(matches!(refreshed, Refreshed::Current), "{refreshed:?}");
-    assert_eq!(w.b.rpc().record_puts.get(), puts);
+    assert_eq!(w.b.fake().record_puts.get(), puts);
     assert_eq!(w.b_vault.unlocks().len(), unlocks);
 }
 
@@ -8036,8 +8133,8 @@ async fn a_note_cleared_after_its_mark_landed_answers_current() {
 #[tokio::test]
 async fn a_take_outranks_an_older_release_and_never_a_newer_one() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let c = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let c = custody(&store, 2);
     let shared = Arc::new(MemoryVault::new());
     let c_vault = MemoryVault::new();
     let did = create(&a, &shared, 101).await;
@@ -8107,7 +8204,7 @@ async fn a_take_outranks_an_older_release_and_never_a_newer_one() {
 /// An executor that, at its first call of `method`, runs another app's `remove_master` to the
 /// end on the same device and a vault sharing the caller's, then makes the call.
 struct RemovalAt<'a> {
-    inner: &'a TestExecutor,
+    inner: &'a Adapted,
     method: &'static str,
     other_vault: SharedVault,
     did: String,
@@ -8135,7 +8232,7 @@ impl ExecutorRpc for RemovalAt<'_> {
 /// that the stored record's recovery key is already attested by the new master: the
 /// re-attesting write lands before any key is pushed.
 struct ReattestedBeforePush<'a> {
-    inner: &'a TestExecutor,
+    inner: &'a Adapted,
     checked: Cell<bool>,
 }
 
@@ -8143,9 +8240,9 @@ struct ReattestedBeforePush<'a> {
 impl ExecutorRpc for ReattestedBeforePush<'_> {
     async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
         if method == "identity.inboxPut" && !self.checked.replace(true) {
-            let (scid, _, chain, _) = self.inner.position().await.unwrap();
-            let (_, body) = self
-                .inner
+            let fake = self.inner.rpc();
+            let (scid, _, chain, _) = fake.position().await.unwrap();
+            let (_, body) = fake
                 .as_device("GET", &format!("/v1/private/{scid}"), None)
                 .await
                 .unwrap();
@@ -8165,8 +8262,8 @@ impl ExecutorRpc for ReattestedBeforePush<'_> {
 #[tokio::test]
 async fn a_rotation_reattests_the_recovery_key_before_handing_over() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let b = custody(&store, 2);
     let vault = MemoryVault::new();
     let b_vault = MemoryVault::new();
     let did = create(&a, &vault, 63).await;
@@ -8202,8 +8299,8 @@ async fn a_rotation_reattests_the_recovery_key_before_handing_over() {
 /// An executor whose first `identity.record` read after `armed` is preceded by another device
 /// taking the master key from its inbox and recording that it holds it.
 struct TakeBeforeRecordRead<'a> {
-    inner: &'a TestExecutor,
-    taker: &'a ViaExecutor<TestExecutor>,
+    inner: &'a Adapted,
+    taker: &'a Custody,
     taker_vault: &'a MemoryVault,
     armed: Cell<bool>,
     taken: RefCell<Option<Taken>>,
@@ -8235,8 +8332,8 @@ impl ExecutorRpc for TakeBeforeRecordRead<'_> {
 #[tokio::test]
 async fn a_hand_over_never_overwrites_a_holder_that_already_took_the_new_master() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let b = custody(&store, 2);
     let vault = MemoryVault::new();
     let b_vault = MemoryVault::new();
     let did = create(&a, &vault, 58).await;
@@ -8291,9 +8388,9 @@ async fn a_hand_over_never_overwrites_a_holder_that_already_took_the_new_master(
 /// this device, taken by another app sharing the vault (`holdsMaster: true, masterIndex: 0`
 /// again), and B's own removal, which sees that and forgets B's copy.
 struct DuplicateTakeAndOtherRemoval<'a> {
-    inner: &'a TestExecutor,
+    inner: &'a Adapted,
     vault: SharedVault,
-    b: &'a ViaExecutor<TestExecutor>,
+    b: &'a Custody,
     b_vault: &'a MemoryVault,
     did: String,
     own: String,
@@ -8341,8 +8438,8 @@ impl ExecutorRpc for DuplicateTakeAndOtherRemoval<'_> {
 #[tokio::test]
 async fn a_removal_never_forgets_a_key_installed_after_its_check_in_the_same_generation() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let b = custody(&store, 2);
     let shared = Arc::new(MemoryVault::new());
     let b_vault = MemoryVault::new();
     let did = create(&a, &shared, 60).await;
@@ -8385,7 +8482,7 @@ async fn a_removal_never_forgets_a_key_installed_after_its_check_in_the_same_gen
 /// by another app finishing a later generation for this same device: #1 kept in the shared
 /// vault and `holdsMaster: true, masterIndex: 1` written.
 struct NewerGenerationBeforeAck<'a> {
-    inner: &'a TestExecutor,
+    inner: &'a Adapted,
     vault: SharedVault,
     did: String,
     own: String,
@@ -8427,8 +8524,8 @@ impl ExecutorRpc for NewerGenerationBeforeAck<'_> {
 #[tokio::test]
 async fn a_late_holds_never_lowers_a_newer_master_index() {
     let store = TestStore::new();
-    let holder = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let a = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let holder = custody(&store, 1);
+    let a = custody(&store, 2);
     let holder_vault = MemoryVault::new();
     let shared = Arc::new(MemoryVault::new());
     let did = create(&holder, &holder_vault, 61).await;
@@ -8483,7 +8580,7 @@ async fn a_late_holds_never_lowers_a_newer_master_index() {
 /// and deletes the kept key under its unchanged custody epoch — the removal a
 /// re-attestation or a take's holder mark can race (Lal's P2 at 0ca8e4d5f).
 struct RemovalInsideRecordWrite<'a> {
-    inner: &'a TestExecutor,
+    inner: &'a Adapted,
     other_vault: SharedVault,
     did: String,
     done: Cell<bool>,
@@ -8516,8 +8613,8 @@ impl ExecutorRpc for RemovalInsideRecordWrite<'_> {
 #[tokio::test]
 async fn a_reattestation_marks_no_custody_a_removal_took() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let b = custody(&store, 2);
     let shared = Arc::new(MemoryVault::new());
     let b_vault = MemoryVault::new();
     let did = create(&a, &shared, 71).await;
@@ -8579,8 +8676,8 @@ async fn a_reattestation_marks_no_custody_a_removal_took() {
 /// Runs a holder mark on the shared vault (through `complete_pending_mark`) right after a
 /// removal's `holdsMaster: false` lands, before that removal forgets the key.
 struct MarkAfterRemovalWrite<'a> {
-    inner: &'a TestExecutor,
-    marker: &'a TestExecutor,
+    inner: &'a Adapted,
+    marker: &'a Adapted,
     shared: SharedVault,
     did: String,
     done: Cell<bool>,
@@ -8613,8 +8710,8 @@ impl ExecutorRpc for MarkAfterRemovalWrite<'_> {
 #[tokio::test]
 async fn a_mark_between_a_removals_write_and_its_forget_does_not_outlive_the_forget() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let b = custody(&store, 2);
     let shared = Arc::new(MemoryVault::new());
     let b_vault = MemoryVault::new();
     let did = create(&a, &shared, 73).await;
@@ -8669,8 +8766,8 @@ async fn a_mark_between_a_removals_write_and_its_forget_does_not_outlive_the_for
 #[tokio::test]
 async fn a_reattestation_writes_no_holder_mark() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let b = custody(&store, 2);
     let vault = MemoryVault::new();
     let b_vault = MemoryVault::new();
     let did = create(&a, &vault, 72).await;
@@ -8717,8 +8814,8 @@ async fn a_reattestation_writes_no_holder_mark() {
 #[tokio::test]
 async fn a_takes_mark_writes_back_no_when_a_removal_won() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let b = custody(&store, 2);
     let shared = Arc::new(MemoryVault::new());
     let b_vault = MemoryVault::new();
     let did = create(&a, &shared, 73).await;
@@ -8778,8 +8875,8 @@ async fn a_takes_mark_writes_back_no_when_a_removal_won() {
 #[tokio::test]
 async fn a_pending_marks_repair_writes_back_no_when_a_removal_won() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let b = custody(&store, 2);
     let shared = Arc::new(MemoryVault::new());
     let b_vault = MemoryVault::new();
     let did = create(&a, &shared, 74).await;
@@ -9033,8 +9130,8 @@ impl Vault for FaultVault {
 /// check passes; the removal releases A's copy and writes `false`, then stops before its
 /// forget (its vault handle fails there).
 struct RemovalBeforeHandOver<'a> {
-    inner: &'a TestExecutor,
-    c: &'a ViaExecutor<TestExecutor>,
+    inner: &'a Adapted,
+    c: &'a Custody,
     c_vault: &'a MemoryVault,
     c_id: String,
     shared: Arc<MemoryVault>,
@@ -9099,8 +9196,8 @@ impl ExecutorRpc for RemovalBeforeHandOver<'_> {
 #[tokio::test]
 async fn a_hand_over_under_a_release_asserts_no_holding() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let c = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let c = custody(&store, 2);
     let shared = Arc::new(MemoryVault::new());
     let c_vault = MemoryVault::new();
     let did = create(&a, &shared, 110).await;
@@ -9175,7 +9272,7 @@ enum Removal {
 /// shared phase: 1 once the first released, 2 once the second wrote `false`, 4 once the test
 /// let the second go on.
 struct Phased<'a> {
-    inner: &'a TestExecutor,
+    inner: &'a Adapted,
     phase: &'a Cell<u8>,
     role: Removal,
     fired: Cell<bool>,
@@ -9228,8 +9325,8 @@ impl ExecutorRpc for Phased<'_> {
 #[tokio::test]
 async fn a_failed_removal_never_rolls_back_another_removals_release() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let c = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let c = custody(&store, 2);
     let shared = Arc::new(MemoryVault::new());
     let c_vault = MemoryVault::new();
     let did = create(&a, &shared, 111).await;
@@ -9259,7 +9356,7 @@ async fn a_failed_removal_never_rolls_back_another_removals_release() {
     send_master(&c, &c_vault, &did, "d1", &SystemClock, &OsRandom)
         .await
         .unwrap();
-    a.rpc().refuse_record_puts.set(1);
+    a.fake().refuse_record_puts.set(1);
     let taken = take_master(&a, &SharedVault(shared.clone()), &OsRandom)
         .await
         .unwrap()
@@ -9321,16 +9418,16 @@ async fn offered_device(
     store: &Arc<TestStore>,
     seed: u8,
 ) -> (
-    ViaExecutor<TestExecutor>,
-    ViaExecutor<TestExecutor>,
+    Custody,
+    Custody,
     MemoryVault,
     Arc<MemoryVault>,
     String,
     String,
     String,
 ) {
-    let a = ViaExecutor::new(TestExecutor::new(store, 1));
-    let b = ViaExecutor::new(TestExecutor::new(store, 2));
+    let a = custody(store, 1);
+    let b = custody(store, 2);
     let a_vault = MemoryVault::new();
     let b_vault = Arc::new(MemoryVault::new());
     let did = create(&a, &a_vault, seed).await;
@@ -9353,7 +9450,7 @@ async fn offered_device(
 /// The restart after a take cut off: the refresh answers the take of the message that still
 /// waited, B marked holding #0, the note cleared, and no message left in the inbox.
 async fn assert_take_converged(
-    b: &ViaExecutor<TestExecutor>,
+    b: &Custody,
     b_vault: &Arc<MemoryVault>,
     did: &str,
     scid: &str,
@@ -9420,7 +9517,7 @@ async fn a_take_cut_off_after_its_intent_is_taken_by_the_restart() {
 #[tokio::test]
 async fn a_stale_intent_marks_nothing_and_is_cleared() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let a = custody(&store, 1);
     let vault = MemoryVault::new();
     let did = create(&a, &vault, 114).await;
     let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
@@ -9441,12 +9538,12 @@ async fn a_stale_intent_marks_nothing_and_is_cleared() {
     assert!(vault
         .swap_custody_note(&scid, "d1", None, Some(&stale))
         .unwrap());
-    let puts = a.rpc().record_puts.get();
+    let puts = a.fake().record_puts.get();
     let refreshed = refresh_master(&a, &vault, &did, &SystemClock, &OsRandom)
         .await
         .unwrap();
     assert!(matches!(refreshed, Refreshed::Current), "{refreshed:?}");
-    assert_eq!(a.rpc().record_puts.get(), puts, "nothing was marked");
+    assert_eq!(a.fake().record_puts.get(), puts, "nothing was marked");
     assert_eq!(note_of(&vault, &scid, "d1"), None);
 }
 
@@ -9459,7 +9556,7 @@ async fn a_stale_intent_marks_nothing_and_is_cleared() {
 #[tokio::test]
 async fn a_promote_cut_off_before_its_receipt_is_not_marked_from_its_intent() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let a = custody(&store, 1);
     let shared = Arc::new(MemoryVault::new());
     let did = create(&a, &shared, 115).await;
     let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
@@ -9525,7 +9622,7 @@ async fn a_promote_cut_off_before_its_receipt_is_not_marked_from_its_intent() {
 /// shared vault (another app taking the key that waits in the device's inbox), then makes the
 /// call.
 struct TakeAt<'a> {
-    inner: &'a TestExecutor,
+    inner: &'a Adapted,
     method: &'static str,
     vault: SharedVault,
     done: Cell<bool>,
@@ -9557,8 +9654,8 @@ impl ExecutorRpc for TakeAt<'_> {
 #[tokio::test]
 async fn a_removal_that_kept_a_later_take_leaves_it_marked() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let c = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let c = custody(&store, 2);
     let shared = Arc::new(MemoryVault::new());
     let c_vault = MemoryVault::new();
     let did = create(&a, &shared, 116).await;
@@ -9632,7 +9729,7 @@ async fn a_takes_intent_names_the_epoch_before_its_store() {
 
 /// The device entry `key_id` of `did`'s record, as `(holdsMaster, masterIndex)`.
 async fn mark_of(
-    executor: &ViaExecutor<TestExecutor>,
+    executor: &Custody,
     vault: &dyn Vault,
     did: &str,
     key_id: &str,
@@ -9651,7 +9748,7 @@ async fn mark_of(
 #[tokio::test]
 async fn an_intent_never_certifies_another_apps_acquisition() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let a = custody(&store, 1);
     let shared = Arc::new(MemoryVault::new());
     let did = create(&a, &shared, 120).await;
     let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
@@ -9718,8 +9815,8 @@ async fn an_intent_never_certifies_another_apps_acquisition() {
 #[tokio::test]
 async fn a_crashed_intent_never_opens_a_release() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let c = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let c = custody(&store, 2);
     let shared = Arc::new(MemoryVault::new());
     let c_vault = MemoryVault::new();
     let did = create(&a, &shared, 121).await;
@@ -9790,8 +9887,8 @@ async fn a_crashed_intent_never_opens_a_release() {
 /// holding #1), and a removal of A's copy releases it, writes `false` and stops before its
 /// forget.
 struct RemovalAfterPublish<'a> {
-    inner: &'a TestExecutor,
-    c: &'a ViaExecutor<TestExecutor>,
+    inner: &'a Adapted,
+    c: &'a Custody,
     c_vault: &'a MemoryVault,
     c_id: String,
     shared: Arc<MemoryVault>,
@@ -9851,8 +9948,8 @@ impl ExecutorRpc for RemovalAfterPublish<'_> {
 #[tokio::test]
 async fn an_already_promoted_acquisition_never_opens_a_release() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let c = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let c = custody(&store, 2);
     let shared = Arc::new(MemoryVault::new());
     let c_vault = MemoryVault::new();
     let did = create(&a, &shared, 122).await;
@@ -9919,8 +10016,8 @@ async fn an_already_promoted_acquisition_never_opens_a_release() {
 #[tokio::test]
 async fn a_removal_after_a_completed_take_leaves_the_record_true_to_the_vault() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let c = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let c = custody(&store, 2);
     let shared = Arc::new(MemoryVault::new());
     let c_vault = MemoryVault::new();
     let did = create(&a, &shared, 123).await;
@@ -9959,7 +10056,7 @@ async fn a_removal_after_a_completed_take_leaves_the_record_true_to_the_vault() 
 /// Two removals of one device nested ([`Nested`]), stepped by a shared phase: 1 once the
 /// outer one released, 2 once the inner one released over it, 3 once the outer one failed.
 struct Nested<'a> {
-    inner: &'a TestExecutor,
+    inner: &'a Adapted,
     phase: &'a Cell<u8>,
     outer: bool,
     fired: Cell<bool>,
@@ -10009,8 +10106,8 @@ impl ExecutorRpc for Nested<'_> {
 #[tokio::test]
 async fn nested_failed_removals_restore_the_owed_mark() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let c = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let c = custody(&store, 2);
     let shared = Arc::new(MemoryVault::new());
     let c_vault = MemoryVault::new();
     let did = create(&a, &shared, 124).await;
@@ -10039,7 +10136,7 @@ async fn nested_failed_removals_restore_the_owed_mark() {
     send_master(&c, &c_vault, &did, "d1", &SystemClock, &OsRandom)
         .await
         .unwrap();
-    a.rpc().refuse_record_puts.set(1);
+    a.fake().refuse_record_puts.set(1);
     let taken = take_master(&a, &SharedVault(shared.clone()), &OsRandom)
         .await
         .unwrap()
@@ -10115,8 +10212,8 @@ fn assert_round_trips(note: &CustodyNote) {
 #[tokio::test]
 async fn repeat_removals_on_an_empty_vault_keep_one_release() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let desk = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let desk = custody(&store, 2);
     let vault = MemoryVault::new();
     let desk_vault = MemoryVault::new();
     let did = create(&a, &vault, 125).await;
@@ -10164,8 +10261,8 @@ async fn repeat_removals_on_an_empty_vault_keep_one_release() {
 #[tokio::test]
 async fn repeat_removals_keep_open_intents_and_retire_older_releases() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let desk = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let desk = custody(&store, 2);
     let vault = MemoryVault::new();
     let desk_vault = MemoryVault::new();
     let did = create(&a, &vault, 126).await;
@@ -10217,7 +10314,7 @@ fn vault_of(vault: &dyn Vault, did: &str) -> ad4m_identity_client::VaultId {
 
 /// A device's whole entry in the record: its holding, its master index and its vault id.
 async fn holding_of(
-    executor: &ViaExecutor<TestExecutor>,
+    executor: &Custody,
     vault: &dyn Vault,
     did: &str,
     key_id: &str,
@@ -10238,8 +10335,8 @@ async fn holding_of(
 #[tokio::test]
 async fn two_apps_on_one_vault_are_one_copy() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let b = custody(&store, 2);
     let shared = Arc::new(MemoryVault::new());
     let did = create(&a, &shared, 141).await;
     let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
@@ -10281,9 +10378,9 @@ async fn two_apps_on_one_vault_are_one_copy() {
 #[tokio::test]
 async fn a_copy_on_another_vault_lets_a_shared_vault_go_with_all_its_entries() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
-    let c = ViaExecutor::new(TestExecutor::new(&store, 3));
+    let a = custody(&store, 1);
+    let b = custody(&store, 2);
+    let c = custody(&store, 3);
     let shared = Arc::new(MemoryVault::new());
     let c_vault = MemoryVault::new();
     let did = create(&a, &shared, 142).await;
@@ -10331,8 +10428,8 @@ async fn a_copy_on_another_vault_lets_a_shared_vault_go_with_all_its_entries() {
 #[tokio::test]
 async fn a_holder_entry_without_a_vault_id_proves_no_copy() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let b = custody(&store, 2);
     let vault = MemoryVault::new();
     let did = create(&a, &vault, 143).await;
     let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
@@ -10374,8 +10471,8 @@ async fn a_holder_entry_without_a_vault_id_proves_no_copy() {
 #[tokio::test]
 async fn a_listed_holder_is_carried_forward_only_on_the_vault_it_names() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
+    let a = custody(&store, 1);
+    let b = custody(&store, 2);
     let v1 = Arc::new(MemoryVault::new());
     let v2 = MemoryVault::new();
     let did = create(&a, &v1, 144).await;
@@ -10425,9 +10522,9 @@ async fn a_listed_holder_is_carried_forward_only_on_the_vault_it_names() {
 #[tokio::test]
 async fn a_newer_key_on_a_shared_vault_carries_every_entry_on_it() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
-    let c = ViaExecutor::new(TestExecutor::new(&store, 3));
+    let a = custody(&store, 1);
+    let b = custody(&store, 2);
+    let c = custody(&store, 3);
     let shared = Arc::new(MemoryVault::new());
     let c_vault = MemoryVault::new();
     let did = create(&a, &shared, 145).await;
@@ -10506,9 +10603,9 @@ async fn a_newer_key_on_a_shared_vault_carries_every_entry_on_it() {
 #[tokio::test]
 async fn a_siblings_mark_while_its_vault_is_being_emptied_writes_no_true() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
-    let c = ViaExecutor::new(TestExecutor::new(&store, 3));
+    let a = custody(&store, 1);
+    let b = custody(&store, 2);
+    let c = custody(&store, 3);
     let shared = Arc::new(MemoryVault::new());
     let c_vault = MemoryVault::new();
     let did = create(&a, &shared, 146).await;
@@ -10602,8 +10699,8 @@ async fn a_siblings_mark_while_its_vault_is_being_emptied_writes_no_true() {
 /// the first `identity.recordPut` reaches the store (`after: false`), or right after it landed
 /// (`after: true`).
 struct TakeAroundRecordPut<'a> {
-    inner: &'a TestExecutor,
-    taker: &'a TestExecutor,
+    inner: &'a Adapted,
+    taker: &'a Adapted,
     vault: SharedVault,
     after: bool,
     done: Cell<bool>,
@@ -10653,9 +10750,9 @@ impl ExecutorRpc for TakeAroundRecordPut<'_> {
 async fn a_newer_key_taken_into_a_shared_vault_during_a_removal_is_kept_and_marked() {
     for (after, entropy) in [(false, 147), (true, 148)] {
         let store = TestStore::new();
-        let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-        let b = ViaExecutor::new(TestExecutor::new(&store, 2));
-        let c = ViaExecutor::new(TestExecutor::new(&store, 3));
+        let a = custody(&store, 1);
+        let b = custody(&store, 2);
+        let c = custody(&store, 3);
         let shared = Arc::new(MemoryVault::new());
         let c_vault = MemoryVault::new();
         let did = create(&a, &shared, entropy).await;
@@ -10753,10 +10850,10 @@ async fn a_newer_key_taken_into_a_shared_vault_during_a_removal_is_kept_and_mark
 /// vault (`marker`, through `complete_pending_mark`), then a removal on another vault
 /// (`remover` on `remover_vault`), once. The removal's answer is kept.
 struct MarkThenRemoveAfterRemovalWrite<'a> {
-    inner: &'a TestExecutor,
-    marker: &'a TestExecutor,
+    inner: &'a Adapted,
+    marker: &'a Adapted,
     shared: SharedVault,
-    remover: &'a TestExecutor,
+    remover: &'a Adapted,
     remover_vault: &'a MemoryVault,
     did: String,
     done: Cell<bool>,
@@ -10806,9 +10903,9 @@ impl ExecutorRpc for MarkThenRemoveAfterRemovalWrite<'_> {
 #[tokio::test]
 async fn a_siblings_mark_during_a_removal_of_its_vault_is_no_copy_for_another_removal() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
-    let c = ViaExecutor::new(TestExecutor::new(&store, 3));
+    let a = custody(&store, 1);
+    let b = custody(&store, 2);
+    let c = custody(&store, 3);
     let shared = Arc::new(MemoryVault::new());
     let c_vault = MemoryVault::new();
     let did = create(&a, &shared, 149).await;
@@ -10889,8 +10986,8 @@ async fn a_siblings_mark_during_a_removal_of_its_vault_is_no_copy_for_another_re
 /// custody epoch moves) and keeps its receipt. Right after that write lands: its owed mark
 /// (`complete_pending_mark`). Once.
 struct StoreAroundRemovalWrite<'a> {
-    inner: &'a TestExecutor,
-    storer: &'a TestExecutor,
+    inner: &'a Adapted,
+    storer: &'a Adapted,
     storer_id: String,
     shared: SharedVault,
     did: String,
@@ -10959,10 +11056,10 @@ impl ExecutorRpc for StoreAroundRemovalWrite<'_> {
 #[tokio::test]
 async fn a_kept_forget_on_a_shared_vault_marks_the_siblings_it_cleared_again() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
-    let c = ViaExecutor::new(TestExecutor::new(&store, 3));
-    let d = ViaExecutor::new(TestExecutor::new(&store, 4));
+    let a = custody(&store, 1);
+    let b = custody(&store, 2);
+    let c = custody(&store, 3);
+    let d = custody(&store, 4);
     let shared = Arc::new(MemoryVault::new());
     let c_vault = MemoryVault::new();
     let entropy = 150;
@@ -11066,9 +11163,9 @@ async fn a_kept_forget_on_a_shared_vault_marks_the_siblings_it_cleared_again() {
 #[tokio::test]
 async fn a_vault_release_left_by_a_cut_off_removal_holds_until_the_epoch_moves() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
-    let c = ViaExecutor::new(TestExecutor::new(&store, 3));
+    let a = custody(&store, 1);
+    let b = custody(&store, 2);
+    let c = custody(&store, 3);
     let shared = Arc::new(MemoryVault::new());
     let c_vault = MemoryVault::new();
     let entropy = 151;
@@ -11180,13 +11277,13 @@ struct Step {
 /// An executor that runs its [`Step`]s in order, each once, against a phase shared by the flows
 /// a test runs at once ([`tokio::join!`]), and yields before each call.
 struct Stepped<'a> {
-    inner: &'a TestExecutor,
+    inner: &'a Adapted,
     phase: &'a Cell<u8>,
     steps: RefCell<std::collections::VecDeque<Step>>,
 }
 
 impl<'a> Stepped<'a> {
-    fn new(inner: &'a TestExecutor, phase: &'a Cell<u8>, steps: Vec<Step>) -> Self {
+    fn new(inner: &'a Adapted, phase: &'a Cell<u8>, steps: Vec<Step>) -> Self {
         Stepped {
             inner,
             phase,
@@ -11240,9 +11337,9 @@ async fn until(phase: &Cell<u8>, at: u8) {
 /// on V landed (a receipt in B's note at the custody epoch now), its mark is owed. Answers the
 /// did, the scid, B's key id and the epoch of B's receipt.
 async fn siblings_with_an_owed_mark(
-    a: &ViaExecutor<TestExecutor>,
-    b: &ViaExecutor<TestExecutor>,
-    c: &ViaExecutor<TestExecutor>,
+    a: &Custody,
+    b: &Custody,
+    c: &Custody,
     shared: &Arc<MemoryVault>,
     c_vault: &MemoryVault,
     entropy: u8,
@@ -11281,7 +11378,7 @@ async fn siblings_with_an_owed_mark(
 /// The end state of a race between a removal of V and C's removal of W: at least one copy is
 /// left, C's removal was refused (W keeps #0), V is empty and no entry claims a copy on V.
 async fn one_copy_left(
-    c: &ViaExecutor<TestExecutor>,
+    c: &Custody,
     shared: &Arc<MemoryVault>,
     c_vault: &MemoryVault,
     did: &str,
@@ -11321,9 +11418,9 @@ async fn one_copy_left(
 #[tokio::test]
 async fn a_mark_that_read_custody_before_a_whole_removal_of_its_vault_writes_no_copy() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
-    let c = ViaExecutor::new(TestExecutor::new(&store, 3));
+    let a = custody(&store, 1);
+    let b = custody(&store, 2);
+    let c = custody(&store, 3);
     let shared = Arc::new(MemoryVault::new());
     let c_vault = MemoryVault::new();
     let (did, scid, _, epoch) =
@@ -11407,9 +11504,9 @@ async fn a_mark_that_read_custody_before_a_whole_removal_of_its_vault_writes_no_
 #[tokio::test]
 async fn a_mark_that_read_custody_before_a_store_and_a_removal_of_its_vault_writes_no_copy() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
-    let c = ViaExecutor::new(TestExecutor::new(&store, 3));
+    let a = custody(&store, 1);
+    let b = custody(&store, 2);
+    let c = custody(&store, 3);
     let shared = Arc::new(MemoryVault::new());
     let c_vault = MemoryVault::new();
     let entropy = 153;
@@ -11499,12 +11596,12 @@ async fn a_mark_that_read_custody_before_a_store_and_a_removal_of_its_vault_writ
 /// `false`, so it marks B again. Before that mark's record read: D removes V whole (V is empty, at a later epoch).
 /// After that mark's write: C removes W.
 struct EmptiedUnderMarkAgain<'a> {
-    inner: &'a TestExecutor,
+    inner: &'a Adapted,
     shared: SharedVault,
     did: String,
     secret: [u8; 32],
-    emptier: &'a TestExecutor,
-    remover: &'a TestExecutor,
+    emptier: &'a Adapted,
+    remover: &'a Adapted,
     remover_vault: &'a MemoryVault,
     /// Record writes of A's removal that landed: the first is its `false`, the second its own
     /// mark after the forget kept the key.
@@ -11562,10 +11659,10 @@ impl ExecutorRpc for EmptiedUnderMarkAgain<'_> {
 #[tokio::test]
 async fn a_re_mark_after_a_kept_forget_that_read_custody_before_a_whole_removal_writes_no_copy() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let b = ViaExecutor::new(TestExecutor::new(&store, 2));
-    let c = ViaExecutor::new(TestExecutor::new(&store, 3));
-    let d = ViaExecutor::new(TestExecutor::new(&store, 4));
+    let a = custody(&store, 1);
+    let b = custody(&store, 2);
+    let c = custody(&store, 3);
+    let d = custody(&store, 4);
     let shared = Arc::new(MemoryVault::new());
     let c_vault = MemoryVault::new();
     let entropy = 154;
@@ -11615,7 +11712,8 @@ async fn a_re_mark_after_a_kept_forget_that_read_custody_before_a_whole_removal_
         .expect("D's removal ran before the re-mark's record read")
         .unwrap();
     // C's removal ran after the re-mark's write, or, when no write came, now.
-    let c_removed = match racing.rpc().removed.borrow_mut().take() {
+    let removed_while_racing = racing.rpc().removed.borrow_mut().take();
+    let c_removed = match removed_while_racing {
         Some(removed) => removed,
         None => remove_master(&c, &c_vault, &did, &OsRandom).await,
     };
@@ -11626,7 +11724,7 @@ async fn a_re_mark_after_a_kept_forget_that_read_custody_before_a_whole_removal_
 /// A removal that stops for good after its record write (the app is closed): its future is
 /// dropped there, with its releases on the device's note and on the vault's note.
 struct CutAfterWrite<'a> {
-    inner: &'a TestExecutor,
+    inner: &'a Adapted,
     cut: Cell<bool>,
 }
 
@@ -11650,8 +11748,8 @@ impl ExecutorRpc for CutAfterWrite<'_> {
 #[tokio::test]
 async fn cut_off_removals_between_takes_do_not_grow_the_vaults_note() {
     let store = TestStore::new();
-    let a = ViaExecutor::new(TestExecutor::new(&store, 1));
-    let c = ViaExecutor::new(TestExecutor::new(&store, 3));
+    let a = custody(&store, 1);
+    let c = custody(&store, 3);
     let shared = Arc::new(MemoryVault::new());
     let c_vault = MemoryVault::new();
     let did = create(&a, &shared, 155).await;
@@ -11703,4 +11801,401 @@ async fn cut_off_removals_between_takes_do_not_grow_the_vaults_note() {
         "a finished removal leaves no release on V's note"
     );
     assert_eq!(shared.master_index(&scid).unwrap(), None);
+}
+
+/// The log of `did` as executor `x` serves it, folded.
+async fn chain_of(x: &Custody, did: &str) -> KelChain {
+    ad4m_identity_core::fold(&x.events(did).await.unwrap()).unwrap()
+}
+
+/// The master key goes from the holder to the desktop's custody service sealed end to end: the
+/// holder seals it to the enc key the log lists for the desktop (the custody service's own),
+/// the desktop's executor only passes the sealed inbox through (`identity.inboxSealed`), and
+/// the custody service opens it and keeps it. No call that reaches either executor carries the
+/// master key's secret, and none asks an executor to open it.
+#[tokio::test]
+async fn the_master_key_reaches_the_custody_service_through_executors_that_see_only_sealed_text() {
+    let store = TestStore::new();
+    let a = custody(&store, 1);
+    let desk = custody(&store, 2);
+    let vault = MemoryVault::new();
+    let did = create(&a, &vault, 31).await;
+    let d2 = link_app(
+        &a,
+        &vault,
+        &did,
+        &desk,
+        entry("Desk", DeviceKind::DesktopApp),
+        true,
+    )
+    .await;
+    let chain = chain_of(&a, &did).await;
+    assert_eq!(
+        chain.state().keys[&d2].enc.as_deref(),
+        Some(desk.rpc().enc().as_str())
+    );
+    assert_ne!(desk.rpc().enc(), desk.fake().device_enc());
+
+    let sent = send_master(&a, &vault, &did, &d2, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    sent.record.unwrap();
+    let desk_vault = MemoryVault::new();
+    let taken = take_master(&desk, &desk_vault, &OsRandom)
+        .await
+        .unwrap()
+        .expect("a master key waits");
+    assert_eq!((taken.did.as_str(), taken.index), (did.as_str(), 0));
+    let scid = ad4m_identity_core::scid_of(&did).unwrap();
+    let master = words::master_key(&words::seed(&words::from_entropy(&[31; 16])), 0).unwrap();
+    let kept = desk_vault.unlock(scid, MasterUse::Link, 0).unwrap();
+    assert_eq!(Signer::key(kept.signer(0).unwrap()), Signer::key(&master));
+    // Acknowledged: the next take finds none.
+    assert!(take_master(&desk, &desk_vault, &OsRandom)
+        .await
+        .unwrap()
+        .is_none());
+
+    let secret = master.to_bytes();
+    let encodings = [
+        bs58::encode(secret).into_string(),
+        secret
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>(),
+        {
+            use base64::Engine;
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(secret)
+        },
+    ];
+    for executor in [&a, &desk] {
+        let seen = executor.fake().seen.borrow();
+        for call in seen.iter() {
+            for text in &encodings {
+                assert!(
+                    !call.contains(text.as_str()),
+                    "an executor saw the secret: {call}"
+                );
+            }
+        }
+    }
+    let methods = desk.fake().methods();
+    assert!(methods.iter().any(|m| m == "identity.inboxSealed"));
+    assert!(methods.iter().any(|m| m == "identity.inboxAck"));
+    assert!(!methods.iter().any(|m| m == "identity.takeMaster"));
+}
+
+/// Forwards to `inner`, but answers for identity `asked` with identity `served`: its status
+/// names `asked` where `inner`'s names `served`, and `identity.log` for `asked` serves the log
+/// of `served` (valid, signed, and another identity's).
+struct OtherLog<'a, R> {
+    inner: &'a R,
+    asked: String,
+    served: String,
+}
+
+#[async_trait(?Send)]
+impl<R: ExecutorRpc> ExecutorRpc for OtherLog<'_, R> {
+    async fn call(&self, method: &str, mut params: Value) -> Result<Value, RpcError> {
+        if method == "identity.log" && params["did"] == json!(self.asked) {
+            params["did"] = json!(self.served);
+        }
+        let mut answer = self.inner.call(method, params).await?;
+        if method == "identity.status" && answer["did"] == json!(self.served) {
+            answer["did"] = json!(self.asked);
+        }
+        Ok(answer)
+    }
+}
+
+/// Review coasys/ad4m#1649: an executor whose status names identity A, but which serves the
+/// valid log of identity B for A and holds a master key of B sealed to the custody enc key,
+/// gets no master key taken: the adapter refuses the log, so nothing is kept or acknowledged.
+#[tokio::test]
+async fn a_log_of_another_identity_takes_no_master_key() {
+    let store = TestStore::new();
+    let a = custody(&store, 1);
+    let other = custody(&store, 3);
+    let desk = custody(&store, 2);
+    let vault = MemoryVault::new();
+    let did = create(&a, &vault, 33).await;
+    let asked = create(&other, &MemoryVault::new(), 34).await;
+    let d2 = link_app(
+        &a,
+        &vault,
+        &did,
+        &desk,
+        entry("Desk", DeviceKind::DesktopApp),
+        true,
+    )
+    .await;
+    send_master(&a, &vault, &did, &d2, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+
+    let lying = ViaExecutor::new(WithEncKey::new(
+        OtherLog {
+            inner: desk.fake(),
+            asked: asked.clone(),
+            served: did.clone(),
+        },
+        Box::new(custody_enc(2)),
+        Box::new(SystemClock),
+    ));
+    let desk_vault = MemoryVault::new();
+    let refused = take_master(&lying, &desk_vault, &OsRandom).await;
+    assert!(refused.is_err(), "a master key taken: {refused:?}");
+    let scid = ad4m_identity_core::scid_of(&did).unwrap();
+    assert!(desk_vault.unlock(scid, MasterUse::Link, 0).is_err());
+    assert!(!desk
+        .fake()
+        .methods()
+        .iter()
+        .any(|m| m == "identity.inboxAck"));
+
+    // The message still waits for an executor that serves the right log.
+    let taken = take_master(&desk, &desk_vault, &OsRandom)
+        .await
+        .unwrap()
+        .expect("the master key still waits");
+    assert_eq!(taken.did, did);
+}
+
+/// Review coasys/ad4m#1649: a flow that writes for the master key refuses a log of another
+/// identity than the one it was asked for, before it unlocks, keeps a push or sends anything.
+#[tokio::test]
+async fn send_master_refuses_a_log_of_another_identity() {
+    let store = TestStore::new();
+    let a = custody(&store, 1);
+    let other = custody(&store, 3);
+    let desk = custody(&store, 2);
+    let vault = MemoryVault::new();
+    let did = create(&a, &vault, 35).await;
+    let served = create(&other, &vault, 36).await;
+    let d2 = link_app(
+        &other,
+        &vault,
+        &served,
+        &desk,
+        entry("Desk", DeviceKind::DesktopApp),
+        true,
+    )
+    .await;
+
+    let lying = ViaExecutor::new(OtherLog {
+        inner: a.rpc(),
+        asked: did.clone(),
+        served: served.clone(),
+    });
+    let before = a.fake().methods().len();
+    let refused = send_master(&lying, &vault, &did, &d2, &SystemClock, &OsRandom).await;
+    match &refused {
+        Err(ClientError::Protocol(message)) => assert!(message.contains(&served), "{message}"),
+        other => panic!("expected a protocol refusal, got {other:?}"),
+    }
+    assert!(vault.pending_pushes().unwrap().is_empty());
+    let sent = a.fake().methods()[before..].to_vec();
+    assert!(
+        sent.iter().all(|m| m == "identity.log"),
+        "called past the log: {sent:?}"
+    );
+}
+
+/// A plain executor no longer opens the master key for anyone: `identity.takeMaster` reaches
+/// only the adapter.
+#[tokio::test]
+async fn an_executor_without_the_adapter_answers_no_take_master() {
+    let store = TestStore::new();
+    let plain = ViaExecutor::new(TestExecutor::new(&store, 1));
+    let refused = plain.take_master().await.unwrap_err();
+    assert_eq!(refused.code, 404, "{refused}");
+}
+
+/// The desktop reads the record through its custody service: its entry is wrapped to the
+/// custody enc key the log lists, which the executor's wallet does not open; the adapter
+/// unwraps it in the app and the executor is never asked.
+#[tokio::test]
+async fn the_record_opens_as_the_device_with_the_custody_enc_key() {
+    let store = TestStore::new();
+    let a = custody(&store, 1);
+    let desk = custody(&store, 2);
+    let vault = MemoryVault::new();
+    let did = create(&a, &vault, 32).await;
+    let d2 = link_app(
+        &a,
+        &vault,
+        &did,
+        &desk,
+        entry("Desk", DeviceKind::DesktopApp),
+        true,
+    )
+    .await;
+
+    let opened = record::read(&desk, &MemoryVault::new(), &did)
+        .await
+        .unwrap()
+        .expect("the link wrote the record");
+    assert_eq!(opened.record.devices[&d2].name, "Desk");
+    assert!(!desk
+        .fake()
+        .methods()
+        .iter()
+        .any(|m| m == "identity.unwrapRecordKey"));
+
+    // The executor's own wallet does not open this entry.
+    let stored = desk
+        .fake()
+        .call("identity.record", json!({}))
+        .await
+        .unwrap();
+    let wrapped = stored["record"]["wrapped"][&d2].as_str().unwrap();
+    let refused = desk
+        .fake()
+        .call("identity.unwrapRecordKey", json!({ "wrapped": wrapped }))
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code, 400, "{refused}");
+}
+
+/// A desktop linked without keeping the master key claimed with its wallet enc key (the
+/// adapter names its own only with `canKeepMaster`): the log lists the wallet's, and the
+/// adapter passes the record key to the executor, whose wallet opens it.
+#[tokio::test]
+async fn a_desktop_linked_without_the_master_key_reads_the_record_through_its_wallet() {
+    let store = TestStore::new();
+    let a = custody(&store, 1);
+    let desk = custody(&store, 2);
+    let vault = MemoryVault::new();
+    let did = create(&a, &vault, 33).await;
+    let d2 = link_app(
+        &a,
+        &vault,
+        &did,
+        &desk,
+        entry("Desk", DeviceKind::DesktopApp),
+        false,
+    )
+    .await;
+    let chain = chain_of(&a, &did).await;
+    assert_eq!(
+        chain.state().keys[&d2].enc.as_deref(),
+        Some(desk.fake().device_enc().as_str())
+    );
+    let opened = record::read(&desk, &MemoryVault::new(), &did)
+        .await
+        .unwrap()
+        .expect("the link wrote the record");
+    assert_eq!(opened.record.devices[&d2].name, "Desk");
+    assert!(desk
+        .fake()
+        .methods()
+        .iter()
+        .any(|m| m == "identity.unwrapRecordKey"));
+}
+
+/// `create` through the custody service lists the custody enc key for the executor's device
+/// key in the incept, not the wallet's.
+#[tokio::test]
+async fn create_lists_the_custody_enc_key_in_the_incept() {
+    let store = TestStore::new();
+    let a = custody(&store, 1);
+    let did = create(&a, &MemoryVault::new(), 34).await;
+    let events = a.events(&did).await.unwrap();
+    let Op::Incept { add, .. } = &events[0].op else {
+        panic!("expected the incept");
+    };
+    assert_eq!(add.len(), 1);
+    assert_eq!(add[0].sign, a.fake().device_key());
+    assert_eq!(add[0].enc, custody_enc(1).enc());
+    assert_ne!(add[0].enc, a.fake().device_enc());
+}
+
+/// A custody enc key that can be locked, as an OS keystore is.
+struct Lockable {
+    key: SoftEncKey,
+    locked: std::rc::Rc<Cell<bool>>,
+}
+
+impl EncKey for Lockable {
+    fn enc(&self) -> String {
+        self.key.enc()
+    }
+    fn open(
+        &self,
+        address: &InboxAddress,
+        sealed: &str,
+    ) -> Result<inbox::InboxPayload, ad4m_identity_client::EncOpenError<inbox::InboxError>> {
+        if self.locked.get() {
+            return Err(ad4m_identity_client::EncOpenError::Unavailable(
+                "locked".into(),
+            ));
+        }
+        self.key.open(address, sealed)
+    }
+    fn unwrap_record_key(
+        &self,
+        scid: &str,
+        wrapped: &str,
+    ) -> Result<
+        ad4m_identity_client::Secret<[u8; record_core::RECORD_KEY_LEN]>,
+        ad4m_identity_client::EncOpenError<record_core::RecordError>,
+    > {
+        if self.locked.get() {
+            return Err(ad4m_identity_client::EncOpenError::Unavailable(
+                "locked".into(),
+            ));
+        }
+        self.key.unwrap_record_key(scid, wrapped)
+    }
+}
+
+/// With the custody enc key locked the take answers `unavailable` and acknowledges nothing:
+/// the master key waits in the inbox, and the take after the unlock keeps it.
+#[tokio::test]
+async fn a_locked_custody_enc_key_leaves_the_master_key_in_the_inbox() {
+    let store = TestStore::new();
+    let a = custody(&store, 1);
+    let locked = std::rc::Rc::new(Cell::new(false));
+    let desk = ViaExecutor::new(WithEncKey::new(
+        TestExecutor::new(&store, 2),
+        Box::new(Lockable {
+            key: custody_enc(2),
+            locked: locked.clone(),
+        }),
+        Box::new(SystemClock),
+    ));
+    let vault = MemoryVault::new();
+    let did = create(&a, &vault, 35).await;
+    let d2 = link_app(
+        &a,
+        &vault,
+        &did,
+        &desk,
+        entry("Desk", DeviceKind::DesktopApp),
+        true,
+    )
+    .await;
+    send_master(&a, &vault, &did, &d2, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+
+    locked.set(true);
+    let desk_vault = MemoryVault::new();
+    let refused = take_master(&desk, &desk_vault, &OsRandom).await;
+    assert!(
+        matches!(&refused, Err(ClientError::Rpc(e)) if e.code == 503),
+        "{refused:?}"
+    );
+    assert!(!desk
+        .fake()
+        .methods()
+        .iter()
+        .any(|m| m == "identity.inboxAck"));
+
+    locked.set(false);
+    let taken = take_master(&desk, &desk_vault, &OsRandom)
+        .await
+        .unwrap()
+        .expect("the master key still waits");
+    assert_eq!(taken.index, 0);
 }
