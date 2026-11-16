@@ -813,7 +813,10 @@ a new string ends the read of the last one.
   can read (`/proc/<pid>/environ`), as can the admin credential, which reads host files. An
   executor with `AD4M_CUSTODY_CREDENTIAL` or `AD4M_CUSTODY_CREDENTIAL_FILE` set refuses to start. The admin credential, an app,
   a network listener, a device-key login and an operator without a credential are refused (403
-  `no-custody-channel`). No master key is ever in the executor's memory.
+  `no-custody-channel`). The executor never opens a master key sealed to the custody service's
+  key, so a master key a holder sends after the join is never in the executor's memory. A
+  desktop linked before its log listed the custody service's key cannot open what was sealed
+  to its old key: it is revoked and linked again.
 - A master key in a pre-join inbox is dropped: a master key never travels before the device
   joined. A valid offer ticket is claimed under the executor's first-link rule (a record
   naming another identity refuses it; so does no record, except on a desktop's first run: an

@@ -340,13 +340,9 @@ impl IdentityService {
             WsRpcError::bad_request("not-listed: the incept does not list this agent's device key")
         })?;
         let enc = enc_key_of(&key).map_err(WsRpcError::internal)?;
-        if custody && !ad4m_identity_core::is_x25519_multikey(&listed.enc) {
-            return Err(WsRpcError::bad_request(format!(
-                "wrong-enc: the incept lists this key with enc {}, which is no X25519 key",
-                listed.enc
-            )));
-        }
-        if listed.enc != enc && !custody {
+        if custody {
+            super::claim::check_custody_enc(&listed.enc, &key)?;
+        } else if listed.enc != enc {
             return Err(WsRpcError::bad_request(format!(
                 "wrong-enc: the incept lists this key with enc {}, not its own {enc}",
                 listed.enc
@@ -1088,6 +1084,37 @@ mod tests {
         );
     }
 
+    /// A claim with the custody service's enc refuses the executor's own X25519 key: it would
+    /// mark this computer as a keeper and point master-key transfers at a key the executor holds.
+    #[tokio::test]
+    async fn claim_for_main_refuses_the_executors_own_key_as_the_custody_enc() {
+        let _op = crate::test_utils::OPERATOR_RECORD.lock().await;
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        let service = test_service();
+        let offer = ad4m_identity_core::link::OfferString {
+            store: "https://store.example".into(),
+            scid: TestLog::new(6).scid(),
+            offer_id: bs58::encode([2u8; 16]).into_string(),
+            s: bs58::encode([1u8; 32]).into_string(),
+        };
+        let (_, key) = device_key(&AgentContext::main_agent()).unwrap();
+        let own = enc_key_of(&key).unwrap();
+        let refused = service
+            .claims()
+            .claim_for_main(&offer, Some(&own), None)
+            .await
+            .expect_err("the claim is refused");
+        assert_eq!(refused.code, 400);
+        assert!(
+            refused
+                .message
+                .starts_with("wrong-enc: enc is the executor's own key"),
+            "{}",
+            refused.message
+        );
+    }
+
     #[tokio::test]
     async fn with_an_operator_record_the_main_agent_co_signs_no_incept() {
         let _op = crate::test_utils::OPERATOR_RECORD.lock().await;
@@ -1165,7 +1192,19 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            refused.message.starts_with("wrong-enc"),
+            refused.message.starts_with("invalid"),
+            "{}",
+            refused.message
+        );
+
+        // The executor's own X25519 key is no custody key: a master key sealed to it would be
+        // the executor's to open.
+        let own = incept_listing(&main, 75);
+        let refused = service.cosign_incept(&main, &own, true).await.unwrap_err();
+        assert!(
+            refused
+                .message
+                .starts_with("wrong-enc: enc is the executor's own key"),
             "{}",
             refused.message
         );
