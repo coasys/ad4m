@@ -326,11 +326,14 @@ impl IdentityService {
     /// `identity.cosignIncept`: adds `agent`'s device-key proof to an `incept` that lists that
     /// key with its `enc` key, while the agent has no identity yet; the event must fold with it.
     /// On an executor with an operator record the main agent co-signs no incept (`first-link`):
-    /// its key may speak only for the operator's identity.
+    /// its key may speak only for the operator's identity. The listed `enc` must be the X25519
+    /// form of the wallet key (`wrong-enc`), unless `custody` (the custody channel admitted the
+    /// caller): the custody service lists its own X25519 key, so a master key is sealed to it.
     pub async fn cosign_incept(
         &self,
         agent: &AgentContext,
         event: &Value,
+        custody: bool,
     ) -> Result<Value, WsRpcError> {
         let (agent_did, key) = device_key(agent).map_err(WsRpcError::internal)?;
         if let Some(held) = db(|db| db.agent_identity(&agent_did))? {
@@ -358,7 +361,9 @@ impl IdentityService {
             WsRpcError::bad_request("not-listed: the incept does not list this agent's device key")
         })?;
         let enc = enc_key_of(&key).map_err(WsRpcError::internal)?;
-        if listed.enc != enc {
+        if custody {
+            super::claim::check_custody_enc(&listed.enc, &key)?;
+        } else if listed.enc != enc {
             return Err(WsRpcError::bad_request(format!(
                 "wrong-enc: the incept lists this key with enc {}, not its own {enc}",
                 listed.enc
@@ -848,8 +853,17 @@ mod tests {
         }
     }
 
+    /// An X25519 key that is not the X25519 form of any wallet key here: a custody service's.
+    const CUSTODY_ENC: &str = "z6LSbysY2xFMRpGMhb7tFTLMpeuPRaqaWM1yECx2AtzE3KCc";
+
     /// A new person's incept listing `agent`'s device key as `d1`, signed by the master only.
     fn incept_listing(agent: &AgentContext, seed: u8) -> Value {
+        let (_, key) = device_key(agent).unwrap();
+        incept_listing_with(agent, seed, &enc_key_of(&key).unwrap())
+    }
+
+    /// As [`incept_listing`], with `enc` as the device key's `enc`.
+    fn incept_listing_with(agent: &AgentContext, seed: u8, enc: &str) -> Value {
         use ad4m_identity_core::build::{incept_human, Signer};
         let (_, key) = device_key(agent).unwrap();
         let master = ed25519_dalek::SigningKey::from_bytes(&[seed; 32]);
@@ -859,7 +873,7 @@ mod tests {
             next,
             vec![ad4m_identity_core::DeviceKey {
                 id: "d1".into(),
-                enc: enc_key_of(&key).unwrap(),
+                enc: enc.into(),
                 sign: key,
                 life: ad4m_identity_core::KeyLife::Standing,
             }],
@@ -1094,7 +1108,7 @@ mod tests {
         let claim = || async {
             service
                 .claims()
-                .claim_for_main(&offer, false, None)
+                .claim_for_main(&offer, None, None)
                 .await
                 .expect_err("the claim is refused")
         };
@@ -1118,6 +1132,37 @@ mod tests {
         );
     }
 
+    /// A claim with the custody service's enc refuses the executor's own X25519 key: it would
+    /// mark this computer as a keeper and point master-key transfers at a key the executor holds.
+    #[tokio::test]
+    async fn claim_for_main_refuses_the_executors_own_key_as_the_custody_enc() {
+        let _op = crate::test_utils::OPERATOR_RECORD.lock().await;
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        let service = test_service();
+        let offer = ad4m_identity_core::link::OfferString {
+            store: "https://store.example".into(),
+            scid: TestLog::new(6).scid(),
+            offer_id: bs58::encode([2u8; 16]).into_string(),
+            s: bs58::encode([1u8; 32]).into_string(),
+        };
+        let (_, key) = device_key(&AgentContext::main_agent()).unwrap();
+        let own = enc_key_of(&key).unwrap();
+        let refused = service
+            .claims()
+            .claim_for_main(&offer, Some(&own), None)
+            .await
+            .expect_err("the claim is refused");
+        assert_eq!(refused.code, 400);
+        assert!(
+            refused
+                .message
+                .starts_with("wrong-enc: enc is the executor's own key"),
+            "{}",
+            refused.message
+        );
+    }
+
     #[tokio::test]
     async fn with_an_operator_record_the_main_agent_co_signs_no_incept() {
         let _op = crate::test_utils::OPERATOR_RECORD.lock().await;
@@ -1131,12 +1176,15 @@ mod tests {
 
         // No operator record (a desktop executor's first run): the main key starts an identity.
         Ad4mDb::with_global_instance(|db| db.set_operator_record_for_test(None)).unwrap();
-        let cosigned = service.cosign_incept(&main, &incept).await.unwrap();
+        let cosigned = service.cosign_incept(&main, &incept, false).await.unwrap();
         assert_eq!(proofs(&cosigned), Some(2));
 
         // With a record the main key may speak only for the operator: no new identity.
         let _record = OperatorRecord::set(&operator);
-        let refused = service.cosign_incept(&main, &incept).await.unwrap_err();
+        let refused = service
+            .cosign_incept(&main, &incept, false)
+            .await
+            .unwrap_err();
         assert_eq!(refused.code, 403, "{refused:?}");
         assert!(
             refused.message.starts_with("first-link") && refused.message.contains(&operator),
@@ -1151,10 +1199,63 @@ mod tests {
         ));
         let managed = AgentContext::managed(user);
         let cosigned = service
-            .cosign_incept(&managed, &incept_listing(&managed, 52))
+            .cosign_incept(&managed, &incept_listing(&managed, 52), false)
             .await
             .unwrap();
         assert_eq!(proofs(&cosigned), Some(2));
+    }
+
+    /// The custody service lists its own X25519 key as this device's `enc`, so the master key
+    /// is sealed to it: the main key co-signs such an incept for the custody channel, and for
+    /// any other caller refuses it `wrong-enc`.
+    #[tokio::test]
+    async fn only_the_custody_channel_co_signs_an_incept_listing_another_enc() {
+        let _op = crate::test_utils::OPERATOR_RECORD.lock().await;
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        Ad4mDb::with_global_instance(|db| db.set_operator_record_for_test(None)).unwrap();
+        let service = test_service();
+        let main = AgentContext::main_agent();
+        let incept = incept_listing_with(&main, 73, CUSTODY_ENC);
+
+        let refused = service
+            .cosign_incept(&main, &incept, false)
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code, 400, "{refused:?}");
+        assert!(
+            refused.message.starts_with("wrong-enc"),
+            "{}",
+            refused.message
+        );
+
+        let cosigned = service.cosign_incept(&main, &incept, true).await.unwrap();
+        assert_eq!(cosigned["proof"].as_array().map(Vec::len), Some(2));
+        assert_eq!(cosigned["add"][0]["enc"], CUSTODY_ENC);
+
+        let (_, key) = device_key(&main).unwrap();
+        let not_x25519 = incept_listing_with(&main, 74, &key);
+        let refused = service
+            .cosign_incept(&main, &not_x25519, true)
+            .await
+            .unwrap_err();
+        assert!(
+            refused.message.starts_with("invalid"),
+            "{}",
+            refused.message
+        );
+
+        // The executor's own X25519 key is no custody key: a master key sealed to it would be
+        // the executor's to open.
+        let own = incept_listing(&main, 75);
+        let refused = service.cosign_incept(&main, &own, true).await.unwrap_err();
+        assert!(
+            refused
+                .message
+                .starts_with("wrong-enc: enc is the executor's own key"),
+            "{}",
+            refused.message
+        );
     }
 
     /// Any controller can `add` an agent's key to its log (the `add` carries only the master's
@@ -1596,7 +1697,7 @@ mod tests {
             store_keys_source: crate::identity::StoreSource::Config,
         };
         let incept = incept_listing(&agent, 53);
-        let cosigned = service.cosign_incept(&agent, &incept).await.unwrap();
+        let cosigned = service.cosign_incept(&agent, &incept, false).await.unwrap();
         let result = service
             .publish(
                 &agent,
@@ -1626,7 +1727,7 @@ mod tests {
         };
         let refused = service
             .claims()
-            .claim_for_main(&offer, false, None)
+            .claim_for_main(&offer, None, None)
             .await
             .expect_err("a claim the executor cannot finish is refused");
         assert!(
@@ -1648,7 +1749,7 @@ mod tests {
         let service = service_on(backend.clone());
         Ad4mDb::with_global_instance(|db| db.set_operator_record_for_test(None)).unwrap();
         let cosigned = service
-            .cosign_incept(&main, &incept_listing(&main, 54))
+            .cosign_incept(&main, &incept_listing(&main, 54), false)
             .await
             .unwrap();
 
@@ -1692,7 +1793,7 @@ mod tests {
         let (agent_did, _) = device_key(&agent).unwrap();
         let service = test_service();
         let incept = service
-            .cosign_incept(&agent, &incept_listing(&agent, 55))
+            .cosign_incept(&agent, &incept_listing(&agent, 55), false)
             .await
             .unwrap();
         let incept = Event::from_json(&incept).unwrap();
@@ -1743,7 +1844,7 @@ mod tests {
         let (main_did, _) = device_key(&main).unwrap();
         Ad4mDb::with_global_instance(|db| db.set_operator_record_for_test(None)).unwrap();
         let incept = test_service()
-            .cosign_incept(&main, &incept_listing(&main, 57))
+            .cosign_incept(&main, &incept_listing(&main, 57), false)
             .await
             .unwrap();
         let incept = Event::from_json(&incept).unwrap();
@@ -1763,7 +1864,7 @@ mod tests {
         let refused = offer(3);
         service
             .claims()
-            .claim_for_main(&refused, false, None)
+            .claim_for_main(&refused, None, None)
             .await
             .expect_err("the store refused");
         assert_eq!(claims(), 1);
@@ -1784,7 +1885,7 @@ mod tests {
         let lost = offer(4);
         service
             .claims()
-            .claim_for_main(&lost, false, None)
+            .claim_for_main(&lost, None, None)
             .await
             .expect_err("the answer was lost");
         assert_eq!(claims(), 2);
@@ -1819,7 +1920,7 @@ mod tests {
         let managed = AgentContext::managed(crate::test_utils::create_test_user(&email));
         let (managed_did, _) = device_key(&managed).unwrap();
         let incept = test_service()
-            .cosign_incept(&main, &incept_listing(&main, 58))
+            .cosign_incept(&main, &incept_listing(&main, 58), false)
             .await
             .unwrap();
         let incept = Event::from_json(&incept).unwrap();
@@ -1834,7 +1935,7 @@ mod tests {
         };
         let claimed = service
             .claims()
-            .claim_for_main(&offer, false, None)
+            .claim_for_main(&offer, None, None)
             .await
             .expect("the main agent claims");
         // With an operator record the claim sets none: no accept, it binds once spent.
@@ -1880,7 +1981,7 @@ mod tests {
         Ad4mDb::with_global_instance(|db| db.set_operator_record_for_test(None)).unwrap();
         Ad4mDb::with_global_instance(|db| db.clear_agent_identity_for_test(&main_did)).unwrap();
         let incept = test_service()
-            .cosign_incept(&main, &incept_listing(&main, 59))
+            .cosign_incept(&main, &incept_listing(&main, 59), false)
             .await
             .unwrap();
         let incept = Event::from_json(&incept).unwrap();
@@ -1898,7 +1999,7 @@ mod tests {
         // Not a desktop app's executor: no record is `no-operator`, and nothing is recorded.
         let refused = service
             .claims()
-            .claim_for_main(&offer(&incept.scid, 5), false, None)
+            .claim_for_main(&offer(&incept.scid, 5), None, None)
             .await
             .expect_err("no operator");
         assert!(
@@ -1912,7 +2013,7 @@ mod tests {
         let first = offer(&incept.scid, 6);
         let claimed = service
             .claims()
-            .claim_for_main(&first, true, None)
+            .claim_for_main(&first, Some(CUSTODY_ENC), None)
             .await
             .expect("a desktop's first claim goes ahead");
         assert!(claimed.needs_accept, "a first-run claim waits for accept");
@@ -1925,7 +2026,7 @@ mod tests {
         let other = TestLog::new(60).scid();
         service
             .claims()
-            .claim_for_main(&offer(&other, 7), true, None)
+            .claim_for_main(&offer(&other, 7), Some(CUSTODY_ENC), None)
             .await
             .expect("a second claim before the join goes ahead");
         assert_eq!((claims(), record()), (2, None));
@@ -1975,7 +2076,7 @@ mod tests {
         // Bound: every offer is `already-linked`.
         let refused = service
             .claims()
-            .claim_for_main(&offer(&other, 8), true, None)
+            .claim_for_main(&offer(&other, 8), Some(CUSTODY_ENC), None)
             .await
             .expect_err("linked");
         assert!(
@@ -1988,7 +2089,7 @@ mod tests {
         Ad4mDb::with_global_instance(|db| db.clear_agent_identity_for_test(&main_did)).unwrap();
         let refused = service
             .claims()
-            .claim_for_main(&offer(&other, 9), true, None)
+            .claim_for_main(&offer(&other, 9), Some(CUSTODY_ENC), None)
             .await
             .expect_err("another identity");
         assert!(
@@ -2048,7 +2149,7 @@ mod tests {
         Ad4mDb::with_global_instance(|db| db.set_operator_record_for_test(None)).unwrap();
         Ad4mDb::with_global_instance(|db| db.clear_agent_identity_for_test(&main_did)).unwrap();
         let incept = test_service()
-            .cosign_incept(&main, &incept_listing(&main, seed))
+            .cosign_incept(&main, &incept_listing(&main, seed), false)
             .await
             .unwrap();
         let incept = Event::from_json(&incept).unwrap();
@@ -2064,7 +2165,7 @@ mod tests {
             };
             service
                 .claims()
-                .claim_for_main(&offer, true, None)
+                .claim_for_main(&offer, Some(CUSTODY_ENC), None)
                 .await
                 .expect("a desktop's claim before the join goes ahead");
             if accept {
@@ -2289,7 +2390,7 @@ mod tests {
         Ad4mDb::with_global_instance(|db| db.set_operator_record_for_test(None)).unwrap();
         Ad4mDb::with_global_instance(|db| db.clear_agent_identity_for_test(&main_did)).unwrap();
         let incept = test_service()
-            .cosign_incept(&main, &incept_listing(&main, 65))
+            .cosign_incept(&main, &incept_listing(&main, 65), false)
             .await
             .unwrap();
         let incept = Event::from_json(&incept).unwrap();
@@ -2304,10 +2405,7 @@ mod tests {
         };
         let claims = service.claims();
         for id in [24, 25] {
-            let claimed = claims
-                .claim_for_main(&offer(id), false, None)
-                .await
-                .unwrap();
+            let claimed = claims.claim_for_main(&offer(id), None, None).await.unwrap();
             assert!(!claimed.needs_accept);
         }
         let refused = claims.accept_join(&main, &offer_id(24)).unwrap_err();
@@ -2361,7 +2459,7 @@ mod tests {
         Ad4mDb::with_global_instance(|db| db.set_operator_record_for_test(None)).unwrap();
         Ad4mDb::with_global_instance(|db| db.clear_agent_identity_for_test(&main_did)).unwrap();
         let incept = test_service()
-            .cosign_incept(&main, &incept_listing(&main, 66))
+            .cosign_incept(&main, &incept_listing(&main, 66), false)
             .await
             .unwrap();
         let incept = Event::from_json(&incept).unwrap();
@@ -2372,14 +2470,14 @@ mod tests {
         let stored = || backend.claims.load(std::sync::atomic::Ordering::SeqCst);
         let offer = offer_of(&incept.scid, 30);
 
-        claims.claim_for_main(&offer, false, None).await.unwrap();
+        claims.claim_for_main(&offer, None, None).await.unwrap();
         claims.cancel_join(&main, &offer.offer_id).unwrap();
         for store_refuses in [false, true] {
             if store_refuses {
                 *backend.claim_error.lock().unwrap() = Some(IdentityError::Gone("spent".into()));
             }
             let refused = claims
-                .claim_for_main(&offer, false, None)
+                .claim_for_main(&offer, None, None)
                 .await
                 .expect_err("a cancelled claim is not made again");
             assert_eq!(refused.code, 409, "{}", refused.message);
@@ -2419,14 +2517,14 @@ mod tests {
 
         claims.accept_join(&main, &offer_id(31)).unwrap();
         let again = claims
-            .claim_for_main(&offer_of(&scid, 31), true, None)
+            .claim_for_main(&offer_of(&scid, 31), Some(CUSTODY_ENC), None)
             .await
             .unwrap();
         assert!(!again.needs_accept, "accepted already");
         assert_eq!(accept_of(31), Some(JoinAccept::Accepted));
         *backend.claim_error.lock().unwrap() = Some(IdentityError::Gone("spent".into()));
         let refused = claims
-            .claim_for_main(&offer_of(&scid, 31), true, None)
+            .claim_for_main(&offer_of(&scid, 31), Some(CUSTODY_ENC), None)
             .await
             .expect_err("the store refuses");
         assert_eq!(refused.code, 410, "{}", refused.message);
@@ -2434,7 +2532,7 @@ mod tests {
         *backend.claim_error.lock().unwrap() = None;
 
         let again = claims
-            .claim_for_main(&offer_of(&scid, 32), true, None)
+            .claim_for_main(&offer_of(&scid, 32), Some(CUSTODY_ENC), None)
             .await
             .unwrap();
         assert!(again.needs_accept, "still held");
@@ -2443,7 +2541,7 @@ mod tests {
         claims.cancel_join(&main, &offer_id(31)).unwrap();
         let before = stored();
         let refused = claims
-            .claim_for_main(&offer_of(&scid, 31), true, None)
+            .claim_for_main(&offer_of(&scid, 31), Some(CUSTODY_ENC), None)
             .await
             .expect_err("a cancelled claim is not made again");
         assert_eq!(refused.code, 409, "{}", refused.message);
@@ -2462,7 +2560,7 @@ mod tests {
 
         let other = offer_of(&TestLog::new(68).scid(), 32);
         let refused = claims
-            .claim_for_main(&other, true, None)
+            .claim_for_main(&other, Some(CUSTODY_ENC), None)
             .await
             .expect_err("the offer is claimed for another identity");
         assert_eq!(refused.code, 409, "{}", refused.message);
@@ -2537,7 +2635,7 @@ mod tests {
         let claims = service.claims();
         for id in [33, 34, 35] {
             let claimed = claims
-                .claim_for_main(&offer_of(&log.scid(), id), true, None)
+                .claim_for_main(&offer_of(&log.scid(), id), Some(CUSTODY_ENC), None)
                 .await
                 .unwrap();
             assert!(claimed.needs_accept);
@@ -2588,7 +2686,7 @@ mod tests {
         let service = service_on(Arc::new(RecordingStore::new(log.events.clone(), false)));
         let claims = service.claims();
         claims
-            .claim_for_main(&offer_of(&log.scid(), 36), true, None)
+            .claim_for_main(&offer_of(&log.scid(), 36), Some(CUSTODY_ENC), None)
             .await
             .unwrap();
         claims.accept_join(&main, &offer_id(36)).unwrap();
@@ -2640,7 +2738,7 @@ mod tests {
         let claims = service.claims();
         for id in [37, 38] {
             let claimed = claims
-                .claim_for_main(&offer_of(&log.scid(), id), false, None)
+                .claim_for_main(&offer_of(&log.scid(), id), None, None)
                 .await
                 .unwrap();
             assert!(!claimed.needs_accept);
@@ -2672,7 +2770,7 @@ mod tests {
         Ad4mDb::with_global_instance(|db| db.clear_agent_identity_for_test(&main_did)).unwrap();
         let channel = crate::config::CustodyChannelForTest::on();
         let incept = test_service()
-            .cosign_incept(&main, &incept_listing(&main, 72))
+            .cosign_incept(&main, &incept_listing(&main, 72), false)
             .await
             .unwrap();
         let scid = Event::from_json(&incept).unwrap().scid;

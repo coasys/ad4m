@@ -2,8 +2,9 @@
 //!
 //! The record is sealed to the `enc` key of every device key of the log, so this app reads it
 //! as its executor's device: the executor reads the sealed record with its device key
-//! (`identity.record`, which answers it with the store's receipt) and unwraps its own entry's
-//! record key in its wallet (`identity.unwrapRecordKey`); the record is decrypted here. A write
+//! (`identity.record`, which answers it with the store's receipt), its own entry's record key is
+//! unwrapped with the enc key the log lists for that device key (`identity.unwrapRecordKey`,
+//! which [`crate::WithEncKey`] answers in the app), and the record is decrypted here. A write
 //! ([`write`]) reads the newest version, applies its [`Change`]s ([`merge`]), seals the result
 //! as the next version to every reader of the log at its head, and writes it
 //! (`identity.recordPut`), where the executor's device key signs the envelope. When another
