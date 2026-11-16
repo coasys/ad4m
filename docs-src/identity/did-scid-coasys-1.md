@@ -867,10 +867,11 @@ a new string ends the read of the last one.
   the refresh of an identity it already speaks for, bind as before.
 - The executor never opens the private record. It passes the record and request-box calls
   with a store request the caller signed with the master key, or signs one with its own key
-  (always for a post). For the app on its machine whose device it is (the desktop's custody
-  service, which has no `enc` key of its own), the operator there may have it open the record
-  key of its own entry of `wrapped` (`identity.unwrapRecordKey`, local only); the app
-  decrypts the record with that key after it verified the envelope's signature and the
+  (always for a post). The desktop's custody service opens the record key of its device's
+  entry of `wrapped` with its own X25519 key when the log lists that key for the device. Where
+  the log lists the executor's own `enc` key (a device that may not keep the master key), the
+  operator there may have the executor open the record key of its own entry of `wrapped`
+  (`identity.unwrapRecordKey`, local only). The app decrypts the record with that key after it verified the envelope's signature and the
   recovery key's attestation against the log. That app's writes are its device's: it seals
   the envelope naming the device key as `signer` with an empty `sig`, and the executor signs
   it with the device key before the put (it refuses an unsigned envelope naming any other
