@@ -7831,6 +7831,122 @@ async fn the_master_key_reaches_the_custody_service_through_executors_that_see_o
     assert!(!methods.iter().any(|m| m == "identity.takeMaster"));
 }
 
+/// Forwards to `inner`, but answers for identity `asked` with identity `served`: its status
+/// names `asked` where `inner`'s names `served`, and `identity.log` for `asked` serves the log
+/// of `served` (valid, signed, and another identity's).
+struct OtherLog<'a, R> {
+    inner: &'a R,
+    asked: String,
+    served: String,
+}
+
+#[async_trait(?Send)]
+impl<R: ExecutorRpc> ExecutorRpc for OtherLog<'_, R> {
+    async fn call(&self, method: &str, mut params: Value) -> Result<Value, RpcError> {
+        if method == "identity.log" && params["did"] == json!(self.asked) {
+            params["did"] = json!(self.served);
+        }
+        let mut answer = self.inner.call(method, params).await?;
+        if method == "identity.status" && answer["did"] == json!(self.served) {
+            answer["did"] = json!(self.asked);
+        }
+        Ok(answer)
+    }
+}
+
+/// Review coasys/ad4m#1649: an executor whose status names identity A, but which serves the
+/// valid log of identity B for A and holds a master key of B sealed to the custody enc key,
+/// gets no master key taken: the adapter refuses the log, so nothing is kept or acknowledged.
+#[tokio::test]
+async fn a_log_of_another_identity_takes_no_master_key() {
+    let store = TestStore::new();
+    let a = custody(&store, 1);
+    let other = custody(&store, 3);
+    let desk = custody(&store, 2);
+    let vault = MemoryVault::new();
+    let did = create(&a, &vault, 33).await;
+    let asked = create(&other, &MemoryVault::new(), 34).await;
+    let d2 = link_app(
+        &a,
+        &vault,
+        &did,
+        &desk,
+        entry("Desk", DeviceKind::DesktopApp),
+        true,
+    )
+    .await;
+    send_master(&a, &vault, &did, &d2, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+
+    let lying = ViaExecutor::new(WithEncKey::new(
+        OtherLog {
+            inner: desk.fake(),
+            asked: asked.clone(),
+            served: did.clone(),
+        },
+        Box::new(custody_enc(2)),
+        Box::new(SystemClock),
+    ));
+    let desk_vault = MemoryVault::new();
+    let refused = take_master(&lying, &desk_vault, &OsRandom).await;
+    assert!(refused.is_err(), "a master key taken: {refused:?}");
+    let scid = ad4m_identity_core::scid_of(&did).unwrap();
+    assert!(desk_vault.unlock(scid, MasterUse::Link, 0).is_err());
+    assert!(!desk
+        .fake()
+        .methods()
+        .iter()
+        .any(|m| m == "identity.inboxAck"));
+
+    // The message still waits for an executor that serves the right log.
+    let taken = take_master(&desk, &desk_vault, &OsRandom)
+        .await
+        .unwrap()
+        .expect("the master key still waits");
+    assert_eq!(taken.did, did);
+}
+
+/// Review coasys/ad4m#1649: a flow that writes for the master key refuses a log of another
+/// identity than the one it was asked for, before it unlocks, keeps a push or sends anything.
+#[tokio::test]
+async fn send_master_refuses_a_log_of_another_identity() {
+    let store = TestStore::new();
+    let a = custody(&store, 1);
+    let other = custody(&store, 3);
+    let desk = custody(&store, 2);
+    let vault = MemoryVault::new();
+    let did = create(&a, &vault, 35).await;
+    let served = create(&other, &vault, 36).await;
+    let d2 = link_app(
+        &other,
+        &vault,
+        &served,
+        &desk,
+        entry("Desk", DeviceKind::DesktopApp),
+        true,
+    )
+    .await;
+
+    let lying = ViaExecutor::new(OtherLog {
+        inner: a.rpc(),
+        asked: did.clone(),
+        served: served.clone(),
+    });
+    let before = a.fake().methods().len();
+    let refused = send_master(&lying, &vault, &did, &d2, &SystemClock, &OsRandom).await;
+    match &refused {
+        Err(ClientError::Protocol(message)) => assert!(message.contains(&served), "{message}"),
+        other => panic!("expected a protocol refusal, got {other:?}"),
+    }
+    assert!(vault.pending_pushes().unwrap().is_empty());
+    let sent = a.fake().methods()[before..].to_vec();
+    assert!(
+        sent.iter().all(|m| m == "identity.log"),
+        "called past the log: {sent:?}"
+    );
+}
+
 /// A plain executor no longer opens the master key for anyone: `identity.takeMaster` reaches
 /// only the adapter.
 #[tokio::test]

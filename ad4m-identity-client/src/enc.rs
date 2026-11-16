@@ -246,13 +246,21 @@ impl<R: ExecutorRpc> WithEncKey<R> {
                 .call(METHOD, json!({ "did": did, "from": 0, "fresh": true }))
                 .await?,
         )?;
-        ad4m_identity_core::fold_json(&log.events).map_err(|e| RpcError {
+        let chain = ad4m_identity_core::fold_json(&log.events).map_err(|e| RpcError {
             code: 502,
             message: format!(
                 "{METHOD} served a log that does not fold: {}",
                 ad4m_identity_core::error_code(&e)
             ),
-        })
+        })?;
+        // A valid log of another identity would check that identity's messages.
+        if chain.state().did != did {
+            return Err(RpcError {
+                code: 502,
+                message: format!("{METHOD} served the log of {} for {did}", chain.state().did),
+            });
+        }
+        Ok(chain)
     }
 
     /// The oldest current master key sealed to this device, opened here: the `TakenMaster` JSON

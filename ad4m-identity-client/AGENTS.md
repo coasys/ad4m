@@ -42,7 +42,9 @@ master key for the person.
 - **One unlock per flow** (`Vault::unlock`): linking signs the offer, the list requests and the
   `add` under one unlock. A callback (`with_unlocked(callback)`) would fit a synchronous flow; the
   flows are async across network calls, so the unlock is a guard the flow holds instead.
-- The client re-checks what it reads: every log goes through `fold` here too.
+- The client re-checks what it reads: every log goes through `fold` here too,
+  and a folded log whose DID is not the one asked for is refused (`request::log_of`,
+  `WithEncKey`'s `takeMaster`), before anything is signed, kept or acknowledged.
 - The core (no features) builds for `wasm32-unknown-unknown`; keep `tokio`, sockets and the
   system clock out of it (they sit behind `ws`, in examples and tests).
 - **Custody before publish.** `create` stores master #0 and the co-signed incept in the vault
