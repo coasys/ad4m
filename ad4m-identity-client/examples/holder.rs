@@ -5,6 +5,8 @@
 //!
 //! ```text
 //! {"cmd":"connect","url":"http://127.0.0.1:12000","token":""}  -> {"ok":true}
+//! {"cmd":"connect","url":"…","token":"","custody":true}         -> {"ok":true,"enc"}
+//! {"cmd":"prepareDevice"}                                       -> {"deviceString",…}
 //! {"cmd":"create","name":"Home","kind":"desktop-app"}           -> {"did","scid","seq","words","record"}
 //! {"cmd":"open","did":"did:scid:…","store":"http://…"}           -> {"link","offerString","offerId"}
 //! {"cmd":"scan","did":"…","store":"http://…","device":"coasys:device:1:…"} -> {"offerId"}
@@ -33,9 +35,14 @@
 //! names the device's record entry (`kind` defaults to `server` for an `open` offer and to
 //! `desktop-app` for a scan) and with `keepMaster` puts the master key into its inbox.
 //! `sendMaster` answers the secret too, from the words this holder made it with, so a test
-//! can compare what the device takes. `takeMaster` is the device's side, for a holder that
-//! connects to the device's executor as its custody service. `record` and `master`/`record`
-//! fields answer a record write's version, or `{"error"}`.
+//! can compare what the device takes. `record` and `master`/`record` fields answer a record
+//! write's version, or `{"error"}`.
+//!
+//! With `"custody": true` the holder is the device's custody service: it makes an enc key of its
+//! own (answered as `enc`) and reaches the executor through `WithEncKey`, which lists that key
+//! on `prepareDevice` and `claimOffer`, and opens the inbox and the record key itself. The
+//! executor passes only sealed text. `prepareDevice` and `takeMaster` are this side's commands;
+//! a plain executor answers no `takeMaster`.
 //!
 //! `create` lists this device in the record as `name` (default `This computer`) of `kind`
 //! (default `desktop-app`), holding master #0. It answers the 12 words too, so a test can restore from them on another executor;
@@ -48,6 +55,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, Write};
 
 use ad4m_client::ws_rpc::WsRpcClient;
+use ad4m_identity_client::executor::{ExecutorRpc, RpcError};
 use ad4m_identity_client::flows::create::{CreateFlow, CreateScreen};
 use ad4m_identity_client::flows::link::{Claimed, LinkFlow};
 use ad4m_identity_client::flows::master::{
@@ -58,15 +66,34 @@ use ad4m_identity_client::flows::restore::RestoreFlow;
 use ad4m_identity_client::flows::revoke::revoke;
 use ad4m_identity_client::flows::rotate::rotate;
 use ad4m_identity_client::record::{self, Change};
-use ad4m_identity_client::{ClientError, MemoryVault, OsRandom, SystemClock, ViaExecutor};
+use ad4m_identity_client::{
+    ClientError, MemoryVault, OsRandom, Random, SoftEncKey, SystemClock, ViaExecutor, WithEncKey,
+};
 use ad4m_identity_core::link::{DeviceString, OfferKind};
 use ad4m_identity_core::record::{DeviceEntry, DeviceKind, HoldsMaster};
-use ad4m_identity_core::words;
+use ad4m_identity_core::{words, X25519Secret};
 use ad4m_ldk::identity::DeviceRequestBody;
+use async_trait::async_trait;
 use serde_json::{json, Value};
 
 static CLOCK: SystemClock = SystemClock;
 static RANDOM: OsRandom = OsRandom;
+
+/// The executor connection: plain, or through the custody service's enc key.
+enum Rpc {
+    Plain(WsRpcClient),
+    Custody(WithEncKey<WsRpcClient>),
+}
+
+#[async_trait(?Send)]
+impl ExecutorRpc for Rpc {
+    async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        match self {
+            Rpc::Plain(client) => ExecutorRpc::call(client, method, params).await,
+            Rpc::Custody(adapted) => adapted.call(method, params).await,
+        }
+    }
+}
 
 fn field<'a>(command: &'a Value, name: &str) -> Result<&'a str, String> {
     command[name]
@@ -148,7 +175,7 @@ fn pushes(pushes: &[(String, Result<String, ClientError>)]) -> Value {
 }
 
 async fn create(
-    executor: &ViaExecutor<WsRpcClient>,
+    executor: &ViaExecutor<Rpc>,
     vault: &MemoryVault,
     masters: &mut Masters,
     phrases: &mut Phrases,
@@ -192,7 +219,7 @@ async fn main() {
     let vault = MemoryVault::new();
     let stdin = std::io::stdin();
     let mut out = std::io::stdout();
-    let mut executor: Option<ViaExecutor<WsRpcClient>> = None;
+    let mut executor: Option<ViaExecutor<Rpc>> = None;
     // The open link and its claim; the flow borrows the executor, so both live in this loop's
     // scope and the executor is never replaced while a link is open.
     let mut lines = stdin.lock().lines();
@@ -218,15 +245,24 @@ async fn main() {
         let url = command["url"].as_str().unwrap_or_default().to_string();
         let token = command["token"].as_str().unwrap_or_default().to_string();
         match WsRpcClient::connect(&url, &token).await {
+            Ok(client) if command["custody"] == true => {
+                let mut secret = [0u8; 32];
+                RANDOM.fill(&mut secret);
+                let enc = SoftEncKey::new(X25519Secret::from(secret));
+                let adapted = WithEncKey::new(client, Box::new(enc), Box::new(SystemClock));
+                let enc = adapted.enc();
+                executor = Some(ViaExecutor::new(Rpc::Custody(adapted)));
+                reply(&mut out, json!({ "ok": true, "enc": enc }));
+            }
             Ok(client) => {
-                executor = Some(ViaExecutor::new(client));
+                executor = Some(ViaExecutor::new(Rpc::Plain(client)));
                 reply(&mut out, json!({ "ok": true }));
             }
             Err(e) => reply(&mut out, json!({ "error": e.to_string() })),
         }
     }
     let executor = executor.expect("connected above");
-    let mut link: Option<(LinkFlow<'_, WsRpcClient>, DeviceKind)> = None;
+    let mut link: Option<(LinkFlow<'_, Rpc>, DeviceKind)> = None;
     let mut claimed: Option<Claimed> = None;
     let mut masters = Masters::new();
     let mut phrases = Phrases::new();
@@ -478,6 +514,14 @@ async fn main() {
                     }))
                 }
                 .await
+            }
+            Some("prepareDevice") => executor
+                .rpc()
+                .call("identity.prepareDevice", json!({}))
+                .await
+                .map_err(|e| e.to_string()),
+            Some("takeMaster") if matches!(executor.rpc(), Rpc::Plain(_)) => {
+                Err("takeMaster needs a custody connection (`connect` with `custody: true`)".into())
             }
             Some("takeMaster") => match take_master(&executor, &vault, &RANDOM).await {
                 Ok(Some(taken)) => Ok(json!({
