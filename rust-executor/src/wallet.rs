@@ -408,6 +408,24 @@ impl Wallet {
         keys.by_name.insert(did.clone(), Key::from(key));
         Ok(did)
     }
+
+    /// Moves the key `name` to `retired_name`, which must be free: the key stays in the wallet
+    /// under its new name, and `name` is free for a new key.
+    pub fn retire_key(&mut self, name: &str, retired_name: &str) -> Result<(), AnyError> {
+        let keys = self
+            .keys
+            .as_mut()
+            .ok_or_else(|| anyhow!("wallet is locked"))?;
+        if keys.by_name.contains_key(retired_name) {
+            return Err(anyhow!("a key named {} already exists", retired_name));
+        }
+        let key = keys
+            .by_name
+            .remove(name)
+            .ok_or_else(|| anyhow!("no key named {}", name))?;
+        keys.by_name.insert(retired_name.to_string(), key);
+        Ok(())
+    }
 }
 
 // ── Key name constants ─────────────────────────────────────────────────────
@@ -508,6 +526,12 @@ pub trait WalletBackend: Send + Sync {
     /// Generate a new Ed25519 keypair, store it under its own DID, and return the DID.
     fn generate_keypair_named_by_did(&self) -> Result<String, AnyError> {
         Err(anyhow!("this wallet backend cannot name keys by DID"))
+    }
+
+    /// Moves the key `name` to `retired_name` and keeps it there (`identity.rekey` keeps the
+    /// main agent's old key). Shared mode cannot rename keys.
+    fn retire_key(&self, _name: &str, _retired_name: &str) -> Result<(), AnyError> {
+        Err(anyhow!("this wallet backend cannot rename keys"))
     }
 }
 
@@ -682,6 +706,11 @@ impl WalletBackend for LocalWallet {
     fn generate_keypair_named_by_did(&self) -> Result<String, AnyError> {
         let mut wallet = self.inner.lock().expect("wallet lock");
         wallet.generate_keypair_named_by_did()
+    }
+
+    fn retire_key(&self, name: &str, retired_name: &str) -> Result<(), AnyError> {
+        let mut wallet = self.inner.lock().expect("wallet lock");
+        wallet.retire_key(name, retired_name)
     }
 }
 

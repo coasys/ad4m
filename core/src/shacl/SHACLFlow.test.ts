@@ -304,14 +304,16 @@ describe('SHACLFlow', () => {
     // V8 backtracks through all of them when the match fails at the end
     // (100k digits then `x`: about 10 s).
     it('state value decoder rejects a long non-number in linear time', () => {
-      const digits = '1'.repeat(50_000);
+      // A quadratic decoder takes seconds at 50k digits, and 16 times that at 200k; a linear one
+      // takes milliseconds. The 2 s bound sits far from both, so a busy CI runner cannot fail it.
+      const digits = '1'.repeat(200_000);
       for (const tail of ['x', 'e', 'e+', '.x']) {
         const target = `literal:number:${digits}${tail}`;
         const started = performance.now();
         const flow = SHACLFlow.fromLinks(flowLinksWithStates('xrt://XFlow', [['s', target]], false), 'xrt://XFlow');
         const elapsed = performance.now() - started;
         expect([tail, Number.isNaN(flow.states[0].value)]).toEqual([tail, true]);
-        expect([tail, elapsed < 200]).toEqual([tail, true]);
+        expect([tail, elapsed < 2000]).toEqual([tail, true]);
       }
     });
 

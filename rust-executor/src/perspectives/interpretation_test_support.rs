@@ -303,11 +303,10 @@ pub(crate) async fn setup_interpretation_e2e(
     eprintln!("[e2e] interpretation against model '{model}' at {base_url}");
     // The native Ollama endpoint: tools go to `/api/chat` as definitions. On an
     // OpenAI-shaped endpoint they are written into the prompt, and Ollama 0.40's Qwen
-    // parser answers the `<tool_call>` text with a 500. The provider otherwise discovers
-    // `context_length` (262144 on the qwen3.8-27b-48k tag) and requests
-    // `num_ctx=131072`, which makes Ollama reload the model out of the staging server's
-    // 49152-token residency — a ~3 min reload per ping-pong. Pin the Modelfile's own
-    // window so the tests ask for what is already loaded.
+    // parser answers the `<tool_call>` text with a 500. The provider sends the tag's
+    // Modelfile `num_ctx` (49152 on qwen3.8-27b-48k; its base window is 262144). The cap
+    // keeps any other model at the staging server's 49152-token residency too: a request
+    // at another `num_ctx` makes Ollama reload the model, a ~3 min reload per ping-pong.
     let endpoint = e2e_endpoint(
         "e2e-llm",
         crate::types::EndpointKind::Ollama,
