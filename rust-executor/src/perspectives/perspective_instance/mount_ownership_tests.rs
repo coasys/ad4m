@@ -13,6 +13,8 @@ use crate::languages::mount_tests::load_mount_test_language;
 use serde_json::json;
 
 const EPOCH: &str = "1970-01-01T00:00:00.000Z";
+/// The mount ledger's mark (`SparqlStore::add_mount_links`).
+const MOUNTED_BY: &str = "ad4m://ontology/mountedBy";
 
 /// `link` signed by the main agent at the Unix epoch, the timestamp A9's
 /// mount used as its marker.
@@ -113,6 +115,121 @@ async fn an_epoch_dated_link_of_the_main_agent_survives_sync_and_unmount() {
     assert!(holds(&p, &mine).await, "sync removed it");
     p.unmount(&lang).await.unwrap();
     assert!(holds(&p, &mine).await, "unmount removed it");
+}
+
+// --- No caller can set the mount mark ---------------------------------------
+
+/// The link that would mark `link`'s reifier as written by the mount of
+/// `lang`: `<link:…> -[mountedBy]-> "<lang>"`, as the ledger stores it.
+fn forged_mark(link: &LinkExpression, lang: &str) -> Link {
+    let reifier = crate::perspectives::sparql_store::SparqlStore::reifier_of(link);
+    Link {
+        source: reifier
+            .trim_start_matches('<')
+            .trim_end_matches('>')
+            .to_string(),
+        predicate: Some(MOUNTED_BY.to_string()),
+        target: format!("literal:string:{lang}"),
+    }
+}
+
+/// A user's Local note on `t1`, as stored.
+async fn users_note(p: &mut PerspectiveInstance, lang: &str) -> LinkExpression {
+    let mut note = LinkExpression::from(
+        p.add_links(
+            vec![Link {
+                source: format!("{lang}://t1"),
+                predicate: Some("ex://note".to_string()),
+                target: "literal:string:mine".to_string(),
+            }],
+            LinkStatus::Local,
+            None,
+            &AgentContext::main_agent(),
+        )
+        .await
+        .unwrap()
+        .remove(0),
+    );
+    note.status = Some(LinkStatus::Local);
+    note
+}
+
+#[tokio::test]
+async fn a_link_stating_the_mount_mark_is_never_stored() {
+    let lang = load_mount_test_language().await;
+    let (mut p, ctx) = mounted(&lang).await;
+    let note = users_note(&mut p, &lang).await;
+    let forged = forged_mark(&note, &lang);
+
+    // Each path either refuses the link or stores nothing: the store
+    // refuses the mark (`refuse_link_metadata`), and `write_link_diff`
+    // logs a store refusal instead of returning it.
+    let stored = |p: &PerspectiveInstance| {
+        let p = p.clone();
+        let source = forged.source.clone();
+        async move { !links_at(&p, &source, MOUNTED_BY).await.is_empty() }
+    };
+
+    // `perspective.addLink` / `addLinks`.
+    let _ = p
+        .add_links(vec![forged.clone()], LinkStatus::Local, None, &ctx)
+        .await;
+    assert!(!stored(&p).await, "add_links stored the mount mark");
+
+    // `perspective.addLinkExpression`: a caller-signed expression.
+    let mut expression =
+        LinkExpression::from(crate::agent::create_signed_expression(forged.clone(), &ctx).unwrap());
+    let _ = p
+        .add_link_expression(expression.clone(), LinkStatus::Local, None)
+        .await;
+    assert!(
+        !stored(&p).await,
+        "add_link_expression stored the mount mark"
+    );
+
+    // A batch commit, an import and a link-language diff all write through
+    // `apply_diff`, which refuses the whole diff.
+    expression.status = Some(LinkStatus::Local);
+    assert!(
+        p.sparql_store.apply_diff(&[], &[expression]).is_err(),
+        "apply_diff took the mount mark"
+    );
+    assert!(
+        links_at(&p, &forged.source, MOUNTED_BY).await.is_empty(),
+        "a mount mark link is in the store"
+    );
+}
+
+#[tokio::test]
+async fn a_caller_cannot_make_its_link_mount_written() {
+    let lang = load_mount_test_language().await;
+    create(&lang, json!({"title": "a"})).await;
+    let (mut p, ctx) = mounted(&lang).await;
+    let note = users_note(&mut p, &lang).await;
+
+    // Try to mark the note as the mount's through each write path; the
+    // outcome of each try does not matter, only what the mount thinks.
+    let forged = forged_mark(&note, &lang);
+    let _ = p
+        .add_links(vec![forged.clone()], LinkStatus::Local, None, &ctx)
+        .await;
+    let mut expression =
+        LinkExpression::from(crate::agent::create_signed_expression(forged, &ctx).unwrap());
+    let _ = p
+        .add_link_expression(expression.clone(), LinkStatus::Local, None)
+        .await;
+    expression.status = Some(LinkStatus::Local);
+    let _ = p.sparql_store.apply_diff(&[], &[expression]);
+
+    let decorated = DecoratedLinkExpression::from((note.clone(), LinkStatus::Local));
+    assert!(
+        !p.mount_written(&lang).unwrap().contains(&decorated),
+        "the caller's note counts as written by the mount"
+    );
+    p.sync_mount(&lang).await.unwrap();
+    assert!(holds(&p, &note).await, "sync removed the caller's note");
+    p.unmount(&lang).await.unwrap();
+    assert!(holds(&p, &note).await, "unmount removed the caller's note");
 }
 
 // --- A stale sync never rolls the schema back -------------------------------
