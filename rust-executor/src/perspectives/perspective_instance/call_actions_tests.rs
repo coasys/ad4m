@@ -336,6 +336,106 @@ async fn grouped_calls_merge_defaults_before_caller_values() {
     );
 }
 
+/// Lal P2: an adder/remover on a collection reached through an abstract
+/// class grouped each member under the same `(source, interaction)` key
+/// as `{own: member}`, so the call carried only the last member. The call
+/// must carry the whole member list as the collection payload — one
+/// `update` with `{children: [..]}`, which is what the mount-test
+/// language's record merge can express (a per-member call would leave
+/// only the last member on the record).
+#[tokio::test]
+async fn an_abstract_collection_call_carries_every_member() {
+    let lang = load_mount_test_language().await;
+    let mut shape: Value = serde_json::from_str(&thing_shape(&lang).await).unwrap();
+    // `children` gets call adder/remover sharing the `update` interaction.
+    let update = shape["properties"][1]["setter"].clone();
+    shape["properties"][4]["adder"] = update.clone();
+    shape["properties"][4]["remover"] = update;
+    let (mut p, ctx) = mounted("MountThing", shape.to_string()).await;
+    let base = created_thing(&lang, &ctx, &mut p).await;
+
+    // The mounted record's class flag — the delta apply would write it;
+    // until then the test writes it by hand (as
+    // `abstract_update_groups_by_concrete_name` does).
+    p.add_link(
+        Link {
+            source: base.clone(),
+            predicate: Some("rdf://type".to_string()),
+            target: "mounttest://Thing".to_string(),
+        },
+        LinkStatus::Local,
+        None,
+        &ctx,
+    )
+    .await
+    .unwrap();
+
+    // Add two members through `Container.children`, then remove two.
+    p.update_subject(
+        class("ad4m://Container"),
+        base.clone(),
+        json!({"children": {"action": "adder", "value": [format!("{lang}://k1"), format!("{lang}://k2")]}}),
+        None,
+        &ctx,
+    )
+    .await
+    .unwrap();
+    p.update_subject(
+        class("ad4m://Container"),
+        base.clone(),
+        json!({"children": {"action": "remover", "value": [format!("{lang}://k1"), format!("{lang}://k3")]}}),
+        None,
+        &ctx,
+    )
+    .await
+    .unwrap();
+    // A single member is a one-element payload, not a scalar.
+    p.update_subject(
+        class("ad4m://Container"),
+        base.clone(),
+        json!({"children": {"action": "adder", "value": format!("{lang}://k4")}}),
+        None,
+        &ctx,
+    )
+    .await
+    .unwrap();
+
+    let log = calls(&lang).await;
+    let updates: Vec<&Value> = log.iter().filter(|c| c["name"] == "update").collect();
+    assert_eq!(updates.len(), 3, "one call per member op: {log:?}");
+    assert_eq!(
+        updates[0]["params"],
+        json!({"children": [format!("{lang}://k1"), format!("{lang}://k2")]}),
+        "the add kept only the last member: {log:?}"
+    );
+    assert_eq!(
+        updates[1]["params"],
+        json!({"children": [format!("{lang}://k1"), format!("{lang}://k3")]}),
+        "the remove kept only the last member: {log:?}"
+    );
+    assert_eq!(
+        updates[2]["params"],
+        json!({"children": [format!("{lang}://k4")]}),
+        "a single member stays an array payload: {log:?}"
+    );
+
+    // An empty member list calls nothing: there is nothing to add or
+    // remove, as for link actions which write no commands for it.
+    for action in ["adder", "remover"] {
+        p.update_subject(
+            class("ad4m://Container"),
+            base.clone(),
+            json!({"children": {"action": action, "value": []}}),
+            None,
+            &ctx,
+        )
+        .await
+        .unwrap();
+    }
+    let after = calls(&lang).await;
+    assert_eq!(after, log, "an empty member op made a call: {after:?}");
+}
+
 #[tokio::test]
 async fn abstract_update_groups_by_concrete_name() {
     let lang = load_mount_test_language().await;
