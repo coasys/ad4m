@@ -42,7 +42,10 @@ setup() {
     export FEED_SCALE_STATE="$TMP/state"
     export EXECUTOR_PUBLISH_DIR="$TMP/publish"
     export FEED_SCALE_NO_BUILD=1
-    unset FEED_SCALE_FORCE FEED_SCALE_MESSAGES FEED_SCALE_MIN_FREE_GB WE_REF COASYS_SPACES_WORK COASYS_SPACES_ARTIFACTS FAKE_SUITE
+    unset FEED_SCALE_FORCE FEED_SCALE_MESSAGES WE_REF COASYS_SPACES_WORK COASYS_SPACES_ARTIFACTS FAKE_SUITE
+    # The fakes write a few KB: the disk guard is off, except in its own test (the CI host's
+    # temp dir has less than the default 40 GB free).
+    export FEED_SCALE_MIN_FREE_GB=0
     mkdir -p "$EXECUTOR_PUBLISH_DIR"
 }
 
