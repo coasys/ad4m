@@ -81,6 +81,8 @@ import {
     MeshManager,
     parseCallMessage,
     createTelepresenceChannel,
+    agentOfMeshPeer,
+    meshPeerId,
     CALL_PROTOCOL_VERSION,
     DEFAULT_ICE_SERVERS,
     DISCONNECT_GRACE_MS,
@@ -430,6 +432,42 @@ afterEach(async () => {
 
 const CALL_ID = "call:rec-abc"
 
+// ── Lifecycle ───────────────────────────────────────────────────────
+
+describe("a mesh destroyed while it joins", () => {
+    it("publishes nothing and starts no sweep or network watch once the channel listens", async () => {
+        jest.useFakeTimers()
+        try {
+            let listen!: () => void
+            const publish = jest.fn()
+            const onNetworkChange = jest.fn(() => () => {})
+            const mesh = new MeshManager({
+                channel: {
+                    publish,
+                    onMessage: () => () => {},
+                    listening: () => new Promise<void>((resolve) => { listen = resolve }),
+                },
+                callId: CALL_ID,
+                selfId: "did:alice",
+                onNetworkChange,
+                sweepMs: 1_000,
+                createPeerConnection: () => new FakePeerConnection() as unknown as RTCPeerConnection,
+            })
+
+            const joining = mesh.join(stream())
+            await mesh.destroy()
+            listen()
+            await joining
+
+            expect(publish).not.toHaveBeenCalled()
+            expect(onNetworkChange).not.toHaveBeenCalled()
+            expect(jest.getTimerCount()).toBe(0)
+        } finally {
+            jest.useRealTimers()
+        }
+    })
+})
+
 // ── Protocol ────────────────────────────────────────────────────────
 
 describe("parseCallMessage", () => {
@@ -477,6 +515,11 @@ describe("parseCallMessage", () => {
             binary: false,
         }
         expect(parseCallMessage(data)).toEqual(data)
+    })
+
+    it("accepts a beat", () => {
+        const beat = { v: CALL_PROTOCOL_VERSION, call: "room:x", kind: "beat" as const }
+        expect(parseCallMessage({ ...beat, to: "*" })).toEqual(beat)
     })
 
     it("coerces missing binary flag to false", () => {
@@ -2279,6 +2322,58 @@ describe("what a call is told about its own connections", () => {
 
 // ── Signalling before the roster ────────────────────────────────────
 
+describe("beats", () => {
+    let bus: InMemoryBus
+
+    beforeEach(() => {
+        bus = new InMemoryBus()
+    })
+
+    it("sends a beat to every peer, which reports it from its sender whether the roster lists it or not", async () => {
+        const alice = await makeMesh(bus, "did:alice#laptop", CALL_ID)
+        const bob = await makeMesh(bus, "did:bob#phone", CALL_ID)
+        const heard: string[] = []
+        bob.mesh.on("beat", (peer: string) => heard.push(peer))
+
+        alice.mesh.beat()
+        await settle()
+        expect(alice.sent[alice.sent.length - 1]).toEqual({ v: CALL_PROTOCOL_VERSION, call: CALL_ID, to: "*", kind: "beat" })
+        expect(heard).toEqual(["did:alice#laptop"])
+
+        bob.mesh.setRoster(["did:alice#laptop", "did:bob#phone"])
+        alice.mesh.beat()
+        await settle()
+        expect(heard).toEqual(["did:alice#laptop", "did:alice#laptop"])
+        expect(bob.errors).toEqual([])
+    })
+
+    it("holds no beat for a peer the roster does not list: it is not signalling", async () => {
+        const alice = await makeMesh(bus, "did:alice", CALL_ID)
+        const bob = await makeMesh(bus, "did:bob", CALL_ID)
+        for (let n = 0; n < 5; n += 1) alice.mesh.beat()
+        await settle()
+        expect((bob.mesh as unknown as { pending: Map<string, unknown[]> }).pending.size).toBe(0)
+    })
+
+    it("reports no beat of another call", async () => {
+        const alice = await makeMesh(bus, "did:alice", "call:other")
+        const bob = await makeMesh(bus, "did:bob", CALL_ID)
+        const heard: string[] = []
+        bob.mesh.on("beat", (peer: string) => heard.push(peer))
+        alice.mesh.beat()
+        await settle()
+        expect(heard).toEqual([])
+    })
+
+    it("sends no beat once it has left", async () => {
+        const alice = await makeMesh(bus, "did:alice", CALL_ID)
+        await alice.mesh.leave()
+        const sent = alice.sent.length
+        alice.mesh.beat()
+        expect(alice.sent.length).toBe(sent)
+    })
+})
+
 describe("signalling that arrives before the roster", () => {
     /**
      * A peer who denied the microphone has no outbound tracks and never fires
@@ -2532,8 +2627,25 @@ describe("a description from a different connection", () => {
 
 // ── Telepresence channel ────────────────────────────────────────────
 
+describe("mesh peer ids", () => {
+    it("name one agent on one device, and give the agent back", () => {
+        expect(meshPeerId("did:key:z6Mk", "laptop")).toBe("did:key:z6Mk#laptop")
+        expect(agentOfMeshPeer("did:key:z6Mk#laptop")).toBe("did:key:z6Mk")
+        expect(agentOfMeshPeer("did:key:z6Mk")).toBe("did:key:z6Mk")
+    })
+
+    it("refuse a device id that is empty or holds '#', which would name another agent", () => {
+        expect(() => meshPeerId("did:key:z6Mk", "")).toThrow(/device id/)
+        expect(() => meshPeerId("did:key:z6Mk", "x#y")).toThrow(/device id/)
+    })
+})
+
 describe("createTelepresenceChannel", () => {
     const PREDICATE = "ad4m://session/rtc"
+    const ALICE = "did:alice#laptop"
+    const BOB = "did:bob#desk"
+    /** A link's source as a channel writes it: the sending device, and the message. */
+    const wire = (message: unknown, device = "desk") => JSON.stringify({ device, message })
 
     function fakeProxy() {
         const handlers = new Set<(payload: PerspectiveExpression) => void>()
@@ -2567,11 +2679,11 @@ describe("createTelepresenceChannel", () => {
         // The mesh acts on the sender id — offers, answers, resets, rebuilds —
         // so an author claim the executor could not verify must never reach it.
         const { proxy, signal } = fakeProxy()
-        const channel = createTelepresenceChannel(proxy, "did:alice")
+        const channel = createTelepresenceChannel(proxy, "did:alice", "laptop")
         const heard: [string, unknown][] = []
         channel.onMessage((from, payload) => heard.push([from, payload]))
         await settle()
-        const message = (n: number) => ({ source: JSON.stringify({ n }), predicate: PREDICATE, target: "*" })
+        const message = (n: number) => ({ source: wire({ n }), predicate: PREDICATE, target: "*" })
 
         signal("did:bob", message(1), { linkValid: false })
         signal("did:bob", message(2), { signalValid: false })
@@ -2579,7 +2691,7 @@ describe("createTelepresenceChannel", () => {
         signal("did:bob", message(4), { signalValid: null })
         signal("did:bob", message(5))
 
-        expect(heard).toEqual([["did:bob", { n: 5 }]])
+        expect(heard).toEqual([[BOB, { n: 5 }]])
     })
 
     it("lets a forged reset change nothing on the mesh", async () => {
@@ -2587,21 +2699,21 @@ describe("createTelepresenceChannel", () => {
         // whose proof does not hold must not rebuild Alice's pair with Bob.
         const { proxy, signal } = fakeProxy()
         const alice = new MeshManager({
-            channel: createTelepresenceChannel(proxy, "did:alice"),
+            channel: createTelepresenceChannel(proxy, "did:alice", "laptop"),
             callId: CALL_ID,
-            selfId: "did:alice",
+            selfId: ALICE,
             createPeerConnection: () => new FakePeerConnection() as unknown as RTCPeerConnection,
             sweepMs: 0,
         })
         meshes.push(alice)
         await alice.join(stream())
-        alice.setRoster(["did:alice", "did:bob"])
+        alice.setRoster([ALICE, BOB])
         await settle()
         const before = alice.getParticipants()[0]?.stream
         const recoveries: unknown[] = []
         alice.on("peer-recovery", (...args: unknown[]) => recoveries.push(args))
 
-        const reset = { source: JSON.stringify({ v: CALL_PROTOCOL_VERSION, call: CALL_ID, to: "did:alice", kind: "reset" }), predicate: PREDICATE, target: "did:alice" }
+        const reset = { source: wire({ v: CALL_PROTOCOL_VERSION, call: CALL_ID, to: ALICE, kind: "reset" }), predicate: PREDICATE, target: ALICE }
         signal("did:bob", reset, { linkValid: false })
         signal("did:bob", reset, { signer: "did:mallory" })
         await settleAll()
@@ -2614,42 +2726,63 @@ describe("createTelepresenceChannel", () => {
         expect(recoveries).toHaveLength(1)
     })
 
-    it("publishes over broadcast, addressed in the link target", () => {
+    it("publishes over broadcast, from this device, addressed to a peer in the link target", () => {
         const { proxy, sends } = fakeProxy()
-        const channel = createTelepresenceChannel(proxy, "did:alice")
+        const channel = createTelepresenceChannel(proxy, "did:alice", "laptop")
 
-        channel.publish({ hello: 1 }, { agentId: "did:bob" })
+        channel.publish({ hello: 1 }, { agentId: BOB })
         channel.publish({ hello: 2 })
 
         expect(sends.map((send) => send.links)).toEqual([
-            [{ source: JSON.stringify({ hello: 1 }), predicate: PREDICATE, target: "did:bob" }],
-            [{ source: JSON.stringify({ hello: 2 }), predicate: PREDICATE, target: "*" }],
+            [{ source: wire({ hello: 1 }, "laptop"), predicate: PREDICATE, target: BOB }],
+            [{ source: wire({ hello: 2 }, "laptop"), predicate: PREDICATE, target: "*" }],
         ])
     })
 
-    it("delivers what is for this agent, with the author as the sender", async () => {
+    it("delivers what is for this device, with the author's device as the sender", async () => {
         const { proxy, signal, handlers } = fakeProxy()
-        const channel = createTelepresenceChannel(proxy, "did:alice")
+        const channel = createTelepresenceChannel(proxy, "did:alice", "laptop")
         const heard: [string, unknown][] = []
         const unsubscribe = channel.onMessage((from, payload) => heard.push([from, payload]))
         await settle()
 
-        signal("did:bob", { source: JSON.stringify({ n: 1 }), predicate: PREDICATE, target: "did:alice" })
-        signal("did:bob", { source: JSON.stringify({ n: 2 }), predicate: PREDICATE, target: "*" })
-        signal("did:bob", { source: JSON.stringify({ n: 3 }), predicate: PREDICATE, target: "did:carol" })
-        signal("did:bob", { source: JSON.stringify({ n: 4 }), predicate: "other://predicate", target: "*" })
-        signal("did:alice", { source: JSON.stringify({ n: 5 }), predicate: PREDICATE, target: "*" })
+        signal("did:bob", { source: wire({ n: 1 }), predicate: PREDICATE, target: ALICE })
+        signal("did:bob", { source: wire({ n: 2 }), predicate: PREDICATE, target: "*" })
+        signal("did:bob", { source: wire({ n: 3 }), predicate: PREDICATE, target: "did:carol#x" })
+        signal("did:bob", { source: wire({ n: 4 }), predicate: "other://predicate", target: "*" })
+        signal("did:alice", { source: wire({ n: 5 }, "laptop"), predicate: PREDICATE, target: "*" })
         signal("did:bob", { source: "{not json", predicate: PREDICATE, target: "*" })
+        // To this agent on another device, and from a sender that names no device.
+        signal("did:bob", { source: wire({ n: 6 }), predicate: PREDICATE, target: "did:alice#phone" })
+        signal("did:bob", { source: JSON.stringify({ n: 7 }), predicate: PREDICATE, target: "*" })
 
-        expect(heard).toEqual([["did:bob", { n: 1 }], ["did:bob", { n: 2 }]])
+        expect(heard).toEqual([[BOB, { n: 1 }], [BOB, { n: 2 }]])
 
         unsubscribe()
         expect(handlers.size).toBe(0)
     })
 
+    it("ignores a device id with '#', and says once that a sender names no device", async () => {
+        const { proxy, signal } = fakeProxy()
+        const channel = createTelepresenceChannel(proxy, "did:alice", "laptop")
+        const heard: [string, unknown][] = []
+        channel.onMessage((from, payload) => heard.push([from, payload]))
+        await settle()
+        const consoleWarn = jest.spyOn(console, "warn").mockImplementation()
+
+        signal("did:bob", { source: wire({ n: 1 }, "x#y"), predicate: PREDICATE, target: "*" })
+        signal("did:bob", { source: JSON.stringify({ message: { n: 2 } }), predicate: PREDICATE, target: "*" })
+        signal("did:bob", { source: JSON.stringify({ message: { n: 3 } }), predicate: PREDICATE, target: "*" })
+
+        expect(heard).toEqual([])
+        expect(consoleWarn).toHaveBeenCalledTimes(1)
+        expect(consoleWarn.mock.calls[0][0]).toMatch(/did:bob sends no device id/)
+        consoleWarn.mockRestore()
+    })
+
     it("reports one result per publish, failed when the send is refused or rejected", async () => {
         const { proxy, sends } = fakeProxy()
-        const channel = createTelepresenceChannel(proxy, "did:alice")
+        const channel = createTelepresenceChannel(proxy, "did:alice", "laptop")
         const results: { ok: boolean; ms: number }[] = []
         const unwatch = channel.onPublishResult!((result) => results.push(result))
         const consoleError = jest.spyOn(console, "error").mockImplementation()
@@ -2686,7 +2819,7 @@ describe("createTelepresenceChannel", () => {
             addSignalHandler: async () => {},
             removeSignalHandler: () => {},
         }
-        const channel = createTelepresenceChannel(proxy, "did:alice")
+        const channel = createTelepresenceChannel(proxy, "did:alice", "laptop")
         const results: { ok: boolean; ms: number }[] = []
         channel.onPublishResult!((result) => results.push(result))
         const consoleError = jest.spyOn(console, "error").mockImplementation()
@@ -2702,9 +2835,9 @@ describe("createTelepresenceChannel", () => {
         const { proxy, sends } = fakeProxy()
         const clock = makeClock()
         const mesh = new MeshManager({
-            channel: createTelepresenceChannel(proxy, "did:alice"),
+            channel: createTelepresenceChannel(proxy, "did:alice", "laptop"),
             callId: CALL_ID,
-            selfId: "did:alice",
+            selfId: ALICE,
             now: clock.now,
             sweepMs: 0,
             createPeerConnection: () => new FakePeerConnection() as unknown as RTCPeerConnection,
@@ -2714,7 +2847,7 @@ describe("createTelepresenceChannel", () => {
         mesh.on("peer-recovery", (_peerId: string, attempt: { rung: RecoveryRung }) => rungs.push(attempt.rung))
         await mesh.join(stream())
 
-        mesh.setRoster(["did:alice", "did:bob"])
+        mesh.setRoster([ALICE, BOB])
         await settle()
         clock.advance(HANDSHAKE_GRACE_MS + 1)
         mesh.tick()

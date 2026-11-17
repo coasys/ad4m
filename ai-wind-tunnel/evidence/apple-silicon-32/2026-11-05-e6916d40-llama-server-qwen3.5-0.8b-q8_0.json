@@ -1,0 +1,266 @@
+{
+  "schemaVersion": 1,
+  "runId": "2134ccaa",
+  "startedAt": "2026-11-05T02:55:07.037Z",
+  "finishedAt": "2026-11-05T02:56:37.092Z",
+  "hardwareClass": "apple-silicon-32",
+  "fingerprint": {
+    "os": "macos",
+    "osVersion": "macOS 15.7.2",
+    "kernel": "24.6.0",
+    "arch": "arm64",
+    "cpu": {
+      "model": "Apple M4 Pro",
+      "cores": 14,
+      "threads": 14
+    },
+    "memoryBytes": 51539607552,
+    "gpus": [
+      {
+        "vendor": "apple",
+        "name": "Apple M4 Pro",
+        "vramBytes": 0,
+        "unified": true
+      }
+    ],
+    "backends": [
+      "cpu",
+      "metal"
+    ],
+    "gpuBudgetBytes": 38654705664,
+    "drivers": {},
+    "id": "e6916d40"
+  },
+  "executor": {
+    "commit": "unknown",
+    "binary": "ad4m-executor",
+    "version": "ad4m 0.13.1-staging.6",
+    "harnessCommit": "b498751fbed495c305aa1e53024f63e1283f2cfe"
+  },
+  "options": {
+    "repeat": 3,
+    "concurrency": [
+      1,
+      4
+    ],
+    "providers": [
+      "llama-server"
+    ],
+    "services": [
+      "llm",
+      "completion",
+      "embeddings",
+      "stt",
+      "tts"
+    ],
+    "direct": true
+  },
+  "providers": {
+    "llama-server": {
+      "status": "available",
+      "builds": [
+        "macos-arm64-metal"
+      ],
+      "mode": "spawned",
+      "version": "b11669"
+    }
+  },
+  "cells": [
+    {
+      "provider": "llama-server",
+      "service": "tts",
+      "status": "unsupported",
+      "reason": "llama-server b11669 has no speech route: it lists no --model-vocoder option and no /tts or /v1/audio/speech path; OuteTTS runs only in the llama-tts CLI",
+      "checks": [],
+      "metrics": {},
+      "durationMs": 0
+    },
+    {
+      "provider": "llama-server",
+      "service": "llm",
+      "status": "pass",
+      "model": {
+        "modelId": "qwen3.5-0.8b-q8_0",
+        "remoteModel": "qwen3.5-0.8b-q8_0",
+        "sizeBytes": 811843840,
+        "memoryBytes": 2800000000,
+        "license": "Apache-2.0",
+        "params": "0.8B",
+        "source": "https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF/resolve/6ab461498e2023f6e3c1baea90a8f0fe38ab64d0/Qwen3.5-0.8B-Q8_0.gguf"
+      },
+      "runtimeBuild": "macos-arm64-metal",
+      "backend": "metal",
+      "endpointKind": "LLAMA_SERVER",
+      "serverFlags": [
+        "-c",
+        "8192",
+        "-ngl",
+        "999",
+        "--reasoning",
+        "off"
+      ],
+      "checks": [
+        {
+          "name": "factual answer (/v1/chat/completions)",
+          "pass": true,
+          "detail": "\"Paris\"",
+          "value": "Paris"
+        },
+        {
+          "name": "task prompt (SDK ai.prompt)",
+          "pass": true,
+          "detail": "\"Paris\""
+        },
+        {
+          "name": "tool call (/v1/chat/completions, tools)",
+          "pass": true,
+          "detail": "get_weather({\"city\":\"Paris\"})"
+        },
+        {
+          "name": "streaming (/v1/chat/completions, stream)",
+          "pass": true,
+          "detail": "19 chunks, \"one, two, three, four, five, six, seven, eight, nine, ten\"",
+          "value": 19,
+          "threshold": "> 1 chunk"
+        }
+      ],
+      "metrics": {
+        "firstRequestMs": 101,
+        "ttftMs": {
+          "n": 3,
+          "median": 28.394,
+          "p95": 28.608,
+          "min": 27.925,
+          "max": 28.632,
+          "mean": 28.317
+        },
+        "decodeTps": {
+          "n": 3,
+          "median": 176,
+          "p95": 177.8,
+          "min": 175.1,
+          "max": 178,
+          "mean": 176.4
+        },
+        "prefillTps": {
+          "n": 3,
+          "median": 4147.2,
+          "p95": 4187.3,
+          "min": 2948.2,
+          "max": 4191.7,
+          "mean": 3762.4
+        },
+        "latencyMs": {
+          "n": 3,
+          "median": 38.593,
+          "p95": 39.028,
+          "min": 37.897,
+          "max": 39.077,
+          "mean": 38.522
+        },
+        "tokenCountSource": "usage",
+        "directLatencyMs": {
+          "n": 3,
+          "median": 38.904,
+          "p95": 40.155,
+          "min": 34.134,
+          "max": 40.294,
+          "mean": 37.777
+        },
+        "executorOverheadMs": -0.3,
+        "throughputTpsC1": {
+          "n": 2,
+          "median": 170.1,
+          "p95": 170.6,
+          "min": 169.5,
+          "max": 170.7,
+          "mean": 170.1
+        },
+        "throughputTpsC4": {
+          "n": 2,
+          "median": 355.4,
+          "p95": 361.2,
+          "min": 348.8,
+          "max": 361.9,
+          "mean": 355.4
+        },
+        "peakRssBytes": 2387460096,
+        "peakGpuBytes": null,
+        "serverReadyMs": 768,
+        "endpointHealth": "REACHABLE"
+      },
+      "fit": {
+        "fits": true,
+        "modelBytes": 2800000000,
+        "budgetBytes": 37580963840,
+        "gpuBudgetBytes": 38654705664,
+        "ramBytes": 51539607552
+      },
+      "durationMs": 81185
+    },
+    {
+      "provider": "llama-server",
+      "service": "completion",
+      "status": "pass",
+      "model": {
+        "modelId": "qwen3.5-0.8b-q8_0",
+        "remoteModel": "qwen3.5-0.8b-q8_0",
+        "sizeBytes": 811843840,
+        "memoryBytes": 2800000000,
+        "license": "Apache-2.0",
+        "params": "0.8B",
+        "source": "https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF/resolve/6ab461498e2023f6e3c1baea90a8f0fe38ab64d0/Qwen3.5-0.8B-Q8_0.gguf"
+      },
+      "runtimeBuild": "macos-arm64-metal",
+      "backend": "metal",
+      "endpointKind": "LLAMA_SERVER",
+      "serverFlags": [
+        "-c",
+        "8192",
+        "-ngl",
+        "999",
+        "--reasoning",
+        "off"
+      ],
+      "checks": [
+        {
+          "name": "continuation (/v1/completions)",
+          "pass": true,
+          "detail": "\"Paris.\\nThe capital city of France is Paris.\\nThe capital city of\""
+        }
+      ],
+      "metrics": {
+        "firstRequestMs": 118,
+        "latencyMs": {
+          "n": 3,
+          "median": 104.3,
+          "p95": 104.6,
+          "min": 19.805,
+          "max": 104.6,
+          "mean": 76.24
+        },
+        "directLatencyMs": {
+          "n": 3,
+          "median": 104.7,
+          "p95": 105.3,
+          "min": 103.2,
+          "max": 105.4,
+          "mean": 104.4
+        },
+        "executorOverheadMs": -0.4,
+        "peakRssBytes": 2668118016,
+        "peakGpuBytes": null,
+        "serverReadyMs": 768,
+        "endpointHealth": "REACHABLE"
+      },
+      "fit": {
+        "fits": true,
+        "modelBytes": 2800000000,
+        "budgetBytes": 37580963840,
+        "gpuBudgetBytes": 38654705664,
+        "ramBytes": 51539607552
+      },
+      "durationMs": 662
+    }
+  ]
+}

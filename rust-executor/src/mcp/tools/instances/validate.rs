@@ -1,15 +1,17 @@
-//! SHACL-derived validation for the `instance_*` write tools.
+//! The text of the `instance_*` write tools' validation failures.
 //!
-//! Every write is checked against the class shape *before* anything is
-//! written; a rejection names the property, the expected type and the
-//! cardinality so the agent can fix its call in one round trip.
+//! The checks are [`crate::perspectives::instances::validate`], shared with the RPC; this file
+//! words each [`shared::ValidationError`] as the tools always have: the property, the problem,
+//! the expected type and the cardinality, so the agent can fix its call in one round trip.
 
-use super::{class_properties, find_property, PropView};
+use super::{cardinality_text, class_properties, find_property, read_only_text};
+use crate::perspectives::instances::validate::{self as shared, value_text, ValidationProblem};
 use crate::perspectives::interpretation::class_local_name;
-use crate::perspectives::model_query::is_safe_iri_target;
 use crate::perspectives::model_query::types::ModelShape;
 use serde::Serialize;
 use serde_json::{json, Map, Value};
+
+pub(crate) use shared::{ValidatedWrite, WriteMode};
 
 /// One rejected property. Serialized into the tool's error payload.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -40,22 +42,6 @@ impl ValidationError {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum WriteMode {
-    /// All required properties must be present; collections may be given as arrays.
-    Create,
-    /// Partial patch of single-valued properties only.
-    Update,
-}
-
-/// A validated, coerced write: canonical property names, values in the
-/// JSON type the property declares.
-#[derive(Debug, Default, PartialEq)]
-pub(crate) struct ValidatedWrite {
-    pub scalars: Map<String, Value>,
-    pub collections: Vec<(String, Vec<Value>)>,
-}
-
 /// Short description of a JSON value for error messages — type plus a
 /// truncated preview, never the whole payload.
 pub(crate) fn describe_value(v: &Value) -> String {
@@ -76,208 +62,99 @@ pub(crate) fn describe_value(v: &Value) -> String {
     }
 }
 
-/// Coerce one scalar value to the property's declared type, or explain why
-/// it can't be. Lenient where the intent is unambiguous ("true" for a
-/// boolean, "42" for an integer, 3 for a string), strict where it isn't.
-pub(crate) fn coerce_scalar(info: &PropView<'_>, value: &Value) -> Result<Value, ValidationError> {
-    let err = |problem: String| ValidationError {
-        property: info.name().to_string(),
-        problem,
-        expected_type: Some(info.type_name()),
-        cardinality: Some(info.cardinality_text().to_string()),
-        received: Some(describe_value(value)),
+/// The allowed values for an error message: each value in declared order, comma separated, at
+/// most 20 then "… and N more".
+fn describe_allowed(allowed: &[Value]) -> String {
+    let mut text = allowed
+        .iter()
+        .take(20)
+        .map(value_text)
+        .collect::<Vec<_>>()
+        .join(", ");
+    if allowed.len() > 20 {
+        text.push_str(&format!(" … and {} more", allowed.len() - 20));
+    }
+    text
+}
+
+/// What is wrong, in words.
+fn problem_text(e: &shared::ValidationError) -> String {
+    let problem = match &e.problem {
+        ValidationProblem::UnknownProperty { class, available } => {
+            format!(
+                "unknown property on class '{}'. Available: {}",
+                class,
+                available.join(", ")
+            )
+        }
+        ValidationProblem::UnknownCollection { class, available } => format!(
+            "unknown collection on class '{}'. Collections: {}",
+            class,
+            if available.is_empty() {
+                "(none)".to_string()
+            } else {
+                available.join(", ")
+            }
+        ),
+        ValidationProblem::ReadOnly { reason } => format!("read-only: {}", read_only_text(*reason)),
+        ValidationProblem::CollectionNotSettable => "is a collection — instance_update only sets \
+                                                     single-valued properties; use \
+                                                     instance_add_to_collection / \
+                                                     instance_remove_from_collection to change \
+                                                     its items"
+            .to_string(),
+        ValidationProblem::NotACollection => "is a single-valued property, not a collection — use \
+                                              instance_update to set it"
+            .to_string(),
+        ValidationProblem::ArrayForScalar { length } => {
+            format!("expects a single value but received an array of {length} — pass one value")
+        }
+        ValidationProblem::Null => {
+            "null is not a value — omit the property instead of passing null".to_string()
+        }
+        ValidationProblem::NotAReference { target_class } => format!(
+            "expects the URI of an existing {target_class} instance (as returned by \
+             instance_query)"
+        ),
+        ValidationProblem::WrongType => match e.expected_type.as_deref() {
+            Some("boolean") => "expects true or false".to_string(),
+            Some("integer") => "expects a whole number".to_string(),
+            Some("number") => "expects a number".to_string(),
+            Some(other) => format!("expects a {other}"),
+            None => "has the wrong type".to_string(),
+        },
+        ValidationProblem::NotAllowed => format!(
+            "not one of the allowed values: {}",
+            describe_allowed(e.allowed_values.as_deref().unwrap_or_default())
+        ),
+        ValidationProblem::MissingRequired => "missing required property".to_string(),
     };
-
-    if let Value::Array(items) = value {
-        return Err(err(format!(
-            "expects a single value but received an array of {} — pass one value",
-            items.len()
-        )));
-    }
-    if value.is_null() {
-        return Err(err(
-            "null is not a value — omit the property instead of passing null".to_string(),
-        ));
-    }
-
-    if let Some((_, target)) = info.relation() {
-        return match value {
-            Value::String(s) if is_safe_iri_target(s) => Ok(value.clone()),
-            _ => Err(err(format!(
-                "expects the URI of an existing {target} instance (as returned by instance_query)"
-            ))),
-        };
-    }
-
-    // Stored through a language as an expression: the language takes the value as it is, and
-    // checks it itself when the setter creates the expression.
-    if info.stored_by_language().is_some() {
-        return Ok(value.clone());
-    }
-
-    match info.type_name().as_str() {
-        "boolean" => match value {
-            Value::Bool(_) => Ok(value.clone()),
-            Value::String(s) if s.eq_ignore_ascii_case("true") => Ok(json!(true)),
-            Value::String(s) if s.eq_ignore_ascii_case("false") => Ok(json!(false)),
-            _ => Err(err("expects true or false".to_string())),
-        },
-        "integer" => match value {
-            Value::Number(n) if n.is_i64() || n.is_u64() => Ok(value.clone()),
-            Value::Number(n) => match n.as_f64() {
-                Some(f) if f.fract() == 0.0 => Ok(json!(f as i64)),
-                _ => Err(err("expects a whole number".to_string())),
-            },
-            Value::String(s) => s
-                .trim()
-                .parse::<i64>()
-                .map(|i| json!(i))
-                .map_err(|_| err("expects a whole number".to_string())),
-            _ => Err(err("expects a whole number".to_string())),
-        },
-        "number" => match value {
-            Value::Number(_) => Ok(value.clone()),
-            Value::String(s) => s
-                .trim()
-                .parse::<f64>()
-                .ok()
-                .and_then(|f| serde_json::Number::from_f64(f).map(Value::Number))
-                .ok_or_else(|| err("expects a number".to_string())),
-            _ => Err(err("expects a number".to_string())),
-        },
-        "string" | "datetime" => match value {
-            Value::String(_) => Ok(value.clone()),
-            Value::Number(n) => Ok(Value::String(n.to_string())),
-            Value::Bool(b) => Ok(Value::String(b.to_string())),
-            _ => Err(err(format!("expects a {}", info.type_name()))),
-        },
-        // Unknown / custom datatype: accept any single JSON value verbatim.
-        _ => Ok(value.clone()),
+    match e.item {
+        Some(_) => format!("collection item {problem}"),
+        None => problem,
     }
 }
 
-/// Validate a `properties` map against a class shape.
-///
-/// On success returns the coerced scalar values (keyed by the property's
-/// canonical name) and, for `Create`, the collection items to link. On
-/// failure returns *every* problem found, not just the first, so the agent
-/// can fix its call in one round trip. Nothing is written by this function.
+impl From<&shared::ValidationError> for ValidationError {
+    fn from(e: &shared::ValidationError) -> Self {
+        ValidationError {
+            property: e.property.clone(),
+            problem: problem_text(e),
+            expected_type: e.expected_type.clone(),
+            cardinality: e.cardinality.map(|c| cardinality_text(c).to_string()),
+            received: e.received.as_ref().map(describe_value),
+        }
+    }
+}
+
+/// [`shared::validate_properties`], its errors worded. Nothing is written by this function.
 pub(crate) fn validate_properties(
     shape: &ModelShape,
     props: &Map<String, Value>,
     mode: WriteMode,
 ) -> Result<ValidatedWrite, Vec<ValidationError>> {
-    let infos = class_properties(shape);
-    let mut errors: Vec<ValidationError> = Vec::new();
-    let mut out = ValidatedWrite::default();
-
-    let available = || -> String {
-        let names: Vec<&str> = infos
-            .iter()
-            .filter(|i| i.writable())
-            .map(|i| i.name())
-            .collect();
-        names.join(", ")
-    };
-
-    for (given_name, value) in props {
-        let Some(info) = find_property(&infos, given_name) else {
-            errors.push(ValidationError {
-                property: given_name.clone(),
-                problem: format!(
-                    "unknown property on class '{}'. Available: {}",
-                    class_local_name(&shape.target_class),
-                    available()
-                ),
-                expected_type: None,
-                cardinality: None,
-                received: Some(describe_value(value)),
-            });
-            continue;
-        };
-
-        if let Some(reason) = info.read_only_reason() {
-            errors.push(ValidationError {
-                property: info.name().to_string(),
-                problem: format!("read-only: {reason}"),
-                expected_type: Some(info.type_name()),
-                cardinality: Some(info.cardinality_text().to_string()),
-                received: Some(describe_value(value)),
-            });
-            continue;
-        }
-
-        if info.collection() {
-            match mode {
-                WriteMode::Update => errors.push(ValidationError {
-                    property: info.name().to_string(),
-                    problem: "is a collection — instance_update only sets single-valued \
-                              properties; use instance_add_to_collection / \
-                              instance_remove_from_collection to change its items"
-                        .to_string(),
-                    expected_type: Some(info.type_name()),
-                    cardinality: Some(info.cardinality_text().to_string()),
-                    received: Some(describe_value(value)),
-                }),
-                WriteMode::Create => {
-                    let items: Vec<Value> = match value {
-                        Value::Array(items) => items.clone(),
-                        Value::Null => vec![],
-                        other => vec![other.clone()],
-                    };
-                    let mut coerced = Vec::with_capacity(items.len());
-                    let mut bad = false;
-                    for item in &items {
-                        match coerce_scalar(info, item) {
-                            Ok(v) => coerced.push(v),
-                            Err(mut e) => {
-                                e.problem = format!("collection item {}", e.problem);
-                                errors.push(e);
-                                bad = true;
-                            }
-                        }
-                    }
-                    if !bad && !coerced.is_empty() {
-                        out.collections.push((info.name().to_string(), coerced));
-                    }
-                }
-            }
-            continue;
-        }
-
-        match coerce_scalar(info, value) {
-            Ok(v) => {
-                out.scalars.insert(info.name().to_string(), v);
-            }
-            Err(e) => errors.push(e),
-        }
-    }
-
-    if mode == WriteMode::Create {
-        for info in infos.iter().filter(|i| i.required() && i.writable()) {
-            let supplied = if info.collection() {
-                out.collections.iter().any(|(n, _)| n == info.name())
-            } else {
-                out.scalars.contains_key(info.name())
-            };
-            let already_reported = errors.iter().any(|e| e.property == info.name());
-            if !supplied && !already_reported {
-                errors.push(ValidationError {
-                    property: info.name().to_string(),
-                    problem: "missing required property".to_string(),
-                    expected_type: Some(info.type_name()),
-                    cardinality: Some(info.cardinality_text().to_string()),
-                    received: None,
-                });
-            }
-        }
-    }
-
-    if errors.is_empty() {
-        Ok(out)
-    } else {
-        Err(errors)
-    }
+    shared::validate_properties(shape, props, mode)
+        .map_err(|errors| errors.iter().map(ValidationError::from).collect())
 }
 
 /// Render a validation failure as the tool's JSON error payload. The

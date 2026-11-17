@@ -8,7 +8,13 @@ export type SfuDataMessage = {
 /**
  * DID of the participant who sent the data.
  */
-senderDid: string, neighbourhoodUrl: string, roomName: string, 
+senderDid: string, 
+/**
+ * The session that sent it. A message reaches the sender's agent when
+ * it is in the call on another device too; the sending session itself
+ * drops it by this id.
+ */
+senderParticipantId: string, neighbourhoodUrl: string, roomName: string, 
 /**
  * Label of the data channel.
  */

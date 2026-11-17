@@ -28,7 +28,7 @@ use super::hydration::{reorder_members, ORDERING_STASH_KEY};
 use super::sparql_builder::{verified_link_exists, LinkGuard};
 use super::types::{ModelShape, ShapeProperty};
 use super::utils::{parse_literal_value, validate_iri, values_or_str_filter};
-use crate::perspectives::sparql_store::SparqlStore;
+use crate::perspectives::sparql_store::{EvalStop, SparqlStore};
 use crate::types::LinkStatus;
 
 /// Decode a SPARQL getter row's raw string based on the property's
@@ -55,6 +55,7 @@ fn decode_getter_target(target: &str, datatype: Option<&str>) -> Value {
 /// the client requests a targeted getter evaluation (as opposed to the
 /// full query pipeline).  Returns a map of `instance_id → { prop: value }`.
 pub fn evaluate_getters_batch(
+    stop: &EvalStop,
     store: &SparqlStore,
     shape: &ModelShape,
     instance_ids: &[String],
@@ -104,6 +105,7 @@ pub fn evaluate_getters_batch(
         .collect();
 
     evaluate_getters(
+        stop,
         store,
         &mut instances,
         &filtered_shape,
@@ -318,7 +320,9 @@ pub(super) fn inject_values_into_select(select: &str, source_constraint: &str) -
 ///
 /// Only the getters of `returned` keys run (all of them when `None`): each is
 /// a store read, and a value the query does not hand back would be stripped.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn evaluate_getters(
+    stop: &EvalStop,
     store: &SparqlStore,
     instances: &mut [Value],
     shape: &ModelShape,
@@ -363,7 +367,7 @@ pub(super) fn evaluate_getters(
 
         if upper.starts_with("ASK") {
             let batched = convert_ask_to_batched_select(getter, &source_constraint);
-            match store.query(&batched) {
+            match store.query(stop, &batched) {
                 Ok(result_json) => {
                     let rows: Vec<Value> = serde_json::from_str(&result_json).unwrap_or_default();
                     let matched: std::collections::HashSet<&str> = rows
@@ -385,6 +389,11 @@ pub(super) fn evaluate_getters(
                         }
                     }
                 }
+                // A stopped call must fail, not answer with the getters it had not
+                // reached yet missing: a re-check would store that as its baseline.
+                Err(e) if stop.is_stopped() => {
+                    return Err(stop.stopped_err("getter").unwrap_or(e));
+                }
                 Err(e) => {
                     log::warn!("Batched ASK getter failed for '{}': {}", prop.name, e);
                 }
@@ -397,7 +406,7 @@ pub(super) fn evaluate_getters(
             };
             let batched = inject_values_into_select(&getter, &source_constraint);
 
-            match store.query(&batched) {
+            match store.query(stop, &batched) {
                 Ok(result_json) => {
                     let rows: Vec<Value> = serde_json::from_str(&result_json).unwrap_or_default();
 
@@ -493,6 +502,11 @@ pub(super) fn evaluate_getters(
                         }
                     }
                 }
+                // A stopped call must fail, not answer with the getters it had not
+                // reached yet missing: a re-check would store that as its baseline.
+                Err(e) if stop.is_stopped() => {
+                    return Err(stop.stopped_err("getter").unwrap_or(e));
+                }
                 Err(e) => {
                     log::warn!("Batched SELECT getter failed for '{}': {}", prop.name, e);
                 }
@@ -507,6 +521,7 @@ pub(super) fn evaluate_getters(
             _ => continue,
         };
         apply_where_filter_to_relation(
+            stop,
             store,
             instances,
             &prop.name,
@@ -557,7 +572,9 @@ fn strip_stashed_entries(instances: &mut [Value]) {
 /// The values are read through the query's `linkStatus` and #1113 proof
 /// filter, so a withheld link on a target neither admits it nor, as the last
 /// row read, drops it.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn apply_where_filter_to_relation(
+    stop: &EvalStop,
     store: &SparqlStore,
     instances: &mut [Value],
     relation_name: &str,
@@ -630,7 +647,7 @@ pub(super) fn apply_where_filter_to_relation(
             )
         );
 
-        let result_json = store.query(&query)?;
+        let result_json = store.query(stop, &query)?;
         let rows: Vec<Value> = serde_json::from_str(&result_json).unwrap_or_default();
 
         let mut target_vals: HashMap<String, Value> = HashMap::new();

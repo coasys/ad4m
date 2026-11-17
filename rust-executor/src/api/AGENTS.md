@@ -9,13 +9,17 @@ REST/WS shim. Split plan: spec item 6.
 |---|---|---|
 | `GET /api/v1/ws` | `ws_rpc.rs` | JSON-RPC-ish: `{type, id, ...params}` → `HandlerMap::dispatch`. Auth once at upgrade (`auth.rs`). Per-request cancel token (`request.cancel`). An `identity.publish` or `identity.cosignIncept` frame whose event names a member twice, or that repeats `params`, `events` or `event`, is refused from the frame's text (`identity_ws::duplicate_member_refusal`, 400 `invalid: DuplicateMember`): the params `Value` keeps only the last. The refusal comes after `HandlerMap::admit`, so a caller the guard refuses gets the access answer. **Also carries events** (`events_ws::build_event_stream`, filtered by `events.watch`) and the connection's live query updates; the only event socket |
 | `GET /health`, `POST /internal/shutdown` | `internal.rs` | `INTERNAL_API_TOKEN` |
-| `/v1/*`, `/api/v1/openai/v1/*` | `openai_compat/router.rs` | chat/completions, embeddings, audio, realtime WS |
+| `/v1/*`, `/api/v1/openai/v1/*` | `openai_compat/router.rs` | chat/completions, embeddings, audio (`audio/transcriptions` passes through to the model's endpoint), realtime WS (`input_audio_buffer.commit` = one utterance) |
 
 ## Handler modules
 
 `*_ws.rs`, one per RPC namespace: `agent`, `ai`, `expressions`, `hosting`,
 `languages`, `neighbourhoods`, `perspectives` (largest; also SHACL + interpretation
-handlers), `runtime`, `users`, and `agent_session` (`perspective.runAgent`). Each exposes `register_ws_handlers(&mut HandlerMap)`
+handlers), `runtime`, `config` (`runtime.config`, `runtime.setConfig`), `users`, `identity`,
+`agent_session` (`perspective.runAgent`), and `perspective_instances` (`perspective.instance*`:
+validated instance writes over `perspectives/instances/`, the same functions as the MCP
+`instance_*` tools; a refused write is a `WsRpcError` with the `InstanceError` as `data`: 422
+for a shape violation, see the module doc). Each exposes `register_ws_handlers(&mut HandlerMap)`
 called from `ws_handler::build_handler_map`.
 
 Handler shape (`perspectives_ws.rs::add_link` is representative):
@@ -111,6 +115,16 @@ without that check. A guard runs before the handler's own checks. A handler chec
 part of the guard (compute credits, param validation beyond the contract type) runs after the
 access check: a call that fails both gets the access answer.
 
+**Local only.** A method flagged `.local_only()` (`MethodFlags::local_only`) answers only the
+operator on this machine (`Session::is_operator_on_this_machine`: the admin credential, or no
+token on an executor without one, on a loopback listener). The dispatcher checks it after the
+guard: every other caller gets 403 `guards::LOCAL_ONLY` (`local-only: …`), a grant with every
+capability and the admin credential on a network listener included. The guard table marks
+these methods "local only". `runtime.setConfig` is not local only as a whole: it refuses each
+`machine` key to a caller off this machine (`config_rpc`). `identity.custodyStatus` adds the
+custody channel's own check (`identity::custody::admit`: the admin credential, not a tokenless
+operator, and `--custody-channel`).
+
 Notes on some methods:
 
 - `agent.generate` creates the main agent on first run only: it refuses (409) an
@@ -126,7 +140,9 @@ Notes on some methods:
 - `runtime.exportData` (`Executor`) has two kinds. A `perspective` export checks
   `get_perspective_with_access` in its handler, so an app exports only the main agent's
   perspectives. A `db` export names no perspective and checks nothing past the guard: it writes
-  the whole executor database (`export_all_to_json`) for any session the guard admits.
+  the whole executor database (`export_all_to_json`). It and `runtime.importData` read and
+  write paths on the executor's machine; they are not local only yet (key login adds them,
+  with `agent.generate`, `agent.import` and `agent.lock`).
 - `Cap` methods that read executor-wide data users read today: `agent.getTrustedAgents`,
   `ai.models`, `language.*` reads, link-language templates,
   `runtime.hcAgentInfos`/`networkMetrics`/`hostRates`/`unytVersionInfo`. `Executor` would refuse
@@ -148,7 +164,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-206 methods: Cap 80, Executor 33, Open 5, Operator 18, Owns 68, UserOrOperator 2.
+239 methods: Cap 81, CapAnyPointer 1, Executor 43, Open 5, Operator 28, Owns 79, UserOrOperator 2. Local only (the operator on this machine): 5.
 
 | Method | Guard |
 |---|---|
@@ -174,23 +190,45 @@ the guard checked:
 | `agent.revokeToken` | `Owns(Grant token, agent:UPDATE)` |
 | `agent.sign` | `Cap(agent:SIGN)` |
 | `agent.status` | `Cap(agent:READ)` |
-| `agent.unlock` | `Executor(agent:SIGN)` |
+| `agent.unlock` | `Executor(agent:SIGN)`, local only |
 | `agent.updateProfile` | `Cap(agent:UPDATE)` |
+| `ai.addEndpoint` | `Executor(artificial intelligence:CREATE)` |
 | `ai.addModel` | `Executor(artificial intelligence:CREATE)` |
 | `ai.addTask` | `Cap(artificial intelligence:CREATE)` |
+| `ai.deleteUpstreamModel` | `Executor(artificial intelligence:DELETE)` |
+| `ai.detectEndpoints` | `Executor(artificial intelligence:CREATE)` |
 | `ai.discoverModels` | `Executor(artificial intelligence:CREATE)` |
 | `ai.embed` | `Cap(artificial intelligence:PROMPT)` |
+| `ai.endpoints` | `Executor(artificial intelligence:READ)` |
 | `ai.getDefaultModel` | `Cap(artificial intelligence:READ)` |
-| `ai.modelLoadingStatus` | `Cap(artificial intelligence:READ)` |
+| `ai.localHardware` | `Executor(artificial intelligence:READ)` |
+| `ai.localInstall` | `Operator` |
+| `ai.localPlan` | `Executor(artificial intelligence:READ)` |
+| `ai.localRemove` | `Operator` |
+| `ai.localStart` | `Operator` |
+| `ai.localStatus` | `Executor(artificial intelligence:READ)` |
+| `ai.localStop` | `Operator` |
+| `ai.modelStatus` | `Cap(artificial intelligence:READ)` |
 | `ai.models` | `Cap(artificial intelligence:READ)` |
 | `ai.prompt` | `Owns(Task taskId, artificial intelligence:PROMPT)` |
-| `ai.removeModel` | `Executor(artificial intelligence:CREATE)` |
+| `ai.pullModel` | `Executor(artificial intelligence:CREATE)` |
+| `ai.removeEndpoint` | `Executor(artificial intelligence:DELETE)` |
+| `ai.removeModel` | `Executor(artificial intelligence:DELETE)` |
 | `ai.removeTask` | `Owns(Task id, artificial intelligence:CREATE)` |
-| `ai.setDefaultModel` | `Executor(artificial intelligence:CREATE)` |
+| `ai.session` | `Owns(AiSession id, artificial intelligence:READ)` |
+| `ai.sessionCancel` | `Owns(AiSession sessionId, artificial intelligence:CREATE)` |
+| `ai.sessionCreate` | `Cap(artificial intelligence:CREATE)` |
+| `ai.sessionDelete` | `Owns(AiSession id, artificial intelligence:CREATE)` |
+| `ai.sessionList` | `Cap(artificial intelligence:READ)` |
+| `ai.sessionMessages` | `Owns(AiSession sessionId, artificial intelligence:READ)` |
+| `ai.sessionSend` | `Owns(AiSession sessionId, artificial intelligence:CREATE)` |
+| `ai.sessionUpdate` | `Owns(AiSession id, artificial intelligence:CREATE)` |
+| `ai.setDefaultModel` | `Executor(artificial intelligence:UPDATE)` |
 | `ai.tasks` | `Cap(artificial intelligence:READ)` |
 | `ai.transcriptionClose` | `Cap(artificial intelligence:TRANSCRIBE)` |
 | `ai.transcriptionOpen` | `Cap(artificial intelligence:TRANSCRIBE)` |
-| `ai.updateModel` | `Executor(artificial intelligence:CREATE)` |
+| `ai.updateEndpoint` | `Executor(artificial intelligence:UPDATE)` |
+| `ai.updateModel` | `Executor(artificial intelligence:UPDATE)` |
 | `ai.updateTask` | `Owns(Task task.taskId, artificial intelligence:CREATE)` |
 | `expression.create` | `Cap(expression:CREATE)` |
 | `expression.get` | `Cap(expression:READ)` |
@@ -205,12 +243,14 @@ the guard checked:
 | `hosting.walletHistory` | `Executor(runtime.hosting:READ)` |
 | `identity.claimOffer` | `Operator` |
 | `identity.cosignIncept` | `UserOrOperator(agent:SIGN)` |
+| `identity.custodyStatus` | `Operator`, local only |
 | `identity.devices` | `Cap(agent:READ)` |
 | `identity.joinStatus` | `Cap(agent:READ)` |
 | `identity.log` | `Cap(agent:READ)` |
 | `identity.offers` | `Cap(agent:READ)` |
 | `identity.openOffer` | `Cap(agent:UPDATE)` |
 | `identity.publish` | `UserOrOperator(agent:UPDATE)` |
+| `identity.rekey` | `Operator`, local only |
 | `identity.resetLog` | `Operator` |
 | `identity.resolve` | `Cap(agent:READ)` |
 | `identity.status` | `Cap(agent:READ)` |
@@ -238,7 +278,7 @@ the guard checked:
 | `perspective.addLinkExpression` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.addLinks` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.addSdna` | `Owns(Perspective uuid, perspective:UPDATE)` |
-| `perspective.all` | `Cap(perspective:READ)` |
+| `perspective.all` | `CapAnyPointer(perspective:READ)` |
 | `perspective.commitBatch` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.create` | `Cap(perspective:CREATE)` |
 | `perspective.createBatch` | `Owns(Perspective uuid, perspective:UPDATE)` |
@@ -257,6 +297,11 @@ the guard checked:
 | `perspective.getShaclNames` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.getShaclTargetClass` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.getSubjectData` | `Owns(Perspective uuid, perspective:READ)` |
+| `perspective.instanceAddToCollection` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.instanceCreate` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.instanceRemove` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.instanceRemoveFromCollection` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.instanceUpdate` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.interpretationOverlays` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.linkMutations` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.mintFlowReceipt` | `Owns(Perspective uuid, perspective:UPDATE)` |
@@ -290,6 +335,7 @@ the guard checked:
 | `runtime.addHcAgentInfos` | `Executor(runtime.hc_agent_info:CREATE)` |
 | `runtime.addLinkLanguageTemplates` | `Executor(runtime.known_link_languages:CREATE)` |
 | `runtime.computeLog` | `Cap(agent:READ)` |
+| `runtime.config` | `Operator` |
 | `runtime.createNotification` | `Cap(agent:UPDATE)` |
 | `runtime.deleteNotification` | `Cap(agent:UPDATE)` |
 | `runtime.exportData` | `Executor(agent:UPDATE)` |
@@ -303,15 +349,18 @@ the guard checked:
 | `runtime.inbox` | `Cap(runtime.messages:READ)` |
 | `runtime.info` | `Open` |
 | `runtime.linkLanguageTemplates` | `Cap(runtime.known_link_languages:READ)` |
+| `runtime.logTail` | `Operator` |
 | `runtime.networkMetrics` | `Cap(runtime.hc_agent_info:READ)` |
 | `runtime.notifications` | `Cap(agent:UPDATE)` |
 | `runtime.openLink` | `Operator` |
 | `runtime.outbox` | `Executor(runtime.messages:READ)` |
-| `runtime.quit` | `Executor(runtime:QUIT)` |
+| `runtime.quit` | `Executor(runtime:QUIT)`, local only |
 | `runtime.removeFriends` | `Executor(runtime.friends:DELETE)` |
 | `runtime.removeLinkLanguageTemplates` | `Executor(runtime.known_link_languages:DELETE)` |
+| `runtime.restart` | `Operator`, local only |
 | `runtime.restartHolochain` | `Operator` |
 | `runtime.sendFriendMessage` | `Executor(runtime.messages:CREATE)` |
+| `runtime.setConfig` | `Operator` |
 | `runtime.setFreeHostingEnabled` | `Executor(*:*)` |
 | `runtime.setHostRates` | `Operator` |
 | `runtime.setStatus` | `Cap(runtime.my_status:UPDATE)` |
@@ -432,7 +481,9 @@ them against those two guards.
   once to each of `event_recipients`, each copy naming that DID as `recipient`
   (`perspectives::publish_telepresence_signal`, used by both link-language paths and by
   `send_signal` / `send_broadcast` for the executor's own agents: a neighbourhood's owners are
-  only this executor's agents). `notification-triggered` goes to the notification's `ownerDid`,
+  only this executor's agents). A broadcast reaches every owner, the sender's own agent too, main
+  or managed, so its other clients hear it (two devices of one agent in a mesh call); `loopback`
+  adds a second copy to every owner. `notification-triggered` goes to the notification's `ownerDid`,
   never to co-owners, and needs the query capability on its perspective (its `triggerMatch` is
   query results), not `runtime.notifications`' AGENT_UPDATE. `auto-processor-event` goes to the pass owner when it is one of
   `event_recipients`, else nobody (`auto_processor::events::pass_audience`);
@@ -444,7 +495,7 @@ them against those two guards.
   may hold the perspective's handle lock while it emits. `hosting-user-info-changed` goes out twice
   (`Event::hosting_user_info`): to the user's DID (looked up by email in the local users table
   at publish, never imported) with RUNTIME_HOSTING_READ, and to the main agent's with
-  RUNTIME_USER_MANAGEMENT_READ (the operator and apps that may list users see every user's). `model-loading-status` goes to everyone; `transcription-text` to the stream
+  RUNTIME_USER_MANAGEMENT_READ (the operator and apps that may list users see every user's). `model-status` goes to everyone; `ai-endpoint-status` to the main agent's DID; `transcription-text` to the stream
   owner's DID. `agent-status-changed` and `agent-updated` go to the DID the payload names
   (`Audience::agent`; a status without a DID, before `agent.generate()`, to everyone).
   `apps-changed` (`Event::apps_changed`) and the approval exceptions (`CapabilityRequested`,
@@ -514,10 +565,12 @@ them against those two guards.
   the auto-permit as its caller, so `agent.permitCapability`'s guard decides whether the caller
   may approve and its handler caps the approval at the caller's own capabilities.
   `capabilities::permit_capability` is the dev-mode auto-permit.
-- Live queries: `subscribeQuery` / `modelSubscribe` reply `{ subscriptionId, result, revision }`
-  (revision 0, or later if a write landed while the first result was computed: the subscription is
-  registered first);
-  each `query-subscription-update` carries the change (models: `ids` + `upsert`; queries: `added` /
+- Live queries: `subscribeQuery` / `modelSubscribe` take the id the client minted
+  (`subscriptionId`, required: 1 to 64 characters of `[A-Za-z0-9-]`, else 400) and reply
+  `{ subscriptionId, result, revision }` with it (revision 0, or later if a write landed while
+  the first result was computed: the subscription is registered first). An id already
+  registered on the perspective, by any connection, is refused with 409 and registers nothing
+  (`SubscriptionIdTaken`). Internal callers mint a uuid. Each `query-subscription-update` carries the change (models: `ids` + `upsert`; queries: `added` /
   `removed` rows, or the whole `result` when the rows would lose their order; see
   `perspectives/perspective_instance/subscriptions.rs`) and `revision` (+1 per update). On a gap,
   `perspective.resyncSubscription { uuid, subscriptionId }` → `{ revision, result }`. When the
@@ -528,13 +581,17 @@ them against those two guards.
   bypass `events.watch`), and `ws_rpc::serve` ends them when the socket closes, and again as each
   call still in flight ends (a late subscribe). No keepalive; subscribing without a connection
   (REST) is a 400.
-- Opening a live query (`subscribeQuery` / `modelSubscribe`) is the one kind of call that a socket
-  close cancels (its `cancel_token` is a child of `Connection::closed`); every other call still
-  finishes after the close. One connection runs at most `MAX_OPENING_LIVE_QUERIES` (8) of these
-  opens at once, and the rest wait, cancellably. A subscribe cancelled before its reply
-  unregisters its query again (`open_subscription`). Cancelling cannot stop a SPARQL statement
+- Opening a live query (the methods registered `.opens()`: `subscribeQuery` / `modelSubscribe`,
+  generated into `OPENS_METHODS`) is the one kind of call that a socket close cancels (its
+  `cancel_token` is a child of `Connection::closed`); every other call still finishes after the
+  close. One connection runs at most `MAX_OPENING_LIVE_QUERIES` (8) of these opens at once, and
+  the rest wait, cancellably. A subscribe cancelled before its reply unregisters its query again
+  (`open_subscription`), and one whose open completed in the same poll as the cancel disposes it
+  (`perspectives_ws::subscribed` checks the token). Cancelling cannot stop a SPARQL statement
   that is already running: it stops at the next await, and the plain `subscribeQuery` first
-  result has none (#1595).
+  result has none (#1595). The SDK cancels an `OPENS_METHODS` call that timed out or was
+  aborted, then disposes its id (`PerspectiveClient`): `request.cancel` is handled inline, before
+  the dispose is dispatched, so whichever wins, nothing stays registered.
 - `ws_rpc::serve` runs one RPC connection over any text stream; `tests/connection_tests.rs` drives
   it through channels in place of a WebSocket.
 - Contracts: each handler registers its params and result types (`map.method::<P, R>`), and
@@ -550,20 +607,42 @@ them against those two guards.
   `core/src/generated/api/`, but not its `index.ts`: add the export line there by hand.
 - `crate::types::core` (domain) vs `crate::types::domain` (wire/input). Some duplicates,
   see spec item 5. Prefer `crate::types::X` re-exports.
-- `WsRpcError { code, message }` (`ws_handler.rs`): constructors `bad_request`,
+- `WsRpcError { code, message, data }` (`ws_handler.rs`): constructors `bad_request`,
   `unauthorized`, `forbidden`, `not_found`, `conflict`, `too_many_requests`,
-  `internal`, `not_implemented`. No `From` impls for domain errors yet.
+  `internal`, `not_implemented`; `.with_data(value)` adds structured detail, sent as
+  `error.data` (`to_wire`) and read by the SDK as `RpcError.data`. No `From` impls for domain
+  errors yet.
 
 ## openai_compat/
 
-Self-contained wire translation over `AIService`. Exception: `harness_bridge.rs` +
+Wire translation over `AIService`, and an aggregator over the AI endpoints:
+`model_selector::resolve` gives `(Model, Option<Endpoint>)` (id, name, `default`,
+`<endpoint name>/<remote model>`). `passthrough.rs` forwards chat and text completions
+and speech to a model's endpoint as the client wrote them (only `model` rewritten, SSE
+passed event by event, billed from upstream `usage`), unless the endpoint is Anthropic
+or Ollama (its `/v1` ignores `num_ctx`; the executor uses native `/api/chat`) or the
+request has active tools the model does not take as definitions, or it forces a call
+(`tool_choice: "required"` or a named function) on a server that does not enforce that
+(all but OpenAI and vLLM, `passthrough::enforces_tool_choice`): those, and models without
+an endpoint, the executor answers, a forced call under a JSON schema the server decodes
+against, checked and retried once (`chat::constrained_tool_calls`,
+`tool_grammar::ToolCallConstraint`). `tool_choice: "none"` reaches llama-server without
+the tools. For a caller who pays, `cap_cost` lowers the completion limits so prompt plus
+`n` answers fit the caller's credits, and drops `service_tier`. A stream is billed when
+it is dropped (`StreamBill`), however it ends, and times out on silence, not on its
+length. Upstream failures map per plan §5.4 (`OpenAIError::from_endpoint`); messages
+name no URL, and `/v1/models` shows no health `detail`. Embeddings go through
+`AIService::embed_batch`. `GET /v1/models` lists model rows by name, not upstream lists.
+Exception: `harness_bridge.rs` +
 `tool_grammar.rs` are the interpretation harness's `CompletionSource` and tool
 grammar, used by `perspectives/interpretation/run.rs`. They move to `agentic/`
 (spec item 7); don't add more non-wire code here.
 
 ## Tests
 
-`tests/` (`types_tests.rs`, `shacl_ws_tests.rs`) and `openai_compat/tests.rs`.
+`tests/` (`types_tests.rs`, `shacl_ws_tests.rs`), `openai_compat/tests.rs` and
+`openai_compat/passthrough_tests.rs` (handlers against `mockito` upstreams, as a managed
+user so billing is observable through `billing::test_seam`).
 `tests/multi_user.rs` starts a multi-user executor and opens sessions from tokens the executor
 signs,
 as the WS upgrade does; the `*_access_tests.rs` files drive `build_handler_map().dispatch` as

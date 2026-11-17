@@ -41,8 +41,8 @@ pub enum DedupStrategy {
     /// the default: existing callers observe no behaviour change.
     NormalizedString,
     /// Embed each identity string through the executor's own
-    /// [`AIService`](crate::ai_service::AIService) embedding model (a local
-    /// candle Bert, CPU-capable — no external endpoint and no CUDA CI switch).
+    /// [`AIService`](crate::ai_service::AIService) embedding model (on the
+    /// endpoint that serves it).
     /// Proposals whose maximum cosine similarity to any existing identity in
     /// the same class meets or exceeds `threshold` are treated as duplicates
     /// and dropped.
@@ -98,11 +98,16 @@ pub(crate) fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     }
 }
 
+/// The most identity strings semantic dedup sends in one embedding request. Endpoints cap
+/// a request's inputs (OpenAI at 2048) and its tokens; identity strings are short, so the
+/// count is what binds.
+pub(crate) const EMBED_BATCH: usize = 64;
+
 /// Embed `texts` through the executor's own [`AIService`] embedding model
-/// (`model_id` must be a registered `ModelType::Embedding` model — a local
-/// candle Bert, so this runs on CPU with no external endpoint). One call per
-/// text against the shared embedding channel; order is preserved so callers can
-/// zip results back onto their inputs.
+/// (`model_id` names a registered `ModelType::Embedding` model, by id or name, on the
+/// endpoint that serves it). One request per [`EMBED_BATCH`] texts, so a large class
+/// stays within what an endpoint takes in one
+/// request; order is preserved so callers can zip results back onto their inputs.
 pub(crate) async fn embed_via_ai_service(
     model_id: &str,
     texts: &[String],
@@ -113,25 +118,24 @@ pub(crate) async fn embed_via_ai_service(
     let service = crate::ai_service::AIService::global_instance()
         .await
         .map_err(|e| anyhow::anyhow!("semantic dedup: AIService not ready: {e:#}"))?;
-    let mut out = Vec::with_capacity(texts.len());
     let batch_started = std::time::Instant::now();
-    for text in texts {
+    let mut vectors = Vec::with_capacity(texts.len());
+    for batch in texts.chunks(EMBED_BATCH) {
         let embedded = service
-            // Internal caller (SHACL dedup) — no user auth context; billing skipped.
-            .embed(model_id.to_string(), text.clone(), None)
+            // Internal caller (SHACL dedup): no user to bill, and it sets up no local AI.
+            .embed_batch(model_id, batch.to_vec(), None)
             .await
             .map_err(|e| anyhow::anyhow!("semantic dedup: embed('{model_id}') failed: {e:#}"))?;
-        out.push(embedded.embeddings);
+        vectors.extend(embedded.vectors);
     }
-    // Batch-level info replaces the per-call info in AIService::embed (now
-    // debug). One line per dedup pass; see rust-executor/LOGGING.md.
+    // One line per dedup pass; see rust-executor/LOGGING.md.
     log::info!(
         "🤖 embed batch model={} n={} latency_total={}ms (semantic-dedup)",
         model_id,
         texts.len(),
         batch_started.elapsed().as_millis()
     );
-    Ok(out)
+    Ok(vectors)
 }
 
 /// PURE (no I/O) semantic-dedup filter over pre-computed vectors — the
@@ -408,6 +412,34 @@ pub async fn resolve_already_present_semantic(
     Ok(out)
 }
 
+/// The strategy a pass runs: `strategy`, except a semantic one whose embedding model is not
+/// registered on this executor, which compares normalized strings. Its threshold was set
+/// for that model: another model's similarities do not compare to it, and could drop real
+/// proposals as duplicates.
+fn effective_strategy(strategy: &DedupStrategy) -> std::borrow::Cow<'_, DedupStrategy> {
+    use std::borrow::Cow;
+    let DedupStrategy::Semantic { model, .. } = strategy else {
+        return Cow::Borrowed(strategy);
+    };
+    let registered = crate::db_backend::db_backend()
+        .get_models()
+        .map(|models| {
+            models.into_iter().any(|m| {
+                m.model_type == crate::types::ModelType::Embedding
+                    && (m.id == *model || m.name == *model)
+            })
+        })
+        .unwrap_or(false);
+    if registered {
+        return Cow::Borrowed(strategy);
+    }
+    log::warn!(
+        "Semantic dedup: no EMBEDDING model '{model}' on this executor; comparing normalized \
+         strings instead"
+    );
+    Cow::Owned(DedupStrategy::NormalizedString)
+}
+
 /// Strategy dispatcher: pick the string or semantic dedup path based on
 /// `strategy`, preserving [`ProposedInstance`] order in both cases so
 /// downstream `new:<Class>:<n>` ordinals still line up.
@@ -417,7 +449,7 @@ pub async fn filter_already_present_with_strategy(
     identity_props: &HashMap<String, String>,
     strategy: &DedupStrategy,
 ) -> anyhow::Result<Vec<ProposedInstance>> {
-    match strategy {
+    match effective_strategy(strategy).as_ref() {
         DedupStrategy::NormalizedString => {
             Ok(filter_already_present(instances, existing, identity_props))
         }
@@ -440,7 +472,7 @@ pub async fn resolve_already_present_with_strategy(
     identity_props: &HashMap<String, String>,
     strategy: &DedupStrategy,
 ) -> anyhow::Result<Vec<(ProposedInstance, Resolution)>> {
-    match strategy {
+    match effective_strategy(strategy).as_ref() {
         DedupStrategy::NormalizedString => {
             Ok(resolve_already_present(instances, existing, identity_props))
         }
@@ -782,6 +814,165 @@ mod tests {
             semantic_res, string_res,
             "semantic tagging precedence must match the string path exactly"
         );
+    }
+
+    // A fresh executor has no embedding model: a semantic pass compares strings instead of
+    // failing the whole interpretation on the embed.
+    #[tokio::test]
+    async fn a_semantic_pass_without_its_embedding_model_compares_strings() {
+        crate::db::Ad4mDb::init_global_instance(":memory:").unwrap();
+        let proposed = parse_interpretation_response(
+            r#"[
+              {"class":"Task","title":"  ship   the   mvp  "},
+              {"class":"Task","title":"Write the docs"}
+            ]"#,
+        )
+        .unwrap();
+        let existing = existing_by_identity(&[("Task", "ship the MVP")]);
+        let mut identity_props = HashMap::new();
+        identity_props.insert("Task".to_string(), "title".to_string());
+        let semantic = DedupStrategy::Semantic {
+            model: "not-registered".into(),
+            threshold: 0.9,
+        };
+
+        let kept = filter_already_present_with_strategy(
+            proposed.clone(),
+            &existing,
+            &identity_props,
+            &semantic,
+        )
+        .await
+        .unwrap();
+        let titles: Vec<&str> = kept
+            .iter()
+            .filter_map(|i| i.props.get("title").and_then(|v| v.as_str()))
+            .collect();
+        assert_eq!(titles, vec!["Write the docs"]);
+        let tagged =
+            resolve_already_present_with_strategy(proposed, &existing, &identity_props, &semantic)
+                .await
+                .unwrap();
+        assert_eq!(tagged.len(), 2);
+    }
+
+    /// An EMBEDDING model `name` on a mock endpoint that embeds every text to one vector,
+    /// loaded; and that mock, expecting `hits` batches.
+    async fn same_vector_embedder(
+        server: &mut mockito::ServerGuard,
+        name: &str,
+        hits: usize,
+    ) -> (String, mockito::Mock) {
+        let mock = server
+            .mock("POST", "/v1/embeddings")
+            .with_body_from_request(|request| {
+                let body: serde_json::Value =
+                    serde_json::from_slice(request.body().unwrap()).unwrap();
+                let n = body["input"].as_array().map_or(1, Vec::len);
+                serde_json::json!({
+                    "data": (0..n)
+                        .map(|i| serde_json::json!({ "index": i, "embedding": [1.0, 0.0] }))
+                        .collect::<Vec<_>>(),
+                })
+                .to_string()
+                .into_bytes()
+            })
+            .expect(hits)
+            .create_async()
+            .await;
+        let endpoint = crate::types::Endpoint {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: format!("{name}-server"),
+            kind: crate::types::EndpointKind::LlamaServer,
+            base_url: url::Url::parse(&server.url()).unwrap(),
+            api_key: crate::secret::Secret::new(""),
+            capabilities: vec![crate::types::AiCapability::Embeddings],
+            max_num_ctx: None,
+            request_timeout_secs: None,
+            max_concurrent: None,
+            managed: false,
+            health: Default::default(),
+        };
+        crate::db::Ad4mDb::with_global_instance(|db| db.insert_endpoint(&endpoint)).unwrap();
+        let id = crate::db::Ad4mDb::with_global_instance(|db| {
+            db.add_model(&crate::types::ModelInput {
+                name: name.into(),
+                model_type: crate::types::ModelType::Embedding,
+                endpoint_id: endpoint.id.clone(),
+                remote_model: "nomic-embed-text-v1.5".into(),
+                native_tools: None,
+            })
+        })
+        .unwrap();
+        crate::ai_service::AIService::global_instance()
+            .await
+            .unwrap()
+            .reload_model(id.clone())
+            .await
+            .unwrap();
+        (id, mock)
+    }
+
+    // A threshold is set for the model a pass names: another model's similarities do not
+    // compare to it. So a pass whose model is missing compares strings, even when other
+    // embedding models are there, and never drops a proposal by another model's vectors.
+    #[tokio::test]
+    async fn a_semantic_pass_without_its_model_compares_strings_not_another_models_vectors() {
+        crate::db::Ad4mDb::init_global_instance(":memory:").unwrap();
+        crate::ai_service::AIService::init_global_instance()
+            .await
+            .unwrap();
+        let proposed = parse_interpretation_response(
+            r#"[
+              {"class":"Task","title":"  ship   the   mvp  "},
+              {"class":"Task","title":"Write the docs"}
+            ]"#,
+        )
+        .unwrap();
+        let existing = existing_by_identity(&[("Task", "ship the MVP")]);
+        let mut identity_props = HashMap::new();
+        identity_props.insert("Task".to_string(), "title".to_string());
+        let titles = |kept: &[ProposedInstance]| -> Vec<String> {
+            kept.iter()
+                .filter_map(|i| i.props.get("title").and_then(|v| v.as_str()))
+                .map(str::to_string)
+                .collect()
+        };
+
+        // The default embedding model embeds every text to one vector, so with it
+        // "Write the docs" would be a duplicate too. It is called once: by the pass that
+        // names it.
+        let mut server = mockito::Server::new_async().await;
+        let (id, embedder) = same_vector_embedder(&mut server, "embed", 1).await;
+        crate::db::Ad4mDb::with_global_instance(|db| {
+            db.set_default_model(crate::types::ModelType::Embedding, &id)
+        })
+        .unwrap();
+
+        let missing = DedupStrategy::Semantic {
+            model: "interpretation-embed".into(),
+            threshold: 0.9,
+        };
+        let kept = filter_already_present_with_strategy(
+            proposed.clone(),
+            &existing,
+            &identity_props,
+            &missing,
+        )
+        .await
+        .unwrap();
+        assert_eq!(titles(&kept), vec!["Write the docs"]);
+
+        let named = DedupStrategy::Semantic {
+            model: "embed".into(),
+            threshold: 0.9,
+        };
+        let kept =
+            filter_already_present_with_strategy(proposed, &existing, &identity_props, &named)
+                .await
+                .unwrap();
+        assert!(titles(&kept).is_empty(), "{:?}", titles(&kept));
+        embedder.assert_async().await;
     }
 
     #[tokio::test]

@@ -111,7 +111,71 @@ impl PerspectivesClient {
             .await
     }
 
+    /// Drop an open batch without committing it — the recovery for a failed batched call:
+    /// a failed call does not roll back the calls before it and may have staged part of its
+    /// own work, so discard rather than commit to keep the successful calls. `true` when the
+    /// batch was open and is now dropped.
+    pub async fn discard_batch(&self, uuid: String, batch_id: String) -> Result<bool> {
+        self.ws
+            .call(
+                "perspective.discardBatch",
+                serde_json::json!({ "uuid": uuid, "batchId": batch_id }),
+            )
+            .await
+    }
+
     pub async fn get(&self, uuid: String) -> Result<PerspectiveProxy> {
         Ok(PerspectiveProxy::new(self.ws.clone(), uuid))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures_util::{SinkExt, StreamExt};
+    use tokio::sync::oneshot;
+    use tokio_tungstenite::tungstenite::Message;
+
+    /// A client on a one-call executor: it answers the first request with `reply(request)` and
+    /// hands the request to the test.
+    async fn one_call_executor(
+        reply: impl FnOnce(&Value) -> Value + Send + 'static,
+    ) -> (PerspectivesClient, oneshot::Receiver<Value>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (seen_tx, seen_rx) = oneshot::channel();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            if let Some(Ok(Message::Text(text))) = ws.next().await {
+                let request: Value = serde_json::from_str(&text).unwrap();
+                let mut response = reply(&request);
+                response["id"] = request["id"].clone();
+                let _ = seen_tx.send(request);
+                ws.send(Message::Text(response.to_string())).await.unwrap();
+                // Keep the socket open until the client is done reading.
+                let _ = ws.next().await;
+            }
+        });
+        let ws = WsRpcClient::connect(&format!("http://127.0.0.1:{port}"), "")
+            .await
+            .unwrap();
+        (PerspectivesClient::new(Arc::new(ws)), seen_rx)
+    }
+
+    #[tokio::test]
+    async fn discard_batch_sends_uuid_and_batch_id() {
+        let (client, seen) = one_call_executor(|_| serde_json::json!({ "result": true })).await;
+        assert!(client
+            .discard_batch("uuid-1".into(), "batch-1".into())
+            .await
+            .unwrap());
+
+        let request = seen.await.unwrap();
+        assert_eq!(request["type"], "perspective.discardBatch");
+        assert_eq!(
+            request["params"],
+            serde_json::json!({ "uuid": "uuid-1", "batchId": "batch-1" })
+        );
     }
 }

@@ -1,5 +1,5 @@
 import { callSafely } from './notifyListeners'
-import { LONG_METHODS, READ_METHODS } from './generated/api/RpcMethods'
+import { LONG_METHODS, OPENS_METHODS, READ_METHODS } from './generated/api/RpcMethods'
 import type { RpcMethod, RpcMethods } from './generated/api/RpcMethods'
 import type { EventMap, EventName } from './generated/api/Events'
 
@@ -11,16 +11,22 @@ export interface WsEvent {
 
 /** Error thrown by ApiClient when an RPC call fails. */
 export class RpcError extends Error {
-    /** Error code (maps to HTTP status semantics: 400, 401, 403, 404, 500). */
+    /** Error code (maps to HTTP status semantics: 400, 401, 403, 404, 422, 500). */
     readonly status: number
     /** Raw error message from server. */
     readonly body: string
+    /**
+     * Structured detail the executor attached (`error.data`), when it did: e.g. the
+     * `InstanceError` of a refused `perspective.instance*` write.
+     */
+    readonly data?: unknown
 
-    constructor(status: number, body: string) {
+    constructor(status: number, body: string, data?: unknown) {
         super(`RPC error ${status}: ${body}`)
         this.name = "RpcError"
         this.status = status
         this.body = body
+        this.data = data
     }
 }
 
@@ -32,7 +38,10 @@ export interface CallOptions {
      */
     signal?: AbortSignal
     /** Timeout in ms, from the call to the reply. Defaults to 30 s, or
-     *  {@link LONG_TIMEOUT_MS} for a method the executor marks long. */
+     *  {@link LONG_TIMEOUT_MS} for a method the executor marks long. A call
+     *  that opens something on the executor (`OPENS_METHODS`, a live query) is
+     *  cancelled there when it times out, as when `signal` aborts it; any other
+     *  call that times out still runs to its end. */
     timeoutMs?: number
 }
 
@@ -250,12 +259,12 @@ export class ApiClient {
             if (parsed.type === undefined) {
                 const pending = this._pendingCalls.get(parsed.id as string)
                 if (!pending) return // late reply to a timed-out or aborted call, or a cancel ack
-                const error = parsed.error as { code?: number; message?: string } | undefined
+                const error = parsed.error as { code?: number; message?: string; data?: unknown } | undefined
                 if (!error) {
                     pending.resolve(parsed.result)
                     return
                 }
-                const rpcError = new RpcError(error.code ?? 500, error.message ?? 'Unknown error')
+                const rpcError = new RpcError(error.code ?? 500, error.message ?? 'Unknown error', error.data)
                 pending.reject(rpcError)
                 // The executor answers 401 only when the token stopped working, then closes the socket.
                 if (rpcError.status === 401) this._failAuth(rpcError.body)
@@ -275,6 +284,10 @@ export class ApiClient {
         }
 
         ws.onerror = (e) => {
+            // A socket this client already let go (closed, or dropped as silent) is no news:
+            // Node reports an `error` when the server ends the connection without answering
+            // the close frame, as the executor does after the last listener goes.
+            if (this._ws !== ws) return
             console.error('WebSocket error:', e)
         }
     }
@@ -545,7 +558,17 @@ export class ApiClient {
                 signal?.removeEventListener('abort', onAbort)
                 fn()
             }
+            // Tell the executor the call is no longer wanted, so it stops the work. A late
+            // reply finds no pending call and is dropped.
+            const cancel = () => {
+                if (pending.sent && this._ws?.readyState === 1 /* OPEN */) {
+                    this._send(this._ws, JSON.stringify({ id: nextId(), type: 'request.cancel', params: { targetId: id } }))
+                }
+            }
             const timer = setTimeout(() => {
+                // Only a call that opens something is cancelled on timeout: a write that
+                // timed out still runs to its end on the executor, as it always has.
+                if ((OPENS_METHODS as ReadonlySet<string>).has(type)) cancel()
                 settle(() => reject(new RpcError(408, `RPC call '${type}' timed out after ${timeoutMs}ms`)))
                 // A connect that never completes (a black-holed port) would hold every later
                 // call. Drop it once no call waits on it, so the next call dials again.
@@ -555,9 +578,7 @@ export class ApiClient {
                 }
             }, timeoutMs)
             const onAbort = () => {
-                if (pending.sent && this._ws?.readyState === 1 /* OPEN */) {
-                    this._send(this._ws, JSON.stringify({ id: nextId(), type: 'request.cancel', params: { targetId: id } }))
-                }
+                cancel()
                 settle(() => reject(new DOMException('Aborted', 'AbortError')))
             }
             const pending: PendingCall = {
