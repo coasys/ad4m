@@ -54,6 +54,12 @@ comes through here: it runs none itself.
   endpoint (`EndpointKind::OpenAi`) gets `max_tokens` only — it rejects unknown fields.
   Anthropic gets neither. A failed completion is logged here
   (`log_upstream_error`: status + a 500-char body excerpt, key already scrubbed).
+- Ollama's `options.num_ctx` comes from `/api/show`: the Modelfile's `num_ctx` in
+  `parameters` when the tag sets one (held to the trained window), else
+  `model_info.<arch>.context_length`; always capped at the endpoint's `max_num_ctx`
+  (default 131072). A tag such as `qwen3.8-27b-48k` thus runs at the 49152 it was
+  made for, not its base model's 262144: a request at another `num_ctx` makes Ollama
+  reload the model with a different KV cache.
 - Whether a *model* gets tools as data is `Model::uses_native_tools(endpoint)`: the client can,
   and the model's `native_tools` flag (default on for Anthropic and Ollama, off for
   OpenAI-shaped servers) says it should.
