@@ -299,7 +299,7 @@ impl<'a, R: ExecutorRpc> LinkFlow<'a, R> {
         Ok(())
     }
 
-    /// The offer link (`https://id.coasys.org/o#coasys:offer:1:…`): the QR code shows it.
+    /// The offer link (`https://coasys.id/o#coasys:offer:1:…`): the QR code shows it.
     pub fn link(&self) -> String {
         self.offer_string.link()
     }
