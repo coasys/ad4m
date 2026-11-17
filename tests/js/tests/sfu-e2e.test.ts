@@ -12,6 +12,7 @@ import { sfuScenario } from "../helpers/sfu/harness.js";
 import { Call } from "../helpers/sfu/e2e/call.js";
 import { Hearing, type Heard, PauseWatch, toneFor, toneSource, wrtc } from "../helpers/sfu/e2e/media.js";
 import type { Snapshot } from "../helpers/sfu/e2e/protocol.js";
+import { specPeerConnection } from "../helpers/sfu/e2e/webrtc.js";
 import type { World } from "../helpers/sfu/e2e/world.js";
 import { pollUntil } from "../utils/utils.js";
 import { e1TwoUsers } from "../helpers/sfu/e2e/scenarios/e1-two-users.js";
@@ -48,6 +49,51 @@ const checkOnly = () => {
   const unknown = only?.filter((id) => !registered.includes(id)) ?? [];
   if (unknown.length) throw new Error(`E2E_ONLY names no scenario: ${unknown.join(", ")} (known: ${registered.join(", ")})`);
 };
+
+/**
+ * The JavaScript side of an @roamhq/wrtc connection, as `specPeerConnection`
+ * uses it: `fire()` is the binding's native ICE callback. As in the binding's
+ * EventTarget, listeners run on the next tick and read the state then.
+ */
+class BindingConnection {
+  iceConnectionState = "new";
+  connectionState = "new";
+  signalingState = "stable";
+  oniceconnectionstatechange: ((event: unknown) => void) | null = null;
+  private listeners = new Map<string, Set<(event: unknown) => void>>();
+  addEventListener(type: string, listener: (event: unknown) => void) {
+    if (!this.listeners.has(type)) this.listeners.set(type, new Set());
+    this.listeners.get(type)!.add(listener);
+  }
+  removeEventListener(type: string, listener: (event: unknown) => void) {
+    this.listeners.get(type)?.delete(listener);
+  }
+  dispatchEvent(event: { type: string }) {
+    process.nextTick(() => {
+      const handler = (this as Record<string, unknown>)[`on${event.type}`];
+      const all = [...(this.listeners.get(event.type) ?? []), ...(typeof handler === "function" ? [handler as (event: unknown) => void] : [])];
+      for (const listener of all) listener.call(this, event);
+    });
+    return true;
+  }
+  fire() {
+    this.dispatchEvent({ type: "iceconnectionstatechange" });
+  }
+  async setLocalDescription() {}
+  async setRemoteDescription() {}
+  async addIceCandidate() {}
+  async createOffer() {
+    return { type: "offer", sdp: "" };
+  }
+  async createAnswer() {
+    return { type: "answer", sdp: "" };
+  }
+  restartIce() {}
+  close() {
+    this.iceConnectionState = "closed";
+    this.connectionState = "closed";
+  }
+}
 
 /**
  * Calls end to end: managed users in real neighbourhoods, each calling
@@ -215,6 +261,44 @@ describe("SFU: end to end through the SDK", function () {
       check(snapshot({ did: users.u2.did, tone: toneFor(1) }, 900), snapshot({ did: users.u1.did, tone: toneFor(1) }), true),
       "a wrong tone always counts",
     ).to.deep.equal([`u2 hears ${toneFor(1)} Hz (u2's tone) from u1, who sends ${toneFor(0)} Hz`]);
+  });
+
+  it("a participant's SDK sees each ICE state the binding reports, also one the binding's event read too early", async function () {
+    // @roamhq/wrtc fires `iceconnectionstatechange` when libwebrtc's legacy ICE
+    // state changes, but `iceConnectionState` returns the standardized state,
+    // which libwebrtc changes just after. On a loaded host a listener reads the
+    // old state. In E17 the one event of the cut read "completed", the state
+    // was "disconnected" 2 ms later, and no event followed: the SDK did not
+    // restart ICE, and the call stayed silent (soak, 14 Nov). A browser fires
+    // the event for the state it reports, so the connection must too.
+    if (!wrtc) this.skip();
+    const native = wrtc.RTCPeerConnection;
+    let binding: BindingConnection | undefined;
+    wrtc.RTCPeerConnection = function RTCPeerConnection() {
+      return (binding = new BindingConnection());
+    };
+    let pc: RTCPeerConnection;
+    try {
+      pc = specPeerConnection();
+    } finally {
+      wrtc.RTCPeerConnection = native;
+    }
+    const seen: string[] = [];
+    pc.oniceconnectionstatechange = () => seen.push(pc.iceConnectionState);
+    try {
+      binding!.iceConnectionState = "completed";
+      binding!.fire();
+      await pollUntil(() => seen.length === 1, { timeoutMs: 1_000, intervalMs: 5, label: "the first event" });
+      // The legacy state goes disconnected. Its event reads the standardized
+      // state before libwebrtc changes it; then it changes with no event.
+      binding!.fire();
+      await new Promise((resolve) => setImmediate(resolve));
+      binding!.iceConnectionState = "disconnected";
+      await pollUntil(() => seen.at(-1) === "disconnected", { timeoutMs: 3_000, intervalMs: 20, label: "disconnected" }).catch(() => {});
+      expect(seen).to.deep.equal(["completed", "completed", "disconnected"]);
+    } finally {
+      pc.close();
+    }
   });
 
   it("a participant knows when its process stood still", async () => {

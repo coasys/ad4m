@@ -192,7 +192,8 @@ describe("Executor config file", () => {
         proc.stderr!.on("data", (d) => (stderr += d.toString()));
         proc.stdout!.on("data", (d) => (stderr += d.toString()));
         const code = await new Promise<number | null>((resolve) => proc.once("close", resolve));
-        expect(code).to.not.equal(0);
+        // 78: a refused start, which a supervisor does not retry.
+        expect(code).to.equal(78);
         expect(stderr).to.include("admin_credential is not allowed in the config file");
         expect(stderr).to.not.include("inline-secret-value");
     });
@@ -211,7 +212,8 @@ describe("Executor config file", () => {
         proc.stderr!.on("data", (d) => (stderr += d.toString()));
         proc.stdout!.on("data", (d) => (stderr += d.toString()));
         const code = await new Promise<number | null>((resolve) => proc.once("close", resolve));
-        expect(code).to.not.equal(0);
+        // 78: a refused start, which a supervisor does not retry.
+        expect(code).to.equal(78);
         expect(stderr).to.include(`the secret in ${empty} is empty`);
     });
 
@@ -227,7 +229,8 @@ describe("Executor config file", () => {
         proc.stderr!.on("data", (d) => (stderr += d.toString()));
         proc.stdout!.on("data", (d) => (stderr += d.toString()));
         const code = await new Promise<number | null>((resolve) => proc.once("close", resolve));
-        expect(code).to.not.equal(0);
+        // 78: a refused start, which a supervisor does not retry.
+        expect(code).to.equal(78);
         expect(stderr).to.include("AD4M_APP_DATA_PATH is set but empty");
     });
 });
