@@ -29,7 +29,7 @@ fn delta_for(address: &str, data: Value) -> MountDelta {
 }
 
 /// Every stored link with `source` and `predicate`.
-async fn links_at(
+pub(super) async fn links_at(
     p: &PerspectiveInstance,
     source: &str,
     predicate: &str,
@@ -43,7 +43,7 @@ async fn links_at(
     .unwrap()
 }
 
-async fn project(lang: &str, name: &str, params: Value) {
+pub(super) async fn project(lang: &str, name: &str, params: Value) {
     interact(&format!("{lang}://project"), name, params)
         .await
         .unwrap();

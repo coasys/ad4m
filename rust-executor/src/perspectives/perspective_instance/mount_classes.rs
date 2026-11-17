@@ -20,7 +20,6 @@ use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
 use serde_json::Value;
 
-use super::mount_links::is_mount_written;
 use super::PerspectiveInstance;
 use crate::languages::mount_types::MountShapes;
 use crate::languages::LanguageController;
@@ -182,7 +181,7 @@ impl PerspectiveInstance {
             }
         }
         if !links.is_empty() {
-            self.add_mount_links(links).await?;
+            self.add_mount_links(lang_address, links).await?;
         }
         Ok(())
     }
@@ -193,30 +192,36 @@ impl PerspectiveInstance {
             predicate: Some(predicate.to_string()),
             ..Default::default()
         };
-        let mut targets: HashMap<String, Vec<String>> = HashMap::new();
-        for link in self.get_links(&by_predicate(CLAIM_TARGET)).await? {
-            if is_mount_written(&link) {
-                targets
-                    .entry(link.data.source)
-                    .or_default()
-                    .push(link.data.target);
+        // A claim counts only when the mount it names wrote it.
+        let mut written = self.mount_written_by_language();
+        let mut claims: Vec<ClassClaim> = Vec::new();
+        for link in self.get_links(&by_predicate(CLAIM_OWNER)).await? {
+            let Some(name) = link.data.source.strip_prefix(CLAIM_SOURCE_PREFIX) else {
+                continue;
+            };
+            let Ok((owner, _)) = LanguageController::parse_expr_url(&link.data.target) else {
+                continue;
+            };
+            if written.wrote(&owner, &link)? {
+                claims.push(ClassClaim {
+                    name: name.to_string(),
+                    owner,
+                    targets: Vec::new(),
+                });
             }
         }
-        Ok(self
-            .get_links(&by_predicate(CLAIM_OWNER))
-            .await?
-            .into_iter()
-            .filter(is_mount_written)
-            .filter_map(|l| {
-                let name = l.data.source.strip_prefix(CLAIM_SOURCE_PREFIX)?.to_string();
-                let (owner, _) = LanguageController::parse_expr_url(&l.data.target).ok()?;
-                Some(ClassClaim {
-                    targets: targets.get(&l.data.source).cloned().unwrap_or_default(),
-                    name,
-                    owner,
-                })
-            })
-            .collect())
+        for link in self.get_links(&by_predicate(CLAIM_TARGET)).await? {
+            let Some(name) = link.data.source.strip_prefix(CLAIM_SOURCE_PREFIX) else {
+                continue;
+            };
+            let Some(claim) = claims.iter_mut().find(|c| c.name == name) else {
+                continue;
+            };
+            if written.wrote(&claim.owner, &link)? {
+                claim.targets.push(link.data.target);
+            }
+        }
+        Ok(claims)
     }
 
     /// Every class node of the installed SHACL (`rdf://type

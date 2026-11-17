@@ -117,6 +117,10 @@ mod mounts_tests;
 mod mount_lifecycle_tests;
 
 #[cfg(test)]
+#[path = "perspective_instance/mount_ownership_tests.rs"]
+mod mount_ownership_tests;
+
+#[cfg(test)]
 #[path = "perspective_instance_join_tests.rs"]
 mod join_tests;
 
