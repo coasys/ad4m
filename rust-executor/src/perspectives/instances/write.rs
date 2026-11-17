@@ -17,9 +17,9 @@
 use super::validate::resolve_collection;
 use super::{
     check_setters, class_properties, coerce_scalar, decoded_literal, fetch_instance,
-    generate_instance_uri, instance_uri, link_target, property_target, remove_all_links_of,
-    require_instance, resolve_class, resolve_writable_class, subject_class, validate_properties,
-    InstanceError, WriteMode, WriteStep,
+    generate_instance_uri, instance_uri, link_target, property_target, property_value_target,
+    remove_all_links_of, require_instance, resolve_class, resolve_writable_class, subject_class,
+    validate_properties, InstanceError, WriteMode, WriteStep,
 };
 use crate::agent::AgentContext;
 use crate::mcp::shacl;
@@ -375,8 +375,10 @@ pub async fn create(
                 Value::String(s) => s.clone(),
                 other => other.to_string(),
             };
+            // The validated value, not its text: re-parsing would turn the string "false" of
+            // a string collection into a boolean.
             let target =
-                property_target(perspective, &class_name, collection, &item_str, agent).await;
+                property_value_target(perspective, &class_name, collection, item, agent).await;
             let link = Link {
                 source: base_uri.clone(),
                 predicate: Some(predicate.clone()),
@@ -559,7 +561,7 @@ pub async fn add_to_collection(
     let infos = class_properties(&shape);
     let info = resolve_collection(&class_name, &infos, &params.collection, &params.item_uri)
         .map_err(|e| invalid(&class_name, vec![e]))?;
-    coerce_scalar(info, &Value::String(params.item_uri.clone()))
+    let coerced = coerce_scalar(info, &Value::String(params.item_uri.clone()))
         .map_err(|e| invalid(&class_name, vec![e]))?;
     let collection = info.name().to_string();
 
@@ -619,14 +621,20 @@ pub async fn add_to_collection(
         });
     }
 
-    let target = property_target(
-        perspective,
-        &class_name,
-        &collection,
-        &params.item_uri,
-        agent,
-    )
-    .await;
+    // Write the coerced value, so a string collection keeps "false" a string. A language-stored
+    // collection takes the item as it is (coercion leaves it text), still JSON-parsed as before.
+    let target = if info.stored_by_language().is_some() {
+        property_target(
+            perspective,
+            &class_name,
+            &collection,
+            &params.item_uri,
+            agent,
+        )
+        .await
+    } else {
+        property_value_target(perspective, &class_name, &collection, &coerced, agent).await
+    };
     let link = Link {
         source: base_uri.clone(),
         predicate: Some(predicate),

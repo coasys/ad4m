@@ -522,8 +522,8 @@ pub(crate) fn instance_uri(field: &str, value: &str) -> Result<String, InstanceE
     })
 }
 
-/// The link target a property value is written as: a well-formed absolute IRI as it is, else
-/// the expression the property's language creates for it (a literal by default).
+/// The link target a property value given as text is written as: a well-formed absolute IRI as
+/// it is, else the expression the property's language creates for it (a literal by default).
 pub(crate) async fn property_target(
     perspective: &PerspectiveInstance,
     class_name: &str,
@@ -540,6 +540,39 @@ pub(crate) async fn property_target(
         return value.to_string();
     }
 
+    // Try to parse as JSON to recover native types (bool, number). MCP tool schemas declare all
+    // values as strings, so "false" arrives as the string "false" — but the language controller
+    // needs json!(false).
+    let json_value: Value =
+        serde_json::from_str(value).unwrap_or_else(|_| Value::String(value.to_string()));
+    property_value_target(
+        perspective,
+        class_name,
+        property_name,
+        &json_value,
+        agent_context,
+    )
+    .await
+}
+
+/// [`property_target`] for a value whose JSON type is already settled — one validation coerced
+/// to the property's type. A string stays a string: `"false"` in a string collection is
+/// written as `literal:string:false`, not re-guessed into a boolean.
+pub(crate) async fn property_value_target(
+    perspective: &PerspectiveInstance,
+    class_name: &str,
+    property_name: &str,
+    value: &Value,
+    agent_context: &AgentContext,
+) -> String {
+    let text = match value {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    };
+    if value.is_string() && is_safe_iri_target(&text) {
+        return text;
+    }
+
     // Resolve the original-cased property name from SHACL. Dynamic tools lowercase the property
     // name (e.g. "isconversation"), but the SHACL links store the original case (e.g.
     // "isConversation").
@@ -554,19 +587,8 @@ pub(crate) async fn property_target(
             .unwrap_or_else(|| property_name.to_string())
     };
 
-    // Try to parse as JSON to recover native types (bool, number). MCP tool schemas declare all
-    // values as strings, so "false" arrives as the string "false" — but the language controller
-    // needs json!(false).
-    let json_value: Value =
-        serde_json::from_str(value).unwrap_or_else(|_| Value::String(value.to_string()));
-
     match perspective
-        .resolve_property_value(
-            class_name,
-            &original_property_name,
-            &json_value,
-            agent_context,
-        )
+        .resolve_property_value(class_name, &original_property_name, value, agent_context)
         .await
     {
         Ok(url) => url,
@@ -577,7 +599,7 @@ pub(crate) async fn property_target(
                 original_property_name,
                 e
             );
-            encode_literal(value)
+            encode_literal(&text)
         }
     }
 }

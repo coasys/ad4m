@@ -4821,3 +4821,104 @@ async fn describe_perspective_lists_allowed_values() {
     // No `in` declared: the key is absent, not null.
     assert!(find(properties, "title").get("allowed_values").is_none());
 }
+
+// ============================================================================
+// #1762 CodeRabbit review: collection values keep their type, an instance
+// stored under the legacy `literal://` spelling is written where it lives,
+// integers that do not fit are refused
+// ============================================================================
+
+/// One string collection and one boolean collection, both stored as plain
+/// literals (no `resolveLanguage`).
+const TAGGED_SDNA: &str = r#"{
+  "target_class": "ns://Tagged",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"rdf://type","target":"ns://Tagged"}
+  ],
+  "properties": [
+    {"path":"ns://tagged_title","name":"title","datatype":"xsd:string","min_count":1,"max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://tagged_title","target":"value"}]},
+    {"path":"ns://tag","name":"tags","datatype":"xsd:string","collection":true,"writable":true,
+     "adder":[{"action":"addLink","source":"this","predicate":"ns://tag","target":"value"}],
+     "remover":[{"action":"removeLink","source":"this","predicate":"ns://tag","target":"value"}]},
+    {"path":"ns://flag","name":"flags","datatype":"xsd:boolean","collection":true,"writable":true,
+     "adder":[{"action":"addLink","source":"this","predicate":"ns://flag","target":"value"}],
+     "remover":[{"action":"removeLink","source":"this","predicate":"ns://flag","target":"value"}]}
+  ]
+}"#;
+
+/// The link targets stored under `source --predicate-->`, sorted.
+async fn stored_targets(
+    handler: &Ad4mMcpHandler,
+    uuid: &str,
+    source: &str,
+    predicate: &str,
+) -> Vec<String> {
+    let (perspective, _) = handler
+        .get_writable_perspective(uuid)
+        .await
+        .expect("fixture perspective");
+    let mut targets: Vec<String> = perspective
+        .get_links(&crate::types::LinkQuery {
+            source: Some(source.to_string()),
+            predicate: Some(predicate.to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("get_links")
+        .into_iter()
+        .map(|l| l.data.target)
+        .collect();
+    targets.sort();
+    targets
+}
+
+/// A string collection given `"false"` and `"42"` stores them as strings —
+/// on create and on add — not as the boolean and number their text parses
+/// to. Validation already settled the type; writing must not re-guess it.
+#[tokio::test(flavor = "multi_thread")]
+async fn string_collection_items_stay_strings_when_written() {
+    let (handler, uuid, _guard) = setup_with(&[("Tagged", TAGGED_SDNA)], false).await;
+
+    let created = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Tagged".into(),
+                properties: Some(props(&[
+                    ("title", json!("t")),
+                    ("tags", json!(["false", "42"])),
+                ])),
+                base_uri: None,
+                parent: None,
+            }))
+            .await,
+    );
+    assert_eq!(created["created"], true, "{created}");
+    let base = created["base_uri"].as_str().unwrap().to_string();
+    assert_eq!(
+        stored_targets(&handler, &uuid, &base, "ns://tag").await,
+        vec!["literal:string:42", "literal:string:false"]
+    );
+
+    let added = parse(
+        &handler
+            .instance_add_to_collection(Parameters(InstanceAddToCollectionParams {
+                perspective_id: uuid.clone(),
+                class_name: "Tagged".into(),
+                base_uri: base.clone(),
+                collection: "tags".into(),
+                item_uri: "true".into(),
+            }))
+            .await,
+    );
+    assert_eq!(added["links_added"], 1, "{added}");
+    assert_eq!(
+        stored_targets(&handler, &uuid, &base, "ns://tag").await,
+        vec![
+            "literal:string:42",
+            "literal:string:false",
+            "literal:string:true"
+        ]
+    );
+}
