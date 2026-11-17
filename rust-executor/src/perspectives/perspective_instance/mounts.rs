@@ -270,15 +270,53 @@ impl PerspectiveInstance {
 
     /// Re-runs every mount's snapshot every `mount_resync_interval()`
     /// (design §1.5: pushed deltas are best effort — the timer catches
-    /// what a signal missed). Exits on `is_teardown` like the other
-    /// perspective loops.
-    ///
-    /// Stub: the loop's tests landed first; it never resyncs and never
-    /// observes teardown, so they stay red until the real loop arrives.
+    /// what a signal missed). Joined into `start_background_tasks`; exits
+    /// on `is_teardown` like the other perspective loops. A failed sync
+    /// logs one warning and the loop continues.
     pub(super) async fn mount_resync_loop(&self) {
-        loop {
-            sleep(mount_resync_interval()).await;
+        let uuid = self.uuid.clone();
+        log::debug!("Starting mount resync loop for perspective {}", uuid);
+
+        while !self.is_teardown.load(Ordering::Acquire) {
+            // Sleep in slices (the fallback sync loop's pattern) so
+            // teardown is observed promptly even at the 15 s interval.
+            let mut remaining = mount_resync_interval();
+            while remaining > Duration::from_millis(0) {
+                if self.is_teardown.load(Ordering::Acquire) {
+                    log::debug!("Mount resync loop ended for perspective {}", uuid);
+                    return;
+                }
+                let step = std::cmp::min(Duration::from_secs(1), remaining);
+                sleep(step).await;
+                remaining = remaining.saturating_sub(step);
+            }
+            if self.is_teardown.load(Ordering::Acquire) {
+                break;
+            }
+
+            // `mounts()` is one predicate read — a perspective with no
+            // mounts costs nothing per tick.
+            let langs = match self.mounts().await {
+                Ok(langs) => langs,
+                Err(e) => {
+                    log::warn!("mount resync for perspective {uuid}: reading mounts failed: {e}");
+                    continue;
+                }
+            };
+            for lang in langs {
+                // `sync_mount` takes `&mut self`; a clone is the same
+                // instance.
+                let mut p = self.clone();
+                if let Err(e) = p.sync_mount(&lang).await {
+                    log::warn!("resync of mount {lang} for perspective {uuid} failed: {e}");
+                }
+                if self.is_teardown.load(Ordering::Acquire) {
+                    break;
+                }
+            }
         }
+
+        log::debug!("Mount resync loop ended for perspective {}", uuid);
     }
 
     /// One mount per class set: `mount` refuses when another mounted

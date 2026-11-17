@@ -934,6 +934,7 @@ impl PerspectiveInstance {
             self.auto_processor_supervisor(),
             self.flow_pass_at_load(),
             mount_restore.restore_mounts(),
+            self.mount_resync_loop(),
         );
     }
 
