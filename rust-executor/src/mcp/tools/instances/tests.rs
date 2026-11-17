@@ -4978,3 +4978,49 @@ async fn boolean_collection_members_are_matched_by_value() {
         .await
         .is_empty());
 }
+
+/// A whole float too large for an integer property is refused, not
+/// saturated to `i64::MAX`; a whole float that fits is still accepted.
+#[tokio::test(flavor = "multi_thread")]
+async fn integer_property_refuses_a_whole_float_that_does_not_fit() {
+    let (handler, uuid, _guard) = setup(false).await;
+
+    let bad = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Channel".into(),
+                properties: Some(props(&[("name", json!("big")), ("rank", json!(1e20))])),
+                base_uri: None,
+                parent: None,
+            }))
+            .await,
+    );
+    let err = bad["error"]
+        .as_str()
+        .unwrap_or_else(|| panic!("1e20 must be refused, got: {bad}"));
+    assert!(err.contains("rank") && err.contains("integer"), "{err}");
+
+    let ok = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Channel".into(),
+                properties: Some(props(&[("name", json!("three")), ("rank", json!(3.0))])),
+                base_uri: None,
+                parent: None,
+            }))
+            .await,
+    );
+    assert_eq!(ok["created"], true, "{ok}");
+    let got = parse(
+        &handler
+            .instance_get(Parameters(InstanceGetParams {
+                perspective_id: uuid.clone(),
+                class_name: "Channel".into(),
+                base_uri: ok["base_uri"].as_str().unwrap().into(),
+            }))
+            .await,
+    );
+    assert_eq!(got["rank"], 3, "{got}");
+}
