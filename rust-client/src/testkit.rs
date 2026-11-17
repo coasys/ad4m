@@ -131,6 +131,12 @@ impl FakeExecutor {
         .unwrap_or_else(|_| panic!("timed out waiting for socket epoch {n}"));
     }
 
+    /// How many sockets were accepted so far (1 = the first `connect`).
+    #[allow(dead_code)]
+    pub fn accepted_sockets(&self) -> u64 {
+        self.epoch.load(Ordering::SeqCst)
+    }
+
     /// Wait until `n` sockets have ended server-side — the client released
     /// its whole stream (both halves), or the test severed it. `false` when
     /// that did not happen within `within`.

@@ -339,6 +339,56 @@ fn merge_watches(watches: &WatchMap) -> Value {
 
 pub struct WsRpcClient {
     shared: Arc<Shared>,
+    /// Held by every handle on this client and by nothing else — the
+    /// reader and supervisor tasks own `shared`, not this — so its drop
+    /// marks the last handle gone, and shuts the client down.
+    owner: Arc<Owner>,
+}
+
+/// Closes the client when the last [`WsRpcClient`] handle is dropped: the
+/// background reader and supervisor hold `Arc<Shared>` themselves, so
+/// without it an abandoned client keeps its socket and, once that dies,
+/// reconnects forever. `close()` stays the awaited, explicit path; this is
+/// the fallback for a handle dropped without it.
+struct Owner {
+    /// Weak: the token must not itself keep the shared state alive.
+    shared: std::sync::Weak<Shared>,
+}
+
+impl Drop for Owner {
+    fn drop(&mut self) {
+        let Some(shared) = self.shared.upgrade() else {
+            return;
+        };
+        if shared.closed.swap(true, Ordering::SeqCst) {
+            // `close()` already ran (or is running).
+            return;
+        }
+        // No reconnect from here on: the supervisor checks `closed` before
+        // every dial.
+        match tokio::runtime::Handle::try_current() {
+            Ok(rt) => {
+                rt.spawn(async move { WsRpcClient::close_shared(&shared).await });
+            }
+            Err(_) => {
+                // Off a runtime nothing can be awaited: stop the tasks
+                // where their handles are free, and end the streams.
+                shared.teardowns.fetch_add(1, Ordering::SeqCst);
+                shared.send_abort.notify_waiters();
+                if let Ok(mut supervisor) = shared.supervisor.try_lock() {
+                    if let Some(h) = supervisor.take() {
+                        h.abort();
+                    }
+                }
+                if let Ok(mut reader) = shared.reader.try_lock() {
+                    if let Some(h) = reader.take() {
+                        h.abort();
+                    }
+                }
+                shared.closed_tx.send_replace(true);
+            }
+        }
+    }
 }
 
 impl std::fmt::Debug for WsRpcClient {
@@ -411,7 +461,10 @@ impl WsRpcClient {
         let supervisor = Self::spawn_supervisor(shared.clone());
         *shared.supervisor.lock().await = Some(supervisor);
 
-        Ok(Self { shared })
+        let owner = Arc::new(Owner {
+            shared: Arc::downgrade(&shared),
+        });
+        Ok(Self { shared, owner })
     }
 
     async fn open_socket(url: &str, executor_url_for_errors: &str) -> Result<(WsSink, WsSource)> {
@@ -440,10 +493,7 @@ impl WsRpcClient {
                         // Blocks this worker mid-poll: an abort cannot
                         // end the task until the park is released.
                         #[cfg(test)]
-                        WsRpcClient {
-                            shared: shared_reader.clone(),
-                        }
-                        .test_sync_park("reader:frame");
+                        Self::sync_park_point(&shared_reader, "reader:frame");
                         t
                     }
                     Ok(Message::Close(frame)) => {
@@ -923,14 +973,20 @@ impl WsRpcClient {
 
     /// Permanently close the client: socket down, no reconnect.
     pub async fn close(&self) {
-        self.shared.closed.store(true, Ordering::SeqCst);
+        Self::close_shared(&self.shared).await;
+    }
+
+    /// [`close`](Self::close) on the shared state — the last handle's drop
+    /// runs it too, with no handle left to call it on.
+    async fn close_shared(shared: &Arc<Shared>) {
+        shared.closed.store(true, Ordering::SeqCst);
         // Same first moves as the disconnect: mark the teardown, then
         // unwind parked socket writes before this path waits on the locks
         // they hold (R5, R4-1).
-        self.shared.teardowns.fetch_add(1, Ordering::SeqCst);
-        self.shared.send_abort.notify_waiters();
+        shared.teardowns.fetch_add(1, Ordering::SeqCst);
+        shared.send_abort.notify_waiters();
         #[cfg(test)]
-        Self::park_point(&self.shared, "close:notified").await;
+        Self::park_point(shared, "close:notified").await;
         // Abort, then wait for the task to end: an aborted supervisor drops
         // its install state — an unpublished socket's reader guard and
         // write half included (N4). The guard aborts that reader and
@@ -938,28 +994,28 @@ impl WsRpcClient {
         // so no task holds the socket once close returns (R4-3). The
         // locks are released before the wait: the tasks' own teardown
         // takes them.
-        let supervisor = self.shared.supervisor.lock().await.take();
+        let supervisor = shared.supervisor.lock().await.take();
         if let Some(h) = supervisor {
             h.abort();
             let _ = h.await;
         }
-        let retired = std::mem::take(&mut *self.shared.retired_readers.lock().unwrap());
+        let retired = std::mem::take(&mut *shared.retired_readers.lock().unwrap());
         #[cfg(test)]
-        Self::park_point(&self.shared, "close:readers").await;
+        Self::park_point(shared, "close:readers").await;
         for h in retired {
             h.abort();
             let _ = h.await;
         }
-        let reader = self.shared.reader.lock().await.take();
+        let reader = shared.reader.lock().await.take();
         if let Some(h) = reader {
             h.abort();
             let _ = h.await;
         }
-        *self.shared.sink.lock().await = None;
-        self.shared.connected.send_replace(false);
+        *shared.sink.lock().await = None;
+        shared.connected.send_replace(false);
         // Wake the live queries' listeners: their streams end here too.
-        self.shared.closed_tx.send_replace(true);
-        let mut map = self.shared.pending.lock().await;
+        shared.closed_tx.send_replace(true);
+        let mut map = shared.pending.lock().await;
         for (_, call) in map.drain() {
             let _ = call.tx.send(Err(anyhow!("WebSocket connection closed")));
         }
@@ -1045,7 +1101,14 @@ impl WsRpcClient {
     /// in a multi-thread runtime).
     #[cfg(test)]
     pub(crate) fn test_sync_park(&self, name: &'static str) {
-        let blocker = self.shared.park_points.lock().unwrap().get(name).cloned();
+        Self::sync_park_point(&self.shared, name);
+    }
+
+    /// [`test_sync_park`](Self::test_sync_park) on the shared state — for
+    /// the reader task, which holds no client handle.
+    #[cfg(test)]
+    fn sync_park_point(shared: &Arc<Shared>, name: &'static str) {
+        let blocker = shared.park_points.lock().unwrap().get(name).cloned();
         if let Some(b) = blocker {
             let _ = b.parked.send(());
             loop {
@@ -1055,6 +1118,17 @@ impl WsRpcClient {
                 }
                 std::thread::sleep(Duration::from_millis(1));
             }
+        }
+    }
+
+    /// Another handle on this client — what an `Arc<WsRpcClient>` clone
+    /// is for callers: it shares the owner token, so dropping it is not
+    /// the last handle going.
+    #[cfg(test)]
+    pub(crate) fn handle(&self) -> WsRpcClient {
+        WsRpcClient {
+            shared: self.shared.clone(),
+            owner: self.owner.clone(),
         }
     }
 
@@ -1462,9 +1536,7 @@ mod tests {
         // A call in flight when the socket dies is failed by
         // `handle_disconnect` — its error is the barrier that the whole
         // disconnect path (flag included) ran.
-        let caller = WsRpcClient {
-            shared: client.shared.clone(),
-        };
+        let caller = client.handle();
         let call =
             tokio::spawn(async move { caller.call_value("x.y", serde_json::json!({})).await });
         let req = fake.next_request().await;
@@ -1507,9 +1579,7 @@ mod tests {
 
         // Socket 1 dies; a drained in-flight call is the barrier that the
         // disconnect path ran.
-        let caller = WsRpcClient {
-            shared: client.shared.clone(),
-        };
+        let caller = client.handle();
         let c0 = tokio::spawn(async move { caller.call_value("x.y", serde_json::json!({})).await });
         fake.next_request().await;
         fake.drop_connection();
@@ -1524,9 +1594,7 @@ mod tests {
         // Give the task a beat to reach the parked callback... actually the
         // callback runs right after send_watch; c1 riding socket 2 proves
         // the socket is installed before we drop it under the parked task.
-        let caller = WsRpcClient {
-            shared: client.shared.clone(),
-        };
+        let caller = client.handle();
         let c1 = tokio::spawn(async move { caller.call_value("x.z", serde_json::json!({})).await });
         fake.next_request().await;
         fake.drop_connection();
@@ -1556,9 +1624,7 @@ mod tests {
 
         // Socket 1 dies; a drained in-flight call is the barrier that the
         // whole disconnect path ran.
-        let caller = WsRpcClient {
-            shared: client.shared.clone(),
-        };
+        let caller = client.handle();
         let c0 = tokio::spawn(async move { caller.call_value("x.y", serde_json::json!({})).await });
         fake.next_request().await;
         fake.drop_connection();
@@ -1602,9 +1668,7 @@ mod tests {
 
         // Socket 1 dies; a drained in-flight call is the barrier that the
         // whole disconnect path ran.
-        let caller = WsRpcClient {
-            shared: client.shared.clone(),
-        };
+        let caller = client.handle();
         let c0 = tokio::spawn(async move { caller.call_value("x.y", serde_json::json!({})).await });
         fake.next_request().await;
         fake.drop_connection();
@@ -1619,9 +1683,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let caller = WsRpcClient {
-            shared: client.shared.clone(),
-        };
+        let caller = client.handle();
         let sub = tokio::spawn(async move {
             caller
                 .call_value(
@@ -1691,9 +1753,7 @@ mod tests {
             .await;
 
         // Register interest while connected — socket 2 must restore it.
-        let caller = WsRpcClient {
-            shared: client.shared.clone(),
-        };
+        let caller = client.handle();
         let watch =
             tokio::spawn(
                 async move { caller.set_watch("k", serde_json::json!({"e": null})).await },
@@ -1704,9 +1764,7 @@ mod tests {
 
         // Socket 1 dies; a drained in-flight call is the barrier that the
         // whole disconnect path ran.
-        let caller = WsRpcClient {
-            shared: client.shared.clone(),
-        };
+        let caller = client.handle();
         let c0 = tokio::spawn(async move { caller.call_value("x.y", serde_json::json!({})).await });
         fake.next_request().await;
         fake.drop_connection();
@@ -1755,9 +1813,7 @@ mod tests {
         let client = WsRpcClient::connect(fake.url(), "").await.unwrap();
 
         // c0 rides socket 1 and dies with it — the disconnect barrier.
-        let caller = WsRpcClient {
-            shared: client.shared.clone(),
-        };
+        let caller = client.handle();
         let c0 = tokio::spawn(async move { caller.call_value("x.y", serde_json::json!({})).await });
         fake.next_request().await;
         client.disconnect_for_testing().await;
@@ -1766,9 +1822,7 @@ mod tests {
         // c1 now waits for a socket: it is pending but was never sent. Wait
         // for its entry to land — otherwise the drain below could race the
         // insert itself.
-        let caller = WsRpcClient {
-            shared: client.shared.clone(),
-        };
+        let caller = client.handle();
         let c1 = tokio::spawn(async move { caller.call_value("x.z", serde_json::json!({})).await });
         tokio::time::timeout(Duration::from_secs(10), async {
             while client.shared.pending.lock().await.is_empty() {
@@ -1819,9 +1873,7 @@ mod tests {
         let client = WsRpcClient::connect(fake.url(), "").await.unwrap();
 
         let (_blocker, mut parked) = client.park_sends().await;
-        let caller = WsRpcClient {
-            shared: client.shared.clone(),
-        };
+        let caller = client.handle();
         let watch =
             tokio::spawn(
                 async move { caller.set_watch("t", serde_json::json!({"e": null})).await },
@@ -1851,9 +1903,7 @@ mod tests {
         let client = WsRpcClient::connect(fake.url(), "").await.unwrap();
 
         let (_blocker, mut parked) = client.park_sends().await;
-        let caller = WsRpcClient {
-            shared: client.shared.clone(),
-        };
+        let caller = client.handle();
         let call =
             tokio::spawn(async move { caller.call_value("x.y", serde_json::json!({})).await });
         parked.recv().await; // parked holding pending + sink
@@ -1880,9 +1930,7 @@ mod tests {
         let client = WsRpcClient::connect(fake.url(), "").await.unwrap();
 
         let (_blocker, mut parked) = client.park_sends().await;
-        let caller = WsRpcClient {
-            shared: client.shared.clone(),
-        };
+        let caller = client.handle();
         let call =
             tokio::spawn(async move { caller.call_value("x.y", serde_json::json!({})).await });
         parked.recv().await;
@@ -1908,9 +1956,7 @@ mod tests {
         let client = WsRpcClient::connect(fake.url(), "").await.unwrap();
 
         // Live interest — every fresh socket must send a restore frame.
-        let caller = WsRpcClient {
-            shared: client.shared.clone(),
-        };
+        let caller = client.handle();
         let watch =
             tokio::spawn(
                 async move { caller.set_watch("t", serde_json::json!({"e": null})).await },
@@ -1955,9 +2001,7 @@ mod tests {
 
         // Close 1008 (policy): the executor's token refusal. The drained
         // in-flight call is the barrier that auth_failed was recorded.
-        let caller = WsRpcClient {
-            shared: client.shared.clone(),
-        };
+        let caller = client.handle();
         let c0 = tokio::spawn(async move { caller.call_value("x.y", serde_json::json!({})).await });
         fake.next_request().await;
         fake.drop_connection_with_code(1008);
@@ -1984,9 +2028,7 @@ mod tests {
         let fake = FakeExecutor::start().await;
         let client = WsRpcClient::connect(fake.url(), "").await.unwrap();
 
-        let caller = WsRpcClient {
-            shared: client.shared.clone(),
-        };
+        let caller = client.handle();
         let watch = tokio::spawn(async move {
             caller
                 .watch_events(serde_json::json!({"bogus-event": null}))
@@ -2013,9 +2055,7 @@ mod tests {
         let fake = FakeExecutor::start().await;
         let client = WsRpcClient::connect(fake.url(), "").await.unwrap();
 
-        let caller = WsRpcClient {
-            shared: client.shared.clone(),
-        };
+        let caller = client.handle();
         let watch =
             tokio::spawn(
                 async move { caller.set_watch("k", serde_json::json!({"e": null})).await },
@@ -2045,9 +2085,7 @@ mod tests {
 
         // set_watch awaits the watch's reply — drive it from a task so the
         // test can answer.
-        let caller = WsRpcClient {
-            shared: client.shared.clone(),
-        };
+        let caller = client.handle();
         let s1 = tokio::spawn(async move {
             caller
                 .set_watch("k1", serde_json::json!({"e1": null}))
@@ -2057,9 +2095,7 @@ mod tests {
         fake.reply(&w1, Value::Bool(true)).await;
         s1.await.unwrap().unwrap();
 
-        let caller = WsRpcClient {
-            shared: client.shared.clone(),
-        };
+        let caller = client.handle();
         let s2 = tokio::spawn(async move {
             caller
                 .set_watch("k2", serde_json::json!({"e2": null}))
@@ -2147,6 +2183,31 @@ mod tests {
             "Error should contain message: {}",
             err_msg
         );
+    }
+
+    /// Dropping the last handle without `close()` shuts the client down:
+    /// the reader and supervisor own `Shared`, not the handles, so before
+    /// they kept the socket — and would have redialled after an outage —
+    /// for a client nobody could reach any more.
+    #[tokio::test]
+    async fn dropping_the_last_handle_stops_the_background_tasks() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let client = WsRpcClient::connect(fake.url(), "").await.unwrap();
+        fake.connection(1).await;
+        let other = client.handle();
+        drop(client);
+        assert!(
+            !fake.sockets_ended(1, Duration::from_millis(300)).await,
+            "another handle is alive: the client stays up"
+        );
+        drop(other);
+        assert!(
+            fake.sockets_ended(1, Duration::from_secs(2)).await,
+            "the last handle's drop must release the socket"
+        );
+        tokio::time::sleep(Duration::from_millis(RECONNECT_BASE_DELAY_MS + 500)).await;
+        assert_eq!(fake.accepted_sockets(), 1, "an abandoned client must not redial");
     }
 
     /// Reconnect: the client's socket dies, a second server accepts the
@@ -2364,9 +2425,7 @@ mod tests {
 
         // A watch send parks inside the sink critical section.
         let (_blocker, mut send_parked) = client.park_sends().await;
-        let caller = WsRpcClient {
-            shared: client.shared.clone(),
-        };
+        let caller = client.handle();
         let watch =
             tokio::spawn(
                 async move { caller.set_watch("t", serde_json::json!({"e": null})).await },
@@ -2375,9 +2434,7 @@ mod tests {
 
         // A call reaches the point just before it competes for the sink.
         let (call_gate, mut call_parked) = client.park_at("call:before-sink");
-        let caller = WsRpcClient {
-            shared: client.shared.clone(),
-        };
+        let caller = client.handle();
         let call =
             tokio::spawn(async move { caller.call_value("x.y", serde_json::json!({})).await });
         call_parked.recv().await;
@@ -2386,9 +2443,7 @@ mod tests {
         // first of them, so the queued call reaches the freed sink ahead
         // of close — as a call queued on the sink mutex before close does.
         let held = client.shared.supervisor.lock().await;
-        let closer = WsRpcClient {
-            shared: client.shared.clone(),
-        };
+        let closer = client.handle();
         let close = tokio::spawn(async move { closer.close().await });
         // The notify unwound the watch send: the sink is free.
         tokio::time::timeout(PROMPT, async {
@@ -2474,16 +2529,12 @@ mod tests {
         let (disconnect_gate, mut disconnect_parked) = client.park_at("disconnect:notified");
         let (refused_gate, mut refused) = client.park_at("call:refused");
         refused_gate.gate.add_permits(1000);
-        let disconnector = WsRpcClient {
-            shared: client.shared.clone(),
-        };
+        let disconnector = client.handle();
         let disconnect = tokio::spawn(async move { disconnector.disconnect_for_testing().await });
         disconnect_parked.recv().await;
 
         // The disconnect notified and paused before it takes the sink.
-        let caller = WsRpcClient {
-            shared: client.shared.clone(),
-        };
+        let caller = client.handle();
         let call =
             tokio::spawn(async move { caller.call_value("x.y", serde_json::json!({})).await });
         let wrote = tokio::time::timeout(PROMPT, async {
@@ -2535,18 +2586,14 @@ mod tests {
         let (_blocker, mut send_parked) = client.park_sends().await;
         let (built_gate, mut built) = client.park_at("watch:built");
         let (close_gate, mut close_parked) = client.park_at("close:notified");
-        let caller = WsRpcClient {
-            shared: client.shared.clone(),
-        };
+        let caller = client.handle();
         let mut watch =
             tokio::spawn(
                 async move { caller.set_watch("t", serde_json::json!({"e": null})).await },
             );
         built.recv().await;
 
-        let closer = WsRpcClient {
-            shared: client.shared.clone(),
-        };
+        let closer = client.handle();
         let close = tokio::spawn(async move { closer.close().await });
         close_parked.recv().await;
         // Close notified and paused before it takes the sink; the flush
@@ -2597,9 +2644,7 @@ mod tests {
         reader_parked.recv().await;
 
         let (close_gate, mut close_parked) = client.park_at("close:readers");
-        let closer = WsRpcClient {
-            shared: client.shared.clone(),
-        };
+        let closer = client.handle();
         let mut close = tokio::spawn(async move { closer.close().await });
         let returned = tokio::time::timeout(PROMPT, async {
             tokio::select! {
