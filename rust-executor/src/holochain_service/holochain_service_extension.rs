@@ -88,7 +88,21 @@ fn json_to_msgpack_value(val: &serde_json::Value) -> rmpv::Value {
             } else if let Some(u) = n.as_u64() {
                 rmpv::Value::Integer(rmpv::Integer::from(u))
             } else if let Some(f) = n.as_f64() {
-                rmpv::Value::F64(f)
+                // serde_v8 widens every JS number above u32 to f64, so an
+                // integral value here can still be an integer on the wire —
+                // emit Integer or zome i64/u64 fields (e.g. an Acorn
+                // connection's `randomizer`, Date.now() timestamps) fail to
+                // deserialize. Genuine fractions keep F64; zome f64 fields
+                // accept msgpack ints (rmp_serde converts).
+                if f.fract() == 0.0 && f >= -(2f64.powi(63)) && f < 2f64.powi(64) {
+                    if f >= 0.0 {
+                        rmpv::Value::Integer(rmpv::Integer::from(f as u64))
+                    } else {
+                        rmpv::Value::Integer(rmpv::Integer::from(f as i64))
+                    }
+                } else {
+                    rmpv::Value::F64(f)
+                }
             } else {
                 rmpv::Value::Nil
             }
@@ -430,3 +444,36 @@ deno_core::extension!(
     esm_entry_point = "ext:holochain_service/holochain_service_extension.js",
     esm = [dir "src/holochain_service", "holochain_service_extension.js"]
 );
+
+#[cfg(test)]
+mod tests {
+    use super::json_to_msgpack_value;
+
+    #[test]
+    fn integral_f64_encodes_as_msgpack_integer() {
+        // serde_v8 widens JS numbers above u32 to f64; an integral f64 must
+        // still reach the zome as a msgpack integer or i64 fields refuse it.
+        let v = json_to_msgpack_value(&serde_json::json!(1794912243597.0));
+        assert_eq!(v, rmpv::Value::Integer(1794912243597u64.into()));
+
+        let v = json_to_msgpack_value(&serde_json::json!(-5.0));
+        assert_eq!(v, rmpv::Value::Integer(rmpv::Integer::from(-5i64)));
+    }
+
+    #[test]
+    fn fractional_and_huge_f64_stay_float() {
+        let v = json_to_msgpack_value(&serde_json::json!(1763370000.5));
+        assert_eq!(v, rmpv::Value::F64(1763370000.5));
+
+        let v = json_to_msgpack_value(&serde_json::json!(1e30));
+        assert_eq!(v, rmpv::Value::F64(1e30));
+    }
+
+    #[test]
+    fn small_ints_stay_integers() {
+        let v = json_to_msgpack_value(&serde_json::json!(0u64));
+        assert_eq!(v, rmpv::Value::Integer(0u64.into()));
+        let v = json_to_msgpack_value(&serde_json::json!(4294967296u64));
+        assert_eq!(v, rmpv::Value::Integer(4294967296u64.into()));
+    }
+}
