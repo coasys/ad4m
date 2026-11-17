@@ -330,6 +330,12 @@ commands:
               echo "export PERF_PIPELINE_NUMBER=<< pipeline.number >>"
             } >> "$BASH_ENV"
       # The key is loaded here, before the tests, so a run whose tests fail still pushes.
+      - perf_history_key
+
+  # The history's deploy key, for a job that records (perf_setup, or a job with its own
+  # record step). perf_history_cleanup deletes it.
+  perf_history_key:
+    steps:
       - when:
           condition: << pipeline.parameters.perf-history-key-fingerprint >>
           steps:
@@ -340,7 +346,7 @@ commands:
                 # Push with this key only: ssh would offer the checkout key first, and
                 # GitHub would take it as the (read-only) ad4m deploy key. The runner
                 # also runs PR jobs, so the key leaves ~/.ssh at once: this job keeps a
-                # copy of its own, which perf_finish's last step deletes. (Another nightly
+                # copy of its own, which perf_history_cleanup deletes. (Another nightly
                 # job on the host loads the same file name; a copy per job means its
                 # cleanup never takes this job's key.)
                 name: Perf history - use the history's deploy key
@@ -403,6 +409,14 @@ commands:
           when: always
           path: test-artifacts/perf
           destination: perf
+      - perf_history_cleanup:
+          job: << parameters.job >>
+
+  perf_history_cleanup:
+    parameters:
+      job:
+        type: string
+    steps:
       - run:
           # Nothing of the history outlives the job on the runner: the push key, and any
           # clone a killed command left (each command removes its own). Only this job's
@@ -1322,6 +1336,8 @@ jobs:
           name: Get the executor for this commit (published, else build)
           command: bash scripts/feed-scale.sh executor
           no_output_timeout: 30m
+      # Before the suite, so a failed run still pushes its record.
+      - perf_history_key
       - run:
           name: Build and pack core and connect
           command: bash scripts/feed-scale.sh sdk
@@ -1356,6 +1372,8 @@ jobs:
           when: always
           path: /home/marvin/.cache/ad4m-ci/feed-scale/artifacts
           destination: feed-scale
+      - perf_history_cleanup:
+          job: feed-scale
       - run:
           name: Summary
           when: always

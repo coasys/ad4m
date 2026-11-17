@@ -246,7 +246,9 @@ trend page. The full contract is the header of `scripts/perf/perf.mjs`.
     latency, output tokens/s), with params `{model}`.
 - A new nightly measurement writes a results JSON file (`{"metrics": [...]}`)
   into `$PERF_RESULTS_DIR`. Wrap the job's tests in `perf_setup` and
-  `perf_finish` (`.circleci/config.yml`).
+  `perf_finish` (`.circleci/config.yml`). A job with its own record step
+  (`feed-scale`) calls `perf_history_key` before its tests and
+  `perf_history_cleanup` at the end instead.
 - **Tests**: run `pnpm run test-perf-unit` in `tests/js`. It runs mocha for
   `sfu-perf.unit.test.ts` and `node --test 'scripts/perf/*.test.mjs'`. The git
   tests push only to bare repos in a temp directory. The `js-unit-tests` CI job
