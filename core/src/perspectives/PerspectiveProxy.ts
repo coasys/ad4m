@@ -20,6 +20,7 @@ import { getPropertiesMetadata, getRelationsMetadata } from "../model/decorators
 import { AllInstancesResult } from "../model/types";
 import { LiveQuery, LiveQueryStatus, Subscribed } from "./LiveQuery";
 import type { TranscriptTurn } from "../generated/api";
+import type { MountSyncReport } from "../generated/api/MountSyncReport";
 import type { AgentMessage } from "../generated/api/AgentMessage";
 import type { AgentReply } from "../generated/api/AgentReply";
 import type { JsonValue } from "../generated/api/serde_json/JsonValue";
@@ -757,6 +758,34 @@ export class PerspectiveProxy {
     async subjectClassesOf(uris: string[]): Promise<Record<string, string[]>> {
         if (uris.length === 0) return {};
         return await this.#client.subjectClassesOf(this.#handle.uuid, uris);
+    }
+
+    /**
+     * Mount a language into this perspective: the executor installs the
+     * language's `mountShapes()`, reads `mountSnapshot()`, and keeps the
+     * records in step as local links — model queries, SPARQL and
+     * subscriptions then see them like any other instances.
+     */
+    async mount(languageAddress: string): Promise<boolean> {
+        return await this.#client.mount(this.#handle.uuid, languageAddress);
+    }
+
+    /** Drop a mount: every record link it expanded, plus the mount link itself. */
+    async unmount(languageAddress: string): Promise<boolean> {
+        return await this.#client.unmount(this.#handle.uuid, languageAddress);
+    }
+
+    /**
+     * Re-read the mounted language's snapshot and apply the diff.
+     * Returns how many links the sync added and removed.
+     */
+    async syncMount(languageAddress: string): Promise<MountSyncReport> {
+        return await this.#client.syncMount(this.#handle.uuid, languageAddress);
+    }
+
+    /** The addresses of every language this perspective has mounted. */
+    async mounts(): Promise<string[]> {
+        return await this.#client.mounts(this.#handle.uuid);
     }
 
     /**

@@ -106,6 +106,7 @@ import type { LogTail } from "./LogTail";
 import type { LogTailParams } from "./LogTailParams";
 import type { Model } from "./Model";
 import type { ModelStatus } from "./ModelStatus";
+import type { MountSyncReport } from "./MountSyncReport";
 import type { NeighbourhoodBroadcastParams } from "./NeighbourhoodBroadcastParams";
 import type { NeighbourhoodOnlineStatusParams } from "./NeighbourhoodOnlineStatusParams";
 import type { NeighbourhoodSignalParams } from "./NeighbourhoodSignalParams";
@@ -149,6 +150,7 @@ import type { PerspectiveMintFlowReceiptParams } from "./PerspectiveMintFlowRece
 import type { PerspectiveMintFlowReceiptResult } from "./PerspectiveMintFlowReceiptResult";
 import type { PerspectiveModelQueryParams } from "./PerspectiveModelQueryParams";
 import type { PerspectiveModelSubscribeParams } from "./PerspectiveModelSubscribeParams";
+import type { PerspectiveMountParams } from "./PerspectiveMountParams";
 import type { PerspectiveProposeFlowTransitionParams } from "./PerspectiveProposeFlowTransitionParams";
 import type { PerspectiveQueryLinksParams } from "./PerspectiveQueryLinksParams";
 import type { PerspectiveQueryParams } from "./PerspectiveQueryParams";
@@ -382,6 +384,8 @@ export interface RpcMethods {
   "perspective.mintFlowReceipt": { params: PerspectiveMintFlowReceiptParams; result: PerspectiveMintFlowReceiptResult };
   "perspective.modelQuery": { params: PerspectiveModelQueryParams; result: string };
   "perspective.modelSubscribe": { params: PerspectiveModelSubscribeParams; result: PerspectiveSubscribed };
+  "perspective.mount": { params: PerspectiveMountParams; result: boolean };
+  "perspective.mounts": { params: PerspectiveUuidParams; result: Array<string> };
   "perspective.proposeFlowTransition": { params: PerspectiveProposeFlowTransitionParams; result: ProposeOutcome };
   "perspective.publishSnapshot": { params: PerspectiveUuidParams; result: string };
   "perspective.queryLinks": { params: PerspectiveQueryLinksParams; result: Array<DecoratedLinkExpression> };
@@ -404,6 +408,8 @@ export interface RpcMethods {
   "perspective.subjectClassesOf": { params: PerspectiveSubjectClassesOfParams; result: { [key in string]: Array<string> } };
   "perspective.subscribeQuery": { params: PerspectiveSubscribeQueryParams; result: PerspectiveSubscribed };
   "perspective.subscribeSparql": { params: PerspectiveQueryParams; result: PerspectiveSubscribed };
+  "perspective.syncMount": { params: PerspectiveMountParams; result: MountSyncReport };
+  "perspective.unmount": { params: PerspectiveMountParams; result: boolean };
   "perspective.update": { params: PerspectiveUpdateParams; result: PerspectiveHandle };
   "perspective.updateLink": { params: PerspectiveUpdateLinkParams; result: DecoratedLinkExpression };
   "perspective.updateSubject": { params: PerspectiveUpdateSubjectParams; result: boolean };
@@ -543,6 +549,7 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "perspective.getSubjectData",
   "perspective.interpretationOverlays",
   "perspective.modelQuery",
+  "perspective.mounts",
   "perspective.queryLinks",
   "perspective.queryProlog",
   "perspective.querySparql",
@@ -604,6 +611,7 @@ export const LONG_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "perspective.runAgent",
   "perspective.runInterpretation",
   "perspective.runInterpretationWithHarness",
+  "perspective.syncMount",
   "runtime.restartHolochain",
 ]);
 
