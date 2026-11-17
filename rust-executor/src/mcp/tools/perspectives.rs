@@ -334,10 +334,12 @@ impl Ad4mMcpHandler {
 
         // The method's guard answers before the caller's own arguments are read: a
         // perspective the caller may not write is refused, not validated against.
+        // Admission checks the params against the method's contract too, so it gets
+        // the call's form with no shape yet.
         if let Err(e) = self
             .admit_method(
                 "perspective.registerShapes",
-                &json!({ "uuid": p.perspective_id }),
+                &json!({ "uuid": p.perspective_id, "shapes": [] }),
             )
             .await
         {
@@ -416,6 +418,40 @@ mod guard_tests {
         let added: serde_json::Value = serde_json::from_str(&added).expect(&added);
         assert_eq!(added["success"], true, "{added}");
         assert_eq!(added["link"]["target"], "literal:string:legacy");
+        for uuid in [uuid, other] {
+            crate::perspectives::remove_perspective(&uuid).await;
+        }
+    }
+
+    /// `add_model` registers through `perspective.registerShapes`: the guard answers before
+    /// the shape is read (a caller who may not write the perspective gets 403, not a
+    /// validation error), then the class is written once and a second call changes nothing.
+    #[tokio::test]
+    async fn add_model_is_admitted_before_its_shape_is_read() {
+        setup();
+        let uuid = perspective(None).await;
+        let other = perspective(None).await;
+        let handler = handler_as(app(vec![perspective_update_capability(
+            vec![other.clone()],
+        )]));
+        let add = |perspective_id: &str, shacl_json: &str| AddModelParams {
+            perspective_id: perspective_id.to_string(),
+            class_name: "Note".into(),
+            shacl_json: shacl_json.to_string(),
+        };
+
+        let refused = handler.add_model(Parameters(add(&uuid, "{"))).await;
+        assert_eq!(status(&refused), Some(403), "{refused}");
+
+        let shape = r#"{"target_class": "test://Note", "properties": [
+            {"path": "test://title", "name": "title", "datatype": "xsd:string", "max_count": 1}
+        ]}"#;
+        for changed in [true, false] {
+            let added = handler.add_model(Parameters(add(&other, shape))).await;
+            let added: serde_json::Value = serde_json::from_str(&added).expect(&added);
+            assert_eq!(added["success"], true, "{added}");
+            assert_eq!(added["changed"], changed, "{added}");
+        }
         for uuid in [uuid, other] {
             crate::perspectives::remove_perspective(&uuid).await;
         }
