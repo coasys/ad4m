@@ -1365,7 +1365,7 @@ dependencies = [
  "bitflags 2.13.1",
  "cexpr",
  "clang-sys",
- "itertools 0.13.0",
+ "itertools 0.10.5",
  "log",
  "prettyplease",
  "proc-macro2",
@@ -1385,7 +1385,7 @@ dependencies = [
  "bitflags 2.13.1",
  "cexpr",
  "clang-sys",
- "itertools 0.13.0",
+ "itertools 0.10.5",
  "log",
  "prettyplease",
  "proc-macro2",
@@ -1405,7 +1405,7 @@ dependencies = [
  "bitflags 2.13.1",
  "cexpr",
  "clang-sys",
- "itertools 0.13.0",
+ "itertools 0.10.5",
  "log",
  "prettyplease",
  "proc-macro2",
@@ -3457,7 +3457,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c54e03a951783e8b327515db3f2a2fd0e3bed362a96b066f341ce66ed49b4ead"
 dependencies = [
  "data-encoding",
- "syn 3.0.3",
+ "syn 1.0.109",
 ]
 
 [[package]]
@@ -5562,7 +5562,7 @@ version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ab8ecd87370524b461f8557c119c405552c396ed91fc0a8eec68679eab26f94a"
 dependencies = [
- "libloading 0.8.9",
+ "libloading 0.7.4",
 ]
 
 [[package]]
@@ -6947,7 +6947,7 @@ dependencies = [
  "libc",
  "log",
  "rustversion",
- "windows-link 0.2.1",
+ "windows-link 0.1.3",
  "windows-result 0.4.1",
 ]
 
@@ -12969,9 +12969,9 @@ checksum = "1a80800c0488c3a21695ea981a54918fbb37abf04f4d0720c453632255e2ff0e"
 [[package]]
 name = "oxigraph"
 version = "0.5.13"
-source = "git+https://github.com/coasys/oxigraph.git?rev=4ccc00df2fed7a6f5622745ba147cefe37aa0f80#4ccc00df2fed7a6f5622745ba147cefe37aa0f80"
+source = "git+https://github.com/coasys/oxigraph.git?tag=v0.5.13-coasys.1#76b963e3b07fef286ae13796c5f3a5f5597ae9a1"
 dependencies = [
- "dashmap 5.5.3",
+ "dashmap 6.2.1",
  "getrandom 0.3.4",
  "libc",
  "oxiri",
@@ -12979,14 +12979,13 @@ dependencies = [
  "oxrdfio",
  "oxrocksdb-sys",
  "oxsdatatypes",
- "rand 0.8.5",
  "rand 0.9.5",
  "rustc-hash 2.1.3",
- "siphasher 0.3.11",
+ "siphasher 1.0.3",
  "sparesults",
  "spareval",
  "spargebra",
- "thiserror 1.0.69",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -13007,80 +13006,80 @@ checksum = "54b4ed3a7192fa19f5f48f99871f2755047fabefd7f222f12a1df1773796a102"
 [[package]]
 name = "oxjsonld"
 version = "0.2.7"
-source = "git+https://github.com/coasys/oxigraph.git?rev=4ccc00df2fed7a6f5622745ba147cefe37aa0f80#4ccc00df2fed7a6f5622745ba147cefe37aa0f80"
+source = "git+https://github.com/coasys/oxigraph.git?tag=v0.5.13-coasys.1#76b963e3b07fef286ae13796c5f3a5f5597ae9a1"
 dependencies = [
  "json-event-parser",
  "oxiri",
  "oxrdf",
  "ryu-js",
- "thiserror 1.0.69",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
 name = "oxrdf"
 version = "0.3.5"
-source = "git+https://github.com/coasys/oxigraph.git?rev=4ccc00df2fed7a6f5622745ba147cefe37aa0f80#4ccc00df2fed7a6f5622745ba147cefe37aa0f80"
+source = "git+https://github.com/coasys/oxigraph.git?tag=v0.5.13-coasys.1#76b963e3b07fef286ae13796c5f3a5f5597ae9a1"
 dependencies = [
  "hex",
  "oxilangtag",
  "oxiri",
  "oxsdatatypes",
- "rand 0.8.5",
- "sha2 0.10.9",
- "thiserror 1.0.69",
+ "rand 0.9.5",
+ "sha2 0.11.0",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
 name = "oxrdfio"
 version = "0.2.7"
-source = "git+https://github.com/coasys/oxigraph.git?rev=4ccc00df2fed7a6f5622745ba147cefe37aa0f80#4ccc00df2fed7a6f5622745ba147cefe37aa0f80"
+source = "git+https://github.com/coasys/oxigraph.git?tag=v0.5.13-coasys.1#76b963e3b07fef286ae13796c5f3a5f5597ae9a1"
 dependencies = [
  "oxjsonld",
  "oxrdf",
  "oxrdfxml",
  "oxttl",
- "thiserror 1.0.69",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
 name = "oxrdfxml"
 version = "0.2.5"
-source = "git+https://github.com/coasys/oxigraph.git?rev=4ccc00df2fed7a6f5622745ba147cefe37aa0f80#4ccc00df2fed7a6f5622745ba147cefe37aa0f80"
+source = "git+https://github.com/coasys/oxigraph.git?tag=v0.5.13-coasys.1#76b963e3b07fef286ae13796c5f3a5f5597ae9a1"
 dependencies = [
  "oxilangtag",
  "oxiri",
  "oxrdf",
  "quick-xml 0.37.5",
- "thiserror 1.0.69",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
 name = "oxrocksdb-sys"
 version = "0.5.13"
-source = "git+https://github.com/coasys/oxigraph.git?rev=4ccc00df2fed7a6f5622745ba147cefe37aa0f80#4ccc00df2fed7a6f5622745ba147cefe37aa0f80"
+source = "git+https://github.com/coasys/oxigraph.git?tag=v0.5.13-coasys.1#76b963e3b07fef286ae13796c5f3a5f5597ae9a1"
 dependencies = [
- "bindgen 0.71.1",
+ "bindgen 0.72.1",
  "cc",
 ]
 
 [[package]]
 name = "oxsdatatypes"
 version = "0.2.4"
-source = "git+https://github.com/coasys/oxigraph.git?rev=4ccc00df2fed7a6f5622745ba147cefe37aa0f80#4ccc00df2fed7a6f5622745ba147cefe37aa0f80"
+source = "git+https://github.com/coasys/oxigraph.git?tag=v0.5.13-coasys.1#76b963e3b07fef286ae13796c5f3a5f5597ae9a1"
 dependencies = [
- "thiserror 1.0.69",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
 name = "oxttl"
 version = "0.2.5"
-source = "git+https://github.com/coasys/oxigraph.git?rev=4ccc00df2fed7a6f5622745ba147cefe37aa0f80#4ccc00df2fed7a6f5622745ba147cefe37aa0f80"
+source = "git+https://github.com/coasys/oxigraph.git?tag=v0.5.13-coasys.1#76b963e3b07fef286ae13796c5f3a5f5597ae9a1"
 dependencies = [
  "memchr",
  "oxilangtag",
  "oxiri",
  "oxrdf",
- "thiserror 1.0.69",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -16988,57 +16987,57 @@ dependencies = [
 [[package]]
 name = "sparesults"
 version = "0.3.5"
-source = "git+https://github.com/coasys/oxigraph.git?rev=4ccc00df2fed7a6f5622745ba147cefe37aa0f80#4ccc00df2fed7a6f5622745ba147cefe37aa0f80"
+source = "git+https://github.com/coasys/oxigraph.git?tag=v0.5.13-coasys.1#76b963e3b07fef286ae13796c5f3a5f5597ae9a1"
 dependencies = [
  "json-event-parser",
  "memchr",
  "oxrdf",
  "quick-xml 0.37.5",
- "thiserror 1.0.69",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
 name = "spareval"
 version = "0.2.9"
-source = "git+https://github.com/coasys/oxigraph.git?rev=4ccc00df2fed7a6f5622745ba147cefe37aa0f80#4ccc00df2fed7a6f5622745ba147cefe37aa0f80"
+source = "git+https://github.com/coasys/oxigraph.git?tag=v0.5.13-coasys.1#76b963e3b07fef286ae13796c5f3a5f5597ae9a1"
 dependencies = [
  "hex",
  "json-event-parser",
- "md-5 0.10.6",
+ "md-5 0.11.0",
  "oxiri",
  "oxrdf",
  "oxsdatatypes",
- "rand 0.8.5",
+ "rand 0.9.5",
  "regex",
  "rustc-hash 2.1.3",
- "sha1 0.10.7",
- "sha2 0.10.9",
+ "sha1 0.11.0",
+ "sha2 0.11.0",
  "sparesults",
  "spargebra",
  "sparopt",
- "thiserror 1.0.69",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
 name = "spargebra"
 version = "0.4.8"
-source = "git+https://github.com/coasys/oxigraph.git?rev=4ccc00df2fed7a6f5622745ba147cefe37aa0f80#4ccc00df2fed7a6f5622745ba147cefe37aa0f80"
+source = "git+https://github.com/coasys/oxigraph.git?tag=v0.5.13-coasys.1#76b963e3b07fef286ae13796c5f3a5f5597ae9a1"
 dependencies = [
  "oxilangtag",
  "oxiri",
  "oxrdf",
  "peg",
- "rand 0.8.5",
- "thiserror 1.0.69",
+ "rand 0.9.5",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
 name = "sparopt"
 version = "0.3.9"
-source = "git+https://github.com/coasys/oxigraph.git?rev=4ccc00df2fed7a6f5622745ba147cefe37aa0f80#4ccc00df2fed7a6f5622745ba147cefe37aa0f80"
+source = "git+https://github.com/coasys/oxigraph.git?tag=v0.5.13-coasys.1#76b963e3b07fef286ae13796c5f3a5f5597ae9a1"
 dependencies = [
  "oxrdf",
- "rand 0.8.5",
+ "rand 0.9.5",
  "spargebra",
 ]
 
