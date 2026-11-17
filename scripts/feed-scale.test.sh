@@ -42,7 +42,7 @@ setup() {
     export FEED_SCALE_STATE="$TMP/state"
     export EXECUTOR_PUBLISH_DIR="$TMP/publish"
     export FEED_SCALE_NO_BUILD=1
-    unset FEED_SCALE_FORCE FEED_SCALE_MESSAGES WE_REF COASYS_SPACES_WORK COASYS_SPACES_ARTIFACTS FAKE_SUITE
+    unset FEED_SCALE_FORCE FEED_SCALE_MESSAGES FEED_SCALE_MIN_FREE_GB WE_REF COASYS_SPACES_WORK COASYS_SPACES_ARTIFACTS FAKE_SUITE
     mkdir -p "$EXECUTOR_PUBLISH_DIR"
 }
 
@@ -76,6 +76,7 @@ EOF
 import { writeFileSync, mkdtempSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { spawn } from 'node:child_process';
 const mode = process.env.FAKE_SUITE ?? 'pass';
 // What the harness does: a data dir under TMPDIR.
 mkdtempSync(join(tmpdir(), 'we-live-web-'));
@@ -85,6 +86,15 @@ writeFileSync(join(process.env.FEED_SCALE_ARTIFACTS, 'env.json'), JSON.stringify
   data: readdirSync(process.env.TMPDIR),
 }));
 if (mode === 'crash') process.exit(3);
+if (mode === 'hang') {
+  // A run stopped mid-suite: a marker in the data dir and a child in the same process
+  // group. The test kills the step and checks both are gone.
+  writeFileSync(join(tmpdir(), 'left.txt'), 'x');
+  const child = spawn('sleep', ['300']);
+  writeFileSync(join(process.env.FEED_SCALE_ARTIFACTS, 'suite-child.pid'), String(child.pid));
+  writeFileSync(join(process.env.FEED_SCALE_ARTIFACTS, 'suite-up'), '');
+  await new Promise(() => {});
+}
 const status = mode === 'pass' ? 'passed' : 'failed';
 const metrics = [{ metric: 'feed.newest_page.median', value: 1, unit: 'ms', better: 'lower', params: {} }];
 writeFileSync(join(process.env.FEED_SCALE_ARTIFACTS, 'results.json'), JSON.stringify({
@@ -168,6 +178,70 @@ test_suite_failure_fails_the_step() {
     FAKE_SUITE=fail bash "$SCRIPT" test >/dev/null 2>&1 && fail "a failing suite passed the step"
     FAKE_SUITE=crash bash "$SCRIPT" test >/dev/null 2>&1 && fail "a crashing suite passed the step"
     [ -z "$(ls -A "$FEED_SCALE_WORK/tmp")" ] || fail "a failed run left its data"
+}
+
+test_a_stopped_run_is_cleaned_up() {
+    make_installed_we
+    FAKE_SUITE=hang bash "$SCRIPT" test >/dev/null 2>&1 &
+    local tpid=$! i
+    for i in $(seq 100); do [ -e "$FEED_SCALE_ARTIFACTS/suite-up" ] && break; sleep 0.1; done
+    [ -e "$FEED_SCALE_ARTIFACTS/suite-up" ] || fail "the suite did not start"
+    [ -e "$FEED_SCALE_WORK/tmp/left.txt" ] || fail "the suite left no file in the data dir"
+    kill -TERM "$tpid"
+    local rc=0
+    wait "$tpid" || rc=$?
+    [ "$rc" -ne 0 ] || fail "a killed step exited 0"
+    [ -z "$(ls -A "$FEED_SCALE_WORK/tmp")" ] || fail "a killed run left its data: $(ls -A "$FEED_SCALE_WORK/tmp")"
+    kill -0 "$(cat "$FEED_SCALE_ARTIFACTS/suite-child.pid")" 2>/dev/null &&
+        fail "a process from the suite's group survived"
+}
+
+test_a_failing_tee_fails_the_step() {
+    make_installed_we
+    # A tee that writes what it is given but fails on the suite log, as ENOSPC would.
+    mkdir -p "$TMP/bin"
+    cat >"$TMP/bin/tee" <<'EOF'
+#!/usr/bin/env bash
+cat >"$1"
+case "$1" in
+    */test-feed-scale.log) exit 1 ;;
+esac
+EOF
+    chmod +x "$TMP/bin/tee"
+    PATH="$TMP/bin:$PATH" bash "$SCRIPT" test >/dev/null 2>&1 && fail "a failing tee passed the step"
+    grep -qF "suite passed" "$FEED_SCALE_ARTIFACTS/test-feed-scale.log" || fail "the suite's log is not in the artifacts"
+}
+
+test_the_disk_guard_refuses_below_the_minimum() {
+    make_installed_we
+    out="$(FEED_SCALE_MIN_FREE_GB=99999999 bash "$SCRIPT" test 2>&1)" && fail "the step ran below the free-space minimum"
+    grep -qF "FEED_SCALE_MIN_FREE_GB" <<<"$out" || fail "the reason is not given: $out"
+    [ ! -e "$FEED_SCALE_ARTIFACTS/results.json" ] || fail "the suite ran below the minimum"
+}
+
+test_the_we_step_clones_the_pinned_commit() {
+    make_we_remote
+    preflight_exits 0
+    [ "$(cat "$FEED_SCALE_WORK/we.pinned")" = "$WE_HEAD" ] ||
+        fail "preflight pinned $(cat "$FEED_SCALE_WORK/we.pinned" 2>/dev/null || echo nothing)"
+    # A pin that preflight cannot resolve does not survive the next preflight.
+    echo stale >"$FEED_SCALE_WORK/we.pinned"
+    WE_REF=no-such-branch preflight_exits 0
+    [ ! -e "$FEED_SCALE_WORK/we.pinned" ] || fail "a stale pin survived a preflight"
+    # A push to the ref between preflight and the we step does not change what is cloned.
+    preflight_exits 0
+    git -C "$WE_REPO" -c user.name=t -c user.email=t@t commit -q --allow-empty -m two
+    printf '#!/usr/bin/env bash\necho "coasys-spaces $1 WE_REF=$WE_REF"\n' >"$TMP/ad4m/scripts/coasys-spaces.sh"
+    out="$(bash "$SCRIPT" we)"
+    grep -qxF "coasys-spaces we WE_REF=$WE_HEAD" <<<"$out" || fail "the we step did not use the pin: $out"
+}
+
+test_rm_rf_targets_are_guarded() {
+    out="$(FEED_SCALE_WORK=relative bash "$SCRIPT" summary 2>&1)" && fail "a relative WORK was taken"
+    grep -qF "not an absolute path" <<<"$out" || fail "the reason is not given: $out"
+    out="$(FEED_SCALE_WORK=/ bash "$SCRIPT" summary 2>&1)" && fail "WORK=/ was taken"
+    out="$(FEED_SCALE_WORK="$HOME" bash "$SCRIPT" summary 2>&1)" && fail "WORK=\$HOME was taken"
+    out="$(FEED_SCALE_ARTIFACTS=relative bash "$SCRIPT" summary 2>&1)" && fail "a relative ARTIFACTS was taken"
 }
 
 test_test_needs_the_script_in_we() {

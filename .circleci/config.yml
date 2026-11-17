@@ -1318,8 +1318,6 @@ jobs:
           name: Get the executor for this commit (published, else build)
           command: bash scripts/feed-scale.sh executor
           no_output_timeout: 30m
-      # Before the suite, so a failed run still pushes its record.
-      - perf_history_key
       - run:
           name: Build and pack core and connect
           command: bash scripts/feed-scale.sh sdk
@@ -1337,6 +1335,9 @@ jobs:
           name: Build we-web
           command: bash scripts/feed-scale.sh build-web
           no_output_timeout: 20m
+      # add_ssh_keys takes no `when: always`, so this cannot go between the suite and
+      # perf steps: a failed suite would skip it and the run's record would not push.
+      - perf_history_key
       - run:
           # The seed logs every 1%; one page load at a million may wait several minutes.
           name: Run the feed-scale suite (WE test:feed-scale)
@@ -1350,6 +1351,12 @@ jobs:
       - run:
           name: Record this commit pair and size as measured
           command: bash scripts/feed-scale.sh record
+      - run:
+          # A stopped or timed-out suite can leave the executor, a browser or its tens
+          # of GB behind.
+          name: Stop what the run left and empty the data dir
+          when: always
+          command: bash scripts/feed-scale.sh cleanup
       - store_artifacts:
           when: always
           path: /home/marvin/.cache/ad4m-ci/feed-scale/artifacts

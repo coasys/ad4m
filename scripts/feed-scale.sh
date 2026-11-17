@@ -9,15 +9,21 @@
 # them in order, for a run by hand.
 #
 #   scripts/feed-scale.sh preflight   exit 10 when this ad4m commit and this WE commit were already
-#                                     measured at this size (the job then halts green); clears the
-#                                     artifacts
+#                                     measured at this size (the job then halts green); kills the
+#                                     last run's leftovers, clears the artifacts and pins the
+#                                     resolved WE commit (<work>/we.pinned) for the we step
 #   scripts/feed-scale.sh executor    \
 #   scripts/feed-scale.sh sdk          | coasys-spaces.sh's steps of the same names, in this job's
 #   scripts/feed-scale.sh we           | own work dir: the executor for the commit, the packed SDK,
 #   scripts/feed-scale.sh build-web   /  WE with that SDK, we-web built with the Coasys seed
 #   scripts/feed-scale.sh test        run test:feed-scale; its log, results.json and the executor
 #                                     log go to the artifacts. The executor's data (tens of GB at a
-#                                     million messages) goes to <work>/tmp, emptied before and after
+#                                     million messages) goes to <work>/tmp, emptied before and
+#                                     after — also when the step is stopped: the suite runs in a
+#                                     process group of its own so a kill reaches the executor and
+#                                     the browser too
+#   scripts/feed-scale.sh cleanup     kill what a stopped run left (the executor, a process with
+#                                     its data under <work>/tmp) and empty the data dir
 #   scripts/feed-scale.sh perf        hand metrics.json to the performance history:
 #                                     scripts/perf/record, scripts/perf/report (the trend page),
 #                                     then scripts/perf/check on a passed run (a serious
@@ -38,6 +44,8 @@
 #   FEED_SCALE_NO_BUILD=1   fail instead of building an executor that is not published
 #   EXECUTOR_PUBLISH_DIR    the published executors (/mnt/hdd/executor-artifacts)
 #   FEED_SCALE_MESSAGES     messages seeded (1000000); a run at another size is its own series
+#   FEED_SCALE_MIN_FREE_GB  free GB on <work> the test step insists on before it seeds (40; a
+#                           million-message store is ~12 GB on disk and the seeding peaks higher)
 #   FEED_SCALE_*            every other knob of the suite (runs, seeding mode and tuning, page
 #                           timeout) passes through to it; see the suite's README
 #   PERF_HISTORY_*          where scripts/perf keeps the history (a git repository; see the header
@@ -52,6 +60,7 @@ WORK="${FEED_SCALE_WORK:-${XDG_CACHE_HOME:-$HOME/.cache}/ad4m-ci/feed-scale}"
 ARTIFACTS="${FEED_SCALE_ARTIFACTS:-$WORK/artifacts}"
 STATE="${FEED_SCALE_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/ad4m-ci/feed-scale}"
 MESSAGES="${FEED_SCALE_MESSAGES:-1000000}"
+MIN_FREE_GB="${FEED_SCALE_MIN_FREE_GB:-40}"
 JOB=feed-scale
 
 WE_DIR="$WORK/we"
@@ -72,6 +81,26 @@ die() {
 is_sha() { printf '%s' "$1" | grep -Eq '^[0-9a-f]{40}$'; }
 
 [[ $MESSAGES =~ ^[1-9][0-9]*$ ]] || die "FEED_SCALE_MESSAGES '$MESSAGES' is not a positive whole number"
+[[ $MIN_FREE_GB =~ ^[0-9]+$ ]] || die "FEED_SCALE_MIN_FREE_GB '$MIN_FREE_GB' is not a whole number"
+
+# $DATA and $ARTIFACTS get rm -rf, whatever the subcommand. Refuse the values that would make
+# that rm -rf disastrous — a relative path, / or $HOME itself.
+guard_rm_dirs() {
+    local var val
+    for var in WORK ARTIFACTS; do
+        val="${!var}"
+        case "$val" in
+            /*) ;;
+            *) die "$var '$val' is not an absolute path" ;;
+        esac
+        # Nothing left without its slashes is / (or //); $HOME with or without a
+        # trailing slash is $HOME.
+        if [ -z "${val//\//}" ] || [ "${val%/}" = "$HOME" ]; then
+            die "$var is '${!var}'; a run rm -rf's under it"
+        fi
+    done
+}
+guard_rm_dirs
 
 # coasys-spaces.sh's step of the same name, in this job's work dir. The steps are the same; the
 # work dir is not, because the two jobs are in different serial groups and may run at once.
@@ -79,18 +108,30 @@ coasys_spaces() {
     COASYS_SPACES_WORK="$WORK" \
         COASYS_SPACES_ARTIFACTS="$ARTIFACTS" \
         COASYS_SPACES_NO_BUILD="${FEED_SCALE_NO_BUILD:-}" \
-        AD4M_SHA="$AD4M_SHA" WE_REPO="$WE_REPO" WE_REF="$WE_REF" \
+        AD4M_SHA="$AD4M_SHA" WE_REPO="$WE_REPO" WE_REF="${2:-$WE_REF}" \
         bash "$REPO/scripts/coasys-spaces.sh" "$1"
 }
+
+# What the we step clones: the commit preflight pinned in we.pinned, or WE_REF when the steps
+# run without a preflight that resolved one. coasys-spaces.sh's we takes a full sha.
+we_ref() {
+    local pin
+    pin="$(cat "$WORK/we.pinned" 2>/dev/null || true)"
+    echo "${pin:-$WE_REF}"
+}
+
+cmd_we() { coasys_spaces we "$(we_ref)"; }
 
 # What a measurement is recorded under: both commits and the size.
 run_key() { echo "$AD4M_SHA $1 messages=$MESSAGES"; }
 
 cmd_preflight() {
+    # Whatever a stopped run left behind: a live executor or suite, and its data.
+    cmd_cleanup
     rm -rf "$ARTIFACTS"
     mkdir -p "$ARTIFACTS" "$WORK"
     local we_sha last changes
-    rm -f "$WORK/unrecorded"
+    rm -f "$WORK/unrecorded" "$WORK/we.pinned"
     changes="$(git -C "$REPO" status --porcelain)"
     if [ -n "$changes" ]; then
         printf '%s\n' "$changes" >"$WORK/unrecorded"
@@ -110,6 +151,9 @@ cmd_preflight() {
         log "cannot resolve WE ref '$WE_REF' on $WE_REPO; running"
         return 0
     fi
+    # The we step clones exactly this commit: a push to WE_REF between now and then must not
+    # measure another WE than the skip check's.
+    printf '%s\n' "$we_sha" >"$WORK/we.pinned"
     if [ "${FEED_SCALE_FORCE:-}" = 1 ]; then
         log "FEED_SCALE_FORCE=1; running ad4m $AD4M_SHA with WE $we_sha"
         return 0
@@ -137,6 +181,38 @@ empty_data() {
     mkdir -p "$DATA"
 }
 
+# What a stopped step can leave on a shared runner: the executor still running, a suite
+# process with its data under $DATA. Killed by command line, this user's processes only;
+# no match is not an error. Then the data dir goes.
+cmd_cleanup() {
+    pkill -u "$(id -u)" -f "$EXECUTOR" 2>/dev/null || true
+    pkill -u "$(id -u)" -f "$DATA/" 2>/dev/null || true
+    empty_data
+}
+
+# The way out of the suite in cmd_test, whether it returned or the step was stopped (a
+# timeout's or a cancel's TERM): TERM the suite's whole process group — the executor and
+# the browser it opened, not just pnpm — give it a few seconds, KILL it, wait for it and
+# empty the data dir. The status the function had stays the step's.
+suite_cleanup() {
+    local rc=$?
+    trap - EXIT TERM INT
+    if [ -n "${suite_pid:-}" ] && kill -0 -- "-$suite_pid" 2>/dev/null; then
+        # The group can be gone between the check and the kill; ESRCH must not end the
+        # cleanup early under set -e.
+        kill -TERM -- "-$suite_pid" 2>/dev/null || true
+        local i
+        for i in 1 2 3 4 5; do
+            kill -0 -- "-$suite_pid" 2>/dev/null || break
+            sleep 1
+        done
+        kill -KILL -- "-$suite_pid" 2>/dev/null || true
+        wait "$suite_pid" 2>/dev/null || true
+    fi
+    empty_data
+    exit "$rc"
+}
+
 cmd_test() {
     [ -x "$EXECUTOR" ] || die "no executor at $EXECUTOR (run the executor step)"
     # `pnpm --filter` that matches no package, or a package without the script, runs nothing and
@@ -157,16 +233,33 @@ cmd_test() {
         echo "data $DATA ($(df -h --output=avail "$WORK" | tail -1 | tr -d ' ') free)"
     } | tee "$ARTIFACTS/run.txt"
     empty_data
-    local rc=0
-    (
-        cd "$WE_DIR"
-        TMPDIR="$DATA" \
-            AD4M_EXECUTOR="$EXECUTOR" \
-            FEED_SCALE_MESSAGES="$MESSAGES" \
-            FEED_SCALE_ARTIFACTS="$ARTIFACTS" \
-            pnpm --filter "$WE_PACKAGE" test:feed-scale 2>&1 | tee "$ARTIFACTS/test-feed-scale.log"
-        exit "${PIPESTATUS[0]}"
-    ) || rc=$?
+    local free_kb suite_pid rc=0
+    # A million-message store is ~12 GB on disk and the seeding peaks higher; starting under
+    # the minimum is a suite that dies half-way, mid-measurement.
+    free_kb="$(df -k --output=avail "$WORK" | tail -1 | tr -d ' ')"
+    [ "$free_kb" -ge "$((MIN_FREE_GB * 1024 * 1024))" ] ||
+        die "only $((free_kb / 1024 / 1024)) GB free on $WORK; a run needs $MIN_FREE_GB GB (FEED_SCALE_MIN_FREE_GB)"
+    # setsid gives the suite a session — and so a process group — of its own, so
+    # suite_cleanup's kill reaches the executor and the browser, not just pnpm. -w: if setsid
+    # has to fork (its caller leads a group), it still waits, so $! lives as long as the suite.
+    suite_pid=
+    trap suite_cleanup EXIT
+    trap 'exit 143' TERM
+    trap 'exit 130' INT
+    TMPDIR="$DATA" \
+    AD4M_EXECUTOR="$EXECUTOR" \
+    FEED_SCALE_MESSAGES="$MESSAGES" \
+    FEED_SCALE_ARTIFACTS="$ARTIFACTS" \
+        setsid -w bash -c '
+            cd "$1" || exit 1
+            pnpm --filter "$2" test:feed-scale 2>&1 | tee "$3"
+            st=("${PIPESTATUS[@]}")
+            # pnpm when it failed, else tee: a truncated log fails the step too.
+            exit $((st[0] != 0 ? st[0] : st[1]))
+        ' -- "$WE_DIR" "$WE_PACKAGE" "$ARTIFACTS/test-feed-scale.log" &
+    suite_pid=$!
+    wait "$suite_pid" || rc=$?
+    trap - EXIT TERM INT
     empty_data
     return "$rc"
 }
@@ -239,8 +332,10 @@ cmd_summary() {
 
 case "${1:-}" in
     preflight) cmd_preflight ;;
-    executor | sdk | we | build-web) coasys_spaces "$1" ;;
+    executor | sdk | build-web) coasys_spaces "$1" ;;
+    we) cmd_we ;;
     test) cmd_test ;;
+    cleanup) cmd_cleanup ;;
     perf) cmd_perf ;;
     record) cmd_record ;;
     summary) cmd_summary ;;
@@ -248,7 +343,7 @@ case "${1:-}" in
         FEED_SCALE_FORCE=1 cmd_preflight
         coasys_spaces executor
         coasys_spaces sdk
-        coasys_spaces we
+        cmd_we
         coasys_spaces build-web
         rc=0
         (cmd_test) || rc=$?
