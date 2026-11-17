@@ -43,6 +43,9 @@ setup() {
     export EXECUTOR_PUBLISH_DIR="$TMP/publish"
     export FEED_SCALE_NO_BUILD=1
     unset FEED_SCALE_FORCE FEED_SCALE_MESSAGES WE_REF COASYS_SPACES_WORK COASYS_SPACES_ARTIFACTS FAKE_SUITE
+    # CircleCI's BASH_ENV re-exports PATH in every non-interactive bash (the suite's `bash -c`
+    # too), which would drop the fakes a test puts first in PATH.
+    unset BASH_ENV
     # The fakes write a few KB: the disk guard is off, except in its own test (the CI host's
     # temp dir has less than the default 40 GB free).
     export FEED_SCALE_MIN_FREE_GB=0
@@ -170,7 +173,8 @@ test_suite_runs_with_its_data_in_the_work_dir() {
     [ "$(jq -r .FEED_SCALE_MESSAGES "$env")" = 10000 ] || fail "FEED_SCALE_MESSAGES did not reach the suite"
     [ "$(jq -r .FEED_SCALE_RUNS "$env")" = 2 ] || fail "FEED_SCALE_RUNS did not pass through"
     # The stale dir was gone before the suite started; the suite's own was gone after it ended.
-    [ "$(jq -r '.data | length' "$env")" = 1 ] || fail "the data dir was not emptied first: $(jq -c .data "$env")"
+    # (Node may add its own entries there, as `node-compile-cache` on the CI host.)
+    [ "$(jq -r '.data | index("we-live-web-stale")' "$env")" = null ] || fail "the data dir was not emptied first: $(jq -c .data "$env")"
     [ -z "$(ls -A "$FEED_SCALE_WORK/tmp")" ] || fail "the data dir was left with: $(ls "$FEED_SCALE_WORK/tmp")"
     grep -qF "suite passed" "$FEED_SCALE_ARTIFACTS/test-feed-scale.log" || fail "the suite's log is not in the artifacts"
     grep -qF "messages 10000" "$FEED_SCALE_ARTIFACTS/run.txt" || fail "run.txt does not say the size"
