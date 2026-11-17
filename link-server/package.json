@@ -10,9 +10,11 @@
     "build": "tsc && chmod +x dist/index.js",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
-    "test": "node --import tsx --test tests/*.test.ts"
+    "test": "node --import tsx --test tests/*.test.ts",
+    "bench": "tsx bench/large-room.ts"
   },
   "dependencies": {
+    "@fastify/compress": "^9.3.0",
     "@fastify/websocket": "^11.0.0",
     "@noble/ciphers": "^1.0.0",
     "@noble/curves": "^1.6.0",

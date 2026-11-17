@@ -33,11 +33,11 @@ pub use gossip::{
     CascadeGossip, GossipTarget, NoopGossip,
 };
 pub use reachability::{is_private_ip, SfuReachability};
-pub use service::{get_sfu_service, SfuService, MAX_MESH_PARTICIPANTS};
+pub use service::{get_sfu_service, CallJoinError, SfuService, MAX_MESH_PARTICIPANTS};
 pub use types::{
     CallSessionInfo, IceServer, SfuCallRenegotiationOffer, SfuConfig, SfuDataMessage,
     SfuMigrateEvent, SfuParticipantInfo, SfuPipeRenegotiationAnswer, SfuPipeRenegotiationOffer,
-    SfuRoomInfo, SfuRoomRoster, TrackMapEntry,
+    SfuRoomInfo, SfuRoomRoster, SfuRosterParticipant, SfuSessionReplaced, TrackMapEntry,
 };
 
 /// Detect the default outbound IP address of this machine.

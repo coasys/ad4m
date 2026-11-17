@@ -49,6 +49,14 @@ impl WsRpcError {
             message: msg.into(),
         }
     }
+    /// 409: the call does not fit the executor's state (`no-config-file`, `no-log-file`, an
+    /// `agent.generate` on an agent that is already initialised).
+    pub fn conflict(msg: impl Into<String>) -> Self {
+        Self {
+            code: 409,
+            message: msg.into(),
+        }
+    }
     pub fn too_many_requests(msg: impl Into<String>) -> Self {
         Self {
             code: 429,
@@ -243,6 +251,10 @@ pub struct MethodSpec {
     /// Can run for minutes (LLM work, Holochain, publishing): the client's
     /// default timeout is its long one.
     pub long: bool,
+    /// Opens something on the executor that lives past the call (a live query): the
+    /// connection caps how many run at once and cancels them when it closes, and the
+    /// client cancels one that timed out (`request.cancel`), as it does one it aborted.
+    pub opens: bool,
 }
 
 type Check = fn(&Value) -> Result<(), String>;
@@ -259,9 +271,13 @@ struct Entry {
     guard: Option<Guard>,
     /// [`MethodFlags::or_null`]: answer `null` where the method would answer 404.
     or_null: bool,
+    /// [`MethodFlags::local_only`]: only the operator on this machine may call it.
+    local_only: bool,
+    /// [`MethodFlags::opens`].
+    opens: bool,
 }
 
-/// Returned by [`HandlerMap::method`] to mark a method `read` or `long` and to set its
+/// Returned by [`HandlerMap::method`] to mark a method `read`, `long` or `opens` and to set its
 /// guard.
 pub struct MethodFlags<'a> {
     spec: &'a mut MethodSpec,
@@ -278,6 +294,20 @@ impl MethodFlags<'_> {
         self.spec.long = true;
         self
     }
+    /// The method opens something that outlives the call: a live query, which belongs to
+    /// the connection that opened it ([`MethodSpec::opens`]).
+    pub fn opens(self) -> Self {
+        let name = &self.spec.name;
+        let entry = self
+            .entry
+            .unwrap_or_else(|| panic!("'{name}' is not dispatched through the map: no opens"));
+        entry.opens = true;
+        self.spec.opens = true;
+        MethodFlags {
+            spec: self.spec,
+            entry: Some(entry),
+        }
+    }
     /// The method answers `null` where it would answer 404: a resource that is missing or not
     /// the caller's (the guard's answer, D6), or one that went away before the handler read
     /// it. For reads whose SDK result is optional (`perspective.get`, `perspective.snapshot`).
@@ -292,6 +322,27 @@ impl MethodFlags<'_> {
             entry: Some(entry),
         }
     }
+
+    /// Only the operator on this machine may call the method: the admin credential, or no token
+    /// on an executor without one, on a loopback listener
+    /// ([`Session::is_operator_on_this_machine`]). The dispatcher checks it after the guard;
+    /// every other caller, a grant with every capability and the admin credential on a
+    /// network listener included, gets 403 [`super::guards::LOCAL_ONLY`]. For calls that
+    /// replace, open or use the executor's own keys, files or process.
+    ///
+    /// [`Session::is_operator_on_this_machine`]: crate::agent::session::Session::is_operator_on_this_machine
+    pub fn local_only(self) -> Self {
+        let name = &self.spec.name;
+        let entry = self
+            .entry
+            .unwrap_or_else(|| panic!("'{name}' is not dispatched through the map: no local_only"));
+        entry.local_only = true;
+        MethodFlags {
+            spec: self.spec,
+            entry: Some(entry),
+        }
+    }
+
     /// Who may call the method. The dispatcher runs the guard after the params deserialize
     /// and before the handler.
     pub fn guard(self, guard: Guard) -> Self {
@@ -321,6 +372,7 @@ where
         result: TsType::of::<R>(),
         read: false,
         long: false,
+        opens: false,
     });
     specs.last_mut().expect("just pushed")
 }
@@ -362,6 +414,8 @@ impl HandlerMap {
             result: check::<R>,
             guard: None,
             or_null: false,
+            local_only: false,
+            opens: false,
         });
         MethodFlags {
             spec: push_spec::<P, R>(&mut self.specs, name),
@@ -405,6 +459,23 @@ impl HandlerMap {
             .collect();
         names.sort();
         names
+    }
+
+    /// The methods flagged [`MethodFlags::local_only`], sorted by name.
+    pub fn local_only_methods(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = self
+            .handlers
+            .iter()
+            .filter(|(_, entry)| entry.local_only)
+            .map(|(name, _)| name.as_str())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// Whether `name` is a dispatched method flagged [`MethodFlags::opens`].
+    pub fn opens(&self, name: &str) -> bool {
+        self.handlers.get(name).is_some_and(|entry| entry.opens)
     }
 
     /// Every method contract, sorted by name.
@@ -467,7 +538,13 @@ impl HandlerMap {
             WsRpcError::bad_request(format!("Invalid params for {}: {}", msg_type, e))
         })?;
         match &entry.guard {
-            Some(guard) => guard.admit(msg_type, params, ctx).await,
+            Some(guard) => {
+                guard.admit(msg_type, params, ctx).await?;
+                if entry.local_only && !ctx.session.is_operator_on_this_machine() {
+                    return Err(WsRpcError::forbidden(super::guards::LOCAL_ONLY));
+                }
+                Ok(())
+            }
             // `require_guards` stops a map with such a method at start-up; a map built
             // without it still refuses the call.
             None => Err(WsRpcError::internal(format!(
@@ -511,7 +588,9 @@ pub fn build_handler_map() -> HandlerMap {
     super::agent_ws::register_ws_handlers(&mut map);
     super::perspectives_ws::register_ws_handlers(&mut map);
     super::agent_session_ws::register_ws_handlers(&mut map);
+    super::ai_sessions_ws::register_ws_handlers(&mut map);
     super::runtime_ws::register_ws_handlers(&mut map);
+    super::config_ws::register_ws_handlers(&mut map);
     super::languages_ws::register_ws_handlers(&mut map);
     super::expressions_ws::register_ws_handlers(&mut map);
     super::ai_ws::register_ws_handlers(&mut map);
@@ -519,6 +598,7 @@ pub fn build_handler_map() -> HandlerMap {
     super::users_ws::register_ws_handlers(&mut map);
     super::hosting_ws::register_ws_handlers(&mut map);
     super::sfu_ws::register_ws_handlers(&mut map);
+    super::identity_ws::register_ws_handlers(&mut map);
     // Event type → the perspectives wanted (`null`: all); replaces the socket's interest.
     map.inline::<super::event_interest::WatchParams, bool>(super::event_interest::WATCH);
     map.inline::<NoParams, bool>(super::event_interest::UNWATCH);

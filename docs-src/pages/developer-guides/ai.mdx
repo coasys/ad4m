@@ -3,182 +3,156 @@ import { Callout } from "nextra-theme-docs";
 # AI in AD4M
 
 <Callout type="info">
-**Looking for AI agent integration?** This page covers running AI models *inside* AD4M. If you want AI agents to *use* AD4M — creating perspectives, managing data, joining neighbourhoods — see the [MCP Server guide](/developer-guides/mcp).
+**Looking for AI agent integration?** This page covers running AI models *for* AD4M. If you want AI agents to *use* AD4M — creating perspectives, managing data, joining neighbourhoods — see the [MCP Server guide](/developer-guides/mcp).
 </Callout>
 
-AD4M provides powerful AI capabilities through both local and remote model inference. This allows you to integrate various AI models into your applications, from language models to embedding models and speech recognition.
+AD4M gives applications language models, embeddings, speech-to-text and text-to-speech. The executor runs no model itself: it sends each request to a **model server**, on your machine (Ollama, llama-server, vLLM, speaches) or remote (OpenAI, Anthropic, any OpenAI-compatible API). It keeps the parts that are AD4M's: who may use which model, billing, AI tasks, the agent tool loop, transcription streams and their events.
 
 ## Overview
 
-The AI system in AD4M supports:
-- Large Language Models (LLM) for text generation and chat
-- Embedding Models for vector representations of text
-- Speech-to-Text Models for audio transcription
-- Both local and remote (API-based) model execution
-- Model management and configuration
-- Task-based inference with system prompts and examples
+- An **endpoint** is one model server: a kind, a URL, an optional key, its capabilities (chat, embeddings, transcription, speech) and its health, checked every minute.
+- A **model** is one model on an endpoint: a name, a type (`LLM`, `EMBEDDING`, `TRANSCRIPTION`, `SPEECH`), the endpoint, and the id the endpoint knows the model by (`remoteModel`).
+- Each type has a **default** model. AI tasks, semantic dedup and the interpretation engine use the defaults unless told otherwise.
+- `/v1/chat/completions`, `/v1/embeddings`, `/v1/audio/*` and `/v1/models` on the executor forward to the model's endpoint (OpenAI-compatible clients work against the executor unchanged).
 
-## Model Configuration
+A fresh executor has no models. Features that need one answer that no model is configured until one is added.
 
-Before using AI features, models need to be configured in the AD4M Launcher. Models can be either local (running on your device) or remote (using external APIs).
+## Local AI on this device
 
-<img src="/images/launcher-ai-overview.png" alt="AD4M AI Models" />
+The quickest setup needs no model server: the executor installs and runs one itself. The launcher's onboarding offers it first ("Set up local AI"), and WE's AI settings use the same calls.
 
-### Local Models
+1. **Detect.** `ai.localHardware` reads the OS, CPU, RAM, GPUs (NVIDIA through NVML, every other GPU through the Vulkan loader, AMD memory from sysfs, Apple Silicon's unified memory) and the backends a runtime can use: CUDA, Metal, Vulkan, ROCm (with the system ROCm libraries), CPU. It gives the device a hardware class (`apple-silicon-16`, `nvidia-12gb`, `amd-igpu-uma-128`, `cpu-8gb`, ...), by the AI wind tunnel's rules.
+2. **Plan.** `ai.localPlan` picks, per service, the model the AI wind tunnel measured for that class (or the nearest smaller measured class: the family's smaller tiers, then the CPU classes; with none, the manifest's smallest model for the service, `basis: "default"`), with the server flags it was measured with, and the runtime build for the best backend. On AMD, Vulkan replaces a recommended ROCm build: that build runs on the CPU, unannounced, without the system ROCm libraries. Chat runs without Qwen3.5's thinking (`--reasoning off`). The models run at once, so their memory adds up: it fits when the sum is at most min(GPU memory − 1 GB, RAM − 4 GB); when it does not, the largest model steps down. The plan says what it downloads, how much, and why it fits or not. `local_ai_device` (`cpu`, `cuda`, `metal`, `vulkan` or `rocm`; `--local-ai-device` / `AD4M_LOCAL_AI_DEVICE`) holds the plan to one backend: only its builds are used (the CPU build for a runtime with none for it), and the memory budget and the hardware class follow, so `cpu` plans by RAM on a machine with a GPU. The plan names the device it was held to (`device`).
+3. **Install.** `ai.localInstall` downloads the pinned [llama.cpp](https://github.com/ggml-org/llama.cpp) `llama-server` and [NVIDIA NeMo-Speech.cpp](https://github.com/NVIDIA/NeMo-Speech.cpp) `nemo-speech` builds from their GitHub releases and the models from Hugging Face. Every file is checked against the sha256 the manifest pins before it is used (a file that changed upstream fails the install rather than running); an interrupted download resumes. Progress arrives as `ai-local-progress` events.
+4. **Run.** The executor starts both servers as its own child processes on free `127.0.0.1` ports (never 9931 or 8080, the upstream defaults), each with a random API key, and restarts one that crashes (3 times, given back after 5 healthy minutes). llama-server serves chat and embeddings; nemo-speech serves transcription with NVIDIA's Parakeet TDT 0.6B v3 (25 European languages; it does not report the language it heard), on Vulkan on Linux where Vulkan runs, on Metal on a Mac, else on the CPU. After a start on a GPU build it checks the runtime holds GPU memory (`onGpu` in `ai.localStatus`; Linux with an AMD or Intel GPU). They stop with the executor and start with it again (`local_ai_autostart`, on by default; it only starts what is installed and never downloads).
 
-Local models run directly on your device using CPU or GPU acceleration (if available). There are three ways to configure local models:
-
-<img src="/images/launcher-ai-add-model.png" alt="AD4M Launcher 'Add Model' dialog showing the local model configuration options" />
-
-#### 1. Pre-configured Models
-
-AD4M comes with several pre-configured models that can be used by simply specifying their name:
+**Nothing downloads unless you ask.** Local AI installs only through a step the user or operator takes: an app's call to `ai.localInstall` (the launcher's setup screen shows the device it found, what it would download and the total, and installs only on "Yes"; "No" installs nothing, and a model server already running is offered instead), `ad4m-executor local-ai install`, or the Docker image's `INCLUDE_MODELS`. No request and no executor start downloads anything. `ai.embed("default", text)` and `ai.transcriptionOpen("default")` use the default model of their type (else the first one registered). On an executor with no model of that type they fail: the operator gets "No default EMBEDDING model on this executor: set up local AI (ai.localInstall) or register a model on an endpoint" (or TRANSCRIPTION), an app or a managed user gets "… ask the operator to set up local AI". On macOS, an install that sets up transcription also fetches ONNX Runtime for the speech gate (its size is in the plan); without it, streams send all audio. A name that is no model (`bert`, a removed model) is an error, not the default.
+5. **Register.** They appear as two endpoints, `This device (llama.cpp)` (chat and embeddings, llama-server in router mode) and `This device (NeMo Speech)` (transcription), marked `managed`. Each model becomes the default of its type only when the type has no default: a default you chose, such as a remote chat model, stays (the launcher's setup screen sets the local models as the defaults when you pick local AI there). The chat model takes tools as definitions (`nativeTools`): llama-server renders them with the model's chat template and parses the calls. A managed endpoint is not edited or removed with `ai.updateEndpoint` / `ai.removeEndpoint`: use `ai.localStop` / `ai.localRemove`. Its health is the supervisor's check (starting, stopped, failed), and once it runs, llama-server's liveness and nemo-speech's model listing.
 
 ```typescript
-const preConfiguredModel = {
-  name: "DeepHermes 3 (Q4)",
-  local: {
-    fileName: "deephermes-3-llama-3-8b-Q4"  // Just specify the model name
-  },
-  modelType: "LLM"
-};
+const plan = await ad4m.ai.localPlan();
+console.log(plan.hardwareClass, plan.models.map((m) => m.modelId), plan.downloadBytes, plan.fits);
+
+if (plan.fits) {
+  const status = await ad4m.ai.localInstall({}, (p) =>
+    console.log(p.phase, p.item, p.doneBytes, '/', p.totalBytes));
+  console.log(status.runtimes.map((r) => `${r.provider}: ${r.phase} on ${r.port}`));
+}
+
+await ad4m.ai.localStop();         // the endpoints stay, down
+await ad4m.ai.localStart();
+await ad4m.ai.localRemove(false);  // true also deletes the downloaded files
 ```
 
-Available pre-configured models:
+| Method | Who | What |
+|---|---|---|
+| `ai.localHardware` | the main agent's sessions (AI READ) | this device |
+| `ai.localPlan` | the main agent's sessions (AI READ) | what an install would do, and whether it fits |
+| `ai.localStatus` | the main agent's sessions (AI READ) | what is installed, and each runtime's phase, port, restarts |
+| `ai.localInstall` | the operator | download, start, register (long) |
+| `ai.localStart`, `ai.localStop` | the operator | the runtimes |
+| `ai.localRemove` | the operator | stop and unregister; `deleteFiles` also deletes the files |
 
-**Language Models (LLM)**:
-- `Qwen2.5.1-Coder-7B-Instruct` - Optimized for coding tasks
-- `deephermes-3-llama-3-8b-Q4` - Fast, efficient 8B parameter model (Q4 quantization)
-- `deephermes-3-llama-3-8b-Q6` - Better quality, slightly larger (Q6 quantization)
-- `deephermes-3-llama-3-8b-Q8` - Best quality, largest size (Q8 quantization)
-- `deepseek_r1_distill_qwen_1_5b` - Small, fast 1.5B parameter model
-- `deepseek_r1_distill_qwen_7b` - Medium 7B parameter model
-- `deepseek_r1_distill_qwen_14b` - Large 14B parameter model
+**Storage.** Runtimes and models go to one per-user directory that every agent and app of the user shares, not into each agent's data: `~/.local/share/ad4m/local-ai` on Linux, `~/Library/Application Support/ad4m/local-ai` on macOS, `%LOCALAPPDATA%\ad4m\local-ai` on Windows (`local_ai_dir` / `--local-ai-dir` / `AD4M_LOCAL_AI_DIR` moves it). Each executor keeps only its own state (the chosen models, ports, pids and the runtimes' logs) in `<app data>/local-ai/`. In the Docker image the store is `/data/local-ai/store`, in the data volume, unless the image ships local AI or `AD4M_LOCAL_AI_DIR` names another place. When the store has lost a file the selection names, `ai.localStart` starts nothing and says to run `ai.localInstall` again.
 
-**Embedding Models**:
-- `bert` - Built-in BERT model for text embeddings
+**Known gaps.** The models are chosen from the AI wind tunnel's measurements, and few hardware classes are measured yet. Elsewhere the plan takes, per service, the manifest's smallest model (by memory) on the best build the device runs, and marks it `basis: "default"` (the launcher shows "not measured on this hardware"); a measured recommendation always wins. nemo-speech's Metal build is not yet measured on a Mac. There is no local text-to-speech yet.
 
-**Speech-to-Text Models**:
-- `Whisper` - OpenAI's Whisper model for audio transcription
+## Setting up model servers
 
-<img src="/images/launcher-ai-preconfigured.png" alt="AD4M Launcher showing a pre-configured model's details and status" />
+The launcher's onboarding (and Settings, AI) looks for model servers on this machine. Onboarding lists the chat models a server already serves first and preselects one, so a running server needs no download. It also offers the recommended models: a 4-8B instruct model that calls tools (`qwen3:8b`), an embedding model (`nomic-embed-text`) and, on a transcription server, `Systran/faster-whisper-small`. The SDK exports the list as `AI_RECOMMENDED_MODELS`.
 
-#### 2. Models from Hugging Face
+| Server | Kind | Serves | Default port |
+|---|---|---|---|
+| [Ollama](https://ollama.com/download) | `OLLAMA` | chat, embeddings; the executor can pull models onto it | 11434 |
+| [llama-server](https://github.com/ggml-org/llama.cpp/tree/master/tools/server) | `LLAMA_SERVER` | chat, or embeddings with `--embeddings` | 9931 / 8080 |
+| [vLLM](https://docs.vllm.ai) | `VLLM` | chat, embeddings, transcription | 8000 |
+| [speaches](https://speaches.ai/) | `OPEN_AI_AUDIO` | transcription, speech | 8000 |
+| OpenAI | `OPEN_AI` | everything | |
+| Anthropic | `ANTHROPIC` | chat | |
+| any other `/v1/models` server | `OPEN_AI_COMPATIBLE` | what it lists | |
 
-AD4M can automatically download and use models from Hugging Face. Just provide the repository details:
+GPU acceleration is the model server's: run Ollama, vLLM or speaches with the GPU, the executor needs nothing for it.
+
+### Endpoints from the SDK
 
 ```typescript
-const huggingFaceModel = {
-  name: "Custom LLM",
-  local: {
-    fileName: "model.gguf",  // The model file to use from the repo
-    huggingfaceRepo: "username/model-repo",  // Hugging Face repository path
-    revision: "main",  // Branch or tag to use
-    tokenizerSource: {  // Optional custom tokenizer
-      repo: "username/tokenizer-repo",
-      revision: "main",
-      fileName: "tokenizer.json"
-    }
-  },
-  modelType: "LLM"
-};
+import { Ad4mClient } from '@coasys/ad4m';
 
-// Example with a specific model version
-const versionedModel = {
-  name: "Specific Model Version",
-  local: {
-    fileName: "model-q4.gguf",
-    huggingfaceRepo: "TheBloke/Mistral-7B-Instruct-v0.1-GGUF",
-    revision: "main"
-  },
-  modelType: "LLM"
-};
+const client = new Ad4mClient(executorUrl, token);
+
+// Model servers on this machine's loopback ports. Nothing is saved.
+const detected = await client.ai.detectEndpoints();
+
+// Save one. The executor lists its models once first and answers with its health.
+const ollama = await client.ai.addEndpoint({
+  name: "ollama",
+  kind: "OLLAMA",
+  baseUrl: "http://127.0.0.1:11434",
+});
+
+// A remote API with a key. A key is never sent over plain HTTP except to loopback,
+// and never read back (`hasApiKey` says whether one is set).
+const openai = await client.ai.addEndpoint({
+  name: "openai",
+  kind: "OPEN_AI",
+  baseUrl: "https://api.openai.com/v1",
+  apiKey: process.env.OPENAI_API_KEY,
+});
+
+// What a saved endpoint, or a server not saved yet, serves.
+const models = await client.ai.discoverModels({ endpointId: ollama.id });
+const before = await client.ai.discoverModels({ kind: "OLLAMA", baseUrl: "http://127.0.0.1:11434" });
+
+// Ollama only: download a model onto the server. Progress arrives as `model-status` events.
+await client.ai.pullModel(ollama.id, "qwen3:8b");
 ```
 
-When you add a model with a Hugging Face repository, AD4M will:
-1. Download the model files from Hugging Face
-2. Store them locally
-3. Load the model when needed
+`ai.endpoints`, `ai.addEndpoint`, `ai.updateEndpoint`, `ai.removeEndpoint`, `ai.detectEndpoints`, `ai.pullModel` and `ai.deleteUpstreamModel` are the operator's: a managed user's session is refused. Users read models (name, type, status), not endpoint URLs.
 
-<img src="/images/launcher-ai-downloading.png" alt="AD4M Launcher showing download progress of a Hugging Face model" />
+### Headless executors
 
-#### 3. Local Files
+The executor config file can declare endpoints, models and defaults, applied at start (see [executor configuration](/developer-guides/executor-config)):
 
-You can also use model files that are already on your device:
-
-```typescript
-const localFileModel = {
-  name: "My Local Model",
-  local: {
-    fileName: "/absolute/path/to/model.gguf",  // Full path to model file
-    tokenizerSource: {
-      repo: "",  // Empty repo means local file
-      fileName: "/path/to/tokenizer.json"
-    }
-  },
-  modelType: "LLM"
-};
+```json
+{
+  "ai_endpoints": [
+    { "name": "ollama", "kind": "OLLAMA", "base_url": "http://127.0.0.1:11434" },
+    { "name": "speaches", "kind": "OPEN_AI_AUDIO", "base_url": "http://127.0.0.1:8000" }
+  ],
+  "ai_models": [
+    { "name": "qwen", "model_type": "LLM", "endpoint": "ollama", "remote_model": "qwen3:8b" },
+    { "name": "nomic", "model_type": "EMBEDDING", "endpoint": "ollama", "remote_model": "nomic-embed-text" },
+    { "name": "whisper", "model_type": "TRANSCRIPTION", "endpoint": "speaches", "remote_model": "Systran/faster-whisper-small" }
+  ],
+  "ai_defaults": { "llm": "qwen", "embedding": "nomic", "transcription": "whisper" }
+}
 ```
 
-### Remote Models (API)
+The Docker image registers model servers from the environment: Ollama (`AD4M_AI_OLLAMA_URL`, `AD4M_AI_LLM_MODEL`, `AD4M_AI_EMBEDDING_MODEL`), llama-server (`AD4M_AI_LLAMA_SERVER_URL`, `AD4M_AI_LLAMA_SERVER_API_KEY`, `AD4M_AI_LLAMA_SERVER_LLM_MODEL`, `AD4M_AI_LLAMA_SERVER_EMBEDDING_MODEL`), any other OpenAI-shaped server (`AD4M_AI_OPENAI_COMPATIBLE_URL`, `AD4M_AI_OPENAI_COMPATIBLE_API_KEY`, `AD4M_AI_OPENAI_COMPATIBLE_LLM_MODEL`, `AD4M_AI_OPENAI_COMPATIBLE_EMBEDDING_MODEL`) and a transcription server (`AD4M_AI_TRANSCRIPTION_URL`, `AD4M_AI_TRANSCRIPTION_API_KEY`, `AD4M_AI_TRANSCRIPTION_MODEL`). The first server that names a model of a type supplies that type's default. `docker/compose.ai.yml` runs it with Ollama and speaches; `docker/ai-env.sh` documents every variable.
 
-Remote models use external APIs for inference. AD4M currently supports OpenAI-compatible APIs:
+An image built with `--build-arg INCLUDE_MODELS=true` needs no model server and no download: the build runs the executor's own local AI installer (`ad4m-executor local-ai install --store … --state … [--device cpu|cuda|vulkan|rocm] [--services llm,embeddings,stt]`, the plan for the build machine held to `LOCAL_AI_DEVICE`, default `cpu`) into `/opt/ad4m/local-ai`, and the container's executor starts those runtimes and models at its first start; with no other models they become the defaults. A later `ai.localInstall` in the container writes to the container's own layer, not to the `/data` volume.
 
-<img src="/images/launcher-ai-remote.png" alt="AD4M Launcher 'Add Model' dialog showing the API model configuration" />
-
-```typescript
-// OpenAI API
-const openAiModel = {
-  name: "GPT-4",
-  api: {
-    baseUrl: "https://api.openai.com/v1",
-    apiKey: "your-api-key",
-    model: "gpt-4",
-    apiType: "OPEN_AI"
-  },
-  modelType: "LLM"
-};
-
-// Custom OpenAI-compatible API
-const customApiModel = {
-  name: "Local API Server",
-  api: {
-    baseUrl: "http://localhost:8000",
-    apiKey: "local-key",
-    model: "local-model",
-    apiType: "OPEN_AI"
-  },
-  modelType: "LLM"
-};
-```
-
-### Hardware Acceleration
-
-AD4M automatically detects and uses available hardware acceleration:
-
-- **CUDA**: For NVIDIA GPUs (requires `cuda` feature)
-- **Metal**: For Apple Silicon and AMD GPUs on macOS (requires `metal` feature)
-- **CPU**: Falls back to CPU if no GPU acceleration is available
+The image installs no GPU runtime. With `LOCAL_AI_DEVICE=cuda`, run the container with the NVIDIA Container Toolkit (`--gpus all`). With `vulkan`, add a Vulkan loader and driver to the image (`libvulkan1`, `mesa-vulkan-drivers`) and pass `/dev/dri` in. With `rocm`, add the ROCm runtime and pass `/dev/kfd` and `/dev/dri` in. Without them the runtimes do not become ready.
 
 ## Using AI in Your Application
 
 ### 1. Adding Models
 
 ```typescript
-import { Ad4mClient } from '@coasys/ad4m';
+const modelId = await client.ai.addModel({
+  name: "qwen",
+  modelType: "LLM",
+  endpointId: ollama.id,
+  remoteModel: "qwen3:8b",
+});
+await client.ai.setDefaultModel("LLM", modelId);
 
-const client = new Ad4mClient();
-
-// Add a model
-const modelId = await client.ai.addModel(modelConfig);
-
-// Wait for model to load
-let status;
-do {
-  status = await client.ai.modelLoadingStatus(modelId);
-  await new Promise(resolve => setTimeout(resolve, 1000));
-} while (status.progress < 100);
+// Where it stands by its endpoint's last health check:
+// READY, MISSING (the endpoint does not list it), ENDPOINT_DOWN, PULLING, UNKNOWN.
+const { state } = await client.ai.modelStatus(modelId);
 ```
+
+`nativeTools` says whether prompts with tools send them as tool definitions. Left out it is on for Ollama and Anthropic and off for an OpenAI-shaped server, where tool support depends on the model and the server's flags (llama-server `--jinja`, vLLM `--enable-auto-tool-choice`); with it off the executor renders the tools into the prompt and reads the calls back from the text. On that text path, `tool_choice: "required"` or a named function sends the server a JSON schema of the call (as `response_format` `json_schema`, or Ollama's `format`), which llama-server, vLLM, Ollama and OpenAI decode against; the executor checks the calls that come back against it, asks once more when they break it, and otherwise answers 502 `tool_call_not_made`. `parallel_tool_calls: false` keeps one call.
 
 ### 2. Creating AI Tasks
 
@@ -216,73 +190,47 @@ console.log(response);
 #### Text Embeddings
 
 ```typescript
-// Get vector representation of text
-const vector = await client.ai.embed(
-  "bert",  // Built-in BERT model
-  "Convert this text to a vector"
-);
+// Get vector representation of text, with an embedding model by id or name
+const vector = await client.ai.embed("nomic", "Convert this text to a vector");
 ```
 
 #### Speech-to-Text
 
 ```typescript
-// Open a transcription stream
+// Open a transcription stream on a TRANSCRIPTION model
 const streamId = await client.ai.openTranscriptionStream(
-  "Whisper",
+  transcriptionModelId,
   (text) => {
     console.log("Transcribed:", text);
-  },
-  {
-    // Optional voice activity detection parameters
-    startThreshold: 0.3,
-    startWindow: 150,
-    endThreshold: 0.2,
-    endWindow: 300,
-    timeBeforeSpeech: 100
   }
 );
 
-// Feed audio data (Float32Array samples at 16kHz)
-await client.ai.feedTranscriptionStream(streamId, audioSamples);
+// Feed one utterance at a time (Float32Array samples at 16kHz)
+await client.ai.feedTranscriptionStream(streamId, utteranceSamples);
 
 // Close stream when done
 await client.ai.closeTranscriptionStream(streamId);
-
-// Or use multiple streams simultaneously
-const fastStreamId = await client.ai.openTranscriptionStream(
-  "whisper_tiny",
-  (text) => console.log("Fast preview:", text),
-  {
-    startThreshold: 0.25,
-    startWindow: 100,
-    endThreshold: 0.15,
-    endWindow: 100
-  }
-);
-
-const accurateStreamId = await client.ai.openTranscriptionStream(
-  "whisper_small",
-  (text) => console.log("Accurate:", text),
-  {
-    startThreshold: 0.3,
-    startWindow: 150,
-    endThreshold: 0.2,
-    endWindow: 500
-  }
-);
-
-// Feed same audio to both streams with a single call
-await client.ai.feedTranscriptionStream([fastStreamId, accurateStreamId], audioSamples);
 ```
+
+The caller decides where an utterance starts and ends (for example with an energy gate in
+an audio worklet) and feeds each one as it ends. The executor scores each utterance with
+Silero VAD and drops one that is not speech (silence, a cough, a fan) before any model
+sees it, as a model makes text up for such audio. Where ONNX Runtime is missing (it is
+loaded at run time on macOS, and a local AI install with transcription fetches it; a
+stream never does), the gate is off and every utterance goes to the model.
+Each utterance goes to the model's endpoint (any server with an OpenAI-shaped
+`POST /v1/audio/transcriptions`: speaches, vLLM, a Parakeet wrapper, OpenAI) as one
+request; `feedTranscriptionStream` then resolves once the text is published, in the order
+the utterances were fed, and rejects when the endpoint failed.
 
 Note: Transcription streams are automatically cleaned up after 30 seconds of inactivity.
 
 ## Best Practices
 
 1. **Model Selection**
-   - Use quantized models (Q4/Q6) for faster inference on CPU
-   - Use larger models when quality is critical
-   - Consider API models for production use cases
+   - A 4-8B instruct model with tool calling covers interpretation and agents on a desktop
+   - Use larger models, or a remote API, when quality is critical
+   - `faster-whisper-small` transcribes faster than real time on a CPU; `large-v3-turbo` is more accurate
 
 2. **Task Design**
    - Write clear system prompts
@@ -291,13 +239,8 @@ Note: Transcription streams are automatically cleaned up after 30 seconds of ina
 
 3. **Resource Management**
    - Close transcription streams when done
-   - Monitor model loading status
+   - Check `modelStatus` (or the `model-status` and `ai-endpoint-status` events) before relying on a model
    - Handle errors appropriately
-
-4. **Performance**
-   - Use GPU acceleration when available
-   - Batch similar requests together
-   - Consider model size vs performance tradeoffs
 
 ## Error Handling
 
@@ -305,12 +248,12 @@ Note: Transcription streams are automatically cleaned up after 30 seconds of ina
 try {
   const response = await client.ai.prompt(taskId, prompt);
 } catch (error) {
-  if (error.message.includes("Model not found")) {
-    // Handle missing model
+  if (error.message.includes("is loaded")) {
+    // The task's model is gone, or its endpoint could not be used
   } else if (error.message.includes("Task not found")) {
     // Handle missing task
   } else {
-    // Handle other errors
+    // The endpoint's own error (unreachable, refused key, missing model)
   }
 }
 ```
@@ -335,28 +278,15 @@ const task = await client.ai.addTask(
 
 ### Model Updates
 
-Models can be updated while maintaining tasks:
+Models can be updated while maintaining tasks; the model's client is rebuilt from its endpoint:
 
 ```typescript
-const updated = await client.ai.updateModel(modelId, newConfig);
-```
-
-### Real-time Transcription
-
-Configure voice activity detection for word-by-word transcription:
-
-```typescript
-const streamId = await client.ai.openTranscriptionStream(
-  "Whisper",
-  (text) => console.log("Word:", text),
-  {
-    startThreshold: 0.25,
-    startWindow: 100,
-    endThreshold: 0.15,
-    endWindow: 100,
-    timeBeforeSpeech: 20
-  }
-);
+const updated = await client.ai.updateModel(modelId, {
+  name: "qwen",
+  modelType: "LLM",
+  endpointId: ollama.id,
+  remoteModel: "qwen3:14b",
+});
 ```
 
 ### Multiple Transcription Streams
@@ -364,18 +294,12 @@ const streamId = await client.ai.openTranscriptionStream(
 You can process the same audio through multiple models simultaneously:
 
 ```typescript
-// Use a fast model for real-time preview
-const fastStreamId = await client.ai.openTranscriptionStream(
-  "whisper_tiny",
-  (text) => console.log("Preview:", text),
-  { startThreshold: 0.25, endWindow: 100 }
+// A fast model for a live preview, a more accurate one for the final text
+const fastStreamId = await client.ai.openTranscriptionStream(fastModelId, (text) =>
+  console.log("Preview:", text)
 );
-
-// Use a more accurate model for final results
-const accurateStreamId = await client.ai.openTranscriptionStream(
-  "whisper_small",
-  (text) => console.log("Final:", text),
-  { startThreshold: 0.3, endWindow: 500 }
+const accurateStreamId = await client.ai.openTranscriptionStream(accurateModelId, (text) =>
+  console.log("Final:", text)
 );
 
 // Feed audio to both streams efficiently

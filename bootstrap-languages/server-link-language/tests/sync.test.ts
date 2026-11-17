@@ -5,14 +5,14 @@
  * this wrong), and must not lose a link it cannot decrypt yet.
  */
 
-import { describe, it } from "node:test";
+import { afterEach, describe, it, mock } from "node:test";
 import assert from "node:assert/strict";
 
 import type { RoomConfig, StorageAdapter, Transport, TransportResponse } from "../src/adapters.js";
 import { initAdapters, resetAdapters } from "../src/adapters.js";
 import * as store from "../src/store.js";
 import * as syncModule from "../src/sync.js";
-import { decryptLinkFromWire, encryptLinkForWire, generateRoomKey, type KeyRing } from "../src/encryption.js";
+import { decryptLinkFromWire, encryptLinkForWire, generateRoomKey, wireLinkHash, type KeyRing } from "../src/encryption.js";
 import type { LinkExpression, PerspectiveDiff, WireLinkExpression } from "../src/types.js";
 import { isEncryptedLinkData } from "../src/types.js";
 
@@ -87,6 +87,7 @@ function wire(link: LinkExpression): WireLinkExpression {
 
 function setup(transport: MockTransport): void {
     resetAdapters();
+    syncModule._resetRenderStateForTests();
     initAdapters({ storage: new MockStorage(), transport, config });
     store.initStore(simpleHash);
 
@@ -112,6 +113,7 @@ describe("sync: applyInboundWireDiff (the emitPerspectiveDiff trap)", () => {
         const transport = new MockTransport();
         setup(transport);
         const link = makeLink();
+        store.setSequence(4);
 
         const result = syncModule.applyInboundWireDiff({ additions: [wire(link)], removals: [] }, 5, "rev-5");
 
@@ -121,6 +123,39 @@ describe("sync: applyInboundWireDiff (the emitPerspectiveDiff trap)", () => {
         assert.equal(emittedDiffs.length, 1);
         assert.deepEqual(emittedDiffs[0], { additions: [link], removals: [] });
         assert.deepEqual(result, { additions: [link], removals: [] });
+    });
+
+    it("a push ahead of the next sequence is applied but leaves the cursor, so the tail fetches the diffs in between", () => {
+        const transport = new MockTransport();
+        setup(transport);
+        store.setSequence(4);
+        store.setRevision("rev-4");
+        const link = makeLink();
+
+        syncModule.applyInboundWireDiff({ additions: [wire(link)], removals: [] }, 7, "rev-7");
+
+        assert.deepEqual(store.allLinks().links, [link]);
+        assert.equal(store.getSequence(), 4, "diffs 5 and 6 are still to come");
+        assert.equal(store.getRevision(), "rev-4");
+    });
+
+    it("a push at or below the cursor is ignored, so it cannot re-add a link a later diff removed", () => {
+        const transport = new MockTransport();
+        setup(transport);
+        const link = makeLink();
+        // The tail applied 5 (add) and 6 (remove); the push of 5 arrives late.
+        store.setSequence(6);
+        store.setRevision("rev-6");
+
+        // Below the cursor (a late push), and equal to it (the echo of our own commit).
+        for (const sequence of [5, 6]) {
+            const result = syncModule.applyInboundWireDiff({ additions: [wire(link)], removals: [] }, sequence, `rev-${sequence}`);
+            assert.deepEqual(result, { additions: [], removals: [] });
+        }
+
+        assert.deepEqual(store.allLinks().links, []);
+        assert.equal(store.getSequence(), 6);
+        assert.equal(store.getRevision(), "rev-6");
     });
 
     it("applies removals and still emits", () => {
@@ -159,6 +194,7 @@ describe("sync: applyInboundWireDiff (the emitPerspectiveDiff trap)", () => {
         const link = makeLink({ source: "encrypted-no-ring" });
         const wireLink = encryptLinkForWire(link, rk, 1);
 
+        store.setSequence(4);
         syncModule.applyInboundWireDiff({ additions: [wireLink], removals: [] }, 5, "rev-5");
 
         assert.equal(store.allLinks().links.length, 0, "undecryptable link must not appear in store");
@@ -176,6 +212,7 @@ describe("sync: applyInboundWireDiff (the emitPerspectiveDiff trap)", () => {
         const link = makeLink({ source: "wrong-version" });
         const wireLink = encryptLinkForWire(link, rk2, 2); // encrypted with version 2, ring only has 1
 
+        store.setSequence(4);
         syncModule.applyInboundWireDiff({ additions: [wireLink], removals: [] }, 5, "rev-5");
         assert.equal(store.allLinks().links.length, 0, "undecryptable link must not appear in store");
         assert.equal(store.getSequence(), 5, "sequence must advance — the link is held, not lost");
@@ -195,6 +232,7 @@ describe("sync: applyInboundWireDiff (the emitPerspectiveDiff trap)", () => {
         const injected = makeLink({ source: "injected" }); // plaintext: what a server, not a member, could add
         const member = makeLink({ source: "from-a-member" });
 
+        store.setSequence(4);
         syncModule.applyInboundWireDiff(
             { additions: [injected, encryptLinkForWire(member, rk, 1)], removals: [] }, 5, "rev-5",
         );
@@ -301,11 +339,12 @@ describe("sync: catchUp / performSync", () => {
                 headers: {},
                 body: JSON.stringify({
                     diffs: [
-                        { additions: [wire(linkA)], removals: [] },
-                        { additions: [wire(linkB)], removals: [] },
+                        { additions: [wire(linkA)], removals: [], sequence: 1 },
+                        { additions: [wire(linkB)], removals: [], sequence: 2 },
                     ],
                     revision: "rev-2",
                     sequence: 2,
+                    next: null,
                 }),
             }),
         );
@@ -335,10 +374,10 @@ describe("sync: catchUp / performSync", () => {
                     return {
                         status: 200,
                         headers: {},
-                        body: JSON.stringify({ diffs: [{ additions: [wire(linkA)], removals: [] }], revision: "rev-1", sequence: 1 }),
+                        body: JSON.stringify({ diffs: [{ additions: [wire(linkA)], removals: [], sequence: 1 }], revision: "rev-1", sequence: 1, next: null }),
                     };
                 }
-                return { status: 200, headers: {}, body: JSON.stringify({ diffs: [], revision: "rev-1", sequence: 1 }) };
+                return { status: 200, headers: {}, body: JSON.stringify({ diffs: [], revision: "rev-1", sequence: 1, next: null }) };
             },
         );
 
@@ -349,28 +388,17 @@ describe("sync: catchUp / performSync", () => {
         assert.equal(emittedDiffs.length, 1);
     });
 
-    it("normalizes nested-shape diff entries ({diff: {additions, removals}})", async () => {
+    it("refuses an answer without the paged fields instead of reading it as a page", async () => {
         const transport = new MockTransport();
         setup(transport);
-        const link = makeLink();
-
         transport.route(
             (url, method) => method === "GET" && url.includes("/sync"),
-            () => ({
-                status: 200,
-                headers: {},
-                body: JSON.stringify({
-                    diffs: [{ diff: { additions: [wire(link)], removals: [] }, revision: "rev-1", sequence: 1 }],
-                    revision: "rev-1",
-                    sequence: 1,
-                }),
-            }),
+            () => jsonResponse({ diffs: [{ additions: [wire(makeLink())], removals: [] }], revision: "rev-1", sequence: 1 }),
         );
 
-        await syncModule.catchUp();
-        assert.equal(emittedDiffs.length, 1);
-        assert.deepEqual(emittedDiffs[0].additions[0].data, link.data);
-        assert.equal(store.getSequence(), 1);
+        await assert.rejects(() => syncModule.catchUp(), /without a paged body/);
+        assert.equal(emittedDiffs.length, 0);
+        assert.equal(store.getSequence(), 0);
     });
 
     it("re-reads the key ring on every catch-up while links are held, and emits them once a key opens them", async () => {
@@ -401,8 +429,8 @@ describe("sync: catchUp / performSync", () => {
             (url, method) => method === "GET" && url.includes("/sync"),
             (url) => {
                 const since = new URL(url).searchParams.get("since");
-                const diffs = since === "0" ? [{ additions: [wireLink], removals: [] }] : [];
-                return jsonResponse({ diffs, revision: "rev-1", sequence: 1 });
+                const diffs = since === "0" ? [{ additions: [wireLink], removals: [], sequence: 1 }] : [];
+                return jsonResponse({ diffs, revision: "rev-1", sequence: 1, next: null });
             },
         );
 
@@ -431,7 +459,7 @@ describe("sync: catchUp / performSync", () => {
         });
         transport.route(
             (url, method) => method === "GET" && url.includes("/sync"),
-            () => jsonResponse({ diffs: [{ additions: [wire(makeLink())], removals: [] }], revision: "rev-1", sequence: 1 }),
+            () => jsonResponse({ diffs: [{ additions: [wire(makeLink())], removals: [], sequence: 1 }], revision: "rev-1", sequence: 1, next: null }),
         );
 
         await syncModule.catchUp();
@@ -646,8 +674,12 @@ describe("sync: bootstrap", () => {
         const linkB = makeLink({ source: "b" });
 
         transport.route(
-            (url, method) => method === "GET" && url.endsWith("/render"),
-            () => ({ status: 200, headers: {}, body: JSON.stringify({ links: [wire(linkA), wire(linkB)], revision: "rev-snap", sequence: 7 }) }),
+            (url, method) => method === "GET" && url.includes("/render"),
+            () => jsonResponse({ links: [wire(linkA), wire(linkB)], revision: "rev-snap", sequence: 7, upto: 7, next: null }),
+        );
+        transport.route(
+            (url, method) => method === "GET" && url.includes("/sync?since=7"),
+            () => jsonResponse({ diffs: [], revision: "rev-snap", sequence: 7, next: null }),
         );
 
         await syncModule.bootstrap();
@@ -682,12 +714,12 @@ describe("sync: bootstrap", () => {
         const encLink = encryptLinkForWire(makeLink({ source: "secret" }), rk, 3);
 
         transport.route(
-            (url, method) => method === "GET" && url.endsWith("/render"),
-            () => ({
-                status: 200,
-                headers: {},
-                body: JSON.stringify({ links: [opens, encLink], revision: "rev-1", sequence: 1 }),
-            }),
+            (url, method) => method === "GET" && url.includes("/render"),
+            () => jsonResponse({ links: [opens, encLink], revision: "rev-1", sequence: 1, upto: 1, next: null }),
+        );
+        transport.route(
+            (url, method) => method === "GET" && url.includes("/sync"),
+            () => jsonResponse({ diffs: [], revision: "rev-1", sequence: 1, next: null }),
         );
 
         await syncModule.bootstrap();
@@ -697,36 +729,34 @@ describe("sync: bootstrap", () => {
 
         // catchUp with empty diffs — should still attempt refresh because
         // bootstrap held the version 3 link.
-        transport.route(
-            (url, method) => method === "GET" && url.includes("/sync"),
-            () => ({ status: 200, headers: {}, body: JSON.stringify({ diffs: [], revision: "rev-1", sequence: 1 }) }),
-        );
-
+        refreshCalled = false;
         await syncModule.catchUp();
         assert.equal(refreshCalled, true, "catchUp should retry key ring refresh for versions tracked by bootstrap");
     });
 
-    it("replaces stale local links with the server snapshot", async () => {
+    it("a member with a cursor above 0 sends no /render: it tails /sync from its cursor", async () => {
         const transport = new MockTransport();
         setup(transport);
+        const kept = makeLink({ source: "kept" });
+        const added = makeLink({ source: "added" });
+        store.putLink(kept);
+        store.setSequence(4);
 
-        // Pre-populate with a stale link that the server no longer has.
-        const staleLink = makeLink({ source: "stale" });
-        store.putLink(staleLink);
-        assert.equal(store.allLinks().links.length, 1);
-
-        const freshLink = makeLink({ source: "fresh" });
         transport.route(
-            (url, method) => method === "GET" && url.endsWith("/render"),
-            () => ({ status: 200, headers: {}, body: JSON.stringify({ links: [wire(freshLink)], revision: "rev-2", sequence: 5 }) }),
+            (url, method) => method === "GET" && url.includes("/sync?since=4"),
+            () => jsonResponse({ diffs: [{ additions: [wire(added)], removals: [wire(kept)], sequence: 5 }], revision: "rev-5", sequence: 5, next: null }),
         );
 
         await syncModule.bootstrap();
 
-        const links = store.allLinks().links;
-        assert.equal(links.length, 1, "stale link should have been removed");
-        assert.equal(links[0].data.source, "fresh");
-        assert.deepEqual(emittedDiffs, [{ additions: [freshLink], removals: [staleLink] }]);
+        assert.deepEqual(transport.calls.map((c) => new URL(c.url).pathname + new URL(c.url).search), [
+            "/rooms/room-1/sync?since=4&limit=100",
+        ]);
+        assert.equal(store.getRenderProgress(), null, "no render is stored");
+        assert.deepEqual(store.allLinks().links, [added]);
+        assert.equal(store.getSequence(), 5);
+        assert.deepEqual(emittedDiffs, [{ additions: [added], removals: [kept] }]);
+        assert.ok(syncStates.includes("Synced"));
     });
 });
 
@@ -735,11 +765,15 @@ describe("sync: bootstrap", () => {
 // ---------------------------------------------------------------------------
 
 describe("sync: render / currentRevision", () => {
-    it("render() returns the local store contents", () => {
+    it("render() returns the local store contents once they are the room's, else null (unknown)", () => {
         const transport = new MockTransport();
         setup(transport);
-        store.putLink(makeLink());
-        assert.equal(syncModule.render().links.length, 1);
+        const link = makeLink();
+        store.putLink(link);
+        assert.equal(syncModule.render(), null, "no revision from the server yet");
+        store.setSequence(1);
+        store.setRevision(roomRevision([link]));
+        assert.equal(syncModule.render()?.links.length, 1);
     });
 
     it("currentRevision() returns the stored revision, or empty string when unset", () => {
@@ -768,6 +802,16 @@ function jsonResponse(body: unknown): TransportResponse {
     return { status: 200, headers: {}, body: JSON.stringify(body) };
 }
 
+/** The last (here: only) `/render` page of a snapshot at `sequence`. */
+function renderPage(links: unknown[], sequence: number) {
+    return { links, revision: `rev-${sequence}`, sequence, upto: sequence, next: null };
+}
+
+/** The last `/sync` page: `diffs` (each with its sequence) and the room's head at `sequence`. */
+function syncPage(diffs: unknown[], sequence: number) {
+    return { diffs, revision: `rev-${sequence}`, sequence, next: null };
+}
+
 describe("sync: no history is lost", () => {
     it("links that arrive before their key are emitted once the key is held, though /render fails", async () => {
         const transport = new MockTransport();
@@ -792,14 +836,14 @@ describe("sync: no history is lost", () => {
         const syncedLink = encryptLinkForWire(makeLink({ source: "caught-up" }), roomKey, 1);
         transport.route(
             (url, method) => method === "GET" && url.includes("/sync?since=1"),
-            () => jsonResponse({ diffs: [{ additions: [syncedLink], removals: [] }], revision: "rev-2", sequence: 2 }),
+            () => jsonResponse(syncPage([{ additions: [syncedLink], removals: [], sequence: 2 }], 2)),
         );
         transport.route(
             (url, method) => method === "GET" && url.includes("/sync?since=2"),
-            () => jsonResponse({ diffs: [], revision: "rev-2", sequence: 2 }),
+            () => jsonResponse(syncPage([], 2)),
         );
         transport.route(
-            (url, method) => method === "GET" && url.endsWith("/render"),
+            (url, method) => method === "GET" && url.includes("/render"),
             () => { throw new Error("timed out after 10000 ms"); },
         );
 
@@ -827,12 +871,12 @@ describe("sync: no history is lost", () => {
         const a = encryptLinkForWire(makeLink({ source: "a" }), roomKey, 1);
         const b = encryptLinkForWire(makeLink({ source: "b" }), roomKey, 1);
         transport.route(
-            (url, method) => method === "GET" && url.endsWith("/render"),
-            () => jsonResponse({ links: [a, b], revision: "rev-7", sequence: 7 }),
+            (url, method) => method === "GET" && url.includes("/render"),
+            () => jsonResponse(renderPage([a, b], 7)),
         );
         transport.route(
             (url, method) => method === "GET" && url.includes("/sync?since=7"),
-            () => jsonResponse({ diffs: [], revision: "rev-7", sequence: 7 }),
+            () => jsonResponse(syncPage([], 7)),
         );
 
         await syncModule.bootstrap();
@@ -851,12 +895,12 @@ describe("sync: no history is lost", () => {
         const roomKey = generateRoomKey();
         const a = encryptLinkForWire(makeLink({ source: "a" }), roomKey, 1);
         transport.route(
-            (url, method) => method === "GET" && url.endsWith("/render"),
-            () => jsonResponse({ links: [a], revision: "rev-1", sequence: 1 }),
+            (url, method) => method === "GET" && url.includes("/render"),
+            () => jsonResponse(renderPage([a], 1)),
         );
         transport.route(
             (url, method) => method === "GET" && url.includes("/sync?since=1"),
-            () => jsonResponse({ diffs: [], revision: "rev-1", sequence: 1 }),
+            () => jsonResponse(syncPage([], 1)),
         );
 
         await syncModule.bootstrap();
@@ -897,27 +941,6 @@ describe("sync: no history is lost", () => {
 
         assert.equal(emitCounts("additions").get("twice"), 1);
     });
-
-    it("a snapshot while the key ring is not loaded does not remove links the member already holds", async () => {
-        const transport = new MockTransport();
-        setup(transport);
-        keyRing = null;
-        const roomKey = generateRoomKey();
-        const kept = makeLink({ source: "kept" });
-        const gone = makeLink({ source: "gone" });
-        store.applyDiff({ additions: [kept, gone], removals: [] });
-        transport.route(
-            (url, method) => method === "GET" && url.endsWith("/render"),
-            () => jsonResponse({ links: [encryptLinkForWire(kept, roomKey, 1)], revision: "rev-3", sequence: 3 }),
-        );
-
-        await syncModule.bootstrap();
-
-        assert.deepEqual(store.allLinks().links.map((l) => l.data.source), ["kept"]);
-        assert.equal(emitCounts("removals").get("gone"), 1, "a link deleted while offline is removed from the executor");
-        assert.equal(emitCounts("removals").get("kept"), undefined);
-        assert.equal(emitCounts("additions").get("kept"), undefined);
-    });
 });
 
 describe("sync: a link no key opens costs that link only", () => {
@@ -926,8 +949,9 @@ describe("sync: a link no key opens costs that link only", () => {
     function unopenable(link: LinkExpression, key: Uint8Array, version: number) {
         const wire = encryptLinkForWire(link, key, version);
         const data = wire.data as { ciphertext: string; nonce: string };
-        const flipped = (parseInt(data.ciphertext.slice(0, 2), 16) ^ 0xff).toString(16).padStart(2, "0");
-        return { ...wire, data: { ...data, ciphertext: flipped + data.ciphertext.slice(2) } };
+        const bytes = Buffer.from(data.ciphertext, "base64");
+        bytes[0] ^= 0xff;
+        return { ...wire, data: { ...data, ciphertext: bytes.toString("base64") } };
     }
 
     it("held links around one the key does not open are all emitted once the key is held", () => {
@@ -965,17 +989,18 @@ describe("sync: a link no key opens costs that link only", () => {
             (url, method) => method === "GET" && url.includes("/sync?since=0"),
             () => jsonResponse({
                 diffs: [
-                    { additions: [encryptLinkForWire(makeLink({ source: "a" }), roomKey, 1)], removals: [] },
-                    { additions: [unopenable(makeLink({ source: "b" }), roomKey, 1)], removals: [] },
-                    { additions: [encryptLinkForWire(makeLink({ source: "c" }), roomKey, 1)], removals: [] },
+                    { additions: [encryptLinkForWire(makeLink({ source: "a" }), roomKey, 1)], removals: [], sequence: 1 },
+                    { additions: [unopenable(makeLink({ source: "b" }), roomKey, 1)], removals: [], sequence: 2 },
+                    { additions: [encryptLinkForWire(makeLink({ source: "c" }), roomKey, 1)], removals: [], sequence: 3 },
                 ],
                 revision: "rev-3",
                 sequence: 3,
+                next: null,
             }),
         );
         transport.route(
             (url, method) => method === "GET" && url.includes("/sync?since=3"),
-            () => jsonResponse({ diffs: [], revision: "rev-3", sequence: 3 }),
+            () => jsonResponse(syncPage([], 3)),
         );
 
         for (let i = 0; i < 2; i++) {
@@ -986,5 +1011,389 @@ describe("sync: a link no key opens costs that link only", () => {
         assert.equal(added.get("a"), 1);
         assert.equal(added.get("c"), 1, "the entry after the unopenable one is applied");
         assert.equal(store.getSequence(), 3);
+    });
+});
+
+// ---------------------------------------------------------------------------
+// The startup render is retried until it succeeds (BUG-115)
+// ---------------------------------------------------------------------------
+
+describe("sync: a failed startup render is retried", () => {
+    afterEach(() => mock.timers.reset());
+
+    /** A transport whose `/render` answers come from `renders`, one per call
+     *  (an Error is thrown, as the host's httpFetch does on its deadline), and
+     *  whose `/sync` reports the head at `head` with no new diffs. A member
+     *  set up here is fresh (cursor 0), the only one that renders. */
+    function renderServer(renders: Array<Error | object | Promise<TransportResponse>>, head: number) {
+        const transport = new MockTransport();
+        setup(transport);
+        let renderCalls = 0;
+        transport.route(
+            (url, method) => method === "GET" && url.includes("/render"),
+            () => {
+                const next = renders[Math.min(renderCalls, renders.length - 1)];
+                renderCalls++;
+                if (next instanceof Error) throw next;
+                if (next instanceof Promise) return next as unknown as TransportResponse;
+                return jsonResponse(next);
+            },
+        );
+        transport.route(
+            (url, method) => method === "GET" && url.includes("/sync"),
+            () => jsonResponse(syncPage([], head)),
+        );
+        return { transport, renderCalls: () => renderCalls };
+    }
+
+    const timeout = () => new Error("httpFetch GET https://server.example/rooms/room-1/render timed out after 10000 ms");
+
+    it("a render that fails then succeeds is retried by catch-up, and its links are emitted", async () => {
+        mock.timers.enable({ apis: ["Date"], now: 1_000_000 });
+        const early = makeLink({ source: "early" });
+        const late = makeLink({ source: "late" });
+        const server = renderServer([timeout(), renderPage([wire(early), wire(late)], 9)], 9);
+
+        await assert.rejects(syncModule.bootstrap(), /timed out/);
+        // A push while the render is stored is left to the render: the cursor
+        // stays at 0 and nothing is emitted yet.
+        syncModule.applyInboundWireDiff({ additions: [wire(late)], removals: [] }, 9, "rev-9");
+        assert.equal(emitCounts("additions").get("late"), undefined);
+        assert.equal(store.getSequence(), 0);
+        await syncModule.catchUp();
+        await syncModule._awaitRenderRetryForTests();
+        assert.equal(server.renderCalls(), 1, "no retry before the backoff elapses");
+
+        mock.timers.tick(syncModule.RENDER_RETRY_BASE_MS);
+        await syncModule.catchUp();
+        await syncModule._awaitRenderRetryForTests();
+
+        assert.equal(server.renderCalls(), 2);
+        assert.equal(emitCounts("additions").get("early"), 1);
+        assert.equal(emitCounts("additions").get("late"), 1, "the pushed link arrives once, with the snapshot");
+        assert.deepEqual(store.allLinks().links.map((l) => l.data.source).sort(), ["early", "late"]);
+        assert.equal(store.getSequence(), 9);
+
+        // Once a render succeeded it is never asked for again.
+        mock.timers.tick(60 * 60 * 1000);
+        await syncModule.catchUp();
+        await syncModule._awaitRenderRetryForTests();
+        assert.equal(server.renderCalls(), 2);
+    });
+
+    it("a successful first render is not retried", async () => {
+        mock.timers.enable({ apis: ["Date"], now: 1_000_000 });
+        const server = renderServer([renderPage([wire(makeLink({ source: "a" }))], 1)], 1);
+        syncModule.needRender();
+
+        await syncModule.bootstrap();
+        for (let i = 0; i < 3; i++) {
+            mock.timers.tick(60 * 60 * 1000);
+            await syncModule.catchUp();
+            await syncModule._awaitRenderRetryForTests();
+        }
+
+        assert.equal(server.renderCalls(), 1);
+        assert.equal(emitCounts("additions").get("a"), 1);
+    });
+
+    it("backs off: each failure doubles the wait before the next attempt", async () => {
+        mock.timers.enable({ apis: ["Date"], now: 1_000_000 });
+        const base = syncModule.RENDER_RETRY_BASE_MS;
+        const server = renderServer([timeout(), timeout(), renderPage([], 0)], 0);
+        const attempt = async (ms: number) => {
+            mock.timers.tick(ms);
+            await syncModule.catchUp();
+            await syncModule._awaitRenderRetryForTests();
+            return server.renderCalls();
+        };
+
+        await assert.rejects(syncModule.bootstrap());
+        assert.equal(await attempt(base), 2, "first retry after the base delay");
+        assert.equal(await attempt(base), 2, "the second wait is twice as long");
+        assert.equal(await attempt(base), 3);
+        assert.equal(await attempt(10 * base), 3, "no attempt after a success");
+    });
+
+    it("a render that never ran at startup (authentication failed first) is run by catch-up", async () => {
+        const a = makeLink({ source: "a" });
+        const server = renderServer([renderPage([wire(a)], 1)], 1);
+
+        syncModule.needRender();
+        await syncModule.catchUp();
+        await syncModule._awaitRenderRetryForTests();
+
+        assert.equal(server.renderCalls(), 1);
+        assert.equal(emitCounts("additions").get("a"), 1);
+    });
+
+    it("a catch-up while the startup render is still out does not start a second one", async () => {
+        let answerRender!: (res: TransportResponse) => void;
+        const slowRender = new Promise<TransportResponse>((resolve) => { answerRender = resolve; });
+        const server = renderServer([slowRender], 1);
+        syncModule.needRender();
+
+        const startup = syncModule.bootstrap();
+        await new Promise((resolve) => setImmediate(resolve));
+        await syncModule.catchUp();
+        await new Promise((resolve) => setImmediate(resolve));
+        assert.equal(server.renderCalls(), 1);
+
+        answerRender(jsonResponse(renderPage([wire(makeLink({ source: "a" }))], 1)));
+        await startup;
+        await syncModule.catchUp();
+        await syncModule._awaitRenderRetryForTests();
+        assert.equal(server.renderCalls(), 1);
+        assert.equal(emitCounts("additions").get("a"), 1);
+    });
+
+    it("catch-up does not wait for a retried render: it returns while the render is in flight, and a diff pushed meanwhile arrives with the render's tail", async () => {
+        mock.timers.enable({ apis: ["Date"], now: 1_000_000 });
+        let answerRender!: (res: TransportResponse) => void;
+        const slowRender = new Promise<TransportResponse>((resolve) => { answerRender = resolve; });
+        const transport = new MockTransport();
+        setup(transport);
+        let renderCalls = 0;
+        transport.route(
+            (url, method) => method === "GET" && url.includes("/render"),
+            () => {
+                renderCalls++;
+                if (renderCalls === 1) throw timeout();
+                return slowRender as unknown as TransportResponse;
+            },
+        );
+        const fresh = makeLink({ source: "fresh" });
+        transport.route(
+            (url, method) => method === "GET" && url.includes("/sync?since=1"),
+            () => jsonResponse(syncPage([{ additions: [wire(fresh)], removals: [], sequence: 2 }], 2)),
+        );
+        transport.route(
+            (url, method) => method === "GET" && url.includes("/sync"),
+            () => jsonResponse(syncPage([], 2)),
+        );
+        const syncGets = () => transport.calls.filter((c) => c.url.includes("/sync?")).map((c) => new URL(c.url).search);
+
+        await assert.rejects(syncModule.bootstrap());
+        mock.timers.tick(syncModule.RENDER_RETRY_BASE_MS);
+        const emitted = await syncModule.catchUp();
+        await new Promise((resolve) => setImmediate(resolve));
+
+        assert.equal(renderCalls, 2, "the retry is in flight");
+        assert.deepEqual(emitted, { additions: [], removals: [] }, "catch-up returned without waiting for the render");
+
+        // A diff the WebSocket pushes while the render is out waits for the
+        // render: it is after the snapshot, so the tail from upto brings it.
+        syncModule.applyInboundWireDiff({ additions: [wire(fresh)], removals: [] }, 2, "rev-2");
+        assert.equal(emitCounts("additions").get("fresh"), undefined);
+
+        // A second catch-up while the render is still out does not start another.
+        mock.timers.tick(60 * 60 * 1000);
+        await syncModule.catchUp();
+        assert.equal(renderCalls, 2);
+        assert.deepEqual(syncGets(), [], "no /sync from cursor 0 while the render is pending");
+
+        // The snapshot is pinned at 1, before the pushed diff; the tail from 1 brings `fresh`.
+        const old = makeLink({ source: "old" });
+        answerRender(jsonResponse(renderPage([wire(old)], 1)));
+        await syncModule._awaitRenderRetryForTests();
+        assert.equal(emitCounts("additions").get("old"), 1);
+        assert.equal(emitCounts("additions").get("fresh"), 1);
+        assert.deepEqual(store.allLinks().links.map((l) => l.data.source).sort(), ["fresh", "old"]);
+        assert.deepEqual(syncGets(), ["?since=1&limit=100"], "the render's own completion tails from its upto");
+        assert.equal(store.getSequence(), 2);
+    });
+
+    it("a failed render page is not re-requested by every catch-up before its backoff elapses", async () => {
+        mock.timers.enable({ apis: ["Date"], now: 1_000_000 });
+        const server = renderServer([timeout(), renderPage([], 0)], 0);
+
+        await assert.rejects(syncModule.bootstrap());
+        for (let i = 0; i < 3; i++) {
+            mock.timers.tick(3_000);
+            await syncModule.catchUp();
+            await syncModule._awaitRenderRetryForTests();
+        }
+        assert.equal(server.renderCalls(), 1, "three 3 s syncs inside the 10 s backoff send no render");
+        assert.notEqual(store.getRenderProgress(), null, "the failed render stays stored, to be resumed");
+
+        mock.timers.tick(syncModule.RENDER_RETRY_BASE_MS);
+        await syncModule.catchUp();
+        await syncModule._awaitRenderRetryForTests();
+        assert.equal(server.renderCalls(), 2);
+        assert.equal(store.getRenderProgress(), null);
+    });
+});
+
+// ---------------------------------------------------------------------------
+// An incomplete mirror is not the server's state, and heals
+// ---------------------------------------------------------------------------
+
+/** The link server's room revision over `links`: the XOR of their link hashes. */
+function roomRevision(links: LinkExpression[]): string {
+    const acc = new Uint8Array(32);
+    for (const link of links) {
+        const h = wireLinkHash(link);
+        for (let i = 0; i < 32; i++) acc[i] ^= parseInt(h.slice(i * 2, i * 2 + 2), 16);
+    }
+    return [...acc].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+describe("sync: an incomplete mirror is not presented as the server's state", () => {
+    afterEach(() => syncModule._setPageLimitsForTests());
+
+    const room = [1, 2, 3, 4, 5].map((i) => makeLink({ source: `room-${i}` }));
+
+    /** A link server holding `links` at `head`: paged `/render` (pages of
+     *  `pageSize`), `/sync` with nothing after `head`. */
+    function roomServer(links: WireLinkExpression[], head: number, revision: string, pageSize = 2) {
+        const transport = new MockTransport();
+        setup(transport);
+        syncModule._setPageLimitsForTests(pageSize);
+        transport.route(
+            (url, method) => method === "GET" && url.includes("/render"),
+            (url) => {
+                const from = Number(new URL(url).searchParams.get("next") ?? "0");
+                const to = from + pageSize;
+                return jsonResponse({
+                    links: links.slice(from, to),
+                    revision,
+                    sequence: head,
+                    upto: head,
+                    next: to < links.length ? String(to) : null,
+                });
+            },
+        );
+        transport.route(
+            (url, method) => method === "GET" && url.includes("/sync"),
+            () => jsonResponse({ diffs: [], revision, sequence: head, next: null }),
+        );
+        return transport;
+    }
+
+    const renders = (transport: MockTransport) =>
+        transport.calls.filter((c) => new URL(c.url).pathname.endsWith("/render")).length;
+
+    it("render() answers the mirror when it hashes to the room's revision at the cursor", () => {
+        setup(new MockTransport());
+        for (const link of room) store.putLink(link);
+        store.setSequence(3745);
+        store.setRevision(roomRevision(room));
+
+        assert.equal(syncModule.render()?.links.length, 5);
+    });
+
+    it("render() is unknown (null) while a render is stored, first page or half done", () => {
+        setup(new MockTransport());
+        store.putLink(room[0]);
+        store.setRevision(roomRevision([room[0]]));
+        store.setRenderProgress({ upto: null, next: null, page: 0 });
+        assert.equal(syncModule.render(), null, "a render stored, no page yet");
+
+        store.putLink(room[1]);
+        store.setRenderProgress({ upto: 9, next: "2", page: 1 });
+        assert.equal(syncModule.render(), null, "a render half done");
+    });
+
+    it("render() is unknown (null) when the mirror holds fewer links than the room's revision covers", () => {
+        // The staging case: cursor 3745, the server holds the whole room,
+        // the mirror only a part of it.
+        setup(new MockTransport());
+        store.putLink(room[0]);
+        store.putLink(room[1]);
+        store.setSequence(3745);
+        store.setRevision(roomRevision(room));
+
+        assert.equal(syncModule.render(), null);
+    });
+
+    it("render() counts a held link as the room's: a member waiting for a key is not short", () => {
+        setup(new MockTransport());
+        const otherKey = generateRoomKey();
+        const waiting = makeLink({ source: "waiting" });
+        store.putLink(room[0]);
+        syncModule.applyInboundWireDiff({ additions: [encryptLinkForWire(waiting, otherKey, 2)], removals: [] }, 1, "");
+        store.setSequence(1);
+        store.setRevision(roomRevision([room[0], waiting]));
+
+        assert.equal(syncModule.hasHeldLinks(), true);
+        assert.deepEqual(syncModule.render()?.links, [room[0]]);
+    });
+
+    it("render() takes a held removal as the room's: the link it removes no longer counts", () => {
+        setup(new MockTransport());
+        const otherKey = generateRoomKey();
+        store.putLink(room[0]);
+        store.putLink(room[1]);
+        syncModule.applyInboundWireDiff({ additions: [], removals: [encryptLinkForWire(room[1], otherKey, 2)] }, 1, "");
+        store.setSequence(1);
+        store.setRevision(roomRevision([room[0]]));
+
+        assert.equal(syncModule.hasHeldLinks(), true);
+        assert.notEqual(syncModule.render(), null);
+    });
+
+    it("a member with a cursor whose mirror is short re-renders, paged, and then answers the whole room", async () => {
+        const revision = roomRevision(room);
+        const transport = roomServer(room.map(wire), 3745, revision);
+        store.putLink(room[0]);
+        store.putLink(room[3]);
+        store.setSequence(3745);
+        store.setRevision(revision);
+
+        await syncModule.catchUp();
+        await syncModule._awaitRenderRetryForTests();
+
+        assert.equal(renders(transport), 3, "five links in pages of two");
+        assert.equal(store.getRenderProgress(), null, "the heal render finished");
+        assert.equal(store.getSequence(), 3745);
+        assert.deepEqual(
+            store.allLinks().links.map((l) => l.data.source).sort(),
+            room.map((l) => l.data.source).sort(),
+        );
+        assert.deepEqual(
+            emitCounts("additions"),
+            new Map([["room-2", 1], ["room-3", 1], ["room-5", 1]]),
+            "only the links the mirror lacked reach the executor",
+        );
+        assert.equal(syncModule.render()?.links.length, 5);
+
+        // Healed: later catch-ups only tail.
+        await syncModule.catchUp();
+        await syncModule._awaitRenderRetryForTests();
+        assert.equal(renders(transport), 3);
+    });
+
+    it("a complete mirror does not re-render", async () => {
+        const revision = roomRevision(room);
+        const transport = roomServer(room.map(wire), 3745, revision);
+        for (const link of room) store.putLink(link);
+        store.setSequence(3745);
+        store.setRevision(revision);
+
+        await syncModule.catchUp();
+        await syncModule._awaitRenderRetryForTests();
+
+        assert.equal(renders(transport), 0);
+        assert.equal(syncModule.render()?.links.length, 5);
+    });
+
+    it("heals at most once per start: a mismatch the render does not fix stays unknown, without a render loop", async () => {
+        // The server counts a link no member can open: no render fixes the mirror.
+        const unopenable = { ...wire(makeLink({ source: "spoiled" })), data: { ciphertext: "AAAA", nonce: "AAAA" } };
+        const revision = roomRevision([...room, makeLink({ source: "spoiled" })]);
+        const transport = roomServer([...room.map(wire), unopenable], 3745, revision);
+        store.putLink(room[0]);
+        store.setSequence(3745);
+        store.setRevision(revision);
+
+        for (let i = 0; i < 3; i++) {
+            await syncModule.catchUp();
+            await syncModule._awaitRenderRetryForTests();
+        }
+
+        assert.equal(renders(transport), 3, "one heal render (three pages), not one per catch-up");
+        assert.equal(store.getRenderProgress(), null);
+        assert.equal(store.allLinks().links.length, 5);
+        assert.equal(syncModule.render(), null, "still short of the room's revision: unknown");
     });
 });

@@ -119,23 +119,43 @@ export async function commitDiff(config: RoomConfig, token: string, diff: WirePe
     };
 }
 
-export async function fetchSync(config: RoomConfig, token: string, since: number): Promise<SyncResponse> {
-    const url = roomUrl(config, `/sync?since=${encodeURIComponent(String(since))}`);
-    const res = await request<Partial<SyncResponse>>(url, "GET", jsonHeaders(token));
-    return {
-        diffs: res.diffs ?? [],
-        revision: res.revision ?? "",
-        sequence: typeof res.sequence === "number" ? res.sequence : since,
-    };
+/** Throws unless `ok`: an answer without the paged fields cannot be read as a page. */
+function expectPage(ok: boolean, path: string): void {
+    if (!ok) throw new Error(`link server answered GET ${path} without a paged body`);
 }
 
-export async function fetchRender(config: RoomConfig, token: string): Promise<RenderResponse> {
-    const res = await request<Partial<RenderResponse>>(roomUrl(config, "/render"), "GET", jsonHeaders(token));
-    return {
-        links: res.links ?? [],
-        revision: res.revision ?? "",
-        sequence: typeof res.sequence === "number" ? res.sequence : 0,
-    };
+/** One page of the diff log after `since`: at most `limit` diffs, each with its sequence. */
+export async function fetchSync(config: RoomConfig, token: string, since: number, limit: number): Promise<SyncResponse> {
+    const path = `/sync?since=${encodeURIComponent(String(since))}&limit=${limit}`;
+    const res = await request<SyncResponse>(roomUrl(config, path), "GET", jsonHeaders(token));
+    expectPage(
+        Array.isArray(res?.diffs) &&
+            res.diffs.every((d) => typeof d?.sequence === "number") &&
+            typeof res.revision === "string" &&
+            typeof res.sequence === "number" &&
+            (res.next === null || (typeof res.next === "number" && res.next > since)),
+        path,
+    );
+    return res;
+}
+
+/** One page of the room's snapshot: the first when `next` is null. */
+export async function fetchRender(
+    config: RoomConfig,
+    token: string,
+    page: { limit: number; next: string | null },
+): Promise<RenderResponse> {
+    const path = `/render?limit=${page.limit}` + (page.next !== null ? `&next=${encodeURIComponent(page.next)}` : "");
+    const res = await request<RenderResponse>(roomUrl(config, path), "GET", jsonHeaders(token));
+    expectPage(
+        Array.isArray(res?.links) &&
+            typeof res.revision === "string" &&
+            typeof res.sequence === "number" &&
+            typeof res.upto === "number" &&
+            (res.next === null || (typeof res.next === "string" && res.next.length > 0)),
+        path,
+    );
+    return res;
 }
 
 // ---------------------------------------------------------------------------

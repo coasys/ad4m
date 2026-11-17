@@ -27,7 +27,7 @@ use super::types::{
     ScopeDirection, ShapeResolver, SortKey, SparqlPagination, WhereCondition,
 };
 use super::utils::{validate_iri, values_or_str_filter, MAX_INCLUDE_DEPTH};
-use crate::perspectives::sparql_store::SparqlStore;
+use crate::perspectives::sparql_store::{EvalStop, SparqlStore};
 use deno_core::anyhow::Error;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -63,6 +63,7 @@ fn walk_roots(query: &ModelQueryInput) -> Option<(Vec<String>, String, ScopeDire
 /// new node turns up. `Out` follows `start -> node`, `In` follows
 /// `node -> start`. As with `+`, a start on a cycle reaches itself.
 pub(super) fn guarded_reach(
+    stop: &EvalStop,
     store: &SparqlStore,
     starts: &[String],
     edges: &[ContainmentEdge],
@@ -92,7 +93,7 @@ pub(super) fn guarded_reach(
             "SELECT DISTINCT ?s ?o WHERE {{\n{step}\n    {} }}",
             values_or_str_filter("s", &nodes)
         );
-        let rows: Vec<Value> = serde_json::from_str(&store.query(&sparql)?)?;
+        let rows: Vec<Value> = serde_json::from_str(&store.query(stop, &sparql)?)?;
         let mut steps: Vec<(String, String)> = rows
             .iter()
             .filter_map(|row| {
@@ -124,6 +125,7 @@ pub(super) fn guarded_reach(
 /// traversal over one predicate with an open guard and no bound is left to
 /// the `+` path.
 pub(super) fn with_walk(
+    stop: &EvalStop,
     store: &SparqlStore,
     query: &ModelQueryInput,
 ) -> Result<Option<ModelQueryInput>, Error> {
@@ -163,7 +165,7 @@ pub(super) fn with_walk(
         .filter(|id| validate_iri(id).is_ok())
         .cloned()
         .collect();
-    let pairs = guarded_reach(store, &anchors, &edges, *direction, guard, *max_depth)?;
+    let pairs = guarded_reach(stop, store, &anchors, &edges, *direction, guard, *max_depth)?;
     Ok(Some(ModelQueryInput {
         walked: Some(pairs),
         ..query.clone()
@@ -241,6 +243,7 @@ fn slice_per_anchor(rows: &mut Vec<Value>, n: usize) {
 /// A node already seen is not walked again, so a cycle terminates rather than looping.
 #[allow(clippy::too_many_arguments)]
 async fn walk_levels(
+    stop: &EvalStop,
     store: &SparqlStore,
     shape: &ModelShape,
     query_input: &ModelQueryInput,
@@ -289,7 +292,7 @@ async fn walk_levels(
             break;
         };
 
-        let json = store.query_async(&pagination_subquery).await?;
+        let json = store.query_async(stop, &pagination_subquery).await?;
         let rows: Vec<Value> = serde_json::from_str(&json)?;
 
         // Slicing and de-duplication are one pass, not two, because a node that is not going to be
@@ -381,7 +384,20 @@ pub async fn execute_model_query(
     query_input: &ModelQueryInput,
     resolver: &dyn ShapeResolver,
 ) -> Result<ModelQueryResult, Error> {
-    execute_model_query_inner(store, shape, query_input, resolver, 0).await
+    execute_model_query_inner(&EvalStop::none(), store, shape, query_input, resolver, 0).await
+}
+
+/// [`execute_model_query`] under `stop` — every SPARQL evaluation the query
+/// makes (page, hydration, walk, include) checks its token and ends when the
+/// gate fires, reporting why.
+pub async fn execute_model_query_stopped(
+    stop: &EvalStop,
+    store: &SparqlStore,
+    shape: &ModelShape,
+    query_input: &ModelQueryInput,
+    resolver: &dyn ShapeResolver,
+) -> Result<ModelQueryResult, Error> {
+    execute_model_query_inner(stop, store, shape, query_input, resolver, 0).await
 }
 
 /// Inner implementation with recursion depth tracking.
@@ -390,6 +406,7 @@ pub async fn execute_model_query(
 /// `include` relations (e.g. A includes B which includes A).  If depth
 /// exceeds [`MAX_INCLUDE_DEPTH`], an empty result is returned.
 pub(super) async fn execute_model_query_inner(
+    stop: &EvalStop,
     store: &SparqlStore,
     shape: &ModelShape,
     query_input: &ModelQueryInput,
@@ -469,7 +486,7 @@ pub(super) async fn execute_model_query_inner(
     // guard that restricts links is walked here and handed to the builder as
     // pairs (see `ModelQueryInput::walked`), so the rows, the page and the
     // count all read the same walk.
-    let walked_input = with_walk(store, query_input)?;
+    let walked_input = with_walk(stop, store, query_input)?;
     let query_input = walked_input.as_ref().unwrap_or(query_input);
     let walk_order = walk_order(query_input);
 
@@ -506,7 +523,7 @@ pub(super) async fn execute_model_query_inner(
         && all_where_pushable(query_input, shape, Some(resolver))
     {
         if let Some(sparql) = build_count_sparql(shape, query_input, Some(resolver)) {
-            let result_json = store.query(&sparql)?;
+            let result_json = store.query(stop, &sparql)?;
             let results: Vec<Value> = serde_json::from_str(&result_json)?;
             let count = results
                 .first()
@@ -749,7 +766,7 @@ pub(super) async fn execute_model_query_inner(
 
     let raw_results: Vec<Value> = match query_plan {
         InstanceQueryPlan::Single(sparql) => {
-            let result_json = store.query_async(&sparql).await?;
+            let result_json = store.query_async(stop, &sparql).await?;
             serde_json::from_str(&result_json)?
         }
         InstanceQueryPlan::TwoPhase {
@@ -762,6 +779,7 @@ pub(super) async fn execute_model_query_inner(
             let ordered_ids: Vec<String> = match (&walk, walk_roots(query_input)) {
                 (Some(levels), Some((roots, predicate, direction))) => {
                     walk_levels(
+                        stop,
                         store,
                         shape,
                         query_input,
@@ -777,7 +795,7 @@ pub(super) async fn execute_model_query_inner(
                     .await?
                 }
                 _ => {
-                    let page_json = store.query_async(&pagination_subquery).await?;
+                    let page_json = store.query_async(stop, &pagination_subquery).await?;
                     let mut page_results: Vec<Value> = serde_json::from_str(&page_json)?;
                     if let Some(n) = anchor_limit {
                         slice_per_anchor(&mut page_results, n);
@@ -816,7 +834,7 @@ pub(super) async fn execute_model_query_inner(
     ?_reifier <ad4m://ontology/timestamp> ?timestamp .
 {link_status}{proof_valid}{local_status}}}"#
                     );
-                    let result_json = store.query_async(&property_sparql).await?;
+                    let result_json = store.query_async(stop, &property_sparql).await?;
                     serde_json::from_str(&result_json)?
                 }
             }
@@ -875,6 +893,7 @@ pub(super) async fn execute_model_query_inner(
         .map(|p| (p.name.clone(), p.predicate.clone(), p.is_scalar_relation))
         .partition(|(name, _, _)| read_before_window.contains(name));
     resolve_reverse_relations(
+        stop,
         store,
         &mut instances,
         &reverse_before_window,
@@ -925,7 +944,7 @@ pub(super) async fn execute_model_query_inner(
         total
     } else if sparql_pagination.is_some() {
         if let Some(count_sparql) = build_count_sparql(shape, query_input, Some(resolver)) {
-            let result_json = store.query(&count_sparql)?;
+            let result_json = store.query(stop, &count_sparql)?;
             let results: Vec<Value> = serde_json::from_str(&result_json)?;
             results
                 .first()
@@ -1001,6 +1020,7 @@ pub(super) async fn execute_model_query_inner(
 
     // The reverse relations the filter and sort did not read, for the page only.
     resolve_reverse_relations(
+        stop,
         store,
         &mut paginated,
         &reverse_on_page,
@@ -1013,6 +1033,7 @@ pub(super) async fn execute_model_query_inner(
     if !paginated.is_empty() {
         let deep_query = query_input.deep_query.unwrap_or(true);
         evaluate_getters(
+            stop,
             store,
             &mut paginated,
             shape,
@@ -1027,6 +1048,7 @@ pub(super) async fn execute_model_query_inner(
     if let Some(ref include) = query_input.include {
         if !paginated.is_empty() && !shape.include_relations.is_empty() {
             resolve_includes_recursive(
+                stop,
                 store,
                 &mut paginated,
                 include,
@@ -1052,6 +1074,7 @@ pub(super) async fn execute_model_query_inner(
 
     // After `filter_properties`, so a `properties` selection cannot strip it.
     attach_links(
+        stop,
         store,
         shape,
         &link_keys,
@@ -1064,6 +1087,7 @@ pub(super) async fn execute_model_query_inner(
     // Attach projection results
     if let Some(ref projections) = query_input.projections {
         resolve_projections(
+            stop,
             store,
             &mut final_instances,
             projections,

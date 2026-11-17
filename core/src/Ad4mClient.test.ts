@@ -36,8 +36,20 @@ type RpcHandler = unknown | ((params: Record<string, unknown>) => unknown);
 
 const MOCK_RESPONSES: Record<string, RpcHandler> = {
     // ── Agent ──
-    'agent.get': { did: 'did:test:123', perspective: new Perspective(), directMessageLanguage: 'lang://dm' },
-    'agent.status': { did: 'did:test:123', didDocument: 'doc', isInitialized: true, isUnlocked: true },
+    'agent.get': { did: 'did:test:123', perspective: new Perspective(), directMessageLanguage: 'lang://dm', identity: 'did:scid:coasys:1:QmTest' },
+    'agent.status': { did: 'did:test:123', didDocument: 'doc', isInitialized: true, isUnlocked: true, identity: 'did:scid:coasys:1:QmTest' },
+    // ── Identity ──
+    'identity.status': { did: 'did:scid:coasys:1:QmTest', deviceKey: 'z6MkTest', deviceEnc: 'z6LSTest', keyId: 'd1', revoked: null, head: null, fork: null, storeBehind: null, store: { url: 'https://store.ad4m.dev', trusted: true } },
+    'identity.claimOffer': (p: Record<string, unknown>) => ({ did: 'did:scid:coasys:1:QmTest', offerId: 'offer', matchCode: 'R7K Q2M', kind: 'node', expires: 1, echo: p }),
+    'identity.log': (p: Record<string, unknown>) => ({ did: p.did, events: [], head: null, fork: null }),
+    'identity.devices': [],
+    'identity.rekey': { sign: 'did:key:z6MkNew', enc: 'z6LSNew' },
+    'identity.custodyStatus': { sign: 'did:key:z6MkTest', enc: 'z6LSTest' },
+    'identity.resolve': (p: Record<string, unknown>) => ({
+        didDocument: { '@context': ['https://www.w3.org/ns/did/v1'], id: p.didUrl, controller: p.didUrl, verificationMethod: [], authentication: [], assertionMethod: [], keyAgreement: [], capabilityInvocation: [] },
+        didDocumentMetadata: { versionId: '2', deactivated: false },
+        didResolutionMetadata: { contentType: 'application/did+ld+json', 'coasys:source': 'cache', 'coasys:headTrusted': true },
+    }),
     'agent.generate': { did: 'did:test:generated', didDocument: 'doc', isInitialized: true, isUnlocked: true },
     'agent.lock': { did: 'did:test:123', isInitialized: true, isUnlocked: false },
     'agent.unlock': { did: 'did:test:123', isInitialized: true, isUnlocked: true },
@@ -201,6 +213,10 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'runtime.addHcAgentInfos': true,
     'runtime.networkMetrics': 'metrics-data',
     'runtime.restartHolochain': true,
+    'runtime.restart': true,
+    'runtime.logTail': (p: Record<string, unknown>) => ({ lines: [`asked ${p.lines}`] }),
+    'runtime.config': { values: { mcp_port: 3001 }, keys: [{ key: 'mcp_port', class: 'restart' }, { key: 'port', class: 'machine', pinned: 'config' }], restartPending: false, file: '/data/adam/config.json' },
+    'runtime.setConfig': (p: Record<string, unknown>) => ({ restartPending: true, refused: p.unset ? [{ key: 'port', reason: 'local-only' }] : [] }),
     'runtime.verifySignature': true,
     'runtime.exportData': true,
     'runtime.importData': { success: true, count: 5 },
@@ -209,7 +225,7 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'runtime.computeLog': [],
 
     // ── AI ──
-    'ai.models': [{ id: 'model-1', name: 'GPT-Test', modelType: 'LLM', api: 'openai' }],
+    'ai.models': [{ id: 'model-1', name: 'GPT-Test', modelType: 'LLM', endpointId: 'e1', remoteModel: 'gpt-5', status: { state: 'READY' } }],
     'ai.addModel': 'model-new-id',
     'ai.updateModel': true,
     'ai.removeModel': true,
@@ -220,7 +236,8 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'ai.updateTask': { taskId: 'task-1', name: 'updated', modelId: 'model-1', systemPrompt: 'Updated', promptExamples: [] },
     'ai.removeTask': true,
     'ai.prompt': 'This is the AI response',
-    'ai.modelLoadingStatus': { model: 'model-1', progress: 100, status: 'loaded' },
+    'ai.modelStatus': { state: 'READY' },
+    'ai.discoverModels': [{ id: 'qwen3:8b', capabilities: ['chat'] }],
 
     // ── Users (unauthenticated on server — empty token allowed) ──
     'user.create': { success: true, did: 'did:test:new-user' },
@@ -432,6 +449,8 @@ describe('AgentClient', () => {
         const agent = await ad4m.agent.me();
         expect(agent.did).toBe('did:test:123');
         expect(agent.directMessageLanguage).toBe('lang://dm');
+        // agent.get's identity reaches the Agent, as IdentityClient documents.
+        expect(agent.identity).toBe('did:scid:coasys:1:QmTest');
     });
 
     test('status() returns agent status', async () => {
@@ -552,7 +571,7 @@ describe('AgentClient', () => {
         const callback = jest.fn();
         freshClient.on('agent-status-changed', ({ agent }) => callback(agent));
 
-        const status = { did: 'did:test:status', didDocument: null, error: null, isInitialized: true, isUnlocked: false };
+        const status = { did: 'did:test:status', didDocument: null, error: null, isInitialized: true, isUnlocked: false, identity: null };
         lastOf(MockWebSocket.instances).emit(event('agent-status-changed', { agent: status }));
 
         expect(callback.mock.calls).toEqual([[status]]);
@@ -1042,19 +1061,19 @@ describe('NeighbourhoodClient', () => {
         expect(ws.rpc[0].params).toEqual({ 'sfu-call-renegotiation-offer': null, 'sfu-data': null, 'sfu-migrate': null });
 
         const room = { neighbourhoodUrl: 'neighbourhood://n', roomName: 'r' };
-        ws.emit(event('sfu-call-renegotiation-offer', { targetDid: 'did:other', ...room, sdpOffer: '{}' }));
-        ws.emit(event('sfu-call-renegotiation-offer', { targetDid: 'did:me', ...room, sdpOffer: '{"x":1}' }));
+        ws.emit(event('sfu-call-renegotiation-offer', { targetDid: 'did:other', participantId: 'P2', ...room, sdpOffer: '{}' }));
+        ws.emit(event('sfu-call-renegotiation-offer', { targetDid: 'did:me', participantId: 'P1', ...room, sdpOffer: '{"x":1}' }));
         ws.emit(event('sfu-migrate', { targetDid: 'did:me', ...room, migrateToDid: 'did:node' }));
-        const message = { senderDid: 'did:other', ...room, channelLabel: 'chat', binary: false, data: 'hi' };
+        const message = { senderDid: 'did:other', senderParticipantId: 'P2', ...room, channelLabel: 'chat', binary: false, data: 'hi' };
         ws.emit(event('sfu-data', message));
 
         expect(offers).toHaveBeenCalledTimes(1);
-        expect(offers).toHaveBeenCalledWith({ targetDid: 'did:me', ...room, sdpOffer: '{"x":1}', trackMapping: undefined });
+        expect(offers).toHaveBeenCalledWith({ targetDid: 'did:me', participantId: 'P1', ...room, sdpOffer: '{"x":1}', trackMapping: undefined });
         expect(migrations).toHaveBeenCalledWith({ targetDid: 'did:me', ...room, migrateToDid: 'did:node' });
         expect(data).toHaveBeenCalledWith(expect.objectContaining(message));
 
         releaseOffers();
-        ws.emit(event('sfu-call-renegotiation-offer', { targetDid: 'did:me', ...room, sdpOffer: '{}' }));
+        ws.emit(event('sfu-call-renegotiation-offer', { targetDid: 'did:me', participantId: 'P1', ...room, sdpOffer: '{}' }));
         expect(offers).toHaveBeenCalledTimes(1);
     });
 });
@@ -1232,6 +1251,93 @@ describe('RuntimeClient', () => {
         const result = await ad4m.runtime.restartHolochain();
         expect(result).toBe(true);
     });
+
+    test('restart() calls runtime.restart', async () => {
+        expect(await ad4m.runtime.restart()).toBe(true);
+        expect(lastRpcCall!.type).toBe('runtime.restart');
+    });
+
+    test('logTail() sends the number of lines', async () => {
+        const tail = await ad4m.runtime.logTail(20);
+        expect(lastRpcCall!.params).toMatchObject({ lines: 20 });
+        expect(tail.lines).toEqual(['asked 20']);
+    });
+
+    test('config() returns the keys with their classes', async () => {
+        const config = await ad4m.runtime.config();
+        expect(lastRpcCall!.type).toBe('runtime.config');
+        expect(config.keys.find(k => k.key === 'port')?.class).toBe('machine');
+        expect(config.keys.find(k => k.key === 'port')?.pinned).toBe('config');
+        expect(config.file).toBe('/data/adam/config.json');
+    });
+
+    test('setConfig() sends set and unset and returns the refusals', async () => {
+        const result = await ad4m.runtime.setConfig({ mcp_port: 3005 }, ['port']);
+        expect(lastRpcCall!.type).toBe('runtime.setConfig');
+        expect(lastRpcCall!.params).toMatchObject({ set: { mcp_port: 3005 }, unset: ['port'] });
+        expect(result.restartPending).toBe(true);
+        expect(result.refused).toEqual([{ key: 'port', reason: 'local-only' }]);
+    });
+});
+
+// ===================== IDENTITY TESTS =====================
+describe('IdentityClient', () => {
+    test('status() calls identity.status', async () => {
+        const status = await ad4m.identity.status();
+        expect(lastRpcCall!.type).toBe('identity.status');
+        expect(status.did).toBe('did:scid:coasys:1:QmTest');
+        expect(status.keyId).toBe('d1');
+        expect(status.store).toEqual({ url: 'https://store.ad4m.dev', trusted: true });
+    });
+
+    test('claimOffer() sends the offer and the hint', async () => {
+        const claimed = await ad4m.identity.claimOffer('coasys:offer:1:abc', 'server');
+        expect(lastRpcCall!.type).toBe('identity.claimOffer');
+        expect(lastRpcCall!.params.offer).toBe('coasys:offer:1:abc');
+        expect(lastRpcCall!.params.hint).toBe('server');
+        expect(claimed.matchCode).toBe('R7K Q2M');
+    });
+
+    test('log() sends the did, from and fresh', async () => {
+        await ad4m.identity.log('did:scid:coasys:1:QmTest', 2, true);
+        expect(lastRpcCall!.params).toMatchObject({ did: 'did:scid:coasys:1:QmTest', from: 2, fresh: true });
+    });
+
+    test('resolve() sends the DID URL and fresh, and returns the resolution result', async () => {
+        const url = 'did:scid:coasys:1:QmTest?src=store.example&versionId=2';
+        const result = await ad4m.identity.resolve(url, { fresh: true });
+        expect(lastRpcCall!.type).toBe('identity.resolve');
+        expect(lastRpcCall!.params).toMatchObject({ didUrl: url, fresh: true });
+        expect(result.didDocument!.id).toBe(url);
+        expect(result.didDocumentMetadata.versionId).toBe('2');
+        expect(result.didResolutionMetadata['coasys:source']).toBe('cache');
+        expect(result.didResolutionMetadata['coasys:headTrusted']).toBe(true);
+    });
+
+    test('resolve() without options leaves fresh unset', async () => {
+        await ad4m.identity.resolve('did:key:z6MkTest');
+        expect(lastRpcCall!.type).toBe('identity.resolve');
+        expect(lastRpcCall!.params.didUrl).toBe('did:key:z6MkTest');
+        expect(lastRpcCall!.params.fresh).toBeUndefined();
+    });
+
+    test('rekey() calls identity.rekey and returns the new device keys', async () => {
+        const keys = await ad4m.identity.rekey();
+        expect(lastRpcCall!.type).toBe('identity.rekey');
+        expect(keys).toEqual({ sign: 'did:key:z6MkNew', enc: 'z6LSNew' });
+    });
+
+    test('custodyStatus() calls identity.custodyStatus', async () => {
+        const keys = await ad4m.identity.custodyStatus();
+        expect(lastRpcCall!.type).toBe('identity.custodyStatus');
+        expect(keys.enc).toBe('z6LSTest');
+    });
+
+    test('agent.status() carries the identity beside the device did', async () => {
+        const status = await ad4m.agent.status();
+        expect(status.did).toBe('did:test:123');
+        expect(status.identity).toBe('did:scid:coasys:1:QmTest');
+    });
 });
 
 // ===================== AI TESTS =====================
@@ -1242,19 +1348,26 @@ describe('AIClient', () => {
         expect(models[0].name).toBe('GPT-Test');
     });
 
-    test('addModel() adds a model', async () => {
-        const id = await ad4m.ai.addModel({ name: 'New Model', modelType: 'LLM' } as any);
+    test('addModel() adds a model on an endpoint', async () => {
+        const model = { name: 'New Model', modelType: 'LLM' as const, endpointId: 'e1', remoteModel: 'qwen3:8b' };
+        const id = await ad4m.ai.addModel(model);
         expect(id).toBe('model-new-id');
-        expect(lastRpcCall!.params.model).toBeDefined();
-        expect((lastRpcCall!.params.model as any).type).toBe('LLM');
-        expect((lastRpcCall!.params.model as any).modelType).toBeUndefined();
+        expect(lastRpcCall!.params).toEqual({ model });
     });
 
     test('updateModel() updates a model', async () => {
-        const result = await ad4m.ai.updateModel('model-1', { name: 'Updated', modelType: 'EMBEDDING' } as any);
+        const model = { name: 'Updated', modelType: 'EMBEDDING' as const, endpointId: 'e1', remoteModel: 'nomic-embed-text' };
+        const result = await ad4m.ai.updateModel('model-1', model);
         expect(result).toBe(true);
-        expect((lastRpcCall!.params.model as any).type).toBe('EMBEDDING');
-        expect((lastRpcCall!.params.model as any).modelType).toBeUndefined();
+        expect(lastRpcCall!.params).toEqual({ id: 'model-1', model });
+    });
+
+    test('discoverModels() lists a saved endpoint or a server by its kind and URL', async () => {
+        const models = await ad4m.ai.discoverModels({ endpointId: 'e1' });
+        expect(models[0].id).toBe('qwen3:8b');
+        expect(lastRpcCall!.params).toEqual({ endpointId: 'e1' });
+        await ad4m.ai.discoverModels({ kind: 'OLLAMA', baseUrl: 'http://127.0.0.1:11434' });
+        expect(lastRpcCall!.params).toEqual({ kind: 'OLLAMA', baseUrl: 'http://127.0.0.1:11434' });
     });
 
     test('removeModel() removes a model', async () => {
@@ -1284,9 +1397,10 @@ describe('AIClient', () => {
         expect(lastRpcCall!.params.prompt).toBe('Hello AI');
     });
 
-    test('modelLoadingStatus() returns status', async () => {
-        const status = await ad4m.ai.modelLoadingStatus('model-1');
-        expect(status.progress).toBe(100);
+    test('modelStatus() returns where the model stands', async () => {
+        const status = await ad4m.ai.modelStatus('model-1');
+        expect(status.state).toBe('READY');
+        expect(lastRpcCall!.params).toEqual({ id: 'model-1' });
     });
 
     test('setDefaultModel() sets default', async () => {
@@ -1521,7 +1635,7 @@ describe('Ad4mClient', () => {
         };
         const ws = lastOf(MockWebSocket.instances);
         ws.emit(event('agent-updated', { agent: { did: 'did:test:upd', directMessageLanguage: null, perspective: null } }));
-        ws.emit(event('agent-status-changed', { agent: { did: 'did:test:upd', didDocument: null, error: null, isInitialized: true, isUnlocked: true } }));
+        ws.emit(event('agent-status-changed', { agent: { did: 'did:test:upd', didDocument: null, error: null, isInitialized: true, isUnlocked: true, identity: 'did:scid:coasys:1:QmTest' } }));
         ws.emit(event('apps-changed', {
             requestId: 'app1', token: 'tok', revoked: null,
             auth: { appName: 'a', appDesc: 'd', appDomain: null, appUrl: null, appIconPath: null, capabilities: null, userEmail: null },

@@ -1,0 +1,1247 @@
+{
+  "cases": [
+    {
+      "base": [
+        {
+          "body": "genesis",
+          "chain": "vector-chain",
+          "key": "z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z",
+          "prev": null,
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "test:chain",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "zDusrcPsgTzSCi3qCuYFHbnXmnu77StkXDTUg5eYmm9m3E5DDtRQ5SKw2zvLyx4Rnr9ELz6C7tVerBG5bqW4yyYG",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "test:vector-chain#z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+            }
+          ],
+          "seq": 0
+        },
+        {
+          "body": "entry 1",
+          "chain": "vector-chain",
+          "prev": "QmPm3xxpch6RZ3gNjUmfkcLubKbtpGi1DuvTLNNFiA9oEt",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "test:chain",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z2Lw12TM42Y6WVS6N9qQvWMFyvs68J2pvQ1DXjRCTh7EveWjb4aWp4Bx42fjBNW15bGHxQhS5oycemWhYSmykyiwP",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "test:vector-chain#z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+            }
+          ],
+          "seq": 1
+        },
+        {
+          "body": "entry 2",
+          "chain": "vector-chain",
+          "prev": "QmeJ5mepiUFkokJAaDCAUL7P5izoZCUYkPvUaSpbCFTHN2",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "test:chain",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "zQFk6PUFw7NsM2qogGVtehL3VrQMFHLjMgjDHhF1wbDcEt5Jo2aY3kWUAoFQs8UnUiJPiMTHxXWZyirioHc98Cgo",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "test:vector-chain#z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+            }
+          ],
+          "seq": 2
+        }
+      ],
+      "batch": [
+        {
+          "body": "entry 3",
+          "chain": "vector-chain",
+          "prev": "QmXRCSzvMqhRb8bfWAaPQf8wuB1Ls8VMkNGp3xju5egZXz",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "test:chain",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z3xfrKHH3eiVZtRzLENd5xKUvaBkRXSSQ7dJbdrooVJaMwZzea7JVVAmYTLejLGdicsh8NdF3wEwohLhKMbKeJ1di",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "test:vector-chain#z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+            }
+          ],
+          "seq": 3
+        },
+        {
+          "body": "entry 4",
+          "chain": "vector-chain",
+          "prev": "Qmc1Mnd82HA92ona5sDfAMyPVWuJHmKMddE1G9FbapVYTw",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "test:chain",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z2jhRJHVLJTa7tj5U1qDQ5iyKccdhe7WnU4GZtfDTxuA1etN331PBhHAgjrdqtr6UUYKgYwgunGLriZbcDfKEiVEg",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "test:vector-chain#z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+            }
+          ],
+          "seq": 4
+        },
+        {
+          "body": "entry 5",
+          "chain": "vector-chain",
+          "prev": "QmYjx3hL4Tya6LQp3NyMoaZXZjNUWXZFX2VExZznSMxi5x",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "test:chain",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z27tx9YcbJkTS69TCT8cmcTwmqh5ov75tP8EcZ7U29Kbxk2uJ7a8nbdGDC6RfNJiovuoL7LmAeCg3QwKF3JxNadNc",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "test:vector-chain#z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+            }
+          ],
+          "seq": 5
+        }
+      ],
+      "name": "continues the head",
+      "result": {
+        "after": {
+          "chain": "vector-chain",
+          "hashes": [
+            "QmPm3xxpch6RZ3gNjUmfkcLubKbtpGi1DuvTLNNFiA9oEt",
+            "QmeJ5mepiUFkokJAaDCAUL7P5izoZCUYkPvUaSpbCFTHN2",
+            "QmXRCSzvMqhRb8bfWAaPQf8wuB1Ls8VMkNGp3xju5egZXz",
+            "Qmc1Mnd82HA92ona5sDfAMyPVWuJHmKMddE1G9FbapVYTw",
+            "QmYjx3hL4Tya6LQp3NyMoaZXZjNUWXZFX2VExZznSMxi5x",
+            "QmV4PJPCt2VekKPSVXx5xVxjbvtYQ9JmP2LP5sGgmS57WN"
+          ],
+          "head": {
+            "hash": "QmV4PJPCt2VekKPSVXx5xVxjbvtYQ9JmP2LP5sGgmS57WN",
+            "seq": 5
+          },
+          "state": {
+            "count": 5,
+            "key": "z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+          }
+        },
+        "outcome": {
+          "count": 3,
+          "head": {
+            "hash": "QmV4PJPCt2VekKPSVXx5xVxjbvtYQ9JmP2LP5sGgmS57WN",
+            "seq": 5
+          },
+          "kind": "appended"
+        }
+      }
+    },
+    {
+      "base": [
+        {
+          "body": "genesis",
+          "chain": "vector-chain",
+          "key": "z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z",
+          "prev": null,
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "test:chain",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "zDusrcPsgTzSCi3qCuYFHbnXmnu77StkXDTUg5eYmm9m3E5DDtRQ5SKw2zvLyx4Rnr9ELz6C7tVerBG5bqW4yyYG",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "test:vector-chain#z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+            }
+          ],
+          "seq": 0
+        },
+        {
+          "body": "entry 1",
+          "chain": "vector-chain",
+          "prev": "QmPm3xxpch6RZ3gNjUmfkcLubKbtpGi1DuvTLNNFiA9oEt",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "test:chain",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z2Lw12TM42Y6WVS6N9qQvWMFyvs68J2pvQ1DXjRCTh7EveWjb4aWp4Bx42fjBNW15bGHxQhS5oycemWhYSmykyiwP",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "test:vector-chain#z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+            }
+          ],
+          "seq": 1
+        },
+        {
+          "body": "entry 2",
+          "chain": "vector-chain",
+          "prev": "QmeJ5mepiUFkokJAaDCAUL7P5izoZCUYkPvUaSpbCFTHN2",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "test:chain",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "zQFk6PUFw7NsM2qogGVtehL3VrQMFHLjMgjDHhF1wbDcEt5Jo2aY3kWUAoFQs8UnUiJPiMTHxXWZyirioHc98Cgo",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "test:vector-chain#z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+            }
+          ],
+          "seq": 2
+        }
+      ],
+      "batch": [
+        {
+          "body": "entry 4",
+          "chain": "vector-chain",
+          "prev": "Qmc1Mnd82HA92ona5sDfAMyPVWuJHmKMddE1G9FbapVYTw",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "test:chain",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z2jhRJHVLJTa7tj5U1qDQ5iyKccdhe7WnU4GZtfDTxuA1etN331PBhHAgjrdqtr6UUYKgYwgunGLriZbcDfKEiVEg",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "test:vector-chain#z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+            }
+          ],
+          "seq": 4
+        },
+        {
+          "body": "entry 5",
+          "chain": "vector-chain",
+          "prev": "QmYjx3hL4Tya6LQp3NyMoaZXZjNUWXZFX2VExZznSMxi5x",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "test:chain",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z27tx9YcbJkTS69TCT8cmcTwmqh5ov75tP8EcZ7U29Kbxk2uJ7a8nbdGDC6RfNJiovuoL7LmAeCg3QwKF3JxNadNc",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "test:vector-chain#z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+            }
+          ],
+          "seq": 5
+        },
+        {
+          "body": "entry 3",
+          "chain": "vector-chain",
+          "prev": "QmXRCSzvMqhRb8bfWAaPQf8wuB1Ls8VMkNGp3xju5egZXz",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "test:chain",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z3xfrKHH3eiVZtRzLENd5xKUvaBkRXSSQ7dJbdrooVJaMwZzea7JVVAmYTLejLGdicsh8NdF3wEwohLhKMbKeJ1di",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "test:vector-chain#z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+            }
+          ],
+          "seq": 3
+        }
+      ],
+      "name": "shuffled batch imports as the sorted batch",
+      "result": {
+        "after": {
+          "chain": "vector-chain",
+          "hashes": [
+            "QmPm3xxpch6RZ3gNjUmfkcLubKbtpGi1DuvTLNNFiA9oEt",
+            "QmeJ5mepiUFkokJAaDCAUL7P5izoZCUYkPvUaSpbCFTHN2",
+            "QmXRCSzvMqhRb8bfWAaPQf8wuB1Ls8VMkNGp3xju5egZXz",
+            "Qmc1Mnd82HA92ona5sDfAMyPVWuJHmKMddE1G9FbapVYTw",
+            "QmYjx3hL4Tya6LQp3NyMoaZXZjNUWXZFX2VExZznSMxi5x",
+            "QmV4PJPCt2VekKPSVXx5xVxjbvtYQ9JmP2LP5sGgmS57WN"
+          ],
+          "head": {
+            "hash": "QmV4PJPCt2VekKPSVXx5xVxjbvtYQ9JmP2LP5sGgmS57WN",
+            "seq": 5
+          },
+          "state": {
+            "count": 5,
+            "key": "z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+          }
+        },
+        "outcome": {
+          "count": 3,
+          "head": {
+            "hash": "QmV4PJPCt2VekKPSVXx5xVxjbvtYQ9JmP2LP5sGgmS57WN",
+            "seq": 5
+          },
+          "kind": "appended"
+        }
+      }
+    },
+    {
+      "base": [
+        {
+          "body": "genesis",
+          "chain": "vector-chain",
+          "key": "z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z",
+          "prev": null,
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "test:chain",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "zDusrcPsgTzSCi3qCuYFHbnXmnu77StkXDTUg5eYmm9m3E5DDtRQ5SKw2zvLyx4Rnr9ELz6C7tVerBG5bqW4yyYG",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "test:vector-chain#z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+            }
+          ],
+          "seq": 0
+        },
+        {
+          "body": "entry 1",
+          "chain": "vector-chain",
+          "prev": "QmPm3xxpch6RZ3gNjUmfkcLubKbtpGi1DuvTLNNFiA9oEt",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "test:chain",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z2Lw12TM42Y6WVS6N9qQvWMFyvs68J2pvQ1DXjRCTh7EveWjb4aWp4Bx42fjBNW15bGHxQhS5oycemWhYSmykyiwP",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "test:vector-chain#z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+            }
+          ],
+          "seq": 1
+        },
+        {
+          "body": "entry 2",
+          "chain": "vector-chain",
+          "prev": "QmeJ5mepiUFkokJAaDCAUL7P5izoZCUYkPvUaSpbCFTHN2",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "test:chain",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "zQFk6PUFw7NsM2qogGVtehL3VrQMFHLjMgjDHhF1wbDcEt5Jo2aY3kWUAoFQs8UnUiJPiMTHxXWZyirioHc98Cgo",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "test:vector-chain#z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+            }
+          ],
+          "seq": 2
+        }
+      ],
+      "batch": [
+        {
+          "body": "entry 1",
+          "chain": "vector-chain",
+          "prev": "QmPm3xxpch6RZ3gNjUmfkcLubKbtpGi1DuvTLNNFiA9oEt",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "test:chain",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z2Lw12TM42Y6WVS6N9qQvWMFyvs68J2pvQ1DXjRCTh7EveWjb4aWp4Bx42fjBNW15bGHxQhS5oycemWhYSmykyiwP",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "test:vector-chain#z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+            }
+          ],
+          "seq": 1
+        },
+        {
+          "body": "entry 2",
+          "chain": "vector-chain",
+          "prev": "QmeJ5mepiUFkokJAaDCAUL7P5izoZCUYkPvUaSpbCFTHN2",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "test:chain",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "zQFk6PUFw7NsM2qogGVtehL3VrQMFHLjMgjDHhF1wbDcEt5Jo2aY3kWUAoFQs8UnUiJPiMTHxXWZyirioHc98Cgo",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "test:vector-chain#z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+            }
+          ],
+          "seq": 2
+        },
+        {
+          "body": "entry 3",
+          "chain": "vector-chain",
+          "prev": "QmXRCSzvMqhRb8bfWAaPQf8wuB1Ls8VMkNGp3xju5egZXz",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "test:chain",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z3xfrKHH3eiVZtRzLENd5xKUvaBkRXSSQ7dJbdrooVJaMwZzea7JVVAmYTLejLGdicsh8NdF3wEwohLhKMbKeJ1di",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "test:vector-chain#z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+            }
+          ],
+          "seq": 3
+        },
+        {
+          "body": "entry 4",
+          "chain": "vector-chain",
+          "prev": "Qmc1Mnd82HA92ona5sDfAMyPVWuJHmKMddE1G9FbapVYTw",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "test:chain",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z2jhRJHVLJTa7tj5U1qDQ5iyKccdhe7WnU4GZtfDTxuA1etN331PBhHAgjrdqtr6UUYKgYwgunGLriZbcDfKEiVEg",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "test:vector-chain#z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+            }
+          ],
+          "seq": 4
+        }
+      ],
+      "name": "held entries and new ones",
+      "result": {
+        "after": {
+          "chain": "vector-chain",
+          "hashes": [
+            "QmPm3xxpch6RZ3gNjUmfkcLubKbtpGi1DuvTLNNFiA9oEt",
+            "QmeJ5mepiUFkokJAaDCAUL7P5izoZCUYkPvUaSpbCFTHN2",
+            "QmXRCSzvMqhRb8bfWAaPQf8wuB1Ls8VMkNGp3xju5egZXz",
+            "Qmc1Mnd82HA92ona5sDfAMyPVWuJHmKMddE1G9FbapVYTw",
+            "QmYjx3hL4Tya6LQp3NyMoaZXZjNUWXZFX2VExZznSMxi5x"
+          ],
+          "head": {
+            "hash": "QmYjx3hL4Tya6LQp3NyMoaZXZjNUWXZFX2VExZznSMxi5x",
+            "seq": 4
+          },
+          "state": {
+            "count": 4,
+            "key": "z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+          }
+        },
+        "outcome": {
+          "count": 2,
+          "head": {
+            "hash": "QmYjx3hL4Tya6LQp3NyMoaZXZjNUWXZFX2VExZznSMxi5x",
+            "seq": 4
+          },
+          "kind": "appended"
+        }
+      }
+    },
+    {
+      "base": [
+        {
+          "body": "genesis",
+          "chain": "vector-chain",
+          "key": "z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z",
+          "prev": null,
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "test:chain",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "zDusrcPsgTzSCi3qCuYFHbnXmnu77StkXDTUg5eYmm9m3E5DDtRQ5SKw2zvLyx4Rnr9ELz6C7tVerBG5bqW4yyYG",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "test:vector-chain#z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+            }
+          ],
+          "seq": 0
+        },
+        {
+          "body": "entry 1",
+          "chain": "vector-chain",
+          "prev": "QmPm3xxpch6RZ3gNjUmfkcLubKbtpGi1DuvTLNNFiA9oEt",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "test:chain",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z2Lw12TM42Y6WVS6N9qQvWMFyvs68J2pvQ1DXjRCTh7EveWjb4aWp4Bx42fjBNW15bGHxQhS5oycemWhYSmykyiwP",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "test:vector-chain#z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+            }
+          ],
+          "seq": 1
+        },
+        {
+          "body": "entry 2",
+          "chain": "vector-chain",
+          "prev": "QmeJ5mepiUFkokJAaDCAUL7P5izoZCUYkPvUaSpbCFTHN2",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "test:chain",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "zQFk6PUFw7NsM2qogGVtehL3VrQMFHLjMgjDHhF1wbDcEt5Jo2aY3kWUAoFQs8UnUiJPiMTHxXWZyirioHc98Cgo",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "test:vector-chain#z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+            }
+          ],
+          "seq": 2
+        }
+      ],
+      "batch": [
+        {
+          "body": "genesis",
+          "chain": "vector-chain",
+          "key": "z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z",
+          "prev": null,
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "test:chain",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "zDusrcPsgTzSCi3qCuYFHbnXmnu77StkXDTUg5eYmm9m3E5DDtRQ5SKw2zvLyx4Rnr9ELz6C7tVerBG5bqW4yyYG",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "test:vector-chain#z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+            }
+          ],
+          "seq": 0
+        },
+        {
+          "body": "entry 1",
+          "chain": "vector-chain",
+          "prev": "QmPm3xxpch6RZ3gNjUmfkcLubKbtpGi1DuvTLNNFiA9oEt",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "test:chain",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z2Lw12TM42Y6WVS6N9qQvWMFyvs68J2pvQ1DXjRCTh7EveWjb4aWp4Bx42fjBNW15bGHxQhS5oycemWhYSmykyiwP",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "test:vector-chain#z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+            }
+          ],
+          "seq": 1
+        },
+        {
+          "body": "entry 2",
+          "chain": "vector-chain",
+          "prev": "QmeJ5mepiUFkokJAaDCAUL7P5izoZCUYkPvUaSpbCFTHN2",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "test:chain",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "zQFk6PUFw7NsM2qogGVtehL3VrQMFHLjMgjDHhF1wbDcEt5Jo2aY3kWUAoFQs8UnUiJPiMTHxXWZyirioHc98Cgo",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "test:vector-chain#z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+            }
+          ],
+          "seq": 2
+        }
+      ],
+      "name": "repeated batch",
+      "result": {
+        "after": {
+          "chain": "vector-chain",
+          "hashes": [
+            "QmPm3xxpch6RZ3gNjUmfkcLubKbtpGi1DuvTLNNFiA9oEt",
+            "QmeJ5mepiUFkokJAaDCAUL7P5izoZCUYkPvUaSpbCFTHN2",
+            "QmXRCSzvMqhRb8bfWAaPQf8wuB1Ls8VMkNGp3xju5egZXz"
+          ],
+          "head": {
+            "hash": "QmXRCSzvMqhRb8bfWAaPQf8wuB1Ls8VMkNGp3xju5egZXz",
+            "seq": 2
+          },
+          "state": {
+            "count": 2,
+            "key": "z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+          }
+        },
+        "outcome": {
+          "kind": "already-have"
+        }
+      }
+    },
+    {
+      "base": [
+        {
+          "body": "genesis",
+          "chain": "vector-chain",
+          "key": "z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z",
+          "prev": null,
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "test:chain",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "zDusrcPsgTzSCi3qCuYFHbnXmnu77StkXDTUg5eYmm9m3E5DDtRQ5SKw2zvLyx4Rnr9ELz6C7tVerBG5bqW4yyYG",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "test:vector-chain#z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+            }
+          ],
+          "seq": 0
+        },
+        {
+          "body": "entry 1",
+          "chain": "vector-chain",
+          "prev": "QmPm3xxpch6RZ3gNjUmfkcLubKbtpGi1DuvTLNNFiA9oEt",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "test:chain",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z2Lw12TM42Y6WVS6N9qQvWMFyvs68J2pvQ1DXjRCTh7EveWjb4aWp4Bx42fjBNW15bGHxQhS5oycemWhYSmykyiwP",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "test:vector-chain#z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+            }
+          ],
+          "seq": 1
+        },
+        {
+          "body": "entry 2",
+          "chain": "vector-chain",
+          "prev": "QmeJ5mepiUFkokJAaDCAUL7P5izoZCUYkPvUaSpbCFTHN2",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "test:chain",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "zQFk6PUFw7NsM2qogGVtehL3VrQMFHLjMgjDHhF1wbDcEt5Jo2aY3kWUAoFQs8UnUiJPiMTHxXWZyirioHc98Cgo",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "test:vector-chain#z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+            }
+          ],
+          "seq": 2
+        }
+      ],
+      "batch": [
+        {
+          "body": "genesis",
+          "chain": "vector-chain",
+          "key": "z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z",
+          "prev": null,
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "test:chain",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "zDusrcPsgTzSCi3qCuYFHbnXmnu77StkXDTUg5eYmm9m3E5DDtRQ5SKw2zvLyx4Rnr9ELz6C7tVerBG5bqW4yyYG",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "test:vector-chain#z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+            }
+          ],
+          "seq": 0
+        },
+        {
+          "body": "entry 1",
+          "chain": "vector-chain",
+          "prev": "QmPm3xxpch6RZ3gNjUmfkcLubKbtpGi1DuvTLNNFiA9oEt",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "test:chain",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z2Lw12TM42Y6WVS6N9qQvWMFyvs68J2pvQ1DXjRCTh7EveWjb4aWp4Bx42fjBNW15bGHxQhS5oycemWhYSmykyiwP",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "test:vector-chain#z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+            }
+          ],
+          "seq": 1
+        }
+      ],
+      "name": "a shorter peer chain",
+      "result": {
+        "after": {
+          "chain": "vector-chain",
+          "hashes": [
+            "QmPm3xxpch6RZ3gNjUmfkcLubKbtpGi1DuvTLNNFiA9oEt",
+            "QmeJ5mepiUFkokJAaDCAUL7P5izoZCUYkPvUaSpbCFTHN2",
+            "QmXRCSzvMqhRb8bfWAaPQf8wuB1Ls8VMkNGp3xju5egZXz"
+          ],
+          "head": {
+            "hash": "QmXRCSzvMqhRb8bfWAaPQf8wuB1Ls8VMkNGp3xju5egZXz",
+            "seq": 2
+          },
+          "state": {
+            "count": 2,
+            "key": "z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+          }
+        },
+        "outcome": {
+          "kind": "already-have"
+        }
+      }
+    },
+    {
+      "base": [
+        {
+          "body": "genesis",
+          "chain": "vector-chain",
+          "key": "z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z",
+          "prev": null,
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "test:chain",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "zDusrcPsgTzSCi3qCuYFHbnXmnu77StkXDTUg5eYmm9m3E5DDtRQ5SKw2zvLyx4Rnr9ELz6C7tVerBG5bqW4yyYG",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "test:vector-chain#z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+            }
+          ],
+          "seq": 0
+        },
+        {
+          "body": "entry 1",
+          "chain": "vector-chain",
+          "prev": "QmPm3xxpch6RZ3gNjUmfkcLubKbtpGi1DuvTLNNFiA9oEt",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "test:chain",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z2Lw12TM42Y6WVS6N9qQvWMFyvs68J2pvQ1DXjRCTh7EveWjb4aWp4Bx42fjBNW15bGHxQhS5oycemWhYSmykyiwP",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "test:vector-chain#z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+            }
+          ],
+          "seq": 1
+        },
+        {
+          "body": "entry 2",
+          "chain": "vector-chain",
+          "prev": "QmeJ5mepiUFkokJAaDCAUL7P5izoZCUYkPvUaSpbCFTHN2",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "test:chain",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "zQFk6PUFw7NsM2qogGVtehL3VrQMFHLjMgjDHhF1wbDcEt5Jo2aY3kWUAoFQs8UnUiJPiMTHxXWZyirioHc98Cgo",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "test:vector-chain#z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+            }
+          ],
+          "seq": 2
+        }
+      ],
+      "batch": [],
+      "name": "empty batch",
+      "result": {
+        "after": {
+          "chain": "vector-chain",
+          "hashes": [
+            "QmPm3xxpch6RZ3gNjUmfkcLubKbtpGi1DuvTLNNFiA9oEt",
+            "QmeJ5mepiUFkokJAaDCAUL7P5izoZCUYkPvUaSpbCFTHN2",
+            "QmXRCSzvMqhRb8bfWAaPQf8wuB1Ls8VMkNGp3xju5egZXz"
+          ],
+          "head": {
+            "hash": "QmXRCSzvMqhRb8bfWAaPQf8wuB1Ls8VMkNGp3xju5egZXz",
+            "seq": 2
+          },
+          "state": {
+            "count": 2,
+            "key": "z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+          }
+        },
+        "outcome": {
+          "kind": "already-have"
+        }
+      }
+    },
+    {
+      "base": [
+        {
+          "body": "genesis",
+          "chain": "vector-chain",
+          "key": "z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z",
+          "prev": null,
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "test:chain",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "zDusrcPsgTzSCi3qCuYFHbnXmnu77StkXDTUg5eYmm9m3E5DDtRQ5SKw2zvLyx4Rnr9ELz6C7tVerBG5bqW4yyYG",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "test:vector-chain#z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+            }
+          ],
+          "seq": 0
+        },
+        {
+          "body": "entry 1",
+          "chain": "vector-chain",
+          "prev": "QmPm3xxpch6RZ3gNjUmfkcLubKbtpGi1DuvTLNNFiA9oEt",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "test:chain",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z2Lw12TM42Y6WVS6N9qQvWMFyvs68J2pvQ1DXjRCTh7EveWjb4aWp4Bx42fjBNW15bGHxQhS5oycemWhYSmykyiwP",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "test:vector-chain#z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+            }
+          ],
+          "seq": 1
+        },
+        {
+          "body": "entry 2",
+          "chain": "vector-chain",
+          "prev": "QmeJ5mepiUFkokJAaDCAUL7P5izoZCUYkPvUaSpbCFTHN2",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "test:chain",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "zQFk6PUFw7NsM2qogGVtehL3VrQMFHLjMgjDHhF1wbDcEt5Jo2aY3kWUAoFQs8UnUiJPiMTHxXWZyirioHc98Cgo",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "test:vector-chain#z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+            }
+          ],
+          "seq": 2
+        }
+      ],
+      "batch": [
+        {
+          "body": "entry 4",
+          "chain": "vector-chain",
+          "prev": "Qmc1Mnd82HA92ona5sDfAMyPVWuJHmKMddE1G9FbapVYTw",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "test:chain",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z2jhRJHVLJTa7tj5U1qDQ5iyKccdhe7WnU4GZtfDTxuA1etN331PBhHAgjrdqtr6UUYKgYwgunGLriZbcDfKEiVEg",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "test:vector-chain#z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+            }
+          ],
+          "seq": 4
+        },
+        {
+          "body": "entry 5",
+          "chain": "vector-chain",
+          "prev": "QmYjx3hL4Tya6LQp3NyMoaZXZjNUWXZFX2VExZznSMxi5x",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "test:chain",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z27tx9YcbJkTS69TCT8cmcTwmqh5ov75tP8EcZ7U29Kbxk2uJ7a8nbdGDC6RfNJiovuoL7LmAeCg3QwKF3JxNadNc",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "test:vector-chain#z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+            }
+          ],
+          "seq": 5
+        }
+      ],
+      "name": "starts past our head",
+      "result": {
+        "after": {
+          "chain": "vector-chain",
+          "hashes": [
+            "QmPm3xxpch6RZ3gNjUmfkcLubKbtpGi1DuvTLNNFiA9oEt",
+            "QmeJ5mepiUFkokJAaDCAUL7P5izoZCUYkPvUaSpbCFTHN2",
+            "QmXRCSzvMqhRb8bfWAaPQf8wuB1Ls8VMkNGp3xju5egZXz"
+          ],
+          "head": {
+            "hash": "QmXRCSzvMqhRb8bfWAaPQf8wuB1Ls8VMkNGp3xju5egZXz",
+            "seq": 2
+          },
+          "state": {
+            "count": 2,
+            "key": "z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+          }
+        },
+        "outcome": {
+          "first": 4,
+          "have": 2,
+          "kind": "gap"
+        }
+      }
+    },
+    {
+      "base": [
+        {
+          "body": "genesis",
+          "chain": "vector-chain",
+          "key": "z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z",
+          "prev": null,
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "test:chain",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "zDusrcPsgTzSCi3qCuYFHbnXmnu77StkXDTUg5eYmm9m3E5DDtRQ5SKw2zvLyx4Rnr9ELz6C7tVerBG5bqW4yyYG",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "test:vector-chain#z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+            }
+          ],
+          "seq": 0
+        },
+        {
+          "body": "entry 1",
+          "chain": "vector-chain",
+          "prev": "QmPm3xxpch6RZ3gNjUmfkcLubKbtpGi1DuvTLNNFiA9oEt",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "test:chain",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z2Lw12TM42Y6WVS6N9qQvWMFyvs68J2pvQ1DXjRCTh7EveWjb4aWp4Bx42fjBNW15bGHxQhS5oycemWhYSmykyiwP",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "test:vector-chain#z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+            }
+          ],
+          "seq": 1
+        },
+        {
+          "body": "entry 2",
+          "chain": "vector-chain",
+          "prev": "QmeJ5mepiUFkokJAaDCAUL7P5izoZCUYkPvUaSpbCFTHN2",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "test:chain",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "zQFk6PUFw7NsM2qogGVtehL3VrQMFHLjMgjDHhF1wbDcEt5Jo2aY3kWUAoFQs8UnUiJPiMTHxXWZyirioHc98Cgo",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "test:vector-chain#z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+            }
+          ],
+          "seq": 2
+        }
+      ],
+      "batch": [
+        {
+          "body": "a different entry 2",
+          "chain": "vector-chain",
+          "prev": "QmeJ5mepiUFkokJAaDCAUL7P5izoZCUYkPvUaSpbCFTHN2",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "test:chain",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z5NrC3AycEVMfCztmz84L1ZNQ8Qs9idSfFXD8R2JvFMf2WTNtrfGt8HnHNv7QhP2UmPrFoKYdjDMtGBzgyuuXgfAk",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "test:vector-chain#z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+            }
+          ],
+          "seq": 2
+        }
+      ],
+      "name": "a different entry at a held seq",
+      "result": {
+        "after": {
+          "chain": "vector-chain",
+          "hashes": [
+            "QmPm3xxpch6RZ3gNjUmfkcLubKbtpGi1DuvTLNNFiA9oEt",
+            "QmeJ5mepiUFkokJAaDCAUL7P5izoZCUYkPvUaSpbCFTHN2",
+            "QmXRCSzvMqhRb8bfWAaPQf8wuB1Ls8VMkNGp3xju5egZXz"
+          ],
+          "head": {
+            "hash": "QmXRCSzvMqhRb8bfWAaPQf8wuB1Ls8VMkNGp3xju5egZXz",
+            "seq": 2
+          },
+          "state": {
+            "count": 2,
+            "key": "z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+          }
+        },
+        "outcome": {
+          "fork": {
+            "chain": "vector-chain",
+            "ours": "QmXRCSzvMqhRb8bfWAaPQf8wuB1Ls8VMkNGp3xju5egZXz",
+            "seq": 2,
+            "theirs": "QmWfNYSrEkKJcH5s5oYLNCsRpiYEri7G3bQX2KHvVoQnf3"
+          },
+          "kind": "fork"
+        }
+      }
+    },
+    {
+      "base": [
+        {
+          "body": "genesis",
+          "chain": "vector-chain",
+          "key": "z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z",
+          "prev": null,
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "test:chain",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "zDusrcPsgTzSCi3qCuYFHbnXmnu77StkXDTUg5eYmm9m3E5DDtRQ5SKw2zvLyx4Rnr9ELz6C7tVerBG5bqW4yyYG",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "test:vector-chain#z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+            }
+          ],
+          "seq": 0
+        },
+        {
+          "body": "entry 1",
+          "chain": "vector-chain",
+          "prev": "QmPm3xxpch6RZ3gNjUmfkcLubKbtpGi1DuvTLNNFiA9oEt",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "test:chain",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z2Lw12TM42Y6WVS6N9qQvWMFyvs68J2pvQ1DXjRCTh7EveWjb4aWp4Bx42fjBNW15bGHxQhS5oycemWhYSmykyiwP",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "test:vector-chain#z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+            }
+          ],
+          "seq": 1
+        },
+        {
+          "body": "entry 2",
+          "chain": "vector-chain",
+          "prev": "QmeJ5mepiUFkokJAaDCAUL7P5izoZCUYkPvUaSpbCFTHN2",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "test:chain",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "zQFk6PUFw7NsM2qogGVtehL3VrQMFHLjMgjDHhF1wbDcEt5Jo2aY3kWUAoFQs8UnUiJPiMTHxXWZyirioHc98Cgo",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "test:vector-chain#z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+            }
+          ],
+          "seq": 2
+        }
+      ],
+      "batch": [
+        {
+          "body": "entry 3",
+          "chain": "another-chain",
+          "prev": "QmXRCSzvMqhRb8bfWAaPQf8wuB1Ls8VMkNGp3xju5egZXz",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "test:chain",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z56EVdbG8ovZdBhyUEWf84rZmNJaxXQHmCEw6zUggtb5mxuxzyChFpjiEN6EQUgyURP93WkC5FdFrpnxXkLCaxJSn",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "test:another-chain#z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+            }
+          ],
+          "seq": 3
+        }
+      ],
+      "name": "an entry of another chain",
+      "result": {
+        "after": {
+          "chain": "vector-chain",
+          "hashes": [
+            "QmPm3xxpch6RZ3gNjUmfkcLubKbtpGi1DuvTLNNFiA9oEt",
+            "QmeJ5mepiUFkokJAaDCAUL7P5izoZCUYkPvUaSpbCFTHN2",
+            "QmXRCSzvMqhRb8bfWAaPQf8wuB1Ls8VMkNGp3xju5egZXz"
+          ],
+          "head": {
+            "hash": "QmXRCSzvMqhRb8bfWAaPQf8wuB1Ls8VMkNGp3xju5egZXz",
+            "seq": 2
+          },
+          "state": {
+            "count": 2,
+            "key": "z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+          }
+        },
+        "error": {
+          "code": "wrong-chain",
+          "got": "another-chain",
+          "want": "vector-chain"
+        }
+      }
+    },
+    {
+      "base": [
+        {
+          "body": "genesis",
+          "chain": "vector-chain",
+          "key": "z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z",
+          "prev": null,
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "test:chain",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "zDusrcPsgTzSCi3qCuYFHbnXmnu77StkXDTUg5eYmm9m3E5DDtRQ5SKw2zvLyx4Rnr9ELz6C7tVerBG5bqW4yyYG",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "test:vector-chain#z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+            }
+          ],
+          "seq": 0
+        },
+        {
+          "body": "entry 1",
+          "chain": "vector-chain",
+          "prev": "QmPm3xxpch6RZ3gNjUmfkcLubKbtpGi1DuvTLNNFiA9oEt",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "test:chain",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z2Lw12TM42Y6WVS6N9qQvWMFyvs68J2pvQ1DXjRCTh7EveWjb4aWp4Bx42fjBNW15bGHxQhS5oycemWhYSmykyiwP",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "test:vector-chain#z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+            }
+          ],
+          "seq": 1
+        },
+        {
+          "body": "entry 2",
+          "chain": "vector-chain",
+          "prev": "QmeJ5mepiUFkokJAaDCAUL7P5izoZCUYkPvUaSpbCFTHN2",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "test:chain",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "zQFk6PUFw7NsM2qogGVtehL3VrQMFHLjMgjDHhF1wbDcEt5Jo2aY3kWUAoFQs8UnUiJPiMTHxXWZyirioHc98Cgo",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "test:vector-chain#z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+            }
+          ],
+          "seq": 2
+        }
+      ],
+      "batch": [
+        {
+          "body": "entry 3",
+          "chain": "vector-chain",
+          "prev": "QmXRCSzvMqhRb8bfWAaPQf8wuB1Ls8VMkNGp3xju5egZXz",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "test:chain",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z3xfrKHH3eiVZtRzLENd5xKUvaBkRXSSQ7dJbdrooVJaMwZzea7JVVAmYTLejLGdicsh8NdF3wEwohLhKMbKeJ1di",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "test:vector-chain#z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+            }
+          ],
+          "seq": 3
+        },
+        {
+          "body": "entry 4",
+          "chain": "vector-chain",
+          "prev": "Qmc1Mnd82HA92ona5sDfAMyPVWuJHmKMddE1G9FbapVYTw",
+          "seq": 4
+        }
+      ],
+      "name": "a bad entry in the batch: nothing appends",
+      "result": {
+        "after": {
+          "chain": "vector-chain",
+          "hashes": [
+            "QmPm3xxpch6RZ3gNjUmfkcLubKbtpGi1DuvTLNNFiA9oEt",
+            "QmeJ5mepiUFkokJAaDCAUL7P5izoZCUYkPvUaSpbCFTHN2",
+            "QmXRCSzvMqhRb8bfWAaPQf8wuB1Ls8VMkNGp3xju5egZXz"
+          ],
+          "head": {
+            "hash": "QmXRCSzvMqhRb8bfWAaPQf8wuB1Ls8VMkNGp3xju5egZXz",
+            "seq": 2
+          },
+          "state": {
+            "count": 2,
+            "key": "z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+          }
+        },
+        "error": {
+          "code": "policy",
+          "reason": "MissingProof"
+        }
+      }
+    },
+    {
+      "base": [
+        {
+          "body": "genesis",
+          "chain": "vector-chain",
+          "key": "z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z",
+          "prev": null,
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "test:chain",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "zDusrcPsgTzSCi3qCuYFHbnXmnu77StkXDTUg5eYmm9m3E5DDtRQ5SKw2zvLyx4Rnr9ELz6C7tVerBG5bqW4yyYG",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "test:vector-chain#z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+            }
+          ],
+          "seq": 0
+        },
+        {
+          "body": "entry 1",
+          "chain": "vector-chain",
+          "prev": "QmPm3xxpch6RZ3gNjUmfkcLubKbtpGi1DuvTLNNFiA9oEt",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "test:chain",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z2Lw12TM42Y6WVS6N9qQvWMFyvs68J2pvQ1DXjRCTh7EveWjb4aWp4Bx42fjBNW15bGHxQhS5oycemWhYSmykyiwP",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "test:vector-chain#z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+            }
+          ],
+          "seq": 1
+        },
+        {
+          "body": "entry 2",
+          "chain": "vector-chain",
+          "prev": "QmeJ5mepiUFkokJAaDCAUL7P5izoZCUYkPvUaSpbCFTHN2",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "test:chain",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "zQFk6PUFw7NsM2qogGVtehL3VrQMFHLjMgjDHhF1wbDcEt5Jo2aY3kWUAoFQs8UnUiJPiMTHxXWZyirioHc98Cgo",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "test:vector-chain#z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+            }
+          ],
+          "seq": 2
+        }
+      ],
+      "batch": [
+        {
+          "body": "entry 3",
+          "chain": "vector-chain",
+          "prev": "QmXRCSzvMqhRb8bfWAaPQf8wuB1Ls8VMkNGp3xju5egZXz",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "test:chain",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z3xfrKHH3eiVZtRzLENd5xKUvaBkRXSSQ7dJbdrooVJaMwZzea7JVVAmYTLejLGdicsh8NdF3wEwohLhKMbKeJ1di",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "test:vector-chain#z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+            }
+          ],
+          "seq": 3
+        },
+        {
+          "body": "another 3",
+          "chain": "vector-chain",
+          "prev": "QmXRCSzvMqhRb8bfWAaPQf8wuB1Ls8VMkNGp3xju5egZXz",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "test:chain",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z5UJBLr7JMVjUPfrt1F69VBudZ6pXX2ddnzNjBdicKQRE2xYv3saYYk9JY6G6nGqDVry3MQuC8J67kJ8YFt8QLd7J",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "test:vector-chain#z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+            }
+          ],
+          "seq": 3
+        }
+      ],
+      "name": "two different entries at one new seq",
+      "result": {
+        "after": {
+          "chain": "vector-chain",
+          "hashes": [
+            "QmPm3xxpch6RZ3gNjUmfkcLubKbtpGi1DuvTLNNFiA9oEt",
+            "QmeJ5mepiUFkokJAaDCAUL7P5izoZCUYkPvUaSpbCFTHN2",
+            "QmXRCSzvMqhRb8bfWAaPQf8wuB1Ls8VMkNGp3xju5egZXz"
+          ],
+          "head": {
+            "hash": "QmXRCSzvMqhRb8bfWAaPQf8wuB1Ls8VMkNGp3xju5egZXz",
+            "seq": 2
+          },
+          "state": {
+            "count": 2,
+            "key": "z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+          }
+        },
+        "error": {
+          "code": "malformed",
+          "reason": "two different entries at seq 3 in one batch"
+        }
+      }
+    }
+  ],
+  "description": "fold(base), then import(batch). result.outcome: an ImportOutcome, or result.error: a ChainErrorCode; result.after: the chain after the call.",
+  "policy": "Test chain type test:chain, domain test:chain. Entries {chain, seq, prev, body, key?, proof}. Entry 0 names the signing key in key; every entry carries exactly one eddsa-jcs-2022 proof by the key in force before it (entry 0: its own key); a later entry with key rotates to that key after it. Chain id = chain. State {key, count}: the key in force and the number of entries after entry 0. Policy errors: NoKey, MissingProof, BadProof."
+}

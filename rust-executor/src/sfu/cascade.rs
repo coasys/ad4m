@@ -29,6 +29,40 @@ use str0m::{Candidate, Rtc};
 
 use super::room::{ParticipantId, RoomId};
 use super::server::SfuPeer;
+use super::types::{SfuRosterParticipant, TrackMapEntry};
+
+/// How this node names session `participant_id` of the SFU node `node_did`.
+/// Every node numbers its own sessions from `P1`, so a remote session's
+/// own id could name a local one; qualified with its node's DID, it cannot.
+/// An id already qualified (a node relaying another node's track) is kept.
+pub fn remote_session_id(participant_id: &str, node_did: &str) -> String {
+    match ParticipantId::parse(participant_id) {
+        Some(pid) => format!("{}@{}", pid, node_did),
+        None => participant_id.to_string(),
+    }
+}
+
+/// Most sessions one node's announce lists for a room: the most any room
+/// holds on one node (four times the largest `maxMeshParticipants`). A
+/// longer list is cut to this length.
+pub const MAX_ANNOUNCED_SESSIONS: usize = super::service::MAX_MESH_PARTICIPANTS as usize * 4;
+
+/// `"<type> from <sender>"` for a gossip frame that did not decode, read
+/// from whatever of it parses as JSON, for the log line that drops it.
+pub fn describe_frame(frame: &str) -> String {
+    let value: serde_json::Value = serde_json::from_str(frame).unwrap_or_default();
+    let field = |names: &[&str]| {
+        names
+            .iter()
+            .find_map(|name| value.get(*name).and_then(|v| v.as_str()))
+            .map(str::to_string)
+    };
+    format!(
+        "{} from {}",
+        field(&["type"]).unwrap_or_else(|| "unknown type".into()),
+        field(&["did", "from_did"]).unwrap_or_else(|| "unknown sender".into())
+    )
+}
 
 /// Represents a remote SFU node in the cascade cluster.
 #[derive(Debug, Clone)]
@@ -36,6 +70,9 @@ pub struct SfuNodeInfo {
     pub did: String,
     pub participant_count: u32,
     pub capacity_hint: u32,
+    /// The node's sessions in the room, by the ids this node gives them
+    /// ([`remote_session_id`]).
+    pub sessions: Vec<SfuRosterParticipant>,
     /// Last time this node sent an Announce.  Used by the TTL eviction
     /// sweep to prune nodes that stopped announcing.
     pub last_seen: Instant,
@@ -68,14 +105,26 @@ pub enum CascadeSignal {
         room_id: String,
         participant_count: u32,
         capacity_hint: u32,
+        /// The announcing node's sessions in the room, by its own ids:
+        /// the other nodes list them in their room rosters. Absent from a
+        /// node on an older build: it announces none.
+        #[serde(default)]
+        sessions: Vec<SfuRosterParticipant>,
     },
-    /// SDP offer to establish a pipe transport between two SFU nodes
+    /// SDP offer to establish a pipe transport between two SFU nodes, or to
+    /// add tracks to one.
     #[serde(rename = "sfu-pipe-offer")]
     PipeOffer {
         from_did: String,
         to_did: String,
         room_id: String,
         sdp_offer: String,
+        /// The session each new m-line carries, as the sending node names
+        /// it: the receiving node attributes the track to that session, not
+        /// to the pipe. Absent from a node on an older build: its tracks
+        /// are attributed to the pipe.
+        #[serde(default)]
+        track_mapping: Vec<TrackMapEntry>,
     },
     /// SDP answer for pipe transport
     #[serde(rename = "sfu-pipe-answer")]
@@ -166,28 +215,78 @@ impl CascadeManager {
         self.max_participants_per_node
     }
 
-    /// Handle an incoming SFU announce from a peer node.
+    /// Handle an incoming SFU announce from a peer node. Returns whether
+    /// the node's sessions in the room changed, so the room's roster is due.
     pub fn handle_sfu_announce(
         &mut self,
         did: String,
         room_id: String,
         participant_count: u32,
         capacity_hint: u32,
-    ) {
+        sessions: Vec<SfuRosterParticipant>,
+    ) -> bool {
         if did == self.local_did {
-            return; // Ignore our own announces
+            return false; // Ignore our own announces
         }
 
+        // A node announces its own sessions only: an entry that is no
+        // session, or names another node, is dropped.
+        let own_suffix = format!("@{}", did);
+        let listed = sessions.len();
+        let mut sessions: Vec<SfuRosterParticipant> = sessions
+            .into_iter()
+            .filter_map(|s| {
+                let participant_id = remote_session_id(&s.participant_id, &did);
+                let own = participant_id
+                    .strip_suffix(&own_suffix)
+                    .is_some_and(|pid| ParticipantId::parse(pid).is_some());
+                own.then_some(SfuRosterParticipant {
+                    participant_id,
+                    agent_did: s.agent_did,
+                })
+            })
+            .collect();
+        sessions.sort();
+        sessions.dedup();
+        sessions.truncate(MAX_ANNOUNCED_SESSIONS);
+        if sessions.len() != listed {
+            warn!(
+                "SFU cascade: {} announced {} sessions in {}; kept {} of its own (at most {})",
+                did,
+                listed,
+                room_id,
+                sessions.len(),
+                MAX_ANNOUNCED_SESSIONS
+            );
+        }
         let nodes = self.known_nodes.entry(room_id).or_default();
+        let changed = nodes
+            .get(&did)
+            .map_or(!sessions.is_empty(), |n| n.sessions != sessions);
         nodes.insert(
             did.clone(),
             SfuNodeInfo {
                 did,
                 participant_count,
                 capacity_hint,
+                sessions,
                 last_seen: Instant::now(),
             },
         );
+        changed
+    }
+
+    /// The sessions in `room_id` on the other nodes that announced it.
+    pub fn remote_sessions(&self, room_id: &str) -> Vec<SfuRosterParticipant> {
+        self.known_nodes
+            .get(room_id)
+            .map(|nodes| {
+                nodes
+                    .values()
+                    .flat_map(|n| n.sessions.iter().cloned())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Evict nodes that have not announced within `max_age`.  Returns
@@ -281,6 +380,9 @@ impl CascadeManager {
                 to_did: remote_did.to_string(),
                 room_id: room_key,
                 sdp_offer,
+                // The pipe opens with its control channel only: tracks come
+                // in later offers, with their sessions.
+                track_mapping: Vec::new(),
             },
         ))
     }
@@ -595,6 +697,151 @@ mod tests {
         format!("127.0.0.1:{}", port).parse().unwrap()
     }
 
+    fn session(agent_did: &str, participant_id: &str) -> SfuRosterParticipant {
+        SfuRosterParticipant {
+            agent_did: agent_did.into(),
+            participant_id: participant_id.into(),
+        }
+    }
+
+    /// Every node numbers its sessions from P1, so the sessions another
+    /// node announces are listed under ids qualified by that node, and an
+    /// announce reports when they changed so the roster is republished.
+    #[test]
+    fn announced_sessions_are_listed_under_their_node() {
+        let mut mgr = CascadeManager::new("did:key:local".into(), test_addr(10030), 8);
+        let room = "test-nh:room1".to_string();
+        let announce = |mgr: &mut CascadeManager, did: &str, sessions| {
+            mgr.handle_sfu_announce(did.into(), room.clone(), 1, 8, sessions)
+        };
+
+        assert!(!announce(&mut mgr, "did:key:nodeA", Vec::new()));
+        assert!(announce(
+            &mut mgr,
+            "did:key:nodeA",
+            vec![session("did:key:alice", "P1")]
+        ));
+        assert!(!announce(
+            &mut mgr,
+            "did:key:nodeA",
+            vec![session("did:key:alice", "P1")]
+        ));
+        assert!(announce(
+            &mut mgr,
+            "did:key:nodeB",
+            vec![session("did:key:bob", "P1")]
+        ));
+        let mut listed = mgr.remote_sessions(&room);
+        listed.sort();
+        assert_eq!(
+            listed,
+            vec![
+                session("did:key:alice", "P1@did:key:nodeA"),
+                session("did:key:bob", "P1@did:key:nodeB"),
+            ]
+        );
+
+        // Our own announce lists nothing; a node that leaves takes its
+        // sessions with it.
+        assert!(!announce(
+            &mut mgr,
+            "did:key:local",
+            vec![session("did:key:me", "P1")]
+        ));
+        mgr.remove_node_from_room(&room, "did:key:nodeA");
+        assert_eq!(
+            mgr.remote_sessions(&room),
+            vec![session("did:key:bob", "P1@did:key:nodeB")]
+        );
+        assert!(mgr.remote_sessions("test-nh:other").is_empty());
+    }
+
+    #[test]
+    fn a_qualified_session_id_is_kept() {
+        assert_eq!(remote_session_id("P3", "did:key:n"), "P3@did:key:n");
+        assert_eq!(
+            remote_session_id("P3@did:key:m", "did:key:n"),
+            "P3@did:key:m"
+        );
+    }
+
+    /// A node on the build before sessions and track mappings sends
+    /// announces without `sessions` and pipe offers without
+    /// `track_mapping`. They decode as before: no sessions, no mapping.
+    #[test]
+    fn frames_from_a_node_without_sessions_or_track_mappings_decode() {
+        let announce: CascadeSignal = serde_json::from_str(
+            r#"{"type":"sfu-announce","did":"did:key:old","room_id":"n:r","participant_count":2,"capacity_hint":8}"#,
+        )
+        .expect("an announce without sessions decodes");
+        assert!(
+            matches!(&announce, CascadeSignal::Announce { did, sessions, .. } if did == "did:key:old" && sessions.is_empty()),
+            "{announce:?}"
+        );
+        let offer: CascadeSignal = serde_json::from_str(
+            r#"{"type":"sfu-pipe-offer","from_did":"did:key:old","to_did":"did:key:new","room_id":"n:r","sdp_offer":"{}"}"#,
+        )
+        .expect("a pipe offer without a track mapping decodes");
+        assert!(
+            matches!(&offer, CascadeSignal::PipeOffer { track_mapping, .. } if track_mapping.is_empty()),
+            "{offer:?}"
+        );
+    }
+
+    /// A node announces only its own sessions: an entry that names another
+    /// node, or no session at all, is dropped, and a list longer than a room
+    /// holds is cut to that length.
+    #[test]
+    fn an_announce_lists_only_the_senders_sessions_up_to_a_room() {
+        let mut mgr = CascadeManager::new("did:key:local".into(), test_addr(10031), 8);
+        let room = "test-nh:room1".to_string();
+        mgr.handle_sfu_announce(
+            "did:key:nodeA".into(),
+            room.clone(),
+            4,
+            8,
+            vec![
+                session("did:key:alice", "P1"),
+                session("did:key:bob", "P2@did:key:nodeA"),
+                session("did:key:mallory", "P3@did:key:nodeB"),
+                session("did:key:mallory", "P4@did:key:local"),
+                session("did:key:mallory", "not-a-session"),
+                session("did:key:mallory", "x@did:key:nodeA"),
+            ],
+        );
+        assert_eq!(
+            mgr.remote_sessions(&room),
+            vec![
+                session("did:key:alice", "P1@did:key:nodeA"),
+                session("did:key:bob", "P2@did:key:nodeA"),
+            ]
+        );
+
+        let many = (1..=MAX_ANNOUNCED_SESSIONS + 10)
+            .map(|i| session("did:key:alice", &format!("P{}", i)))
+            .collect();
+        mgr.handle_sfu_announce("did:key:nodeA".into(), room.clone(), 1, 8, many);
+        assert_eq!(mgr.remote_sessions(&room).len(), MAX_ANNOUNCED_SESSIONS);
+    }
+
+    /// A frame that does not decode is logged by its type and sender, read
+    /// from whatever of it parses.
+    #[test]
+    fn an_undecodable_frame_is_described_by_type_and_sender() {
+        assert_eq!(
+            describe_frame(r#"{"type":"sfu-announce","did":"did:key:a","room_id":5}"#),
+            "sfu-announce from did:key:a"
+        );
+        assert_eq!(
+            describe_frame(r#"{"type":"sfu-pipe-offer","from_did":"did:key:b"}"#),
+            "sfu-pipe-offer from did:key:b"
+        );
+        assert_eq!(
+            describe_frame("not json"),
+            "unknown type from unknown sender"
+        );
+    }
+
     #[test]
     fn test_cascade_pipe_offer_answer() {
         let mut node_a = CascadeManager::new("did:key:nodeA".into(), test_addr(10003), 8);
@@ -659,7 +906,13 @@ mod tests {
         let room_id = RoomId::new("test-nh", "room1");
 
         // Add remote node with low load
-        mgr.handle_sfu_announce("did:key:remote".into(), room_id.to_string(), 1, 8);
+        mgr.handle_sfu_announce(
+            "did:key:remote".into(),
+            room_id.to_string(),
+            1,
+            8,
+            Vec::new(),
+        );
 
         // local_count=5 (over capacity=4) → must redirect
         let redirect = mgr.pick_redirect_node(&room_id.to_string(), 5, None);
@@ -671,18 +924,36 @@ mod tests {
         assert!(redirect.is_none());
 
         // local_count=2, remote has 0 → still under local cap, accept
-        mgr.handle_sfu_announce("did:key:remote".into(), room_id.to_string(), 0, 8);
+        mgr.handle_sfu_announce(
+            "did:key:remote".into(),
+            room_id.to_string(),
+            0,
+            8,
+            Vec::new(),
+        );
         let redirect = mgr.pick_redirect_node(&room_id.to_string(), 2, None);
         assert!(redirect.is_none());
 
         // local_count=4 (at capacity), remote has 1 → must redirect
-        mgr.handle_sfu_announce("did:key:remote".into(), room_id.to_string(), 1, 8);
+        mgr.handle_sfu_announce(
+            "did:key:remote".into(),
+            room_id.to_string(),
+            1,
+            8,
+            Vec::new(),
+        );
         let redirect = mgr.pick_redirect_node(&room_id.to_string(), 4, None);
         assert!(redirect.is_some());
 
         // local_count=4, ALL remote nodes also full → still redirect
         // (client-side cycle detection handles the overflow).
-        mgr.handle_sfu_announce("did:key:remote".into(), room_id.to_string(), 8, 8);
+        mgr.handle_sfu_announce(
+            "did:key:remote".into(),
+            room_id.to_string(),
+            8,
+            8,
+            Vec::new(),
+        );
         let redirect = mgr.pick_redirect_node(&room_id.to_string(), 4, None);
         assert!(redirect.is_some());
         assert_eq!(redirect.unwrap().did, "did:key:remote");
@@ -695,7 +966,13 @@ mod tests {
         // ── Preferred-node routing ──
         // When a preferred node has capacity, redirect there even if
         // the local node also has capacity.
-        mgr.handle_sfu_announce("did:key:remote".into(), room_id.to_string(), 0, 8);
+        mgr.handle_sfu_announce(
+            "did:key:remote".into(),
+            room_id.to_string(),
+            0,
+            8,
+            Vec::new(),
+        );
         let redirect = mgr.pick_redirect_node(
             &room_id.to_string(),
             1,                      // local well under capacity
@@ -705,7 +982,13 @@ mod tests {
         assert_eq!(redirect.unwrap().did, "did:key:remote");
 
         // When preferred node is at capacity, fall through to normal logic
-        mgr.handle_sfu_announce("did:key:remote".into(), room_id.to_string(), 8, 8);
+        mgr.handle_sfu_announce(
+            "did:key:remote".into(),
+            room_id.to_string(),
+            8,
+            8,
+            Vec::new(),
+        );
         let redirect = mgr.pick_redirect_node(&room_id.to_string(), 1, Some("did:key:remote"));
         assert!(redirect.is_none()); // local has capacity, preferred full
 
@@ -731,7 +1014,7 @@ mod tests {
         // local_count=8 stays below threshold → no suggestion.
         let mut mgr = CascadeManager::new("did:key:local".into(), test_addr(10010), 10);
         let room = "nh://test:room1";
-        mgr.handle_sfu_announce("did:key:peer".into(), room.into(), 2, 10);
+        mgr.handle_sfu_announce("did:key:peer".into(), room.into(), 2, 10, Vec::new());
         assert!(mgr.suggest_rebalance(room, 8).is_none());
     }
 
@@ -741,7 +1024,7 @@ mod tests {
         // gap=9-2=7 >= 4. Peer has 80% free >= 30%.
         let mut mgr = CascadeManager::new("did:key:local".into(), test_addr(10011), 10);
         let room = "nh://test:room1";
-        mgr.handle_sfu_announce("did:key:peer".into(), room.into(), 2, 10);
+        mgr.handle_sfu_announce("did:key:peer".into(), room.into(), 2, 10, Vec::new());
         let target = mgr.suggest_rebalance(room, 9);
         assert_eq!(target.as_deref(), Some("did:key:peer"));
     }
@@ -750,7 +1033,7 @@ mod tests {
     fn test_rebalance_cooldown() {
         let mut mgr = CascadeManager::new("did:key:local".into(), test_addr(10012), 10);
         let room = "nh://test:room1";
-        mgr.handle_sfu_announce("did:key:peer".into(), room.into(), 2, 10);
+        mgr.handle_sfu_announce("did:key:peer".into(), room.into(), 2, 10, Vec::new());
 
         // First call succeeds
         assert!(mgr.suggest_rebalance(room, 9).is_some());
@@ -765,7 +1048,7 @@ mod tests {
         // Peer has 7/10 participants. local=9. gap=9-7=2 < 4 → no migration.
         let mut mgr = CascadeManager::new("did:key:local".into(), test_addr(10013), 10);
         let room = "nh://test:room1";
-        mgr.handle_sfu_announce("did:key:peer".into(), room.into(), 7, 10);
+        mgr.handle_sfu_announce("did:key:peer".into(), room.into(), 7, 10, Vec::new());
         assert!(mgr.suggest_rebalance(room, 9).is_none());
     }
 
@@ -774,7 +1057,7 @@ mod tests {
         // Peer has 8/10 (only 20% free < 30% threshold) → no migration.
         let mut mgr = CascadeManager::new("did:key:local".into(), test_addr(10014), 10);
         let room = "nh://test:room1";
-        mgr.handle_sfu_announce("did:key:peer".into(), room.into(), 8, 10);
+        mgr.handle_sfu_announce("did:key:peer".into(), room.into(), 8, 10, Vec::new());
         assert!(mgr.suggest_rebalance(room, 10).is_none());
     }
 
@@ -782,8 +1065,8 @@ mod tests {
     fn test_rebalance_picks_emptiest_peer() {
         let mut mgr = CascadeManager::new("did:key:local".into(), test_addr(10015), 20);
         let room = "nh://test:room1";
-        mgr.handle_sfu_announce("did:key:peerA".into(), room.into(), 5, 20);
-        mgr.handle_sfu_announce("did:key:peerB".into(), room.into(), 2, 20);
+        mgr.handle_sfu_announce("did:key:peerA".into(), room.into(), 5, 20, Vec::new());
+        mgr.handle_sfu_announce("did:key:peerB".into(), room.into(), 2, 20, Vec::new());
         // Both qualify (>= 30% free, gap >= 4). peerB has most headroom.
         let target = mgr.suggest_rebalance(room, 18);
         assert_eq!(target.as_deref(), Some("did:key:peerB"));
@@ -794,8 +1077,8 @@ mod tests {
         let mut mgr = CascadeManager::new("did:key:local".into(), test_addr(10016), 10);
         let room_a = "nh://test:roomA";
         let room_b = "nh://test:roomB";
-        mgr.handle_sfu_announce("did:key:peer".into(), room_a.into(), 2, 10);
-        mgr.handle_sfu_announce("did:key:peer".into(), room_b.into(), 2, 10);
+        mgr.handle_sfu_announce("did:key:peer".into(), room_a.into(), 2, 10, Vec::new());
+        mgr.handle_sfu_announce("did:key:peer".into(), room_b.into(), 2, 10, Vec::new());
 
         // Rebalance room A and record cooldown
         assert!(mgr.suggest_rebalance(room_a, 9).is_some());
