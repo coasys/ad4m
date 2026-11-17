@@ -609,6 +609,7 @@ pub struct FlowProposeResult {
 /// The three-way verdict of `perspective.verifyFlowReceipt` — never collapse
 /// it to a bool (`"undecidable"` and `"rejected"` need different callers).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FlowReceiptVerdict {
     pub outcome: String,
     pub detail: String,
@@ -1806,6 +1807,25 @@ mod tests {
             "the Shipping run is found, the stale one skipped"
         );
         assert_eq!(runs[0].shape.flow_uri(), "urn:example:DeliveryFlow");
+    }
+
+    /// A verified verdict carries `terminalState` (the generated
+    /// `PerspectiveFlowReceiptVerdict`); it must land in `terminal_state`.
+    #[test]
+    fn a_verified_receipt_verdict_keeps_its_terminal_state() {
+        let verdict: FlowReceiptVerdict = serde_json::from_value(json!({
+            "outcome": "verified",
+            "detail": "ok",
+            "terminalState": "Shipped",
+            "outputs": [{"className": "Parcel", "id": "p://1"}],
+            "voters": ["did:a"],
+        }))
+        .unwrap();
+        assert_eq!(verdict.terminal_state.as_deref(), Some("Shipped"));
+        assert_eq!(verdict.voters, Some(vec!["did:a".to_string()]));
+        let rejected: FlowReceiptVerdict =
+            serde_json::from_value(json!({"outcome": "rejected", "detail": "bad"})).unwrap();
+        assert_eq!(rejected.terminal_state, None);
     }
 
     #[test]
