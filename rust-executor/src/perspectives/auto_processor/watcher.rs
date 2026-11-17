@@ -254,13 +254,24 @@ pub struct WatcherState {
 /// write lands. Everything that depends on the tick's `now_ms` (both
 /// `source_window_ms` filters, deferrals) is applied to the kept rows at
 /// each tick, exactly as to fresh ones.
+///
+/// The configs and cursor rows are read again after any write. A kept
+/// transcript is brought up to date instead when every write since only
+/// added links ([`SparqlStore::additions_since`](crate::perspectives::sparql_store::SparqlStore::additions_since)):
+/// the tick reads only the rows those links can add
+/// ([`delta_query`](super::delta_read::delta_query)) and merges them in
+/// ([`Self::merge_transcript`]), so a busy conversation costs a read of its
+/// new turns, not of all of them. A removal (an edit or a delete), a reload,
+/// a log that no longer reaches back to the kept read, or a scope query a
+/// delta cannot follow, reads the whole transcript again.
 #[derive(Debug, Default, Clone)]
 pub(crate) struct TickReads {
     configs: Option<(u64, Arc<Vec<AutoProcessorConfig>>)>,
-    /// Per processor id: its scope query, and the turns it returned. Only the
-    /// turns that could still be queued keep their text (see [`CachedTurn`]).
-    /// One copy per processor and per loop, and one loop runs per perspective
-    /// and per online managed user.
+    /// Per processor id: the generation it is up to date with, its scope
+    /// query, and the turns it returned. Only the turns that could still be
+    /// queued keep their text (see [`CachedTurn`]). One copy per processor
+    /// and per loop, and one loop runs per perspective and per online
+    /// managed user.
     transcripts: BTreeMap<String, (u64, String, Arc<Vec<CachedTurn>>)>,
     /// Per processor id: the cursor rows, not yet windowed.
     processed: BTreeMap<String, (u64, Arc<Vec<ProcessedSource>>)>,
@@ -319,15 +330,60 @@ impl TickReads {
         configs
     }
 
+    /// The kept transcript of `cfg`'s scope query, with the generation it is
+    /// up to date with.
     pub(crate) fn transcript(
         &self,
         cfg: &AutoProcessorConfig,
-        generation: u64,
-    ) -> Option<Arc<Vec<CachedTurn>>> {
+    ) -> Option<(u64, Arc<Vec<CachedTurn>>)> {
         self.transcripts
             .get(&cfg.processor_id)
-            .filter(|(g, query, _)| *g == generation && *query == cfg.source_scope_query)
-            .map(|(_, _, turns)| turns.clone())
+            .filter(|(_, query, _)| *query == cfg.source_scope_query)
+            .map(|(g, _, turns)| (*g, turns.clone()))
+    }
+
+    /// Bring the kept transcript of `cfg` up to `generation` with the turns
+    /// the links added since gave its scope query (`gained`): those it does
+    /// not hold yet are appended, in the order read. A kept turn that is no
+    /// longer `queueable` drops its text, as a fresh read would keep it.
+    /// Without a kept transcript this is [`Self::set_transcript`].
+    pub(crate) fn merge_transcript(
+        &mut self,
+        cfg: &AutoProcessorConfig,
+        generation: u64,
+        gained: Vec<PendingTurn>,
+        queueable: impl Fn(&str, &str) -> bool,
+    ) -> Arc<Vec<CachedTurn>> {
+        let Some((_, query, kept)) = self
+            .transcripts
+            .remove(&cfg.processor_id)
+            .filter(|(_, query, _)| *query == cfg.source_scope_query)
+        else {
+            return self.set_transcript(cfg, generation, gained, queueable);
+        };
+        let mut turns = Arc::try_unwrap(kept).unwrap_or_else(|shared| (*shared).clone());
+        for turn in turns.iter_mut() {
+            if let CachedTurn::Full(t) = turn {
+                if !queueable(&t.id, &t.timestamp) {
+                    *turn = CachedTurn::Consumed {
+                        id: std::mem::take(&mut t.id),
+                        timestamp: std::mem::take(&mut t.timestamp),
+                    };
+                }
+            }
+        }
+        if !gained.is_empty() {
+            let mut known: HashSet<String> = turns.iter().map(|t| t.id().to_string()).collect();
+            for t in gained {
+                if known.insert(t.id.clone()) {
+                    turns.push(cached(t, &queueable));
+                }
+            }
+        }
+        let turns = Arc::new(turns);
+        self.transcripts
+            .insert(cfg.processor_id.clone(), (generation, query, turns.clone()));
+        turns
     }
 
     /// Keep `turns`, with the text only of those `queueable` accepts.
@@ -338,21 +394,8 @@ impl TickReads {
         turns: Vec<PendingTurn>,
         queueable: impl Fn(&str, &str) -> bool,
     ) -> Arc<Vec<CachedTurn>> {
-        let turns: Arc<Vec<CachedTurn>> = Arc::new(
-            turns
-                .into_iter()
-                .map(|t| {
-                    if queueable(&t.id, &t.timestamp) {
-                        CachedTurn::Full(t)
-                    } else {
-                        CachedTurn::Consumed {
-                            id: t.id,
-                            timestamp: t.timestamp,
-                        }
-                    }
-                })
-                .collect(),
-        );
+        let turns: Arc<Vec<CachedTurn>> =
+            Arc::new(turns.into_iter().map(|t| cached(t, &queueable)).collect());
         self.transcripts.insert(
             cfg.processor_id.clone(),
             (generation, cfg.source_scope_query.clone(), turns.clone()),
@@ -381,6 +424,18 @@ impl TickReads {
         self.processed
             .insert(processor_id.to_string(), (generation, rows.clone()));
         rows
+    }
+}
+
+/// `turn` as [`TickReads`] keeps it: with its text only when `queueable`.
+fn cached(turn: PendingTurn, queueable: &impl Fn(&str, &str) -> bool) -> CachedTurn {
+    if queueable(&turn.id, &turn.timestamp) {
+        CachedTurn::Full(turn)
+    } else {
+        CachedTurn::Consumed {
+            id: turn.id,
+            timestamp: turn.timestamp,
+        }
     }
 }
 

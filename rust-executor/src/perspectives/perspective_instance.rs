@@ -6557,7 +6557,8 @@ impl PerspectiveInstance {
     /// [`idle_wait_ms`](crate::perspectives::auto_processor::watcher::idle_wait_ms)
     /// (60 s, or when a deferral ends). A tick reuses the store reads of the
     /// one before while no write landed in between (`TickReads`), so an idle
-    /// perspective costs no query at all. Each tick:
+    /// perspective costs no query at all, and after writes that only added
+    /// links it reads only the turns they add (`delta_read`). Each tick:
     ///   1. Load every `AutoProcessorConfig` declared on this perspective's
     ///      shared graph (`load_processors`). Zero configs = no-op tick.
     ///   2. Per config, run its `source_scope_query` to gather the current
@@ -6659,7 +6660,9 @@ impl PerspectiveInstance {
     /// `InterpretationRun.sources`, optionally windowed), then drains and runs
     /// any ready batch. The config, transcript and cursor reads are kept in
     /// `watcher` and reused while the store's write generation is unchanged;
-    /// the windows and deferrals are applied at `now_ms` either way.
+    /// after writes that only added links the kept transcript is brought up
+    /// to date with a read of what they add (`TickReads::merge_transcript`).
+    /// The windows and deferrals are applied at `now_ms` either way.
     ///
     /// `context` is the agent this executor runs the pass as — the production
     /// loop passes the main agent; a multi-user test passes each managed user's
@@ -6688,6 +6691,7 @@ impl PerspectiveInstance {
         use crate::perspectives::auto_processor::{
             config::load_processors,
             cursor::{load_processed_sources, processed_ids_in_window, turn_in_source_window},
+            delta_read::{delta_query, DeltaRead},
             events::{emit, AutoProcessorEvent, AutoProcessorStep},
             watcher::{
                 model_available, run_one_pass, CachedTurn, PassOutcome, PendingTurn, TickOutcome,
@@ -6745,14 +6749,58 @@ impl PerspectiveInstance {
             };
             // A kept read is reused unless a turn it keeps without text has
             // become queueable (its run aged out of the window).
-            let kept = watcher.reads.transcript(cfg, generation).filter(|turns| {
+            let kept = watcher.reads.transcript(cfg).filter(|(_, turns)| {
                 !turns.iter().any(|t| {
                     matches!(t, CachedTurn::Consumed { .. }) && queueable(t.id(), t.timestamp())
                 })
             });
-            let transcript = match kept {
-                Some(t) => t,
-                None => match crate::perspectives::interpretation::gather_transcript_sparql(
+            // After writes that only added links, read what they can add to
+            // the kept read (late turns with old timestamps included, see
+            // `delta_read`). Anything else (no kept read, a removal or reload
+            // since, a log that no longer reaches back, a scope query a delta
+            // cannot follow) reads the whole transcript.
+            let delta = match &kept {
+                Some((kept_at, _)) if *kept_at == generation => None,
+                Some((kept_at, _)) => self
+                    .sparql_store
+                    .additions_since(*kept_at, generation)
+                    .map(|added| delta_query(&cfg.source_scope_query, &added))
+                    .filter(|d| *d != DeltaRead::Full),
+                None => None,
+            };
+            let transcript = match (kept, delta) {
+                (Some((kept_at, turns)), _) if kept_at == generation => turns,
+                (kept, Some(delta)) => {
+                    // Release the kept copy, so the merge can take it over.
+                    drop(kept);
+                    let gained = match delta {
+                        DeltaRead::Query(query) => {
+                            crate::perspectives::interpretation::gather_transcript_sparql(
+                                self, &query,
+                            )
+                            .await
+                        }
+                        _ => Ok(Vec::new()),
+                    };
+                    match gained {
+                        Ok(t) => watcher.reads.merge_transcript(
+                            cfg,
+                            generation,
+                            t.iter().map(PendingTurn::from_transcript).collect(),
+                            queueable,
+                        ),
+                        Err(e) => {
+                            log::warn!(
+                                "auto_processor `{}` [{}]: reading the turns added since the last \
+                                 tick failed: {e:#}",
+                                cfg.processor_id,
+                                uuid
+                            );
+                            continue;
+                        }
+                    }
+                }
+                _ => match crate::perspectives::interpretation::gather_transcript_sparql(
                     self,
                     &cfg.source_scope_query,
                 )

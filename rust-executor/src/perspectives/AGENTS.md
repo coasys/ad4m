@@ -11,6 +11,7 @@ or writes the graph. Split plan: spec items 3, 7, 8.
 | `mod.rs` | Global registry `PERSPECTIVES` (uuid → `PerspectiveInstance`), `add/update/remove_perspective`, `get_perspective(uuid)`, `all_perspectives()`, link-language signal routing (`handle_*_from_link_language`), telepresence publish, import/export |
 | `perspective_instance.rs` (7.6k) | **The** instance: link CRUD + batches, neighbourhood sync/commit loops, SDNA/SHACL registration, subject create/update/read, `execute_commands`, query subscriptions, notifications, telepresence signals, Prolog facade, auto-processor tick. One `impl`; being split into `perspective_instance/` |
 | `sparql_store.rs` | Per-perspective oxigraph store. Links stored as reified triples. `add_link/remove_link`, `query_links`, `query_arbitrary` (read-only SPARQL from clients), custom SPARQL fns (`parse_literal`, `strip_html`), named-graph → reifier migration |
+| `write_log.rs` | The store's log of recent writes by generation: the links each one only added, or `Other` (`SparqlStore::additions_since`) |
 | `model_query/` | Typed queries over SHACL shapes: `shape.rs` loads `ModelShape` from SHACL triples → `sparql_builder.rs` → `SparqlStore` → `hydration.rs` → `filtering.rs` → `getters.rs`/`relations.rs`/`projection.rs`. Entry: `execute_model_query` (`query.rs`). `mod.rs` has the pipeline diagram |
 | `shacl_parser.rs` | Writer side: SHACL class JSON → links (`parse_shacl_to_links`), flow JSON ↔ links (`parse_flow_to_links`, `parse_flow_from_links`). Types `SHACLShape`, `SHACLFlow`, `AD4MAction` |
 | `subject_classes_of.rs` | Which classes a URI conforms to (SPARQL) |
@@ -18,7 +19,7 @@ or writes the graph. Split plan: spec items 3, 7, 8.
 | `flow_classes.rs`, `flow_evaluator.rs`, `flow_spawn.rs`, `flow_semantic_check.rs`, `flow_context/` | SHACLFlow state machines: hard-wired classes, deterministic transition evaluation, spawn candidates, LLM flow context. Moving to `agentic/` (spec item 7) |
 | `interpretation/` | LLM interpretation: text → typed subjects. `run.rs` orchestrates, `prompt.rs`, `parse.rs`, `dedup.rs`, `graph/{read,write}.rs`, `overlay/` (provenance + human accept). Depends on `ai_service::harness` |
 | `agent_session.rs` | `perspective.runAgent`: a conversation with a model in one perspective over the static MCP tools in `SESSION_READS`, plus the writes the caller names from `SESSION_WRITES`. Both lists are explicit and perspective-scoped (a tool joins only by being added there), and `perspective_id` is forced. Same harness as interpretation, neutral prompt. Tests with a scripted model in `agent_session_tests.rs` |
-| `auto_processor/` | Runs interpretation automatically over neighbourhood conversations: `config.rs`, `watcher.rs` (debounce/batch), `cursor.rs`, `claim.rs` (multi-agent claim), `events.rs` (pubsub step signals) |
+| `auto_processor/` | Runs interpretation automatically over neighbourhood conversations: `config.rs`, `watcher.rs` (debounce/batch), `cursor.rs`, `claim.rs` (multi-agent claim), `events.rs` (pubsub step signals), `delta_read.rs` (a scope query's read of what added links gain it) |
 | `ordering/` | CRDT ordering for `@HasMany`. Parsed into `ModelShape.ordering` but **not wired** into hydration/writes yet (spec D2) |
 | `hardwired_class.rs` | Registration of hard-wired subject classes (used by flows and overlay) |
 | `migration.rs` | rusqlite → SPARQL link migration and other one-shot data migrations |
@@ -79,8 +80,14 @@ or writes the graph. Split plan: spec items 3, 7, 8.
   did. It keeps its config, transcript and cursor reads in `WatcherState` (`TickReads`) while the
   generation is unchanged; the transcript keeps text only for turns that may still be queued
   (consumed or out-of-window turns are id + timestamp), one copy per processor per loop (one loop
-  per perspective and per online managed user). A new store write path must call `note_write`,
-  or the loop misses that change until some other write lands. With turns pending but no default
+  per perspective and per online managed user). After writes that only added links, the tick
+  reads only what they add to the kept transcript (`SparqlStore::additions_since`,
+  `auto_processor/delta_read.rs`: the scope query with one triple pattern at a time restricted
+  by `VALUES` to the added terms) and merges it; a removal, a reload, a log that no longer reaches
+  back (1024 links), or a scope query that is not monotone (`OPTIONAL`, `MINUS`, `EXISTS`,
+  `LIMIT`, aggregates, paths) reads it whole. A new store write path must call
+  `note_write(WriteDelta)`, `Added` only when it removed nothing and every reifier is new, or the
+  loop misses that change until some other write lands. With turns pending but no default
   LLM set and spawned (`watcher::model_available`), a tick drains nothing and returns
   `TickOutcome::NoModel`, and the loop backs off as if idle: no signal announces a new default
   model, so the next write or the 60 s fallback finds it.

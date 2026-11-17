@@ -154,6 +154,7 @@ dependencies = [
  "sha2 0.10.9",
  "signal-hook",
  "sodoken",
+ "spargebra",
  "str0m",
  "sys_traits",
  "tar",

@@ -44,6 +44,7 @@ pub mod shacl_to_prolog;
 pub mod sparql_store;
 pub mod subject_classes_of;
 pub mod utils;
+pub(crate) mod write_log;
 use crate::types::{
     LinkQuery, LinkStatus, NeighbourhoodSignalFilter, PerspectiveEvent, PerspectiveExpression,
     PerspectiveHandle, PerspectiveRemovedEvent, PerspectiveState,

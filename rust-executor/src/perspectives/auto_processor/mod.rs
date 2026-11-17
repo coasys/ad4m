@@ -20,6 +20,7 @@
 pub mod claim;
 pub mod config;
 pub mod cursor;
+pub(crate) mod delta_read;
 pub mod events;
 pub mod watcher;
 
