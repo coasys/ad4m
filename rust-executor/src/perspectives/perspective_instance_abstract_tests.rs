@@ -120,6 +120,7 @@ async fn create(
 ) -> Result<(), AnyError> {
     p.create_subject(class(name), base.into(), Some(props), None, ctx)
         .await
+        .map(|_| ())
 }
 
 async fn update(

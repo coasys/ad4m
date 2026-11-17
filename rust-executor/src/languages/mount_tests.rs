@@ -46,6 +46,19 @@ pub(crate) async fn interact(url: &str, name: &str, params: Value) -> Result<Val
     })
 }
 
+/// The `MountThing` shape `mount-test` exports as its `mountShapes`
+/// reports it — the `call`-action shape a perspective can `add_sdna` to
+/// make creates, updates and deletes language calls.
+pub(crate) async fn mount_thing_shape(lang: &str) -> String {
+    LanguageController::global_instance()
+        .mount_shapes(lang)
+        .await
+        .unwrap()
+        .shapes[0]
+        .shape
+        .to_string()
+}
+
 #[tokio::test]
 async fn create_on_a_static_class_address_returns_a_delta() {
     let addr = load_mount_test_language().await;
