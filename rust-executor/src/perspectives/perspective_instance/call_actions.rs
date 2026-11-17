@@ -199,7 +199,10 @@ impl PerspectiveInstance {
             // before the call went out. An unmount meanwhile wins.
             let generation = self.active_mount_generation(&lang).await;
             let delta = self.execute_call(run).await?;
-            self.apply_call_delta(&lang, &delta, generation, context)
+            // Ordered as of its return: the delta is at least as new as
+            // anything the language emitted before the call ended.
+            let seq = super::next_mount_seq();
+            self.apply_call_delta(&lang, &delta, generation, seq, context)
                 .await;
             deltas.push(delta);
         }
@@ -244,6 +247,7 @@ impl PerspectiveInstance {
         lang_address: &str,
         delta: &MountDelta,
         generation: Option<u64>,
+        seq: u64,
         _context: &AgentContext,
     ) {
         let Some(generation) = generation else {
@@ -255,7 +259,7 @@ impl PerspectiveInstance {
         };
         if let Err(e) = self
             .clone()
-            .apply_mount_delta(lang_address, delta, generation)
+            .apply_mount_delta(lang_address, delta, generation, seq)
             .await
         {
             log::warn!("call action on {lang_address}: applying its delta failed: {e}");
