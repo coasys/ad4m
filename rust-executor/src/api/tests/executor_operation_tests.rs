@@ -572,6 +572,44 @@ async fn apply_template_publishes_as_the_calling_session() {
         .await;
 }
 
+/// `language.applyTemplateLocal` templates on this machine only: the templated
+/// language saves and loads, but nothing reaches the language language — the
+/// template data may hold a secret (an Acorn project passphrase).
+#[tokio::test]
+async fn apply_template_local_publishes_nothing() {
+    crate::test_utils::setup_wallet();
+    crate::test_utils::setup_agent();
+    let languages = TestLanguageLanguage::install().await;
+
+    let local = call(
+        "language.applyTemplateLocal",
+        json!({
+            "sourceLanguageHash": languages.template_address,
+            "templateData": json!({ "uid": "secret words" }).to_string(),
+        }),
+        operator_session(),
+    )
+    .await
+    .expect("the operator may template a language locally");
+
+    // A publish would have put the templated meta in the language language;
+    // language.meta reads exactly that store and must miss.
+    let meta = call(
+        "language.meta",
+        json!({ "address": local["address"] }),
+        operator_session(),
+    )
+    .await;
+    assert!(
+        meta.is_err(),
+        "the local template must not be published: {meta:?}"
+    );
+
+    languages
+        .uninstall(&[local["address"].as_str().unwrap()])
+        .await;
+}
+
 /// The MCP neighbourhood tool clones its link language itself; a user's clone must carry
 /// the user's DID as author, as `language.applyTemplate` does.
 #[tokio::test]
