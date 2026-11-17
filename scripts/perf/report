@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Write the static HTML trend page of the performance history.
+#   scripts/perf/report [--job JOB]... [--out FILE] [--runs 90]
+# Contract and every option: the header of scripts/perf/perf.mjs.
+exec node "$(dirname "$0")/perf.mjs" report "$@"

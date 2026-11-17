@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Fail (exit 1) when a run's measurement is a serious regression against the job's history.
+#   scripts/perf/check --job JOB [--run-id ID] [--factor METRIC=N] [--ceiling METRIC=N]
+# Contract and every option: the header of scripts/perf/perf.mjs.
+exec node "$(dirname "$0")/perf.mjs" check "$@"

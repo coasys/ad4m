@@ -1,0 +1,16 @@
+{
+  "_comment": "Per-metric limits for scripts/perf/check. Each rule matches a job and a metric (glob: * is any run of characters, dots too); later matching rules win. This file is the only place for limits. factor: a value worse than factor x the baseline median is a regression (default 1.5). min_delta: and at least this much worse, in the metric's unit (small timings jitter by more than half). ceiling (lower is better) and floor (higher is better): absolute limits, checked even before the history has 3 runs.",
+  "rules": [
+    { "job": "integration-tests-sfu", "metric": "sfu.*", "min_delta": 500 },
+    { "job": "integration-tests-sfu", "metric": "sfu.*.duration_ms", "min_delta": 5000, "ceiling": 600000 },
+    { "job": "integration-tests-sfu", "metric": "sfu.*rtt*", "min_delta": 20 },
+    { "job": "integration-tests-sfu", "metric": "sfu.suite.duration_ms", "min_delta": 60000, "ceiling": 1800000 },
+
+    { "job": "llm-e2e", "metric": "suite.*", "min_delta": 120 },
+    { "job": "llm-e2e", "metric": "test.*", "factor": 2.0, "min_delta": 30 },
+    { "job": "llm-e2e", "metric": "llm.*.latency_ms*", "min_delta": 1000 },
+    { "job": "llm-e2e", "metric": "llm.*.calls", "factor": 2.0, "min_delta": 20 },
+    { "job": "llm-e2e", "metric": "llm.*.failures", "factor": 2.0, "min_delta": 3 },
+    { "job": "llm-e2e", "metric": "llm.*.output_tokens_per_s*", "min_delta": 2 }
+  ]
+}
