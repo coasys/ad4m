@@ -374,6 +374,10 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
         || json!({ "sourceLanguageHash": "QmLang", "templateData": "{}" }),
     ),
     (
+        "language.applyTemplateLocal",
+        || json!({ "sourceLanguageHash": "QmLang", "templateData": "{}" }),
+    ),
+    (
         "language.writeSettings",
         || json!({ "address": "QmLang", "settings": {} }),
     ),

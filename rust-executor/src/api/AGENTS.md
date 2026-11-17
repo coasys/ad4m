@@ -164,7 +164,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-236 methods: Cap 81, CapAnyPointer 1, Executor 43, Open 5, Operator 28, Owns 76, UserOrOperator 2. Local only (the operator on this machine): 5.
+237 methods: Cap 82, CapAnyPointer 1, Executor 43, Open 5, Operator 28, Owns 76, UserOrOperator 2. Local only (the operator on this machine): 5.
 
 | Method | Guard |
 |---|---|
@@ -256,6 +256,7 @@ the guard checked:
 | `identity.status` | `Cap(agent:READ)` |
 | `language.all` | `Cap(language:READ)` |
 | `language.applyTemplate` | `Cap(language:CREATE)` |
+| `language.applyTemplateLocal` | `Cap(language:CREATE)` |
 | `language.get` | `Cap(language:READ)` |
 | `language.meta` | `Cap(language:READ)` |
 | `language.publish` | `Executor(language:CREATE)` |
