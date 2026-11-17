@@ -616,11 +616,17 @@ impl Inner {
         tokio::spawn(async move { this.resync_perform(generation, id).await });
     }
 
-    /// Arm a resync for a lagged event (an executor `lagged` notice, or a
-    /// missed event on our own broadcast).
+    /// Arm a resync for a missed event on our own broadcast. Goes through
+    /// `receive` as a lag marker, like an executor `lagged` notice: while
+    /// an open or resync is outstanding the marker is buffered — that
+    /// reply's snapshot may predate the missed event — and replayed after
+    /// it installs, which arms a fresh resync.
     async fn resync(self: &Arc<Self>) {
-        let mut state = self.state.lock().await;
-        self.arm_and_spawn_resync(&mut state);
+        self.receive(QueryUpdate {
+            lagged: true,
+            ..Default::default()
+        })
+        .await;
     }
 
     /// The resync `arm_and_spawn_resync` armed: fetch the current
@@ -1088,6 +1094,34 @@ mod tests {
             .unwrap();
         assert_eq!(delivered, serde_json::json!(["new"]));
         assert_eq!(query.id().await.as_deref(), Some("sub-2"));
+        client.close().await;
+    }
+
+    /// A broadcast lag seen while a resync is outstanding must not be
+    /// lost: that resync's snapshot may predate the missed event, so a
+    /// second resync follows once it installs.
+    #[tokio::test]
+    async fn a_lag_during_a_resync_triggers_another_resync() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let client = Arc::new(WsRpcClient::connect(fake.url(), "").await.unwrap());
+        let query = started_query(&fake, &client).await;
+
+        query.inner.resync().await;
+        let first = fake.next_request().await;
+        assert_eq!(first["type"], "perspective.resyncSubscription");
+        // The listener's `Lagged` path, while that resync is outstanding.
+        query.inner.resync().await;
+        fake.reply(&first, serde_json::json!({"result": [], "revision": 3}))
+            .await;
+
+        let second = fake
+            .maybe_request(Duration::from_secs(2))
+            .await
+            .expect("the lag seen mid-resync must arm another resync");
+        assert_eq!(second["type"], "perspective.resyncSubscription");
+        fake.reply(&second, serde_json::json!({"result": [], "revision": 4}))
+            .await;
         client.close().await;
     }
 
