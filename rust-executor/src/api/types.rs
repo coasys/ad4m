@@ -713,6 +713,8 @@ pub struct DiscardBatchRequest {
 #[ts(export)]
 pub struct SubscribeQueryRequest {
     pub query: String,
+    /// Minted by the client, so it can end the subscription without the reply.
+    pub subscription_id: String,
 }
 
 #[derive(Deserialize, TS)]

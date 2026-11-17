@@ -1,3 +1,4 @@
+use super::fallback_sync::{fallback_push_refused, ShareScope};
 use super::hosted_status;
 use super::model_query::is_safe_iri_target;
 use super::model_query::load_shape_from_store;
@@ -7,6 +8,7 @@ use super::monotonic::{committable, drop_monotonic_removals, refuse_monotonic_re
 use super::sdna::{generic_link_fact, is_sdna_link};
 use super::shacl_parser::check_consensus_rule_links;
 use super::shacl_parser::property_node_name;
+use super::sparql_store::EvalStop;
 use super::update_perspective_with;
 use super::utils::prolog_get_all_string_bindings;
 use crate::agent::{create_signed_expression, did_for_context};
@@ -73,7 +75,7 @@ mod shapes;
 pub(crate) use abstract_classes::faults::fail_next_index;
 pub use shapes::{RegisterResult, ShapeSummary};
 mod subscriptions;
-pub(crate) use subscriptions::result_json;
+pub(crate) use subscriptions::{result_json, SubscriptionIdTaken};
 // Which writes re-run a model subscription (#1237).
 mod subscription_triggers;
 // Registering this executor's owners with the link language.
@@ -81,6 +83,8 @@ mod local_agents;
 // Committing a batch only if the links it expects still stand.
 mod expected_links;
 pub use expected_links::{ExpectedLinks, LinksChanged};
+// A batch's effective view of the graph for the validated write core.
+mod batch_view;
 
 #[cfg(test)]
 #[path = "perspective_instance_subscription_tests.rs"]
@@ -688,9 +692,9 @@ pub struct PerspectiveInstance {
 
 /// The local Shared links the remote render lacks, without the links of the diffs the
 /// queue still holds (queued or parked). Links compare by author, timestamp, source,
-/// predicate and target; one set of those identities for remote and unsent keeps the
-/// pass linear.
-fn links_missing_remotely(
+/// predicate (an empty predicate counts as none) and target; one set of those
+/// identities for remote and unsent keeps the pass linear.
+pub(super) fn links_missing_remotely(
     local_links: &[(LinkExpression, LinkStatus)],
     remote_links: &[LinkExpression],
     unsent: &[LinkExpression],
@@ -700,7 +704,7 @@ fn links_missing_remotely(
             &l.author,
             &l.timestamp,
             &l.data.source,
-            l.data.predicate.as_deref(),
+            l.data.predicate.as_deref().filter(|p| !p.is_empty()),
             &l.data.target,
         )
     }
@@ -934,8 +938,9 @@ impl PerspectiveInstance {
 
     /// Multi-user auto-processor spawn loop. Every supervisor tick it
     /// re-computes the set of managed users whose `last_seen` falls inside
-    /// `MANAGED_USER_ONLINE_WINDOW_S` (twice the `last_seen` write-throttle,
-    /// so active users do not flap — #1070), spawns a per-user
+    /// `MANAGED_USER_ONLINE_WINDOW_S` (see [`crate::presence`]: three times the
+    /// `last_seen` write-throttle, so active users do not flap — #1070), and
+    /// the same window `online_agents` elects authors with, spawns a per-user
     /// `auto_processor_watch_loop` for any newly-online user, and aborts the
     /// loop of any user who has aged out. Users that go offline are cheap to
     /// re-spawn on next activity, so the transient churn is bounded.
@@ -947,9 +952,7 @@ impl PerspectiveInstance {
     ///   forever and no pass ever runs — the exact symptom we hit on Marvin
     ///   with James in a live call.
     async fn managed_user_auto_processor_supervisor(&self) {
-        use crate::perspectives::auto_processor::watcher::{
-            select_online_managed_users, MANAGED_USER_ONLINE_WINDOW_S,
-        };
+        use crate::perspectives::auto_processor::watcher::select_online_managed_users;
         use std::collections::HashMap;
         use std::time::{SystemTime, UNIX_EPOCH};
         use tokio::task::JoinHandle;
@@ -991,8 +994,7 @@ impl PerspectiveInstance {
                 }
             };
 
-            let online =
-                select_online_managed_users(user_tuples, now_s, MANAGED_USER_ONLINE_WINDOW_S);
+            let online = select_online_managed_users(user_tuples, now_s);
             let online_set: std::collections::HashSet<&String> = online.iter().collect();
 
             // Reap: drop entries for users who finished, aged out, or are no
@@ -1256,7 +1258,7 @@ impl PerspectiveInstance {
             );
         }
         if self.persisted.lock().await.state == PerspectiveState::NeighbourhoodCreationInitiated {
-            self.ensure_public_links_are_shared().await;
+            self.share_links_after_publish().await;
         }
         self.update_perspective_state_log_error(
             PerspectiveState::LinkLanguageInstalledButNotSynced,
@@ -1442,13 +1444,16 @@ impl PerspectiveInstance {
                         match link_language.commit(oldest.clone()).await {
                             Ok(_) => oldest_ids,
                             Err(refusal) => {
-                                // The batch concatenates its diffs oldest first.
-                                let rest = PerspectiveDiff {
-                                    additions: pending_diffs.additions[oldest.additions.len()..]
-                                        .to_vec(),
-                                    removals: pending_diffs.removals[oldest.removals.len()..]
-                                        .to_vec(),
-                                };
+                                // The batch's other rows, merged on their own: the
+                                // batch's merge may have cancelled the oldest's links
+                                // against them.
+                                let rest_ids: Vec<u64> = pending_ids
+                                    .iter()
+                                    .filter(|id| !oldest_ids.contains(id))
+                                    .copied()
+                                    .collect();
+                                let rest = crate::db_backend::db_backend()
+                                    .get_pending_diffs_among(&uuid, &rest_ids)?;
                                 if link_language.commit(rest).await.is_err() {
                                     return Err(e.context(format!(
                                         "a batch of {} diffs",
@@ -1464,10 +1469,7 @@ impl PerspectiveInstance {
                                 );
                                 crate::db_backend::db_backend()
                                     .park_pending_diffs(&uuid, oldest_ids.clone())?;
-                                pending_ids
-                                    .into_iter()
-                                    .filter(|id| !oldest_ids.contains(id))
-                                    .collect()
+                                rest_ids
                             }
                         }
                     }
@@ -1526,7 +1528,10 @@ impl PerspectiveInstance {
         }
     }
 
-    pub async fn ensure_public_links_are_shared(&self) -> bool {
+    /// Commits the Shared links the link language's `render()` lacks. Callers:
+    /// `ensure_public_links_are_shared` and `share_links_after_publish`
+    /// (`fallback_sync.rs`); `scope` says how many it may send.
+    pub(crate) async fn share_links_missing_remotely(&self, scope: ShareScope) -> bool {
         let _sharing = self.share_links_mutex.lock().await;
         let uuid = self.uuid.clone();
 
@@ -1538,7 +1543,7 @@ impl PerspectiveInstance {
 
         if let Some(mut link_language) = link_language_clone {
             // Query SPARQL store for all links
-            let decorated_links = match self.sparql_store.get_all_links() {
+            let decorated_links = match self.sparql_store.get_all_links(&EvalStop::none()) {
                 Ok(links) => links,
                 Err(e) => {
                     log::error!(
@@ -1636,17 +1641,16 @@ impl PerspectiveInstance {
             if !links_to_commit.is_empty() {
                 let links_count = links_to_commit.len();
 
-                // Defensive check: a fallback sync should normally only ever need to commit
-                // a handful of links that failed to make it into a prior commit. If it's
-                // about to resubmit most or all of the perspective's shared links, that's a
-                // signal something upstream (e.g. a misread of the remote state) is wrong —
-                // log it loudly so a future regression like this one is caught immediately
-                // rather than only discoverable by manually auditing link counts later.
-                if links_count > 20 && links_count as f64 > local_links.len() as f64 * 0.5 {
-                    log::warn!(
-                        "ensure_public_links_are_shared: about to commit {} of {} local shared links for perspective {} — this looks like a full resync rather than a small catch-up, which usually indicates the remote state couldn't be read correctly",
+                // A fallback sync catches up the few links a commit missed. Most of
+                // the shared set missing means the language's view of the remote is
+                // wrong (an empty or partial mirror): sending would push the room's
+                // whole set again. Send nothing; the caller's backoff retries.
+                if fallback_push_refused(links_count, local_links.len(), scope) {
+                    log::error!(
+                        "ensure_public_links_are_shared: refusing to commit {} of {} local shared links for perspective {}: the link language's render() lacks most of them, so its view of the remote is incomplete, not the remote",
                         links_count, local_links.len(), uuid
                     );
+                    return false;
                 }
 
                 let result = link_language
@@ -2004,6 +2008,7 @@ impl PerspectiveInstance {
             let decorated_link = self
                 .sparql_store
                 .get_link(
+                    &EvalStop::none(),
                     &link_expression.data.source,
                     link_expression.data.predicate.as_deref(),
                     &link_expression.data.target,
@@ -2023,6 +2028,7 @@ impl PerspectiveInstance {
 
             // Query SPARQL store
             if let Some(decorated_link) = self.sparql_store.get_link(
+                &EvalStop::none(),
                 &link_expression.data.source,
                 link_expression.data.predicate.as_deref(),
                 &link_expression.data.target,
@@ -2290,6 +2296,7 @@ impl PerspectiveInstance {
             .map(|removal| {
                 let link = LinkExpression::try_from(removal)?;
                 let stored = self.sparql_store.get_link(
+                    &EvalStop::none(),
                     &link.data.source,
                     link.data.predicate.as_deref(),
                     &link.data.target,
@@ -2399,6 +2406,7 @@ impl PerspectiveInstance {
 
         // Query SPARQL store
         let decorated_link_option = self.sparql_store.get_link(
+            &EvalStop::none(),
             &old_link.data.source,
             old_link.data.predicate.as_deref(),
             &old_link.data.target,
@@ -2518,6 +2526,7 @@ impl PerspectiveInstance {
         for link in link_expressions {
             // Query SPARQL store
             if let Some(decorated_link) = self.sparql_store.get_link(
+                &EvalStop::none(),
                 &link.data.source,
                 link.data.predicate.as_deref(),
                 &link.data.target,
@@ -2642,6 +2651,7 @@ impl PerspectiveInstance {
     /// Prolog) should use [`Self::get_links_local`] which unwraps for them.
     fn get_links_local_decorated(
         &self,
+        stop: &EvalStop,
         query: &LinkQuery,
     ) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
         let from_date = query.from_date.as_ref().map(|d| {
@@ -2654,6 +2664,7 @@ impl PerspectiveInstance {
         });
 
         Ok(self.sparql_store.query_links(
+            stop,
             query.source.as_deref(),
             query.predicate.as_deref(),
             query.target.as_deref(),
@@ -2667,10 +2678,18 @@ impl PerspectiveInstance {
         &self,
         query: &LinkQuery,
     ) -> Result<Vec<(LinkExpression, LinkStatus)>, AnyError> {
+        self.get_links_local_stopped(&EvalStop::none(), query)
+    }
+
+    fn get_links_local_stopped(
+        &self,
+        stop: &EvalStop,
+        query: &LinkQuery,
+    ) -> Result<Vec<(LinkExpression, LinkStatus)>, AnyError> {
         // Unwrap the decorated form into the (LinkExpression, LinkStatus)
         // tuple format the legacy in-process callers (SDNA, Prolog facts)
         // expect. No re-verification — we trust the stored `valid` flag.
-        let decorated_links = self.get_links_local_decorated(query)?;
+        let decorated_links = self.get_links_local_decorated(stop, query)?;
         Ok(decorated_links
             .into_iter()
             .map(|decorated| {
@@ -2691,6 +2710,16 @@ impl PerspectiveInstance {
     }
 
     pub async fn get_links(&self, q: &LinkQuery) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
+        self.get_links_stopped(&EvalStop::none(), q).await
+    }
+
+    /// [`Self::get_links`] under `stop`: the store reads end when the call's
+    /// gate fires (deadline, cancel, or the call's future dropped).
+    pub async fn get_links_stopped(
+        &self,
+        stop: &EvalStop,
+        q: &LinkQuery,
+    ) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
         let mut reverse = false;
         let mut query = q.clone();
 
@@ -2726,6 +2755,7 @@ impl PerspectiveInstance {
                 dt.to_rfc3339()
             });
             return Ok(self.sparql_store.query_links_top_n_by_timestamp(
+                stop,
                 query.source.as_deref(),
                 query.predicate.as_deref(),
                 query.target.as_deref(),
@@ -2746,7 +2776,7 @@ impl PerspectiveInstance {
         // that's ~30K extra small allocations + 10K crypto ops every call.
         // The wind-tunnel S9 query path was the dominant remaining source of
         // RSS growth; this collapses it to a single Vec.
-        let mut links = self.get_links_local_decorated(&query)?;
+        let mut links = self.get_links_local_decorated(stop, &query)?;
 
         links.sort_by(|a, b| {
             let a_time = DateTime::parse_from_rfc3339(&a.timestamp).unwrap_or_default();
@@ -3061,7 +3091,7 @@ impl PerspectiveInstance {
                 // Get all links for Simple mode. Use the decorated form
                 // directly — re-running signature verification per link was
                 // hot in the wind tunnel.
-                self.get_links_local_decorated(&LinkQuery::default())?
+                self.get_links_local_decorated(&EvalStop::none(), &LinkQuery::default())?
             }
             PrologMode::SdnaOnly => {
                 // Get only SDNA links for SdnaOnly mode (efficient query)
@@ -3158,7 +3188,8 @@ impl PerspectiveInstance {
                 };
 
                 // Get links for SDNA fact generation
-                let links = self.get_links_local_decorated(&LinkQuery::default())?;
+                let links =
+                    self.get_links_local_decorated(&EvalStop::none(), &LinkQuery::default())?;
 
                 service
                     .run_query_simple(
@@ -3253,7 +3284,8 @@ impl PerspectiveInstance {
                 });
 
                 // Get links for SDNA fact generation
-                let links = self.get_links_local_decorated(&LinkQuery::default())?;
+                let links =
+                    self.get_links_local_decorated(&EvalStop::none(), &LinkQuery::default())?;
 
                 service
                     .run_query_simple(
@@ -3400,7 +3432,18 @@ impl PerspectiveInstance {
     /// `query` (no wire-format re-encoding of coincidentally-named
     /// `?target`/`?t` bindings; see `SparqlStore::query_arbitrary`).
     pub fn sparql_query(&self, query: String) -> Result<String, deno_core::anyhow::Error> {
-        self.sparql_store.query_arbitrary(&query)
+        self.sparql_query_stopped(&EvalStop::none(), &query)
+    }
+
+    /// [`Self::sparql_query`] under `stop`: the evaluation ends when the
+    /// call's gate fires — its deadline passing, `request.cancel`, the
+    /// connection closing, or the call's future being dropped.
+    pub fn sparql_query_stopped(
+        &self,
+        stop: &EvalStop,
+        query: &str,
+    ) -> Result<String, deno_core::anyhow::Error> {
+        self.sparql_store.query_arbitrary(stop, query)
     }
 
     /// Resolve each URI to every subject class it is an instance of, most
@@ -3421,22 +3464,32 @@ impl PerspectiveInstance {
         &self,
         uris: &[String],
     ) -> Result<std::collections::HashMap<String, Vec<String>>, AnyError> {
+        self.subject_classes_of_stopped(&EvalStop::none(), uris)
+    }
+
+    /// [`Self::subject_classes_of`] under `stop` — every store evaluation
+    /// the classification makes ends when the call's gate fires.
+    pub fn subject_classes_of_stopped(
+        &self,
+        stop: &EvalStop,
+        uris: &[String],
+    ) -> Result<std::collections::HashMap<String, Vec<String>>, AnyError> {
         let resolver = self.shape_resolver();
-        super::subject_classes_of::subject_classes_of(&self.sparql_store, &resolver, uris)
+        super::subject_classes_of::subject_classes_of(stop, &self.sparql_store, &resolver, uris)
     }
 
     /// Cancellation-aware async variant of [`Self::sparql_query`].
     ///
-    /// Forwards to [`SparqlStore::query_cancellable`] — see that method
-    /// for the cancellation semantics (the eval is uncancellable on the
-    /// Oxigraph side, but the network reply + JSON serialisation are
-    /// short-circuited).
+    /// Runs the evaluation on a blocking thread under `stop`: when its gate
+    /// fires (deadline, `request.cancel`, the connection closing, or the
+    /// caller's future dropped) the Oxigraph token cancels the evaluation
+    /// itself, and its error says which way it stopped.
     pub async fn sparql_query_cancellable(
         &self,
+        stop: EvalStop,
         query: String,
-        cancel: tokio_util::sync::CancellationToken,
     ) -> Result<String, deno_core::anyhow::Error> {
-        self.sparql_store.query_cancellable(&query, cancel).await
+        self.sparql_store.query_cancellable(&stop, &query).await
     }
 
     /// The ordering strategy declared for `(source, predicate)`, if any.
@@ -3477,6 +3530,7 @@ impl PerspectiveInstance {
         let pending = self.staged_triples_for(source, batch_id).await;
         let resolver = self.shape_resolver();
         let classes = super::subject_classes_of::subject_classes_of_with_pending(
+            &EvalStop::none(),
             &self.sparql_store,
             &resolver,
             &[source.to_string()],
@@ -3718,7 +3772,20 @@ impl PerspectiveInstance {
         class_name: &str,
         query_json: &str,
     ) -> Result<String, deno_core::anyhow::Error> {
-        self.model_query_within(class_name, query_json, MODEL_QUERY_SHAPE_WAIT)
+        self.model_query_stopped(&EvalStop::none(), class_name, query_json)
+            .await
+    }
+
+    /// [`Self::model_query`] under `stop`: every evaluation the query makes
+    /// ends when the call's gate fires, reporting why.
+    pub async fn model_query_stopped(
+        &self,
+        stop: &EvalStop,
+        class_name: &str,
+        query_json: &str,
+    ) -> Result<String, deno_core::anyhow::Error> {
+        let classes = super::model_query::QueryClasses::One(class_name.to_string());
+        self.model_query_classes_within(stop, &classes, query_json, MODEL_QUERY_SHAPE_WAIT)
             .await
     }
 
@@ -3728,12 +3795,30 @@ impl PerspectiveInstance {
         classes: &super::model_query::QueryClasses,
         query_json: &str,
     ) -> Result<String, deno_core::anyhow::Error> {
-        self.model_query_classes_within(classes, query_json, MODEL_QUERY_SHAPE_WAIT)
+        self.model_query_classes_within(
+            &EvalStop::none(),
+            classes,
+            query_json,
+            MODEL_QUERY_SHAPE_WAIT,
+        )
+        .await
+    }
+
+    /// [`Self::model_query_classes`] under `stop` — every evaluation the
+    /// query makes ends when the call's gate fires.
+    pub async fn model_query_classes_stopped(
+        &self,
+        stop: &EvalStop,
+        classes: &super::model_query::QueryClasses,
+        query_json: &str,
+    ) -> Result<String, deno_core::anyhow::Error> {
+        self.model_query_classes_within(stop, classes, query_json, MODEL_QUERY_SHAPE_WAIT)
             .await
     }
 
     /// [`Self::model_query`] with the shape-wait budget as a parameter, so
     /// tests can exercise its expiry without waiting the production 20 s.
+    #[cfg(test)]
     async fn model_query_within(
         &self,
         class_name: &str,
@@ -3741,7 +3826,7 @@ impl PerspectiveInstance {
         shape_wait: Duration,
     ) -> Result<String, deno_core::anyhow::Error> {
         let classes = super::model_query::QueryClasses::One(class_name.to_string());
-        self.model_query_classes_within(&classes, query_json, shape_wait)
+        self.model_query_classes_within(&EvalStop::none(), &classes, query_json, shape_wait)
             .await
     }
 
@@ -3750,6 +3835,7 @@ impl PerspectiveInstance {
     /// union names is waited for under the one budget, as an included class is.
     pub(super) async fn model_query_classes_within(
         &self,
+        stop: &EvalStop,
         classes: &super::model_query::QueryClasses,
         query_json: &str,
         shape_wait: Duration,
@@ -3818,7 +3904,7 @@ impl PerspectiveInstance {
         if let Some(edges) = &targets.containment {
             super::model_query::containment::set_containment(&mut query_input, edges);
         }
-        self.resolve_container_children(classes, &mut query_input)
+        self.resolve_container_children(stop, classes, &mut query_input)
             .await?;
         let named = classes;
         let classes = &targets.classes;
@@ -3902,7 +3988,8 @@ impl PerspectiveInstance {
         let result = loop {
             let run = match classes {
                 super::model_query::QueryClasses::One(_) => {
-                    super::model_query::execute_model_query(
+                    super::model_query::execute_model_query_stopped(
+                        stop,
                         &self.sparql_store,
                         shapes[0].1.as_ref(),
                         &query_input,
@@ -3912,6 +3999,7 @@ impl PerspectiveInstance {
                 }
                 super::model_query::QueryClasses::Union(names) => {
                     super::model_query::execute_union_query_with_views(
+                        stop,
                         &self.sparql_store,
                         names,
                         &query_input,
@@ -3936,7 +4024,7 @@ impl PerspectiveInstance {
                 .await?;
         };
         let mut result = result;
-        self.finish_container_rows(named, &query_input, &mut result)
+        self.finish_container_rows(stop, named, &query_input, &mut result)
             .await?;
 
         serde_json::to_string(&result).map_err(|e| {
@@ -3953,8 +4041,20 @@ impl PerspectiveInstance {
         instance_ids: &[String],
         property_names: Option<&[String]>,
     ) -> Result<String, deno_core::anyhow::Error> {
+        self.evaluate_getters_stopped(&EvalStop::none(), class_name, instance_ids, property_names)
+    }
+
+    /// [`Self::evaluate_getters`] under `stop`.
+    pub fn evaluate_getters_stopped(
+        &self,
+        stop: &EvalStop,
+        class_name: &str,
+        instance_ids: &[String],
+        property_names: Option<&[String]>,
+    ) -> Result<String, deno_core::anyhow::Error> {
         let shape = self.get_shape(class_name)?;
         let result = super::model_query::evaluate_getters_batch(
+            stop,
             &self.sparql_store,
             shape.as_ref(),
             instance_ids,
@@ -3995,16 +4095,39 @@ impl PerspectiveInstance {
         // pubsub/prolog, rather than decorating and converting back here.
 
         let effects = self.retraction_effects(&diff.additions)?;
-        let retracted = effects.retracted.iter().cloned().map(LinkExpression::from);
+        let removals: Vec<LinkExpression> = diff
+            .removals
+            .iter()
+            .cloned()
+            .chain(effects.retracted.iter().cloned().map(LinkExpression::from))
+            .collect();
+        let additions: Vec<LinkExpression> = diff
+            .additions
+            .iter()
+            .filter(|a| !effects.covers(a))
+            .cloned()
+            .collect();
+
+        // One store transaction for the whole diff, so a batch lands as one
+        // write. On failure nothing was written; fall back to one link at a
+        // time.
+        match self.sparql_store.apply_diff(&removals, &additions) {
+            Ok(()) => return Ok(effects),
+            Err(e) => log::warn!(
+                "Failed to apply link diff to SPARQL store in one transaction, \
+                 writing links one by one: {:?}",
+                e
+            ),
+        }
 
         // Removals first
-        for removal in diff.removals.iter().cloned().chain(retracted) {
-            if let Err(e) = self.sparql_store.remove_link(&removal) {
+        for removal in &removals {
+            if let Err(e) = self.sparql_store.remove_link(removal) {
                 log::warn!("Failed to remove link from SPARQL store: {:?}", e);
             }
         }
         // Additions after
-        for addition in diff.additions.iter().filter(|a| !effects.covers(a)) {
+        for addition in &additions {
             if let Err(e) = self.sparql_store.add_link(addition) {
                 log::warn!("Failed to add link to SPARQL store: {:?}", e);
             }
@@ -4258,7 +4381,7 @@ impl PerspectiveInstance {
                 // One failing trigger must not silence the other notifications.
                 match {
                     let query = n.trigger.clone();
-                    let result_json = self.sparql_store.query(&query);
+                    let result_json = self.sparql_store.query(&EvalStop::none(), &query);
                     match result_json {
                         Ok(json) => serde_json::from_str::<Vec<serde_json::Value>>(&json)
                             .map_err(|e| anyhow::anyhow!(e)),
@@ -4479,11 +4602,6 @@ impl PerspectiveInstance {
         }
     }
 
-    /// Seconds a locally-managed multi-tenancy user's `last_seen` may lag before
-    /// we treat them as offline for telepresence. Mirrors the 5-minute window
-    /// `agent::capabilities` already uses to throttle last-seen updates.
-    const LOCAL_ONLINE_THRESHOLD_SECS: i64 = 300;
-
     pub async fn online_agents(&self) -> Result<Vec<OnlineAgent>, AnyError> {
         // Remote peers via the link language's telepresence adapter (when one is
         // present — i.e. a real multi-executor neighbourhood).
@@ -4534,18 +4652,16 @@ impl PerspectiveInstance {
         Ok(agents)
     }
 
-    /// DIDs of managed users who used any authed API within
-    /// [`Self::LOCAL_ONLINE_THRESHOLD_SECS`].
+    /// DIDs of managed users who are online by [`crate::presence::is_online`]:
+    /// the same predicate and window as the supervisor that runs their loops,
+    /// so a user is never "running" there yet absent from election here (#1070).
     fn recently_active_users() -> Vec<String> {
         let now = chrono::Utc::now().timestamp();
         crate::db_backend::db_backend()
             .list_users()
             .unwrap_or_default()
             .into_iter()
-            .filter(|user| {
-                user.last_seen
-                    .map_or(false, |ls| now - ls < Self::LOCAL_ONLINE_THRESHOLD_SECS)
-            })
+            .filter(|user| crate::presence::is_online(user.last_seen, now))
             .map(|user| user.did)
             .collect()
     }
@@ -4635,8 +4751,6 @@ impl PerspectiveInstance {
         payload: PerspectiveExpression,
         loopback: bool,
     ) -> Result<(), AnyError> {
-        use crate::agent::AgentService;
-
         let current_perspective_handle = self.persisted.lock().await.clone();
 
         if loopback {
@@ -4651,18 +4765,13 @@ impl PerspectiveInstance {
         }
 
         // Route the broadcast to every local agent that owns the neighbourhood (its
-        // `event_recipients`), each copy naming that agent. The main agent does not get its
-        // own broadcast back: loopback handles that.
+        // `event_recipients`), each copy naming that agent. The sender's own agent gets it
+        // too, the main agent like any managed agent: its other clients (devices) must hear
+        // it, and a client drops its own messages. With `loopback` every owner gets it twice.
         if current_perspective_handle.shared_url.is_some() {
-            let main_agent_did = AgentService::with_global_instance(|s| s.did.clone());
             let mut signal = payload.clone();
             signal.verify_signatures();
             for recipient in super::event_recipients(&current_perspective_handle) {
-                let main_sent_it = main_agent_did.as_deref() == Some(recipient.as_str())
-                    && payload.author == recipient;
-                if main_sent_it {
-                    continue;
-                }
                 super::publish_telepresence_signal(
                     current_perspective_handle.clone(),
                     signal.clone(),
@@ -5071,7 +5180,15 @@ impl PerspectiveInstance {
     fn first_target(&self, source: &str, predicate: &str) -> Result<Option<String>, AnyError> {
         Ok(self
             .sparql_store
-            .query_links(Some(source), Some(predicate), None, None, None, None)?
+            .query_links(
+                &EvalStop::none(),
+                Some(source),
+                Some(predicate),
+                None,
+                None,
+                None,
+                None,
+            )?
             .into_iter()
             .map(|l| l.data.target)
             .min())
@@ -5086,6 +5203,7 @@ impl PerspectiveInstance {
         Ok(self
             .sparql_store
             .query_links(
+                &EvalStop::none(),
                 Some(&class.shape_uri),
                 Some("sh://property"),
                 None,
@@ -5735,16 +5853,19 @@ impl PerspectiveInstance {
         Ok(format!("{{ {} }}", stringified))
     }
 
-    /// Subscribe to a SPARQL query for the RPC connection `connection_id`, as
-    /// `subscriber` (a managed agent's DID, `None` for the main agent). Returns
-    /// the subscription id and the revision and result the reply carries (see
-    /// `open_subscription`); every change after that is published as a delta
-    /// update (`send_delta_update`). Each call makes a new subscription, so
-    /// every subscriber counts revisions from 0. A query that is not SPARQL
-    /// fails with [`PROLOG_LIVE_QUERY_UNSUPPORTED`].
+    /// Subscribe to a SPARQL query under `subscription_id` (the client's) for
+    /// the RPC connection `connection_id`, as `subscriber` (a managed agent's
+    /// DID, `None` for the main agent). Returns the subscription id and the
+    /// revision and result the reply carries (see `open_subscription`, which
+    /// refuses an id already in use); every change after that is published as
+    /// a delta update (`send_delta_update`). Each call makes a new
+    /// subscription, so every subscriber counts revisions from 0. A query that
+    /// is not SPARQL fails with [`PROLOG_LIVE_QUERY_UNSUPPORTED`].
     pub async fn subscribe_and_query(
         &self,
+        stop: &EvalStop,
         query: String,
+        subscription_id: String,
         connection_id: String,
         subscriber: Option<String>,
     ) -> Result<(String, u64, String), AnyError> {
@@ -5752,22 +5873,26 @@ impl PerspectiveInstance {
             return Err(anyhow!(PROLOG_LIVE_QUERY_UNSUPPORTED));
         }
         let subscribed_query = SubscribedQuery::new(query.clone(), connection_id, subscriber);
-        let first_result = async { self.sparql_query(query) };
-        self.open_subscription(subscribed_query, first_result).await
+        let first_result = async { self.sparql_query_stopped(stop, &query) };
+        self.open_subscription(subscription_id, subscribed_query, first_result)
+            .await
     }
 
     /// Subscribe to model query changes. Builds trigger SPARQL from the model shape,
     /// registers a subscription, and runs the initial model query — all in one call.
     /// When link changes match the trigger predicates, `execute_model_query` is
     /// re-run in Rust and the change is pushed to the client as a delta
-    /// update. Each call makes a new subscription (see `open_subscription`).
+    /// update. Each call makes a new subscription under `subscription_id`, the
+    /// client's (see `open_subscription`).
     ///
     /// `classes` is one class or a union (#1238). A union is one subscription:
     /// it re-runs when a diff touches the trigger set of any class it names.
     pub async fn model_subscribe_and_query(
         &self,
+        stop: &EvalStop,
         classes: super::model_query::QueryClasses,
         query_json: String,
+        subscription_id: String,
         connection_id: String,
         subscriber: Option<String>,
     ) -> Result<(String, u64, String), AnyError> {
@@ -5798,8 +5923,9 @@ impl PerspectiveInstance {
             subscriber,
         };
         let first_result =
-            self.model_query_classes_within(&classes, &query_json, MODEL_QUERY_SHAPE_WAIT);
-        self.open_subscription(subscribed_query, first_result).await
+            self.model_query_classes_within(stop, &classes, &query_json, MODEL_QUERY_SHAPE_WAIT);
+        self.open_subscription(subscription_id, subscribed_query, first_result)
+            .await
     }
 
     /// Extract predicates from a model shape for subscription trigger matching.
@@ -5845,7 +5971,7 @@ impl PerspectiveInstance {
         // First, so the queries collected below carry the new class lists.
         let reresolved = self.refresh_abstract_subscriptions().await;
 
-        let mut query_futures: Vec<future::BoxFuture<'static, Option<(String, String)>>> =
+        let mut query_futures: Vec<future::BoxFuture<'static, Option<(Vec<String>, String)>>> =
             Vec::new();
 
         // Collect only the minimal data needed: ID, query string, predicates,
@@ -5868,6 +5994,9 @@ impl PerspectiveInstance {
 
         // Store reads the model triggers make, shared by every subscription.
         let mut trigger_lookups = subscription_triggers::StoreLookups::new(&self.sparql_store);
+        // The subscriptions to re-run, grouped by what they evaluate.
+        let mut groups: Vec<(Vec<String>, String, Option<ModelSubscriptionParams>)> = Vec::new();
+        let mut evaluations: HashMap<String, usize> = HashMap::new();
 
         // Create futures for each query check
         for (id, query_string, sub_predicates, model_params) in queries {
@@ -5912,19 +6041,47 @@ impl PerspectiveInstance {
             #[cfg(test)]
             subscription_triggers::reruns::note(&id);
 
-            // Each future returns Option<(id, new_result)> instead of locking individually.
+            // Identical queries give identical results, whoever subscribed, so
+            // each one runs once and its result goes to every subscription
+            // holding it. A client that retried a slow subscribe and left the
+            // earlier ones behind then costs one evaluation, not one per retry.
+            let key = subscriptions::evaluation_key(&query_string, model_params.as_ref());
+            match evaluations.get(&key) {
+                Some(&i) => groups[i].0.push(id),
+                None => {
+                    evaluations.insert(key, groups.len());
+                    groups.push((vec![id], query_string, model_params));
+                }
+            }
+        }
+
+        for (ids, query_string, model_params) in groups {
+            // Each future returns Option<(ids, new_result)> instead of locking individually.
             // This avoids a lock convoy where N futures all contend on subscribed_queries.
             let self_clone = self.clone();
             let query_future = Box::pin(async move {
+                #[cfg(test)]
+                subscriptions::evaluations::note(&self_clone.uuid);
                 // Model subscriptions: re-run execute_model_query instead of raw SPARQL.
                 // With no shape wait: every subscription on the perspective is
                 // re-checked in the one pass below, so a wait here for one
                 // subscription's unsynced class would hold back every other
                 // subscription's update. A class still missing fails this pass
                 // at once and is retried on the next one.
+                // A re-check runs under its own deadline gate: one slow
+                // subscription's eval stops there and is skipped for this
+                // pass — it does not kill the subscription or hold back the
+                // others. The gate drops with the future, so an eval still
+                // stopping is still ended.
+                let gate = crate::perspectives::sparql_store::EvalGate::request(
+                    crate::perspectives::sparql_store::query_deadline(),
+                    None,
+                );
+                let stop = gate.stop();
                 let result_string = if let Some(ref params) = model_params {
                     match self_clone
                         .model_query_classes_within(
+                            &stop,
                             &params.classes,
                             &params.query_json,
                             Duration::ZERO,
@@ -5933,20 +6090,28 @@ impl PerspectiveInstance {
                     {
                         Ok(r) => r,
                         Err(e) => {
-                            log::error!("❌ 🔗 🧠 model-based subscription query failed: {}", e);
+                            log::error!(
+                                "❌ 🔗 🧠 model-based subscription query failed (subscriptions {:?}): {}",
+                                ids,
+                                e
+                            );
                             return None;
                         }
                     }
                 } else {
-                    match self_clone.sparql_query(query_string) {
+                    match self_clone.sparql_query_stopped(&stop, &query_string) {
                         Ok(r) => r,
                         Err(e) => {
-                            log::error!("❌ 🔗 🔎 SPARQL subscription query failed: {}", e);
+                            log::error!(
+                                "❌ 🔗 🔎 SPARQL subscription query failed (subscriptions {:?}): {}",
+                                ids,
+                                e
+                            );
                             return None;
                         }
                     }
                 };
-                Some((id, result_string))
+                Some((ids, result_string))
             });
             query_futures.push(query_future);
         }
@@ -5963,8 +6128,11 @@ impl PerspectiveInstance {
         let mut delta_updates = Vec::new();
         {
             let mut queries = self.subscribed_queries.lock().await;
-            for result in results.into_iter().flatten() {
-                let (id, result_string) = result;
+            let results = results
+                .into_iter()
+                .flatten()
+                .flat_map(|(ids, result)| ids.into_iter().map(move |id| (id, result.clone())));
+            for (id, result_string) in results {
                 if let Some(stored_query) = queries.get_mut(&id) {
                     if result_string != stored_query.last_result {
                         log::debug!(
@@ -6377,6 +6545,7 @@ impl PerspectiveInstance {
             // to the claim (the min-DID claim still prevents doubles among peers
             // that escalate together).
             let escalate = watcher.should_escalate(&batch_id, now_ms, cfg.claim_ttl_ms);
+            let settle_ms = crate::perspectives::auto_processor::claim::claim_settle_ms(self).await;
             let outcome = match run_one_pass(
                 &mut perspective_clone,
                 cfg,
@@ -6384,7 +6553,7 @@ impl PerspectiveInstance {
                 now_ms,
                 context,
                 escalate,
-                crate::perspectives::auto_processor::claim::CLAIM_SETTLE_MS,
+                settle_ms,
             )
             .await
             {
@@ -6525,6 +6694,68 @@ mod tests {
     use crate::types::PerspectiveState;
     use fake::{Fake, Faker};
     use uuid::Uuid;
+
+    /// `online_agents` reports co-located managed users with the same
+    /// predicate and window as the auto-processor supervisor (#1070): a user
+    /// whose `last_seen` is inside `MANAGED_USER_ONLINE_WINDOW_S` is present for
+    /// author election, one just outside it is not. Before #1070 this reader
+    /// kept its own 300 s window, so a user whose loop the supervisor was
+    /// still running could be missing from election.
+    #[tokio::test]
+    async fn online_agents_uses_the_managed_user_online_window() {
+        use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
+        use crate::presence::MANAGED_USER_ONLINE_WINDOW_S;
+
+        let (perspective, _shapes, _ctx) = setup_perspective_no_llm(&[]).await;
+        let now = chrono::Utc::now().timestamp();
+        // 5 s either side of the boundary absorbs the clock read inside
+        // `online_agents`.
+        let users = [
+            ("presence-fresh@test", "did:key:presence-fresh", now),
+            (
+                "presence-inside@test",
+                "did:key:presence-inside",
+                now - MANAGED_USER_ONLINE_WINDOW_S + 5,
+            ),
+            (
+                "presence-outside@test",
+                "did:key:presence-outside",
+                now - MANAGED_USER_ONLINE_WINDOW_S - 5,
+            ),
+        ];
+        let rows: Vec<serde_json::Value> = users
+            .iter()
+            .map(|(email, did, last_seen)| {
+                serde_json::json!({
+                    "username": email, "did": did, "password_hash": "x", "last_seen": last_seen,
+                })
+            })
+            .collect();
+        Ad4mDb::with_global_instance(|db| {
+            db.import_from_json(serde_json::json!({ "users": rows }), None)
+        })
+        .expect("seed users");
+        {
+            let mut h = perspective.persisted.lock().await;
+            h.shared_url = Some("test://neighbourhood".into());
+            h.owners = Some(users.iter().map(|(_, did, _)| did.to_string()).collect());
+        }
+
+        let mut online: Vec<String> = perspective
+            .online_agents()
+            .await
+            .map(|agents| agents.into_iter().map(|a| a.did).collect())
+            .unwrap_or_default();
+        online.sort();
+        assert_eq!(
+            online,
+            vec![
+                "did:key:presence-fresh".to_string(),
+                "did:key:presence-inside".to_string()
+            ],
+            "online_agents must use the supervisor's {MANAGED_USER_ONLINE_WINDOW_S}s window"
+        );
+    }
 
     async fn setup() -> PerspectiveInstance {
         setup_wallet();
@@ -7735,6 +7966,7 @@ mod tests {
             perspective
                 .sparql_store
                 .query_links(
+                    &crate::perspectives::sparql_store::EvalStop::none(),
                     Some("test://record"),
                     Some("test://body"),
                     None,
@@ -8879,8 +9111,10 @@ mod tests {
         // No board has tasks yet, so hydration does not need `Task`.
         let (board_sub, _, _) = perspective
             .model_subscribe_and_query(
+                &crate::perspectives::sparql_store::EvalStop::none(),
                 "Board".into(),
                 NESTED_INCLUDE_QUERY.into(),
+                uuid::Uuid::new_v4().to_string(),
                 "c".into(),
                 None,
             )
@@ -8888,7 +9122,9 @@ mod tests {
             .expect("subscribe to Board");
         let (other_sub, _, _) = perspective
             .subscribe_and_query(
+                &crate::perspectives::sparql_store::EvalStop::none(),
                 "SELECT ?s ?o WHERE { ?s <ns://title> ?o . }".into(),
+                uuid::Uuid::new_v4().to_string(),
                 "c".into(),
                 None,
             )
@@ -9441,7 +9677,16 @@ mod tests {
         // assertion below catches drift between the two implementations.
         let direct = perspective
             .sparql_store
-            .query_links_top_n_by_timestamp(None, None, None, None, None, 5, false)
+            .query_links_top_n_by_timestamp(
+                &crate::perspectives::sparql_store::EvalStop::none(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                5,
+                false,
+            )
             .unwrap();
         assert_eq!(
             direct.len(),
@@ -9477,9 +9722,11 @@ mod tests {
             .unwrap();
 
         // Uncancelled — should return JSON with at least the inserted triple.
-        let cancel = tokio_util::sync::CancellationToken::new();
         let result = perspective
-            .sparql_query_cancellable("SELECT ?s ?p ?o WHERE { ?s ?p ?o }".to_string(), cancel)
+            .sparql_query_cancellable(
+                EvalStop::none(),
+                "SELECT ?s ?p ?o WHERE { ?s ?p ?o }".to_string(),
+            )
             .await
             .expect("non-cancelled query should succeed");
         let rows: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
@@ -9489,10 +9736,11 @@ mod tests {
     #[tokio::test]
     async fn sparql_query_cancellable_pre_cancelled_errors() {
         let perspective = setup().await;
-        let cancel = tokio_util::sync::CancellationToken::new();
-        cancel.cancel();
         let err = perspective
-            .sparql_query_cancellable("SELECT ?s ?p ?o WHERE { ?s ?p ?o }".to_string(), cancel)
+            .sparql_query_cancellable(
+                EvalStop::cancelled(),
+                "SELECT ?s ?p ?o WHERE { ?s ?p ?o }".to_string(),
+            )
             .await
             .expect_err("pre-cancelled query should error");
         assert!(

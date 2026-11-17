@@ -70,6 +70,45 @@ export function toneSource(hz: number): Source {
   return { track, stop: () => { clearInterval(timer); track.stop(); } };
 }
 
+/**
+ * Where this process's event loop stood still. The tone source is a timer on
+ * that loop, and received audio reaches a `Receiver` through it: while the
+ * loop stands still (a host too loaded to run the process), the participant
+ * sends no tone and hears nothing, whatever the call does.
+ */
+export class PauseWatch {
+  /** How often the watch runs: a gap well past this is a pause. */
+  private static readonly TICK_MS = 20;
+  /** Gaps shorter than this are timer jitter, not pauses. */
+  private static readonly MIN_PAUSE_MS = 100;
+  private last = Date.now();
+  private pauses: { end: number; ms: number }[] = [];
+  private timer: ReturnType<typeof setInterval>;
+
+  constructor() {
+    this.timer = setInterval(() => {
+      const now = Date.now();
+      const gap = now - this.last;
+      this.last = now;
+      if (gap >= PauseWatch.MIN_PAUSE_MS) this.pauses.push({ end: now, ms: gap });
+      while (this.pauses.length && this.pauses[0].end < now - 60_000) this.pauses.shift();
+    }, PauseWatch.TICK_MS);
+    this.timer.unref();
+  }
+
+  /** The longest pause that lasted into the last `windowMs`, the current one included. */
+  longestWithin(windowMs: number): number {
+    const now = Date.now();
+    const ongoing = now - this.last;
+    const past = this.pauses.filter((p) => p.end >= now - windowMs).map((p) => p.ms);
+    return Math.max(ongoing >= PauseWatch.MIN_PAUSE_MS ? ongoing : 0, ...past, 0);
+  }
+
+  stop(): void {
+    clearInterval(this.timer);
+  }
+}
+
 export function videoSource(width: number, height: number, fps = 15): Source {
   const source = new wrtc.nonstandard.RTCVideoSource();
   const track = source.createTrack();
@@ -162,6 +201,8 @@ export class Receiver {
 /** A participant as the SDK session reports it: who, and the stream their media arrives on. */
 export interface Heard {
   agentDid: string;
+  /** The participant's session; an agent on two devices is two participants. */
+  participantId?: string;
   stream: MediaStream;
 }
 
@@ -185,13 +226,16 @@ export class Hearing {
     }
   }
 
-  /** Per participant: the frames arriving, the tone their audio carries, their video's size. */
-  remotes(participants: readonly Heard[], tones: number[]): Record<string, Remote> {
+  /**
+   * Per participant — by DID unless `key` says otherwise — the frames
+   * arriving, the tone their audio carries, their video's size.
+   */
+  remotes(participants: readonly Heard[], tones: number[], key: (p: Heard) => string = (p) => p.agentDid): Record<string, Remote> {
     this.attach(participants);
     const held = new Set<string>();
     const remotes: Record<string, Remote> = {};
     for (const participant of participants) {
-      const remote = (remotes[participant.agentDid] ??= { audioFrames: 0, audioRecent: 0, tone: null, videoFrames: 0, videoRecent: 0, width: 0, height: 0 });
+      const remote = (remotes[key(participant)] ??= { audioFrames: 0, audioRecent: 0, tone: null, videoFrames: 0, videoRecent: 0, width: 0, height: 0 });
       for (const track of participant.stream.getTracks()) {
         held.add(track.id);
         const receiver = this.receivers.get(track.id)!;

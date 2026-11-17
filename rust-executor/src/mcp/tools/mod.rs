@@ -22,8 +22,9 @@
 //! - `profiles` — agent profile management
 //! - `subscriptions` — waker query generation
 //! - `neighbourhoods` / `languages` — P2P sharing and language metadata
-//! - `dynamic` — auto-generated per-class SHACL tools (exposed over MCP only
-//!   with `dynamicClassTools`; always fed to the in-process harness)
+//! - `dynamic` — auto-generated per-class SHACL tools (listed over MCP and in
+//!   the in-process harness only while the context's `dynamic_class_tools` is
+//!   on; `call_tool_by_name` dispatches a per-class name either way)
 
 pub mod auth;
 pub mod docs;
@@ -277,6 +278,7 @@ pub(crate) fn request_context(session: Arc<Session>) -> crate::types::RequestCon
         cancel_token: None,
         session,
         connection_id: None,
+        query_slots: None,
     }
 }
 
@@ -545,16 +547,18 @@ impl Ad4mMcpHandler {
         }
     }
 
-    /// The tool list this MCP transport advertises: every static `#[tool]`
-    /// on the router, plus the dynamic per-class SHACL tools **only when**
-    /// `dynamicClassTools` is enabled. With the flag off (the default) the
+    /// The tool list this handler advertises: every static `#[tool]` on the
+    /// router, plus the dynamic per-class SHACL tools **only when**
+    /// `dynamic_class_tools` is enabled. With the flag off (the default) the
     /// list is constant regardless of which social DNA is loaded — that is
     /// what lets plugin manifests and agent configs declare the AD4M tools
     /// statically. The generic `instance_*` tools cover per-class operations
     /// in that mode.
     ///
-    /// Note this is deliberately NOT what the in-process harness sees:
-    /// `harness_bridge::list_tool_schemas` always merges the dynamic tools.
+    /// This is also exactly what the in-process harness sees:
+    /// `harness_bridge::list_tool_schemas` returns this list. An AI session
+    /// passes the operator's `dynamicClassTools`; an interpretation pass sets
+    /// the flag on because its `propose_*` flow reads through per-class tools.
     pub(crate) async fn exposed_tools(&self) -> Vec<rmcp::model::Tool> {
         let mut tools = self.tool_router.list_all();
         if self.context.dynamic_class_tools {
@@ -710,24 +714,13 @@ impl Ad4mMcpHandler {
     /// Resolve a literal value from a link target URI.
     /// Delegates to rust-client's `Literal` implementation for proper URL decoding.
     pub(crate) fn resolve_literal_value(target: &str) -> String {
-        use ad4m_client::literal::Literal;
-        if let Ok(literal) = Literal::from_url(target.to_string()) {
-            match literal.get() {
-                Ok(value) => value.to_string(),
-                Err(_) => target.to_string(),
-            }
-        } else {
-            target.to_string()
-        }
+        crate::perspectives::instances::resolve_literal_value(target)
     }
 
     /// Encode a string value as a `literal:string:` URL.
     /// Uses rust-client's `Literal` for proper URL encoding.
     pub(crate) fn encode_literal(value: &str) -> String {
-        use ad4m_client::literal::Literal;
-        Literal::from_string(value.to_string())
-            .to_url()
-            .unwrap_or_else(|_| format!("literal:string:{}", value))
+        crate::perspectives::instances::encode_literal(value)
     }
 
     /// Wrap a bare string as a literal URI; pass an already-URI value through.
@@ -794,56 +787,14 @@ impl Ad4mMcpHandler {
         value: &str,
         agent_context: &crate::agent::AgentContext,
     ) -> String {
-        // Short-circuit only when the value is a well-formed absolute IRI —
-        // the same predicate the SPARQL query builder uses to gate its
-        // `UNION { ?s <pred> <val> }` IRI arm. Sharing the check keeps write
-        // and read agreeing on what "already a URI" means; otherwise values
-        // like `"Note: buy milk"` would slip through and become invalid
-        // `NamedNode::new_unchecked` targets that no query can match.
-        if crate::perspectives::model_query::is_safe_iri_target(value) {
-            return value.to_string();
-        }
-
-        // Resolve the original-cased property name from SHACL.
-        // Dynamic tools lowercase the property name (e.g. "isconversation"),
-        // but the SHACL links store the original case (e.g. "isConversation").
-        let original_property_name = {
-            let props: Vec<crate::mcp::shacl::ShaclProperty> =
-                crate::mcp::shacl::load_class_properties(perspective, class_name).await;
-            let prop_lower = property_name.to_lowercase();
-            props
-                .into_iter()
-                .find(|p| p.name == property_name || p.name.to_lowercase() == prop_lower)
-                .map(|p| p.name)
-                .unwrap_or_else(|| property_name.to_string())
-        };
-
-        // Try to parse as JSON to recover native types (bool, number).
-        // MCP tool schemas declare all values as strings, so "false" arrives
-        // as the string "false" — but the language controller needs json!(false).
-        let json_value: serde_json::Value = serde_json::from_str(value)
-            .unwrap_or_else(|_| serde_json::Value::String(value.to_string()));
-
-        match perspective
-            .resolve_property_value(
-                class_name,
-                &original_property_name,
-                &json_value,
-                agent_context,
-            )
-            .await
-        {
-            Ok(url) => url,
-            Err(e) => {
-                log::warn!(
-                    "Failed to resolve property value for {}.{}: {}, falling back to encode_literal",
-                    class_name,
-                    original_property_name,
-                    e
-                );
-                Self::encode_literal(value)
-            }
-        }
+        crate::perspectives::instances::property_target(
+            perspective,
+            class_name,
+            property_name,
+            value,
+            agent_context,
+        )
+        .await
     }
 }
 
@@ -934,6 +885,105 @@ pub(crate) mod test_support {
             .ok()?
             .get("status")?
             .as_u64()
+    }
+
+    /// A subject class `attack://{class}` with a `body` text and an `items` collection.
+    pub(crate) fn class_shape(class: &str) -> String {
+        json!({
+            "target_class": format!("attack://{class}"),
+            "constructor_actions": [{
+                "action": "addLink", "source": "this",
+                "predicate": "rdf://type", "target": format!("attack://{class}"),
+            }],
+            "properties": [
+                {
+                    "path": "attack://body", "name": "body", "datatype": "xsd:string",
+                    "min_count": 1, "max_count": 1, "writable": true,
+                    "setter": [{
+                        "action": "setSingleTarget", "source": "this",
+                        "predicate": "attack://body", "target": "value",
+                    }],
+                },
+                {
+                    "path": "ad4m://has_child", "name": "items", "collection": true,
+                    "writable": true,
+                    "adder": [{
+                        "action": "addLink", "source": "this",
+                        "predicate": "ad4m://has_child", "target": "value",
+                    }],
+                    "remover": [{
+                        "action": "removeLink", "source": "this",
+                        "predicate": "ad4m://has_child", "target": "value",
+                    }],
+                },
+            ],
+        })
+        .to_string()
+    }
+
+    /// Gives the perspective `uuid` the class `class`, one instance `item://{name}` of it
+    /// whose body is `secret`, and a plain link to `secret` — written by the operator.
+    pub(crate) async fn seed(uuid: &str, class: &str, name: &str, secret: &str) {
+        let operator = handler_as(self::operator());
+        let base = format!("item://{name}");
+        for (tool, arguments) in [
+            (
+                "add_model",
+                json!({"perspective_id": uuid, "class_name": class, "shacl_json": class_shape(class)}),
+            ),
+            (
+                "instance_create",
+                json!({
+                    "perspective_id": uuid, "class_name": class, "base_uri": base,
+                    "properties": {"body": secret},
+                }),
+            ),
+            (
+                "add_link",
+                json!({
+                    "perspective_id": uuid, "source": base,
+                    "predicate": "attack://holds", "target": format!("literal:string:{secret}"),
+                }),
+            ),
+        ] {
+            operator
+                .call_tool_by_name(tool, arguments)
+                .await
+                .unwrap_or_else(|e| panic!("seeding with {tool}: {e}"));
+        }
+    }
+
+    /// Every link of the perspective `uuid` as (source, predicate, target), sorted.
+    pub(crate) async fn links_of(uuid: &str) -> Vec<(String, String, String)> {
+        let mut links: Vec<_> = crate::perspectives::get_perspective(uuid)
+            .expect("the perspective")
+            .get_links(&crate::types::LinkQuery::default())
+            .await
+            .expect("its links")
+            .into_iter()
+            .map(|link| {
+                (
+                    link.data.source,
+                    link.data.predicate.unwrap_or_default(),
+                    link.data.target,
+                )
+            })
+            .collect();
+        links.sort();
+        links
+    }
+
+    /// Two perspectives of `did`'s; the returned ids unregister on `clean_up`.
+    pub(crate) async fn two_perspectives_of(did: &str) -> (String, String, Vec<String>) {
+        let a = perspective(Some(vec![did.to_string()])).await;
+        let b = perspective(Some(vec![did.to_string()])).await;
+        (a.clone(), b.clone(), vec![a, b])
+    }
+
+    pub(crate) async fn clean_up(perspectives: Vec<String>) {
+        for uuid in perspectives {
+            crate::perspectives::unregister_perspective(&uuid);
+        }
     }
 }
 

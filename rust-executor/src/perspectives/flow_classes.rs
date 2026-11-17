@@ -747,4 +747,145 @@ mod tests {
             "fresh perspective must return empty FlowInstance list"
         );
     }
+
+    /// Read the flows back through the loader the engine uses and check the
+    /// Delivery fixture survived: name, both states, the one transition, and
+    /// the input type.
+    async fn assert_delivery_flow_loaded(perspective: &PerspectiveInstance) {
+        let flows = crate::perspectives::flow_context::load_shacl_flows(perspective)
+            .await
+            .expect("load_shacl_flows");
+        let flow = flows
+            .get("delivery://DeliveryFlow")
+            .unwrap_or_else(|| panic!("Delivery flow not loaded, got {:?}", flows.keys()));
+        assert_eq!(flow.name, "Delivery");
+        let states: Vec<&str> = flow.states.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(states, vec!["identified", "scoped"]);
+        let transitions: Vec<(&str, &str, &str)> = flow
+            .transitions
+            .iter()
+            .map(|t| {
+                (
+                    t.action_name.as_str(),
+                    t.from_state.as_str(),
+                    t.to_state.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(transitions, vec![("Scope", "identified", "scoped")]);
+        assert_eq!(flow.input_types, vec!["Task".to_string()]);
+    }
+
+    /// #1650: a flow definition is parsed as a flow, not as a class shape
+    /// (it used to fail with "missing field `target_class`"). Registered the
+    /// way the MCP `add_flow` tool registers it: its links and name index,
+    /// written with `add_links`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn add_flow_registers_a_flow_definition() {
+        use crate::mcp::tools::flows::flow_registration_links;
+        use crate::perspectives::interpretation_test_support::delivery_flow_json_for;
+        let (mut perspective, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+
+        let links = flow_registration_links(&delivery_flow_json_for("Task"), "Delivery")
+            .expect("a flow definition parses as a flow");
+        perspective
+            .add_links(links, LinkStatus::Shared, None, &ctx)
+            .await
+            .expect("add_flow's links must be written");
+
+        assert_delivery_flow_loaded(&perspective).await;
+    }
+
+    /// A flow definition whose state carries a `consensusRule` the reader
+    /// cannot read back: `fromRole.linkedTo` with a key outside the known set
+    /// (#1144). `linkedTo` is a raw `Value` in `ModelQuery`, so serde keeps
+    /// the key and `parse_flow_to_links` emits it as written.
+    fn unreadable_gate_flow_json() -> String {
+        serde_json::json!({
+            "name": "Gated",
+            "namespace": "gated://",
+            "start_action": [],
+            "states": [
+                { "name": "identified", "value": 0.0 },
+                {
+                    "name": "scoped",
+                    "value": 1.0,
+                    "consensusRule": {
+                        "n": 1,
+                        "fromRole": {
+                            "className": "ns://Role",
+                            "didProperty": "agent",
+                            "linkedTo": { "via": "ns://has", "to": "base", "author": "did:key:admin" }
+                        }
+                    }
+                }
+            ],
+            "transitions": [
+                { "action_name": "Scope", "from_state": "identified", "to_state": "scoped", "actions": [] }
+            ],
+            "inputTypes": [],
+            "outputTypes": [],
+        })
+        .to_string()
+    }
+
+    /// Nothing of the `Gated` flow is stored: no `ad4m://has_flow` link naming
+    /// it, no link under its namespace, and the loader does not return it.
+    async fn assert_gated_flow_not_stored(perspective: &PerspectiveInstance) {
+        let gated_name = ad4m_client::literal::Literal::from_string("Gated".to_string())
+            .to_url()
+            .expect("literal url");
+        let links = perspective
+            .get_links(&crate::types::LinkQuery::default())
+            .await
+            .expect("get_links");
+        let has_flow: Vec<_> = links
+            .iter()
+            .filter(|l| {
+                l.data.predicate.as_deref() == Some("ad4m://has_flow")
+                    && l.data.target == gated_name
+            })
+            .collect();
+        assert!(has_flow.is_empty(), "has_flow link stored: {has_flow:?}");
+        let under_namespace: Vec<_> = links
+            .iter()
+            .filter(|l| l.data.source.starts_with("gated://"))
+            .collect();
+        assert!(
+            under_namespace.is_empty(),
+            "flow links stored: {under_namespace:?}"
+        );
+        let flows = crate::perspectives::flow_context::load_shacl_flows(perspective)
+            .await
+            .expect("load_shacl_flows");
+        assert!(
+            !flows.contains_key("gated://GatedFlow"),
+            "loader returned the refused flow"
+        );
+    }
+
+    /// #1650 review: a flow whose `consensusRule` cannot be read is refused
+    /// before anything is written. It used to store the `has_flow` / `sdna`
+    /// links and only then fail on the SHACL links, leaving a half-registered
+    /// flow. The MCP `add_flow` tool writes the flow's links in one `add_links`
+    /// call, which checks every consensus rule before it writes.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn add_flow_refuses_an_unreadable_consensus_rule_before_writing() {
+        use crate::mcp::tools::flows::flow_registration_links;
+        let (mut perspective, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+
+        let links = flow_registration_links(&unreadable_gate_flow_json(), "Gated")
+            .expect("the flow parses; its rule is refused on write");
+        let err = perspective
+            .add_links(links, LinkStatus::Shared, None, &ctx)
+            .await
+            .expect_err("add_links must refuse an unreadable consensusRule")
+            .to_string();
+        assert!(
+            err.contains("gated://Gated.scoped") && err.contains("author"),
+            "the error names the state and the key; got: {err}"
+        );
+
+        assert_gated_flow_not_stored(&perspective).await;
+    }
 }

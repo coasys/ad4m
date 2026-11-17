@@ -14,7 +14,7 @@
 //!  classes ──▶ 1. per class: execute_model_query_inner (scope + where, no paging)
 //!                      │      rows hydrated as that class
 //!                      ▼
-//!              2. subject_classes_of(union ids) ──▶ choose() one requested class
+//!              2. subject_classes_of(&crate::perspectives::sparql_store::EvalStop::none(),union ids) ──▶ choose() one requested class
 //!                      │      among those whose step-1 query returned the record;
 //!                      │      a record answered by two classes is kept once
 //!                      ▼
@@ -48,7 +48,7 @@ use super::types::{
     WhereCondition,
 };
 use crate::perspectives::shacl_parser::class_name_of;
-use crate::perspectives::sparql_store::SparqlStore;
+use crate::perspectives::sparql_store::{EvalStop, SparqlStore};
 use deno_core::anyhow::{anyhow, Error};
 use serde_json::Value;
 use std::cmp::Ordering;
@@ -198,7 +198,15 @@ pub async fn execute_union_query(
     query: &ModelQueryInput,
     resolver: &dyn ShapeResolver,
 ) -> Result<ModelQueryResult, Error> {
-    execute_union_query_with_views(store, classes, query, resolver, &HashMap::new()).await
+    execute_union_query_with_views(
+        &EvalStop::none(),
+        store,
+        classes,
+        query,
+        resolver,
+        &HashMap::new(),
+    )
+    .await
 }
 
 /// [`execute_union_query`], reading each class in `views` through its view
@@ -206,6 +214,7 @@ pub async fn execute_union_query(
 /// carry the abstract class's names. Records an `include` reaches are read
 /// through `resolver`, as their own class.
 pub async fn execute_union_query_with_views(
+    stop: &EvalStop,
     store: &SparqlStore,
     classes: &[String],
     query: &ModelQueryInput,
@@ -215,7 +224,7 @@ pub async fn execute_union_query_with_views(
     refuse_unanswerable(classes, query)?;
     // A walk is made once for the union, not once per class: every class
     // reads the same reached nodes, and their order is the walk's.
-    let walked_query = with_walk(store, query)?;
+    let walked_query = with_walk(stop, store, query)?;
     let query = walked_query.as_ref().unwrap_or(query);
     let walk_order = walk_order(query);
     let shape_of = |class: &str| match views.get(class) {
@@ -263,9 +272,10 @@ pub async fn execute_union_query_with_views(
     for class in &requested {
         let shape = shape_of(class)?;
         let mut result =
-            execute_model_query_inner(store, shape.as_ref(), &select, resolver, 0).await?;
+            execute_model_query_inner(stop, store, shape.as_ref(), &select, resolver, 0).await?;
         if let Some(projs) = sort_projections.as_ref().filter(|p| !p.is_empty()) {
             resolve_projections(
+                stop,
                 store,
                 &mut result.instances,
                 projs,
@@ -301,8 +311,9 @@ pub async fn execute_union_query_with_views(
     // Classified by class IRI; a requested key (an IRI or a name) is a
     // reading of the record when one of its classes is that IRI or has that
     // name.
-    let classified =
-        crate::perspectives::subject_classes_of::subject_class_iris_of(store, resolver, &all_ids)?;
+    let classified = crate::perspectives::subject_classes_of::subject_class_iris_of(
+        stop, store, resolver, &all_ids,
+    )?;
     let preferred = query.prefer_classes.as_deref().unwrap_or(&[]);
     let mut union: Vec<Value> = Vec::new();
     let mut chosen_by_id: HashMap<String, String> = HashMap::new();
@@ -410,7 +421,8 @@ pub async fn execute_union_query_with_views(
             count: None,
             ..query.clone()
         };
-        let result = execute_model_query_inner(store, shape.as_ref(), &fetch, resolver, 0).await?;
+        let result =
+            execute_model_query_inner(stop, store, shape.as_ref(), &fetch, resolver, 0).await?;
         for mut row in result.instances {
             let Some(id) = row["id"].as_str().map(str::to_string) else {
                 continue;

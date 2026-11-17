@@ -1,0 +1,236 @@
+{
+  "schemaVersion": 1,
+  "runId": "e7425f82",
+  "startedAt": "2026-11-05T03:14:06.219Z",
+  "finishedAt": "2026-11-05T03:17:03.064Z",
+  "hardwareClass": "apple-silicon-32",
+  "fingerprint": {
+    "os": "macos",
+    "osVersion": "macOS 15.7.2",
+    "kernel": "24.6.0",
+    "arch": "arm64",
+    "cpu": {
+      "model": "Apple M4 Pro",
+      "cores": 14,
+      "threads": 14
+    },
+    "memoryBytes": 51539607552,
+    "gpus": [
+      {
+        "vendor": "apple",
+        "name": "Apple M4 Pro",
+        "vramBytes": 0,
+        "unified": true
+      }
+    ],
+    "backends": [
+      "cpu",
+      "metal"
+    ],
+    "gpuBudgetBytes": 38654705664,
+    "drivers": {},
+    "id": "e6916d40"
+  },
+  "executor": {
+    "commit": "unknown",
+    "binary": "ad4m-executor",
+    "version": "ad4m 0.13.1-staging.6",
+    "harnessCommit": "b498751fbed495c305aa1e53024f63e1283f2cfe"
+  },
+  "options": {
+    "repeat": 3,
+    "concurrency": [
+      1,
+      4
+    ],
+    "providers": [
+      "sherpa-onnx"
+    ],
+    "services": [
+      "llm",
+      "completion",
+      "embeddings",
+      "stt",
+      "tts"
+    ],
+    "direct": true
+  },
+  "providers": {
+    "sherpa-onnx": {
+      "status": "available",
+      "builds": [
+        "macos-arm64-cpu"
+      ],
+      "mode": "spawned",
+      "version": "v2.0.1"
+    }
+  },
+  "cells": [
+    {
+      "provider": "sherpa-onnx",
+      "service": "llm",
+      "status": "unsupported",
+      "reason": "sherpa-onnx serves speech models only",
+      "checks": [],
+      "metrics": {},
+      "durationMs": 0
+    },
+    {
+      "provider": "sherpa-onnx",
+      "service": "completion",
+      "status": "unsupported",
+      "reason": "sherpa-onnx serves speech models only",
+      "checks": [],
+      "metrics": {},
+      "durationMs": 0
+    },
+    {
+      "provider": "sherpa-onnx",
+      "service": "embeddings",
+      "status": "unsupported",
+      "reason": "sherpa-onnx serves speech models only",
+      "checks": [],
+      "metrics": {},
+      "durationMs": 0
+    },
+    {
+      "provider": "sherpa-onnx",
+      "service": "tts",
+      "status": "unsupported",
+      "reason": "sherpa-onnx's servers speak WebSocket only; its offline TTS has no server binary",
+      "checks": [],
+      "metrics": {},
+      "durationMs": 0
+    },
+    {
+      "provider": "sherpa-onnx",
+      "service": "stt",
+      "status": "fail",
+      "reason": "transcribes recording (SDK transcription stream): error: RPC error 408: RPC call 'ai.transcriptionOpen' timed out after 30000ms; transcribes meeting (SDK transcription stream): error: RPC error 408: RPC call 'ai.transcriptionOpen' timed out after 30000ms; transcribes weather (SDK transcription stream): error: RPC error 408: RPC call 'ai.transcriptionOpen' timed out after 30000ms; transcribes weather-noisy (SDK transcription stream): error: RPC error 408: RPC call 'ai.transcriptionOpen' timed out after 30000ms",
+      "model": {
+        "modelId": "parakeet-tdt-0.6b-v3-int8-onnx",
+        "remoteModel": "parakeet-tdt-0.6b-v3-int8-onnx",
+        "sizeBytes": 670478772,
+        "memoryBytes": 2000000000,
+        "license": "CC-BY-4.0",
+        "params": "0.6B",
+        "source": "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/resolve/2bda32ec70b097a55adaa07d9a7173915b43cc78/encoder.int8.onnx"
+      },
+      "runtimeBuild": "macos-arm64-cpu",
+      "backend": "cpu",
+      "endpointKind": "OPEN_AI_AUDIO",
+      "serverFlags": [
+        "--provider=cpu",
+        "--num-threads=8",
+        "--num-work-threads=1",
+        "--max-batch-size=1"
+      ],
+      "checks": [
+        {
+          "name": "transcribes recording (/v1/audio/transcriptions)",
+          "pass": true,
+          "detail": "WER 0.000: \"If you can read this, transcription is working.\"",
+          "value": 0,
+          "threshold": 0.25
+        },
+        {
+          "name": "transcribes recording (SDK transcription stream)",
+          "pass": false,
+          "detail": "error: RPC error 408: RPC call 'ai.transcriptionOpen' timed out after 30000ms"
+        },
+        {
+          "name": "transcribes meeting (/v1/audio/transcriptions)",
+          "pass": true,
+          "detail": "WER 0.000: \"Please move the weekly planning meeting to Thursday afternoon and invite the design team.\"",
+          "value": 0,
+          "threshold": 0.2
+        },
+        {
+          "name": "transcribes meeting (SDK transcription stream)",
+          "pass": false,
+          "detail": "error: RPC error 408: RPC call 'ai.transcriptionOpen' timed out after 30000ms"
+        },
+        {
+          "name": "transcribes weather (/v1/audio/transcriptions)",
+          "pass": true,
+          "detail": "WER 0.000: \"The forecast says light rain in the morning, clearing to sunshine by the evening.\"",
+          "value": 0,
+          "threshold": 0.2
+        },
+        {
+          "name": "transcribes weather (SDK transcription stream)",
+          "pass": false,
+          "detail": "error: RPC error 408: RPC call 'ai.transcriptionOpen' timed out after 30000ms"
+        },
+        {
+          "name": "transcribes weather-noisy (/v1/audio/transcriptions)",
+          "pass": true,
+          "detail": "WER 0.071: \"The forecast that light rain in the morning, clearing to sunshine by the evening.\"",
+          "value": 0.071,
+          "threshold": 0.5
+        },
+        {
+          "name": "transcribes weather-noisy (SDK transcription stream)",
+          "pass": false,
+          "detail": "error: RPC error 408: RPC call 'ai.transcriptionOpen' timed out after 30000ms"
+        }
+      ],
+      "metrics": {
+        "firstRequestMs": 110,
+        "noisyLanguage": "not reported",
+        "noisyNoHintWer": 0.071,
+        "noisyNoHintText": "The forecast that light rain in the morning, clearing to sunshine by the evening.",
+        "wer": {
+          "n": 4,
+          "median": 0,
+          "p95": 0.061,
+          "min": 0,
+          "max": 0.071,
+          "mean": 0.018
+        },
+        "werMean": 0.018,
+        "streamWerMean": null,
+        "rtf": {
+          "n": 12,
+          "median": 0.02,
+          "p95": 0.028,
+          "min": 0.018,
+          "max": 0.029,
+          "mean": 0.022
+        },
+        "latencyMs": {
+          "n": 12,
+          "median": 96.321,
+          "p95": 139.4,
+          "min": 84.328,
+          "max": 145.5,
+          "mean": 103.3
+        },
+        "streamLatencyMs": null,
+        "audioSec": 18.99,
+        "directLatencyMs": {
+          "n": 12,
+          "median": 89.132,
+          "p95": 103.5,
+          "min": 81.124,
+          "max": 105.6,
+          "mean": 90.871
+        },
+        "executorOverheadMs": 7.2,
+        "peakRssBytes": 1854324736,
+        "peakGpuBytes": null,
+        "serverReadyMs": 2295,
+        "adapter": "OpenAI-shaped front: /v1/audio/transcriptions -> sherpa-onnx offline WebSocket",
+        "endpointHealth": "REACHABLE"
+      },
+      "fit": {
+        "fits": true,
+        "modelBytes": 2000000000,
+        "budgetBytes": 37580963840,
+        "gpuBudgetBytes": 38654705664,
+        "ramBytes": 51539607552
+      },
+      "durationMs": 164791
+    }
+  ]
+}

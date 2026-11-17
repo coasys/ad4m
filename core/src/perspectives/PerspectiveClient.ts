@@ -20,7 +20,11 @@ import type { AgentReply } from "../generated/api/AgentReply";
 import type { PerspectiveQueryLinksParams } from "../generated/api/PerspectiveQueryLinksParams";
 import type { JsonValue } from "../generated/api/serde_json/JsonValue";
 import type { FlowFiredEntry } from "../generated/api/FlowFiredEntry";
-import type { RegisterResult, ShapeJson, ShapeSummary } from "../generated/api";
+import type {
+    CollectionItemAdded, CollectionItemRemoved, InstanceAddToCollection, InstanceCreate,
+    InstanceCreated, InstanceRemove, InstanceRemoveFromCollection, InstanceRemoved,
+    InstanceUpdate, InstanceUpdated, RegisterResult, ShapeJson, ShapeSummary,
+} from "../generated/api";
 import type { AddAutoProcessorConfig, InterpretationOverlayInfo, RawScope, RunInterpretationObserveOptions } from "./AutoProcessor";
 // FlowInstance.ts owns the flow-proposal result types so they sit next to the
 // `proposeTransition()` API they describe. `import type` keeps this out of the
@@ -35,6 +39,17 @@ import type {
 /** The wire form of a model query's classes: `class_name` for one, `class_names` for a union. */
 function classParams(className: string | string[]): { class_name: string } | { class_names: string[] } {
     return Array.isArray(className) ? { class_names: className } : { class_name: className }
+}
+
+/** A new live query's id (a UUID v4). The client mints it, so it can end the
+ *  subscription without the subscribe call's reply. `getRandomValues`, not
+ *  `randomUUID`: a page served over plain HTTP has only the former. */
+function mintSubscriptionId(): string {
+    const b = globalThis.crypto.getRandomValues(new Uint8Array(16))
+    b[6] = (b[6] & 0x0f) | 0x40
+    b[8] = (b[8] & 0x3f) | 0x80
+    const hex = Array.from(b, x => x.toString(16).padStart(2, '0')).join('')
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
 }
 
 export class PerspectiveClient {
@@ -144,7 +159,26 @@ export class PerspectiveClient {
     /** Open a live SPARQL query. Updates arrive through {@link onQueryUpdate}. */
     /** `options.signal` cancels the call, and the executor stops computing the first result. */
     async subscribeQuery(uuid: string, query: string, options?: CallOptions): Promise<Subscribed> {
-        return this.#apiClient.call('perspective.subscribeQuery', { uuid, query }, options)
+        const subscriptionId = mintSubscriptionId()
+        return this.#released(uuid, subscriptionId, this.#apiClient.call(
+            'perspective.subscribeQuery', { uuid, query, subscriptionId }, options,
+        ))
+    }
+
+    /** A subscribe call that failed (timed out, aborted, refused) leaves no live
+     *  query on the executor that nobody holds. The client minted its id, so it
+     *  disposes it without the reply. A timeout or an abort sends `request.cancel`
+     *  first, and the executor handles a cancel before the calls after it: the
+     *  cancel either stops the call before it registers, or the dispose finds the
+     *  subscription. The dispose goes out before the call's error is thrown, and
+     *  is not awaited; one that fails changes nothing. */
+    async #released(uuid: string, subscriptionId: string, call: Promise<Subscribed>): Promise<Subscribed> {
+        try {
+            return await call
+        } catch (e) {
+            this.disposeQuerySubscription(uuid, subscriptionId).catch(() => {})
+            throw e
+        }
     }
 
     /** Every `query-subscription-update` event on this client's socket. */
@@ -199,9 +233,11 @@ export class PerspectiveClient {
     /** Open a live model query over one class or several. Updates arrive through {@link onQueryUpdate}. */
     /** `options.signal` cancels the call, and the executor stops computing the first result. */
     async modelSubscribe(uuid: string, className: string | string[], queryJson: string, options?: CallOptions): Promise<Subscribed> {
-        return this.#apiClient.call(
-            'perspective.modelSubscribe', { uuid, ...classParams(className), query_json: queryJson }, options
-        )
+        const subscriptionId = mintSubscriptionId()
+        return this.#released(uuid, subscriptionId, this.#apiClient.call(
+            'perspective.modelSubscribe', { uuid, ...classParams(className), query_json: queryJson, subscriptionId },
+            options,
+        ))
     }
 
     async add(name: string): Promise<PerspectiveProxy> {
@@ -542,6 +578,47 @@ export class PerspectiveClient {
         ))
     }
 
+    /**
+     * Validated writes (`perspective.instance*`): the executor checks each against the class's
+     * SHACL shape — each property's type, which are required, which take a single value, `sh:in`
+     * — before writing anything. A refused write rejects with an `RpcError` whose `data` is an
+     * `InstanceError` and stages nothing for that call; a shape violation is status 422 with
+     * `data.kind === 'validation'` and `data.errors` naming each property.
+     *
+     * With `batchId` the write is staged into that open batch and lands on its commit; the
+     * link reads a write does (collection membership, the remove cascade) see the batch's own
+     * staged work, but an instance created in the same batch is not found — instance existence
+     * reads committed state only, so a create followed by an update, remove or
+     * `instanceAddToCollection` of the new instance in one batch fails `notFound`; put a new
+     * instance's initial collection items on the create itself. A failure that is not a
+     * refusal — a store error mid-write, `failed` / `partiallyRemoved` — can leave part of the
+     * write staged in the batch: discard it ({@link discardBatch}) instead of committing
+     * it to keep the calls that succeeded.
+     */
+    async instanceCreate(uuid: string, body: InstanceCreate): Promise<InstanceCreated> {
+        return this.#wrote(uuid, this.#apiClient.call('perspective.instanceCreate', { uuid, ...body }))
+    }
+
+    /** Sets the given single-valued properties; the others stay. See {@link instanceCreate}. */
+    async instanceUpdate(uuid: string, body: InstanceUpdate): Promise<InstanceUpdated> {
+        return this.#wrote(uuid, this.#apiClient.call('perspective.instanceUpdate', { uuid, ...body }))
+    }
+
+    /** Removes the instance and every link to and from it. See {@link instanceCreate}. */
+    async instanceRemove(uuid: string, body: InstanceRemove): Promise<InstanceRemoved> {
+        return this.#wrote(uuid, this.#apiClient.call('perspective.instanceRemove', { uuid, ...body }))
+    }
+
+    /** Adds an item to a collection (a no-op when it is a member). See {@link instanceCreate}. */
+    async instanceAddToCollection(uuid: string, body: InstanceAddToCollection): Promise<CollectionItemAdded> {
+        return this.#wrote(uuid, this.#apiClient.call('perspective.instanceAddToCollection', { uuid, ...body }))
+    }
+
+    /** Removes an item's membership link from a collection. See {@link instanceCreate}. */
+    async instanceRemoveFromCollection(uuid: string, body: InstanceRemoveFromCollection): Promise<CollectionItemRemoved> {
+        return this.#wrote(uuid, this.#apiClient.call('perspective.instanceRemoveFromCollection', { uuid, ...body }))
+    }
+
     async getSubjectData(uuid: string, subjectClass: string, expressionAddress: string): Promise<string> {
         return this.#apiClient.call(
             'perspective.getSubjectData', { uuid, subjectClass, expressionAddress }
@@ -575,6 +652,16 @@ export class PerspectiveClient {
             'perspective.commitBatch', { uuid, batchId }
         ))
         return LinkExpressionMutations.fromWire(diff)
+    }
+
+    /**
+     * Drops an open batch without committing it — the recovery for a failed batched call:
+     * a failed call does not roll back the calls before it and may have staged part of its
+     * own work, so discard rather than commit to keep the successful calls. Resolves `true`
+     * when the batch was open and is now dropped.
+     */
+    async discardBatch(uuid: string, batchId: string): Promise<boolean> {
+        return this.#apiClient.call('perspective.discardBatch', { uuid, batchId })
     }
 
     /** Register a callback that fires after a successful WebSocket reconnect.

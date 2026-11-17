@@ -3,6 +3,8 @@
 # Per-workspace Holochain CLI toolchain built by scripts/install-hc-toolchain.sh
 # Isolated per repo so it doesn't clobber ~/.cargo/bin/hc on shared CI runners.
 .hc-toolchain/
+# Per-job CI test artifacts (.circleci/config.yml test_artifacts_dir)
+/test-artifacts/
 *.js
 !executor/scripts/*.js
 !skills/ad4m/waker/*.js
@@ -94,6 +96,8 @@ CUSTOM_DENO_SNAPSHOT.residual_esm.rs
 CUSTOM_DENO_SNAPSHOT.residual_js.rs
 rust-executor/CUSTOM_DENO_SNAPSHOT.residual_esm.rs
 rust-executor/CUSTOM_DENO_SNAPSHOT.residual_js.rs
+# Hash of the snapshot's inputs (rust-executor/scripts/build-deno-snapshot.sh).
+rust-executor/CUSTOM_DENO_SNAPSHOT.inputs
 
 # Overnight watchdog scratch — logs and repro scripts, not source
 .overnight-status/

@@ -205,7 +205,9 @@ costs that one link, not the rest of its batch or the other held links.
   page (500 links) is applied and emitted as its own diff and the cursor is
   stored after it (`render/progress`), so a restart resumes at the next
   page. Nothing is removed after the last page: a fresh store held nothing
-  the server does not have.
+  the server does not have. Once per start, a store at the room's head that
+  does not hash to the room's revision (the XOR of the links' `link_hash`)
+  loads the same paged render again; until then `render()` answers null.
 - The stored `render/progress` is what says a fresh member's render is
   still needed. `init()` stores it before authenticating, so a render that timed out, or
   never ran because authentication failed first, is resumed by catch-up (the

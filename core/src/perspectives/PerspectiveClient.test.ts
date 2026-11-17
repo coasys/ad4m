@@ -410,6 +410,12 @@ describe('PerspectiveProxy.querySparql shares in-flight calls', () => {
             () => client.acceptFlowProposal('u', 'proposal://1'),
             () => client.rejectFlowProposal('u', 'proposal://1'),
             () => client.mintFlowReceipt('u', 'flow://1'),
+            // The validated instance writes.
+            () => client.instanceCreate('u', { className: 'C', properties: {} } as any),
+            () => client.instanceUpdate('u', { className: 'C', baseUri: 'expr', properties: {} } as any),
+            () => client.instanceRemove('u', { className: 'C', baseUri: 'expr' } as any),
+            () => client.instanceAddToCollection('u', { className: 'C', baseUri: 'expr', collection: 'c', itemUri: 'i' } as any),
+            () => client.instanceRemoveFromCollection('u', { className: 'C', baseUri: 'expr', collection: 'c', itemUri: 'i' } as any),
         ]
         for (const write of writes) {
             const executor = executorAnsweringAtSendTime()

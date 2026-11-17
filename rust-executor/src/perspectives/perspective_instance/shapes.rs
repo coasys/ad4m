@@ -28,6 +28,7 @@ use crate::perspectives::shacl_parser::{
     ShapeNode, SHAPE_PREDICATE, SUBJECT_CLASS,
 };
 use crate::perspectives::sparql_store::canonical_target;
+use crate::perspectives::sparql_store::EvalStop;
 use crate::types::{DecoratedLinkExpression, Link, LinkMutations, LinkStatus};
 
 /// What `register_shapes` did, by target class IRI (two classes may share a
@@ -85,7 +86,7 @@ impl PerspectiveInstance {
         let own_of = |node: ShapeNode, source: &str| -> Result<_, AnyError> {
             Ok(self
                 .sparql_store
-                .get_links_by_source(source)?
+                .get_links_by_source(&EvalStop::none(), source)?
                 .into_iter()
                 .filter(|l| {
                     l.data
@@ -126,6 +127,7 @@ impl PerspectiveInstance {
         let classes: BTreeSet<String> = self
             .sparql_store
             .query_links(
+                &EvalStop::none(),
                 None,
                 Some("rdf://type"),
                 Some(SUBJECT_CLASS),
@@ -262,6 +264,7 @@ impl PerspectiveInstance {
 
         for (shape_uri, target_class) in &shape_uris {
             let holders = self.sparql_store.query_links(
+                &EvalStop::none(),
                 None,
                 Some(SHAPE_PREDICATE),
                 Some(shape_uri),

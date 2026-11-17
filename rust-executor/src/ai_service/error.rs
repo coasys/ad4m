@@ -10,7 +10,6 @@ pub enum AIServiceError {
     #[allow(dead_code)]
     LockError,
     CrazyError(String),
-    ModelNotFound,
 }
 
 impl Error for AIServiceError {}
@@ -24,7 +23,6 @@ impl fmt::Display for AIServiceError {
             AIServiceError::LockError => write!(f, "Lock error"),
             AIServiceError::StreamNotFound => write!(f, "Transcription stream not found"),
             AIServiceError::CrazyError(msg) => write!(f, "Something crazy happened: {}", msg),
-            AIServiceError::ModelNotFound => write!(f, "Model not found"),
         }
     }
 }

@@ -353,7 +353,11 @@ export async function spawnExecutor(
     const { enableMcp = false, env = {}, onOutput } = opts;
     const executorProcess = spawn(executorBinary(), args, {
         stdio: ['ignore', 'pipe', 'pipe'],
-        env: { ...process.env, ...env },
+        // AD4M_EXIT_WITH_PARENT: the executor ends with this process, however it ends. A
+        // SIGKILLed or cancelled job, or mocha --exit past a test that never stopped its
+        // executor, otherwise leaves it running on the runner. An executor too old to know the
+        // variable ignores it.
+        env: { ...process.env, AD4M_EXIT_WITH_PARENT: 'true', ...env },
     });
     // Decode as a stream, so a multibyte character split across two chunks
     // survives in the startup-failure tail. Every data handler below gets strings.
@@ -380,7 +384,7 @@ export async function spawnExecutor(
         let resolved = false;
 
         // Without these, an executor that dies or stalls before the marker
-        // (e.g. the API port is taken: it logs the bind error and exits 1)
+        // (e.g. the API port is taken: it logs the bind error and exits 80)
         // leaves this promise pending until mocha's 1200 s timeout.
         const fail = (reason: string) => {
             if (resolved) return;

@@ -100,7 +100,7 @@ pub const ACCEPTED_BY_PREDICATE: &str = "ad4m://acceptedBy";
 /// grant; the link's author-asserted timestamp is the revocation time. Source =
 /// role-instance URI, target = the DID — literal-encoded or raw, the reader
 /// accepts both (`flow_evaluator::target_names_did`). Authority mirrors the
-/// grant's own rule (`roles::revocation_authorised`): whoever the role
+/// grant's own rule (`roles::evidence::granter_authorised`): whoever the role
 /// query's `author` condition accepts as granter may revoke, which makes
 /// admin-gated roles admin-revoked, `$did` roles self-revoked, and
 /// open-authorship roles revocable by anyone. Stays in the graph forever so
@@ -363,10 +363,10 @@ impl PerspectiveInstance {
             .collect();
 
         for (tombstone, signature) in &tombstones {
-            for stored in self
-                .sparql_store
-                .get_links_by_source(&tombstone.data.source)?
-            {
+            for stored in self.sparql_store.get_links_by_source(
+                &crate::perspectives::sparql_store::EvalStop::none(),
+                &tombstone.data.source,
+            )? {
                 let link = LinkExpression::from(stored.clone());
                 if ends(tombstone, signature, &link) {
                     effects.retracted.push(stored);
@@ -388,6 +388,7 @@ impl PerspectiveInstance {
 
     fn stored_tombstone_ends(&self, link: &LinkExpression) -> Result<bool, AnyError> {
         let stored = self.sparql_store.query_links(
+            &crate::perspectives::sparql_store::EvalStop::none(),
             Some(&link.data.source),
             Some(RETRACTED_PREDICATE),
             None,

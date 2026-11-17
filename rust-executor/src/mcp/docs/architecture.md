@@ -333,6 +333,6 @@ The first two links are the name index: the class name is the IRI's local name (
 
 ## Built-in Services
 
-- **AI Service** — local LLM inference, embeddings, Whisper transcription
+- **AI Service** — LLM prompts, embeddings and transcription through the model servers registered as endpoints (Ollama, llama-server, vLLM, speaches, remote APIs)
 - **Prolog Engine** — logic queries over perspectives (legacy, being replaced)
 - **SPARQL (Oxigraph)** — per-perspective RDF store for indexed queries

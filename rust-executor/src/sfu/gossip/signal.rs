@@ -33,7 +33,7 @@ use async_trait::async_trait;
 use log::{debug, warn};
 use tokio::sync::mpsc;
 
-use super::super::cascade::CascadeSignal;
+use super::super::cascade::{describe_frame, CascadeSignal};
 use super::{CascadeGossip, GossipTarget};
 
 /// Callback the host application provides for outbound signals.
@@ -99,8 +99,15 @@ impl SignalGossip {
     /// Returns `Ok(())` on success, `Err` if the JSON does not parse
     /// as a valid `CascadeSignal` or the internal channel has closed.
     pub fn inject_signal(&self, json_payload: &str) -> Result<(), String> {
-        let signal: CascadeSignal = serde_json::from_str(json_payload)
-            .map_err(|e| format!("SignalGossip: invalid JSON: {}", e))?;
+        let signal: CascadeSignal = serde_json::from_str(json_payload).map_err(|e| {
+            warn!(
+                "SignalGossip[{}] dropped a {} signal that does not decode: {}",
+                self.local_did,
+                describe_frame(json_payload),
+                e
+            );
+            format!("SignalGossip: invalid JSON: {}", e)
+        })?;
 
         debug!(
             "SignalGossip[{}] injected inbound {}",
@@ -182,7 +189,7 @@ mod tests {
         let gossip = SignalGossip::new("did:test:local".into(), 8, sender);
 
         // Inject a well-formed signal
-        let json = r#"{"type":"sfu-announce","did":"did:test:remote","room_id":"r1","participant_count":2,"capacity_hint":8}"#;
+        let json = r#"{"type":"sfu-announce","did":"did:test:remote","room_id":"r1","participant_count":2,"capacity_hint":8,"sessions":[{"agentDid":"did:test:alice","participantId":"P1"}]}"#;
         assert!(gossip.inject_signal(json).is_ok());
 
         // Take the inbound channel and verify the signal arrived

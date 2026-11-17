@@ -25,7 +25,7 @@ use super::types::{
 };
 use super::utils::{validate_iri, values_or_str_filter};
 use crate::perspectives::shacl_parser::class_name_of;
-use crate::perspectives::sparql_store::SparqlStore;
+use crate::perspectives::sparql_store::{EvalStop, SparqlStore};
 use crate::types::LinkStatus;
 
 /// Resolve reverse relations (`@BelongsTo`) for all instances in a batch.
@@ -40,6 +40,7 @@ use crate::types::LinkStatus;
 /// with `include_unverified` (#1113). Both are checked on one reifier
 /// ([`verified_link_exists`]).
 pub fn resolve_reverse_relations(
+    stop: &EvalStop,
     store: &SparqlStore,
     instances: &mut [Value],
     relations: &[(String, String, bool)], // (name, predicate, is_single)
@@ -79,7 +80,7 @@ pub fn resolve_reverse_relations(
             "SELECT ?source ?target WHERE {{ {} ?source <{safe_pred}> ?target .{filter} }}",
             target_constraint
         );
-        let result_json = store.query(&sparql)?;
+        let result_json = store.query(stop, &sparql)?;
         let rows: Vec<Value> = serde_json::from_str(&result_json)?;
 
         let mut target_to_sources: HashMap<String, Vec<String>> = HashMap::new();
@@ -132,6 +133,7 @@ pub fn resolve_reverse_relations(
 /// unverified rows sees them there too. A sub-query's own setting wins,
 /// including an explicit `includeUnverified: false`.
 pub(super) async fn resolve_includes_recursive(
+    stop: &EvalStop,
     store: &SparqlStore,
     instances: &mut [Value],
     include: &HashMap<String, IncludeValue>,
@@ -172,9 +174,11 @@ pub(super) async fn resolve_includes_recursive(
         reject_pagination_on_polymorphic(rel_name, &sub_query)?;
 
         if rel.direction == "reverse" {
-            resolve_reverse_include(store, instances, rel, &sub_query, resolver, depth).await?;
+            resolve_reverse_include(stop, store, instances, rel, &sub_query, resolver, depth)
+                .await?;
         } else {
-            resolve_forward_include(store, instances, rel, &sub_query, resolver, depth).await?;
+            resolve_forward_include(stop, store, instances, rel, &sub_query, resolver, depth)
+                .await?;
         }
     }
     Ok(())
@@ -309,6 +313,7 @@ pub(super) fn choose<'a>(matched: &'a [String], preferred: &[String]) -> Option<
 }
 
 async fn hydrate_polymorphic(
+    stop: &EvalStop,
     store: &SparqlStore,
     relation_name: &str,
     target_ids: &[String],
@@ -323,7 +328,7 @@ async fn hydrate_polymorphic(
     // By class IRI: two classes may share a name, and each target hydrates
     // through the class it conforms to.
     let classes = crate::perspectives::subject_classes_of::subject_class_iris_of(
-        store, resolver, target_ids,
+        stop, store, resolver, target_ids,
     )?;
 
     // Group by class, keeping the ids of each group in the order they arrived so
@@ -373,6 +378,7 @@ async fn hydrate_polymorphic(
         group_query.offset = None;
 
         let result = Box::pin(execute_model_query_inner(
+            stop,
             store,
             target_shape.as_ref(),
             &group_query,
@@ -413,6 +419,7 @@ async fn hydrate_polymorphic(
 /// to hydrate them, and replaces the raw ID arrays with hydrated JSON objects.
 /// If the sub-query specifies an `order`, the result order is preserved.
 async fn resolve_forward_include(
+    stop: &EvalStop,
     store: &SparqlStore,
     instances: &mut [Value],
     rel: &ShapeRelation,
@@ -467,6 +474,7 @@ async fn resolve_forward_include(
 
     if polymorphic {
         hydrate_polymorphic(
+            stop,
             store,
             &rel.name,
             &target_ids,
@@ -492,6 +500,7 @@ async fn resolve_forward_include(
         }
         let target_shape = resolver.get_shape(rel.target())?;
         let result = Box::pin(execute_model_query_inner(
+            stop,
             store,
             target_shape.as_ref(),
             &query,
@@ -562,6 +571,7 @@ async fn resolve_forward_include(
 /// points *at* this instance is whatever somebody linked, so a `parent` read
 /// backwards from a block can be any of several container classes.
 async fn resolve_reverse_include(
+    stop: &EvalStop,
     store: &SparqlStore,
     instances: &mut [Value],
     rel: &ShapeRelation,
@@ -600,7 +610,7 @@ async fn resolve_reverse_include(
     let sparql = format!(
         "SELECT ?source ?target WHERE {{ ?source <{safe_pred}> ?target . {target_constraint}{filter} }}"
     );
-    let result_json = store.query(&sparql)?;
+    let result_json = store.query(stop, &sparql)?;
     let rows: Vec<Value> = serde_json::from_str(&result_json)?;
 
     let mut sources_by_target: HashMap<String, Vec<String>> = HashMap::new();
@@ -656,6 +666,7 @@ async fn resolve_reverse_include(
 
         if polymorphic {
             hydrate_polymorphic(
+                stop,
                 store,
                 &rel.name,
                 &target_ids,
@@ -680,6 +691,7 @@ async fn resolve_reverse_include(
             }
             let target_shape = resolver.get_shape(rel.target())?;
             let result = Box::pin(execute_model_query_inner(
+                stop,
                 store,
                 target_shape.as_ref(),
                 &query,

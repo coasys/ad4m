@@ -80,7 +80,10 @@ pub struct FlowValidOutputsParams {
 /// The links of the flow `flow_json` named `flow_name`, with the index links
 /// `getFlow` and `sdnaFlows` read: `ad4m://self ad4m://has_flow <name>` and
 /// `<name> ad4m://flow_uri <flow>`.
-fn flow_registration_links(flow_json: &str, flow_name: &str) -> anyhow::Result<Vec<Link>> {
+pub(crate) fn flow_registration_links(
+    flow_json: &str,
+    flow_name: &str,
+) -> anyhow::Result<Vec<Link>> {
     let mut links = parse_flow_to_links(flow_json, flow_name)?;
     let flow_uri = links
         .first()

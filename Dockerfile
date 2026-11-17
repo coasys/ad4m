@@ -4,7 +4,16 @@
 #
 # Build args:
 #   INCLUDE_WE=true       — bundle WE web frontend (served on port 8081)
-#   INCLUDE_MODELS=false  — pre-cache default Kalosm AI models (~1.8 GB)
+#   INCLUDE_MODELS=false  — ship local AI in the image: the llama-server and nemo-speech
+#                           runtimes and the models `ai.localInstall` picks (several GB),
+#                           started with the executor, no download at run time
+#   LOCAL_AI_DEVICE=cpu   — the device those builds are for: cpu, cuda, vulkan, rocm.
+#                           The image installs no GPU runtime: cuda needs the NVIDIA
+#                           Container Toolkit (`--gpus all`); vulkan needs a Vulkan loader
+#                           and driver (libvulkan1, mesa-vulkan-drivers) added to the image
+#                           and /dev/dri passed in; rocm needs the ROCm runtime added and
+#                           /dev/kfd and /dev/dri passed in. Without them the runtimes do not
+#                           become ready.
 #   RUN_HOLOCHAIN=true    — include Holochain conductor (false = standalone mode)
 # =============================================================================
 
@@ -13,6 +22,7 @@ ARG NODE_MAJOR=24
 ARG GO_VERSION=1.24.6
 ARG INCLUDE_WE=true
 ARG INCLUDE_MODELS=false
+ARG LOCAL_AI_DEVICE=cpu
 
 # =============================================================================
 # Stage 1: Builder
@@ -142,6 +152,8 @@ WORKDIR /home/builder/ad4m
 COPY --chown=builder:builder Cargo.toml Cargo.lock package.json pnpm-lock.yaml pnpm-workspace.yaml rust-toolchain.toml deno.lock turbo.json ./
 COPY --chown=builder:builder .cargo/ ./.cargo/
 COPY --chown=builder:builder rust-executor/ ./rust-executor/
+# The local AI recommendations and hardware classes the executor embeds (include_str!).
+COPY --chown=builder:builder ai-wind-tunnel/ ./ai-wind-tunnel/
 COPY --chown=builder:builder rust-client/ ./rust-client/
 COPY --chown=builder:builder cli/ ./cli/
 COPY --chown=builder:builder core/ ./core/
@@ -236,7 +248,7 @@ RUN rm -rf /home/builder/deno-local /home/builder/rusty_v8-local \
 # ── Generate Docker bootstrap seed ────────────────────────────────────
 # Local bootstrap languages replace Holochain-backed ones for standalone mode.
 # docker/ is copied here (not with the source tree above) so that changes
-# to generate-seed.mjs or download-models.sh don't bust the Rust cache.
+# to generate-seed.mjs don't bust the Rust cache.
 COPY --chown=builder:builder docker/ ./docker/
 RUN node docker/generate-seed.mjs docker/bootstrap-languages docker/seed-output
 
@@ -325,25 +337,27 @@ RUN mkdir -p /flux-dist && \
     fi
 
 # =============================================================================
-# Stage 2b: Kalosm model pre-cache (conditional)
+# Stage 2b: Local AI runtimes and models (conditional)
 # =============================================================================
-FROM ubuntu:24.04 AS model-fetcher
+# The executor's own installer (`ad4m-executor local-ai install`): the plan for this
+# build machine held to LOCAL_AI_DEVICE, downloaded and checked against the manifest's
+# sha256s, and the selection the executor starts at run time.
+FROM ubuntu:24.04 AS local-ai-fetcher
 
 ARG INCLUDE_MODELS
+ARG LOCAL_AI_DEVICE
 
-RUN if [ "${INCLUDE_MODELS}" != "true" ]; then \
-      mkdir -p /models && exit 0; \
-    fi && \
-    apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates curl && \
-    rm -rf /var/lib/apt/lists/*
+COPY --from=builder /home/builder/ad4m-executor-bin /usr/local/bin/ad4m-executor
 
-COPY docker/download-models.sh /tmp/download-models.sh
-RUN chmod +x /tmp/download-models.sh && \
+RUN mkdir -p /opt/ad4m/local-ai /opt/ad4m/local-ai-state && \
     if [ "${INCLUDE_MODELS}" = "true" ]; then \
-      /tmp/download-models.sh /models; \
-    else \
-      mkdir -p /models; \
+      apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates libssl3 libgtk-3-0 libwebkit2gtk-4.1-0 \
+        libjavascriptcoregtk-4.1-0 libasound2t64 && \
+      rm -rf /var/lib/apt/lists/* && \
+      ad4m-executor local-ai install \
+        --store /opt/ad4m/local-ai --state /opt/ad4m/local-ai-state \
+        --device "${LOCAL_AI_DEVICE}"; \
     fi
 
 # =============================================================================
@@ -364,6 +378,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libwebkit2gtk-4.1-0 \
     libjavascriptcoregtk-4.1-0 \
     libasound2t64 \
+    libgomp1 \
+    libzstd1 \
+    zlib1g \
     gosu \
     && rm -rf /var/lib/apt/lists/*
 
@@ -396,14 +413,19 @@ COPY --from=we-builder /we-dist/ /opt/ad4m/we-dist/
 # Flux app (served at /apps/flux/ alongside WE; empty dir if INCLUDE_WE=false)
 COPY --from=we-builder /flux-dist/ /opt/ad4m/flux-dist/
 
-# Pre-cached Kalosm models (empty dir if INCLUDE_MODELS=false)
-COPY --from=model-fetcher /models/ /opt/ad4m/models/
-
 RUN useradd -m -s /bin/bash ad4m && mkdir -p /data && chown ad4m:ad4m /data \
     && chown -R ad4m:ad4m /opt/ad4m/we-dist/ \
     && chown -R ad4m:ad4m /opt/ad4m/flux-dist/
 
+# Local AI runtimes, models and their selection (empty dirs if INCLUDE_MODELS=false);
+# docker-entrypoint.sh hands them to the executor. Owned by ad4m so a later
+# `ai.localInstall` in the container can add to the store (a chown after the copy would
+# copy the layer again).
+COPY --from=local-ai-fetcher --chown=ad4m:ad4m /opt/ad4m/local-ai/ /opt/ad4m/local-ai/
+COPY --from=local-ai-fetcher --chown=ad4m:ad4m /opt/ad4m/local-ai-state/ /opt/ad4m/local-ai-state/
+
 COPY --chmod=755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+COPY --chmod=644 docker/ai-env.sh /usr/local/lib/ad4m/ai-env.sh
 
 WORKDIR /data
 

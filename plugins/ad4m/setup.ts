@@ -264,12 +264,15 @@ async function setupManagedMode(
     return;
   }
 
-  // Executor spawned — generate agent
+  // Executor spawned — generate agent. Not marked as a bot here: the first start does that,
+  // under the config's `declareBot`, which setup has not written yet.
   const agentResult = await ensureAgentReady(
     executorUrl,
     adminCredential,
     logger,
     agentPassphrase,
+    undefined,
+    false,
   );
 
   // Stop executor — user will start it properly after adding config

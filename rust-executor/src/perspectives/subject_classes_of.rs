@@ -46,20 +46,20 @@ use std::collections::{HashMap, HashSet};
 use super::model_query::types::{ModelShape, ShapeResolver};
 use super::model_query::utils::looks_like_absolute_iri;
 use super::shacl_parser::{class_name_of, ABSTRACT_PREDICATE};
-use super::sparql_store::SparqlStore;
+use super::sparql_store::{EvalStop, SparqlStore};
 
 /// Every subject class registered in this perspective.
 ///
 /// The SHACL writer records each one as
 /// `<namespace://ClassName> rdf://type <ad4m://SubjectClass>`, so the class
 /// names are the local parts of those subjects.
-pub fn all_subject_class_names(store: &SparqlStore) -> Result<Vec<String>, Error> {
+pub fn all_subject_class_names(stop: &EvalStop, store: &SparqlStore) -> Result<Vec<String>, Error> {
     let query = r#"
         SELECT ?targetClass WHERE {
             ?targetClass <rdf://type> <ad4m://SubjectClass> .
         }
     "#;
-    let rows: Vec<Value> = serde_json::from_str(&store.query(query)?)?;
+    let rows: Vec<Value> = serde_json::from_str(&store.query(stop, query)?)?;
 
     let mut names: Vec<String> = rows
         .iter()
@@ -77,7 +77,10 @@ pub fn all_subject_class_names(store: &SparqlStore) -> Result<Vec<String>, Error
 /// it is, so it is never one of a record's classes. By target class IRI,
 /// sorted. Two classes may share a name (`a://Task`, `b://Task`); each is its
 /// own class here.
-pub fn concrete_subject_classes(store: &SparqlStore) -> Result<Vec<String>, Error> {
+pub fn concrete_subject_classes(
+    stop: &EvalStop,
+    store: &SparqlStore,
+) -> Result<Vec<String>, Error> {
     let query = format!(
         r#"
         SELECT ?targetClass WHERE {{
@@ -89,7 +92,7 @@ pub fn concrete_subject_classes(store: &SparqlStore) -> Result<Vec<String>, Erro
         }}
     "#
     );
-    let rows: Vec<Value> = serde_json::from_str(&store.query(&query)?)?;
+    let rows: Vec<Value> = serde_json::from_str(&store.query(stop, &query)?)?;
     let mut classes: Vec<String> = rows
         .iter()
         .filter_map(|r| r["targetClass"].as_str())
@@ -192,11 +195,12 @@ fn order_by_specificity(matches: &mut Vec<(String, usize)>) -> Vec<String> {
 /// because an empty list would claim the stronger thing — that the URI belongs
 /// to no class — which this cannot know.
 pub fn subject_classes_of(
+    stop: &EvalStop,
     store: &SparqlStore,
     resolver: &dyn ShapeResolver,
     uris: &[String],
 ) -> Result<HashMap<String, Vec<String>>, Error> {
-    subject_classes_of_with_pending(store, resolver, uris, &[])
+    subject_classes_of_with_pending(stop, store, resolver, uris, &[])
 }
 
 /// [`subject_classes_of`], counting links that are staged but not yet committed.
@@ -212,13 +216,14 @@ pub fn subject_classes_of(
 /// Membership is set containment, so a staged triple counts exactly as a
 /// committed one does — this widens what is known, never what conforms.
 pub fn subject_classes_of_with_pending(
+    stop: &EvalStop,
     store: &SparqlStore,
     resolver: &dyn ShapeResolver,
     uris: &[String],
     pending: &[(String, String, String)],
 ) -> Result<HashMap<String, Vec<String>>, Error> {
     Ok(
-        subject_class_iris_of_with_pending(store, resolver, uris, pending)?
+        subject_class_iris_of_with_pending(stop, store, resolver, uris, pending)?
             .into_iter()
             .map(|(uri, classes)| {
                 let mut names: Vec<String> = Vec::new();
@@ -237,14 +242,16 @@ pub fn subject_classes_of_with_pending(
 /// specific first. Two classes of one name are told apart here, so a reader
 /// hydrates an instance through the class it conforms to.
 pub fn subject_class_iris_of(
+    stop: &EvalStop,
     store: &SparqlStore,
     resolver: &dyn ShapeResolver,
     uris: &[String],
 ) -> Result<HashMap<String, Vec<String>>, Error> {
-    subject_class_iris_of_with_pending(store, resolver, uris, &[])
+    subject_class_iris_of_with_pending(stop, store, resolver, uris, &[])
 }
 
 fn subject_class_iris_of_with_pending(
+    stop: &EvalStop,
     store: &SparqlStore,
     resolver: &dyn ShapeResolver,
     uris: &[String],
@@ -272,7 +279,7 @@ fn subject_class_iris_of_with_pending(
 
     // Load every class's shape once, by its IRI. Shapes are cached per
     // perspective, so this is a map lookup after the first call.
-    let classes = concrete_subject_classes(store)?;
+    let classes = concrete_subject_classes(stop, store)?;
     let mut shapes: Vec<(String, Vec<(String, Option<String>)>)> = Vec::new();
     for class in classes {
         match resolver.get_shape(&class) {
@@ -323,7 +330,7 @@ fn subject_class_iris_of_with_pending(
     }
 
     if !flag_preds.is_empty() {
-        let rows = fetch(store, &values_clause, &flag_preds, true)?;
+        let rows = fetch(stop, store, &values_clause, &flag_preds, true)?;
         for row in &rows {
             let (s, p, o) = match (row["s"].as_str(), row["p"].as_str(), row["o"].as_str()) {
                 (Some(s), Some(p), Some(o)) => (s, p, o),
@@ -343,7 +350,7 @@ fn subject_class_iris_of_with_pending(
     }
 
     if !presence_preds.is_empty() {
-        let rows = fetch(store, &values_clause, &presence_preds, false)?;
+        let rows = fetch(stop, store, &values_clause, &presence_preds, false)?;
         for row in &rows {
             let (s, p) = match (row["s"].as_str(), row["p"].as_str()) {
                 (Some(s), Some(p)) => (s, p),
@@ -391,6 +398,7 @@ fn subject_class_iris_of_with_pending(
 /// presence test does not — a required property's value can be an arbitrarily
 /// long literal, and none of it is read.
 fn fetch(
+    stop: &EvalStop,
     store: &SparqlStore,
     values_clause: &str,
     preds: &HashSet<&str>,
@@ -412,7 +420,7 @@ fn fetch(
         )
     };
 
-    Ok(serde_json::from_str(&store.query(&query)?)?)
+    Ok(serde_json::from_str(&store.query(stop, &query)?)?)
 }
 
 #[cfg(test)]

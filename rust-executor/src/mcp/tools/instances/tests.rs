@@ -4630,3 +4630,577 @@ async fn a_property_stored_through_a_language_takes_the_value_the_language_does(
     );
     assert_eq!(on_a_file["success"], true, "{on_a_file}");
 }
+
+// ---- sh:in (allowed values) --------------------------------------------------
+//
+// WE writes property `options` as `sh://in` links (one JSON array per
+// property). The executor decodes them into `ShapeProperty.in_values` and
+// `coerce_scalar` enforces them on every validated write — instance_create,
+// instance_update, and collection items. A class with no `in` is
+// unconstrained, exactly as before (`instance_tools_round_trip_typed_data`
+// covers that: Channel has no `in` and every typed value passes).
+
+/// Task with `sh:in` on three properties: `status` (object entries, one
+/// labeled), `priority` (bare numbers), `locked` (present-and-empty: allows
+/// nothing), and `tags` (scalar collection of bare strings).
+const TASK_SDNA: &str = r#"{
+  "target_class": "ns://Task",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"rdf://type","target":"ns://Task"}
+  ],
+  "properties": [
+    {"path":"ns://task_title","name":"title","datatype":"xsd:string","min_count":1,"max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://task_title","target":"value"}]},
+    {"path":"ns://task_status","name":"status","datatype":"xsd:string","min_count":0,"max_count":1,"writable":true,
+     "in":[{"value":"todo"},{"value":"doing","label":"Doing"}],
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://task_status","target":"value"}]},
+    {"path":"ns://task_priority","name":"priority","datatype":"xsd:integer","min_count":0,"max_count":1,"writable":true,
+     "in":[1,2],
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://task_priority","target":"value"}]},
+    {"path":"ns://task_locked","name":"locked","datatype":"xsd:string","min_count":0,"max_count":1,"writable":true,
+     "in":[],
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://task_locked","target":"value"}]},
+    {"path":"ns://task_tag","name":"tags","collection":true,"datatype":"xsd:string","writable":true,
+     "in":["a","b"],
+     "adder":[{"action":"addLink","source":"this","predicate":"ns://task_tag","target":"value"}],
+     "remover":[{"action":"removeLink","source":"this","predicate":"ns://task_tag","target":"value"}]}
+  ]
+}"#;
+
+async fn setup_tasks() -> (Ad4mMcpHandler, String, PerspectiveGuard) {
+    setup_with(&[("Task", TASK_SDNA)], false).await
+}
+
+async fn create_task(
+    handler: &Ad4mMcpHandler,
+    uuid: &str,
+    properties: Map<String, Value>,
+) -> Value {
+    parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: uuid.to_string(),
+                class_name: "Task".into(),
+                properties: Some(properties),
+                base_uri: None,
+                parent: None,
+            }))
+            .await,
+    )
+}
+
+/// `sh:in` gates `instance_create`: a declared value passes, an undeclared
+/// one is refused, and the error names the allowed values in declared order.
+#[tokio::test(flavor = "multi_thread")]
+async fn in_list_gates_instance_create() {
+    let (handler, uuid, _guard) = setup_tasks().await;
+
+    let ok = create_task(
+        &handler,
+        &uuid,
+        props(&[("title", json!("t")), ("status", json!("doing"))]),
+    )
+    .await;
+    assert_eq!(ok["created"], true, "{ok}");
+
+    let bad = create_task(
+        &handler,
+        &uuid,
+        props(&[("title", json!("t")), ("status", json!("done"))]),
+    )
+    .await;
+    let err = bad["error"].as_str().expect("error field");
+    assert!(err.contains("status"), "{err}");
+    assert!(err.contains("todo, doing"), "{err}");
+
+    // The rejection wrote nothing: validation runs before any link is made.
+    let count = parse(
+        &handler
+            .instance_query(Parameters(InstanceQueryParams {
+                perspective_id: uuid.clone(),
+                class_name: "Task".into(),
+                filter: None,
+                parent: None,
+                limit: None,
+                offset: None,
+            }))
+            .await,
+    )["count"]
+        .as_u64()
+        .unwrap();
+    assert_eq!(count, 1, "only the accepted instance exists");
+}
+
+/// The same gate runs on `instance_update`.
+#[tokio::test(flavor = "multi_thread")]
+async fn in_list_gates_instance_update() {
+    let (handler, uuid, _guard) = setup_tasks().await;
+    let task = create_task(
+        &handler,
+        &uuid,
+        props(&[("title", json!("t")), ("status", json!("todo"))]),
+    )
+    .await;
+    let base_uri = task["base_uri"].as_str().expect("created").to_string();
+
+    let ok = parse(
+        &handler
+            .instance_update(Parameters(InstanceUpdateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Task".into(),
+                base_uri: base_uri.clone(),
+                properties: props(&[("status", json!("doing"))]),
+            }))
+            .await,
+    );
+    assert_eq!(ok["success"], true, "{ok}");
+
+    let bad = parse(
+        &handler
+            .instance_update(Parameters(InstanceUpdateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Task".into(),
+                base_uri,
+                properties: props(&[("status", json!("done"))]),
+            }))
+            .await,
+    );
+    let err = bad["error"].as_str().expect("error field");
+    assert!(err.contains("status"), "{err}");
+    assert!(err.contains("todo, doing"), "{err}");
+}
+
+/// Collection items pass through the same gate: `tags` declares `["a","b"]`,
+/// so `instance_add_to_collection` refuses `"c"` and the error names the
+/// allowed values.
+#[tokio::test(flavor = "multi_thread")]
+async fn in_list_gates_collection_items() {
+    let (handler, uuid, _guard) = setup_tasks().await;
+    let task = create_task(&handler, &uuid, props(&[("title", json!("t"))])).await;
+    let base_uri = task["base_uri"].as_str().expect("created").to_string();
+
+    let ok = parse(
+        &handler
+            .instance_add_to_collection(Parameters(InstanceAddToCollectionParams {
+                perspective_id: uuid.clone(),
+                class_name: "Task".into(),
+                base_uri: base_uri.clone(),
+                collection: "tags".into(),
+                item_uri: "a".into(),
+            }))
+            .await,
+    );
+    assert_eq!(ok["success"], true, "{ok}");
+
+    let bad = parse(
+        &handler
+            .instance_add_to_collection(Parameters(InstanceAddToCollectionParams {
+                perspective_id: uuid.clone(),
+                class_name: "Task".into(),
+                base_uri,
+                collection: "tags".into(),
+                item_uri: "c".into(),
+            }))
+            .await,
+    );
+    let err = bad["error"].as_str().expect("error field");
+    assert!(err.contains("tags"), "{err}");
+    assert!(err.contains("a, b"), "{err}");
+}
+
+/// Bare entries behave exactly like object entries: `in: ["a","b"]` accepts
+/// "b" and rejects "c" with the same error shape.
+#[tokio::test(flavor = "multi_thread")]
+async fn in_list_bare_entries_match_like_object_entries() {
+    let (handler, uuid, _guard) = setup_tasks().await;
+
+    let ok = create_task(
+        &handler,
+        &uuid,
+        props(&[("title", json!("t")), ("tags", json!(["b"]))]),
+    )
+    .await;
+    assert_eq!(ok["created"], true, "{ok}");
+
+    let bad = create_task(
+        &handler,
+        &uuid,
+        props(&[("title", json!("t")), ("tags", json!(["c"]))]),
+    )
+    .await;
+    let err = bad["error"].as_str().expect("error field");
+    assert!(err.contains("a, b"), "{err}");
+}
+
+/// A number property compares on the coerced value: `in: [1,2]` accepts 2
+/// (also passed as the string "2", which coerces to the same integer) and
+/// rejects 3.
+#[tokio::test(flavor = "multi_thread")]
+async fn in_list_compares_coerced_numbers() {
+    let (handler, uuid, _guard) = setup_tasks().await;
+
+    let ok = create_task(
+        &handler,
+        &uuid,
+        props(&[("title", json!("t")), ("priority", json!(2))]),
+    )
+    .await;
+    assert_eq!(ok["created"], true, "{ok}");
+
+    let ok_str = create_task(
+        &handler,
+        &uuid,
+        props(&[("title", json!("t")), ("priority", json!("2"))]),
+    )
+    .await;
+    assert_eq!(ok_str["created"], true, "{ok_str}");
+
+    let bad = create_task(
+        &handler,
+        &uuid,
+        props(&[("title", json!("t")), ("priority", json!(3))]),
+    )
+    .await;
+    let err = bad["error"].as_str().expect("error field");
+    assert!(err.contains("priority"), "{err}");
+    assert!(err.contains("1, 2"), "{err}");
+}
+
+/// `in: []` is present-and-empty: it allows nothing, not everything.
+#[tokio::test(flavor = "multi_thread")]
+async fn in_list_empty_rejects_every_value() {
+    let (handler, uuid, _guard) = setup_tasks().await;
+
+    let bad = create_task(
+        &handler,
+        &uuid,
+        props(&[("title", json!("t")), ("locked", json!("yes"))]),
+    )
+    .await;
+    let err = bad["error"].as_str().expect("error field");
+    assert!(err.contains("locked"), "{err}");
+    assert!(err.contains("allowed"), "{err}");
+
+    // An instance without `locked` still creates — the constraint binds the
+    // property's values, not its presence.
+    let ok = create_task(&handler, &uuid, props(&[("title", json!("t"))])).await;
+    assert_eq!(ok["created"], true, "{ok}");
+}
+
+/// `describe_perspective` exposes the allowed values as `allowed_values`:
+/// objects with `value`, `label` only where declared, in declared order.
+#[tokio::test(flavor = "multi_thread")]
+async fn describe_perspective_lists_allowed_values() {
+    let (handler, uuid, _guard) = setup_tasks().await;
+    let out = handler
+        .describe_perspective(Parameters(DescribePerspectiveParams {
+            perspective_id: uuid.clone(),
+        }))
+        .await;
+    let desc = parse(&out);
+    let task = find(desc["classes"].as_array().unwrap(), "Task");
+    let properties = task["properties"].as_array().unwrap();
+
+    let status = find(properties, "status");
+    assert_eq!(
+        status["allowed_values"],
+        json!([{"value": "todo"}, {"value": "doing", "label": "Doing"}]),
+        "declared order, label only where present"
+    );
+    assert_eq!(
+        find(properties, "priority")["allowed_values"],
+        json!([{"value": 1}, {"value": 2}])
+    );
+    // Present-and-empty: `in: []` still reports the (empty) constraint.
+    assert_eq!(find(properties, "locked")["allowed_values"], json!([]));
+    // No `in` declared: the key is absent, not null.
+    assert!(find(properties, "title").get("allowed_values").is_none());
+}
+
+// ============================================================================
+// #1762 CodeRabbit review: collection values keep their type, an instance
+// stored under the legacy `literal://` spelling is written where it lives,
+// integers that do not fit are refused
+// ============================================================================
+
+/// One string collection and one boolean collection, both stored as plain
+/// literals (no `resolveLanguage`).
+const TAGGED_SDNA: &str = r#"{
+  "target_class": "ns://Tagged",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"rdf://type","target":"ns://Tagged"}
+  ],
+  "properties": [
+    {"path":"ns://tagged_title","name":"title","datatype":"xsd:string","min_count":1,"max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://tagged_title","target":"value"}]},
+    {"path":"ns://tag","name":"tags","datatype":"xsd:string","collection":true,"writable":true,
+     "adder":[{"action":"addLink","source":"this","predicate":"ns://tag","target":"value"}],
+     "remover":[{"action":"removeLink","source":"this","predicate":"ns://tag","target":"value"}]},
+    {"path":"ns://flag","name":"flags","datatype":"xsd:boolean","collection":true,"writable":true,
+     "adder":[{"action":"addLink","source":"this","predicate":"ns://flag","target":"value"}],
+     "remover":[{"action":"removeLink","source":"this","predicate":"ns://flag","target":"value"}]}
+  ]
+}"#;
+
+/// The link targets stored under `source --predicate-->`, sorted.
+async fn stored_targets(
+    handler: &Ad4mMcpHandler,
+    uuid: &str,
+    source: &str,
+    predicate: &str,
+) -> Vec<String> {
+    let (perspective, _) = handler
+        .get_writable_perspective(uuid)
+        .await
+        .expect("fixture perspective");
+    let mut targets: Vec<String> = perspective
+        .get_links(&crate::types::LinkQuery {
+            source: Some(source.to_string()),
+            predicate: Some(predicate.to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("get_links")
+        .into_iter()
+        .map(|l| l.data.target)
+        .collect();
+    targets.sort();
+    targets
+}
+
+/// A string collection given `"false"` and `"42"` stores them as strings —
+/// on create and on add — not as the boolean and number their text parses
+/// to. Validation already settled the type; writing must not re-guess it.
+#[tokio::test(flavor = "multi_thread")]
+async fn string_collection_items_stay_strings_when_written() {
+    let (handler, uuid, _guard) = setup_with(&[("Tagged", TAGGED_SDNA)], false).await;
+
+    let created = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Tagged".into(),
+                properties: Some(props(&[
+                    ("title", json!("t")),
+                    ("tags", json!(["false", "42"])),
+                ])),
+                base_uri: None,
+                parent: None,
+            }))
+            .await,
+    );
+    assert_eq!(created["created"], true, "{created}");
+    let base = created["base_uri"].as_str().unwrap().to_string();
+    assert_eq!(
+        stored_targets(&handler, &uuid, &base, "ns://tag").await,
+        vec!["literal:string:42", "literal:string:false"]
+    );
+
+    let added = parse(
+        &handler
+            .instance_add_to_collection(Parameters(InstanceAddToCollectionParams {
+                perspective_id: uuid.clone(),
+                class_name: "Tagged".into(),
+                base_uri: base.clone(),
+                collection: "tags".into(),
+                item_uri: "true".into(),
+            }))
+            .await,
+    );
+    assert_eq!(added["links_added"], 1, "{added}");
+    assert_eq!(
+        stored_targets(&handler, &uuid, &base, "ns://tag").await,
+        vec![
+            "literal:string:42",
+            "literal:string:false",
+            "literal:string:true"
+        ]
+    );
+}
+
+/// A boolean collection member is stored as `literal:boolean:true`; the
+/// value `"true"` must find it, so adding it again is a no-op and removing
+/// it removes it.
+#[tokio::test(flavor = "multi_thread")]
+async fn boolean_collection_members_are_matched_by_value() {
+    let (handler, uuid, _guard) = setup_with(&[("Tagged", TAGGED_SDNA)], false).await;
+
+    let created = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Tagged".into(),
+                properties: Some(props(&[("title", json!("t")), ("flags", json!([true]))])),
+                base_uri: None,
+                parent: None,
+            }))
+            .await,
+    );
+    assert_eq!(created["created"], true, "{created}");
+    let base = created["base_uri"].as_str().unwrap().to_string();
+    assert_eq!(
+        stored_targets(&handler, &uuid, &base, "ns://flag").await,
+        vec!["literal:boolean:true"]
+    );
+
+    let again = parse(
+        &handler
+            .instance_add_to_collection(Parameters(InstanceAddToCollectionParams {
+                perspective_id: uuid.clone(),
+                class_name: "Tagged".into(),
+                base_uri: base.clone(),
+                collection: "flags".into(),
+                item_uri: "true".into(),
+            }))
+            .await,
+    );
+    assert_eq!(again["links_added"], 0, "{again}");
+    assert_eq!(again["already_member"], true, "{again}");
+
+    let removed = parse(
+        &handler
+            .instance_remove_from_collection(Parameters(InstanceRemoveFromCollectionParams {
+                perspective_id: uuid.clone(),
+                class_name: "Tagged".into(),
+                base_uri: base.clone(),
+                collection: "flags".into(),
+                item_uri: "true".into(),
+            }))
+            .await,
+    );
+    assert_eq!(removed["links_removed"], 1, "{removed}");
+    assert!(stored_targets(&handler, &uuid, &base, "ns://flag")
+        .await
+        .is_empty());
+}
+
+/// A whole float too large for an integer property is refused, not
+/// saturated to `i64::MAX`; a whole float that fits is still accepted.
+#[tokio::test(flavor = "multi_thread")]
+async fn integer_property_refuses_a_whole_float_that_does_not_fit() {
+    let (handler, uuid, _guard) = setup(false).await;
+
+    let bad = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Channel".into(),
+                properties: Some(props(&[("name", json!("big")), ("rank", json!(1e20))])),
+                base_uri: None,
+                parent: None,
+            }))
+            .await,
+    );
+    let err = bad["error"]
+        .as_str()
+        .unwrap_or_else(|| panic!("1e20 must be refused, got: {bad}"));
+    assert!(err.contains("rank") && err.contains("integer"), "{err}");
+
+    let ok = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Channel".into(),
+                properties: Some(props(&[("name", json!("three")), ("rank", json!(3.0))])),
+                base_uri: None,
+                parent: None,
+            }))
+            .await,
+    );
+    assert_eq!(ok["created"], true, "{ok}");
+    let got = parse(
+        &handler
+            .instance_get(Parameters(InstanceGetParams {
+                perspective_id: uuid.clone(),
+                class_name: "Channel".into(),
+                base_uri: ok["base_uri"].as_str().unwrap().into(),
+            }))
+            .await,
+    );
+    assert_eq!(got["rank"], 3, "{got}");
+}
+
+/// An instance written before ids were normalised lives under the legacy
+/// `literal://string:…` source. `fetch_instance` finds it through the other
+/// spelling; update and remove must then write at that stored source, not at
+/// the normalised one the store does not alias to it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_legacy_spelled_instance_is_updated_and_removed_where_it_is_stored() {
+    let (handler, uuid, _guard) = setup(false).await;
+    let legacy = "literal://string:legacy-room";
+    let normalised = "literal:string:legacy-room";
+
+    {
+        let (mut perspective, agent) = handler
+            .get_writable_perspective(&uuid)
+            .await
+            .expect("fixture perspective");
+        for (predicate, target) in [
+            ("flux://entry_type", "flux://has_channel"),
+            ("rdf://type", "flux://Channel"),
+            ("flux://channel_name", "literal:string:Old"),
+        ] {
+            perspective
+                .add_link(
+                    crate::types::Link {
+                        source: legacy.into(),
+                        predicate: Some(predicate.into()),
+                        target: target.into(),
+                    },
+                    crate::types::LinkStatus::Shared,
+                    None,
+                    &agent,
+                )
+                .await
+                .expect("seed legacy link");
+        }
+    }
+    // The premise: the store keeps the legacy source as written.
+    assert_eq!(
+        stored_targets(&handler, &uuid, legacy, "flux://channel_name").await,
+        vec!["literal:string:Old"]
+    );
+
+    let updated = parse(
+        &handler
+            .instance_update(Parameters(InstanceUpdateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Channel".into(),
+                base_uri: legacy.into(),
+                properties: props(&[("name", json!("New"))]),
+            }))
+            .await,
+    );
+    assert!(updated.get("error").is_none(), "{updated}");
+    assert_eq!(
+        stored_targets(&handler, &uuid, legacy, "flux://channel_name").await,
+        vec!["literal:string:New"],
+        "the update must land on the stored instance"
+    );
+    assert!(
+        stored_targets(&handler, &uuid, normalised, "flux://channel_name")
+            .await
+            .is_empty(),
+        "the update must not start a second node under the normalised id"
+    );
+
+    let removed = parse(
+        &handler
+            .instance_remove(Parameters(InstanceRemoveParams {
+                perspective_id: uuid.clone(),
+                class_name: "Channel".into(),
+                base_uri: legacy.into(),
+            }))
+            .await,
+    );
+    assert!(removed.get("error").is_none(), "{removed}");
+    let (perspective, _) = handler.get_writable_perspective(&uuid).await.unwrap();
+    let left = perspective
+        .get_links(&crate::types::LinkQuery {
+            source: Some(legacy.into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(left.is_empty(), "remove left the stored links: {left:?}");
+}

@@ -259,7 +259,11 @@ mod tests {
             .register_shapes(vec![newer], &ctx)
             .await
             .unwrap();
-        let before = perspective.sparql_store.get_all_links().unwrap().len();
+        let before = perspective
+            .sparql_store
+            .get_all_links(&crate::perspectives::sparql_store::EvalStop::none())
+            .unwrap()
+            .len();
 
         ensure_subject_classes(&mut perspective, &[CLASS], &ctx)
             .await
@@ -270,7 +274,11 @@ mod tests {
             ["ad4m://hw/a", "ad4m://hw/b", "ad4m://hw/c"]
         );
         assert_eq!(
-            perspective.sparql_store.get_all_links().unwrap().len(),
+            perspective
+                .sparql_store
+                .get_all_links(&crate::perspectives::sparql_store::EvalStop::none())
+                .unwrap()
+                .len(),
             before
         );
     }
@@ -278,7 +286,7 @@ mod tests {
     fn triples(perspective: &PerspectiveInstance) -> Vec<(String, Option<String>, String)> {
         let mut triples: Vec<_> = perspective
             .sparql_store
-            .get_all_links()
+            .get_all_links(&crate::perspectives::sparql_store::EvalStop::none())
             .unwrap()
             .into_iter()
             .map(|l| (l.data.source, l.data.predicate, l.data.target))
@@ -557,12 +565,20 @@ mod tests {
         ensure_subject_classes(&mut perspective, &[CLASS], &ctx)
             .await
             .unwrap();
-        let before = perspective.sparql_store.get_all_links().unwrap().len();
+        let before = perspective
+            .sparql_store
+            .get_all_links(&crate::perspectives::sparql_store::EvalStop::none())
+            .unwrap()
+            .len();
         ensure_subject_classes(&mut perspective, &[CLASS], &ctx)
             .await
             .unwrap();
         assert_eq!(
-            perspective.sparql_store.get_all_links().unwrap().len(),
+            perspective
+                .sparql_store
+                .get_all_links(&crate::perspectives::sparql_store::EvalStop::none())
+                .unwrap()
+                .len(),
             before
         );
     }

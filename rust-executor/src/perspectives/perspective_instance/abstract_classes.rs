@@ -27,6 +27,7 @@ use crate::perspectives::model_query::types::ModelShape;
 use crate::perspectives::model_query::{ModelQueryInput, QueryClasses};
 use crate::perspectives::perspective_instance::SubjectClassOption;
 use crate::perspectives::shacl_parser::class_name_of;
+use crate::perspectives::sparql_store::EvalStop;
 use crate::perspectives::subject_classes_of::subject_class_iris_of;
 use serde_json::Value;
 
@@ -261,11 +262,14 @@ impl PerspectiveInstance {
     /// classes of one name are told apart, as the resolution tells them.
     fn own_classes(&self, base: &str) -> Result<Vec<String>, AnyError> {
         let resolver = self.shape_resolver();
-        Ok(
-            subject_class_iris_of(&self.sparql_store, &resolver, &[base.to_string()])?
-                .remove(base)
-                .unwrap_or_default(),
-        )
+        Ok(subject_class_iris_of(
+            &EvalStop::none(),
+            &self.sparql_store,
+            &resolver,
+            &[base.to_string()],
+        )?
+        .remove(base)
+        .unwrap_or_default())
     }
 
     /// The classes of `base` a write through `abstract_class` reaches: those

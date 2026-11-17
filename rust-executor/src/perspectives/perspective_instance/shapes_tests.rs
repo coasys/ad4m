@@ -51,7 +51,7 @@ fn all_links(
 ) -> BTreeSet<(String, String, String, String, String)> {
     perspective
         .sparql_store
-        .get_all_links()
+        .get_all_links(&crate::perspectives::sparql_store::EvalStop::none())
         .unwrap()
         .into_iter()
         .map(|l| {
@@ -70,6 +70,7 @@ fn count(perspective: &PerspectiveInstance, source: &str, predicate: &str, targe
     perspective
         .sparql_store
         .query_links(
+            &crate::perspectives::sparql_store::EvalStop::none(),
             Some(source),
             Some(predicate),
             Some(target),
@@ -344,7 +345,10 @@ async fn registration_writes_exactly_two_index_links() {
     let (mut perspective, _, ctx) = setup_perspective_no_llm(&[]).await;
     let self_links = perspective
         .sparql_store
-        .get_links_by_source("ad4m://self")
+        .get_links_by_source(
+            &crate::perspectives::sparql_store::EvalStop::none(),
+            "ad4m://self",
+        )
         .unwrap()
         .len();
 
@@ -355,7 +359,10 @@ async fn registration_writes_exactly_two_index_links() {
 
     let index: BTreeSet<(String, String)> = perspective
         .sparql_store
-        .get_links_by_source("ns://Note")
+        .get_links_by_source(
+            &crate::perspectives::sparql_store::EvalStop::none(),
+            "ns://Note",
+        )
         .unwrap()
         .into_iter()
         .map(|l| (l.data.predicate.unwrap_or_default(), l.data.target))
@@ -370,7 +377,10 @@ async fn registration_writes_exactly_two_index_links() {
     assert_eq!(
         perspective
             .sparql_store
-            .get_links_by_source("ad4m://self")
+            .get_links_by_source(
+                &crate::perspectives::sparql_store::EvalStop::none(),
+                "ad4m://self"
+            )
             .unwrap()
             .len(),
         self_links,
@@ -455,6 +465,7 @@ async fn shape_moved_to_a_new_uri_moves_its_mapping() {
     let shapes: Vec<String> = perspective
         .sparql_store
         .query_links(
+            &crate::perspectives::sparql_store::EvalStop::none(),
             Some("ns://Note"),
             Some(SHAPE_PREDICATE),
             None,
@@ -470,7 +481,10 @@ async fn shape_moved_to_a_new_uri_moves_its_mapping() {
     assert!(
         perspective
             .sparql_store
-            .get_links_by_source("ns://NoteShape")
+            .get_links_by_source(
+                &crate::perspectives::sparql_store::EvalStop::none(),
+                "ns://NoteShape"
+            )
             .unwrap()
             .is_empty(),
         "the old shape node's own links go"
@@ -595,7 +609,7 @@ async fn create_task(
 fn predicates_of(perspective: &PerspectiveInstance, id: &str) -> BTreeSet<String> {
     perspective
         .sparql_store
-        .get_links_by_source(id)
+        .get_links_by_source(&crate::perspectives::sparql_store::EvalStop::none(), id)
         .unwrap()
         .into_iter()
         .map(|l| l.data.predicate.unwrap_or_default())
@@ -819,12 +833,23 @@ async fn a_query_and_a_create_by_name_use_the_registered_class() {
     assert_eq!(count(&perspective, "expr://t1", "a://kind", "a://task"), 1);
     let titles: Vec<_> = perspective
         .sparql_store
-        .query_links(Some("expr://t1"), Some("a://title"), None, None, None, None)
+        .query_links(
+            &crate::perspectives::sparql_store::EvalStop::none(),
+            Some("expr://t1"),
+            Some("a://title"),
+            None,
+            None,
+            None,
+            None,
+        )
         .unwrap();
     assert_eq!(titles.len(), 1);
     assert!(perspective
         .sparql_store
-        .get_links_by_source("expr://t1")
+        .get_links_by_source(
+            &crate::perspectives::sparql_store::EvalStop::none(),
+            "expr://t1"
+        )
         .unwrap()
         .iter()
         .all(|l| {
@@ -1070,7 +1095,7 @@ async fn two_concurrent_registrations_of_one_shape_write_once() {
     let nodes: BTreeSet<&str> = expected.iter().map(|l| l.source.as_str()).collect();
     let triples: Vec<Triple> = perspective
         .sparql_store
-        .get_all_links()
+        .get_all_links(&crate::perspectives::sparql_store::EvalStop::none())
         .unwrap()
         .iter()
         .filter(|l| nodes.contains(l.data.source.as_str()))
