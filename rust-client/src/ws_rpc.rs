@@ -383,7 +383,7 @@ pub struct WsRpcClient {
     /// Held by every handle on this client and by nothing else — the
     /// reader and supervisor tasks own `shared`, not this — so its drop
     /// marks the last handle gone, and shuts the client down.
-    owner: Arc<Owner>,
+    _owner: Arc<Owner>,
 }
 
 /// Closes the client when the last [`WsRpcClient`] handle is dropped: the
@@ -506,7 +506,10 @@ impl WsRpcClient {
         let owner = Arc::new(Owner {
             shared: Arc::downgrade(&shared),
         });
-        Ok(Self { shared, owner })
+        Ok(Self {
+            shared,
+            _owner: owner,
+        })
     }
 
     async fn open_socket(url: &str, executor_url_for_errors: &str) -> Result<(WsSink, WsSource)> {
@@ -1202,7 +1205,7 @@ impl WsRpcClient {
     pub(crate) fn handle(&self) -> WsRpcClient {
         WsRpcClient {
             shared: self.shared.clone(),
-            owner: self.owner.clone(),
+            _owner: self._owner.clone(),
         }
     }
 
