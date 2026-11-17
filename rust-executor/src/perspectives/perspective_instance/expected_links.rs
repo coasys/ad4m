@@ -40,6 +40,12 @@ impl std::fmt::Display for LinksChanged {
 impl std::error::Error for LinksChanged {}
 
 impl PerspectiveInstance {
+    /// Whether a batch with this id is open: created, and neither committed, discarded nor
+    /// swept by the timeout. A write into a caller's batch checks it before writing anything.
+    pub async fn has_batch(&self, batch_uuid: &str) -> bool {
+        self.batch_store.read().await.contains_key(batch_uuid)
+    }
+
     /// What the store holds from `source` along `predicate` now, for [`Self::commit_batch_if`]
     /// to expect.
     pub fn expect_links(&self, source: &str, predicate: &str) -> Result<ExpectedLinks, AnyError> {
