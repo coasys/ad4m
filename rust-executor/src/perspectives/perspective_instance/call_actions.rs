@@ -207,8 +207,11 @@ impl PerspectiveInstance {
     /// answered, an empty one when the result is no delta object at all —
     /// accepted, the next resync picks the change up (§3.4).
     async fn execute_call(&self, run: &CallRun) -> Result<MountDelta, AnyError> {
-        // `expression_interact` runs without an agent context
-        // (languages/mod.rs:2952); the call signs nothing.
+        // `expression_interact` takes no agent context, so the call runs
+        // as the executor's main agent: whatever the language signs or
+        // writes during it (zome calls, its own links) is the main agent's,
+        // whoever made the write, until ad4m#1775 passes the caller's
+        // context through.
         let result = LanguageController::global_instance()
             .expression_interact(
                 &run.source,
