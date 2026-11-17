@@ -1,6 +1,10 @@
 //! Real-executor integration coverage for the A4 client surface: `Model`
 //! CRUD + subscriptions, batches, reconnect resync, and `FlowInstance`.
 //!
+//! Native-only: it spawns the executor binary — the browser coverage is
+//! `wasm_browser.rs` under wasm-bindgen-test.
+#![cfg(not(target_arch = "wasm32"))]
+//!
 //! The spawn/connect harness lives in `tests/common/`. The suite skips
 //! (prints and passes) when no binary exists — unless
 //! `AD4M_REQUIRE_EXECUTOR=1`, which makes a missing binary fail; a dangling

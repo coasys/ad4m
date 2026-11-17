@@ -1396,7 +1396,7 @@ fn state_of(flow: &ShaclFlow, record: &Value, entries: &[FlowStateEntry]) -> Opt
         .or_else(|| flow.states.first().map(|s| s.name.clone()))
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use serde_json::json;

@@ -6,6 +6,8 @@
 //! Same harness as `integration.rs`: skips without a binary unless
 //! `AD4M_REQUIRE_EXECUTOR=1`.
 
+#![cfg(not(target_arch = "wasm32"))]
+
 mod common;
 
 use ad4m_client::connect::{

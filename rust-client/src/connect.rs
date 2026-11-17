@@ -395,7 +395,7 @@ impl WsIo {
                 .timeout(HEALTH_TIMEOUT)
                 // `localhost` is loopback by destination, not by whatever the
                 // resolver says (N1); the WebSocket dial pins it the same way
-                // (`ws_rpc::loopback_dial_addrs`). Ports come from the URL.
+                // (`loopback_dial_addrs` in `transport/native.rs`). Ports come from the URL.
                 .resolve_to_addrs(
                     "localhost",
                     &[

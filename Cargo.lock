@@ -40,7 +40,11 @@ dependencies = [
  "clap",
  "dirs 5.0.1",
  "fd-lock 4.0.4",
+ "futures-channel",
  "futures-util",
+ "getrandom 0.2.17",
+ "gloo-timers",
+ "js-sys",
  "libc",
  "maplit",
  "rand 0.8.5",
@@ -54,6 +58,10 @@ dependencies = [
  "tokio-tungstenite 0.21.0",
  "unicode-width 0.1.14",
  "urlencoding",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "wasm-bindgen-test",
+ "web-sys",
 ]
 
 [[package]]

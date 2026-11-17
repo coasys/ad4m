@@ -348,7 +348,7 @@ impl Model {
                     // and releases the subscription when its reply has no
                     // taker (R4).
                     let (done_tx, done_rx) = tokio::sync::oneshot::channel();
-                    tokio::spawn(async move {
+                    crate::rt::spawn(async move {
                         match ws
                             .call::<Value>("perspective.modelSubscribe", Value::Object(params))
                             .await
@@ -367,7 +367,7 @@ impl Model {
                                         .unwrap_or(0),
                                 };
                                 let sent = done_tx.send(Ok(subscribed));
-                                #[cfg(test)]
+                                #[cfg(all(test, not(target_arch = "wasm32")))]
                                 ws.test_park("open:reply-queued").await;
                                 if sent.is_err() {
                                     // Open cancelled mid-call — nobody will
@@ -970,7 +970,7 @@ pub(crate) fn decode_timestamps_in_instance(instance: &mut Value) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use crate::subscription::{apply_update, QueryUpdate};

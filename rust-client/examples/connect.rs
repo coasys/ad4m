@@ -11,6 +11,10 @@
 //! A plaintext (`http://`/`ws://`) executor off loopback is refused unless
 //! `--allow-insecure-remote` is given.
 
+// Native only, like `connect` itself; the wasm build has no `main` here.
+#![cfg_attr(target_arch = "wasm32", no_main)]
+#![cfg(not(target_arch = "wasm32"))]
+
 use ad4m_client::connect::{
     default_token_dir, Ad4mConnect, AppInfo, AuthState, ConnectOptions, ConnectPrompts,
     ConnectStatus,

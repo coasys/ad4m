@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Result};
-use futures_util::{SinkExt, StreamExt};
+use futures_util::StreamExt;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -8,14 +8,10 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::net::TcpStream;
 use tokio::sync::{broadcast, oneshot, watch, Mutex};
-use tokio::task::JoinHandle;
-use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
-use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::{
-    client_async_with_config, connect_async_with_config, MaybeTlsStream, WebSocketStream,
-};
+
+use crate::rt::{self, Task};
+use crate::transport::{self, InFrame, SendText, Socket, WsSink, WsStream};
 
 static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -137,6 +133,10 @@ const WATCH_SEND_TIMEOUT: Duration = Duration::from_secs(5);
 /// Close and disconnect still unwind it at once through `send_abort`.
 const CALL_SEND_TIMEOUT: Duration = DEFAULT_TIMEOUT;
 
+/// The WS close code the executor sends when it refuses the capability
+/// token (`close_refused`; tungstenite's `CloseCode::Policy`).
+const AUTH_REFUSAL_CLOSE_CODE: u16 = 1008;
+
 /// A reader task that is not installed yet: dropping the guard aborts it.
 /// The supervisor holds its fresh socket's reader in one until publication
 /// — aborting the supervisor (close) then aborts the reader too, and with
@@ -144,12 +144,12 @@ const CALL_SEND_TIMEOUT: Duration = DEFAULT_TIMEOUT;
 /// effect at the task's next poll, so the handle is not dropped but
 /// handed to `retired_readers`, where close joins it (R4-3).
 struct AbortOnDrop {
-    handle: Option<JoinHandle<()>>,
+    handle: Option<Task>,
     shared: Arc<Shared>,
 }
 
 impl AbortOnDrop {
-    fn new(handle: JoinHandle<()>, shared: Arc<Shared>) -> Self {
+    fn new(handle: Task, shared: Arc<Shared>) -> Self {
         Self {
             handle: Some(handle),
             shared,
@@ -157,7 +157,7 @@ impl AbortOnDrop {
     }
 
     /// Hand the task over to whoever installs it; the guard is disarmed.
-    fn disarm(mut self) -> JoinHandle<()> {
+    fn disarm(mut self) -> Task {
         self.handle
             .take()
             .expect("reader handle present until disarmed")
@@ -206,8 +206,6 @@ struct PendingCall {
 }
 
 type PendingMap = Arc<Mutex<HashMap<String, PendingCall>>>;
-type WsSink = futures_util::stream::SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>;
-type WsSource = futures_util::stream::SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>;
 
 /// One named event interest. `spec` is the `events.watch` params fragment for
 /// this watcher: `{ "<event type>": null | ["uuid", ...] }`.
@@ -222,10 +220,20 @@ struct Watches {
 }
 
 /// A callback fired once a fresh socket is installed (post `events.watch`).
+/// The Send+Sync bound only exists natively — the browser socket types are
+/// single-threaded (`Closure` isn't Send), and wasm callbacks never leave
+/// the event loop anyway.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) type ReconnectCb = Arc<dyn Fn() + Send + Sync>;
+#[cfg(target_arch = "wasm32")]
+pub(crate) type ReconnectCb = Arc<dyn Fn()>;
 
 /// A callback fired once when the executor refuses the token (close 1008).
+/// Send+Sync natively only, like [`ReconnectCb`].
+#[cfg(not(target_arch = "wasm32"))]
 type AuthFailedCb = Arc<dyn Fn(&str) + Send + Sync>;
+#[cfg(target_arch = "wasm32")]
+type AuthFailedCb = Arc<dyn Fn(&str)>;
 
 /// The token refusal (close 1008) and who is waiting for it.
 #[derive(Default)]
@@ -240,6 +248,8 @@ struct Refusal {
 struct Shared {
     /// The WS URL (token already inside) — needed by the reconnect task.
     url: String,
+    /// `url` without the token — printed inside dial errors.
+    display_url: String,
     /// The installed write half, stamped with the `teardowns` value it
     /// was published under. A stamp that no longer matches means a
     /// teardown of this socket has begun: writers refuse it (R4-1).
@@ -285,16 +295,16 @@ struct Shared {
     /// once whichever comes first (F3). Never held across an await or a
     /// callback.
     refusal: std::sync::Mutex<Refusal>,
-    reader: Mutex<Option<JoinHandle<()>>>,
+    reader: Mutex<Option<Task>>,
     /// Aborted readers of sockets that were never published, kept until
     /// they finished: close joins them, so no reader still holds a socket
     /// half once close returns (R4-3). The supervisor prunes finished ones.
-    retired_readers: std::sync::Mutex<Vec<JoinHandle<()>>>,
+    retired_readers: std::sync::Mutex<Vec<Task>>,
     /// The single task that ever dials again (spawned once at `connect`,
     /// aborted by `close`). A socket dying while it restores leaves
     /// `connected` false, which is exactly what it waits on — there is no
     /// "reconnect in progress" guard a disconnect can hide behind.
-    supervisor: Mutex<Option<JoinHandle<()>>>,
+    supervisor: Mutex<Option<Task>>,
     /// `notify_waiters` unwinds every send parked on a socket write: a
     /// backpressured peer can hold `sink` (and `pending`/`watch_flush`
     /// behind it) indefinitely, and the disconnect/close paths need those
@@ -305,11 +315,11 @@ struct Shared {
     /// Test hook: when set, socket writes park inside their critical
     /// section — held locks stay held — until aborted or released, like a
     /// peer that keeps TCP open but stops reading (R5).
-    #[cfg(test)]
+    #[cfg(all(test, not(target_arch = "wasm32")))]
     send_block: Mutex<Option<Arc<SendBlocker>>>,
     /// Test hook: named park points ([`WsRpcClient::park_at`]) — a code
     /// path that reaches an armed point announces it and waits for a permit.
-    #[cfg(test)]
+    #[cfg(all(test, not(target_arch = "wasm32")))]
     park_points: std::sync::Mutex<HashMap<&'static str, Arc<SendBlocker>>>,
 }
 
@@ -317,7 +327,7 @@ struct Shared {
 /// write that reached the critical section; `gate` (zero permits) keeps
 /// it there. The park only ends when the send is aborted or the test adds
 /// a permit — whichever an R5 test wants to prove.
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 pub(crate) struct SendBlocker {
     parked: tokio::sync::mpsc::UnboundedSender<()>,
     pub(crate) gate: tokio::sync::Semaphore,
@@ -384,34 +394,15 @@ fn to_ws_url(executor_url: &str, token: &str) -> String {
     }
 }
 
-fn ws_config() -> WebSocketConfig {
-    WebSocketConfig {
-        max_message_size: Some(256 * 1024 * 1024),
-        max_frame_size: Some(64 * 1024 * 1024),
-        ..Default::default()
-    }
-}
-
-/// The loopback addresses to dial for a plain `ws://localhost` URL, so the
-/// name never goes to the resolver: `localhost` is exempt from the plaintext
-/// refusal by name (connect's `plaintext_remote`), so it must also be
-/// loopback by destination (N1). `None`: dial as usual.
-pub(crate) fn loopback_dial_addrs(url: &str) -> Option<Vec<std::net::SocketAddr>> {
-    let url = reqwest::Url::parse(url).ok()?;
-    if url.scheme() != "ws" || !url.host_str()?.eq_ignore_ascii_case("localhost") {
-        return None;
-    }
-    let port = url.port_or_known_default()?;
-    Some(vec![
-        std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port)),
-        std::net::SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, port)),
-    ])
-}
-
 impl WsRpcClient {
     pub async fn connect(executor_url: &str, token: &str) -> Result<Self> {
         let url = to_ws_url(executor_url, token);
-        let (write, read) = Self::open_socket(&url, executor_url).await?;
+        // The token stays out of error strings: dial failures name this one.
+        let display_url = to_ws_url(executor_url, "");
+        let Socket {
+            sink: write,
+            stream: read,
+        } = transport::connect(&url, &display_url).await?;
 
         let (events_tx, _) = broadcast::channel::<Value>(512);
         let (connected_tx, _) = watch::channel(true);
@@ -419,6 +410,7 @@ impl WsRpcClient {
 
         let shared = Arc::new(Shared {
             url: url.clone(),
+            display_url,
             sink: Mutex::new(Some((0, write))),
             pending: Arc::new(Mutex::new(HashMap::new())),
             events: events_tx,
@@ -439,9 +431,9 @@ impl WsRpcClient {
             retired_readers: std::sync::Mutex::new(Vec::new()),
             supervisor: Mutex::new(None),
             send_abort: tokio::sync::Notify::new(),
-            #[cfg(test)]
+            #[cfg(all(test, not(target_arch = "wasm32")))]
             send_block: Mutex::new(None),
-            #[cfg(test)]
+            #[cfg(all(test, not(target_arch = "wasm32")))]
             park_points: std::sync::Mutex::new(HashMap::new()),
         });
 
@@ -453,66 +445,35 @@ impl WsRpcClient {
         Ok(Self { shared })
     }
 
-    async fn open_socket(url: &str, executor_url_for_errors: &str) -> Result<(WsSink, WsSource)> {
-        let opened = match loopback_dial_addrs(url) {
-            // The handshake keeps the URL (Host: localhost); only the TCP
-            // destination is pinned.
-            Some(addrs) => match TcpStream::connect(&addrs[..]).await {
-                Ok(tcp) => {
-                    client_async_with_config(url, MaybeTlsStream::Plain(tcp), Some(ws_config()))
-                        .await
-                        .map_err(|e| e.to_string())
-                }
-                Err(e) => Err(e.to_string()),
-            },
-            None => connect_async_with_config(url, Some(ws_config()), false)
-                .await
-                .map_err(|e| e.to_string()),
-        };
-        let (ws_stream, _) = opened
-            // Named without the token: callers print this error.
-            .map_err(|e| {
-                anyhow!(
-                    "WebSocket connection to {} failed: {}",
-                    to_ws_url(executor_url_for_errors, ""),
-                    e
-                )
-            })?;
-        Ok(ws_stream.split())
-    }
-
     /// Background reader: RPC replies go to pending callers, everything else
     /// to the event broadcast. On exit it drives the disconnect path.
-    fn spawn_reader(mut read: WsSource, shared: Arc<Shared>) -> JoinHandle<()> {
+    fn spawn_reader(mut read: WsStream, shared: Arc<Shared>) -> Task {
         let shared_reader = shared.clone();
-        tokio::spawn(async move {
+        rt::spawn(async move {
             let mut auth_reason: Option<String> = None;
-            while let Some(msg) = read.next().await {
-                let text = match msg {
-                    Ok(Message::Text(t)) => {
+            while let Some(frame) = read.next().await {
+                let text = match frame {
+                    InFrame::Text(t) => {
                         // Blocks this worker mid-poll: an abort cannot
                         // end the task until the park is released.
-                        #[cfg(test)]
+                        #[cfg(all(test, not(target_arch = "wasm32")))]
                         WsRpcClient {
                             shared: shared_reader.clone(),
                         }
                         .test_sync_park("reader:frame");
                         t
                     }
-                    Ok(Message::Close(frame)) => {
-                        eprintln!("[ws-rpc] connection closed by server: {:?}", frame);
-                        auth_reason = frame.and_then(|f| {
-                            (f.code
-                                == tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Policy)
-                                .then(|| f.reason.to_string())
-                        });
+                    InFrame::Close { code, reason } => {
+                        rt::log(&format!(
+                            "[ws-rpc] connection closed by server: {code:?} {reason:?}"
+                        ));
+                        auth_reason = (code == Some(AUTH_REFUSAL_CLOSE_CODE)).then_some(reason);
                         break;
                     }
-                    Err(e) => {
-                        eprintln!("[ws-rpc] read error: {:?}", e);
+                    InFrame::Error(e) => {
+                        rt::log(&format!("[ws-rpc] read error: {e}"));
                         break;
                     }
-                    _ => continue,
                 };
 
                 let parsed: Value = match serde_json::from_str(&text) {
@@ -553,7 +514,7 @@ impl WsRpcClient {
                 for (_, cb) in callbacks {
                     // A panicking callback must not skip the later ones or
                     // the terminal cleanup below (the list is already taken).
-                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cb(&reason)));
+                    Self::run_auth_failed_callback(cb, reason.clone());
                 }
                 // Terminal, like `close`: no socket will ever come back.
                 shared.closed_tx.send_replace(true);
@@ -576,7 +537,7 @@ impl WsRpcClient {
         // under the sink lock (R4-1).
         shared.teardowns.fetch_add(1, Ordering::SeqCst);
         shared.send_abort.notify_waiters();
-        #[cfg(test)]
+        #[cfg(all(test, not(target_arch = "wasm32")))]
         Self::park_point(shared, "disconnect:notified").await;
         {
             // `conn_guard` makes the disconnect's flag write atomic against
@@ -624,8 +585,8 @@ impl WsRpcClient {
     /// reconnect callbacks — then waits on the flag again. A socket that
     /// dies mid-restore leaves the flag false, so the loop just dials the
     /// next one (F6): ownership of reconnecting never lapses.
-    fn spawn_supervisor(shared: Arc<Shared>) -> JoinHandle<()> {
-        tokio::spawn(async move {
+    fn spawn_supervisor(shared: Arc<Shared>) -> Task {
+        rt::spawn(async move {
             let mut conn = shared.connected.subscribe();
             let mut failures: u64 = 0;
             loop {
@@ -649,11 +610,13 @@ impl WsRpcClient {
                 failures += 1;
                 let delay =
                     backoff_delay_ms(failures, RECONNECT_BASE_DELAY_MS, RECONNECT_MAX_DELAY_MS);
-                tokio::time::sleep(Duration::from_millis(delay)).await;
+                rt::sleep(Duration::from_millis(delay)).await;
 
-                match connect_async_with_config(&shared.url, Some(ws_config()), false).await {
-                    Ok((ws_stream, _)) => {
-                        let (mut write, read) = ws_stream.split();
+                match transport::connect(&shared.url, &shared.display_url).await {
+                    Ok(Socket {
+                        sink: mut write,
+                        stream: read,
+                    }) => {
                         // The epoch this install owns: the reader does not
                         // exist yet, so `teardowns` can only move after
                         // this — a close landing while we restore is always
@@ -673,7 +636,7 @@ impl WsRpcClient {
                         let watches = match Self::restore_watches(&shared, &mut write).await {
                             Ok(watches) => watches,
                             Err(e) => {
-                                eprintln!("[ws-rpc] watch restore failed: {e}");
+                                rt::log(&format!("[ws-rpc] watch restore failed: {e}"));
                                 // No publish, no callbacks, no re-open on a
                                 // filter that is not there — drop the socket
                                 // (the guard aborts its reader) and dial
@@ -688,7 +651,7 @@ impl WsRpcClient {
                         // the restore re-flushed) or waits until the
                         // publish below, then sees `connected` and flushes
                         // itself. No interest can fall between (N1).
-                        #[cfg(test)]
+                        #[cfg(all(test, not(target_arch = "wasm32")))]
                         Self::park_point(&shared, "install:checked").await;
                         {
                             let _guard = shared.conn_guard.lock().await;
@@ -714,7 +677,7 @@ impl WsRpcClient {
                         // barrier) would trap them there and nothing would
                         // ever drain it. Yield so the waiters leave the
                         // slot before user code can park this worker.
-                        tokio::task::yield_now().await;
+                        rt::yield_now().await;
 
                         // Subscription re-opens fired below need the filter
                         // the acknowledged restore just installed (R2).
@@ -726,16 +689,16 @@ impl WsRpcClient {
                             .map(|(_, cb)| cb.clone())
                             .collect();
                         for cb in callbacks {
-                            // A panicking callback must not take the
-                            // supervisor down with it.
-                            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cb()));
+                            Self::run_reconnect_callback(cb);
                         }
                         if *conn.borrow() {
                             failures = 0;
                         }
                     }
                     Err(e) => {
-                        eprintln!("[ws-rpc] reconnect failed (attempt {failures}): {e}");
+                        rt::log(&format!(
+                            "[ws-rpc] reconnect failed (attempt {failures}): {e}"
+                        ));
                     }
                 }
             }
@@ -786,7 +749,7 @@ impl WsRpcClient {
         id: &str,
         rx: oneshot::Receiver<Result<Value>>,
     ) -> Result<()> {
-        match tokio::time::timeout(WATCH_REPLY_TIMEOUT, rx).await {
+        match rt::timeout(WATCH_REPLY_TIMEOUT, rx).await {
             Ok(reply) => reply
                 .map_err(|_| anyhow!("Response channel closed"))?
                 .map(|_| ()),
@@ -807,7 +770,7 @@ impl WsRpcClient {
     async fn send_watch(shared: &Arc<Shared>) -> Result<()> {
         let _gate = shared.watch_flush.lock().await;
         let (_rev, id, json, rx) = Self::watch_frame_parts(shared).await?;
-        #[cfg(test)]
+        #[cfg(all(test, not(target_arch = "wasm32")))]
         Self::park_point(shared, "watch:built").await;
         // The send — lock acquisition included — is bounded and
         // abortable: a peer that stops reading must not hold `sink` (and
@@ -821,16 +784,16 @@ impl WsRpcClient {
         // the sink was taken (the notify may have come before this waiter
         // registered), so the stamped sink is refused (R4-1).
         let sent = tokio::select! {
-            r = tokio::time::timeout(WATCH_SEND_TIMEOUT, async {
+            r = rt::timeout(WATCH_SEND_TIMEOUT, async {
                 let mut sink = shared.sink.lock().await;
                 match sink.as_mut() {
                     Some((epoch, _)) if *epoch != shared.teardowns.load(Ordering::SeqCst) => {
                         Some(None)
                     }
                     Some((_, s)) => {
-                        #[cfg(test)]
+                        #[cfg(all(test, not(target_arch = "wasm32")))]
                         Self::park_for_send_test(shared).await;
-                        Some(Some(s.send(Message::Text(json)).await))
+                        Some(Some(s.send_text(json).await))
                     }
                     None => None,
                 }
@@ -874,10 +837,10 @@ impl WsRpcClient {
             tokio::pin!(abort);
             abort.as_mut().enable();
             let sent = tokio::select! {
-                r = tokio::time::timeout(WATCH_SEND_TIMEOUT, async {
-                    #[cfg(test)]
+                r = rt::timeout(WATCH_SEND_TIMEOUT, async {
+                    #[cfg(all(test, not(target_arch = "wasm32")))]
                     Self::park_for_send_test(shared).await;
-                    sink.send(Message::Text(json)).await
+                    sink.send_text(json).await
                 }) => Some(r),
                 _ = &mut abort => None,
             };
@@ -936,9 +899,69 @@ impl WsRpcClient {
         Ok(())
     }
 
+    /// Run one reconnect callback so that its panic cannot take the
+    /// supervisor (or the callbacks after it) down. Native: `catch_unwind`,
+    /// in place.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn run_reconnect_callback(cb: ReconnectCb) {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cb()));
+    }
+
+    /// wasm32-unknown-unknown has no unwinding: a panic is a trap that
+    /// abandons whatever task is being polled, and `catch_unwind` cannot
+    /// see it. So each callback runs in a task of its own (in order, after
+    /// the supervisor's current poll): a panic traps only that task, and
+    /// the supervisor and the other callbacks run on.
+    #[cfg(target_arch = "wasm32")]
+    fn run_reconnect_callback(cb: ReconnectCb) {
+        rt::try_spawn(async move { cb() });
+    }
+
+    /// Run one refusal callback so that its panic cannot skip the later
+    /// callbacks or the reader's terminal cleanup. Native: `catch_unwind`,
+    /// in place.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn run_auth_failed_callback(cb: AuthFailedCb, reason: String) {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cb(&reason)));
+    }
+
+    /// The browser: a task per callback — the ones on the reader's list
+    /// when the refusal lands — for the reason
+    /// [`run_reconnect_callback`](Self::run_reconnect_callback) gives. A
+    /// registration that arrives later never comes through here:
+    /// `register_on_auth_failed` runs it inline instead.
+    #[cfg(target_arch = "wasm32")]
+    fn run_auth_failed_callback(cb: AuthFailedCb, reason: String) {
+        rt::try_spawn(async move { cb(&reason) });
+    }
+
     /// `callback` runs after each successful reconnect, once the watch was
     /// re-sent. Returns an id for `remove_on_reconnect`.
+    ///
+    /// A panicking callback does not stop reconnecting on either target.
+    /// In the browser, though, a panic does not unwind: the callback's own
+    /// task is abandoned mid-way with no destructors run, so state it was
+    /// changing (a lock it held, a half-written value) stays as it was.
+    /// Callbacks must not panic; the isolation only keeps the client alive.
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn on_reconnect(&self, callback: impl Fn() + Send + Sync + 'static) -> u64 {
+        self.register_on_reconnect(Arc::new(callback))
+    }
+
+    /// `callback` runs after each successful reconnect, once the watch was
+    /// re-sent. Returns an id for `remove_on_reconnect`.
+    ///
+    /// A panicking callback does not stop reconnecting: each callback runs
+    /// in a task of its own. But a panic in the browser does not unwind:
+    /// the callback's task is abandoned mid-way with no destructors run, so
+    /// state it was changing (a lock it held, a half-written value) stays
+    /// as it was. Callbacks must not panic; the isolation only keeps the
+    /// client alive.
+    ///
+    /// The browser signature: client state there is single-threaded, so
+    /// there is no Send+Sync bound.
+    #[cfg(target_arch = "wasm32")]
+    pub async fn on_reconnect(&self, callback: impl Fn() + 'static) -> u64 {
         self.register_on_reconnect(Arc::new(callback))
     }
 
@@ -972,26 +995,51 @@ impl WsRpcClient {
     /// the token (close code 1008): expired, revoked, or bad signature — like
     /// TS `ApiClient.onAuthFailed`. No reconnect follows; `reason` is the
     /// server's close reason. If the refusal already happened, the callback
-    /// fires at once (on the caller's task). A callback that panics in the
-    /// reader does not stop the later callbacks or the terminal cleanup.
-    /// Returns an id for `remove_on_auth_failed`.
+    /// fires at once — inline on the caller's task, without the reader's
+    /// `catch_unwind`, so its panic is the caller's. A callback that panics
+    /// in the reader does not stop the later callbacks or the terminal
+    /// cleanup. Returns an id for `remove_on_auth_failed`.
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn on_auth_failed(&self, callback: impl Fn(&str) + Send + Sync + 'static) -> u64 {
+        self.register_on_auth_failed(Arc::new(callback)).await
+    }
+
+    /// `callback(reason)` runs once if the executor closes the socket refusing
+    /// the token (close code 1008). Returns an id for `remove_on_auth_failed`.
+    ///
+    /// Where it runs depends on when it registers. A callback already on the
+    /// list when the refusal lands runs in a task of its own, so a panic
+    /// traps only that task and cannot stop the others. A callback that
+    /// registers after the refusal runs inline inside this call — on the
+    /// caller's poll with no task of its own, so a panic abandons that poll.
+    /// Either way a trap runs no destructors, so state a panicking callback
+    /// was changing stays as it was: callbacks must not panic.
+    ///
+    /// The browser signature: no Send+Sync bound, as for
+    /// [`on_reconnect`](Self::on_reconnect).
+    #[cfg(target_arch = "wasm32")]
+    pub async fn on_auth_failed(&self, callback: impl Fn(&str) + 'static) -> u64 {
+        self.register_on_auth_failed(Arc::new(callback)).await
+    }
+
+    async fn register_on_auth_failed(&self, callback: AuthFailedCb) -> u64 {
         static CB_ID: AtomicU64 = AtomicU64::new(0);
         let id = CB_ID.fetch_add(1, Ordering::Relaxed);
-        #[cfg(test)]
+        #[cfg(all(test, not(target_arch = "wasm32")))]
         Self::park_point(&self.shared, "auth:register").await;
         let reason = {
             let mut refusal = self.shared.refusal.lock().unwrap();
             match refusal.reason.clone() {
                 Some(reason) => reason,
                 None => {
-                    refusal.callbacks.push((id, Arc::new(callback)));
+                    refusal.callbacks.push((id, callback));
                     return id;
                 }
             }
         };
         // Refused before this registration: the reader already ran its
-        // list, so this one is ours to run — outside the lock.
+        // list, so this one is ours to run — outside the lock, and inline
+        // on the caller's poll: no catch_unwind, no task of its own.
         callback(&reason);
         id
     }
@@ -1041,7 +1089,7 @@ impl WsRpcClient {
         // they hold (R5, R4-1).
         self.shared.teardowns.fetch_add(1, Ordering::SeqCst);
         self.shared.send_abort.notify_waiters();
-        #[cfg(test)]
+        #[cfg(all(test, not(target_arch = "wasm32")))]
         Self::park_point(&self.shared, "close:notified").await;
         // Abort, then wait for the task to end: an aborted supervisor drops
         // its install state — an unpublished socket's reader guard and
@@ -1053,19 +1101,19 @@ impl WsRpcClient {
         let supervisor = self.shared.supervisor.lock().await.take();
         if let Some(h) = supervisor {
             h.abort();
-            let _ = h.await;
+            let _ = h.join().await;
         }
         let retired = std::mem::take(&mut *self.shared.retired_readers.lock().unwrap());
-        #[cfg(test)]
+        #[cfg(all(test, not(target_arch = "wasm32")))]
         Self::park_point(&self.shared, "close:readers").await;
         for h in retired {
             h.abort();
-            let _ = h.await;
+            let _ = h.join().await;
         }
         let reader = self.shared.reader.lock().await.take();
         if let Some(h) = reader {
             h.abort();
-            let _ = h.await;
+            let _ = h.join().await;
         }
         *self.shared.sink.lock().await = None;
         self.shared.connected.send_replace(false);
@@ -1087,7 +1135,7 @@ impl WsRpcClient {
 
     /// How many `on_reconnect` callbacks are currently registered — a leak
     /// shows up as a count that never returns to what the test installed.
-    #[cfg(test)]
+    #[cfg(all(test, not(target_arch = "wasm32")))]
     pub(crate) async fn reconnect_callback_count(&self) -> usize {
         self.shared.on_reconnect.lock().unwrap().len()
     }
@@ -1095,7 +1143,7 @@ impl WsRpcClient {
     /// Install a [`SendBlocker`]: socket writes now park inside their
     /// critical section — held locks stay held — and the returned
     /// receiver announces each park (R5).
-    #[cfg(test)]
+    #[cfg(all(test, not(target_arch = "wasm32")))]
     pub(crate) async fn park_sends(
         &self,
     ) -> (Arc<SendBlocker>, tokio::sync::mpsc::UnboundedReceiver<()>) {
@@ -1111,7 +1159,7 @@ impl WsRpcClient {
     /// Park inside a socket write's critical section when a test put a
     /// [`SendBlocker`] in place — the locks the caller holds stay held,
     /// like a `SinkExt::send` a backpressured peer stalls forever (R5).
-    #[cfg(test)]
+    #[cfg(all(test, not(target_arch = "wasm32")))]
     async fn park_for_send_test(shared: &Arc<Shared>) {
         let blocker = shared.send_block.lock().await.clone();
         if let Some(b) = blocker {
@@ -1123,7 +1171,7 @@ impl WsRpcClient {
     /// Arm the park point `name`: the next code paths that reach it
     /// announce it on the returned receiver and wait for a permit on the
     /// returned blocker's gate.
-    #[cfg(test)]
+    #[cfg(all(test, not(target_arch = "wasm32")))]
     pub(crate) fn park_at(
         &self,
         name: &'static str,
@@ -1142,7 +1190,7 @@ impl WsRpcClient {
     }
 
     /// Park at `name` if a test armed it ([`park_at`](Self::park_at)).
-    #[cfg(test)]
+    #[cfg(all(test, not(target_arch = "wasm32")))]
     async fn park_point(shared: &Arc<Shared>, name: &'static str) {
         let blocker = shared.park_points.lock().unwrap().get(name).cloned();
         if let Some(b) = blocker {
@@ -1155,7 +1203,7 @@ impl WsRpcClient {
     /// calling thread until a permit arrives, so call it only from a
     /// thread that may block (`spawn_blocking`, a blocked reader's worker
     /// in a multi-thread runtime).
-    #[cfg(test)]
+    #[cfg(all(test, not(target_arch = "wasm32")))]
     pub(crate) fn test_sync_park(&self, name: &'static str) {
         let blocker = self.shared.park_points.lock().unwrap().get(name).cloned();
         if let Some(b) = blocker {
@@ -1172,14 +1220,14 @@ impl WsRpcClient {
 
     /// How many receivers of the terminal signal exist: a listener that
     /// handled the close dropped its own.
-    #[cfg(test)]
+    #[cfg(all(test, not(target_arch = "wasm32")))]
     pub(crate) fn closed_receivers(&self) -> usize {
         self.shared.closed_tx.receiver_count()
     }
 
     /// [`park_point`](Self::park_point) for code outside this module that
     /// holds the client (live queries, models).
-    #[cfg(test)]
+    #[cfg(all(test, not(target_arch = "wasm32")))]
     pub(crate) async fn test_park(&self, name: &'static str) {
         Self::park_point(&self.shared, name).await;
     }
@@ -1208,7 +1256,7 @@ impl WsRpcClient {
         } else {
             DEFAULT_TIMEOUT
         };
-        match tokio::time::timeout(timeout, self.call_inner(&id, msg_type, params)).await {
+        match rt::timeout(timeout, self.call_inner(&id, msg_type, params)).await {
             Ok(r) => r,
             Err(_) => {
                 // The pending entry would sit until a reply lands (or the
@@ -1284,7 +1332,7 @@ impl WsRpcClient {
                     // the call already told the caller; never send now.
                     return Attempt::Gone;
                 }
-                #[cfg(test)]
+                #[cfg(all(test, not(target_arch = "wasm32")))]
                 Self::park_point(&self.shared, "call:before-sink").await;
                 let mut sink = self.shared.sink.lock().await;
                 // Recheck under the locks: a close that stored `closed`
@@ -1298,7 +1346,7 @@ impl WsRpcClient {
                     // this attempt registered, so only the epoch tells.
                     // Nothing was written; the call waits (R4-1).
                     Some((epoch, _)) if *epoch != self.shared.teardowns.load(Ordering::SeqCst) => {
-                        #[cfg(test)]
+                        #[cfg(all(test, not(target_arch = "wasm32")))]
                         Self::park_point(&self.shared, "call:refused").await;
                         return Attempt::NoSocket;
                     }
@@ -1308,10 +1356,10 @@ impl WsRpcClient {
                 if let Some(call) = pending.get_mut(id) {
                     call.sent = true;
                 }
-                match tokio::time::timeout(CALL_SEND_TIMEOUT, async {
-                    #[cfg(test)]
+                match rt::timeout(CALL_SEND_TIMEOUT, async {
+                    #[cfg(all(test, not(target_arch = "wasm32")))]
                     Self::park_for_send_test(&self.shared).await;
-                    s.send(Message::Text(json.clone())).await
+                    s.send_text(json.clone()).await
                 })
                 .await
                 {
@@ -1388,11 +1436,13 @@ impl WsRpcClient {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
+    use futures_util::SinkExt;
     use std::future::Future;
     use std::task::Poll;
+    use tokio_tungstenite::tungstenite::Message;
 
     #[test]
     fn to_ws_url_converts_http_to_ws() {
@@ -1604,6 +1654,54 @@ mod tests {
         // A permanent close reports disconnected too.
         client.close().await;
         assert!(!client.is_connected());
+    }
+
+    /// N1 end to end: a `ws://localhost` connect — and the supervisor's
+    /// redial once the socket dies — must dial the loopback literals
+    /// `loopback_dial_addrs` hands them, never the resolver.
+    /// `transport::connect` records each dial's destination, so
+    /// this fails if the pin is removed (the records show resolver dials)
+    /// or if the reconnect path dials around `transport::connect` (no
+    /// second record at all).
+    #[tokio::test]
+    async fn localhost_connect_and_reconnect_dial_the_loopback_literals() {
+        use crate::testkit::FakeExecutor;
+        use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+        let fake = FakeExecutor::start().await;
+        // The same listener reached by name, so `to_ws_url` builds the
+        // `ws://localhost:…` URL the pin applies to.
+        let localhost = fake.url().replace("127.0.0.1", "localhost");
+        let port: u16 = localhost.rsplit(':').next().unwrap().parse().unwrap();
+        let ws_url = to_ws_url(&localhost, "");
+        let pinned = Some(vec![
+            SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
+            SocketAddr::from((Ipv6Addr::LOCALHOST, port)),
+        ]);
+
+        let client = WsRpcClient::connect(&localhost, "").await.unwrap();
+        // The first dial already happened — `connect` awaited it.
+        assert_eq!(
+            transport::dialed_addrs(&ws_url),
+            vec![pinned.clone()],
+            "the first ws://localhost connect did not dial the loopback literals"
+        );
+
+        // Socket 1 dies server-side; the supervisor redials through
+        // `transport::connect`. Its dial is recorded before the TCP connect,
+        // so the accept is the barrier that the record exists.
+        fake.drop_connection();
+        fake.connection(2).await;
+        assert_eq!(
+            transport::dialed_addrs(&ws_url),
+            vec![pinned.clone(), pinned],
+            "the supervisor's reconnect did not dial the loopback literals"
+        );
+
+        // Let the restore settle so close does not interrupt it.
+        let w = fake.next_request().await;
+        assert_eq!(w["type"], "events.watch");
+        fake.reply(&w, Value::Bool(true)).await;
+        client.close().await;
     }
 
     /// F6: a socket that dies *while the reconnect task is still restoring*
@@ -2362,32 +2460,6 @@ mod tests {
         assert_eq!(result, Value::Bool(true));
         drop(rx);
         client.close().await;
-    }
-
-    /// N1 (round 3): plain `ws://localhost` dials 127.0.0.1 and ::1, never
-    /// the resolver; other hosts and TLS dial as usual.
-    #[test]
-    fn localhost_dials_loopback_literals() {
-        use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
-        let both = Some(vec![
-            SocketAddr::from((Ipv4Addr::LOCALHOST, 12000)),
-            SocketAddr::from((Ipv6Addr::LOCALHOST, 12000)),
-        ]);
-        assert_eq!(
-            loopback_dial_addrs("ws://localhost:12000/api/v1/ws?token=t"),
-            both
-        );
-        assert_eq!(loopback_dial_addrs("ws://LocalHost:12000/api/v1/ws"), both);
-        assert_eq!(
-            loopback_dial_addrs("ws://localhost/api/v1/ws"),
-            Some(vec![
-                SocketAddr::from((Ipv4Addr::LOCALHOST, 80)),
-                SocketAddr::from((Ipv6Addr::LOCALHOST, 80)),
-            ])
-        );
-        assert_eq!(loopback_dial_addrs("ws://localhost.evil.example:1/"), None);
-        assert_eq!(loopback_dial_addrs("ws://127.0.0.1:12000/"), None);
-        assert_eq!(loopback_dial_addrs("wss://localhost:12000/"), None);
     }
 
     /// N1: `http://localhost` reaches an executor on 127.0.0.1 through the

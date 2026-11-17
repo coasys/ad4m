@@ -10,7 +10,7 @@
 //! `perspective.addLink` and `perspective.linkMutations` for tests that need
 //! to assert what a call wrote rather than that it was sent.
 
-#![cfg(test)]
+#![cfg(all(test, not(target_arch = "wasm32")))]
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};

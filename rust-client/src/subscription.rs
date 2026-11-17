@@ -17,8 +17,8 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, Mutex};
-use tokio::task::JoinHandle;
 
+use crate::rt::{self, Task};
 use crate::ws_rpc::WsRpcClient;
 
 /// Reply to `perspective.subscribeQuery` / `perspective.modelSubscribe`: the
@@ -168,8 +168,13 @@ pub fn apply_update(result: &Value, update: &QueryUpdate) -> Result<Value> {
 
 /// What one `open` call returns. The closure mints a fresh subscription id
 /// per call, so a re-open is a brand-new subscription on the executor.
+/// Send+Sync bounds are native-only — the browser transport types are
+/// single-threaded.
+#[cfg(not(target_arch = "wasm32"))]
 pub type OpenFn =
     Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<Subscribed>> + Send>> + Send + Sync>;
+#[cfg(target_arch = "wasm32")]
+pub type OpenFn = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<Subscribed>>>>>;
 
 struct State {
     id: Option<String>,
@@ -198,7 +203,7 @@ struct Inner {
     /// before the subscribe call goes out, so the executor's event filter
     /// is in place before the subscription it feeds exists (F4).
     watch_ready: tokio::sync::OnceCell<()>,
-    listener: std::sync::Mutex<Option<JoinHandle<()>>>,
+    listener: std::sync::Mutex<Option<Task>>,
     /// The detached `on_reconnect` registration — aborted on dispose so a
     /// dispose racing it can never leave a callback behind (F5).
     reconnect_cb: std::sync::Mutex<Option<u64>>,
@@ -231,13 +236,12 @@ impl Drop for LiveQuery {
     /// executor-side subscription, watch interest, listener — or every
     /// abandoned query leaks all three server-side and locally (R4).
     /// Async teardown needs a runtime; off one, `dispose().await` is the
-    /// clean path.
+    /// clean path (native: no runtime in `Drop` context; browser:
+    /// `spawn_local` always has the event loop, see `rt::try_spawn`).
     fn drop(&mut self) {
         if self.inner.handles.fetch_sub(1, Ordering::SeqCst) == 1 {
-            if let Ok(rt) = tokio::runtime::Handle::try_current() {
-                let inner = self.inner.clone();
-                rt.spawn(async move { inner.dispose_shared().await });
-            }
+            let inner = self.inner.clone();
+            rt::try_spawn(async move { inner.dispose_shared().await });
         }
     }
 }
@@ -287,11 +291,11 @@ impl LiveQuery {
         let weak = Arc::downgrade(&inner);
         let cb_id = inner.ws.register_on_reconnect(Arc::new(move || {
             if let Some(inner) = weak.upgrade() {
-                tokio::spawn(async move { inner.reopen().await });
+                rt::spawn(async move { inner.reopen().await });
             }
         }));
         *inner.reconnect_cb.lock().unwrap() = Some(cb_id);
-        #[cfg(test)]
+        #[cfg(all(test, not(target_arch = "wasm32")))]
         inner.ws.test_sync_park("new:midway");
 
         // Event listener — filters update events, feeds `receive` IN ORDER:
@@ -302,7 +306,7 @@ impl LiveQuery {
         let inner2 = inner.clone();
         let mut events = inner.ws.events();
         let mut closed = inner.ws.closed();
-        let listener = tokio::spawn(async move {
+        let listener = rt::spawn(async move {
             // `changed()` reports only values stored after the subscription:
             // a close that came first is read here (R4-2).
             if *closed.borrow_and_update() {
@@ -407,7 +411,7 @@ impl Inner {
     /// nobody holding its id (N3). This holds for any [`OpenFn`].
     async fn start(self: &Arc<Self>) -> Result<Value> {
         let this = self.clone();
-        tokio::spawn(async move { this.start_owned().await })
+        rt::spawn_detached(async move { this.start_owned().await })
             .await
             .map_err(|e| anyhow::anyhow!("live query start ended: {e}"))?
     }
@@ -436,7 +440,7 @@ impl Inner {
             }
         };
 
-        #[cfg(test)]
+        #[cfg(all(test, not(target_arch = "wasm32")))]
         self.ws.test_park("start:opened").await;
         let mut state = self.state.lock().await;
         if state.disposed || state.generation != generation {
@@ -463,7 +467,7 @@ impl Inner {
         if let Some(old) = superseded {
             let ws = self.ws.clone();
             let uuid = self.uuid.clone();
-            tokio::spawn(async move {
+            rt::spawn(async move {
                 let _ = dispose_query(&ws, &uuid, &old).await;
             });
         }
@@ -608,7 +612,7 @@ impl Inner {
         let generation = state.generation;
         state.buffer = Some(Vec::new());
         let this = self.clone();
-        tokio::spawn(async move { this.resync_perform(generation, id).await });
+        rt::spawn(async move { this.resync_perform(generation, id).await });
     }
 
     /// Arm a resync for a lagged event (an executor `lagged` notice, or a
@@ -699,13 +703,13 @@ impl Inner {
                     expected = Some(before + 1);
                     let retry = reopen_delay(failures);
                     drop(state);
-                    eprintln!(
+                    rt::log(&format!(
                         "[live-query] re-open failed (attempt {failures}), retrying in {retry}ms: {e}"
-                    );
+                    ));
                     // A newer start wakes the sleep early — the generation
                     // check above then ends this loop (F10).
                     tokio::select! {
-                        _ = tokio::time::sleep(Duration::from_millis(retry)) => {}
+                        _ = rt::sleep(Duration::from_millis(retry)) => {}
                         _ = self.reopen_wake.notified() => {}
                     }
                 }
@@ -727,7 +731,7 @@ pub(crate) async fn dispose_query(
     .await
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use serde_json::json;
@@ -1065,7 +1069,7 @@ mod tests {
         let listener = query.inner.listener.lock().unwrap().take();
         if let Some(h) = listener {
             h.abort();
-            let _ = h.await;
+            let _ = h.join().await;
         }
         let weak = Arc::downgrade(&query.inner);
         drop(query);
