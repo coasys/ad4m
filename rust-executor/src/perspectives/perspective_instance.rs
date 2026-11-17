@@ -72,6 +72,10 @@ mod call_actions;
 // Mounted languages: the language's records mirrored as Local links
 // (design §1, §2).
 mod mounts;
+// Each mount's lifecycle phase, generation and apply lock.
+mod mount_lifecycle;
+// Test seam: deterministic pause points in the mount engine's runs.
+pub(crate) mod mount_gates;
 mod containment;
 // Class registration and the registry of shapes.
 mod shapes;
@@ -114,6 +118,10 @@ mod call_actions_tests;
 #[cfg(test)]
 #[path = "perspective_instance/mounts_tests.rs"]
 mod mounts_tests;
+
+#[cfg(test)]
+#[path = "perspective_instance/mount_lifecycle_tests.rs"]
+mod mount_lifecycle_tests;
 
 #[cfg(test)]
 #[path = "perspective_instance_join_tests.rs"]
@@ -684,6 +692,9 @@ pub struct PerspectiveInstance {
     /// Resource counters of this perspective (`GET /metrics`). They go with the instance:
     /// a removed perspective leaves the output.
     pub metrics: Arc<crate::metrics::PerspectiveCounters>,
+    /// Each mounted language's lifecycle phase, generation and apply lock
+    /// (`mount_lifecycle`).
+    mount_lifecycles: Arc<mount_lifecycle::MountLifecycles>,
     /// Test-only fault injection for [`Self::add_link_expression`] (#981).
     /// Compiled out entirely in non-test builds — see [`Self::fail_next_add_link`].
     /// `0` means the *next* call returns an error instead of writing, then
@@ -807,6 +818,7 @@ impl PerspectiveInstance {
             flow_pass_queue: Arc::new(std::sync::Mutex::new(Default::default())),
             flow_pass_lock: Arc::new(Mutex::new(())),
             metrics: Arc::new(Default::default()),
+            mount_lifecycles: Arc::new(Default::default()),
             #[cfg(test)]
             fail_add_link_after: Arc::new(AtomicI64::new(-1)),
             #[cfg(test)]

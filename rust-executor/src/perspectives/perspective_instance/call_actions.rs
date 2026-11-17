@@ -286,9 +286,12 @@ impl PerspectiveInstance {
         }
         let mut answers = Vec::with_capacity(calls.len());
         for run in calls {
-            let answer = self.execute_call(run).await?;
             let (lang, _) = LanguageController::parse_expr_url(&run.source)
                 .map_err(|e| anyhow!("call action source {:?}: {e}", run.source))?;
+            // The mount the call's delta may land in: the one active
+            // before the call went out. An unmount meanwhile wins.
+            let generation = self.active_mount_generation(&lang).await;
+            let answer = self.execute_call(run).await?;
             if let Some(why) = &answer.malformed {
                 log::warn!(
                     "call {} on {}: the call succeeded but its result is not a delta ({why}); \
@@ -297,7 +300,8 @@ impl PerspectiveInstance {
                     run.source
                 );
             }
-            self.apply_call_delta(&lang, &answer.delta, context).await;
+            self.apply_call_delta(&lang, &answer.delta, generation, context)
+                .await;
             answers.push(answer);
         }
         Ok(answers)
@@ -327,12 +331,28 @@ impl PerspectiveInstance {
 
     /// Where the delta a `call` returns becomes links: the same per-record
     /// expansion `sync_mount` runs, so a created record is queryable before
-    /// the call's RPC returns (A4). A failure is logged, not fatal — the
-    /// next `sync_mount` converges the store with the snapshot anyway.
-    async fn apply_call_delta(&self, lang_address: &str, delta: &MountDelta, _context: &AgentContext) {
+    /// the call's RPC returns (A4). Only into the mount `generation` names
+    /// (active when the call went out): a language this perspective does
+    /// not mount, or no longer mounts, gets no links. A failure is logged,
+    /// not fatal — the next `sync_mount` converges the store with the
+    /// snapshot anyway.
+    async fn apply_call_delta(
+        &self,
+        lang_address: &str,
+        delta: &MountDelta,
+        generation: Option<u64>,
+        _context: &AgentContext,
+    ) {
+        let Some(generation) = generation else {
+            log::debug!(
+                "call action on {lang_address}: not mounted in perspective {}; its delta is not applied",
+                self.uuid
+            );
+            return;
+        };
         if let Err(e) = self
             .clone()
-            .apply_mount_delta(lang_address, delta)
+            .apply_mount_delta(lang_address, delta, generation)
             .await
         {
             log::warn!("call action on {lang_address}: applying its delta failed: {e}");
