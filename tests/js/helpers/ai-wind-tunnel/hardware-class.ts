@@ -13,6 +13,8 @@ const GIB = 1024 ** 3;
 export interface ClassInput {
   os: string;
   arch: string;
+  /** The CPU brand, e.g. "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S". Unset when not read. */
+  cpuBrand?: string;
   memoryBytes: number;
   backends: string[];
   gpus: { vendor: string; vramBytes: number; unified: boolean }[];
@@ -22,6 +24,7 @@ export function classInput(fp: Fingerprint): ClassInput {
   return {
     os: fp.os,
     arch: fp.arch,
+    cpuBrand: fp.cpu.model,
     memoryBytes: fp.memoryBytes,
     backends: fp.backends,
     gpus: fp.gpus.map((g) => ({ vendor: g.vendor, vramBytes: g.vramBytes, unified: g.unified })),
@@ -32,6 +35,10 @@ function matches(rule: ClassRule, m: ClassInput): boolean {
   const r = rule.match;
   if (r.os !== undefined && r.os !== m.os) return false;
   if (r.arch !== undefined && r.arch !== m.arch) return false;
+  if (r.cpuBrandAny !== undefined) {
+    const brand = (m.cpuBrand ?? "").toLowerCase();
+    if (!r.cpuBrandAny.some((b) => brand.includes(b.toLowerCase()))) return false;
+  }
   if (r.backendAny !== undefined && !r.backendAny.some((b) => m.backends.includes(b))) return false;
   if (r.minMemoryGb !== undefined && m.memoryBytes / GIB < r.minMemoryGb) return false;
   if (r.gpuVendor !== undefined || r.unifiedMemory !== undefined || r.minVramGb !== undefined) {
@@ -57,15 +64,19 @@ export function classify(m: ClassInput, rules: ClassRule[]): string {
  * The classes to look in for a recommendation, nearest first: the class itself, the
  * smaller tiers of its family (largest first), then the cpu family at the same or a
  * smaller tier. What runs on less memory runs on more; a GPU class can always run what a
- * CPU class of its memory runs.
+ * CPU class of its memory runs. A class with a `fallback` (a narrower case of another, such
+ * as one chip of a family) goes on with that class's chain; no other chain reaches it.
  */
-export function fallbackClasses(cls: string, rules: ClassRule[]): string[] {
+export function fallbackClasses(cls: string, rules: ClassRule[], seen: Set<string> = new Set()): string[] {
   const own = rules.find((r) => r.class === cls);
   if (!own) return [cls];
+  seen.add(cls);
   const smaller = (family: string, tier: number) =>
     rules.filter((r) => r.family === family && r.tierGb <= tier).sort((a, b) => b.tierGb - a.tierGb).map((r) => r.class);
   const chain = [cls, ...smaller(own.family, own.tierGb).filter((c) => c !== cls)];
-  if (own.family !== "cpu") {
+  if (own.fallback !== undefined && !seen.has(own.fallback)) {
+    chain.push(...fallbackClasses(own.fallback, rules, seen));
+  } else if (own.family !== "cpu") {
     // A GPU class's tier is its VRAM for a discrete card and its RAM otherwise; either way
     // the machine has at least that much RAM to give a CPU runtime.
     chain.push(...smaller("cpu", own.tierGb));
