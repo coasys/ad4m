@@ -16,7 +16,7 @@ use deno_core::error::AnyError;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
-use super::call_actions::CallRun;
+use super::call_actions::{CallGroup, CallRun};
 use super::{Action, Command, Parameter, PerspectiveInstance};
 use crate::agent::AgentContext;
 use crate::perspectives::model_query::abstract_classes::{
@@ -371,7 +371,7 @@ impl PerspectiveInstance {
         let targets = self.write_targets(abstract_class, base)?;
         let mut commands = Vec::new();
         let mut runs = Vec::new();
-        let mut call_groups: BTreeMap<(String, String), CallRun> = BTreeMap::new();
+        let mut call_groups: BTreeMap<(String, String), CallGroup> = BTreeMap::new();
         for (name, value) in values {
             let membership = memberships.contains(name.as_str());
             let (op, value) = match membership {
@@ -484,7 +484,10 @@ impl PerspectiveInstance {
         }
         Ok(AbstractWrite {
             runs,
-            calls: call_groups.into_values().collect(),
+            calls: call_groups
+                .into_values()
+                .map(CallGroup::into_run)
+                .collect(),
         })
     }
 
@@ -641,7 +644,7 @@ impl PerspectiveInstance {
             vec![class_name]
         };
         let mut commands: Vec<Command> = Vec::new();
-        let mut call_groups: BTreeMap<(String, String), CallRun> = BTreeMap::new();
+        let mut call_groups: BTreeMap<(String, String), CallGroup> = BTreeMap::new();
         for class in &classes {
             let destructor = self
                 .get_shape_actions_from_shacl(class, "ad4m://destructor")
@@ -667,7 +670,10 @@ impl PerspectiveInstance {
                 }
             }
         }
-        let calls: Vec<CallRun> = call_groups.into_values().collect();
+        let calls: Vec<CallRun> = call_groups
+            .into_values()
+            .map(CallGroup::into_run)
+            .collect();
         self.run_call_actions(&calls, batch_id.as_deref(), context)
             .await?;
         if commands.is_empty() {

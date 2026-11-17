@@ -276,6 +276,66 @@ async fn a_call_target_is_not_parameter_substituted() {
     );
 }
 
+/// two setters sharing one `(source, interaction)` group merge
+/// each action's `target` defaults into the group together with the
+/// caller's values. A later property's default for an earlier property
+/// must not overwrite the caller's explicit value: the group's defaults
+/// merge first, the caller values last — so the caller wins regardless of
+/// which property's contribution lands last.
+#[tokio::test]
+async fn grouped_calls_merge_defaults_before_caller_values() {
+    let lang = load_mount_test_language().await;
+    let mut shape: Value = serde_json::from_str(&thing_shape(&lang).await).unwrap();
+    // `done`'s setter defaults `title`; `title`'s setter defaults `done`
+    // and `tags`; `tags`' setter defaults `title`. Every setter shares the
+    // `update` interaction, so all three land in one call group.
+    shape["properties"][2]["setter"][0]["target"] = json!("{\"title\":\"from-done-default\"}");
+    shape["properties"][1]["setter"][0]["target"] =
+        json!("{\"done\":\"from-title-default\",\"tags\":\"from-title-tags\"}");
+    shape["properties"][3]["setter"][0]["target"] = json!("{\"title\":\"from-tags-default\"}");
+    let (mut p, ctx) = mounted("MountThing", shape.to_string()).await;
+    let base = created_thing(&lang, &ctx, &mut p).await;
+
+    // done < title: `done` merges first, and `title`'s default for `done`
+    // would overwrite the caller's `true`. `title`'s `tags` default is not
+    // caller-supplied, so it must survive.
+    p.update_subject(
+        class("MountThing"),
+        base.clone(),
+        json!({"done": true, "title": "x"}),
+        None,
+        &ctx,
+    )
+    .await
+    .unwrap();
+    // tags < title: `tags` merges first, and `title`'s default for `tags`
+    // would overwrite the caller's `["g"]`. `title`'s `done` default is
+    // not caller-supplied here, so it must survive.
+    p.update_subject(
+        class("MountThing"),
+        base,
+        json!({"tags": ["g"], "title": "y"}),
+        None,
+        &ctx,
+    )
+    .await
+    .unwrap();
+
+    let calls = calls(&lang).await;
+    let updates: Vec<&Value> = calls.iter().filter(|c| c["name"] == "update").collect();
+    assert_eq!(updates.len(), 2, "one grouped update per write: {calls:?}");
+    assert_eq!(
+        updates[0]["params"],
+        json!({"title": "x", "done": true, "tags": "from-title-tags"}),
+        "a later property's default overwrote a caller value: {calls:?}"
+    );
+    assert_eq!(
+        updates[1]["params"],
+        json!({"title": "y", "tags": ["g"], "done": "from-title-default"}),
+        "caller values must win over every default, defaults over nothing: {calls:?}"
+    );
+}
+
 #[tokio::test]
 async fn abstract_update_groups_by_concrete_name() {
     let lang = load_mount_test_language().await;

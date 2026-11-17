@@ -5476,7 +5476,8 @@ impl PerspectiveInstance {
         // Each `collectionSetter`, run after the merged commands with the
         // members as its parameters (as in `update_subject`).
         let mut collection_runs = Vec::new();
-        let mut call_groups: BTreeMap<(String, String), call_actions::CallRun> = BTreeMap::new();
+        let mut call_groups: BTreeMap<(String, String), call_actions::CallGroup> =
+            BTreeMap::new();
 
         // Handle initial values if provided
         if let Some(obj) = initial_values {
@@ -5615,7 +5616,10 @@ impl PerspectiveInstance {
         //let execute_start = std::time::Instant::now();
         //log::info!("🎯 CREATE SUBJECT: Executing {} commands...", commands.len());
         // The calls run before the constructor's links, outside any batch.
-        let calls: Vec<call_actions::CallRun> = call_groups.into_values().collect();
+        let calls: Vec<call_actions::CallRun> = call_groups
+            .into_values()
+            .map(call_actions::CallGroup::into_run)
+            .collect();
         self.run_call_actions(&calls, batch_id.as_deref(), context)
             .await?;
         // Execute the merged commands, then each collection setter
@@ -5679,7 +5683,7 @@ impl PerspectiveInstance {
             // list into calls and link actions first. The calls run before
             // any link run and outside any batch, so they are collected
             // here and the link setters resolved after.
-            let mut call_groups: BTreeMap<(String, String), call_actions::CallRun> =
+            let mut call_groups: BTreeMap<(String, String), call_actions::CallGroup> =
                 BTreeMap::new();
             let mut link_setters: Vec<(&String, Vec<Command>, &serde_json::Value)> = Vec::new();
             for (prop, value) in obj.iter() {
@@ -5715,7 +5719,10 @@ impl PerspectiveInstance {
                     link_setters.push((prop, setter_commands, value));
                 }
             }
-            let calls: Vec<call_actions::CallRun> = call_groups.into_values().collect();
+            let calls: Vec<call_actions::CallRun> = call_groups
+                .into_values()
+                .map(call_actions::CallGroup::into_run)
+                .collect();
             self.run_call_actions(&calls, batch_id.as_deref(), context)
                 .await?;
             for (prop, setter_commands, value) in link_setters {
