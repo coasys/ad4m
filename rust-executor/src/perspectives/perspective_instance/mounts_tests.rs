@@ -401,7 +401,7 @@ async fn a_version_change_reinstalls_shapes() {
     interact(
         &format!("{lang}://project"),
         "setVersion",
-        json!({"version": "2"}),
+        json!({"version": "3"}),
     )
     .await
     .unwrap();
@@ -416,7 +416,7 @@ async fn a_version_change_reinstalls_shapes() {
         .await
         .unwrap();
     assert_eq!(versions.len(), 1, "{versions:?}");
-    assert_eq!(versions[0].data.target, "literal:string:2");
+    assert_eq!(versions[0].data.target, "literal:string:3");
 }
 
 /// Design R4: the first sync of a large language must not take minutes.

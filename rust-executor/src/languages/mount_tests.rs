@@ -189,7 +189,7 @@ async fn mount_shapes_returns_the_parsed_shapes() {
         .mount_shapes(&addr)
         .await
         .unwrap();
-    assert_eq!(shapes.version, "1");
+    assert_eq!(shapes.version, "2");
     assert_eq!(shapes.shapes.len(), 1);
     assert_eq!(shapes.shapes[0].name, "MountThing");
     assert_eq!(
