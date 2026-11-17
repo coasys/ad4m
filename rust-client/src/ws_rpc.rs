@@ -231,6 +231,9 @@ struct Watches {
     /// rejected registration is rolled back only if no newer one for the
     /// key replaced it.
     stamps: BTreeMap<String, u64>,
+    /// The named interests of the union the executor last acknowledged:
+    /// what a refused registration rolls back to.
+    accepted: WatchMap,
 }
 
 /// Removes a call's `pending` entry when the call future is dropped before
@@ -260,6 +263,18 @@ impl Drop for PendingGuard<'_> {
             });
         }
     }
+}
+
+/// One `events.watch` flush, built: everything a send needs except the sink.
+struct WatchFrame {
+    /// The `watches` revision the union was taken at.
+    rev: u64,
+    id: String,
+    json: String,
+    rx: oneshot::Receiver<Result<Value>>,
+    /// The named interests the union was merged from — what the executor
+    /// holds once it acknowledges this frame.
+    snapshot: WatchMap,
 }
 
 /// A callback fired once a fresh socket is installed (post `events.watch`).
@@ -518,6 +533,7 @@ impl WsRpcClient {
                 map: WatchMap::new(),
                 rev: 0,
                 stamps: BTreeMap::new(),
+                accepted: WatchMap::new(),
             }),
             watch_flush: Mutex::new(()),
             teardowns: AtomicU64::new(0),
@@ -850,17 +866,20 @@ impl WsRpcClient {
     }
 
     /// Snapshot the union and register its pending entry. Caller holds
-    /// `watch_flush`. Returns the flushed watches revision, the request id,
-    /// the serialized frame and the reply channel — everything a send needs
-    /// except the sink itself, so no `watches`/`pending` acquisition can
+    /// `watch_flush`. Returns the [`WatchFrame`]: the flushed watches
+    /// revision and interests, the request id, the serialized frame and the
+    /// reply channel — everything a send needs except the sink itself, so
+    /// no `watches`/`pending` acquisition can
     /// ever run under a held `shared.sink` (call paths take them in the
     /// opposite order).
-    async fn watch_frame_parts(
-        shared: &Arc<Shared>,
-    ) -> Result<(u64, String, String, oneshot::Receiver<Result<Value>>)> {
-        let (merged, rev) = {
+    async fn watch_frame_parts(shared: &Arc<Shared>) -> Result<WatchFrame> {
+        let (merged, rev, snapshot) = {
             let watches = shared.watches.lock().await;
-            (merge_watches(&watches.map), watches.rev)
+            (
+                merge_watches(&watches.map),
+                watches.rev,
+                watches.map.clone(),
+            )
         };
         // Send directly rather than via `call` — `call` on the freshly
         // installed socket works, but this keeps ordering explicit.
@@ -880,7 +899,13 @@ impl WsRpcClient {
                 failed_connects: 0,
             },
         );
-        Ok((rev, id, json, rx))
+        Ok(WatchFrame {
+            rev,
+            id,
+            json,
+            rx,
+            snapshot,
+        })
     }
 
     /// Await one `events.watch` reply — a real RPC, so a rejection (or a
@@ -913,7 +938,13 @@ impl WsRpcClient {
     /// only across the frame send, never across the reply wait.
     async fn send_watch(shared: &Arc<Shared>) -> Result<()> {
         let _gate = shared.watch_flush.lock().await;
-        let (_rev, id, json, rx) = Self::watch_frame_parts(shared).await?;
+        let WatchFrame {
+            id,
+            json,
+            rx,
+            snapshot,
+            ..
+        } = Self::watch_frame_parts(shared).await?;
         #[cfg(test)]
         Self::park_point(shared, "watch:built").await;
         // The send — lock acquisition included — is bounded and
@@ -945,7 +976,11 @@ impl WsRpcClient {
             _ = &mut abort => None,
         };
         match sent {
-            Some(Ok(Some(Some(Ok(()))))) => Self::await_watch_reply(shared, &id, rx).await,
+            Some(Ok(Some(Some(Ok(()))))) => {
+                Self::await_watch_reply(shared, &id, rx).await?;
+                shared.watches.lock().await.accepted = snapshot;
+                Ok(())
+            }
             other => {
                 shared.pending.lock().await.remove(&id);
                 Err(match other {
@@ -973,7 +1008,13 @@ impl WsRpcClient {
     ) -> Result<tokio::sync::MutexGuard<'a, Watches>> {
         let _gate = shared.watch_flush.lock().await;
         loop {
-            let (rev, id, json, rx) = Self::watch_frame_parts(shared).await?;
+            let WatchFrame {
+                rev,
+                id,
+                json,
+                rx,
+                snapshot,
+            } = Self::watch_frame_parts(shared).await?;
             // The same bound + abort as the installed-socket flush: a
             // peer that stops reading mid-restore must not pin the
             // supervisor on this write (R5).
@@ -1000,7 +1041,8 @@ impl WsRpcClient {
                     });
                 }
             }
-            let watches = shared.watches.lock().await;
+            let mut watches = shared.watches.lock().await;
+            watches.accepted = snapshot;
             if rev >= watches.rev {
                 return Ok(watches);
             }
@@ -1027,13 +1069,17 @@ impl WsRpcClient {
                 // The executor answered and refused: this interest can
                 // never be installed, and kept in the map every restore
                 // would resend it, fail, and drop the fresh socket. Roll
-                // it back, unless a newer registration for the key
+                // the key back to what the executor last accepted for it
+                // (nothing, for a new key), unless a newer registration
                 // replaced it meanwhile. A timeout or a lost socket is no
                 // verdict — the interest stays for the restore to resend.
                 if e.downcast_ref::<RpcCallError>().is_some() {
                     let mut watches = self.shared.watches.lock().await;
                     if watches.stamps.get(key) == Some(&stamp) {
-                        watches.map.remove(key);
+                        match watches.accepted.get(key).cloned() {
+                            Some(previous) => watches.map.insert(key.to_string(), previous),
+                            None => watches.map.remove(key),
+                        };
                         watches.stamps.remove(key);
                         watches.rev += 1;
                     }
@@ -2521,6 +2567,54 @@ mod tests {
         let restore = fake.next_request().await;
         assert_eq!(restore["type"], "events.watch");
         assert_eq!(restore["params"], serde_json::json!({"good-event": null}));
+        fake.reply(&restore, serde_json::json!(true)).await;
+        client.close().await;
+    }
+
+    /// A refused *replacement* rolls the key back to the interest the
+    /// executor accepted before it — the socket still carries that one —
+    /// rather than dropping the key, which would lose the old interest on
+    /// the next reconnect.
+    #[tokio::test]
+    async fn a_refused_replacement_keeps_the_accepted_watch() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let client = Arc::new(WsRpcClient::connect(fake.url(), "").await.unwrap());
+
+        let accept = tokio::spawn({
+            let client = client.clone();
+            async move {
+                client
+                    .set_watch("k", serde_json::json!({"old-event": null}))
+                    .await
+            }
+        });
+        let req = fake.next_request().await;
+        fake.reply(&req, serde_json::json!(true)).await;
+        accept.await.unwrap().unwrap();
+
+        let refuse = tokio::spawn({
+            let client = client.clone();
+            async move {
+                client
+                    .set_watch("k", serde_json::json!({"new-event": null}))
+                    .await
+            }
+        });
+        let req = fake.next_request().await;
+        assert_eq!(req["params"], serde_json::json!({"new-event": null}));
+        fake.reply_error(&req, 400, "unknown event type").await;
+        refuse.await.unwrap().unwrap_err();
+
+        client.disconnect_for_testing().await;
+        fake.connection(2).await;
+        let restore = fake.next_request().await;
+        assert_eq!(restore["type"], "events.watch");
+        assert_eq!(
+            restore["params"],
+            serde_json::json!({"old-event": null}),
+            "the accepted interest must survive a refused replacement"
+        );
         fake.reply(&restore, serde_json::json!(true)).await;
         client.close().await;
     }

@@ -51,7 +51,8 @@ fn generated_methods(source: &str) -> BTreeSet<String> {
 }
 
 /// The first string literal of every `call`/`call_void`/`call_value`/`send_watch`
-/// invocation in `source`: the method name it wraps. Test modules are
+/// invocation in `source`, and every literal `msg_type: "…"` of a frame
+/// built by hand (`events.watch`): the method names it sends. Test modules are
 /// excluded — a top-level `#[cfg(test)] mod … {` through its closing `}` at
 /// column 0 — so mock `test.*` calls stay out of the check. Other
 /// `#[cfg(test)]` items (fields, hooks inside function bodies) are kept:
@@ -74,7 +75,9 @@ fn called_methods(source: &str) -> BTreeSet<String> {
         production.push_str(line);
         production.push('\n');
     }
+    let frame = Regex::new(r#"msg_type:\s*"([^"]+)""#).unwrap();
     re.captures_iter(&production)
+        .chain(frame.captures_iter(&production))
         .map(|c| c[1].to_string())
         .collect()
 }
@@ -100,10 +103,14 @@ mod tests {
 
 fn b(ws: &Ws) {
     ws.call::<Value>("after.tests", json!({}));
+    let msg = RpcMessage { id, msg_type: "events.wtach".to_string(), params };
 }
 "#;
     let methods: Vec<String> = called_methods(source).into_iter().collect();
-    assert_eq!(methods, ["after.hook", "after.tests", "before.hook"]);
+    assert_eq!(
+        methods,
+        ["after.hook", "after.tests", "before.hook", "events.wtach"]
+    );
 }
 
 #[test]
@@ -145,8 +152,8 @@ fn every_wrapped_rpc_exists_in_the_generated_contract() {
             }
         }
     }
-    // `events.watch` is sent inside `send_watch` (built as an RpcMessage, not
-    // a `call` literal) — it is part of the contract all the same.
+    // `events.watch` is built as an `RpcMessage` (its `msg_type` literal
+    // is scanned above); `events.unwatch` is part of the same contract.
     for method in ["events.watch", "events.unwatch"] {
         if !generated.contains(method) {
             missing.push(format!("ws_rpc.rs (watch): `{method}`"));
