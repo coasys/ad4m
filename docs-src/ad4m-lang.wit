@@ -441,6 +441,41 @@ interface interactions {
     list-for: func(addr: address) -> list<interaction>;
 }
 
+/// Mount capability — a Language that can be mounted into a perspective
+/// exposes the SHACL shapes to install and the records to show in it.
+/// Optional. Export both or neither. JS languages export `mountShapes` /
+/// `mountSnapshot`.
+interface mount {
+    use types.{address};
+
+    record mount-shape {
+        /// Class name the shape installs under.
+        name: string,
+        /// The SHACL shape as `ShapeJson`, the JSON `perspective.registerShapes` takes.
+        shape-json: string,
+    }
+
+    /// What `mountShapes()` returns: a format version (re-installs when it
+    /// changes) plus one named shape per mounted class.
+    record mount-shapes {
+        version: string,
+        shapes: list<mount-shape>,
+    }
+
+    /// One record the mounted perspective shows.
+    record mount-entry {
+        /// Name of the class this record mounts as.
+        class: string,
+        /// Expression address without the `<lang>://` prefix.
+        address: address,
+        /// The record's data as a JSON object.
+        data-json: string,
+    }
+
+    shapes: func() -> mount-shapes;
+    snapshot: func() -> list<mount-entry>;
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 //  Asynchronous event handler exports
 // ────────────────────────────────────────────────────────────────────────────
@@ -732,6 +767,7 @@ world ad4m-language {
     export language-source;
     export ui;
     export interactions;
+    export mount;
     export event-handlers;
 }
 
