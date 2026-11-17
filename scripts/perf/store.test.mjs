@@ -9,11 +9,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { after, test } from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { cleanGitEnv } from "./lib.mjs";
 import { DEFAULT_REPO, openStore } from "./store.mjs";
 
-const HERE = path.dirname(new URL(import.meta.url).pathname);
+const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PERF = path.join(HERE, "perf.mjs");
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 

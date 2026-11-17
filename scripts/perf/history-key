@@ -55,7 +55,14 @@ use)
     fi
     rm -rf "$copy"
     mkdir -m 700 "$copy"
-    cp "${keys[0]}" "$copy/key"
+    # Another nightly job on the host may move the same key out of ~/.ssh between the listing and
+    # the copy: then this job has none, as when no key matched (its push warns; the records stay
+    # in the artifacts).
+    if ! cp "${keys[0]}" "$copy/key" 2>/dev/null; then
+        rm -rf "$copy"
+        echo "the key in $ssh_dir went away before it was copied (another job took it): record pushes with the default keys" >&2
+        exit 0
+    fi
     chmod 600 "$copy/key"
     forget ${keys[@]+"${keys[@]}"}
     echo "history key: $copy/key" >&2

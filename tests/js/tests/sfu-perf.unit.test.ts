@@ -107,7 +107,8 @@ describe("SFU perf metrics", () => {
   });
 
   it("writes sfu-<id>.json only when PERF_RESULTS_DIR is set", () => {
-    expect(writePerfResults("t3", result({ pipeWaitMs: 5 }), undefined)).to.equal(null);
+    // "" and not undefined: undefined would take the default, the caller's PERF_RESULTS_DIR.
+    expect(writePerfResults("t3", result({ pipeWaitMs: 5 }), "")).to.equal(null);
     const dir = mkdtempSync(join(tmpdir(), "sfu-perf-"));
     try {
       const file = writePerfResults("t3", result({ pipeWaitMs: 5 }), join(dir, "nested"));

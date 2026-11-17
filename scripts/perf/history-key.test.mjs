@@ -72,3 +72,21 @@ test("use with no matching key exports nothing and succeeds", { skip: !hasKeygen
   assert.match(u.stderr, /no key file/);
   assert.ok(fs.existsSync(s.key));
 });
+
+test("use whose key another job moved away first exports nothing and succeeds", { skip: !hasKeygen && "no ssh-keygen" }, (t) => {
+  const s = setup();
+  t.after(() => fs.rmSync(s.root, { recursive: true, force: true }));
+  // The other job's `forget` landing between this job's listing and its copy: a cp that finds
+  // no source.
+  const bin = path.join(s.root, "bin");
+  fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, "cp"), "#!/bin/sh\necho \"cp: cannot stat '$1': No such file or directory\" >&2\nexit 1\n", { mode: 0o755 });
+  const u = spawnSync("bash", [script, "use", s.fp], {
+    env: { ...process.env, PERF_SSH_DIR: path.dirname(s.key), TMPDIR: s.tmp, CIRCLE_BUILD_NUM: "4242", PATH: `${bin}:${process.env.PATH}` },
+    encoding: "utf8",
+  });
+  assert.equal(u.status, 0, u.stderr);
+  assert.equal(u.stdout, "", "no key exported");
+  assert.match(u.stderr, /went away before it was copied/);
+  assert.ok(!fs.existsSync(s.copy), "no empty copy dir left");
+});
