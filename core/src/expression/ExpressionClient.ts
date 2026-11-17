@@ -5,6 +5,9 @@ import { Literal } from "../Literal";
 import { createPersistentCache } from "../cache/PersistentCache";
 import { KeyedCache, StoredEntry } from "../cache/KeyedCache";
 
+/** Most URLs the executor takes in one `expression.getMany` call. */
+const MAX_URLS_PER_CALL = 200;
+
 export class ExpressionClient {
     #apiClient: ApiClient
 
@@ -15,8 +18,8 @@ export class ExpressionClient {
 
     // A `get` miss is its own `expression.get`, so it waits for no slower
     // expression and has its own call timeout. The misses of the `getMany`
-    // calls made in one tick go out in one `expression.getMany`, which answers
-    // per URL what `expression.get` would.
+    // calls made in one tick go out in `expression.getMany` calls of at most
+    // MAX_URLS_PER_CALL URLs, which answer per URL what `expression.get` would.
     #expressions: KeyedCache<ExpressionRendered>;
 
     constructor(baseUrl: string, token?: string, sharedApiClient?: ApiClient) {
@@ -25,6 +28,7 @@ export class ExpressionClient {
             load: (url) => this.#apiClient.call('expression.get', { url }),
             loadMany: async (urls) => (await this.#apiClient.call('expression.getMany', { urls })).map(entry =>
                 entry && 'code' in entry ? new RpcError(entry.code, entry.message) : entry as ExpressionRendered | null),
+            maxBatch: MAX_URLS_PER_CALL,
             persistent: createPersistentCache<StoredEntry<ExpressionRendered>>('ad4m-expression-cache', 'expressions'),
             limits: () => ({ entries: ExpressionClient.MAX_MEM_ENTRIES, bytes: ExpressionClient.MAX_MEM_BYTES }),
         });
@@ -50,7 +54,7 @@ export class ExpressionClient {
 
     /**
      * The expressions at `urls`, in order (`null` when not found); the misses go
-     * out in one call. Rejects with the `RpcError` `get` gives when a URL's read fails.
+     * out in calls of at most 200 URLs. Rejects with the `RpcError` `get` gives when a URL's read fails.
      */
     async getMany(urls: string[]): Promise<ExpressionRendered[]> {
         return this.#expressions.getMany(urls);

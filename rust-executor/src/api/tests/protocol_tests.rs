@@ -392,3 +392,25 @@ async fn agents_by_dids_rejects_more_than_the_cap() {
         .expect_err("over the cap");
     assert_eq!(err.code, 400);
 }
+
+#[tokio::test]
+async fn expressions_get_many_rejects_more_than_the_cap() {
+    use crate::api::expressions_ws::MAX_EXPRESSIONS_GET_MANY;
+    init_agent();
+    // URLs that do not parse resolve to `null` without a language lookup.
+    let at_cap: Vec<String> = (0..MAX_EXPRESSIONS_GET_MANY)
+        .map(|i| format!("not-an-expression-url-{i}"))
+        .collect();
+    let reply = call("expression.getMany", json!({ "urls": at_cap }), admin_ctx())
+        .await
+        .expect("the cap itself is allowed");
+    assert_eq!(reply.as_array().unwrap().len(), MAX_EXPRESSIONS_GET_MANY);
+
+    // Duplicates count toward the cap: it bounds the reply, not the lookups.
+    let over: Vec<&str> = vec!["not-an-expression-url"; MAX_EXPRESSIONS_GET_MANY + 1];
+    let err = call("expression.getMany", json!({ "urls": over }), admin_ctx())
+        .await
+        .expect_err("over the cap");
+    assert_eq!(err.code, 400);
+    assert!(err.message.contains("the limit is"), "{}", err.message);
+}
