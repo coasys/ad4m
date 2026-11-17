@@ -1,6 +1,5 @@
 use super::fallback_sync::{fallback_push_refused, ShareScope};
 use super::hosted_status;
-use super::model_query::is_safe_iri_target;
 use super::model_query::load_shape_from_store;
 use super::model_query::shape::find_class;
 use super::model_query::types::{ModelShape, ShapeResolver};
@@ -5384,52 +5383,9 @@ impl PerspectiveInstance {
                 }
             }
         } else {
-            let uri = match value {
-                serde_json::Value::String(s) => {
-                    // If the value is already a well-formed absolute IRI, store it as a
-                    // raw NamedNode target. Otherwise wrap it in a `literal:string:*`
-                    // URI so link targets are always valid IRIs and stay round-trippable
-                    // through the query side. The predicate is shared with
-                    // `model_query::utils::looks_like_absolute_iri` — see
-                    // `is_safe_iri_target` for why they MUST agree.
-                    if is_safe_iri_target(s) {
-                        s.clone()
-                    } else {
-                        Literal::from_string(s.clone())
-                            .to_url()
-                            .map_err(|e| anyhow!("Failed to encode string as literal URI: {}", e))?
-                    }
-                }
-                serde_json::Value::Number(n) => {
-                    if let Some(f) = n.as_f64() {
-                        Literal::from_number(f)
-                            .to_url()
-                            .map_err(|e| anyhow!("Failed to encode number as literal URI: {}", e))?
-                    } else {
-                        Literal::from_string(value.to_string())
-                            .to_url()
-                            .map_err(|e| anyhow!("Failed to encode number as literal URI: {}", e))?
-                    }
-                }
-                // Booleans become deterministic `literal:boolean:` IRIs, matching
-                // the TS `valueToLiteralIri` / `Literal` encoding. The storage
-                // layer turns these into typed `xsd:boolean` terms for indexed
-                // WHERE matching, and the read path decodes them back to a JSON
-                // bool. The Rust `Literal` helper has no boolean variant, so we
-                // format the wire form directly.
-                serde_json::Value::Bool(b) => format!("literal:boolean:{b}"),
-                // Objects / arrays become deterministic `literal:json:` IRIs so
-                // they round-trip back to JSON values rather than being stored
-                // as raw `value.to_string()` targets (which the storage layer
-                // would keep as opaque NamedNode IRIs and read back as strings).
-                serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
-                    Literal::from_json(value.clone())
-                        .to_url()
-                        .map_err(|e| anyhow!("Failed to encode JSON as literal URI: {}", e))?
-                }
-                serde_json::Value::Null => value.to_string(),
-            };
-            Ok(uri)
+            // Deterministic `literal:` storage — shared with the mount
+            // engine, which expands records through the same encoding.
+            super::model_query::utils::literal_target(value)
         }
     }
 
