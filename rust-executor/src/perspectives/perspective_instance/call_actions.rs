@@ -325,19 +325,18 @@ impl PerspectiveInstance {
         Ok(parse_call_result(result.as_deref()))
     }
 
-    /// Where the delta a `call` returns becomes links. A stub until A4:
-    /// the call is made and the delta parsed, nothing is written.
-    async fn apply_call_delta(
-        &self,
-        lang_address: &str,
-        delta: &MountDelta,
-        _context: &AgentContext,
-    ) {
-        log::debug!(
-            "call action on {lang_address}: delta of {} changed / {} removed not applied yet (A4)",
-            delta.changed.len(),
-            delta.removed.len()
-        );
+    /// Where the delta a `call` returns becomes links: the same per-record
+    /// expansion `sync_mount` runs, so a created record is queryable before
+    /// the call's RPC returns (A4). A failure is logged, not fatal — the
+    /// next `sync_mount` converges the store with the snapshot anyway.
+    async fn apply_call_delta(&self, lang_address: &str, delta: &MountDelta, _context: &AgentContext) {
+        if let Err(e) = self
+            .clone()
+            .apply_mount_delta(lang_address, delta)
+            .await
+        {
+            log::warn!("call action on {lang_address}: applying its delta failed: {e}");
+        }
     }
 
     /// `create_subject` for a class whose constructor calls into a
