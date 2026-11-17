@@ -38,7 +38,27 @@ struct RpcResponse {
 struct RpcError {
     code: Option<i32>,
     message: Option<String>,
+    data: Option<Value>,
 }
+
+/// An error reply from the executor. `call` returns it inside the `anyhow::Error`, so a caller
+/// reads the code and the structured `data` with `err.downcast_ref::<RpcCallError>()`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RpcCallError {
+    pub code: i32,
+    pub message: String,
+    /// The reply's `error.data`, when the executor attached some (e.g. the `InstanceError` of a
+    /// refused `perspective.instance*` write).
+    pub data: Option<Value>,
+}
+
+impl std::fmt::Display for RpcCallError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "RPC error {}: {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for RpcCallError {}
 
 type PendingMap = Arc<Mutex<HashMap<String, oneshot::Sender<Result<Value>>>>>;
 type WsSink = futures_util::stream::SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>;
@@ -118,11 +138,11 @@ impl WsRpcClient {
                     };
                     if let Some(tx) = pending_reader.lock().await.remove(&id) {
                         if let Some(error) = resp.error {
-                            let _ = tx.send(Err(anyhow!(
-                                "RPC error {}: {}",
-                                error.code.unwrap_or(500),
-                                error.message.unwrap_or_default()
-                            )));
+                            let _ = tx.send(Err(anyhow::Error::new(RpcCallError {
+                                code: error.code.unwrap_or(500),
+                                message: error.message.unwrap_or_default(),
+                                data: error.data,
+                            })));
                         } else {
                             let _ = tx.send(Ok(resp.result.unwrap_or(Value::Null)));
                         }

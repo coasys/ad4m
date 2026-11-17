@@ -46,6 +46,7 @@ use super::ws_handler::{HandlerMap, NoParams, WsRpcError};
 /// unless they raced the boot sequence.
 fn service() -> Result<Arc<crate::sfu::SfuService>, WsRpcError> {
     get_sfu_service().ok_or_else(|| WsRpcError {
+        data: None,
         code: 503,
         message: "SFU service not yet available".to_string(),
     })
