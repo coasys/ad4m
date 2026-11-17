@@ -11,8 +11,9 @@ let counter = 0;
 // version reported by mountShapes(); setVersion changes it so a remount
 // can be told apart from the first install
 let mountVersion = "2";
-// the classes mountShapes() reports: [{ name, target }]; setShapes changes
-// them so tests can collide with another mount's names and class IRIs
+// the classes mountShapes() reports: [{ name, target, nodeShapeUri? }];
+// setShapes changes them so tests can collide with another mount's names,
+// class IRIs and shape nodes
 let shapeClasses = [{ name: CLASS, target: "mounttest://Thing" }];
 // mountSnapshot() throws this message while it is set (setSnapshotFault)
 let snapshotFailure = null;
@@ -59,7 +60,7 @@ export function interactions(address) {
       // Change the version mountShapes() reports (tests re-install on version change).
       { label: "Set version", name: "setVersion", parameters: [],
         execute: async (params) => { mountVersion = plain(params).version; return true; } },
-      // Change the classes mountShapes() reports: { shapes: [{ name, target }], version }.
+      // Change the classes mountShapes() reports: { shapes: [{ name, target, nodeShapeUri? }], version }.
       { label: "Set shapes", name: "setShapes", parameters: [],
         execute: async (params) => {
           const p = plain(params);
@@ -123,9 +124,10 @@ export function mountShapes() {
   const update = [{ action: "call", source: "this", predicate: "update", target: "{}" }];
   return {
     version: mountVersion,
-    shapes: shapeClasses.map(({ name, target }) => ({
+    shapes: shapeClasses.map(({ name, target, nodeShapeUri }) => ({
       name,
       shape: {
+        ...(nodeShapeUri ? { node_shape_uri: nodeShapeUri } : {}),
         target_class: target,
         constructor_actions: [{ action: "call", source: lang + "://class/" + name, predicate: "create", target: "{}" }],
         destructor_actions: [{ action: "call", source: "this", predicate: "delete", target: "{}" }],

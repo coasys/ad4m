@@ -1,6 +1,6 @@
 //! What a mount owns, and what it leaves alone: links someone else wrote
-//! under `<lang>://`, whatever their timestamp, and the schema a newer
-//! sync installed.
+//! under `<lang>://`, whatever their timestamp, the schema a newer sync
+//! installed, and another mount's shape nodes.
 
 use super::mount_gates::gates;
 use super::mount_gates::MountPoint;
@@ -143,4 +143,48 @@ async fn an_older_sync_does_not_roll_back_newer_shapes() {
         vec!["literal:string:3".to_string()],
         "the older sync reinstalled its shapes"
     );
+}
+
+// --- Shape nodes and declared names are owned too ---------------------------
+
+#[tokio::test]
+async fn a_shape_node_of_another_mount_is_refused() {
+    let lang = load_mount_test_language().await;
+    let lang2 = load_mount_test_language().await;
+    project(
+        &lang,
+        "setShapes",
+        json!({"shapes": [{"name": "XFoo", "target": "a://XFoo"}]}),
+    )
+    .await;
+    // Name, basename and IRI all differ; only the shape node is `lang`'s.
+    project(
+        &lang2,
+        "setShapes",
+        json!({"shapes": [{"name": "Foo", "target": "b://Foo", "nodeShapeUri": "a://XFooShape"}]}),
+    )
+    .await;
+    let (mut p, _ctx) = mounted(&lang).await;
+
+    let error = p.mount(&lang2).await.unwrap_err();
+    assert!(error.to_string().contains("a://XFooShape"), "{error}");
+}
+
+#[tokio::test]
+async fn one_shape_set_naming_a_class_twice_is_refused() {
+    let lang = load_mount_test_language().await;
+    project(
+        &lang,
+        "setShapes",
+        json!({"shapes": [
+            {"name": "Dup", "target": "mounttest://DupA"},
+            {"name": "Dup", "target": "mounttest://DupB"}
+        ]}),
+    )
+    .await;
+    let (mut p, _shapes, _ctx) =
+        crate::perspectives::interpretation_test_support::setup_perspective_no_llm(&[]).await;
+
+    let error = p.mount(&lang).await.unwrap_err();
+    assert!(error.to_string().contains("Dup"), "{error}");
 }
