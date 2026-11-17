@@ -57,6 +57,14 @@ pub(super) struct ReadTargets {
 /// The generation an unresolved subscription records: never a real one.
 pub(super) const UNRESOLVED: u64 = u64::MAX;
 
+/// What [`PerspectiveInstance::update_through_abstract`] built: the
+/// `execute_commands` runs and, beside them, the language calls a `call`
+/// action asks for — made before the runs, outside any batch (§3.3).
+pub(super) struct AbstractWrite {
+    pub(super) runs: Vec<Run>,
+    pub(super) calls: Vec<CallRun>,
+}
+
 impl PerspectiveInstance {
     /// Drop every cached shape, and what was derived from them.
     pub(super) fn clear_shape_cache(&self) {
@@ -294,21 +302,27 @@ impl PerspectiveInstance {
         base: &str,
         values: &Value,
         context: &AgentContext,
-    ) -> Result<Vec<Run>, AnyError> {
+    ) -> Result<AbstractWrite, AnyError> {
         let mut has_child = Vec::new();
         if abstract_class == CONTAINER_URI {
             if let Some(write) = self.has_child_write(base, values).await? {
                 if !write.beside_own {
-                    return Ok(vec![Run {
-                        commands: write.commands,
-                        parameters: vec![],
-                    }]);
+                    return Ok(AbstractWrite {
+                        runs: vec![Run {
+                            commands: write.commands,
+                            parameters: vec![],
+                        }],
+                        calls: vec![],
+                    });
                 }
                 has_child = write.commands;
             }
         }
         let Value::Object(values) = values else {
-            return Ok(vec![]);
+            return Ok(AbstractWrite {
+                runs: vec![],
+                calls: vec![],
+            });
         };
         let (alias_key, shape) = self.abstract_shape(abstract_class)?;
         let names: HashSet<&str> = shape
@@ -337,6 +351,7 @@ impl PerspectiveInstance {
         let targets = self.write_targets(abstract_class, base)?;
         let mut commands = Vec::new();
         let mut runs = Vec::new();
+        let mut call_groups: BTreeMap<(String, String), CallRun> = BTreeMap::new();
         for (name, value) in values {
             let membership = memberships.contains(name.as_str());
             let (op, value) = match membership {
@@ -354,7 +369,42 @@ impl PerspectiveInstance {
                     continue;
                 };
                 has_action = true;
-                let actions: Vec<Command> = actions
+                // A `call` is made, not written: split it out before the
+                // dedupe below, which keys on (action, source, predicate)
+                // and would collapse two properties that share one
+                // interaction into the first. The params carry the
+                // concrete name `own`, not the abstract `name`.
+                let where_ = format!("{class}.{own}");
+                let (call_commands, link_commands) = Self::partition_actions(actions, &where_)?;
+                if !call_commands.is_empty() {
+                    let items: Vec<Value> = match op {
+                        Op::Set => vec![value.clone()],
+                        _ => match value {
+                            Value::Array(items) => items.clone(),
+                            Value::Null => {
+                                return Err(anyhow!(
+                                    "'{own}' of '{class}': null names no members. \
+                                     Pass [] to clear it."
+                                ))
+                            }
+                            single => vec![single.clone()],
+                        },
+                    };
+                    for command in &call_commands {
+                        for item in &items {
+                            let mut one = serde_json::Map::new();
+                            one.insert(own.to_string(), item.clone());
+                            Self::group_call(
+                                &mut call_groups,
+                                command,
+                                Some(base),
+                                one,
+                                &where_,
+                            )?;
+                        }
+                    }
+                }
+                let actions: Vec<Command> = link_commands
                     .into_iter()
                     .filter(|c| {
                         let key = (c.action.clone(), c.source.clone(), c.predicate.clone());
@@ -412,7 +462,10 @@ impl PerspectiveInstance {
                 },
             );
         }
-        Ok(runs)
+        Ok(AbstractWrite {
+            runs,
+            calls: call_groups.into_values().collect(),
+        })
     }
 
     /// The actions of `class` that do `op` to its property `own`. Setting a
@@ -616,10 +669,12 @@ impl PerspectiveInstance {
         context: &AgentContext,
     ) -> Result<(), AnyError> {
         let value = serde_json::json!({ "children": { "action": "adder", "value": [child] } });
-        let runs = self
+        let write = self
             .update_through_abstract(CONTAINER_URI, parent, &value, context)
             .await?;
-        self.execute_runs(runs, parent.to_string(), batch_id, context)
+        self.run_call_actions(&write.calls, batch_id.as_deref(), context)
+            .await?;
+        self.execute_runs(write.runs, parent.to_string(), batch_id, context)
             .await
     }
 

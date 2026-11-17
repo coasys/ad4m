@@ -5987,11 +5987,14 @@ impl PerspectiveInstance {
         // Through an abstract class (#1435): each of the record's classes it
         // reads writes the value with its own setter.
         if self.is_abstract_class(&class_name)? {
-            let runs = self
+            let write = self
                 .update_through_abstract(&class_name, &expression_address, &values, context)
                 .await?;
+            // Its calls run before the link runs, outside any batch.
+            self.run_call_actions(&write.calls, batch_id.as_deref(), context)
+                .await?;
             return self
-                .execute_runs(runs, expression_address, batch_id, context)
+                .execute_runs(write.runs, expression_address, batch_id, context)
                 .await;
         }
 
