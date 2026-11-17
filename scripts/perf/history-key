@@ -37,14 +37,18 @@ forget() {
     for key in "$@"; do
         rm -f "$key" "$key.pub"
         [ -f "$config" ] || continue
-        kept=$(awk -v k="$(basename "$key")" '!($1 == "IdentityFile" && (index($2, "/" k) || $2 == k))' "$config")
+        # The whole file name: `id_rsa_abc` must not take `id_rsa_abc_backup`'s line.
+        kept=$(awk -v k="$(basename "$key")" '!($1 == "IdentityFile" && (n = split($2, p, "/")) && p[n] == k)' "$config")
         printf '%s\n' "$kept" >"$config"
     done
 }
 
+# `keys` = matches, one per line (no mapfile: bash 3.2, as on macOS, has none).
+keys=()
+while IFS= read -r key; do keys+=("$key"); done < <(matches)
+
 case "$cmd" in
 use)
-    mapfile -t keys < <(matches)
     if [ "${#keys[@]}" -eq 0 ]; then
         echo "no key file in $ssh_dir matches $want: record pushes with the default keys" >&2
         exit 0
@@ -58,7 +62,6 @@ use)
     echo "export PERF_HISTORY_SSH_KEY=\"$copy/key\""
     ;;
 clean)
-    mapfile -t keys < <(matches)
     forget ${keys[@]+"${keys[@]}"}
     rm -rf "$copy"
     ;;

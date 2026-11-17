@@ -21,10 +21,12 @@ function setup() {
   const other = path.join(ssh, "id_rsa_other");
   for (const k of [key, other]) execFileSync("ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-f", k]);
   const fp = execFileSync("ssh-keygen", ["-l", "-E", "sha256", "-f", key], { encoding: "utf8" }).split(" ")[1];
-  fs.writeFileSync(path.join(ssh, "config"), `Host !github.com *\n  IdentityFile ${key}\n  IdentityFile ${other}\nHost example\n  User git\n`);
+  // `${key}_backup`: another key whose name starts with this one's; its line must stay.
+  fs.writeFileSync(path.join(ssh, "config"), `Host !github.com *\n  IdentityFile ${key}\n  IdentityFile ${key}_backup\n  IdentityFile ${other}\nHost example\n  User git\n`);
   const env = { ...process.env, PERF_SSH_DIR: ssh, TMPDIR: tmp, CIRCLE_BUILD_NUM: "4242" };
   const run = (...args) => spawnSync("bash", [script, ...args], { env, encoding: "utf8" });
-  const config = () => fs.readFileSync(path.join(ssh, "config"), "utf8");
+  // The config's lines, trimmed: a line is kept or dropped whole.
+  const config = () => fs.readFileSync(path.join(ssh, "config"), "utf8").split("\n").map((l) => l.trim());
   return { root, key, other, fp, tmp, run, config, copy: path.join(tmp, "ad4m-perf-key-4242") };
 }
 
@@ -38,7 +40,9 @@ test("use moves the key to the build's copy and drops its config line; clean rem
   assert.equal(fs.statSync(path.join(s.copy, "key")).mode & 0o777, 0o600);
   assert.ok(!fs.existsSync(s.key) && !fs.existsSync(`${s.key}.pub`));
   assert.ok(fs.existsSync(s.other), "another key stays");
-  assert.ok(!s.config().includes(s.key) && s.config().includes(s.other) && s.config().includes("Host example"));
+  assert.ok(!s.config().includes(`IdentityFile ${s.key}`));
+  assert.ok(s.config().includes(`IdentityFile ${s.key}_backup`), "a longer name that starts with the key's stays");
+  assert.ok(s.config().includes(`IdentityFile ${s.other}`) && s.config().includes("Host example"));
 
   const c = s.run("clean", s.fp);
   assert.equal(c.status, 0, c.stderr);
@@ -55,7 +59,8 @@ test("clean after a use that never ran removes the key from ~/.ssh and its confi
   const c = s.run("clean", s.fp);
   assert.equal(c.status, 0, c.stderr);
   assert.ok(!fs.existsSync(s.key) && !fs.existsSync(s.copy));
-  assert.ok(!s.config().includes(s.key) && s.config().includes(s.other));
+  assert.ok(!s.config().includes(`IdentityFile ${s.key}`) && s.config().includes(`IdentityFile ${s.key}_backup`));
+  assert.ok(s.config().includes(`IdentityFile ${s.other}`));
 });
 
 test("use with no matching key exports nothing and succeeds", { skip: !hasKeygen && "no ssh-keygen" }, (t) => {
