@@ -1,81 +1,110 @@
-//! The links a mount writes, told apart from everyone else's. A mount
-//! signs every `Local` link it writes (records, its version link, its
-//! class claims) as the main agent at one fixed timestamp,
-//! [`MOUNT_TIMESTAMP`], instead of the time of writing. So:
+//! The links a mount writes, told apart from everyone else's by a ledger
+//! in the store: every `Local` link a mount writes (records, its version
+//! link, its class claims) is stored together with an
+//! `ad4m://ontology/mountedBy <lang>` mark on its reifier
+//! (`SparqlStore::add_mount_links`), in one transaction. The mark is in the
+//! store's own metadata vocabulary, which every link write and import
+//! refuses (`is_link_metadata`), so only the mount engine can set it; it
+//! goes with the reifier when the link is removed.
 //!
-//! - a mount removes only links that carry it ([`is_mount_written`]): a
-//!   user's own `Local` link under `<lang>://`, or a `Shared` one on a
-//!   bookkeeping predicate, is never swept, even when its triple equals
-//!   one the mount wrote (the store keeps a triple while any reifier
-//!   holds it);
-//! - the same link always has the same identity (the reifier hashes
-//!   author, triple and timestamp), so a link written twice is one link,
-//!   and the mirror can be dropped and rebuilt to the same state.
-//!
-//! The mirror is derived data: nothing reads a mounted link's time.
+//! A mount removes only links it marked ([`MountWritten`]). A user's or
+//! app's own link under `<lang>://` — any author, any timestamp, even the
+//! same triple as a mounted value — is never swept or adopted, and a
+//! `Shared` link on a bookkeeping predicate is never touched.
 
-use chrono::{DateTime, Utc};
+use std::collections::HashMap;
+use std::collections::HashSet;
+
 use deno_core::error::AnyError;
 
 use super::PerspectiveInstance;
-use crate::agent::{did_for_context, sign_for_context, signing_key_id_for_context, AgentContext};
+use crate::agent::{create_signed_expression, AgentContext};
+use crate::perspectives::sparql_store::SparqlStore;
 use crate::types::{
-    DecoratedLinkExpression, DecoratedPerspectiveDiff, Expression, ExpressionProof, Link,
-    LinkExpression, LinkStatus, PerspectiveDiff,
+    DecoratedLinkExpression, DecoratedPerspectiveDiff, Link, LinkExpression, LinkStatus,
 };
 
-/// The timestamp of every link a mount writes: the Unix epoch, as
-/// `create_signed_expression` renders a time.
-pub(super) const MOUNT_TIMESTAMP: &str = "1970-01-01T00:00:00.000Z";
+/// The reifiers one mount wrote, as the ledger lists them.
+pub(super) struct MountWritten(HashSet<String>);
 
-/// Whether the mount wrote `link`: `Local`, at [`MOUNT_TIMESTAMP`].
-pub(super) fn is_mount_written(link: &DecoratedLinkExpression) -> bool {
-    link.status == Some(LinkStatus::Local) && link.timestamp == MOUNT_TIMESTAMP
+impl MountWritten {
+    /// Whether the mount wrote `link` (and it is still `Local`).
+    pub(super) fn contains(&self, link: &DecoratedLinkExpression) -> bool {
+        link.status == Some(LinkStatus::Local)
+            && self
+                .0
+                .contains(&SparqlStore::reifier_of(&LinkExpression::from(link.clone())))
+    }
 }
 
-/// `link` signed by the main agent at [`MOUNT_TIMESTAMP`].
-fn mount_link_expression(link: Link) -> Result<LinkExpression, AnyError> {
-    let context = AgentContext::main_agent();
-    let data = link.normalize();
-    let signature = hex::encode(sign_for_context(
-        &crate::agent::signatures::hash_data_and_timestamp(&data, &DateTime::<Utc>::UNIX_EPOCH),
-        &context,
-    )?);
-    Ok(LinkExpression::from(Expression {
-        author: did_for_context(&context)?,
-        timestamp: MOUNT_TIMESTAMP.to_string(),
-        data,
-        proof: ExpressionProof {
-            key: signing_key_id_for_context(&context)?,
-            signature,
-        },
-    }))
+/// [`MountWritten`] per mounted language, read once per language.
+pub(super) struct MountWrittenByLanguage<'a> {
+    perspective: &'a PerspectiveInstance,
+    read: HashMap<String, MountWritten>,
+}
+
+impl MountWrittenByLanguage<'_> {
+    /// Whether the mount of `lang` wrote `link`.
+    pub(super) fn wrote(
+        &mut self,
+        lang: &str,
+        link: &DecoratedLinkExpression,
+    ) -> Result<bool, AnyError> {
+        if !self.read.contains_key(lang) {
+            let written = self.perspective.mount_written(lang)?;
+            self.read.insert(lang.to_string(), written);
+        }
+        Ok(self.read[lang].contains(link))
+    }
 }
 
 impl PerspectiveInstance {
-    /// Write `links` as the mount's own `Local` links — `add_links`
-    /// without a batch, signed at [`MOUNT_TIMESTAMP`]: stored, then Prolog
-    /// facts and the link events as for any write (`Local`: no commit).
-    /// Returns how many it wrote.
-    pub(super) async fn add_mount_links(&mut self, links: Vec<Link>) -> Result<usize, AnyError> {
+    /// The links the mount of `lang` wrote.
+    pub(super) fn mount_written(&self, lang: &str) -> Result<MountWritten, AnyError> {
+        Ok(MountWritten(self.sparql_store.mount_written(lang)?))
+    }
+
+    /// A [`MountWrittenByLanguage`] over this perspective.
+    pub(super) fn mount_written_by_language(&self) -> MountWrittenByLanguage<'_> {
+        MountWrittenByLanguage {
+            perspective: self,
+            read: HashMap::new(),
+        }
+    }
+
+    /// Write `links` as the mount of `lang`'s own `Local` links, signed by
+    /// the main agent: stored and marked in one transaction (under
+    /// `persist_lock`, as every store write), then Prolog facts and the
+    /// link events as for any write (`Local`: no commit). Returns how many
+    /// it wrote.
+    pub(super) async fn add_mount_links(
+        &mut self,
+        lang: &str,
+        links: Vec<Link>,
+    ) -> Result<usize, AnyError> {
+        let context = AgentContext::main_agent();
         let mut expressions = Vec::with_capacity(links.len());
         for link in links {
             link.validate()?;
-            let mut expression = mount_link_expression(link)?;
+            let mut expression =
+                LinkExpression::from(create_signed_expression(link.normalize(), &context)?);
             expression.status = Some(LinkStatus::Local);
             expressions.push(expression);
         }
+        {
+            let _persisting = self
+                .persist_lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            self.sparql_store.add_mount_links(&expressions, lang)?;
+        }
         let count = expressions.len();
-        let mut decorated = DecoratedPerspectiveDiff::from_additions(
+        let decorated = DecoratedPerspectiveDiff::from_additions(
             expressions
-                .iter()
-                .cloned()
+                .into_iter()
                 .map(|l| DecoratedLinkExpression::from((l, LinkStatus::Local)))
                 .collect(),
         );
-        self.persist_link_diff(&PerspectiveDiff::from_additions(expressions))
-            .await?
-            .fold_into(&mut decorated);
         self.spawn_prolog_facts_update(decorated.clone(), None);
         self.pubsub_publish_diff(&decorated).await;
         Ok(count)

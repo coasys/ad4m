@@ -9,7 +9,7 @@
 //! writes and language-emitted changes).
 //!
 //! Ownership: the mount owns the `Local` links it wrote under `<lang>://`
-//! (`mount_links`: signed at a fixed timestamp) — `unmount` deletes them
+//! (`mount_links`: marked in the store's ledger) — `unmount` deletes them
 //! all, and no sync or delta touches anyone else's link there. The mount's own
 //! bookkeeping (the version link under `<lang>://project`) is exempt from
 //! the snapshot sweep. Which classes a mount owns is recorded outside its
@@ -29,7 +29,6 @@ use tokio::time::sleep;
 
 use super::mount_gates::{pause, MountPoint};
 use super::mount_lifecycle::{next_mount_seq, MountPhase, MountSlot};
-use super::mount_links::is_mount_written;
 use super::{PerspectiveInstance, SdnaType};
 use crate::agent::AgentContext;
 use crate::languages::mount_types::{MountDelta, MountEntry, MountShapes, MountSyncReport};
@@ -169,11 +168,12 @@ impl PerspectiveInstance {
     /// bookkeeping).
     async fn remove_written_under(&mut self, lang_address: &str) -> Result<(), AnyError> {
         let prefix = format!("{lang_address}://");
+        let written = self.mount_written(lang_address)?;
         let doomed: Vec<LinkExpression> = self
             .get_links(&LinkQuery::default())
             .await?
             .into_iter()
-            .filter(|l| l.data.source.starts_with(&prefix) && is_mount_written(l))
+            .filter(|l| l.data.source.starts_with(&prefix) && written.contains(l))
             .map(LinkExpression::from)
             .collect();
         self.remove_links(doomed, None).await?;
@@ -361,6 +361,7 @@ impl PerspectiveInstance {
                 continue;
             }
             slot.delta_applied(address, seq);
+            let written = self.mount_written(lang_address)?;
             let doomed: Vec<LinkExpression> = self
                 .get_links(&LinkQuery {
                     source: Some(format!("{lang_address}://{address}")),
@@ -368,7 +369,7 @@ impl PerspectiveInstance {
                 })
                 .await?
                 .into_iter()
-                .filter(|l| is_mount_written(l) && !is_bookkeeping(l.data.predicate.as_deref()))
+                .filter(|l| written.contains(l) && !is_bookkeeping(l.data.predicate.as_deref()))
                 .map(LinkExpression::from)
                 .collect();
             report.removed += self.remove_links(doomed, None).await?.len();
@@ -599,7 +600,7 @@ impl PerspectiveInstance {
             predicate: Some(VERSION_PREDICATE.to_string()),
             target: literal_target(&Value::String(shapes.version.clone()))?,
         };
-        self.add_mount_links(vec![version]).await?;
+        self.add_mount_links(lang_address, vec![version]).await?;
         Ok(())
     }
 
@@ -651,6 +652,7 @@ impl PerspectiveInstance {
 
     /// Delete the bookkeeping links the mount wrote under `<lang>://project`.
     async fn remove_bookkeeping(&mut self, lang_address: &str) -> Result<(), AnyError> {
+        let written = self.mount_written(lang_address)?;
         let doomed: Vec<LinkExpression> = self
             .get_links(&LinkQuery {
                 source: Some(mount_target(lang_address)),
@@ -658,7 +660,7 @@ impl PerspectiveInstance {
             })
             .await?
             .into_iter()
-            .filter(|l| is_mount_written(l) && is_bookkeeping(l.data.predicate.as_deref()))
+            .filter(|l| written.contains(l) && is_bookkeeping(l.data.predicate.as_deref()))
             .map(LinkExpression::from)
             .collect();
         self.remove_links(doomed, None).await?;
@@ -675,7 +677,8 @@ impl PerspectiveInstance {
                 ..Default::default()
             })
             .await?;
-        Ok(links.iter().find(|l| is_mount_written(l)).and_then(|l| {
+        let written = self.mount_written(lang_address)?;
+        Ok(links.iter().find(|l| written.contains(l)).and_then(|l| {
             match parse_literal_value(&l.data.target) {
                 Value::String(s) => Some(s),
                 _ => None,
@@ -690,12 +693,13 @@ impl PerspectiveInstance {
         lang_address: &str,
     ) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
         let prefix = format!("{lang_address}://");
+        let written = self.mount_written(lang_address)?;
         Ok(self
             .get_links(&LinkQuery::default())
             .await?
             .into_iter()
             .filter(|l| {
-                is_mount_written(l)
+                written.contains(l)
                     && l.data.source.starts_with(&prefix)
                     && !is_bookkeeping(l.data.predicate.as_deref())
             })
@@ -722,6 +726,7 @@ impl PerspectiveInstance {
             .map(|l| (l.predicate.clone(), l.target.clone()))
             .collect();
 
+        let written = self.mount_written(lang_address)?;
         let current = self
             .get_links(&LinkQuery {
                 source: Some(source.clone()),
@@ -729,7 +734,7 @@ impl PerspectiveInstance {
             })
             .await?
             .into_iter()
-            .filter(|l| is_mount_written(l) && !is_bookkeeping(l.data.predicate.as_deref()))
+            .filter(|l| written.contains(l) && !is_bookkeeping(l.data.predicate.as_deref()))
             .collect::<Vec<_>>();
         pause(lang_address, MountPoint::EntryRead).await;
 
@@ -759,7 +764,7 @@ impl PerspectiveInstance {
             report.removed += self.remove_links(doomed, None).await?.len();
         }
         if !additions.is_empty() {
-            report.added += self.add_mount_links(additions).await?;
+            report.added += self.add_mount_links(lang_address, additions).await?;
         }
         Ok(report)
     }
