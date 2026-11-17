@@ -134,6 +134,14 @@ const WATCH_SEND_TIMEOUT: Duration = Duration::from_secs(5);
 /// write, instead of pinning `pending` and `sink` for the whole call (N2).
 /// Close and disconnect still unwind it at once through `send_abort`.
 const CALL_SEND_TIMEOUT: Duration = DEFAULT_TIMEOUT;
+/// Bound on one reconnect dial, TCP connect and WebSocket upgrade
+/// together: a peer that accepts TCP but never answers the upgrade must
+/// not pin the one supervisor that ever dials. On expiry the attempt is
+/// dropped and the backoff loop dials again.
+#[cfg(not(test))]
+const RECONNECT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(test)]
+const RECONNECT_HANDSHAKE_TIMEOUT: Duration = Duration::from_millis(1_500);
 
 /// A reader task that is not installed yet: dropping the guard aborts it.
 /// The supervisor holds its fresh socket's reader in one until publication
@@ -637,7 +645,20 @@ impl WsRpcClient {
                     backoff_delay_ms(failures, RECONNECT_BASE_DELAY_MS, RECONNECT_MAX_DELAY_MS);
                 tokio::time::sleep(Duration::from_millis(delay)).await;
 
-                match connect_async_with_config(&shared.url, Some(ws_config()), false).await {
+                let dial = tokio::time::timeout(
+                    RECONNECT_HANDSHAKE_TIMEOUT,
+                    connect_async_with_config(&shared.url, Some(ws_config()), false),
+                )
+                .await
+                .unwrap_or_else(|_| {
+                    Err(tokio_tungstenite::tungstenite::Error::Io(
+                        std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "WebSocket handshake timed out",
+                        ),
+                    ))
+                });
+                match dial {
                     Ok((ws_stream, _)) => {
                         let (mut write, read) = ws_stream.split();
                         // The epoch this install owns: the reader does not
@@ -2183,6 +2204,65 @@ mod tests {
             "Error should contain message: {}",
             err_msg
         );
+    }
+
+    /// A reconnect dial whose peer accepts TCP but never answers the
+    /// WebSocket upgrade is abandoned after the handshake bound, and the
+    /// supervisor dials again — rather than waiting on it forever.
+    #[tokio::test]
+    async fn a_stalled_reconnect_handshake_is_abandoned() {
+        use tokio::net::TcpListener;
+        use tokio_tungstenite::accept_async;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (dials_tx, mut dials_rx) = tokio::sync::mpsc::unbounded_channel::<u32>();
+        tokio::spawn(async move {
+            let mut count = 0;
+            let mut stalled = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                count += 1;
+                let _ = dials_tx.send(count);
+                if count == 2 {
+                    // TCP accepted, upgrade never answered.
+                    stalled.push(stream);
+                    continue;
+                }
+                tokio::spawn(async move {
+                    let mut ws = accept_async(stream).await.unwrap();
+                    while let Some(Ok(Message::Text(text))) = ws.next().await {
+                        let req: Value = serde_json::from_str(&text).unwrap();
+                        let reply = serde_json::json!({"id": req["id"], "result": true});
+                        if ws.send(Message::Text(reply.to_string())).await.is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+
+        let client = WsRpcClient::connect(&format!("http://{addr}"), "")
+            .await
+            .unwrap();
+        assert_eq!(dials_rx.recv().await, Some(1));
+        client.disconnect_for_testing().await;
+        let third = tokio::time::timeout(Duration::from_secs(10), async {
+            while let Some(n) = dials_rx.recv().await {
+                if n == 3 {
+                    return;
+                }
+            }
+        })
+        .await;
+        assert!(third.is_ok(), "the supervisor never gave up the stalled handshake");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !client.is_connected() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the client reconnects on the next dial");
+        client.close().await;
     }
 
     /// Dropping the last handle without `close()` shuts the client down:
