@@ -37,9 +37,12 @@ export class AgentClient {
 
   // byDID cache: concurrent misses go out in one `agent.byDIDs` call.
   #agents: KeyedCache<Agent>;
-  // The own profile is kept fresh by `agent-updated` events, so it has no TTL.
-  #selfDid: string | null = null;
-  /** TTL of other agents' profiles, in memory and in the persistent cache (ms). */
+  /**
+   * TTL of every cached profile, the own one too, in memory and in the
+   * persistent cache (ms). `agent-updated` only comes from this executor, so
+   * a profile changed through another executor of the same agent shows up
+   * when the entry expires.
+   */
   static REMOTE_AGENT_TTL_MS = 5 * 60_000; // 5 minutes
 
   constructor(baseUrl: string, token?: string, sharedApiClient?: ApiClient) {
@@ -48,21 +51,13 @@ export class AgentClient {
       loadMany: (dids) => this.#loadAgents(dids),
       maxBatch: MAX_DIDS_PER_CALL,
       persistent: createPersistentCache<StoredEntry<Agent>>('ad4m-agent-cache', 'agents'),
-      maxAgeMs: (did) => did === this.#selfDid ? Infinity : AgentClient.REMOTE_AGENT_TTL_MS,
+      maxAgeMs: () => AgentClient.REMOTE_AGENT_TTL_MS,
       persistentMaxAgeMs: () => AgentClient.REMOTE_AGENT_TTL_MS,
     });
   }
 
   async me(): Promise<Agent> {
-    const agentObject = toAgent(await this.#apiClient.call('agent.get', {}));
-
-    // Auto-set selfDid so event-driven cache invalidation works
-    // without requiring apps to call setSelfDid() manually
-    if (agentObject.did && !this.#selfDid) {
-      this.#selfDid = agentObject.did;
-    }
-
-    return agentObject;
+    return toAgent(await this.#apiClient.call('agent.get', {}));
   }
 
   async status(): Promise<AgentStatus> {
@@ -98,7 +93,7 @@ export class AgentClient {
    * for any DIDs share one `agent.byDIDs` request.
    */
   async byDID(did: string): Promise<Agent> {
-    // agent-updated events keep cached entries fresh (the self-DID entry has no TTL).
+    // agent-updated events refresh cached entries before their TTL runs out.
     this.#listen();
     return this.#agents.get(did);
   }
@@ -126,12 +121,10 @@ export class AgentClient {
   }
 
   /**
-   * Set the current agent's own DID.
-   * The self-DID receives event-driven invalidation and is never TTL-expired.
+   * @deprecated Does nothing. The own profile now expires after
+   * `REMOTE_AGENT_TTL_MS` like every other profile.
    */
-  setSelfDid(did: string): void {
-    this.#selfDid = did;
-  }
+  setSelfDid(_did: string): void {}
 
   /**
    * Invalidate a specific DID's cache entry in both L1 and L2.
