@@ -277,7 +277,9 @@ describe('AgentClient Cache', () => {
         }
     });
 
-    test('self-DID never expires from TTL', async () => {
+    test('the own DID expires after the TTL too', async () => {
+        // agent-updated only comes from this executor, so a profile changed
+        // through another executor of the same agent needs the TTL.
         const originalTTL = AgentClient.REMOTE_AGENT_TTL_MS;
         AgentClient.REMOTE_AGENT_TTL_MS = 1; // 1ms
 
@@ -290,9 +292,8 @@ describe('AgentClient Cache', () => {
 
             await ad4m.agent.byDID('did:test:self');
 
-            // Should still be 1 RPC — self-DID is event-invalidated, not TTL-invalidated
             const byDidCalls = rpcCallLog.filter(c => c.type === 'agent.byDIDs');
-            expect(byDidCalls).toHaveLength(1);
+            expect(byDidCalls).toHaveLength(2);
         } finally {
             AgentClient.REMOTE_AGENT_TTL_MS = originalTTL;
         }
