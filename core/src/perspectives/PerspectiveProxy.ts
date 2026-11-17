@@ -1674,9 +1674,13 @@ export class PerspectiveProxy {
 
     /** Removes an instance and every link to and from it. See {@link instanceCreate}. */
     async instanceRemove(body: InstanceRemove): Promise<InstanceRemoved> {
-        const removed = await this.#client.instanceRemove(this.#handle.uuid, body);
-        invalidatePerspectiveCache(this.#handle.uuid);
-        return removed;
+        // Outside a batch the links go one by one, so a rejection (`partiallyRemoved`) can
+        // come after some are gone: invalidate either way.
+        try {
+            return await this.#client.instanceRemove(this.#handle.uuid, body);
+        } finally {
+            invalidatePerspectiveCache(this.#handle.uuid);
+        }
     }
 
     /** Adds an item to a collection of an instance, validated. See {@link instanceCreate}. */
@@ -1688,9 +1692,12 @@ export class PerspectiveProxy {
 
     /** Removes an item from a collection of an instance. See {@link instanceCreate}. */
     async instanceRemoveFromCollection(body: InstanceRemoveFromCollection): Promise<CollectionItemRemoved> {
-        const removed = await this.#client.instanceRemoveFromCollection(this.#handle.uuid, body);
-        invalidatePerspectiveCache(this.#handle.uuid);
-        return removed;
+        // Like instanceRemove, a rejection can come after some links are gone.
+        try {
+            return await this.#client.instanceRemoveFromCollection(this.#handle.uuid, body);
+        } finally {
+            invalidatePerspectiveCache(this.#handle.uuid);
+        }
     }
 
     async getSubjectData<T>(subjectClass: T, exprAddr: string): Promise<T> {
