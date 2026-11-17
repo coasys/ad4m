@@ -14,6 +14,10 @@ let mountVersion = "2";
 // the classes mountShapes() reports: [{ name, target }]; setShapes changes
 // them so tests can collide with another mount's names and class IRIs
 let shapeClasses = [{ name: CLASS, target: "mounttest://Thing" }];
+// mountSnapshot() throws this message while it is set (setSnapshotFault)
+let snapshotFailure = null;
+// entries mountSnapshot() lists after the records (setSnapshotFault)
+let extraEntries = [];
 
 export async function init() {}
 export function isPublic() { return false; }
@@ -61,6 +65,15 @@ export function interactions(address) {
           const p = plain(params);
           shapeClasses = p.shapes;
           if (p.version !== undefined) mountVersion = p.version;
+          return true;
+        } },
+      // Make mountSnapshot() throw ({ fail: "msg" }) or list extra entries
+      // after the records ({ extra: [entry] }); {} clears both.
+      { label: "Set snapshot fault", name: "setSnapshotFault", parameters: [],
+        execute: async (params) => {
+          const p = plain(params);
+          snapshotFailure = p.fail ?? null;
+          extraEntries = p.extra ?? [];
           return true;
         } },
       // Change a record "from outside" (like a stock Acorn user would). Emits a delta only if emit is true.
@@ -130,7 +143,9 @@ export function mountShapes() {
 }
 
 export function mountSnapshot() {
-  return { entries: [...records.entries()].map(([address, data]) => ({ class: CLASS, address, data })) };
+  if (snapshotFailure) throw new Error("mountSnapshot: " + snapshotFailure);
+  const entries = [...records.entries()].map(([address, data]) => ({ class: CLASS, address, data }));
+  return { entries: entries.concat(extraEntries) };
 }
 
 export async function expressionGet(address) {
