@@ -19,6 +19,11 @@ import type { AgentMessage } from "../generated/api/AgentMessage";
 import type { AgentReply } from "../generated/api/AgentReply";
 import type { PerspectiveQueryLinksParams } from "../generated/api/PerspectiveQueryLinksParams";
 import type { JsonValue } from "../generated/api/serde_json/JsonValue";
+import type {
+    CollectionItemAdded, CollectionItemRemoved, InstanceAddToCollection, InstanceCreate,
+    InstanceCreated, InstanceRemove, InstanceRemoveFromCollection, InstanceRemoved,
+    InstanceUpdate, InstanceUpdated,
+} from "../generated/api";
 import type { AddAutoProcessorConfig, InterpretationOverlayInfo, RawScope, RunInterpretationObserveOptions } from "./AutoProcessor";
 // FlowInstance.ts owns the flow-proposal result types so they sit next to the
 // `proposeTransition()` API they describe. `import type` keeps this out of the
@@ -537,6 +542,47 @@ export class PerspectiveClient {
         )
     }
 
+    /**
+     * Validated writes (`perspective.instance*`): the executor checks each against the class's
+     * SHACL shape — each property's type, which are required, which take a single value, `sh:in`
+     * — before writing anything. A refused write rejects with an `RpcError` whose `data` is an
+     * `InstanceError` and stages nothing for that call; a shape violation is status 422 with
+     * `data.kind === 'validation'` and `data.errors` naming each property.
+     *
+     * With `batchId` the write is staged into that open batch and lands on its commit; the
+     * link reads a write does (collection membership, the remove cascade) see the batch's own
+     * staged work, but an instance created in the same batch is not found — instance existence
+     * reads committed state only, so a create followed by an update, remove or
+     * `instanceAddToCollection` of the new instance in one batch fails `notFound`; put a new
+     * instance's initial collection items on the create itself. A failure that is not a
+     * refusal — a store error mid-write, `failed` / `partiallyRemoved` — can leave part of the
+     * write staged in the batch: discard it ({@link discardBatch}) instead of committing
+     * it to keep the calls that succeeded.
+     */
+    async instanceCreate(uuid: string, body: InstanceCreate): Promise<InstanceCreated> {
+        return this.#apiClient.call('perspective.instanceCreate', { uuid, ...body })
+    }
+
+    /** Sets the given single-valued properties; the others stay. See {@link instanceCreate}. */
+    async instanceUpdate(uuid: string, body: InstanceUpdate): Promise<InstanceUpdated> {
+        return this.#apiClient.call('perspective.instanceUpdate', { uuid, ...body })
+    }
+
+    /** Removes the instance and every link to and from it. See {@link instanceCreate}. */
+    async instanceRemove(uuid: string, body: InstanceRemove): Promise<InstanceRemoved> {
+        return this.#apiClient.call('perspective.instanceRemove', { uuid, ...body })
+    }
+
+    /** Adds an item to a collection (a no-op when it is a member). See {@link instanceCreate}. */
+    async instanceAddToCollection(uuid: string, body: InstanceAddToCollection): Promise<CollectionItemAdded> {
+        return this.#apiClient.call('perspective.instanceAddToCollection', { uuid, ...body })
+    }
+
+    /** Removes an item's membership link from a collection. See {@link instanceCreate}. */
+    async instanceRemoveFromCollection(uuid: string, body: InstanceRemoveFromCollection): Promise<CollectionItemRemoved> {
+        return this.#apiClient.call('perspective.instanceRemoveFromCollection', { uuid, ...body })
+    }
+
     async getSubjectData(uuid: string, subjectClass: string, expressionAddress: string): Promise<string> {
         return this.#apiClient.call(
             'perspective.getSubjectData', { uuid, subjectClass, expressionAddress }
@@ -619,6 +665,16 @@ export class PerspectiveClient {
             'perspective.commitBatch', { uuid, batchId }
         )
         return LinkExpressionMutations.fromWire(diff)
+    }
+
+    /**
+     * Drops an open batch without committing it — the recovery for a failed batched call:
+     * a failed call does not roll back the calls before it and may have staged part of its
+     * own work, so discard rather than commit to keep the successful calls. Resolves `true`
+     * when the batch was open and is now dropped.
+     */
+    async discardBatch(uuid: string, batchId: string): Promise<boolean> {
+        return this.#apiClient.call('perspective.discardBatch', { uuid, batchId })
     }
 
     /** Register a callback that fires after a successful WebSocket reconnect.
