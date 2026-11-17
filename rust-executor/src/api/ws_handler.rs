@@ -17,11 +17,14 @@ use crate::types::RequestContext;
 // ── Error type ──────────────────────────────────────────────────────────────
 
 /// Error returned by WS RPC handlers.
-/// Maps directly to the `{ "error": { "code": N, "message": "..." } }` wire format.
+/// Maps directly to the `{ "error": { "code": N, "message": "...", "data"?: ... } }` wire format.
 #[derive(Debug)]
 pub struct WsRpcError {
     pub code: u16,
     pub message: String,
+    /// Structured detail a client can read (`error.data` on the wire), e.g. the validation
+    /// errors of a refused instance write. Absent from the reply when `None`.
+    pub data: Option<Value>,
 }
 
 impl WsRpcError {
@@ -29,24 +32,28 @@ impl WsRpcError {
         Self {
             code: 400,
             message: msg.into(),
+            data: None,
         }
     }
     pub fn unauthorized(msg: impl Into<String>) -> Self {
         Self {
             code: 401,
             message: msg.into(),
+            data: None,
         }
     }
     pub fn forbidden(msg: impl Into<String>) -> Self {
         Self {
             code: 403,
             message: msg.into(),
+            data: None,
         }
     }
     pub fn not_found(msg: impl Into<String>) -> Self {
         Self {
             code: 404,
             message: msg.into(),
+            data: None,
         }
     }
     /// 409: the call does not fit the executor's state (`no-config-file`, `no-log-file`, an
@@ -55,25 +62,46 @@ impl WsRpcError {
         Self {
             code: 409,
             message: msg.into(),
+            data: None,
         }
     }
     pub fn too_many_requests(msg: impl Into<String>) -> Self {
         Self {
             code: 429,
             message: msg.into(),
+            data: None,
         }
     }
     pub fn internal(msg: impl Into<String>) -> Self {
         Self {
             code: 500,
             message: msg.into(),
+            data: None,
         }
     }
     pub fn not_implemented(msg: impl Into<String>) -> Self {
         Self {
             code: 501,
             message: msg.into(),
+            data: None,
         }
+    }
+}
+
+impl WsRpcError {
+    /// The same error, carrying `data` for the client.
+    pub fn with_data(mut self, data: Value) -> Self {
+        self.data = Some(data);
+        self
+    }
+
+    /// The reply's `error` member: `{ code, message }`, plus `data` when there is some.
+    pub fn to_wire(&self) -> Value {
+        let mut wire = serde_json::json!({ "code": self.code, "message": self.message });
+        if let Some(data) = &self.data {
+            wire["data"] = data.clone();
+        }
+        wire
     }
 }
 
@@ -596,6 +624,7 @@ pub fn build_handler_map() -> HandlerMap {
     let mut map = HandlerMap::new();
     super::agent_ws::register_ws_handlers(&mut map);
     super::perspectives_ws::register_ws_handlers(&mut map);
+    super::perspective_instances_ws::register_ws_handlers(&mut map);
     super::agent_session_ws::register_ws_handlers(&mut map);
     super::ai_sessions_ws::register_ws_handlers(&mut map);
     super::runtime_ws::register_ws_handlers(&mut map);

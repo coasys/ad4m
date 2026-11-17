@@ -96,3 +96,18 @@ async fn capability_err_to_api_unauthorized() {
     let (status, _) = error_to_json(err).await;
     assert_eq!(status, 401);
 }
+
+/// A WS RPC error's reply member carries `data` only when the handler set some.
+#[test]
+fn ws_rpc_error_wire_carries_data_only_when_set() {
+    use crate::api::ws_handler::WsRpcError;
+    let plain = WsRpcError::bad_request("nope").to_wire();
+    assert_eq!(plain, serde_json::json!({ "code": 400, "message": "nope" }));
+    let detailed = WsRpcError::bad_request("nope")
+        .with_data(serde_json::json!({ "kind": "validation" }))
+        .to_wire();
+    assert_eq!(
+        detailed,
+        serde_json::json!({ "code": 400, "message": "nope", "data": { "kind": "validation" } })
+    );
+}
