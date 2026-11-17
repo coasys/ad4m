@@ -761,11 +761,12 @@ impl Instance {
     /// **Ordered relations** ([`Model::ordered`]): the executor does
     /// not persist collection order yet — `ad4m://ordering` is
     /// declaration-only and hydration sorts members by link timestamp —
-    /// so an edit that reorders an ordered collection's surviving items
-    /// has no write to express it. `save` refuses it before any frame
-    /// goes out, scalar writes included, and leaves the snapshot
-    /// untouched. A membership-only edit — adds and removes with the
-    /// common items keeping their relative order — dispatches as above.
+    /// so the only order a save can produce is the surviving items in
+    /// their old order followed by the new items. Any other edit of an
+    /// ordered collection — a reorder, a prepend, an insert between
+    /// surviving items — has no write to express it. `save` refuses it
+    /// before any frame goes out, scalar writes included, and leaves the
+    /// snapshot untouched. Removals and appends dispatch as above.
     ///
     /// **Baseline** (R7): inside a batch the writes are invisible to
     /// reads until commit, so the current values are snapshotted
@@ -806,24 +807,26 @@ impl Instance {
         let is_collection = |key: &String| {
             self.current[key].is_array() || self.snapshot.get(key).is_some_and(Value::is_array)
         };
-        // A reorder of an ordered collection's surviving items has no
-        // write to express it — refuse the whole save before any frame
-        // goes out rather than commit a half-applied edit.
+        // Hydration sorts members by link timestamp, so the only order a
+        // save can produce is the surviving items in their old order
+        // followed by the new ones in the order they are added. Anything
+        // else — a reorder, a prepend, an insert between survivors — has
+        // no write to express it: refuse the whole save before any frame
+        // goes out rather than commit an edit that reads back differently.
         for key in changed
             .iter()
             .filter(|k| is_collection(k) && self.model.is_ordered(k))
         {
             let before = collection_items(self.snapshot.get(key));
             let after = collection_items(self.current.get(key));
-            let kept_before: Vec<&String> = before.iter().filter(|i| after.contains(i)).collect();
-            let kept_after: Vec<&String> = after.iter().filter(|i| before.contains(i)).collect();
-            if kept_before != kept_after {
+            let kept: Vec<&String> = before.iter().filter(|i| after.contains(i)).collect();
+            if !after.iter().take(kept.len()).eq(kept.iter().copied()) {
                 return Err(anyhow!(
                     "cannot save {}: `{key}` is an ordered collection and this edit \
-                     reorders its items — the executor does not persist collection \
-                     order yet (`ad4m://ordering` is declaration-only; hydration \
-                     sorts members by link timestamp). Only membership edits that \
-                     keep the common items' order can be saved",
+                     changes the order of its items — the executor does not persist \
+                     collection order yet (`ad4m://ordering` is declaration-only; \
+                     hydration sorts members by link timestamp). Only removals and \
+                     appends after the remaining items can be saved",
                     self.base_uri
                 ));
             }
@@ -1290,6 +1293,101 @@ mod tests {
         );
         let err = save.await.unwrap().unwrap_err().to_string();
         assert!(err.contains("columns"), "same refusal: {err}");
+        ws.close().await;
+    }
+
+    /// A new item placed before or between the surviving items keeps
+    /// their relative order, but hydration sorts by link timestamp, so it
+    /// would read back appended (`[c, a, b]` → `[a, b, c]`). Outside a
+    /// batch the re-read would replace the caller's order without a
+    /// word; inside one the optimistic snapshot would keep `[c, a, b]`
+    /// clean locally. Both modes refuse before any frame goes out.
+    #[tokio::test]
+    async fn save_refuses_an_ordered_insert_before_the_end() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let ws = Arc::new(WsRpcClient::connect(fake.url(), "").await.unwrap());
+        let model = Model::new(&ws, "p1", "Board").ordered(["columns"]);
+
+        let cases = [
+            ("prepend", json!(["col://c", "col://a", "col://b"])),
+            ("interleave", json!(["col://a", "col://c", "col://b"])),
+            ("prepend after a removal", json!(["col://c", "col://b"])),
+        ];
+        for (name, edited) in cases {
+            for batch in [None, Some("batch-1".to_string())] {
+                let hydrated = json!({"id": "board://1", "columns": ["col://a", "col://b"]})
+                    .as_object()
+                    .unwrap()
+                    .clone();
+                let mut inst = model.instance("board://1", hydrated);
+                inst.set("columns", edited.clone());
+                let mode = if batch.is_some() {
+                    "batch"
+                } else {
+                    "non-batch"
+                };
+                let save = tokio::spawn(async move {
+                    let mut inst = inst;
+                    (inst.save(batch).await, inst)
+                });
+                assert!(
+                    fake.maybe_request(Duration::from_millis(300))
+                        .await
+                        .is_none(),
+                    "{name} ({mode}): a refused insert must not put any frame on the wire"
+                );
+                let (res, inst) = save.await.unwrap();
+                let err = res.unwrap_err().to_string();
+                assert!(
+                    err.contains("columns") && err.contains("order"),
+                    "{name} ({mode}): the refusal must name the collection and the reason: {err}"
+                );
+                assert!(inst.is_dirty(), "{name} ({mode}): the edit stays unsaved");
+            }
+        }
+        ws.close().await;
+    }
+
+    /// Removals plus appends after the surviving items are what
+    /// hydration reads back, so a batched save of one goes through:
+    /// the remove, then the add, and a clean optimistic snapshot.
+    #[tokio::test]
+    async fn a_remove_and_append_on_an_ordered_collection_saves_in_a_batch() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let ws = Arc::new(WsRpcClient::connect(fake.url(), "").await.unwrap());
+        let model = Model::new(&ws, "p1", "Board").ordered(["columns"]);
+
+        let hydrated = json!({"id": "board://1", "columns": ["col://a", "col://b"]})
+            .as_object()
+            .unwrap()
+            .clone();
+        let mut inst = model.instance("board://1", hydrated);
+        inst.set("columns", json!(["col://b", "col://c"]));
+        let save = tokio::spawn(async move {
+            let mut inst = inst;
+            (inst.save(Some("batch-1".to_string())).await, inst)
+        });
+        let req = fake.next_request().await;
+        assert_eq!(req["type"], "perspective.instanceRemoveFromCollection");
+        assert_eq!(req["params"]["itemUri"], "col://a");
+        fake.reply(
+            &req,
+            json!({"className": "Board", "baseUri": "board://1", "collection": "columns", "itemUri": "col://a", "linksRemoved": 1}),
+        )
+        .await;
+        let req = fake.next_request().await;
+        assert_eq!(req["type"], "perspective.instanceAddToCollection");
+        assert_eq!(req["params"]["itemUri"], "col://c");
+        fake.reply(
+            &req,
+            json!({"className": "Board", "baseUri": "board://1", "collection": "columns", "itemUri": "col://c", "linksAdded": 1, "alreadyMember": false}),
+        )
+        .await;
+        let (res, inst) = save.await.unwrap();
+        res.unwrap();
+        assert!(!inst.is_dirty());
         ws.close().await;
     }
 
