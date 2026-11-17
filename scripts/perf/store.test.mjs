@@ -4,7 +4,7 @@
 //   node --test 'scripts/perf/*.test.mjs'   (tests/js: pnpm run test-perf-unit)
 
 import assert from "node:assert/strict";
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -54,8 +54,10 @@ const show = (bare, file) => {
 };
 const jsonl = (text) => (text ?? "").split("\n").filter(Boolean).map((l) => JSON.parse(l));
 
-function envFor(bare, clone, extra = {}) {
-  return { ...BASE_ENV, PERF_HISTORY_REPO: bare, PERF_HISTORY_CLONE: clone, ...extra };
+/** The env of a command on a host whose temp directory is `tmpdir` (where its clones go). */
+function envFor(bare, tmpdir, extra = {}) {
+  fs.mkdirSync(tmpdir, { recursive: true });
+  return { ...BASE_ENV, PERF_HISTORY_REPO: bare, TMPDIR: tmpdir, ...extra };
 }
 
 function results(dir, metrics) {
@@ -96,26 +98,68 @@ test("the branch and subdir come from PERF_HISTORY_BRANCH and PERF_HISTORY_SUBDI
   assert.equal(spawnSync("git", ["-C", bare, "show", "perf:README.md"]).status, 128, "the new branch has only the history");
 });
 
-test("runs from other clones (other runners, other jobs) push in turn; every line lands once", async () => {
+test("a run that loses the push race fetches the winner's head and pushes on top; every line lands once", () => {
   const { root, bare } = bareRepo();
-  // Six runs at once: pushes race, and the losers retry on top. Runs 2k and 2k+1 are two jobs on
-  // one host (one PERF_HISTORY_CLONE): each job has its own clone under it, so no lock is needed.
-  const runs = Array.from({ length: 6 }, (_, i) => {
-    const f = results(tmp(), metric(100 + i));
-    const env = envFor(bare, path.join(root, `host-${i >> 1}`));
-    const job = i % 2 ? "k" : "j";
-    return new Promise((resolve) => {
-      const p = spawn(process.execPath, [PERF, "record", "--job", job, "--ad4m-sha", SHA, "--run-id", `run-${i}`, f], { env });
-      let err = "";
-      p.stderr.on("data", (d) => (err += d));
-      p.on("exit", (code) => resolve({ code, err }));
-    });
-  });
-  for (const r of await Promise.all(runs)) assert.equal(r.code, 0, r.err);
-  const ids = (job) => jsonl(show(bare, `nightly/${job}.jsonl`)).map((l) => l.run_id).sort();
-  assert.deepEqual(ids("j"), ["run-0", "run-2", "run-4"]);
-  assert.deepEqual(ids("k"), ["run-1", "run-3", "run-5"]);
-  assert.equal(Number(git(bare, "rev-list", "--count", "main")), 7);
+  // The race, made to happen: a `git` first in PATH that, at j's first push, runs a whole record
+  // of job k (on the same host) to the end before letting j's push go. That push is then
+  // rejected (k moved main), and j must retry on top of k's commit.
+  const bin = path.join(root, "bin");
+  fs.mkdirSync(bin);
+  const log = path.join(root, "pushes.log");
+  const mark = path.join(root, "raced");
+  const k = results(tmp(), metric(200));
+  const realGit = spawnSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).stdout.trim();
+  const other = [process.execPath, PERF, "record", "--job", "k", "--ad4m-sha", SHA, "--run-id", "run-k", k].map((a) => `'${a}'`).join(" ");
+  fs.writeFileSync(
+    path.join(bin, "git"),
+    [
+      "#!/bin/sh",
+      'case " $* " in *" push "*)',
+      `  echo push >> '${log}'`,
+      `  if mkdir '${mark}' 2>/dev/null; then PATH='${process.env.PATH}' ${other} >&2 || exit 9; fi;;`,
+      "esac",
+      `exec '${realGit}' "$@"`,
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  const env = envFor(bare, path.join(root, "host"), { PATH: `${bin}:${process.env.PATH}` });
+  const r = record(env, "run-j", 100, 1);
+  assert.equal(r.code, 0, r.err);
+  assert.doesNotMatch(r.err, /not pushed/, r.err);
+  assert.ok(fs.existsSync(mark), "k ran inside j's first push");
+  assert.ok(fs.readFileSync(log, "utf8").split("\n").filter(Boolean).length >= 2, "j's first push was rejected and retried");
+  assert.deepEqual(jsonl(show(bare, "nightly/j.jsonl")).map((l) => l.run_id), ["run-j"]);
+  assert.deepEqual(jsonl(show(bare, "nightly/k.jsonl")).map((l) => l.run_id), ["run-k"]);
+  // The seed, k's commit, then j's on top: nothing lost, nothing doubled.
+  assert.deepEqual(git(bare, "log", "--format=%s", "main").split("\n").map((s) => s.split(" ")[0]), ["perf(j):", "perf(k):", "init"]);
+});
+
+test("each command clones into a fresh temp directory and removes it; git runs no hook", () => {
+  const { root, bare } = bareRepo();
+  const host = path.join(root, "host");
+  // A hook another job on the runner could set up for every repository of the user.
+  const hooks = path.join(root, "hooks");
+  const ran = path.join(root, "hook-ran");
+  fs.mkdirSync(hooks);
+  for (const h of ["pre-commit", "post-commit", "pre-push", "post-checkout"]) {
+    fs.writeFileSync(path.join(hooks, h), `#!/bin/sh\ntouch '${ran}'\nexit 1\n`, { mode: 0o755 });
+  }
+  const globalConfig = path.join(root, "gitconfig");
+  fs.writeFileSync(globalConfig, `[core]\n\thooksPath = ${hooks}\n`);
+  const env = envFor(bare, host, { GIT_CONFIG_GLOBAL: globalConfig });
+  const left = () => fs.readdirSync(host).filter((d) => d.startsWith("ad4m-perf-history-"));
+  for (const [i, v] of [100, 100, 100, 100].entries()) {
+    const r = record(env, `run-${i}`, v, i + 1);
+    assert.equal(r.code, 0, r.err);
+    assert.doesNotMatch(r.err, /not pushed/, r.err);
+  }
+  assert.equal(perf(["check", "--job", "j", "--run-id", "run-3"], env).code, 0);
+  assert.equal(perf(["report", "--job", "j", "--out", path.join(root, "trend.html")], env).code, 0);
+  assert.deepEqual(left(), [], "no clone left behind");
+  assert.equal(fs.existsSync(ran), false, "no hook ran");
+  assert.equal(jsonl(show(bare, "nightly/j.jsonl")).length, 4);
+  assert.equal(jsonl(show(bare, "nightly/j.checks.jsonl")).length, 1);
 });
 
 test("check reads the fetched history: runs another runner pushed count", () => {
@@ -152,27 +196,36 @@ test("an unreachable history: record keeps the run in the artifacts, warns, exit
   assert.match(fs.readFileSync(path.join(out, "trend.html"), "utf8"), /m\.latency_ms/);
 });
 
-test("the default repository is read-only outside CI: no push is tried", () => {
+test("git reaches the history with its own ssh command: the key alone, no ~/.ssh/config, GIT_SSH_COMMAND ignored", () => {
   const root = tmp();
-  const store = openStore("j", { ...BASE_ENV, PERF_HISTORY_CLONE: path.join(root, "clone") });
+  const bin = path.join(root, "bin");
+  fs.mkdirSync(bin);
+  const log = path.join(root, "ssh.log");
+  // An ssh that only logs how it was called, then fails as an unreachable host would.
+  fs.writeFileSync(path.join(bin, "ssh"), `#!/bin/sh\necho "$@" >> '${log}'\nexit 255\n`, { mode: 0o755 });
+  const key = path.join(root, "key with space");
+  const env = envFor("ssh://git@history.invalid/h.git", path.join(root, "host"), {
+    PATH: `${bin}:${process.env.PATH}`,
+    PERF_HISTORY_SSH_KEY: key,
+    GIT_SSH_COMMAND: "/bin/false never-used",
+  });
+  const r = record(env, "run-1", 100, 1);
+  assert.equal(r.code, 0, r.err);
+  assert.match(r.err, /history not pushed: fetch/);
+  const call = fs.readFileSync(log, "utf8").split("\n")[0];
+  assert.match(call, /^-F \/dev\/null -o BatchMode=yes -i .*key with space -o IdentitiesOnly=yes .*history\.invalid/);
+  assert.deepEqual(fs.readdirSync(path.join(root, "host")), [], "the clone is removed after a failed fetch too");
+});
+
+test("the default repository is read-only outside CI: no push is tried", () => {
+  const host = tmp();
+  const store = openStore("j", { ...BASE_ENV, TMPDIR: host });
   assert.equal(store.writable, false);
   assert.match(store.label, new RegExp(DEFAULT_REPO.replace(/[.]/g, "\\.")));
   const w = store.append("j.jsonl", [{ a: 1 }], "m");
   assert.equal(w.ok, false);
   assert.match(w.reason, /written only from CI/);
-  assert.equal(fs.existsSync(path.join(root, "clone")), false, "nothing cloned, nothing fetched");
+  store.close();
+  assert.deepEqual(fs.readdirSync(host), [], "nothing cloned, nothing fetched");
   assert.equal(openStore("j", { ...BASE_ENV, CI: "true" }).writable, true);
-});
-
-test("a line left by a failed write is dropped: the branch is the history", () => {
-  const { root, bare } = bareRepo();
-  const clone = path.join(root, "clone");
-  const env = envFor(bare, clone);
-  assert.equal(record(env, "run-1", 100, 1).code, 0);
-  // Each job has its own clone, under PERF_HISTORY_CLONE/<job>.
-  fs.appendFileSync(path.join(clone, "j", "nightly", "j.jsonl"), '{"stray":true}\n');
-  fs.writeFileSync(path.join(clone, "j", "nightly", "other.jsonl"), '{"stray":true}\n');
-  assert.equal(record(env, "run-2", 100, 2).code, 0);
-  assert.deepEqual(jsonl(show(bare, "nightly/j.jsonl")).map((l) => l.run_id), ["run-1", "run-2"]);
-  assert.equal(show(bare, "nightly/other.jsonl"), null);
 });

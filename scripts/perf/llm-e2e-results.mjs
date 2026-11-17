@@ -86,14 +86,15 @@ export function fromMocha(events) {
 export function runMetrics(suite, run, params) {
   const out = [];
   if (Number.isFinite(run.duration_ms)) out.push({ metric: `suite.${suite}.duration`, value: round(run.duration_ms / 1000), unit: "s", better: "lower", params });
-  const seen = new Map();
+  const taken = new Set();
   for (const t of run.tests ?? []) {
     if (t.state !== "passed" || !Number.isFinite(t.duration_ms)) continue;
-    // Two titles that slug alike still get a name each.
-    let name = slug(t.name);
-    const n = (seen.get(name) ?? 0) + 1;
-    seen.set(name, n);
-    if (n > 1) name = `${name}_${n}`;
+    // Two titles that slug alike still get a name each: the first free of name, name_2, ...
+    // (a title may itself slug to another's suffixed name).
+    const base = slug(t.name);
+    let name = base;
+    for (let n = 2; taken.has(name); n++) name = `${base}_${n}`;
+    taken.add(name);
     out.push({ metric: `test.${suite}.${name}.duration`, value: round(t.duration_ms / 1000), unit: "s", better: "lower", params });
   }
   return out;

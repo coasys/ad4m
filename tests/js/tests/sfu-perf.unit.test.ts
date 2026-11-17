@@ -37,6 +37,10 @@ describe("SFU perf metrics", () => {
     expect(classify("messages_delivered")).to.deep.equal({ unit: "count", better: "higher" });
     expect(classify("colocated_frames.alice.bob")).to.deep.equal({ unit: "count", better: "higher" });
     expect(classify("descriptions_dropped")).to.deep.equal({ unit: "count", better: "lower" });
+    // A loss word wins over a frame word: fewer dropped frames is better.
+    expect(classify("framesDropped")).to.deep.equal({ unit: "count", better: "lower" });
+    expect(classify("frames_lost")).to.deep.equal({ unit: "count", better: "lower" });
+    expect(classify("colocated_frames_delivered")).to.deep.equal({ unit: "count", better: "higher" });
     expect(classify("renegotiationsPerPeer.max")).to.deep.equal({ unit: "count", better: "lower" });
     for (const exact of [
       "nodeAKilledAt", "startTime", "preCrash_nodeA_pipeCount", "overflowCount", "landedCount",
@@ -72,6 +76,20 @@ describe("SFU perf metrics", () => {
     expect(Object.keys(m).some((k) => k.includes("did"))).to.equal(false);
     expect(Object.keys(m).some((k) => k.includes("failures") || k.includes("crashes") || k.includes("error"))).to.equal(false);
     for (const metric of Object.keys(m)) expect(metric).to.match(/^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*$/);
+  });
+
+  it("suffixes keys that slug to one name, so record never refuses the run", () => {
+    const ms = perfMetrics("t21", result({
+      duration_ms: 7,
+      colocated_frames: { "bob->alice": 50, bob_to_alice: 60, "bob to alice": 70 },
+    }));
+    expect(ms.map((m) => [m.metric, m.value])).to.deep.equal([
+      ["sfu.t21.duration_ms", 1234],
+      ["sfu.t21.duration_ms_2", 7],
+      ["sfu.t21.colocated_frames.bob_to_alice", 50],
+      ["sfu.t21.colocated_frames.bob_to_alice_2", 60],
+      ["sfu.t21.colocated_frames.bob_to_alice_3", 70],
+    ]);
   });
 
   it("takes timed samples without an error, once per name", () => {

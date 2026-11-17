@@ -56,10 +56,11 @@ export function classify(path: string): Kind {
   if (has("with")) return null;
   if (has("ms", "latency", "rtt", "wait")) return { unit: "ms", better: "lower" };
   if (has("bytes") || (has("upload", "download") && has("mean"))) return { unit: "bytes", better: "higher" };
-  if (has("frames", "delivered")) return { unit: "count", better: "higher" };
+  // A loss word wins over `frames`: `framesDropped` counts frames lost.
   if (has("dropped", "lost", "loss", "repairs", "renegotiations", "crashes", "failures", "errors")) {
     return { unit: "count", better: "lower" };
   }
+  if (has("frames", "delivered")) return { unit: "count", better: "higher" };
   return null;
 }
 
@@ -110,11 +111,17 @@ export function perfMetrics(id: string, result: ScenarioResult): PerfMetric[] {
   }
   const found: Array<[string, number]> = [];
   for (const [k, v] of Object.entries(result.metrics ?? {})) leaves(v, slug(k), found);
+  const seen = new Set(out.map((m) => m.metric));
   for (const [path, value] of found) {
     const kind = classify(path);
-    if (kind) out.push({ metric: `${base}.${path}`, value, ...kind });
+    if (!kind) continue;
+    // Two keys that slug alike (`a->b` and `a_to_b`, or a `duration_ms` key): the later
+    // ones get `_2`, `_3`, in the result's key order, so record never sees a name twice.
+    let metric = `${base}.${path}`;
+    for (let n = 2; seen.has(metric); n++) metric = `${base}.${path}_${n}`;
+    seen.add(metric);
+    out.push({ metric, value, ...kind });
   }
-  const seen = new Set(out.map((m) => m.metric));
   for (const s of result.samples ?? []) {
     if (s.error || !isNum(s.durationMs) || s.durationMs <= 0) continue;
     const metric = `${base}.sample.${slug(s.name)}`;

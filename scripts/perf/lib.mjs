@@ -145,16 +145,23 @@ export function fmt(n) {
   return n.toFixed(2).replace(/\.?0+$/, "") || "0";
 }
 
-/** run_id → its last verdict (`ok`, `regressed`, `report-only`, `accepted`). */
+/** run_id → its last verdict (`ok`, `regressed`, `report-only`, `accepted`). An accept is final. */
 export function verdicts(checkLines) {
-  return new Map(checkLines.filter((c) => c.run_id).map((c) => [c.run_id, c.verdict]));
+  const out = new Map();
+  for (const c of checkLines) if (c.run_id && out.get(c.run_id) !== "accepted") out.set(c.run_id, c.verdict);
+  return out;
 }
 
-/** The runs a baseline may use, oldest first: passed, and not found regressed (unless accepted). */
+/**
+ * The runs a baseline may use, oldest first: passed, not found regressed (unless accepted), and
+ * not older than the newest accepted run. An accepted run resets the baseline: its numbers are
+ * the new normal, so the runs before it no longer count.
+ */
 export function passingRuns(records, verdictOf) {
+  const since = records.reduce((t, r) => (verdictOf.get(r.run_id) === "accepted" ? Math.max(t, Date.parse(r.run_at)) : t), -Infinity);
   const runs = new Map();
   for (const r of records) {
-    if (r.status === "failed" || verdictOf.get(r.run_id) === "regressed") continue;
+    if (r.status === "failed" || verdictOf.get(r.run_id) === "regressed" || Date.parse(r.run_at) < since) continue;
     if (!runs.has(r.run_id)) runs.set(r.run_id, { run_id: r.run_id, run_at: r.run_at, records: [] });
     runs.get(r.run_id).records.push(r);
   }

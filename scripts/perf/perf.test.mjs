@@ -11,8 +11,8 @@ import os from "node:os";
 import path from "node:path";
 import { after, describe, test } from "node:test";
 
-import { evaluateRun, judge, limitsFor, loadThresholds, parseResults } from "./lib.mjs";
-import { renderReport } from "./report.mjs";
+import { evaluateRun, judge, limitsFor, loadThresholds, parseResults, verdicts } from "./lib.mjs";
+import { renderReport, seriesOf } from "./report.mjs";
 
 const HERE = path.dirname(new URL(import.meta.url).pathname);
 const PERF = path.join(HERE, "perf.mjs");
@@ -39,7 +39,7 @@ function history(extra = {}) {
   const root = tmp();
   const bare = path.join(root, "history.git");
   spawnSync("git", ["init", "-q", "--bare", "-b", "main", bare]);
-  const env = { ...ENV, PERF_HISTORY_REPO: bare, PERF_HISTORY_CLONE: path.join(root, "clone"), ...extra };
+  const env = { ...ENV, PERF_HISTORY_REPO: bare, TMPDIR: root, ...extra };
   const read = (file) => {
     const r = spawnSync("git", ["-C", bare, "show", `main:nightly/${file}`], { encoding: "utf8" });
     return r.status === 0 ? jsonl(r.stdout) : [];
@@ -269,6 +269,35 @@ describe("check", () => {
     assert.match(results[0].reasons[0], /above the ceiling 1800000 ms/);
   });
 
+  test("a history that cannot be read: runs in the artifacts make no baseline (report only), a ceiling still fails", () => {
+    const root = tmp();
+    const art = path.join(root, "artifacts");
+    const h = { env: { ...ENV, PERF_HISTORY_REPO: path.join(root, "missing.git"), TMPDIR: root, PERF_ARTIFACTS_DIR: art } };
+    // Four runs end up in one records.jsonl (the history unreachable each time); the last is 10x.
+    for (let d = 1; d <= 3; d++) recordValue(h, `r${d}`, d, 100);
+    recordValue(h, "r4", 4, 1000);
+    let r = check(h, "r4");
+    assert.equal(r.code, 0, r.out + r.err);
+    assert.match(r.err, /history not read/);
+    assert.match(r.out, /1 metrics, 0 regressed, 1 report-only/);
+    recordValue(h, "r5", 5, 2_000_000, { metric: "sfu.suite.duration_ms", job: "integration-tests-sfu" });
+    r = check(h, "r5", [], "integration-tests-sfu");
+    assert.equal(r.code, 1, r.out + r.err);
+    assert.match(r.out, /above the ceiling/);
+  });
+
+  test("llm failures: a zero baseline never trips the factor, so thresholds.json caps them (0 → 135 fails, 3 passes)", () => {
+    const rules = loadThresholds();
+    const rec = (run, day, value) => ({ job: "llm-e2e", metric: "llm.rust.failures", value, unit: "count", better: "lower", params: { model: "m" }, run_id: run, run_at: `2026-11-${String(day).padStart(2, "0")}T00:00:00Z`, status: "passed" });
+    const zeros = [1, 2, 3, 4, 5].map((d) => rec(`r${d}`, d, 0));
+    const at = (value) => evaluateRun([...zeros, rec("r6", 6, value)], [], "r6", rules).results[0];
+    assert.equal(at(135).regressed, true);
+    assert.match(at(135).reasons.join(), /above the ceiling 5 count/);
+    assert.equal(at(3).regressed, false);
+    assert.equal(at(5).regressed, false);
+    assert.equal(at(6).regressed, true);
+  });
+
   test("only the last 7 passing runs make the baseline; failed and regressed runs are left out until accepted", () => {
     const h = history();
     // Seven old slow runs, then seven fast ones: only the fast ones count.
@@ -298,6 +327,35 @@ describe("check", () => {
     assert.equal(check(h, null, ["--accept", "nope"]).code, 2);
   });
 
+  test("--accept resets the baseline (default window 7, min 3 runs): after a step change the next run is report-only, not a regression, then compares with the new level", () => {
+    const h = history();
+    for (let d = 1; d <= 7; d++) recordValue(h, `old-${d}`, d, 100);
+    recordValue(h, "step-8", 8, 300);
+    assert.equal(check(h, "step-8").code, 1, "the step change is a regression");
+    assert.equal(check(h, null, ["--accept", "step-8"]).code, 0);
+    // The accept is final: checking the run again writes no `regressed` over it.
+    const lines = h.checks().length;
+    assert.match(check(h, "step-8").out, /run step-8 was accepted; its verdict stays/);
+    assert.equal(h.checks().length, lines);
+    assert.equal(verdicts([...h.checks(), { run_id: "step-8", verdict: "regressed" }]).get("step-8"), "accepted");
+    // Without the reset the baseline would be old-2..7 and step-8: median 100, and 310 would fail.
+    recordValue(h, "r9", 9, 310);
+    let r = check(h, "r9");
+    assert.equal(r.code, 0, r.out);
+    assert.match(r.out, /1 metrics, 0 regressed, 1 report-only/, "one run since the reset");
+    recordValue(h, "r10", 10, 300);
+    assert.match(check(h, "r10").out, /0 regressed, 1 report-only/, "two runs since the reset");
+    recordValue(h, "r11", 11, 290);
+    r = check(h, "r11");
+    assert.equal(r.code, 0, r.out);
+    assert.match(r.out, /0 regressed, 0 report-only.* - OK/, "three runs since the reset: judged");
+    // The new normal is the baseline now: 1.5x of it (median 300) still fails.
+    recordValue(h, "r12", 12, 460);
+    r = check(h, "r12");
+    assert.equal(r.code, 1, r.out);
+    assert.match(r.out, /median 300 ms of 4 runs/);
+  });
+
   test("defaults to the newest run in the history; exit 2 without history", () => {
     const h = history();
     assert.equal(check(h, null).code, 2);
@@ -310,6 +368,16 @@ describe("check", () => {
 });
 
 describe("report", () => {
+  test("the drawn baseline comes from the whole series, as check's; the window only limits the points", () => {
+    const rec = (d, value) => ({ job: "j", metric: "m", value, unit: "ms", better: "lower", params: {}, run_id: `r${d}`, run_at: `2026-11-${String(d).padStart(2, "0")}T00:00:00Z`, status: "passed", ad4m_sha: SHA });
+    const records = [1, 2, 3, 4, 5, 6, 7].map((d) => rec(d, 100)).concat([rec(8, 200), rec(9, 200), rec(10, 150)]);
+    const [s] = seriesOf(records, [], 3);
+    assert.deepEqual(s.points.map((p) => p.run_id), ["r8", "r9", "r10"]);
+    // The 7 passing runs before r10: r3..r9 = five 100s and two 200s. Inside the window: 200.
+    assert.equal(s.baseline, 100);
+    assert.equal(evaluateRun(records, [], "r10", []).results[0].median, s.baseline);
+  });
+
   test("draws one chart per series with commit links", () => {
     const h = history();
     for (let d = 1; d <= 3; d++) recordValue(h, `r${d}`, d, 100 + d);

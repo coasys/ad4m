@@ -27,8 +27,9 @@
 //      "regressions":[{"metric","params","value","median","reasons"}],"checked_at":"<ISO>"}
 //
 //   Environment: PERF_HISTORY_REPO (default git@github.com:coasys/ad4m-wind-tunnel.git),
-//   PERF_HISTORY_BRANCH (main), PERF_HISTORY_SUBDIR (nightly), PERF_HISTORY_CLONE (the base of
-//   the per-job clones, default ~/.cache/ad4m-ci/perf-history), PERF_HISTORY_SSH_KEY. The default
+//   PERF_HISTORY_BRANCH (main), PERF_HISTORY_SUBDIR (nightly), PERF_HISTORY_SSH_KEY. Each
+//   command clones the branch's head into a fresh $TMPDIR/ad4m-perf-history-<job>-* and removes
+//   it when done; git runs with hooks off and without ~/.ssh/config. The default
 //   repository is written only when CI=true. PERF_ARTIFACTS_DIR: where records.jsonl and
 //   trend.html go. Run fields from CircleCI: CIRCLE_SHA1, CIRCLE_BUILD_NUM, CIRCLE_WORKFLOW_ID,
 //   PERF_PIPELINE_NUMBER (perf_setup exports it), WE_SHA.
@@ -64,8 +65,10 @@
 //   Prints a line per regression, then one summary line:
 //     perf check <job>: <n> metrics, <r> regressed, <k> report-only (<3 earlier runs) - OK|REGRESSION (...)
 //   Appends the verdict to <job>.checks.jsonl (a failed write only warns). A run found
-//   regressed is left out of later baselines until `--accept RUN_ID` takes its numbers as the
-//   new normal. Exit: 0 no serious regression, 1 a serious regression, 2 usage or input error.
+//   regressed is left out of later baselines. `--accept RUN_ID` takes its numbers as the new
+//   normal: it resets the baseline, so later runs compare only with RUN_ID and the passing runs
+//   after it (report-only until there are 3). A lasting step change needs one accept.
+//   Exit: 0 no serious regression, 1 a serious regression, 2 usage or input error.
 //
 // ---- report ----------------------------------------------------------------------------------
 //
@@ -94,6 +97,7 @@ import {
   parseResults,
   readLines,
   seriesKey,
+  verdicts,
 } from "./lib.mjs";
 import { renderReport } from "./report.mjs";
 import { openStore } from "./store.mjs";
@@ -184,7 +188,13 @@ export function cmdRecord(argv, env = process.env) {
   // The artifacts first: they keep the run when the history cannot be written.
   const out = env.PERF_ARTIFACTS_DIR ? path.join(env.PERF_ARTIFACTS_DIR, "records.jsonl") : null;
   if (out) appendLines(out, records);
-  const w = openStore(job, env).append(`${job}.jsonl`, records, `perf(${job}): ${ad4mSha.slice(0, 9)} ${runAt}`);
+  const store = openStore(job, env);
+  let w;
+  try {
+    w = store.append(`${job}.jsonl`, records, `perf(${job}): ${ad4mSha.slice(0, 9)} ${runAt}`);
+  } finally {
+    store.close();
+  }
   console.log(`perf record ${job}: ${records.length} metrics, run ${run.run_id} (${status}, ad4m ${ad4mSha.slice(0, 9)}) -> ${w.ok ? w.where : (out ?? "nowhere")}`);
   if (!w.ok) console.error(`perf record ${job}: history not pushed: ${w.reason}`);
   return 0;
@@ -196,6 +206,14 @@ export function cmdCheck(argv, env = process.env) {
   const a = parseArgs(argv, ["job", "run-id", "accept"]);
   const job = checkJob(a.one("job"));
   const store = openStore(job, env);
+  try {
+    return checkWith(store, job, a, env);
+  } finally {
+    store.close();
+  }
+}
+
+function checkWith(store, job, a, env) {
   const h = store.read();
   if (!h.ok) console.error(`perf check ${job}: history not read (${h.reason}): report only`);
   const history = h.ok ? readLines(path.join(h.dir, `${job}.jsonl`)) : [];
@@ -207,22 +225,25 @@ export function cmdCheck(argv, env = process.env) {
     if (!history.some((r) => r.run_id === accept)) throw new UsageError(`no records of run '${accept}' in the ${job} history`);
     const w = verdict(accept, "accepted", []);
     if (!w.ok) throw new UsageError(`verdict not written: ${w.reason}`);
-    console.log(`perf check ${job}: run ${accept} accepted; later baselines include it`);
+    console.log(`perf check ${job}: run ${accept} accepted; later baselines start at it`);
     return 0;
   }
 
   const records = withRunsOf(history, artifactRecords(env), job);
   const runId = a.one("run-id") ?? defaultRunId(env) ?? latestRunId(records);
   if (!runId) throw new UsageError(`no history for ${job} in ${store.label}`);
-  // Without history every series is report-only, so only a ceiling or a floor can fail.
-  const { own, results } = evaluateRun(records, checkLines, runId, loadThresholds());
+  // Without history every series is report-only (the artifacts' runs make no baseline), so
+  // only a ceiling or a floor can fail.
+  const { own, results } = evaluateRun(records, checkLines, runId, loadThresholds(), h.ok ? {} : { minRuns: Infinity });
   const regressed = results.filter((r) => r.regressed);
   const reportOnly = results.filter((r) => r.reportOnly);
   for (const { record: r, reasons } of regressed) {
     console.log(`REGRESSION ${job} ${r.metric}${formatParams(r.params) ? " " + formatParams(r.params) : ""}: ${fmt(r.value)} ${r.unit} (${r.better} is better) ${reasons.join("; ")}`);
   }
   const v = regressed.length ? "regressed" : reportOnly.length === results.length ? "report-only" : "ok";
-  if (h.ok) {
+  if (h.ok && verdicts(checkLines).get(runId) === "accepted") {
+    console.log(`perf check ${job}: run ${runId} was accepted; its verdict stays`);
+  } else if (h.ok) {
     const w = verdict(runId, v, regressed.map(({ record: r, median, reasons }) => ({ metric: r.metric, params: r.params, value: r.value, median, reasons })));
     if (!w.ok) console.error(`perf check ${job}: verdict not pushed: ${w.reason}`);
   }
@@ -238,14 +259,21 @@ export function cmdReport(argv, env = process.env) {
   const jobs = a.all("job").map(checkJob);
   if (jobs.length === 0) throw new UsageError("--job is required");
   // Every job's file is on the branch: the first job's clone has them all.
-  const h = openStore(jobs[0], env).read();
-  if (!h.ok) console.error(`perf report: history not fetched (${h.reason}); drawing what is at hand`);
-  const extra = artifactRecords(env);
-  const data = jobs.map((job) => ({
-    job,
-    records: withRunsOf(readLines(path.join(h.dir, `${job}.jsonl`)), extra, job),
-    checks: readLines(path.join(h.dir, `${job}.checks.jsonl`)),
-  }));
+  const store = openStore(jobs[0], env);
+  let data;
+  try {
+    const h = store.read();
+    if (!h.ok) console.error(`perf report: history not fetched (${h.reason}); drawing what is at hand`);
+    const extra = artifactRecords(env);
+    const file = (name) => (h.dir ? path.join(h.dir, name) : null);
+    data = jobs.map((job) => ({
+      job,
+      records: withRunsOf(readLines(file(`${job}.jsonl`)), extra, job),
+      checks: readLines(file(`${job}.checks.jsonl`)),
+    }));
+  } finally {
+    store.close();
+  }
   const out = a.one("out") ?? (env.PERF_ARTIFACTS_DIR ? path.join(env.PERF_ARTIFACTS_DIR, "trend.html") : "perf-trend.html");
   fs.mkdirSync(path.dirname(path.resolve(out)), { recursive: true });
   fs.writeFileSync(out, renderReport(data));

@@ -10,7 +10,7 @@
     { "job": "llm-e2e", "metric": "test.*", "factor": 2.0, "min_delta": 30 },
     { "job": "llm-e2e", "metric": "llm.*.latency_ms*", "min_delta": 1000 },
     { "job": "llm-e2e", "metric": "llm.*.calls", "factor": 2.0, "min_delta": 20 },
-    { "job": "llm-e2e", "metric": "llm.*.failures", "factor": 2.0, "min_delta": 3 },
+    { "job": "llm-e2e", "metric": "llm.*.failures", "factor": 2.0, "min_delta": 3, "ceiling": 5, "_ceiling": "Passing runs fail 0 prompts (the median is 0, so the factor never fires): more than 5 is a broken model or GPU (the out-of-memory runs failed 130 to 140). A few are tolerated: interpretation retries a failed prompt." },
     { "job": "llm-e2e", "metric": "llm.*.output_tokens_per_s*", "min_delta": 2 }
   ]
 }

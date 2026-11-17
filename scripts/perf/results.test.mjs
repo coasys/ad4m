@@ -2,7 +2,7 @@
 // node --test 'scripts/perf/*.test.mjs'   (tests/js: pnpm run test-perf-unit)
 
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -10,7 +10,7 @@ import test from "node:test";
 
 import { HERE, parseResults } from "./lib.mjs";
 import { libtestTimer } from "./libtest-timer.mjs";
-import { fromMocha, llmE2eResults, promptMetrics, promptsInLog, quantile } from "./llm-e2e-results.mjs";
+import { fromMocha, llmE2eResults, promptMetrics, promptsInLog, quantile, runMetrics } from "./llm-e2e-results.mjs";
 
 /** Throws unless record would take these metrics. */
 const valid = (metrics) => parseResults(JSON.stringify({ metrics }), "test");
@@ -70,6 +70,48 @@ test("libtest-timer passes the output through unchanged and keeps going on colou
   assert.deepEqual(doc.tests.map((t) => [t.name, t.state]), [["x::y", "passed"]]);
   assert.equal(doc.result, "ok");
   fs.rmSync(dir, { recursive: true });
+});
+
+test("libtest-timer times a test from its newline-free `test <name> ... ` to its outcome, as libtest writes it", async () => {
+  const dir = tmp();
+  const out = path.join(dir, "rust.libtest.json");
+  const p = spawn(process.execPath, [path.join(HERE, "libtest-timer.mjs"), out], { stdio: ["pipe", "pipe", "inherit"] });
+  let passed = "";
+  p.stdout.on("data", (d) => (passed += d));
+  const exited = new Promise((resolve) => p.on("exit", resolve));
+  const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const write = (s) => new Promise((resolve) => p.stdin.write(s, resolve));
+  // libtest flushes the start of each test's line, then runs it, then writes the outcome.
+  await write("running 2 tests\ntest a::slow ... ");
+  await pause(600);
+  await write("ok\ntest a::fast ... ");
+  await pause(50);
+  await write("ok\n\ntest result: ok. 2 passed\n");
+  p.stdin.end();
+  assert.equal(await exited, 0);
+  assert.equal(passed, "running 2 tests\ntest a::slow ... ok\ntest a::fast ... ok\n\ntest result: ok. 2 passed\n");
+  const doc = JSON.parse(fs.readFileSync(out, "utf8"));
+  const [slow, fast] = doc.tests;
+  assert.equal(slow.name, "a::slow");
+  // Timed at the line's end, the slow test would get the fast one's time (or none).
+  assert.ok(slow.duration_ms >= 550, `slow: ${slow.duration_ms} ms`);
+  assert.ok(fast.duration_ms < 450, `fast: ${fast.duration_ms} ms`);
+  fs.rmSync(dir, { recursive: true });
+});
+
+test("libtest-timer: output after a started test's `... ` keeps it running to the next test", () => {
+  const timer = libtestTimer();
+  timer.line("running 2 tests", 0);
+  timer.partial("test a::one ... ", 100);
+  timer.line("test a::one ... [e2e] interpretation", 200);
+  timer.line("ok", 900);
+  timer.partial("test a::two ... ", 1000);
+  timer.line("test a::two ... ignored, needs a model", 1000);
+  timer.line("test result: ok. 1 passed; 1 ignored", 1100);
+  assert.deepEqual(timer.finish(1200).tests, [
+    { name: "a::one", state: "passed", duration_ms: 900 },
+    { name: "a::two", state: "ignored", duration_ms: 0 },
+  ]);
 });
 
 test("fromMocha spans the first start to the last end and keeps a retried test's last outcome", () => {
@@ -164,6 +206,10 @@ test("llmE2eResults reads every suite's files into valid, uniquely named metrics
     "test.rust.a_two.duration",
   ]);
   assert.equal(new Set(names).size, names.length);
+  // A title that slugs to another's suffixed name gets a free name too.
+  const titles = ["a b", "a/b", "a_b_2"].map((name) => ({ name, state: "passed", duration_ms: 1000 }));
+  const generated = runMetrics("s", { tests: titles }, {}).map((m) => m.metric);
+  assert.deepEqual(generated, ["test.s.a_b.duration", "test.s.a_b_2.duration", "test.s.a_b_2_2.duration"]);
   const byName = Object.fromEntries(metrics.map((m) => [m.metric, m]));
   assert.equal(byName["suite.js_model.duration"].value, 61);
   assert.equal(byName["suite.rust.duration"].value, 5.3);

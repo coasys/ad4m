@@ -17,17 +17,20 @@ export function seriesOf(records, checks, runs) {
   const passing = new Set(passingRuns(records, verdictOf).map((r) => r.run_id));
   const map = new Map();
   for (const r of records) {
-    if (!keep.has(r.run_id)) continue;
     const key = seriesKey(r);
-    if (!map.has(key)) map.set(key, { metric: r.metric, params: r.params ?? {}, unit: r.unit, better: r.better, points: [] });
+    if (!map.has(key)) map.set(key, { metric: r.metric, params: r.params ?? {}, unit: r.unit, better: r.better, all: [] });
     const regressed = verdictOf.get(r.run_id) === "regressed" && (regressedIn.get(r.run_id)?.has(key) ?? false);
-    map.get(key).points.push({ ...r, cls: regressed ? "regressed" : r.status === "failed" ? "failed" : "passed" });
+    map.get(key).all.push({ ...r, cls: regressed ? "regressed" : r.status === "failed" ? "failed" : "passed" });
   }
-  const out = [...map.values()];
-  for (const s of out) {
-    s.points.sort((a, b) => Date.parse(a.run_at) - Date.parse(b.run_at));
-    s.last = s.points.at(-1);
-    s.baseline = median(s.points.filter((p) => p !== s.last && passing.has(p.run_id)).slice(-7).map((p) => p.value));
+  const out = [];
+  for (const { all, ...s } of map.values()) {
+    all.sort((a, b) => Date.parse(a.run_at) - Date.parse(b.run_at));
+    // Only the last `runs` runs are drawn; the baseline comes from the whole series, as check's.
+    s.points = all.filter((p) => keep.has(p.run_id));
+    if (s.points.length === 0) continue;
+    s.last = all.at(-1);
+    s.baseline = median(all.filter((p) => p !== s.last && passing.has(p.run_id)).slice(-7).map((p) => p.value));
+    out.push(s);
   }
   return out.sort((a, b) => a.metric.localeCompare(b.metric) || paramsKey(a.params).localeCompare(paramsKey(b.params)));
 }

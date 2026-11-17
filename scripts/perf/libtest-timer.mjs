@@ -4,10 +4,12 @@
 //   cargo test ... -- --test-threads=1 2>&1 | node scripts/perf/libtest-timer.mjs OUT.json
 //
 // Stable libtest prints no time per test (`--report-time` is nightly only), so this
-// filter stamps each line as it arrives. It passes every line through to stdout
-// unchanged, so the CI log is the same. With `--test-threads=1` the tests run one
-// after the other: a test runs from its `test <name> ... ` line to the next test's
-// line, or to `test result:`. Run the tests serially, or the times overlap.
+// filter stamps the output as it arrives. It passes every chunk through to stdout
+// unchanged, so the CI log is the same. With `--test-threads=1` libtest prints
+// `test <name> ... ` with no newline when a test starts and `ok` when it ends: a test
+// runs from that prefix's arrival to the end of its line (its outcome), or, when its
+// line is broken by its own output, to the next test or `test result:`. Run the tests
+// serially, or the times overlap.
 //
 // OUT.json (written at the end of the input, also when the tests failed):
 //
@@ -22,12 +24,14 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 
 const START_RE = /^test (\S+) \.\.\. ?(.*)$/;
 const RESULT_RE = /^test result: (\w+)/;
 const RUNNING_RE = /^running \d+ tests?$/;
+// A test that has started: its line so far, before its outcome.
+const PARTIAL_RE = /^test (\S+) \.\.\. $/;
+const OUTCOME_RE = /^(ok|FAILED|ignored\b.*)$/;
 
 // The ANSI colour codes libtest adds on a terminal (CI may force them).
 const plain = (line) => line.replace(/\x1b\[[0-9;]*m/g, "");
@@ -46,11 +50,20 @@ export function libtestTimer() {
     if (current) {
       current.duration_ms = Math.max(0, Math.round(at - current.at));
       delete current.at;
+      delete current.started;
       current = null;
     }
   };
 
   return {
+    /** The input after its last newline: a `test <name> ... ` there is a test starting. */
+    partial(raw, at) {
+      const m = PARTIAL_RE.exec(plain(raw));
+      if (!m || current?.started) return;
+      close(at);
+      current = { name: m[1], state: "passed", at, started: true };
+      tests.push(current);
+    },
     line(raw, at) {
       const line = plain(raw).trimEnd();
       if (RUNNING_RE.test(line)) {
@@ -58,6 +71,18 @@ export function libtestTimer() {
         return;
       }
       const start = START_RE.exec(line);
+      if (start && current?.started && current.name === start[1]) {
+        // The started test's line is complete: its outcome, now.
+        // Anything else after `... ` is the test's own output: it ends at the next test.
+        const rest = start[2].trim();
+        if (OUTCOME_RE.test(rest)) {
+          current.state = rest.startsWith("ignored") ? "ignored" : "passed";
+          close(at);
+        } else {
+          delete current.started;
+        }
+        return;
+      }
       if (start) {
         close(at);
         const rest = start[2].trim();
@@ -107,11 +132,18 @@ async function main(argv) {
     return 2;
   }
   const timer = libtestTimer();
-  const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
-  for await (const line of rl) {
-    process.stdout.write(line + "\n");
-    timer.line(line, Date.now());
+  // Chunks, not lines: the `test <name> ... ` that starts a test has no newline yet.
+  let rest = "";
+  process.stdin.setEncoding("utf8");
+  for await (const chunk of process.stdin) {
+    process.stdout.write(chunk);
+    const at = Date.now();
+    const lines = (rest + chunk).split("\n");
+    rest = lines.pop();
+    for (const line of lines) timer.line(line.replace(/\r$/, ""), at);
+    if (rest) timer.partial(rest, at);
   }
+  if (rest) timer.line(rest, Date.now());
   const doc = timer.finish(Date.now());
   try {
     fs.mkdirSync(path.dirname(path.resolve(out)), { recursive: true });

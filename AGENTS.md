@@ -171,11 +171,14 @@ trend page. The full contract is the header of `scripts/perf/perf.mjs`.
 - **The history is a git repository**: folder `nightly/` on branch `main` of
   `coasys/ad4m-wind-tunnel`. `nightly/<job>.jsonl` holds one line per metric per
   run, `nightly/<job>.checks.jsonl` one verdict per check. Both are append-only.
-  `record` commits `perf(<job>): <sha9> <run_at>` in the job's own cached clone
-  (`~/.cache/ad4m-ci/perf-history/<job>`), and pushes. When another run pushed
-  first, it fetches, puts its lines on the new head and pushes again, up to 5
-  times. Env: `PERF_HISTORY_REPO`, `PERF_HISTORY_BRANCH`, `PERF_HISTORY_SUBDIR`,
-  `PERF_HISTORY_CLONE` (the base of the per-job clones), `PERF_HISTORY_SSH_KEY`.
+  `record` commits `perf(<job>): <sha9> <run_at>` in a fresh shallow clone
+  (`$TMPDIR/ad4m-perf-history-<job>-*`, removed when the command ends), and
+  pushes. When another run pushed first, it fetches, puts its lines on the new
+  head and pushes again, up to 5 times. git runs with hooks off and its own ssh
+  command (no `~/.ssh/config`): the runner also runs PR jobs, so nothing of the
+  history, and not the key, stays on it; `perf_finish`'s last step deletes the
+  key and any clone left. Env: `PERF_HISTORY_REPO`, `PERF_HISTORY_BRANCH`,
+  `PERF_HISTORY_SUBDIR`, `PERF_HISTORY_SSH_KEY`.
 - **The default repository is written only when `CI=true`.** For a local run,
   set `PERF_HISTORY_REPO` to a local bare repo. Never push test runs to the
   real history.
@@ -191,8 +194,9 @@ trend page. The full contract is the header of `scripts/perf/perf.mjs`.
   (factor, min_delta, an absolute ceiling or floor) live only in
   `scripts/perf/thresholds.json`; a ceiling or floor fails at any history. With fewer than 3 earlier
   runs it only reports. Values with different `params` (such as another LLM
-  model) never compare. A regressed run stays out of later baselines until
-  `scripts/perf/check --job J --accept <run_id>`.
+  model) never compare. A regressed run stays out of later baselines.
+  `scripts/perf/check --job J --accept <run_id>` takes it as the new normal: it
+  resets the baseline, so later runs compare only with it and the runs after it.
 - **What each job measures.**
   - `integration-tests-sfu`: every scenario writes `$PERF_RESULTS_DIR/sfu-<id>.json`
     (`tests/js/helpers/sfu/perf.ts`), and the step adds `sfu.suite.duration_ms`.

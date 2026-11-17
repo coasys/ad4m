@@ -338,7 +338,11 @@ commands:
                   - << pipeline.parameters.perf-history-key-fingerprint >>
             - run:
                 # Push with this key only: ssh would offer the checkout key first, and
-                # GitHub would take it as the (read-only) ad4m deploy key.
+                # GitHub would take it as the (read-only) ad4m deploy key. The runner
+                # also runs PR jobs, so the key leaves ~/.ssh at once: this job keeps a
+                # copy of its own, which perf_finish's last step deletes. (Another nightly
+                # job on the host loads the same file name; a copy per job means its
+                # cleanup never takes this job's key.)
                 name: Perf history - use the history's deploy key
                 command: |
                   want="<< pipeline.parameters.perf-history-key-fingerprint >>"
@@ -347,8 +351,11 @@ commands:
                     for hash in sha256 md5; do
                       fp=$(ssh-keygen -l -E "$hash" -f "$key" 2>/dev/null | awk '{print $2}')
                       if [ "$fp" = "$want" ] || [ "$fp" = "MD5:$want" ]; then
-                        echo "export PERF_HISTORY_SSH_KEY=\"$key\"" >> "$BASH_ENV"
-                        echo "history key: $key"
+                        dir=$(mktemp -d "${TMPDIR:-/tmp}/ad4m-perf-key-XXXXXX")
+                        cp "$key" "$dir/key" && chmod 600 "$dir/key"
+                        rm -f "$key" "$key.pub"
+                        echo "export PERF_HISTORY_SSH_KEY=\"$dir/key\"" >> "$BASH_ENV"
+                        echo "history key: $dir/key"
                         exit 0
                       fi
                     done
@@ -396,6 +403,18 @@ commands:
           when: always
           path: test-artifacts/perf
           destination: perf
+      - run:
+          # Nothing of the history outlives the job on the runner: the push key, and any
+          # clone a killed command left (each command removes its own). Only this job's
+          # clones: each nightly job has its own serial group, so none of them is in use.
+          name: Perf history - delete the key and the clones
+          when: always
+          command: |
+            if [ -n "${PERF_HISTORY_SSH_KEY:-}" ]; then
+              rm -f "$PERF_HISTORY_SSH_KEY"
+              rmdir "$(dirname "$PERF_HISTORY_SSH_KEY")" 2>/dev/null || true
+            fi
+            rm -rf "${TMPDIR:-/tmp}"/ad4m-perf-history-<< parameters.job >>-*
 
   setup_integration_test_environment:
     description: "Setup integration test environment from build's stash (Holochain or local-only bootstrap languages)"
