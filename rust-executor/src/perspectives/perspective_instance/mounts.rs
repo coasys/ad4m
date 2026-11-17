@@ -28,7 +28,7 @@ use serde_json::Value;
 use tokio::time::sleep;
 
 use super::mount_gates::{pause, MountPoint};
-use super::mount_lifecycle::{next_mount_seq, MountPhase};
+use super::mount_lifecycle::{next_mount_seq, MountPhase, MountSlot};
 use super::mount_links::is_mount_written;
 use super::{PerspectiveInstance, SdnaType};
 use crate::agent::AgentContext;
@@ -69,6 +69,14 @@ fn mount_target(lang: &str) -> String {
     format!("{lang}://{MOUNT_PROJECT_PATH}")
 }
 
+/// One snapshot or delta record, expanded into the links it wants under
+/// `source` and not written yet.
+struct StagedRecord {
+    address: String,
+    source: String,
+    links: Vec<Link>,
+}
+
 /// Bookkeeping predicates never belong to a record, so the snapshot sweep
 /// and the per-address diff must leave them alone.
 fn is_bookkeeping(predicate: Option<&str>) -> bool {
@@ -77,10 +85,15 @@ fn is_bookkeeping(predicate: Option<&str>) -> bool {
 
 impl PerspectiveInstance {
     /// Mount a language: refuse when it does not export `mountShapes()` /
-    /// `mountSnapshot()` or when another mount in this perspective claims
-    /// one of its class names; install the shapes; write the mount link;
-    /// then run the first sync. While it runs the mount is `Mounting`:
-    /// no sync or delta applies, and an `unmount` meanwhile wins.
+    /// `mountSnapshot()` or when its classes are not its own to install
+    /// (`check_class_ownership`); install the shapes; write the first
+    /// snapshot; then write the mount link and register for pushed deltas.
+    /// Every record is expanded before any is written, and the mount link
+    /// comes last: a mount that fails leaves no mount link and none of its
+    /// records (its class claims stay, so a retry may install over its own
+    /// shapes), and a retry runs it all again. While it runs the mount is
+    /// `Mounting`: no sync or delta applies, and an `unmount` meanwhile
+    /// wins.
     pub async fn mount(&mut self, lang_address: &str) -> Result<(), AnyError> {
         let generation = {
             let mut slot = self.mount_lifecycles.lock(lang_address).await;
@@ -108,14 +121,20 @@ impl PerspectiveInstance {
     async fn mount_as(&mut self, lang_address: &str, generation: u64) -> Result<(), AnyError> {
         let controller = LanguageController::global_instance();
         let shapes = controller.mount_shapes(lang_address).await?;
-        {
-            let mut slot = self.mount_lifecycles.lock(lang_address).await;
-            if slot.generation != generation {
-                return Err(anyhow!(
-                    "{lang_address} was unmounted while it was being mounted"
-                ));
-            }
-            self.install_mount_shapes(lang_address, &shapes).await?;
+        let seq = next_mount_seq();
+        let snapshot = controller.mount_snapshot(lang_address).await?;
+
+        let mut slot = self.mount_lifecycles.lock(lang_address).await;
+        if slot.generation != generation {
+            return Err(anyhow!(
+                "{lang_address} was unmounted while it was being mounted"
+            ));
+        }
+        self.install_mount_shapes(lang_address, &shapes).await?;
+        let written = async {
+            let records = self.stage_records(lang_address, &snapshot.entries)?;
+            self.write_snapshot(lang_address, &mut slot, records, seq)
+                .await?;
             if !self.has_mount_link(lang_address).await? {
                 self.add_links(
                     vec![Link {
@@ -129,10 +148,36 @@ impl PerspectiveInstance {
                 )
                 .await?;
             }
-            register_mount(lang_address, &self.uuid);
-            slot.phase = MountPhase::Active;
+            Ok::<(), AnyError>(())
         }
-        self.sync_mount(lang_address).await.map(|_| ())
+        .await;
+        if let Err(e) = written {
+            if let Err(cleanup) = self.remove_written_under(lang_address).await {
+                log::warn!(
+                    "perspective {}: cleaning up the failed mount of {lang_address} failed: {cleanup}",
+                    self.uuid
+                );
+            }
+            return Err(e);
+        }
+        slot.phase = MountPhase::Active;
+        register_mount(lang_address, &self.uuid);
+        Ok(())
+    }
+
+    /// Remove every link the mount wrote under `<lang>://` (records and
+    /// bookkeeping).
+    async fn remove_written_under(&mut self, lang_address: &str) -> Result<(), AnyError> {
+        let prefix = format!("{lang_address}://");
+        let doomed: Vec<LinkExpression> = self
+            .get_links(&LinkQuery::default())
+            .await?
+            .into_iter()
+            .filter(|l| l.data.source.starts_with(&prefix) && is_mount_written(l))
+            .map(LinkExpression::from)
+            .collect();
+        self.remove_links(doomed, None).await?;
+        Ok(())
     }
 
     /// Drop the mount: every link it wrote under `<lang>://` plus the mount
@@ -144,21 +189,19 @@ impl PerspectiveInstance {
         self.mount_lifecycles.enter(&mut slot, MountPhase::Inactive);
         unregister_mount(lang_address, &self.uuid);
 
-        let prefix = format!("{lang_address}://");
-        let target = mount_target(lang_address);
-        let doomed: Vec<LinkExpression> = self
-            .get_links(&LinkQuery::default())
+        self.remove_written_under(lang_address).await?;
+        let mount_links: Vec<LinkExpression> = self
+            .get_links(&LinkQuery {
+                source: Some(MOUNT_SOURCE.to_string()),
+                predicate: Some(MOUNT_PREDICATE.to_string()),
+                target: Some(mount_target(lang_address)),
+                ..Default::default()
+            })
             .await?
             .into_iter()
-            .filter(|l| {
-                (l.data.source.starts_with(&prefix) && is_mount_written(l))
-                    || (l.data.source == MOUNT_SOURCE
-                        && l.data.predicate.as_deref() == Some(MOUNT_PREDICATE)
-                        && l.data.target == target)
-            })
             .map(LinkExpression::from)
             .collect();
-        self.remove_links(doomed, None).await?;
+        self.remove_links(mount_links, None).await?;
         Ok(())
     }
 
@@ -196,26 +239,64 @@ impl PerspectiveInstance {
         if self.mounted_version(lang_address).await?.as_deref() != Some(shapes.version.as_str()) {
             self.install_mount_shapes(lang_address, &shapes).await?;
         }
+        let records = self.stage_records(lang_address, &snapshot.entries)?;
+        self.write_snapshot(lang_address, &mut slot, records, seq)
+            .await
+    }
+
+    /// Expand `entries` into the records they want, before any is
+    /// written: an entry that does not expand fails them all.
+    fn stage_records(
+        &self,
+        lang_address: &str,
+        entries: &[MountEntry],
+    ) -> Result<Vec<StagedRecord>, AnyError> {
+        entries
+            .iter()
+            .map(|entry| {
+                let source = format!("{lang_address}://{}", entry.address);
+                let links = self
+                    .expand_entry(entry, &source)
+                    .map_err(|e| anyhow!("mounted record {}: {e}", entry.address))?;
+                Ok(StagedRecord {
+                    address: entry.address.clone(),
+                    source,
+                    links,
+                })
+            })
+            .collect()
+    }
+
+    /// Write a snapshot taken at `seq` (its `records` staged): diff each
+    /// record, then sweep every record the snapshot no longer lists. Runs
+    /// under the mount's apply lock (`slot`). A snapshot older than the
+    /// last one applied writes nothing, and a record a delta newer than
+    /// this snapshot wrote keeps the delta's state: the snapshot may have
+    /// been read before the change.
+    async fn write_snapshot(
+        &mut self,
+        lang_address: &str,
+        slot: &mut MountSlot,
+        records: Vec<StagedRecord>,
+        seq: u64,
+    ) -> Result<MountSyncReport, AnyError> {
         if slot.snapshot_is_stale(seq) {
             return Ok(MountSyncReport::default());
         }
-
-        // A record a delta newer than this snapshot wrote keeps the delta's
-        // state: the snapshot may have been read before the change.
         let mut report = MountSyncReport::default();
         let mut wanted_sources = HashSet::new();
-        for entry in &snapshot.entries {
-            wanted_sources.insert(format!("{lang_address}://{}", entry.address));
-            if slot.newer_than_snapshot(&entry.address, seq) {
+        for record in records {
+            wanted_sources.insert(record.source.clone());
+            if slot.newer_than_snapshot(&record.address, seq) {
                 continue;
             }
-            let r = self.apply_mount_entry(lang_address, entry).await?;
+            let r = self.write_record(lang_address, record).await?;
             report.added += r.added;
             report.removed += r.removed;
         }
 
-        // Snapshot sync: a mounted address missing from the snapshot is
-        // removed — all the links the mount owns under that source.
+        // A mounted address missing from the snapshot is removed — all the
+        // links the mount owns under that source.
         let prefix = format!("{lang_address}://");
         let doomed: Vec<LinkExpression> = self
             .owned_links(lang_address)
@@ -270,12 +351,13 @@ impl PerspectiveInstance {
             return Ok(MountSyncReport::default());
         };
         let mut report = MountSyncReport::default();
-        for entry in &delta.changed {
-            if !slot.delta_applies(&entry.address, seq) {
+        for record in self.stage_records(lang_address, &delta.changed)? {
+            if !slot.delta_applies(&record.address, seq) {
                 continue;
             }
-            let r = self.apply_mount_entry(lang_address, entry).await?;
-            slot.delta_applied(&entry.address, seq);
+            let address = record.address.clone();
+            let r = self.write_record(lang_address, record).await?;
+            slot.delta_applied(&address, seq);
             report.added += r.added;
             report.removed += r.removed;
         }
@@ -485,8 +567,8 @@ impl PerspectiveInstance {
 
     /// Install `shapes` through `add_sdna_batch` (one SubjectClass per
     /// shape, Shared as `add_sdna` writes them) once `check_class_ownership`
-    /// lets this language install them, claim the classes, and rewrite the
-    /// mount's version link. The check and the install hold the
+    /// lets this language install them and it claimed them, then rewrite
+    /// the mount's version link. The check and the install hold the
     /// perspective's install lock, so two mounts cannot both pass the check
     /// for the same class.
     async fn install_mount_shapes(
@@ -497,6 +579,9 @@ impl PerspectiveInstance {
         let lifecycles = self.mount_lifecycles.clone();
         let _installing = lifecycles.install_lock().await;
         self.check_class_ownership(lang_address, shapes).await?;
+        // Claimed before they are installed: an install that fails halfway
+        // leaves classes this language may still install over on a retry.
+        self.claim_mount_classes(lang_address, shapes).await?;
         let context = AgentContext::main_agent();
         let entries = shapes
             .shapes
@@ -512,8 +597,6 @@ impl PerspectiveInstance {
             .collect();
         self.add_sdna_batch(entries, &context).await?;
         self.alias_mount_class_names(shapes).await?;
-
-        self.claim_mount_classes(lang_address, shapes).await?;
 
         self.remove_bookkeeping(lang_address).await?;
         let version = Link {
@@ -629,13 +712,16 @@ impl PerspectiveInstance {
     /// wanted` is removed, `wanted − current` added; equal links stay
     /// untouched (no subscription noise). Anyone else's link under the
     /// source is neither adopted nor removed.
-    async fn apply_mount_entry(
+    async fn write_record(
         &mut self,
         lang_address: &str,
-        entry: &MountEntry,
+        record: StagedRecord,
     ) -> Result<MountSyncReport, AnyError> {
-        let source = format!("{lang_address}://{}", entry.address);
-        let wanted = self.expand_entry(entry, &source)?;
+        let StagedRecord {
+            source,
+            links: wanted,
+            ..
+        } = record;
         let wanted_set: HashSet<(Option<String>, String)> = wanted
             .iter()
             .map(|l| (l.predicate.clone(), l.target.clone()))

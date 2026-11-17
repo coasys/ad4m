@@ -1,8 +1,10 @@
 //! The mount's lifecycle and the order of its applies: an unmount wins
 //! against every sync, delta and call result in flight; snapshots and
 //! deltas apply one at a time and never regress a record; a mount owns
-//! only the classes it installed and removes only links it wrote. The races stop one run at a chosen point with a
-//! `mount_gates` gate, run the other side, then let it go.
+//! only the classes it installed and removes only links it wrote; a failed
+//! mount leaves nothing behind and can be retried. The races stop one run
+//! at a chosen point with a `mount_gates` gate, run the other side, then
+//! let it go.
 
 use super::mount_gates::gates;
 use super::mount_gates::MountPoint;
@@ -411,4 +413,55 @@ async fn a_bookkeeping_refresh_spares_shared_links() {
             .any(|l| l.status == Some(LinkStatus::Shared) && l.data.target == "literal:string:peer"),
         "the refresh removed a Shared link: {versions:?}"
     );
+}
+
+// --- A failed mount leaves nothing and can be retried -------------------------
+
+#[tokio::test]
+async fn a_failed_snapshot_leaves_no_mount_and_a_retry_works() {
+    let lang = load_mount_test_language().await;
+    create(&lang, json!({"title": "a"})).await;
+    let (mut p, _shapes, _ctx) =
+        crate::perspectives::interpretation_test_support::setup_perspective_no_llm(&[]).await;
+
+    project(&lang, "setSnapshotFault", json!({"fail": "boom"})).await;
+    let error = p.mount(&lang).await.unwrap_err();
+    assert!(error.to_string().contains("boom"), "{error}");
+    assert!(p.mounts().await.unwrap().is_empty(), "a failed mount is listed");
+    assert!(crate::perspectives::perspectives_for_mount(&lang).is_empty());
+
+    project(&lang, "setSnapshotFault", json!({})).await;
+    p.mount(&lang).await.unwrap();
+    let instances = things(&p).await;
+    crate::perspectives::unregister_mount(&lang, &p.uuid);
+    assert_eq!(instances.len(), 1, "the retry imported nothing: {instances:?}");
+}
+
+#[tokio::test]
+async fn an_invalid_entry_leaves_no_records_and_a_retry_works() {
+    let lang = load_mount_test_language().await;
+    create(&lang, json!({"title": "a"})).await;
+    let (mut p, _shapes, _ctx) =
+        crate::perspectives::interpretation_test_support::setup_perspective_no_llm(&[]).await;
+
+    project(
+        &lang,
+        "setSnapshotFault",
+        json!({"extra": [{"class": "NoSuchClass", "address": "bad", "data": {}}]}),
+    )
+    .await;
+    assert!(p.mount(&lang).await.is_err());
+    let records: Vec<_> = lang_links(&p, &lang)
+        .await
+        .into_iter()
+        .filter(|l| l.data.source != format!("{lang}://project"))
+        .collect();
+    assert!(records.is_empty(), "a failed mount wrote records: {records:?}");
+    assert!(p.mounts().await.unwrap().is_empty(), "a failed mount is listed");
+
+    project(&lang, "setSnapshotFault", json!({})).await;
+    p.mount(&lang).await.unwrap();
+    let instances = things(&p).await;
+    crate::perspectives::unregister_mount(&lang, &p.uuid);
+    assert_eq!(instances.len(), 1, "the retry imported nothing: {instances:?}");
 }
