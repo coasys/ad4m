@@ -153,10 +153,27 @@ try {
   console.log('Added:', result.additions.length);
   console.log('Removed:', result.removals.length);
 } catch (error) {
-  // If any operation fails, none of the changes are applied
+  // Earlier calls' staged writes stay in the open batch — drop them all
+  await perspective.discardBatch(batchId);
   console.error('Batch operation failed:', error);
 }
 ```
+
+**A failed call does not roll back the batch.** The staged writes of every call that
+succeeded stay in the open batch — and the failed call itself may have staged part of its
+work before it erred. Discard the batch with `perspective.discardBatch(batchId)`; committing
+it to keep the successful calls also commits whatever the failed call left behind. (The
+`perspective.instance*` validated writes stage nothing for a *refused* call — a 422 shape
+violation is detected before any link is written — but a failure that is not a refusal, like
+a store error mid-write, can still leave a partial write staged.)
+
+**A new instance is found only after its batch commits.** The `perspective.instance*`
+existence checks read committed state, so within one batch an `instanceCreate` followed by
+an `instanceUpdate`, `instanceRemove`, `instanceAddToCollection` or
+`instanceRemoveFromCollection` of the new instance's URI fails `notFound`. Put a new
+instance's initial collection items on the create itself, or commit the create before
+adding to its collections. (The link reads a write does — collection membership, the remove
+cascade — do see the batch's own staged work.)
 
 Under the hood, `Ad4mModel.transaction()` calls `createBatch()` and `commitBatch()` for you.
 

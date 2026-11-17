@@ -1,26 +1,27 @@
-//! Remote LLM providers — one trait, one implementation per wire protocol.
+//! Model providers — one trait per capability, one implementation per wire protocol.
 //!
-//! Before this module the remote path was a bare `ChatGPTClient` held in
-//! `LlmModel::Remote`, so "a remote model" and "an OpenAI-shaped HTTP API"
-//! were the same thing. Anthropic is not OpenAI-shaped: it carries tools and
-//! tool results as structured content blocks rather than text, and its prompt
-//! cache has to be addressed explicitly with `cache_control` breakpoints —
-//! neither of which an OpenAI request struct has anywhere to put.
+//! Anthropic is not OpenAI-shaped: it carries tools and tool results as structured
+//! content blocks rather than text, and its prompt cache has to be addressed explicitly
+//! with `cache_control` breakpoints. Ollama's native `/api/chat` sizes `num_ctx`. So the
+//! provider is the seam: [`RemoteChat`] is what `ai_service` prompts an LLM through,
+//! each implementation owns its own wire format, and nothing above this module knows
+//! which one answered.
 //!
-//! So the provider is the seam. [`RemoteChat`] is what the per-model worker
-//! thread in `ai_service` talks to; each implementation owns its own wire
-//! format, and nothing above this module knows which one answered.
-//!
-//! Adding a provider: implement [`RemoteChat`], and construct it in
-//! [`build`] from the model's [`ModelApiType`](crate::types::ModelApiType).
-//! Do not add a variant to `LlmModel` — that enum distinguishes *local
-//! weights* from *a remote endpoint*, which is a different question.
+//! Adding a provider: implement [`RemoteChat`] and [`discovery::Discover`], construct the
+//! client in [`chat_client`] from the endpoint's protocol
+//! ([`EndpointKind::protocol`](crate::types::EndpointKind::protocol)), and the listing in
+//! [`discovery::discover_for`] from its [`EndpointKind`](crate::types::EndpointKind).
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use tokio::sync::mpsc;
 
+use crate::types::{Endpoint, ModelApiType};
+
 pub mod anthropic;
+pub mod audio;
+pub mod discovery;
+pub mod embed;
 pub mod http;
 pub mod ollama;
 pub mod openai;
@@ -28,44 +29,51 @@ pub mod openai;
 #[cfg(test)]
 mod anthropic_e2e;
 
-/// Ask a configured endpoint which models it serves, before any model has
-/// been registered against it.
+/// The chat client of `endpoint`, by its protocol. One per model: it holds a connection
+/// pool, no per-request state.
 ///
-/// The settings form calling this is how an operator finds out what they can
-/// pick, and — because a bad key fails here rather than on the first
-/// completion — whether their credentials work at all.
-pub async fn list_models(
-    api_type: &crate::types::ModelApiType,
-    api_key: &str,
-    base_url: url::Url,
-) -> Result<Vec<String>> {
-    match api_type {
-        crate::types::ModelApiType::OpenAi => openai::list_models(api_key, base_url).await,
-        crate::types::ModelApiType::Anthropic => anthropic::list_models(api_key, base_url).await,
-        crate::types::ModelApiType::Ollama => ollama::list_models(api_key, base_url).await,
+/// Refuses a key that would cross the network in the clear. The endpoint handlers refuse
+/// it too, but an endpoint saved before they did still loads through here, and would
+/// otherwise send its key with every completion.
+pub fn chat_client(endpoint: &Endpoint) -> Result<Box<dyn RemoteChat>> {
+    if !endpoint.api_key.is_empty() && !http::is_transport_safe(&endpoint.base_url) {
+        return Err(anyhow!(
+            "{} ({})",
+            http::CLEARTEXT_KEY_REFUSAL,
+            endpoint.base_url
+        ));
     }
+    // The client is the key's one receiver: it sends the key to the provider.
+    let api_key = endpoint.api_key.expose();
+    let base_url = endpoint.base_url.clone();
+    Ok(match endpoint.kind.protocol() {
+        ModelApiType::OpenAi => Box::new(openai::OpenAiChat::new(api_key, base_url, endpoint.kind)),
+        ModelApiType::Anthropic => Box::new(anthropic::AnthropicChat::new(api_key, base_url)),
+        ModelApiType::Ollama => Box::new(ollama::OllamaChat::new(
+            api_key,
+            base_url,
+            endpoint.max_num_ctx,
+        )),
+    })
 }
 
 /// Whether this executor's client for an API type passes tools as data.
 ///
 /// The same fact as [`RemoteChat::supports_native_tools`], asked of a model
 /// config rather than of a built client — the harness has to decide how to
-/// render tools *before* anything reaches a worker thread, so it cannot ask
+/// render tools *before* it picks a client to call, so it cannot ask
 /// the instance. Kept beside the trait, and covered by a test asserting the
 /// two agree, because two answers drifting apart would route a model down a
 /// path its client cannot serve.
 ///
-/// `OpenAi => false` is about [`openai::OpenAiChat`] and not about the OpenAI
-/// wire format, which carries tools perfectly well. That client could support
-/// them and does not yet, so every OpenAI-shaped model takes the prompt-
-/// injection path. Flipping this arm alone is not enough to make it work — it
-/// would also need building `tools[]` in `OpenAiChat::chat`, which is why that
-/// method refuses a request carrying tools instead of ignoring them.
+/// Every client can. Whether a given model is handed tools is the model's own
+/// flag on top of this (`Model::uses_native_tools`): OpenAI-shaped servers
+/// differ per model in whether they honour `tools[]`.
 pub fn api_type_supports_native_tools(api_type: &crate::types::ModelApiType) -> bool {
     match api_type {
         crate::types::ModelApiType::Anthropic => true,
         crate::types::ModelApiType::Ollama => true,
-        crate::types::ModelApiType::OpenAi => false,
+        crate::types::ModelApiType::OpenAi => true,
     }
 }
 
@@ -183,6 +191,29 @@ pub struct ChatRequest {
     /// [`RemoteChat::supports_native_tools`] is true — everything else has its
     /// tools rendered into the prompt before the request is built.
     pub tools: Vec<ToolSpec>,
+    /// OpenAI's `tool_choice` (`"auto"`, `"required"`, `"none"`, or a named function),
+    /// as the caller wrote it. Only the OpenAI-shaped client sends it; the others refuse
+    /// a request carrying it rather than drop it.
+    pub tool_choice: Option<serde_json::Value>,
+    /// OpenAI's `response_format` (`json_object`, `json_schema`), as the caller wrote it.
+    /// Same rule as `tool_choice`.
+    pub response_format: Option<serde_json::Value>,
+    /// A decoding constraint: the reply's text must be JSON matching this schema. Each
+    /// provider sends it the way its server takes one (OpenAI-shaped: `response_format`
+    /// `json_schema`, which llama-server, vLLM and OpenAI apply while decoding; Ollama's
+    /// native API: `format`). A provider without such a field (Anthropic) sends the
+    /// request without it, so the caller validates the reply whatever answered.
+    /// Ignored when `response_format` is set: the caller's own format wins.
+    pub json_schema: Option<serde_json::Value>,
+    /// Ask the model not to spend the window on a thinking channel. Sent only
+    /// where the endpoint accepts it: Ollama's `think: false` when `/api/show`
+    /// lists the `thinking` capability, llama-server's
+    /// `chat_template_kwargs.enable_thinking`. A strict OpenAI endpoint gets
+    /// nothing.
+    pub disable_thinking: bool,
+    /// Cap on generated tokens (Ollama `options.num_predict`, OpenAI-shaped
+    /// `max_tokens`). `None` leaves the server's own default.
+    pub max_output_tokens: Option<u32>,
 }
 
 impl ChatRequest {
@@ -191,11 +222,46 @@ impl ChatRequest {
             model: model.into(),
             messages,
             tools: Vec::new(),
+            tool_choice: None,
+            response_format: None,
+            json_schema: None,
+            disable_thinking: false,
+            max_output_tokens: None,
         }
+    }
+
+    /// Refuses a request carrying `tool_choice` or `response_format`, for a provider
+    /// that does not translate them: dropping either would answer a different question.
+    pub(crate) fn refuse_openai_options(&self, provider: &str) -> Result<()> {
+        if self.tool_choice.is_some() || self.response_format.is_some() {
+            return Err(anyhow::anyhow!(
+                "{provider} does not take tool_choice or response_format from this executor"
+            ));
+        }
+        Ok(())
     }
 
     pub fn with_tools(mut self, tools: Vec<ToolSpec>) -> Self {
         self.tools = tools;
+        self
+    }
+
+    /// Constrain the reply to JSON matching `schema` (see [`ChatRequest::json_schema`]).
+    pub fn with_json_schema(mut self, schema: Option<serde_json::Value>) -> Self {
+        self.json_schema = schema;
+        self
+    }
+
+    /// No thinking channel, and at most `max_output_tokens` generated
+    /// (`None` leaves the server's own length). See
+    /// [`ChatRequest::disable_thinking`].
+    pub fn with_generation(
+        mut self,
+        disable_thinking: bool,
+        max_output_tokens: Option<u32>,
+    ) -> Self {
+        self.disable_thinking = disable_thinking;
+        self.max_output_tokens = max_output_tokens;
         self
     }
 }
@@ -229,14 +295,16 @@ pub struct ChatReply {
     /// What the provider reported about token use. Empty when it reported
     /// nothing.
     pub usage: ChatUsage,
+    /// Why generation stopped, when the provider said. `"length"` means the
+    /// reply was cut at the output cap or the window. Absent when it did not say.
+    pub stop_reason: Option<String>,
 }
 
 /// A remote chat endpoint.
 ///
-/// One instance per configured model, built once when the model's worker
-/// thread starts and reused for every prompt on that thread — so an
-/// implementation may hold a connection pool, but must not hold per-request
-/// state.
+/// One instance per configured model, built once when the model loads and called
+/// concurrently for every prompt on it — so an implementation may hold a
+/// connection pool, but must not hold per-request state.
 #[async_trait]
 pub trait RemoteChat: Send + Sync {
     /// Whether tools can be handed to this provider as structured
@@ -250,11 +318,8 @@ pub trait RemoteChat: Send + Sync {
     /// come back as data rather than as text that happens to look like data.
     ///
     /// It is a fact about *this implementation*, not about the protocol it
-    /// speaks. The OpenAI wire format carries `tools[]` and answers with
-    /// `tool_calls` — it is one of the two formats that defined the shape —
-    /// and [`super::openai::OpenAiChat`] still answers `false`, because it
-    /// does not build them. Read a `false` as "this client does not pass
-    /// tools as data", never as "this protocol cannot".
+    /// speaks. Read a `false` as "this client does not pass tools as data",
+    /// never as "this protocol cannot".
     ///
     /// Answering it wrongly is the one way a provider can break a caller: a
     /// `true` from a client that then drops `ChatRequest::tools` hands the
@@ -280,9 +345,9 @@ pub trait RemoteChat: Send + Sync {
     /// not it streamed, because the caller bills on it.
     ///
     /// Tools are *not* promised here, even on a provider whose
-    /// [`Self::supports_native_tools`] is true. Reading structured calls out of
-    /// a stream means reassembling them from partial JSON, which no
-    /// implementation does yet. An implementation that cannot must answer a
+    /// [`Self::supports_native_tools`] is true: reading structured calls out of
+    /// a stream means reassembling them from partial JSON, which only the
+    /// OpenAI-shaped client does. An implementation that cannot must answer a
     /// request carrying tools with an error rather than a reply with none —
     /// an empty `tool_calls` is indistinguishable from a model that chose not
     /// to call anything.
@@ -294,6 +359,34 @@ pub trait RemoteChat: Send + Sync {
         let reply = self.chat(request).await?;
         let _ = tokens.send(reply.text.clone());
         Ok(reply)
+    }
+
+    /// The context window in tokens this client puts `model`'s requests out
+    /// at — the value the request itself is sent with, when the client
+    /// resolves one. `None` (the default) means the client keeps no window
+    /// of its own: the endpoint's configured `max_num_ctx`, where set, is
+    /// the only hint there is.
+    ///
+    /// `OllamaChat` answers the `num_ctx` the request is sent with —
+    /// `min(context_length from `/api/show`, the endpoint's cap)`, its own
+    /// 2,048 fallback when the model's metadata cannot be read at all —
+    /// which can sit far under the configured ceiling. A request budget
+    /// sized from that ceiling alone can then exceed the window the model
+    /// actually runs.
+    async fn context_window_tokens(&self, model: &str) -> Option<u32> {
+        let _ = model;
+        None
+    }
+
+    /// The window `chat` sends when [`Self::context_window_tokens`]'s
+    /// resolution cannot happen — its failure fallback, so a caller whose
+    /// probe timed out still budgets for the request the model would get.
+    /// `None` for a client with no resolution of its own.
+    ///
+    /// `OllamaChat`'s is the same `num_ctx` `resolve_num_ctx` falls back
+    /// to on any `/api/show` failure.
+    fn context_window_fallback_tokens(&self) -> Option<u32> {
+        None
     }
 }
 
@@ -321,7 +414,11 @@ mod tests {
             ModelApiType::Ollama,
         ] {
             let client: Box<dyn RemoteChat> = match api_type {
-                ModelApiType::OpenAi => Box::new(openai::OpenAiChat::new("k", base.clone())),
+                ModelApiType::OpenAi => Box::new(openai::OpenAiChat::new(
+                    "k",
+                    base.clone(),
+                    crate::types::EndpointKind::OpenAi,
+                )),
                 ModelApiType::Anthropic => {
                     Box::new(anthropic::AnthropicChat::new("k", base.clone()))
                 }

@@ -25,7 +25,7 @@ export interface LinkData {
 
 /**
  * Opaque, encrypted link payload: the only kind the commit route accepts.
- * `ciphertext`/`nonce` are hex-encoded AES-256-GCM output over the
+ * `ciphertext`/`nonce` are base64-encoded AES-256-GCM output over the
  * plaintext LinkData (see encryption.ts). The server never sees the
  * plaintext source/predicate/target for these links.
  */

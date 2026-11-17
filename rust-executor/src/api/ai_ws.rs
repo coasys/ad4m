@@ -6,11 +6,17 @@ use std::sync::Arc;
 use ts_rs::TS;
 
 use crate::agent::capabilities::*;
-use crate::ai_service::providers::http::{is_transport_safe, CLEARTEXT_KEY_REFUSAL};
+use crate::ai_service::endpoints::EndpointNotFound;
+use crate::ai_service::local;
+use crate::ai_service::providers::discovery::discover_for;
+use crate::ai_service::providers::http::{
+    is_transport_safe, CLEARTEXT_KEY_REFUSAL, DISCOVERY_TIMEOUT,
+};
 use crate::ai_service::AIService;
+use crate::secret::Secret;
 use crate::types::{
-    AIModelLoadingStatus, AITask, AITaskInput, Model, ModelInput, ModelType, ModelView,
-    RequestContext, VoiceActivityParamsInput,
+    AITask, AITaskInput, DetectedEndpoint, DiscoveredModel, EndpointInput, EndpointKind,
+    EndpointView, ModelInput, ModelStatus, ModelType, ModelView, RequestContext,
 };
 use base64::Engine;
 
@@ -53,28 +59,24 @@ async fn list_models(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value,
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
-    let models: Vec<ModelView> = crate::db_backend::db_backend()
-        .get_models()
-        .map_err(|e| WsRpcError::internal(e.to_string()))?
-        .iter()
-        .map(Model::view)
-        .collect();
+    let models: Vec<ModelView> =
+        AIService::model_views().map_err(|e| WsRpcError::internal(e.to_string()))?;
     Ok(serde_json::to_value(models)?)
 }
 
 /// `ai.discoverModels` — what does this endpoint serve, and does this key work?
 ///
-/// Takes the credentials of a model that does not exist yet: an operator is
-/// filling in the form and wants the list to pick from, before there is
-/// anything to list. Answers the provider's own model ids.
+/// Takes a saved endpoint's id, or the kind, URL and key of a server not saved yet: an
+/// operator filling in the form wants the list to pick from before there is anything to
+/// save. Answers the models the server lists, with their capabilities.
 ///
 /// Gated on AI_CREATE rather than AI_READ. It reads nothing of this executor's,
 /// but it makes an outbound request to an arbitrary URL with an
 /// arbitrary key, which is the same authority adding a model carries and more
 /// than reading the models already configured.
 ///
-/// That includes the failure body. `list_models` puts the upstream response
-/// verbatim into its error, so a caller can point `baseUrl` at a host this
+/// That includes the failure body. The listing puts the upstream response
+/// into its error (key scrubbed), so a caller can point `baseUrl` at a host this
 /// executor can reach and read what it answers. Deliberate, on two grounds: a
 /// holder of AI_CREATE can already name an arbitrary URL and send it
 /// credentials, so this widens reach and not authority; and the body is the
@@ -84,23 +86,22 @@ async fn list_models(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value,
 /// user sessions: the executor sends a request to a URL the caller chooses, a cleaner
 /// read primitive than `addModel` plus a prompt, needing no model and no completion.
 async fn discover_models(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let base_url = params.require_str("baseUrl")?;
-    let base_url = url::Url::parse(&base_url)
-        .map_err(|e| WsRpcError::bad_request(format!("Invalid baseUrl: {e}")))?;
-
-    // Defaults to OpenAI, which is what every endpoint that is not Anthropic
-    // speaks, and what the field meant before there was a choice.
-    let api_type = match params.get("apiType").and_then(|v| v.as_str()) {
-        Some(raw) => raw
-            .parse::<crate::types::ModelApiType>()
-            .map_err(WsRpcError::bad_request)?,
-        None => crate::types::ModelApiType::OpenAi,
+    let body: AiDiscoverModelsParams = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {e}")))?;
+    let (kind, base_url, api_key) = match body {
+        AiDiscoverModelsParams::Endpoint { endpoint_id } => {
+            let endpoint = crate::db_backend::db_backend()
+                .get_endpoint(&endpoint_id)
+                .map_err(|e| WsRpcError::internal(e.to_string()))?
+                .ok_or_else(|| WsRpcError::not_found(EndpointNotFound.to_string()))?;
+            (endpoint.kind, endpoint.base_url, endpoint.api_key)
+        }
+        AiDiscoverModelsParams::Server {
+            kind,
+            base_url,
+            api_key,
+        } => (kind, base_url, api_key.unwrap_or_else(|| Secret::new(""))),
     };
-
-    let api_key = params
-        .get("apiKey")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
 
     // A key sent over plain HTTP crosses the network in the clear, and the
     // OpenAI path sends it as a bearer token. Refuse that rather than leak it
@@ -114,33 +115,115 @@ async fn discover_models(params: Value, _ctx: Arc<RequestContext>) -> Result<Val
         return Err(WsRpcError::bad_request(CLEARTEXT_KEY_REFUSAL));
     }
 
-    let models = crate::ai_service::providers::list_models(&api_type, api_key, base_url)
-        .await
-        .map_err(|e| WsRpcError::bad_request(e.to_string()))?;
-
+    let models: Vec<DiscoveredModel> =
+        discover_for(kind, base_url, api_key.expose(), DISCOVERY_TIMEOUT)
+            .list_models()
+            .await
+            .map_err(|e| WsRpcError::bad_request(e.to_string()))?;
     Ok(serde_json::to_value(models)?)
 }
 
-/// Refuse a model whose key would cross the network in the clear.
-///
-/// The same rule as discovery, applied where it matters more: discovery sends
-/// a key once, and a saved model sends it with every completion for as long as
-/// the model exists. A base URL that does not parse is left for the service to
-/// reject with its own error.
-///
-/// `AIService::build_remote_client` refuses the same model again. This check
-/// is the one that keeps it out of the database and answers the caller.
-pub(super) fn refuse_cleartext_credential(model: &ModelInput) -> Result<(), WsRpcError> {
-    let Some(api) = &model.api else {
-        return Ok(());
-    };
-    // No key sent: an update keeps the stored key only for the URL it was set for.
-    if api.api_key.as_ref().is_none_or(|key| key.is_empty()) {
-        return Ok(());
+// ── Endpoints ──
+
+/// The answer to a failed endpoint call: the caller's mistake (a refused write, a key not
+/// sent again, a key over plain HTTP) is a bad request, a missing endpoint 404.
+fn endpoint_error(e: anyhow::Error) -> WsRpcError {
+    if e.downcast_ref::<crate::db::InvalidEndpoint>().is_some()
+        || e.downcast_ref::<crate::db::ApiKeyNotResent>().is_some()
+        || e.downcast_ref::<crate::ai_service::providers::http::UpstreamStatus>()
+            .is_some()
+    {
+        WsRpcError::bad_request(e.to_string())
+    } else if e.downcast_ref::<EndpointNotFound>().is_some() {
+        WsRpcError::not_found(e.to_string())
+    } else {
+        WsRpcError::internal(format!("{e:#}"))
     }
-    match url::Url::parse(&api.base_url) {
-        Ok(url) if !is_transport_safe(&url) => Err(WsRpcError::bad_request(CLEARTEXT_KEY_REFUSAL)),
-        _ => Ok(()),
+}
+
+async fn service() -> Result<AIService, WsRpcError> {
+    AIService::global_instance()
+        .await
+        .map_err(|e| WsRpcError::internal(e.to_string()))
+}
+
+async fn list_endpoints(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let endpoints = AIService::endpoints().map_err(endpoint_error)?;
+    Ok(serde_json::to_value(endpoints)?)
+}
+
+async fn add_endpoint(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let input: EndpointInput = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {e}")))?;
+    let endpoint = service()
+        .await?
+        .add_endpoint(input)
+        .await
+        .map_err(endpoint_error)?;
+    Ok(serde_json::to_value(endpoint)?)
+}
+
+async fn update_endpoint(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let body: AiUpdateEndpointParams = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {e}")))?;
+    let endpoint = service()
+        .await?
+        .update_endpoint(&body.id, body.endpoint)
+        .await
+        .map_err(endpoint_error)?;
+    Ok(serde_json::to_value(endpoint)?)
+}
+
+async fn remove_endpoint(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let body: AiRemoveEndpointParams = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {e}")))?;
+    service()
+        .await?
+        .remove_endpoint(&body.id, body.cascade.unwrap_or(false))
+        .await
+        .map_err(endpoint_error)?;
+    Ok(Value::Bool(true))
+}
+
+/// Probes this machine's loopback ports for model servers. Saves nothing.
+async fn detect_endpoints(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let detected = crate::ai_service::endpoints::detect::detect_endpoints().await;
+    Ok(serde_json::to_value(detected)?)
+}
+
+async fn pull_model(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let body: AiUpstreamModelParams = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {e}")))?;
+    service()
+        .await?
+        .pull_model(&body.endpoint_id, &body.remote_model)
+        .await
+        .map_err(endpoint_error)?;
+    Ok(Value::Bool(true))
+}
+
+async fn delete_upstream_model(
+    params: Value,
+    _ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
+    let body: AiUpstreamModelParams = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {e}")))?;
+    service()
+        .await?
+        .delete_upstream_model(&body.endpoint_id, &body.remote_model)
+        .await
+        .map_err(endpoint_error)?;
+    Ok(Value::Bool(true))
+}
+
+/// The answer to a refused model or task write: the caller's mistake (an endpoint that does
+/// not exist, an empty remote model, an endpoint that cannot serve the type, a task on a
+/// model that is not an LLM) is a bad request.
+fn model_error(e: anyhow::Error) -> WsRpcError {
+    if e.downcast_ref::<crate::db::InvalidModel>().is_some() {
+        WsRpcError::bad_request(e.to_string())
+    } else {
+        WsRpcError::internal(format!("{e:#}"))
     }
 }
 
@@ -148,16 +231,12 @@ async fn add_model(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, Ws
     let model: ModelInput =
         serde_json::from_value(params.get("model").cloned().unwrap_or(Value::Null))
             .map_err(|e| WsRpcError::bad_request(e.to_string()))?;
-    refuse_cleartext_credential(&model)?;
 
     let service = AIService::global_instance()
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
-    let id = service
-        .add_model(model)
-        .await
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    let id = service.add_model(model).await.map_err(model_error)?;
 
     Ok(Value::String(id))
 }
@@ -167,19 +246,12 @@ async fn update_model(params: Value, _ctx: Arc<RequestContext>) -> Result<Value,
     let model: ModelInput =
         serde_json::from_value(params.get("model").cloned().unwrap_or(Value::Null))
             .map_err(|e| WsRpcError::bad_request(e.to_string()))?;
-    refuse_cleartext_credential(&model)?;
 
     let service = AIService::global_instance()
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
-    service.update_model(id, model).await.map_err(|e| {
-        if let Some(refusal) = e.downcast_ref::<crate::db::ApiKeyNotResent>() {
-            WsRpcError::bad_request(refusal.to_string())
-        } else {
-            WsRpcError::internal(format!("Failed to update model: {:#}", e))
-        }
-    })?;
+    service.update_model(id, model).await.map_err(model_error)?;
 
     Ok(Value::Bool(true))
 }
@@ -232,31 +304,22 @@ async fn get_default_model(params: Value, _ctx: Arc<RequestContext>) -> Result<V
         .get_default_model(model_type)
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
-    let model = if let Some(id) = model_id {
-        crate::db_backend::db_backend()
-            .get_model(id)
-            .map_err(|e| WsRpcError::internal(e.to_string()))?
-    } else {
-        None
+    let model = match model_id {
+        Some(id) => AIService::model_view(&id).map_err(|e| WsRpcError::internal(e.to_string()))?,
+        None => None,
     };
 
-    Ok(serde_json::to_value(model.as_ref().map(Model::view))?)
+    Ok(serde_json::to_value(model)?)
 }
 
-async fn get_model_loading_status(
-    params: Value,
-    _ctx: Arc<RequestContext>,
-) -> Result<Value, WsRpcError> {
-    let model = params
-        .opt_str("model")
-        .or_else(|| params.opt_str("modelId"))
-        .ok_or_else(|| WsRpcError::bad_request("model parameter required"))?;
-
-    let status = AIService::model_status(model)
-        .await
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
-
-    Ok(serde_json::to_value(status).unwrap_or_default())
+/// Where a model stands by its endpoint's last health check.
+async fn get_model_status(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let body: AiIdParams = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {e}")))?;
+    let model = AIService::model_view(&body.id)
+        .map_err(|e| WsRpcError::internal(e.to_string()))?
+        .ok_or_else(|| WsRpcError::not_found(format!("No model has the id {}", body.id)))?;
+    Ok(serde_json::to_value(model.status)?)
 }
 
 // ── Tasks ──
@@ -299,7 +362,7 @@ async fn add_task(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRp
     let result = service
         .add_task(task, ctx.user_did())
         .await
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+        .map_err(model_error)?;
 
     Ok(serde_json::to_value(result)?)
 }
@@ -315,10 +378,7 @@ async fn update_task(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, 
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
-    let result = service
-        .update_task(task)
-        .await
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    let result = service.update_task(task).await.map_err(model_error)?;
 
     Ok(serde_json::to_value(result)?)
 }
@@ -340,6 +400,46 @@ async fn remove_task(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, 
 
 // ── Prompt & Embed ──
 
+/// The answer to a failed prompt or embed. A managed user does not read endpoints
+/// (`ai.endpoints` refuses them, and their model statuses carry no detail), so the URLs of
+/// the endpoints leave the message they get: a provider's "could not reach" error names
+/// the URL it called.
+fn upstream_failure(e: &anyhow::Error, ctx: &RequestContext) -> WsRpcError {
+    if e.downcast_ref::<crate::db::InvalidModel>().is_some()
+        || e.downcast_ref::<local::LocalAiRefused>().is_some()
+    {
+        // The task's model is not an LLM, or there is no default model of the type (set up
+        // local AI or register one): no endpoint was called.
+        return WsRpcError::bad_request(e.to_string());
+    }
+    let message = e.to_string();
+    if ctx.user_did().is_none() {
+        return WsRpcError::internal(message);
+    }
+    let endpoints = crate::db_backend::db_backend()
+        .get_endpoints()
+        .unwrap_or_default();
+    WsRpcError::internal(without_endpoint_urls(&message, &endpoints))
+}
+
+/// `message` with each endpoint's base URL, and then its origin (a provider calls paths
+/// under it), replaced by a neutral phrase.
+fn without_endpoint_urls(message: &str, endpoints: &[crate::types::Endpoint]) -> String {
+    const REPLACEMENT: &str = "<the model's endpoint>";
+    let mut message = message.to_string();
+    for endpoint in endpoints {
+        let base = endpoint.base_url.as_str().trim_end_matches('/').to_string();
+        let origin = endpoint.base_url.origin();
+        let origin = origin.is_tuple().then(|| origin.ascii_serialization());
+        for needle in std::iter::once(base).chain(origin) {
+            if !needle.is_empty() {
+                message = message.replace(&needle, REPLACEMENT);
+            }
+        }
+    }
+    message
+}
+
 async fn ai_prompt(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_compute_credits_ws(ctx.user_did())?;
 
@@ -355,7 +455,7 @@ async fn ai_prompt(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
     let result = service
         .prompt(task_id, body.prompt, ctx.user_did().map(str::to_string))
         .await
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+        .map_err(|e| upstream_failure(&e, &ctx))?;
 
     Ok(Value::String(result.text))
 }
@@ -371,9 +471,9 @@ async fn ai_embed(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRp
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     let embedding = service
-        .embed(body.model_id, body.text, ctx.user_did().map(str::to_string))
+        .embed(body.model_id, body.text, Some(&*ctx))
         .await
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+        .map_err(|e| upstream_failure(&e, &ctx))?;
 
     let json_string = serde_json::to_string(&embedding.embeddings)
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
@@ -399,9 +499,9 @@ async fn open_transcription_stream(
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     let stream_id = service
-        .open_transcription_stream(body.model_id, body.params.map(|p| p.into()), &ctx)
+        .open_transcription_stream(body.model_id, &ctx)
         .await
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+        .map_err(|e| upstream_failure(&e, &ctx))?;
 
     Ok(Value::String(stream_id))
 }
@@ -425,38 +525,148 @@ async fn close_transcription_stream(
     Ok(Value::String("true".to_string()))
 }
 
+// ── Local AI ──
+
+/// The answer to a failed local AI call: an install while one runs, a plan that does not
+/// fit, nothing installed to start, or a write to a managed endpoint is a bad request.
+fn local_error(e: anyhow::Error) -> WsRpcError {
+    if e.downcast_ref::<local::LocalAiRefused>().is_some()
+        || e.downcast_ref::<crate::db::InvalidEndpoint>().is_some()
+    {
+        WsRpcError::bad_request(e.to_string())
+    } else {
+        WsRpcError::internal(format!("{e:#}"))
+    }
+}
+
+/// This device: OS, CPU, memory, GPUs, the backends a runtime can use, the memory budget.
+async fn local_hardware(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    Ok(serde_json::to_value(
+        local::hardware().await.map_err(local_error)?,
+    )?)
+}
+
+/// What `ai.localInstall` would download and run here, and whether it fits.
+async fn local_plan(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    Ok(serde_json::to_value(
+        local::current_plan().await.map_err(local_error)?,
+    )?)
+}
+
+async fn local_status(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    Ok(serde_json::to_value(local::status().await)?)
+}
+
+/// Downloads the plan's runtimes and models (progress as `ai-local-progress`), then starts
+/// and registers them. Minutes for a first install.
+async fn local_install(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let body: local::InstallParams = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {e}")))?;
+    Ok(serde_json::to_value(
+        local::install(body).await.map_err(local_error)?,
+    )?)
+}
+
+async fn local_start(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    Ok(serde_json::to_value(
+        local::start().await.map_err(local_error)?,
+    )?)
+}
+
+async fn local_stop(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    Ok(serde_json::to_value(local::stop().await)?)
+}
+
+async fn local_remove(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let body: local::RemoveParams = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {e}")))?;
+    Ok(serde_json::to_value(
+        local::remove(body).await.map_err(local_error)?,
+    )?)
+}
+
 pub fn register_ws_handlers(map: &mut HandlerMap) {
     // The executor's models (without keys), which users read too.
     map.method::<NoParams, Vec<ModelView>>("ai.models", list_models)
         .read()
         .guard(Guard::Cap(AI_READ_CAPABILITY.clone()));
-    // The provider's own model ids.
-    map.method::<AiDiscoverModelsParams, Vec<String>>("ai.discoverModels", discover_models)
-        .read()
-        .guard(Guard::Executor(AI_CREATE_CAPABILITY.clone()));
+    // The models a server lists, with their capabilities.
+    map.method::<AiDiscoverModelsParams, Vec<DiscoveredModel>>(
+        "ai.discoverModels",
+        discover_models,
+    )
+    .read()
+    .guard(Guard::Executor(AI_CREATE_CAPABILITY.clone()));
     // Executor-wide settings: every user's prompts go to the models and keys set here.
     // The new model's id.
     map.method::<AiAddModelParams, String>("ai.addModel", add_model)
-        .long()
         .guard(Guard::Executor(AI_CREATE_CAPABILITY.clone()));
     map.method::<AiUpdateModelParams, bool>("ai.updateModel", update_model)
-        .guard(Guard::Executor(AI_CREATE_CAPABILITY.clone()));
+        .guard(Guard::Executor(AI_UPDATE_CAPABILITY.clone()));
     map.method::<AiIdParams, bool>("ai.removeModel", remove_model)
-        .guard(Guard::Executor(AI_CREATE_CAPABILITY.clone()));
+        .guard(Guard::Executor(AI_DELETE_CAPABILITY.clone()));
     map.method::<AiSetDefaultModelParams, bool>("ai.setDefaultModel", set_default_model)
+        .guard(Guard::Executor(AI_UPDATE_CAPABILITY.clone()));
+    // The upstream servers, with their URLs and health: the operator's view (users read
+    // `ai.models`). Keys never leave: `hasApiKey` says whether one is set.
+    map.method::<NoParams, Vec<EndpointView>>("ai.endpoints", list_endpoints)
+        .read()
+        .guard(Guard::Executor(AI_READ_CAPABILITY.clone()));
+    // Probed once before it saves.
+    map.method::<EndpointInput, EndpointView>("ai.addEndpoint", add_endpoint)
         .guard(Guard::Executor(AI_CREATE_CAPABILITY.clone()));
+    // Long: an update reloads the models on the endpoint, and a cascade removes them, each
+    // after the inference it runs.
+    map.method::<AiUpdateEndpointParams, EndpointView>("ai.updateEndpoint", update_endpoint)
+        .long()
+        .guard(Guard::Executor(AI_UPDATE_CAPABILITY.clone()));
+    map.method::<AiRemoveEndpointParams, bool>("ai.removeEndpoint", remove_endpoint)
+        .long()
+        .guard(Guard::Executor(AI_DELETE_CAPABILITY.clone()));
+    // Requests to this machine's loopback ports; saves nothing.
+    map.method::<NoParams, Vec<DetectedEndpoint>>("ai.detectEndpoints", detect_endpoints)
+        .read()
+        .guard(Guard::Executor(AI_CREATE_CAPABILITY.clone()));
+    // ── Local AI: reads for the main agent's sessions, process control for the operator.
+    // Installing downloads gigabytes and starts processes on this machine: no app token
+    // does that, only the admin credential (or a loopback executor without one).
+    map.method::<NoParams, local::hardware::LocalHardware>("ai.localHardware", local_hardware)
+        .read()
+        .guard(Guard::Executor(AI_READ_CAPABILITY.clone()));
+    map.method::<NoParams, local::plan::LocalPlan>("ai.localPlan", local_plan)
+        .read()
+        .guard(Guard::Executor(AI_READ_CAPABILITY.clone()));
+    map.method::<NoParams, local::LocalStatus>("ai.localStatus", local_status)
+        .read()
+        .guard(Guard::Executor(AI_READ_CAPABILITY.clone()));
+    map.method::<local::InstallParams, local::LocalStatus>("ai.localInstall", local_install)
+        .long()
+        .guard(Guard::Operator);
+    map.method::<NoParams, local::LocalStatus>("ai.localStart", local_start)
+        .long()
+        .guard(Guard::Operator);
+    map.method::<NoParams, local::LocalStatus>("ai.localStop", local_stop)
+        .guard(Guard::Operator);
+    map.method::<local::RemoveParams, bool>("ai.localRemove", local_remove)
+        .guard(Guard::Operator);
+
+    // Ollama only. Progress goes out as `model-status`.
+    map.method::<AiUpstreamModelParams, bool>("ai.pullModel", pull_model)
+        .long()
+        .guard(Guard::Executor(AI_CREATE_CAPABILITY.clone()));
+    // An Ollama delete then a health probe can outlast the default RPC timeout.
+    map.method::<AiUpstreamModelParams, bool>("ai.deleteUpstreamModel", delete_upstream_model)
+        .long()
+        .guard(Guard::Executor(AI_DELETE_CAPABILITY.clone()));
     map.method::<AiGetDefaultModelParams, Option<ModelView>>(
         "ai.getDefaultModel",
         get_default_model,
     )
     .read()
     .guard(Guard::Cap(AI_READ_CAPABILITY.clone()));
-    map.method::<AiModelLoadingStatusParams, AIModelLoadingStatus>(
-        "ai.modelLoadingStatus",
-        get_model_loading_status,
-    )
-    .read()
-    .guard(Guard::Cap(AI_READ_CAPABILITY.clone()));
+    map.method::<AiIdParams, ModelStatus>("ai.modelStatus", get_model_status)
+        .read()
+        .guard(Guard::Cap(AI_READ_CAPABILITY.clone()));
     // Tasks belong to the agent whose session created them (`tasks.agent_did`, `NULL` for the
     // main agent); the operator reaches every task, any other session its agent's. The list
     // and the new task follow the caller's agent.
@@ -573,16 +783,20 @@ pub async fn feed_transcription_stream(
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
-    let mut errors: Vec<String> = Vec::new();
-    for stream_id in &stream_ids {
-        if let Err(e) = service
-            .feed_transcription_stream(stream_id, audio_f32.clone(), &context)
-            .await
-        {
+    // Concurrently: a stream on an endpoint answers once its utterance is transcribed.
+    let outcomes = futures::future::join_all(stream_ids.iter().map(|stream_id| {
+        service.feed_transcription_stream(stream_id, audio_f32.clone(), &context)
+    }))
+    .await;
+    let errors: Vec<String> = stream_ids
+        .iter()
+        .zip(outcomes)
+        .filter_map(|(stream_id, outcome)| {
+            let e = outcome.err()?;
             log::warn!("Error feeding stream {}: {}", stream_id, e);
-            errors.push(format!("{}: {}", stream_id, e));
-        }
-    }
+            Some(format!("{}: {}", stream_id, e))
+        })
+        .collect();
 
     feed_outcome(&errors, stream_ids.len())?;
     Ok(Json("true".to_string()))
@@ -620,16 +834,48 @@ pub struct AiIdParams {
     pub id: String,
 }
 
+/// A saved endpoint by its id, or a server not saved yet by its kind, URL and key.
+#[derive(Deserialize, TS)]
+#[serde(untagged, deny_unknown_fields)]
+#[ts(export)]
+pub enum AiDiscoverModelsParams {
+    #[serde(rename_all = "camelCase")]
+    Endpoint { endpoint_id: String },
+    #[serde(rename_all = "camelCase")]
+    Server {
+        kind: EndpointKind,
+        base_url: url::Url,
+        #[ts(optional, as = "Option<String>")]
+        api_key: Option<Secret>,
+    },
+}
+
 #[derive(Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
-pub struct AiDiscoverModelsParams {
-    pub base_url: String,
-    /// Parsed leniently (`openai`, `OpenAi`, `OPEN_AI`, ...); defaults to OpenAI.
+pub struct AiUpdateEndpointParams {
+    pub id: String,
+    pub endpoint: EndpointInput,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AiRemoveEndpointParams {
+    pub id: String,
+    /// Remove the models that run on the endpoint too. Without it, a removal is refused
+    /// while any does.
     #[ts(optional)]
-    pub api_type: Option<String>,
-    #[ts(optional)]
-    pub api_key: Option<String>,
+    pub cascade: Option<bool>,
+}
+
+/// A model on an Ollama endpoint, by the id Ollama knows it by.
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AiUpstreamModelParams {
+    pub endpoint_id: String,
+    pub remote_model: String,
 }
 
 #[derive(Deserialize, TS)]
@@ -662,17 +908,6 @@ pub struct AiGetDefaultModelParams {
     pub model_type: ModelType,
 }
 
-/// One of `model` or `modelId` is required; `model` wins when both are set.
-#[derive(Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export)]
-pub struct AiModelLoadingStatusParams {
-    #[ts(optional)]
-    pub model: Option<String>,
-    #[ts(optional)]
-    pub model_id: Option<String>,
-}
-
 #[derive(Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
@@ -692,8 +927,6 @@ pub struct AiUpdateTaskParams {
 #[ts(export)]
 pub struct AiTranscriptionOpenParams {
     pub model_id: String,
-    #[ts(optional)]
-    pub params: Option<VoiceActivityParamsInput>,
 }
 
 #[derive(Deserialize, TS)]
@@ -704,64 +937,47 @@ pub struct AiTranscriptionCloseParams {
 }
 
 #[cfg(test)]
-mod model_key_tests {
+mod model_view_tests {
     use super::*;
     use crate::db::Ad4mDb;
-    use crate::types::{ModelApi, ModelApiInput, ModelApiType};
+    use crate::types::{Endpoint, EndpointHealth, EndpointState};
 
     const KEY: &str = "sk-provider-secret";
 
-    fn remote_model(api_key: &str) -> Model {
-        Model {
-            id: "m1".to_string(),
-            name: "Remote".to_string(),
-            api: Some(ModelApi {
-                base_url: url::Url::parse("https://api.example.org/v1").unwrap(),
-                api_key: api_key.into(),
-                model: "gpt".to_string(),
-                api_type: ModelApiType::OpenAi,
-                max_num_ctx: None,
-            }),
-            local: None,
-            model_type: ModelType::Llm,
-        }
-    }
-
-    #[test]
-    fn the_view_says_whether_a_key_is_set_and_never_carries_it() {
-        let json = serde_json::to_value(remote_model(KEY).view()).unwrap();
-        assert!(!json.to_string().contains(KEY), "{json}");
-        assert!(json["api"].get("apiKey").is_none(), "{json}");
-        assert_eq!(json["api"]["hasApiKey"], true);
-        assert_eq!(json["api"]["model"], "gpt");
-
-        let keyless = serde_json::to_value(remote_model("").view()).unwrap();
-        assert_eq!(keyless["api"]["hasApiKey"], false);
-    }
-
-    // #1167 stripped the key for user sessions by hand and let the operator and apps read
-    // it. The view now leaves it out for every caller.
-    #[tokio::test]
-    async fn no_session_gets_the_default_models_key() {
+    /// A saved endpoint holding [`KEY`] that has listed `qwen3:8b`, and an LLM on it.
+    fn model_on_a_keyed_endpoint() -> (Endpoint, String) {
         Ad4mDb::init_global_instance(":memory:").unwrap();
+        let mut endpoint = Endpoint::for_test(
+            "openai",
+            EndpointKind::OpenAi,
+            "https://api.example.org",
+            KEY,
+        );
+        endpoint.health = EndpointHealth {
+            state: EndpointState::Reachable,
+            checked_at: Some(1),
+            detail: None,
+            served_models: vec!["qwen3:8b".into()],
+        };
         let id = Ad4mDb::with_global_instance(|db| {
+            db.insert_endpoint(&endpoint)?;
             db.add_model(&ModelInput {
                 name: "Remote".to_string(),
-                api: Some(ModelApiInput {
-                    base_url: "https://api.example.org/v1".to_string(),
-                    api_key: Some(KEY.into()),
-                    model: "gpt".to_string(),
-                    api_type: "OPEN_AI".to_string(),
-                    max_num_ctx: None,
-                }),
-                local: None,
                 model_type: ModelType::Llm,
+                endpoint_id: endpoint.id.clone(),
+                remote_model: "qwen3:8b".to_string(),
+                native_tools: Some(true),
             })
         })
         .unwrap();
-        crate::db_backend::db_backend()
-            .set_default_model(ModelType::Llm, &id)
-            .unwrap();
+        (endpoint, id)
+    }
+
+    // A model names its endpoint and never carries the endpoint's key, for any caller.
+    #[tokio::test]
+    async fn every_session_reads_the_model_with_its_endpoint_and_status_and_no_key() {
+        let (endpoint, id) = model_on_a_keyed_endpoint();
+        Ad4mDb::with_global_instance(|db| db.set_default_model(ModelType::Llm, &id)).unwrap();
         let params = serde_json::json!({ "modelType": "LLM" });
         let read = vec![AI_READ_CAPABILITY.clone()];
 
@@ -776,105 +992,133 @@ mod model_key_tests {
             let model = get_default_model(params.clone(), Arc::new(ctx))
                 .await
                 .unwrap();
-            assert_eq!(model["id"], id.as_str(), "{who}");
+            assert_eq!(
+                model,
+                serde_json::json!({
+                    "id": id,
+                    "name": "Remote",
+                    "modelType": "LLM",
+                    "endpointId": endpoint.id,
+                    "remoteModel": "qwen3:8b",
+                    "nativeTools": true,
+                    "status": { "state": "READY" },
+                }),
+                "{who}"
+            );
             assert!(!model.to_string().contains(KEY), "{who}: {model}");
-            assert_eq!(model["api"]["hasApiKey"], true, "{who}");
         }
     }
 
-    /// The stored model's key, read in place for the assertion.
-    fn stored_key(id: &str) -> String {
-        crate::db_backend::db_backend()
-            .get_model(id.to_string())
-            .unwrap()
-            .unwrap()
-            .api
-            .unwrap()
-            .api_key
-            .expose()
-            .to_string()
-    }
-
-    fn input(base_url: &str, api_key: Option<&str>) -> ModelInput {
-        ModelInput {
-            name: "Remote".to_string(),
-            api: Some(ModelApiInput {
-                base_url: base_url.to_string(),
-                api_key: api_key.map(Into::into),
-                model: "gpt".to_string(),
-                api_type: "OPEN_AI".to_string(),
-                max_num_ctx: None,
-            }),
-            local: None,
-            model_type: ModelType::Llm,
-        }
-    }
-
-    // A client never reads the key back, so an update that leaves it out keeps it. It
-    // goes only to the endpoint it was set for: moving the model needs the key again.
-    #[test]
-    fn an_update_without_a_key_keeps_the_stored_key_for_the_same_endpoint() {
-        Ad4mDb::init_global_instance(":memory:").unwrap();
-        let url = "https://api.example.org/v1";
-        let id = crate::db_backend::db_backend()
-            .add_model(&input(url, Some(KEY)))
-            .unwrap();
-        let update = |model: ModelInput| crate::db_backend::db_backend().update_model(&id, &model);
-
-        update(input(url, None)).unwrap();
-        assert_eq!(stored_key(&id), KEY);
-
-        let moved = update(input("https://elsewhere.example.org/v1", None)).unwrap_err();
-        assert!(moved.downcast_ref::<crate::db::ApiKeyNotResent>().is_some());
-        assert_eq!(stored_key(&id), KEY, "a refused update changes nothing");
-
-        update(input("https://elsewhere.example.org/v1", Some("sk-new"))).unwrap();
-        assert_eq!(stored_key(&id), "sk-new");
-
-        // An empty key clears it, as before; a keyless model then moves freely.
-        update(input(url, Some(""))).unwrap();
-        assert_eq!(stored_key(&id), "");
-        update(input("https://elsewhere.example.org/v1", None)).unwrap();
-        assert_eq!(stored_key(&id), "");
-    }
-
-    // The refusal reaches the caller as a bad request, through the service's error.
     #[tokio::test]
-    async fn moving_a_keyed_model_without_its_key_is_a_bad_request() {
+    async fn a_models_status_is_its_endpoints_last_check_and_an_unknown_model_is_not_found() {
+        let (_, id) = model_on_a_keyed_endpoint();
+        let ctx = Arc::new(RequestContext::operator_for_test());
+        let status = get_model_status(serde_json::json!({ "id": id }), ctx.clone())
+            .await
+            .unwrap();
+        assert_eq!(status, serde_json::json!({ "state": "READY" }));
+        let missing = get_model_status(serde_json::json!({ "id": "nope" }), ctx)
+            .await
+            .unwrap_err();
+        assert_eq!(missing.code, 404);
+    }
+
+    #[tokio::test]
+    async fn a_model_on_an_endpoint_that_does_not_exist_is_a_bad_request() {
         Ad4mDb::init_global_instance(":memory:").unwrap();
         AIService::init_global_instance().await.unwrap();
-        let url = "https://api.example.org/v1";
-        let id = crate::db_backend::db_backend()
-            .add_model(&input(url, Some(KEY)))
-            .unwrap();
-
-        let moved = serde_json::to_value(input("https://elsewhere.example.org/v1", None)).unwrap();
-        let err = update_model(
-            serde_json::json!({ "id": id, "model": moved }),
+        let err = add_model(
+            serde_json::json!({ "model": {
+                "name": "m", "modelType": "LLM", "endpointId": "nope", "remoteModel": "r"
+            } }),
             Arc::new(RequestContext::operator_for_test()),
         )
         .await
         .unwrap_err();
         assert_eq!(err.code, 400, "{}", err.message);
-        assert!(err.message.contains("send apiKey again"), "{}", err.message);
-        assert_eq!(stored_key(&id), KEY);
     }
 
-    #[test]
-    fn a_model_added_without_a_key_has_none() {
-        Ad4mDb::init_global_instance(":memory:").unwrap();
-        let id = Ad4mDb::with_global_instance(|db| {
-            db.add_model(&input("https://api.example.org/v1", None))
+    // A task on a model that is not an LLM is the caller's mistake, as the other refusals of
+    // a model's type are: 400, not "No LLM with id … is loaded" as a 500.
+    #[tokio::test]
+    async fn a_task_on_a_model_that_is_not_an_llm_is_a_bad_request() {
+        let (endpoint, _) = model_on_a_keyed_endpoint();
+        AIService::init_global_instance().await.unwrap();
+        let (embedding, task_id) = Ad4mDb::with_global_instance(|db| {
+            let embedding = db.add_model(&ModelInput {
+                name: "Embed".to_string(),
+                model_type: ModelType::Embedding,
+                endpoint_id: endpoint.id.clone(),
+                remote_model: "bge-m3".to_string(),
+                native_tools: None,
+            })?;
+            // A task stored before its model became an embedding model.
+            let task_id = db.add_task(
+                "t".into(),
+                embedding.clone(),
+                String::new(),
+                vec![],
+                None,
+                None,
+            )?;
+            Ok::<_, anyhow::Error>((embedding, task_id))
         })
         .unwrap();
-        assert_eq!(stored_key(&id), "");
+        AIService::global_instance()
+            .await
+            .unwrap()
+            .load()
+            .await
+            .unwrap();
+        let ctx = Arc::new(RequestContext::operator_for_test());
+
+        let task = serde_json::json!({ "task": {
+            "name": "t", "modelId": embedding, "systemPrompt": "", "promptExamples": []
+        } });
+        let added = add_task(task, ctx.clone()).await.unwrap_err();
+        assert_eq!(added.code, 400, "ai.addTask: {}", added.message);
+
+        let prompt = serde_json::json!({ "taskId": task_id, "prompt": "hi" });
+        let prompted = ai_prompt(prompt, ctx).await.unwrap_err();
+        assert_eq!(prompted.code, 400, "ai.prompt: {}", prompted.message);
     }
 
+    // An embed on a model this executor does not have (Flux sends 'bert') is the caller's
+    // mistake: 400, not 500.
+    #[tokio::test]
+    async fn an_embed_on_a_model_that_does_not_exist_is_a_bad_request() {
+        Ad4mDb::init_global_instance(":memory:").unwrap();
+        AIService::init_global_instance().await.unwrap();
+        let err = ai_embed(
+            serde_json::json!({ "modelId": "bert", "text": "hi" }),
+            Arc::new(RequestContext::operator_for_test()),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, 400, "{}", err.message);
+    }
+}
+
+#[cfg(test)]
+mod upstream_failure_tests {
+    use super::*;
+
+    // `default` on an executor without a model of the type (`ai.embed`,
+    // `ai.transcriptionOpen`): the caller can fix it, so it is a bad request, not a server
+    // fault.
     #[test]
-    fn a_sent_key_never_reaches_a_log_line() {
-        let model = input("https://api.example.org/v1", Some(KEY));
-        assert!(!format!("{model:?}").contains(KEY));
-        assert!(!format!("{:?}", remote_model(KEY)).contains(KEY));
+    fn a_missing_default_refusal_is_a_bad_request() {
+        let refused = anyhow::Error::new(local::LocalAiRefused(
+            "No default Embedding model on this executor: ask the operator to set up local AI"
+                .into(),
+        ));
+        let error = upstream_failure(&refused, &RequestContext::app_for_test(vec![]));
+        assert_eq!(error.code, 400);
+        assert!(
+            error.message.contains("ask the operator"),
+            "{}",
+            error.message
+        );
     }
 }
 
@@ -919,6 +1163,49 @@ mod compute_credit_tests {
         assert!(results.2.is_ok(), "a caller without a user pays nothing");
     }
 
+    // The HTTP feed refuses a user at 0 credits before any stream is fed.
+    #[tokio::test]
+    async fn the_http_feed_refuses_a_user_without_credits() {
+        use crate::agent::session::{Principal, Session};
+        use crate::agent::AgentContext;
+        if Ad4mDb::global_instance().lock().unwrap().is_none() {
+            Ad4mDb::init_global_instance(":memory:").unwrap();
+        }
+        let id = uuid::Uuid::new_v4();
+        let broke_did = format!("did:key:broke-feeder-{id}");
+        let was_free = Ad4mDb::with_global_instance(|db| {
+            db.add_user(&format!("broke-feeder-{id}@example.org"), &broke_did, "pw")?;
+            let was_free = db.get_free_hosting_enabled()?;
+            db.set_free_hosting_enabled(false)?;
+            Ok::<_, anyhow::Error>(was_free)
+        })
+        .unwrap();
+        let context = RequestContext::for_session(
+            Session::for_test(Principal::Agent(AgentContext::managed(broke_did)))
+                .with_caps(vec![AI_TRANSCRIBE_CAPABILITY.clone()]),
+        );
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("x-stream-ids", "a-stream".parse().unwrap());
+
+        let fed = feed_transcription_stream(
+            State(AppState {
+                admin_credential: None,
+            }),
+            context,
+            headers,
+            axum::body::Bytes::from(vec![0u8; 8]),
+        )
+        .await;
+        crate::db_backend::db_backend()
+            .set_free_hosting_enabled(was_free)
+            .unwrap();
+
+        match fed {
+            Err(ApiError::Forbidden(message)) => assert!(message.contains("credits"), "{message}"),
+            other => panic!("a user without credits fed a stream: {other:?}"),
+        }
+    }
+
     // On dev a closed database panicked the check, so the request failed. The read error
     // must not count as free hosting: the request would run without a credit check.
     #[test]
@@ -928,6 +1215,145 @@ mod compute_credit_tests {
         assert!(
             check_compute_credits_ws(None).is_ok(),
             "a caller without a user pays nothing and reads no setting"
+        );
+    }
+}
+
+#[cfg(test)]
+mod endpoint_guard_tests {
+    use super::*;
+    use crate::api::ws_handler::build_handler_map;
+    use serde_json::json;
+
+    fn params(method: &str) -> Value {
+        let endpoint =
+            json!({ "name": "e", "kind": "OLLAMA", "baseUrl": "http://127.0.0.1:11434" });
+        match method {
+            "ai.addEndpoint" => endpoint,
+            "ai.updateEndpoint" => json!({ "id": "e1", "endpoint": endpoint }),
+            "ai.updateModel" => json!({ "id": "m1", "model": {
+                "name": "m", "modelType": "LLM", "endpointId": "e1", "remoteModel": "r"
+            } }),
+            "ai.setDefaultModel" => json!({ "id": "m1", "modelType": "LLM" }),
+            "ai.pullModel" | "ai.deleteUpstreamModel" => {
+                json!({ "endpointId": "e1", "remoteModel": "m" })
+            }
+            "ai.endpoints" | "ai.detectEndpoints" => json!({}),
+            _ => json!({ "id": "e1" }),
+        }
+    }
+
+    /// Who passes each endpoint and model-admin method: an app on the main agent holding
+    /// what a user token holds by default (AI READ, CREATE, PROMPT, TRANSCRIBE: no UPDATE
+    /// or DELETE), and a user session holding every AI capability.
+    #[tokio::test]
+    async fn rewrites_and_removals_need_update_and_delete_and_users_are_refused_all() {
+        let map = build_handler_map();
+        let app = RequestContext::app_for_test(get_user_default_capabilities());
+        let user =
+            RequestContext::user_for_test("did:key:ai-admin-user", vec![AI_ALL_CAPABILITY.clone()]);
+
+        let app_passes = [
+            ("ai.endpoints", true),
+            ("ai.addEndpoint", true),
+            ("ai.detectEndpoints", true),
+            ("ai.pullModel", true),
+            ("ai.updateEndpoint", false),
+            ("ai.removeEndpoint", false),
+            ("ai.deleteUpstreamModel", false),
+            ("ai.updateModel", false),
+            ("ai.removeModel", false),
+            ("ai.setDefaultModel", false),
+        ];
+        for (method, passes) in app_passes {
+            let app_answer = map.admit(method, &params(method), &app).await;
+            assert_eq!(
+                app_answer.is_ok(),
+                passes,
+                "{method} as an app: {app_answer:?}"
+            );
+            if let Err(refused) = app_answer {
+                assert_eq!(refused.code, 403, "{method}");
+            }
+            let user_answer = map.admit(method, &params(method), &user).await;
+            assert_eq!(
+                user_answer.map_err(|e| e.code),
+                Err(403),
+                "{method} as a user: endpoints are the operator's"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod local_ai_guard_tests {
+    use super::*;
+    use crate::api::ws_handler::build_handler_map;
+    use serde_json::json;
+
+    const READS: [&str; 3] = ["ai.localHardware", "ai.localPlan", "ai.localStatus"];
+    const CONTROL: [&str; 4] = [
+        "ai.localInstall",
+        "ai.localStart",
+        "ai.localStop",
+        "ai.localRemove",
+    ];
+
+    /// Reads: an app on the main agent with AI READ; never a managed user. Installing,
+    /// starting, stopping and removing download files and start processes on this machine:
+    /// the operator only, not even an app holding every capability.
+    #[tokio::test]
+    async fn local_ai_reads_are_the_main_agents_and_process_control_the_operators() {
+        let map = build_handler_map();
+        let operator = RequestContext::operator_for_test();
+        let app = RequestContext::app_for_test(vec![AI_READ_CAPABILITY.clone()]);
+        let app_all = RequestContext::app_for_test(vec![ALL_CAPABILITY.clone()]);
+        let user =
+            RequestContext::user_for_test("did:key:local-ai-user", vec![ALL_CAPABILITY.clone()]);
+        let params = json!({});
+
+        for method in READS {
+            assert!(
+                map.admit(method, &params, &operator).await.is_ok(),
+                "{method}"
+            );
+            assert!(
+                map.admit(method, &params, &app).await.is_ok(),
+                "{method} as an app"
+            );
+            assert_eq!(
+                map.admit(method, &params, &user).await.map_err(|e| e.code),
+                Err(403),
+                "{method} as a managed user"
+            );
+        }
+        for method in CONTROL {
+            assert!(
+                map.admit(method, &params, &operator).await.is_ok(),
+                "{method}"
+            );
+            for (who, ctx) in [("an app with *", &app_all), ("a managed user", &user)] {
+                let refused = map.admit(method, &params, ctx).await.unwrap_err();
+                assert_eq!(refused.code, 403, "{method} as {who}");
+                assert_eq!(refused.message, super::super::guards::OPERATOR_ONLY);
+            }
+        }
+    }
+
+    /// The install's params are its contract: a service the executor does not know is a
+    /// 400 before the guard.
+    #[tokio::test]
+    async fn an_install_names_known_services_only() {
+        let map = build_handler_map();
+        let operator = RequestContext::operator_for_test();
+        let ok = json!({ "services": ["llm", "embeddings", "stt"], "start": false });
+        assert!(map.admit("ai.localInstall", &ok, &operator).await.is_ok());
+        let bad = json!({ "services": ["video"] });
+        assert_eq!(
+            map.admit("ai.localInstall", &bad, &operator)
+                .await
+                .map_err(|e| e.code),
+            Err(400)
         );
     }
 }

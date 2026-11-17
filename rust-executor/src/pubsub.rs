@@ -65,13 +65,13 @@ mod tests {
         let mut second = pubsub.subscribe_events();
         let payload = serde_json::json!({ "model": "m" });
         pubsub.publish_event(Event::new(
-            Topic::AiModelLoadingStatus,
+            Topic::AiModelStatus,
             Audience::Everyone,
             &payload,
         ));
         for rx in [&mut first, &mut second] {
             let event = rx.try_recv().expect("the event arrives");
-            assert_eq!(event.topic, Topic::AiModelLoadingStatus);
+            assert_eq!(event.topic, Topic::AiModelStatus);
             assert_eq!(event.payload, payload);
             assert!(rx.try_recv().is_err(), "exactly once");
         }
