@@ -563,9 +563,12 @@ async fn a_kept_transcript_holds_no_text_for_consumed_turns() {
 
 /// Hand `watcher` a kept read of `n` pending turns, as if the store had
 /// answered them at the current generation, and tick twice over it: the
-/// first tick queues them, the second re-records them as the loop does at
-/// every tick. Returns the id checks `record_item` made.
-async fn id_checks_for_two_ticks_over(n: usize) -> u64 {
+/// first tick queues them (every id is new), the second re-records them as
+/// the loop does at every tick (every id is a duplicate). Returns the id
+/// comparisons the queue's duplicate check made in each tick.
+async fn id_comparisons_in_two_ticks_over(n: usize) -> (u64, u64) {
+    use super::watcher::id_comparisons;
+
     let (p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
     let cfg = config("many", 600_000, None);
     let generation = p.sparql_store.write_generation();
@@ -587,36 +590,51 @@ async fn id_checks_for_two_ticks_over(n: usize) -> u64 {
         .set_transcript(&cfg, generation, turns, |_, _| true);
 
     let now_ms = chrono::Utc::now().timestamp_millis();
+    let before = id_comparisons();
     assert!(p
         .run_auto_processor_tick(&mut watcher, now_ms, &ctx)
         .await
         .polls_at_base_rate());
+    let first = id_comparisons() - before;
+    let before = id_comparisons();
     assert!(p
         .run_auto_processor_tick(&mut watcher, now_ms + 500, &ctx)
         .await
         .polls_at_base_rate());
+    let second = id_comparisons() - before;
     assert_eq!(
         watcher.pending_for("many").map(|e| e.items.len()),
         Some(n),
         "every turn is queued once"
     );
-    watcher.id_checks
+    (first, second)
 }
 
 /// A tick records every queueable turn of the kept transcript again, so the
 /// cost of recording one must not grow with the queue: over 50k pending
 /// turns (a large space with no model) the duplicate check scanned the
-/// queue, and a tick made N²/2 id comparisons. Counted, not timed: at most
-/// one id check per turn per tick, at 5k and at 50k alike.
+/// queue, and a tick made N²/2 id comparisons. Counted, not timed, and
+/// counted as comparisons of queued ids, not as calls: the second tick finds
+/// every id already queued, so it must compare at least one id per turn (the
+/// check goes through the queue's id set), and at most two (a lookup, not a
+/// scan). At 5k and at 50k alike.
 #[tokio::test]
 async fn a_tick_over_50k_kept_turns_records_them_in_linear_time() {
     for n in [5_000usize, 50_000] {
-        let checks = id_checks_for_two_ticks_over(n).await;
-        println!("{n} pending turns, two ticks: {checks} id checks");
+        let (first, second) = id_comparisons_in_two_ticks_over(n).await;
+        let n = n as u64;
+        println!(
+            "{n} pending turns: {first} id comparisons queueing them, {second} re-recording them"
+        );
         assert!(
-            checks <= 2 * n as u64,
-            "{checks} id checks for two ticks over {n} pending turns; \
-             recording must cost one check per turn"
+            first <= n,
+            "{first} id comparisons to queue {n} new turns; a lookup of a new id compares next to none"
+        );
+        assert!(
+            (n..=2 * n).contains(&second),
+            "{second} id comparisons to re-record {n} queued turns; \
+             the duplicate check must look each up in the queue's id set, \
+             about one comparison per turn"
         );
     }
 }

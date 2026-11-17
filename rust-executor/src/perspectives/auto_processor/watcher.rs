@@ -189,6 +189,38 @@ impl PendingTurn {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static ID_COMPARISONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Test-only: how many queued ids this thread compared so far, in the
+/// pending queues' duplicate checks.
+#[cfg(test)]
+pub(crate) fn id_comparisons() -> u64 {
+    ID_COMPARISONS.with(|c| c.get())
+}
+
+/// A turn id in a pending queue's id set. Equal as its string; in tests each
+/// comparison is counted ([`id_comparisons`]), so a test can tell a lookup
+/// (about one comparison) from a scan (one per queued id).
+#[derive(Debug, Clone, Eq)]
+struct QueuedId(String);
+
+impl std::hash::Hash for QueuedId {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.0.hash(state);
+    }
+}
+
+impl PartialEq for QueuedId {
+    fn eq(&self, other: &Self) -> bool {
+        #[cfg(test)]
+        ID_COMPARISONS.with(|c| c.set(c.get() + 1));
+        self.0 == other.0
+    }
+}
+
 /// Per-processor observation state. Kept in a `BTreeMap` inside
 /// [`WatcherState`] so iteration is deterministic (mattering for tests, not
 /// correctness).
@@ -200,7 +232,7 @@ pub struct ProcessorPending {
     /// The ids in `items`. Every tick records each queueable turn again, so
     /// the duplicate check must not scan `items`: over N pending turns that
     /// made a tick N²/2 comparisons.
-    ids: HashSet<String>,
+    ids: HashSet<QueuedId>,
     /// Wall-clock (unix millis) of the most recent [`WatcherState::record_item`]
     /// for this processor. Used to compare against `debounce_ms`.
     pub last_touched_ms: i64,
@@ -242,10 +274,6 @@ pub struct WatcherState {
     /// The last tick found turns waiting and no model to run them
     /// ([`TickOutcome::NoModel`]); logged once when it starts and ends.
     pub(crate) waiting_for_model: bool,
-    /// Test-only: how many ids [`Self::record_item`] compared or looked up
-    /// to find a duplicate.
-    #[cfg(test)]
-    pub(crate) id_checks: u64,
 }
 
 /// Store reads a tick keeps for the next one, each tagged with the store's
@@ -497,16 +525,13 @@ impl WatcherState {
             .per_processor
             .entry(processor_id.to_string())
             .or_default();
-        #[cfg(test)]
-        {
-            self.id_checks += 1;
-        }
-        if !entry.ids.contains(&turn.id) {
+        let id = QueuedId(turn.id.clone());
+        if !entry.ids.contains(&id) {
             if entry.items.is_empty() {
                 // First item of a fresh window — start the max-wait clock.
                 entry.first_touched_ms = now_ms;
             }
-            entry.ids.insert(turn.id.clone());
+            entry.ids.insert(id);
             entry.items.push(turn);
             entry.last_touched_ms = now_ms;
         }
@@ -555,7 +580,7 @@ impl WatcherState {
         let take = entry.items.len().min(cfg.batch_max.max(1));
         let batch: Vec<PendingTurn> = entry.items.drain(..take).collect();
         for turn in &batch {
-            entry.ids.remove(&turn.id);
+            entry.ids.remove(&QueuedId(turn.id.clone()));
         }
         Some(batch)
     }
