@@ -840,11 +840,8 @@ impl Instance {
             .iter()
             .filter(|k| is_collection(k) && self.model.is_ordered(k))
         {
-            let before = collection_items(
-                self.unconfirmed
-                    .get(key)
-                    .or_else(|| self.snapshot.get(key)),
-            );
+            let before =
+                collection_items(self.unconfirmed.get(key).or_else(|| self.snapshot.get(key)));
             let after = collection_items(self.current.get(key));
             let kept: Vec<&String> = before.iter().filter(|i| after.contains(i)).collect();
             if !after.iter().take(kept.len()).eq(kept.iter().copied()) {
@@ -880,11 +877,8 @@ impl Instance {
             // Item ops go against the executor's membership: the
             // unconfirmed one when an earlier save wrote it, else the
             // snapshot's.
-            let before = collection_items(
-                self.unconfirmed
-                    .get(key)
-                    .or_else(|| self.snapshot.get(key)),
-            );
+            let before =
+                collection_items(self.unconfirmed.get(key).or_else(|| self.snapshot.get(key)));
             let after = collection_items(self.current.get(key));
             let mut held = before.clone();
             for item in before.iter().filter(|i| !after.contains(i)) {
@@ -893,7 +887,8 @@ impl Instance {
                     .await?;
                 if live {
                     held.retain(|i| i != item);
-                    self.unconfirmed.insert(key.clone(), Value::from(held.clone()));
+                    self.unconfirmed
+                        .insert(key.clone(), Value::from(held.clone()));
                 }
             }
             for item in after.iter().filter(|i| !before.contains(i)) {
@@ -902,7 +897,8 @@ impl Instance {
                     .await?;
                 if live {
                     held.push(item.clone());
-                    self.unconfirmed.insert(key.clone(), Value::from(held.clone()));
+                    self.unconfirmed
+                        .insert(key.clone(), Value::from(held.clone()));
                 }
             }
         }

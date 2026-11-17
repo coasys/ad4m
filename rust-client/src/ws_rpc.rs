@@ -2327,7 +2327,10 @@ mod tests {
             }
         })
         .await;
-        assert!(third.is_ok(), "the supervisor never gave up the stalled handshake");
+        assert!(
+            third.is_ok(),
+            "the supervisor never gave up the stalled handshake"
+        );
         tokio::time::timeout(Duration::from_secs(5), async {
             while !client.is_connected() {
                 tokio::time::sleep(Duration::from_millis(20)).await;
@@ -2446,7 +2449,11 @@ mod tests {
             "the last handle's drop must release the socket"
         );
         tokio::time::sleep(Duration::from_millis(RECONNECT_BASE_DELAY_MS + 500)).await;
-        assert_eq!(fake.accepted_sockets(), 1, "an abandoned client must not redial");
+        assert_eq!(
+            fake.accepted_sockets(),
+            1,
+            "an abandoned client must not redial"
+        );
     }
 
     /// Reconnect: the client's socket dies, a second server accepts the

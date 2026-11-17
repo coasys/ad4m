@@ -1800,7 +1800,11 @@ mod tests {
         });
         let runs = serve(&server, &mut store, &mut find).await.unwrap();
         let ids: Vec<&str> = runs.iter().map(|r| record_id(&r.record)).collect();
-        assert_eq!(ids, ["run://1"], "the Shipping run is found, the stale one skipped");
+        assert_eq!(
+            ids,
+            ["run://1"],
+            "the Shipping run is found, the stale one skipped"
+        );
         assert_eq!(runs[0].shape.flow_uri(), "urn:example:DeliveryFlow");
     }
 
