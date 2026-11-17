@@ -567,12 +567,19 @@ pub fn handle_mount_delta_from_language(delta: MountDelta, language_address: Str
 }
 
 /// Applies `delta` in every perspective that mounts `language_address`
-/// (`MOUNT_LANG_TO_PERSPECTIVES`). A perspective that fails logs one
-/// warning; the others still get the delta.
+/// (`MOUNT_LANG_TO_PERSPECTIVES`), to the mount active as it arrives. A
+/// perspective that fails logs one warning; the others still get the
+/// delta.
 pub async fn handle_mount_delta_from_language_impl(delta: MountDelta, language_address: String) {
     for uuid in perspectives_for_mount(&language_address) {
         if let Some(mut p) = get_perspective(&uuid) {
-            if let Err(e) = p.apply_mount_delta(&language_address, &delta).await {
+            let Some(generation) = p.active_mount_generation(&language_address).await else {
+                continue;
+            };
+            if let Err(e) = p
+                .apply_mount_delta(&language_address, &delta, generation)
+                .await
+            {
                 log::warn!("mount delta for {} in {}: {}", language_address, uuid, e);
             }
         }

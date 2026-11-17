@@ -14,17 +14,17 @@ use crate::pubsub::get_global_pubsub;
 use serde_json::{json, Value};
 use tokio::sync::broadcast;
 
-fn class(name: &str) -> SubjectClassOption {
+pub(super) fn class(name: &str) -> SubjectClassOption {
     SubjectClassOption {
         class_name: Some(name.to_string()),
         query: None,
     }
 }
 
-const UNVERIFIED: &str = r#"{"includeUnverified":false}"#;
+pub(super) const UNVERIFIED: &str = r#"{"includeUnverified":false}"#;
 
 /// A private perspective with `lang` mounted.
-async fn mounted(lang: &str) -> (PerspectiveInstance, AgentContext) {
+pub(super) async fn mounted(lang: &str) -> (PerspectiveInstance, AgentContext) {
     let (mut p, _shapes, ctx) =
         crate::perspectives::interpretation_test_support::setup_perspective_no_llm(&[]).await;
     p.mount(lang).await.unwrap();
@@ -34,7 +34,7 @@ async fn mounted(lang: &str) -> (PerspectiveInstance, AgentContext) {
 /// A private perspective with `lang` mounted, registered in the global
 /// map so `get_perspective` — and with it the pushed-delta routing —
 /// finds it. Remove it with `crate::perspectives::remove_perspective`.
-async fn mounted_and_registered(lang: &str) -> (PerspectiveInstance, AgentContext) {
+pub(super) async fn mounted_and_registered(lang: &str) -> (PerspectiveInstance, AgentContext) {
     let (p, ctx) = mounted(lang).await;
     crate::perspectives::register_perspective(p.uuid.clone(), p.clone());
     (p, ctx)
@@ -58,7 +58,7 @@ async fn eventually(
 }
 
 /// `model_query("MountThing")`'s instances parsed to JSON.
-async fn things(p: &PerspectiveInstance) -> Vec<Value> {
+pub(super) async fn things(p: &PerspectiveInstance) -> Vec<Value> {
     let result = p
         .model_query("MountThing", UNVERIFIED)
         .await
@@ -71,7 +71,7 @@ async fn things(p: &PerspectiveInstance) -> Vec<Value> {
 
 /// Create a record straight in the language — the perspective learns of it
 /// through `mount`/`sync_mount`, not through this call.
-async fn create(lang: &str, params: Value) {
+pub(super) async fn create(lang: &str, params: Value) {
     interact(&format!("{lang}://class/MountThing"), "create", params)
         .await
         .unwrap();
@@ -88,7 +88,7 @@ async fn calls(lang: &str) -> Vec<Value> {
 }
 
 /// Every stored link whose source sits under `lang`.
-async fn lang_links(p: &PerspectiveInstance, lang: &str) -> Vec<DecoratedLinkExpression> {
+pub(super) async fn lang_links(p: &PerspectiveInstance, lang: &str) -> Vec<DecoratedLinkExpression> {
     let prefix = format!("{lang}://");
     p.get_links(&LinkQuery::default())
         .await

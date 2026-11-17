@@ -25,6 +25,8 @@ use deno_core::error::AnyError;
 use serde_json::Value;
 use tokio::time::sleep;
 
+use super::mount_gates::{pause, MountPoint};
+use super::mount_lifecycle::MountPhase;
 use super::{PerspectiveInstance, SdnaType};
 use crate::agent::AgentContext;
 use crate::languages::mount_types::{MountDelta, MountEntry, MountShapes, MountSyncReport};
@@ -79,33 +81,72 @@ impl PerspectiveInstance {
     /// Mount a language: refuse when it does not export `mountShapes()` /
     /// `mountSnapshot()` or when another mount in this perspective claims
     /// one of its class names; install the shapes; write the mount link;
-    /// then run the first sync.
+    /// then run the first sync. While it runs the mount is `Mounting`:
+    /// no sync or delta applies, and an `unmount` meanwhile wins.
     pub async fn mount(&mut self, lang_address: &str) -> Result<(), AnyError> {
-        if self.mounts().await?.iter().any(|l| l == lang_address) {
-            return Ok(());
+        let generation = {
+            let mut slot = self.mount_lifecycles.lock(lang_address).await;
+            match slot.phase {
+                MountPhase::Active => return Ok(()),
+                MountPhase::Mounting => {
+                    return Err(anyhow!("{lang_address} is already being mounted"))
+                }
+                MountPhase::Inactive => self
+                    .mount_lifecycles
+                    .enter(&mut slot, MountPhase::Mounting),
+            }
+        };
+        let result = self.mount_as(lang_address, generation).await;
+        if result.is_err() {
+            let mut slot = self.mount_lifecycles.lock(lang_address).await;
+            if slot.generation == generation && slot.phase == MountPhase::Mounting {
+                self.mount_lifecycles.enter(&mut slot, MountPhase::Inactive);
+            }
         }
+        result
+    }
+
+    /// `mount`'s work for the mount `generation` names.
+    async fn mount_as(&mut self, lang_address: &str, generation: u64) -> Result<(), AnyError> {
         let controller = LanguageController::global_instance();
         let shapes = controller.mount_shapes(lang_address).await?;
         self.refuse_class_collisions(lang_address, &shapes).await?;
-        self.install_mount_shapes(lang_address, &shapes).await?;
-        self.add_links(
-            vec![Link {
-                source: MOUNT_SOURCE.to_string(),
-                predicate: Some(MOUNT_PREDICATE.to_string()),
-                target: mount_target(lang_address),
-            }],
-            LinkStatus::Shared,
-            None,
-            &AgentContext::main_agent(),
-        )
-        .await?;
-        register_mount(lang_address, &self.uuid);
+        {
+            let mut slot = self.mount_lifecycles.lock(lang_address).await;
+            if slot.generation != generation {
+                return Err(anyhow!(
+                    "{lang_address} was unmounted while it was being mounted"
+                ));
+            }
+            self.install_mount_shapes(lang_address, &shapes).await?;
+            if !self.has_mount_link(lang_address).await? {
+                self.add_links(
+                    vec![Link {
+                        source: MOUNT_SOURCE.to_string(),
+                        predicate: Some(MOUNT_PREDICATE.to_string()),
+                        target: mount_target(lang_address),
+                    }],
+                    LinkStatus::Shared,
+                    None,
+                    &AgentContext::main_agent(),
+                )
+                .await?;
+            }
+            register_mount(lang_address, &self.uuid);
+            slot.phase = MountPhase::Active;
+        }
         self.sync_mount(lang_address).await.map(|_| ())
     }
 
     /// Drop the mount: every `Local` link under `<lang>://` plus the mount
-    /// link itself, and the registry entry.
+    /// link itself, and the registry entry. Takes the mount's apply lock
+    /// and moves it to a new generation, so a sync, delta or call result
+    /// still in flight finds the mount gone and writes nothing.
     pub async fn unmount(&mut self, lang_address: &str) -> Result<(), AnyError> {
+        let mut slot = self.mount_lifecycles.lock(lang_address).await;
+        self.mount_lifecycles.enter(&mut slot, MountPhase::Inactive);
+        unregister_mount(lang_address, &self.uuid);
+
         let prefix = format!("{lang_address}://");
         let target = mount_target(lang_address);
         let doomed: Vec<LinkExpression> = self
@@ -121,23 +162,42 @@ impl PerspectiveInstance {
             .map(LinkExpression::from)
             .collect();
         self.remove_links(doomed, None).await?;
-        unregister_mount(lang_address, &self.uuid);
         Ok(())
     }
 
     /// Re-read the snapshot and diff every record against the store; a
     /// `mountShapes()` version change re-installs the shapes first
     /// (design §2.4). Addresses the snapshot no longer lists are removed.
+    /// Refused for a language this perspective has not mounted. The
+    /// language is asked first; the result is applied under the mount's
+    /// apply lock only if the mount is still the one the sync started on.
     pub async fn sync_mount(
         &mut self,
         lang_address: &str,
     ) -> Result<MountSyncReport, AnyError> {
+        let Some(generation) = self.active_mount_generation(lang_address).await else {
+            return Err(anyhow!(
+                "language {lang_address} is not mounted in perspective {}",
+                self.uuid
+            ));
+        };
         let controller = LanguageController::global_instance();
         let shapes = controller.mount_shapes(lang_address).await?;
+        let snapshot = controller.mount_snapshot(lang_address).await?;
+        pause(lang_address, MountPoint::SnapshotFetched).await;
+
+        let Some(_slot) = self
+            .mount_lifecycles
+            .lock_current(lang_address, generation)
+            .await
+        else {
+            return Err(anyhow!(
+                "language {lang_address} was unmounted while it synced"
+            ));
+        };
         if self.mounted_version(lang_address).await?.as_deref() != Some(shapes.version.as_str()) {
             self.install_mount_shapes(lang_address, &shapes).await?;
         }
-        let snapshot = controller.mount_snapshot(lang_address).await?;
 
         let mut report = MountSyncReport::default();
         let mut wanted_sources = HashSet::new();
@@ -161,13 +221,37 @@ impl PerspectiveInstance {
         Ok(report)
     }
 
+    /// The generation of `lang`'s mount while it is active: a delta or call
+    /// result takes it before it goes to the language (or as it arrives)
+    /// and hands it to `apply_mount_delta`.
+    pub(crate) async fn active_mount_generation(&self, lang_address: &str) -> Option<u64> {
+        self.mount_lifecycles
+            .active_generation(lang_address)
+            .await
+    }
+
     /// Apply one delta (`changed` records re-expanded, `removed` addresses
-    /// swept) — the same per-address diff `sync_mount` runs.
+    /// swept) — the same per-address diff `sync_mount` runs — under the
+    /// mount's apply lock. A delta for a mount that is no longer the one
+    /// at `generation` (unmounted since) is dropped.
     pub async fn apply_mount_delta(
         &mut self,
         lang_address: &str,
         delta: &MountDelta,
+        generation: u64,
     ) -> Result<MountSyncReport, AnyError> {
+        pause(lang_address, MountPoint::DeltaReceived).await;
+        let Some(_slot) = self
+            .mount_lifecycles
+            .lock_current(lang_address, generation)
+            .await
+        else {
+            log::debug!(
+                "perspective {}: {lang_address} is no longer mounted; delta dropped",
+                self.uuid
+            );
+            return Ok(MountSyncReport::default());
+        };
         let mut report = MountSyncReport::default();
         for entry in &delta.changed {
             let r = self.apply_mount_entry(lang_address, entry).await?;
@@ -191,6 +275,39 @@ impl PerspectiveInstance {
             report.removed += self.remove_links(doomed, None).await?.len();
         }
         Ok(report)
+    }
+
+    /// Whether the mount link for `lang` is in the store.
+    async fn has_mount_link(&self, lang_address: &str) -> Result<bool, AnyError> {
+        Ok(!self
+            .get_links(&LinkQuery {
+                source: Some(MOUNT_SOURCE.to_string()),
+                predicate: Some(MOUNT_PREDICATE.to_string()),
+                target: Some(mount_target(lang_address)),
+                ..Default::default()
+            })
+            .await?
+            .is_empty())
+    }
+
+    /// Make the mount a mount link names active (startup, or a mount link
+    /// a peer shared): register it for pushed deltas under a new
+    /// generation. Returns whether it is active now. Checked under the
+    /// apply lock, so a link an `unmount` removed meanwhile activates
+    /// nothing.
+    async fn activate_mount(&mut self, lang_address: &str) -> Result<bool, AnyError> {
+        let mut slot = self.mount_lifecycles.lock(lang_address).await;
+        match slot.phase {
+            MountPhase::Active => return Ok(true),
+            MountPhase::Mounting => return Ok(false),
+            MountPhase::Inactive => {}
+        }
+        if !self.has_mount_link(lang_address).await? {
+            return Ok(false);
+        }
+        self.mount_lifecycles.enter(&mut slot, MountPhase::Active);
+        register_mount(lang_address, &self.uuid);
+        Ok(true)
     }
 
     /// The addresses of every mounted language, from the mount links.
@@ -217,7 +334,8 @@ impl PerspectiveInstance {
 
     /// Startup: read the mount links, wait for each language to load
     /// (languages load after the conductor —
-    /// `languages/conductor_languages.rs`), register it, and sync. A mount
+    /// `languages/conductor_languages.rs`), activate it (`activate_mount`),
+    /// and sync. A mount
     /// link naming a language that is not installed is skipped with one
     /// warning (a peer without the passphrase cannot install it, design
     /// §5.2). Never fails.
@@ -258,7 +376,17 @@ impl PerspectiveInstance {
             {
                 continue;
             }
-            register_mount(&lang, &self.uuid);
+            match self.activate_mount(&lang).await {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(e) => {
+                    log::warn!(
+                        "perspective {}: restoring mount {lang} failed: {e}",
+                        self.uuid
+                    );
+                    continue;
+                }
+            }
             if let Err(e) = self.sync_mount(&lang).await {
                 log::warn!(
                     "perspective {}: restoring mount {lang} failed: {e}",
@@ -271,8 +399,10 @@ impl PerspectiveInstance {
     /// Re-runs every mount's snapshot every `mount_resync_interval()`
     /// (design §1.5: pushed deltas are best effort — the timer catches
     /// what a signal missed). Joined into `start_background_tasks`; exits
-    /// on `is_teardown` like the other perspective loops. A failed sync
-    /// logs one warning and the loop continues.
+    /// on `is_teardown` like the other perspective loops. A mount link
+    /// whose mount is not active yet (a peer shared it, or its language
+    /// loaded after the restore gave up) is activated once its language is
+    /// loaded. A failed sync logs one warning and the loop continues.
     pub(super) async fn mount_resync_loop(&self) {
         let uuid = self.uuid.clone();
         log::debug!("Starting mount resync loop for perspective {}", uuid);
@@ -303,10 +433,22 @@ impl PerspectiveInstance {
                     continue;
                 }
             };
+            let controller = LanguageController::global_instance();
             for lang in langs {
+                if !controller.is_language_loaded(&lang).await {
+                    continue;
+                }
                 // `sync_mount` takes `&mut self`; a clone is the same
                 // instance.
                 let mut p = self.clone();
+                match p.activate_mount(&lang).await {
+                    Ok(true) => {}
+                    Ok(false) => continue,
+                    Err(e) => {
+                        log::warn!("resync of mount {lang} for perspective {uuid} failed: {e}");
+                        continue;
+                    }
+                }
                 if let Err(e) = p.sync_mount(&lang).await {
                     log::warn!("resync of mount {lang} for perspective {uuid} failed: {e}");
                 }
@@ -544,6 +686,7 @@ impl PerspectiveInstance {
                     && !is_bookkeeping(l.data.predicate.as_deref())
             })
             .collect::<Vec<_>>();
+        pause(lang_address, MountPoint::EntryRead).await;
 
         // A wanted link already in the store stays; `claimed` also dedupes
         // surplus identical links so a doubled link loses its copy.
