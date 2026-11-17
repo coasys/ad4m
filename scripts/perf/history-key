@@ -53,13 +53,13 @@ use)
     mkdir -m 700 "$copy"
     cp "${keys[0]}" "$copy/key"
     chmod 600 "$copy/key"
-    forget "${keys[@]}"
+    forget ${keys[@]+"${keys[@]}"}
     echo "history key: $copy/key" >&2
     echo "export PERF_HISTORY_SSH_KEY=\"$copy/key\""
     ;;
 clean)
     mapfile -t keys < <(matches)
-    forget "${keys[@]}"
+    forget ${keys[@]+"${keys[@]}"}
     rm -rf "$copy"
     ;;
 *)

@@ -88,6 +88,7 @@ import {
   UsageError,
   appendLines,
   checkJob,
+  cleanGitEnv,
   evaluateRun,
   fmt,
   formatParams,
@@ -133,7 +134,7 @@ function withRunsOf(records, extra, job) {
 
 function gitHead() {
   try {
-    return execFileSync("git", ["rev-parse", "HEAD"], { cwd: HERE, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+    return execFileSync("git", ["rev-parse", "HEAD"], { cwd: HERE, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], env: cleanGitEnv(process.env) }).trim();
   } catch {
     return null;
   }
