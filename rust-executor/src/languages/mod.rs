@@ -1685,10 +1685,7 @@ impl LanguageController {
 
         let mut source_lines: Vec<String> = source.split('\n').map(String::from).collect();
 
-        if source_lines
-            .iter()
-            .any(|line| line.contains("var happ = "))
-        {
+        if source_lines.iter().any(|line| line.contains("var happ = ")) {
             return Err(LanguageError::InvalidBundle {
                 message: "applyTemplateLocal: source has a `var happ = ` line; ship the happ under another name".to_string(),
             });

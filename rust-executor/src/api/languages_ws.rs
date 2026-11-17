@@ -262,7 +262,10 @@ async fn apply_template(params: Value, ctx: Arc<RequestContext>) -> Result<Value
 /// `language.applyTemplate` minus the publish: the template data may hold a
 /// secret (an Acorn project passphrase), so nothing is written to the language
 /// language — the templated language is saved and loaded on this machine only.
-async fn apply_template_local(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+async fn apply_template_local(
+    params: Value,
+    _ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
     let _total = span("applyTemplateLocal");
     let body: ApplyTemplateRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -294,7 +297,9 @@ async fn apply_template_local(params: Value, _ctx: Arc<RequestContext>) -> Resul
             name
         }
         None => {
-            let source_name = controller.get_language_name(&body.source_language_hash).await;
+            let source_name = controller
+                .get_language_name(&body.source_language_hash)
+                .await;
             if !source_name.is_empty() {
                 source_name
             } else {
