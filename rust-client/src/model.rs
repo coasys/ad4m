@@ -583,12 +583,15 @@ impl Model {
     /// one does.
     /// A failing `f` never commits: the batch is left unwritten (and
     /// `discard`ed best-effort, an executor-side no-op either way).
-    pub async fn transaction<R, Fut>(&self, f: impl FnOnce(&Batch) -> Fut) -> Result<R>
+    ///
+    /// `f` gets its own clone of the batch (a clone names the same batch),
+    /// so an `async move` body can hold it across awaits.
+    pub async fn transaction<R, Fut>(&self, f: impl FnOnce(Batch) -> Fut) -> Result<R>
     where
         Fut: std::future::Future<Output = Result<R>>,
     {
         let batch = Batch::open(&self.ws, &self.uuid).await?;
-        match f(&batch).await {
+        match f(batch.clone()).await {
             Ok(r) => {
                 batch.commit().await?;
                 Ok(r)
@@ -1388,6 +1391,60 @@ mod tests {
         let (res, inst) = save.await.unwrap();
         res.unwrap();
         assert!(!inst.is_dirty());
+        ws.close().await;
+    }
+
+    /// A `transaction` body is a plain `async move` that holds its batch
+    /// across awaits — two writes in the batch, then the commit. (With a
+    /// `&Batch` argument this body does not compile: the future cannot
+    /// borrow the reference.)
+    #[tokio::test]
+    async fn a_transaction_body_holds_its_batch_across_awaits() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let ws = Arc::new(WsRpcClient::connect(fake.url(), "").await.unwrap());
+        let model = Model::new(&ws, "p1", "Recipe");
+
+        let tx = tokio::spawn({
+            let model = model.clone();
+            async move {
+                let writer = model.clone();
+                model
+                    .transaction(|batch| async move {
+                        let options = || CreateOptions {
+                            batch_id: Some(batch.id().to_string()),
+                            ..Default::default()
+                        };
+                        let mut props = Map::new();
+                        props.insert("name".into(), json!("a"));
+                        writer.create(props.clone(), options()).await?;
+                        props.insert("name".into(), json!("b"));
+                        writer.create(props, options()).await?;
+                        Ok(batch.id().to_string())
+                    })
+                    .await
+            }
+        });
+        let req = fake.next_request().await;
+        assert_eq!(req["type"], "perspective.createBatch");
+        fake.reply(&req, json!("batch-7")).await;
+        for uri in ["recipe://a", "recipe://b"] {
+            let req = fake.next_request().await;
+            assert_eq!(req["type"], "perspective.instanceCreate");
+            assert_eq!(req["params"]["batchId"], "batch-7");
+            fake.reply(
+                &req,
+                json!({"className": "Recipe", "baseUri": uri, "propertiesSet": ["name"],
+                       "collectionsSet": [], "parent": null}),
+            )
+            .await;
+        }
+        let req = fake.next_request().await;
+        assert_eq!(req["type"], "perspective.commitBatch");
+        assert_eq!(req["params"]["batchId"], "batch-7");
+        fake.reply(&req, json!({"additions": [], "removals": []}))
+            .await;
+        assert_eq!(tx.await.unwrap().unwrap(), "batch-7");
         ws.close().await;
     }
 
