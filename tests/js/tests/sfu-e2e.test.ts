@@ -204,16 +204,41 @@ describe("SFU: end to end through the SDK", function () {
       const source = toneSource(hz);
       const sending = new wrtc.RTCPeerConnection();
       const receiving = new wrtc.RTCPeerConnection();
-      sending.onicecandidate = (e: any) => e.candidate && receiving.addIceCandidate(e.candidate);
-      receiving.onicecandidate = (e: any) => e.candidate && sending.addIceCandidate(e.candidate);
+      // Hand over the offer and the answer createOffer/createAnswer returned,
+      // not localDescription. libwebrtc rewrites localDescription while it
+      // gathers, and a read in that window can be `c=IN IP6` with an IPv4
+      // address. setRemoteDescription then throws "address type is
+      // mismatching". Candidates still trickle. One that arrives before the
+      // remote description is set is kept and added after; a rejection is
+      // caught so it cannot fail the run.
+      const holdCandidates = (from: any, to: any) => {
+        const pending: Array<() => Promise<unknown>> = [];
+        let open = false;
+        from.onicecandidate = (e: any) => {
+          if (!e.candidate) return;
+          const add = () => Promise.resolve(to.addIceCandidate(e.candidate)).catch(() => {});
+          if (open) void add();
+          else pending.push(add);
+        };
+        return async () => {
+          open = true;
+          for (const add of pending.splice(0)) await add();
+        };
+      };
+      const releaseToReceiving = holdCandidates(sending, receiving);
+      const releaseToSending = holdCandidates(receiving, sending);
       const track = new Promise<MediaStreamTrack>((resolve) => {
         receiving.ontrack = (e: any) => resolve(e.track);
       });
       sending.addTrack(source.track);
-      await sending.setLocalDescription(await sending.createOffer());
-      await receiving.setRemoteDescription(sending.localDescription);
-      await receiving.setLocalDescription(await receiving.createAnswer());
-      await sending.setRemoteDescription(receiving.localDescription);
+      const offer = await sending.createOffer();
+      await sending.setLocalDescription(offer);
+      await receiving.setRemoteDescription(offer);
+      await releaseToReceiving();
+      const answer = await receiving.createAnswer();
+      await receiving.setLocalDescription(answer);
+      await sending.setRemoteDescription(answer);
+      await releaseToSending();
       const stream: MediaStream = new wrtc.MediaStream([await track]);
       return { stream, close: () => { receiving.close(); sending.close(); source.stop(); } };
     };
