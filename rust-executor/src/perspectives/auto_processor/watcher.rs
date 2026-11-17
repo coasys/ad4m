@@ -196,6 +196,10 @@ pub struct ProcessorPending {
     /// Source turns seen since the last drained batch, insertion order,
     /// deduplicated by [`PendingTurn::id`].
     pub items: Vec<PendingTurn>,
+    /// The ids in `items`. Every tick records each queueable turn again, so
+    /// the duplicate check must not scan `items`: over N pending turns that
+    /// made a tick N²/2 comparisons.
+    ids: HashSet<String>,
     /// Wall-clock (unix millis) of the most recent [`WatcherState::record_item`]
     /// for this processor. Used to compare against `debounce_ms`.
     pub last_touched_ms: i64,
@@ -234,6 +238,10 @@ pub struct WatcherState {
     deferred: BTreeMap<String, BTreeMap<String, i64>>,
     /// The store reads the last tick made, reused while no link changed.
     pub(crate) reads: TickReads,
+    /// Test-only: how many ids [`Self::record_item`] compared or looked up
+    /// to find a duplicate.
+    #[cfg(test)]
+    pub(crate) id_checks: u64,
 }
 
 /// Store reads a tick keeps for the next one, each tagged with the store's
@@ -395,11 +403,16 @@ impl WatcherState {
             .per_processor
             .entry(processor_id.to_string())
             .or_default();
-        if !entry.items.iter().any(|t| t.id == turn.id) {
+        #[cfg(test)]
+        {
+            self.id_checks += 1;
+        }
+        if !entry.ids.contains(&turn.id) {
             if entry.items.is_empty() {
                 // First item of a fresh window — start the max-wait clock.
                 entry.first_touched_ms = now_ms;
             }
+            entry.ids.insert(turn.id.clone());
             entry.items.push(turn);
             entry.last_touched_ms = now_ms;
         }
@@ -446,7 +459,11 @@ impl WatcherState {
         // already rejects it) — a 0 would take nothing, drain nothing, and the
         // caller would run an empty pass every tick without the queue emptying.
         let take = entry.items.len().min(cfg.batch_max.max(1));
-        Some(entry.items.drain(..take).collect())
+        let batch: Vec<PendingTurn> = entry.items.drain(..take).collect();
+        for turn in &batch {
+            entry.ids.remove(&turn.id);
+        }
+        Some(batch)
     }
 
     /// Record that this tick stood down for a batch's online elected author.

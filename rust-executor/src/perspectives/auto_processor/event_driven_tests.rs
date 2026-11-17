@@ -536,3 +536,60 @@ async fn a_kept_transcript_holds_no_text_for_consumed_turns() {
         .any(|t| matches!(t, CachedTurn::Consumed { .. })));
     assert_eq!(pending_texts(&watcher, "lean"), vec!["open"]);
 }
+
+/// Hand `watcher` a kept read of `n` pending turns, as if the store had
+/// answered them at the current generation, and tick twice over it: the
+/// first tick queues them, the second re-records them as the loop does at
+/// every tick. Returns the id checks `record_item` made.
+async fn id_checks_for_two_ticks_over(n: usize) -> u64 {
+    let (p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+    let cfg = config("many", 600_000, None);
+    let generation = p.sparql_store.write_generation();
+    let mut watcher = WatcherState::new();
+    watcher.reads.set_configs(generation, vec![cfg.clone()]);
+    watcher
+        .reads
+        .set_processed(&cfg.processor_id, generation, Vec::new());
+    let turns = (0..n)
+        .map(|i| PendingTurn {
+            id: format!("{i:016x}"),
+            speaker: "did:key:alice".into(),
+            text: format!("turn {i}"),
+            timestamp: format!("2026-11-17T10:00:00.{i:06}Z"),
+        })
+        .collect();
+    watcher
+        .reads
+        .set_transcript(&cfg, generation, turns, |_, _| true);
+
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    assert!(p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await);
+    assert!(
+        p.run_auto_processor_tick(&mut watcher, now_ms + 500, &ctx)
+            .await
+    );
+    assert_eq!(
+        watcher.pending_for("many").map(|e| e.items.len()),
+        Some(n),
+        "every turn is queued once"
+    );
+    watcher.id_checks
+}
+
+/// A tick records every queueable turn of the kept transcript again, so the
+/// cost of recording one must not grow with the queue: over 50k pending
+/// turns (a large space with no model) the duplicate check scanned the
+/// queue, and a tick made N²/2 id comparisons. Counted, not timed: at most
+/// one id check per turn per tick, at 5k and at 50k alike.
+#[tokio::test]
+async fn a_tick_over_50k_kept_turns_records_them_in_linear_time() {
+    for n in [5_000usize, 50_000] {
+        let checks = id_checks_for_two_ticks_over(n).await;
+        println!("{n} pending turns, two ticks: {checks} id checks");
+        assert!(
+            checks <= 2 * n as u64,
+            "{checks} id checks for two ticks over {n} pending turns; \
+             recording must cost one check per turn"
+        );
+    }
+}
