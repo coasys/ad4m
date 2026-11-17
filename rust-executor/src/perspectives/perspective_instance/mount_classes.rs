@@ -5,30 +5,36 @@
 //! ```text
 //! ad4m://mounted_class/<name> -[ad4m://mounted_by]->     <lang>://project
 //! ad4m://mounted_class/<name> -[ad4m://mounted_target]-> <target class IRI>
+//! ad4m://mounted_class/<name> -[ad4m://mounted_node]->   <SHACL node>
 //! ```
 //!
 //! A class resolves by its declared name, by the basename of its target
-//! class (`load_shape`) and by its class node, so a shape set occupies all
-//! three. Before any install (the first mount and every version refresh)
-//! `check_class_ownership` refuses a shape set that occupies a name or
-//! class IRI of a class this language does not own: another mount's, or
-//! an SDNA class no mount installed. Only the owner may replace a class.
+//! class (`load_shape`) and by its class node, and its SHACL writes its
+//! shape node and the property and action nodes under it. Before any
+//! install (the first mount and every version refresh)
+//! `check_class_ownership` refuses a shape set that occupies a name,
+//! class IRI or SHACL node of a class this language does not own: another
+//! mount's, or an SDNA class no mount installed. Only the owner may
+//! replace a class. Claims count only when the claiming mount wrote them
+//! (`mount_links`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
 use serde_json::Value;
 
 use super::PerspectiveInstance;
-use crate::languages::mount_types::MountShapes;
+use crate::languages::mount_types::{MountShape, MountShapes};
 use crate::languages::LanguageController;
 use crate::perspectives::model_query::utils::parse_literal_value;
+use crate::perspectives::shacl_parser::parse_shacl_to_links;
 use crate::types::{Link, LinkQuery};
 
 const CLAIM_SOURCE_PREFIX: &str = "ad4m://mounted_class/";
 const CLAIM_OWNER: &str = "ad4m://mounted_by";
 const CLAIM_TARGET: &str = "ad4m://mounted_target";
+const CLAIM_NODE: &str = "ad4m://mounted_node";
 
 /// One class a mount claimed.
 struct ClassClaim {
@@ -38,6 +44,23 @@ struct ClassClaim {
     /// Every target class IRI it was installed with (a refresh that moved
     /// the class to a new IRI leaves the old class node installed too).
     targets: Vec<String>,
+    /// Every node its SHACL wrote: the shape node (a `node_shape_uri` may
+    /// name any URI with the class's suffix), its property and action
+    /// nodes, the class node and the name mapping.
+    nodes: Vec<String>,
+}
+
+/// Every node the SHACL of `shape` writes as `parse_shacl_to_links` would:
+/// each source of its links but `ad4m://self`.
+fn shape_nodes(shape: &MountShape) -> Result<Vec<String>, AnyError> {
+    let mut nodes: Vec<String> = parse_shacl_to_links(&shape.shape.to_string(), &shape.name)?
+        .into_iter()
+        .map(|l| l.source)
+        .filter(|source| source != "ad4m://self")
+        .collect();
+    nodes.sort();
+    nodes.dedup();
+    Ok(nodes)
 }
 
 /// The name a class node resolves by, as `add_sdna` matches it: the last
@@ -71,11 +94,27 @@ impl PerspectiveInstance {
             anyhow!("cannot mount {lang_address}: {what} is already in this perspective and {held}")
         };
 
-        // Every name and class IRI the shape set occupies, by the shape
-        // that declares it.
+        // Every name, class IRI and shape node the shape set occupies, by
+        // the shape that declares it.
+        let mut declared: HashSet<&str> = HashSet::new();
         let mut names: HashMap<&str, &str> = HashMap::new();
         let mut targets: HashMap<&str, &str> = HashMap::new();
+        let mut nodes: HashMap<String, &str> = HashMap::new();
         for shape in &shapes.shapes {
+            if !declared.insert(&shape.name) {
+                return Err(anyhow!(
+                    "cannot mount {lang_address}: it declares class {} twice",
+                    shape.name
+                ));
+            }
+            for node in shape_nodes(shape)? {
+                if let Some(other) = nodes.insert(node.clone(), &shape.name) {
+                    return Err(anyhow!(
+                        "cannot mount {lang_address}: classes {other} and {} both write shape node {node}",
+                        shape.name
+                    ));
+                }
+            }
             let target = shape.shape["target_class"].as_str().ok_or_else(|| {
                 anyhow!(
                     "cannot mount {lang_address}: class {} has no target_class",
@@ -106,6 +145,9 @@ impl PerspectiveInstance {
             if names.contains_key(claim.name.as_str()) {
                 return Err(refuse(format!("class {}", claim.name), owner));
             }
+            if let Some(node) = claim.nodes.iter().find(|n| nodes.contains_key(n.as_str())) {
+                return Err(refuse(format!("shape node {node}"), owner));
+            }
             for target in &claim.targets {
                 if targets.contains_key(target.as_str()) {
                     return Err(refuse(format!("class IRI {target}"), owner));
@@ -113,6 +155,27 @@ impl PerspectiveInstance {
                 if names.contains_key(class_basename(target)) {
                     return Err(refuse(format!("class {}", class_basename(target)), owner));
                 }
+            }
+        }
+
+        // A node this language has not claimed must not be in the store
+        // yet: it would be another class's SHACL (a non-mount class's, or
+        // one a claim no longer names).
+        let own_nodes: HashSet<&str> = claims
+            .iter()
+            .filter(|c| c.owner == lang_address)
+            .flat_map(|c| c.nodes.iter().map(String::as_str))
+            .collect();
+        for node in nodes.keys().filter(|n| !own_nodes.contains(n.as_str())) {
+            let in_use = !self
+                .get_links(&LinkQuery {
+                    source: Some(node.clone()),
+                    ..Default::default()
+                })
+                .await?
+                .is_empty();
+            if in_use {
+                return Err(refuse(format!("shape node {node}"), None));
             }
         }
 
@@ -148,6 +211,15 @@ impl PerspectiveInstance {
 
     /// Claim every class of `shapes` for `lang_address` (the links this
     /// language does not hold yet).
+    ///
+    /// Spike limit: claims are permanent. Neither `unmount` nor a refresh
+    /// that drops a class or moves it to a new IRI or node releases
+    /// anything, and a failed install keeps what it claimed. So the names,
+    /// IRIs and nodes a language ever installed stay its own in this
+    /// perspective: the same language address may remount and refresh,
+    /// but no other language — a new version of it at a new address
+    /// included — can take them. Releasing a claim safely needs the
+    /// retained SDNA removed with it, which the spike does not do.
     pub(super) async fn claim_mount_classes(
         &mut self,
         lang_address: &str,
@@ -173,9 +245,18 @@ impl PerspectiveInstance {
             if let Some(target) = shape.shape["target_class"].as_str() {
                 if !claim.is_some_and(|c| c.targets.iter().any(|t| t == target)) {
                     links.push(Link {
-                        source,
+                        source: source.clone(),
                         predicate: Some(CLAIM_TARGET.to_string()),
                         target: target.to_string(),
+                    });
+                }
+            }
+            for node in shape_nodes(shape)? {
+                if !claim.is_some_and(|c| c.nodes.contains(&node)) {
+                    links.push(Link {
+                        source: source.clone(),
+                        predicate: Some(CLAIM_NODE.to_string()),
+                        target: node,
                     });
                 }
             }
@@ -207,18 +288,25 @@ impl PerspectiveInstance {
                     name: name.to_string(),
                     owner,
                     targets: Vec::new(),
+                    nodes: Vec::new(),
                 });
             }
         }
-        for link in self.get_links(&by_predicate(CLAIM_TARGET)).await? {
-            let Some(name) = link.data.source.strip_prefix(CLAIM_SOURCE_PREFIX) else {
-                continue;
-            };
-            let Some(claim) = claims.iter_mut().find(|c| c.name == name) else {
-                continue;
-            };
-            if written.wrote(&claim.owner, &link)? {
-                claim.targets.push(link.data.target);
+        for predicate in [CLAIM_TARGET, CLAIM_NODE] {
+            for link in self.get_links(&by_predicate(predicate)).await? {
+                let Some(name) = link.data.source.strip_prefix(CLAIM_SOURCE_PREFIX) else {
+                    continue;
+                };
+                let Some(claim) = claims.iter_mut().find(|c| c.name == name) else {
+                    continue;
+                };
+                if written.wrote(&claim.owner, &link)? {
+                    if predicate == CLAIM_TARGET {
+                        claim.targets.push(link.data.target);
+                    } else {
+                        claim.nodes.push(link.data.target);
+                    }
+                }
             }
         }
         Ok(claims)
