@@ -3,7 +3,7 @@
 //! Projects the registered SHACL classes (and flows) into plain JSON an
 //! agent can read: property names, friendly types, cardinality, hints.
 
-use super::{class_properties, pretty, Ad4mMcpHandler, PropView};
+use super::{class_properties, pretty, prop_json, Ad4mMcpHandler};
 use crate::perspectives::flow_context::load_shacl_flows;
 use crate::perspectives::model_query::types::ModelShape;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
@@ -60,12 +60,12 @@ pub(crate) fn describe_class(
     let mut properties: Vec<Value> = infos
         .iter()
         .filter(|i| !i.flag() && !i.collection())
-        .map(PropView::to_json)
+        .map(prop_json)
         .collect();
     let mut collections: Vec<Value> = infos
         .iter()
         .filter(|i| !i.flag() && i.collection())
-        .map(PropView::to_json)
+        .map(prop_json)
         .collect();
     flag_unresolved_relation_targets(&mut properties, registered);
     flag_unresolved_relation_targets(&mut collections, registered);
