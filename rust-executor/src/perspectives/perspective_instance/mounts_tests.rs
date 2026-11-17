@@ -215,27 +215,50 @@ async fn unmount_leaves_nothing_under_the_language() {
 async fn a_mount_survives_a_restart() {
     let lang = load_mount_test_language().await;
     create(&lang, json!({"title": "a"})).await;
-    let (p, _ctx) = mounted(&lang).await;
 
-    // "Restart": drop the instance (its last clone closes the store), then
-    // build a new one on the same uuid — the same RocksDB path. The mount
-    // registry forgets it; the mount link in the store must be enough.
-    let handle = p.persisted.lock().await.clone();
-    let uuid = handle.uuid.clone();
-    crate::perspectives::unregister_mount(&lang, &uuid);
-    drop(p);
+    // "Restart" only means something if the store is file-backed: tests
+    // leave APP_DATA_PATH unset (in-memory stores), so point it at a temp
+    // dir for this test and put it back afterwards.
+    let dir = tempfile::tempdir().unwrap();
+    let previous = crate::perspectives::get_app_data_path();
+    crate::perspectives::set_app_data_path(dir.path().to_str().unwrap().to_string());
 
-    let mut reopened = PerspectiveInstance::new(handle, None);
-    reopened.restore_mounts().await;
+    let check = async {
+        let (p, _ctx) = mounted(&lang).await;
 
-    let instances = things(&reopened).await;
-    assert_eq!(instances.len(), 1, "{instances:?}");
-    assert_eq!(instances[0]["title"], "a");
-    assert_eq!(
-        crate::perspectives::perspectives_for_mount(&lang),
-        vec![uuid.clone()]
-    );
-    crate::perspectives::unregister_mount(&lang, &uuid);
+        // "Restart": drop the instance, then build a new one on the same
+        // uuid — the same RocksDB path. Tasks spawned by the mount's writes
+        // hold clones of the instance, so hold a handle on the store and
+        // wait for their clones to go before reopening (a second store on
+        // the path while one is open is a RocksDB LOCK failure).
+        let handle = p.persisted.lock().await.clone();
+        let uuid = handle.uuid.clone();
+        let store = p.sparql_store.clone();
+        crate::perspectives::unregister_mount(&lang, &uuid);
+        drop(p);
+        for _ in 0..200 {
+            if std::sync::Arc::strong_count(&store) == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        drop(store);
+
+        let mut reopened = PerspectiveInstance::new(handle, None);
+        reopened.restore_mounts().await;
+
+        let instances = things(&reopened).await;
+        assert_eq!(instances.len(), 1, "{instances:?}");
+        assert_eq!(instances[0]["title"], "a");
+        assert_eq!(
+            crate::perspectives::perspectives_for_mount(&lang),
+            vec![uuid.clone()]
+        );
+        crate::perspectives::unregister_mount(&lang, &uuid);
+    }
+    .await;
+    *crate::perspectives::APP_DATA_PATH.write().unwrap() = previous;
+    check
 }
 
 #[tokio::test]
