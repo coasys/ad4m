@@ -42,6 +42,7 @@ use crate::agent::AgentContext;
 use crate::mcp::shacl;
 use crate::perspectives::model_query::is_safe_iri_target;
 use crate::perspectives::model_query::types::{ModelShape, ShapeProperty, ShapeRelation};
+use crate::perspectives::model_query::utils::parse_literal_value;
 use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClassOption};
 use crate::types::{LinkExpression, LinkQuery};
 use crate::utils::{normalize_legacy_literal, other_literal_spelling};
@@ -468,23 +469,18 @@ pub(crate) fn encode_literal(value: &str) -> String {
         .unwrap_or_else(|_| format!("literal:string:{}", value))
 }
 
-/// The plain value behind a literal link target: a `literal:string:x` decodes to `x`, a signed
-/// literal envelope (`literal:json:{…,"data":…}`) to its `data` payload. Non-literal targets come
-/// back unchanged.
+/// The plain value behind a literal link target, as text: a `literal:string:x` decodes to `x`,
+/// `literal:boolean:true` to `true`, a signed literal envelope (`literal:json:{…,"data":…}`) to
+/// its `data` payload. Non-literal targets come back unchanged.
 pub(crate) fn decoded_literal(target: &str) -> String {
-    let decoded = resolve_literal_value(target);
-    if decoded == target {
-        return decoded;
+    let text = |value: &Value| match value {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    };
+    match parse_literal_value(target) {
+        Value::Object(envelope) if envelope.contains_key("data") => text(&envelope["data"]),
+        other => text(&other),
     }
-    if let Ok(Value::Object(envelope)) = serde_json::from_str::<Value>(&decoded) {
-        if let Some(data) = envelope.get("data") {
-            return match data {
-                Value::String(s) => s.clone(),
-                other => other.to_string(),
-            };
-        }
-    }
-    decoded
 }
 
 /// URI-or-literal encoding for link targets, shared with the per-class tools.

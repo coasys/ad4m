@@ -4922,3 +4922,59 @@ async fn string_collection_items_stay_strings_when_written() {
         ]
     );
 }
+
+/// A boolean collection member is stored as `literal:boolean:true`; the
+/// value `"true"` must find it, so adding it again is a no-op and removing
+/// it removes it.
+#[tokio::test(flavor = "multi_thread")]
+async fn boolean_collection_members_are_matched_by_value() {
+    let (handler, uuid, _guard) = setup_with(&[("Tagged", TAGGED_SDNA)], false).await;
+
+    let created = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Tagged".into(),
+                properties: Some(props(&[("title", json!("t")), ("flags", json!([true]))])),
+                base_uri: None,
+                parent: None,
+            }))
+            .await,
+    );
+    assert_eq!(created["created"], true, "{created}");
+    let base = created["base_uri"].as_str().unwrap().to_string();
+    assert_eq!(
+        stored_targets(&handler, &uuid, &base, "ns://flag").await,
+        vec!["literal:boolean:true"]
+    );
+
+    let again = parse(
+        &handler
+            .instance_add_to_collection(Parameters(InstanceAddToCollectionParams {
+                perspective_id: uuid.clone(),
+                class_name: "Tagged".into(),
+                base_uri: base.clone(),
+                collection: "flags".into(),
+                item_uri: "true".into(),
+            }))
+            .await,
+    );
+    assert_eq!(again["links_added"], 0, "{again}");
+    assert_eq!(again["already_member"], true, "{again}");
+
+    let removed = parse(
+        &handler
+            .instance_remove_from_collection(Parameters(InstanceRemoveFromCollectionParams {
+                perspective_id: uuid.clone(),
+                class_name: "Tagged".into(),
+                base_uri: base.clone(),
+                collection: "flags".into(),
+                item_uri: "true".into(),
+            }))
+            .await,
+    );
+    assert_eq!(removed["links_removed"], 1, "{removed}");
+    assert!(stored_targets(&handler, &uuid, &base, "ns://flag")
+        .await
+        .is_empty());
+}
