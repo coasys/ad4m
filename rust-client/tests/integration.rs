@@ -241,6 +241,26 @@ async fn next_result(
         .expect("subscription ended")
 }
 
+/// Read results until one satisfies `want`, under one 30 s deadline for the
+/// whole wait — results that do not match (an update still unread from
+/// before a re-open, say) are skipped, not failed on.
+async fn next_result_where(
+    sub: &mut ad4m_client::model::ModelSubscription,
+    what: &str,
+    want: impl Fn(&ad4m_client::model::ModelResult) -> bool,
+) -> ad4m_client::model::ModelResult {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let result = sub.next().await.expect("subscription ended");
+            if want(&result) {
+                return result;
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out waiting for subscription result: {what}"))
+}
+
 #[tokio::test]
 async fn model_batch_subscription_reconnect_and_flow() {
     let Some(executor) = start_executor() else {
@@ -515,15 +535,20 @@ async fn model_batch_subscription_reconnect_and_flow() {
             }
         }
     }
-    let resynced = next_result(&mut sub, "post-outage resync").await;
-    assert_eq!(resynced.instances.len(), 4);
-    assert!(
-        resynced
-            .instances
-            .iter()
-            .any(|r| r["title"] == json!("written-while-offline")),
-        "the re-opened subscription lost the row written during the outage"
-    );
+    // An update still unread from before the outage can come out of the
+    // stream ahead of the re-open's snapshot: read on until the snapshot
+    // with the offline row arrives.
+    next_result_where(
+        &mut sub,
+        "the re-opened subscription's result with the row written during the outage",
+        |r| {
+            r.instances.len() == 4
+                && r.instances
+                    .iter()
+                    .any(|i| i["title"] == json!("written-while-offline"))
+        },
+    )
+    .await;
 
     // ── reconnect: write through the gap. `call` waits for a socket, so
     // the create lands once the client reconnects; the re-opened
@@ -570,8 +595,10 @@ async fn model_batch_subscription_reconnect_and_flow() {
             }
         }
     }
-    let updated = next_result(&mut sub, "post-reconnect resync").await;
-    assert_eq!(updated.instances.len(), 5);
+    next_result_where(&mut sub, "post-reconnect result with 5 rows", |r| {
+        r.instances.len() == 5
+    })
+    .await;
     sub.dispose().await;
 
     // ── flow: register, start, propose, fire ─────────────────────────────
