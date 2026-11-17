@@ -10,11 +10,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { after, describe, test } from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { cleanGitEnv, evaluateRun, judge, limitsFor, loadThresholds, parseResults, verdicts } from "./lib.mjs";
 import { renderReport, seriesOf } from "./report.mjs";
 
-const HERE = path.dirname(new URL(import.meta.url).pathname);
+const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PERF = path.join(HERE, "perf.mjs");
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 const SHA2 = "fedcba9876543210fedcba9876543210fedcba98";
