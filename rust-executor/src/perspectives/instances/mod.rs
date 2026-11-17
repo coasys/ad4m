@@ -25,6 +25,9 @@ pub mod error;
 pub mod validate;
 pub mod write;
 
+#[cfg(test)]
+mod tests;
+
 pub use error::{CascadeStep, InstanceError, WriteStep};
 pub(crate) use validate::coerce_scalar;
 pub use validate::{
@@ -42,6 +45,7 @@ use crate::agent::AgentContext;
 use crate::mcp::shacl;
 use crate::perspectives::model_query::is_safe_iri_target;
 use crate::perspectives::model_query::types::{ModelShape, ShapeProperty, ShapeRelation};
+use crate::perspectives::model_query::utils::parse_literal_value;
 use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClassOption};
 use crate::types::{LinkExpression, LinkQuery};
 use crate::utils::{normalize_legacy_literal, other_literal_spelling};
@@ -356,14 +360,26 @@ pub(crate) async fn fetch_instance(
     class_name: &str,
     base_uri: &str,
 ) -> Result<Option<Value>, String> {
+    Ok(find_instance(perspective, class_name, base_uri)
+        .await?
+        .map(|(_, instance)| instance))
+}
+
+/// [`fetch_instance`], with the URI the instance is stored under: `base_uri`, or its other
+/// `literal:` spelling when that is where the lookup found it.
+async fn find_instance(
+    perspective: &PerspectiveInstance,
+    class_name: &str,
+    base_uri: &str,
+) -> Result<Option<(String, Value)>, String> {
     let lookup = |uri: String| async move {
-        let query = json!({ "where": { "id": uri }, "limit": 1 });
+        let query = json!({ "where": { "id": uri.clone() }, "limit": 1 });
         let (instances, _) = run_model_query(perspective, class_name, &query).await?;
-        Ok::<Option<Value>, String>(instances.into_iter().next())
+        Ok::<Option<(String, Value)>, String>(instances.into_iter().next().map(|i| (uri, i)))
     };
 
-    if let Some(instance) = lookup(base_uri.to_string()).await? {
-        return Ok(Some(instance));
+    if let Some(found) = lookup(base_uri.to_string()).await? {
+        return Ok(Some(found));
     }
     match other_literal_spelling(base_uri) {
         Some(counterpart) => lookup(counterpart).await,
@@ -371,15 +387,17 @@ pub(crate) async fn fetch_instance(
     }
 }
 
-/// `Ok` when an instance of `class_name` lives at `base_uri`, else `NotFound` (or `Failed` when
-/// the lookup itself failed).
+/// The URI an instance of `class_name` at `base_uri` is stored under — `base_uri`, or its legacy
+/// `literal://` spelling for a node written before ids were normalised; writes go there, since
+/// the store does not alias the two. `NotFound` when there is none (or `Failed` when the lookup
+/// itself failed).
 async fn require_instance(
     perspective: &PerspectiveInstance,
     class_name: &str,
     base_uri: &str,
-) -> Result<(), InstanceError> {
-    match fetch_instance(perspective, class_name, base_uri).await {
-        Ok(Some(_)) => Ok(()),
+) -> Result<String, InstanceError> {
+    match find_instance(perspective, class_name, base_uri).await {
+        Ok(Some((stored, _))) => Ok(stored),
         Ok(None) => Err(InstanceError::NotFound {
             class_name: class_name.to_string(),
             base_uri: base_uri.to_string(),
@@ -468,23 +486,15 @@ pub(crate) fn encode_literal(value: &str) -> String {
         .unwrap_or_else(|_| format!("literal:string:{}", value))
 }
 
-/// The plain value behind a literal link target: a `literal:string:x` decodes to `x`, a signed
-/// literal envelope (`literal:json:{…,"data":…}`) to its `data` payload. Non-literal targets come
-/// back unchanged.
+/// The plain value behind a literal link target, as text: a `literal:string:x` decodes to `x`,
+/// `literal:boolean:true` to `true`, a signed literal envelope (`literal:json:{…,"data":…}`) to
+/// its `data` payload — once: [`parse_literal_value`] unwraps the envelope, so a payload with a
+/// `data` key of its own stays whole. Non-literal targets come back unchanged.
 pub(crate) fn decoded_literal(target: &str) -> String {
-    let decoded = resolve_literal_value(target);
-    if decoded == target {
-        return decoded;
+    match parse_literal_value(target) {
+        Value::String(s) => s,
+        other => other.to_string(),
     }
-    if let Ok(Value::Object(envelope)) = serde_json::from_str::<Value>(&decoded) {
-        if let Some(data) = envelope.get("data") {
-            return match data {
-                Value::String(s) => s.clone(),
-                other => other.to_string(),
-            };
-        }
-    }
-    decoded
 }
 
 /// URI-or-literal encoding for link targets, shared with the per-class tools.
@@ -522,8 +532,8 @@ pub(crate) fn instance_uri(field: &str, value: &str) -> Result<String, InstanceE
     })
 }
 
-/// The link target a property value is written as: a well-formed absolute IRI as it is, else
-/// the expression the property's language creates for it (a literal by default).
+/// The link target a property value given as text is written as: a well-formed absolute IRI as
+/// it is, else the expression the property's language creates for it (a literal by default).
 pub(crate) async fn property_target(
     perspective: &PerspectiveInstance,
     class_name: &str,
@@ -540,6 +550,39 @@ pub(crate) async fn property_target(
         return value.to_string();
     }
 
+    // Try to parse as JSON to recover native types (bool, number). MCP tool schemas declare all
+    // values as strings, so "false" arrives as the string "false" — but the language controller
+    // needs json!(false).
+    let json_value: Value =
+        serde_json::from_str(value).unwrap_or_else(|_| Value::String(value.to_string()));
+    property_value_target(
+        perspective,
+        class_name,
+        property_name,
+        &json_value,
+        agent_context,
+    )
+    .await
+}
+
+/// [`property_target`] for a value whose JSON type is already settled — one validation coerced
+/// to the property's type. A string stays a string: `"false"` in a string collection is
+/// written as `literal:string:false`, not re-guessed into a boolean.
+pub(crate) async fn property_value_target(
+    perspective: &PerspectiveInstance,
+    class_name: &str,
+    property_name: &str,
+    value: &Value,
+    agent_context: &AgentContext,
+) -> String {
+    let text = match value {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    };
+    if value.is_string() && is_safe_iri_target(&text) {
+        return text;
+    }
+
     // Resolve the original-cased property name from SHACL. Dynamic tools lowercase the property
     // name (e.g. "isconversation"), but the SHACL links store the original case (e.g.
     // "isConversation").
@@ -554,19 +597,8 @@ pub(crate) async fn property_target(
             .unwrap_or_else(|| property_name.to_string())
     };
 
-    // Try to parse as JSON to recover native types (bool, number). MCP tool schemas declare all
-    // values as strings, so "false" arrives as the string "false" — but the language controller
-    // needs json!(false).
-    let json_value: Value =
-        serde_json::from_str(value).unwrap_or_else(|_| Value::String(value.to_string()));
-
     match perspective
-        .resolve_property_value(
-            class_name,
-            &original_property_name,
-            &json_value,
-            agent_context,
-        )
+        .resolve_property_value(class_name, &original_property_name, value, agent_context)
         .await
     {
         Ok(url) => url,
@@ -577,7 +609,7 @@ pub(crate) async fn property_target(
                 original_property_name,
                 e
             );
-            encode_literal(value)
+            encode_literal(&text)
         }
     }
 }

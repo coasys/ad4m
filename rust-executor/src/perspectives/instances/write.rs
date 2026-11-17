@@ -14,12 +14,12 @@
 //! batch's staged work (`get_links_effective`); instance existence still reads committed state
 //! only, so create-then-update / -remove of a new instance in one batch fails `notFound`.
 
-use super::validate::resolve_collection;
+use super::validate::{resolve_collection, value_text};
 use super::{
     check_setters, class_properties, coerce_scalar, decoded_literal, fetch_instance,
-    generate_instance_uri, instance_uri, link_target, property_target, remove_all_links_of,
-    require_instance, resolve_class, resolve_writable_class, subject_class, validate_properties,
-    InstanceError, WriteMode, WriteStep,
+    generate_instance_uri, instance_uri, link_target, property_target, property_value_target,
+    remove_all_links_of, require_instance, resolve_class, resolve_writable_class, subject_class,
+    validate_properties, InstanceError, WriteMode, WriteStep,
 };
 use crate::agent::AgentContext;
 use crate::mcp::shacl;
@@ -266,12 +266,34 @@ fn invalid(class_name: &str, errors: Vec<super::ValidationError>) -> InstanceErr
     }
 }
 
-/// Whether a stored collection link target denotes `wanted`. The target may be the item URI
+/// The texts a collection item is looked for by, each with its literal encoding: the text the
+/// caller gave and, when validation coerces it, the coerced value's — which is what
+/// `add_to_collection` stores, so `TRUE` finds a stored `true` and `+005` a stored `5`.
+fn item_spellings(given: &str, coerced: Option<&Value>) -> Vec<(String, String)> {
+    let mut texts = vec![given.to_string()];
+    if let Some(text) = coerced.map(value_text) {
+        if text != given {
+            texts.push(text);
+        }
+    }
+    texts
+        .into_iter()
+        .map(|text| {
+            let encoded = link_target(&text);
+            (text, encoded)
+        })
+        .collect()
+}
+
+/// Whether a stored collection link target denotes the item. The target may be the item URI
 /// itself (references), the literal-encoded form of a bare value, or a signed literal envelope
 /// whose payload is the value — accept all three spellings so the caller can pass back whatever
 /// a read showed them.
-fn target_matches(target: &str, wanted: &str, encoded: &str) -> bool {
-    target == wanted || target == encoded || decoded_literal(target) == wanted
+fn target_matches(target: &str, spellings: &[(String, String)]) -> bool {
+    let decoded = decoded_literal(target);
+    spellings
+        .iter()
+        .any(|(wanted, encoded)| target == wanted || target == encoded || decoded == *wanted)
 }
 
 /// Create an instance of a subject class, its collection items and its parent link, in one
@@ -375,8 +397,10 @@ pub async fn create(
                 Value::String(s) => s.clone(),
                 other => other.to_string(),
             };
+            // The validated value, not its text: re-parsing would turn the string "false" of
+            // a string collection into a boolean.
             let target =
-                property_target(perspective, &class_name, collection, &item_str, agent).await;
+                property_value_target(perspective, &class_name, collection, item, agent).await;
             let link = Link {
                 source: base_uri.clone(),
                 predicate: Some(predicate.clone()),
@@ -464,7 +488,8 @@ pub async fn update(
     }
 
     let base_uri = instance_uri("base_uri", &params.base_uri)?;
-    require_instance(perspective, &class_name, &base_uri).await?;
+    // Where it is stored: a legacy-spelled id's node is not the normalised one.
+    let stored = require_instance(perspective, &class_name, &base_uri).await?;
 
     // One batch for the whole update so remove-old + add-new per property lands atomically
     // (same reasoning as the per-class setters: without it a peer can observe the property as
@@ -473,7 +498,7 @@ pub async fn update(
     if let Err(e) = perspective
         .update_subject(
             subject_class(&class_name),
-            base_uri.clone(),
+            stored,
             Value::Object(validated.scalars.clone()),
             Some(batch.id()),
             agent,
@@ -503,7 +528,8 @@ pub async fn remove(
 ) -> Result<InstanceRemoved, InstanceError> {
     let (class_name, _shape) = resolve_class(perspective, &params.class_name).await?;
     let base_uri = instance_uri("base_uri", &params.base_uri)?;
-    require_instance(perspective, &class_name, &base_uri).await?;
+    // Where it is stored: a legacy-spelled id's node is not the normalised one.
+    let stored = require_instance(perspective, &class_name, &base_uri).await?;
     check_batch(perspective, params.batch_id.as_deref()).await?;
 
     // Through an abstract class (#1435), the destructors of the record's classes it reads: the
@@ -513,12 +539,7 @@ pub async fn remove(
         .map_err(|e| failed(&class_name, WriteStep::ReadShape, e))?;
     if is_abstract {
         perspective
-            .remove_subject(
-                subject_class(&class_name),
-                base_uri.clone(),
-                params.batch_id,
-                agent,
-            )
+            .remove_subject(subject_class(&class_name), stored, params.batch_id, agent)
             .await
             .map_err(|e| failed(&class_name, WriteStep::RemoveSubject, e))?;
         return Ok(InstanceRemoved {
@@ -530,7 +551,7 @@ pub async fn remove(
 
     // Outside a batch the cascade is not atomic, so on failure the links already removed stay
     // removed: the error says so, with the count.
-    match remove_all_links_of(perspective, &base_uri, params.batch_id.as_deref()).await {
+    match remove_all_links_of(perspective, &stored, params.batch_id.as_deref()).await {
         Ok(removed) => Ok(InstanceRemoved {
             class_name,
             base_uri,
@@ -559,12 +580,13 @@ pub async fn add_to_collection(
     let infos = class_properties(&shape);
     let info = resolve_collection(&class_name, &infos, &params.collection, &params.item_uri)
         .map_err(|e| invalid(&class_name, vec![e]))?;
-    coerce_scalar(info, &Value::String(params.item_uri.clone()))
+    let coerced = coerce_scalar(info, &Value::String(params.item_uri.clone()))
         .map_err(|e| invalid(&class_name, vec![e]))?;
     let collection = info.name().to_string();
 
     let base_uri = instance_uri("base_uri", &params.base_uri)?;
-    require_instance(perspective, &class_name, &base_uri).await?;
+    // Where it is stored: a legacy-spelled id's node is not the normalised one.
+    let stored = require_instance(perspective, &class_name, &base_uri).await?;
     check_batch(perspective, params.batch_id.as_deref()).await?;
 
     let predicate = shacl::resolve_property_predicate(perspective, &class_name, &collection)
@@ -585,11 +607,11 @@ pub async fn add_to_collection(
     // already in it — on the batch's effective graph, so a member the same batch dropped reads
     // as out and one it added reads as in.
     let wanted = params.item_uri.trim();
-    let encoded = link_target(wanted);
+    let spellings = item_spellings(wanted, Some(&coerced));
     let existing = perspective
         .get_links_effective(
             &LinkQuery {
-                source: Some(base_uri.clone()),
+                source: Some(stored.clone()),
                 predicate: Some(predicate.clone()),
                 ..Default::default()
             },
@@ -607,7 +629,7 @@ pub async fn add_to_collection(
         })?;
     if existing
         .iter()
-        .any(|effective| target_matches(&effective.link.data.target, wanted, &encoded))
+        .any(|effective| target_matches(&effective.link.data.target, &spellings))
     {
         return Ok(CollectionItemAdded {
             class_name,
@@ -619,16 +641,22 @@ pub async fn add_to_collection(
         });
     }
 
-    let target = property_target(
-        perspective,
-        &class_name,
-        &collection,
-        &params.item_uri,
-        agent,
-    )
-    .await;
+    // Write the coerced value, so a string collection keeps "false" a string. A language-stored
+    // collection takes the item as it is (coercion leaves it text), still JSON-parsed as before.
+    let target = if info.stored_by_language().is_some() {
+        property_target(
+            perspective,
+            &class_name,
+            &collection,
+            &params.item_uri,
+            agent,
+        )
+        .await
+    } else {
+        property_value_target(perspective, &class_name, &collection, &coerced, agent).await
+    };
     let link = Link {
-        source: base_uri.clone(),
+        source: stored,
         predicate: Some(predicate),
         target,
     };
@@ -681,7 +709,8 @@ pub async fn remove_from_collection(
     let collection = info.name().to_string();
 
     let base_uri = instance_uri("base_uri", &params.base_uri)?;
-    require_instance(perspective, &class_name, &base_uri).await?;
+    // Where it is stored: a legacy-spelled id's node is not the normalised one.
+    let stored = require_instance(perspective, &class_name, &base_uri).await?;
     check_batch(perspective, params.batch_id.as_deref()).await?;
 
     let predicate = shacl::resolve_property_predicate(perspective, &class_name, &collection)
@@ -697,13 +726,16 @@ pub async fn remove_from_collection(
         })?;
 
     let wanted = params.item_uri.trim();
-    let encoded = link_target(wanted);
+    // Members are stored as the coerced value. A value validation refuses is still looked for
+    // as given: removal names what is there, it does not validate.
+    let coerced = coerce_scalar(info, &Value::String(params.item_uri.clone())).ok();
+    let spellings = item_spellings(wanted, coerced.as_ref());
     // The batch's effective graph, so a member the same batch dropped reads as out already
     // and one it added is found and removed.
     let links = perspective
         .get_links_effective(
             &LinkQuery {
-                source: Some(base_uri.clone()),
+                source: Some(stored),
                 predicate: Some(predicate),
                 ..Default::default()
             },
@@ -725,7 +757,7 @@ pub async fn remove_from_collection(
         .collect();
     let mut removed = 0usize;
     for effective in links {
-        if !target_matches(&effective.link.data.target, wanted, &encoded) {
+        if !target_matches(&effective.link.data.target, &spellings) {
             continue;
         }
         let link = LinkExpression::from(effective.link);

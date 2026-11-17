@@ -211,8 +211,12 @@ pub(crate) fn coerce_scalar(info: &PropView<'_>, value: &Value) -> Result<Value,
         },
         "integer" => match value {
             Value::Number(n) if n.is_i64() || n.is_u64() => Ok(value.clone()),
+            // A whole float in i64 range: `as` saturates, so 1e20 would become i64::MAX.
+            // `i64::MAX as f64` is 2^63, itself out of range, hence `<`.
             Value::Number(n) => match n.as_f64() {
-                Some(f) if f.fract() == 0.0 => Ok(json!(f as i64)),
+                Some(f) if f.fract() == 0.0 && f >= i64::MIN as f64 && f < i64::MAX as f64 => {
+                    Ok(json!(f as i64))
+                }
                 _ => Err(wrong_type()),
             },
             Value::String(s) => s
