@@ -225,6 +225,10 @@ type WatchMap = BTreeMap<String, Value>;
 struct Watches {
     map: WatchMap,
     rev: u64,
+    /// The revision each key's current registration was made at — so a
+    /// rejected registration is rolled back only if no newer one for the
+    /// key replaced it.
+    stamps: BTreeMap<String, u64>,
 }
 
 /// A callback fired once a fresh socket is installed (post `events.watch`).
@@ -446,6 +450,7 @@ impl WsRpcClient {
             watches: Mutex::new(Watches {
                 map: WatchMap::new(),
                 rev: 0,
+                stamps: BTreeMap::new(),
             }),
             watch_flush: Mutex::new(()),
             teardowns: AtomicU64::new(0),
@@ -912,16 +917,34 @@ impl WsRpcClient {
     pub(crate) async fn set_watch(&self, key: &str, spec: Value) -> Result<()> {
         // `connected` is read under the same `watches` lock an install
         // holds from its final revision check through publication (N1).
-        let connected = {
+        let (connected, stamp) = {
             let mut watches = self.shared.watches.lock().await;
             watches.map.insert(key.to_string(), spec);
             watches.rev += 1;
-            *self.shared.connected.borrow()
+            let stamp = watches.rev;
+            watches.stamps.insert(key.to_string(), stamp);
+            (*self.shared.connected.borrow(), stamp)
         };
         // A dead socket sends nothing — the next install's restore flush
         // picks the interest up instead (R2); a live socket flushes now.
         if connected {
-            Self::send_watch(&self.shared).await?;
+            if let Err(e) = Self::send_watch(&self.shared).await {
+                // The executor answered and refused: this interest can
+                // never be installed, and kept in the map every restore
+                // would resend it, fail, and drop the fresh socket. Roll
+                // it back, unless a newer registration for the key
+                // replaced it meanwhile. A timeout or a lost socket is no
+                // verdict — the interest stays for the restore to resend.
+                if e.downcast_ref::<RpcCallError>().is_some() {
+                    let mut watches = self.shared.watches.lock().await;
+                    if watches.stamps.get(key) == Some(&stamp) {
+                        watches.map.remove(key);
+                        watches.stamps.remove(key);
+                        watches.rev += 1;
+                    }
+                }
+                return Err(e);
+            }
         }
         Ok(())
     }
@@ -930,6 +953,7 @@ impl WsRpcClient {
         let (removed, connected) = {
             let mut watches = self.shared.watches.lock().await;
             let removed = watches.map.remove(key).is_some();
+            watches.stamps.remove(key);
             if removed {
                 watches.rev += 1;
             }
@@ -2262,6 +2286,69 @@ mod tests {
         })
         .await
         .expect("the client reconnects on the next dial");
+        client.close().await;
+    }
+
+    /// An `events.watch` the executor refuses is rolled back: kept, every
+    /// restore would resend it, be refused, and drop the fresh socket. A
+    /// newer registration of the same key that replaced it meanwhile is
+    /// kept.
+    #[tokio::test]
+    async fn a_refused_watch_is_rolled_back_unless_replaced() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let client = Arc::new(WsRpcClient::connect(fake.url(), "").await.unwrap());
+
+        // Refused outright: rolled back.
+        let set = tokio::spawn({
+            let client = client.clone();
+            async move {
+                client
+                    .set_watch("bad", serde_json::json!({"bad-event": null}))
+                    .await
+            }
+        });
+        let req = fake.next_request().await;
+        assert_eq!(req["type"], "events.watch");
+        fake.reply_error(&req, 400, "unknown event type").await;
+        set.await.unwrap().unwrap_err();
+
+        // Refused, but replaced by a newer registration of the key first.
+        let first = tokio::spawn({
+            let client = client.clone();
+            async move {
+                client
+                    .set_watch("k", serde_json::json!({"rejected-event": null}))
+                    .await
+            }
+        });
+        let req1 = fake.next_request().await;
+        let rev = client.shared.watches.lock().await.rev;
+        let second = tokio::spawn({
+            let client = client.clone();
+            async move {
+                client
+                    .set_watch("k", serde_json::json!({"good-event": null}))
+                    .await
+            }
+        });
+        while client.shared.watches.lock().await.rev == rev {
+            tokio::task::yield_now().await;
+        }
+        fake.reply_error(&req1, 400, "unknown event type").await;
+        first.await.unwrap().unwrap_err();
+        let req2 = fake.next_request().await;
+        assert_eq!(req2["params"], serde_json::json!({"good-event": null}));
+        fake.reply(&req2, serde_json::json!(true)).await;
+        second.await.unwrap().unwrap();
+
+        // The restore after a reconnect sends only what was accepted.
+        client.disconnect_for_testing().await;
+        fake.connection(2).await;
+        let restore = fake.next_request().await;
+        assert_eq!(restore["type"], "events.watch");
+        assert_eq!(restore["params"], serde_json::json!({"good-event": null}));
+        fake.reply(&restore, serde_json::json!(true)).await;
         client.close().await;
     }
 
