@@ -406,20 +406,36 @@ impl Inner {
     /// query, release it), so the subscription is never stranded with
     /// nobody holding its id (N3). This holds for any [`OpenFn`].
     async fn start(self: &Arc<Self>) -> Result<Value> {
-        let this = self.clone();
-        tokio::spawn(async move { this.start_owned().await })
-            .await
-            .map_err(|e| anyhow::anyhow!("live query start ended: {e}"))?
+        self.start_tracked().await.1
     }
 
-    async fn start_owned(self: &Arc<Self>) -> Result<Value> {
-        self.ensure_watch().await?;
+    /// [`start`](Self::start), also answering the generation the attempt
+    /// allocated (`None` when it failed before allocating one): a
+    /// re-open compares against its own attempt's generation, not a
+    /// guess from what it read before starting.
+    async fn start_tracked(self: &Arc<Self>) -> (Option<u64>, Result<Value>) {
+        let this = self.clone();
+        match tokio::spawn(async move { this.start_owned().await }).await {
+            Ok(outcome) => outcome,
+            Err(e) => (None, Err(anyhow::anyhow!("live query start ended: {e}"))),
+        }
+    }
+
+    async fn start_owned(self: &Arc<Self>) -> (Option<u64>, Result<Value>) {
+        if let Err(e) = self.ensure_watch().await {
+            return (None, Err(e));
+        }
         let generation = {
             let mut s = self.state.lock().await;
             s.generation += 1;
             s.buffer = Some(Vec::new());
             s.generation
         };
+        (Some(generation), self.open_as(generation).await)
+    }
+
+    /// The open-to-install half of a start that owns `generation`.
+    async fn open_as(self: &Arc<Self>, generation: u64) -> Result<Value> {
         // A re-open retry sleeping off a failure is obsolete the moment a
         // newer start exists — wake it so it dies on the generation check
         // (F10; TS clears the pending retry timer on every start).
@@ -688,26 +704,33 @@ impl Inner {
                 }
                 s.generation
             };
-            // `start` bumps `generation`, so this attempt's generation is
-            // `before + 1` — anything newer means another start overtook us.
+            #[cfg(test)]
+            self.ws.test_park("reopen:generation-read").await;
+            // The attempt's own generation — anything newer means another
+            // start overtook it. Not `before + 1`: an overlapping re-open
+            // may have started in between, so ours can be later still. An
+            // attempt that failed before allocating one owns `before` as
+            // long as nothing else started.
             // Straight on the Arc: minting a `LiveQuery` handle for the
             // duration would corrupt the handle count (R4).
-            match self.start().await {
+            let (allocated, outcome) = self.start_tracked().await;
+            let mine = allocated.unwrap_or(before);
+            match outcome {
                 Ok(_) => {
                     let mut state = self.state.lock().await;
-                    if !state.disposed && state.generation == before + 1 {
+                    if !state.disposed && state.generation == mine {
                         state.reopening = false;
                     }
                     return;
                 }
                 Err(e) => {
                     let mut state = self.state.lock().await;
-                    if state.disposed || state.generation != before + 1 {
+                    if state.disposed || state.generation != mine {
                         return;
                     }
                     failures += 1;
                     state.reopening = true;
-                    expected = Some(before + 1);
+                    expected = Some(mine);
                     let retry = reopen_delay(failures);
                     drop(state);
                     eprintln!(
@@ -1094,6 +1117,57 @@ mod tests {
             .unwrap();
         assert_eq!(delivered, serde_json::json!(["new"]));
         assert_eq!(query.id().await.as_deref(), Some("sub-2"));
+        client.close().await;
+    }
+
+    /// Two overlapping re-opens read the same generation, then start: their
+    /// attempts own the next two. Both opens fail. The one whose attempt
+    /// owns the newest generation must keep retrying — judged against
+    /// `before + 1`, both loops thought themselves overtaken and the query
+    /// was never restored.
+    #[tokio::test]
+    async fn overlapping_failed_reopens_leave_one_retry_loop() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let client = Arc::new(WsRpcClient::connect(fake.url(), "").await.unwrap());
+        let query = started_query(&fake, &client).await;
+
+        let (gate, mut parked) = client.park_at("reopen:generation-read");
+        let a = tokio::spawn({
+            let inner = query.inner.clone();
+            async move { inner.reopen().await }
+        });
+        let b = tokio::spawn({
+            let inner = query.inner.clone();
+            async move { inner.reopen().await }
+        });
+        parked.recv().await.unwrap();
+        parked.recv().await.unwrap();
+        // Both read the same generation; let them (and any retry) through.
+        gate.gate.add_permits(100);
+
+        for _ in 0..2 {
+            let req = fake.next_request().await;
+            assert_eq!(req["type"], "perspective.subscribeQuery");
+            fake.reply_error(&req, 500, "socket just came back").await;
+        }
+        // One loop survives and retries after its backoff (≤ 1 s).
+        let retry = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let req = fake.next_request().await;
+                if req["type"] == "perspective.subscribeQuery" {
+                    return req;
+                }
+                fake.reply(&req, serde_json::json!(true)).await;
+            }
+        })
+        .await
+        .expect("no re-open loop survived two overlapping failures");
+        fake.reply(&retry, serde_json::json!({"result": [], "revision": 0}))
+            .await;
+        a.await.unwrap();
+        b.await.unwrap();
+        assert!(!query.reopening().await);
         client.close().await;
     }
 
