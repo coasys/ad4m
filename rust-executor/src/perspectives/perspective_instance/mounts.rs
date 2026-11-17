@@ -46,6 +46,10 @@ const MOUNT_PROJECT_PATH: &str = "project";
 /// `<lang>://project -[ad4m://mount_shapes_version]-> literal:string:<v>`
 /// records which `mountShapes()` version is installed (design §2.4).
 const VERSION_PREDICATE: &str = "ad4m://mount_shapes_version";
+/// `<lang>://project -[ad4m://mounts_class]-> literal:string:<name>`: the
+/// class links builds before A9 wrote; only `refuse_mirror_of_an_older_build`
+/// still looks for them.
+const OLDER_CLASS_PREDICATE: &str = "ad4m://mounts_class";
 /// The interval between resync passes over a perspective's mounts
 /// (design §1.5: 15 s), in milliseconds. An `AtomicU64` so a test can
 /// shorten it through `set_mount_resync_interval_for_test`.
@@ -94,6 +98,7 @@ impl PerspectiveInstance {
     /// `Mounting`: no sync or delta applies, and an `unmount` meanwhile
     /// wins.
     pub async fn mount(&mut self, lang_address: &str) -> Result<(), AnyError> {
+        self.refuse_mirror_of_an_older_build(lang_address).await?;
         let generation = {
             let mut slot = self.mount_lifecycles.lock(lang_address).await;
             match slot.phase {
@@ -385,6 +390,42 @@ impl PerspectiveInstance {
         Ok(report)
     }
 
+    /// Refuse a mount of `lang` over the mirror an older build wrote: a
+    /// `Local` version or class link under `<lang>://project` that is not
+    /// in the mount ledger (`mount_links`). Builds before the ledger (A9
+    /// and earlier) wrote every mounted link that way, so this mount could
+    /// tell none of its old links from a user's: it would neither update
+    /// nor remove them. Such a perspective is not migrated (a sweep by
+    /// prefix would delete users' links again); remount the language in a
+    /// fresh perspective.
+    async fn refuse_mirror_of_an_older_build(&self, lang_address: &str) -> Result<(), AnyError> {
+        let written = self.mount_written(lang_address)?;
+        let older = self
+            .get_links(&LinkQuery {
+                source: Some(mount_target(lang_address)),
+                ..Default::default()
+            })
+            .await?
+            .into_iter()
+            .any(|l| {
+                l.status == Some(LinkStatus::Local)
+                    && matches!(
+                        l.data.predicate.as_deref(),
+                        Some(VERSION_PREDICATE) | Some(OLDER_CLASS_PREDICATE)
+                    )
+                    && !written.contains(&l)
+            });
+        if older {
+            return Err(anyhow!(
+                "perspective {} holds a mount of {lang_address} written by an older build, \
+                 whose links this build cannot tell from other links; remount \
+                 {lang_address} in a fresh perspective",
+                self.uuid
+            ));
+        }
+        Ok(())
+    }
+
     /// Whether the mount link for `lang` is in the store.
     async fn has_mount_link(&self, lang_address: &str) -> Result<bool, AnyError> {
         Ok(!self
@@ -413,6 +454,7 @@ impl PerspectiveInstance {
         if !self.has_mount_link(lang_address).await? {
             return Ok(false);
         }
+        self.refuse_mirror_of_an_older_build(lang_address).await?;
         self.mount_lifecycles.enter(&mut slot, MountPhase::Active);
         register_mount(lang_address, &self.uuid);
         Ok(true)

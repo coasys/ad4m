@@ -1,6 +1,7 @@
 //! What a mount owns, and what it leaves alone: links someone else wrote
 //! under `<lang>://`, whatever their timestamp, the schema a newer sync
-//! installed, and another mount's shape nodes.
+//! installed, another mount's shape nodes, and a mirror an older build
+//! wrote.
 
 use super::mount_gates::gates;
 use super::mount_gates::MountPoint;
@@ -187,4 +188,71 @@ async fn one_shape_set_naming_a_class_twice_is_refused() {
 
     let error = p.mount(&lang).await.unwrap_err();
     assert!(error.to_string().contains("Dup"), "{error}");
+}
+
+// --- A mirror an older build wrote is not adopted ---------------------------
+
+/// A perspective holding what a pre-A10 build left of a mount of `lang`:
+/// the Shared mount link, and a version link and a record link written as
+/// ordinary Local links.
+async fn mirror_from_an_older_build(lang: &str) -> PerspectiveInstance {
+    let (mut p, _shapes, ctx) =
+        crate::perspectives::interpretation_test_support::setup_perspective_no_llm(&[]).await;
+    p.add_links(
+        vec![Link {
+            source: "ad4m://self".to_string(),
+            predicate: Some("ad4m://mount".to_string()),
+            target: format!("{lang}://project"),
+        }],
+        LinkStatus::Shared,
+        None,
+        &ctx,
+    )
+    .await
+    .unwrap();
+    p.add_links(
+        vec![
+            Link {
+                source: format!("{lang}://project"),
+                predicate: Some("ad4m://mount_shapes_version".to_string()),
+                target: "literal:string:2".to_string(),
+            },
+            Link {
+                source: format!("{lang}://t1"),
+                predicate: Some("mounttest://title".to_string()),
+                target: "literal:string:old".to_string(),
+            },
+        ],
+        LinkStatus::Local,
+        None,
+        &ctx,
+    )
+    .await
+    .unwrap();
+    p
+}
+
+#[tokio::test]
+async fn a_restore_refuses_a_mirror_from_an_older_build() {
+    let lang = load_mount_test_language().await;
+    create(&lang, json!({"title": "new"})).await;
+    let mut p = mirror_from_an_older_build(&lang).await;
+
+    p.restore_mounts().await;
+    let registered = crate::perspectives::perspectives_for_mount(&lang);
+    crate::perspectives::unregister_mount(&lang, &p.uuid);
+    assert!(registered.is_empty(), "the old mirror was activated");
+    let titles = links_at(&p, &format!("{lang}://t1"), "mounttest://title").await;
+    assert_eq!(titles.len(), 1, "the old mirror was synced: {titles:?}");
+}
+
+#[tokio::test]
+async fn a_mount_refuses_a_mirror_from_an_older_build() {
+    let lang = load_mount_test_language().await;
+    create(&lang, json!({"title": "new"})).await;
+    let mut p = mirror_from_an_older_build(&lang).await;
+
+    let error = p.mount(&lang).await.unwrap_err();
+    crate::perspectives::unregister_mount(&lang, &p.uuid);
+    assert!(error.to_string().contains("fresh perspective"), "{error}");
 }
