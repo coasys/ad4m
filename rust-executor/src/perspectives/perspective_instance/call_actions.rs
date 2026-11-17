@@ -33,6 +33,32 @@ pub(super) struct CallRun {
     pub(super) params: Map<String, Value>,
 }
 
+/// A `(source, interaction)` call group under accumulation: every
+/// contributing action's `target` defaults and the caller's values, each
+/// merged in order on its own side. `into_run` merges all defaults first
+/// and all caller values last, so a later action's default can never
+/// overwrite an earlier caller value.
+pub(super) struct CallGroup {
+    source: String,
+    name: String,
+    defaults: Map<String, Value>,
+    values: Map<String, Value>,
+}
+
+impl CallGroup {
+    /// The `CallRun` this group accumulated: every default under every
+    /// caller value.
+    pub(super) fn into_run(self) -> CallRun {
+        let mut params = self.defaults;
+        params.extend(self.values);
+        CallRun {
+            source: self.source,
+            name: self.name,
+            params,
+        }
+    }
+}
+
 impl PerspectiveInstance {
     /// Split `commands` into call actions and link actions. A list that
     /// contains a call must contain only calls — anything else would be a
@@ -72,16 +98,14 @@ impl PerspectiveInstance {
         }
     }
 
-    /// The resolved `CallRun` of one call command: `source` resolved
-    /// ("this" → the instance URL `instance`, an error when there is none
-    /// yet), the interaction name from `predicate`, the fixed `target`
-    /// params with `values` merged over them.
-    fn call_run(
+    /// The `(source, interaction)` key a call command resolves to:
+    /// `source` resolved ("this" → the instance URL `instance`, an error
+    /// when there is none yet), the interaction name from `predicate`.
+    fn call_key(
         command: &Command,
         instance: Option<&str>,
-        values: Map<String, Value>,
         where_: &str,
-    ) -> Result<CallRun, AnyError> {
+    ) -> Result<(String, String), AnyError> {
         let source = match command.source.as_deref().unwrap_or_default() {
             "this" => instance
                 .ok_or_else(|| {
@@ -96,6 +120,20 @@ impl PerspectiveInstance {
         let name = command.predicate.clone().ok_or_else(|| {
             anyhow!("call action of {where_} has no predicate to name the interaction")
         })?;
+        Ok((source, name))
+    }
+
+    /// The resolved `CallRun` of one call command: `source` resolved
+    /// ("this" → the instance URL `instance`, an error when there is none
+    /// yet), the interaction name from `predicate`, the fixed `target`
+    /// params with `values` merged over them.
+    fn call_run(
+        command: &Command,
+        instance: Option<&str>,
+        values: Map<String, Value>,
+        where_: &str,
+    ) -> Result<CallRun, AnyError> {
+        let (source, name) = Self::call_key(command, instance, where_)?;
         let mut params = Self::call_target_object(command.target.as_deref(), where_)?;
         params.extend(values);
         Ok(CallRun {
@@ -109,19 +147,31 @@ impl PerspectiveInstance {
     /// interaction name): every call of one setter list lands in its
     /// group and shares one call, so `update_subject` of several
     /// properties makes a single `update` carrying each of them (§3.3).
+    /// The defaults and the caller's values accumulate on their own side
+    /// of the group: merged straight into the params, a later action's
+    /// default for an earlier property would overwrite the caller's
+    /// explicit value.
     pub(super) fn group_call(
-        groups: &mut BTreeMap<(String, String), CallRun>,
+        groups: &mut BTreeMap<(String, String), CallGroup>,
         command: &Command,
         instance: Option<&str>,
         values: Map<String, Value>,
         where_: &str,
     ) -> Result<(), AnyError> {
-        let run = Self::call_run(command, instance, values, where_)?;
-        let key = (run.source.clone(), run.name.clone());
+        let (source, name) = Self::call_key(command, instance, where_)?;
+        let defaults = Self::call_target_object(command.target.as_deref(), where_)?;
         groups
-            .entry(key)
-            .and_modify(|r| r.params.extend(run.params.clone()))
-            .or_insert(run);
+            .entry((source.clone(), name.clone()))
+            .and_modify(|g| {
+                g.defaults.extend(defaults.clone());
+                g.values.extend(values.clone());
+            })
+            .or_insert(CallGroup {
+                source,
+                name,
+                defaults,
+                values,
+            });
         Ok(())
     }
 
