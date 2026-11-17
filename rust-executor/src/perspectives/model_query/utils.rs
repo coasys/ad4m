@@ -5,6 +5,7 @@
 //! `literal:` URI scheme ([`parse_literal_value`]), and numeric/timestamp
 //! coercion helpers used by the filtering engine.
 
+use ad4m_client::literal::Literal;
 use deno_core::anyhow::{anyhow, Error};
 #[cfg(test)]
 use percent_encoding::utf8_percent_encode;
@@ -238,6 +239,59 @@ pub(crate) fn parse_literal_value(uri: &str) -> Value {
     } else {
         Value::String(uri.to_string())
     }
+}
+
+/// The deterministic `literal:` IRI one JSON value lands at when no
+/// `resolve_language` path resolves it — the encoding
+/// `PerspectiveInstance::resolve_property_value` writes for setters and the
+/// mount engine writes expanding records:
+///
+/// - a string that is a well-formed absolute IRI stays a raw NamedNode
+///   target (see [`is_safe_iri_target`]; the read side's
+///   [`looks_like_absolute_iri`] MUST agree);
+/// - other strings become `literal:string:*`;
+/// - numbers become `literal:number:*`, booleans `literal:boolean:*`;
+/// - arrays/objects become `literal:json:*` (collections expand per
+///   element before reaching here);
+/// - null stays its plain string form, as the setter path encodes it.
+pub(crate) fn literal_target(value: &Value) -> Result<String, Error> {
+    Ok(match value {
+        Value::String(s) => {
+            if is_safe_iri_target(s) {
+                s.clone()
+            } else {
+                Literal::from_string(s.clone())
+                    .to_url()
+                    .map_err(|e| anyhow!("Failed to encode string as literal URI: {}", e))?
+            }
+        }
+        Value::Number(n) => {
+            if let Some(f) = n.as_f64() {
+                Literal::from_number(f)
+                    .to_url()
+                    .map_err(|e| anyhow!("Failed to encode number as literal URI: {}", e))?
+            } else {
+                Literal::from_string(value.to_string())
+                    .to_url()
+                    .map_err(|e| anyhow!("Failed to encode number as literal URI: {}", e))?
+            }
+        }
+        // Booleans become deterministic `literal:boolean:` IRIs, matching
+        // the TS `valueToLiteralIri` / `Literal` encoding. The storage
+        // layer turns these into typed `xsd:boolean` terms for indexed
+        // WHERE matching, and the read path decodes them back to a JSON
+        // bool. The Rust `Literal` helper has no boolean variant, so we
+        // format the wire form directly.
+        Value::Bool(b) => format!("literal:boolean:{b}"),
+        // Objects / arrays become deterministic `literal:json:` IRIs so
+        // they round-trip back to JSON values rather than being stored
+        // as raw `value.to_string()` targets (which the storage layer
+        // would keep as opaque NamedNode IRIs and read back as strings).
+        Value::Array(_) | Value::Object(_) => Literal::from_json(value.clone())
+            .to_url()
+            .map_err(|e| anyhow!("Failed to encode JSON as literal URI: {}", e))?,
+        Value::Null => value.to_string(),
+    })
 }
 
 /// Extract numeric value from a JSON value for comparison.
