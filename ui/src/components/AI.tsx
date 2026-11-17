@@ -1,9 +1,65 @@
-import { Model } from "@coasys/ad4m/lib/src/ai/AIResolver";
+import type { Ad4mClient, AIModel, AiEndpoint, ModelType } from "@coasys/ad4m";
 import { useCallback, useContext, useEffect, useRef, useState } from "react";
 import { Ad4minContext } from "../context/Ad4minContext";
 import "../index.css";
+import { LocalAiPanel, useLocalAi } from "./LocalAiPanel";
 import ModelCard from "./ModelCard";
 import ModelModal from "./ModelModal";
+import { endpointLabel } from "./aiSetup";
+
+const MODEL_TYPES: ModelType[] = ["LLM", "EMBEDDING", "TRANSCRIPTION", "SPEECH"];
+
+/**
+ * Local AI in Settings: the same panel as onboarding's (device, plan, the question, progress,
+ * the runtimes' state), for someone who skipped it there, chose a model server, or lost a
+ * model. Its models become the defaults only of types that have none: a default chosen here
+ * (a remote chat model, say) stays. `onChange` reloads the page's endpoints and models.
+ */
+function LocalAiSettings(props: { client: Ad4mClient; onChange: () => void }) {
+  const { client, onChange } = props;
+  const [error, setError] = useState("");
+  const [stopping, setStopping] = useState(false);
+  const local = useLocalAi(client, true, setError);
+
+  async function install() {
+    await local.install();
+    onChange();
+  }
+
+  async function start() {
+    await local.start();
+    onChange();
+  }
+
+  async function stop() {
+    setStopping(true);
+    setError("");
+    try {
+      local.setStatus(await client.ai.localStop());
+    } catch (e) {
+      setError(`${e}`);
+    }
+    setStopping(false);
+    onChange();
+  }
+
+  return (
+    <j-flex direction="column" gap="300">
+      <LocalAiPanel
+        local={local}
+        title="Local AI on this device"
+        onInstall={install}
+        onStart={start}
+        onStop={{ run: stop, stopping }}
+      />
+      {error && (
+        <j-text nomargin color="danger-500">
+          {error}
+        </j-text>
+      )}
+    </j-flex>
+  );
+}
 
 const AI = () => {
   const {
@@ -12,18 +68,27 @@ const AI = () => {
 
   const [models, setModels] = useState<any[]>([]);
   const modelsRef = useRef<any[]>([]);
-  const [selectedModel, setSelectedModel] = useState(null);
+  const [endpoints, setEndpoints] = useState<AiEndpoint[]>([]);
+  const [selectedModel, setSelectedModel] = useState<AIModel | null>(null);
   const [newModelModalOpen, setNewModelModalOpen] = useState(false);
+  /** Bumped when local AI is removed here: the local AI panel reads it again. */
+  const [localGeneration, setLocalGeneration] = useState(0);
 
   const getData = useCallback(async () => {
     const modelsInDB = await client!.ai.getModels();
     const tasksInDB = await client!.ai.tasks();
-    const defaultLLM = await client!.ai.getDefaultModel("LLM");
+    setEndpoints(await client!.ai.endpoints());
+    const defaults = await Promise.all(
+      MODEL_TYPES.map((type) => client!.ai.getDefaultModel(type))
+    );
+    const defaultIds = new Set(defaults.map((d) => d?.id).filter(Boolean));
     // attach tasks to models
     const modelsWithTasks = modelsInDB.map((model) => {
       const modelWithTasks = { ...model } as any;
-      if (model.id === defaultLLM?.id) {
+      if (defaultIds.has(model.id)) {
         modelWithTasks.default = true;
+      }
+      if (model.modelType === "LLM" && defaultIds.has(model.id)) {
         // find tasks for default model
         const matchingTasks = tasksInDB.filter(
           (task) => task.modelId === "default"
@@ -41,13 +106,30 @@ const AI = () => {
     setModels(modelsWithTasks);
   }, [client]);
 
-  function removeModel(model: Model) {
-    client!.ai.removeModel(model.id);
+  async function removeModel(model: AIModel) {
+    await client!.ai.removeModel(model.id);
     getData();
   }
 
-  function setDefaultModel(model: Model) {
-    client!.ai.setDefaultModel(model.modelType, model.id);
+  async function setDefaultModel(model: AIModel) {
+    await client!.ai.setDefaultModel(model.modelType, model.id);
+    getData();
+  }
+
+  async function removeEndpoint(endpoint: AiEndpoint) {
+    try {
+      if (endpoint.managed) {
+        // This executor runs it: removing it stops local AI and removes its models. The
+        // downloaded files stay for the next install (other agents may use them).
+        if (!confirm("Stop local AI and remove its models from this agent?")) return;
+        await client!.ai.localRemove(false);
+        setLocalGeneration((g) => g + 1);
+      } else {
+        await client!.ai.removeEndpoint(endpoint.id);
+      }
+    } catch (e) {
+      alert(`${e}`);
+    }
     getData();
   }
 
@@ -85,38 +167,6 @@ const AI = () => {
     if (client) getData();
   }, [client, getData]);
 
-  // update model status every second until all loaded
-  useEffect(() => {
-    let interval = null as any;
-    if (client && models.length) {
-      interval = setInterval(async () => {
-        const allLoaded = !models.find(
-          (model) => !model.status || !model.loaded
-        );
-        if (allLoaded) clearInterval(interval);
-        else {
-          // update each models status
-          const newModels = await Promise.all(
-            modelsRef.current.map(
-              (model) =>
-                new Promise(async (resolve) => {
-                  client.ai
-                    .modelLoadingStatus(model.id)
-                    .then((status) => resolve({ ...model, ...status }))
-                    .catch((error) => {
-                      console.log("model not found: ", error, model.name);
-                      resolve(model);
-                    });
-                })
-            )
-          );
-          setModels(newModels);
-          modelsRef.current = newModels;
-        }
-      }, 1000);
-    }
-    return () => clearInterval(interval);
-  }, [client, models]);
 
   return (
     <j-box p="400">
@@ -155,10 +205,33 @@ const AI = () => {
           )}
 
           <j-flex direction="column" gap="400">
+            {client && <LocalAiSettings key={localGeneration} client={client} onChange={getData} />}
+            {endpoints.length > 0 && (
+              <j-box className="box">
+                <j-flex direction="column" gap="300">
+                  <j-text variant="heading-sm" nomargin>
+                    Endpoints
+                  </j-text>
+                  {endpoints.map((endpoint) => (
+                    <j-flex key={endpoint.id} a="center" j="between" gap="300">
+                      <j-text nomargin color="ui-0">
+                        {endpoint.name}: {endpointLabel(endpoint)} at {endpoint.baseUrl} (
+                        {endpoint.managed ? "local AI, " : ""}
+                        {endpoint.health.state.toLowerCase()})
+                      </j-text>
+                      <j-button variant="subtle" size="sm" onClick={() => removeEndpoint(endpoint)}>
+                        <j-icon name="trash" size="sm" />
+                      </j-button>
+                    </j-flex>
+                  ))}
+                </j-flex>
+              </j-box>
+            )}
             {models.map((model) => (
               <ModelCard
                 key={model.id}
                 model={model}
+                endpoint={endpoints.find((e) => e.id === model.endpointId)}
                 editModel={() => setSelectedModel(model)}
                 removeModel={() => removeModel(model)}
                 setDefaultModel={() => setDefaultModel(model)}

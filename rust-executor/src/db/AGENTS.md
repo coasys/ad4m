@@ -8,11 +8,32 @@ with its own `impl Ad4mDb` block. Child modules can use the private `conn` field
 
 | File | Content |
 |---|---|
+| `rekey.rs` | The rows `identity.rekey` moves to the main agent's new DID: notification owners, the flow bookkeeping (`flow_replica_state`, `flow_fired_mark`); and the claims the old key made, which it forgets |
+| `endpoints.rs` | The `ai_endpoints` table (AI model servers: URL, key, protocol, capabilities, health). A model (`models`: `id, name, type, endpoint_id, remote_model, native_tools`) names its endpoint; `add_model` refuses an endpoint that does not exist and gives the endpoint the model type's capability. `ai_service::endpoints` calls them through `db_backend()` |
+| `grants.rs` | The `grants` table: one row per token the executor issued, read by `agent::grants` |
+| `model_migration.rs` | The one-time move of a `models` table with `api_*` / `local_*` columns: each API model gets the endpoint with its protocol, URL and key (one is created, named by the host), each local model is deleted with one warning line (and its default), the table is rebuilt, `model_status` dropped. An import of an old export goes through the same linking. Runs only inside `Ad4mDb` (startup, import) |
 | `session_cutoffs.rs` | The users' session cutoffs (`users.sessions_valid_after`), read by `agent::revoked` |
 | `tasks.rs` | Owner-scoped reads of the `tasks` table: `get_task_owner`, `get_tasks_owned_by` |
+| `identity.rs` | `operator_record`, `identity_agents`, `identity_joins` (created in `Ad4mDb::new`), read by `identity/`. The operator record functions also take a bare connection for `ad4m-executor init --operator`, which runs before any executor. The key logs and `identity_heads`/`identity_fork_signers` are `identity::cache::KelCache`'s own connection to the same file |
 
 Task CRUD (`add_task`, `get_task`, `get_tasks`, `update_task`, `remove_task`) and every
 migration still live in `db.rs`.
+
+## Executor code reaches the database through `DbBackend`
+
+`crate::db_backend::db_backend()` is the executor's database. Executor code calls its methods,
+never `Ad4mDb` directly: `Ad4mDb::with_global_instance` is `#[cfg(test)]`.
+
+- A new `Ad4mDb` method that executor code calls gets one line in `ad4m_db_methods!` in
+  `db_backend.rs`, with the same name, arguments and result. `LocalDb` and `SharedDb` get it
+  from that line.
+- `SharedDb` (shared mode) runs every domain method on the executor's own SQLite database.
+  Only the key-value methods (`get`, `list`, `upsert`, `delete`) reach the platform Worker:
+  the users and perspective metadata that executors share, under `shared:platform`.
+- A check that must hold under the same lock as a write (a flag read, then a write) is one
+  trait method, which runs both in one `on_ad4m_db` call: see
+  `record_flow_replica_pass_unless_torn_down`. Two trait calls take the lock twice.
+- A database that is not open is an error from every domain method, not a panic.
 
 ## Invariants
 
@@ -32,3 +53,5 @@ migration still live in `db.rs`.
 
 - Add a column without an `alter_add_column` migration in `Ad4mDb::new`. Append it last, so
   `SELECT *` positions match on fresh and migrated tables.
+- Make a `SharedDb` domain method fail because the Worker does not serve it. A shared-mode
+  executor serves it from SQLite.

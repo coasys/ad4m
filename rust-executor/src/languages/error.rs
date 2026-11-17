@@ -29,6 +29,13 @@ pub enum LanguageError {
 
     /// V8 event loop panic/error in a language runtime
     EventLoopPanic { address: String, message: String },
+
+    /// An identity or token capability asked of a language that is not the
+    /// agent language (those run only on the agent language)
+    NotAgentLanguage {
+        address: String,
+        capability: &'static str,
+    },
 }
 
 impl fmt::Display for LanguageError {
@@ -60,6 +67,16 @@ impl fmt::Display for LanguageError {
             }
             LanguageError::EventLoopPanic { address, message } => {
                 write!(f, "Event loop panic in language {}: {}", address, message)
+            }
+            LanguageError::NotAgentLanguage {
+                address,
+                capability,
+            } => {
+                write!(
+                    f,
+                    "Capability {} runs only on the agent language, not on {}",
+                    capability, address
+                )
             }
         }
     }

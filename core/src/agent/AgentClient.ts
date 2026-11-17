@@ -10,12 +10,14 @@ import {
 } from "./Agent";
 import { HostingUserInfo, PaymentRequestResult, ComputeLogEntry } from "../runtime/RuntimeTypes";
 import { AgentStatus } from "./AgentStatus";
+import { AGENT_KIND } from "./AgentKind";
 import { LinkMutations, LinkExpression, LinkInput, linkEqual } from "../links/Links";
 import { VerificationRequestResult } from "../runtime/RuntimeTypes";
 import { createPersistentCache } from "../cache/PersistentCache";
 import { KeyedCache, StoredEntry } from "../cache/KeyedCache";
 import type { Agent as AgentData } from "../generated/api/Agent";
 import type { AgentSignature } from "../generated/api/AgentSignature";
+import type { AgentWithIdentity } from "../generated/api/AgentWithIdentity";
 
 export interface InitializeArgs {
   did: string;
@@ -24,7 +26,7 @@ export interface InitializeArgs {
   passphrase: string;
 }
 
-function toAgent(data: AgentData | null): Agent | null {
+function toAgent(data: AgentData | AgentWithIdentity | null): Agent | null {
   return data ? Agent.fromWire(data) : null;
 }
 
@@ -36,9 +38,12 @@ export class AgentClient {
 
   // byDID cache: concurrent misses go out in one `agent.byDIDs` call.
   #agents: KeyedCache<Agent>;
-  // The own profile is kept fresh by `agent-updated` events, so it has no TTL.
-  #selfDid: string | null = null;
-  /** TTL of other agents' profiles, in memory and in the persistent cache (ms). */
+  /**
+   * TTL of every cached profile, the own one too, in memory and in the
+   * persistent cache (ms). `agent-updated` only comes from this executor, so
+   * a profile changed through another executor of the same agent shows up
+   * when the entry expires.
+   */
   static REMOTE_AGENT_TTL_MS = 5 * 60_000; // 5 minutes
 
   constructor(baseUrl: string, token?: string, sharedApiClient?: ApiClient) {
@@ -47,21 +52,13 @@ export class AgentClient {
       loadMany: (dids) => this.#loadAgents(dids),
       maxBatch: MAX_DIDS_PER_CALL,
       persistent: createPersistentCache<StoredEntry<Agent>>('ad4m-agent-cache', 'agents'),
-      maxAgeMs: (did) => did === this.#selfDid ? Infinity : AgentClient.REMOTE_AGENT_TTL_MS,
+      maxAgeMs: () => AgentClient.REMOTE_AGENT_TTL_MS,
       persistentMaxAgeMs: () => AgentClient.REMOTE_AGENT_TTL_MS,
     });
   }
 
   async me(): Promise<Agent> {
-    const agentObject = toAgent(await this.#apiClient.call('agent.get', {}));
-
-    // Auto-set selfDid so event-driven cache invalidation works
-    // without requiring apps to call setSelfDid() manually
-    if (agentObject.did && !this.#selfDid) {
-      this.#selfDid = agentObject.did;
-    }
-
-    return agentObject;
+    return toAgent(await this.#apiClient.call('agent.get', {}));
   }
 
   async status(): Promise<AgentStatus> {
@@ -69,6 +66,9 @@ export class AgentClient {
     return new AgentStatus(agentStatus);
   }
 
+  /** Creates the agent's keys and DID on first run. The executor refuses (409)
+   *  an agent that is already initialised — {@link unlock} it instead; a second
+   *  `generate` never replaces the existing keys and DID. */
   async generate(passphrase: string, options?: CallOptions): Promise<AgentStatus> {
     const result = await this.#apiClient.call('agent.generate', { passphrase }, options);
     return new AgentStatus(result);
@@ -94,7 +94,7 @@ export class AgentClient {
    * for any DIDs share one `agent.byDIDs` request.
    */
   async byDID(did: string): Promise<Agent> {
-    // agent-updated events keep cached entries fresh (the self-DID entry has no TTL).
+    // agent-updated events refresh cached entries before their TTL runs out.
     this.#listen();
     return this.#agents.get(did);
   }
@@ -122,12 +122,10 @@ export class AgentClient {
   }
 
   /**
-   * Set the current agent's own DID.
-   * The self-DID receives event-driven invalidation and is never TTL-expired.
+   * @deprecated Does nothing. The own profile now expires after
+   * `REMOTE_AGENT_TTL_MS` like every other profile.
    */
-  setSelfDid(did: string): void {
-    this.#selfDid = did;
-  }
+  setSelfDid(_did: string): void {}
 
   /**
    * Invalidate a specific DID's cache entry in both L1 and L2.
@@ -168,6 +166,25 @@ export class AgentClient {
     const { perspective } = await this.me();
     const kept = (perspective?.links ?? []).filter(link => !removals.some(r => linkEqual(link, r as LinkExpression)));
     return this.updatePublicPerspective({ links: [...kept, ...added] } as PerspectiveInput);
+  }
+
+  /**
+   * Say what kind of agent this is in its public perspective (`AGENT_KIND`; a bot is
+   * `AGENT_KIND_BOT`), replacing any kind it said before, or say none with `null`. Changes
+   * nothing when the perspective already says exactly that, so it can be called on every start.
+   */
+  async setKind(kind: string | null): Promise<Agent> {
+    const me = await this.me();
+    const said = (me.perspective?.links ?? []).filter(
+      (l) => l.data.source === me.did && l.data.predicate === AGENT_KIND,
+    );
+    if ((kind === null && said.length === 0) || (said.length === 1 && said[0].data.target === kind)) {
+      return me;
+    }
+    return this.mutatePublicPerspective({
+      additions: kind === null ? [] : [{ source: me.did, predicate: AGENT_KIND, target: kind } as LinkInput],
+      removals: said as LinkMutations['removals'],
+    });
   }
 
   /** Has the executor sign `links` as this agent, in a throwaway perspective. */

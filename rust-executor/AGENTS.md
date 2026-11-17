@@ -10,9 +10,11 @@ file; keep `CLAUDE.md` as `@AGENTS.md`.
 ## Build and test
 
 ```bash
-pnpm build                 # deno snapshot + cargo build --release (needed after any js_core/*.js or
-                           # extension-list change; with a stale snapshot, deno_core panics at runtime
-                           # creation: "Extensions from snapshot loaded in wrong order")
+pnpm build                 # deno snapshot (scripts/build-deno-snapshot.sh). Run it after every pull and
+                           # every js_core/ or extension change: it skips when the snapshot's inputs
+                           # did not change (stamp CUSTOM_DENO_SNAPSHOT.inputs). FORCE_DENO_SNAPSHOT=1
+                           # builds anyway. A stale snapshot can make deno_core panic at runtime creation
+                           # ("Extensions from snapshot loaded in wrong order") or call the wrong op silently
 cargo build --release      # Rust-only change
 pnpm test                  # = cargo test --release -- --test-threads=1  (serial: global singletons)
 cargo test --release -- --test-threads=1 <name>   # one test
@@ -34,24 +36,29 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
 | `lib.rs` | Boot sequence (`run()`): config → wallet/db backends → `Ad4mDb` → `AIService` → `AgentService` → runtime → V8 → `LanguageController` → perspectives → axum. Order is hand-maintained. | — |
 | `config.rs` | `Ad4mConfig` + global config accessor | — |
 | `config_file.rs` | The `run --config` JSON file shared with the launcher (`launcher-state.json` key names), secret resolution (`AD4M_*_FILE`), and the one mapping to `Ad4mConfig` | `docs-src/pages/developer-guides/executor-config.mdx` |
+| `config_rpc.rs` | The config file as RPC (`runtime.config`, `runtime.setConfig`, handlers in `api/config_ws.rs`): key classes (`restart`, `machine`), atomic 0600 writes, pinned keys, validators (`register_config_key`), `config-changed`. A value is written only when the file still maps to `Ad4mConfig` as the next start maps it (`to_ad4m_config`), else `invalid` | — |
+| `exit.rs` | The run contract a supervisor reads: `ExitReason` (0, 75, 78, 79, 80), `StartRefused`, the graceful stop (`request_shutdown`), `--watch-stdin` (`stop_when_closed`), the data-folder lock (`executor.lock`, taken before the log folder rotates, so a refused start leaves the running executor's log alone and reports to stdout), no core dumps on Linux | — |
+| `log_files.rs` | `--log-dir`: one file per run (`executor-0.log`), five runs kept, 50 MiB cap per file, `tail` for `runtime.logTail` | — |
 | `api/` | axum WS RPC (`/api/v1/ws`), event stream, OpenAI-compatible `/v1` | `src/api/AGENTS.md` |
 | `mcp/` | MCP server + tools (static + SHACL-generated dynamic tools) | `src/mcp/AGENTS.md` |
 | `perspectives/` | Perspective registry, `PerspectiveInstance`, SPARQL store, SHACL/model queries, flows, interpretation, auto-processor | `src/perspectives/AGENTS.md` |
-| `ai_service/` | Local (candle) + remote LLM/embedding/whisper models, AI tasks; `harness/` = tool-calling loop for interpretation and agent sessions (`perspectives/agent_session.rs`) | `src/ai_service/AGENTS.md` |
+| `ai_service/` | AI through model servers (endpoints): LLM, embedding, transcription and speech models, AI tasks; `harness/` = tool-calling loop for interpretation, agent sessions (`perspectives/agent_session.rs`) and `ai_sessions/` | `src/ai_service/AGENTS.md` |
+| `ai_sessions/` | AI chat sessions (`ai.session*`): transcripts in `db/ai_sessions.rs` (`ai_sessions`/`ai_messages`, owner-DID scoped), one detached turn per session through `ai_service::harness`, `ai-session-changed` events | — |
 | `prolog_service/` | Scryer Prolog engine pools. **Disabled by default** (`PROLOG_MODE`), kept as an option | `src/prolog_service/AGENTS.md` |
 | `languages/` + `js_core/` | Language runtime: one Deno isolate per Language on its own thread; install, templates, expressions | `src/languages/AGENTS.md`, `src/js_core/AGENTS.md` |
 | `tool_bundles/` | Tool bundles: an app's JS for its agents' tools, one bare `JsRuntime` per bundle with two ops (random bytes, a log line); time limit on load and every call, memory cap on heap and ArrayBuffers. `builtin.rs` compiles in WE's template tools (`template_read` / `template_update` in `mcp/`), downloaded from a WE release by `build.rs` (version and sha256 pinned there) | `src/tool_bundles/AGENTS.md` |
 | `holochain_service/` | Embedded Holochain conductor behind an actor channel; signal fan-in | `src/holochain_service/AGENTS.md` |
 | `agent/` | Agent keys/DID, signing, multi-user (managed agents by DID; a user's email is only the login name), `capabilities/` (auth tokens, capability defs) | — |
-| `db.rs`, `db/` | All SQLite access (`rusqlite`): `impl Ad4mDb` in `db.rs` plus child modules in `db/`, accessed via `Ad4mDb::with_global_instance(closure)`. Perspective **links** are not here (they are in `perspectives/sparql_store.rs`); `db` holds handles, diffs, agent data, AI models/tasks, users, billing, notifications. | `src/db/AGENTS.md` |
-| `db_backend.rs` | `SharedDb` HTTP backend for stateless/hosted mode; only used when `config.db_backend == "shared"` | — |
+| `identity/` | `did:scid:coasys:1` on the executor: `KelCache` (key logs on `ad4m-hash-chain`'s `SqliteChainStore` in `ad4m_db.sqlite`), the agent-language backend, the operator record and first-link rule, `ClaimService`, the `identity.*` calls (handlers in `api/identity_ws.rs`), the `identity-fork` event | `src/identity/AGENTS.md` |
+| `db.rs`, `db/` | All SQLite access (`rusqlite`): `impl Ad4mDb` in `db.rs` plus child modules in `db/`. Executor code reaches it through `db_backend::db_backend()`, never `Ad4mDb` directly. Perspective **links** are not here (they are in `perspectives/sparql_store.rs`); `db` holds handles, diffs, agent data, AI models/tasks, users, billing, notifications. | `src/db/AGENTS.md` |
+| `db_backend.rs` | `DbBackend`: the executor's database, one domain method per `Ad4mDb` method that executor code calls (`ad4m_db_methods!`), plus key-value methods for the shared records. `LocalDb` runs on SQLite; `SharedDb` (`config.db_backend == "shared"`) serves the key-value methods from the platform Worker over HTTP and every domain method from SQLite | `src/db/AGENTS.md` |
 | `pubsub.rs` | Global broadcast bus: one channel of typed events (`events.rs`: `Topic`, `Audience`, `Event`) for every event (live query updates too, as `Event::for_connection`); feeds `api/events_ws.rs` | `src/api/AGENTS.md` |
 | `types/` | `core.rs` = domain types (Link, Expression, Perspective…), `domain.rs` = wire/input types; some duplicates, see spec item 5 | — |
 | `runtime_service/`, `entanglement_service/`, `neighbourhoods.rs`, `billing.rs`, `email_service.rs`, `user_management.rs`, `unyt_service.rs`, `wallet.rs`, `perspective_snapshot.rs`, `logging.rs` | Smaller services; `unyt_service.rs` = Unyt/mHOT currency DNA + payments | — |
 
 ## Cross-cutting facts you need before editing
 
-- **Services are global singletons** (`lazy_static`), e.g. `Ad4mDb::with_global_instance`,
+- **Services are global singletons** (`lazy_static`), e.g. `db_backend::db_backend()`,
   `AgentService::with_global_instance`, `LanguageController::global_instance()`,
   `AIService::global_instance().await`, `get_global_pubsub()`, `perspectives::get_perspective(uuid)`.
   Do not add new ones; spec item 11 introduces `AppContext`.
@@ -61,6 +68,26 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   (see `perspectives/AGENTS.md`), so a 256 soft `RLIMIT_NOFILE` ran out at about a dozen
   perspectives ("Too many open files"). The executor raises its soft limit at startup in
   `fd_limit::raise_fd_limit_at_startup` (#1462); do not add another.
+- **The run contract** (`exit.rs`), for a supervisor (the desktop app, systemd, a host). Exit
+  codes: 0 stopped (`runtime.quit`, SIGTERM, SIGINT, stdin closed with `--watch-stdin true`),
+  75 `runtime.restart`, 78 a refused config (the CLI's resolve, the admin-credential check,
+  `--custody-channel` with multi-user mode), 79 another executor holds
+  `<app_data_path>/executor.lock`, 80 the API port does not bind; any other code is a crash.
+  `run` returns a refused start through its handle as a `StartRefused`, and
+  `exit_when_api_fails` exits with its code. Readiness: `GET /health` answers once the API
+  listener is bound, the last step of `run`. The admin credential comes from the environment
+  (`AD4M_ADMIN_CREDENTIAL`, or `AD4M_ADMIN_CREDENTIAL_FILE`), never from a file the executor
+  writes; a supervisor gives a new one at each start. On Linux `run` sets `RLIMIT_CORE = 0`
+  and `PR_SET_DUMPABLE = 0`.
+- **Local only.** A method registered `.local_only()` answers only the operator on this
+  machine (`Session::is_operator_on_this_machine`: the admin credential, or no token on an
+  executor without one, on a loopback listener). The method's guard answers first (403 "Admin
+  credential required" for a caller without the credential); the admin credential on a
+  network listener gets 403 `local-only`. It is on `agent.unlock`,
+  `identity.rekey`, `identity.custodyStatus`, `runtime.quit` and `runtime.restart`, and `runtime.setConfig`
+  refuses its `machine` keys the same way (the guard table in `api/AGENTS.md` marks them).
+  An executor on `--localhost false` without TLS has no loopback listener, so these calls
+  answer on no listener there.
 - **Prolog is off.** `prolog_service::PROLOG_MODE` is `Disabled`; Prolog query paths return empty.
   Subject classes, flows and model queries run on SHACL + SPARQL (`perspectives/model_query`).
 - **Tokio vs std locks** are both used; check the import before assuming `.lock()` is async.
@@ -148,6 +175,35 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   `keystoreFingerprint` (the saved keys) into `agent.json`, and the fallback to the backup runs
   only while the backup holds exactly those keys. Write the agent file only through
   `AgentService::save` / `try_save`.
+- **Identity** (`identity/`): an agent's device key (the wallet key) may speak
+  for a `did:scid` whose log lists it; the master key and the 12 words never reach the executor
+  (apps hold them through `ad4m-identity-client`). The configured store's logs come through the
+  agent language (`Capability::Identity*`, refused on any other language); a DID URL's foreign
+  `src` is read by the executor itself (`identity/src_fetch.rs`, public addresses only at
+  connect). The configured store's logs are kept after `fold` in `KelCache`; a foreign `src`
+  log is folded in memory only, never stored, and a conflict it shows is reported in the
+  resolution metadata (`coasys:skipped`), never recorded as a fork. A head counts only under a key of the
+  config's `identity.storeKeys`, authorship reads a log only up to that head, and
+  `identity.storeUrl` and `identity.storeKeys` become the agent language's `storeUrl` and
+  `storeKeys` settings at every start (unset removes them; with neither set, the store and
+  keys are the network seed's `identityStore` (the compiled-in `mainnet_seed.json` names
+  `https://store.ad4m.dev`, today's staging network; a seed file without one, as an older
+  `init` wrote, gets the compiled-in seed's), and without one there is no store; a
+  `storeUrl` without `storeKeys` has no key; without a key the executor warns at start: no
+  `did:scid` record verifies). A different event at a held seq that holds on the prefix
+  records a fork, keeps the history and fires `identity-fork`; a store answering a shorter log
+  is behind (or an unverified conflict), records nothing, and the cache answers.
+  `ad4m-executor init --operator <did:scid>` records the operator (`operator_record`, never
+  replaced by `init`); `identity.claimOffer` (operator only) claims with the main wallet key and
+  refuses `already-linked` / `no-operator` / `first-link` inside
+  `ClaimService::claim_for_main`. `agent.status` and `agent.get` gain `identity`; `did` stays the
+  device `did:key`. `identity.resolve` (`identity/resolver.rs`) answers a DID Core resolution
+  result for a `did:scid:coasys:1` DID URL or a device `did:key`; a URL's `src` must name a
+  public HTTPS host unless `identity.allowPrivateSrc` is set. `identity.rekey` (local only, or
+  `ad4m-executor rekey`) gives the main agent a new wallet key and moves the places that hold
+  its DID (`identity/rekey.rs`); tokens signed with the old key stop working. A perspective
+  that is not open at the time keeps the retired DID as owner until a later unlock moves it.
+  `identity.custodyStatus` is the custody channel (`identity/custody.rs`).
 
 ## Do / don't
 

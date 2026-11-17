@@ -26,7 +26,8 @@ use crate::types::RequestContext;
 use serde_json::Value;
 
 /// Who may call a method. The dispatcher checks the capability (403), then the rule of the
-/// variant (403 for [`Guard::Operator`] and [`Guard::Executor`], 404 for [`Guard::Owns`]).
+/// variant (403 for [`Guard::Operator`], [`Guard::Executor`] and [`Guard::UserOrOperator`], 404
+/// for [`Guard::Owns`]).
 #[derive(Clone, Debug)]
 pub enum Guard {
     /// No check: every caller reaches the handler, anonymous ones included, and the handler
@@ -41,11 +42,24 @@ pub enum Guard {
     /// capabilities of the anonymous set (requesting a capability, signing up, logging in);
     /// a grant for its agent, which the handler takes from `ctx.acts_as()`.
     Cap(Capability),
+    /// The capability held on at least one pointer, rather than on every pointer it names:
+    /// the domain and actions must match, the pointers may be any. For a method that lists
+    /// the resources of the capability's domain (`perspective.all`): a caller that may read
+    /// part of the list is admitted, and the handler narrows its answer to the pointers its
+    /// session may read (`capabilities::pointers_covered`). A caller holding it on no
+    /// pointer gets 403, exactly as [`Guard::Cap`] refuses one without it.
+    CapAnyPointer(Capability),
     /// Acts on the executor itself: the capability, then the operator or a grant on the main
     /// agent. Never a session on a managed agent, whatever its capabilities, nor an anonymous
     /// caller. A grant on the main agent passes: an app the operator approved administers
     /// the executor (WE web holds `*` on a local executor).
     Executor(Capability),
+    /// Acts for the caller's own agent, but on the main agent only for the operator: the
+    /// capability, then the operator or a session on a managed agent (a user, or an app the
+    /// user approved). A grant on the main agent is refused whatever its capabilities: the
+    /// default capabilities of every app cover the check, and the call binds the main agent
+    /// for good (`identity.cosignIncept`, `identity.publish`).
+    UserOrOperator(Capability),
     /// Acts on one resource that `id` reads from the params: the capability, then the owner
     /// rule. The operator reaches every resource; any other session only those its agent
     /// owns ([`Owner`]). Missing and not yours are both 404.
@@ -158,6 +172,8 @@ pub enum Owner {
     Grant,
     /// A pending capability request (`PendingRequests`): the agent it asks to act as (D12).
     Request,
+    /// An AI session: its `owner_did`; none is the main agent's.
+    AiSession,
 }
 
 impl Owner {
@@ -167,6 +183,7 @@ impl Owner {
             Owner::Task => "AI task",
             Owner::Grant => "app",
             Owner::Request => "capability request",
+            Owner::AiSession => "AI session",
         }
     }
 
@@ -182,6 +199,7 @@ impl Owner {
             Owner::Request => "Capability request not found: it may have expired. The app must \
                                request access again"
                 .to_string(),
+            Owner::AiSession => format!("AI session {id} not found"),
         })
     }
 }
@@ -189,6 +207,11 @@ impl Owner {
 /// What [`Guard::Operator`] answers every other caller, as the handlers did before it
 /// (`anonymous_access_tests` pins it).
 pub const OPERATOR_ONLY: &str = "Admin credential required";
+
+/// What a method registered `.local_only()` answers every caller but the operator on this
+/// machine (`MethodFlags::local_only`), the code first as the other refusals carry theirs.
+pub const LOCAL_ONLY: &str = "local-only: only the operator on this machine may call this method \
+                              (the admin credential on a loopback listener)";
 
 /// The `uuid` field of the params: where most perspective methods name their perspective.
 pub const UUID_PARAM: IdParam = IdParam::Field(&["uuid"]);
@@ -208,7 +231,10 @@ impl Guard {
     pub fn capability(&self, id: &str) -> Option<Capability> {
         match self {
             Guard::Open | Guard::Operator => None,
-            Guard::Cap(cap) | Guard::Executor(cap) => Some(cap.clone()),
+            Guard::Cap(cap)
+            | Guard::CapAnyPointer(cap)
+            | Guard::Executor(cap)
+            | Guard::UserOrOperator(cap) => Some(cap.clone()),
             Guard::Owns { cap, .. } => Some(cap(vec![id.to_string()])),
         }
     }
@@ -231,11 +257,17 @@ impl Guard {
         };
         let id = resource.as_ref().map(|(_, id)| id.as_str());
         if let Some(capability) = self.capability(id.unwrap_or_default()) {
-            ctx.require(&capability).map_err(WsRpcError::forbidden)?;
+            if let Guard::CapAnyPointer(_) = self {
+                ctx.session
+                    .require_any_pointer(&capability)
+                    .map_err(WsRpcError::forbidden)?;
+            } else {
+                ctx.require(&capability).map_err(WsRpcError::forbidden)?;
+            }
         }
 
         match self {
-            Guard::Open | Guard::Cap(_) => Ok(()),
+            Guard::Open | Guard::Cap(_) | Guard::CapAnyPointer(_) => Ok(()),
             Guard::Operator if ctx.is_operator() => Ok(()),
             Guard::Operator => Err(WsRpcError::forbidden(OPERATOR_ONLY)),
             Guard::Executor(_) if !ctx.session.is_authenticated() => Err(WsRpcError::forbidden(
@@ -245,6 +277,15 @@ impl Guard {
                 format!("{method} acts on the executor itself, so a user session may not call it"),
             )),
             Guard::Executor(_) => Ok(()),
+            Guard::UserOrOperator(_) if ctx.is_operator() => Ok(()),
+            Guard::UserOrOperator(_)
+                if ctx.session.is_authenticated() && !ctx.acts_as().is_main_agent() =>
+            {
+                Ok(())
+            }
+            Guard::UserOrOperator(_) => Err(WsRpcError::forbidden(format!(
+                "{method} for the main agent needs the admin credential"
+            ))),
             Guard::Owns { .. } => {
                 let (owner, id) = resource.expect("an owner guard reads an id");
                 owns(ctx, owner, &id).await
@@ -268,7 +309,8 @@ pub async fn owns(ctx: &RequestContext, owner: Owner, id: &str) -> Result<(), Ws
                 .map(|_| ())
         }
         Owner::Task => {
-            let task_owner = crate::db::Ad4mDb::with_global_instance(|db| db.get_task_owner(id))
+            let task_owner = crate::db_backend::db_backend()
+                .get_task_owner(id)
                 .map_err(|e| WsRpcError::internal(e.to_string()))?;
             // The outer `None`: no such task. The inner one: a task of the main agent.
             let Some(task_owner) = task_owner else {
@@ -289,6 +331,17 @@ pub async fn owns(ctx: &RequestContext, owner: Owner, id: &str) -> Result<(), Ws
             // operator's alone.
             Some(target) => target.agent() == Some(&agent),
         },
+        Owner::AiSession => {
+            let session_owner = crate::ai_sessions::ai_session_store()
+                .session_any(id)
+                .map_err(|e| WsRpcError::internal(e.to_string()))?;
+            // The outer `None`: no such session. The inner one: a session of the main
+            // agent — `managed_did` is `None` for the operator and the main agent's grants.
+            let Some(session) = session_owner else {
+                return Err(not_found());
+            };
+            session.owner_did.as_deref() == agent.managed_did()
+        }
     };
     if ctx.is_operator() || (ctx.session.is_authenticated() && owned) {
         Ok(())
@@ -320,6 +373,42 @@ mod tests {
 
         let app = RequestContext::app_for_test(vec![update]);
         assert!(lock.admit("agent.lock", &Value::Null, &app).await.is_ok());
+    }
+
+    /// The main agent's apps hold the capability (every app does by default) and still may not
+    /// act for the main agent: only the operator does. A user acts for their own agent.
+    #[tokio::test]
+    async fn a_user_or_operator_guard_refuses_the_main_agents_apps() {
+        let sign = crate::agent::capabilities::AGENT_SIGN_CAPABILITY.clone();
+        let guard = Guard::UserOrOperator(sign.clone());
+        let method = "identity.cosignIncept";
+
+        let app = RequestContext::app_for_test(vec![sign.clone()]);
+        let err = guard.admit(method, &Value::Null, &app).await.unwrap_err();
+        assert_eq!(
+            (err.code, err.message.as_str()),
+            (
+                403,
+                "identity.cosignIncept for the main agent needs the admin credential"
+            )
+        );
+
+        let operator = RequestContext::operator_for_test();
+        assert!(guard.admit(method, &Value::Null, &operator).await.is_ok());
+
+        let user = RequestContext::user_for_test("did:key:alice", vec![sign.clone()]);
+        assert!(guard.admit(method, &Value::Null, &user).await.is_ok());
+
+        // The capability still comes first for a user.
+        let bare = RequestContext::user_for_test("did:key:alice", vec![]);
+        assert_eq!(
+            guard
+                .admit(method, &Value::Null, &bare)
+                .await
+                .unwrap_err()
+                .code,
+            403
+        );
     }
 
     #[test]

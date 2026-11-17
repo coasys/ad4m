@@ -146,6 +146,14 @@ pub(crate) fn render_rpc_methods(map: &HandlerMap) -> String {
     out.push_str(&quoted(
         specs.iter().filter(|s| s.long).map(|s| s.name.clone()),
     ));
+    out.push_str("]);\n\n");
+    out.push_str(
+        "/** Calls that open something on the executor that outlives them (a live query): the client cancels one that timed out, as one it aborted. */\n",
+    );
+    out.push_str("export const OPENS_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([\n");
+    out.push_str(&quoted(
+        specs.iter().filter(|s| s.opens).map(|s| s.name.clone()),
+    ));
     out.push_str("]);\n");
     out
 }
@@ -248,7 +256,11 @@ fn render_guard(guard: &Guard) -> String {
         Guard::Open => "`Open`".to_string(),
         Guard::Operator => "`Operator`".to_string(),
         Guard::Cap(cap) => format!("`Cap({})`", render_capability(cap)),
+        Guard::CapAnyPointer(cap) => {
+            format!("`CapAnyPointer({})`", render_capability(cap))
+        }
         Guard::Executor(cap) => format!("`Executor({})`", render_capability(cap)),
+        Guard::UserOrOperator(cap) => format!("`UserOrOperator({})`", render_capability(cap)),
         Guard::Owns { cap, id, owner } => format!(
             "`Owns({owner:?} {id}, {})`",
             render_capability(&cap(vec!["*".to_string()]))
@@ -261,11 +273,14 @@ fn render_guard(guard: &Guard) -> String {
 pub(crate) fn render_guard_table(map: &HandlerMap) -> String {
     let guards = map.guards();
     let or_null = map.or_null_methods();
+    let local_only = map.local_only_methods();
     let kind = |guard: Option<&Guard>| match guard {
         Some(Guard::Open) => "Open",
         Some(Guard::Operator) => "Operator",
         Some(Guard::Cap(_)) => "Cap",
+        Some(Guard::CapAnyPointer(_)) => "CapAnyPointer",
         Some(Guard::Executor(_)) => "Executor",
+        Some(Guard::UserOrOperator(_)) => "UserOrOperator",
         Some(Guard::Owns { .. }) => "Owns",
         None => "none",
     };
@@ -280,13 +295,14 @@ pub(crate) fn render_guard_table(map: &HandlerMap) -> String {
     counts.sort();
     let mut out = format!("{GUARD_TABLE_START}\n\n");
     out.push_str(&format!(
-        "{} methods: {}.\n\n",
+        "{} methods: {}. Local only (the operator on this machine): {}.\n\n",
         guards.len(),
         counts
             .iter()
             .map(|(k, n)| format!("{k} {n}"))
             .collect::<Vec<_>>()
-            .join(", ")
+            .join(", "),
+        local_only.len()
     ));
     out.push_str("| Method | Guard |\n|---|---|\n");
     for (name, guard) in guards {
@@ -296,7 +312,12 @@ pub(crate) fn render_guard_table(map: &HandlerMap) -> String {
         } else {
             ""
         };
-        out.push_str(&format!("| `{name}` | {rendered}{null} |\n"));
+        let local = if local_only.contains(&name) {
+            ", local only"
+        } else {
+            ""
+        };
+        out.push_str(&format!("| `{name}` | {rendered}{null}{local} |\n"));
     }
     out.push('\n');
     out.push_str(GUARD_TABLE_END);
@@ -335,6 +356,10 @@ fn the_guard_table_names_the_param_an_owner_guard_reads() {
         ("ai.removeTask", "Task id"),
         ("agent.removeApp", "Grant id"),
         ("agent.revokeToken", "Grant token"),
+        ("ai.sessionUpdate", "AiSession id"),
+        ("ai.sessionDelete", "AiSession id"),
+        ("ai.sessionSend", "AiSession sessionId"),
+        ("ai.sessionCancel", "AiSession sessionId"),
         ("agent.permitCapability", "Request auth(JSON).requestId"),
         (
             "neighbourhood.publish",

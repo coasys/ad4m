@@ -9,11 +9,13 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { ed25519, x25519 } from "@noble/curves/ed25519";
+import { gcm } from "@noble/ciphers/aes";
 
 import type { AgentAdapter } from "../src/adapters.js";
 import {
     AES_KEY_BYTES,
     buildKeyRing,
+    bytesToBase64,
     bytesToHex,
     decryptLinkFromWire,
     encryptLinkForWire,
@@ -192,7 +194,16 @@ describe("encryption: encryptLinkForWire / decryptLinkFromWire", () => {
         assert.equal(wire.author, undefined);
         assert.equal(wire.timestamp, undefined);
         assert.equal(wire.proof, undefined);
-        assert.equal((wire.data as any).ciphertext.includes(Buffer.from("s3cr3t").toString("hex")), false);
+        assert.equal(Buffer.from((wire.data as any).ciphertext, "base64").includes(Buffer.from("s3cr3t")), false);
+    });
+
+    it("writes ciphertext and nonce in canonical base64", () => {
+        const roomKey = generateRoomKey();
+        const wire = encryptLinkForWire(makeLink(), roomKey, 1);
+        const data = wire.data as { ciphertext: string; nonce: string };
+        assert.match(data.nonce, /^[A-Za-z0-9+/]{16}$/, "a 12-byte nonce is 16 base64 characters");
+        const ciphertextBytes = Buffer.from(data.ciphertext, "base64");
+        assert.equal(ciphertextBytes.toString("base64"), data.ciphertext, "the ciphertext is canonical base64");
     });
 
     it("uses a fresh nonce per call (different ciphertext for identical input)", () => {
@@ -212,6 +223,29 @@ describe("encryption: encryptLinkForWire / decryptLinkFromWire", () => {
     it("throws when asked to decrypt a wire link with no encrypted data in data field", () => {
         const roomKey = generateRoomKey();
         assert.throws(() => decryptLinkFromWire({ author: "a", timestamp: "t", proof: { signature: "s", key: "k" } } as any, roomKey));
+    });
+
+    it("throws when the key opens the ciphertext but the payload is only a link's data", () => {
+        // Author, timestamp and proof always travel inside the ciphertext: a data-only payload is not a link.
+        const roomKey = generateRoomKey();
+        const nonce = randomBytes(12);
+        const payload = new TextEncoder().encode(JSON.stringify({ source: "s", predicate: "p", target: "t" }));
+        const wire = {
+            author: "did:key:z6MkCleartext",
+            timestamp: "2026-01-01T00:00:00.000Z",
+            data: { ciphertext: bytesToBase64(gcm(roomKey, nonce).encrypt(payload)), nonce: bytesToBase64(nonce) },
+        };
+        assert.throws(() => decryptLinkFromWire(wire, roomKey), /not \{author, timestamp, proof, data\}/);
+    });
+
+    it("throws when the payload has author and data but no timestamp or proof", () => {
+        const roomKey = generateRoomKey();
+        const nonce = randomBytes(12);
+        const payload = new TextEncoder().encode(
+            JSON.stringify({ author: "did:key:z6MkA", data: { source: "s", predicate: "p", target: "t" } }),
+        );
+        const wire = { data: { ciphertext: bytesToBase64(gcm(roomKey, nonce).encrypt(payload)), nonce: bytesToBase64(nonce) } };
+        assert.throws(() => decryptLinkFromWire(wire as any, roomKey), /not \{author, timestamp, proof, data\}/);
     });
 
     it("attaches key_version when provided", () => {

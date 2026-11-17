@@ -213,6 +213,20 @@ export class Ad4mConnectElement extends LitElement {
   @state() private requestingPayment = false;
   @state() private paymentError: string | null = null;
   private openedDueToCreditDepletion = false;
+  /** Aborts the background retry of the stored session (see `connectWhenReachable`). */
+  private storedSessionRetry: AbortController | null = null;
+
+  /** Stop retrying the stored session: it connected, or the user chose another way. */
+  private stopStoredSessionRetry() {
+    this.storedSessionRetry?.abort();
+    this.storedSessionRetry = null;
+  }
+
+  disconnectedCallback() {
+    // A removed element must not be logged in later by a retry it started.
+    this.stopStoredSessionRetry();
+    super.disconnectedCallback();
+  }
 
   connectedCallback() {
     super.connectedCallback();
@@ -220,6 +234,7 @@ export class Ad4mConnectElement extends LitElement {
 
     // Set up auth listener before attempting connection
     this.core.addEventListener('authstatechange', (e: any) => {
+      if (e.detail !== 'locked') this.stopStoredSessionRetry();
       if (e.detail === 'unauthenticated') {
         // Token expired or invalid - show connection options
         this.currentView = "connection-options";
@@ -262,22 +277,29 @@ export class Ad4mConnectElement extends LitElement {
 
     if (this.core.token) {
       // Try to auto-connect with stored token
-      this.core.connect().then(() => {
-        // If we have a connected host, start credit polling
-        if (this.core.connectedHost) {
-          this.selectedHost = this.core.connectedHost;
-          this.core.startCreditSubscription();
-        }
-      }).catch((error) => {
+      this.core.connect().then(() => this.storedSessionConnected()).catch((error) => {
         // Connection failed - show connection options
         console.error('[Ad4m Connect UI] Auto-connect failed:', error);
         this.currentView = "connection-options";
         this.modalOpen = true;
+        // The stored session is still the user's: its node may be restarting or redeploying.
+        // Keep trying it behind the options; the modal closes on its own once it answers.
+        this.storedSessionRetry = new AbortController();
+        void this.core.connectWhenReachable({ signal: this.storedSessionRetry.signal })
+          .then((client) => { if (client) this.storedSessionConnected(); });
       });
     } else {
       // No token - show connection options
       this.currentView = "connection-options";
       this.modalOpen = true;
+    }
+  }
+
+  /** The stored session connected, at load or on a later retry: a hosted node tracks its credits. */
+  private storedSessionConnected() {
+    if (this.core.connectedHost) {
+      this.selectedHost = this.core.connectedHost;
+      this.core.startCreditSubscription();
     }
   }
 
@@ -288,6 +310,7 @@ export class Ad4mConnectElement extends LitElement {
   }
 
   private async connectLocalNode() {
+    this.stopStoredSessionRetry();
     // First, try same-origin (works when Vite dev server proxies /health to executor)
     try {
       const probeRes = await fetch(window.location.origin + '/health', { signal: AbortSignal.timeout(2000) });
@@ -430,6 +453,7 @@ export class Ad4mConnectElement extends LitElement {
 
   private async connectRemoteNode(e: CustomEvent) {
     // Legacy direct-URL connection (kept for backward compat if needed)
+    this.stopStoredSessionRetry();
     this.core.url = e.detail.remoteUrl;
 
     try {

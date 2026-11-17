@@ -38,17 +38,28 @@ async fn read_expression(params: Value, raw: bool) -> Result<Value, WsRpcError> 
     )
 }
 
+/// Most URLs one `expression.getMany` call may name.
+pub(crate) const MAX_EXPRESSIONS_GET_MANY: usize = 200;
+
 /// Most expression lookups one `expression.getMany` call runs at once.
 const GET_MANY_CONCURRENCY: usize = 16;
 
 /// `expression.getMany { urls }` → one entry per URL, in order: what
 /// `expression.get` returns for it, or `{ code, message }` where it fails.
+/// More than [`MAX_EXPRESSIONS_GET_MANY`] URLs → 400.
 async fn get_many_expressions(
     params: Value,
     _ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
     let body: ExpressionManyRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    if body.urls.len() > MAX_EXPRESSIONS_GET_MANY {
+        return Err(WsRpcError::bad_request(format!(
+            "`urls` holds {} entries; the limit is {}",
+            body.urls.len(),
+            MAX_EXPRESSIONS_GET_MANY
+        )));
+    }
     Ok(serde_json::to_value(
         get_many_entries(body.urls, loaded_language_expression).await,
     )?)

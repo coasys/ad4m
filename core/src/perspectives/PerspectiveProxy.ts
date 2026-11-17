@@ -23,6 +23,11 @@ import type { TranscriptTurn } from "../generated/api";
 import type { AgentMessage } from "../generated/api/AgentMessage";
 import type { AgentReply } from "../generated/api/AgentReply";
 import type { JsonValue } from "../generated/api/serde_json/JsonValue";
+import type {
+    CollectionItemAdded, CollectionItemRemoved, InstanceAddToCollection, InstanceCreate,
+    InstanceCreated, InstanceRemove, InstanceRemoveFromCollection, InstanceRemoved,
+    InstanceUpdate, InstanceUpdated,
+} from "../generated/api";
 
 import { SHACLShape } from "../shacl/SHACLShape";
 import { SHACLFlow } from "../shacl/SHACLFlow";
@@ -947,6 +952,16 @@ export class PerspectiveProxy {
     async commitBatch(batchId: string): Promise<LinkExpressionMutations> {
         return this.#client.commitBatch(this.#handle.uuid, batchId)
     }
+
+    /**
+     * Drops an open batch without committing it — the recovery for a failed batched call:
+     * a failed call does not roll back the calls before it and may have staged part of its
+     * own work, so discard rather than commit to keep the successful calls. Resolves `true`
+     * when the batch was open and is now dropped.
+     */
+    async discardBatch(batchId: string): Promise<boolean> {
+        return await this.#client.discardBatch(this.#handle.uuid, batchId)
+    }
     /**
      * Retrieves and renders an Expression referenced in this perspective.
      * 
@@ -1615,6 +1630,46 @@ export class PerspectiveProxy {
         await this.#client.updateSubject(this.#handle.uuid, className, exprAddr, JSON.stringify(values), batchId);
     }
 
+    /**
+     * Creates an instance of a subject class, validated by the executor against the class's
+     * SHACL shape before anything is written (each property's type, which are required, which
+     * take a single value, `sh:in`): the same check as the MCP `instance_create` tool. A refused
+     * write rejects with an `RpcError` whose `data` is an `InstanceError` (status 422 and
+     * `kind: 'validation'` for a shape violation, with one `ValidationError` per property) and
+     * stages nothing. With `batchId` a non-validation failure can leave part of the write
+     * staged in the batch — discard it ({@link discardBatch}), don't commit it to keep
+     * earlier calls. An instance created in the same batch is not found — existence reads
+     * committed state only — so a create followed by an update, remove or
+     * `instanceAddToCollection` of the new instance in one batch fails `notFound`; put a new
+     * instance's initial collection items on the create itself.
+     *
+     * @example
+     * const { baseUri } = await perspective.instanceCreate({ className: "Task", properties: { title: "Write" } });
+     */
+    async instanceCreate(body: InstanceCreate): Promise<InstanceCreated> {
+        return this.#client.instanceCreate(this.#handle.uuid, body);
+    }
+
+    /** Sets single-valued properties of an instance, validated; the others stay. See {@link instanceCreate}. */
+    async instanceUpdate(body: InstanceUpdate): Promise<InstanceUpdated> {
+        return this.#client.instanceUpdate(this.#handle.uuid, body);
+    }
+
+    /** Removes an instance and every link to and from it. See {@link instanceCreate}. */
+    async instanceRemove(body: InstanceRemove): Promise<InstanceRemoved> {
+        return this.#client.instanceRemove(this.#handle.uuid, body);
+    }
+
+    /** Adds an item to a collection of an instance, validated. See {@link instanceCreate}. */
+    async instanceAddToCollection(body: InstanceAddToCollection): Promise<CollectionItemAdded> {
+        return this.#client.instanceAddToCollection(this.#handle.uuid, body);
+    }
+
+    /** Removes an item from a collection of an instance. See {@link instanceCreate}. */
+    async instanceRemoveFromCollection(body: InstanceRemoveFromCollection): Promise<CollectionItemRemoved> {
+        return this.#client.instanceRemoveFromCollection(this.#handle.uuid, body);
+    }
+
     async getSubjectData<T>(subjectClass: T, exprAddr: string): Promise<T> {
         if (typeof subjectClass === "string") {
             return JSON.parse(await this.#client.getSubjectData(this.#handle.uuid, JSON.stringify({className: subjectClass}), exprAddr))
@@ -2176,7 +2231,9 @@ export class PerspectiveProxy {
                 required: minCount > 0,
                 collection: isCollection,
                 writable,
-                ...(options && options.length > 0 ? { options } : {}),
+                // `options: []` means "allows nothing" — keep it distinct
+                // from an absent constraint.
+                ...(options !== undefined ? { options } : {}),
             };
         });
 
@@ -2226,7 +2283,7 @@ export class PerspectiveProxy {
         if (!shape) return {};
         const result: Record<string, Array<{ value: string; label?: string }>> = {};
         for (const prop of shape.properties) {
-            if (prop.options && prop.options.length > 0) {
+            if (prop.options !== undefined) {
                 result[prop.name] = prop.options;
             }
         }

@@ -1,0 +1,21 @@
+{
+  "description": "A tiny retrieval check: each query's expected passage must rank first by cosine similarity. Prefixes follow nomic-embed-text's task instructions; other models read them as plain words.",
+  "queryPrefix": "search_query: ",
+  "documentPrefix": "search_document: ",
+  "passages": [
+    "The Eiffel Tower is a wrought-iron lattice tower in Paris, completed in 1889 for the World's Fair.",
+    "Photosynthesis is the process by which green plants turn sunlight, water and carbon dioxide into glucose and oxygen.",
+    "A sourdough starter is a fermented mix of flour and water that holds wild yeast and lactic acid bacteria.",
+    "The Pacific Ocean is the largest and deepest of Earth's oceans, covering about a third of the planet's surface.",
+    "Rust is a systems programming language that guarantees memory safety through ownership and borrowing without a garbage collector.",
+    "Mitochondria are organelles that produce most of a cell's chemical energy in the form of ATP."
+  ],
+  "queries": [
+    { "text": "Which landmark in France was built for the 1889 exhibition?", "expected": 0 },
+    { "text": "How do plants make sugar from light?", "expected": 1 },
+    { "text": "What do I need to bake bread with natural yeast?", "expected": 2 },
+    { "text": "What is the biggest sea on the planet?", "expected": 3 },
+    { "text": "Which language prevents memory bugs without garbage collection?", "expected": 4 },
+    { "text": "What part of a cell makes energy?", "expected": 5 }
+  ]
+}

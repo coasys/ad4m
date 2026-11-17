@@ -52,7 +52,7 @@ use std::collections::BTreeMap;
 use super::sparql_builder::{link_status_filter, local_status_filter, proof_valid_filter};
 use super::types::{IncludeValue, ModelQueryInput, ModelShape, ShapeResolver};
 use super::utils::{emittable_iri, values_or_str_filter};
-use crate::perspectives::sparql_store::{status_from_str, SparqlStore};
+use crate::perspectives::sparql_store::{status_from_str, EvalStop, SparqlStore};
 use crate::types::LinkStatus;
 
 /// Instance key carrying the requested per-link rows. Reserved as a property
@@ -198,6 +198,7 @@ pub(super) fn resolve_link_keys(
 /// `model_query`, this query needs it too, after `{local_status}`. It accepts
 /// arbitrary predicate IRIs, so it is the widest read to leave unscoped.
 pub(super) async fn attach_links(
+    stop: &EvalStop,
     store: &SparqlStore,
     shape: &ModelShape,
     keys: &[(String, String)],
@@ -246,7 +247,7 @@ pub(super) async fn attach_links(
     OPTIONAL {{ ?_reifier <ad4m://ontology/status> ?rowStatus . }}
 {local_status}}}"#
         );
-        let rows: Vec<Value> = serde_json::from_str(&store.query_async(&sparql).await?)?;
+        let rows: Vec<Value> = serde_json::from_str(&store.query_async(stop, &sparql).await?)?;
         for row in &rows {
             let s = |var: &str| row[var].as_str().unwrap_or("").to_string();
             let source = s("source");
@@ -616,6 +617,7 @@ mod tests {
             let mut instances = vec![json!({ "id": "we://s7" })];
             let started = std::time::Instant::now();
             attach_links(
+                &crate::perspectives::sparql_store::EvalStop::none(),
                 &store,
                 &shape,
                 &keys,

@@ -1,0 +1,340 @@
+{
+  "schemaVersion": 1,
+  "runId": "5fa5768f",
+  "startedAt": "2026-11-03T04:45:23.220Z",
+  "finishedAt": "2026-11-03T04:46:52.883Z",
+  "hardwareClass": "amd-igpu-uma-128",
+  "fingerprint": {
+    "os": "linux",
+    "osVersion": "Ubuntu 26.04 LTS",
+    "kernel": "7.0.0-38-generic",
+    "arch": "x64",
+    "cpu": {
+      "model": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S",
+      "cores": 16,
+      "threads": 32
+    },
+    "memoryBytes": 131891142656,
+    "gpus": [
+      {
+        "vendor": "amd",
+        "name": "Advanced Micro Devices, Inc. [AMD/ATI] Strix Halo [Radeon Graphics / Radeon 8050S Graphics / Radeon 8060S Graphics]",
+        "vramBytes": 536870912,
+        "gttBytes": 65945571328,
+        "unified": true,
+        "pciId": "0000:c2:00.0"
+      }
+    ],
+    "backends": [
+      "cpu",
+      "rocm",
+      "vulkan"
+    ],
+    "gpuBudgetBytes": 66482442240,
+    "drivers": {
+      "rocm": "10.0.0",
+      "amdgpu": "in-kernel 7.0.0-38-generic"
+    },
+    "id": "d9d043fd"
+  },
+  "executor": {
+    "commit": "cf70b3b1b",
+    "binary": "ad4m-executor",
+    "version": "ad4m 0.13.1-staging.6",
+    "harnessCommit": "3d1bf4809afcd0a05f94d17fb4b6f50fb7c2b6df"
+  },
+  "options": {
+    "repeat": 3,
+    "concurrency": [
+      1,
+      4
+    ],
+    "providers": [
+      "speaches"
+    ],
+    "services": [
+      "stt"
+    ],
+    "direct": true
+  },
+  "providers": {
+    "speaches": {
+      "status": "available",
+      "builds": [],
+      "mode": "docker",
+      "version": "image created 2025-09-19",
+      "image": "ghcr.io/speaches-ai/speaches:latest-cpu"
+    }
+  },
+  "cells": [
+    {
+      "provider": "speaches",
+      "service": "stt",
+      "status": "pass",
+      "model": {
+        "remoteModel": "Systran/faster-whisper-base.en",
+        "sizeBytes": 147772310,
+        "license": "MIT",
+        "params": "74M",
+        "source": "https://huggingface.co/Systran/faster-whisper-base.en",
+        "memoryBytes": 147772310
+      },
+      "backend": "cpu",
+      "endpointKind": "OPEN_AI_AUDIO",
+      "checks": [
+        {
+          "name": "transcribes recording (/v1/audio/transcriptions)",
+          "pass": true,
+          "detail": "WER 0.000: \"If you can read this, transcription is working.\"",
+          "value": 0,
+          "threshold": 0.25
+        },
+        {
+          "name": "transcribes recording (SDK transcription stream)",
+          "pass": true,
+          "detail": "WER 0.000: \"If you can read this, transcription is working.\"",
+          "value": 0,
+          "threshold": 0.25
+        },
+        {
+          "name": "transcribes meeting (/v1/audio/transcriptions)",
+          "pass": true,
+          "detail": "WER 0.000: \"Please move the weekly planning meeting to Thursday afternoon and invite the design team.\"",
+          "value": 0,
+          "threshold": 0.2
+        },
+        {
+          "name": "transcribes meeting (SDK transcription stream)",
+          "pass": true,
+          "detail": "WER 0.000: \"Please move the weekly planning meeting to Thursday afternoon and invite the design team.\"",
+          "value": 0,
+          "threshold": 0.2
+        },
+        {
+          "name": "transcribes weather (/v1/audio/transcriptions)",
+          "pass": true,
+          "detail": "WER 0.000: \"The forecast says light rain in the morning, clearing to sunshine by the evening.\"",
+          "value": 0,
+          "threshold": 0.2
+        },
+        {
+          "name": "transcribes weather (SDK transcription stream)",
+          "pass": true,
+          "detail": "WER 0.000: \"The forecast says light rain in the morning, clearing to sunshine by the evening.\"",
+          "value": 0,
+          "threshold": 0.2
+        },
+        {
+          "name": "transcribes weather-noisy (/v1/audio/transcriptions)",
+          "pass": true,
+          "detail": "WER 0.286: \"The forecast is light raining in the morning, hearing the sunshine by the evening.\"",
+          "value": 0.286,
+          "threshold": 0.5
+        },
+        {
+          "name": "transcribes weather-noisy (SDK transcription stream)",
+          "pass": true,
+          "detail": "WER 0.286: \"The forecast is light raining in the morning, hearing the sunshine by the evening.\"",
+          "value": 0.286,
+          "threshold": 0.5
+        }
+      ],
+      "metrics": {
+        "firstRequestMs": 1346,
+        "noisyLanguage": "en",
+        "noisyNoHintWer": 0.286,
+        "noisyNoHintText": "The forecast is light raining in the morning, hearing the sunshine by the evening.",
+        "wer": {
+          "n": 4,
+          "median": 0,
+          "p95": 0.243,
+          "min": 0,
+          "max": 0.286,
+          "mean": 0.071
+        },
+        "werMean": 0.071,
+        "streamWerMean": 0.071,
+        "rtf": {
+          "n": 12,
+          "median": 0.121,
+          "p95": 0.176,
+          "min": 0.099,
+          "max": 0.216,
+          "mean": 0.126
+        },
+        "latencyMs": {
+          "n": 12,
+          "median": 574.9,
+          "p95": 735.7,
+          "min": 485.9,
+          "max": 901.5,
+          "mean": 584.8
+        },
+        "streamLatencyMs": {
+          "n": 4,
+          "median": 553.7,
+          "p95": 576.5,
+          "min": 535.6,
+          "max": 579.9,
+          "mean": 555.7
+        },
+        "audioSec": 18.99,
+        "directLatencyMs": {
+          "n": 12,
+          "median": 553.7,
+          "p95": 615,
+          "min": 447.6,
+          "max": 615,
+          "mean": 548.7
+        },
+        "executorOverheadMs": 21.2,
+        "peakRssBytes": 774823936,
+        "peakGpuBytes": 0,
+        "endpointHealth": "REACHABLE"
+      },
+      "fit": {
+        "fits": true,
+        "modelBytes": 147772310,
+        "budgetBytes": 65408700416,
+        "gpuBudgetBytes": 66482442240,
+        "ramBytes": 131891142656
+      },
+      "durationMs": 19537
+    },
+    {
+      "provider": "speaches",
+      "service": "stt",
+      "status": "fail",
+      "reason": "transcribes weather-noisy (SDK transcription stream): WER 1.000: \"Mae'r ffordd o'r Llywodraeth Llywodraeth Cymru, sy'n gweithio'r gweithio'r Llywodraeth Cymru.\"",
+      "model": {
+        "remoteModel": "Systran/faster-whisper-small",
+        "sizeBytes": 486215847,
+        "license": "MIT",
+        "params": "244M",
+        "source": "https://huggingface.co/Systran/faster-whisper-small",
+        "memoryBytes": 486215847
+      },
+      "backend": "cpu",
+      "endpointKind": "OPEN_AI_AUDIO",
+      "checks": [
+        {
+          "name": "transcribes recording (/v1/audio/transcriptions)",
+          "pass": true,
+          "detail": "WER 0.000: \"If you can read this, transcription is working.\"",
+          "value": 0,
+          "threshold": 0.25
+        },
+        {
+          "name": "transcribes recording (SDK transcription stream)",
+          "pass": true,
+          "detail": "WER 0.000: \"If you can read this, transcription is working.\"",
+          "value": 0,
+          "threshold": 0.25
+        },
+        {
+          "name": "transcribes meeting (/v1/audio/transcriptions)",
+          "pass": true,
+          "detail": "WER 0.000: \"Please move the weekly planning meeting to Thursday afternoon and invite the design team.\"",
+          "value": 0,
+          "threshold": 0.2
+        },
+        {
+          "name": "transcribes meeting (SDK transcription stream)",
+          "pass": true,
+          "detail": "WER 0.000: \"Please move the weekly planning meeting to Thursday afternoon and invite the design team.\"",
+          "value": 0,
+          "threshold": 0.2
+        },
+        {
+          "name": "transcribes weather (/v1/audio/transcriptions)",
+          "pass": true,
+          "detail": "WER 0.000: \"The forecast says light rain in the morning, clearing to sunshine by the evening.\"",
+          "value": 0,
+          "threshold": 0.2
+        },
+        {
+          "name": "transcribes weather (SDK transcription stream)",
+          "pass": true,
+          "detail": "WER 0.000: \"The forecast says light rain in the morning, clearing to sunshine by the evening.\"",
+          "value": 0,
+          "threshold": 0.2
+        },
+        {
+          "name": "transcribes weather-noisy (/v1/audio/transcriptions)",
+          "pass": true,
+          "detail": "WER 0.071: \"the forecast says light rain in the moon, clearing to sunshine by the evening.\"",
+          "value": 0.071,
+          "threshold": 0.5
+        },
+        {
+          "name": "transcribes weather-noisy (SDK transcription stream)",
+          "pass": false,
+          "detail": "WER 1.000: \"Mae'r ffordd o'r Llywodraeth Llywodraeth Cymru, sy'n gweithio'r gweithio'r Llywodraeth Cymru.\"",
+          "value": 1,
+          "threshold": 0.5
+        }
+      ],
+      "metrics": {
+        "firstRequestMs": 2076,
+        "noisyLanguage": "cy",
+        "noisyNoHintWer": 1,
+        "noisyNoHintText": "Mae'r ffordd o'r Llywodraeth Llywodraeth Cymru, sy'n gweithio'r gweithio'r Llywodraeth Cymru.",
+        "wer": {
+          "n": 4,
+          "median": 0,
+          "p95": 0.061,
+          "min": 0,
+          "max": 0.071,
+          "mean": 0.018
+        },
+        "werMean": 0.018,
+        "streamWerMean": 0.25,
+        "rtf": {
+          "n": 12,
+          "median": 0.29,
+          "p95": 0.552,
+          "min": 0.242,
+          "max": 0.685,
+          "mean": 0.332
+        },
+        "latencyMs": {
+          "n": 12,
+          "median": 1383.6,
+          "p95": 2308.9,
+          "min": 1215.3,
+          "max": 2865.4,
+          "mean": 1537.1
+        },
+        "streamLatencyMs": {
+          "n": 4,
+          "median": 2449.7,
+          "p95": 3120.9,
+          "min": 2115.5,
+          "max": 3215.2,
+          "mean": 2557.5
+        },
+        "audioSec": 18.99,
+        "directLatencyMs": {
+          "n": 12,
+          "median": 1377.6,
+          "p95": 2228.4,
+          "min": 1196.6,
+          "max": 2332.6,
+          "mean": 1509.9
+        },
+        "executorOverheadMs": 6,
+        "peakRssBytes": 1994960896,
+        "peakGpuBytes": 0,
+        "endpointHealth": "REACHABLE"
+      },
+      "fit": {
+        "fits": true,
+        "modelBytes": 486215847,
+        "budgetBytes": 65408700416,
+        "gpuBudgetBytes": 66482442240,
+        "ramBytes": 131891142656
+      },
+      "durationMs": 56885
+    }
+  ]
+}

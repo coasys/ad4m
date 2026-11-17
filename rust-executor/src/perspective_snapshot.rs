@@ -266,7 +266,8 @@ pub fn backup_perspectives(config: &Ad4mConfig) -> Result<(), AnyError> {
     // Start-up opens each stored perspective in its own task. An archive taken
     // before all are open would replace the last full snapshot with a partial
     // one, so refuse until every stored perspective has its store.
-    let stored = crate::db::Ad4mDb::with_global_instance(|db| db.get_all_perspectives())
+    let stored = crate::db_backend::db_backend()
+        .get_all_perspectives()
         .map_err(|e| anyhow!("Failed to list perspectives: {}", e))?;
     let loading = missing_stores(&stored, &stores);
     if !loading.is_empty() {
@@ -445,7 +446,14 @@ mod tests {
         for (uuid, count) in [("uuid-a", 3), ("uuid-b", 5)] {
             let dir = restored.path().join("perspectives").join(uuid);
             let store = SparqlStore::new(Some(dir.to_str().unwrap())).unwrap();
-            assert_eq!(store.get_all_links().unwrap().len(), count, "{uuid}");
+            assert_eq!(
+                store
+                    .get_all_links(&crate::perspectives::sparql_store::EvalStop::none(),)
+                    .unwrap()
+                    .len(),
+                count,
+                "{uuid}"
+            );
         }
     }
 

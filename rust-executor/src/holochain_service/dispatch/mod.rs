@@ -272,17 +272,32 @@ impl RequestDispatch for ConductorDispatch {
                         started.elapsed()
                     );
                 }
-                match result {
-                    Ok(result) => {
-                        if let Ok(app_info) = &result {
-                            let _ = new_app_ids_sender.send(app_info.clone());
+                let result = result.and_then(|result| result);
+                // An install can fail after the conductor started the app's cells:
+                // `enable_app` joins the cells, then writes the `Enabled` status, and that
+                // write can fail on a busy conductor database ("database is locked").
+                // `registerDNAs` then takes the app from `getAppInfo`, so its cells deliver
+                // remote signals; without a subscription every one is dropped (telepresence
+                // signals, and p-diff-sync's revision broadcasts, which carry its link sync).
+                let to_subscribe = match (&result, app_id) {
+                    (Ok(app_info), _) => Some(app_info.clone()),
+                    (Err(e), Some(id)) => {
+                        let app = service.conductor.get_app_info(&id).await.ok().flatten();
+                        if app.is_some() {
+                            warn!(
+                                "InstallApp {:?} failed ({}), but the app is installed and its cells may run: \
+                                 subscribing to its signals anyway",
+                                id, e
+                            );
                         }
-                        let _ = response.send(HolochainServiceResponse::InstallApp(result));
+                        app
                     }
-                    Err(err) => {
-                        let _ = response.send(HolochainServiceResponse::InstallApp(Err(err)));
-                    }
+                    (Err(_), None) => None,
+                };
+                if let Some(app_info) = to_subscribe {
+                    let _ = new_app_ids_sender.send(app_info);
                 }
+                let _ = response.send(HolochainServiceResponse::InstallApp(result));
             }
             HolochainServiceRequest::CallZomeFunction {
                 app_id,

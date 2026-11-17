@@ -1,0 +1,120 @@
+{
+  "cases": [
+    {
+      "entry": {
+        "body": "genesis",
+        "chain": "vector-chain",
+        "key": "z6Mkon3Necd6NkkyfoGoHxid2znGc59LU3K7mubaRcFbLfLX",
+        "prev": null,
+        "proof": [
+          {
+            "cryptosuite": "eddsa-jcs-2022",
+            "domain": "test:chain",
+            "proofPurpose": "assertionMethod",
+            "proofValue": "z5VyXY1AwBoCEwQAw8RebVZpaF8hkvEnv3wvo1XEiGfZdVV1JkfFCbPM2gReF6Lc6QeD149G6yd77iAYGqg1fq8id",
+            "type": "DataIntegrityProof",
+            "verificationMethod": "test:vector-chain#z6Mkon3Necd6NkkyfoGoHxid2znGc59LU3K7mubaRcFbLfLX"
+          }
+        ],
+        "seq": 0
+      },
+      "hash": "QmWs9SLTuEW8wTVqEP3ojmehxknYjPMCxjfBzfSNneEYsB",
+      "jcs": "{\"body\":\"genesis\",\"chain\":\"vector-chain\",\"key\":\"z6Mkon3Necd6NkkyfoGoHxid2znGc59LU3K7mubaRcFbLfLX\",\"prev\":null,\"seq\":0}",
+      "name": "test entry 0 with its proof"
+    },
+    {
+      "entry": {
+        "body": "genesis",
+        "chain": "vector-chain",
+        "key": "z6Mkon3Necd6NkkyfoGoHxid2znGc59LU3K7mubaRcFbLfLX",
+        "prev": null,
+        "seq": 0
+      },
+      "hash": "QmWs9SLTuEW8wTVqEP3ojmehxknYjPMCxjfBzfSNneEYsB",
+      "jcs": "{\"body\":\"genesis\",\"chain\":\"vector-chain\",\"key\":\"z6Mkon3Necd6NkkyfoGoHxid2znGc59LU3K7mubaRcFbLfLX\",\"prev\":null,\"seq\":0}",
+      "name": "the same entry without proof: same hash"
+    },
+    {
+      "entry": {
+        "\r": 2,
+        "1": 4,
+        "prev": null,
+        "seq": 1,
+        "z": {
+          "a": true,
+          "b": [
+            3,
+            2,
+            1
+          ]
+        },
+        "": 6,
+        "ö": 7,
+        "€": 1,
+        "דּ": 3,
+        "😀": 5
+      },
+      "hash": "QmRa2zrdcFRLti6HKgnP3n8vFbYRz8YnayHbdGRJKTeFpr",
+      "jcs": "{\"\\r\":2,\"1\":4,\"prev\":null,\"seq\":1,\"z\":{\"a\":true,\"b\":[3,2,1]},\"\":6,\"ö\":7,\"€\":1,\"😀\":5,\"דּ\":3}",
+      "name": "member order and nesting (JCS sorts by UTF-16 code units)"
+    },
+    {
+      "entry": {
+        "prev": null,
+        "s": "€$\u000f\nA'B\"\\\\\"/\b\f\t\r\u001f ",
+        "seq": 0
+      },
+      "hash": "QmZ4ZLnRiuk49KdvZ88KCS1d7gbxj8VNxFjomvhk4cbDPa",
+      "jcs": "{\"prev\":null,\"s\":\"€$\\u000f\\nA'B\\\"\\\\\\\\\\\"/\\b\\f\\t\\r\\u001f \",\"seq\":0}",
+      "name": "string escapes"
+    },
+    {
+      "entry": {
+        "n": -9007199254740991,
+        "prev": null,
+        "seq": 9007199254740991
+      },
+      "hash": "QmfRWEHZeyiBhrsaSUiWDvFaQa244j3Zz2WxwUWkuPVSoJ",
+      "jcs": "{\"n\":-9007199254740991,\"prev\":null,\"seq\":9007199254740991}",
+      "name": "largest safe integers"
+    },
+    {
+      "entry": {
+        "prev": null,
+        "seq": 0,
+        "x": {
+          "proof": 1
+        }
+      },
+      "hash": "QmQQXLTisHCdzYcTUB3wZhTghWXRos4FYE7XpzjzhgRKMx",
+      "jcs": "{\"prev\":null,\"seq\":0,\"x\":{\"proof\":1}}",
+      "name": "a nested proof member enters the hash"
+    },
+    {
+      "entry": {
+        "f": 1.5,
+        "prev": null,
+        "seq": 0
+      },
+      "error": "malformed",
+      "name": "float refused"
+    },
+    {
+      "entry": {
+        "prev": null,
+        "seq": 9007199254740992
+      },
+      "error": "malformed",
+      "name": "integer 2^53 refused"
+    },
+    {
+      "entry": [
+        1,
+        2
+      ],
+      "error": "malformed",
+      "name": "not an object"
+    }
+  ],
+  "description": "entryHash = base58btc(0x12 0x20 ‖ sha256(JCS(entry without its top-level \"proof\" member))). \"jcs\" is the canonical text that is hashed. \"error\": \"malformed\" means the entry has no canonical form."
+}

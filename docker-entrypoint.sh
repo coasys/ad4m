@@ -66,19 +66,6 @@ if [ -f /opt/ad4m/language-language-kv/address.txt ]; then
     fi
 fi
 
-# ── Pre-populate Kalosm model cache ────────────────────────────────────────
-# If the Docker image includes pre-cached models (INCLUDE_MODELS=true at
-# build time), copy them into the kalosm cache directory so the executor
-# finds them on disk and skips network downloads.
-KALOSM_CACHE="${HOME}/.local/share/kalosm/cache"
-if [ -d /opt/ad4m/models ] && [ "$(ls -A /opt/ad4m/models 2>/dev/null)" ]; then
-    if [ ! -d "${KALOSM_CACHE}" ]; then
-        echo "Pre-populating Kalosm model cache..."
-        mkdir -p "${KALOSM_CACHE}"
-        cp -r /opt/ad4m/models/* "${KALOSM_CACHE}/"
-    fi
-fi
-
 # ── Build executor args ─────────────────────────────────────────────────────
 # The executor reads the credential from the environment: a flag value would stay
 # visible in its process arguments (`ps`) for as long as it runs.
@@ -290,10 +277,8 @@ stamp_bootstrap_language_authors() {
     echo "Stamped bootstrap language meta authors as ${did}"
 }
 
-# ── AI model auto-registration ─────────────────────────────────────────────
-# When pre-cached models exist (INCLUDE_MODELS=true at build time), register
-# them with the executor via WebSocket RPC so Flux transcription and
-# summarisation work out of the box.
+# ── AI endpoints from the environment ─────────────────────────────────────────
+# setup_ai_models and the AD4M_AI_* variables it reads: docker/ai-env.sh.
 ws_rpc() {
     local msg_type="$1" params="$2" msg_id="${3:-1}"
     # Percent-encode the credential for the query string. Axum's Query
@@ -305,84 +290,8 @@ ws_rpc() {
         | websocat -n1 "ws://localhost:12000/api/v1/ws?token=${encoded_token}" 2>/dev/null
 }
 
-setup_ai_models() {
-    if [ -z "$(ls -A "${KALOSM_CACHE}" 2>/dev/null)" ]; then
-        return
-    fi
-    if ! command -v websocat >/dev/null 2>&1; then
-        echo "WARNING: websocat not found, skipping AI model registration." >&2
-        return
-    fi
-
-    echo "Registering AI models..."
-
-    local models_response
-    models_response=$(ws_rpc "ai.models" "{}" "list-models")
-    if [ -z "${models_response}" ]; then
-        echo "WARNING: could not query AI models." >&2
-        return
-    fi
-
-    # Register Whisper (transcription) if not already present
-    if ! echo "${models_response}" | jq -e '.result[] | select(.name == "Whisper")' >/dev/null 2>&1; then
-        local whisper_result whisper_id
-        whisper_result=$(ws_rpc "ai.addModel" \
-            '{"model":{"name":"Whisper","type":"TRANSCRIPTION","local":{"fileName":"whisper_small"}}}' \
-            "add-whisper")
-        whisper_id=$(echo "${whisper_result}" | jq -r '.result // empty')
-        if [ -n "${whisper_id}" ]; then
-            echo "  Registered transcription model: Whisper (${whisper_id})"
-        else
-            echo "  WARNING: failed to register Whisper model." >&2
-        fi
-    else
-        echo "  Whisper model already registered."
-    fi
-
-    # Register Whisper tiny quantized (fast preview transcription) if not already present
-    if ! echo "${models_response}" | jq -e '.result[] | select(.name == "Whisper tiny quantized")' >/dev/null 2>&1; then
-        local whisper_tiny_result whisper_tiny_id
-        whisper_tiny_result=$(ws_rpc "ai.addModel" \
-            '{"model":{"name":"Whisper tiny quantized","type":"TRANSCRIPTION","local":{"fileName":"whisper_tiny_quantized"}}}' \
-            "add-whisper-tiny")
-        whisper_tiny_id=$(echo "${whisper_tiny_result}" | jq -r '.result // empty')
-        if [ -n "${whisper_tiny_id}" ]; then
-            echo "  Registered transcription model: Whisper tiny quantized (${whisper_tiny_id})"
-        else
-            echo "  WARNING: failed to register Whisper tiny quantized model." >&2
-        fi
-    else
-        echo "  Whisper tiny quantized model already registered."
-    fi
-
-    # Register TinyLlama (LLM) if no LLM model exists
-    local llm_id=""
-    if echo "${models_response}" | jq -e '.result[] | select(.modelType == "LLM")' >/dev/null 2>&1; then
-        llm_id=$(echo "${models_response}" | jq -r '[.result[] | select(.modelType == "LLM")][0].id')
-        echo "  LLM model already registered (${llm_id})."
-    else
-        local llm_result
-        llm_result=$(ws_rpc "ai.addModel" \
-            '{"model":{"name":"TinyLlama","type":"LLM","local":{"fileName":"tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf","huggingfaceRepo":"TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF","tokenizerSource":{"repo":"hf-internal-testing/llama-tokenizer","revision":"main","fileName":"tokenizer.json"}}}}' \
-            "add-llm")
-        llm_id=$(echo "${llm_result}" | jq -r '.result // empty')
-        if [ -n "${llm_id}" ]; then
-            echo "  Registered LLM model: TinyLlama (${llm_id})"
-        else
-            echo "  WARNING: failed to register TinyLlama model." >&2
-        fi
-    fi
-
-    # Set default LLM if none configured
-    if [ -n "${llm_id}" ]; then
-        local default_response
-        default_response=$(ws_rpc "ai.getDefaultModel" '{"modelType":"LLM"}' "get-default")
-        if echo "${default_response}" | jq -e '.result == null' >/dev/null 2>&1; then
-            ws_rpc "ai.setDefaultModel" "{\"id\":\"${llm_id}\",\"modelType\":\"LLM\"}" "set-default" >/dev/null
-            echo "  Set TinyLlama as default LLM."
-        fi
-    fi
-}
+# shellcheck source=docker/ai-env.sh
+. /usr/local/lib/ad4m/ai-env.sh
 
 # ── Global discovery space (create on first boot, inject URL into WE) ───
 setup_global_space() {
@@ -524,6 +433,9 @@ CADDYEOF
     WE_PID=$!
     echo "WE frontend + API proxy serving at http://0.0.0.0:${we_port}/"
 }
+
+# ── Local AI shipped in the image (INCLUDE_MODELS=true) ──────────────────────
+seed_local_ai /opt/ad4m/local-ai-state /opt/ad4m/local-ai /data/local-ai
 
 # ── Start executor in background, auto-generate agent, then wait ────────────
 ad4m-executor run \
