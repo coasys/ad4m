@@ -36,7 +36,9 @@ struct ClassClaim {
     name: String,
     /// The language that installed it.
     owner: String,
-    target: Option<String>,
+    /// Every target class IRI it was installed with (a refresh that moved
+    /// the class to a new IRI leaves the old class node installed too).
+    targets: Vec<String>,
 }
 
 /// The name a class node resolves by, as `add_sdna` matches it: the last
@@ -102,7 +104,7 @@ impl PerspectiveInstance {
             if names.contains_key(claim.name.as_str()) {
                 return Err(refuse(format!("class {}", claim.name), owner));
             }
-            if let Some(target) = &claim.target {
+            for target in &claim.targets {
                 if targets.contains_key(target.as_str()) {
                     return Err(refuse(format!("class IRI {target}"), owner));
                 }
@@ -115,7 +117,7 @@ impl PerspectiveInstance {
         let owner_of_node = |node: &str| {
             claims
                 .iter()
-                .find(|c| c.target.as_deref() == Some(node) || alias_node(&c.name) == node)
+                .find(|c| c.targets.iter().any(|t| t == node) || alias_node(&c.name) == node)
                 .map(|c| c.owner.as_str())
         };
         for node in self.class_nodes().await? {
@@ -130,9 +132,7 @@ impl PerspectiveInstance {
         let owner_of_name = |name: &str| {
             claims
                 .iter()
-                .find(|c| {
-                    c.name == name || c.target.as_deref().map(class_basename) == Some(name)
-                })
+                .find(|c| c.name == name || c.targets.iter().any(|t| class_basename(t) == name))
                 .map(|c| c.owner.as_str())
         };
         for name in self.subject_class_names().await? {
@@ -151,31 +151,31 @@ impl PerspectiveInstance {
         lang_address: &str,
         shapes: &MountShapes,
     ) -> Result<(), AnyError> {
-        let held: Vec<(String, Option<String>)> = self
+        let held: Vec<ClassClaim> = self
             .class_claims()
             .await?
             .into_iter()
             .filter(|c| c.owner == lang_address)
-            .map(|c| (c.name, c.target))
             .collect();
         let mut links = Vec::new();
         for shape in &shapes.shapes {
-            let target = shape.shape["target_class"].as_str().map(str::to_string);
-            if held.contains(&(shape.name.clone(), target.clone())) {
-                continue;
-            }
             let source = format!("{CLAIM_SOURCE_PREFIX}{}", shape.name);
-            links.push(Link {
-                source: source.clone(),
-                predicate: Some(CLAIM_OWNER.to_string()),
-                target: format!("{lang_address}://project"),
-            });
-            if let Some(target) = target {
+            let claim = held.iter().find(|c| c.name == shape.name);
+            if claim.is_none() {
                 links.push(Link {
-                    source,
-                    predicate: Some(CLAIM_TARGET.to_string()),
-                    target,
+                    source: source.clone(),
+                    predicate: Some(CLAIM_OWNER.to_string()),
+                    target: format!("{lang_address}://project"),
                 });
+            }
+            if let Some(target) = shape.shape["target_class"].as_str() {
+                if !claim.is_some_and(|c| c.targets.iter().any(|t| t == target)) {
+                    links.push(Link {
+                        source,
+                        predicate: Some(CLAIM_TARGET.to_string()),
+                        target: target.to_string(),
+                    });
+                }
             }
         }
         if !links.is_empty() {
@@ -190,10 +190,13 @@ impl PerspectiveInstance {
             predicate: Some(predicate.to_string()),
             ..Default::default()
         };
-        let mut targets: HashMap<String, String> = HashMap::new();
+        let mut targets: HashMap<String, Vec<String>> = HashMap::new();
         for link in self.get_links(&by_predicate(CLAIM_TARGET)).await? {
             if is_mount_written(&link) {
-                targets.insert(link.data.source, link.data.target);
+                targets
+                    .entry(link.data.source)
+                    .or_default()
+                    .push(link.data.target);
             }
         }
         Ok(self
@@ -205,7 +208,7 @@ impl PerspectiveInstance {
                 let name = l.data.source.strip_prefix(CLAIM_SOURCE_PREFIX)?.to_string();
                 let (owner, _) = LanguageController::parse_expr_url(&l.data.target).ok()?;
                 Some(ClassClaim {
-                    target: targets.get(&l.data.source).cloned(),
+                    targets: targets.get(&l.data.source).cloned().unwrap_or_default(),
                     name,
                     owner,
                 })
