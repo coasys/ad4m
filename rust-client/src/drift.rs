@@ -51,16 +51,59 @@ fn generated_methods(source: &str) -> BTreeSet<String> {
 }
 
 /// The first string literal of every `call`/`call_void`/`call_value`/`send_watch`
-/// invocation in `source`: the method name it wraps. Test code is excluded —
-/// the `#[cfg(test)]` block that starts it ends the file in this crate, so
-/// scanning the prefix keeps mock `test.*` calls out of the check.
+/// invocation in `source`: the method name it wraps. Test modules are
+/// excluded — a top-level `#[cfg(test)] mod … {` through its closing `}` at
+/// column 0 — so mock `test.*` calls stay out of the check. Other
+/// `#[cfg(test)]` items (fields, hooks inside function bodies) are kept:
+/// production calls after them are still scanned.
 fn called_methods(source: &str) -> BTreeSet<String> {
     let re =
         Regex::new(r#"call(?:_void|_value|_inner)?(?:\s*::<[^>]*>)?\s*\(\s*"([^"]+)""#).unwrap();
-    let production = source.split("#[cfg(test)]").next().unwrap_or(source);
-    re.captures_iter(production)
+    let mod_start = Regex::new(r"^(?:pub(?:\([^)]*\))?\s+)?mod\s+\w+\s*\{").unwrap();
+    let mut production = String::with_capacity(source.len());
+    let mut lines = source.lines().peekable();
+    while let Some(line) = lines.next() {
+        if line == "#[cfg(test)]" && lines.peek().is_some_and(|next| mod_start.is_match(next)) {
+            for skipped in lines.by_ref() {
+                if skipped == "}" {
+                    break;
+                }
+            }
+            continue;
+        }
+        production.push_str(line);
+        production.push('\n');
+    }
+    re.captures_iter(&production)
         .map(|c| c[1].to_string())
         .collect()
+}
+
+/// An in-body `#[cfg(test)]` hook must not hide the production calls after
+/// it, and the test module must stay excluded wherever it sits.
+#[test]
+fn called_methods_scans_past_in_body_test_attributes() {
+    let source = r#"
+fn a(ws: &Ws) {
+    ws.call_value("before.hook", json!({}));
+    #[cfg(test)]
+    ws.test_park("x");
+    ws.call_value("after.hook", json!({}));
+}
+
+#[cfg(test)]
+mod tests {
+    fn t(ws: &Ws) {
+        ws.call("test.mock", json!({}));
+    }
+}
+
+fn b(ws: &Ws) {
+    ws.call::<Value>("after.tests", json!({}));
+}
+"#;
+    let methods: Vec<String> = called_methods(source).into_iter().collect();
+    assert_eq!(methods, ["after.hook", "after.tests", "before.hook"]);
 }
 
 #[test]
