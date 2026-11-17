@@ -141,6 +141,23 @@ fn ad4m_signal_emitted(
     #[string] language_address: String,
 ) -> Result<(), AnyhowWrapperError> {
     let language_address = own_language(&language_address)?;
+    // A mounted language pushes changes as `{ mountDelta }`: route it to
+    // every perspective mounting this language (design §1.5). A payload
+    // that does not parse is dropped with a warning, not an error back
+    // into the language.
+    if let Some(delta) = signal.get("mountDelta") {
+        match serde_json::from_value::<crate::languages::mount_types::MountDelta>(delta.clone()) {
+            Ok(delta) => {
+                crate::perspectives::handle_mount_delta_from_language(delta, language_address)
+            }
+            Err(e) => log::warn!(
+                "emitSignal from `{}`: invalid mountDelta: {}",
+                language_address,
+                e
+            ),
+        }
+        return Ok(());
+    }
     // Spec §7.5 `emitSignal` is defined as an arbitrary language→runtime
     // signal — no perspective/recipient envelope, no specific shape.
     //

@@ -46,6 +46,7 @@ pub mod sparql_store;
 pub mod subject_classes_of;
 pub mod utils;
 pub(crate) mod write_log;
+use crate::languages::mount_types::MountDelta;
 use crate::types::{
     LinkQuery, LinkStatus, NeighbourhoodSignalFilter, PerspectiveEvent, PerspectiveExpression,
     PerspectiveHandle, PerspectiveRemovedEvent, PerspectiveState,
@@ -556,6 +557,28 @@ pub fn handle_perspective_diff_from_link_language(diff: PerspectiveDiff, languag
         diff,
         language_address,
     ));
+}
+
+/// A `mountDelta` a mounted language pushed through `emitSignal` (design
+/// §1.5). Called from the sync `ad4m_signal_emitted` op — spawns the apply.
+pub fn handle_mount_delta_from_language(delta: MountDelta, language_address: String) {
+    tokio::spawn(handle_mount_delta_from_language_impl(
+        delta,
+        language_address,
+    ));
+}
+
+/// Applies `delta` in every perspective that mounts `language_address`
+/// (`MOUNT_LANG_TO_PERSPECTIVES`). A perspective that fails logs one
+/// warning; the others still get the delta.
+pub async fn handle_mount_delta_from_language_impl(delta: MountDelta, language_address: String) {
+    for uuid in perspectives_for_mount(&language_address) {
+        if let Some(mut p) = get_perspective(&uuid) {
+            if let Err(e) = p.apply_mount_delta(&language_address, &delta).await {
+                log::warn!("mount delta for {} in {}: {}", language_address, uuid, e);
+            }
+        }
+    }
 }
 
 /// Register a mapping from link_language address to PerspectiveHandle for fast signal routing
