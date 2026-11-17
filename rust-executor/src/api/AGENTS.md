@@ -161,7 +161,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-235 methods: Cap 82, CapAnyPointer 1, Executor 43, Open 5, Operator 28, Owns 74, UserOrOperator 2. Local only (the operator on this machine): 5.
+239 methods: Cap 82, CapAnyPointer 1, Executor 43, Open 5, Operator 28, Owns 78, UserOrOperator 2. Local only (the operator on this machine): 5.
 
 | Method | Guard |
 |---|---|
@@ -300,6 +300,8 @@ the guard checked:
 | `perspective.mintFlowReceipt` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.modelQuery` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.modelSubscribe` | `Owns(Perspective uuid, perspective:READ)` |
+| `perspective.mount` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.mounts` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.proposeFlowTransition` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.publishSnapshot` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.queryLinks` | `Owns(Perspective uuid, perspective:READ)` |
@@ -320,6 +322,8 @@ the guard checked:
 | `perspective.subjectClassesOf` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.subscribeQuery` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.subscribeSparql` | `Owns(Perspective uuid, perspective:READ)` |
+| `perspective.syncMount` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.unmount` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.update` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.updateLink` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.updateSubject` | `Owns(Perspective uuid, perspective:UPDATE)` |

@@ -8,6 +8,7 @@ use ts_rs::TS;
 
 use crate::agent::capabilities::*;
 use crate::helpers::can_access_perspective_with_did;
+use crate::languages::mount_types::MountSyncReport;
 use crate::perspectives::model_query::QueryClasses;
 use crate::perspectives::perspective_instance::{
     is_sparql_query, result_json, SubscriptionIdTaken, PROLOG_LIVE_QUERY_UNSUPPORTED,
@@ -1104,6 +1105,45 @@ async fn model_query_handler(params: Value, ctx: Arc<RequestContext>) -> Result<
         Ok(json) => Ok(Value::String(json)),
         Err(e) => Err(query_eval_error_ws(e)),
     }
+}
+
+async fn mount_handler(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let language_address = params.require_str("languageAddress")?;
+    let mut perspective = guarded_perspective(&params).await?;
+    perspective
+        .mount(&language_address)
+        .await
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    Ok(Value::Bool(true))
+}
+
+async fn unmount_handler(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let language_address = params.require_str("languageAddress")?;
+    let mut perspective = guarded_perspective(&params).await?;
+    perspective
+        .unmount(&language_address)
+        .await
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    Ok(Value::Bool(true))
+}
+
+async fn sync_mount_handler(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let language_address = params.require_str("languageAddress")?;
+    let mut perspective = guarded_perspective(&params).await?;
+    let report = perspective
+        .sync_mount(&language_address)
+        .await
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    Ok(serde_json::to_value(report)?)
+}
+
+async fn mounts_handler(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let perspective = guarded_perspective(&params).await?;
+    let langs = perspective
+        .mounts()
+        .await
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    Ok(serde_json::to_value(langs)?)
 }
 
 async fn evaluate_getters_handler(
@@ -2692,6 +2732,19 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     )
     .read()
     .guard(query());
+    map.method::<PerspectiveMountParams, bool>("perspective.mount", mount_handler)
+        .guard(update());
+    map.method::<PerspectiveMountParams, bool>("perspective.unmount", unmount_handler)
+        .guard(update());
+    map.method::<PerspectiveMountParams, MountSyncReport>(
+        "perspective.syncMount",
+        sync_mount_handler,
+    )
+    .long()
+    .guard(update());
+    map.method::<PerspectiveUuidParams, Vec<String>>("perspective.mounts", mounts_handler)
+        .read()
+        .guard(query());
 }
 
 // ── Contracts ──
@@ -2700,6 +2753,14 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
 #[ts(export)]
 pub struct PerspectiveUuidParams {
     pub uuid: String,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct PerspectiveMountParams {
+    pub uuid: String,
+    pub language_address: String,
 }
 
 #[derive(Deserialize, TS)]

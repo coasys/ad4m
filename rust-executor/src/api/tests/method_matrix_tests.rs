@@ -650,6 +650,15 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
         || json!({ "instanceUri": "i" }),
     ),
     ("perspective.flowFired", || json!({ "instance": "i" })),
+    ("perspective.mount", || json!({ "languageAddress": "QmLang" })),
+    (
+        "perspective.unmount",
+        || json!({ "languageAddress": "QmLang" }),
+    ),
+    (
+        "perspective.syncMount",
+        || json!({ "languageAddress": "QmLang" }),
+    ),
     // #712's SFU. `sfu.servesAllMembers` names its perspective in `uuid`; the reads without
     // params take `{}`.
     ("sfu.startRoom", sfu_room),
