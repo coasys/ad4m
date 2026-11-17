@@ -7,6 +7,8 @@ pub mod ai_task_access_tests;
 #[cfg(test)]
 pub mod anonymous_access_tests;
 #[cfg(test)]
+pub mod call_action_ws_tests;
+#[cfg(test)]
 pub mod connection_tests;
 #[cfg(test)]
 pub mod error_tests;

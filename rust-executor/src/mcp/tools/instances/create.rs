@@ -69,22 +69,31 @@ impl Ad4mMcpHandler {
             Some(uri) if !uri.trim().is_empty() => link_target(uri.trim()),
             _ => generate_instance_uri(),
         };
-        // Three arms, not `if let Ok(Some(_))`: a store/query failure must not
-        // read as "no instance found" and let the create land on top of an
-        // existing instance, merging its property links.
-        match fetch_instance(&perspective, &class_name, &base_uri).await {
-            Ok(Some(_)) => {
-                return error_json(format!(
-                    "A {class_name} instance already exists at '{base_uri}'. Use instance_update \
-                     to change it, or omit base_uri to create a new instance with a generated id."
-                ))
-            }
-            Ok(None) => {}
-            Err(e) => {
-                return error_json(format!(
-                    "Could not check whether a {class_name} instance already exists at \
-                     '{base_uri}': {e} — nothing was created."
-                ))
+        // A `call` constructor makes the record in its language and names
+        // it — the generated base_uri is not its id, and it cannot run
+        // inside the batch below, so create_subject gets none.
+        let call_ctor = perspective
+            .constructor_is_call(&class_name)
+            .await
+            .unwrap_or(false);
+        if !call_ctor {
+            // Three arms, not `if let Ok(Some(_))`: a store/query failure must not
+            // read as "no instance found" and let the create land on top of an
+            // existing instance, merging its property links.
+            match fetch_instance(&perspective, &class_name, &base_uri).await {
+                Ok(Some(_)) => {
+                    return error_json(format!(
+                        "A {class_name} instance already exists at '{base_uri}'. Use instance_update \
+                         to change it, or omit base_uri to create a new instance with a generated id."
+                    ))
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    return error_json(format!(
+                        "Could not check whether a {class_name} instance already exists at \
+                         '{base_uri}': {e} — nothing was created."
+                    ))
+                }
             }
         }
 
@@ -129,21 +138,32 @@ impl Ad4mMcpHandler {
         // pre-commit error path discards the batch so it does not sit in
         // the store until the timeout sweep.
         let batch_id = perspective.create_batch().await;
-        if let Err(e) = perspective
+        // The call constructor's URL — when it returns one — replaces the
+        // generated base_uri as the instance id for the collection and
+        // parent links too.
+        let created = perspective
             .create_subject(
                 subject_class(&class_name),
                 base_uri.clone(),
                 initial_values,
-                Some(batch_id.clone()),
+                if call_ctor {
+                    None
+                } else {
+                    Some(batch_id.clone())
+                },
                 &agent_context,
             )
-            .await
-        {
-            perspective.discard_batch(&batch_id).await;
-            return error_json(format!(
-                "Error creating {class_name} instance (nothing was created): {e:#}"
-            ));
-        }
+            .await;
+        let base_uri = match created {
+            Err(e) => {
+                perspective.discard_batch(&batch_id).await;
+                return error_json(format!(
+                    "Error creating {class_name} instance (nothing was created): {e:#}"
+                ));
+            }
+            Ok(Some(url)) => url,
+            Ok(None) => base_uri,
+        };
 
         // Collections: one link per item, same path as instance_add_to_collection.
         let mut collections_set: Map<String, Value> = Map::new();

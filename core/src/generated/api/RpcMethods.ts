@@ -121,6 +121,7 @@ import type { PerspectiveAddSdnaParams } from "./PerspectiveAddSdnaParams";
 import type { PerspectiveAddSdnaResult } from "./PerspectiveAddSdnaResult";
 import type { PerspectiveCommitBatchParams } from "./PerspectiveCommitBatchParams";
 import type { PerspectiveCreateSubjectParams } from "./PerspectiveCreateSubjectParams";
+import type { PerspectiveCreateSubjectResult } from "./PerspectiveCreateSubjectResult";
 import type { PerspectiveDiscardBatchParams } from "./PerspectiveDiscardBatchParams";
 import type { PerspectiveEvaluateGettersParams } from "./PerspectiveEvaluateGettersParams";
 import type { PerspectiveExecuteCommandsParams } from "./PerspectiveExecuteCommandsParams";
@@ -351,7 +352,7 @@ export interface RpcMethods {
   "perspective.commitBatch": { params: PerspectiveCommitBatchParams; result: PerspectiveLinkDiff };
   "perspective.create": { params: CreatePerspectiveRequest; result: PerspectiveHandle };
   "perspective.createBatch": { params: PerspectiveUuidParams; result: string };
-  "perspective.createSubject": { params: PerspectiveCreateSubjectParams; result: boolean };
+  "perspective.createSubject": { params: PerspectiveCreateSubjectParams; result: PerspectiveCreateSubjectResult };
   "perspective.discardBatch": { params: PerspectiveDiscardBatchParams; result: boolean };
   "perspective.disposeQuery": { params: PerspectiveSubscriptionParams; result: boolean };
   "perspective.disposeSparql": { params: PerspectiveSubscriptionParams; result: boolean };
