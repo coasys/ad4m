@@ -148,11 +148,7 @@ async fn the_language_language_is_never_asked() {
         .apply_template_local(&base, template_data(&[("seed", "x")]))
         .await;
 
-    controller
-        .system_addresses
-        .lock()
-        .await
-        .language_language = previous;
+    controller.system_addresses.lock().await.language_language = previous;
     controller.set_runtime_for_test(&ll, None).await;
 
     result.unwrap();
