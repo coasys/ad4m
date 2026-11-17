@@ -118,9 +118,9 @@ impl PerspectiveInstance {
 
     /// `mount`'s work for the mount `generation` names.
     async fn mount_as(&mut self, lang_address: &str, generation: u64) -> Result<(), AnyError> {
+        let seq = next_mount_seq();
         let controller = LanguageController::global_instance();
         let shapes = controller.mount_shapes(lang_address).await?;
-        let seq = next_mount_seq();
         let snapshot = controller.mount_snapshot(lang_address).await?;
 
         let mut slot = self.mount_lifecycles.lock(lang_address).await;
@@ -218,9 +218,11 @@ impl PerspectiveInstance {
                 self.uuid
             ));
         };
+        // One sequence number for the shapes and the snapshot: the schema
+        // and the records this sync read are ordered together.
+        let seq = next_mount_seq();
         let controller = LanguageController::global_instance();
         let shapes = controller.mount_shapes(lang_address).await?;
-        let seq = next_mount_seq();
         let snapshot = controller.mount_snapshot(lang_address).await?;
         pause(lang_address, MountPoint::SnapshotFetched).await;
 
@@ -233,8 +235,14 @@ impl PerspectiveInstance {
                 "language {lang_address} was unmounted while it synced"
             ));
         };
+        // A sync older than one already applied writes nothing, its shapes
+        // included: it must not roll the schema back under newer records.
+        if slot.snapshot_is_stale(seq) {
+            return Ok(MountSyncReport::default());
+        }
         if self.mounted_version(lang_address).await?.as_deref() != Some(shapes.version.as_str()) {
             self.install_mount_shapes(lang_address, &shapes).await?;
+            slot.schema_installed(seq);
         }
         let records = self.stage_records(lang_address, &snapshot.entries)?;
         self.write_snapshot(lang_address, &mut slot, records, seq)

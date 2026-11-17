@@ -1,6 +1,9 @@
 //! What a mount owns, and what it leaves alone: links someone else wrote
-//! under `<lang>://`, whatever their timestamp.
+//! under `<lang>://`, whatever their timestamp, and the schema a newer
+//! sync installed.
 
+use super::mount_gates::gates;
+use super::mount_gates::MountPoint;
 use super::mount_lifecycle_tests::{links_at, project};
 use super::mounts_tests::{create, mounted};
 use super::*;
@@ -109,4 +112,35 @@ async fn an_epoch_dated_link_of_the_main_agent_survives_sync_and_unmount() {
     assert!(holds(&p, &mine).await, "sync removed it");
     p.unmount(&lang).await.unwrap();
     assert!(holds(&p, &mine).await, "unmount removed it");
+}
+
+// --- A stale sync never rolls the schema back -------------------------------
+
+#[tokio::test]
+async fn an_older_sync_does_not_roll_back_newer_shapes() {
+    let lang = load_mount_test_language().await;
+    let (p, _ctx) = mounted(&lang).await;
+
+    // Sync A reads version 2 and stops; sync B reads version 3 and applies.
+    let gate = gates::arm(&lang, MountPoint::SnapshotFetched);
+    let mut older = p.clone();
+    let l = lang.clone();
+    let a = tokio::spawn(async move { older.sync_mount(&l).await });
+    gate.arrived().await;
+    project(&lang, "setVersion", json!({"version": "3"})).await;
+    p.clone().sync_mount(&lang).await.unwrap();
+    gate.release();
+    let _ = a.await.unwrap();
+
+    let versions: Vec<String> =
+        links_at(&p, &format!("{lang}://project"), "ad4m://mount_shapes_version")
+            .await
+            .into_iter()
+            .map(|l| l.data.target)
+            .collect();
+    assert_eq!(
+        versions,
+        vec!["literal:string:3".to_string()],
+        "the older sync reinstalled its shapes"
+    );
 }

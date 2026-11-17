@@ -16,12 +16,13 @@
 //! Order: everything a mounted language reports carries a sequence number
 //! (`next_mount_seq`) taken where its order is known — a pushed delta as
 //! the language emits it, a call's delta as the call returns, a snapshot
-//! before it is asked for. A delta applies to a record only when it is
-//! newer than what the record last got (`seen`) and than the last applied
-//! snapshot; a snapshot skips a record a newer delta wrote and is dropped
-//! whole when a newer snapshot was applied. So an older delta never
-//! regresses a record, and a snapshot read before a delta never sweeps
-//! the delta's record.
+//! and the shapes it installs before they are asked for. A delta applies
+//! to a record only when it is newer than what the record last got
+//! (`seen`) and than the last applied snapshot; a snapshot skips a record a newer delta wrote and is dropped
+//! whole, shapes included, when a newer snapshot or newer shapes were
+//! applied. So an older delta never regresses a record, a snapshot read
+//! before a delta never sweeps the delta's record, and an older sync never
+//! rolls the schema back.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -57,6 +58,8 @@ pub(crate) struct MountSlot {
     pub(crate) generation: u64,
     /// The sequence number of the last applied snapshot.
     last_snapshot: u64,
+    /// The sequence number of the sync whose shapes were installed last.
+    last_schema: u64,
     /// Per record address, the sequence number of the delta that last
     /// wrote it, kept only while newer than `last_snapshot`.
     seen: HashMap<String, u64>,
@@ -78,9 +81,15 @@ impl MountSlot {
         self.seen.insert(address.to_string(), seq);
     }
 
-    /// Whether a snapshot taken at `seq` is older than one already applied.
+    /// Whether a sync taken at `seq` is older than a snapshot or shapes
+    /// already applied: it writes nothing.
     pub(crate) fn snapshot_is_stale(&self, seq: u64) -> bool {
-        seq < self.last_snapshot
+        seq < self.last_snapshot || seq < self.last_schema
+    }
+
+    /// Record that the shapes of a sync taken at `seq` were installed.
+    pub(crate) fn schema_installed(&mut self, seq: u64) {
+        self.last_schema = self.last_schema.max(seq);
     }
 
     /// Whether a delta newer than a snapshot taken at `seq` wrote `address`:
@@ -120,6 +129,7 @@ impl MountLifecycles {
                     phase: MountPhase::Inactive,
                     generation: 0,
                     last_snapshot: 0,
+                    last_schema: 0,
                     seen: HashMap::new(),
                 }))
             })
@@ -136,6 +146,7 @@ impl MountLifecycles {
     pub(crate) fn enter(&self, slot: &mut MountSlot, phase: MountPhase) -> u64 {
         slot.phase = phase;
         slot.last_snapshot = 0;
+        slot.last_schema = 0;
         slot.seen.clear();
         slot.generation = self.generations.fetch_add(1, Ordering::SeqCst) + 1;
         slot.generation
