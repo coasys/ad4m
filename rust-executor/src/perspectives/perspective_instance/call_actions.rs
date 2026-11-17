@@ -226,4 +226,15 @@ impl PerspectiveInstance {
             .map_err(|e| anyhow!("{e}"))?;
         Ok(Some(format!("{scheme}://{address}")))
     }
+
+    /// Whether `class_name`'s constructor makes a language call — MCP's
+    /// `instance_create` checks this to keep its batch out of
+    /// `create_subject`'s way, since calls cannot run inside one.
+    pub(crate) async fn constructor_is_call(&self, class_name: &str) -> Result<bool, AnyError> {
+        Ok(self
+            .get_constructor_actions(class_name)
+            .await?
+            .iter()
+            .any(|c| c.action == Action::Call))
+    }
 }
