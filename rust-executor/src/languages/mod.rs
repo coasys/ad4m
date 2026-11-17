@@ -20,6 +20,8 @@ mod metas;
 pub(crate) mod mount_tests;
 #[cfg(test)]
 mod signing_reach_tests;
+#[cfg(test)]
+mod template_local_tests;
 pub mod wasm_delegate;
 
 pub use literal::{literal_decode, literal_encode};
