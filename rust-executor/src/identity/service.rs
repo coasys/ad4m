@@ -595,7 +595,7 @@ pub(super) fn first_link_error(refusal: FirstLinkRefusal) -> WsRpcError {
     WsRpcError::forbidden(refusal.to_string())
 }
 
-/// An offer string (`coasys:offer:1:…`) or link (`https://id.coasys.org/o#…`).
+/// An offer string (`coasys:offer:1:…`) or link (`https://coasys.id/o#…`).
 pub fn parse_offer(text: &str) -> Result<OfferString, WsRpcError> {
     let text = text.trim();
     let parsed = if text.starts_with(link::OFFER_STRING_PREFIX) {

@@ -272,10 +272,7 @@ const SPEC: &str = include_str!(concat!(
 
 #[test]
 fn the_context_file_defines_every_extension_term_under_the_context_url() {
-    assert_eq!(
-        COASYS_CONTEXT,
-        "https://id.coasys.org/ns/did-scid-coasys/v1"
-    );
+    assert_eq!(COASYS_CONTEXT, "https://coasys.id/ns/did-scid-coasys/v1");
     let file: Value = serde_json::from_str(CONTEXT_FILE).unwrap();
     let context = &file["@context"];
     assert_eq!(context["@version"], json!(1.1));
