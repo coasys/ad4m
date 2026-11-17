@@ -944,6 +944,10 @@ impl PerspectiveInstance {
     }
 
     pub async fn start_background_tasks(self) {
+        // `restore_mounts` needs `&mut self` (it writes links), which cannot
+        // share this borrow with the `&self` loops — a clone is the same
+        // instance.
+        let mut mount_restore = self.clone();
         let _ = join!(
             self.ensure_link_language(),
             self.notification_check_loop(),
@@ -953,6 +957,7 @@ impl PerspectiveInstance {
             self.fallback_sync_loop(),
             self.auto_processor_supervisor(),
             self.flow_pass_at_load(),
+            mount_restore.restore_mounts(),
         );
     }
 
