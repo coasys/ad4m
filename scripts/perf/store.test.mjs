@@ -92,6 +92,22 @@ test("record commits the run to <subdir>/<job>.jsonl on the branch and pushes it
   assert.equal(git(bare, "log", "-1", "--format=%s|%an", "main"), "perf(j): 012345678 2026-11-01T02:00:00Z|ad4m nightly");
 });
 
+test("a caller's GIT_DIR and GIT_COMMON_DIR never reach the store's git: the caller's repository stays as it was", () => {
+  const { root, bare } = bareRepo();
+  // The caller: a repository a CI step (or a hook) would export, as a worktree's git does.
+  const caller = path.join(root, "caller");
+  spawnSync("git", ["init", "-q", caller], { env: GIT_ENV });
+  const callerGit = path.join(caller, ".git");
+  const config = () => fs.readFileSync(path.join(callerGit, "config"), "utf8");
+  const before = config();
+  const env = envFor(bare, path.join(root, "clone"), { GIT_DIR: callerGit, GIT_COMMON_DIR: callerGit, GIT_WORK_TREE: caller });
+  const r = record(env, "run-1", 100, 1);
+  assert.equal(r.code, 0, r.err);
+  assert.equal(jsonl(show(bare, "nightly/j.jsonl")).length, 1, "the history got the run");
+  assert.equal(config(), before, "no remote or setting was added to the caller's repository");
+  assert.equal(git(caller, "rev-list", "--all", "--count"), "0", "and no commit");
+});
+
 test("the branch and subdir come from PERF_HISTORY_BRANCH and PERF_HISTORY_SUBDIR; a new branch starts empty", () => {
   const { root, bare } = bareRepo();
   const env = envFor(bare, path.join(root, "clone"), { PERF_HISTORY_BRANCH: "perf", PERF_HISTORY_SUBDIR: "runs" });
