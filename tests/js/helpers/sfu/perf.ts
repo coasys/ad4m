@@ -55,11 +55,10 @@ export function classify(path: string): Kind {
   // A count of layers that carried bytes (`simulcastActiveWithBytes`) is asserted exactly.
   if (has("with")) return null;
   if (has("ms", "latency", "rtt", "wait")) return { unit: "ms", better: "lower" };
-  if (has("bytes") || (has("upload", "download") && has("mean"))) return { unit: "bytes", better: "higher" };
-  // A loss word wins over `frames`: `framesDropped` counts frames lost.
-  if (has("dropped", "lost", "loss", "repairs", "renegotiations", "crashes", "failures", "errors")) {
-    return { unit: "count", better: "lower" };
-  }
+  // A loss word wins over `bytes` and `frames`: `bytesDropped` and `framesDropped` count what was lost.
+  const loss = has("dropped", "lost", "loss", "repairs", "renegotiations", "crashes", "failures", "errors");
+  if (has("bytes") || (has("upload", "download") && has("mean"))) return { unit: "bytes", better: loss ? "lower" : "higher" };
+  if (loss) return { unit: "count", better: "lower" };
   if (has("frames", "delivered")) return { unit: "count", better: "higher" };
   return null;
 }

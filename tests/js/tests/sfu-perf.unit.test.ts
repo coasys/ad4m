@@ -40,6 +40,8 @@ describe("SFU perf metrics", () => {
     // A loss word wins over a frame word: fewer dropped frames is better.
     expect(classify("framesDropped")).to.deep.equal({ unit: "count", better: "lower" });
     expect(classify("frames_lost")).to.deep.equal({ unit: "count", better: "lower" });
+    // ...and over a byte word, which keeps its unit.
+    expect(classify("bytesDropped")).to.deep.equal({ unit: "bytes", better: "lower" });
     expect(classify("colocated_frames_delivered")).to.deep.equal({ unit: "count", better: "higher" });
     expect(classify("renegotiationsPerPeer.max")).to.deep.equal({ unit: "count", better: "lower" });
     for (const exact of [
