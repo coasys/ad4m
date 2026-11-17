@@ -37,7 +37,10 @@ const SESSION_KEYS = ["ad4m-token", "ad4m-url", "ad4m-port", "ad4m-last-host"];
  * Every key is stored under `${version}/`, so upgrading the package (an app redeploy) used to
  * leave the stored token under the old prefix, unread: the user had to log in again although the
  * executor still accepted the token. When this version holds no token, the session of the newest
- * other version that holds one is copied over. The token is not checked here; a refused one is
+ * older version of the same minor line that holds one is copied over (`0.13.1-staging.4` →
+ * `0.13.1-staging.5`, `0.13.1` → `0.13.2`). A minor or major upgrade may break the session, which
+ * is why the keys carry the version, so it starts logged out; and a newer version's session is not
+ * carried back to an app rolled back to an older version. The token is not checked here; a refused one is
  * dropped by `checkAuth` as before. The other versions' sessions are removed once one is carried
  * over: left in place, a logout (or a refused token, which is discarded) only cleared this
  * version's keys, and the next load carried the old session over again. Answers whether a session
@@ -57,9 +60,9 @@ export function adoptStoredSession(url?: string): boolean {
     const key = localStorage.key(i);
     if (!key?.endsWith(suffix) || !localStorage.getItem(key)) continue;
     const prefix = key.slice(0, key.length - suffix.length);
-    // A session for another executor is neither a candidate nor cleaned up: an app configured for
-    // that executor can still carry it over.
-    if (prefix === version || (url !== undefined && !storedFor(prefix, url))) continue;
+    // A session from another minor line, from a newer version, or for another executor is neither
+    // a candidate nor cleaned up: the app it belongs to can still read it, or carry it over.
+    if (!adoptableFrom(prefix) || (url !== undefined && !storedFor(prefix, url))) continue;
     prefixes.push(prefix);
     if (newest === null || compareVersions(newest, prefix) < 0) newest = prefix;
   }
@@ -74,6 +77,17 @@ export function adoptStoredSession(url?: string): boolean {
     for (const name of SESSION_KEYS) localStorage.removeItem(`${prefix}/${name}`);
   }
   return true;
+}
+
+/** Whether this version may carry over the session under `prefix`: an older one, same major.minor. */
+function adoptableFrom(prefix: string): boolean {
+  const line = minorLine(version);
+  return line !== null && minorLine(prefix) === line && compareVersions(prefix, version) < 0;
+}
+
+/** `major.minor` of a version (`0.13` for `0.13.1-staging.5`), or null for a key prefix that is no version. */
+function minorLine(v: string): string | null {
+  return /^(\d+\.\d+)\.\d+(?:-|$)/.exec(v)?.[1] ?? null;
 }
 
 /** Whether the session under `prefix` was stored for the executor at `url`. */

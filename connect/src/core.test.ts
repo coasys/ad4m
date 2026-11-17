@@ -3,6 +3,9 @@ import Ad4mConnect from './core';
 import { setLocal, getLocal } from './utils';
 import { AgentStatus, Ad4mClient, RpcError } from '@coasys/ad4m';
 
+// The version every key is stored under, pinned so the tests can name earlier ones.
+vi.mock('../../package.json', () => ({ version: '0.10.2-staging.3' }));
+
 const { mockAgent, mockRuntime, mockClientInstance } = vi.hoisted(() => {
   const mockAgent = {
     isLocked: vi.fn().mockResolvedValue(false),
@@ -115,17 +118,25 @@ describe('Ad4mConnect', () => {
     });
 
     it('restores the session an earlier version stored, so an upgrade does not log the user out', () => {
-      localStorage.setItem('0.0.1/ad4m-token', 'old-version-jwt');
-      localStorage.setItem('0.0.1/ad4m-url', 'https://node.example:12000');
+      localStorage.setItem('0.10.2-staging.2/ad4m-token', 'old-version-jwt');
+      localStorage.setItem('0.10.2-staging.2/ad4m-url', 'https://node.example:12000');
       const conn = new Ad4mConnect(defaultOptions);
       expect(conn.token).toBe('old-version-jwt');
       expect(conn.url).toBe('https://node.example:12000');
       expect(getLocal('ad4m-token')).toBe('old-version-jwt');
     });
 
+    it('restores no session an earlier minor version stored: a minor upgrade starts logged out', () => {
+      localStorage.setItem('0.9.4/ad4m-token', 'old-minor-jwt');
+      localStorage.setItem('0.9.4/ad4m-url', 'https://node.example:12000');
+      const conn = new Ad4mConnect(defaultOptions);
+      expect(conn.token).toBe('');
+      expect(getLocal('ad4m-token')).toBeNull();
+    });
+
     it('restores no earlier session stored for another executor than the app names', () => {
-      localStorage.setItem('0.0.1/ad4m-token', 'old-executor-jwt');
-      localStorage.setItem('0.0.1/ad4m-url', 'https://old-node.example:12000');
+      localStorage.setItem('0.10.2-staging.2/ad4m-token', 'old-executor-jwt');
+      localStorage.setItem('0.10.2-staging.2/ad4m-url', 'https://old-node.example:12000');
       const conn = new Ad4mConnect({ ...defaultOptions, url: 'https://new-node.example:12000' });
       expect(conn.token).toBe('');
       expect(conn.url).toBe('https://new-node.example:12000');
@@ -133,8 +144,8 @@ describe('Ad4mConnect', () => {
     });
 
     it('restores an earlier session stored for the executor the app names', () => {
-      localStorage.setItem('0.0.1/ad4m-token', 'same-executor-jwt');
-      localStorage.setItem('0.0.1/ad4m-url', 'https://node.example:12000');
+      localStorage.setItem('0.10.2-staging.2/ad4m-token', 'same-executor-jwt');
+      localStorage.setItem('0.10.2-staging.2/ad4m-url', 'https://node.example:12000');
       const conn = new Ad4mConnect({ ...defaultOptions, url: 'https://node.example:12000' });
       expect(conn.token).toBe('same-executor-jwt');
     });
