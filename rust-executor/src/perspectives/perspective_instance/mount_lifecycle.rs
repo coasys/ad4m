@@ -101,6 +101,10 @@ impl MountSlot {
 pub(crate) struct MountLifecycles {
     slots: Mutex<HashMap<String, Arc<AsyncMutex<MountSlot>>>>,
     generations: AtomicU64,
+    /// Held from a mount's class ownership check through its shape
+    /// install (`install_mount_shapes`). Taken under a slot's lock, never
+    /// the other way round.
+    install: AsyncMutex<()>,
 }
 
 impl MountLifecycles {
@@ -121,6 +125,11 @@ impl MountLifecycles {
             })
             .clone();
         slot.lock_owned().await
+    }
+
+    /// The perspective's shape install lock (see `install`).
+    pub(crate) async fn install_lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.install.lock().await
     }
 
     /// Move `slot` to `phase` under a new generation; returns it.

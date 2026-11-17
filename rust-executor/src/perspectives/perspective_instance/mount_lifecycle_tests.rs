@@ -1,6 +1,7 @@
 //! The mount's lifecycle and the order of its applies: an unmount wins
 //! against every sync, delta and call result in flight; snapshots and
-//! deltas apply one at a time and never regress a record. The races stop one run at a chosen point with a
+//! deltas apply one at a time and never regress a record; a mount owns
+//! only the classes it installed. The races stop one run at a chosen point with a
 //! `mount_gates` gate, run the other side, then let it go.
 
 use super::mount_gates::gates;
@@ -237,4 +238,82 @@ async fn an_older_delta_after_a_newer_one_does_not_regress() {
     crate::perspectives::remove_perspective(&p.uuid).await;
     assert_eq!(instances.len(), 1, "{instances:?}");
     assert_eq!(instances[0]["title"], "new", "the older delta regressed t1");
+}
+
+// --- A mount owns only its own classes ----------------------------------------
+
+#[tokio::test]
+async fn mounting_over_an_existing_class_is_refused() {
+    let lang = load_mount_test_language().await;
+    let (mut p, _shapes, ctx) =
+        crate::perspectives::interpretation_test_support::setup_perspective_no_llm(&[]).await;
+    p.add_sdna(
+        "MountThing".to_string(),
+        String::new(),
+        SdnaType::SubjectClass,
+        Some(
+            json!({
+                "target_class": "todo://MountThing",
+                "properties": [{"path": "todo://title", "name": "title", "max_count": 1}]
+            })
+            .to_string(),
+        ),
+        &ctx,
+    )
+    .await
+    .unwrap();
+
+    let error = p.mount(&lang).await.unwrap_err();
+    assert!(error.to_string().contains("MountThing"), "{error}");
+    assert_eq!(
+        p.get_shape("MountThing").unwrap().target_class,
+        "todo://MountThing",
+        "the refused mount replaced the existing class"
+    );
+}
+
+#[tokio::test]
+async fn a_second_name_for_a_mounted_class_iri_is_refused() {
+    let lang = load_mount_test_language().await;
+    let lang2 = load_mount_test_language().await;
+    project(
+        &lang2,
+        "setShapes",
+        json!({"shapes": [{"name": "OtherThing", "target": "mounttest://Thing"}]}),
+    )
+    .await;
+    let (mut p, _ctx) = mounted(&lang).await;
+
+    let error = p.mount(&lang2).await.unwrap_err();
+    assert!(error.to_string().contains("mounttest://Thing"), "{error}");
+}
+
+#[tokio::test]
+async fn a_version_refresh_cannot_take_another_mounts_class() {
+    let lang = load_mount_test_language().await;
+    let lang2 = load_mount_test_language().await;
+    create(&lang, json!({"title": "a"})).await;
+    project(
+        &lang2,
+        "setShapes",
+        json!({"shapes": [{"name": "OtherThing", "target": "mounttest://Other"}]}),
+    )
+    .await;
+    let (mut p, _ctx) = mounted(&lang).await;
+    p.mount(&lang2).await.unwrap();
+
+    project(
+        &lang2,
+        "setShapes",
+        json!({"version": "3", "shapes": [
+            {"name": "OtherThing", "target": "mounttest://Other"},
+            {"name": "MountThing", "target": "mounttest://Stolen"}
+        ]}),
+    )
+    .await;
+    let error = p.sync_mount(&lang2).await.unwrap_err();
+    assert!(error.to_string().contains("MountThing"), "{error}");
+    let instances = things(&p).await;
+    assert_eq!(instances.len(), 1, "{instances:?}");
+    assert_eq!(instances[0]["id"], json!(format!("{lang}://t1")));
 }

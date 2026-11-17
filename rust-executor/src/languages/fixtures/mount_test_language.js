@@ -11,6 +11,9 @@ let counter = 0;
 // version reported by mountShapes(); setVersion changes it so a remount
 // can be told apart from the first install
 let mountVersion = "2";
+// the classes mountShapes() reports: [{ name, target }]; setShapes changes
+// them so tests can collide with another mount's names and class IRIs
+let shapeClasses = [{ name: CLASS, target: "mounttest://Thing" }];
 
 export async function init() {}
 export function isPublic() { return false; }
@@ -54,6 +57,14 @@ export function interactions(address) {
       // Change the version mountShapes() reports (tests re-install on version change).
       { label: "Set version", name: "setVersion", parameters: [],
         execute: async (params) => { mountVersion = plain(params).version; return true; } },
+      // Change the classes mountShapes() reports: { shapes: [{ name, target }], version }.
+      { label: "Set shapes", name: "setShapes", parameters: [],
+        execute: async (params) => {
+          const p = plain(params);
+          shapeClasses = p.shapes;
+          if (p.version !== undefined) mountVersion = p.version;
+          return true;
+        } },
       // Change a record "from outside" (like a stock Acorn user would). Emits a delta only if emit is true.
       { label: "Outside change", name: "outsideChange", parameters: [],
         execute: async (params) => {
@@ -101,14 +112,14 @@ export function mountShapes() {
   const update = [{ action: "call", source: "this", predicate: "update", target: "{}" }];
   return {
     version: mountVersion,
-    shapes: [{
-      name: CLASS,
+    shapes: shapeClasses.map(({ name, target }) => ({
+      name,
       shape: {
-        target_class: "mounttest://Thing",
-        constructor_actions: [{ action: "call", source: lang + "://class/" + CLASS, predicate: "create", target: "{}" }],
+        target_class: target,
+        constructor_actions: [{ action: "call", source: lang + "://class/" + name, predicate: "create", target: "{}" }],
         destructor_actions: [{ action: "call", source: "this", predicate: "delete", target: "{}" }],
         properties: [
-          { path: "rdf://type", name: "type", has_value: "mounttest://Thing", min_count: 1, max_count: 1 },
+          { path: "rdf://type", name: "type", has_value: target, min_count: 1, max_count: 1 },
           { path: "mounttest://title", name: "title", max_count: 1, writable: true, alias: { TextContent: "text" }, setter: update },
           { path: "mounttest://done", name: "done", max_count: 1, writable: true, setter: update },
           { path: "mounttest://tag", name: "tags", collection: true, datatype: "xsd://string", writable: true, setter: update, ordering: "linkedList" },
@@ -116,7 +127,7 @@ export function mountShapes() {
           { path: "ad4m://collection_order", name: "_collectionOrder" },
         ],
       },
-    }],
+    })),
   };
 }
 

@@ -10,8 +10,9 @@
 //!
 //! Ownership: every `Local` link whose source starts with `<lang>://`
 //! belongs to the mount — `unmount` deletes them all. The mount's own
-//! bookkeeping (the version and class-claim links under `<lang>://project`)
-//! is exempt from the snapshot sweep. The mount link itself is `Shared` so
+//! bookkeeping (the version link under `<lang>://project`) is exempt from
+//! the snapshot sweep. Which classes a mount owns is recorded outside its
+//! address space (`mount_classes`). The mount link itself is `Shared` so
 //! peers see it (design §5.2); `perspective.publishSnapshot` is
 //! unimplemented (api/perspectives_ws.rs), so no RPC ever exports the
 //! `Local` mirror.
@@ -44,11 +45,6 @@ const MOUNT_PROJECT_PATH: &str = "project";
 /// `<lang>://project -[ad4m://mount_shapes_version]-> literal:string:<v>`
 /// records which `mountShapes()` version is installed (design §2.4).
 const VERSION_PREDICATE: &str = "ad4m://mount_shapes_version";
-/// `<lang>://project -[ad4m://mounts_class]-> literal:string:<name>` per
-/// class the mount installed: the persistent record the one-mount-per-
-/// class-set check consults even when the owning language is not loaded.
-const CLASS_PREDICATE: &str = "ad4m://mounts_class";
-
 /// The interval between resync passes over a perspective's mounts
 /// (design §1.5: 15 s), in milliseconds. An `AtomicU64` so a test can
 /// shorten it through `set_mount_resync_interval_for_test`.
@@ -74,7 +70,7 @@ fn mount_target(lang: &str) -> String {
 /// Bookkeeping predicates never belong to a record, so the snapshot sweep
 /// and the per-address diff must leave them alone.
 fn is_bookkeeping(predicate: Option<&str>) -> bool {
-    matches!(predicate, Some(VERSION_PREDICATE) | Some(CLASS_PREDICATE))
+    predicate == Some(VERSION_PREDICATE)
 }
 
 impl PerspectiveInstance {
@@ -110,7 +106,6 @@ impl PerspectiveInstance {
     async fn mount_as(&mut self, lang_address: &str, generation: u64) -> Result<(), AnyError> {
         let controller = LanguageController::global_instance();
         let shapes = controller.mount_shapes(lang_address).await?;
-        self.refuse_class_collisions(lang_address, &shapes).await?;
         {
             let mut slot = self.mount_lifecycles.lock(lang_address).await;
             if slot.generation != generation {
@@ -489,69 +484,20 @@ impl PerspectiveInstance {
         log::debug!("Mount resync loop ended for perspective {}", uuid);
     }
 
-    /// One mount per class set: `mount` refuses when another mounted
-    /// language claims a class name `shapes` brings (design §2.2).
-    async fn refuse_class_collisions(
-        &self,
-        lang_address: &str,
-        shapes: &MountShapes,
-    ) -> Result<(), AnyError> {
-        let new_names: HashSet<&str> = shapes.shapes.iter().map(|s| s.name.as_str()).collect();
-        for other in self.mounts().await? {
-            if other == lang_address {
-                continue;
-            }
-            let claimed = self.claimed_classes(&other).await?;
-            if let Some(name) = new_names.iter().find(|n| claimed.contains(**n)) {
-                return Err(anyhow!(
-                    "cannot mount {lang_address}: class {name} is already mounted by language {other} in this perspective"
-                ));
-            }
-        }
-        Ok(())
-    }
-
-    /// The class names `lang`'s mount installed, from the claim links it
-    /// wrote — the record that survives restarts and unloaded languages.
-    /// An empty answer falls back to asking the language itself.
-    async fn claimed_classes(&self, lang_address: &str) -> Result<HashSet<String>, AnyError> {
-        let links = self
-            .get_links(&LinkQuery {
-                source: Some(mount_target(lang_address)),
-                predicate: Some(CLASS_PREDICATE.to_string()),
-                ..Default::default()
-            })
-            .await?;
-        let mut names: HashSet<String> = links
-            .iter()
-            .filter_map(|l| match parse_literal_value(&l.data.target) {
-                Value::String(s) => Some(s),
-                _ => None,
-            })
-            .collect();
-        if names.is_empty()
-            && LanguageController::global_instance()
-                .is_language_loaded(lang_address)
-                .await
-        {
-            if let Ok(shapes) = LanguageController::global_instance()
-                .mount_shapes(lang_address)
-                .await
-            {
-                names = shapes.shapes.into_iter().map(|s| s.name).collect();
-            }
-        }
-        Ok(names)
-    }
-
     /// Install `shapes` through `add_sdna_batch` (one SubjectClass per
-    /// shape, Shared as `add_sdna` writes them) and rewrite the mount's
-    /// bookkeeping: the new version link and a class-claim link per shape.
+    /// shape, Shared as `add_sdna` writes them) once `check_class_ownership`
+    /// lets this language install them, claim the classes, and rewrite the
+    /// mount's version link. The check and the install hold the
+    /// perspective's install lock, so two mounts cannot both pass the check
+    /// for the same class.
     async fn install_mount_shapes(
         &mut self,
         lang_address: &str,
         shapes: &MountShapes,
     ) -> Result<(), AnyError> {
+        let lifecycles = self.mount_lifecycles.clone();
+        let _installing = lifecycles.install_lock().await;
+        self.check_class_ownership(lang_address, shapes).await?;
         let context = AgentContext::main_agent();
         let entries = shapes
             .shapes
@@ -568,21 +514,15 @@ impl PerspectiveInstance {
         self.add_sdna_batch(entries, &context).await?;
         self.alias_mount_class_names(shapes).await?;
 
+        self.claim_mount_classes(lang_address, shapes).await?;
+
         self.remove_bookkeeping(lang_address).await?;
-        let mut links = Vec::with_capacity(shapes.shapes.len() + 1);
-        links.push(Link {
+        let version = Link {
             source: mount_target(lang_address),
             predicate: Some(VERSION_PREDICATE.to_string()),
             target: literal_target(&Value::String(shapes.version.clone()))?,
-        });
-        for shape in &shapes.shapes {
-            links.push(Link {
-                source: mount_target(lang_address),
-                predicate: Some(CLASS_PREDICATE.to_string()),
-                target: literal_target(&Value::String(shape.name.clone()))?,
-            });
-        }
-        self.add_links(links, LinkStatus::Local, None, &context)
+        };
+        self.add_links(vec![version], LinkStatus::Local, None, &context)
             .await?;
         Ok(())
     }
