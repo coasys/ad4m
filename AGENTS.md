@@ -176,8 +176,10 @@ trend page. The full contract is the header of `scripts/perf/perf.mjs`.
   pushes. When another run pushed first, it fetches, puts its lines on the new
   head and pushes again, up to 5 times. git runs with hooks off and its own ssh
   command (no `~/.ssh/config`): the runner also runs PR jobs, so nothing of the
-  history, and not the key, stays on it; `perf_finish`'s last step deletes the
-  key and any clone left. Env: `PERF_HISTORY_REPO`, `PERF_HISTORY_BRANCH`,
+  history, and not the key, stays on it. `scripts/perf/history-key` moves the
+  key out of `~/.ssh` (`perf_history_key`) and deletes it, by fixed paths, with
+  any clone left (`perf_history_cleanup`, the end of `perf_finish`). A job with
+  its own record step calls those two commands. Env: `PERF_HISTORY_REPO`, `PERF_HISTORY_BRANCH`,
   `PERF_HISTORY_SUBDIR`, `PERF_HISTORY_SSH_KEY`.
 - **The default repository is written only when `CI=true`.** For a local run,
   set `PERF_HISTORY_REPO` to a local bare repo. Never push test runs to the
