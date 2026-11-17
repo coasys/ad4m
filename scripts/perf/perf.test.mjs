@@ -380,6 +380,16 @@ describe("report", () => {
     assert.equal(evaluateRun(records, [], "r10", []).results[0].median, s.baseline);
   });
 
+  test("an accepted latest run still shows the baseline check judged it by", () => {
+    const rec = (d, value) => ({ job: "j", metric: "m", value, unit: "ms", better: "lower", params: {}, run_id: `r${d}`, run_at: `2026-11-${String(d).padStart(2, "0")}T00:00:00Z`, status: "passed", ad4m_sha: SHA });
+    const records = [1, 2, 3].map((d) => rec(d, 100)).concat([rec(4, 300)]);
+    const checks = [{ run_id: "r4", verdict: "accepted" }];
+    const [s] = seriesOf(records, checks, 90);
+    // r4's accept resets the baselines after it; r4 itself was judged by r1..r3.
+    assert.equal(s.baseline, 100);
+    assert.equal(evaluateRun(records, checks, "r4", []).results[0].median, s.baseline);
+  });
+
   test("draws one chart per series with commit links", () => {
     const h = history();
     for (let d = 1; d <= 3; d++) recordValue(h, `r${d}`, d, 100 + d);
