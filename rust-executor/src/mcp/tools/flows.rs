@@ -115,6 +115,18 @@ impl Ad4mMcpHandler {
     pub async fn add_flow(&self, params: Parameters<AddFlowParams>) -> String {
         let p = &params.0;
 
+        // The method's guard answers before the caller's own arguments are read: a
+        // perspective the caller may not write is refused, not parsed against.
+        if let Err(e) = self
+            .admit_method(
+                "perspective.addLinks",
+                &json!({ "uuid": p.perspective_id, "links": [], "status": "shared" }),
+            )
+            .await
+        {
+            return method_error(e);
+        }
+
         let links = match flow_registration_links(&p.shacl_json, &p.flow_name) {
             Ok(links) => links,
             Err(e) => return format!("Error adding flow: {e:#}"),
