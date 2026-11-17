@@ -1,5 +1,5 @@
 //! Which mount owns which class (design §2.2: one mount per class set).
-//! A mount claims every class it installs with `Local` claim links outside
+//! A mount claims every class it installs with links it writes outside
 //! its own address space, so they outlive an unmount and a restart:
 //!
 //! ```text
@@ -21,11 +21,11 @@ use deno_core::error::AnyError;
 use serde_json::Value;
 
 use super::PerspectiveInstance;
-use crate::agent::AgentContext;
 use crate::languages::mount_types::MountShapes;
 use crate::languages::LanguageController;
 use crate::perspectives::model_query::utils::parse_literal_value;
-use crate::types::{Link, LinkQuery, LinkStatus};
+use super::mount_links::is_mount_written;
+use crate::types::{Link, LinkQuery};
 
 const CLAIM_SOURCE_PREFIX: &str = "ad4m://mounted_class/";
 const CLAIM_OWNER: &str = "ad4m://mounted_by";
@@ -179,8 +179,7 @@ impl PerspectiveInstance {
             }
         }
         if !links.is_empty() {
-            self.add_links(links, LinkStatus::Local, None, &AgentContext::main_agent())
-                .await?;
+            self.add_mount_links(links).await?;
         }
         Ok(())
     }
@@ -193,7 +192,7 @@ impl PerspectiveInstance {
         };
         let mut targets: HashMap<String, String> = HashMap::new();
         for link in self.get_links(&by_predicate(CLAIM_TARGET)).await? {
-            if link.status == Some(LinkStatus::Local) {
+            if is_mount_written(&link) {
                 targets.insert(link.data.source, link.data.target);
             }
         }
@@ -201,7 +200,7 @@ impl PerspectiveInstance {
             .get_links(&by_predicate(CLAIM_OWNER))
             .await?
             .into_iter()
-            .filter(|l| l.status == Some(LinkStatus::Local))
+            .filter(is_mount_written)
             .filter_map(|l| {
                 let name = l.data.source.strip_prefix(CLAIM_SOURCE_PREFIX)?.to_string();
                 let (owner, _) = LanguageController::parse_expr_url(&l.data.target).ok()?;
