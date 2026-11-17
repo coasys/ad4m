@@ -86,7 +86,7 @@ export function libtestTimer() {
       if (start) {
         close(at);
         const rest = start[2].trim();
-        current = { name: start[1], state: rest === "ignored" ? "ignored" : "passed", at };
+        current = { name: start[1], state: rest.startsWith("ignored") ? "ignored" : "passed", at };
         tests.push(current);
         if (rest.startsWith("ignored")) close(at);
         return;

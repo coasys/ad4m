@@ -11,7 +11,7 @@ import os from "node:os";
 import path from "node:path";
 import { after, describe, test } from "node:test";
 
-import { evaluateRun, judge, limitsFor, loadThresholds, parseResults, verdicts } from "./lib.mjs";
+import { cleanGitEnv, evaluateRun, judge, limitsFor, loadThresholds, parseResults, verdicts } from "./lib.mjs";
 import { renderReport, seriesOf } from "./report.mjs";
 
 const HERE = path.dirname(new URL(import.meta.url).pathname);
@@ -34,14 +34,16 @@ const ENV = Object.fromEntries(
 
 const jsonl = (text) => (text ?? "").split("\n").filter(Boolean).map((l) => JSON.parse(l));
 
+const GIT_ENV = cleanGitEnv(process.env);
+
 /** A fresh history: an empty bare repository, and the env that points the commands at it. */
 function history(extra = {}) {
   const root = tmp();
   const bare = path.join(root, "history.git");
-  spawnSync("git", ["init", "-q", "--bare", "-b", "main", bare]);
+  spawnSync("git", ["init", "-q", "--bare", "-b", "main", bare], { env: GIT_ENV });
   const env = { ...ENV, PERF_HISTORY_REPO: bare, TMPDIR: root, ...extra };
   const read = (file) => {
-    const r = spawnSync("git", ["-C", bare, "show", `main:nightly/${file}`], { encoding: "utf8" });
+    const r = spawnSync("git", ["-C", bare, "show", `main:nightly/${file}`], { encoding: "utf8", env: GIT_ENV });
     return r.status === 0 ? jsonl(r.stdout) : [];
   };
   return { env, records: (job = "j") => read(`${job}.jsonl`), checks: (job = "j") => read(`${job}.checks.jsonl`) };

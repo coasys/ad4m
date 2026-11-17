@@ -23,7 +23,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { appendLines, checkJob } from "./lib.mjs";
+import { appendLines, checkJob, cleanGitEnv } from "./lib.mjs";
 
 export const DEFAULT_REPO = "git@github.com:coasys/ad4m-wind-tunnel.git";
 const PUSH_ATTEMPTS = 5;
@@ -48,8 +48,9 @@ export function openStore(job, env = process.env) {
   // -F /dev/null: no ~/.ssh/config. BatchMode: no prompt for a passphrase or a host key.
   const ssh = ["ssh", "-F", "/dev/null", "-o", "BatchMode=yes", ...(env.PERF_HISTORY_SSH_KEY ? ["-i", shellQuote(env.PERF_HISTORY_SSH_KEY), "-o", "IdentitiesOnly=yes"] : [])];
   const config = ["-c", "core.hooksPath=/dev/null", "-c", `core.sshCommand=${ssh.join(" ")}`];
-  // GIT_SSH_COMMAND and GIT_SSH would win over core.sshCommand.
-  const { GIT_SSH_COMMAND, GIT_SSH, ...rest } = env;
+  // GIT_SSH_COMMAND and GIT_SSH would win over core.sshCommand; GIT_DIR & friends would point
+  // git at the checkout that set them (cleanGitEnv).
+  const { GIT_SSH_COMMAND, GIT_SSH, ...rest } = cleanGitEnv(env);
   const gitEnv = { ...rest, GIT_TERMINAL_PROMPT: "0" };
   // Made at the first read or write: a store that is never synced leaves nothing behind.
   let clone = null;

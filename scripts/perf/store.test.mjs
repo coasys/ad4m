@@ -10,6 +10,7 @@ import os from "node:os";
 import path from "node:path";
 import { after, test } from "node:test";
 
+import { cleanGitEnv } from "./lib.mjs";
 import { DEFAULT_REPO, openStore } from "./store.mjs";
 
 const HERE = path.dirname(new URL(import.meta.url).pathname);
@@ -28,8 +29,10 @@ const BASE_ENV = Object.fromEntries(
   Object.entries(process.env).filter(([k]) => !k.startsWith("CIRCLE") && !k.startsWith("PERF_") && k !== "WE_SHA" && k !== "CI"),
 );
 
+const GIT_ENV = cleanGitEnv(process.env);
+
 const git = (cwd, ...args) => {
-  const r = spawnSync("git", ["-C", cwd, ...args], { encoding: "utf8" });
+  const r = spawnSync("git", ["-C", cwd, ...args], { encoding: "utf8", env: GIT_ENV });
   assert.equal(r.status, 0, `git ${args.join(" ")}: ${r.stderr}`);
   return r.stdout.trim();
 };
@@ -38,9 +41,9 @@ const git = (cwd, ...args) => {
 function bareRepo() {
   const root = tmp();
   const bare = path.join(root, "history.git");
-  spawnSync("git", ["init", "-q", "--bare", "-b", "main", bare]);
+  spawnSync("git", ["init", "-q", "--bare", "-b", "main", bare], { env: GIT_ENV });
   const seed = path.join(root, "seed");
-  spawnSync("git", ["clone", "-q", bare, seed]);
+  spawnSync("git", ["clone", "-q", bare, seed], { env: GIT_ENV });
   fs.writeFileSync(path.join(seed, "README.md"), "wind tunnel\n");
   git(seed, "add", "README.md");
   git(seed, "-c", "user.name=t", "-c", "user.email=t@t.invalid", "commit", "-q", "-m", "init");
@@ -49,7 +52,7 @@ function bareRepo() {
 }
 
 const show = (bare, file) => {
-  const r = spawnSync("git", ["-C", bare, "show", `main:${file}`], { encoding: "utf8" });
+  const r = spawnSync("git", ["-C", bare, "show", `main:${file}`], { encoding: "utf8", env: GIT_ENV });
   return r.status === 0 ? r.stdout : null;
 };
 const jsonl = (text) => (text ?? "").split("\n").filter(Boolean).map((l) => JSON.parse(l));
@@ -93,9 +96,9 @@ test("the branch and subdir come from PERF_HISTORY_BRANCH and PERF_HISTORY_SUBDI
   const { root, bare } = bareRepo();
   const env = envFor(bare, path.join(root, "clone"), { PERF_HISTORY_BRANCH: "perf", PERF_HISTORY_SUBDIR: "runs" });
   assert.equal(record(env, "run-1", 100, 1).code, 0);
-  const r = spawnSync("git", ["-C", bare, "show", "perf:runs/j.jsonl"], { encoding: "utf8" });
+  const r = spawnSync("git", ["-C", bare, "show", "perf:runs/j.jsonl"], { encoding: "utf8", env: GIT_ENV });
   assert.equal(jsonl(r.stdout).length, 1);
-  assert.equal(spawnSync("git", ["-C", bare, "show", "perf:README.md"]).status, 128, "the new branch has only the history");
+  assert.equal(spawnSync("git", ["-C", bare, "show", "perf:README.md"], { env: GIT_ENV }).status, 128, "the new branch has only the history");
 });
 
 test("a run that loses the push race fetches the winner's head and pushes on top; every line lands once", () => {

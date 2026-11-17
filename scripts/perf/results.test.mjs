@@ -78,17 +78,30 @@ test("libtest-timer times a test from its newline-free `test <name> ... ` to its
   const p = spawn(process.execPath, [path.join(HERE, "libtest-timer.mjs"), out], { stdio: ["pipe", "pipe", "inherit"] });
   let passed = "";
   p.stdout.on("data", (d) => (passed += d));
-  const exited = new Promise((resolve) => p.on("exit", resolve));
+  // stdout can still be open at `exit`; `close` means the passthrough is complete.
+  const closed = new Promise((resolve) => p.on("close", resolve));
   const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const write = (s) => new Promise((resolve) => p.stdin.write(s, resolve));
+  const seen = (s) =>
+    new Promise((resolve) => {
+      const on = () => {
+        if (passed.includes(s)) {
+          p.stdout.off("data", on);
+          resolve();
+        }
+      };
+      p.stdout.on("data", on);
+      on();
+    });
   // libtest flushes the start of each test's line, then runs it, then writes the outcome.
   await write("running 2 tests\ntest a::slow ... ");
+  await seen("test a::slow ... ");
   await pause(600);
   await write("ok\ntest a::fast ... ");
   await pause(50);
   await write("ok\n\ntest result: ok. 2 passed\n");
   p.stdin.end();
-  assert.equal(await exited, 0);
+  assert.equal(await closed, 0);
   assert.equal(passed, "running 2 tests\ntest a::slow ... ok\ntest a::fast ... ok\n\ntest result: ok. 2 passed\n");
   const doc = JSON.parse(fs.readFileSync(out, "utf8"));
   const [slow, fast] = doc.tests;
@@ -111,6 +124,18 @@ test("libtest-timer: output after a started test's `... ` keeps it running to th
   assert.deepEqual(timer.finish(1200).tests, [
     { name: "a::one", state: "passed", duration_ms: 900 },
     { name: "a::two", state: "ignored", duration_ms: 0 },
+  ]);
+});
+
+test("libtest-timer: a whole `test <name> ... ignored, <reason>` line is ignored too, whatever the chunking", () => {
+  const timer = libtestTimer();
+  timer.line("running 2 tests", 0);
+  timer.line("test a ... ignored, slow", 100);
+  timer.line("test b ... ok", 200);
+  timer.line("test result: ok. 1 passed; 1 ignored", 300);
+  assert.deepEqual(timer.finish(400).tests, [
+    { name: "a", state: "ignored", duration_ms: 0 },
+    { name: "b", state: "passed", duration_ms: 100 },
   ]);
 });
 

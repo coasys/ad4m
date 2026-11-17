@@ -110,6 +110,16 @@ export function readLines(file) {
     });
 }
 
+/**
+ * `env` without the variables that would point a spawned git at another repository or index
+ * (a CI step's own checkout exports them): every git call this tool makes gets this env.
+ */
+export function cleanGitEnv(env) {
+  const out = { ...env };
+  for (const k of ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY"]) delete out[k];
+  return out;
+}
+
 // ---- thresholds.json: the only place for per-metric limits ---------------------------------
 
 const LIMIT_KEYS = ["factor", "min_delta", "ceiling", "floor"];
