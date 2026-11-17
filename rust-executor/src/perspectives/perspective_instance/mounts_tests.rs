@@ -77,6 +77,16 @@ async fn create(lang: &str, params: Value) {
         .unwrap();
 }
 
+/// Every call the language has served, in order: `{address, name, params}`.
+async fn calls(lang: &str) -> Vec<Value> {
+    interact(&format!("{lang}://project"), "calls", json!({}))
+        .await
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .clone()
+}
+
 /// Every stored link whose source sits under `lang`.
 async fn lang_links(p: &PerspectiveInstance, lang: &str) -> Vec<DecoratedLinkExpression> {
     let prefix = format!("{lang}://");
@@ -600,4 +610,147 @@ async fn a_delta_reaches_every_perspective_that_mounts_the_language() {
 
     crate::perspectives::remove_perspective(&p1.uuid).await;
     crate::perspectives::remove_perspective(&p2.uuid).await;
+}
+
+/// `model_query` instances of `class_name` parsed to JSON (the `things`
+/// helper for one class).
+async fn query_instances(p: &PerspectiveInstance, class_name: &str) -> Vec<Value> {
+    let result = p
+        .model_query(class_name, UNVERIFIED)
+        .await
+        .expect("model_query");
+    serde_json::from_str::<Value>(&result).unwrap()["instances"]
+        .as_array()
+        .unwrap()
+        .clone()
+}
+
+/// Design §3.5: a mounted record reads through the built-in abstract class
+/// `ad4m://TextContent` — `MountThing.title` answers to `text` through the
+/// shape's `TextContent` alias.
+#[tokio::test]
+async fn mounted_records_read_as_text_content() {
+    let lang = load_mount_test_language().await;
+    create(&lang, json!({"title": "hello"})).await;
+    let (p, _ctx) = mounted(&lang).await;
+
+    let instances = query_instances(&p, "ad4m://TextContent").await;
+    let row = instances
+        .iter()
+        .find(|i| i["id"] == json!(format!("{lang}://t1")))
+        .unwrap_or_else(|| panic!("the mounted record is not a TextContent row: {instances:?}"));
+    assert_eq!(row["text"], "hello", "{row}");
+}
+
+/// The break test of design §3.5: a write through `ad4m://TextContent`
+/// reaches the language as one `update` call keyed by the *concrete*
+/// property name (`title`, not `text`), and the call's delta lands in the
+/// store without a `sync_mount`. Passing the abstract name `text` to the
+/// call turns this red.
+#[tokio::test]
+async fn a_text_content_write_is_one_call_with_the_concrete_key() {
+    let lang = load_mount_test_language().await;
+    create(&lang, json!({"title": "hello"})).await;
+    let (mut p, ctx) = mounted(&lang).await;
+
+    p.update_subject(
+        class("ad4m://TextContent"),
+        format!("{lang}://t1"),
+        json!({"text": "bye"}),
+        None,
+        &ctx,
+    )
+    .await
+    .unwrap();
+
+    let calls = calls(&lang).await;
+    let updates: Vec<&Value> = calls.iter().filter(|c| c["name"] == "update").collect();
+    assert_eq!(updates.len(), 1, "one grouped update call: {calls:?}");
+    assert_eq!(updates[0]["address"], "t1", "{calls:?}");
+    assert_eq!(
+        updates[0]["params"],
+        json!({"title": "bye"}),
+        "the call's params must key the concrete name `title`, not `text`: {calls:?}"
+    );
+
+    let instances = things(&p).await;
+    assert_eq!(instances.len(), 1, "{instances:?}");
+    assert_eq!(
+        instances[0]["title"], "bye",
+        "the call's delta was applied without a sync_mount"
+    );
+}
+
+/// Two writes through `ad4m://TextContent` are two calls, applied in order.
+#[tokio::test]
+async fn two_writes_through_text_content_in_a_row() {
+    let lang = load_mount_test_language().await;
+    create(&lang, json!({"title": "hello"})).await;
+    let (mut p, ctx) = mounted(&lang).await;
+
+    for text in ["a", "b"] {
+        p.update_subject(
+            class("ad4m://TextContent"),
+            format!("{lang}://t1"),
+            json!({"text": text}),
+            None,
+            &ctx,
+        )
+        .await
+        .unwrap();
+    }
+
+    let calls = calls(&lang).await;
+    let updates: Vec<&Value> = calls.iter().filter(|c| c["name"] == "update").collect();
+    assert_eq!(updates.len(), 2, "{calls:?}");
+    assert_eq!(updates[0]["params"], json!({"title": "a"}));
+    assert_eq!(updates[1]["params"], json!({"title": "b"}));
+
+    let instances = things(&p).await;
+    assert_eq!(instances[0]["title"], "b", "{instances:?}");
+}
+
+/// `MountThing.children` is a `mounttest://child` relation aliased to
+/// `Container.children`: a mounted record holding a child reads through
+/// `ad4m://Container`.
+#[tokio::test]
+async fn mounted_records_read_as_containers() {
+    let lang = load_mount_test_language().await;
+    create(
+        &lang,
+        json!({"title": "parent", "children": [format!("{lang}://t2")]}),
+    )
+    .await;
+    create(&lang, json!({"title": "kid"})).await;
+    let (p, _ctx) = mounted(&lang).await;
+
+    let instances = query_instances(&p, "ad4m://Container").await;
+    let row = instances
+        .iter()
+        .find(|i| i["id"] == json!(format!("{lang}://t1")))
+        .unwrap_or_else(|| panic!("the mounted record is not a Container row: {instances:?}"));
+    assert_eq!(row["children"], json!([format!("{lang}://t2")]), "{row}");
+}
+
+/// `ad4m://TextContent` names what a record has, not what it is: creating
+/// through it is refused (`refuse_abstract_create`) and no call is made.
+#[tokio::test]
+async fn creating_through_text_content_is_still_refused() {
+    let lang = load_mount_test_language().await;
+    create(&lang, json!({"title": "hello"})).await;
+    let (mut p, ctx) = mounted(&lang).await;
+
+    let before = calls(&lang).await;
+    let err = p
+        .create_subject(
+            class("ad4m://TextContent"),
+            "ignored".to_string(),
+            Some(json!({"text": "new"})),
+            None,
+            &ctx,
+        )
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("abstract class"), "{err}");
+    assert_eq!(calls(&lang).await, before, "a refused create made a call");
 }
