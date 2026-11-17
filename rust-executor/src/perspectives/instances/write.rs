@@ -14,7 +14,7 @@
 //! batch's staged work (`get_links_effective`); instance existence still reads committed state
 //! only, so create-then-update / -remove of a new instance in one batch fails `notFound`.
 
-use super::validate::resolve_collection;
+use super::validate::{resolve_collection, value_text};
 use super::{
     check_setters, class_properties, coerce_scalar, decoded_literal, fetch_instance,
     generate_instance_uri, instance_uri, link_target, property_target, property_value_target,
@@ -266,12 +266,34 @@ fn invalid(class_name: &str, errors: Vec<super::ValidationError>) -> InstanceErr
     }
 }
 
-/// Whether a stored collection link target denotes `wanted`. The target may be the item URI
+/// The texts a collection item is looked for by, each with its literal encoding: the text the
+/// caller gave and, when validation coerces it, the coerced value's — which is what
+/// `add_to_collection` stores, so `TRUE` finds a stored `true` and `+005` a stored `5`.
+fn item_spellings(given: &str, coerced: Option<&Value>) -> Vec<(String, String)> {
+    let mut texts = vec![given.to_string()];
+    if let Some(text) = coerced.map(value_text) {
+        if text != given {
+            texts.push(text);
+        }
+    }
+    texts
+        .into_iter()
+        .map(|text| {
+            let encoded = link_target(&text);
+            (text, encoded)
+        })
+        .collect()
+}
+
+/// Whether a stored collection link target denotes the item. The target may be the item URI
 /// itself (references), the literal-encoded form of a bare value, or a signed literal envelope
 /// whose payload is the value — accept all three spellings so the caller can pass back whatever
 /// a read showed them.
-fn target_matches(target: &str, wanted: &str, encoded: &str) -> bool {
-    target == wanted || target == encoded || decoded_literal(target) == wanted
+fn target_matches(target: &str, spellings: &[(String, String)]) -> bool {
+    let decoded = decoded_literal(target);
+    spellings
+        .iter()
+        .any(|(wanted, encoded)| target == wanted || target == encoded || decoded == *wanted)
 }
 
 /// Create an instance of a subject class, its collection items and its parent link, in one
@@ -585,7 +607,7 @@ pub async fn add_to_collection(
     // already in it — on the batch's effective graph, so a member the same batch dropped reads
     // as out and one it added reads as in.
     let wanted = params.item_uri.trim();
-    let encoded = link_target(wanted);
+    let spellings = item_spellings(wanted, Some(&coerced));
     let existing = perspective
         .get_links_effective(
             &LinkQuery {
@@ -607,7 +629,7 @@ pub async fn add_to_collection(
         })?;
     if existing
         .iter()
-        .any(|effective| target_matches(&effective.link.data.target, wanted, &encoded))
+        .any(|effective| target_matches(&effective.link.data.target, &spellings))
     {
         return Ok(CollectionItemAdded {
             class_name,
@@ -704,7 +726,10 @@ pub async fn remove_from_collection(
         })?;
 
     let wanted = params.item_uri.trim();
-    let encoded = link_target(wanted);
+    // Members are stored as the coerced value. A value validation refuses is still looked for
+    // as given: removal names what is there, it does not validate.
+    let coerced = coerce_scalar(info, &Value::String(params.item_uri.clone())).ok();
+    let spellings = item_spellings(wanted, coerced.as_ref());
     // The batch's effective graph, so a member the same batch dropped reads as out already
     // and one it added is found and removed.
     let links = perspective
@@ -732,7 +757,7 @@ pub async fn remove_from_collection(
         .collect();
     let mut removed = 0usize;
     for effective in links {
-        if !target_matches(&effective.link.data.target, wanted, &encoded) {
+        if !target_matches(&effective.link.data.target, &spellings) {
             continue;
         }
         let link = LinkExpression::from(effective.link);

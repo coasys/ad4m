@@ -25,6 +25,9 @@ pub mod error;
 pub mod validate;
 pub mod write;
 
+#[cfg(test)]
+mod tests;
+
 pub use error::{CascadeStep, InstanceError, WriteStep};
 pub(crate) use validate::coerce_scalar;
 pub use validate::{
