@@ -682,19 +682,18 @@ impl WsRpcClient {
                     backoff_delay_ms(failures, RECONNECT_BASE_DELAY_MS, RECONNECT_MAX_DELAY_MS);
                 tokio::time::sleep(Duration::from_millis(delay)).await;
 
-                let dial = tokio::time::timeout(
+                let dial = match tokio::time::timeout(
                     RECONNECT_HANDSHAKE_TIMEOUT,
                     connect_async_with_config(&shared.url, Some(ws_config()), false),
                 )
                 .await
-                .unwrap_or_else(|_| {
-                    Err(tokio_tungstenite::tungstenite::Error::Io(
-                        std::io::Error::new(
-                            std::io::ErrorKind::TimedOut,
-                            "WebSocket handshake timed out",
-                        ),
-                    ))
-                });
+                {
+                    Ok(dialled) => dialled.map_err(|e| anyhow!(e)),
+                    Err(_) => Err(anyhow!(
+                        "WebSocket handshake timed out after {}ms",
+                        RECONNECT_HANDSHAKE_TIMEOUT.as_millis()
+                    )),
+                };
                 match dial {
                     Ok((ws_stream, _)) => {
                         let (mut write, read) = ws_stream.split();
