@@ -14,7 +14,17 @@ export function seriesOf(records, checks, runs) {
   const regressedIn = new Map(checks.filter((c) => c.run_id).map((c) => [c.run_id, new Set((c.regressions ?? []).map(seriesKey))]));
   const runOrder = [...new Map(records.map((r) => [r.run_id, r.run_at])).entries()].sort((a, b) => Date.parse(a[1]) - Date.parse(b[1]));
   const keep = new Set(runOrder.slice(-runs).map(([id]) => id));
-  const passing = new Set(passingRuns(records, verdictOf).map((r) => r.run_id));
+  // The runs a baseline may use, as check picks them: among the runs before the judged one (so an
+  // accepted latest run resets the baseline after itself, not before). By run_at, as most series
+  // end at the same run.
+  const passingBefore = new Map();
+  const passing = (at) => {
+    if (!passingBefore.has(at)) {
+      const earlier = records.filter((r) => Date.parse(r.run_at) < at);
+      passingBefore.set(at, new Set(passingRuns(earlier, verdictOf).map((r) => r.run_id)));
+    }
+    return passingBefore.get(at);
+  };
   const map = new Map();
   for (const r of records) {
     const key = seriesKey(r);
@@ -29,7 +39,8 @@ export function seriesOf(records, checks, runs) {
     s.points = all.filter((p) => keep.has(p.run_id));
     if (s.points.length === 0) continue;
     s.last = all.at(-1);
-    s.baseline = median(all.filter((p) => p !== s.last && passing.has(p.run_id)).slice(-7).map((p) => p.value));
+    const before = passing(Date.parse(s.last.run_at));
+    s.baseline = median(all.filter((p) => before.has(p.run_id)).slice(-7).map((p) => p.value));
     out.push(s);
   }
   return out.sort((a, b) => a.metric.localeCompare(b.metric) || paramsKey(a.params).localeCompare(paramsKey(b.params)));
