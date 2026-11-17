@@ -1164,3 +1164,94 @@ async fn a_model_becoming_ready_wakes_a_loop_waiting_for_one() {
         .expect("teardown ends the loop promptly")
         .expect("loop task");
 }
+
+/// Lal's P2-3: a turn that arrives late, stamped before the turns already
+/// read, must sit where a fresh read of the scope query (`ORDER BY
+/// ?timestamp`) puts it, so turns are queued, and batched, in the same order.
+/// The turns are held back (deferred) until all four are read, so the queue
+/// is built from the transcript's order alone: watcher A reads three turns,
+/// then merges the late one; watcher B reads all four at once.
+#[tokio::test]
+async fn a_late_older_turn_is_merged_where_a_fresh_read_puts_it() {
+    use super::watcher::turn_id;
+
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+    let signer = crate::agent::signatures::TestSigner::generate();
+    let start = chrono::Utc::now() - chrono::Duration::minutes(10);
+    let links: Vec<_> = (0..4)
+        .map(|i| {
+            body_link(
+                &signer,
+                &format!("msg://{i}"),
+                &format!("turn {i}"),
+                start + chrono::Duration::seconds(i),
+            )
+        })
+        .collect();
+    let ids: Vec<String> = links
+        .iter()
+        .enumerate()
+        .map(|(i, l)| turn_id(&l.author, &format!("turn {i}"), &l.timestamp))
+        .collect();
+    // Turns 1 to 3 first; turn 0, the oldest, arrives late.
+    for l in &links[1..] {
+        p.sparql_store.add_link(l).expect("link");
+    }
+    let cfg = config("ordered", 600_000, None);
+    write_processor(&mut p, &cfg, Some(false), &ctx)
+        .await
+        .expect("write_processor");
+
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let mut merged = WatcherState::new();
+    merged.defer_turns("ordered", &ids, now_ms, 10_000);
+    p.run_auto_processor_tick(&mut merged, now_ms, &ctx).await;
+
+    p.sparql_store.add_link(&links[0]).expect("the late turn");
+    p.run_auto_processor_tick(&mut merged, now_ms + 500, &ctx)
+        .await;
+    assert!(
+        p.sparql_store
+            .queries_run()
+            .last()
+            .is_some_and(|q| q.contains("VALUES")),
+        "the late turn was merged from a read of what was added"
+    );
+
+    let mut fresh = WatcherState::new();
+    fresh.defer_turns("ordered", &ids, now_ms, 10_000);
+    p.run_auto_processor_tick(&mut fresh, now_ms + 500, &ctx)
+        .await;
+
+    let order = |w: &WatcherState| -> Vec<String> {
+        let (_, turns) = w.reads.transcript(&cfg).expect("a kept read");
+        turns.iter().map(|t| t.id().to_string()).collect()
+    };
+    assert_eq!(order(&merged), ids, "the merged read is in timestamp order");
+    assert_eq!(order(&merged), order(&fresh));
+
+    // The deferral ends: both queue the four turns in transcript order.
+    for w in [&mut merged, &mut fresh] {
+        p.run_auto_processor_tick(w, now_ms + 20_000, &ctx).await;
+    }
+    let queued = |w: &WatcherState| -> Vec<String> {
+        w.pending_for("ordered")
+            .map(|e| e.items.iter().map(|t| t.id.clone()).collect())
+            .unwrap_or_default()
+    };
+    assert_eq!(queued(&merged), ids);
+    assert_eq!(queued(&merged), queued(&fresh));
+    let drain = AutoProcessorConfig {
+        debounce_ms: 0,
+        batch_max: 2,
+        ..cfg.clone()
+    };
+    let batch_ids = |b: Option<Vec<PendingTurn>>| -> Vec<String> {
+        b.expect("a batch").into_iter().map(|t| t.id).collect()
+    };
+    assert_eq!(
+        batch_ids(merged.drain_ready_batch(&drain, now_ms + 20_500)),
+        batch_ids(fresh.drain_ready_batch(&drain, now_ms + 20_500)),
+        "the first FIFO batch is the fresh read's"
+    );
+}

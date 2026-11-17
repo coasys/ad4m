@@ -30,6 +30,7 @@ use crate::types::{Link, LinkStatus};
 use super::claim::{batch_key, confirm_claim, renew_claim, settle_claim, try_claim, ClaimOutcome};
 use super::config::AutoProcessorConfig;
 use super::cursor::ProcessedSource;
+use super::delta_read::{transcript_order, TranscriptOrder};
 use super::events::{
     emit, emit_neighbourhood_state, AutoProcessorEvent, AutoProcessorNeighbourhoodState,
     AutoProcessorStep, NeighbourhoodPhase,
@@ -343,10 +344,12 @@ impl TickReads {
     }
 
     /// Bring the kept transcript of `cfg` up to `generation` with the turns
-    /// the links added since gave its scope query (`gained`): those it does
-    /// not hold yet are appended, in the order read. A kept turn that is no
-    /// longer `queueable` drops its text, as a fresh read would keep it.
-    /// Without a kept transcript this is [`Self::set_transcript`].
+    /// the links added since gave its scope query (`gained`): each it does not
+    /// hold yet goes where [`Self::set_transcript`] would put it over the same
+    /// turns (in timestamp order for `ORDER BY ?timestamp`, see
+    /// [`TranscriptOrder`]; appended for a query without `ORDER BY`). A kept
+    /// turn that is no longer `queueable` drops its text, as a fresh read
+    /// would keep it. Without a kept transcript this is `set_transcript`.
     pub(crate) fn merge_transcript(
         &mut self,
         cfg: &AutoProcessorConfig,
@@ -373,10 +376,21 @@ impl TickReads {
             }
         }
         if !gained.is_empty() {
+            let order = transcript_order(&cfg.source_scope_query);
             let mut known: HashSet<String> = turns.iter().map(|t| t.id().to_string()).collect();
             for t in gained {
                 if known.insert(t.id.clone()) {
-                    turns.push(cached(t, &queueable));
+                    let turn = cached(t, &queueable);
+                    // Where a fresh read, sorted the same way, puts it.
+                    let at = match order {
+                        Some(TranscriptOrder::Timestamp { descending }) => {
+                            turns.partition_point(|k| {
+                                transcript_cmp(k, &turn, descending) == std::cmp::Ordering::Less
+                            })
+                        }
+                        _ => turns.len(),
+                    };
+                    turns.insert(at, turn);
                 }
             }
         }
@@ -386,7 +400,8 @@ impl TickReads {
         turns
     }
 
-    /// Keep `turns`, with the text only of those `queueable` accepts.
+    /// Keep `turns`, with the text only of those `queueable` accepts, one per
+    /// turn id, sorted as [`TranscriptOrder`] says for the scope query.
     pub(crate) fn set_transcript(
         &mut self,
         cfg: &AutoProcessorConfig,
@@ -394,8 +409,18 @@ impl TickReads {
         turns: Vec<PendingTurn>,
         queueable: impl Fn(&str, &str) -> bool,
     ) -> Arc<Vec<CachedTurn>> {
-        let turns: Arc<Vec<CachedTurn>> =
-            Arc::new(turns.into_iter().map(|t| cached(t, &queueable)).collect());
+        let mut seen = HashSet::new();
+        let mut turns: Vec<CachedTurn> = turns
+            .into_iter()
+            .filter(|t| seen.insert(t.id.clone()))
+            .map(|t| cached(t, &queueable))
+            .collect();
+        if let Some(TranscriptOrder::Timestamp { descending }) =
+            transcript_order(&cfg.source_scope_query)
+        {
+            turns.sort_by(|a, b| transcript_cmp(a, b, descending));
+        }
+        let turns = Arc::new(turns);
         self.transcripts.insert(
             cfg.processor_id.clone(),
             (generation, cfg.source_scope_query.clone(), turns.clone()),
@@ -425,6 +450,17 @@ impl TickReads {
             .insert(processor_id.to_string(), (generation, rows.clone()));
         rows
     }
+}
+
+/// [`TranscriptOrder::Timestamp`]: by timestamp, then by turn id.
+fn transcript_cmp(a: &CachedTurn, b: &CachedTurn, descending: bool) -> std::cmp::Ordering {
+    let by_time = a.timestamp().cmp(b.timestamp());
+    let by_time = if descending {
+        by_time.reverse()
+    } else {
+        by_time
+    };
+    by_time.then_with(|| a.id().cmp(b.id()))
 }
 
 /// `turn` as [`TickReads`] keeps it: with its text only when `queueable`.

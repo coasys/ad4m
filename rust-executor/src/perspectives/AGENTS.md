@@ -83,7 +83,9 @@ or writes the graph. Split plan: spec items 3, 7, 8.
   per perspective and per online managed user). After writes that only added links, the tick
   reads only what they add to the kept transcript (`SparqlStore::additions_since`,
   `auto_processor/delta_read.rs`: the scope query with one triple pattern at a time restricted
-  by `VALUES` to the added terms) and merges it; a removal, a reload, a log that no longer reaches
+  by `VALUES` to the added terms) and merges it where a fresh read puts each turn (`ORDER BY
+  ?timestamp` transcripts are kept sorted by timestamp, then turn id; any other `ORDER BY` is read
+  whole: `delta_read::transcript_order`); a removal, a reload, a log that no longer reaches
   back (1024 links or 1024 writes; an `Other` write drops everything before it), or a scope query that is not monotone (`OPTIONAL`, `MINUS`, `EXISTS`,
   `LIMIT`, aggregates, paths) reads it whole. A new store write path must call
   `note_write(WriteDelta)`, `Added` only when it removed nothing and every reifier is new, or the

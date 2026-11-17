@@ -40,10 +40,61 @@ pub(crate) enum DeltaRead {
     Full,
 }
 
+/// The order a kept transcript holds its turns in, so a merge puts each
+/// gained turn where a fresh read puts it ([`transcript_order`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TranscriptOrder {
+    /// The query has no `ORDER BY`: SPARQL gives its rows no order, so a
+    /// fresh read's order is the engine's, and gained turns are appended.
+    Unordered,
+    /// `ORDER BY ?timestamp` (or `DESC(?timestamp)`): turns are kept sorted
+    /// by timestamp, then by turn id, a total order. A fresh read and a merge
+    /// both sort the same turns by it, so they agree turn for turn. It is
+    /// the query's own order wherever the query's is defined: timestamps are
+    /// stored as plain literals, which SPARQL orders by code point, as Rust
+    /// orders `str`; ties, which SPARQL leaves in no order, go by turn id.
+    Timestamp { descending: bool },
+}
+
+/// The order `scope_query`'s turns are kept in. `None` for an `ORDER BY` the
+/// kept transcript cannot reproduce (any key but `?timestamp` alone: a
+/// turn kept without its text has no `?text` or `?speaker` to sort by); such
+/// a query is always read whole ([`delta_query`] answers [`DeltaRead::Full`]).
+pub(crate) fn transcript_order(scope_query: &str) -> Option<TranscriptOrder> {
+    let Ok(Query::Select { pattern, .. }) = SparqlParser::new().parse_query(scope_query) else {
+        return Some(TranscriptOrder::Unordered);
+    };
+    order_of(&pattern)
+}
+
+fn order_of(pattern: &GraphPattern) -> Option<TranscriptOrder> {
+    use spargebra::algebra::OrderExpression;
+    match pattern {
+        GraphPattern::Project { inner, .. }
+        | GraphPattern::Distinct { inner }
+        | GraphPattern::Reduced { inner }
+        | GraphPattern::Slice { inner, .. } => order_of(inner),
+        GraphPattern::OrderBy { expression, .. } => match expression.as_slice() {
+            [OrderExpression::Asc(Expression::Variable(v))] if v.as_str() == "timestamp" => {
+                Some(TranscriptOrder::Timestamp { descending: false })
+            }
+            [OrderExpression::Desc(Expression::Variable(v))] if v.as_str() == "timestamp" => {
+                Some(TranscriptOrder::Timestamp { descending: true })
+            }
+            _ => None,
+        },
+        _ => Some(TranscriptOrder::Unordered),
+    }
+}
+
 /// The read that brings `scope_query`'s kept result up to date after `added`.
 pub(crate) fn delta_query(scope_query: &str, added: &[AddedLink]) -> DeltaRead {
     if added.is_empty() {
         return DeltaRead::Unchanged;
+    }
+    // A merge must put each gained turn where a fresh read would.
+    if transcript_order(scope_query).is_none() {
+        return DeltaRead::Full;
     }
     let Ok(Query::Select {
         dataset: None,
@@ -446,5 +497,29 @@ mod tests {
             "the branch no added link matches is not read: {read}"
         );
         assert!(read.contains("<msg://9>"), "{read}");
+    }
+
+    #[test]
+    fn only_an_order_by_timestamp_is_kept_and_any_other_order_reads_whole() {
+        assert_eq!(
+            transcript_order(BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY),
+            Some(TranscriptOrder::Timestamp { descending: false })
+        );
+        assert_eq!(
+            transcript_order("SELECT ?speaker ?text ?timestamp WHERE { ?m <ns://body> ?text } ORDER BY DESC(?timestamp)"),
+            Some(TranscriptOrder::Timestamp { descending: true })
+        );
+        assert_eq!(
+            transcript_order("SELECT ?speaker ?text ?timestamp WHERE { ?m <ns://body> ?text }"),
+            Some(TranscriptOrder::Unordered)
+        );
+        for q in [
+            "SELECT ?speaker ?text ?timestamp WHERE { ?m <ns://body> ?text } ORDER BY ?speaker",
+            "SELECT ?speaker ?text ?timestamp WHERE { ?m <ns://body> ?text } ORDER BY ?timestamp ?text",
+            "SELECT ?speaker ?text ?timestamp WHERE { ?m <ns://body> ?text } ORDER BY STR(?timestamp)",
+        ] {
+            assert_eq!(transcript_order(q), None, "{q}");
+            assert_eq!(delta_query(q, &[body("msg://1")]), DeltaRead::Full, "{q}");
+        }
     }
 }
