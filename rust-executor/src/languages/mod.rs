@@ -49,8 +49,8 @@ use error::LanguageError;
 use language::Language;
 use language_context::LanguageContext;
 use language_runtime_handle::LanguageRuntimeHandle;
-use mount_types::{MountShapes, MountSnapshot};
 use log::{error, info, warn};
+use mount_types::{MountShapes, MountSnapshot};
 use regex::Regex;
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
@@ -3083,10 +3083,7 @@ impl LanguageController {
 
     /// Every record a mountable language wants shown in the perspective
     /// (`mountSnapshot()`): class name, address and data per record.
-    pub async fn mount_snapshot(
-        &self,
-        lang_address: &str,
-    ) -> Result<MountSnapshot, LanguageError> {
+    pub async fn mount_snapshot(&self, lang_address: &str) -> Result<MountSnapshot, LanguageError> {
         let result = self
             .call_mount_export(lang_address, "mountSnapshot")
             .await?;

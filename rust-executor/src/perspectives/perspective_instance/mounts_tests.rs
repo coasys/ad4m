@@ -88,7 +88,10 @@ async fn calls(lang: &str) -> Vec<Value> {
 }
 
 /// Every stored link whose source sits under `lang`.
-pub(super) async fn lang_links(p: &PerspectiveInstance, lang: &str) -> Vec<DecoratedLinkExpression> {
+pub(super) async fn lang_links(
+    p: &PerspectiveInstance,
+    lang: &str,
+) -> Vec<DecoratedLinkExpression> {
     let prefix = format!("{lang}://");
     p.get_links(&LinkQuery::default())
         .await
@@ -101,7 +104,11 @@ pub(super) async fn lang_links(p: &PerspectiveInstance, lang: &str) -> Vec<Decor
 #[tokio::test]
 async fn mounted_records_are_instances() {
     let lang = load_mount_test_language().await;
-    create(&lang, json!({"title": "a", "done": true, "tags": ["x", "y"]})).await;
+    create(
+        &lang,
+        json!({"title": "a", "done": true, "tags": ["x", "y"]}),
+    )
+    .await;
     let (p, _ctx) = mounted(&lang).await;
 
     let instances = things(&p).await;
@@ -116,7 +123,11 @@ async fn mounted_records_are_instances() {
 #[tokio::test]
 async fn mounted_links_are_local_and_never_committed() {
     let lang = load_mount_test_language().await;
-    create(&lang, json!({"title": "a", "done": true, "tags": ["x", "y"]})).await;
+    create(
+        &lang,
+        json!({"title": "a", "done": true, "tags": ["x", "y"]}),
+    )
+    .await;
     let (p, _ctx) = mounted(&lang).await;
 
     // Every link under the language's address space is a Local cache link —
@@ -234,15 +245,14 @@ async fn unmount_leaves_nothing_under_the_language() {
 
     assert!(lang_links(&p, &lang).await.is_empty());
     // The mount link itself is gone.
-    assert!(
-        p.get_links(&LinkQuery {
+    assert!(p
+        .get_links(&LinkQuery {
             predicate: Some("ad4m://mount".to_string()),
             ..Default::default()
         })
         .await
         .unwrap()
-        .is_empty()
-    );
+        .is_empty());
     assert!(p.mounts().await.unwrap().is_empty());
     assert!(crate::perspectives::perspectives_for_mount(&lang).is_empty());
 }
@@ -331,8 +341,16 @@ async fn a_subscription_fires_on_sync() {
     // subscribed_queries_loop is not running; drive one pass over the
     // links the sync wrote (its -a +b title change).
     let mut writes = subscription_triggers::Writes::new();
-    writes.record(&format!("{lang}://t1"), "mounttest://title", "literal:string:a");
-    writes.record(&format!("{lang}://t1"), "mounttest://title", "literal:string:b");
+    writes.record(
+        &format!("{lang}://t1"),
+        "mounttest://title",
+        "literal:string:a",
+    );
+    writes.record(
+        &format!("{lang}://t1"),
+        "mounttest://title",
+        "literal:string:b",
+    );
     p.check_subscribed_queries(ChangedPredicates::Specific(writes))
         .await;
 
@@ -352,7 +370,10 @@ async fn a_subscription_fires_on_sync() {
     })
     .await
     .expect("the subscription never pushed the sync's change");
-    assert!(update.contains("\"b\""), "update misses the new title: {update}");
+    assert!(
+        update.contains("\"b\""),
+        "update misses the new title: {update}"
+    );
 }
 
 #[tokio::test]
@@ -386,10 +407,7 @@ async fn a_language_without_mount_exports_is_refused() {
     let (mut p, _shapes, _ctx) =
         crate::perspectives::interpretation_test_support::setup_perspective_no_llm(&[]).await;
     let error = p.mount(&lang).await.unwrap_err();
-    assert!(
-        error.to_string().contains("cannot be mounted"),
-        "{error}"
-    );
+    assert!(error.to_string().contains("cannot be mounted"), "{error}");
     assert!(
         p.get_links(&LinkQuery {
             predicate: Some("ad4m://mount".to_string()),
@@ -436,8 +454,11 @@ async fn a_version_change_reinstalls_shapes() {
 async fn two_thousand_records_first_sync() {
     let lang = load_mount_test_language().await;
     for i in 0..2000 {
-        create(&lang, json!({"title": format!("record {i}"), "done": i % 2 == 0, "tags": ["a", "b"]}))
-            .await;
+        create(
+            &lang,
+            json!({"title": format!("record {i}"), "done": i % 2 == 0, "tags": ["a", "b"]}),
+        )
+        .await;
     }
     let (mut p, _shapes, _ctx) =
         crate::perspectives::interpretation_test_support::setup_perspective_no_llm(&[]).await;

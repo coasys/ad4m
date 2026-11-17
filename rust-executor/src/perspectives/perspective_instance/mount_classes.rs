@@ -20,11 +20,11 @@ use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
 use serde_json::Value;
 
+use super::mount_links::is_mount_written;
 use super::PerspectiveInstance;
 use crate::languages::mount_types::MountShapes;
 use crate::languages::LanguageController;
 use crate::perspectives::model_query::utils::parse_literal_value;
-use super::mount_links::is_mount_written;
 use crate::types::{Link, LinkQuery};
 
 const CLAIM_SOURCE_PREFIX: &str = "ad4m://mounted_class/";
@@ -78,7 +78,10 @@ impl PerspectiveInstance {
         let mut targets: HashMap<&str, &str> = HashMap::new();
         for shape in &shapes.shapes {
             let target = shape.shape["target_class"].as_str().ok_or_else(|| {
-                anyhow!("cannot mount {lang_address}: class {} has no target_class", shape.name)
+                anyhow!(
+                    "cannot mount {lang_address}: class {} has no target_class",
+                    shape.name
+                )
             })?;
             for name in [shape.name.as_str(), class_basename(target)] {
                 if let Some(other) = names.insert(name, &shape.name) {

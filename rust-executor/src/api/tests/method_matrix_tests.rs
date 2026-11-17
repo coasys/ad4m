@@ -650,7 +650,10 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
         || json!({ "instanceUri": "i" }),
     ),
     ("perspective.flowFired", || json!({ "instance": "i" })),
-    ("perspective.mount", || json!({ "languageAddress": "QmLang" })),
+    (
+        "perspective.mount",
+        || json!({ "languageAddress": "QmLang" }),
+    ),
     (
         "perspective.unmount",
         || json!({ "languageAddress": "QmLang" }),
