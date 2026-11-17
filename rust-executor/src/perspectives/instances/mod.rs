@@ -488,15 +488,12 @@ pub(crate) fn encode_literal(value: &str) -> String {
 
 /// The plain value behind a literal link target, as text: a `literal:string:x` decodes to `x`,
 /// `literal:boolean:true` to `true`, a signed literal envelope (`literal:json:{…,"data":…}`) to
-/// its `data` payload. Non-literal targets come back unchanged.
+/// its `data` payload — once: [`parse_literal_value`] unwraps the envelope, so a payload with a
+/// `data` key of its own stays whole. Non-literal targets come back unchanged.
 pub(crate) fn decoded_literal(target: &str) -> String {
-    let text = |value: &Value| match value {
-        Value::String(s) => s.clone(),
-        other => other.to_string(),
-    };
     match parse_literal_value(target) {
-        Value::Object(envelope) if envelope.contains_key("data") => text(&envelope["data"]),
-        other => text(&other),
+        Value::String(s) => s,
+        other => other.to_string(),
     }
 }
 

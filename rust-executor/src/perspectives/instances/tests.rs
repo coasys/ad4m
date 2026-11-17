@@ -127,3 +127,47 @@ async fn collection_items_are_found_by_their_coerced_value() {
     assert_eq!(remove(&mut p, &ctx, &base, "counts", "+005").await, 1);
     assert!(stored_targets(&p, &base, "ns://count").await.is_empty());
 }
+
+mod decoded_literal {
+    use super::super::decoded_literal;
+    use serde_json::{json, Value};
+
+    fn json_literal(value: &Value) -> String {
+        format!("literal:json:{}", urlencoding::encode(&value.to_string()))
+    }
+
+    fn decoded_json(target: &str) -> Value {
+        let text = decoded_literal(target);
+        serde_json::from_str(&text).unwrap_or(Value::String(text))
+    }
+
+    /// A signed envelope decodes to its payload once: a payload with a `data` key of its own,
+    /// or a plain JSON literal with one, stays whole.
+    #[test]
+    fn a_payloads_own_data_key_is_not_unwrapped() {
+        let payload = json!({"data": "inner", "note": "x"});
+        assert_eq!(decoded_json(&json_literal(&payload)), payload);
+
+        let envelope = json!({
+            "author": "did:key:z6Mk",
+            "timestamp": "2026-11-17T00:00:00Z",
+            "data": payload,
+            "proof": {"signature": "s", "key": "k"},
+        });
+        assert_eq!(decoded_json(&json_literal(&envelope)), payload);
+    }
+
+    #[test]
+    fn a_signed_envelope_decodes_to_its_payload() {
+        let envelope = json!({
+            "author": "did:key:z6Mk",
+            "timestamp": "2026-11-17T00:00:00Z",
+            "data": "hello",
+            "proof": {"signature": "s", "key": "k"},
+        });
+        assert_eq!(decoded_literal(&json_literal(&envelope)), "hello");
+        assert_eq!(decoded_literal("literal:string:a%20b"), "a b");
+        assert_eq!(decoded_literal("literal:boolean:true"), "true");
+        assert_eq!(decoded_literal("ns://item"), "ns://item");
+    }
+}
