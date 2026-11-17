@@ -11,6 +11,7 @@
 
 use anyhow::{anyhow, Context, Result};
 use serde_json::{Map, Value};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
@@ -183,6 +184,8 @@ pub struct Model {
     ws: Arc<WsRpcClient>,
     uuid: String,
     classes: Classes,
+    /// Relations whose sequence is their state — [`Model::ordered`].
+    ordered: BTreeSet<String>,
 }
 
 impl Model {
@@ -195,6 +198,7 @@ impl Model {
             ws: ws.clone(),
             uuid: uuid.into(),
             classes: Classes::One(class_name.into()),
+            ordered: BTreeSet::new(),
         }
     }
 
@@ -210,7 +214,27 @@ impl Model {
             ws: ws.clone(),
             uuid: uuid.into(),
             classes: Classes::Many(class_names),
+            ordered: BTreeSet::new(),
         }
+    }
+
+    /// Declare the relations whose sequence is their state — TS reads this
+    /// off the relation decorator's `ordering` (`ad4m://ordering` in the
+    /// SHACL shape); the Rust model takes it from the caller instead:
+    /// `Model::new(&ws, "p1", "Board").ordered(["columns"])`.
+    ///
+    /// An ordered relation compares as a sequence in dirty tracking — a
+    /// reorder is a change (see [`Instance::changed_fields`]) — and
+    /// [`Instance::save`] refuses a reorder it cannot write. A union
+    /// model may declare ordered relations too; it stays read-only.
+    pub fn ordered(mut self, relations: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.ordered = relations.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Whether `relation` was declared ordered — [`Model::ordered`].
+    fn is_ordered(&self, relation: &str) -> bool {
+        self.ordered.contains(relation)
     }
 
     /// The perspective uuid this model is bound to.
@@ -706,13 +730,16 @@ impl Instance {
 
     /// TS `changedFields` — sorted keys whose current value differs from
     /// the snapshot's. A key the caller `set` but the hydration lacked
-    /// counts: it is a real write. Collections compare as unordered sets
-    /// — a reorder is not a change (R6).
+    /// counts: it is a real write. A collection on a relation the model
+    /// declared ordered ([`Model::ordered`], the caller-side equivalent
+    /// of the TS decorator's `ordering` metadata) compares as a sequence
+    /// — a reorder is a change; every other array compares as an
+    /// unordered set — a reorder there is not (R6).
     pub fn changed_fields(&self) -> Vec<String> {
         let mut changed: Vec<String> = self
             .current
             .iter()
-            .filter(|(k, v)| !snapshot_equal(self.snapshot.get(*k), v))
+            .filter(|(k, v)| !snapshot_equal(self.snapshot.get(*k), v, self.model.is_ordered(k)))
             .map(|(k, _)| k.clone())
             .collect();
         changed.sort();
@@ -730,6 +757,16 @@ impl Instance {
     /// like TS dispatching relation changes separately (R6). A failed
     /// call aborts the save with the snapshot untouched — a retry
     /// replays idempotent ops, never a duplicate write.
+    ///
+    /// **Ordered relations** ([`Model::ordered`]): the executor does
+    /// not persist collection order yet — `ad4m://ordering` is
+    /// declaration-only and hydration sorts members by link timestamp —
+    /// so the only order a save can produce is the surviving items in
+    /// their old order followed by the new items. Any other edit of an
+    /// ordered collection — a reorder, a prepend, an insert between
+    /// surviving items — has no write to express it. `save` refuses it
+    /// before any frame goes out, scalar writes included, and leaves the
+    /// snapshot untouched. Removals and appends dispatch as above.
     ///
     /// **Baseline** (R7): inside a batch the writes are invisible to
     /// reads until commit, so the current values are snapshotted
@@ -770,6 +807,30 @@ impl Instance {
         let is_collection = |key: &String| {
             self.current[key].is_array() || self.snapshot.get(key).is_some_and(Value::is_array)
         };
+        // Hydration sorts members by link timestamp, so the only order a
+        // save can produce is the surviving items in their old order
+        // followed by the new ones in the order they are added. Anything
+        // else — a reorder, a prepend, an insert between survivors — has
+        // no write to express it: refuse the whole save before any frame
+        // goes out rather than commit an edit that reads back differently.
+        for key in changed
+            .iter()
+            .filter(|k| is_collection(k) && self.model.is_ordered(k))
+        {
+            let before = collection_items(self.snapshot.get(key));
+            let after = collection_items(self.current.get(key));
+            let kept: Vec<&String> = before.iter().filter(|i| after.contains(i)).collect();
+            if !after.iter().take(kept.len()).eq(kept.iter().copied()) {
+                return Err(anyhow!(
+                    "cannot save {}: `{key}` is an ordered collection and this edit \
+                     changes the order of its items — the executor does not persist \
+                     collection order yet (`ad4m://ordering` is declaration-only; \
+                     hydration sorts members by link timestamp). Only removals and \
+                     appends after the remaining items can be saved",
+                    self.base_uri
+                ));
+            }
+        }
         let scalars: Map<String, Value> = changed
             .iter()
             .filter(|k| !is_collection(k))
@@ -818,16 +879,20 @@ impl Instance {
     }
 }
 
-/// Snapshot equality for `Instance::changed_fields`: two arrays compare
-/// as unordered sets — a reorder or a duplicate entry is no change —
-/// everything else as-is.
-fn snapshot_equal(baseline: Option<&Value>, current: &Value) -> bool {
+/// Snapshot equality for `Instance::changed_fields`: two arrays on a
+/// relation the model declared `ordered` compare as sequences — the
+/// deduped item URIs in order — so a reorder is a change; every other
+/// pair of arrays compares as unordered sets — a reorder or a duplicate
+/// entry is no change. Everything else compares as-is.
+fn snapshot_equal(baseline: Option<&Value>, current: &Value, ordered: bool) -> bool {
     match (baseline, current) {
         (Some(Value::Array(_)), Value::Array(_)) => {
             let mut before = collection_items(baseline);
             let mut after = collection_items(Some(current));
-            before.sort_unstable();
-            after.sort_unstable();
+            if !ordered {
+                before.sort_unstable();
+                after.sort_unstable();
+            }
             before == after
         }
         (Some(b), c) => b == c,
@@ -835,9 +900,10 @@ fn snapshot_equal(baseline: Option<&Value>, current: &Value) -> bool {
     }
 }
 
-/// The item URIs of a collection property's wire value: an array of
-/// them, a lone non-array value as a one-item collection, `Null`/absent
-/// as empty — and deduped, since a collection is a set.
+/// The item URIs of a collection property's wire value, deduped to
+/// their first occurrence — a set for an unordered compare, a sequence
+/// for an ordered one: an array of URIs, a lone non-array value as a
+/// one-item collection, `Null`/absent as empty.
 fn collection_items(value: Option<&Value>) -> Vec<String> {
     let raw: &[Value] = match value {
         Some(Value::Array(items)) => items,
@@ -1059,11 +1125,12 @@ mod tests {
         ws.close().await;
     }
 
-    /// R6: reordering a collection changes nothing — `save` sends no
-    /// *write* at all (the array compares as a set, not a sequence); the
-    /// only frame on the wire is the post-save re-read (R7).
+    /// R6: reordering a collection the model did not declare ordered
+    /// changes nothing — `save` sends no *write* at all (the array
+    /// compares as a set, not a sequence); the only frame on the wire is
+    /// the post-save re-read (R7).
     #[tokio::test]
-    async fn a_reordered_collection_is_not_dirty() {
+    async fn a_reordered_unordered_collection_is_not_dirty() {
         use crate::testkit::FakeExecutor;
         let fake = FakeExecutor::start().await;
         let ws = Arc::new(WsRpcClient::connect(fake.url(), "").await.unwrap());
@@ -1092,6 +1159,280 @@ mod tests {
             .maybe_request(Duration::from_millis(300))
             .await
             .is_none());
+        ws.close().await;
+    }
+
+    /// A collection on a relation the model declared ordered
+    /// ([`Model::ordered`], the caller-side equivalent of the TS relation
+    /// decorator's `ordering`) has its sequence as the state: a pure
+    /// reorder is a change — `is_dirty` and `changed_fields` name it —
+    /// where the same edit on an unordered collection reads as no
+    /// change (R6).
+    #[tokio::test]
+    async fn a_reordered_ordered_collection_is_dirty() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let ws = Arc::new(WsRpcClient::connect(fake.url(), "").await.unwrap());
+        let model = Model::new(&ws, "p1", "Board").ordered(["columns"]);
+
+        let hydrated = json!({"id": "board://1", "columns": ["col://a", "col://b"]})
+            .as_object()
+            .unwrap()
+            .clone();
+        let mut inst = model.instance("board://1", hydrated);
+        inst.set("columns", json!(["col://b", "col://a"]));
+        assert!(
+            inst.is_dirty(),
+            "a pure reorder of an ordered collection must be dirty"
+        );
+        assert_eq!(inst.changed_fields(), vec!["columns".to_string()]);
+        ws.close().await;
+    }
+
+    /// Declaring `columns` ordered must not leak onto the model's other
+    /// collections: `tags`, undeclared, still compares as a set — its
+    /// reorder is not a change and `save` sends only the re-read (R6).
+    #[tokio::test]
+    async fn an_unordered_collection_on_an_ordering_model_stays_a_set() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let ws = Arc::new(WsRpcClient::connect(fake.url(), "").await.unwrap());
+        let model = Model::new(&ws, "p1", "Board").ordered(["columns"]);
+
+        let hydrated = json!({
+            "id": "board://1",
+            "columns": ["col://a", "col://b"],
+            "tags": ["tag://a", "tag://b"],
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let mut inst = model.instance("board://1", hydrated);
+        inst.set("tags", json!(["tag://b", "tag://a"]));
+        assert!(!inst.is_dirty(), "an unordered reorder is not a change");
+        let save = tokio::spawn(async move { inst.save(None).await });
+        let req = fake.next_request().await;
+        assert_eq!(
+            req["type"], "perspective.modelQuery",
+            "a clean save writes nothing — the only frame is the re-read"
+        );
+        fake.reply(
+            &req,
+            json!("{\"instances\":[{\"id\":\"board://1\",\"columns\":[\"col://a\",\"col://b\"],\"tags\":[\"tag://a\",\"tag://b\"]}],\"totalCount\":1}"),
+        )
+        .await;
+        save.await.unwrap().unwrap();
+        assert!(fake
+            .maybe_request(Duration::from_millis(300))
+            .await
+            .is_none());
+        ws.close().await;
+    }
+
+    /// A reorder of an ordered collection has no write to express it —
+    /// the executor does not persist collection order yet
+    /// (`ad4m://ordering` is declaration-only; hydration sorts members by
+    /// link timestamp) — so `save` refuses before *any* frame goes out:
+    /// no collection call, and not even the scalar update a different
+    /// field asked for in the same save. The refusal names the collection
+    /// and the reason; the snapshot is untouched, so the instance stays
+    /// dirty.
+    #[tokio::test]
+    async fn save_refuses_an_ordered_reorder_before_any_write() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let ws = Arc::new(WsRpcClient::connect(fake.url(), "").await.unwrap());
+        let model = Model::new(&ws, "p1", "Board").ordered(["columns"]);
+
+        // A scalar change riding the same save must not leak out either.
+        let hydrated = json!({
+            "id": "board://1",
+            "name": "Sprint",
+            "columns": ["col://a", "col://b"],
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let mut inst = model.instance("board://1", hydrated);
+        inst.set("name", json!("Week 1"));
+        inst.set("columns", json!(["col://b", "col://a"]));
+        let save = tokio::spawn(async move {
+            let mut inst = inst;
+            (inst.save(None).await, inst)
+        });
+        assert!(
+            fake.maybe_request(Duration::from_millis(300))
+                .await
+                .is_none(),
+            "a refused reorder must not put any frame on the wire"
+        );
+        let (res, inst) = save.await.unwrap();
+        let err = res.unwrap_err().to_string();
+        assert!(
+            err.contains("columns") && err.contains("order"),
+            "the refusal must name the collection and the reason: {err}"
+        );
+        assert!(
+            inst.is_dirty(),
+            "nothing was written — the edits stay unsaved"
+        );
+
+        // The same refusal with no scalar in the save at all.
+        let hydrated = json!({"id": "board://2", "columns": ["col://a", "col://b"]})
+            .as_object()
+            .unwrap()
+            .clone();
+        let mut inst = model.instance("board://2", hydrated);
+        inst.set("columns", json!(["col://b", "col://a"]));
+        let save = tokio::spawn(async move { inst.save(None).await });
+        assert!(
+            fake.maybe_request(Duration::from_millis(300))
+                .await
+                .is_none(),
+            "a pure reorder must not put any frame on the wire either"
+        );
+        let err = save.await.unwrap().unwrap_err().to_string();
+        assert!(err.contains("columns"), "same refusal: {err}");
+        ws.close().await;
+    }
+
+    /// A new item placed before or between the surviving items keeps
+    /// their relative order, but hydration sorts by link timestamp, so it
+    /// would read back appended (`[c, a, b]` → `[a, b, c]`). Outside a
+    /// batch the re-read would replace the caller's order without a
+    /// word; inside one the optimistic snapshot would keep `[c, a, b]`
+    /// clean locally. Both modes refuse before any frame goes out.
+    #[tokio::test]
+    async fn save_refuses_an_ordered_insert_before_the_end() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let ws = Arc::new(WsRpcClient::connect(fake.url(), "").await.unwrap());
+        let model = Model::new(&ws, "p1", "Board").ordered(["columns"]);
+
+        let cases = [
+            ("prepend", json!(["col://c", "col://a", "col://b"])),
+            ("interleave", json!(["col://a", "col://c", "col://b"])),
+            ("prepend after a removal", json!(["col://c", "col://b"])),
+        ];
+        for (name, edited) in cases {
+            for batch in [None, Some("batch-1".to_string())] {
+                let hydrated = json!({"id": "board://1", "columns": ["col://a", "col://b"]})
+                    .as_object()
+                    .unwrap()
+                    .clone();
+                let mut inst = model.instance("board://1", hydrated);
+                inst.set("columns", edited.clone());
+                let mode = if batch.is_some() {
+                    "batch"
+                } else {
+                    "non-batch"
+                };
+                let save = tokio::spawn(async move {
+                    let mut inst = inst;
+                    (inst.save(batch).await, inst)
+                });
+                assert!(
+                    fake.maybe_request(Duration::from_millis(300))
+                        .await
+                        .is_none(),
+                    "{name} ({mode}): a refused insert must not put any frame on the wire"
+                );
+                let (res, inst) = save.await.unwrap();
+                let err = res.unwrap_err().to_string();
+                assert!(
+                    err.contains("columns") && err.contains("order"),
+                    "{name} ({mode}): the refusal must name the collection and the reason: {err}"
+                );
+                assert!(inst.is_dirty(), "{name} ({mode}): the edit stays unsaved");
+            }
+        }
+        ws.close().await;
+    }
+
+    /// Removals plus appends after the surviving items are what
+    /// hydration reads back, so a batched save of one goes through:
+    /// the remove, then the add, and a clean optimistic snapshot.
+    #[tokio::test]
+    async fn a_remove_and_append_on_an_ordered_collection_saves_in_a_batch() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let ws = Arc::new(WsRpcClient::connect(fake.url(), "").await.unwrap());
+        let model = Model::new(&ws, "p1", "Board").ordered(["columns"]);
+
+        let hydrated = json!({"id": "board://1", "columns": ["col://a", "col://b"]})
+            .as_object()
+            .unwrap()
+            .clone();
+        let mut inst = model.instance("board://1", hydrated);
+        inst.set("columns", json!(["col://b", "col://c"]));
+        let save = tokio::spawn(async move {
+            let mut inst = inst;
+            (inst.save(Some("batch-1".to_string())).await, inst)
+        });
+        let req = fake.next_request().await;
+        assert_eq!(req["type"], "perspective.instanceRemoveFromCollection");
+        assert_eq!(req["params"]["itemUri"], "col://a");
+        fake.reply(
+            &req,
+            json!({"className": "Board", "baseUri": "board://1", "collection": "columns", "itemUri": "col://a", "linksRemoved": 1}),
+        )
+        .await;
+        let req = fake.next_request().await;
+        assert_eq!(req["type"], "perspective.instanceAddToCollection");
+        assert_eq!(req["params"]["itemUri"], "col://c");
+        fake.reply(
+            &req,
+            json!({"className": "Board", "baseUri": "board://1", "collection": "columns", "itemUri": "col://c", "linksAdded": 1, "alreadyMember": false}),
+        )
+        .await;
+        let (res, inst) = save.await.unwrap();
+        res.unwrap();
+        assert!(!inst.is_dirty());
+        ws.close().await;
+    }
+
+    /// A membership edit on an ordered collection — an item appended,
+    /// the rest keeping their order — is not a reorder of the common
+    /// items: it saves with the usual item-by-item dispatch and no
+    /// error.
+    #[tokio::test]
+    async fn a_membership_edit_on_an_ordered_collection_saves() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let ws = Arc::new(WsRpcClient::connect(fake.url(), "").await.unwrap());
+        let model = Model::new(&ws, "p1", "Board").ordered(["columns"]);
+
+        let hydrated = json!({"id": "board://1", "columns": ["col://a", "col://b"]})
+            .as_object()
+            .unwrap()
+            .clone();
+        let mut inst = model.instance("board://1", hydrated);
+        inst.set("columns", json!(["col://a", "col://b", "col://c"]));
+        assert!(inst.is_dirty());
+
+        let save = tokio::spawn(async move {
+            let mut inst = inst;
+            (inst.save(None).await, inst)
+        });
+        let req = fake.next_request().await;
+        assert_eq!(req["type"], "perspective.instanceAddToCollection");
+        assert_eq!(req["params"]["collection"], "columns");
+        assert_eq!(req["params"]["itemUri"], "col://c");
+        fake.reply(
+            &req,
+            json!({"className": "Board", "baseUri": "board://1", "collection": "columns", "itemUri": "col://c", "linksAdded": 1, "alreadyMember": false}),
+        )
+        .await;
+        let req = fake.next_request().await;
+        assert_eq!(req["type"], "perspective.modelQuery");
+        fake.reply(
+            &req,
+            json!("{\"instances\":[{\"id\":\"board://1\",\"columns\":[\"col://a\",\"col://b\",\"col://c\"]}],\"totalCount\":1}"),
+        )
+        .await;
+        let (res, inst) = save.await.unwrap();
+        res.unwrap();
+        assert!(!inst.is_dirty());
         ws.close().await;
     }
 

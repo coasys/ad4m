@@ -15,12 +15,26 @@
  * an operation on a closed connection, and closing under a running
  * operation. ICE uses host candidates only: every agent here shares a
  * machine, and test hosts may have no route to a STUN server.
+ *
+ * It fires `iceconnectionstatechange` for each ICE state it reports, as a
+ * browser does. The binding fires the event when libwebrtc's legacy ICE
+ * state changes, but `iceConnectionState` returns the standardized state,
+ * which libwebrtc changes just after. A listener can read the old state,
+ * and then no event comes for the new one (see `ICE_STATE_RECHECK_MS`).
  */
 
 import { wrtc } from "./media.js";
 
 /** The peer connections this process holds open. */
 const open = new Set<RTCPeerConnection>();
+
+/**
+ * After each ICE state event, look at the state again at these times and
+ * fire one more event if it is not the state the last event showed. In E17
+ * the event of a cut read "completed" and the state was "disconnected" 2 ms
+ * later; without a second event the SDK never restarted ICE.
+ */
+const ICE_STATE_RECHECK_MS = [10, 100, 1_000];
 
 /** The next offer a connection of this process creates fails (`failNextOffer`). */
 let offerFails = false;
@@ -104,6 +118,18 @@ export function specPeerConnection(configuration: RTCConfiguration = {}): RTCPee
   const who = process.env.E2E_WHO ?? String(process.pid);
   (pc as any).addEventListener?.("iceconnectionstatechange", () => {
     console.log(`[e2e ${who}] ${new Date().toISOString().slice(11, 23)} ICE ${pc.iceConnectionState}`);
+  });
+  let shown = pc.iceConnectionState;
+  let events = 0;
+  (pc as any).addEventListener?.("iceconnectionstatechange", () => {
+    shown = pc.iceConnectionState;
+    const event = (events += 1);
+    for (const ms of ICE_STATE_RECHECK_MS) {
+      setTimeout(() => {
+        if (closed || event !== events || pc.iceConnectionState === shown) return;
+        (pc as any).dispatchEvent({ type: "iceconnectionstatechange", target: pc });
+      }, ms).unref();
+    }
   });
   if (process.env.E2E_DEBUG) trace(pc);
   return pc as RTCPeerConnection;

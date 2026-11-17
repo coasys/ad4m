@@ -122,6 +122,8 @@ pub(crate) mod shape;
 mod sparql_builder;
 #[cfg(test)]
 mod test_helpers;
+#[cfg(test)]
+mod timestamp_probe_tests;
 pub(crate) mod types;
 mod union;
 pub(crate) mod utils;

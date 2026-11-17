@@ -517,6 +517,11 @@ describe("parseCallMessage", () => {
         expect(parseCallMessage(data)).toEqual(data)
     })
 
+    it("accepts a beat", () => {
+        const beat = { v: CALL_PROTOCOL_VERSION, call: "room:x", kind: "beat" as const }
+        expect(parseCallMessage({ ...beat, to: "*" })).toEqual(beat)
+    })
+
     it("coerces missing binary flag to false", () => {
         const raw = {
             v: CALL_PROTOCOL_VERSION,
@@ -2316,6 +2321,58 @@ describe("what a call is told about its own connections", () => {
 })
 
 // ── Signalling before the roster ────────────────────────────────────
+
+describe("beats", () => {
+    let bus: InMemoryBus
+
+    beforeEach(() => {
+        bus = new InMemoryBus()
+    })
+
+    it("sends a beat to every peer, which reports it from its sender whether the roster lists it or not", async () => {
+        const alice = await makeMesh(bus, "did:alice#laptop", CALL_ID)
+        const bob = await makeMesh(bus, "did:bob#phone", CALL_ID)
+        const heard: string[] = []
+        bob.mesh.on("beat", (peer: string) => heard.push(peer))
+
+        alice.mesh.beat()
+        await settle()
+        expect(alice.sent[alice.sent.length - 1]).toEqual({ v: CALL_PROTOCOL_VERSION, call: CALL_ID, to: "*", kind: "beat" })
+        expect(heard).toEqual(["did:alice#laptop"])
+
+        bob.mesh.setRoster(["did:alice#laptop", "did:bob#phone"])
+        alice.mesh.beat()
+        await settle()
+        expect(heard).toEqual(["did:alice#laptop", "did:alice#laptop"])
+        expect(bob.errors).toEqual([])
+    })
+
+    it("holds no beat for a peer the roster does not list: it is not signalling", async () => {
+        const alice = await makeMesh(bus, "did:alice", CALL_ID)
+        const bob = await makeMesh(bus, "did:bob", CALL_ID)
+        for (let n = 0; n < 5; n += 1) alice.mesh.beat()
+        await settle()
+        expect((bob.mesh as unknown as { pending: Map<string, unknown[]> }).pending.size).toBe(0)
+    })
+
+    it("reports no beat of another call", async () => {
+        const alice = await makeMesh(bus, "did:alice", "call:other")
+        const bob = await makeMesh(bus, "did:bob", CALL_ID)
+        const heard: string[] = []
+        bob.mesh.on("beat", (peer: string) => heard.push(peer))
+        alice.mesh.beat()
+        await settle()
+        expect(heard).toEqual([])
+    })
+
+    it("sends no beat once it has left", async () => {
+        const alice = await makeMesh(bus, "did:alice", CALL_ID)
+        await alice.mesh.leave()
+        const sent = alice.sent.length
+        alice.mesh.beat()
+        expect(alice.sent.length).toBe(sent)
+    })
+})
 
 describe("signalling that arrives before the roster", () => {
     /**
