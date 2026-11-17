@@ -11,6 +11,7 @@
 
 use anyhow::{anyhow, Context, Result};
 use serde_json::{Map, Value};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
@@ -183,6 +184,8 @@ pub struct Model {
     ws: Arc<WsRpcClient>,
     uuid: String,
     classes: Classes,
+    /// Relations whose sequence is their state — [`Model::ordered`].
+    ordered: BTreeSet<String>,
 }
 
 impl Model {
@@ -195,6 +198,7 @@ impl Model {
             ws: ws.clone(),
             uuid: uuid.into(),
             classes: Classes::One(class_name.into()),
+            ordered: BTreeSet::new(),
         }
     }
 
@@ -210,7 +214,26 @@ impl Model {
             ws: ws.clone(),
             uuid: uuid.into(),
             classes: Classes::Many(class_names),
+            ordered: BTreeSet::new(),
         }
+    }
+
+    /// Declare the relations whose sequence is their state — TS reads this
+    /// off the relation decorator's `ordering` (`ad4m://ordering` in the
+    /// SHACL shape); the Rust model takes it from the caller instead:
+    /// `Model::new(&ws, "p1", "Board").ordered(["columns"])`.
+    ///
+    /// An ordered relation compares as a sequence in dirty tracking — a
+    /// reorder is a change (see [`Instance::changed_fields`]). A union
+    /// model may declare ordered relations too; it stays read-only.
+    pub fn ordered(mut self, relations: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.ordered = relations.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Whether `relation` was declared ordered — [`Model::ordered`].
+    fn is_ordered(&self, relation: &str) -> bool {
+        self.ordered.contains(relation)
     }
 
     /// The perspective uuid this model is bound to.
@@ -706,13 +729,16 @@ impl Instance {
 
     /// TS `changedFields` — sorted keys whose current value differs from
     /// the snapshot's. A key the caller `set` but the hydration lacked
-    /// counts: it is a real write. Collections compare as unordered sets
-    /// — a reorder is not a change (R6).
+    /// counts: it is a real write. A collection on a relation the model
+    /// declared ordered ([`Model::ordered`], the caller-side equivalent
+    /// of the TS decorator's `ordering` metadata) compares as a sequence
+    /// — a reorder is a change; every other array compares as an
+    /// unordered set — a reorder there is not (R6).
     pub fn changed_fields(&self) -> Vec<String> {
         let mut changed: Vec<String> = self
             .current
             .iter()
-            .filter(|(k, v)| !snapshot_equal(self.snapshot.get(*k), v))
+            .filter(|(k, v)| !snapshot_equal(self.snapshot.get(*k), v, self.model.is_ordered(k)))
             .map(|(k, _)| k.clone())
             .collect();
         changed.sort();
@@ -818,16 +844,20 @@ impl Instance {
     }
 }
 
-/// Snapshot equality for `Instance::changed_fields`: two arrays compare
-/// as unordered sets — a reorder or a duplicate entry is no change —
-/// everything else as-is.
-fn snapshot_equal(baseline: Option<&Value>, current: &Value) -> bool {
+/// Snapshot equality for `Instance::changed_fields`: two arrays on a
+/// relation the model declared `ordered` compare as sequences — the
+/// deduped item URIs in order — so a reorder is a change; every other
+/// pair of arrays compares as unordered sets — a reorder or a duplicate
+/// entry is no change. Everything else compares as-is.
+fn snapshot_equal(baseline: Option<&Value>, current: &Value, ordered: bool) -> bool {
     match (baseline, current) {
         (Some(Value::Array(_)), Value::Array(_)) => {
             let mut before = collection_items(baseline);
             let mut after = collection_items(Some(current));
-            before.sort_unstable();
-            after.sort_unstable();
+            if !ordered {
+                before.sort_unstable();
+                after.sort_unstable();
+            }
             before == after
         }
         (Some(b), c) => b == c,
@@ -835,9 +865,10 @@ fn snapshot_equal(baseline: Option<&Value>, current: &Value) -> bool {
     }
 }
 
-/// The item URIs of a collection property's wire value: an array of
-/// them, a lone non-array value as a one-item collection, `Null`/absent
-/// as empty — and deduped, since a collection is a set.
+/// The item URIs of a collection property's wire value, deduped to
+/// their first occurrence — a set for an unordered compare, a sequence
+/// for an ordered one: an array of URIs, a lone non-array value as a
+/// one-item collection, `Null`/absent as empty.
 fn collection_items(value: Option<&Value>) -> Vec<String> {
     let raw: &[Value] = match value {
         Some(Value::Array(items)) => items,
@@ -1086,6 +1117,73 @@ mod tests {
         fake.reply(
             &req,
             json!("{\"instances\":[{\"id\":\"recipe://1\",\"tags\":[\"tag://a\",\"tag://b\"]}],\"totalCount\":1}"),
+        )
+        .await;
+        save.await.unwrap().unwrap();
+        assert!(fake
+            .maybe_request(Duration::from_millis(300))
+            .await
+            .is_none());
+        ws.close().await;
+    }
+
+    /// A collection on a relation the model declared ordered
+    /// ([`Model::ordered`], the caller-side equivalent of the TS relation
+    /// decorator's `ordering`) has its sequence as the state: a pure
+    /// reorder is a change — `is_dirty` and `changed_fields` name it —
+    /// where the same edit on an unordered collection reads as no
+    /// change (R6).
+    #[tokio::test]
+    async fn a_reordered_ordered_collection_is_dirty() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let ws = Arc::new(WsRpcClient::connect(fake.url(), "").await.unwrap());
+        let model = Model::new(&ws, "p1", "Board").ordered(["columns"]);
+
+        let hydrated = json!({"id": "board://1", "columns": ["col://a", "col://b"]})
+            .as_object()
+            .unwrap()
+            .clone();
+        let mut inst = model.instance("board://1", hydrated);
+        inst.set("columns", json!(["col://b", "col://a"]));
+        assert!(
+            inst.is_dirty(),
+            "a pure reorder of an ordered collection must be dirty"
+        );
+        assert_eq!(inst.changed_fields(), vec!["columns".to_string()]);
+        ws.close().await;
+    }
+
+    /// Declaring `columns` ordered must not leak onto the model's other
+    /// collections: `tags`, undeclared, still compares as a set — its
+    /// reorder is not a change and `save` sends only the re-read (R6).
+    #[tokio::test]
+    async fn an_unordered_collection_on_an_ordering_model_stays_a_set() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let ws = Arc::new(WsRpcClient::connect(fake.url(), "").await.unwrap());
+        let model = Model::new(&ws, "p1", "Board").ordered(["columns"]);
+
+        let hydrated = json!({
+            "id": "board://1",
+            "columns": ["col://a", "col://b"],
+            "tags": ["tag://a", "tag://b"],
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let mut inst = model.instance("board://1", hydrated);
+        inst.set("tags", json!(["tag://b", "tag://a"]));
+        assert!(!inst.is_dirty(), "an unordered reorder is not a change");
+        let save = tokio::spawn(async move { inst.save(None).await });
+        let req = fake.next_request().await;
+        assert_eq!(
+            req["type"], "perspective.modelQuery",
+            "a clean save writes nothing — the only frame is the re-read"
+        );
+        fake.reply(
+            &req,
+            json!("{\"instances\":[{\"id\":\"board://1\",\"columns\":[\"col://a\",\"col://b\"],\"tags\":[\"tag://a\",\"tag://b\"]}],\"totalCount\":1}"),
         )
         .await;
         save.await.unwrap().unwrap();
