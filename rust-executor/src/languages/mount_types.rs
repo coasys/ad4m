@@ -34,3 +34,17 @@ pub struct MountEntry {
 pub struct MountSnapshot {
     pub entries: Vec<MountEntry>,
 }
+
+/// What a `call` action's interaction returns: the address of the primary
+/// expression it touched (required of a `create`), plus the records that
+/// changed or were removed — the same `changed`/`removed` delta a signal
+/// push carries (design §3.4). Addresses carry no `<lang>://` prefix.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
+pub struct MountDelta {
+    #[serde(default)]
+    pub address: Option<String>,
+    #[serde(default)]
+    pub changed: Vec<MountEntry>,
+    #[serde(default)]
+    pub removed: Vec<String>,
+}
