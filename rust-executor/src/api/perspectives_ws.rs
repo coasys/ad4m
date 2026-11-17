@@ -617,11 +617,13 @@ fn query_eval_error_ws(e: deno_core::anyhow::Error) -> WsRpcError {
     let msg = e.to_string();
     if msg.contains("query cancelled") {
         WsRpcError {
+            data: None,
             code: 499,
             message: "Request cancelled by client".to_string(),
         }
     } else if msg.contains("SPARQL deadline") {
         WsRpcError {
+            data: None,
             code: 504,
             message: msg,
         }
@@ -877,6 +879,7 @@ async fn subscribed(
             .dispose_query_subscription(&subscription_id, connection_id)
             .await;
         return Err(WsRpcError {
+            data: None,
             code: 499,
             message: "Request cancelled by client".to_string(),
         });
@@ -1369,6 +1372,7 @@ async fn run_interpretation_handler(
                 .await;
             }
             return Err(WsRpcError {
+                data: None,
                 code: 408,
                 message: format!(
                     "runInterpretation timed out after {}s",
@@ -1589,6 +1593,7 @@ async fn run_interpretation_with_harness_handler(
                 RUN_INTERPRETATION_HARNESS_TIMEOUT_SECS
             );
             return Err(WsRpcError {
+                data: None,
                 code: 408,
                 message: format!(
                     "runInterpretationWithHarness timed out after {}s",
