@@ -28,6 +28,7 @@ pub mod identity_ws;
 pub mod key_login_ws;
 pub mod languages_ws;
 pub mod neighbourhoods_ws;
+pub mod perspective_instances_ws;
 pub mod perspectives_ws;
 pub mod runtime_ws;
 pub mod sfu_ws;

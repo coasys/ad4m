@@ -149,7 +149,7 @@ These tools are the default way to work with typed data. The subject class is an
 | `add_child` / `get_children` | `(perspective_id, parent, child)` / `(perspective_id, parent, limit?)` | The raw `ad4m://has_child` tree, class-agnostic: neither node has to be a subject-class instance |
 | `execute_commands` | `(perspective_id, expression_address, commands, parameters?)` | Escape hatch: raw SDNA `{action, source, predicate, target}` commands on one instance. **Not** SHACL-validated |
 
-Every write through the typed tools is validated against the class's SHACL shape before anything is stored (`execute_commands` is the documented exception). A rejected call returns all problems at once, each naming the property, the expected type and the cardinality:
+Every write through the typed tools is checked against the class's SHACL shape before any link is written (`execute_commands` is the documented exception), so a rejected call stores nothing. A rejected call returns all problems at once, each naming the property, the expected type and the cardinality:
 
 ```json
 {
@@ -162,6 +162,14 @@ Every write through the typed tools is validated against the class's SHACL shape
   "hint": "Call describe_perspective for the full schema of this class."
 }
 ```
+
+That "stores nothing" guarantee is about rejections. A failure that is not a rejection — a
+store error in the middle of `instance_remove`'s link cascade — can leave the removals it
+already made applied; the error then says how far it got (a `partiallyRemoved`-style
+message), not that everything was rolled back. The same holds for the
+`perspective.instance*` RPC methods when `batchId` is given: a non-validation failure can
+leave part of the write staged in that open batch — discard it
+(`perspective.discardBatch`) rather than commit it to keep earlier calls.
 
 ### Dynamic SHACL Tools (opt-in)
 

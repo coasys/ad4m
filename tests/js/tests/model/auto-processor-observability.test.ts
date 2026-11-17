@@ -41,8 +41,8 @@ import { addOllamaLlm, startAgent, waitUntil } from "../../helpers/index.js";
 import { ConversationSubgroup } from "./auto-processor-models.js";
 
 const BASE_URL = process.env.INTERPRETATION_E2E_BASE_URL || "http://localhost:11434/v1";
-// Ask for the window the Modelfile already loaded (qwen3.8-27b-48k: 49152). Without it the
-// Ollama provider requests num_ctx 131072 and Ollama reloads the model out of staging's residency.
+// Ask for the window the Modelfile already loaded (qwen3.8-27b-48k: 49152). The provider reads
+// it from /api/show too; the pin also holds a model without a Modelfile num_ctx to staging's residency.
 const MAX_NUM_CTX = Number(process.env.INTERPRETATION_E2E_MAX_NUM_CTX) || 49152;
 const MODEL = process.env.INTERPRETATION_E2E_MODEL || "qwen3.8-27b-48k";
 

@@ -79,6 +79,8 @@ mod local_agents;
 // Committing a batch only if the links it expects still stand.
 mod expected_links;
 pub use expected_links::{ExpectedLinks, LinksChanged};
+// A batch's effective view of the graph for the validated write core.
+mod batch_view;
 // The judgement the store holds for a link a write path just persisted.
 mod stored_judgements;
 
@@ -3226,33 +3228,49 @@ impl PerspectiveInstance {
 
         let mut sdna_links: Vec<Link> = Vec::new();
 
-        // For SubjectClass refresh: if a class with this name already exists
-        // we must purge the prior SHACL graph before writing new triples.
+        // For SubjectClass refresh: if this class already exists we must
+        // purge the prior SHACL graph before writing new triples.
         // Without this, divergent old/new SHACL property triples coexist in
         // the store and the loader produces non-deterministic shapes.
         //
         // When `shacl_links` is `None` and the class already exists, we
         // preserve the historical no-op behaviour: nothing to refresh.
         if matches!(sdna_type, SdnaType::SubjectClass) {
-            // Check for any existing SubjectClass with this name, regardless of namespace
-            // We query by target (ad4m://SubjectClass) and then filter by class name
             let all_class_links = self.get_links_local(&LinkQuery {
                 predicate: Some("rdf://type".to_string()),
                 target: Some("ad4m://SubjectClass".to_string()),
                 ..Default::default()
             })?;
 
-            // Collect any existing class URIs that match this name
+            // A new shape refreshes only the class with its own target-class
+            // URI: `flux://Message` and `we://Message` are different classes,
+            // and a match on the name alone lets one app delete the other's.
+            // Without a shape nothing is deleted, so a class of this name in
+            // any namespace counts as already registered.
+            let incoming_target_class_uris: Option<Vec<&str>> = shacl_links.as_ref().map(|links| {
+                links
+                    .iter()
+                    .filter(|link| {
+                        link.predicate.as_deref() == Some("rdf://type")
+                            && link.target == "ad4m://SubjectClass"
+                    })
+                    .map(|link| link.source.as_str())
+                    .collect()
+            });
+
             let existing_target_class_uris: Vec<String> = all_class_links
                 .iter()
                 .filter_map(|(link, _)| {
                     let source = &link.data.source;
-                    let matches = source
-                        .split("://")
-                        .last()
-                        .and_then(|s| s.split('/').last())
-                        .map(|class_name| class_name == name)
-                        .unwrap_or(false);
+                    let matches = match &incoming_target_class_uris {
+                        Some(uris) => uris.contains(&source.as_str()),
+                        None => source
+                            .split("://")
+                            .last()
+                            .and_then(|s| s.split('/').last())
+                            .map(|class_name| class_name == name)
+                            .unwrap_or(false),
+                    };
                     if matches {
                         Some(source.clone())
                     } else {
@@ -5457,8 +5475,6 @@ impl PerspectiveInstance {
         payload: PerspectiveExpression,
         loopback: bool,
     ) -> Result<(), AnyError> {
-        use crate::agent::AgentService;
-
         let current_perspective_handle = self.persisted.lock().await.clone();
 
         if loopback {
@@ -5473,18 +5489,13 @@ impl PerspectiveInstance {
         }
 
         // Route the broadcast to every local agent that owns the neighbourhood (its
-        // `event_recipients`), each copy naming that agent. The main agent does not get its
-        // own broadcast back: loopback handles that.
+        // `event_recipients`), each copy naming that agent. The sender's own agent gets it
+        // too, the main agent like any managed agent: its other clients (devices) must hear
+        // it, and a client drops its own messages. With `loopback` every owner gets it twice.
         if current_perspective_handle.shared_url.is_some() {
-            let main_agent_did = AgentService::with_global_instance(|s| s.did.clone());
             let mut signal = payload.clone();
             signal.verify_signatures();
             for recipient in super::event_recipients(&current_perspective_handle) {
-                let main_sent_it = main_agent_did.as_deref() == Some(recipient.as_str())
-                    && payload.author == recipient;
-                if main_sent_it {
-                    continue;
-                }
                 super::publish_telepresence_signal(
                     current_perspective_handle.clone(),
                     signal.clone(),
@@ -12046,6 +12057,92 @@ mod tests {
             .get_shape("Recipe")
             .expect("re-parse after invalidation");
         assert!(!Arc::ptr_eq(&first, &second));
+    }
+
+    /// Two apps that each define `Message` in their own namespace must not
+    /// delete each other's shape: a refresh replaces only the class with the
+    /// same target-class URI, not every class whose last segment is `Message`.
+    #[tokio::test]
+    async fn test_add_sdna_refresh_keeps_same_named_class_of_another_namespace() {
+        fn class_links(perspective: &PerspectiveInstance, target_class: &str) -> Vec<String> {
+            let shape_uri = format!("{target_class}Shape");
+            let mut links: Vec<String> = perspective
+                .get_links_local(&LinkQuery::default())
+                .expect("get_links_local")
+                .into_iter()
+                .map(|(l, _)| l.data)
+                .filter(|l| {
+                    l.source == target_class
+                        || l.source == shape_uri
+                        || l.source.starts_with(&format!("{target_class}."))
+                })
+                .map(|l| format!("{} {:?} {}", l.source, l.predicate, l.target))
+                .collect();
+            links.sort();
+            links
+        }
+        let ctx = AgentContext::main_agent();
+        let mut perspective = setup().await;
+        let register = |namespace: &str, path: &str| {
+            cache_test_shacl("Message", namespace).replace(
+                &format!("\"{namespace}name\""),
+                &format!("\"{namespace}{path}\""),
+            )
+        };
+
+        perspective
+            .add_sdna(
+                "Message".to_string(),
+                String::new(),
+                SdnaType::SubjectClass,
+                Some(register("flux://", "name")),
+                &ctx,
+            )
+            .await
+            .expect("register flux://Message");
+        let flux_links = class_links(&perspective, "flux://Message");
+        assert!(
+            flux_links.iter().any(|l| l.contains("rdf://type")),
+            "{flux_links:?}"
+        );
+
+        perspective
+            .add_sdna(
+                "Message".to_string(),
+                String::new(),
+                SdnaType::SubjectClass,
+                Some(register("we://", "name")),
+                &ctx,
+            )
+            .await
+            .expect("register we://Message");
+        assert_eq!(
+            class_links(&perspective, "flux://Message"),
+            flux_links,
+            "registering we://Message must not touch flux://Message"
+        );
+
+        // Re-registering the same URI still replaces its shape.
+        perspective
+            .add_sdna(
+                "Message".to_string(),
+                String::new(),
+                SdnaType::SubjectClass,
+                Some(register("we://", "body")),
+                &ctx,
+            )
+            .await
+            .expect("refresh we://Message");
+        let we_links = class_links(&perspective, "we://Message");
+        assert!(
+            we_links.iter().any(|l| l.contains("we://body")),
+            "{we_links:?}"
+        );
+        assert!(
+            !we_links.iter().any(|l| l.contains("we://name")),
+            "the refresh purges the old property: {we_links:?}"
+        );
+        assert_eq!(class_links(&perspective, "flux://Message"), flux_links);
     }
 
     /// A shape `parse_shacl_to_links` refuses must leave the store untouched

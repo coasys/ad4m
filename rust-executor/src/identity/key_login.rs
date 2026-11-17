@@ -169,6 +169,7 @@ impl From<KeyLoginError> for WsRpcError {
             KeyLoginError::StoreUnavailable => WsRpcError {
                 code: 503,
                 message: code.into(),
+                data: None,
             },
             KeyLoginError::TooManyChallenges => WsRpcError::too_many_requests(code),
             KeyLoginError::Forbidden(m) => WsRpcError::forbidden(m),
