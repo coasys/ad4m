@@ -641,7 +641,8 @@ pub enum TickOutcome {
     /// Turns are waiting, but no pass could run them: the executor has no
     /// LLM ([`model_available`]). Nothing is drained, so the turns stay
     /// queued with their debounce clocks, and the loop backs off as if idle
-    /// until a write (or the idle fallback) brings the next tick.
+    /// until a write, a model becoming available ([`model_readiness`]) or the
+    /// idle fallback brings the next tick.
     NoModel,
 }
 
@@ -672,6 +673,24 @@ pub async fn model_available() -> bool {
     }
 }
 
+/// A receiver that changes when a model may have become available
+/// ([`AIService::watch_llm_readiness`](crate::ai_service::AIService::watch_llm_readiness)),
+/// so a loop waiting after [`TickOutcome::NoModel`] ticks again at once.
+/// `None` before the AI service is up.
+pub async fn model_readiness() -> Option<tokio::sync::watch::Receiver<u64>> {
+    #[cfg(test)]
+    {
+        test_hooks::model_readiness()
+    }
+    #[cfg(not(test))]
+    {
+        crate::ai_service::AIService::global_instance()
+            .await
+            .ok()
+            .map(|ai| ai.watch_llm_readiness())
+    }
+}
+
 /// Longest an idle watch loop sleeps when no link changes. A link write wakes
 /// it at once ([`wait_for_tick`]); a tick with no write since the last runs no
 /// store query ([`TickReads`]), so this fallback only re-applies the
@@ -696,16 +715,20 @@ pub enum WaitEnd {
     Teardown,
     /// The store took a write.
     Write,
+    /// A model may have become available ([`model_readiness`]).
+    ModelReady,
     Elapsed,
 }
 
 /// Sleep up to `ms`, in slices of at most [`AUTO_PROCESSOR_TICK_MS`] so
 /// `teardown` is seen promptly. With `writes`, return as soon as the store's
-/// write generation moves past what the receiver has seen.
+/// write generation moves past what the receiver has seen; with `model`, as
+/// soon as the model readiness watch does.
 pub async fn wait_for_tick(
     teardown: &AtomicBool,
     ms: u64,
     mut writes: Option<&mut tokio::sync::watch::Receiver<u64>>,
+    mut model: Option<&mut tokio::sync::watch::Receiver<u64>>,
 ) -> WaitEnd {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(ms);
     loop {
@@ -717,20 +740,24 @@ pub async fn wait_for_tick(
             return WaitEnd::Elapsed;
         }
         let slice = (deadline - now).min(std::time::Duration::from_millis(AUTO_PROCESSOR_TICK_MS));
-        let mut closed = false;
-        match writes.as_deref_mut() {
-            Some(rx) => tokio::select! {
-                changed = rx.changed() => match changed {
-                    Ok(()) => return WaitEnd::Write,
-                    // The store is gone; only the timer is left.
-                    Err(_) => closed = true,
-                },
-                _ = tokio::time::sleep(slice) => {}
+        let (mut writes_closed, mut model_closed) = (false, false);
+        tokio::select! {
+            changed = async { writes.as_deref_mut()?.changed().await.ok() }, if writes.is_some() => match changed {
+                Some(()) => return WaitEnd::Write,
+                // The store is gone; only the timer is left.
+                None => writes_closed = true,
             },
-            None => tokio::time::sleep(slice).await,
+            changed = async { model.as_deref_mut()?.changed().await.ok() }, if model.is_some() => match changed {
+                Some(()) => return WaitEnd::ModelReady,
+                None => model_closed = true,
+            },
+            _ = tokio::time::sleep(slice) => {}
         }
-        if closed {
+        if writes_closed {
             writes = None;
+        }
+        if model_closed {
+            model = None;
         }
     }
 }
@@ -1717,7 +1744,10 @@ pub(crate) mod test_hooks {
         /// Set by either of the two above; read by `LeaseGuard::is_healthy`.
         pub lease_lost: Arc<AtomicBool>,
         /// The executor has no model: [`model_available`] answers `false`.
-        pub no_model: bool,
+        pub no_model: Arc<AtomicBool>,
+        /// Stands in for the AI service's readiness watch
+        /// ([`model_readiness`]).
+        pub model_readiness: Option<Arc<tokio::sync::watch::Sender<u64>>>,
         /// How many times a tick asked [`model_available`].
         pub model_checks: Arc<std::sync::atomic::AtomicUsize>,
     }
@@ -1786,9 +1816,16 @@ pub(crate) mod test_hooks {
         HOOKS
             .try_with(|h| {
                 h.model_checks.fetch_add(1, Ordering::Relaxed);
-                !h.no_model
+                !h.no_model.load(Ordering::Relaxed)
             })
             .unwrap_or(true)
+    }
+
+    pub(super) fn model_readiness() -> Option<tokio::sync::watch::Receiver<u64>> {
+        HOOKS
+            .try_with(|h| h.model_readiness.as_ref().map(|tx| tx.subscribe()))
+            .ok()
+            .flatten()
     }
 
     pub(super) fn lease_lost() -> bool {

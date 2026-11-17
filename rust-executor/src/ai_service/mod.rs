@@ -121,6 +121,9 @@ pub struct AIService {
     /// Saves 500MB-1.5GB per stream!
     shared_whisper_models: Arc<Mutex<HashMap<String, Arc<Whisper>>>>,
     default_embedding: Arc<default_embedding::DefaultEmbedding>,
+    /// Bumped whenever the default LLM may have become ready
+    /// ([`Self::watch_llm_readiness`]).
+    llm_readiness: Arc<tokio::sync::watch::Sender<u64>>,
 }
 
 impl Drop for AIService {
@@ -441,6 +444,7 @@ impl AIService {
             cleanup_task_shutdown: Arc::new(std::sync::Mutex::new(None)),
             shared_whisper_models: Arc::new(Mutex::new(HashMap::new())), // Models loaded on demand per size
             default_embedding: Arc::new(default_embedding::DefaultEmbedding::new(loader)),
+            llm_readiness: Arc::new(tokio::sync::watch::Sender::new(0)),
         };
 
         let clone = service.clone();
@@ -567,6 +571,9 @@ impl AIService {
     pub async fn set_default_model(&self, model_type: ModelType, model_id: String) -> Result<()> {
         // Every model type has a default. Only an LLM default has tasks to move.
         crate::db_backend::db_backend().set_default_model(model_type.clone(), &model_id)?;
+        if ModelType::Llm == model_type {
+            self.note_llm_readiness();
+        }
 
         if ModelType::Llm == model_type {
             // Respawn task on new default model
@@ -829,6 +836,7 @@ impl AIService {
             .lock()
             .await
             .insert(model_config.id.clone(), llama_tx);
+        self.note_llm_readiness();
         thread::spawn({
             move || {
                 let model_id = model_config.id.clone();
@@ -3178,6 +3186,7 @@ mod stream_ownership_tests {
             default_embedding: Arc::new(default_embedding::DefaultEmbedding::new(Arc::new(|_| {
                 Box::pin(async { Err(anyhow!("no embedding models in this test")) })
             }))),
+            llm_readiness: Arc::new(tokio::sync::watch::Sender::new(0)),
         };
         let alice = RequestContext::user_for_test("did:key:alice", vec![]);
         let app =

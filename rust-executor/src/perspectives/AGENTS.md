@@ -89,8 +89,9 @@ or writes the graph. Split plan: spec items 3, 7, 8.
   `note_write(WriteDelta)`, `Added` only when it removed nothing and every reifier is new, or the
   loop misses that change until some other write lands. With turns pending but no default
   LLM set and spawned (`watcher::model_available`), a tick drains nothing and returns
-  `TickOutcome::NoModel`, and the loop backs off as if idle: no signal announces a new default
-  model, so the next write or the 60 s fallback finds it.
+  `TickOutcome::NoModel`, and the loop backs off as if idle, waiting on writes and on
+  `AIService::watch_llm_readiness` (bumped by `set_default_model` and by every LLM worker
+  `spawn_llm_model` registers), so a model configured while turns wait is used at once.
 - **File descriptors.** Every perspective keeps one RocksDB store open
   (`SparqlStore::new`), and only `PerspectiveInstance` holds it: the store's descriptors close
   when the last clone of the removed instance drops, i.e. once its background loops have seen

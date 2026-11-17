@@ -650,7 +650,7 @@ async fn with_no_model_pending_turns_back_off_to_the_idle_delay() {
     let mut watcher = WatcherState::new();
     let now_ms = chrono::Utc::now().timestamp_millis();
     let no_model = PassHooks {
-        no_model: true,
+        no_model: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
         ..Default::default()
     };
     HOOKS
@@ -710,7 +710,7 @@ async fn with_no_model_the_watch_loop_stops_polling() {
         .expect("write_processor");
 
     let hooks = PassHooks {
-        no_model: true,
+        no_model: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
         ..Default::default()
     };
     let checks = hooks.model_checks.clone();
@@ -1088,4 +1088,79 @@ async fn a_long_run_of_removals_keeps_the_write_log_bounded_and_the_next_tick_re
     p.run_auto_processor_tick(&mut watcher, now_ms + 500, &ctx)
         .await;
     assert_eq!(transcript_rows(&p) - rows, 10, "the tick reads in full");
+}
+
+/// Josh's open question 1 and Lal's P2-2: a loop waiting after a `NoModel`
+/// tick also waits on the AI service's readiness watch, so a model
+/// configured while turns wait is used at once, not after the 60 s
+/// fallback or the next write.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_model_becoming_ready_wakes_a_loop_waiting_for_one() {
+    use super::watcher::test_hooks::{PassHooks, HOOKS};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+    seed_message(
+        &mut p,
+        &ctx,
+        "msg://1",
+        "did:key:alice",
+        "first",
+        "ns://body",
+    )
+    .await;
+    write_processor(&mut p, &config("awaiting", 50, None), Some(false), &ctx)
+        .await
+        .expect("write_processor");
+
+    let no_model = Arc::new(AtomicBool::new(true));
+    let readiness = Arc::new(tokio::sync::watch::Sender::new(0u64));
+    let hooks = PassHooks {
+        no_model: no_model.clone(),
+        model_readiness: Some(readiness.clone()),
+        ..Default::default()
+    };
+    let checks = hooks.model_checks.clone();
+    let uuid = p.uuid.clone();
+    let mut rx = subscribe().await;
+    let looping = p.clone();
+    let loop_ctx = ctx.clone();
+    let handle = tokio::spawn(HOOKS.scope(hooks, async move {
+        looping.auto_processor_watch_loop(loop_ctx).await
+    }));
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while checks.load(Ordering::Relaxed) == 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the loop's first tick never asked for a model"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // Let the loop settle into its idle wait.
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert_eq!(checks.load(Ordering::Relaxed), 1);
+
+    // A model is configured. No link is written.
+    no_model.store(false, Ordering::Relaxed);
+    let configured = tokio::time::Instant::now();
+    readiness.send_modify(|g| *g += 1);
+    next_event_matching(&mut rx, Duration::from_millis(1_500), |e| {
+        e.perspective_uuid == uuid
+            && e.processor_id == "awaiting"
+            && e.step == AutoProcessorStep::BatchReady
+    })
+    .await
+    .expect("the waiting batch drains within 1.5 s of the model, not 60 s");
+    println!(
+        "batch ready {:?} after the model was configured",
+        configured.elapsed()
+    );
+
+    p.teardown_background_tasks().await;
+    tokio::time::timeout(Duration::from_secs(2), handle)
+        .await
+        .expect("teardown ends the loop promptly")
+        .expect("loop task");
 }

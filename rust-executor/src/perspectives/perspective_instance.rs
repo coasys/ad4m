@@ -6583,8 +6583,8 @@ impl PerspectiveInstance {
     /// `ProcessingClaim` election runs across distinct DIDs on one executor.
     pub(crate) async fn auto_processor_watch_loop(&self, context: AgentContext) {
         use crate::perspectives::auto_processor::watcher::{
-            idle_wait_ms, next_tick_delay_ms, wait_for_tick, WaitEnd, WatcherState,
-            AUTO_PROCESSOR_TICK_MS,
+            idle_wait_ms, model_readiness, next_tick_delay_ms, wait_for_tick, TickOutcome, WaitEnd,
+            WatcherState, AUTO_PROCESSOR_TICK_MS,
         };
         use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -6599,14 +6599,20 @@ impl PerspectiveInstance {
         // store more often than the idle back-off did.
         let mut last_read: Option<(u64, tokio::time::Instant)> = None;
         let mut idle_floor_ms = AUTO_PROCESSOR_TICK_MS;
+        // After a `NoModel` tick the idle wait also ends when a model may have
+        // become available, so a model configured while turns wait is used at
+        // once rather than after the next write or the idle fallback.
+        let mut models = model_readiness().await;
+        let mut waiting_for_model = false;
 
         loop {
             let end = match wait {
-                Some(ms) => wait_for_tick(&self.is_teardown, ms, None).await,
+                Some(ms) => wait_for_tick(&self.is_teardown, ms, None, None).await,
                 None => {
                     let now_ms = chrono::Utc::now().timestamp_millis();
                     let ms = idle_wait_ms(&watcher, now_ms);
-                    match wait_for_tick(&self.is_teardown, ms, Some(&mut writes)).await {
+                    let models = models.as_mut().filter(|_| waiting_for_model);
+                    match wait_for_tick(&self.is_teardown, ms, Some(&mut writes), models).await {
                         // Let the rest of a burst of writes land first, and
                         // keep the back-off since the last read.
                         WaitEnd::Write => {
@@ -6617,6 +6623,7 @@ impl PerspectiveInstance {
                             wait_for_tick(
                                 &self.is_teardown,
                                 floor.max(AUTO_PROCESSOR_TICK_MS),
+                                None,
                                 None,
                             )
                             .await
@@ -6638,10 +6645,18 @@ impl PerspectiveInstance {
                 Ok(d) => d.as_millis() as i64,
                 Err(_) => continue, // clock before epoch — skip tick
             };
-            let polls = self
+            // A readiness change from here on wakes the next wait.
+            if let Some(rx) = models.as_mut() {
+                rx.borrow_and_update();
+            }
+            let outcome = self
                 .run_auto_processor_tick(&mut watcher, now_ms, &context)
-                .await
-                .polls_at_base_rate();
+                .await;
+            waiting_for_model = outcome == TickOutcome::NoModel;
+            if waiting_for_model && models.is_none() {
+                models = model_readiness().await;
+            }
+            let polls = outcome.polls_at_base_rate();
             wait = polls.then_some(AUTO_PROCESSOR_TICK_MS);
             idle_floor_ms = next_tick_delay_ms(idle_floor_ms, polls);
         }
