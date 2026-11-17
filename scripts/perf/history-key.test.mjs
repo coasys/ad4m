@@ -10,6 +10,8 @@ import { fileURLToPath } from "node:url";
 
 const script = path.join(path.dirname(fileURLToPath(import.meta.url)), "history-key");
 const hasKeygen = spawnSync("ssh-keygen", ["-?"]).error === undefined;
+// The script's bash without BASH_ENV: CircleCI's re-exports PATH, which would drop a fake put first.
+const { BASH_ENV, ...BASE_ENV } = process.env;
 
 function setup() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "history-key-test-"));
@@ -23,7 +25,7 @@ function setup() {
   const fp = execFileSync("ssh-keygen", ["-l", "-E", "sha256", "-f", key], { encoding: "utf8" }).split(" ")[1];
   // `${key}_backup`: another key whose name starts with this one's; its line must stay.
   fs.writeFileSync(path.join(ssh, "config"), `Host !github.com *\n  IdentityFile ${key}\n  IdentityFile ${key}_backup\n  IdentityFile ${other}\nHost example\n  User git\n`);
-  const env = { ...process.env, PERF_SSH_DIR: ssh, TMPDIR: tmp, CIRCLE_BUILD_NUM: "4242" };
+  const env = { ...BASE_ENV, PERF_SSH_DIR: ssh, TMPDIR: tmp, CIRCLE_BUILD_NUM: "4242" };
   const run = (...args) => spawnSync("bash", [script, ...args], { env, encoding: "utf8" });
   // The config's lines, trimmed: a line is kept or dropped whole.
   const config = () => fs.readFileSync(path.join(ssh, "config"), "utf8").split("\n").map((l) => l.trim());
@@ -82,7 +84,7 @@ test("use whose key another job moved away first exports nothing and succeeds", 
   fs.mkdirSync(bin);
   fs.writeFileSync(path.join(bin, "cp"), "#!/bin/sh\necho \"cp: cannot stat '$1': No such file or directory\" >&2\nexit 1\n", { mode: 0o755 });
   const u = spawnSync("bash", [script, "use", s.fp], {
-    env: { ...process.env, PERF_SSH_DIR: path.dirname(s.key), TMPDIR: s.tmp, CIRCLE_BUILD_NUM: "4242", PATH: `${bin}:${process.env.PATH}` },
+    env: { ...BASE_ENV, PERF_SSH_DIR: path.dirname(s.key), TMPDIR: s.tmp, CIRCLE_BUILD_NUM: "4242", PATH: `${bin}:${process.env.PATH}` },
     encoding: "utf8",
   });
   assert.equal(u.status, 0, u.stderr);
