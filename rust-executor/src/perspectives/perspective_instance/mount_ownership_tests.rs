@@ -133,12 +133,15 @@ async fn an_older_sync_does_not_roll_back_newer_shapes() {
     gate.release();
     let _ = a.await.unwrap();
 
-    let versions: Vec<String> =
-        links_at(&p, &format!("{lang}://project"), "ad4m://mount_shapes_version")
-            .await
-            .into_iter()
-            .map(|l| l.data.target)
-            .collect();
+    let versions: Vec<String> = links_at(
+        &p,
+        &format!("{lang}://project"),
+        "ad4m://mount_shapes_version",
+    )
+    .await
+    .into_iter()
+    .map(|l| l.data.target)
+    .collect();
     assert_eq!(
         versions,
         vec!["literal:string:3".to_string()],

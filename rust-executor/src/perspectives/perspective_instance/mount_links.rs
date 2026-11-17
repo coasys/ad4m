@@ -33,7 +33,9 @@ impl MountWritten {
         link.status == Some(LinkStatus::Local)
             && self
                 .0
-                .contains(&SparqlStore::reifier_of(&LinkExpression::from(link.clone())))
+                .contains(&SparqlStore::reifier_of(&LinkExpression::from(
+                    link.clone(),
+                )))
     }
 }
 

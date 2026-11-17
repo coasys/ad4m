@@ -1555,7 +1555,11 @@ impl SparqlStore {
     /// `lang`: one transaction writes each link and marks its reifier with
     /// [`ONT_MOUNTED_BY`]. The mark goes with the reifier: removing the
     /// link removes it.
-    pub(crate) fn add_mount_links(&self, links: &[LinkExpression], lang: &str) -> Result<(), Error> {
+    pub(crate) fn add_mount_links(
+        &self,
+        links: &[LinkExpression],
+        lang: &str,
+    ) -> Result<(), Error> {
         for link in links {
             refuse_link_metadata(link)?;
         }
