@@ -1607,10 +1607,11 @@ export class PerspectiveProxy {
         batchId?: B
     ): Promise<B extends undefined ? T : string> {
         let className: string;
+        let created: boolean | string;
 
         if(typeof subjectClass === "string") {
             className = subjectClass;
-            await this.#client.createSubject(
+            created = await this.#client.createSubject(
                 this.#handle.uuid, 
                 JSON.stringify({
                     className,
@@ -1627,7 +1628,7 @@ export class PerspectiveProxy {
             if (!resolvedClassName) {
                 throw new Error("Could not resolve subject class name from object. Use a decorated class or pass a className string.");
             }
-            await this.#client.createSubject(
+            created = await this.#client.createSubject(
                 this.#handle.uuid, 
                 JSON.stringify({
                     className: resolvedClassName,
@@ -1639,14 +1640,20 @@ export class PerspectiveProxy {
             );
         }
 
+        // A `call` constructor ignores `exprAddr` and mints the record inside
+        // its language; the RPC then answers the minted URL (a string), which
+        // is the instance's id. A link constructor answers `true` and the
+        // instance is at `exprAddr`.
+        const address = typeof created === "string" ? created : exprAddr;
+
         // Skip subject proxy creation when in batch mode since the subject won't exist until batch is committed
         if (batchId) {
-            return exprAddr as B extends undefined ? T : string;
+            return address as B extends undefined ? T : string;
         }
 
         // Return the expression address directly — callers should use Ad4mModel or
         // getSubjectData() to interact with the created instance.
-        return exprAddr as unknown as B extends undefined ? T : string;
+        return address as unknown as B extends undefined ? T : string;
     }
 
     /** Sets properties of an existing instance in the executor. Through an
