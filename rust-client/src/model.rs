@@ -583,12 +583,15 @@ impl Model {
     /// one does.
     /// A failing `f` never commits: the batch is left unwritten (and
     /// `discard`ed best-effort, an executor-side no-op either way).
-    pub async fn transaction<R, Fut>(&self, f: impl FnOnce(&Batch) -> Fut) -> Result<R>
+    ///
+    /// `f` gets its own clone of the batch (a clone names the same batch),
+    /// so an `async move` body can hold it across awaits.
+    pub async fn transaction<R, Fut>(&self, f: impl FnOnce(Batch) -> Fut) -> Result<R>
     where
         Fut: std::future::Future<Output = Result<R>>,
     {
         let batch = Batch::open(&self.ws, &self.uuid).await?;
-        match f(&batch).await {
+        match f(batch.clone()).await {
             Ok(r) => {
                 batch.commit().await?;
                 Ok(r)
@@ -687,6 +690,11 @@ pub struct Instance {
     snapshot: Map<String, Value>,
     /// The hydrated values plus every `set` since.
     current: Map<String, Value>,
+    /// Values a non-batch save wrote that the executor confirmed but no
+    /// re-read has hydrated yet: what the executor now holds for those
+    /// keys while `snapshot` still has the old value. Cleared by the next
+    /// successful re-read or batched save.
+    unconfirmed: Map<String, Value>,
 }
 
 impl Model {
@@ -698,6 +706,7 @@ impl Model {
             base_uri: base_uri.into(),
             snapshot: hydrated.clone(),
             current: hydrated,
+            unconfirmed: Map::new(),
         }
     }
 }
@@ -730,7 +739,10 @@ impl Instance {
 
     /// TS `changedFields` — sorted keys whose current value differs from
     /// the snapshot's. A key the caller `set` but the hydration lacked
-    /// counts: it is a real write. A collection on a relation the model
+    /// counts: it is a real write. So does a key whose current value
+    /// differs from a written-but-unconfirmed one (a save whose re-read
+    /// failed): the executor holds that value, so setting the key back to
+    /// the snapshot's is still a write. A collection on a relation the model
     /// declared ordered ([`Model::ordered`], the caller-side equivalent
     /// of the TS decorator's `ordering` metadata) compares as a sequence
     /// — a reorder is a change; every other array compares as an
@@ -739,7 +751,14 @@ impl Instance {
         let mut changed: Vec<String> = self
             .current
             .iter()
-            .filter(|(k, v)| !snapshot_equal(self.snapshot.get(*k), v, self.model.is_ordered(k)))
+            .filter(|(k, v)| {
+                let ordered = self.model.is_ordered(k);
+                !snapshot_equal(self.snapshot.get(*k), v, ordered)
+                    || self
+                        .unconfirmed
+                        .get(*k)
+                        .is_some_and(|held| !snapshot_equal(Some(held), v, ordered))
+            })
             .map(|(k, _)| k.clone())
             .collect();
         changed.sort();
@@ -756,7 +775,10 @@ impl Instance {
     /// `instanceRemoveFromCollection` before `instanceAddToCollection`,
     /// like TS dispatching relation changes separately (R6). A failed
     /// call aborts the save with the snapshot untouched — a retry
-    /// replays idempotent ops, never a duplicate write.
+    /// replays idempotent ops, never a duplicate write. Outside a batch a
+    /// write the executor confirmed is recorded as unconfirmed state, and
+    /// the next save diffs against it: a later `set` back to the old
+    /// value still writes.
     ///
     /// **Ordered relations** ([`Model::ordered`]): the executor does
     /// not persist collection order yet — `ad4m://ordering` is
@@ -780,8 +802,8 @@ impl Instance {
     /// later `set` diffs against the remote state rather than a stale
     /// local copy. A re-read that fails or no longer returns the row
     /// surfaces an error and leaves the snapshot untouched — the writes
-    /// are already committed, so a retry replays idempotent ops before
-    /// re-reading.
+    /// are already committed (and recorded as unconfirmed), so a retry
+    /// replays idempotent ops before re-reading.
     ///
     /// **Minimum executor for batched saves.** The optimistic snapshot is
     /// right only if the executor resolves each batched `instance*` write
@@ -799,6 +821,7 @@ impl Instance {
         let changed = self.changed_fields();
         if changed.is_empty() && batch_id.is_some() {
             self.snapshot = self.current.clone();
+            self.unconfirmed.clear();
             return Ok(());
         }
         // A hydrated collection always reads as a JSON array of item
@@ -817,7 +840,8 @@ impl Instance {
             .iter()
             .filter(|k| is_collection(k) && self.model.is_ordered(k))
         {
-            let before = collection_items(self.snapshot.get(key));
+            let before =
+                collection_items(self.unconfirmed.get(key).or_else(|| self.snapshot.get(key)));
             let after = collection_items(self.current.get(key));
             let kept: Vec<&String> = before.iter().filter(|i| after.contains(i)).collect();
             if !after.iter().take(kept.len()).eq(kept.iter().copied()) {
@@ -836,23 +860,46 @@ impl Instance {
             .filter(|k| !is_collection(k))
             .map(|k| (k.clone(), self.current[k].clone()))
             .collect();
+        let collections: Vec<&String> = changed.iter().filter(|k| is_collection(k)).collect();
+        // Outside a batch a write the executor confirms is live at once:
+        // record it, so a failure later in this save (or of the re-read)
+        // leaves the next diff computed against what the executor holds.
+        let live = batch_id.is_none();
         if !scalars.is_empty() {
             self.model
-                .update(&self.base_uri, scalars, batch_id.clone())
+                .update(&self.base_uri, scalars.clone(), batch_id.clone())
                 .await?;
+            if live {
+                self.unconfirmed.extend(scalars);
+            }
         }
-        for key in changed.iter().filter(|k| is_collection(k)) {
-            let before = collection_items(self.snapshot.get(key));
+        for key in collections {
+            // Item ops go against the executor's membership: the
+            // unconfirmed one when an earlier save wrote it, else the
+            // snapshot's.
+            let before =
+                collection_items(self.unconfirmed.get(key).or_else(|| self.snapshot.get(key)));
             let after = collection_items(self.current.get(key));
+            let mut held = before.clone();
             for item in before.iter().filter(|i| !after.contains(i)) {
                 self.model
                     .remove_from_collection(&self.base_uri, key, item, batch_id.clone())
                     .await?;
+                if live {
+                    held.retain(|i| i != item);
+                    self.unconfirmed
+                        .insert(key.clone(), Value::from(held.clone()));
+                }
             }
             for item in after.iter().filter(|i| !before.contains(i)) {
                 self.model
                     .add_to_collection(&self.base_uri, key, item, batch_id.clone())
                     .await?;
+                if live {
+                    held.push(item.clone());
+                    self.unconfirmed
+                        .insert(key.clone(), Value::from(held.clone()));
+                }
             }
         }
         if batch_id.is_some() {
@@ -860,6 +907,7 @@ impl Instance {
             // re-reading now would fetch the stale row and regress
             // in-memory values — TS takes the optimistic snapshot here.
             self.snapshot = self.current.clone();
+            self.unconfirmed.clear();
             return Ok(());
         }
         // Non-batch (R7): re-read the row — TS `getData` — and merge the
@@ -875,6 +923,7 @@ impl Instance {
             self.current.insert(key, value);
         }
         self.snapshot = self.current.clone();
+        self.unconfirmed.clear();
         Ok(())
     }
 }
@@ -1391,6 +1440,60 @@ mod tests {
         ws.close().await;
     }
 
+    /// A `transaction` body is a plain `async move` that holds its batch
+    /// across awaits — two writes in the batch, then the commit. (With a
+    /// `&Batch` argument this body does not compile: the future cannot
+    /// borrow the reference.)
+    #[tokio::test]
+    async fn a_transaction_body_holds_its_batch_across_awaits() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let ws = Arc::new(WsRpcClient::connect(fake.url(), "").await.unwrap());
+        let model = Model::new(&ws, "p1", "Recipe");
+
+        let tx = tokio::spawn({
+            let model = model.clone();
+            async move {
+                let writer = model.clone();
+                model
+                    .transaction(|batch| async move {
+                        let options = || CreateOptions {
+                            batch_id: Some(batch.id().to_string()),
+                            ..Default::default()
+                        };
+                        let mut props = Map::new();
+                        props.insert("name".into(), json!("a"));
+                        writer.create(props.clone(), options()).await?;
+                        props.insert("name".into(), json!("b"));
+                        writer.create(props, options()).await?;
+                        Ok(batch.id().to_string())
+                    })
+                    .await
+            }
+        });
+        let req = fake.next_request().await;
+        assert_eq!(req["type"], "perspective.createBatch");
+        fake.reply(&req, json!("batch-7")).await;
+        for uri in ["recipe://a", "recipe://b"] {
+            let req = fake.next_request().await;
+            assert_eq!(req["type"], "perspective.instanceCreate");
+            assert_eq!(req["params"]["batchId"], "batch-7");
+            fake.reply(
+                &req,
+                json!({"className": "Recipe", "baseUri": uri, "propertiesSet": ["name"],
+                       "collectionsSet": [], "parent": null}),
+            )
+            .await;
+        }
+        let req = fake.next_request().await;
+        assert_eq!(req["type"], "perspective.commitBatch");
+        assert_eq!(req["params"]["batchId"], "batch-7");
+        fake.reply(&req, json!({"additions": [], "removals": []}))
+            .await;
+        assert_eq!(tx.await.unwrap().unwrap(), "batch-7");
+        ws.close().await;
+    }
+
     /// A membership edit on an ordered collection — an item appended,
     /// the rest keeping their order — is not a reorder of the common
     /// items: it saves with the usual item-by-item dispatch and no
@@ -1623,6 +1726,91 @@ mod tests {
         fake.reply(
             &req,
             json!("{\"instances\":[{\"id\":\"recipe://1\",\"name\":\"B\"}],\"totalCount\":1}"),
+        )
+        .await;
+        let (res, inst) = save.await.unwrap();
+        res.unwrap();
+        assert!(!inst.is_dirty());
+        ws.close().await;
+    }
+
+    /// A save whose writes landed but whose re-read failed leaves the
+    /// executor holding the written values. Setting a key back to the
+    /// snapshot's value is then still a write — and so is a collection
+    /// item the failed save added and the caller drops again.
+    #[tokio::test]
+    async fn a_revert_after_a_failed_refresh_still_writes() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let ws = Arc::new(WsRpcClient::connect(fake.url(), "").await.unwrap());
+        let model = Model::new(&ws, "p1", "Recipe");
+
+        let hydrated = json!({"id": "recipe://1", "name": "A", "tags": ["t://1"]})
+            .as_object()
+            .unwrap()
+            .clone();
+        let mut inst = model.instance("recipe://1", hydrated);
+        inst.set("name", json!("B"));
+        inst.set("tags", json!(["t://1", "t://2"]));
+
+        let save = tokio::spawn(async move {
+            let mut inst = inst;
+            (inst.save(None).await, inst)
+        });
+        let req = fake.next_request().await;
+        assert_eq!(req["type"], "perspective.instanceUpdate");
+        fake.reply(
+            &req,
+            json!({"className": "Recipe", "baseUri": "recipe://1", "updatedProperties": ["name"]}),
+        )
+        .await;
+        let req = fake.next_request().await;
+        assert_eq!(req["type"], "perspective.instanceAddToCollection");
+        assert_eq!(req["params"]["itemUri"], "t://2");
+        fake.reply(
+            &req,
+            json!({"className": "Recipe", "baseUri": "recipe://1", "collection": "tags", "itemUri": "t://2", "linksAdded": 1, "alreadyMember": false}),
+        )
+        .await;
+        let req = fake.next_request().await;
+        assert_eq!(req["type"], "perspective.modelQuery");
+        fake.reply_error(&req, 503, "query backend unavailable")
+            .await;
+        let (res, mut inst) = save.await.unwrap();
+        assert!(res.is_err());
+
+        // Back to the snapshot's values: the executor holds B and t://2.
+        inst.set("name", json!("A"));
+        inst.set("tags", json!(["t://1"]));
+        assert_eq!(inst.changed_fields(), ["name", "tags"]);
+        let save = tokio::spawn(async move {
+            let mut inst = inst;
+            (inst.save(None).await, inst)
+        });
+        let req = fake.next_request().await;
+        assert_eq!(
+            req["type"], "perspective.instanceUpdate",
+            "the revert must be written, not skipped as clean"
+        );
+        assert_eq!(req["params"]["properties"], json!({"name": "A"}));
+        fake.reply(
+            &req,
+            json!({"className": "Recipe", "baseUri": "recipe://1", "updatedProperties": ["name"]}),
+        )
+        .await;
+        let req = fake.next_request().await;
+        assert_eq!(req["type"], "perspective.instanceRemoveFromCollection");
+        assert_eq!(req["params"]["itemUri"], "t://2");
+        fake.reply(
+            &req,
+            json!({"className": "Recipe", "baseUri": "recipe://1", "collection": "tags", "itemUri": "t://2", "linksRemoved": 1}),
+        )
+        .await;
+        let req = fake.next_request().await;
+        assert_eq!(req["type"], "perspective.modelQuery");
+        fake.reply(
+            &req,
+            json!("{\"instances\":[{\"id\":\"recipe://1\",\"name\":\"A\",\"tags\":[\"t://1\"]}],\"totalCount\":1}"),
         )
         .await;
         let (res, inst) = save.await.unwrap();

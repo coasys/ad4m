@@ -861,6 +861,30 @@ impl FlowApi {
         Ok(Some(ShaclFlow::from_links(&all, &flow_uri)?))
     }
 
+    /// The registered flow whose URI is `flow_uri`, found through the
+    /// registration links (`<name literal> ad4m://flow_uri <flow_uri>`) —
+    /// not by parsing a name out of the URI: the registered name need not
+    /// be the definition's `name`, and a namespace such as `urn:example:`
+    /// has no `/` or `#` to split on. `None` when no registered name
+    /// currently resolves to this URI (unregistered, or the name now
+    /// points at another flow).
+    async fn registered_flow_by_uri(&self, flow_uri: &str) -> Result<Option<ShaclFlow>> {
+        let registrations = self
+            .query_links(None, Some(flow_uri), Some("ad4m://flow_uri"))
+            .await?;
+        for link in registrations {
+            let Some(name) = decode_literal_string(&link.data.source) else {
+                continue;
+            };
+            if let Some(flow) = self.get_flow(&name).await? {
+                if flow.flow_uri() == flow_uri {
+                    return Ok(Some(flow));
+                }
+            }
+        }
+        Ok(None)
+    }
+
     /// Every flow name registered on the perspective — `sdnaFlows`: the
     /// `ad4m://has_flow` name literals off `ad4m://self`, decoded.
     pub async fn sdna_flows(&self) -> Result<Vec<String>> {
@@ -1182,7 +1206,7 @@ impl FlowInstance {
         };
 
         // Pair each record with its parsed flow, one `get_flow` per URI.
-        let mut shapes: BTreeMap<String, ShaclFlow> = BTreeMap::new();
+        let mut shapes: BTreeMap<String, Option<ShaclFlow>> = BTreeMap::new();
         let mut paired: Vec<(Value, ShaclFlow)> = Vec::new();
         for record in records {
             let Some(flow_uri) = record.get("flowUri").and_then(Value::as_str) else {
@@ -1191,19 +1215,15 @@ impl FlowInstance {
             let shape = match shapes.get(flow_uri) {
                 Some(s) => s.clone(),
                 None => {
-                    let Some(name) = flow_name_from_uri(flow_uri) else {
-                        continue;
-                    };
-                    match api.get_flow(&name).await? {
-                        Some(s) if s.flow_uri() == flow_uri => {
-                            shapes.insert(flow_uri.to_string(), s.clone());
-                            s
-                        }
-                        // Stale record — the flow was unregistered, or a
-                        // different flow now owns the name.
-                        _ => continue,
-                    }
+                    let s = api.registered_flow_by_uri(flow_uri).await?;
+                    shapes.insert(flow_uri.to_string(), s.clone());
+                    s
                 }
+            };
+            // Stale record — the flow was unregistered, or a different flow
+            // now owns the name.
+            let Some(shape) = shape else {
+                continue;
             };
             paired.push((record, shape));
         }
@@ -1716,6 +1736,76 @@ mod tests {
 
         assert_eq!(round(&api, &server, &mut store, &flow).await, 1);
         assert_eq!(round(&api, &server, &mut store, &flow).await, 0);
+    }
+
+    /// `find_all` resolves a record's `flowUri` through the registration
+    /// links, not by parsing a name out of the URI: a flow registered as
+    /// "Shipping" whose definition is named "Delivery", in a `urn:example:`
+    /// namespace, is still found; a record of an unregistered flow is not.
+    #[tokio::test]
+    async fn find_all_resolves_runs_by_registered_flow_uri() {
+        use crate::testkit::{FakeExecutor, LinkStore};
+
+        let server = FakeExecutor::start().await;
+        let ws = Arc::new(WsRpcClient::connect(server.url(), "").await.unwrap());
+        let api = FlowApi::new(&ws, "p1");
+        let mut store = LinkStore::default();
+
+        let mut flow = ShaclFlow::new("Delivery", "urn:example:");
+        flow.states = vec![FlowState {
+            name: "Open".into(),
+            value: 0.0,
+            ..Default::default()
+        }];
+        assert_eq!(flow.flow_uri(), "urn:example:DeliveryFlow");
+
+        async fn serve<T>(
+            server: &FakeExecutor,
+            store: &mut LinkStore,
+            task: &mut tokio::task::JoinHandle<T>,
+        ) -> T {
+            loop {
+                tokio::select! {
+                    req = server.next_request() => {
+                        let result = match req["type"].as_str() {
+                            Some("perspective.modelQuery") => json!(json!({
+                                "instances": [
+                                    {"id": "run://1", "flowUri": "urn:example:DeliveryFlow",
+                                     "subject": "s://1"},
+                                    {"id": "run://2", "flowUri": "urn:example:GoneFlow",
+                                     "subject": "s://2"},
+                                ],
+                                "totalCount": 2,
+                            }).to_string()),
+                            Some("perspective.flowStates") => json!([]),
+                            _ => store.handle(&req).unwrap_or(Value::Bool(true)),
+                        };
+                        server.reply(&req, result).await;
+                    }
+                    r = &mut *task => return r.unwrap(),
+                }
+            }
+        }
+
+        let mut add = tokio::spawn({
+            let api = api.clone();
+            let flow = flow.clone();
+            async move { api.add_flow("Shipping", &flow).await }
+        });
+        serve(&server, &mut store, &mut add).await.unwrap();
+
+        let mut find = tokio::spawn({
+            let api = api.clone();
+            async move { FlowInstance::find_all(&api, None).await }
+        });
+        let runs = serve(&server, &mut store, &mut find).await.unwrap();
+        let ids: Vec<&str> = runs.iter().map(|r| record_id(&r.record)).collect();
+        assert_eq!(
+            ids,
+            ["run://1"],
+            "the Shipping run is found, the stale one skipped"
+        );
+        assert_eq!(runs[0].shape.flow_uri(), "urn:example:DeliveryFlow");
     }
 
     #[test]
