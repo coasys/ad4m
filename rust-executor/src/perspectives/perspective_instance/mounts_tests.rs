@@ -31,6 +31,32 @@ async fn mounted(lang: &str) -> (PerspectiveInstance, AgentContext) {
     (p, ctx)
 }
 
+/// A private perspective with `lang` mounted, registered in the global
+/// map so `get_perspective` — and with it the pushed-delta routing —
+/// finds it. Remove it with `crate::perspectives::remove_perspective`.
+async fn mounted_and_registered(lang: &str) -> (PerspectiveInstance, AgentContext) {
+    let (p, ctx) = mounted(lang).await;
+    crate::perspectives::register_perspective(p.uuid.clone(), p.clone());
+    (p, ctx)
+}
+
+/// Poll `things` every 50 ms until `done` holds or `within` elapses;
+/// returns the last result either way.
+async fn eventually(
+    p: &PerspectiveInstance,
+    within: Duration,
+    done: impl Fn(&[Value]) -> bool,
+) -> Vec<Value> {
+    let deadline = tokio::time::Instant::now() + within;
+    loop {
+        let instances = things(p).await;
+        if done(&instances) || tokio::time::Instant::now() >= deadline {
+            return instances;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 /// `model_query("MountThing")`'s instances parsed to JSON.
 async fn things(p: &PerspectiveInstance) -> Vec<Value> {
     let result = p
@@ -412,4 +438,166 @@ async fn two_thousand_records_first_sync() {
     println!("two_thousand_records_first_sync: mount+first sync took {first_sync:?}");
 
     assert_eq!(things(&p).await.len(), 2000);
+}
+
+/// Design §1.5 path 2: a `mountDelta` the language pushes through
+/// `emitSignal` lands in the mounting perspective — no `sync_mount` call.
+/// Break check: dropping the `mountDelta` branch in `ad4m_signal_emitted`
+/// turns this red.
+#[tokio::test]
+async fn a_pushed_delta_shows_without_sync() {
+    let lang = load_mount_test_language().await;
+    let (p, _ctx) = mounted_and_registered(&lang).await;
+
+    interact(
+        &format!("{lang}://project"),
+        "outsideChange",
+        json!({"address": "t1", "data": {"title": "pushed"}, "emit": true}),
+    )
+    .await
+    .unwrap();
+
+    let instances = eventually(&p, Duration::from_secs(3), |i| {
+        i.len() == 1 && i[0]["title"] == "pushed"
+    })
+    .await;
+    assert_eq!(instances.len(), 1, "{instances:?}");
+    assert_eq!(instances[0]["title"], "pushed");
+
+    crate::perspectives::remove_perspective(&p.uuid).await;
+}
+
+#[tokio::test]
+async fn a_pushed_removal_shows_without_sync() {
+    let lang = load_mount_test_language().await;
+    create(&lang, json!({"title": "a"})).await;
+    let (p, _ctx) = mounted_and_registered(&lang).await;
+    assert_eq!(things(&p).await.len(), 1);
+
+    interact(
+        &format!("{lang}://project"),
+        "outsideRemove",
+        json!({"address": "t1", "emit": true}),
+    )
+    .await
+    .unwrap();
+
+    let instances = eventually(&p, Duration::from_secs(3), |i| i.is_empty()).await;
+    assert!(instances.is_empty(), "{instances:?}");
+
+    crate::perspectives::remove_perspective(&p.uuid).await;
+}
+
+/// Design §1.5 path 3: a change the language did not signal is caught by
+/// the resync loop on its next tick.
+#[tokio::test]
+async fn a_silent_change_shows_after_the_resync_interval() {
+    let lang = load_mount_test_language().await;
+    create(&lang, json!({"title": "a"})).await;
+    let (p, _ctx) = mounted(&lang).await;
+    super::mounts::set_mount_resync_interval_for_test(Duration::from_secs(1));
+    let instance = p.clone();
+    let loop_handle = tokio::spawn(async move { instance.mount_resync_loop().await });
+
+    interact(
+        &format!("{lang}://project"),
+        "outsideChange",
+        json!({"address": "t1", "data": {"title": "silent"}, "emit": false}),
+    )
+    .await
+    .unwrap();
+
+    let instances = eventually(&p, Duration::from_secs(3), |i| {
+        i.len() == 1 && i[0]["title"] == "silent"
+    })
+    .await;
+    assert_eq!(instances.len(), 1, "{instances:?}");
+    assert_eq!(instances[0]["title"], "silent");
+
+    p.teardown_background_tasks().await;
+    loop_handle.await.unwrap();
+    crate::perspectives::unregister_mount(&lang, &p.uuid);
+    super::mounts::set_mount_resync_interval_for_test(Duration::from_secs(15));
+}
+
+#[tokio::test]
+async fn removing_the_perspective_stops_the_loop() {
+    let lang = load_mount_test_language().await;
+    let (p, _ctx) = mounted(&lang).await;
+    super::mounts::set_mount_resync_interval_for_test(Duration::from_millis(200));
+    let instance = p.clone();
+    let loop_handle = tokio::spawn(async move { instance.mount_resync_loop().await });
+
+    p.teardown_background_tasks().await;
+
+    let stopped = tokio::time::timeout(Duration::from_secs(1), loop_handle).await;
+    crate::perspectives::unregister_mount(&lang, &p.uuid);
+    super::mounts::set_mount_resync_interval_for_test(Duration::from_secs(15));
+    assert!(
+        stopped.is_ok(),
+        "the resync loop did not stop within 1 s of teardown"
+    );
+}
+
+/// A `mountDelta` that does not parse is dropped with a warning: the
+/// perspective keeps its records and the language keeps working.
+#[tokio::test]
+async fn an_invalid_delta_is_dropped_with_a_warning() {
+    let lang = load_mount_test_language().await;
+    create(&lang, json!({"title": "a"})).await;
+    let (p, _ctx) = mounted_and_registered(&lang).await;
+
+    interact(
+        &format!("{lang}://project"),
+        "emitRaw",
+        json!({"mountDelta": {"changed": "nope"}}),
+    )
+    .await
+    .unwrap();
+
+    // Were a malformed payload routed, its apply would be async — give it
+    // a moment to land before checking the store is unchanged.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let instances = things(&p).await;
+    assert_eq!(instances.len(), 1, "{instances:?}");
+    assert_eq!(instances[0]["title"], "a");
+
+    // The language is unharmed: a `create` still answers with its delta.
+    let result = interact(
+        &format!("{lang}://class/MountThing"),
+        "create",
+        json!({"title": "b"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result["address"], "t2");
+
+    crate::perspectives::remove_perspective(&p.uuid).await;
+}
+
+#[tokio::test]
+async fn a_delta_reaches_every_perspective_that_mounts_the_language() {
+    let lang = load_mount_test_language().await;
+    let (p1, _c1) = mounted_and_registered(&lang).await;
+    let (p2, _c2) = mounted_and_registered(&lang).await;
+
+    interact(
+        &format!("{lang}://project"),
+        "outsideChange",
+        json!({"address": "t1", "data": {"title": "for all"}, "emit": true}),
+    )
+    .await
+    .unwrap();
+
+    for p in [&p1, &p2] {
+        let instances = eventually(p, Duration::from_secs(3), |i| {
+            i.len() == 1 && i[0]["title"] == "for all"
+        })
+        .await;
+        assert_eq!(instances.len(), 1, "{instances:?}");
+        assert_eq!(instances[0]["title"], "for all");
+    }
+
+    crate::perspectives::remove_perspective(&p1.uuid).await;
+    crate::perspectives::remove_perspective(&p2.uuid).await;
 }

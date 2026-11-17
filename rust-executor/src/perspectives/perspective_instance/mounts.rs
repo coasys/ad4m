@@ -17,7 +17,7 @@
 //! `Local` mirror.
 
 use std::collections::HashSet;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use deno_core::anyhow::anyhow;
@@ -46,6 +46,23 @@ const VERSION_PREDICATE: &str = "ad4m://mount_shapes_version";
 /// class the mount installed: the persistent record the one-mount-per-
 /// class-set check consults even when the owning language is not loaded.
 const CLASS_PREDICATE: &str = "ad4m://mounts_class";
+
+/// The interval between resync passes over a perspective's mounts
+/// (design §1.5: 15 s), in milliseconds. An `AtomicU64` so a test can
+/// shorten it through `set_mount_resync_interval_for_test`.
+static MOUNT_RESYNC_INTERVAL_MS: AtomicU64 = AtomicU64::new(15_000);
+
+/// How long `mount_resync_loop` sleeps between passes.
+fn mount_resync_interval() -> Duration {
+    Duration::from_millis(MOUNT_RESYNC_INTERVAL_MS.load(Ordering::Relaxed))
+}
+
+/// Test helper: set the resync interval. Tests run serially; a test that
+/// shortens it must set it back.
+#[cfg(test)]
+pub(crate) fn set_mount_resync_interval_for_test(interval: Duration) {
+    MOUNT_RESYNC_INTERVAL_MS.store(interval.as_millis() as u64, Ordering::Relaxed);
+}
 
 /// The mount's bookkeeping lives under the language's project handle.
 fn mount_target(lang: &str) -> String {
@@ -248,6 +265,19 @@ impl PerspectiveInstance {
                     self.uuid
                 );
             }
+        }
+    }
+
+    /// Re-runs every mount's snapshot every `mount_resync_interval()`
+    /// (design §1.5: pushed deltas are best effort — the timer catches
+    /// what a signal missed). Exits on `is_teardown` like the other
+    /// perspective loops.
+    ///
+    /// Stub: the loop's tests landed first; it never resyncs and never
+    /// observes teardown, so they stay red until the real loop arrives.
+    pub(super) async fn mount_resync_loop(&self) {
+        loop {
+            sleep(mount_resync_interval()).await;
         }
     }
 

@@ -69,6 +69,10 @@ export function interactions(address) {
           if (p.emit) emitSignal({ mountDelta: { changed: [], removed: [p.address] } });
           return true;
         } },
+      // Emit the params object as the signal payload unchanged (tests push
+      // malformed mountDelta shapes through this).
+      { label: "Emit raw", name: "emitRaw", parameters: [],
+        execute: async (params) => { emitSignal(params); return true; } },
     ];
   }
   if (records.has(address)) {
