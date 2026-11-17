@@ -4,6 +4,7 @@
 //! The delta type joins them here with the resync work.
 
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
 /// What `mountShapes()` returns.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -33,6 +34,16 @@ pub struct MountEntry {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
 pub struct MountSnapshot {
     pub entries: Vec<MountEntry>,
+}
+
+/// What a mount sync reports back: how many links the expansion added to
+/// and removed from the perspective's store (one link per changed property
+/// value — a title edit is `{added: 1, removed: 1}`).
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq, TS)]
+#[ts(export)]
+pub struct MountSyncReport {
+    pub added: usize,
+    pub removed: usize,
 }
 
 /// What a `call` action's interaction returns: the address of the primary

@@ -51,7 +51,7 @@ use crate::types::{
 use lazy_static::lazy_static;
 use perspective_instance::PerspectiveInstance;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
 
 use crate::events::{Audience, Event, Topic};
@@ -64,6 +64,14 @@ lazy_static! {
     static ref APP_DATA_PATH: RwLock<Option<String>> = RwLock::new(None);
     /// Cache mapping link_language address → PerspectiveHandle for fast signal routing
     static ref LINK_LANG_TO_PERSPECTIVE_HANDLE: RwLock<HashMap<String, PerspectiveHandle>> =
+        RwLock::new(HashMap::new());
+    /// Mounted language address → the perspective uuids holding that
+    /// mount. Kept current by `mount`/`unmount`/`restore_mounts`; the
+    /// mount link in the perspective's store is the persisted record this
+    /// mirrors, so it is rebuilt at every start (design §2.3). The
+    /// link-language signal router uses it to send `mountDelta`s to the
+    /// mounting perspectives.
+    static ref MOUNT_LANG_TO_PERSPECTIVES: RwLock<HashMap<String, HashSet<String>>> =
         RwLock::new(HashMap::new());
 }
 
@@ -500,6 +508,15 @@ pub async fn remove_perspective(uuid: &str) -> Option<PerspectiveInstance> {
             }
         }
 
+        // Drop every mount registration this perspective held.
+        {
+            let mut mounts = MOUNT_LANG_TO_PERSPECTIVES.write().unwrap();
+            mounts.retain(|_, uuids| {
+                uuids.remove(uuid);
+                !uuids.is_empty()
+            });
+        }
+
         // Clean up the per-perspective SPARQL (Oxigraph/RocksDB) directory
         if let Some(data_path) = get_app_data_path() {
             let db_path = std::path::Path::new(&data_path)
@@ -549,6 +566,39 @@ pub fn register_link_language_perspective(language_address: String, handle: Pers
         .write()
         .unwrap()
         .insert(language_address, handle);
+}
+
+/// Record that perspective `uuid` mounts `lang` (see
+/// `MOUNT_LANG_TO_PERSPECTIVES`).
+pub fn register_mount(lang: &str, uuid: &str) {
+    MOUNT_LANG_TO_PERSPECTIVES
+        .write()
+        .unwrap()
+        .entry(lang.to_string())
+        .or_default()
+        .insert(uuid.to_string());
+}
+
+/// Drop `uuid` from `lang`'s mount set; an empty set loses its key.
+pub fn unregister_mount(lang: &str, uuid: &str) {
+    let mut mounts = MOUNT_LANG_TO_PERSPECTIVES.write().unwrap();
+    if let Some(uuids) = mounts.get_mut(lang) {
+        uuids.remove(uuid);
+        if uuids.is_empty() {
+            mounts.remove(lang);
+        }
+    }
+}
+
+/// The uuids of every perspective mounting `lang` — the signal router's
+/// delivery list for that language's `mountDelta`s.
+pub fn perspectives_for_mount(lang: &str) -> Vec<String> {
+    MOUNT_LANG_TO_PERSPECTIVES
+        .read()
+        .unwrap()
+        .get(lang)
+        .map(|uuids| uuids.iter().cloned().collect())
+        .unwrap_or_default()
 }
 
 /// Look up PerspectiveHandle by link language address from cache
