@@ -18,38 +18,6 @@
 //! # Ok(())
 //! # }
 //! ```
-//!
-//! # Migrating from the first version of this module
-//!
-//! Source-breaking changes, with what a caller changes:
-//!
-//! - `TokenStore::token(url, app)` returns `Result<Option<String>>` (was
-//!   `Option<String>`): a store that cannot be read or parsed is an error,
-//!   no longer an empty store. Add `?` or handle the error.
-//! - The remembered URL is per app: `TokenStore::last_url(app)` returns
-//!   `Result<Option<RememberedUrl>>` (was `last_url()` returning
-//!   `Option<String>`) and `set_last_url(app, url, pinned)` takes the app and
-//!   whether the URL was chosen (`url`/`port`) rather than discovered (was
-//!   `set_last_url(url)`). The old global entry in `tokens.json` is ignored,
-//!   so each app discovers its executor once more.
-//! - New: `TokenStore::remove_token_if(url, app, token)`, which removes the
-//!   token only while it is still `token`.
-//! - New variant `ConnectError::InsecureTransport { url }`: plaintext
-//!   (`http://`/`ws://`) to an executor off loopback is now refused before
-//!   any token, password or code is sent. Opt in with
-//!   `ConnectOptions::allow_insecure_remote(true)`; code that builds
-//!   `ConnectOptions` as a struct literal must set the new `insecure_remote`
-//!   field (or use `ConnectOptions::new`).
-//! - New variant `ConnectStatus::EmailCodeExpired`: the email challenge is
-//!   no longer valid and a new code is requested (see its docs: it does not
-//!   detect expiry by time).
-//!
-//! Exhaustive `match`es on `ConnectError` or `ConnectStatus` need the new
-//! arms. Behaviour changes: `connect` can return `Ok(AuthState::Unauthenticated)`
-//! (see [`Ad4mConnect::connect`]); `disconnect` closes the socket and
-//! publishes `Unauthenticated` before it returns a store error; a
-//! `localhost` URL is dialled on 127.0.0.1 and ::1, never through the
-//! resolver.
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
