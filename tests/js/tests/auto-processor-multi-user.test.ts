@@ -36,18 +36,13 @@ import {
   gracefulShutdown,
 } from "../utils/utils";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
-import { addOllamaLlm, waitUntil } from "../helpers/index";
+import { addE2eLlm, E2E_PASS_TIMEOUT_MS, waitUntil } from "../helpers/index";
 import { ChildProcess } from "node:child_process";
 import { ConversationSubgroup } from "./model/auto-processor-models";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const BASE_URL = process.env.INTERPRETATION_E2E_BASE_URL || "http://localhost:11434/v1";
-// Ask for the window the Modelfile already loaded (qwen3.8-27b-48k: 49152). The provider reads
-// it from /api/show too; the pin also holds a model without a Modelfile num_ctx to staging's residency.
-const MAX_NUM_CTX = Number(process.env.INTERPRETATION_E2E_MAX_NUM_CTX) || 49152;
-const MODEL = process.env.INTERPRETATION_E2E_MODEL || "qwen3.8-27b-48k";
 const ADMIN_CREDENTIAL = "auto-processor-multi-user-admin";
 
 // Same shape as the two-executor test uses: speaker + timestamp come off the
@@ -63,14 +58,14 @@ ORDER BY ?timestamp`;
 
 // LLM E2E gate — this suite drives the executor's real LLM path. Skipped by
 // default (unset `LLM_E2E`); the nightly `llm-e2e` workflow on `dev` runs it
-// against Marvin's Ollama. Run locally with `LLM_E2E=1`, or the umbrella
+// against the host's llama-server. Run locally with `LLM_E2E=1`, or the umbrella
 // `./scripts/run-llm-e2e.sh` at the repo root.
 const describeIfLLM: Mocha.SuiteFunction = (process.env.LLM_E2E === "1"
   ? describe
   : (describe.skip as unknown as Mocha.SuiteFunction));
 
 describeIfLLM("AutoProcessor runs for managed users on a hosted node", function () {
-  this.timeout(600_000);
+  this.timeout(1_200_000);
 
   const TEST_DIR = path.join(`${__dirname}/../tst-tmp`);
   const appDataPath = path.join(TEST_DIR, "agents", "auto-processor-multi-user");
@@ -118,7 +113,7 @@ describeIfLLM("AutoProcessor runs for managed users on a hosted node", function 
     // LLM lives on the admin side — its default binding is global, so
     // interpretation passes running under a managed user's context still
     // resolve to it.
-    const modelId = await addOllamaLlm(admin, "interpretation-llm", BASE_URL, MODEL, MAX_NUM_CTX);
+    const modelId = await addE2eLlm(admin, "interpretation-llm");
     await admin.ai.setDefaultModel("LLM", modelId);
 
     // Two managed users, free-access so billing doesn't gate the LLM call.
@@ -221,7 +216,7 @@ describeIfLLM("AutoProcessor runs for managed users on a hosted node", function 
         const processedCount = events.filter((e) => e.step === "processed").length;
         return processedCount >= 1 && subgroups.length >= 1;
       },
-      240_000,
+      E2E_PASS_TIMEOUT_MS,
       "a processed event and at least one subgroup from managed-user utterances",
     );
 
