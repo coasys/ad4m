@@ -395,7 +395,10 @@ mod tests {
         .expect("mint prior sources");
 
         let mut watcher = WatcherState::new();
-        let had_pending = p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
+        let had_pending = p
+            .run_auto_processor_tick(&mut watcher, now_ms, &ctx)
+            .await
+            .polls_at_base_rate();
         assert_eq!(
             watcher
                 .pending_for("cursor-skip")
@@ -433,7 +436,9 @@ mod tests {
         let now_ms = chrono::Utc::now().timestamp_millis();
         let mut watcher = WatcherState::new();
         assert!(
-            !p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await,
+            !p.run_auto_processor_tick(&mut watcher, now_ms, &ctx)
+                .await
+                .polls_at_base_rate(),
             "no processor declared: nothing can be pending"
         );
 
@@ -452,12 +457,15 @@ mod tests {
             .await
             .expect("write_processor");
         assert!(
-            p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await,
+            p.run_auto_processor_tick(&mut watcher, now_ms, &ctx)
+                .await
+                .polls_at_base_rate(),
             "an unprocessed turn waiting out its debounce keeps the loop at the base rate"
         );
         assert!(
             p.run_auto_processor_tick(&mut watcher, now_ms + 500, &ctx)
-                .await,
+                .await
+                .polls_at_base_rate(),
             "still pending on the next tick"
         );
     }
@@ -500,12 +508,15 @@ mod tests {
         let now_ms = chrono::Utc::now().timestamp_millis();
         let mut watcher = WatcherState::new();
         assert!(
-            p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await,
+            p.run_auto_processor_tick(&mut watcher, now_ms, &ctx)
+                .await
+                .polls_at_base_rate(),
             "recording tick"
         );
         assert!(
             p.run_auto_processor_tick(&mut watcher, now_ms + 51, &ctx)
-                .await,
+                .await
+                .polls_at_base_rate(),
             "the draining tick of a batch that will be retried must not report idle"
         );
         assert!(
@@ -516,7 +527,8 @@ mod tests {
         );
         assert!(
             p.run_auto_processor_tick(&mut watcher, now_ms + 102, &ctx)
-                .await,
+                .await
+                .polls_at_base_rate(),
             "the unretired turn is re-recorded on the next tick"
         );
     }
@@ -558,7 +570,9 @@ mod tests {
             now_ms,
         );
         assert!(
-            !p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await,
+            !p.run_auto_processor_tick(&mut watcher, now_ms, &ctx)
+                .await
+                .polls_at_base_rate(),
             "a removed processor's queue must not keep the loop at the base rate"
         );
     }

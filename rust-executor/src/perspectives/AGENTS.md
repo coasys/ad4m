@@ -80,7 +80,10 @@ or writes the graph. Split plan: spec items 3, 7, 8.
   generation is unchanged; the transcript keeps text only for turns that may still be queued
   (consumed or out-of-window turns are id + timestamp), one copy per processor per loop (one loop
   per perspective and per online managed user). A new store write path must call `note_write`,
-  or the loop misses that change until some other write lands.
+  or the loop misses that change until some other write lands. With turns pending but no default
+  LLM set and spawned (`watcher::model_available`), a tick drains nothing and returns
+  `TickOutcome::NoModel`, and the loop backs off as if idle: no signal announces a new default
+  model, so the next write or the 60 s fallback finds it.
 - **File descriptors.** Every perspective keeps one RocksDB store open
   (`SparqlStore::new`), and only `PerspectiveInstance` holds it: the store's descriptors close
   when the last clone of the removed instance drops, i.e. once its background loops have seen

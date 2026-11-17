@@ -238,6 +238,9 @@ pub struct WatcherState {
     deferred: BTreeMap<String, BTreeMap<String, i64>>,
     /// The store reads the last tick made, reused while no link changed.
     pub(crate) reads: TickReads,
+    /// The last tick found turns waiting and no model to run them
+    /// ([`TickOutcome::NoModel`]); logged once when it starts and ends.
+    pub(crate) waiting_for_model: bool,
     /// Test-only: how many ids [`Self::record_item`] compared or looked up
     /// to find a duplicate.
     #[cfg(test)]
@@ -527,9 +530,9 @@ impl WatcherState {
     }
 
     /// Whether any of the declared `processor_ids` has turns waiting to be
-    /// batched. While this holds the watch loop polls at
-    /// [`AUTO_PROCESSOR_TICK_MS`], so `debounce_ms` and `max_wait_ms` keep
-    /// their resolution. Scoped to declared processors because a removed
+    /// batched. While this holds and a model can run them, the watch loop
+    /// polls at [`AUTO_PROCESSOR_TICK_MS`], so `debounce_ms` and `max_wait_ms`
+    /// keep their resolution ([`TickOutcome`]). Scoped to declared processors because a removed
     /// processor's queue is never drained again and must not pin the loop at
     /// the base rate.
     pub fn has_pending_for<'a>(&self, processor_ids: impl IntoIterator<Item = &'a str>) -> bool {
@@ -541,7 +544,8 @@ impl WatcherState {
     }
 }
 
-/// Tick interval of an auto-processor watch loop while turns are pending, so
+/// Tick interval of an auto-processor watch loop while turns are pending (and
+/// a model can run them, see [`TickOutcome::NoModel`]), so
 /// `debounce_ms` and `max_wait_ms` keep their resolution. Also how long the
 /// loop lets a burst of link writes settle before the tick they woke, and the
 /// slice it sleeps in, so teardown is seen this promptly.
@@ -556,7 +560,8 @@ pub const AUTO_PROCESSOR_TICK_MS: u64 = 500;
 pub const AUTO_PROCESSOR_IDLE_TICK_MAX_MS: u64 = 4_000;
 
 /// The shortest time from one store-reading tick to the next write-woken one:
-/// [`AUTO_PROCESSOR_TICK_MS`] after a tick that left turns pending, otherwise
+/// [`AUTO_PROCESSOR_TICK_MS`] after a tick that left turns pending
+/// ([`TickOutcome::polls_at_base_rate`]), otherwise
 /// double the previous value, capped at [`AUTO_PROCESSOR_IDLE_TICK_MAX_MS`].
 /// It is measured from the last tick that read the store, so the first write
 /// after a quiet spell is still picked up after [`AUTO_PROCESSOR_TICK_MS`].
@@ -567,6 +572,49 @@ pub fn next_tick_delay_ms(previous_ms: u64, had_pending: bool) -> u64 {
     previous_ms
         .saturating_mul(2)
         .clamp(AUTO_PROCESSOR_TICK_MS, AUTO_PROCESSOR_IDLE_TICK_MAX_MS)
+}
+
+/// What a tick of the watch loop found, which sets how soon the next runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TickOutcome {
+    /// No declared processor has a turn waiting.
+    Idle,
+    /// Turns are waiting to be batched or retried: poll at
+    /// [`AUTO_PROCESSOR_TICK_MS`], so `debounce_ms` and `max_wait_ms` keep
+    /// their resolution.
+    Pending,
+    /// Turns are waiting, but no pass could run them: the executor has no
+    /// LLM ([`model_available`]). Nothing is drained, so the turns stay
+    /// queued with their debounce clocks, and the loop backs off as if idle
+    /// until a write (or the idle fallback) brings the next tick.
+    NoModel,
+}
+
+impl TickOutcome {
+    /// Whether the loop must tick again after [`AUTO_PROCESSOR_TICK_MS`]
+    /// rather than back off.
+    pub fn polls_at_base_rate(self) -> bool {
+        self == TickOutcome::Pending
+    }
+}
+
+/// Whether a pass could reach a model: every pass prompts the executor's
+/// default LLM ([`run_one_pass`]), so with none set and spawned each would
+/// claim its batch and then fail. Tests answer through [`test_hooks`]
+/// (available unless a test says otherwise): the stand-in interpretation
+/// needs no model.
+pub async fn model_available() -> bool {
+    #[cfg(test)]
+    {
+        test_hooks::model_available()
+    }
+    #[cfg(not(test))]
+    {
+        match crate::ai_service::AIService::global_instance().await {
+            Ok(ai) => ai.default_llm_ready().await,
+            Err(_) => false,
+        }
+    }
 }
 
 /// Longest an idle watch loop sleeps when no link changes. A link write wakes
@@ -1613,6 +1661,10 @@ pub(crate) mod test_hooks {
         pub lose_lease_in_interpretation: bool,
         /// Set by either of the two above; read by `LeaseGuard::is_healthy`.
         pub lease_lost: Arc<AtomicBool>,
+        /// The executor has no model: [`model_available`] answers `false`.
+        pub no_model: bool,
+        /// How many times a tick asked [`model_available`].
+        pub model_checks: Arc<std::sync::atomic::AtomicUsize>,
     }
 
     tokio::task_local! {
@@ -1673,6 +1725,15 @@ pub(crate) mod test_hooks {
                 })
                 .collect(),
         ))
+    }
+
+    pub(super) fn model_available() -> bool {
+        HOOKS
+            .try_with(|h| {
+                h.model_checks.fetch_add(1, Ordering::Relaxed);
+                !h.no_model
+            })
+            .unwrap_or(true)
     }
 
     pub(super) fn lease_lost() -> bool {

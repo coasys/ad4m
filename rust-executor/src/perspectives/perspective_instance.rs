@@ -6540,11 +6540,14 @@ impl PerspectiveInstance {
 
     /// Auto-processor watch loop.
     ///
-    /// One instance per perspective, joined into `start_background_tasks`.
-    /// It ticks every `AUTO_PROCESSOR_TICK_MS` while turns are pending. While
-    /// idle it sleeps until the perspective's store takes a write (a link
-    /// added or removed, by anyone: local, a link language, the pass itself),
-    /// waits `AUTO_PROCESSOR_TICK_MS` more so a burst of writes makes one
+    /// One instance per perspective, joined into `start_background_tasks`
+    /// (and one per online managed user, from
+    /// `managed_user_auto_processor_supervisor`). It ticks every
+    /// `AUTO_PROCESSOR_TICK_MS` while turns are pending and the executor has
+    /// an LLM to run them. While idle, or while turns wait for a model
+    /// (`TickOutcome::NoModel`: nothing is drained), it sleeps until the
+    /// perspective's store takes a write (a link added or removed, by anyone:
+    /// local, a link language, the pass itself), waits `AUTO_PROCESSOR_TICK_MS` more so a burst of writes makes one
     /// tick, and ticks. A write-woken tick also waits out the idle back-off
     /// since the last tick that read the store (doubling from
     /// `AUTO_PROCESSOR_TICK_MS` to `AUTO_PROCESSOR_IDLE_TICK_MAX_MS`, see
@@ -6634,11 +6637,12 @@ impl PerspectiveInstance {
                 Ok(d) => d.as_millis() as i64,
                 Err(_) => continue, // clock before epoch — skip tick
             };
-            let had_pending = self
+            let polls = self
                 .run_auto_processor_tick(&mut watcher, now_ms, &context)
-                .await;
-            wait = had_pending.then_some(AUTO_PROCESSOR_TICK_MS);
-            idle_floor_ms = next_tick_delay_ms(idle_floor_ms, had_pending);
+                .await
+                .polls_at_base_rate();
+            wait = polls.then_some(AUTO_PROCESSOR_TICK_MS);
+            idle_floor_ms = next_tick_delay_ms(idle_floor_ms, polls);
         }
 
         log::debug!("auto_processor_watch_loop ended for perspective {}", uuid);
@@ -6662,26 +6666,32 @@ impl PerspectiveInstance {
     /// context so the `ProcessingClaim` election runs across distinct DIDs
     /// (proving two users on one executor don't double-process).
     ///
-    /// Returns whether a declared processor had turns pending after recording,
-    /// i.e. whether the loop must keep polling at the base rate (#1072). It is
-    /// sampled before draining, so a drained batch that is retried (stand-down,
-    /// awaiting author, missing shapes, pass error) keeps the base rate: the
-    /// next tick re-records it. `false` when no processor is declared or every
-    /// gathered turn was already processed or deferred. If loading the
-    /// processors fails, any queued turn counts. A per-config query failure
-    /// records nothing for that config, so a failing scope query backs off
-    /// instead of logging a warning twice a second.
+    /// Returns [`TickOutcome::Pending`] when a declared processor had turns
+    /// pending after recording, i.e. the loop must keep polling at the base
+    /// rate (#1072). It is sampled before draining, so a drained batch that is
+    /// retried (stand-down, awaiting author, missing shapes, pass error) keeps
+    /// the base rate: the next tick re-records it. `Idle` when no processor is
+    /// declared or every gathered turn was already processed or deferred. If
+    /// loading the processors fails, any queued turn counts. A per-config
+    /// query failure records nothing for that config, so a failing scope
+    /// query backs off instead of logging a warning twice a second.
+    /// `NoModel` when turns are pending but the executor has no LLM: nothing
+    /// is drained, and the loop backs off as if idle (#1682).
+    ///
+    /// [`TickOutcome::Pending`]: crate::perspectives::auto_processor::watcher::TickOutcome
     pub(crate) async fn run_auto_processor_tick(
         &self,
         watcher: &mut crate::perspectives::auto_processor::watcher::WatcherState,
         now_ms: i64,
         context: &AgentContext,
-    ) -> bool {
+    ) -> crate::perspectives::auto_processor::watcher::TickOutcome {
         use crate::perspectives::auto_processor::{
             config::load_processors,
             cursor::{load_processed_sources, processed_ids_in_window, turn_in_source_window},
             events::{emit, AutoProcessorEvent, AutoProcessorStep},
-            watcher::{run_one_pass, CachedTurn, PassOutcome, PendingTurn},
+            watcher::{
+                model_available, run_one_pass, CachedTurn, PassOutcome, PendingTurn, TickOutcome,
+            },
         };
 
         let uuid = self.uuid.clone();
@@ -6696,12 +6706,16 @@ impl PerspectiveInstance {
                         "auto_processor_tick [{}]: load_processors failed: {e:#}",
                         uuid
                     );
-                    return watcher.has_pending();
+                    return if watcher.has_pending() {
+                        TickOutcome::Pending
+                    } else {
+                        TickOutcome::Idle
+                    };
                 }
             },
         };
         if configs.is_empty() {
-            return false;
+            return TickOutcome::Idle;
         }
 
         // 1. Record new-since-last-processed turns per config (payload kept).
@@ -6775,6 +6789,28 @@ impl PerspectiveInstance {
         }
 
         let had_pending = watcher.has_pending_for(configs.iter().map(|c| c.processor_id.as_str()));
+        if !had_pending {
+            return TickOutcome::Idle;
+        }
+        // Every pass prompts the default LLM. Without one, a drained batch
+        // would be claimed and fail, and the loop would retry it twice a
+        // second for as long as the executor has no model. Leave the turns
+        // queued instead (their debounce clocks keep running, so they drain
+        // on the first tick that finds a model) and let the loop back off.
+        if !model_available().await {
+            if !watcher.waiting_for_model {
+                log::info!(
+                    "auto_processor [{uuid}]: turns are waiting but no LLM is configured; \
+                     backing off until a tick finds one"
+                );
+                watcher.waiting_for_model = true;
+            }
+            return TickOutcome::NoModel;
+        }
+        if watcher.waiting_for_model {
+            log::info!("auto_processor [{uuid}]: an LLM is configured; processing resumes");
+            watcher.waiting_for_model = false;
+        }
 
         // 2. Drain + run a pass per config.
         for cfg in configs.iter() {
@@ -6859,7 +6895,7 @@ impl PerspectiveInstance {
                 }
             }
         }
-        had_pending
+        TickOutcome::Pending
     }
 
     /// Reset the fallback sync interval to 30 seconds when new links are added

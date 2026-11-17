@@ -27,6 +27,7 @@ use tokio::time::sleep;
 mod default_embedding;
 mod error;
 pub mod harness;
+mod llm_ready;
 pub mod providers;
 use log::error;
 use providers::{ChatReply, ChatRequest, ChatTurn, RemoteChat, ToolSpec};

@@ -104,13 +104,16 @@ async fn a_tick_without_link_changes_queries_nothing_when_no_processor_is_declar
     let mut watcher = WatcherState::new();
     let now_ms = chrono::Utc::now().timestamp_millis();
 
-    assert!(!p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await);
+    assert!(!p
+        .run_auto_processor_tick(&mut watcher, now_ms, &ctx)
+        .await
+        .polls_at_base_rate());
     let after_first = all_queries(&p);
     for i in 1..=5 {
-        assert!(
-            !p.run_auto_processor_tick(&mut watcher, now_ms + i * 60_000, &ctx)
-                .await
-        );
+        assert!(!p
+            .run_auto_processor_tick(&mut watcher, now_ms + i * 60_000, &ctx)
+            .await
+            .polls_at_base_rate());
     }
     assert_eq!(
         all_queries(&p),
@@ -141,7 +144,10 @@ async fn a_tick_rereads_the_transcript_only_after_a_link_change() {
 
     let mut watcher = WatcherState::new();
     let now_ms = chrono::Utc::now().timestamp_millis();
-    assert!(p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await);
+    assert!(p
+        .run_auto_processor_tick(&mut watcher, now_ms, &ctx)
+        .await
+        .polls_at_base_rate());
     assert_eq!(
         transcript_queries(&p),
         1,
@@ -152,7 +158,8 @@ async fn a_tick_rereads_the_transcript_only_after_a_link_change() {
     for i in 1..=10 {
         assert!(
             p.run_auto_processor_tick(&mut watcher, now_ms + i * 500, &ctx)
-                .await,
+                .await
+                .polls_at_base_rate(),
             "the turn is still waiting"
         );
     }
@@ -563,11 +570,14 @@ async fn id_checks_for_two_ticks_over(n: usize) -> u64 {
         .set_transcript(&cfg, generation, turns, |_, _| true);
 
     let now_ms = chrono::Utc::now().timestamp_millis();
-    assert!(p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await);
-    assert!(
-        p.run_auto_processor_tick(&mut watcher, now_ms + 500, &ctx)
-            .await
-    );
+    assert!(p
+        .run_auto_processor_tick(&mut watcher, now_ms, &ctx)
+        .await
+        .polls_at_base_rate());
+    assert!(p
+        .run_auto_processor_tick(&mut watcher, now_ms + 500, &ctx)
+        .await
+        .polls_at_base_rate());
     assert_eq!(
         watcher.pending_for("many").map(|e| e.items.len()),
         Some(n),
@@ -592,4 +602,127 @@ async fn a_tick_over_50k_kept_turns_records_them_in_linear_time() {
              recording must cost one check per turn"
         );
     }
+}
+
+/// Josh's profile, part 3: on an executor with no model a processor's turns
+/// stay pending forever, and a pending tick polled at the base rate (0.5 s)
+/// forever, in every loop of the space. With no model a tick drains nothing,
+/// keeps the turns queued, and reports `NoModel`, which backs the loop off to
+/// the idle delay. Once a model is there, the next tick drains the batch.
+#[tokio::test]
+async fn with_no_model_pending_turns_back_off_to_the_idle_delay() {
+    use super::watcher::test_hooks::{PassHooks, HOOKS};
+    use super::watcher::{
+        next_tick_delay_ms, TickOutcome, AUTO_PROCESSOR_IDLE_TICK_MAX_MS, AUTO_PROCESSOR_TICK_MS,
+    };
+
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+    seed_message(
+        &mut p,
+        &ctx,
+        "msg://1",
+        "did:key:alice",
+        "first",
+        "ns://body",
+    )
+    .await;
+    write_processor(&mut p, &config("modelless", 50, None), Some(false), &ctx)
+        .await
+        .expect("write_processor");
+
+    let mut watcher = WatcherState::new();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let no_model = PassHooks {
+        no_model: true,
+        ..Default::default()
+    };
+    HOOKS
+        .scope(no_model, async {
+            let mut floor = AUTO_PROCESSOR_TICK_MS;
+            // Past the debounce from the second tick on: a batch is ready.
+            for i in 0..6 {
+                let outcome = p
+                    .run_auto_processor_tick(&mut watcher, now_ms + i * 500, &ctx)
+                    .await;
+                assert_eq!(outcome, TickOutcome::NoModel, "tick {i}");
+                floor = next_tick_delay_ms(floor, outcome.polls_at_base_rate());
+            }
+            assert_eq!(
+                floor, AUTO_PROCESSOR_IDLE_TICK_MAX_MS,
+                "with no model the loop backs off to the idle delay"
+            );
+        })
+        .await;
+    assert_eq!(
+        pending_texts(&watcher, "modelless"),
+        vec!["first"],
+        "nothing is drained without a model; the turn stays queued"
+    );
+
+    // A model is there (the hooks' default): the batch drains at once.
+    let outcome = p
+        .run_auto_processor_tick(&mut watcher, now_ms + 3_000, &ctx)
+        .await;
+    assert_eq!(outcome, TickOutcome::Pending);
+    assert!(
+        pending_texts(&watcher, "modelless").is_empty(),
+        "the first tick with a model drains the waiting batch"
+    );
+}
+
+/// The loop itself, with no model and a turn pending: after the tick that
+/// finds no model it waits for a write or the idle fallback, instead of
+/// ticking every 0.5 s. Counted by how often a tick asked for a model.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn with_no_model_the_watch_loop_stops_polling() {
+    use super::watcher::test_hooks::{PassHooks, HOOKS};
+    use std::sync::atomic::Ordering;
+
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+    seed_message(
+        &mut p,
+        &ctx,
+        "msg://1",
+        "did:key:alice",
+        "first",
+        "ns://body",
+    )
+    .await;
+    write_processor(&mut p, &config("modelless", 50, None), Some(false), &ctx)
+        .await
+        .expect("write_processor");
+
+    let hooks = PassHooks {
+        no_model: true,
+        ..Default::default()
+    };
+    let checks = hooks.model_checks.clone();
+    let looping = p.clone();
+    let loop_ctx = ctx.clone();
+    let handle = tokio::spawn(HOOKS.scope(hooks, async move {
+        looping.auto_processor_watch_loop(loop_ctx).await
+    }));
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while checks.load(Ordering::Relaxed) == 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the loop's first tick never asked for a model"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let ticks = checks.load(Ordering::Relaxed);
+    println!("{ticks} ticks in ~3 s with a turn pending and no model");
+    assert_eq!(
+        ticks, 1,
+        "with no model and no write the loop ticked {ticks} times in ~3 s; \
+         polling at 0.5 s would be about 6"
+    );
+
+    p.teardown_background_tasks().await;
+    tokio::time::timeout(Duration::from_secs(2), handle)
+        .await
+        .expect("teardown ends the loop promptly")
+        .expect("loop task");
 }
