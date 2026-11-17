@@ -124,8 +124,10 @@ is a second, raw-link parser slated for deletion.
 ## Rules
 
 - A tool that does the job of an RPC method calls it (`call`), never the code behind
-  it. The other tools call `PerspectiveInstance` directly; keep their semantics aligned with
-  the WS handlers (same capability, same `Session::acts_as`).
+  it. The one exception is the five `instance_*` write tools: they call the functions in
+  `perspectives/instances/` that the `perspective.instance*` methods call, under the same
+  guard (above). The other tools call `PerspectiveInstance` directly; keep their semantics
+  aligned with the WS handlers (same capability, same `Session::acts_as`).
 - Permission denial on a perspective is 404 from the guard (D6), never 403: don't leak
   perspective existence. No tool names an AI task; an MCP session reaches tasks only through
   the handler map, under `Owns { Task }`
