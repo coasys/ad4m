@@ -66,6 +66,8 @@ use uuid::Uuid;
 // `perspective_instance/` layout (see perspectives/AGENTS.md).
 // Abstract classes: resolution cache, queries, subscriptions (#1435).
 mod abstract_classes;
+// `call` actions: shape actions that call into a language (design §3).
+mod call_actions;
 mod containment;
 #[cfg(test)]
 pub(crate) use abstract_classes::faults::fail_next_index;
@@ -90,6 +92,10 @@ mod subscription_recheck_tests;
 #[cfg(test)]
 #[path = "perspective_instance_abstract_tests.rs"]
 mod abstract_tests;
+
+#[cfg(test)]
+#[path = "perspective_instance/call_actions_tests.rs"]
+mod call_actions_tests;
 
 #[cfg(test)]
 #[path = "perspective_instance_join_tests.rs"]
@@ -399,6 +405,8 @@ pub enum Action {
     SetSingleTarget,
     #[serde(rename = "collectionSetter")]
     CollectionSetter,
+    #[serde(rename = "call")]
+    Call,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
@@ -5262,6 +5270,12 @@ impl PerspectiveInstance {
             };
 
             match command.action {
+                Action::Call => {
+                    // Calls into a language are made by `call_actions`
+                    // before `execute_commands` sees a command list; one
+                    // reaching here slipped past a dispatch point.
+                    return Err(anyhow!("internal: call action reached execute_commands"));
+                }
                 Action::AddLink => {
                     self.add_link(
                         Link {
@@ -5762,7 +5776,7 @@ impl PerspectiveInstance {
         initial_values: Option<serde_json::Value>,
         batch_id: Option<String>,
         context: &AgentContext,
-    ) -> Result<(), AnyError> {
+    ) -> Result<Option<String>, AnyError> {
         //let create_start = std::time::Instant::now();
         //log::info!("🎯 CREATE SUBJECT: Starting create_subject for expression '{}' - batch_id: {:?}",
         //    expression_address, batch_id);
@@ -5778,6 +5792,13 @@ impl PerspectiveInstance {
         let mut commands = self.get_constructor_actions(&class_name).await?;
         //log::info!("🎯 CREATE SUBJECT: Got {} constructor actions in {:?}",
         //    commands.len(), constructor_start.elapsed());
+        // A constructor that is a call into a language mints the record
+        // there; its answer names the instance (design §3.3).
+        if commands.iter().any(|c| c.action == Action::Call) {
+            return self
+                .create_through_call(&class_name, commands, initial_values, batch_id, context)
+                .await;
+        }
         // Each `collectionSetter`, run after the merged commands with the
         // members as its parameters (as in `update_subject`).
         let mut collection_runs = Vec::new();
@@ -5913,7 +5934,7 @@ impl PerspectiveInstance {
         //log::info!("🎯 CREATE SUBJECT: Commands executed in {:?}", execute_start.elapsed());
         //log::info!("🎯 CREATE SUBJECT: Total create_subject took {:?}", create_start.elapsed());
 
-        Ok(())
+        Ok(None)
     }
 
     /// Patch property values on an instance that already exists: runs the
