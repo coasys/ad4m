@@ -1059,11 +1059,12 @@ mod tests {
         ws.close().await;
     }
 
-    /// R6: reordering a collection changes nothing — `save` sends no
-    /// *write* at all (the array compares as a set, not a sequence); the
-    /// only frame on the wire is the post-save re-read (R7).
+    /// R6: reordering a collection the model did not declare ordered
+    /// changes nothing — `save` sends no *write* at all (the array
+    /// compares as a set, not a sequence); the only frame on the wire is
+    /// the post-save re-read (R7).
     #[tokio::test]
-    async fn a_reordered_collection_is_not_dirty() {
+    async fn a_reordered_unordered_collection_is_not_dirty() {
         use crate::testkit::FakeExecutor;
         let fake = FakeExecutor::start().await;
         let ws = Arc::new(WsRpcClient::connect(fake.url(), "").await.unwrap());
