@@ -5,18 +5,17 @@
 //! Split into their own file (from the pure unit tests in `interpretation.rs`) so a
 //! reviewer can read *just this* to understand what the feature does end-to-end.
 //!
-//! They talk to an OpenAI-compatible endpoint (Ollama), NOT the embedded CUDA
-//! LLM — so no GPU build is needed, only a reachable model. Endpoint + model are
+//! They talk to staging's llama-server (OpenAI-shaped `/v1`), NOT an embedded
+//! CUDA LLM — so no GPU build is needed, only that server. Endpoint + model are
 //! env-overridable (`INTERPRETATION_E2E_BASE_URL` / `INTERPRETATION_E2E_MODEL` /
-//! `INTERPRETATION_E2E_API_KEY`); defaults hit Ollama at `localhost:11434` with
-//! `gemma3:12b` (fits the GPU, ~10s for the suite, Flux's summary model). On CI
-//! (self-hosted runner = Marvin) that endpoint is local; from a dev box, tunnel
-//! it (`ssh -L 11434:localhost:11434 marvin`).
+//! `INTERPRETATION_E2E_ENDPOINT_KIND` / `INTERPRETATION_E2E_API_KEY`); defaults
+//! are `http://127.0.0.1:12460/v1` and `qwen3.8-27b-ud-q4_k_m`. The nightly
+//! `llm-e2e` job points at the same server. It does not start one.
 //!
 //! Gated behind `#[ignore = "llm-e2e"]` so a `cargo test` on a dev box with no
 //! model reachable does not fail on the suite; regular CI skips it too. The
-//! nightly `llm-e2e` workflow on `dev` runs them all against Marvin's local
-//! Ollama.
+//! nightly `llm-e2e` workflow runs them against that llama-server. Embeddings
+//! (`nomic-embed-text`) stay on Ollama at `:11434`.
 //!
 //! Run this suite locally:
 //!   `cargo test --release --lib perspectives::interpretation_e2e -- --ignored
@@ -35,7 +34,7 @@ use super::model_query::types::ModelShape;
 use super::perspective_instance::PerspectiveInstance;
 use crate::types::Link;
 
-// ---- create_subject write path (no LLM — runs without Ollama) ---------------
+// ---- create_subject write path (no LLM call — runs without the server) ------
 
 /// The interpretation write path goes through `create_subject`. This proves the
 /// SDNA fixtures are real subject classes: constructor mints the type flag, the
@@ -1344,14 +1343,13 @@ async fn e2e_flux_grouping_scoped_incremental_lifecycle() {
 /// wording, then feeds a transcript that reintroduces the SAME task under
 /// different words + adds a genuinely new one. The default (`NormalizedString`)
 /// strategy would let the reworded duplicate through; the semantic strategy
-/// (via `nomic-embed-text` on the same Ollama base URL as the LLM) must catch
-/// it, so no fresh instance carries a title semantically equal to the seed.
+/// (via `nomic-embed-text` on Ollama, not on the llama-server the LLM uses) must
+/// catch it, so no fresh instance carries a title semantically equal to the seed.
 ///
-/// Requires `nomic-embed-text` to be pulled on the embeddings endpoint
-/// (`ollama pull nomic-embed-text` on Marvin). Base URL/model overridable via
-/// `INTERPRETATION_EMBED_BASE_URL` / `INTERPRETATION_EMBED_MODEL` (defaults
-/// hit `http://localhost:11434/v1` + `nomic-embed-text`, matching the LLM
-/// tunnel).
+/// Requires `nomic-embed-text` on the embeddings endpoint (Ollama at `:11434`).
+/// Base URL/model overridable via `INTERPRETATION_EMBED_BASE_URL` /
+/// `INTERPRETATION_EMBED_MODEL` (defaults `http://127.0.0.1:11434/v1` +
+/// `nomic-embed-text`).
 #[tokio::test]
 #[ignore = "llm-e2e"]
 async fn e2e_semantic_dedup_drops_reworded_duplicate() {
@@ -1359,7 +1357,7 @@ async fn e2e_semantic_dedup_drops_reworded_duplicate() {
 
     // Retry wrapper matches the pattern already used in this file for other
     // real-LLM tests (see `e2e_flux_grouping_creates_new_subgroup_on_topic_shift`
-    // and `e2e_flux_grouping_scoped_incremental_lifecycle`). Gemma3-12B is
+    // and `e2e_flux_grouping_scoped_incremental_lifecycle`). The model is
     // non-deterministic on the "extract two distinct tasks from two short
     // transcript lines" prompt: on the failing attempt the model emitted
     // zero placements ("e2e placements: 0 instance(s)"), so the new CI-docs
