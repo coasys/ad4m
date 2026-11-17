@@ -357,14 +357,26 @@ pub(crate) async fn fetch_instance(
     class_name: &str,
     base_uri: &str,
 ) -> Result<Option<Value>, String> {
+    Ok(find_instance(perspective, class_name, base_uri)
+        .await?
+        .map(|(_, instance)| instance))
+}
+
+/// [`fetch_instance`], with the URI the instance is stored under: `base_uri`, or its other
+/// `literal:` spelling when that is where the lookup found it.
+async fn find_instance(
+    perspective: &PerspectiveInstance,
+    class_name: &str,
+    base_uri: &str,
+) -> Result<Option<(String, Value)>, String> {
     let lookup = |uri: String| async move {
-        let query = json!({ "where": { "id": uri }, "limit": 1 });
+        let query = json!({ "where": { "id": uri.clone() }, "limit": 1 });
         let (instances, _) = run_model_query(perspective, class_name, &query).await?;
-        Ok::<Option<Value>, String>(instances.into_iter().next())
+        Ok::<Option<(String, Value)>, String>(instances.into_iter().next().map(|i| (uri, i)))
     };
 
-    if let Some(instance) = lookup(base_uri.to_string()).await? {
-        return Ok(Some(instance));
+    if let Some(found) = lookup(base_uri.to_string()).await? {
+        return Ok(Some(found));
     }
     match other_literal_spelling(base_uri) {
         Some(counterpart) => lookup(counterpart).await,
@@ -372,15 +384,17 @@ pub(crate) async fn fetch_instance(
     }
 }
 
-/// `Ok` when an instance of `class_name` lives at `base_uri`, else `NotFound` (or `Failed` when
-/// the lookup itself failed).
+/// The URI an instance of `class_name` at `base_uri` is stored under — `base_uri`, or its legacy
+/// `literal://` spelling for a node written before ids were normalised; writes go there, since
+/// the store does not alias the two. `NotFound` when there is none (or `Failed` when the lookup
+/// itself failed).
 async fn require_instance(
     perspective: &PerspectiveInstance,
     class_name: &str,
     base_uri: &str,
-) -> Result<(), InstanceError> {
-    match fetch_instance(perspective, class_name, base_uri).await {
-        Ok(Some(_)) => Ok(()),
+) -> Result<String, InstanceError> {
+    match find_instance(perspective, class_name, base_uri).await {
+        Ok(Some((stored, _))) => Ok(stored),
         Ok(None) => Err(InstanceError::NotFound {
             class_name: class_name.to_string(),
             base_uri: base_uri.to_string(),

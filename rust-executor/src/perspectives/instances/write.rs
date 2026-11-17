@@ -466,7 +466,8 @@ pub async fn update(
     }
 
     let base_uri = instance_uri("base_uri", &params.base_uri)?;
-    require_instance(perspective, &class_name, &base_uri).await?;
+    // Where it is stored: a legacy-spelled id's node is not the normalised one.
+    let stored = require_instance(perspective, &class_name, &base_uri).await?;
 
     // One batch for the whole update so remove-old + add-new per property lands atomically
     // (same reasoning as the per-class setters: without it a peer can observe the property as
@@ -475,7 +476,7 @@ pub async fn update(
     if let Err(e) = perspective
         .update_subject(
             subject_class(&class_name),
-            base_uri.clone(),
+            stored,
             Value::Object(validated.scalars.clone()),
             Some(batch.id()),
             agent,
@@ -505,7 +506,8 @@ pub async fn remove(
 ) -> Result<InstanceRemoved, InstanceError> {
     let (class_name, _shape) = resolve_class(perspective, &params.class_name).await?;
     let base_uri = instance_uri("base_uri", &params.base_uri)?;
-    require_instance(perspective, &class_name, &base_uri).await?;
+    // Where it is stored: a legacy-spelled id's node is not the normalised one.
+    let stored = require_instance(perspective, &class_name, &base_uri).await?;
     check_batch(perspective, params.batch_id.as_deref()).await?;
 
     // Through an abstract class (#1435), the destructors of the record's classes it reads: the
@@ -515,12 +517,7 @@ pub async fn remove(
         .map_err(|e| failed(&class_name, WriteStep::ReadShape, e))?;
     if is_abstract {
         perspective
-            .remove_subject(
-                subject_class(&class_name),
-                base_uri.clone(),
-                params.batch_id,
-                agent,
-            )
+            .remove_subject(subject_class(&class_name), stored, params.batch_id, agent)
             .await
             .map_err(|e| failed(&class_name, WriteStep::RemoveSubject, e))?;
         return Ok(InstanceRemoved {
@@ -532,7 +529,7 @@ pub async fn remove(
 
     // Outside a batch the cascade is not atomic, so on failure the links already removed stay
     // removed: the error says so, with the count.
-    match remove_all_links_of(perspective, &base_uri, params.batch_id.as_deref()).await {
+    match remove_all_links_of(perspective, &stored, params.batch_id.as_deref()).await {
         Ok(removed) => Ok(InstanceRemoved {
             class_name,
             base_uri,
@@ -566,7 +563,8 @@ pub async fn add_to_collection(
     let collection = info.name().to_string();
 
     let base_uri = instance_uri("base_uri", &params.base_uri)?;
-    require_instance(perspective, &class_name, &base_uri).await?;
+    // Where it is stored: a legacy-spelled id's node is not the normalised one.
+    let stored = require_instance(perspective, &class_name, &base_uri).await?;
     check_batch(perspective, params.batch_id.as_deref()).await?;
 
     let predicate = shacl::resolve_property_predicate(perspective, &class_name, &collection)
@@ -591,7 +589,7 @@ pub async fn add_to_collection(
     let existing = perspective
         .get_links_effective(
             &LinkQuery {
-                source: Some(base_uri.clone()),
+                source: Some(stored.clone()),
                 predicate: Some(predicate.clone()),
                 ..Default::default()
             },
@@ -636,7 +634,7 @@ pub async fn add_to_collection(
         property_value_target(perspective, &class_name, &collection, &coerced, agent).await
     };
     let link = Link {
-        source: base_uri.clone(),
+        source: stored,
         predicate: Some(predicate),
         target,
     };
@@ -689,7 +687,8 @@ pub async fn remove_from_collection(
     let collection = info.name().to_string();
 
     let base_uri = instance_uri("base_uri", &params.base_uri)?;
-    require_instance(perspective, &class_name, &base_uri).await?;
+    // Where it is stored: a legacy-spelled id's node is not the normalised one.
+    let stored = require_instance(perspective, &class_name, &base_uri).await?;
     check_batch(perspective, params.batch_id.as_deref()).await?;
 
     let predicate = shacl::resolve_property_predicate(perspective, &class_name, &collection)
@@ -711,7 +710,7 @@ pub async fn remove_from_collection(
     let links = perspective
         .get_links_effective(
             &LinkQuery {
-                source: Some(base_uri.clone()),
+                source: Some(stored),
                 predicate: Some(predicate),
                 ..Default::default()
             },

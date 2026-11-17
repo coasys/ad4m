@@ -5024,3 +5024,88 @@ async fn integer_property_refuses_a_whole_float_that_does_not_fit() {
     );
     assert_eq!(got["rank"], 3, "{got}");
 }
+
+/// An instance written before ids were normalised lives under the legacy
+/// `literal://string:…` source. `fetch_instance` finds it through the other
+/// spelling; update and remove must then write at that stored source, not at
+/// the normalised one the store does not alias to it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_legacy_spelled_instance_is_updated_and_removed_where_it_is_stored() {
+    let (handler, uuid, _guard) = setup(false).await;
+    let legacy = "literal://string:legacy-room";
+    let normalised = "literal:string:legacy-room";
+
+    {
+        let (mut perspective, agent) = handler
+            .get_writable_perspective(&uuid)
+            .await
+            .expect("fixture perspective");
+        for (predicate, target) in [
+            ("flux://entry_type", "flux://has_channel"),
+            ("rdf://type", "flux://Channel"),
+            ("flux://channel_name", "literal:string:Old"),
+        ] {
+            perspective
+                .add_link(
+                    crate::types::Link {
+                        source: legacy.into(),
+                        predicate: Some(predicate.into()),
+                        target: target.into(),
+                    },
+                    crate::types::LinkStatus::Shared,
+                    None,
+                    &agent,
+                )
+                .await
+                .expect("seed legacy link");
+        }
+    }
+    // The premise: the store keeps the legacy source as written.
+    assert_eq!(
+        stored_targets(&handler, &uuid, legacy, "flux://channel_name").await,
+        vec!["literal:string:Old"]
+    );
+
+    let updated = parse(
+        &handler
+            .instance_update(Parameters(InstanceUpdateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Channel".into(),
+                base_uri: legacy.into(),
+                properties: props(&[("name", json!("New"))]),
+            }))
+            .await,
+    );
+    assert!(updated.get("error").is_none(), "{updated}");
+    assert_eq!(
+        stored_targets(&handler, &uuid, legacy, "flux://channel_name").await,
+        vec!["literal:string:New"],
+        "the update must land on the stored instance"
+    );
+    assert!(
+        stored_targets(&handler, &uuid, normalised, "flux://channel_name")
+            .await
+            .is_empty(),
+        "the update must not start a second node under the normalised id"
+    );
+
+    let removed = parse(
+        &handler
+            .instance_remove(Parameters(InstanceRemoveParams {
+                perspective_id: uuid.clone(),
+                class_name: "Channel".into(),
+                base_uri: legacy.into(),
+            }))
+            .await,
+    );
+    assert!(removed.get("error").is_none(), "{removed}");
+    let (perspective, _) = handler.get_writable_perspective(&uuid).await.unwrap();
+    let left = perspective
+        .get_links(&crate::types::LinkQuery {
+            source: Some(legacy.into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(left.is_empty(), "remove left the stored links: {left:?}");
+}
