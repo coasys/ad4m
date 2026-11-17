@@ -231,6 +231,35 @@ struct Watches {
     stamps: BTreeMap<String, u64>,
 }
 
+/// Removes a call's `pending` entry when the call future is dropped before
+/// it finished — a caller's own timeout or `select!` cancels it, and the
+/// call's timeout arm, which cleans up otherwise, goes with it. Without
+/// this the entry stays until a reply or a disconnect; on a silent open
+/// socket, never. A reply racing the cancellation already removed the
+/// entry: the removal is then a no-op.
+struct PendingGuard<'a> {
+    shared: &'a Arc<Shared>,
+    id: &'a str,
+    finished: bool,
+}
+
+impl Drop for PendingGuard<'_> {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        if let Ok(mut pending) = self.shared.pending.try_lock() {
+            pending.remove(self.id);
+        } else if let Ok(rt) = tokio::runtime::Handle::try_current() {
+            let shared = self.shared.clone();
+            let id = self.id.to_string();
+            rt.spawn(async move {
+                shared.pending.lock().await.remove(&id);
+            });
+        }
+    }
+}
+
 /// A callback fired once a fresh socket is installed (post `events.watch`).
 pub(crate) type ReconnectCb = Arc<dyn Fn() + Send + Sync>;
 
@@ -1215,13 +1244,30 @@ impl WsRpcClient {
         } else {
             DEFAULT_TIMEOUT
         };
-        match tokio::time::timeout(timeout, self.call_inner(&id, msg_type, params)).await {
+        let mut guard = PendingGuard {
+            shared: &self.shared,
+            id: &id,
+            finished: false,
+        };
+        let outcome = self.call_timed(&id, msg_type, params, timeout).await;
+        guard.finished = true;
+        outcome
+    }
+
+    async fn call_timed(
+        &self,
+        id: &str,
+        msg_type: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<Value> {
+        match tokio::time::timeout(timeout, self.call_inner(id, msg_type, params)).await {
             Ok(r) => r,
             Err(_) => {
                 // The pending entry would sit until a reply lands (or the
                 // socket drains it); drop it now so a late reply answers no
                 // one.
-                self.shared.pending.lock().await.remove(&id);
+                self.shared.pending.lock().await.remove(id);
                 Err(anyhow!(
                     "RPC call '{}' timed out after {}ms",
                     msg_type,
@@ -2349,6 +2395,29 @@ mod tests {
         assert_eq!(restore["type"], "events.watch");
         assert_eq!(restore["params"], serde_json::json!({"good-event": null}));
         fake.reply(&restore, serde_json::json!(true)).await;
+        client.close().await;
+    }
+
+    /// A call the caller cancels (its own timeout, a `select!`) after the
+    /// frame went out must not leave its `pending` entry behind: on a
+    /// silent but open socket nothing else would ever remove it.
+    #[tokio::test]
+    async fn a_cancelled_call_leaves_no_pending_entry() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let client = WsRpcClient::connect(fake.url(), "").await.unwrap();
+
+        let mut call = Box::pin(client.call_value("x.y", serde_json::json!({})));
+        tokio::select! {
+            _ = &mut call => panic!("the fake never replies"),
+            req = fake.next_request() => assert_eq!(req["type"], "x.y"),
+        }
+        assert_eq!(client.shared.pending.lock().await.len(), 1);
+        drop(call);
+        assert!(
+            client.shared.pending.lock().await.is_empty(),
+            "the cancelled call's entry is still pending"
+        );
         client.close().await;
     }
 
