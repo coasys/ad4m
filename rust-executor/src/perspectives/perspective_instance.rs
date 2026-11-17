@@ -70,6 +70,9 @@ use uuid::Uuid;
 mod abstract_classes;
 // `call` actions: shape actions that call into a language (design §3).
 mod call_actions;
+// Mounted languages: the language's records mirrored as Local links
+// (design §1, §2).
+mod mounts;
 mod containment;
 // Class registration and the registry of shapes.
 mod shapes;
@@ -108,6 +111,10 @@ mod abstract_tests;
 #[cfg(test)]
 #[path = "perspective_instance/call_actions_tests.rs"]
 mod call_actions_tests;
+
+#[cfg(test)]
+#[path = "perspective_instance/mounts_tests.rs"]
+mod mounts_tests;
 
 #[cfg(test)]
 #[path = "perspective_instance_join_tests.rs"]
