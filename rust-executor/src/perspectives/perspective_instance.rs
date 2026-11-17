@@ -5802,6 +5802,7 @@ impl PerspectiveInstance {
         // Each `collectionSetter`, run after the merged commands with the
         // members as its parameters (as in `update_subject`).
         let mut collection_runs = Vec::new();
+        let mut call_groups: BTreeMap<(String, String), call_actions::CallRun> = BTreeMap::new();
 
         // Handle initial values if provided
         if let Some(obj) = initial_values {
@@ -5813,6 +5814,23 @@ impl PerspectiveInstance {
                     if let Some(setter_commands) =
                         self.get_property_setter_actions(&class_name, prop).await?
                     {
+                        // A `call` setter is made, not written — as in
+                        // `update_subject`, grouped per interaction and
+                        // run before the constructor's links.
+                        let where_ = format!("{class_name}.{prop}");
+                        let (call_commands, setter_commands) =
+                            Self::partition_actions(setter_commands, &where_)?;
+                        for command in &call_commands {
+                            let mut one = serde_json::Map::new();
+                            one.insert(prop.clone(), value.clone());
+                            Self::group_call(
+                                &mut call_groups,
+                                command,
+                                Some(&expression_address),
+                                one,
+                                &where_,
+                            )?;
+                        }
                         let (collection, setter_commands): (Vec<_>, Vec<_>) = setter_commands
                             .into_iter()
                             .partition(|c| c.action == Action::CollectionSetter);
@@ -5922,6 +5940,10 @@ impl PerspectiveInstance {
 
         //let execute_start = std::time::Instant::now();
         //log::info!("🎯 CREATE SUBJECT: Executing {} commands...", commands.len());
+        // The calls run before the constructor's links, outside any batch.
+        let calls: Vec<call_actions::CallRun> = call_groups.into_values().collect();
+        self.run_call_actions(&calls, batch_id.as_deref(), context)
+            .await?;
         // Execute the merged commands, then each collection setter
         let mut runs = vec![abstract_classes::Run {
             commands,
@@ -5976,6 +5998,13 @@ impl PerspectiveInstance {
         let mut commands: Vec<Command> = Vec::new();
         let mut runs = Vec::new();
         if let serde_json::Value::Object(obj) = values {
+            // A `call` setter is made, not written: split every property's
+            // list into calls and link actions first. The calls run before
+            // any link run and outside any batch, so they are collected
+            // here and the link setters resolved after.
+            let mut call_groups: BTreeMap<(String, String), call_actions::CallRun> =
+                BTreeMap::new();
+            let mut link_setters: Vec<(&String, Vec<Command>, &serde_json::Value)> = Vec::new();
             for (prop, value) in obj.iter() {
                 let Some(setter_commands) =
                     self.get_property_setter_actions(&class_name, prop).await?
@@ -5991,6 +6020,28 @@ impl PerspectiveInstance {
                     );
                     continue;
                 };
+                let where_ = format!("{class_name}.{prop}");
+                let (call_commands, setter_commands) =
+                    Self::partition_actions(setter_commands, &where_)?;
+                for command in &call_commands {
+                    let mut one = serde_json::Map::new();
+                    one.insert(prop.clone(), value.clone());
+                    Self::group_call(
+                        &mut call_groups,
+                        command,
+                        Some(&expression_address),
+                        one,
+                        &where_,
+                    )?;
+                }
+                if !setter_commands.is_empty() {
+                    link_setters.push((prop, setter_commands, value));
+                }
+            }
+            let calls: Vec<call_actions::CallRun> = call_groups.into_values().collect();
+            self.run_call_actions(&calls, batch_id.as_deref(), context)
+                .await?;
+            for (prop, setter_commands, value) in link_setters {
                 // A `collectionSetter` sets the members as its parameters, in
                 // a run of its own: with none it would set `[]`.
                 let (collection, setter): (Vec<_>, Vec<_>) = setter_commands

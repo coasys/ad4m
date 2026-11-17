@@ -13,6 +13,8 @@
 //! (§3.4). An action list that mixes calls and link actions is an
 //! authoring error.
 
+use std::collections::BTreeMap;
+
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
 use serde_json::{Map, Value};
@@ -101,6 +103,26 @@ impl PerspectiveInstance {
             name,
             params,
         })
+    }
+
+    /// Add `command`'s call to `groups`, keyed by (resolved source,
+    /// interaction name): every call of one setter list lands in its
+    /// group and shares one call, so `update_subject` of several
+    /// properties makes a single `update` carrying each of them (§3.3).
+    pub(super) fn group_call(
+        groups: &mut BTreeMap<(String, String), CallRun>,
+        command: &Command,
+        instance: Option<&str>,
+        values: Map<String, Value>,
+        where_: &str,
+    ) -> Result<(), AnyError> {
+        let run = Self::call_run(command, instance, values, where_)?;
+        let key = (run.source.clone(), run.name.clone());
+        groups
+            .entry(key)
+            .and_modify(|r| r.params.extend(run.params.clone()))
+            .or_insert(run);
+        Ok(())
     }
 
     /// Run `calls` in order and hand each returned `MountDelta` to

@@ -12,9 +12,10 @@
 
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
+use super::call_actions::CallRun;
 use super::{Action, Command, Parameter, PerspectiveInstance};
 use crate::agent::AgentContext;
 use crate::perspectives::model_query::abstract_classes::{
@@ -567,17 +568,35 @@ impl PerspectiveInstance {
             vec![class_name]
         };
         let mut commands: Vec<Command> = Vec::new();
+        let mut call_groups: BTreeMap<(String, String), CallRun> = BTreeMap::new();
         for class in &classes {
             let destructor = self
                 .get_shape_actions_from_shacl(class, "ad4m://destructor")
                 .await?
                 .ok_or_else(|| anyhow!("No destructor found for subject class: {class}."))?;
-            for command in destructor {
+            // A `call` destructor is made, not written: it runs before
+            // the destructor's links and outside any batch.
+            let where_ = format!("{class}.destructor");
+            let (call_commands, link_commands) = Self::partition_actions(destructor, &where_)?;
+            for command in &call_commands {
+                // Only its own `target` params: there are no values.
+                Self::group_call(
+                    &mut call_groups,
+                    command,
+                    Some(&base),
+                    serde_json::Map::new(),
+                    &where_,
+                )?;
+            }
+            for command in link_commands {
                 if !commands.contains(&command) {
                     commands.push(command);
                 }
             }
         }
+        let calls: Vec<CallRun> = call_groups.into_values().collect();
+        self.run_call_actions(&calls, batch_id.as_deref(), context)
+            .await?;
         if commands.is_empty() {
             return Ok(());
         }
