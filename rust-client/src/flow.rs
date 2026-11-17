@@ -490,6 +490,22 @@ const STATE_AND_TRANSITION_PREDICATES: &[&str] = &[
     "ad4m://transitionActions",
 ];
 
+/// The `rdf://type` targets [`ShaclFlow::to_links`] writes. Other types on
+/// the same URIs belong to the application.
+const DEFINITION_TYPES: &[&str] = &["ad4m://Flow", "ad4m://FlowState", "ad4m://FlowTransition"];
+
+/// Whether a stored link is part of a flow definition: its predicate is
+/// one of `predicates` and, for `rdf://type`, its target is a definition
+/// type — so a re-add never removes an application's own classification
+/// (`rdf://type app://Auditable`) of the flow, a state or a transition.
+fn is_definition_link(link: &LinkExpression, predicates: &[&str]) -> bool {
+    match link.data.predicate.as_deref() {
+        Some("rdf://type") => DEFINITION_TYPES.contains(&link.data.target.as_str()),
+        Some(p) => predicates.contains(&p),
+        None => false,
+    }
+}
+
 /// Decode a `literal:string:` (or a `literal:json:` string payload) target
 /// into its text — TS `Literal.fromUrl(t).get()` where the result must be a
 /// string.
@@ -735,12 +751,7 @@ impl FlowApi {
             .query_links(Some(&flow_uri), None, None)
             .await?
             .into_iter()
-            .filter(|l| {
-                l.data
-                    .predicate
-                    .as_deref()
-                    .is_some_and(|p| FLOW_LEVEL_PREDICATES.contains(&p))
-            })
+            .filter(|l| is_definition_link(l, FLOW_LEVEL_PREDICATES))
             .collect();
         let children: Vec<String> = own_links
             .iter()
@@ -758,12 +769,7 @@ impl FlowApi {
                 self.query_links(Some(uri), None, None)
                     .await?
                     .into_iter()
-                    .filter(|l| {
-                        l.data
-                            .predicate
-                            .as_deref()
-                            .is_some_and(|p| STATE_AND_TRANSITION_PREDICATES.contains(&p))
-                    }),
+                    .filter(|l| is_definition_link(l, STATE_AND_TRANSITION_PREDICATES)),
             );
         }
         // A name points at one flow: `get_flow` reads the first flow_uri
@@ -1737,6 +1743,71 @@ mod tests {
 
         assert_eq!(round(&api, &server, &mut store, &flow).await, 1);
         assert_eq!(round(&api, &server, &mut store, &flow).await, 0);
+    }
+
+    /// Re-adding a flow keeps the application's own `rdf://type` links on
+    /// the flow and state URIs: only the definition types are the
+    /// definition's to replace, so an unchanged re-add writes nothing.
+    #[tokio::test]
+    async fn re_adding_a_flow_keeps_application_types() {
+        use crate::testkit::{FakeExecutor, LinkStore};
+
+        let server = FakeExecutor::start().await;
+        let ws = Arc::new(WsRpcClient::connect(server.url(), "").await.unwrap());
+        let api = FlowApi::new(&ws, "p1");
+        let mut store = LinkStore::default();
+        let mut flow = ShaclFlow::new("F", "new://");
+        flow.states = vec![FlowState {
+            name: "S1".into(),
+            value: 1.0,
+            ..Default::default()
+        }];
+
+        async fn add(
+            api: &FlowApi,
+            server: &FakeExecutor,
+            store: &mut LinkStore,
+            flow: &ShaclFlow,
+        ) -> u64 {
+            let mut task = tokio::spawn({
+                let api = api.clone();
+                let flow = flow.clone();
+                async move { api.add_flow("F", &flow).await }
+            });
+            let mut mutations = 0;
+            loop {
+                tokio::select! {
+                    req = server.next_request() => {
+                        if req["type"] == "perspective.linkMutations" {
+                            mutations += 1;
+                        }
+                        let result = store.handle(&req).unwrap_or(Value::Bool(true));
+                        server.reply(&req, result).await;
+                    }
+                    r = &mut task => { r.unwrap().unwrap(); return mutations; }
+                }
+            }
+        }
+
+        assert_eq!(add(&api, &server, &mut store, &flow).await, 1);
+        store.seed(&flow.flow_uri(), "rdf://type", "app://Auditable");
+        store.seed(&flow.state_uri("S1"), "rdf://type", "app://Milestone");
+        assert_eq!(
+            add(&api, &server, &mut store, &flow).await,
+            0,
+            "an unchanged re-add must not touch the application's types"
+        );
+        let triples = store.triples();
+        assert!(triples.contains(&(
+            "new://FFlow".into(),
+            "rdf://type".into(),
+            "app://Auditable".into()
+        )));
+        assert!(triples.contains(&(
+            "new://F.S1".into(),
+            "rdf://type".into(),
+            "app://Milestone".into()
+        )));
     }
 
     /// `find_all` resolves a record's `flowUri` through the registration
