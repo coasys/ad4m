@@ -127,6 +127,23 @@ test("libtest-timer: output after a started test's `... ` keeps it running to th
   ]);
 });
 
+test("libtest-timer: a started test's own output in the same chunk still starts it then", () => {
+  const timer = libtestTimer();
+  timer.line("running 2 tests", 0);
+  // The prefix and the test's first output arrive together; the newline comes a minute later.
+  timer.partial("test a::slow ... [e2e] seeding", 100);
+  timer.partial("test a::slow ... [e2e] seeding, still", 30_000);
+  timer.line("test a::slow ... [e2e] seeding, still, done", 60_100);
+  timer.line("ok", 60_150);
+  timer.partial("test a::next ... ", 60_200);
+  timer.line("test a::next ... ok", 60_300);
+  timer.line("test result: ok. 2 passed", 60_400);
+  assert.deepEqual(timer.finish(60_500).tests, [
+    { name: "a::slow", state: "passed", duration_ms: 60_100 },
+    { name: "a::next", state: "passed", duration_ms: 100 },
+  ]);
+});
+
 test("libtest-timer: a whole `test <name> ... ignored, <reason>` line is ignored too, whatever the chunking", () => {
   const timer = libtestTimer();
   timer.line("running 2 tests", 0);

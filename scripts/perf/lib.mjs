@@ -111,14 +111,33 @@ export function readLines(file) {
 }
 
 /**
- * `env` without the variables that would point a spawned git at another repository or index
- * (a CI step's own checkout exports them): every git call this tool makes gets this env.
+ * `env` without the variables that would point a spawned git at another repository, index or
+ * config (a CI step's own checkout, or a hook, exports them): every git call this tool makes gets
+ * this env. The list is git's own, `git rev-parse --local-env-vars` (git 2.53).
  */
 export function cleanGitEnv(env) {
   const out = { ...env };
-  for (const k of ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY"]) delete out[k];
+  for (const k of GIT_LOCAL_ENV) delete out[k];
   return out;
 }
+
+const GIT_LOCAL_ENV = [
+  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+  "GIT_CONFIG",
+  "GIT_CONFIG_PARAMETERS",
+  "GIT_CONFIG_COUNT",
+  "GIT_OBJECT_DIRECTORY",
+  "GIT_DIR",
+  "GIT_WORK_TREE",
+  "GIT_IMPLICIT_WORK_TREE",
+  "GIT_GRAFT_FILE",
+  "GIT_INDEX_FILE",
+  "GIT_NO_REPLACE_OBJECTS",
+  "GIT_REPLACE_REF_BASE",
+  "GIT_PREFIX",
+  "GIT_SHALLOW_FILE",
+  "GIT_COMMON_DIR",
+];
 
 // ---- thresholds.json: the only place for per-metric limits ---------------------------------
 

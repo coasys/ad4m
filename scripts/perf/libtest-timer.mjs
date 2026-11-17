@@ -30,7 +30,8 @@ const START_RE = /^test (\S+) \.\.\. ?(.*)$/;
 const RESULT_RE = /^test result: (\w+)/;
 const RUNNING_RE = /^running \d+ tests?$/;
 // A test that has started: its line so far, before its outcome.
-const PARTIAL_RE = /^test (\S+) \.\.\. $/;
+// Output of its own may follow in the same chunk, before any newline: the test has started anyway.
+const PARTIAL_RE = /^test (\S+) \.\.\. /;
 const OUTCOME_RE = /^(ok|FAILED|ignored\b.*)$/;
 
 // The ANSI colour codes libtest adds on a terminal (CI may force them).
