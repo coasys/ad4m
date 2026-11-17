@@ -19,6 +19,10 @@ use std::collections::VecDeque;
 /// adds more than this many links is logged as [`WriteDelta::Other`].
 pub(crate) const WRITE_LOG_MAX_LINKS: usize = 1024;
 
+/// Most writes the log keeps. Past this the oldest drop out, as past
+/// [`WRITE_LOG_MAX_LINKS`].
+pub(crate) const WRITE_LOG_MAX_ENTRIES: usize = 1024;
+
 /// The terms of one added link as the store holds them: its direct triple
 /// and its reifier. The reifier's own facts (author, timestamp, proof,
 /// status) are all on `reifier`.
@@ -41,25 +45,41 @@ pub(crate) enum WriteDelta {
 
 #[derive(Debug, Default)]
 pub(crate) struct WriteLog {
-    /// `(generation, delta)`, oldest first, for every generation after `floor`.
+    /// `(generation, delta)` of every write after `floor` that added links,
+    /// oldest first. Only `Added` entries are kept; a generation after
+    /// `floor` with no entry added nothing.
     entries: VecDeque<(u64, WriteDelta)>,
-    /// The generation the oldest kept entry follows.
+    /// No reader from before this generation may use the log: the last
+    /// `Other` write, or the newest entry dropped.
     floor: u64,
     links: usize,
 }
 
 impl WriteLog {
     /// Record the write that ends `generation` (one past the last recorded).
+    ///
+    /// An [`WriteDelta::Other`] is not kept: no reader from before it may use
+    /// the log, so it raises the floor to its generation and drops every
+    /// entry. A write that added nothing is not kept either: it changes no
+    /// answer. Past [`WRITE_LOG_MAX_LINKS`] links or [`WRITE_LOG_MAX_ENTRIES`]
+    /// entries the oldest entries drop out, raising the floor to theirs.
     pub(crate) fn record(&mut self, generation: u64, delta: WriteDelta) {
-        let delta = match delta {
-            WriteDelta::Added(links) if links.len() > WRITE_LOG_MAX_LINKS => WriteDelta::Other,
-            d => d,
+        let links = match delta {
+            WriteDelta::Added(links) if links.len() <= WRITE_LOG_MAX_LINKS => links,
+            _ => {
+                self.entries.clear();
+                self.links = 0;
+                self.floor = generation;
+                return;
+            }
         };
-        if let WriteDelta::Added(links) = &delta {
-            self.links += links.len();
+        if links.is_empty() {
+            return;
         }
-        self.entries.push_back((generation, delta));
-        while self.links > WRITE_LOG_MAX_LINKS {
+        self.links += links.len();
+        self.entries
+            .push_back((generation, WriteDelta::Added(links)));
+        while self.links > WRITE_LOG_MAX_LINKS || self.entries.len() > WRITE_LOG_MAX_ENTRIES {
             let Some((dropped, delta)) = self.entries.pop_front() else {
                 break;
             };
@@ -68,6 +88,12 @@ impl WriteLog {
             }
             self.floor = dropped;
         }
+    }
+
+    /// Test-only: how many writes the log holds.
+    #[cfg(test)]
+    pub(crate) fn entry_count(&self) -> usize {
+        self.entries.len()
     }
 
     /// The links added by the writes after generation `from` up to and
@@ -120,6 +146,54 @@ mod tests {
             Some(vec![link(1)]),
             "a write after `to` is not counted"
         );
+    }
+
+    /// Writes that add nothing (a removal, a clear, an empty diff) must not
+    /// pile up: the log stays bounded by its entry cap, a reader from before
+    /// them reads everything, and one from after them still reads the log.
+    #[test]
+    fn a_long_run_of_other_or_empty_writes_keeps_the_log_bounded() {
+        let mut log = WriteLog::default();
+        log.record(1, WriteDelta::Added(vec![link(1)]));
+        let last = 10_001;
+        for g in 2..=last {
+            let delta = if g % 2 == 0 {
+                WriteDelta::Other
+            } else {
+                WriteDelta::Added(Vec::new())
+            };
+            log.record(g, delta);
+        }
+        assert!(
+            log.entry_count() <= WRITE_LOG_MAX_ENTRIES,
+            "{} entries after {} writes that added nothing",
+            log.entry_count(),
+            last - 1
+        );
+        assert_eq!(log.additions_since(0, last), None);
+        assert_eq!(
+            log.additions_since(last - 2, last),
+            None,
+            "an Other in between"
+        );
+        assert_eq!(log.additions_since(last - 1, last), Some(vec![]));
+        log.record(last + 1, WriteDelta::Added(vec![link(2)]));
+        assert_eq!(log.additions_since(last - 1, last + 1), Some(vec![link(2)]));
+    }
+
+    /// The entry cap holds for writes that each add a link too.
+    #[test]
+    fn the_log_is_capped_by_entries_as_well_as_links() {
+        let mut log = WriteLog::default();
+        for g in 1..=(3 * WRITE_LOG_MAX_ENTRIES as u64) {
+            let delta = if g % 3 == 0 {
+                WriteDelta::Added(vec![link(g as usize)])
+            } else {
+                WriteDelta::Added(Vec::new())
+            };
+            log.record(g, delta);
+        }
+        assert!(log.entry_count() <= WRITE_LOG_MAX_ENTRIES);
     }
 
     #[test]

@@ -1045,3 +1045,47 @@ async fn a_removal_reads_the_whole_transcript_again() {
         .await;
     assert_eq!(transcript_rows(&p) - rows, 1);
 }
+
+/// A long run of writes that are not additions (removals, here of a link the
+/// store does not hold) keeps the store's write log bounded, and the tick
+/// after them reads the whole transcript.
+#[tokio::test]
+async fn a_long_run_of_removals_keeps_the_write_log_bounded_and_the_next_tick_reads_in_full() {
+    use crate::perspectives::write_log::WRITE_LOG_MAX_ENTRIES;
+
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+    let signer = crate::agent::signatures::TestSigner::generate();
+    let start = chrono::Utc::now() - chrono::Duration::minutes(10);
+    for i in 0..10 {
+        p.sparql_store
+            .add_link(&body_link(
+                &signer,
+                &format!("msg://{i}"),
+                &format!("turn {i}"),
+                start + chrono::Duration::seconds(i),
+            ))
+            .expect("link");
+    }
+    let cfg = config("bounded", 600_000, None);
+    write_processor(&mut p, &cfg, Some(false), &ctx)
+        .await
+        .expect("write_processor");
+    let mut watcher = WatcherState::new();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
+
+    let ghost = body_link(&signer, "msg://ghost", "never stored", start);
+    for _ in 0..3 * WRITE_LOG_MAX_ENTRIES {
+        p.sparql_store.remove_link(&ghost).expect("remove");
+    }
+    assert!(
+        p.sparql_store.write_log_entries() <= WRITE_LOG_MAX_ENTRIES,
+        "{} log entries after {} removals",
+        p.sparql_store.write_log_entries(),
+        3 * WRITE_LOG_MAX_ENTRIES
+    );
+    let rows = transcript_rows(&p);
+    p.run_auto_processor_tick(&mut watcher, now_ms + 500, &ctx)
+        .await;
+    assert_eq!(transcript_rows(&p) - rows, 10, "the tick reads in full");
+}

@@ -2119,6 +2119,15 @@ impl SparqlStore {
             .unwrap_or_default()
     }
 
+    /// Test-only: how many writes the write log holds.
+    #[cfg(test)]
+    pub(crate) fn write_log_entries(&self) -> usize {
+        self.write_log
+            .lock()
+            .map(|log| log.entry_count())
+            .unwrap_or_default()
+    }
+
     /// Test-only: each SELECT this store (and its clones) ran so far, with the
     /// number of rows it returned, in order.
     #[cfg(test)]
