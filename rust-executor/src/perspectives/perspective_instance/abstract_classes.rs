@@ -312,10 +312,12 @@ impl PerspectiveInstance {
     /// A relation or collection name also takes `{"action": "adder" |
     /// "remover" | "setter", "value": [...]}` (the SDK's `addX` / `removeX`
     /// / `setX`): each class's adder or remover runs once per member, a
-    /// setter as for a plain value. A class with no setter for it sets the
-    /// members with a `collectionSetter` on its adder's predicate, as the
-    /// SDK does for a concrete class. A `collectionSetter` gets the members
-    /// as its parameters, in a run of its own.
+    /// setter as for a plain value; a `call` adder or remover carries the
+    /// whole member list as its property's value. A class with no setter
+    /// for it sets the members with a `collectionSetter` on its adder's
+    /// predicate, as the SDK does for a concrete class. A
+    /// `collectionSetter` gets the members as its parameters, in a run of
+    /// its own.
     pub(super) async fn update_through_abstract(
         &self,
         abstract_class: &str,
@@ -397,23 +399,31 @@ impl PerspectiveInstance {
                 let where_ = format!("{class}.{own}");
                 let (call_commands, link_commands) = Self::partition_actions(actions, &where_)?;
                 if !call_commands.is_empty() {
-                    let items: Vec<Value> = match op {
-                        Op::Set => vec![value.clone()],
-                        _ => match value {
-                            Value::Array(items) => items.clone(),
-                            Value::Null => {
-                                return Err(anyhow!(
-                                    "'{own}' of '{class}': null names no members. \
-                                     Pass [] to clear it."
-                                ))
-                            }
-                            single => vec![single.clone()],
-                        },
+                    // The whole member list is the call's payload for
+                    // `own`: grouped per member, every member lands on the
+                    // same `(source, interaction)` key and only the last
+                    // reaches the language. An empty list is no call, as a
+                    // link adder/remover writes no commands for it.
+                    let payload: Option<Value> = match op {
+                        Op::Set => Some(value.clone()),
+                        _ => {
+                            let members: Vec<Value> = match value {
+                                Value::Array(items) => items.clone(),
+                                Value::Null => {
+                                    return Err(anyhow!(
+                                        "'{own}' of '{class}': null names no members. \
+                                         Pass [] to clear it."
+                                    ))
+                                }
+                                single => vec![single.clone()],
+                            };
+                            (!members.is_empty()).then_some(Value::Array(members))
+                        }
                     };
-                    for command in &call_commands {
-                        for item in &items {
+                    if let Some(payload) = payload {
+                        for command in &call_commands {
                             let mut one = serde_json::Map::new();
-                            one.insert(own.to_string(), item.clone());
+                            one.insert(own.to_string(), payload.clone());
                             Self::group_call(
                                 &mut call_groups,
                                 command,
