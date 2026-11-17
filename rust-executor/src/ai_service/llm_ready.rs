@@ -31,14 +31,38 @@ impl AIService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ai_service::local::test_support::TEST_LOCK;
     use crate::db::Ad4mDb;
     use crate::types::{Endpoint, EndpointKind, ModelInput};
+
+    /// Puts the global database this test replaced back, including on panic.
+    /// `init_global_instance` drops the previous one; a later test that only
+    /// calls `ensure_test_db` would otherwise keep this test's default LLM.
+    struct RestoreDb(Option<Ad4mDb>);
+
+    impl Drop for RestoreDb {
+        fn drop(&mut self) {
+            let slot = Ad4mDb::global_instance();
+            let mut slot = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            *slot = self.0.take();
+        }
+    }
 
     /// Configuring a model is announced: adding an LLM (its client is built)
     /// and making it the default each change the readiness watch, and the
     /// service is ready once both happened.
     #[tokio::test]
     async fn adding_and_defaulting_an_llm_announce_readiness() {
+        // Same global database and default model the local-AI tests read.
+        // The lock covers a parallel `cargo test`. The restore covers
+        // `--test-threads=1`: this test runs first and would otherwise leave
+        // its default under `a_replan_keeps_a_default_of_each_type_it_registers`.
+        let _serial = TEST_LOCK.lock().await;
+        let _restore = RestoreDb({
+            let slot = Ad4mDb::global_instance();
+            let mut slot = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            slot.take()
+        });
         Ad4mDb::init_global_instance(":memory:").expect("Ad4mDb to initialize");
         let service = AIService::empty();
         let endpoint = Endpoint::for_test(
