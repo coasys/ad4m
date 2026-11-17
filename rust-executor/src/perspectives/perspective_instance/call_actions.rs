@@ -15,22 +15,193 @@
 
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
-use serde_json::Value;
+use serde_json::{Map, Value};
 
-use super::{Command, PerspectiveInstance};
+use super::{Action, Command, PerspectiveInstance};
 use crate::agent::AgentContext;
+use crate::languages::mount_types::MountDelta;
+use crate::languages::LanguageController;
+use crate::types::InteractionCall;
+
+/// One language call a write makes: the interaction `name` on the
+/// expression URL `source` with the merged JSON object `params`.
+pub(super) struct CallRun {
+    pub(super) source: String,
+    pub(super) name: String,
+    pub(super) params: Map<String, Value>,
+}
 
 impl PerspectiveInstance {
-    /// `create_subject` for a class whose constructor calls into a
-    /// language. Not implemented yet — the test commit is red.
-    pub(super) async fn create_through_call(
-        &mut self,
-        _class_name: &str,
-        _commands: Vec<Command>,
-        _initial_values: Option<Value>,
-        _batch_id: Option<String>,
+    /// Split `commands` into call actions and link actions. A list that
+    /// contains a call must contain only calls — anything else would be a
+    /// silently dropped write, so it is an error naming the list
+    /// (`where_`, e.g. `MountThing.title`, `MountThing.constructor`).
+    pub(super) fn partition_actions(
+        commands: Vec<Command>,
+        where_: &str,
+    ) -> Result<(Vec<Command>, Vec<Command>), AnyError> {
+        if !commands.iter().any(|c| c.action == Action::Call) {
+            return Ok((Vec::new(), commands));
+        }
+        if commands.iter().any(|c| c.action != Action::Call) {
+            return Err(anyhow!(
+                "action list of {where_} mixes call and link actions"
+            ));
+        }
+        Ok((commands, Vec::new()))
+    }
+
+    /// The JSON object a call action's `target` contributes (usually
+    /// "{}"), under which the caller's values are merged. Empty is `{}`;
+    /// anything that is not a JSON object is an authoring error, not a
+    /// parameter to substitute into.
+    fn call_target_object(
+        target: Option<&str>,
+        where_: &str,
+    ) -> Result<Map<String, Value>, AnyError> {
+        match target.map(str::trim) {
+            None | Some("") => Ok(Map::new()),
+            Some(text) => match serde_json::from_str::<Value>(text) {
+                Ok(Value::Object(map)) => Ok(map),
+                _ => Err(anyhow!(
+                    "call action of {where_} has a target that is not a JSON object: {text:?}"
+                )),
+            },
+        }
+    }
+
+    /// The resolved `CallRun` of one call command: `source` resolved
+    /// ("this" → the instance URL `instance`, an error when there is none
+    /// yet), the interaction name from `predicate`, the fixed `target`
+    /// params with `values` merged over them.
+    fn call_run(
+        command: &Command,
+        instance: Option<&str>,
+        values: Map<String, Value>,
+        where_: &str,
+    ) -> Result<CallRun, AnyError> {
+        let source = match command.source.as_deref().unwrap_or_default() {
+            "this" => instance
+                .ok_or_else(|| {
+                    anyhow!(
+                        "call action of {where_} has source \"this\" but there is no instance yet"
+                    )
+                })?
+                .to_string(),
+            "" => return Err(anyhow!("call action of {where_} has no source expression URL")),
+            source => source.to_string(),
+        };
+        let name = command.predicate.clone().ok_or_else(|| {
+            anyhow!("call action of {where_} has no predicate to name the interaction")
+        })?;
+        let mut params = Self::call_target_object(command.target.as_deref(), where_)?;
+        params.extend(values);
+        Ok(CallRun {
+            source,
+            name,
+            params,
+        })
+    }
+
+    /// Run `calls` in order and hand each returned `MountDelta` to
+    /// `apply_call_delta`. A caller batch is refused before the first
+    /// call: a language call cannot be rolled back with the batch's
+    /// links. Returns the deltas in call order.
+    pub(super) async fn run_call_actions(
+        &self,
+        calls: &[CallRun],
+        batch_id: Option<&str>,
+        context: &AgentContext,
+    ) -> Result<Vec<MountDelta>, AnyError> {
+        if calls.is_empty() {
+            return Ok(Vec::new());
+        }
+        if batch_id.is_some() {
+            return Err(anyhow!("call actions cannot run inside a batch"));
+        }
+        let mut deltas = Vec::with_capacity(calls.len());
+        for run in calls {
+            let delta = self.execute_call(run).await?;
+            let (lang, _) = LanguageController::parse_expr_url(&run.source)
+                .map_err(|e| anyhow!("call action source {:?}: {e}", run.source))?;
+            self.apply_call_delta(&lang, &delta, context).await;
+            deltas.push(delta);
+        }
+        Ok(deltas)
+    }
+
+    /// One call: `run.name` on `run.source` with `run.params` as the
+    /// single JSON object argument. Returns the `MountDelta` the language
+    /// answered, an empty one when the result is no delta object at all —
+    /// accepted, the next resync picks the change up (§3.4).
+    async fn execute_call(&self, run: &CallRun) -> Result<MountDelta, AnyError> {
+        // `expression_interact` runs without an agent context
+        // (languages/mod.rs:2952); the call signs nothing.
+        let result = LanguageController::global_instance()
+            .expression_interact(
+                &run.source,
+                &InteractionCall {
+                    name: run.name.clone(),
+                    parameters_stringified: Value::Object(run.params.clone()).to_string(),
+                },
+            )
+            .await
+            .map_err(|e| anyhow!("{e}"))?;
+        let Some(text) = result else {
+            return Ok(MountDelta::default());
+        };
+        let Ok(value) = serde_json::from_str::<Value>(&text) else {
+            return Ok(MountDelta::default());
+        };
+        Ok(serde_json::from_value(value).unwrap_or_default())
+    }
+
+    /// Where the delta a `call` returns becomes links. A stub until A4:
+    /// the call is made and the delta parsed, nothing is written.
+    async fn apply_call_delta(
+        &self,
+        lang_address: &str,
+        delta: &MountDelta,
         _context: &AgentContext,
+    ) {
+        log::debug!(
+            "call action on {lang_address}: delta of {} changed / {} removed not applied yet (A4)",
+            delta.changed.len(),
+            delta.removed.len()
+        );
+    }
+
+    /// `create_subject` for a class whose constructor calls into a
+    /// language: the whole `initial_values` object is the call's
+    /// parameters, the caller's `expression_address` is ignored, and the
+    /// call's `address` names the new instance (§3.3).
+    pub(super) async fn create_through_call(
+        &self,
+        class_name: &str,
+        commands: Vec<Command>,
+        initial_values: Option<Value>,
+        batch_id: Option<String>,
+        context: &AgentContext,
     ) -> Result<Option<String>, AnyError> {
-        Err(anyhow!("call actions are not implemented"))
+        let where_ = format!("{class_name}.constructor");
+        let (call_commands, _) = Self::partition_actions(commands, &where_)?;
+        let values = match initial_values {
+            Some(Value::Object(map)) => map,
+            _ => Map::new(),
+        };
+        let mut calls = Vec::with_capacity(call_commands.len());
+        for command in &call_commands {
+            // A constructor has no instance for `source: "this"` to mean.
+            calls.push(Self::call_run(command, None, values.clone(), &where_)?);
+        }
+        let deltas = self
+            .run_call_actions(&calls, batch_id.as_deref(), context)
+            .await?;
+        let Some(address) = deltas.first().and_then(|d| d.address.clone()) else {
+            return Err(anyhow!("create returned no address"));
+        };
+        let (scheme, _) = LanguageController::parse_expr_url(&calls[0].source)
+            .map_err(|e| anyhow!("{e}"))?;
+        Ok(Some(format!("{scheme}://{address}")))
     }
 }
