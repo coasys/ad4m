@@ -1660,6 +1660,76 @@ impl LanguageController {
         })
     }
 
+    /// Template `source_language_hash` with `template_data` from the bundle on this
+    /// machine, save it and load it. Publishes nothing and reads nothing from the
+    /// language language: the template data may hold a secret (an Acorn project
+    /// passphrase). Refuses a source with a `var happ = ` line, because that path
+    /// writes the template data into the DNA properties (`read_and_template_holochain_dna`).
+    pub async fn apply_template_local(
+        &self,
+        source_language_hash: &str,
+        mut template_data: serde_json::Map<String, JsonValue>,
+    ) -> Result<String, LanguageError> {
+        let bundle_path = languages_directory()
+            .join(source_language_hash)
+            .join("bundle.js");
+        let source = fs::read_to_string(&bundle_path).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                LanguageError::NotFound {
+                    address: source_language_hash.to_string(),
+                }
+            } else {
+                e.into()
+            }
+        })?;
+
+        let mut source_lines: Vec<String> = source.split('\n').map(String::from).collect();
+
+        if source_lines
+            .iter()
+            .any(|line| line.contains("var happ = "))
+        {
+            return Err(LanguageError::InvalidBundle {
+                message: "applyTemplateLocal: source has a `var happ = ` line; ship the happ under another name".to_string(),
+            });
+        }
+
+        // Sort template_data keys (equivalent to JS orderObject)
+        let sorted_data: serde_json::Map<String, JsonValue> = {
+            let mut keys: Vec<String> = template_data.keys().cloned().collect();
+            keys.sort();
+            let mut sorted = serde_json::Map::new();
+            for key in keys {
+                if let Some(val) = template_data.remove(&key) {
+                    sorted.insert(key, val);
+                }
+            }
+            sorted
+        };
+        template_data = sorted_data;
+
+        Self::apply_template_data(&mut source_lines, &template_data);
+
+        let unfilled = Self::unfilled_template_variables(&source_lines);
+        if !unfilled.is_empty() {
+            return Err(LanguageError::InvalidBundle {
+                message: format!(
+                    "template variable(s) {} left unfilled; the template data has {:?}",
+                    unfilled.join(", "),
+                    template_data
+                        .keys()
+                        .filter(|k| *k != "happ")
+                        .collect::<Vec<_>>()
+                ),
+            });
+        }
+
+        let bundle = source_lines.join("\n");
+        let (address, path) = self.save_language_bundle(&bundle, None)?;
+        self.load_language(path, false).await?;
+        Ok(address)
+    }
+
     /// Remove a language: unload runtime, remove Holochain app, delete files.
     /// Port of JS languageRemove method.
     pub async fn language_remove(&mut self, address: &str) -> Result<(), LanguageError> {
