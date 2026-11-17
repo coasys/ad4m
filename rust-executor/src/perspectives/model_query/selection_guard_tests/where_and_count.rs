@@ -510,6 +510,14 @@ async fn selection_two_passing_links_on_one_triple_do_not_duplicate_an_instance(
     else {
         panic!("expected the single plan");
     };
-    let rows: Vec<Value> = serde_json::from_str(&store.query(&sparql).unwrap()).unwrap();
+    let rows: Vec<Value> = serde_json::from_str(
+        &store
+            .query(
+                &crate::perspectives::sparql_store::EvalStop::none(),
+                &sparql,
+            )
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(rows.len(), 6, "one row per link: {rows:?}");
 }

@@ -2,6 +2,10 @@
 
 export type SfuAddIceCandidateParams = { neighbourhoodUrl: string, roomName: string, 
 /**
+ * The caller's session, as its join returned it.
+ */
+participantId: string, 
+/**
  * The candidate's SDP attribute line.
  */
 candidate: string, };

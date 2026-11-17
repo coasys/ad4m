@@ -14,7 +14,7 @@
 #
 # Endpoint + model — env-overridable, defaults hit Ollama at localhost:
 #   INTERPRETATION_E2E_BASE_URL (default http://localhost:11434/v1)
-#   INTERPRETATION_E2E_MODEL    (default gemma3:12b)
+#   INTERPRETATION_E2E_MODEL    (default qwen3.8-27b-48k)
 #   INTERPRETATION_E2E_API_KEY  (only if the endpoint requires it)
 #
 # From a dev box, tunnel Marvin's Ollama first:
