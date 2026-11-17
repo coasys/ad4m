@@ -440,6 +440,11 @@ impl Inner {
         self.ws.test_park("start:opened").await;
         let mut state = self.state.lock().await;
         if state.disposed || state.generation != generation {
+            // This caller may get its own (obsolete) snapshot below if the
+            // winning open has not installed yet: the winner's result must
+            // then go out on `results()`, not install silently as if it
+            // were the first one a caller saw.
+            state.started = true;
             let dispose_id = subscribed.subscription_id.clone();
             let ws = self.ws.clone();
             let uuid = self.uuid.clone();
@@ -1012,6 +1017,76 @@ mod tests {
         .expect("the superseded subscription must be disposed");
         assert_eq!(disposed["params"]["subscriptionId"], "sub-1");
         restart.await.unwrap().unwrap();
+        assert_eq!(query.id().await.as_deref(), Some("sub-2"));
+        client.close().await;
+    }
+
+    /// An initial start overtaken by a re-open (a reconnect while it
+    /// waited) answers its caller with its own snapshot when it replies
+    /// first. The re-open's snapshot, installed after, must then reach
+    /// `results()` — not install silently as the "first" result.
+    #[tokio::test]
+    async fn a_superseded_initial_start_still_delivers_the_winning_snapshot() {
+        use crate::testkit::FakeExecutor;
+        let fake = FakeExecutor::start().await;
+        let client = Arc::new(WsRpcClient::connect(fake.url(), "").await.unwrap());
+
+        let opens = Arc::new(AtomicU64::new(0));
+        let open: OpenFn = {
+            let ws = client.clone();
+            let opens = opens.clone();
+            Arc::new(move || {
+                let ws = ws.clone();
+                let opens = opens.clone();
+                Box::pin(async move {
+                    let n = opens.fetch_add(1, Ordering::Relaxed) + 1;
+                    let sid = format!("sub-{n}");
+                    ws.call(
+                        "perspective.subscribeQuery",
+                        serde_json::json!({"uuid": "p1", "subscriptionId": sid}),
+                    )
+                    .await
+                    .map(|v| Subscribed {
+                        subscription_id: sid,
+                        result: v,
+                        revision: 0,
+                    })
+                })
+            })
+        };
+        let query = LiveQuery::new(client.clone(), "p1", open);
+        let mut rx = query.results();
+        let q = query.clone();
+        let start = tokio::spawn(async move { q.start().await });
+        let req = fake.next_request().await;
+        assert_eq!(req["type"], "events.watch");
+        fake.reply(&req, serde_json::json!(true)).await;
+        let first = fake.next_request().await;
+        assert_eq!(first["params"]["subscriptionId"], "sub-1");
+
+        // The reconnect hook's re-open overtakes the initial start.
+        let inner = query.inner.clone();
+        let reopen = tokio::spawn(async move { inner.reopen().await });
+        let second = fake.next_request().await;
+        assert_eq!(second["params"]["subscriptionId"], "sub-2");
+
+        // The initial open answers first: its caller gets that snapshot,
+        // and the obsolete subscription is released.
+        fake.reply(&first, serde_json::json!(["old"])).await;
+        let dispose = fake.next_request().await;
+        assert_eq!(dispose["type"], "perspective.disposeQuery");
+        assert_eq!(dispose["params"]["subscriptionId"], "sub-1");
+        fake.reply(&dispose, serde_json::json!(true)).await;
+        assert_eq!(start.await.unwrap().unwrap(), serde_json::json!(["old"]));
+
+        // The winner installs after: its snapshot goes out on results().
+        fake.reply(&second, serde_json::json!(["new"])).await;
+        reopen.await.unwrap();
+        let delivered = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("the winning snapshot must reach results()")
+            .unwrap();
+        assert_eq!(delivered, serde_json::json!(["new"]));
         assert_eq!(query.id().await.as_deref(), Some("sub-2"));
         client.close().await;
     }
