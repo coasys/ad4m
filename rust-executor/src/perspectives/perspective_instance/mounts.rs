@@ -26,7 +26,7 @@ use serde_json::Value;
 use tokio::time::sleep;
 
 use super::mount_gates::{pause, MountPoint};
-use super::mount_lifecycle::MountPhase;
+use super::mount_lifecycle::{next_mount_seq, MountPhase};
 use super::{PerspectiveInstance, SdnaType};
 use crate::agent::AgentContext;
 use crate::languages::mount_types::{MountDelta, MountEntry, MountShapes, MountSyncReport};
@@ -183,10 +183,11 @@ impl PerspectiveInstance {
         };
         let controller = LanguageController::global_instance();
         let shapes = controller.mount_shapes(lang_address).await?;
+        let seq = next_mount_seq();
         let snapshot = controller.mount_snapshot(lang_address).await?;
         pause(lang_address, MountPoint::SnapshotFetched).await;
 
-        let Some(_slot) = self
+        let Some(mut slot) = self
             .mount_lifecycles
             .lock_current(lang_address, generation)
             .await
@@ -198,11 +199,19 @@ impl PerspectiveInstance {
         if self.mounted_version(lang_address).await?.as_deref() != Some(shapes.version.as_str()) {
             self.install_mount_shapes(lang_address, &shapes).await?;
         }
+        if slot.snapshot_is_stale(seq) {
+            return Ok(MountSyncReport::default());
+        }
 
+        // A record a delta newer than this snapshot wrote keeps the delta's
+        // state: the snapshot may have been read before the change.
         let mut report = MountSyncReport::default();
         let mut wanted_sources = HashSet::new();
         for entry in &snapshot.entries {
             wanted_sources.insert(format!("{lang_address}://{}", entry.address));
+            if slot.newer_than_snapshot(&entry.address, seq) {
+                continue;
+            }
             let r = self.apply_mount_entry(lang_address, entry).await?;
             report.added += r.added;
             report.removed += r.removed;
@@ -210,14 +219,23 @@ impl PerspectiveInstance {
 
         // Snapshot sync: a mounted address missing from the snapshot is
         // removed — all the links the mount owns under that source.
+        let prefix = format!("{lang_address}://");
         let doomed: Vec<LinkExpression> = self
             .owned_links(lang_address)
             .await?
             .into_iter()
-            .filter(|l| !wanted_sources.contains(&l.data.source))
+            .filter(|l| {
+                !wanted_sources.contains(&l.data.source)
+                    && !l
+                        .data
+                        .source
+                        .strip_prefix(&prefix)
+                        .is_some_and(|address| slot.newer_than_snapshot(address, seq))
+            })
             .map(LinkExpression::from)
             .collect();
         report.removed += self.remove_links(doomed, None).await?.len();
+        slot.snapshot_applied(seq);
         Ok(report)
     }
 
@@ -233,15 +251,17 @@ impl PerspectiveInstance {
     /// Apply one delta (`changed` records re-expanded, `removed` addresses
     /// swept) — the same per-address diff `sync_mount` runs — under the
     /// mount's apply lock. A delta for a mount that is no longer the one
-    /// at `generation` (unmounted since) is dropped.
+    /// at `generation` (unmounted since) is dropped, and so is each record
+    /// of it that something newer than `seq` already wrote.
     pub async fn apply_mount_delta(
         &mut self,
         lang_address: &str,
         delta: &MountDelta,
         generation: u64,
+        seq: u64,
     ) -> Result<MountSyncReport, AnyError> {
         pause(lang_address, MountPoint::DeltaReceived).await;
-        let Some(_slot) = self
+        let Some(mut slot) = self
             .mount_lifecycles
             .lock_current(lang_address, generation)
             .await
@@ -254,11 +274,19 @@ impl PerspectiveInstance {
         };
         let mut report = MountSyncReport::default();
         for entry in &delta.changed {
+            if !slot.delta_applies(&entry.address, seq) {
+                continue;
+            }
             let r = self.apply_mount_entry(lang_address, entry).await?;
+            slot.delta_applied(&entry.address, seq);
             report.added += r.added;
             report.removed += r.removed;
         }
         for address in &delta.removed {
+            if !slot.delta_applies(address, seq) {
+                continue;
+            }
+            slot.delta_applied(address, seq);
             let doomed: Vec<LinkExpression> = self
                 .get_links(&LinkQuery {
                     source: Some(format!("{lang_address}://{address}")),

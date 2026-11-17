@@ -74,6 +74,7 @@ mod call_actions;
 mod mounts;
 // Each mount's lifecycle phase, generation and apply lock.
 mod mount_lifecycle;
+pub(crate) use mount_lifecycle::next_mount_seq;
 // Test seam: deterministic pause points in the mount engine's runs.
 pub(crate) mod mount_gates;
 mod containment;

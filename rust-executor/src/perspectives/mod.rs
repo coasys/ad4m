@@ -561,25 +561,32 @@ pub fn handle_perspective_diff_from_link_language(diff: PerspectiveDiff, languag
 
 /// A `mountDelta` a mounted language pushed through `emitSignal` (design
 /// §1.5). Called from the sync `ad4m_signal_emitted` op — spawns the apply.
+/// The delta's sequence number is taken here, on the language's thread in
+/// emit order, not in the spawned task.
 pub fn handle_mount_delta_from_language(delta: MountDelta, language_address: String) {
-    tokio::spawn(handle_mount_delta_from_language_impl(
-        delta,
-        language_address,
-    ));
+    let seq = perspective_instance::next_mount_seq();
+    tokio::spawn(apply_pushed_mount_delta(delta, language_address, seq));
 }
 
-/// Applies `delta` in every perspective that mounts `language_address`
-/// (`MOUNT_LANG_TO_PERSPECTIVES`), to the mount active as it arrives. A
-/// perspective that fails logs one warning; the others still get the
-/// delta.
+/// [`handle_mount_delta_from_language`] for a caller that awaits the
+/// apply: the delta is ordered as of this call.
 pub async fn handle_mount_delta_from_language_impl(delta: MountDelta, language_address: String) {
+    let seq = perspective_instance::next_mount_seq();
+    apply_pushed_mount_delta(delta, language_address, seq).await
+}
+
+/// Applies `delta` (sequence number `seq`) in every perspective that mounts
+/// `language_address` (`MOUNT_LANG_TO_PERSPECTIVES`), to the mount active
+/// as it arrives. A perspective that fails logs one warning; the others
+/// still get the delta.
+async fn apply_pushed_mount_delta(delta: MountDelta, language_address: String, seq: u64) {
     for uuid in perspectives_for_mount(&language_address) {
         if let Some(mut p) = get_perspective(&uuid) {
             let Some(generation) = p.active_mount_generation(&language_address).await else {
                 continue;
             };
             if let Err(e) = p
-                .apply_mount_delta(&language_address, &delta, generation)
+                .apply_mount_delta(&language_address, &delta, generation, seq)
                 .await
             {
                 log::warn!("mount delta for {} in {}: {}", language_address, uuid, e);

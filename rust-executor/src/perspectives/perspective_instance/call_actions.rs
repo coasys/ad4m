@@ -300,7 +300,10 @@ impl PerspectiveInstance {
                     run.source
                 );
             }
-            self.apply_call_delta(&lang, &answer.delta, generation, context)
+            // Ordered as of its return: the delta is at least as new as
+            // anything the language emitted before the call ended.
+            let seq = super::next_mount_seq();
+            self.apply_call_delta(&lang, &answer.delta, generation, seq, context)
                 .await;
             answers.push(answer);
         }
@@ -341,6 +344,7 @@ impl PerspectiveInstance {
         lang_address: &str,
         delta: &MountDelta,
         generation: Option<u64>,
+        seq: u64,
         _context: &AgentContext,
     ) {
         let Some(generation) = generation else {
@@ -352,7 +356,7 @@ impl PerspectiveInstance {
         };
         if let Err(e) = self
             .clone()
-            .apply_mount_delta(lang_address, delta, generation)
+            .apply_mount_delta(lang_address, delta, generation, seq)
             .await
         {
             log::warn!("call action on {lang_address}: applying its delta failed: {e}");
