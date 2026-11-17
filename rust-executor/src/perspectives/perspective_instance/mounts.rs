@@ -8,8 +8,9 @@
 //! `apply_mount_delta` applies the same expansion to one delta (`call`
 //! writes and language-emitted changes).
 //!
-//! Ownership: every `Local` link whose source starts with `<lang>://`
-//! belongs to the mount — `unmount` deletes them all. The mount's own
+//! Ownership: the mount owns the `Local` links it wrote under `<lang>://`
+//! (`mount_links`: signed at a fixed timestamp) — `unmount` deletes them
+//! all, and no sync or delta touches anyone else's link there. The mount's own
 //! bookkeeping (the version link under `<lang>://project`) is exempt from
 //! the snapshot sweep. Which classes a mount owns is recorded outside its
 //! address space (`mount_classes`). The mount link itself is `Shared` so
@@ -28,6 +29,7 @@ use tokio::time::sleep;
 
 use super::mount_gates::{pause, MountPoint};
 use super::mount_lifecycle::{next_mount_seq, MountPhase};
+use super::mount_links::is_mount_written;
 use super::{PerspectiveInstance, SdnaType};
 use crate::agent::AgentContext;
 use crate::languages::mount_types::{MountDelta, MountEntry, MountShapes, MountSyncReport};
@@ -133,7 +135,7 @@ impl PerspectiveInstance {
         self.sync_mount(lang_address).await.map(|_| ())
     }
 
-    /// Drop the mount: every `Local` link under `<lang>://` plus the mount
+    /// Drop the mount: every link it wrote under `<lang>://` plus the mount
     /// link itself, and the registry entry. Takes the mount's apply lock
     /// and moves it to a new generation, so a sync, delta or call result
     /// still in flight finds the mount gone and writes nothing.
@@ -149,7 +151,7 @@ impl PerspectiveInstance {
             .await?
             .into_iter()
             .filter(|l| {
-                (l.data.source.starts_with(&prefix) && l.status == Some(LinkStatus::Local))
+                (l.data.source.starts_with(&prefix) && is_mount_written(l))
                     || (l.data.source == MOUNT_SOURCE
                         && l.data.predicate.as_deref() == Some(MOUNT_PREDICATE)
                         && l.data.target == target)
@@ -289,10 +291,7 @@ impl PerspectiveInstance {
                 })
                 .await?
                 .into_iter()
-                .filter(|l| {
-                    l.status == Some(LinkStatus::Local)
-                        && !is_bookkeeping(l.data.predicate.as_deref())
-                })
+                .filter(|l| is_mount_written(l) && !is_bookkeeping(l.data.predicate.as_deref()))
                 .map(LinkExpression::from)
                 .collect();
             report.removed += self.remove_links(doomed, None).await?.len();
@@ -522,8 +521,7 @@ impl PerspectiveInstance {
             predicate: Some(VERSION_PREDICATE.to_string()),
             target: literal_target(&Value::String(shapes.version.clone()))?,
         };
-        self.add_links(vec![version], LinkStatus::Local, None, &context)
-            .await?;
+        self.add_mount_links(vec![version]).await?;
         Ok(())
     }
 
@@ -573,7 +571,7 @@ impl PerspectiveInstance {
         Ok(())
     }
 
-    /// Delete the mount's bookkeeping links under `<lang>://project`.
+    /// Delete the bookkeeping links the mount wrote under `<lang>://project`.
     async fn remove_bookkeeping(&mut self, lang_address: &str) -> Result<(), AnyError> {
         let doomed: Vec<LinkExpression> = self
             .get_links(&LinkQuery {
@@ -582,7 +580,7 @@ impl PerspectiveInstance {
             })
             .await?
             .into_iter()
-            .filter(|l| is_bookkeeping(l.data.predicate.as_deref()))
+            .filter(|l| is_mount_written(l) && is_bookkeeping(l.data.predicate.as_deref()))
             .map(LinkExpression::from)
             .collect();
         self.remove_links(doomed, None).await?;
@@ -599,7 +597,7 @@ impl PerspectiveInstance {
                 ..Default::default()
             })
             .await?;
-        Ok(links.first().and_then(|l| {
+        Ok(links.iter().find(|l| is_mount_written(l)).and_then(|l| {
             match parse_literal_value(&l.data.target) {
                 Value::String(s) => Some(s),
                 _ => None,
@@ -607,7 +605,7 @@ impl PerspectiveInstance {
         }))
     }
 
-    /// Every `Local` record link under `<lang>://` — the data the mount
+    /// Every record link the mount wrote under `<lang>://` — the data it
     /// owns; bookkeeping links are not part of the sweep.
     async fn owned_links(
         &self,
@@ -619,17 +617,18 @@ impl PerspectiveInstance {
             .await?
             .into_iter()
             .filter(|l| {
-                l.status == Some(LinkStatus::Local)
+                is_mount_written(l)
                     && l.data.source.starts_with(&prefix)
                     && !is_bookkeeping(l.data.predicate.as_deref())
             })
             .collect())
     }
 
-    /// Diff one record against the store: current = its `Local` links with
-    /// exactly this source, wanted = the expansion. `current − wanted` is
-    /// removed, `wanted − current` added; equal links stay untouched (no
-    /// subscription noise).
+    /// Diff one record against the store: current = the links the mount
+    /// wrote with exactly this source, wanted = the expansion. `current −
+    /// wanted` is removed, `wanted − current` added; equal links stay
+    /// untouched (no subscription noise). Anyone else's link under the
+    /// source is neither adopted nor removed.
     async fn apply_mount_entry(
         &mut self,
         lang_address: &str,
@@ -649,10 +648,7 @@ impl PerspectiveInstance {
             })
             .await?
             .into_iter()
-            .filter(|l| {
-                l.status == Some(LinkStatus::Local)
-                    && !is_bookkeeping(l.data.predicate.as_deref())
-            })
+            .filter(|l| is_mount_written(l) && !is_bookkeeping(l.data.predicate.as_deref()))
             .collect::<Vec<_>>();
         pause(lang_address, MountPoint::EntryRead).await;
 
@@ -682,10 +678,7 @@ impl PerspectiveInstance {
             report.removed += self.remove_links(doomed, None).await?.len();
         }
         if !additions.is_empty() {
-            report.added += self
-                .add_links(additions, LinkStatus::Local, None, &AgentContext::main_agent())
-                .await?
-                .len();
+            report.added += self.add_mount_links(additions).await?;
         }
         Ok(report)
     }

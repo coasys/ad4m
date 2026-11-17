@@ -1,7 +1,7 @@
 //! The mount's lifecycle and the order of its applies: an unmount wins
 //! against every sync, delta and call result in flight; snapshots and
 //! deltas apply one at a time and never regress a record; a mount owns
-//! only the classes it installed. The races stop one run at a chosen point with a
+//! only the classes it installed and removes only links it wrote. The races stop one run at a chosen point with a
 //! `mount_gates` gate, run the other side, then let it go.
 
 use super::mount_gates::gates;
@@ -320,4 +320,99 @@ async fn a_version_refresh_cannot_take_another_mounts_class() {
     let instances = things(&p).await;
     assert_eq!(instances.len(), 1, "{instances:?}");
     assert_eq!(instances[0]["id"], json!(format!("{lang}://t1")));
+}
+
+// --- A mount removes only links it wrote -------------------------------------
+
+#[tokio::test]
+async fn a_foreign_local_link_under_the_prefix_survives_sync_and_unmount() {
+    let lang = load_mount_test_language().await;
+    create(&lang, json!({"title": "a"})).await;
+    let (mut p, ctx) = mounted(&lang).await;
+    let source = format!("{lang}://t1");
+    p.add_links(
+        vec![Link {
+            source: source.clone(),
+            predicate: Some("ex://note".to_string()),
+            target: "literal:string:mine".to_string(),
+        }],
+        LinkStatus::Local,
+        None,
+        &ctx,
+    )
+    .await
+    .unwrap();
+
+    p.sync_mount(&lang).await.unwrap();
+    assert_eq!(links_at(&p, &source, "ex://note").await.len(), 1, "sync removed it");
+    p.unmount(&lang).await.unwrap();
+    assert_eq!(links_at(&p, &source, "ex://note").await.len(), 1, "unmount removed it");
+}
+
+#[tokio::test]
+async fn a_foreign_reifier_of_a_mount_triple_survives() {
+    let lang = load_mount_test_language().await;
+    create(&lang, json!({"title": "a"})).await;
+    let (mut p, ctx) = mounted(&lang).await;
+    let source = format!("{lang}://t1");
+    let mine = p
+        .add_links(
+            vec![Link {
+                source: source.clone(),
+                predicate: Some("mounttest://title".to_string()),
+                target: "literal:string:a".to_string(),
+            }],
+            LinkStatus::Local,
+            None,
+            &ctx,
+        )
+        .await
+        .unwrap()
+        .remove(0);
+
+    project(
+        &lang,
+        "outsideChange",
+        json!({"address": "t1", "data": {"title": "b"}, "emit": false}),
+    )
+    .await;
+    p.sync_mount(&lang).await.unwrap();
+
+    let titles = links_at(&p, &source, "mounttest://title").await;
+    assert!(
+        titles
+            .iter()
+            .any(|l| l.timestamp == mine.timestamp && l.data.target == "literal:string:a"),
+        "the user's own title link was removed: {titles:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_bookkeeping_refresh_spares_shared_links() {
+    let lang = load_mount_test_language().await;
+    let (mut p, ctx) = mounted(&lang).await;
+    let project_node = format!("{lang}://project");
+    p.add_links(
+        vec![Link {
+            source: project_node.clone(),
+            predicate: Some("ad4m://mount_shapes_version".to_string()),
+            target: "literal:string:peer".to_string(),
+        }],
+        LinkStatus::Shared,
+        None,
+        &ctx,
+    )
+    .await
+    .unwrap();
+
+    project(&lang, "setVersion", json!({"version": "3"})).await;
+    p.sync_mount(&lang).await.unwrap();
+
+    let versions = links_at(&p, &project_node, "ad4m://mount_shapes_version").await;
+    assert!(
+        versions
+            .iter()
+            .any(|l| l.status == Some(LinkStatus::Shared) && l.data.target == "literal:string:peer"),
+        "the refresh removed a Shared link: {versions:?}"
+    );
 }
