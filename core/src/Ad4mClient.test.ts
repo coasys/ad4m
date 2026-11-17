@@ -1164,6 +1164,16 @@ describe('ExpressionClient', () => {
         expect(exprs[1].author).toBe('did:test:123');
     });
 
+    test('getMany() sends at most 200 URLs per expression.getMany call', async () => {
+        const freshClient = newClient();
+        const urls = Array.from({ length: 201 }, (_, i) => `lang://test/Qm${i}`);
+        const exprs = await freshClient.expression.getMany(urls);
+        expect(exprs).toHaveLength(201);
+        const calls = lastOf(MockWebSocket.instances).rpc.filter(c => c.type === 'expression.getMany');
+        expect(calls.map(c => (c.params.urls as string[]).length)).toEqual([200, 1]);
+        expect(calls.flatMap(c => c.params.urls as string[])).toEqual(urls);
+    });
+
     test('getRaw() returns raw expression', async () => {
         const raw = await ad4m.expression.getRaw('lang://test/Qm123');
         expect(raw).toBe('raw-expression-data');
