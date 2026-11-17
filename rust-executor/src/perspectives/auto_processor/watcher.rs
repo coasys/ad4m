@@ -2943,4 +2943,32 @@ mod tests {
             "error mentions the shape mismatch: {msg}"
         );
     }
+
+    /// A merged transcript keeps each turn as a fresh read would: a kept
+    /// turn that is no longer queueable (consumed since, or out of the
+    /// window) drops its text, and the result equals `set_transcript` over
+    /// the same turns.
+    #[test]
+    fn a_merged_transcript_drops_the_text_of_turns_no_longer_queueable() {
+        let c = cfg("merge", 0, 32);
+        let mut reads = TickReads::default();
+        reads.set_transcript(&c, 1, vec![pt("a"), pt("b")], |_, _| true);
+
+        // Since then "a" was consumed, and "c" was added.
+        let queueable = |id: &str, _: &str| id != "a";
+        let merged = reads.merge_transcript(&c, 2, vec![pt("c")], queueable);
+        assert_eq!(
+            merged[0],
+            CachedTurn::Consumed {
+                id: "a".into(),
+                timestamp: "ts".into(),
+            },
+            "a turn no longer queueable keeps no text"
+        );
+
+        let mut fresh = TickReads::default();
+        let read = fresh.set_transcript(&c, 2, vec![pt("a"), pt("b"), pt("c")], queueable);
+        assert_eq!(*merged, *read, "the merge holds what a fresh read holds");
+        assert_eq!(reads.transcript(&c), Some((2, merged)));
+    }
 }
