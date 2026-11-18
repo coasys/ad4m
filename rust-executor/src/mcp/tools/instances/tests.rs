@@ -5204,3 +5204,17 @@ async fn a_legacy_spelled_instance_is_updated_and_removed_where_it_is_stored() {
         .unwrap();
     assert!(left.is_empty(), "remove left the stored links: {left:?}");
 }
+
+/// `common_error` words an ambiguous class name with the IRIs a caller may
+/// pass instead.
+#[test]
+fn an_ambiguous_class_error_names_the_candidate_iris() {
+    let text = common_error(&InstanceError::AmbiguousClass {
+        class_name: "Task".into(),
+        candidates: vec!["a://Task".into(), "b://Task".into()],
+    })
+    .expect("worded by common_error");
+    assert!(text.contains("Task"), "{text}");
+    assert!(text.contains("a://Task"), "{text}");
+    assert!(text.contains("b://Task"), "{text}");
+}

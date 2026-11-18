@@ -651,29 +651,13 @@ impl Ad4mMcpHandler {
             }
         }
 
-        // Strategy 2: Fallback to rdf://type matching (for classes that use standard RDF typing)
-        let class_links = match perspective
-            .get_links(&LinkQuery {
-                predicate: Some("rdf://type".to_string()),
-                target: Some("ad4m://SubjectClass".to_string()),
-                ..Default::default()
-            })
-            .await
-        {
-            Ok(links) => links,
-            Err(e) => return format!("Error: {}", e),
-        };
-
-        let target_class = match class_links.iter().find_map(|l| {
-            let name = l.data.source.split("://").last().unwrap_or("");
-            if name == class_name {
-                Some(l.data.source.clone())
-            } else {
-                None
-            }
-        }) {
-            Some(tc) => tc,
-            None => return format!("Subject class '{}' not found", class_name),
+        // Strategy 2: rdf://type matching on the resolved class's IRI (for
+        // classes that use standard RDF typing). The class was resolved from
+        // the shape registry already; its shape names the IRI instances type
+        // against.
+        let target_class = match perspective.get_shape(class_name) {
+            Ok(shape) => shape.target_class.clone(),
+            Err(_) => return format!("Subject class '{}' not found", class_name),
         };
 
         let instance_links = match perspective

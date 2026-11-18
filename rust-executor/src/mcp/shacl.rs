@@ -8,7 +8,7 @@
 
 use crate::perspectives::model_query::types::ModelShape;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
-use crate::types::{LinkQuery, LinkStatus};
+use crate::types::LinkStatus;
 
 /// A SHACL subject class with its properties and metadata.
 ///
@@ -232,7 +232,10 @@ fn shape_to_shacl_class(class_name: &str, shape: &ModelShape) -> ShaclClass {
     }
 }
 
-/// Find the original-cased class name from a lowercase name
+/// Find the original-cased class name from a lowercase name. The shape
+/// registry (`class_names`) is the only class lookup: a name that exists only
+/// as an `rdf://type ad4m://SubjectClass` link — without a registered shape —
+/// is not a class.
 pub async fn find_class_name(
     perspective: &PerspectiveInstance,
     class_name_lower: &str,
@@ -245,31 +248,6 @@ pub async fn find_class_name(
     for name in &class_names {
         if name.to_lowercase() == class_name_lower {
             return Some(name.clone());
-        }
-    }
-
-    // Fallback: direct link query for non-standard URIs
-    let class_links = match perspective
-        .get_links(&LinkQuery {
-            predicate: Some("rdf://type".to_string()),
-            target: Some("ad4m://SubjectClass".to_string()),
-            ..Default::default()
-        })
-        .await
-    {
-        Ok(links) => links,
-        Err(_) => return None,
-    };
-
-    for link in &class_links {
-        let name = link
-            .data
-            .source
-            .split("://")
-            .last()
-            .unwrap_or(&link.data.source);
-        if name.to_lowercase() == class_name_lower {
-            return Some(name.to_string());
         }
     }
 

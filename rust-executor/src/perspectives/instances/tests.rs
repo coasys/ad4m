@@ -128,6 +128,181 @@ async fn collection_items_are_found_by_their_coerced_value() {
     assert!(stored_targets(&p, &base, "ns://count").await.is_empty());
 }
 
+/// `resolve_class` reads the shape registry only: every key `class_keys`
+/// gives resolves to its one class, a name two classes share to neither.
+mod resolve_class {
+    use super::*;
+    use crate::perspectives::instances::resolve_class;
+    use crate::types::{Link, LinkStatus};
+
+    /// Two classes of one name, `title` required on each.
+    const TASK_A_SDNA: &str = r#"{
+  "target_class": "a://Task",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"rdf://type","target":"a://Task"}
+  ],
+  "properties": [
+    {"path":"a://task_title","name":"title","datatype":"xsd:string","min_count":1,"max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"a://task_title","target":"value"}]}
+  ]
+}"#;
+
+    const TASK_B_SDNA: &str = r#"{
+  "target_class": "b://Task",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"rdf://type","target":"b://Task"}
+  ],
+  "properties": [
+    {"path":"b://task_title","name":"title","datatype":"xsd:string","min_count":1,"max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"b://task_title","target":"value"}]}
+  ]
+}"#;
+
+    /// `a://Task` and `b://Task` share the name `Task`; `Counted` is unique.
+    async fn shared_name_perspective() -> (PerspectiveInstance, AgentContext) {
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        for sdna in [TASK_A_SDNA, TASK_B_SDNA, COUNTED_SDNA] {
+            p.register_shape_json(sdna, &ctx).await.expect("register");
+        }
+        (p, ctx)
+    }
+
+    /// Every key `class_keys()` gives resolves: a unique name, or a target
+    /// class IRI when the name is shared.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_target_class_iri_resolves_to_its_class() {
+        let (p, _ctx) = shared_name_perspective().await;
+        let (key, shape) = resolve_class(&p, "b://Task")
+            .await
+            .expect("an IRI key resolves");
+        assert_eq!(key, "b://Task");
+        assert_eq!(shape.target_class, "b://Task");
+    }
+
+    /// A bare name two registered classes share resolves to neither — the
+    /// refusal names both target class IRIs.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_name_two_classes_share_is_refused_as_ambiguous() {
+        let (p, _ctx) = shared_name_perspective().await;
+        let error = resolve_class(&p, "Task")
+            .await
+            .expect_err("a shared name resolves to neither class");
+        let data = serde_json::to_value(&error).expect("serialize");
+        assert_eq!(data["kind"], "ambiguousClass", "{data}");
+        assert_eq!(
+            data["candidates"],
+            json!(["a://Task", "b://Task"]),
+            "{data}"
+        );
+    }
+
+    /// The case-insensitive match is held to the same rule: onto a shared
+    /// name it is refused, not resolved to one of them.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_case_insensitive_match_onto_a_shared_name_is_ambiguous() {
+        let (p, _ctx) = shared_name_perspective().await;
+        let error = resolve_class(&p, "task")
+            .await
+            .expect_err("a shared name resolves to neither class");
+        let data = serde_json::to_value(&error).expect("serialize");
+        assert_eq!(data["kind"], "ambiguousClass", "{data}");
+        assert_eq!(
+            data["candidates"],
+            json!(["a://Task", "b://Task"]),
+            "{data}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_case_insensitive_unique_name_still_resolves() {
+        let (p, _ctx) = shared_name_perspective().await;
+        let (key, shape) = resolve_class(&p, "cOuNtEd")
+            .await
+            .expect("a unique name resolves case-insensitively");
+        assert_eq!(key, "Counted");
+        assert_eq!(shape.target_class, "ns://Counted");
+    }
+
+    /// A class that exists only as an `rdf://type ad4m://SubjectClass` link
+    /// (no registered shape) is not resolved.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_subject_class_marker_without_a_shape_is_not_a_class() {
+        let (mut p, ctx) = shared_name_perspective().await;
+        p.add_link(
+            Link {
+                source: "ns://Orphan".to_string(),
+                predicate: Some("rdf://type".to_string()),
+                target: "ad4m://SubjectClass".to_string(),
+            },
+            LinkStatus::Shared,
+            None,
+            &ctx,
+        )
+        .await
+        .expect("marker link");
+
+        let error = resolve_class(&p, "Orphan")
+            .await
+            .expect_err("a marker without a shape is not a class");
+        let data = serde_json::to_value(&error).expect("serialize");
+        assert_eq!(data["kind"], "unknownClass", "{data}");
+        let error = resolve_class(&p, "ns://Orphan")
+            .await
+            .expect_err("a marker without a shape is not a class");
+        let data = serde_json::to_value(&error).expect("serialize");
+        assert_eq!(data["kind"], "unknownClass", "{data}");
+    }
+
+    /// `UnknownClass` lists the class keys — an IRI for each class whose name
+    /// is shared.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unknown_class_lists_the_class_keys() {
+        let (p, _ctx) = shared_name_perspective().await;
+        let error = resolve_class(&p, "Nope").await.expect_err("unknown class");
+        let data = serde_json::to_value(&error).expect("serialize");
+        assert_eq!(data["kind"], "unknownClass", "{data}");
+        assert_eq!(
+            data["registered"],
+            json!(["Counted", "a://Task", "b://Task"]),
+            "{data}"
+        );
+    }
+
+    /// The rule end to end: `Task` is refused, `b://Task` creates against
+    /// `b://Task`'s shape.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_shared_name_create_is_refused_but_the_iri_creates() {
+        let (mut p, ctx) = shared_name_perspective().await;
+        let properties = || Some(Map::from_iter([("title".to_string(), json!("t"))]));
+        let error = create(
+            &mut p,
+            &ctx,
+            InstanceCreate {
+                class_name: "Task".into(),
+                properties: properties(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("a shared name resolves to neither class");
+        let data = serde_json::to_value(&error).expect("serialize");
+        assert_eq!(data["kind"], "ambiguousClass", "{data}");
+
+        let created = create(
+            &mut p,
+            &ctx,
+            InstanceCreate {
+                class_name: "b://Task".into(),
+                properties: properties(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("an IRI key resolves");
+        assert_eq!(created.class_name, "b://Task");
+    }
+}
+
 mod decoded_literal {
     use super::super::decoded_literal;
     use serde_json::{json, Value};
