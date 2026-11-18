@@ -112,15 +112,23 @@ so the same file runs on both link languages.
 
 ### Nightly (`nightly-llm-e2e` workflow)
 
-A pipeline with `run-nightly-llm: true` runs only this workflow, on `coasys/marvin`
-(local Ollama). Each job has its own serial group. The jobs: `llm-e2e`,
+A pipeline with `run-nightly-llm: true` runs only this workflow, on `coasys/marvin`.
+Each job has its own serial group. The jobs: `llm-e2e`,
 `integration-tests-sfu`, `integration-tests-sfu-browsers` (see below) and
 `coasys-spaces`.
 
+`llm-e2e` runs the ignored Rust interpretation suites and the JS suites gated
+by `LLM_E2E=1`. It does not start a model server. It prompts staging's
+llama-server at `http://127.0.0.1:12460/v1` (alias `qwen3.8-27b-ud-q4_k_m`,
+kind `LLAMA_SERVER`, context budget 57344 under the server's 65536-token
+slot) and embeds with Ollama's `nomic-embed-text` on `:11434`. A preflight
+checks `/health` and that `/v1/models` lists the alias, and fails the job
+when the unit is down. Requests share that one slot with staging's own AI
+processing.
+
 `coasys-spaces` runs WE's product suite (`pnpm --filter @we/app-web test:spaces`,
 WE `apps/we-web/tests/live/coasys-spaces/`): a Coasys space, a call, its
-transcript (executor Whisper), extraction on Ollama `qwen3.8-27b-48k` (the
-model staging and `llm-e2e` use, which Marvin keeps loaded), and flows.
+transcript (executor Whisper), extraction on Ollama `qwen3.8-27b-48k`, and flows.
 Ollama's OpenAI endpoint runs a model with the server's default context window
 and cuts a longer prompt silently. So when the model's own `num_ctx` is below
 `COASYS_SPACES_LLM_NUM_CTX` (16384), `llm-check` makes a variant such as
@@ -139,10 +147,11 @@ holds one load. It uses this commit's executor and SDK:
 The job halts green when the same ad4m commit, WE commit, tier and model already
 passed on the host (`~/.local/state/ad4m-ci/coasys-spaces/last-success`). Set
 `COASYS_SPACES_FORCE=1` to run anyway. A checkout with changes (a run by hand
-with local edits) runs, but neither skips nor records a pass. It shares the serial group
-`nightly-llm` with `llm-e2e`: both use the host's Ollama and GPU, so they run
-one after the other. Screenshots, traces and logs are under the
-job's artifacts, `coasys-spaces/`.
+with local edits) runs, but neither skips nor records a pass. It shares the
+serial group `nightly-llm` with `llm-e2e`. That job talks to staging's
+llama-server, which already holds the GPU, and this job still loads an
+Ollama model, so they run one after the other. Screenshots, traces and logs
+are under the job's artifacts, `coasys-spaces/`.
 
 Each step is a subcommand of `scripts/coasys-spaces.sh`. `bash
 scripts/coasys-spaces.sh all` runs the whole job on a machine with Ollama and the

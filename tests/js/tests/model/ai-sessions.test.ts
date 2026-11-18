@@ -21,16 +21,15 @@
  * TS client — not on the model's wording (the one exception is the
  * list_perspectives reply, where the two distinctive names are checked).
  *
- * Requires a reachable LLM endpoint. Endpoint + model are env-overridable to
- * match the Rust e2e suite:
- *   INTERPRETATION_E2E_BASE_URL (default http://localhost:11434/v1)
- *   INTERPRETATION_E2E_MODEL    (default qwen3.8-27b-48k)
- *   INTERPRETATION_E2E_MAX_NUM_CTX (default 49152, the context the model
- *     was created with; matching it keeps Ollama from reloading the model)
- *   INTERPRETATION_E2E_API_KEY  (default "ollama", the helper placeholder)
- * The endpoint is native Ollama (`addOllamaLlm`), as in the other LLM suites.
- * The helper always sends a key, and the executor refuses a key over plain
- * HTTP except to loopback: reach a remote Ollama over https or a local port.
+ * Requires staging's llama-server. Endpoint + model are env-overridable to
+ * match the Rust e2e suite (`addE2eLlm`):
+ *   INTERPRETATION_E2E_BASE_URL (default http://127.0.0.1:12460/v1)
+ *   INTERPRETATION_E2E_MODEL    (default qwen3.8-27b-ud-q4_k_m)
+ *   INTERPRETATION_E2E_ENDPOINT_KIND (default LLAMA_SERVER)
+ *   INTERPRETATION_E2E_MAX_NUM_CTX (default 57344, under the server's 65536 slot)
+ *   INTERPRETATION_E2E_API_KEY  (unset: no key; llama-server takes none)
+ * Tools go out as definitions (`nativeTools`). The context budget stays under
+ * the server slot, so a request is not refused for filling it.
  *
  * Run (from tests/js, executor built + `pnpm run prepare-test` once):
  *   LLM_E2E=1 pnpm ts-mocha -p tsconfig.json --timeout 1200000 --exit \
@@ -41,19 +40,17 @@ import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
 import { Ad4mClient, LinkQuery, SHACLShape } from "@coasys/ad4m";
 import type { AISession, AISessionChanged, AISessionMessage } from "@coasys/ad4m";
-import { addOllamaLlm, startAgent, waitUntil } from "../../helpers/index.js";
+import { addE2eLlm, e2eMaxNumCtx, startAgent, waitUntil } from "../../helpers/index.js";
 
 const expect = chai.expect;
 chai.use(chaiAsPromised);
 
-const BASE_URL = process.env.INTERPRETATION_E2E_BASE_URL || "http://localhost:11434/v1";
-const MODEL = process.env.INTERPRETATION_E2E_MODEL || "qwen3.8-27b-48k";
-const MAX_NUM_CTX = Number(process.env.INTERPRETATION_E2E_MAX_NUM_CTX) || 49152;
-const API_KEY = process.env.INTERPRETATION_E2E_API_KEY;
-
 // A turn is a detached task; the reply row settles whenever the model is done.
-// Ollama needs a cold model load (~15 s) plus generation time per turn.
-const TURN_TIMEOUT_MS = 300_000;
+// The request may wait behind staging on the one llama-server slot, then generate.
+const TURN_TIMEOUT_MS = 600_000;
+// The budget the executor sizes prompts to. The big-result test checks the
+// stored tool result is larger than this window.
+const MAX_NUM_CTX = e2eMaxNumCtx();
 
 /** The fields the test reads off a transcript entry's `content`. */
 type StepContent = {
@@ -76,14 +73,15 @@ const toolSteps = (msgs: AISessionMessage[], name?: string) =>
 
 // LLM E2E gate — this suite drives the executor's real LLM path. Skipped by
 // default (unset `LLM_E2E`); the nightly `llm-e2e` workflow on `dev` runs it
-// against Marvin's Ollama. Run locally with `LLM_E2E=1`, or the umbrella
+// against the host's llama-server. Run locally with `LLM_E2E=1`, or the umbrella
 // `./scripts/run-llm-e2e.sh` at the repo root.
 const describeIfLLM: Mocha.SuiteFunction = (process.env.LLM_E2E === "1"
   ? describe
   : (describe.skip as unknown as Mocha.SuiteFunction));
 
 describeIfLLM("ai.session* — persistent AI sessions (WS + real LLM)", function () {
-  this.timeout(900_000);
+  // Several turns, and each may queue on the single llama-server slot.
+  this.timeout(3_600_000);
 
   let ad4m: Ad4mClient;
   let stopAgent: (() => Promise<void>) | null = null;
@@ -99,14 +97,7 @@ describeIfLLM("ai.session* — persistent AI sessions (WS + real LLM)", function
     ad4m = agent.client;
     stopAgent = agent.stop;
 
-    const modelId = await addOllamaLlm(
-      ad4m,
-      "ai-sessions-llm",
-      BASE_URL,
-      MODEL,
-      MAX_NUM_CTX,
-      API_KEY
-    );
+    const modelId = await addE2eLlm(ad4m, "ai-sessions-llm");
     await ad4m.ai.setDefaultModel("LLM", modelId);
   });
 
