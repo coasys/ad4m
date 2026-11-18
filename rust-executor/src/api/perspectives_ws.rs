@@ -1327,25 +1327,62 @@ async fn run_interpretation_handler(
     // `model_query_handler` / `evaluate_getters_handler`, but with a longer
     // budget appropriate for the interpretation pass (see
     // `RUN_INTERPRETATION_TIMEOUT_SECS`).
-    let bases = match tokio::time::timeout(
-        Duration::from_secs(RUN_INTERPRETATION_TIMEOUT_SECS),
-        crate::perspectives::interpretation::run_interpretation_observed(
-            &mut perspective,
-            &shapes,
-            &transcript,
-            &body.base_prefix,
-            &agent_context,
-            // Existing-instance scope: when the caller supplies one,
-            // dedup lookup is restricted to instances under that subtree
-            // (same semantics as `AutoProcessorConfig.existingScope`).
-            // `None` keeps the whole-perspective dedup set — the
-            // pre-scope default that #883 originally added the plumbing for.
-            body.existing_scope.as_ref(),
-            emit_ctx.as_ref(),
-        ),
-    )
-    .await
-    {
+    // The harness by default, single-shot for `maxToolCalls: 0` (#1804), as
+    // the auto-processor decides.
+    let tool_cap =
+        crate::perspectives::interpretation::interpretation_tool_cap(body.max_tool_calls);
+    let timeout_secs = match tool_cap {
+        Some(_) => RUN_INTERPRETATION_HARNESS_TIMEOUT_SECS,
+        None => RUN_INTERPRETATION_TIMEOUT_SECS,
+    };
+    let pass = async {
+        match tool_cap {
+            Some(cap) => {
+                crate::perspectives::interpretation::run_interpretation_with_harness_and_model(
+                    &mut perspective,
+                    &shapes,
+                    &transcript,
+                    &body.base_prefix,
+                    &agent_context,
+                    None,
+                    body.existing_scope.as_ref(),
+                    None,
+                    cap,
+                    // The pass's tools act as the caller, as in
+                    // `runInterpretationWithHarness`.
+                    Some(ctx.session.clone()),
+                    emit_ctx.as_ref(),
+                    false,
+                    Some(std::sync::Arc::new(WsHarnessCreditGate::new(
+                        ctx.user_did().map(str::to_string),
+                    ))),
+                    None,
+                    &crate::perspectives::interpretation::DedupStrategy::default(),
+                    false,
+                )
+                .await
+                .map(|outcome| outcome.bases)
+            }
+            None => {
+                crate::perspectives::interpretation::run_interpretation_observed(
+                    &mut perspective,
+                    &shapes,
+                    &transcript,
+                    &body.base_prefix,
+                    &agent_context,
+                    // Existing-instance scope: when the caller supplies one,
+                    // dedup lookup is restricted to instances under that subtree
+                    // (same semantics as `AutoProcessorConfig.existingScope`).
+                    // `None` keeps the whole-perspective dedup set — the
+                    // pre-scope default that #883 originally added the plumbing for.
+                    body.existing_scope.as_ref(),
+                    emit_ctx.as_ref(),
+                )
+                .await
+            }
+        }
+    };
+    let bases = match tokio::time::timeout(Duration::from_secs(timeout_secs), pass).await {
         Ok(Ok(bases)) => bases,
         Ok(Err(e)) => {
             // Both failure arms close the row before returning. A consumer that opened one on
@@ -1358,26 +1395,20 @@ async fn run_interpretation_handler(
             return Err(WsRpcError::internal(e.to_string()));
         }
         Err(_) => {
-            log::warn!(
-                "run_interpretation timed out after {}s",
-                RUN_INTERPRETATION_TIMEOUT_SECS
-            );
+            log::warn!("run_interpretation timed out after {timeout_secs}s");
             if let Some((id, did)) = observe {
                 emit_one_shot_abandoned(
                     &uuid,
                     id,
                     did,
-                    &format!("timed out after {RUN_INTERPRETATION_TIMEOUT_SECS}s"),
+                    &format!("timed out after {timeout_secs}s"),
                 )
                 .await;
             }
             return Err(WsRpcError {
                 data: None,
                 code: 408,
-                message: format!(
-                    "runInterpretation timed out after {}s",
-                    RUN_INTERPRETATION_TIMEOUT_SECS
-                ),
+                message: format!("runInterpretation timed out after {timeout_secs}s"),
             });
         }
     };

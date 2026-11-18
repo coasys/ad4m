@@ -57,4 +57,11 @@ observationId?: string,
  * would be nothing to correlate the payloads to. Same switch, same
  * reasons, as `AutoProcessorConfig.emit_debug_events`.
  */
-emitDebugEvents?: boolean, };
+emitDebugEvents?: boolean, 
+/**
+ * Tool-call cap of the pass (#1804). Absent: the tool-calling harness
+ * with the executor's default cap. `0`: the single-shot path. `N`: the
+ * harness with the cap `N`. A harness pass that ends without a usable
+ * answer falls back to single-shot.
+ */
+maxToolCalls?: number, };

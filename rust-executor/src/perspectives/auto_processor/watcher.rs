@@ -1467,9 +1467,11 @@ pub async fn run_one_pass(
             batch_key: batch_key_hex.clone(),
         });
 
-    // Fork: harness-dispatched pass when the operator opted in via
-    // `AutoProcessorConfig.max_tool_calls > 0`; otherwise the classic
-    // single-shot LLM+parse+plan pipeline. The two paths converge on the
+    // Fork (#1804): the harness pass by default — `maxToolCalls` absent means
+    // the cap `DEFAULT_INTERPRETATION_TOOL_CALLS`, `n > 0` the cap `n` — and
+    // the classic single-shot LLM+parse+plan pipeline when `maxToolCalls` is
+    // 0 (`interpretation_tool_cap`). A harness pass that ends without a
+    // usable answer falls back to single-shot itself. The two paths converge on the
     // same overlay-writing gate (`apply_with_overlay`), so downstream
     // provenance + processed signalling is identical.
     //
@@ -1491,9 +1493,10 @@ pub async fn run_one_pass(
     );
     #[cfg(not(test))]
     let stubbed: Option<Vec<String>> = None;
-    let (bases, debug) = match (stubbed, cfg.max_tool_calls) {
+    let tool_cap = crate::perspectives::interpretation::interpretation_tool_cap(cfg.max_tool_calls);
+    let (bases, debug) = match (stubbed, tool_cap) {
         (Some(bases), _) => (bases, None),
-        (None, Some(n)) if n > 0 => {
+        (None, Some(n)) => {
             let outcome = abandon_on_err!(
                 run_interpretation_with_harness_and_model(
                     perspective,

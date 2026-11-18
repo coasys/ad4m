@@ -261,6 +261,10 @@ export class PerspectiveClient {
      * retries on parse failure), so it can legitimately take minutes on slower
      * or CPU-only models, so it defaults to {@link LONG_TIMEOUT_MS}.
      *
+     * The executor runs the tool-calling harness with its default cap, and
+     * falls back to single-shot when the harness ends without a usable
+     * answer (#1804). A raw `maxToolCalls: 0` param selects single-shot.
+     *
      * `existingScope` and `mintScope` match the AutoProcessor semantics:
      * `existingScope` constrains the dedup lookup to instances under a
      * subtree; `mintScope` links every FRESHLY-created base as a child of
