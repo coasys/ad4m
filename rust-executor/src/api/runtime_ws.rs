@@ -781,9 +781,9 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     // An import writes rows as they are in the file: notifications with their `granted` flag
     // and `owner_did`, users with their password hashes — or, for `type: "perspective"`,
     // every link of a snapshot into any perspective on the executor. Only the operator
-    // imports, as only the operator grants notifications. A perspective import yields the
-    // same result as writing each link through the normal write path, in file order,
-    // except that nothing is sent to the link language and no per-link diff is published.
+    // imports, as only the operator grants notifications. A perspective import adds links
+    // new to the perspective in one commit, and refuses the whole file otherwise (see
+    // `SparqlStore::import_links_file`). Nothing is sent to the link language.
     map.method::<ImportRequest, RuntimeImportResult>("runtime.importData", import_data)
         .long()
         .guard(Guard::Operator);
@@ -1051,10 +1051,13 @@ pub enum RuntimeImportResult {
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct RuntimeImportPerspectiveResult {
-    /// Links the load wrote.
+    /// Links the load wrote — the file's links that were new to the
+    /// perspective. The whole file commits in one transaction, or not at
+    /// all: a link the store already holds, a reifier repeated in the
+    /// file, or a valid tombstone ending a stored or in-file link
+    /// refuses the import.
     pub imported: usize,
-    /// Links a tombstone ends — a stored one or one earlier in the file:
-    /// not written.
+    /// Links a tombstone the store already held ends: not written.
     pub covered: usize,
     /// Links refused: in the store's own metadata vocabulary.
     pub skipped: usize,

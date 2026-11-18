@@ -2,12 +2,15 @@
 
 export type RuntimeImportPerspectiveResult = { 
 /**
- * Links the load wrote.
+ * Links the load wrote — the file's links that were new to the
+ * perspective. The whole file commits in one transaction, or not at
+ * all: a link the store already holds, a reifier repeated in the
+ * file, or a valid tombstone ending a stored or in-file link
+ * refuses the import.
  */
 imported: number, 
 /**
- * Links a tombstone ends — a stored one or one earlier in the file:
- * not written.
+ * Links a tombstone the store already held ends: not written.
  */
 covered: number, 
 /**

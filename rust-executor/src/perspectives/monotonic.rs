@@ -299,7 +299,7 @@ fn retracted_signature(link: &LinkExpression) -> Option<String> {
 /// The link side of [`ends`]: only a Shared link under a retractable
 /// predicate can be ended — a Local one is private to this replica,
 /// whatever tombstone names it.
-fn coverable(link: &LinkExpression) -> bool {
+pub(crate) fn coverable(link: &LinkExpression) -> bool {
     link.status == Some(LinkStatus::Shared) && is_retractable(link.data.predicate.as_deref())
 }
 
@@ -308,12 +308,30 @@ fn coverable(link: &LinkExpression) -> bool {
 pub(crate) type EndsKey = (String, String, String);
 
 /// The link's [`EndsKey`]: what a tombstone naming it would have to carry.
-fn ends_key_of(link: &LinkExpression) -> EndsKey {
+pub(crate) fn ends_key_of(link: &LinkExpression) -> EndsKey {
     (
         link.data.source.clone(),
         link.author.clone(),
         link.proof.signature.clone(),
     )
+}
+
+/// The [`EndsKey`] a tombstone names — its own source and author plus the
+/// signature it retracts — when `link` is a tombstone that counts under
+/// [`retracted_signature`]; `None` for anything else.
+pub(crate) fn named_ends_key(link: &LinkExpression) -> Option<EndsKey> {
+    retracted_signature(link)
+        .map(|signature| (link.data.source.clone(), link.author.clone(), signature))
+}
+
+/// A compact hash of an [`EndsKey`]: the file import's coverage checks run
+/// on these, so a million-key set stays small. `DefaultHasher` is a fixed
+/// SipHash, so the same key hashes the same on every call.
+pub(crate) fn ends_key_hash(key: &EndsKey) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    key.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// Whether `tombstone` (already checked by [`retracted_signature`] to name
@@ -331,13 +349,13 @@ fn ends(tombstone: &LinkExpression, signature: &str, link: &LinkExpression) -> b
         )
 }
 
-/// The [`EndsKey`] of every tombstone `store` holds that counts under
-/// [`retracted_signature`], collected once so a bulk import checks a
-/// candidate link's coverage with one set lookup instead of a `query_links`
-/// per link.
+/// The [`ends_key_hash`] of the [`EndsKey`] every tombstone `store` holds
+/// that counts under [`retracted_signature`] names, collected once so a
+/// bulk import checks a candidate link's coverage with one set lookup
+/// instead of a `query_links` per link.
 pub(crate) fn stored_tombstone_keys(
     store: &crate::perspectives::sparql_store::SparqlStore,
-) -> Result<std::collections::HashSet<EndsKey>, AnyError> {
+) -> Result<std::collections::HashSet<u64>, AnyError> {
     let mut keys = std::collections::HashSet::new();
     for stored in store.query_links(
         &crate::perspectives::sparql_store::EvalStop::none(),
@@ -349,8 +367,8 @@ pub(crate) fn stored_tombstone_keys(
         None,
     )? {
         let tombstone = LinkExpression::from(stored);
-        if let Some(signature) = retracted_signature(&tombstone) {
-            keys.insert((tombstone.data.source, tombstone.author, signature));
+        if let Some(key) = named_ends_key(&tombstone) {
+            keys.insert(ends_key_hash(&key));
         }
     }
     Ok(keys)
@@ -359,10 +377,31 @@ pub(crate) fn stored_tombstone_keys(
 /// Whether a tombstone in `keys` ([`stored_tombstone_keys`]) ends `link`:
 /// the [`ends`] test with the stored tombstone side already collected.
 pub(crate) fn ended_by_stored(
-    keys: &std::collections::HashSet<EndsKey>,
+    keys: &std::collections::HashSet<u64>,
     link: &LinkExpression,
 ) -> bool {
-    coverable(link) && keys.contains(&ends_key_of(link))
+    coverable(link) && keys.contains(&ends_key_hash(&ends_key_of(link)))
+}
+
+/// Whether `link` — a tombstone that counts under [`retracted_signature`] —
+/// ends a link `store` already holds: the [`ends`] test over the stored
+/// links sharing the tombstone's source. Reads the store, writes nothing.
+pub(crate) fn tombstone_ends_stored(
+    store: &crate::perspectives::sparql_store::SparqlStore,
+    link: &LinkExpression,
+) -> Result<bool, AnyError> {
+    let Some(signature) = retracted_signature(link) else {
+        return Ok(false);
+    };
+    for stored in store.get_links_by_source(
+        &crate::perspectives::sparql_store::EvalStop::none(),
+        &link.data.source,
+    )? {
+        if ends(link, &signature, &LinkExpression::from(stored)) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// What the tombstones in, and already under, a diff's additions do to the
@@ -406,64 +445,6 @@ fn same_link(a: &LinkExpression, b: &LinkExpression) -> bool {
         && a.data.target == b.data.target
 }
 
-/// [`PerspectiveInstance::retraction_effects`]' computation against `store`
-/// directly: the bulk import's slow list applies the same coverage and
-/// retraction rules without a `PerspectiveInstance` in hand. Reads the
-/// store, writes nothing.
-pub(crate) fn retraction_effects_on(
-    store: &crate::perspectives::sparql_store::SparqlStore,
-    additions: &[LinkExpression],
-) -> Result<RetractionEffects, AnyError> {
-    let mut effects = RetractionEffects::default();
-    let tombstones: Vec<(&LinkExpression, String)> = additions
-        .iter()
-        .filter_map(|l| retracted_signature(l).map(|sig| (l, sig)))
-        .collect();
-
-    for (tombstone, signature) in &tombstones {
-        for stored in store.get_links_by_source(
-            &crate::perspectives::sparql_store::EvalStop::none(),
-            &tombstone.data.source,
-        )? {
-            let link = LinkExpression::from(stored.clone());
-            if ends(tombstone, signature, &link) {
-                effects.retracted.push(stored);
-            }
-        }
-    }
-
-    for link in additions {
-        if !is_retractable(link.data.predicate.as_deref()) {
-            continue;
-        }
-        let in_diff = tombstones.iter().any(|(t, sig)| ends(t, sig, link));
-        if in_diff || stored_tombstone_ends(store, link)? {
-            effects.covered.push(link.clone());
-        }
-    }
-    Ok(effects)
-}
-
-/// Whether a tombstone already in `store` ends `link` under [`ends`].
-fn stored_tombstone_ends(
-    store: &crate::perspectives::sparql_store::SparqlStore,
-    link: &LinkExpression,
-) -> Result<bool, AnyError> {
-    let stored = store.query_links(
-        &crate::perspectives::sparql_store::EvalStop::none(),
-        Some(&link.data.source),
-        Some(RETRACTED_PREDICATE),
-        None,
-        None,
-        None,
-        None,
-    )?;
-    Ok(stored.into_iter().any(|t| {
-        let tombstone = LinkExpression::from(t);
-        retracted_signature(&tombstone).is_some_and(|sig| ends(&tombstone, &sig, link))
-    }))
-}
-
 impl PerspectiveInstance {
     /// The retraction effects of writing `additions`: see the module doc.
     /// Reads the store, writes nothing.
@@ -471,7 +452,50 @@ impl PerspectiveInstance {
         &self,
         additions: &[LinkExpression],
     ) -> Result<RetractionEffects, AnyError> {
-        retraction_effects_on(&self.sparql_store, additions)
+        let mut effects = RetractionEffects::default();
+        let tombstones: Vec<(&LinkExpression, String)> = additions
+            .iter()
+            .filter_map(|l| retracted_signature(l).map(|sig| (l, sig)))
+            .collect();
+
+        for (tombstone, signature) in &tombstones {
+            for stored in self.sparql_store.get_links_by_source(
+                &crate::perspectives::sparql_store::EvalStop::none(),
+                &tombstone.data.source,
+            )? {
+                let link = LinkExpression::from(stored.clone());
+                if ends(tombstone, signature, &link) {
+                    effects.retracted.push(stored);
+                }
+            }
+        }
+
+        for link in additions {
+            if !is_retractable(link.data.predicate.as_deref()) {
+                continue;
+            }
+            let in_diff = tombstones.iter().any(|(t, sig)| ends(t, sig, link));
+            if in_diff || self.stored_tombstone_ends(link)? {
+                effects.covered.push(link.clone());
+            }
+        }
+        Ok(effects)
+    }
+
+    fn stored_tombstone_ends(&self, link: &LinkExpression) -> Result<bool, AnyError> {
+        let stored = self.sparql_store.query_links(
+            &crate::perspectives::sparql_store::EvalStop::none(),
+            Some(&link.data.source),
+            Some(RETRACTED_PREDICATE),
+            None,
+            None,
+            None,
+            None,
+        )?;
+        Ok(stored.into_iter().any(|t| {
+            let tombstone = LinkExpression::from(t);
+            retracted_signature(&tombstone).is_some_and(|sig| ends(&tombstone, &sig, link))
+        }))
     }
 }
 

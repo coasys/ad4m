@@ -157,7 +157,9 @@ It needs no model and no GPU, and has its own serial group, `nightly-feed-scale`
   It generates every link already signed by the message's author (one of 40 seed
   agents; the Feed shows its author and time) into one file, on all cores, and loads the
   file into the space's perspective with `runtime.importData` (`type: "perspective"`,
-  Oxigraph's bulk loader; nothing goes to the link language). Then WE web opens the
+  Oxigraph's bulk loader, one commit; nothing goes to the link language). The import
+  only adds links new to the perspective: it refuses the whole file if a link is
+  already stored, repeats in the file, or is ended by a tombstone in the file. Then WE web opens the
   space in Chromium five times (cold, then warm) and loads the newest page and one
   older page. The links file (~6 GB at a million) lives in the data dir, beside the
   store.

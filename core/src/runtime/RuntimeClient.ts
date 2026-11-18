@@ -166,6 +166,15 @@ export class RuntimeClient {
         return this.#apiClient.call('runtime.exportData', { type: "perspective", perspectiveUuid: uuid, filePath })
     }
 
+    /** Bulk-loads a `runtime.exportData {type:"perspective"}` file into the
+     * perspective's store. The import adds links that are new to the
+     * perspective in one commit and publishes nothing to the link
+     * language — in a neighbourhood perspective the imported Shared links
+     * may sync to peers later, as links written while offline would. The
+     * whole file is refused (nothing committed) when a link's reifier
+     * already stands in the store, a reifier appears twice in the file,
+     * or a valid tombstone in the file ends a stored or in-file link.
+     */
     async importPerspective(uuid: string, filePath: string): Promise<RuntimeImportPerspectiveResult> {
         const result = await this.#apiClient.call('runtime.importData', { type: "perspective", perspectiveUuid: uuid, filePath })
         if ('imported' in result) return result
