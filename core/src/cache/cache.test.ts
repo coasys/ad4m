@@ -279,18 +279,19 @@ describe('AgentClient Cache', () => {
 
     test('the own DID expires after the TTL too', async () => {
         // agent-updated only comes from this executor, so a profile changed
-        // through another executor of the same agent needs the TTL.
+        // through another executor of the same agent needs the TTL: every
+        // cached profile expires, the own one included.
         const originalTTL = AgentClient.REMOTE_AGENT_TTL_MS;
         AgentClient.REMOTE_AGENT_TTL_MS = 1; // 1ms
 
         try {
-            ad4m.agent.setSelfDid('did:test:self');
-            await ad4m.agent.byDID('did:test:self');
+            const own = (await ad4m.agent.status()).did!;
+            await ad4m.agent.byDID(own);
 
             // Wait longer than TTL
             await new Promise(r => setTimeout(r, 10));
 
-            await ad4m.agent.byDID('did:test:self');
+            await ad4m.agent.byDID(own);
 
             const byDidCalls = rpcCallLog.filter(c => c.type === 'agent.byDIDs');
             expect(byDidCalls).toHaveLength(2);
@@ -639,6 +640,26 @@ describe('ExpressionClient Cache', () => {
         expect(rpcCallLog).toHaveLength(0); // no RPCs at all
     });
 
+    test('get() TTL expiry triggers re-fetch', async () => {
+        // A language may change what a URL returns and no event tells the
+        // client, so a cached expression expires instead of staying fresh.
+        const originalTTL = ExpressionClient.EXPRESSION_TTL_MS;
+        ExpressionClient.EXPRESSION_TTL_MS = 1; // 1ms
+
+        try {
+            await ad4m.expression.get('lang://test/Qm-ttl');
+            expect(expressionReads()).toHaveLength(1);
+
+            // Wait longer than TTL
+            await new Promise(r => setTimeout(r, 10));
+
+            await ad4m.expression.get('lang://test/Qm-ttl');
+            expect(expressionReads()).toHaveLength(2);
+        } finally {
+            ExpressionClient.EXPRESSION_TTL_MS = originalTTL;
+        }
+    });
+
     test('clearCache() forces re-fetch', async () => {
         await ad4m.expression.get('lang://test/Qm-clear');
         expect(expressionReads()).toHaveLength(1);
@@ -833,14 +854,14 @@ describe('AgentClient Cache — additional edge cases', () => {
         expect(() => ad4m.agent.invalidateByDid('did:test:nonexistent')).not.toThrow();
     });
 
-    test('setSelfDid() then invalidateByDid() allows re-fetch of self', async () => {
-        ad4m.agent.setSelfDid('did:test:self-inv');
-        await ad4m.agent.byDID('did:test:self-inv');
+    test('invalidateByDid() on the own DID forces a re-fetch', async () => {
+        const own = (await ad4m.agent.status()).did!;
+        await ad4m.agent.byDID(own);
         expect(rpcCallLog.filter(c => c.type === 'agent.byDIDs')).toHaveLength(1);
 
-        ad4m.agent.invalidateByDid('did:test:self-inv');
+        ad4m.agent.invalidateByDid(own);
 
-        await ad4m.agent.byDID('did:test:self-inv');
+        await ad4m.agent.byDID(own);
         expect(rpcCallLog.filter(c => c.type === 'agent.byDIDs')).toHaveLength(2);
     });
 
