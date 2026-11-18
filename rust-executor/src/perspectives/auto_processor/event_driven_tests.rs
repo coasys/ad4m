@@ -268,8 +268,9 @@ async fn reused_reads_queue_only_new_turns_and_follow_the_window() {
         transcript_reads + 1,
         "a consumed turn coming back is read again, once"
     );
-    // A transcript read is the scope query plus its `links` provenance read.
-    assert_eq!(all_queries(&p), reads + 2, "and nothing else is read");
+    // A transcript read is one scope query: its `links` provenance comes
+    // back on the instance query's own rows.
+    assert_eq!(all_queries(&p), reads + 1, "and nothing else is read");
     let reads = all_queries(&p);
     p.run_auto_processor_tick(&mut watcher, now_ms + WINDOW / 2 + 1_500, &ctx)
         .await;
@@ -628,6 +629,98 @@ async fn a_kept_transcript_holds_no_text_for_consumed_turns() {
         .iter()
         .any(|t| matches!(t, CachedTurn::Consumed { .. })));
     assert_eq!(pending_texts(&watcher, "lean"), vec!["open"]);
+}
+
+/// A shape-only write — nothing the transcript's trigger matches, no
+/// `ns://type` or `ns://body` link moves — still invalidates the kept read:
+/// the shape it was read under is gone. The edit below adds a required
+/// property the seeded message lacks, so the re-read returns no turns and
+/// the pending queue is drained of it — before the fix the kept read was
+/// trusted for as long as only schema writes landed.
+///
+/// The write goes through `add_sdna` — the production commit path — because
+/// a raw `sparql_store` write takes the unclassifiable fallback and would
+/// mark the read stale by accident, hiding the bug it tests for.
+#[tokio::test]
+async fn a_schema_write_stales_the_kept_transcript() {
+    use crate::perspectives::perspective_instance::SdnaType;
+    use crate::types::{Link, LinkStatus};
+
+    /// `MESSAGE_SDNA` plus a required `ns://priority` the seeded message
+    /// lacks.
+    const MESSAGE_SDNA_V2: &str = r#"{
+      "target_class":"ns://Message",
+      "properties":[
+        {"path":"ns://type","name":"type","has_value":"ns://message","min_count":1,"max_count":1},
+        {"path":"ns://body","name":"body","resolve_language":"literal","min_count":1,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://body","target":"value"}]},
+        {"path":"ns://priority","name":"priority","min_count":1,"max_count":1}
+      ]
+    }"#;
+
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
+    seed_message(
+        &mut p,
+        &ctx,
+        "msg://1",
+        "did:key:alice",
+        "hello",
+        "ns://body",
+    )
+    .await;
+    let cfg = config("schema", 600_000, None);
+    write_processor(&mut p, &cfg, Some(false), &ctx)
+        .await
+        .expect("write_processor");
+
+    let mut watcher = WatcherState::new();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
+    assert_eq!(pending_texts(&watcher, "schema"), vec!["hello"]);
+    let reads = transcript_queries(&p);
+    assert_eq!(reads, 1);
+
+    // The unrelated-write optimisation the schema case must not give up: a
+    // predicate the trigger has no rule for keeps the kept read.
+    p.add_link(
+        Link {
+            source: "note://reactions".into(),
+            predicate: Some("ns://reaction".into()),
+            target: "literal:string:+1".into(),
+        },
+        LinkStatus::Local,
+        None,
+        &ctx,
+    )
+    .await
+    .expect("unrelated link");
+    p.run_auto_processor_tick(&mut watcher, now_ms + 500, &ctx)
+        .await;
+    assert_eq!(
+        transcript_queries(&p),
+        reads,
+        "an unrelated write must not re-read the kept transcript"
+    );
+
+    p.add_sdna(
+        "ns://Message".into(),
+        String::new(),
+        SdnaType::SubjectClass,
+        Some(MESSAGE_SDNA_V2.into()),
+        &ctx,
+    )
+    .await
+    .expect("add_sdna");
+    p.run_auto_processor_tick(&mut watcher, now_ms + 1000, &ctx)
+        .await;
+    assert_eq!(
+        transcript_queries(&p),
+        reads + 1,
+        "a schema write must re-read the kept transcript"
+    );
+    assert!(
+        pending_texts(&watcher, "schema").is_empty(),
+        "the message no longer conforms, so its turn is dropped"
+    );
 }
 
 /// Hand `watcher` a kept read of `n` pending turns, as if the store had
@@ -1463,8 +1556,10 @@ async fn a_path_scope_reads_children_and_their_replies() {
     let mut watcher = WatcherState::new();
     let now_ms = chrono::Utc::now().timestamp_millis();
     p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
+    let mut texts = pending_texts(&watcher, "path");
+    texts.sort();
     assert_eq!(
-        pending_texts(&watcher, "path"),
+        texts,
         vec!["direct", "reply"],
         "hop one and hop two queue; the foreign conversation's message does not"
     );

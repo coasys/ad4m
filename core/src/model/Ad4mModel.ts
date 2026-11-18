@@ -1163,6 +1163,16 @@ export class Ad4mModel {
         path: t.path,
       };
       if (t.direction !== undefined) traverse.direction = t.direction;
+      // The fields a path refuses travel too: typed `never` they arrive only
+      // from a cast or a plain object, and dropping them would run the walk
+      // the caller did not mean (`{ids, path, limitPerAnchor: 1}` read
+      // unlimited). The executor's mutual-exclusion check refuses them, as
+      // it does on the other traverse forms.
+      if (t.predicate !== undefined) traverse.predicate = t.predicate;
+      if (t.transitive !== undefined) traverse.transitive = t.transitive;
+      if (t.limitPerAnchor !== undefined) traverse.limitPerAnchor = t.limitPerAnchor;
+      if (t.levels !== undefined) traverse.levels = t.levels;
+      if (t.maxDepth !== undefined) traverse.maxDepth = t.maxDepth;
       queryInput.parent = traverse;
     } else if (query.parent) {
       const parentPredicate = resolveParentPredicate(query.parent, this);

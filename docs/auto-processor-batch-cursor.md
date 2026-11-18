@@ -16,9 +16,12 @@ Nothing in this doc is implemented yet.
 > `speaker`/`timestamp` are taken from the link row hydration actually
 > selected for that text — the signer and time of the *text link*, not
 > of the instance's earliest link. The gatherer requests `links` for
-> `source_text` (the model query's per-property link-provenance option)
-> and reads author/timestamp off the last, timestamp-sorted `__links`
-> row; an instance with no such row is skipped rather than attributed to
+> `source_text` (the model query's per-property link-provenance option);
+> a `links` predicate the instance query already fetches is served from
+> those same rows — one read, no second `links` query — so the last row
+> under the shared total order (timestamp, then target, then author,
+> then signature) is provably the link the text hydrated from, and an
+> instance with no such row is skipped rather than attributed to
 > its creator. Ordered by timestamp then id. Wherever this doc says “run
 > `source_scope_query`” or “the scope query binds `?speaker` `?text`
 > `?timestamp`”, read “run the model query”; speaker/timestamp semantics
@@ -270,9 +273,11 @@ reifier node (`sparql_store.rs`): direct `?m <ns://body> ?text`, plus
 `ad4m://ontology/author` and `ad4m://ontology/timestamp` on that reifier.
 Query 1 is the model query the processor builds from `source_class` /
 `source_text` / `source_query`, plus `"links": [source_text]` so each
-instance carries the provenance rows of its text links (`__links`);
-the gatherer reads speaker/timestamp off the row hydration selected for
-the text. Query 2 is engine-owned — a model query over the hard-wired
+instance carries the provenance rows of its text links (`__links`) —
+for `source_text` those rows ride the instance query itself (the read
+is one query, not a scope query plus a `links` query), so
+speaker/timestamp come off the same row the hydrated text does, under
+the deterministic last-row rule both reads share. Query 2 is engine-owned — a model query over the hard-wired
 `InterpretationRun` class, so signature verification applies to it too
 (the earlier raw-SPARQL read let a forged run link mark turns processed):
 

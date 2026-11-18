@@ -3017,7 +3017,7 @@ async fn test_build_instance_sparql_scalar_only_model_uses_values_clause() {
         scalar_prop("description", "flux://description", false, false),
     ]);
     let query = ModelQueryInput::default();
-    let sparql = build_instance_sparql(&shape, &query, None, None).into_single();
+    let sparql = build_instance_sparql(&shape, &query, None, None, false).into_single();
 
     assert!(
         sparql.contains("VALUES ?predicate"),
@@ -3051,7 +3051,7 @@ async fn test_build_instance_sparql_excludes_getter_backed_collections() {
         ),
     ]);
     let query = ModelQueryInput::default();
-    let sparql = build_instance_sparql(&shape, &query, None, None).into_single();
+    let sparql = build_instance_sparql(&shape, &query, None, None, false).into_single();
 
     assert!(
         sparql.contains("VALUES ?predicate"),
@@ -3085,7 +3085,7 @@ async fn test_build_instance_sparql_retains_raw_predicate_collections() {
         ),
     ]);
     let query = ModelQueryInput::default();
-    let sparql = build_instance_sparql(&shape, &query, None, None).into_single();
+    let sparql = build_instance_sparql(&shape, &query, None, None, false).into_single();
 
     assert!(sparql.contains("VALUES ?predicate"));
     assert!(sparql.contains("<flux://entry_type>"));
@@ -3116,7 +3116,7 @@ async fn test_build_instance_sparql_shared_predicate_mixed_getter() {
         ),
     ]);
     let query = ModelQueryInput::default();
-    let sparql = build_instance_sparql(&shape, &query, None, None).into_single();
+    let sparql = build_instance_sparql(&shape, &query, None, None, false).into_single();
 
     assert!(sparql.contains("VALUES ?predicate"));
     // ad4m://has_child should appear because raw_children needs it
@@ -3132,7 +3132,7 @@ async fn test_build_instance_sparql_empty_shape_falls_back_to_wildcard() {
     // unrestricted wildcard (no VALUES clause).
     let shape = make_shape(vec![]);
     let query = ModelQueryInput::default();
-    let sparql = build_instance_sparql(&shape, &query, None, None).into_single();
+    let sparql = build_instance_sparql(&shape, &query, None, None, false).into_single();
 
     assert!(
         !sparql.contains("VALUES ?predicate"),
@@ -3152,7 +3152,7 @@ async fn test_build_instance_sparql_values_clause_is_deduplicated() {
         scalar_prop("name", "ns://name", false, false),
     ]);
     let query = ModelQueryInput::default();
-    let sparql = build_instance_sparql(&shape, &query, None, None).into_single();
+    let sparql = build_instance_sparql(&shape, &query, None, None, false).into_single();
 
     assert!(sparql.contains("VALUES ?predicate"));
     // Count occurrences of the shared predicate in the VALUES clause
@@ -8757,6 +8757,188 @@ async fn a_path_walk_refuses_every_competing_shape() {
             .await
             .expect_err(&format!("{label} must be refused"));
     }
+}
+
+/// The graph where one `seen` set serves two jobs breaks:
+///
+/// ```text
+/// root ──p──> a ──q──> b ──s──> c
+///      └────p────────^
+/// ```
+///
+/// `b` is in the result from hop 1 (`p`), and hop 2 reaches it again through
+/// `q`. When reporting it again also meant not walking it, hop 3 had nobody
+/// to follow `s` from and `c` was lost — output de-duplication is not
+/// frontier membership.
+fn shared_node_store() -> SparqlStore {
+    let store = SparqlStore::new(None).unwrap();
+    let mut t = 1000;
+    for (source, predicate, target) in [
+        ("we://root", "we://p", "we://a"),
+        ("we://root", "we://p", "we://b"),
+        ("we://a", "we://q", "we://b"),
+        ("we://b", "we://s", "we://c"),
+    ] {
+        t += 1;
+        store
+            .add_link(&make_link(
+                source,
+                predicate,
+                target,
+                &format!("2026-01-01T00:00:{t:04}Z"),
+            ))
+            .unwrap();
+    }
+    for id in ["we://a", "we://b", "we://c"] {
+        t += 1;
+        store
+            .add_link(&make_link(
+                id,
+                "ad4m://type",
+                "we://TextBlock",
+                &format!("2026-01-01T00:00:{t:04}Z"),
+            ))
+            .unwrap();
+    }
+    store
+}
+
+async fn shared_node_walk(
+    store: &SparqlStore,
+    anchor: &str,
+    direction: ScopeDirection,
+) -> Vec<String> {
+    let query = ModelQueryInput {
+        parent: Some(Scope::Traverse {
+            ids: vec![anchor.to_string()],
+            predicate: None,
+            transitive: false,
+            direction,
+            limit_per_anchor: None,
+            levels: None,
+            max_depth: None,
+            path: Some(vec![
+                "we://p".to_string(),
+                "we://q".to_string(),
+                "we://s".to_string(),
+            ]),
+        }),
+        ..Default::default()
+    };
+    let mut ids: Vec<String> =
+        fixture_query_from_json(store, "TextBlock", &query, TEXT_BLOCK_SHAPE_JSON)
+            .await
+            .expect("path walk should execute")
+            .instances
+            .iter()
+            .filter_map(|i| i["id"].as_str().map(|s| s.to_string()))
+            .collect();
+    ids.sort();
+    ids
+}
+
+#[tokio::test]
+async fn a_path_walk_walks_a_node_it_reported_at_an_earlier_depth() {
+    let store = shared_node_store();
+    let ids = shared_node_walk(&store, "we://root", ScopeDirection::Out).await;
+    assert_eq!(
+        ids,
+        vec!["we://a", "we://b", "we://c"],
+        "`b` is reported once but walked at both depths, so `s` reaches `c`: {ids:?}"
+    );
+}
+
+/// The twin in `In` direction: `x` is reported at depth 1 and reached again
+/// at depth 2 (through `q`, pointing at `b`), and only walking it again gets
+/// `r` at depth 3.
+///
+/// ```text
+/// z <──p── x ──q──> b        (x points p into z, q into b)
+///   <──p── b                 (b points p into z)
+///            r ──s──> x      (r points s into x)
+/// ```
+#[tokio::test]
+async fn a_path_walk_walks_a_node_it_reported_at_an_earlier_depth_in_reverse() {
+    let store = SparqlStore::new(None).unwrap();
+    let mut t = 1000;
+    for (source, predicate, target) in [
+        ("we://x", "we://p", "we://z"),
+        ("we://b", "we://p", "we://z"),
+        ("we://x", "we://q", "we://b"),
+        ("we://r", "we://s", "we://x"),
+    ] {
+        t += 1;
+        store
+            .add_link(&make_link(
+                source,
+                predicate,
+                target,
+                &format!("2026-01-01T00:00:{t:04}Z"),
+            ))
+            .unwrap();
+    }
+    for id in ["we://x", "we://b", "we://r"] {
+        t += 1;
+        store
+            .add_link(&make_link(
+                id,
+                "ad4m://type",
+                "we://TextBlock",
+                &format!("2026-01-01T00:00:{t:04}Z"),
+            ))
+            .unwrap();
+    }
+    let ids = shared_node_walk(&store, "we://z", ScopeDirection::In).await;
+    assert_eq!(
+        ids,
+        vec!["we://b", "we://r", "we://x"],
+        "`x` is reported once but walked at both depths, so `s` reaches `r`: {ids:?}"
+    );
+}
+
+/// A node the shape does not select is not a frontier node either — the same
+/// answer `levels` gives, where every hop's rows are the scoped query's rows.
+/// `b` without its flag link cannot carry the walk on to `c`; it is dropped
+/// at hop 1 and never walked, so the path ends there.
+#[tokio::test]
+async fn a_path_walk_does_not_pass_through_a_non_conforming_node() {
+    let store = SparqlStore::new(None).unwrap();
+    let mut t = 1000;
+    for (source, predicate, target) in [
+        ("we://root", "we://p", "we://a"),
+        ("we://root", "we://p", "we://b"),
+        ("we://a", "we://q", "we://b"),
+        ("we://b", "we://s", "we://c"),
+    ] {
+        t += 1;
+        store
+            .add_link(&make_link(
+                source,
+                predicate,
+                target,
+                &format!("2026-01-01T00:00:{t:04}Z"),
+            ))
+            .unwrap();
+    }
+    // `b` and `c` never get their `we://TextBlock` flag, so `b` is neither
+    // reported nor walked and `c` is unreachable.
+    for id in ["we://a"] {
+        t += 1;
+        store
+            .add_link(&make_link(
+                id,
+                "ad4m://type",
+                "we://TextBlock",
+                &format!("2026-01-01T00:00:{t:04}Z"),
+            ))
+            .unwrap();
+    }
+    let ids = shared_node_walk(&store, "we://root", ScopeDirection::Out).await;
+    assert_eq!(
+        ids,
+        vec!["we://a"],
+        "a non-conforming intermediate ends the path, as `levels` ends it: {ids:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -14,7 +14,7 @@ use super::hydration::{
     filter_properties, group_results_by_source, hydrate_instances, ALWAYS_KEPT,
 };
 use super::link_author::refuse_unanswerable_link_author;
-use super::links::{attach_links, resolve_link_keys};
+use super::links::{attach_links, hydration_carries_links, resolve_link_keys};
 use super::projection::resolve_projections;
 use super::relations::{resolve_includes_recursive, resolve_reverse_relations};
 use super::sparql_builder::{
@@ -265,7 +265,9 @@ fn slice_per_anchor(rows: &mut Vec<Value>, n: usize) {
 /// one request and one hydration instead of three of each.
 ///
 /// Returns the ids in breadth-first order, which is also the order the caller's rows come back in.
-/// A node already seen is not walked again, so a cycle terminates rather than looping.
+/// A `levels` walk never walks a node twice, so a cycle terminates rather than looping; a `path`
+/// walk walks a node once per depth it is reached at — the hop that follows is a different
+/// predicate — and is bounded by the path's length.
 #[allow(clippy::too_many_arguments)]
 async fn walk_levels(
     stop: &EvalStop,
@@ -279,8 +281,17 @@ async fn walk_levels(
     hops: &[(String, Option<usize>)],
 ) -> Result<Vec<String>, Error> {
     let mut ordered: Vec<String> = Vec::new();
-    // Seeded with the roots so that a cycle back to an anchor neither returns
-    // the anchor as its own descendant nor walks it a second time.
+    // Two sets, two jobs. `seen` de-duplicates the OUTPUT — a node reachable
+    // by two routes is reported once, under whichever anchor the ordering
+    // reaches first — and is seeded with the roots so a cycle back to an
+    // anchor never returns the anchor as its own descendant. The `frontier`
+    // is what the next hop walks from, and they are not the same set: under
+    // `path` (whose hops carry no breadth — `limit.is_none()`) the next hop
+    // follows a different predicate, so a node reported at an earlier depth
+    // still holds the links that hop reads and must be walked again at this
+    // one. Under `levels` every hop is the same predicate, so a reported node
+    // was already walked through it and re-walking could only re-evaluate
+    // what the first walk already admitted or dropped.
     let mut seen: HashSet<String> = roots.iter().cloned().collect();
     let mut frontier = roots;
 
@@ -305,7 +316,8 @@ async fn walk_levels(
         level_input.limit = None;
         level_input.offset = None;
 
-        let plan = build_instance_sparql(shape, &level_input, Some(pagination), Some(resolver));
+        let plan =
+            build_instance_sparql(shape, &level_input, Some(pagination), Some(resolver), false);
         let InstanceQueryPlan::TwoPhase {
             pagination_subquery,
             ..
@@ -332,28 +344,36 @@ async fn walk_levels(
         // filling it with duplicates would return fewer distinct records than the caller asked for.
         let mut kept: HashMap<String, usize> = HashMap::new();
         let mut next = Vec::new();
+        let mut next_seen: HashSet<String> = HashSet::new();
         for row in &rows {
             let Some(id) = row["source"].as_str() else {
                 continue;
             };
-            // A node reachable by two routes is one node. Walking it twice would duplicate its
-            // subtree and, in a cycle, never finish.
-            if seen.contains(id) {
-                continue;
-            }
-            // A row with no anchor cannot be attributed to one, so it is kept rather than dropped:
-            // losing rows silently is worse than a slice that is occasionally too generous. (Same
-            // reading as `slice_per_anchor`, which the non-walking path still uses.)
-            if let Some(anchor) = row[ANCHOR_VAR].as_str() {
-                let used = kept.entry(anchor.to_string()).or_insert(0);
-                if limit.is_some_and(|limit| *used >= limit) {
-                    continue;
+            let mut reported = false;
+            if !seen.contains(id) {
+                // A row with no anchor cannot be attributed to one, so it is kept rather than dropped:
+                // losing rows silently is worse than a slice that is occasionally too generous. (Same
+                // reading as `slice_per_anchor`, which the non-walking path still uses.)
+                if let Some(anchor) = row[ANCHOR_VAR].as_str() {
+                    let used = kept.entry(anchor.to_string()).or_insert(0);
+                    if limit.is_some_and(|limit| *used >= limit) {
+                        continue;
+                    }
+                    *used += 1;
                 }
-                *used += 1;
+                seen.insert(id.to_string());
+                ordered.push(id.to_string());
+                reported = true;
             }
-            seen.insert(id.to_string());
-            ordered.push(id.to_string());
-            next.push(id.to_string());
+            // The frontier is de-duplicated per depth, not per output: a
+            // `path` hop (`limit.is_none()`) walks a node reported at an
+            // earlier depth because the next hop follows a different
+            // predicate, which `levels` never needs (see `seen` above). Once
+            // per depth suffices — two parents reaching it through the same
+            // hop are one walk, not two.
+            if (limit.is_none() || reported) && next_seen.insert(id.to_string()) {
+                next.push(id.to_string());
+            }
         }
         log::debug!(
             "Walk depth {depth}: kept {} of {} rows across {} anchors at a breadth of {limit:?}",
@@ -565,6 +585,10 @@ pub(super) async fn execute_model_query_inner(
         Some(requested) => resolve_link_keys(shape, requested)?,
         None => Vec::new(),
     };
+    // A `links` key on a predicate the instance query fetches is served from
+    // the hydration rows — `attach_links` then needs their provenance columns
+    // in every plan's row SELECT, which this one flag carries through.
+    let link_columns = hydration_carries_links(shape, &link_keys);
 
     // Fast path: COUNT-only
     //
@@ -822,6 +846,7 @@ pub(super) async fn execute_model_query_inner(
         query_input,
         sparql_pagination.as_ref(),
         Some(resolver),
+        link_columns,
     );
 
     // Captures the source IRI order returned by the phase-1 pagination subquery
@@ -887,15 +912,25 @@ pub(super) async fn execute_model_query_inner(
                     let local_status = local_status_filter(shape);
                     let link_status = link_status_filter(query_input.link_status.as_ref());
                     let proof_valid = proof_valid_filter(query_input.include_unverified);
+                    // The same provenance columns the single plan selects
+                    // under `link_columns` (see `build_instance_sparql`).
+                    let (link_select, link_optionals) = if link_columns {
+                        (
+                            " ?wireTarget ?proofKey ?proofSig ?proofValid ?rowStatus",
+                            "    OPTIONAL { ?_reifier <ad4m://ontology/proofKey> ?proofKey . }\n    OPTIONAL { ?_reifier <ad4m://ontology/proofSignature> ?proofSig . }\n    OPTIONAL { ?_reifier <ad4m://ontology/proofValid> ?proofValid . }\n    OPTIONAL { ?_reifier <ad4m://ontology/wireTarget> ?wireTarget . }\n    OPTIONAL { ?_reifier <ad4m://ontology/status> ?rowStatus . }\n",
+                        )
+                    } else {
+                        ("", "")
+                    };
                     let property_sparql = format!(
-                        r#"SELECT ?source ?predicate ?target ?author ?timestamp WHERE {{
+                        r#"SELECT ?source ?predicate ?target ?author ?timestamp{link_select} WHERE {{
     {source_constraint}
 {predicate_filter}    ?source ?predicate ?target .
     ?_reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?predicate ?target )>> .
     FILTER(isIRI(?predicate))
     ?_reifier <ad4m://ontology/author> ?author .
     ?_reifier <ad4m://ontology/timestamp> ?timestamp .
-{link_status}{proof_valid}{local_status}}}"#
+{link_status}{proof_valid}{link_optionals}{local_status}}}"#
                     );
                     let result_json = store.query_async(stop, &property_sparql).await?;
                     serde_json::from_str(&result_json)?
@@ -904,7 +939,7 @@ pub(super) async fn execute_model_query_inner(
         }
     };
 
-    let grouped = group_results_by_source(&raw_results, shape);
+    let grouped = group_results_by_source(&raw_results, shape, link_columns);
     let mut instances = hydrate_instances(shape, &grouped);
 
     // group_results_by_source uses BTreeMap (alphabetical by source IRI), so
@@ -1143,6 +1178,7 @@ pub(super) async fn execute_model_query_inner(
         &link_keys,
         query_input.link_status.as_ref(),
         query_input.include_unverified,
+        link_columns.then_some(grouped.as_slice()),
         &mut final_instances,
     )
     .await?;

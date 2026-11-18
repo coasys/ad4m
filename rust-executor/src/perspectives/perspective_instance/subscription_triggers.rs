@@ -143,6 +143,26 @@ impl Writes {
             _ => self.links = None,
         }
     }
+
+    /// Whether the batch is a schema write — the classification
+    /// `inbound_touches_shacl` makes over a diff for the shape cache, made
+    /// over these links. A kept transcript read under the old shape is stale
+    /// on such a batch whatever its data predicates are, so the
+    /// auto-processor marks every processor stale (`auto_processor_mark_stale`).
+    /// With per-link detail gone (a batch past [`MAX_TRACKED_LINKS`]) a
+    /// predicate whose link *could* be a schema write reads as one:
+    /// over-marking costs a re-read, under-marking keeps a stale read.
+    pub(super) fn touches_shacl(&self) -> bool {
+        match &self.links {
+            Some(links) => links
+                .iter()
+                .any(|l| super::shacl_write_link(&l.predicate, &l.target)),
+            None => self
+                .predicates
+                .iter()
+                .any(|p| super::shacl_write_link(p, "ad4m://SubjectClass")),
+        }
+    }
 }
 
 impl From<HashSet<String>> for Writes {

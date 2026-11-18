@@ -221,6 +221,11 @@ export interface TraverseByPath extends TraverseOptions {
   path: string[];
   predicate?: never;
   model?: never;
+  field?: never;
+  transitive?: never;
+  limitPerAnchor?: never;
+  maxDepth?: never;
+  levels?: never;
 }
 
 /** Everything a traversal says that is not how it names its predicate. */

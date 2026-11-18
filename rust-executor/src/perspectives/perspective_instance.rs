@@ -119,46 +119,54 @@ fn notification_pool_name(uuid: &str) -> String {
     format!("notification_{}", uuid)
 }
 
-/// True iff any addition or removal in the diff carries a triple
-/// that would alter a class's stored SHACL definition:
+/// Whether one link is a schema write — carries a triple that would alter a
+/// class's stored SHACL definition:
 ///   * the `ad4m://` housekeeping triples emitted by `add_sdna`
 ///     (`ad4m://has_subject_class`, `ad4m://sdna`, `ad4m://shape`),
 ///   * a class-level `rdf://type ad4m://SubjectClass` marker (only
 ///     that specific target — normal `rdf://type ns://SomeClass`
-///     application links must not flush the cache), or
+///     application links must not count), or
 ///   * any SHACL-vocabulary predicate (`sh://...`) which only
 ///     appears on property-shape triples written by the SHACL
 ///     writer, not on regular application data, or
 ///   * an abstract-class marker or alias (#1435).
 ///
-/// Used by `diff_from_link_language` to decide whether to
-/// invalidate the shape cache. The scan is one loop over
-/// (additions + removals) per inbound diff — cheap next to the
-/// SPARQL write. Kept intentionally narrow so that a chatty
-/// application (Flux message writes, etc.) doesn't churn the
-/// cache. `ad4m://resolveLanguage`, `getter`, `transform`,
-/// `interpretation_hint`, `identity` etc. also appear on live
-/// application data (a `@Property` decorator emits them onto every
-/// instance's property URI) and MUST NOT trigger invalidation.
-fn inbound_touches_shacl(diff: &DecoratedPerspectiveDiff) -> bool {
-    let iter = diff.additions.iter().chain(diff.removals.iter());
-    for decorated in iter {
-        let predicate = decorated.data.predicate.as_deref().unwrap_or("");
-        if predicate.starts_with("sh://") {
-            return true;
-        }
-        match predicate {
-            "ad4m://has_subject_class" | "ad4m://sdna" | "ad4m://shape" => return true,
-            // The abstract-class marker and aliases (#1435) can sync apart
-            // from the rest of a shape.
-            super::shacl_parser::ABSTRACT_PREDICATE | super::shacl_parser::ALIAS_PREDICATE => {
-                return true
-            }
-            "rdf://type" if decorated.data.target == "ad4m://SubjectClass" => return true,
-            _ => {}
-        }
+/// Kept intentionally narrow so that a chatty application (Flux message
+/// writes, etc.) doesn't churn what it guards. `ad4m://resolveLanguage`,
+/// `getter`, `transform`, `interpretation_hint`, `identity` etc. also appear
+/// on live application data (a `@Property` decorator emits them onto every
+/// instance's property URI) and MUST NOT count.
+fn shacl_write_link(predicate: &str, target: &str) -> bool {
+    if predicate.starts_with("sh://") {
+        return true;
     }
-    false
+    match predicate {
+        "ad4m://has_subject_class" | "ad4m://sdna" | "ad4m://shape" => true,
+        // The abstract-class marker and aliases (#1435) can sync apart
+        // from the rest of a shape.
+        super::shacl_parser::ABSTRACT_PREDICATE | super::shacl_parser::ALIAS_PREDICATE => true,
+        "rdf://type" => target == "ad4m://SubjectClass",
+        _ => false,
+    }
+}
+
+/// True iff any addition or removal in the diff is a schema write
+/// ([`shacl_write_link`]). Used by `diff_from_link_language` to decide
+/// whether to invalidate the shape cache. The scan is one loop over
+/// (additions + removals) per inbound diff — cheap next to the
+/// SPARQL write. `Writes::touches_shacl` makes the same
+/// classification over a committed batch for the auto-processor's
+/// kept reads.
+fn inbound_touches_shacl(diff: &DecoratedPerspectiveDiff) -> bool {
+    diff.additions
+        .iter()
+        .chain(diff.removals.iter())
+        .any(|decorated| {
+            shacl_write_link(
+                decorated.data.predicate.as_deref().unwrap_or(""),
+                &decorated.data.target,
+            )
+        })
 }
 
 /// The error a live query that is not SPARQL gets. Live queries are SPARQL or
@@ -4601,6 +4609,10 @@ impl PerspectiveInstance {
             .predicates
             .iter()
             .any(|p| config_write_predicates().contains(p))
+            // A schema write can change every kept read (see
+            // `auto_processor_mark_stale`), so it wakes the loop like a
+            // config write rather than waiting out the idle fallback.
+            || writes.touches_shacl()
         {
             return true;
         }
@@ -4613,12 +4625,12 @@ impl PerspectiveInstance {
 
     /// Mark each processor's kept transcript stale when `writes` may change
     /// what its scope returns: the processor's trigger matches, or the batch
-    /// carries a config predicate or could not be classified (`None` — a
-    /// predicate-less diff, or a `Lagged` receiver that missed one), which
-    /// stales every declared processor. A batch that matches nothing leaves
-    /// the kept reads valid though the write generation moved, so a tick
-    /// with turns pending does not re-read the whole transcript after an
-    /// unrelated write (#1795).
+    /// carries a config predicate, is a schema write, or could not be
+    /// classified (`None` — a predicate-less diff, or a `Lagged` receiver
+    /// that missed one), which stales every declared processor. A batch that
+    /// matches nothing leaves the kept reads valid though the write
+    /// generation moved, so a tick with turns pending does not re-read the
+    /// whole transcript after an unrelated write (#1795).
     fn auto_processor_mark_stale(
         &self,
         watcher: &mut crate::perspectives::auto_processor::watcher::WatcherState,
@@ -4637,6 +4649,10 @@ impl PerspectiveInstance {
             .predicates
             .iter()
             .any(|p| config_write_predicates().contains(p))
+            // A schema write matches no data predicate, yet the shape the
+            // kept reads were taken under is gone — the classification the
+            // shape cache is dropped by (`inbound_touches_shacl`).
+            || writes.touches_shacl()
         {
             return stale_all(watcher);
         }
@@ -7024,9 +7040,10 @@ impl PerspectiveInstance {
                 Ok(cs) => {
                     let cs = watcher.reads.set_configs(generation, cs);
                     // (Re)build each processor's wake trigger from its scope.
-                    // Their `near`/`via` node sets are re-fed by this tick's
-                    // transcript reads (the generation just changed, so each
-                    // kept read is stale anyway).
+                    // Their `near`/`via` node sets are re-fed when a
+                    // transcript read next runs (`set_trigger_result`); a
+                    // generation move does not itself stale a kept read —
+                    // `auto_processor_mark_stale` decides that per write.
                     watcher
                         .triggers
                         .retain(|id, _| cs.iter().any(|c| &c.processor_id == id));

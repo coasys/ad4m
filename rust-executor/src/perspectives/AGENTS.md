@@ -12,7 +12,7 @@ or writes the graph. Split plan: spec items 3, 7, 8.
 | `perspective_instance.rs` (7.6k) | **The** instance: link CRUD + batches, neighbourhood sync/commit loops, SDNA/SHACL registration, subject create/update/read, `execute_commands`, query subscriptions, notifications, telepresence signals, Prolog facade, auto-processor tick. One `impl`; being split into `perspective_instance/` |
 | `sparql_store.rs` | Per-perspective oxigraph store. Links stored as reified triples. `add_link/remove_link`, `query_links`, `query_arbitrary` (read-only SPARQL from clients), custom SPARQL fns (`parse_literal`, `strip_html`), named-graph → reifier migration |
 | `write_log.rs` | Removed (#1794): the auto-processor's wake feed is now `subscription_triggers::Writes`, the per-commit write info `check_subscribed_queries` already builds |
-| `model_query/` | Typed queries over SHACL shapes: `shape.rs` loads `ModelShape` from SHACL triples → `sparql_builder.rs` → `SparqlStore` → `hydration.rs` → `filtering.rs` → `getters.rs`/`relations.rs`/`projection.rs`. Entry: `execute_model_query` (`query.rs`). `mod.rs` has the pipeline diagram |
+| `model_query/` | Typed queries over SHACL shapes: `shape.rs` loads `ModelShape` from SHACL triples → `sparql_builder.rs` → `SparqlStore` → `hydration.rs` → `filtering.rs` → `getters.rs`/`relations.rs`/`projection.rs`. Entry: `execute_model_query` (`query.rs`). `mod.rs` has the pipeline diagram. Traversal (`walk_levels`): output de-dupes per node; the next-depth frontier de-dupes per depth — under a multi-hop `path` a node reported at one depth still walks at the next (its hop predicates differ); under `levels` only newly reported nodes walk on |
 | `shacl_parser.rs` | Writer side: SHACL class JSON → links (`parse_shacl_to_links`), flow JSON ↔ links (`parse_flow_to_links`, `parse_flow_from_links`). Types `SHACLShape`, `SHACLFlow`, `AD4MAction` |
 | `instances/` | Validated instance writes (create, update, remove, collection items) against a class's SHACL shape: the shared core of the MCP `instance_*` tools and the `perspective.instance*` RPC methods. See `instances/AGENTS.md` |
 | `subject_classes_of.rs` | Which classes a URI conforms to (SPARQL) |
@@ -100,16 +100,22 @@ or writes the graph. Split plan: spec items 3, 7, 8.
   or processor; deeper walks (`transitive`, `levels`, a multi-hop `path`) stay
   ungated, because one neighbour read cannot prove membership. While turns are
   pending, the kept transcript's freshness is decided by the same trigger —
-  `auto_processor_mark_stale` records a matched write (or a `Lagged` /
-  unclassifiable one) against the read's scope key so the tick re-reads instead
+  `auto_processor_mark_stale` records a matched write, a schema write
+  (`Writes::touches_shacl`, the `inbound_touches_shacl` classification: a
+  SHACL/SDNA batch changes the shape every kept read ran under, whatever the
+  trigger's predicates), or a `Lagged` / unclassifiable one against the
+  read's scope key so the tick re-reads instead
   of draining stale turns; pending turns that fell out of the scope are dropped
   before drain, and a failed re-read keeps them pending and skips the drain. A wake re-runs
   the transcript as a full model query; `TickReads` (config, transcript, cursor) is still
   kept while the generation is unchanged, the transcript keeping text only for turns that
   may still be queued. The transcript query requests `links` provenance for
   `source_text`, and each turn's speaker/timestamp come from the link row hydration
-  selected for the text — a body link signed by someone other than the instance creator
-  attributes to its own signer; an instance with no provable text-link row is skipped.
+  selected for the text — a `links` predicate the instance query already
+  fetches is served from those same rows (one read, no second query), so the
+  signer is provably the text link's; a body link signed by someone other
+  than the instance creator attributes to its own signer; an instance with
+  no provable text-link row is skipped.
   A turn whose `source_text` `resolveLanguage` fails (the resolver marks the property
   under `__unresolved`) is likewise skipped: it is never queued or cursor-recorded, and
   a transcript read that held unresolved turns expires on `UNRESOLVED_TEXT_RETRY_MS`

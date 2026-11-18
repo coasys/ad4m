@@ -322,8 +322,9 @@ impl WatcherState {
 /// The configs and cursor rows are read again whenever the generation moved;
 /// a transcript is read again only when a write could change it — the
 /// loop's wake trigger decides (`stale_transcripts`), so an unrelated write
-/// that moves the generation does not re-read a kept scope, while a
-/// predicate-less batch or `Lagged` stales them all conservatively.
+/// that moves the generation does not re-read a kept scope, while a schema
+/// write (the shape the read ran under is gone), a predicate-less batch or
+/// `Lagged` stales them all conservatively.
 #[derive(Debug, Default, Clone)]
 pub(crate) struct TickReads {
     configs: Option<(u64, Arc<Vec<AutoProcessorConfig>>)>,

@@ -166,10 +166,13 @@ pub(crate) async fn gather_transcript_model_within(
         let Some(text) = scalar_text(instance.get(text_property)) else {
             continue;
         };
-        // Rows are timestamp-ordered (see `attach_links`), so the last is
-        // the link hydration selected for a scalar. A hydrated scalar with
-        // no row here means the link left between the two reads — skipping
-        // is the safe direction, never fall back to the instance's.
+        // Rows are ranked the way hydration's scalar pick ranks (see
+        // `attach_links`) and — for the shape's own predicates, which the
+        // text property always is — served from the same hydration rows, so
+        // the last is the link whose target became the text: one read, one
+        // rank, no window for a newer write to split text from speaker.
+        // Skipping a scalar with no row stays the safe direction, never
+        // fall back to the instance's author.
         let Some(link) = instance
             .get(crate::perspectives::model_query::LINKS_KEY)
             .and_then(|links| links.get(text_property))
@@ -792,5 +795,69 @@ ORDER BY ?timestamp";
             turn_id(&old_turn.speaker, &old_turn.text, &old_turn.timestamp),
             "the processed-set id must be the one the SPARQL scope minted"
         );
+    }
+
+    /// Two signers writing a body at the SAME timestamp: the turn must take
+    /// text and speaker from ONE link — the one the deterministic tie rule
+    /// (timestamp, then target, author, signature) ranks last. Written in both
+    /// insertion orders, because a read that keeps the first row it sees
+    /// answers differently per order — and one that reads the value from
+    /// hydration but the author from `__links`' last row can pair one signer's
+    /// words with the other's name.
+    #[tokio::test]
+    async fn a_body_written_twice_at_one_instant_keeps_text_and_speaker_together() {
+        use crate::agent::signatures::TestSigner;
+        use crate::types::{Link, LinkExpression, LinkStatus};
+
+        let (p, _shapes, _ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
+        let alice = TestSigner::generate();
+        let bob = TestSigner::generate();
+        let at = chrono::Utc::now();
+
+        let signed = |signer: &TestSigner, msg: &str, predicate: &str, target: &str| {
+            let mut l = LinkExpression::from(
+                signer.sign_at(
+                    Link {
+                        source: msg.into(),
+                        predicate: Some(predicate.into()),
+                        target: target.into(),
+                    }
+                    .normalize(),
+                    at,
+                ),
+            );
+            l.status = Some(LinkStatus::Shared);
+            l
+        };
+
+        // The same two bodies on each message, inserted in opposite orders.
+        for (msg, alice_first) in [("msg://tie/a", true), ("msg://tie/b", false)] {
+            p.sparql_store
+                .add_link(&signed(&alice, msg, "ns://type", "ns://message"))
+                .expect("flag");
+            let alice_body = signed(&alice, msg, "ns://body", "literal:string:aaa");
+            let bob_body = signed(&bob, msg, "ns://body", "literal:string:bbb");
+            let ordered = if alice_first {
+                [alice_body, bob_body]
+            } else {
+                [bob_body, alice_body]
+            };
+            for link in ordered {
+                p.sparql_store.add_link(&link).expect("body");
+            }
+        }
+
+        let turns = gather_transcript_model(&p, "ns://Message", "body", "{}")
+            .await
+            .expect("model read")
+            .turns;
+        assert_eq!(turns.len(), 2, "got {turns:#?}");
+        for turn in &turns {
+            assert_eq!(
+                (turn.text.as_str(), turn.speaker.as_str()),
+                ("bbb", bob.did.as_str()),
+                "text and speaker must name one link, the same in both orders: {turn:#?}"
+            );
+        }
     }
 }

@@ -17,7 +17,7 @@
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, HashMap};
 
-use super::types::{InstanceLinks, ModelShape, ShapeProperty};
+use super::types::{InstanceLinkRow, InstanceLinks, LinkRowProvenance, ModelShape, ShapeProperty};
 use super::utils::parse_literal_value;
 use crate::perspectives::ordering::{
     create_strategy, parse_ordering_entries, COLLECTION_ORDER_PREDICATE,
@@ -27,22 +27,37 @@ use crate::perspectives::ordering::{
 ///
 /// Returns one [`InstanceLinks`] per unique source, preserving insertion
 /// order (via `BTreeMap`) so that results are deterministic.
-pub(super) fn group_results_by_source(rows: &[Value], _shape: &ModelShape) -> Vec<InstanceLinks> {
-    let mut map: BTreeMap<String, Vec<(String, String, String, String)>> = BTreeMap::new();
+///
+/// `provenance` is whether the rows were selected with the `__links`
+/// columns (`?wireTarget ?proofKey ?proofSig ?proofValid ?rowStatus`); it is
+/// recorded rather than sniffed off the row so an unbound column cannot be
+/// told apart from an absent one.
+pub(super) fn group_results_by_source(
+    rows: &[Value],
+    _shape: &ModelShape,
+    provenance: bool,
+) -> Vec<InstanceLinks> {
+    let mut map: BTreeMap<String, Vec<InstanceLinkRow>> = BTreeMap::new();
+    let s = |row: &Value, var: &str| row[var].as_str().unwrap_or("").to_string();
 
     for row in rows {
         let source = match row["source"].as_str() {
             Some(s) => s.to_string(),
             None => continue,
         };
-        let predicate = row["predicate"].as_str().unwrap_or("").to_string();
-        let target = row["target"].as_str().unwrap_or("").to_string();
-        let author = row["author"].as_str().unwrap_or("").to_string();
-        let timestamp = row["timestamp"].as_str().unwrap_or("").to_string();
-
-        map.entry(source)
-            .or_default()
-            .push((predicate, target, author, timestamp));
+        map.entry(source).or_default().push(InstanceLinkRow {
+            predicate: s(row, "predicate"),
+            target: s(row, "target"),
+            author: s(row, "author"),
+            timestamp: s(row, "timestamp"),
+            provenance: provenance.then(|| LinkRowProvenance {
+                wire_target: s(row, "wireTarget"),
+                proof_key: s(row, "proofKey"),
+                proof_signature: s(row, "proofSig"),
+                proof_valid: s(row, "proofValid"),
+                status: s(row, "rowStatus"),
+            }),
+        });
     }
 
     map.into_iter()
@@ -132,9 +147,12 @@ pub(super) fn reorder_members(
 
 /// Hydrate a single instance from its collected links.
 ///
-/// For each link `(predicate, target, author, timestamp)`:
+/// For each link:
 /// - If the predicate maps to a **scalar property** (or flag), the latest
-///   value by timestamp wins (`parse_literal_value` for typed conversion).
+///   value wins (`parse_literal_value` for typed conversion), "latest" being
+///   the row ranked highest by [`InstanceLinkRow::rank`] — the same order
+///   `__links` reports, so the value and its provenance always name the same
+///   link even on a timestamp tie.
 /// - If the predicate maps to a **collection relation**, the target is
 ///   appended to an array (sorted by timestamp).
 /// - If multiple shape properties share the same predicate (e.g. several
@@ -160,8 +178,8 @@ pub(super) fn hydrate_one(shape: &ModelShape, inst: &InstanceLinks) -> Option<Va
             .push(p);
     }
 
-    let mut prop_timestamps: HashMap<&str, &str> = HashMap::new();
-    let mut collection_values: HashMap<&str, Vec<(&str, &str)>> = HashMap::new();
+    let mut prop_best: HashMap<&str, &InstanceLinkRow> = HashMap::new();
+    let mut collection_values: HashMap<&str, Vec<&InstanceLinkRow>> = HashMap::new();
     // Ordering entries are sourced on the parent under one shared predicate, so
     // they arrive with the instance's own links and reconstruction costs no
     // extra query. That is the whole reason they live here rather than on the
@@ -171,16 +189,16 @@ pub(super) fn hydrate_one(shape: &ModelShape, inst: &InstanceLinks) -> Option<Va
     let mut earliest_author: Option<&str> = None;
     let mut latest_timestamp: Option<&str> = None;
 
-    for (predicate, target, author, timestamp) in &inst.links {
-        let ts = timestamp.as_str();
+    for link in &inst.links {
+        let ts = link.timestamp.as_str();
         match earliest_timestamp {
             None => {
                 earliest_timestamp = Some(ts);
-                earliest_author = Some(author.as_str());
+                earliest_author = Some(link.author.as_str());
             }
             Some(et) if ts < et => {
                 earliest_timestamp = Some(ts);
-                earliest_author = Some(author.as_str());
+                earliest_author = Some(link.author.as_str());
             }
             _ => {}
         }
@@ -194,38 +212,45 @@ pub(super) fn hydrate_one(shape: &ModelShape, inst: &InstanceLinks) -> Option<Va
             _ => {}
         }
 
-        if predicate.as_str() == COLLECTION_ORDER_PREDICATE {
-            ordering_targets.push(target.clone());
+        if link.predicate.as_str() == COLLECTION_ORDER_PREDICATE {
+            ordering_targets.push(link.target.clone());
             continue;
         }
 
-        if let Some(props) = pred_to_props.get(predicate.as_str()) {
+        if let Some(props) = pred_to_props.get(link.predicate.as_str()) {
             for prop in props {
                 if prop.is_collection {
                     collection_values
                         .entry(prop.name.as_str())
                         .or_default()
-                        .push((target.as_str(), ts));
-                } else if prop.is_flag {
-                    let current_ts = prop_timestamps.get(prop.name.as_str()).copied();
-                    if current_ts.is_none() || current_ts.map(|t| ts > t).unwrap_or(true) {
-                        prop_timestamps.insert(prop.name.as_str(), ts);
-                        let val = parse_literal_value(target);
-                        obj.insert(prop.name.clone(), val);
-                    }
+                        .push(link);
                 } else {
-                    let current_ts = prop_timestamps.get(prop.name.as_str()).copied();
-                    if current_ts.is_none() || current_ts.map(|t| ts > t).unwrap_or(true) {
-                        prop_timestamps.insert(prop.name.as_str(), ts);
+                    // One pick per property, ranked the way `__links` ranks:
+                    // timestamp, then the signed target, author and signature.
+                    // A strict `>` on the timestamp alone kept the first row
+                    // seen on a tie — the store's own order — so a value and
+                    // the `__links` row read for it could name two different
+                    // links written in the same millisecond.
+                    let outranks = prop_best
+                        .get(prop.name.as_str())
+                        .is_none_or(|best| link.rank() > best.rank());
+                    if !outranks {
+                        continue;
+                    }
+                    prop_best.insert(prop.name.as_str(), link);
+                    if prop.is_flag {
+                        let val = parse_literal_value(&link.target);
+                        obj.insert(prop.name.clone(), val);
+                    } else {
                         // A `resolveLanguage` target stays raw: its value is
                         // for `resolve_language_transforms` to produce, and
                         // decoding a `literal:` envelope here would erase the
                         // distinction between it and an expression URL once
                         // the decoded text itself looks like `scheme://...`.
                         let val = if prop.resolve_language.is_some() {
-                            Value::String(target.clone())
+                            Value::String(link.target.clone())
                         } else {
-                            parse_literal_value(target)
+                            parse_literal_value(&link.target)
                         };
                         obj.insert(prop.name.clone(), val);
                     }
@@ -235,7 +260,7 @@ pub(super) fn hydrate_one(shape: &ModelShape, inst: &InstanceLinks) -> Option<Va
     }
 
     for (name, mut values) in collection_values {
-        values.sort_by_key(|&(_, ts)| ts);
+        values.sort_by_key(|link| link.timestamp.as_str());
         // Whether to decode `literal:<type>:<value>` wire form is a
         // shape-level decision, not a per-target one. A relation with
         // `sh:datatype` (produced by `@HasMany({ datatype: "xsd:string" })`
@@ -266,7 +291,9 @@ pub(super) fn hydrate_one(shape: &ModelShape, inst: &InstanceLinks) -> Option<Va
 
         if is_scalar {
             // A scalar relation (`@HasOne` / `@BelongsToOne`) resolves
-            // last-write-wins, exactly as a scalar property does above.
+            // last-write-wins, exactly as a scalar property does above —
+            // including the same tie rule, so `__links` and the value pick
+            // one link.
             //
             // It previously took the *earliest* link — the collection was sorted
             // ascending and the first entry won — so re-pointing a to-one relation
@@ -275,18 +302,15 @@ pub(super) fn hydrate_one(shape: &ModelShape, inst: &InstanceLinks) -> Option<Va
             // normally. Today `collectionSetter` deletes before adding, which
             // leaves one link and hides this; concurrent writes from two peers do
             // not, and neither will the incremental diff that replaces it.
-            //
-            // Strict `>` means the first of several links sharing a timestamp
-            // wins, matching the scalar-property branch rather than diverging
-            // from it on ties.
-            let mut winner: Option<(&str, &str)> = None;
-            for &(target, ts) in &values {
-                if winner.map_or(true, |(_, best_ts)| ts > best_ts) {
-                    winner = Some((target, ts));
+            let winner = values.iter().copied().reduce(|best, link| {
+                if link.rank() > best.rank() {
+                    link
+                } else {
+                    best
                 }
-            }
-            if let Some((target, _)) = winner {
-                obj.insert(name.to_string(), decode(target));
+            });
+            if let Some(link) = winner {
+                obj.insert(name.to_string(), decode(&link.target));
             }
         } else {
             // Collapse duplicate targets.
@@ -308,7 +332,7 @@ pub(super) fn hydrate_one(shape: &ModelShape, inst: &InstanceLinks) -> Option<Va
             // target keeps its earliest timestamp — the same instant `createdAt`
             // and the append-by-timestamp fallback ordering already use.
             let mut seen = std::collections::HashSet::new();
-            values.retain(|&(target, _)| seen.insert(target));
+            values.retain(|link| seen.insert(link.target.as_str()));
 
             // A collection the shape declares ordered is reordered here, on the
             // ORM's own read path. Doing it only in `get_links` — as an earlier
@@ -320,12 +344,16 @@ pub(super) fn hydrate_one(shape: &ModelShape, inst: &InstanceLinks) -> Option<Va
                 .find(|p| p.name == name)
                 .and_then(|p| {
                     let strategy = p.ordering.as_deref()?;
-                    reorder_collection(strategy, &values, &ordering_targets, &p.predicate)
+                    let pairs: Vec<(&str, &str)> = values
+                        .iter()
+                        .map(|link| (link.target.as_str(), link.timestamp.as_str()))
+                        .collect();
+                    reorder_collection(strategy, &pairs, &ordering_targets, &p.predicate)
                 });
 
             let arr: Vec<Value> = match ordered {
                 Some(items) => items.iter().map(|t| decode(t)).collect(),
-                None => values.iter().map(|&(target, _)| decode(target)).collect(),
+                None => values.iter().map(|link| decode(&link.target)).collect(),
             };
             obj.insert(name.to_string(), Value::Array(arr));
         }
@@ -826,9 +854,11 @@ mod tests {
 
     #[test]
     fn test_hydrate_scalar_relation_tie_matches_scalar_property() {
-        // Two links sharing a timestamp: the scalar-property branch keeps the
-        // first seen (its comparison is strict `>`), and the relation branch
-        // must not diverge from it on ties.
+        // Two links sharing a timestamp: both branches pick the row ranked
+        // highest by `InstanceLinkRow::rank` — timestamp, then target, author
+        // and signature — which is also the order `__links` reports, so the
+        // value and its provenance always name the same link. On this data
+        // "second" outranks "first" on the target, in either insertion order.
         let s = shape(
             "Space",
             vec![
@@ -836,39 +866,37 @@ mod tests {
                 prop("name", "we://name"),
             ],
         );
-        let inst = inst_links_at(
-            "we://space/1",
-            vec![
-                (
-                    "we://location",
-                    "we://loc/first",
-                    "2026-01-01T00:00:00.000Z",
-                ),
-                (
-                    "we://location",
-                    "we://loc/second",
-                    "2026-01-01T00:00:00.000Z",
-                ),
-                (
-                    "we://name",
-                    "literal:string:first",
-                    "2026-01-01T00:00:00.000Z",
-                ),
-                (
-                    "we://name",
-                    "literal:string:second",
-                    "2026-01-01T00:00:00.000Z",
-                ),
-            ],
-        );
-
-        let result = hydrate_one(&s, &inst).unwrap();
-        assert_eq!(result["location"].as_str().unwrap(), "we://loc/first");
-        assert_eq!(
-            result["name"].as_str().unwrap(),
-            "first",
-            "the relation branch must tiebreak the same way the property branch does",
-        );
+        let links = vec![
+            (
+                "we://location",
+                "we://loc/first",
+                "2026-01-01T00:00:00.000Z",
+            ),
+            (
+                "we://location",
+                "we://loc/second",
+                "2026-01-01T00:00:00.000Z",
+            ),
+            (
+                "we://name",
+                "literal:string:first",
+                "2026-01-01T00:00:00.000Z",
+            ),
+            (
+                "we://name",
+                "literal:string:second",
+                "2026-01-01T00:00:00.000Z",
+            ),
+        ];
+        for ordered in [links.clone(), links.into_iter().rev().collect()] {
+            let result = hydrate_one(&s, &inst_links_at("we://space/1", ordered)).unwrap();
+            assert_eq!(result["location"].as_str().unwrap(), "we://loc/second");
+            assert_eq!(
+                result["name"].as_str().unwrap(),
+                "second",
+                "the relation branch must tiebreak the same way the property branch does",
+            );
+        }
     }
 
     #[test]

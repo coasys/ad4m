@@ -1393,10 +1393,65 @@ mod produced_by_flow_filter_tests {
 ///
 /// Produced by [`super::hydration::group_results_by_source`] from raw SPARQL
 /// result rows, then consumed by [`super::hydration::hydrate_one`] to build
-/// a fully typed JSON object.
+/// a fully typed JSON object — and, when the query asked for `links` on a
+/// predicate the instance query fetches, by [`super::links::attach_links`]
+/// to serve `__links` from the same rows instead of re-reading them.
 #[derive(Debug)]
 pub(super) struct InstanceLinks {
     pub(super) source: String,
-    /// (predicate, target, author, timestamp) for each link
-    pub(super) links: Vec<(String, String, String, String)>,
+    pub(super) links: Vec<InstanceLinkRow>,
+}
+
+/// One link of an instance as the instance query returns it: the columns
+/// hydration always binds plus, when the query asked for them, the per-link
+/// provenance a `__links` read would otherwise fetch in a second query.
+#[derive(Debug)]
+pub(super) struct InstanceLinkRow {
+    pub(super) predicate: String,
+    pub(super) target: String,
+    pub(super) author: String,
+    pub(super) timestamp: String,
+    pub(super) provenance: Option<LinkRowProvenance>,
+}
+
+impl InstanceLinkRow {
+    /// The order this row competes in wherever one link must be picked —
+    /// hydration's scalar last-write-wins and [`super::links::sort_link_rows`]
+    /// alike — so both always name the same link: timestamp, then the link's
+    /// target as signed (the wire bytes when the store keeps them apart),
+    /// then author, then signature. The last three make the order total: two
+    /// agents can write the same triple in the same millisecond and the store
+    /// returns those rows in no fixed order.
+    pub(super) fn rank(&self) -> (&str, &str, &str, &str) {
+        let (wire, signature) = match &self.provenance {
+            Some(p) => (p.wire_target.as_str(), p.proof_signature.as_str()),
+            None => ("", ""),
+        };
+        (
+            self.timestamp.as_str(),
+            if wire.is_empty() {
+                self.target.as_str()
+            } else {
+                wire
+            },
+            self.author.as_str(),
+            signature,
+        )
+    }
+}
+
+/// The columns `__links` reports for one row — carried by the instance
+/// query's rows when a `links` request is served from hydration (see
+/// [`super::links::attach_links`]).
+#[derive(Debug)]
+pub(super) struct LinkRowProvenance {
+    /// The signed bytes the store keeps apart from its canonical literal
+    /// rendering (`ad4m://ontology/wireTarget`); empty when there are none.
+    pub(super) wire_target: String,
+    pub(super) proof_key: String,
+    pub(super) proof_signature: String,
+    /// The stored signature verdict (`"true"` / `"false"`).
+    pub(super) proof_valid: String,
+    /// The reifier's `ad4m://ontology/status` annotation, empty when none.
+    pub(super) status: String,
 }

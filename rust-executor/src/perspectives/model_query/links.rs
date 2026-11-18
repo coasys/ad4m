@@ -28,34 +28,41 @@
 //! `links: ["members"]` gives each member its own author, timestamp and
 //! verdict next to the plain `members` array, which stays as it is.
 //!
-//! The read is one extra query over the requested predicates, run after
-//! hydration and restricted to the returned page by a sub-SELECT on the
-//! instance ids (`utils::values_subselect`: a bare `VALUES` next to the
-//! triple pattern joined inside the for-loop and was re-iterated per link
-//! row; the sub-SELECT drives seeks for a small page and hash-joins one
-//! predicate scan for a large one).
-//! That placement is deliberate: the instance query and its
-//! hydration are left byte-for-byte as they were, so an annotation link cannot
-//! move `updatedAt`, `author` or a property value, and both instance-query plans
-//! (single and two-phase) are covered by the same code instead of by two copies
-//! of a predicate list. A query that does not ask for `links` issues no extra
-//! query and returns exactly the JSON it returned before.
+//! How the rows are read depends on the predicate. A `links` entry that
+//! names a predicate the instance query already fetches (a property of the
+//! shape) is served from the hydration rows themselves: the instance query
+//! then also selects the reifier's provenance columns, and [`attach_links`]
+//! decorates them instead of re-reading. That is one snapshot, not two — a
+//! scalar's `__links` rows are the same links its value was picked from, so
+//! a consumer reading "the author of the link this value came from" cannot
+//! get another link's author, and it costs no second query.
 //!
-//! The price of that placement: `__links` is a second read, not the same
-//! snapshot as the instance. A member added or removed between the two can be
-//! in the hydrated collection without a row here, or the reverse. A consumer
-//! dating members by their own link (#1112, #1103) must treat "in the
-//! collection, no row in `__links`" as an error, never fall back to
+//! Everything else — an annotation predicate the shape does not declare, or
+//! a getter-backed collection the instance query does not fetch — is one
+//! extra query over the requested predicates, run after hydration and
+//! restricted to the returned page by a sub-SELECT on the instance ids
+//! (`utils::values_subselect`: a bare `VALUES` next to the triple pattern
+//! joined inside the for-loop and was re-iterated per link row; the
+//! sub-SELECT drives seeks for a small page and hash-joins one predicate
+//! scan for a large one).
+//!
+//! The price of that read: for those keys `__links` is a second read, not
+//! the same snapshot as the instance. A member added or removed between the
+//! two can be in the hydrated collection without a row here, or the reverse.
+//! A consumer dating members by their own link (#1112, #1103) must treat
+//! "in the collection, no row in `__links`" as an error, never fall back to
 //! `createdAt`: that is the earlier date, so for role eligibility it widens
 //! the window.
 
 use deno_core::anyhow::{anyhow, Error};
 use serde::de::DeserializeOwned;
 use serde_json::{json, Map, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
-use super::sparql_builder::{link_status_filter, local_status_filter, proof_valid_filter};
-use super::types::{IncludeValue, ModelQueryInput, ModelShape, ShapeResolver};
+use super::sparql_builder::{
+    instance_link_predicates, link_status_filter, local_status_filter, proof_valid_filter,
+};
+use super::types::{IncludeValue, InstanceLinks, ModelQueryInput, ModelShape, ShapeResolver};
 use super::utils::{emittable_iri, values_subselect};
 use crate::perspectives::sparql_store::{status_from_str, EvalStop, SparqlStore};
 use crate::types::LinkStatus;
@@ -156,6 +163,27 @@ pub(super) fn resolve_link_keys(
     Ok(out)
 }
 
+/// The predicates of `keys` the hydration rows answer: those the instance
+/// query fetches. An empty predicate list means it fetches every predicate.
+fn served_predicates<'a>(shape: &ModelShape, keys: &'a [(String, String)]) -> HashSet<&'a str> {
+    let needed = instance_link_predicates(shape);
+    if needed.is_empty() {
+        return keys.iter().map(|(_, p)| p.as_str()).collect();
+    }
+    let needed: HashSet<&str> = needed.into_iter().collect();
+    keys.iter()
+        .filter(|(_, p)| needed.contains(p.as_str()))
+        .map(|(_, p)| p.as_str())
+        .collect()
+}
+
+/// Whether the instance query must carry the `__links` provenance columns:
+/// any `links` key that is served from the hydration rows needs them (see
+/// [`attach_links`]). `keys` is the already-resolved `links` request.
+pub(super) fn hydration_carries_links(shape: &ModelShape, keys: &[(String, String)]) -> bool {
+    !served_predicates(shape, keys).is_empty()
+}
+
 /// Attach [`LINKS_KEY`] to every instance in `instances`.
 ///
 /// Every requested key is present on every instance, as an empty array when the
@@ -163,6 +191,15 @@ pub(super) fn resolve_link_keys(
 /// "not asked". Rows are ordered by timestamp, then target (the same string
 /// order `createdAt` and collection hydration use), then author and signature
 /// so the order is total — see [`sort_link_rows`].
+///
+/// Keys whose predicate the instance query fetches are served from
+/// `hydrated` — the same rows hydration folded, so on a timestamp tie the
+/// last `__links` row is the link the scalar's value came from
+/// ([`InstanceLinkRow::rank`](super::types::InstanceLinkRow::rank) is the
+/// order both pick by) — and no second query runs for them. `hydrated` is
+/// `Some` only when the instance query selected the provenance columns,
+/// which `hydration_carries_links` decides. Keys on any other predicate are
+/// read with one query over just those predicates, restricted to the page.
 ///
 /// `local: true` properties get the same `LinkStatus::Local` restriction the
 /// instance query applies, so a gossiped Shared link on a local predicate is not
@@ -202,6 +239,7 @@ pub(super) fn resolve_link_keys(
 /// not take a `viewer_did`. When #1058 threads `viewer_author_filter` through
 /// `model_query`, this query needs it too, after `{local_status}`. It accepts
 /// arbitrary predicate IRIs, so it is the widest read to leave unscoped.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn attach_links(
     stop: &EvalStop,
     store: &SparqlStore,
@@ -209,6 +247,7 @@ pub(super) async fn attach_links(
     keys: &[(String, String)],
     link_status: Option<&LinkStatus>,
     include_unverified: Option<bool>,
+    hydrated: Option<&[InstanceLinks]>,
     instances: &mut [Value],
 ) -> Result<(), Error> {
     if keys.is_empty() || instances.is_empty() {
@@ -221,13 +260,60 @@ pub(super) async fn attach_links(
     ids.sort();
     ids.dedup();
 
-    let mut predicates: Vec<&str> = keys.iter().map(|(_, p)| p.as_str()).collect();
+    // source -> predicate -> rows
+    let mut found: BTreeMap<String, BTreeMap<String, Vec<Value>>> = BTreeMap::new();
+
+    // The predicates a `links` request is answered for out of the hydration
+    // rows — `None` when the instance query did not carry the provenance
+    // columns, which is whenever no key is served this way.
+    let served: Option<HashSet<&str>> = hydrated.map(|_| served_predicates(shape, keys));
+    if let (Some(hydrated), Some(served)) = (hydrated, served.as_ref()) {
+        let by_source: HashMap<&str, &InstanceLinks> =
+            hydrated.iter().map(|i| (i.source.as_str(), i)).collect();
+        for id in &ids {
+            let Some(inst) = by_source.get(id.as_str()) else {
+                continue;
+            };
+            for row in &inst.links {
+                let (Some(provenance), true) = (
+                    row.provenance.as_ref(),
+                    served.contains(row.predicate.as_str()),
+                ) else {
+                    continue;
+                };
+                let mut link = decorated_link(&json!({
+                    "source": inst.source,
+                    "predicate": row.predicate,
+                    "target": row.target,
+                    "wireTarget": provenance.wire_target,
+                    "author": row.author,
+                    "timestamp": row.timestamp,
+                    "proofKey": provenance.proof_key,
+                    "proofSig": provenance.proof_signature,
+                    "proofValid": provenance.proof_valid,
+                }));
+                if let Some(status) = status_from_str(&provenance.status) {
+                    link["status"] = serde_json::to_value(status)?;
+                }
+                found
+                    .entry(id.clone())
+                    .or_default()
+                    .entry(row.predicate.clone())
+                    .or_default()
+                    .push(link);
+            }
+        }
+    }
+
+    let mut predicates: Vec<&str> = keys
+        .iter()
+        .map(|(_, p)| p.as_str())
+        .filter(|p| served.as_ref().is_none_or(|s| !s.contains(p)))
+        .collect();
     predicates.sort();
     predicates.dedup();
 
-    // source -> predicate -> rows
-    let mut found: BTreeMap<String, BTreeMap<String, Vec<Value>>> = BTreeMap::new();
-    if !ids.is_empty() {
+    if !ids.is_empty() && !predicates.is_empty() {
         // The page ids constrain `?source` through a sub-SELECT
         // (`values_subselect`), not a bare `VALUES ?source { ... }` and not a
         // predicate scan filtered here. Beside `?source ?predicate ?target` a
@@ -287,10 +373,12 @@ pub(super) async fn attach_links(
                 .or_default()
                 .push(link);
         }
-        for by_predicate in found.values_mut() {
-            for rows in by_predicate.values_mut() {
-                sort_link_rows(rows);
-            }
+    }
+    // The order is total (see `sort_link_rows`) however the rows arrived —
+    // queried or served from hydration, whose own order is the store's.
+    for by_predicate in found.values_mut() {
+        for rows in by_predicate.values_mut() {
+            sort_link_rows(rows);
         }
     }
 
@@ -345,12 +433,15 @@ pub(super) fn decorated_link(row: &Value) -> Value {
     })
 }
 
-/// Order one predicate's rows by timestamp, then target, author and
-/// signature. The last two make the order total: two agents can write the same
-/// triple in the same millisecond, and the store returns those rows in no fixed
-/// order. Anything hashing `__links` (an evidence seal, a receipt) needs every
-/// replica to produce the same array, and `canonical_json` sorts keys, not
-/// arrays.
+/// Order one predicate's rows by timestamp, then target (the signed bytes,
+/// as `data.target` reports them), then author and signature — the order
+/// [`InstanceLinkRow::rank`](super::types::InstanceLinkRow::rank) ranks the
+/// same links in, so `__links`' last row is the link hydration's scalar
+/// pick came from. The last two make the order total: two agents can write
+/// the same triple in the same millisecond, and the store returns those rows
+/// in no fixed order. Anything hashing `__links` (an evidence seal, a
+/// receipt) needs every replica to produce the same array, and
+/// `canonical_json` sorts keys, not arrays.
 pub(super) fn sort_link_rows(rows: &mut [Value]) {
     rows.sort_by_cached_key(|v| {
         let s = |x: &Value| x.as_str().unwrap_or("").to_string();
@@ -533,6 +624,7 @@ mod tests {
             &keys,
             None,
             None,
+            None,
             &mut instances,
         )
         .await
@@ -702,6 +794,7 @@ mod tests {
                 &keys,
                 status.as_ref(),
                 include_unverified,
+                None,
                 &mut instances,
             )
             .await
@@ -888,9 +981,18 @@ mod tests {
             let keys: Vec<(String, String)> = vec![("name".into(), "we://name".into())];
             let mut instances: Vec<Value> = ids.iter().map(|id| json!({ "id": id })).collect();
             let t = std::time::Instant::now();
-            attach_links(&stop, &store, &shape, &keys, None, None, &mut instances)
-                .await
-                .unwrap();
+            attach_links(
+                &stop,
+                &store,
+                &shape,
+                &keys,
+                None,
+                None,
+                None,
+                &mut instances,
+            )
+            .await
+            .unwrap();
             println!("page {page:>6} {:>18}: {:>8?}", "attach-links", t.elapsed());
         }
     }
