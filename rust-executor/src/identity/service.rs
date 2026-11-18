@@ -45,6 +45,7 @@ pub(super) fn now() -> u64 {
 
 pub(super) fn error(code: u16, message: impl Into<String>) -> WsRpcError {
     WsRpcError {
+        data: None,
         code,
         message: message.into(),
     }
