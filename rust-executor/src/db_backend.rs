@@ -33,8 +33,8 @@ use tokio::sync::OnceCell;
 
 use crate::ai_sessions::types::{AiSession, AiSessionMessage, AiSessionUpdate};
 use crate::db::{
-    Ad4mDb, Ad4mDbResult, ComputeLogEntry, FlowReplicaStateRow, GrantRow, JoinRow,
-    OperatorRecordRow, PaymentRequest,
+    Ad4mDb, Ad4mDbResult, ComputeLogEntry, FlowReplicaStateRow, GrantRow, InstanceEmbeddingRow,
+    JoinRow, OperatorRecordRow, PaymentRequest,
 };
 use crate::secret::Secret;
 use crate::types::{
@@ -296,6 +296,20 @@ macro_rules! ad4m_db_methods {
                 user_did: &str
             ) -> Ad4mDbResult<()>;
             fn get_neighbourhood_owners(&self, neighbourhood_url: &str) -> Ad4mDbResult<Vec<String>>;
+
+            // Cached title vectors (`perspectives::interpretation::embedding_cache`)
+            fn get_instance_embeddings(
+                &self,
+                perspective: &str,
+                model: &str,
+                instance_ids: &[String]
+            ) -> Ad4mDbResult<Vec<InstanceEmbeddingRow>>;
+            fn put_instance_embeddings(
+                &self,
+                perspective: &str,
+                model: &str,
+                rows: &[InstanceEmbeddingRow]
+            ) -> Ad4mDbResult<()>;
 
             // Flow replica state
             fn remove_flow_replica_rows(&self, perspective: &str) -> Ad4mDbResult<()>;

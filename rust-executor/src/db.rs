@@ -27,6 +27,7 @@ mod ai_sessions;
 mod endpoints;
 mod grants;
 mod identity;
+mod instance_embedding;
 mod model_migration;
 mod rekey;
 mod tasks;
@@ -36,6 +37,7 @@ pub use grants::GrantRow;
 pub(crate) use identity::operator_record_in;
 pub(crate) use identity::set_operator_record_if_empty_in;
 pub use identity::{JoinRow, OperatorRecordRow, OperatorSetBy};
+pub use instance_embedding::InstanceEmbeddingRow;
 
 #[derive(Serialize, Deserialize)]
 struct LinkSchema {
@@ -634,6 +636,7 @@ impl Ad4mDb {
         )?;
 
         ai_sessions::create_ai_session_tables(&conn)?;
+        instance_embedding::create_instance_embedding_table(&conn)?;
 
         let db = Self { conn };
         db.migrate_models_to_endpoints()?;
@@ -1492,6 +1495,7 @@ impl Ad4mDb {
         )?;
 
         self.remove_flow_replica_rows(uuid)?;
+        self.remove_instance_embeddings(uuid)?;
 
         Ok(())
     }
