@@ -1,7 +1,7 @@
 import { Link } from "../links/Links";
 import { Literal } from "../Literal";
 import { AD4MAction } from "./SHACLShape";
-import { encodeRFC3986URIComponent } from "../utils";
+import { encodeRFC3986URIComponent } from "../rfc3986";
 
 // Re-export AD4MAction for consumers who import from SHACLFlow
 export { AD4MAction };

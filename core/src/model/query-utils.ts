@@ -8,7 +8,8 @@
  */
 
 import type { WhereCondition, Where, ModelMetadata } from "./types";
-import { encodeRFC3986URIComponent, escapeQueryString } from "../utils";
+import { encodeRFC3986URIComponent } from "../rfc3986";
+import { escapeQueryString } from "../utils";
 
 /**
  * Format a JavaScript value for embedding in a query expression.

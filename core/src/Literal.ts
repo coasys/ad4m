@@ -1,4 +1,4 @@
-import { encodeRFC3986URIComponent } from "./utils";
+import { encodeRFC3986URIComponent } from "./rfc3986";
 
 export class Literal {
     #literal?: any
