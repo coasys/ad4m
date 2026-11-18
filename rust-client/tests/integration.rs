@@ -63,12 +63,29 @@ struct Executor {
     url: String,
     port: u16,
     _data: tempfile::TempDir,
+    _secret: tempfile::TempDir,
 }
 
 fn start_executor() -> Option<Executor> {
     let binary = executor_binary()?;
     let data = tempfile::tempdir().unwrap();
     let port = free_port();
+    // The storage secret the executor opens its data with, as `testStorageSecretEnv` gives the JS
+    // suites: without one it starts sealed and answers only the storage status and the unlock. A
+    // fresh data folder each run, so any 64 hex characters do; it sits on the data disk, hence
+    // `AD4M_ALLOW_SECRET_ON_DATA_DISK`.
+    let secret = tempfile::tempdir().unwrap();
+    let secret_file = secret.path().join("storage-secret");
+    std::fs::write(&secret_file, format!("{}\n", "5e".repeat(32))).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&secret_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let storage_env = [
+        ("AD4M_STORAGE_SECRET_FILE", secret_file.to_str().unwrap()),
+        ("AD4M_ALLOW_SECRET_ON_DATA_DISK", "true"),
+    ];
     // `init` first — as `tests/js/startExecutor` does: `run` on a data dir
     // that never saw `init` leaves the runtime service without its seed and
     // `agent.generate` panics executor-side. The seed is the one the JS
@@ -83,6 +100,7 @@ fn start_executor() -> Option<Executor> {
             "--network-bootstrap-seed",
             seed.to_str().unwrap(),
         ])
+        .envs(storage_env)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
@@ -104,6 +122,7 @@ fn start_executor() -> Option<Executor> {
             "--insecure-no-admin-credential",
         ])
         .env("AD4M_EXIT_WITH_PARENT", "true")
+        .envs(storage_env)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -113,6 +132,7 @@ fn start_executor() -> Option<Executor> {
         url: format!("http://127.0.0.1:{port}"),
         port,
         _data: data,
+        _secret: secret,
     })
 }
 
