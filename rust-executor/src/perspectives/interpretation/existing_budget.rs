@@ -1235,8 +1235,8 @@ mod tests {
         let after = select_existing(&existing, "", budget, None, Compact::Yes, &HashSet::new());
         println!(
             "#1804 existing block, 504 rows: before {} tokens (est.), short handles {} tokens, \
-             budget {budget} -> {} rows, {} tokens",
-            before.tokens, compact.tokens, after.rows_shown, after.tokens
+             budget {budget} -> {} rows, {} tokens, stages {:?}",
+            before.tokens, compact.tokens, after.rows_shown, after.tokens, after.stages
         );
         assert_eq!(before.rows_shown, 504);
         assert!(
