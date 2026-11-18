@@ -29,6 +29,8 @@ use crate::types::{Link, LinkStatus};
 
 use super::claim::{batch_key, confirm_claim, renew_claim, settle_claim, try_claim, ClaimOutcome};
 use super::config::AutoProcessorConfig;
+use super::cursor::ProcessedSource;
+use super::delta_read::{transcript_order, TranscriptOrder};
 use super::events::{
     emit, emit_neighbourhood_state, AutoProcessorEvent, AutoProcessorNeighbourhoodState,
     AutoProcessorStep, NeighbourhoodPhase,
@@ -187,6 +189,38 @@ impl PendingTurn {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static ID_COMPARISONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Test-only: how many queued ids this thread compared so far, in the
+/// pending queues' duplicate checks.
+#[cfg(test)]
+pub(crate) fn id_comparisons() -> u64 {
+    ID_COMPARISONS.with(|c| c.get())
+}
+
+/// A turn id in a pending queue's id set. Equal as its string; in tests each
+/// comparison is counted ([`id_comparisons`]), so a test can tell a lookup
+/// (about one comparison) from a scan (one per queued id).
+#[derive(Debug, Clone, Eq)]
+struct QueuedId(String);
+
+impl std::hash::Hash for QueuedId {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.0.hash(state);
+    }
+}
+
+impl PartialEq for QueuedId {
+    fn eq(&self, other: &Self) -> bool {
+        #[cfg(test)]
+        ID_COMPARISONS.with(|c| c.set(c.get() + 1));
+        self.0 == other.0
+    }
+}
+
 /// Per-processor observation state. Kept in a `BTreeMap` inside
 /// [`WatcherState`] so iteration is deterministic (mattering for tests, not
 /// correctness).
@@ -195,6 +229,10 @@ pub struct ProcessorPending {
     /// Source turns seen since the last drained batch, insertion order,
     /// deduplicated by [`PendingTurn::id`].
     pub items: Vec<PendingTurn>,
+    /// The ids in `items`. Every tick records each queueable turn again, so
+    /// the duplicate check must not scan `items`: over N pending turns that
+    /// made a tick N²/2 comparisons.
+    ids: HashSet<QueuedId>,
     /// Wall-clock (unix millis) of the most recent [`WatcherState::record_item`]
     /// for this processor. Used to compare against `debounce_ms`.
     pub last_touched_ms: i64,
@@ -231,6 +269,238 @@ pub struct WatcherState {
     /// anyway, so retrying is the intended crashed-claimant recovery rather
     /// than a redundant race.
     deferred: BTreeMap<String, BTreeMap<String, i64>>,
+    /// The store reads the last tick made, reused while no link changed.
+    pub(crate) reads: TickReads,
+    /// The last tick found turns waiting and no model to run them
+    /// ([`TickOutcome::NoModel`]); logged once when it starts and ends.
+    pub(crate) waiting_for_model: bool,
+}
+
+/// Store reads a tick keeps for the next one, each tagged with the store's
+/// write generation ([`SparqlStore::write_generation`](crate::perspectives::sparql_store::SparqlStore::write_generation))
+/// read before the query. A tick reuses a read while the generation is
+/// unchanged: the store answers the same query with the same rows until a
+/// write lands. Everything that depends on the tick's `now_ms` (both
+/// `source_window_ms` filters, deferrals) is applied to the kept rows at
+/// each tick, exactly as to fresh ones.
+///
+/// The configs and cursor rows are read again after any write. A kept
+/// transcript is brought up to date instead when every write since only
+/// added links ([`SparqlStore::additions_since`](crate::perspectives::sparql_store::SparqlStore::additions_since)):
+/// the tick reads only the rows those links can add
+/// ([`delta_query`](super::delta_read::delta_query)) and merges them in
+/// ([`Self::merge_transcript`]), so a busy conversation costs a read of its
+/// new turns, not of all of them. A removal (an edit or a delete), a reload,
+/// a log that no longer reaches back to the kept read, or a scope query a
+/// delta cannot follow, reads the whole transcript again.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct TickReads {
+    configs: Option<(u64, Arc<Vec<AutoProcessorConfig>>)>,
+    /// Per processor id: the generation it is up to date with, its scope
+    /// query, and the turns it returned. Only the turns that could still be
+    /// queued keep their text (see [`CachedTurn`]). One copy per processor
+    /// and per loop, and one loop runs per perspective and per online
+    /// managed user.
+    transcripts: BTreeMap<String, (u64, String, Arc<Vec<CachedTurn>>)>,
+    /// Per processor id: the cursor rows, not yet windowed.
+    processed: BTreeMap<String, (u64, Arc<Vec<ProcessedSource>>)>,
+}
+
+/// A transcript turn as [`TickReads`] keeps it. A turn that was already
+/// consumed (in the processor's cursor) or outside its `source_window_ms` when
+/// it was read keeps only its id and timestamp: in a long, mostly interpreted
+/// conversation that is nearly every turn, and its text is the bulk of a read.
+/// A window only moves forward, so a turn outside it never comes back; a
+/// consumed turn comes back only when the run that consumed it ages out of
+/// the window, and then the tick reads the transcript again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CachedTurn {
+    Full(PendingTurn),
+    Consumed { id: String, timestamp: String },
+}
+
+impl CachedTurn {
+    pub(crate) fn id(&self) -> &str {
+        match self {
+            CachedTurn::Full(t) => &t.id,
+            CachedTurn::Consumed { id, .. } => id,
+        }
+    }
+
+    pub(crate) fn timestamp(&self) -> &str {
+        match self {
+            CachedTurn::Full(t) => &t.timestamp,
+            CachedTurn::Consumed { timestamp, .. } => timestamp,
+        }
+    }
+}
+
+impl TickReads {
+    pub(crate) fn configs(&self, generation: u64) -> Option<Arc<Vec<AutoProcessorConfig>>> {
+        self.configs
+            .as_ref()
+            .filter(|(g, _)| *g == generation)
+            .map(|(_, c)| c.clone())
+    }
+
+    /// Keep `configs`, and drop the reads of processors no longer declared.
+    pub(crate) fn set_configs(
+        &mut self,
+        generation: u64,
+        configs: Vec<AutoProcessorConfig>,
+    ) -> Arc<Vec<AutoProcessorConfig>> {
+        let declared: HashSet<&str> = configs.iter().map(|c| c.processor_id.as_str()).collect();
+        self.transcripts
+            .retain(|id, _| declared.contains(id.as_str()));
+        self.processed
+            .retain(|id, _| declared.contains(id.as_str()));
+        let configs = Arc::new(configs);
+        self.configs = Some((generation, configs.clone()));
+        configs
+    }
+
+    /// The kept transcript of `cfg`'s scope query, with the generation it is
+    /// up to date with.
+    pub(crate) fn transcript(
+        &self,
+        cfg: &AutoProcessorConfig,
+    ) -> Option<(u64, Arc<Vec<CachedTurn>>)> {
+        self.transcripts
+            .get(&cfg.processor_id)
+            .filter(|(_, query, _)| *query == cfg.source_scope_query)
+            .map(|(g, _, turns)| (*g, turns.clone()))
+    }
+
+    /// Bring the kept transcript of `cfg` up to `generation` with the turns
+    /// the links added since gave its scope query (`gained`): each it does not
+    /// hold yet goes where [`Self::set_transcript`] would put it over the same
+    /// turns (in timestamp order for `ORDER BY ?timestamp`, see
+    /// [`TranscriptOrder`]; appended for a query without `ORDER BY`). A kept
+    /// turn that is no longer `queueable` drops its text, as a fresh read
+    /// would keep it. Without a kept transcript this is `set_transcript`.
+    pub(crate) fn merge_transcript(
+        &mut self,
+        cfg: &AutoProcessorConfig,
+        generation: u64,
+        gained: Vec<PendingTurn>,
+        queueable: impl Fn(&str, &str) -> bool,
+    ) -> Arc<Vec<CachedTurn>> {
+        let Some((_, query, kept)) = self
+            .transcripts
+            .remove(&cfg.processor_id)
+            .filter(|(_, query, _)| *query == cfg.source_scope_query)
+        else {
+            return self.set_transcript(cfg, generation, gained, queueable);
+        };
+        let mut turns = Arc::try_unwrap(kept).unwrap_or_else(|shared| (*shared).clone());
+        for turn in turns.iter_mut() {
+            if let CachedTurn::Full(t) = turn {
+                if !queueable(&t.id, &t.timestamp) {
+                    *turn = CachedTurn::Consumed {
+                        id: std::mem::take(&mut t.id),
+                        timestamp: std::mem::take(&mut t.timestamp),
+                    };
+                }
+            }
+        }
+        if !gained.is_empty() {
+            let order = transcript_order(&cfg.source_scope_query);
+            let mut known: HashSet<String> = turns.iter().map(|t| t.id().to_string()).collect();
+            for t in gained {
+                if known.insert(t.id.clone()) {
+                    let turn = cached(t, &queueable);
+                    // Where a fresh read, sorted the same way, puts it.
+                    let at = match order {
+                        Some(TranscriptOrder::Timestamp { descending }) => {
+                            turns.partition_point(|k| {
+                                transcript_cmp(k, &turn, descending) == std::cmp::Ordering::Less
+                            })
+                        }
+                        _ => turns.len(),
+                    };
+                    turns.insert(at, turn);
+                }
+            }
+        }
+        let turns = Arc::new(turns);
+        self.transcripts
+            .insert(cfg.processor_id.clone(), (generation, query, turns.clone()));
+        turns
+    }
+
+    /// Keep `turns`, with the text only of those `queueable` accepts, one per
+    /// turn id, sorted as [`TranscriptOrder`] says for the scope query.
+    pub(crate) fn set_transcript(
+        &mut self,
+        cfg: &AutoProcessorConfig,
+        generation: u64,
+        turns: Vec<PendingTurn>,
+        queueable: impl Fn(&str, &str) -> bool,
+    ) -> Arc<Vec<CachedTurn>> {
+        let mut seen = HashSet::new();
+        let mut turns: Vec<CachedTurn> = turns
+            .into_iter()
+            .filter(|t| seen.insert(t.id.clone()))
+            .map(|t| cached(t, &queueable))
+            .collect();
+        if let Some(TranscriptOrder::Timestamp { descending }) =
+            transcript_order(&cfg.source_scope_query)
+        {
+            turns.sort_by(|a, b| transcript_cmp(a, b, descending));
+        }
+        let turns = Arc::new(turns);
+        self.transcripts.insert(
+            cfg.processor_id.clone(),
+            (generation, cfg.source_scope_query.clone(), turns.clone()),
+        );
+        turns
+    }
+
+    pub(crate) fn processed(
+        &self,
+        processor_id: &str,
+        generation: u64,
+    ) -> Option<Arc<Vec<ProcessedSource>>> {
+        self.processed
+            .get(processor_id)
+            .filter(|(g, _)| *g == generation)
+            .map(|(_, rows)| rows.clone())
+    }
+
+    pub(crate) fn set_processed(
+        &mut self,
+        processor_id: &str,
+        generation: u64,
+        rows: Vec<ProcessedSource>,
+    ) -> Arc<Vec<ProcessedSource>> {
+        let rows = Arc::new(rows);
+        self.processed
+            .insert(processor_id.to_string(), (generation, rows.clone()));
+        rows
+    }
+}
+
+/// [`TranscriptOrder::Timestamp`]: by timestamp, then by turn id.
+fn transcript_cmp(a: &CachedTurn, b: &CachedTurn, descending: bool) -> std::cmp::Ordering {
+    let by_time = a.timestamp().cmp(b.timestamp());
+    let by_time = if descending {
+        by_time.reverse()
+    } else {
+        by_time
+    };
+    by_time.then_with(|| a.id().cmp(b.id()))
+}
+
+/// `turn` as [`TickReads`] keeps it: with its text only when `queueable`.
+fn cached(turn: PendingTurn, queueable: &impl Fn(&str, &str) -> bool) -> CachedTurn {
+    if queueable(&turn.id, &turn.timestamp) {
+        CachedTurn::Full(turn)
+    } else {
+        CachedTurn::Consumed {
+            id: turn.id,
+            timestamp: turn.timestamp,
+        }
+    }
 }
 
 impl WatcherState {
@@ -255,14 +525,38 @@ impl WatcherState {
             .per_processor
             .entry(processor_id.to_string())
             .or_default();
-        if !entry.items.iter().any(|t| t.id == turn.id) {
+        let id = QueuedId(turn.id.clone());
+        if !entry.ids.contains(&id) {
             if entry.items.is_empty() {
                 // First item of a fresh window — start the max-wait clock.
                 entry.first_touched_ms = now_ms;
             }
+            entry.ids.insert(id);
             entry.items.push(turn);
             entry.last_touched_ms = now_ms;
         }
+    }
+
+    /// Drop queued turns of `processor_id` that `keep` rejects, and their ids.
+    /// A turn queued at an earlier tick can since have been consumed by a
+    /// completed run (here or on a peer) or have left the source window; the
+    /// drain hands the queue over as it is, so the tick prunes it first.
+    pub fn retain_pending(
+        &mut self,
+        processor_id: &str,
+        mut keep: impl FnMut(&PendingTurn) -> bool,
+    ) {
+        let Some(entry) = self.per_processor.get_mut(processor_id) else {
+            return;
+        };
+        let ids = &mut entry.ids;
+        entry.items.retain(|turn| {
+            let kept = keep(turn);
+            if !kept {
+                ids.remove(&QueuedId(turn.id.clone()));
+            }
+            kept
+        });
     }
 
     /// Read-only view of a processor's pending state (tests + observability).
@@ -306,7 +600,11 @@ impl WatcherState {
         // already rejects it) — a 0 would take nothing, drain nothing, and the
         // caller would run an empty pass every tick without the queue emptying.
         let take = entry.items.len().min(cfg.batch_max.max(1));
-        Some(entry.items.drain(..take).collect())
+        let batch: Vec<PendingTurn> = entry.items.drain(..take).collect();
+        for turn in &batch {
+            entry.ids.remove(&QueuedId(turn.id.clone()));
+        }
+        Some(batch)
     }
 
     /// Record that this tick stood down for a batch's online elected author.
@@ -352,6 +650,17 @@ impl WatcherState {
             .is_some_and(|until| *until > now_ms)
     }
 
+    /// The earliest deferral that is still running at `now_ms`, as the unix
+    /// millis it ends: its turns may be queued again then, with no link
+    /// change to wake the loop.
+    pub fn next_deferral_end_ms(&self, now_ms: i64) -> Option<i64> {
+        self.deferred
+            .values()
+            .flat_map(|m| m.values().copied())
+            .filter(|until| *until > now_ms)
+            .min()
+    }
+
     /// Whether any processor has turns waiting to be batched, declared or
     /// not. Used only when the declared processors could not be loaded.
     pub fn has_pending(&self) -> bool {
@@ -359,9 +668,9 @@ impl WatcherState {
     }
 
     /// Whether any of the declared `processor_ids` has turns waiting to be
-    /// batched. While this holds the watch loop polls at
-    /// [`AUTO_PROCESSOR_TICK_MS`], so `debounce_ms` and `max_wait_ms` keep
-    /// their resolution. Scoped to declared processors because a removed
+    /// batched. While this holds and a model can run them, the watch loop
+    /// polls at [`AUTO_PROCESSOR_TICK_MS`], so `debounce_ms` and `max_wait_ms`
+    /// keep their resolution ([`TickOutcome`]). Scoped to declared processors because a removed
     /// processor's queue is never drained again and must not pin the loop at
     /// the base rate.
     pub fn has_pending_for<'a>(&self, processor_ids: impl IntoIterator<Item = &'a str>) -> bool {
@@ -373,20 +682,27 @@ impl WatcherState {
     }
 }
 
-/// Poll interval of an auto-processor watch loop while turns are pending.
+/// Tick interval of an auto-processor watch loop while turns are pending (and
+/// a model can run them, see [`TickOutcome::NoModel`]), so
+/// `debounce_ms` and `max_wait_ms` keep their resolution. Also how long the
+/// loop lets a burst of link writes settle before the tick they woke, and the
+/// slice it sleeps in, so teardown is seen this promptly.
 pub const AUTO_PROCESSOR_TICK_MS: u64 = 500;
 
-/// Longest interval an idle watch loop backs off to (#1072). Every tick costs
-/// a `load_processors` store query plus, per config, the transcript and cursor
-/// queries, whether or not anything changed; one loop runs per perspective and
-/// online user. Backing off cuts an idle loop from 2 ticks/s to one per 4 s.
-/// The price is up to this much extra delay before the first new turn after a
-/// quiet spell is noticed.
+/// Longest back-off between two store-reading ticks of an idle loop that link
+/// writes keep waking (#1072). A write that adds no turn (a reaction, another
+/// agent's output arriving, a peer syncing) still changes the store, so the
+/// tick it wakes reads configs, transcripts and cursors again; without a floor
+/// a store busy with such writes would be read every
+/// [`AUTO_PROCESSOR_TICK_MS`]. See [`next_tick_delay_ms`].
 pub const AUTO_PROCESSOR_IDLE_TICK_MAX_MS: u64 = 4_000;
 
-/// Delay before the next watch-loop tick: [`AUTO_PROCESSOR_TICK_MS`] after a
-/// tick that left turns pending, otherwise double the previous delay, capped at
-/// [`AUTO_PROCESSOR_IDLE_TICK_MAX_MS`].
+/// The shortest time from one store-reading tick to the next write-woken one:
+/// [`AUTO_PROCESSOR_TICK_MS`] after a tick that left turns pending
+/// ([`TickOutcome::polls_at_base_rate`]), otherwise
+/// double the previous value, capped at [`AUTO_PROCESSOR_IDLE_TICK_MAX_MS`].
+/// It is measured from the last tick that read the store, so the first write
+/// after a quiet spell is still picked up after [`AUTO_PROCESSOR_TICK_MS`].
 pub fn next_tick_delay_ms(previous_ms: u64, had_pending: bool) -> u64 {
     if had_pending {
         return AUTO_PROCESSOR_TICK_MS;
@@ -394,6 +710,139 @@ pub fn next_tick_delay_ms(previous_ms: u64, had_pending: bool) -> u64 {
     previous_ms
         .saturating_mul(2)
         .clamp(AUTO_PROCESSOR_TICK_MS, AUTO_PROCESSOR_IDLE_TICK_MAX_MS)
+}
+
+/// What a tick of the watch loop found, which sets how soon the next runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TickOutcome {
+    /// No declared processor has a turn waiting.
+    Idle,
+    /// Turns are waiting to be batched or retried: poll at
+    /// [`AUTO_PROCESSOR_TICK_MS`], so `debounce_ms` and `max_wait_ms` keep
+    /// their resolution.
+    Pending,
+    /// Turns are waiting, but no pass could run them: the executor has no
+    /// LLM ([`model_available`]). Nothing is drained, so the turns stay
+    /// queued with their debounce clocks, and the loop backs off as if idle
+    /// until a write, a model becoming available ([`model_readiness`]) or the
+    /// idle fallback brings the next tick.
+    NoModel,
+}
+
+impl TickOutcome {
+    /// Whether the loop must tick again after [`AUTO_PROCESSOR_TICK_MS`]
+    /// rather than back off.
+    pub fn polls_at_base_rate(self) -> bool {
+        self == TickOutcome::Pending
+    }
+}
+
+/// Whether a pass could reach a model: every pass prompts the executor's
+/// default LLM ([`run_one_pass`]), so with none set and spawned each would
+/// claim its batch and then fail. Tests answer through [`test_hooks`]
+/// (available unless a test says otherwise): the stand-in interpretation
+/// needs no model.
+pub async fn model_available() -> bool {
+    #[cfg(test)]
+    {
+        test_hooks::model_available()
+    }
+    #[cfg(not(test))]
+    {
+        match crate::ai_service::AIService::global_instance().await {
+            Ok(ai) => ai.default_llm_ready().await,
+            Err(_) => false,
+        }
+    }
+}
+
+/// A receiver that changes when a model may have become available
+/// ([`AIService::watch_llm_readiness`](crate::ai_service::AIService::watch_llm_readiness)),
+/// so a loop waiting after [`TickOutcome::NoModel`] ticks again at once.
+/// `None` before the AI service is up.
+pub async fn model_readiness() -> Option<tokio::sync::watch::Receiver<u64>> {
+    #[cfg(test)]
+    {
+        test_hooks::model_readiness()
+    }
+    #[cfg(not(test))]
+    {
+        crate::ai_service::AIService::global_instance()
+            .await
+            .ok()
+            .map(|ai| ai.watch_llm_readiness())
+    }
+}
+
+/// Longest an idle watch loop sleeps when no link changes. A link write wakes
+/// it at once ([`wait_for_tick`]); a tick with no write since the last runs no
+/// store query ([`TickReads`]), so this fallback only re-applies the
+/// time-based filters (`source_window_ms`) to what the loop already read.
+pub const AUTO_PROCESSOR_IDLE_FALLBACK_MS: u64 = 60_000;
+
+/// How long an idle loop (no turn pending) waits for a link write before it
+/// ticks anyway: [`AUTO_PROCESSOR_IDLE_FALLBACK_MS`], or less when a deferral
+/// ends sooner, since its turns may be queued again without any write.
+pub fn idle_wait_ms(watcher: &WatcherState, now_ms: i64) -> u64 {
+    match watcher.next_deferral_end_ms(now_ms) {
+        Some(until) => {
+            (until.saturating_sub(now_ms).max(0) as u64).min(AUTO_PROCESSOR_IDLE_FALLBACK_MS)
+        }
+        None => AUTO_PROCESSOR_IDLE_FALLBACK_MS,
+    }
+}
+
+/// How a [`wait_for_tick`] ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaitEnd {
+    Teardown,
+    /// The store took a write.
+    Write,
+    /// A model may have become available ([`model_readiness`]).
+    ModelReady,
+    Elapsed,
+}
+
+/// Sleep up to `ms`, in slices of at most [`AUTO_PROCESSOR_TICK_MS`] so
+/// `teardown` is seen promptly. With `writes`, return as soon as the store's
+/// write generation moves past what the receiver has seen; with `model`, as
+/// soon as the model readiness watch does.
+pub async fn wait_for_tick(
+    teardown: &AtomicBool,
+    ms: u64,
+    mut writes: Option<&mut tokio::sync::watch::Receiver<u64>>,
+    mut model: Option<&mut tokio::sync::watch::Receiver<u64>>,
+) -> WaitEnd {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(ms);
+    loop {
+        if teardown.load(Ordering::Acquire) {
+            return WaitEnd::Teardown;
+        }
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return WaitEnd::Elapsed;
+        }
+        let slice = (deadline - now).min(std::time::Duration::from_millis(AUTO_PROCESSOR_TICK_MS));
+        let (mut writes_closed, mut model_closed) = (false, false);
+        tokio::select! {
+            changed = async { writes.as_deref_mut()?.changed().await.ok() }, if writes.is_some() => match changed {
+                Some(()) => return WaitEnd::Write,
+                // The store is gone; only the timer is left.
+                None => writes_closed = true,
+            },
+            changed = async { model.as_deref_mut()?.changed().await.ok() }, if model.is_some() => match changed {
+                Some(()) => return WaitEnd::ModelReady,
+                None => model_closed = true,
+            },
+            _ = tokio::time::sleep(slice) => {}
+        }
+        if writes_closed {
+            writes = None;
+        }
+        if model_closed {
+            model = None;
+        }
+    }
 }
 
 /// Result of a single [`run_one_pass`] call.
@@ -1377,6 +1826,13 @@ pub(crate) mod test_hooks {
         pub lose_lease_in_interpretation: bool,
         /// Set by either of the two above; read by `LeaseGuard::is_healthy`.
         pub lease_lost: Arc<AtomicBool>,
+        /// The executor has no model: [`model_available`] answers `false`.
+        pub no_model: Arc<AtomicBool>,
+        /// Stands in for the AI service's readiness watch
+        /// ([`model_readiness`]).
+        pub model_readiness: Option<Arc<tokio::sync::watch::Sender<u64>>>,
+        /// How many times a tick asked [`model_available`].
+        pub model_checks: Arc<std::sync::atomic::AtomicUsize>,
     }
 
     tokio::task_local! {
@@ -1439,6 +1895,22 @@ pub(crate) mod test_hooks {
         ))
     }
 
+    pub(super) fn model_available() -> bool {
+        HOOKS
+            .try_with(|h| {
+                h.model_checks.fetch_add(1, Ordering::Relaxed);
+                !h.no_model.load(Ordering::Relaxed)
+            })
+            .unwrap_or(true)
+    }
+
+    pub(super) fn model_readiness() -> Option<tokio::sync::watch::Receiver<u64>> {
+        HOOKS
+            .try_with(|h| h.model_readiness.as_ref().map(|tx| tx.subscribe()))
+            .ok()
+            .flatten()
+    }
+
     pub(super) fn lease_lost() -> bool {
         HOOKS
             .try_with(|h| h.lose_lease || h.lease_lost.load(Ordering::Relaxed))
@@ -1490,6 +1962,24 @@ mod tests {
 
     fn ids(turns: &[PendingTurn]) -> Vec<String> {
         turns.iter().map(|t| t.id.clone()).collect()
+    }
+
+    /// A queued turn that a run consumed while the processor waited (no
+    /// model, or past a batch cap) is pruned before the drain, and its id can
+    /// be queued again later.
+    #[test]
+    fn retain_pending_drops_turns_that_are_no_longer_queueable() {
+        let mut w = WatcherState::new();
+        rec(&mut w, "p", "a", 0);
+        rec(&mut w, "p", "b", 0);
+        rec(&mut w, "p", "c", 0);
+        w.retain_pending("p", |t| t.id != "b");
+        assert_eq!(ids(&w.pending_for("p").unwrap().items), vec!["a", "c"]);
+        // The pruned id is free again: a fresh record queues it.
+        rec(&mut w, "p", "b", 1);
+        assert_eq!(ids(&w.pending_for("p").unwrap().items), vec!["a", "c", "b"]);
+        // An unknown processor is a no-op.
+        w.retain_pending("q", |_| false);
     }
 
     // ---- turn_id -----------------------------------------------------------
@@ -1633,10 +2123,10 @@ mod tests {
 
     // ---- WatcherState -------------------------------------------------------
 
-    /// Idle ticks double the delay up to the ceiling; one tick that leaves
-    /// turns pending drops straight back to the base rate (#1072).
+    /// Write-woken idle ticks back off: the floor doubles up to the ceiling,
+    /// and one tick that leaves turns pending drops it to the base rate.
     #[test]
-    fn tick_delay_backs_off_while_idle_and_resets_when_turns_are_pending() {
+    fn idle_floor_backs_off_and_resets_when_turns_are_pending() {
         let mut delay = AUTO_PROCESSOR_TICK_MS;
         let mut idle_delays = Vec::new();
         for _ in 0..6 {
@@ -1653,6 +2143,25 @@ mod tests {
             next_tick_delay_ms(u64::MAX, false),
             AUTO_PROCESSOR_IDLE_TICK_MAX_MS
         );
+    }
+
+    /// An idle loop waits the long fallback for a link write, or less when a
+    /// deferral ends first: a backed-off batch is retried at the claim's
+    /// expiry whether or not a link changed.
+    #[test]
+    fn idle_wait_is_the_fallback_unless_a_deferral_ends_sooner() {
+        let mut w = WatcherState::new();
+        assert_eq!(idle_wait_ms(&w, 1_000), AUTO_PROCESSOR_IDLE_FALLBACK_MS);
+        w.defer_turns("p", &["a".into()], 1_000, 20_000);
+        assert_eq!(idle_wait_ms(&w, 1_000), 20_000);
+        assert_eq!(idle_wait_ms(&w, 16_000), 5_000);
+        assert_eq!(
+            idle_wait_ms(&w, 21_000),
+            AUTO_PROCESSOR_IDLE_FALLBACK_MS,
+            "an ended deferral no longer shortens the wait"
+        );
+        w.defer_turns("p", &["b".into()], 21_000, 600_000);
+        assert_eq!(idle_wait_ms(&w, 21_000), AUTO_PROCESSOR_IDLE_FALLBACK_MS);
     }
 
     /// `has_pending` is what keeps the loop at the base rate: true from the
@@ -2571,5 +3080,33 @@ mod tests {
             msg.contains("must be a `Raw` scope"),
             "error mentions the shape mismatch: {msg}"
         );
+    }
+
+    /// A merged transcript keeps each turn as a fresh read would: a kept
+    /// turn that is no longer queueable (consumed since, or out of the
+    /// window) drops its text, and the result equals `set_transcript` over
+    /// the same turns.
+    #[test]
+    fn a_merged_transcript_drops_the_text_of_turns_no_longer_queueable() {
+        let c = cfg("merge", 0, 32);
+        let mut reads = TickReads::default();
+        reads.set_transcript(&c, 1, vec![pt("a"), pt("b")], |_, _| true);
+
+        // Since then "a" was consumed, and "c" was added.
+        let queueable = |id: &str, _: &str| id != "a";
+        let merged = reads.merge_transcript(&c, 2, vec![pt("c")], queueable);
+        assert_eq!(
+            merged[0],
+            CachedTurn::Consumed {
+                id: "a".into(),
+                timestamp: "ts".into(),
+            },
+            "a turn no longer queueable keeps no text"
+        );
+
+        let mut fresh = TickReads::default();
+        let read = fresh.set_transcript(&c, 2, vec![pt("a"), pt("b"), pt("c")], queueable);
+        assert_eq!(*merged, *read, "the merge holds what a fresh read holds");
+        assert_eq!(reads.transcript(&c), Some((2, merged)));
     }
 }

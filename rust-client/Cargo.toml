@@ -1,6 +1,6 @@
 [package]
 name = "ad4m-client"
-version = "0.13.1-staging.11"
+version = "0.13.1-staging.12"
 edition = "2021"
 authors = ["Nicolas Luck <nicolas@coasys.org>"]
 description = "Client library wrapping AD4M's WebSocket RPC interface"
@@ -31,6 +31,16 @@ unicode-width = "0.1"
 rand = "0.8"
 regex = "1"
 maplit = "1"
+dirs = "5"
+reqwest = { version = "0.11.20", features = ["json", "native-tls"] }
+# The connect token store: a cross-process lock and atomic replace.
+fd-lock = "4"
+tempfile = "3"
 
 [dev-dependencies]
-tempfile = "3"
+# The connect example reads passwords and codes without echo.
+rpassword = "7"
+
+[target.'cfg(unix)'.dev-dependencies]
+# The connect example restores the terminal on ^C.
+libc = "0.2"

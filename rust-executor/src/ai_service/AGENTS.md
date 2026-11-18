@@ -63,10 +63,10 @@ The registry of upstream model servers (an endpoint owns URL, key, capabilities,
     60 s).
   - The remote chat calls of a model worker (`within_endpoint_limits` in
     `ai_service/mod.rs`): a call that is not a stream gets the slot and the timeout from
-    the slot wait on (default `CHAT_TIMEOUT`, 600 s, the provider clients' own
-    `CHAT_REQUEST_TIMEOUT`). A streaming call gets the slot only: neither its wait for the
-    slot nor the stream has `request_timeout`; the provider client's 600 s bounds the call
-    once it holds the slot.
+    the slot wait on (default `CHAT_TIMEOUT`, 600 s). A streaming call gets the slot only.
+    Its timer is the provider client. An OpenAI-protocol client uses
+    `endpoints::request_timeout` (the endpoint's `request_timeout_secs`, else 600 s) and
+    keeps a value above 600 s. Anthropic and Ollama clients stay at 600 s.
   - Not covered: Ollama `pull_model` (its own idle timeout, `PULL_IDLE_TIMEOUT`) and
     `delete_upstream_model` (30 s), health checks and discovery (`PROBE_TIMEOUT`). None
     takes a slot.

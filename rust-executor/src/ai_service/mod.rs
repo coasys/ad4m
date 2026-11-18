@@ -15,6 +15,7 @@ use std::pin::Pin;
 pub mod endpoints;
 mod error;
 pub mod harness;
+mod llm_ready;
 pub mod local;
 pub mod providers;
 pub(crate) mod transcription;
@@ -220,6 +221,9 @@ pub struct AIService {
     /// start). Local AI's autostart waits for it: a load after the runtimes register would
     /// put back the clients of the endpoint settings from before.
     loaded: Arc<tokio::sync::watch::Sender<bool>>,
+    /// Bumped whenever the default LLM may have become ready
+    /// ([`Self::watch_llm_readiness`]).
+    llm_readiness: Arc<tokio::sync::watch::Sender<u64>>,
 }
 
 /// What prompts one LLM: the client of its endpoint, and the id the endpoint knows the
@@ -397,6 +401,12 @@ fn estimate_turns_tokens(turns: &[ChatTurn]) -> usize {
             .sum::<usize>()
 }
 
+/// The estimated input tokens of `prompt` sent on `task`: its system prompt and
+/// examples included, counted as [`AIService::prompt_interpretation_pass`] counts them.
+pub(crate) fn estimate_task_prompt_tokens(task: &AITask, prompt: &str) -> usize {
+    estimate_turns_tokens(&turns_for_task(task, prompt.to_string()))
+}
+
 /// A reasoning reply that did not produce a usable answer: nothing came back,
 /// or the provider cut it at the output cap / window.
 fn interpretation_reply_needs_no_thinking(result: &PromptResult) -> bool {
@@ -470,6 +480,7 @@ impl AIService {
             transcription_streams: Arc::new(Mutex::new(HashMap::new())),
             // Nothing to load.
             loaded: Arc::new(tokio::sync::watch::channel(true).0),
+            llm_readiness: Arc::new(tokio::sync::watch::Sender::new(0)),
         }
     }
 
@@ -543,6 +554,7 @@ impl AIService {
             ModelType::Llm => {
                 let chat = ChatModel::new(model, endpoint)?;
                 self.llms.lock().await.insert(model.id.clone(), chat);
+                self.note_llm_readiness();
             }
             ModelType::Embedding => {
                 let embedder = Embedder {
@@ -636,7 +648,11 @@ impl AIService {
 
     pub async fn set_default_model(&self, model_type: ModelType, model_id: String) -> Result<()> {
         // Tasks on "default" resolve it when they are prompted: nothing to move.
-        crate::db_backend::db_backend().set_default_model(model_type, &model_id)
+        crate::db_backend::db_backend().set_default_model(model_type.clone(), &model_id)?;
+        if ModelType::Llm == model_type {
+            self.note_llm_readiness();
+        }
+        Ok(())
     }
 
     /// Every model, as RPC results show it.
@@ -977,6 +993,13 @@ impl AIService {
             }
         }
         Self::model_context_tokens(model_id)
+    }
+
+    /// The context window `model_id`'s requests run at, in tokens, when it is
+    /// known: the same value [`Self::prompt_interpretation_pass`] checks a
+    /// prompt against. Interpretation sizes its `existing` block from it.
+    pub(crate) async fn context_window_tokens(&self, model_id: &str) -> Option<usize> {
+        self.resolved_context_tokens(model_id).await
     }
 
     /// How many bytes of one outgoing request's message list the model's
