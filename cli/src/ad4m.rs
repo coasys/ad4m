@@ -10,6 +10,7 @@ extern crate rustyline;
 extern crate tokio;
 
 mod formatting;
+mod login;
 mod startup;
 mod util;
 
@@ -26,8 +27,9 @@ mod runtime;
 use crate::{
     agent::*, expression::*, languages::*, neighbourhoods::*, perspectives::*, runtime::*,
 };
-use ad4m_client::*;
-use anyhow::{Context, Result};
+use ad4m_client::connect::normalize_base_url;
+use ad4m_client::Ad4mClient;
+use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use startup::executor_data_path;
 
@@ -111,33 +113,56 @@ enum Domain {
     },
     /// Print the executor log
     Log,
+
+    /// Log in to an executor and store a token for that URL
+    Login {
+        /// Executor URL (`http://` or `ws://`)
+        url: String,
+
+        /// Email for a multi-user executor
+        #[arg(long)]
+        email: Option<String>,
+
+        /// Permit a plaintext executor that is not on loopback
+        #[arg(long)]
+        allow_insecure_remote: bool,
+    },
 }
 
-async fn get_ad4m_client(args: &ClapApp) -> Result<Ad4mClient> {
-    let executor_url = if let Some(custom_url) = args.executor_url.clone() {
+async fn get_ad4m_client(args: &ClapApp, domain: &Domain) -> Result<Ad4mClient> {
+    let executor_url = normalize_base_url(&if let Some(custom_url) = args.executor_url.clone() {
         custom_url
     } else {
         crate::startup::get_executor_url()?
-    };
+    });
 
     let cap_token = if let Some(admin_credential) = &args.admin_credential {
         admin_credential.clone()
     } else if args.no_capability {
-        "".to_string()
+        String::new()
     } else {
-        match &args.domain {
-            Domain::Log => "".to_string(),
+        match domain {
+            Domain::Log => String::new(),
             Domain::Agent {
                 command:
                     AgentFunctions::Lock
                     | AgentFunctions::Unlock { .. }
                     | AgentFunctions::Generate { .. },
-            } => "".to_string(),
-            _ => startup::get_cap_token(executor_url.clone()).await?,
+            } => String::new(),
+            Domain::Login { .. } => String::new(),
+            _ => match login::stored_token(&executor_url)? {
+                Some(token) => token,
+                None if login::is_loopback(&executor_url) => String::new(),
+                None => {
+                    bail!("No token stored for {executor_url}. Run `ad4m login {executor_url}`.")
+                }
+            },
         }
     };
 
-    let ad4m_client = Ad4mClient::connect(executor_url, cap_token).await?;
+    let ad4m_client = Ad4mClient::connect(executor_url.clone(), cap_token)
+        .await
+        .with_context(|| format!("cannot connect to {executor_url}"))?;
 
     Ok(ad4m_client)
 }
@@ -146,9 +171,25 @@ async fn get_ad4m_client(args: &ClapApp) -> Result<Ad4mClient> {
 async fn main() -> Result<()> {
     let args = ClapApp::parse();
 
-    let ad4m_client = get_ad4m_client(&args).await?;
+    if let Domain::Login {
+        url,
+        email,
+        allow_insecure_remote,
+    } = &args.domain
+    {
+        return login::login(
+            url,
+            email.clone(),
+            args.admin_credential.as_deref(),
+            *allow_insecure_remote,
+        )
+        .await;
+    }
+
+    let ad4m_client = get_ad4m_client(&args, &args.domain).await?;
 
     match args.domain {
+        Domain::Login { .. } => unreachable!("login returns above"),
         Domain::Agent { command } => agent::run(ad4m_client, command).await?,
         Domain::Languages { command } => languages::run(ad4m_client, command).await?,
         Domain::Perspectives { command } => perspectives::run(ad4m_client, command).await?,
