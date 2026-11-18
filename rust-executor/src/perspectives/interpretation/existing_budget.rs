@@ -10,10 +10,11 @@
 //! - **Budget.** The block gets [`EXISTING_SHARE`] of the window that is left
 //!   after the rest of the prompt (system prompt, examples, schema, transcript,
 //!   flows) and [`OUTPUT_RESERVE_TOKENS`].
-//! - **Order.** Rows under the pass's `base_prefix` (the records this
-//!   processor's scope minted) come first. Then, when the pass has a semantic
-//!   dedup embedding model, the rows most similar to the transcript; else, and
-//!   when embedding fails, the most recently changed rows.
+//! - **Order** ([`fill_stages`]). (a) Rows under the pass's `base_prefix`
+//!   (the records this processor's scope minted). (b) The most recently
+//!   changed rows, up to half of the budget (a) left. (c) The rest: the rows
+//!   most similar to the transcript when the pass has a semantic dedup
+//!   embedding model, else (and when embedding fails) more recent rows.
 //! - **Short ids** (the single-shot path only, see [`Compact`]): each id is
 //!   shown as a short handle (`P1`, `P2`, ...). [`Handles`] maps the model's
 //!   output back to the full ids. Values are always shown whole: a row that
@@ -157,6 +158,10 @@ pub(crate) struct PromptExisting {
     pub rows_shown: usize,
     /// Estimated tokens of the shown rows.
     pub tokens: usize,
+    /// Full ids of the shown instances, in fill order.
+    pub order: Vec<String>,
+    /// Each fill stage's name and how many instances it added.
+    pub stages: Vec<(&'static str, usize)>,
 }
 
 /// Milliseconds since the epoch of a stored timestamp (epoch milliseconds or
@@ -169,16 +174,111 @@ fn timestamp_millis(ts: &str) -> i64 {
     })
 }
 
-/// Pick the rows of `existing` that fit in `budget_tokens`, best first:
+/// The newest timestamp of an instance's rows, in epoch milliseconds.
+fn recency(rows: &[InstanceContext]) -> i64 {
+    rows.iter()
+        .map(|r| timestamp_millis(&r.updated_at))
+        .max()
+        .unwrap_or(0)
+}
+
+/// One step of the fill: the rows it offers, best first, and the share of the
+/// tokens still free when it starts that it may use. Rows an earlier stage
+/// took are skipped.
+struct FillStage<'a> {
+    name: &'static str,
+    rows: Vec<&'a String>,
+    share: f64,
+}
+
+/// Every instance id, newest first (then by id).
+fn by_recency(existing: &ExistingInstances) -> Vec<&String> {
+    let mut ids: Vec<&String> = existing.keys().collect();
+    ids.sort_by(|a, b| {
+        recency(&existing[*b])
+            .cmp(&recency(&existing[*a]))
+            .then_with(|| a.cmp(b))
+    });
+    ids
+}
+
+/// (a) The rows under `base_prefix` (the pass's own records), newest first.
+/// They may use the whole budget.
+fn scope_stage<'a>(newest_first: &[&'a String], base_prefix: &str) -> FillStage<'a> {
+    FillStage {
+        name: "scope",
+        rows: newest_first
+            .iter()
+            .copied()
+            .filter(|id| !base_prefix.is_empty() && id.starts_with(base_prefix))
+            .collect(),
+        share: 1.0,
+    }
+}
+
+/// (b) The most recently changed rows, at most half of what (a) left.
+fn recent_stage<'a>(newest_first: &[&'a String]) -> FillStage<'a> {
+    FillStage {
+        name: "recent",
+        rows: newest_first.to_vec(),
+        share: 0.5,
+    }
+}
+
+/// (c) The rest of the budget: the rows most similar to the batch when there
+/// are `scores` (rows without a score last, newest first); else more of the
+/// most recent rows.
+fn rest_stage<'a>(
+    newest_first: &[&'a String],
+    scores: Option<&HashMap<String, f32>>,
+) -> FillStage<'a> {
+    let Some(scores) = scores else {
+        return FillStage {
+            name: "more_recent",
+            rows: newest_first.to_vec(),
+            share: 1.0,
+        };
+    };
+    let mut rows = newest_first.to_vec();
+    // Stable: equal scores keep the recency order. `None` sorts after every
+    // score.
+    rows.sort_by(|a, b| {
+        let (a, b) = (scores.get(*a), scores.get(*b));
+        b.partial_cmp(&a).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    FillStage {
+        name: "similar",
+        rows,
+        share: 1.0,
+    }
+}
+
+/// The fill stages in order (Nico, 2026-11-18): (a) the pass's own records,
+/// (b) the most recent rows up to half of the rest, (c) the most similar (or
+/// more recent) rows. A new stage, for example the structural neighbours of
+/// (a), goes into this list.
+fn fill_stages<'a>(
+    existing: &'a ExistingInstances,
+    base_prefix: &str,
+    scores: Option<&HashMap<String, f32>>,
+) -> Vec<FillStage<'a>> {
+    let newest_first = by_recency(existing);
+    vec![
+        scope_stage(&newest_first, base_prefix),
+        recent_stage(&newest_first),
+        rest_stage(&newest_first, scores),
+    ]
+}
+
+/// Pick the rows of `existing` that fit in `budget_tokens`, stage by stage
+/// (see [`fill_stages`]). A stage takes its rows in order and leaves out a
+/// row that does not fit in its share, then goes on with the next row, so
+/// one large row does not stop the fill. Rows that fit nowhere are not
+/// shown.
 ///
-/// 1. rows whose id starts with `base_prefix` (the pass's own records);
-/// 2. inside each group, by `scores` (higher first) when given, then by
-///    `updated_at` (newest first), then by id.
-///
-/// An instance in several classes is one unit: all its rows or none. The fill
-/// stops at the first unit that does not fit, so a lower-ranked row never
-/// takes the place of a higher-ranked one. With [`Compact::Yes`] each shown
-/// id becomes a handle `P1`, `P2`, ... in rank order.
+/// An instance in several classes is one unit: all its rows or none. With
+/// [`Compact::Yes`] each shown id becomes a handle `P1`, `P2`, ... in fill
+/// order.
 pub(crate) fn select_existing(
     existing: &ExistingInstances,
     base_prefix: &str,
@@ -186,61 +286,59 @@ pub(crate) fn select_existing(
     scores: Option<&HashMap<String, f32>>,
     compact: Compact,
 ) -> PromptExisting {
-    let in_scope = |id: &str| !base_prefix.is_empty() && id.starts_with(base_prefix);
-    let score = |id: &str| scores.and_then(|s| s.get(id)).copied();
-    let recency = |rows: &[InstanceContext]| {
-        rows.iter()
-            .map(|r| timestamp_millis(&r.updated_at))
-            .max()
-            .unwrap_or(0)
-    };
-
-    let mut units: Vec<(&String, &Vec<InstanceContext>)> = existing.iter().collect();
-    units.sort_by(|(a_id, a_rows), (b_id, b_rows)| {
-        in_scope(b_id)
-            .cmp(&in_scope(a_id))
-            .then_with(|| {
-                // `None` (no score) after every score.
-                let (a, b) = (score(a_id), score(b_id));
-                b.partial_cmp(&a).unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .then_with(|| recency(b_rows).cmp(&recency(a_rows)))
-            .then_with(|| a_id.cmp(b_id))
-    });
-
     let mut out = PromptExisting {
         shown: ExistingInstances::new(),
         handles: Handles::default(),
         rows_total: existing.len(),
         rows_shown: 0,
         tokens: 0,
+        order: Vec::new(),
+        stages: Vec::new(),
     };
-    for (id, rows) in units {
-        let shown_id = match compact {
-            Compact::Yes => format!("P{}", out.rows_shown + 1),
-            Compact::No => id.clone(),
-        };
-        let shown_rows: Vec<InstanceContext> = rows
-            .iter()
-            .map(|r| InstanceContext {
-                id: shown_id.clone(),
-                ..r.clone()
-            })
-            .collect();
-        // Each row costs its JSON plus the comma between rows.
-        let cost: usize = shown_rows
-            .iter()
-            .map(|r| estimate_token_count(&existing_entry_json(r).to_string()) + 1)
-            .sum();
-        if out.tokens + cost > budget_tokens {
-            break;
+    let mut taken: HashSet<&String> = HashSet::new();
+    for stage in fill_stages(existing, base_prefix, scores) {
+        let free = budget_tokens - out.tokens;
+        let cap = (free as f64 * stage.share) as usize;
+        let mut used = 0;
+        let mut rows_taken = 0;
+        for id in stage.rows {
+            if used >= cap {
+                break;
+            }
+            if taken.contains(id) {
+                continue;
+            }
+            let shown_id = match compact {
+                Compact::Yes => format!("P{}", out.rows_shown + 1),
+                Compact::No => id.clone(),
+            };
+            let shown_rows: Vec<InstanceContext> = existing[id]
+                .iter()
+                .map(|r| InstanceContext {
+                    id: shown_id.clone(),
+                    ..r.clone()
+                })
+                .collect();
+            // Each row costs its JSON plus the comma between rows.
+            let cost: usize = shown_rows
+                .iter()
+                .map(|r| estimate_token_count(&existing_entry_json(r).to_string()) + 1)
+                .sum();
+            if used + cost > cap {
+                continue;
+            }
+            used += cost;
+            rows_taken += 1;
+            taken.insert(id);
+            out.tokens += cost;
+            out.rows_shown += 1;
+            out.order.push(id.clone());
+            if compact == Compact::Yes {
+                out.handles.to_id.insert(shown_id.clone(), id.clone());
+            }
+            out.shown.insert(shown_id, shown_rows);
         }
-        out.tokens += cost;
-        out.rows_shown += 1;
-        if compact == Compact::Yes {
-            out.handles.to_id.insert(shown_id.clone(), id.clone());
-        }
-        out.shown.insert(shown_id, shown_rows);
+        out.stages.push((stage.name, rows_taken));
     }
     out
 }
@@ -340,8 +438,9 @@ pub(crate) async fn similarity_scores(
 
 /// The `existing` rows for one pass's prompt: the budget from the model's
 /// window and the rest of the prompt, then [`select_existing`]. The
-/// similarity order runs only when the rows do not all fit and `embed_model`
-/// is set. Logs one line: rows total, rows shown, estimated tokens.
+/// similarity order runs only when `embed_model` is set and
+/// [`needs_similarity`]. Logs one line: rows total, rows shown, estimated
+/// tokens, rows per fill stage.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn existing_for_prompt(
     task: &AITask,
@@ -369,18 +468,19 @@ pub(crate) async fn existing_for_prompt(
     let budget = existing_budget_tokens(window, other_tokens);
 
     let mut view = select_existing(existing, base_prefix, budget, None, compact);
-    let mut order = "recency";
-    if view.rows_shown < view.rows_total {
-        if let Some(model) = embed_model {
-            if let Some(scores) = similarity_scores(model, transcript, existing).await {
-                view = select_existing(existing, base_prefix, budget, Some(&scores), compact);
-                order = "similarity";
-            }
+    if let Some(model) = embed_model.filter(|_| needs_similarity(budget, &view)) {
+        if let Some(scores) = similarity_scores(model, transcript, existing).await {
+            view = select_existing(existing, base_prefix, budget, Some(&scores), compact);
         }
     }
+    let stages: Vec<String> = view
+        .stages
+        .iter()
+        .map(|(name, n)| format!("{name}:{n}"))
+        .collect();
     log::info!(
         "🧠 interpretation existing rows_total={} rows_shown={} tokens_est={} budget={} \
-         window={} order={}",
+         window={} stages={}",
         view.rows_total,
         view.rows_shown,
         view.tokens,
@@ -389,9 +489,16 @@ pub(crate) async fn existing_for_prompt(
             || format!("{ASSUMED_WINDOW_TOKENS} (assumed)"),
             |w| w.to_string()
         ),
-        order
+        stages.join(",")
     );
     view
+}
+
+/// Whether the similarity order can change what `view` shows: some rows are
+/// left out and the budget is not 0. Embedding every row costs one call per
+/// 64 texts, so it does not run when nothing more could be shown.
+fn needs_similarity(budget: usize, view: &PromptExisting) -> bool {
+    budget > 0 && view.rows_shown < view.rows_total
 }
 
 #[cfg(test)]
@@ -418,11 +525,141 @@ mod tests {
         out
     }
 
-    /// Full ids of the shown rows, in handle order (`P1` first).
+    /// Full ids of the shown rows, in fill order. A compact view names them
+    /// `P1`, `P2`, ... in the same order.
     fn shown_ids(view: &PromptExisting) -> Vec<String> {
-        (1..=view.rows_shown)
-            .map(|n| view.handles.id_of(&format!("P{n}")).unwrap().to_string())
-            .collect()
+        assert_eq!(view.order.len(), view.rows_shown);
+        if !view.handles.to_id.is_empty() {
+            for (n, id) in view.order.iter().enumerate() {
+                assert_eq!(view.handles.id_of(&format!("P{}", n + 1)), Some(id.as_str()));
+            }
+        }
+        view.order.clone()
+    }
+
+    /// 20 rows of the same token cost: `soa://t/00` (oldest) to `soa://t/19`
+    /// (newest). Scores rise with age: `soa://t/00` is the most similar.
+    fn twenty_rows() -> (ExistingInstances, HashMap<String, f32>, usize) {
+        let rows: Vec<InstanceContext> = (0..20)
+            .map(|i| row(&format!("soa://t/{i:02}"), "Task", &format!("Task {i:02}"), i))
+            .collect();
+        let scores = rows
+            .iter()
+            .enumerate()
+            .map(|(i, r)| (r.id.clone(), 1.0 - i as f32 / 100.0))
+            .collect();
+        let existing = existing_of(rows);
+        let one = existing_of(vec![row("soa://t/00", "Task", "Task 00", 0)]);
+        let cost = select_existing(&one, "", usize::MAX, None, Compact::No).tokens;
+        (existing, scores, cost)
+    }
+
+    fn ids(range: impl Iterator<Item = i64>) -> Vec<String> {
+        range.map(|i| format!("soa://t/{i:02}")).collect()
+    }
+
+    #[test]
+    fn the_recent_rows_use_at_most_half_of_the_budget_left_after_the_scope() {
+        let (existing, scores, cost) = twenty_rows();
+        // Room for 10.5 rows: the recent stage gets 5.25 rows' worth.
+        let budget = 10 * cost + cost / 2;
+        let view = select_existing(&existing, "", budget, Some(&scores), Compact::No);
+        assert_eq!(
+            view.stages,
+            vec![("scope", 0), ("recent", 5), ("similar", 5)]
+        );
+        assert_eq!(shown_ids(&view)[..5], ids((15..20).rev())[..]);
+
+        // A scope row first: the recent stage gets half of what it left.
+        let in_scope = select_existing(&existing, "soa://t/00", budget, Some(&scores), Compact::No);
+        assert_eq!(
+            in_scope.stages,
+            vec![("scope", 1), ("recent", 4), ("similar", 5)]
+        );
+    }
+
+    #[test]
+    fn the_most_similar_rows_fill_the_rest_of_the_budget() {
+        let (existing, scores, cost) = twenty_rows();
+        let budget = 10 * cost + cost / 2;
+        let view = select_existing(&existing, "", budget, Some(&scores), Compact::No);
+        let mut expected = ids((15..20).rev());
+        expected.extend(ids(0..5));
+        assert_eq!(
+            shown_ids(&view),
+            expected,
+            "the 5 newest, then the 5 most similar (the oldest)"
+        );
+        assert!(view.tokens <= budget);
+    }
+
+    #[test]
+    fn without_an_embedding_model_the_order_is_pure_recency() {
+        let (existing, _, cost) = twenty_rows();
+        let budget = 10 * cost + cost / 2;
+        let view = select_existing(&existing, "", budget, None, Compact::No);
+        assert_eq!(shown_ids(&view), ids((10..20).rev()));
+        assert_eq!(
+            view.stages,
+            vec![("scope", 0), ("recent", 5), ("more_recent", 5)]
+        );
+    }
+
+    #[test]
+    fn rows_in_the_pass_scope_always_come_first() {
+        let mut rows: Vec<InstanceContext> = (0..20)
+            .map(|i| row(&format!("soa://t/{i:02}"), "Task", &format!("Task {i:02}"), 100 + i))
+            .collect();
+        // The oldest and least similar rows are the pass's own.
+        rows.push(row("we://call/1/a", "Task", "Own A", 1));
+        rows.push(row("we://call/1/b", "Task", "Own B", 2));
+        let mut scores: HashMap<String, f32> =
+            rows.iter().map(|r| (r.id.clone(), 0.9)).collect();
+        scores.insert("we://call/1/a".into(), 0.0);
+        scores.insert("we://call/1/b".into(), 0.0);
+        let existing = existing_of(rows);
+        for budget in [60, 200, usize::MAX] {
+            for s in [None, Some(&scores)] {
+                let view = select_existing(&existing, "we://call/1/", budget, s, Compact::Yes);
+                assert_eq!(
+                    shown_ids(&view)[..2],
+                    ["we://call/1/b".to_string(), "we://call/1/a".to_string()],
+                    "budget {budget}"
+                );
+                assert_eq!(view.stages[0], ("scope", 2));
+            }
+        }
+    }
+
+    /// Lal on #1806: a row larger than the budget must not stop the fill for
+    /// every row after it.
+    #[test]
+    fn a_row_too_large_for_the_budget_does_not_stop_the_fill() {
+        let mut big = row("we://call/1/big", "Task", "Big", 999);
+        big.properties.insert("summary".into(), "z".repeat(4_000));
+        let existing = existing_of(vec![
+            big,
+            row("we://call/1/small", "Task", "Small", 1),
+            row("soa://newest", "Task", "Newest", 998),
+            row("soa://older", "Task", "Older", 2),
+        ]);
+        let view = select_existing(&existing, "we://call/1/", 200, None, Compact::Yes);
+        assert_eq!(
+            shown_ids(&view),
+            vec!["we://call/1/small", "soa://newest", "soa://older"]
+        );
+    }
+
+    #[test]
+    fn a_zero_budget_skips_the_similarity_order() {
+        let (existing, _, cost) = twenty_rows();
+        let none = select_existing(&existing, "", 0, None, Compact::Yes);
+        assert_eq!(none.rows_shown, 0);
+        assert!(!needs_similarity(0, &none), "nothing can be shown: no embedding call");
+        let some = select_existing(&existing, "", 3 * cost, None, Compact::Yes);
+        assert!(needs_similarity(3 * cost, &some));
+        let all = select_existing(&existing, "", usize::MAX, None, Compact::Yes);
+        assert!(!needs_similarity(usize::MAX, &all), "all rows shown");
     }
 
     /// The token cost of one row as the prompt shows it, plus its comma.
@@ -584,37 +821,19 @@ mod tests {
     }
 
     #[test]
-    fn with_vectors_the_most_similar_rows_come_first_after_the_scope() {
-        let existing = existing_of(vec![
-            row("we://call/1/t/own", "Task", "Own call", 1),
-            row("soa://far", "Task", "Unrelated", 900),
-            row("soa://near", "Task", "About the budget", 2),
-            row("soa://mid", "Task", "Partly related", 3),
-        ]);
+    fn a_row_scores_its_highest_similarity_to_any_turn() {
         // Two turns; the rows' vectors point near one of them or away.
         let turns = vec![vec![1.0, 0.0, 0.0], vec![0.0, 1.0, 0.0]];
         let rows = vec![
-            ("we://call/1/t/own".to_string(), vec![0.0, 0.0, 1.0]),
             ("soa://far".to_string(), vec![0.0, 0.0, 1.0]),
             ("soa://near".to_string(), vec![0.0, 1.0, 0.1]),
             ("soa://mid".to_string(), vec![0.6, 0.0, 0.8]),
+            ("soa://other-dim".to_string(), vec![1.0, 0.0]),
         ];
         let scores = similarity_from_vectors(&turns, &rows);
         assert!(scores["soa://near"] > scores["soa://mid"]);
         assert!(scores["soa://mid"] > scores["soa://far"]);
-
-        let view = select_existing(
-            &existing,
-            "we://call/1/",
-            usize::MAX,
-            Some(&scores),
-            Compact::Yes,
-        );
-        assert_eq!(
-            shown_ids(&view),
-            vec!["we://call/1/t/own", "soa://near", "soa://mid", "soa://far"],
-            "the newest row (far) is last: similarity beats recency"
-        );
+        assert!(!scores.contains_key("soa://other-dim"));
     }
 
     #[tokio::test]
