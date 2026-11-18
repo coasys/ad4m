@@ -166,7 +166,7 @@ pub(crate) struct PromptExisting {
 
 /// Milliseconds since the epoch of a stored timestamp (epoch milliseconds or
 /// RFC 3339); 0 when it is empty or neither.
-fn timestamp_millis(ts: &str) -> i64 {
+pub(super) fn timestamp_millis(ts: &str) -> i64 {
     ts.parse::<i64>().ok().unwrap_or_else(|| {
         chrono::DateTime::parse_from_rfc3339(ts)
             .map(|t| t.timestamp_millis())
@@ -278,13 +278,20 @@ fn fill_stages<'a>(
 ///
 /// An instance in several classes is one unit: all its rows or none. With
 /// [`Compact::Yes`] each shown id becomes a handle `P1`, `P2`, ... in fill
-/// order.
+/// order, except:
+///
+/// - an id in `full_ids` stays whole. These are the subjects of the active
+///   flows, which the prompt names by full id under `active_flows`, so the
+///   model can tie a flow to its row.
+/// - a handle that is also a real id in `existing` is not used, so every
+///   handle in the answer means one row.
 pub(crate) fn select_existing(
     existing: &ExistingInstances,
     base_prefix: &str,
     budget_tokens: usize,
     scores: Option<&HashMap<String, f32>>,
     compact: Compact,
+    full_ids: &HashSet<String>,
 ) -> PromptExisting {
     let mut out = PromptExisting {
         shown: ExistingInstances::new(),
@@ -296,6 +303,7 @@ pub(crate) fn select_existing(
         stages: Vec::new(),
     };
     let mut taken: HashSet<&String> = HashSet::new();
+    let mut next_handle = 1usize;
     for stage in fill_stages(existing, base_prefix, scores) {
         let free = budget_tokens - out.tokens;
         let cap = (free as f64 * stage.share) as usize;
@@ -308,9 +316,14 @@ pub(crate) fn select_existing(
             if taken.contains(id) {
                 continue;
             }
-            let shown_id = match compact {
-                Compact::Yes => format!("P{}", out.rows_shown + 1),
-                Compact::No => id.clone(),
+            let handle = compact == Compact::Yes && !full_ids.contains(id);
+            let shown_id = if handle {
+                while existing.contains_key(&format!("P{next_handle}")) {
+                    next_handle += 1;
+                }
+                format!("P{next_handle}")
+            } else {
+                id.clone()
             };
             let shown_rows: Vec<InstanceContext> = existing[id]
                 .iter()
@@ -333,7 +346,8 @@ pub(crate) fn select_existing(
             out.tokens += cost;
             out.rows_shown += 1;
             out.order.push(id.clone());
-            if compact == Compact::Yes {
+            if handle {
+                next_handle += 1;
                 out.handles.to_id.insert(shown_id.clone(), id.clone());
             }
             out.shown.insert(shown_id, shown_rows);
@@ -467,10 +481,18 @@ pub(crate) async fn existing_for_prompt(
     let other_tokens = estimate_task_prompt_tokens(task, &without_rows);
     let budget = existing_budget_tokens(window, other_tokens);
 
-    let mut view = select_existing(existing, base_prefix, budget, None, compact);
+    let flow_subjects: HashSet<String> = active_flows.iter().map(|f| f.subject.clone()).collect();
+    let mut view = select_existing(existing, base_prefix, budget, None, compact, &flow_subjects);
     if let Some(model) = embed_model.filter(|_| needs_similarity(budget, &view)) {
         if let Some(scores) = similarity_scores(model, transcript, existing).await {
-            view = select_existing(existing, base_prefix, budget, Some(&scores), compact);
+            view = select_existing(
+                existing,
+                base_prefix,
+                budget,
+                Some(&scores),
+                compact,
+                &flow_subjects,
+            );
         }
     }
     let stages: Vec<String> = view
@@ -525,15 +547,9 @@ mod tests {
         out
     }
 
-    /// Full ids of the shown rows, in fill order. A compact view names them
-    /// `P1`, `P2`, ... in the same order.
+    /// Full ids of the shown rows, in fill order.
     fn shown_ids(view: &PromptExisting) -> Vec<String> {
         assert_eq!(view.order.len(), view.rows_shown);
-        if !view.handles.to_id.is_empty() {
-            for (n, id) in view.order.iter().enumerate() {
-                assert_eq!(view.handles.id_of(&format!("P{}", n + 1)), Some(id.as_str()));
-            }
-        }
         view.order.clone()
     }
 
@@ -541,7 +557,14 @@ mod tests {
     /// (newest). Scores rise with age: `soa://t/00` is the most similar.
     fn twenty_rows() -> (ExistingInstances, HashMap<String, f32>, usize) {
         let rows: Vec<InstanceContext> = (0..20)
-            .map(|i| row(&format!("soa://t/{i:02}"), "Task", &format!("Task {i:02}"), i))
+            .map(|i| {
+                row(
+                    &format!("soa://t/{i:02}"),
+                    "Task",
+                    &format!("Task {i:02}"),
+                    i,
+                )
+            })
             .collect();
         let scores = rows
             .iter()
@@ -550,7 +573,7 @@ mod tests {
             .collect();
         let existing = existing_of(rows);
         let one = existing_of(vec![row("soa://t/00", "Task", "Task 00", 0)]);
-        let cost = select_existing(&one, "", usize::MAX, None, Compact::No).tokens;
+        let cost = select_existing(&one, "", usize::MAX, None, Compact::No, &HashSet::new()).tokens;
         (existing, scores, cost)
     }
 
@@ -563,7 +586,14 @@ mod tests {
         let (existing, scores, cost) = twenty_rows();
         // Room for 10.5 rows: the recent stage gets 5.25 rows' worth.
         let budget = 10 * cost + cost / 2;
-        let view = select_existing(&existing, "", budget, Some(&scores), Compact::No);
+        let view = select_existing(
+            &existing,
+            "",
+            budget,
+            Some(&scores),
+            Compact::No,
+            &HashSet::new(),
+        );
         assert_eq!(
             view.stages,
             vec![("scope", 0), ("recent", 5), ("similar", 5)]
@@ -571,7 +601,14 @@ mod tests {
         assert_eq!(shown_ids(&view)[..5], ids((15..20).rev())[..]);
 
         // A scope row first: the recent stage gets half of what it left.
-        let in_scope = select_existing(&existing, "soa://t/00", budget, Some(&scores), Compact::No);
+        let in_scope = select_existing(
+            &existing,
+            "soa://t/00",
+            budget,
+            Some(&scores),
+            Compact::No,
+            &HashSet::new(),
+        );
         assert_eq!(
             in_scope.stages,
             vec![("scope", 1), ("recent", 4), ("similar", 5)]
@@ -582,7 +619,14 @@ mod tests {
     fn the_most_similar_rows_fill_the_rest_of_the_budget() {
         let (existing, scores, cost) = twenty_rows();
         let budget = 10 * cost + cost / 2;
-        let view = select_existing(&existing, "", budget, Some(&scores), Compact::No);
+        let view = select_existing(
+            &existing,
+            "",
+            budget,
+            Some(&scores),
+            Compact::No,
+            &HashSet::new(),
+        );
         let mut expected = ids((15..20).rev());
         expected.extend(ids(0..5));
         assert_eq!(
@@ -597,7 +641,7 @@ mod tests {
     fn without_an_embedding_model_the_order_is_pure_recency() {
         let (existing, _, cost) = twenty_rows();
         let budget = 10 * cost + cost / 2;
-        let view = select_existing(&existing, "", budget, None, Compact::No);
+        let view = select_existing(&existing, "", budget, None, Compact::No, &HashSet::new());
         assert_eq!(shown_ids(&view), ids((10..20).rev()));
         assert_eq!(
             view.stages,
@@ -608,19 +652,32 @@ mod tests {
     #[test]
     fn rows_in_the_pass_scope_always_come_first() {
         let mut rows: Vec<InstanceContext> = (0..20)
-            .map(|i| row(&format!("soa://t/{i:02}"), "Task", &format!("Task {i:02}"), 100 + i))
+            .map(|i| {
+                row(
+                    &format!("soa://t/{i:02}"),
+                    "Task",
+                    &format!("Task {i:02}"),
+                    100 + i,
+                )
+            })
             .collect();
         // The oldest and least similar rows are the pass's own.
         rows.push(row("we://call/1/a", "Task", "Own A", 1));
         rows.push(row("we://call/1/b", "Task", "Own B", 2));
-        let mut scores: HashMap<String, f32> =
-            rows.iter().map(|r| (r.id.clone(), 0.9)).collect();
+        let mut scores: HashMap<String, f32> = rows.iter().map(|r| (r.id.clone(), 0.9)).collect();
         scores.insert("we://call/1/a".into(), 0.0);
         scores.insert("we://call/1/b".into(), 0.0);
         let existing = existing_of(rows);
         for budget in [60, 200, usize::MAX] {
             for s in [None, Some(&scores)] {
-                let view = select_existing(&existing, "we://call/1/", budget, s, Compact::Yes);
+                let view = select_existing(
+                    &existing,
+                    "we://call/1/",
+                    budget,
+                    s,
+                    Compact::Yes,
+                    &HashSet::new(),
+                );
                 assert_eq!(
                     shown_ids(&view)[..2],
                     ["we://call/1/b".to_string(), "we://call/1/a".to_string()],
@@ -643,7 +700,14 @@ mod tests {
             row("soa://newest", "Task", "Newest", 998),
             row("soa://older", "Task", "Older", 2),
         ]);
-        let view = select_existing(&existing, "we://call/1/", 200, None, Compact::Yes);
+        let view = select_existing(
+            &existing,
+            "we://call/1/",
+            200,
+            None,
+            Compact::Yes,
+            &HashSet::new(),
+        );
         assert_eq!(
             shown_ids(&view),
             vec!["we://call/1/small", "soa://newest", "soa://older"]
@@ -653,12 +717,22 @@ mod tests {
     #[test]
     fn a_zero_budget_skips_the_similarity_order() {
         let (existing, _, cost) = twenty_rows();
-        let none = select_existing(&existing, "", 0, None, Compact::Yes);
+        let none = select_existing(&existing, "", 0, None, Compact::Yes, &HashSet::new());
         assert_eq!(none.rows_shown, 0);
-        assert!(!needs_similarity(0, &none), "nothing can be shown: no embedding call");
-        let some = select_existing(&existing, "", 3 * cost, None, Compact::Yes);
+        assert!(
+            !needs_similarity(0, &none),
+            "nothing can be shown: no embedding call"
+        );
+        let some = select_existing(&existing, "", 3 * cost, None, Compact::Yes, &HashSet::new());
         assert!(needs_similarity(3 * cost, &some));
-        let all = select_existing(&existing, "", usize::MAX, None, Compact::Yes);
+        let all = select_existing(
+            &existing,
+            "",
+            usize::MAX,
+            None,
+            Compact::Yes,
+            &HashSet::new(),
+        );
         assert!(!needs_similarity(usize::MAX, &all), "all rows shown");
     }
 
@@ -741,7 +815,7 @@ mod tests {
         }
         let existing = existing_of(rows);
         let budget = 2_000;
-        let view = select_existing(&existing, "", budget, None, Compact::Yes);
+        let view = select_existing(&existing, "", budget, None, Compact::Yes, &HashSet::new());
         assert_eq!(view.rows_total, 504);
         assert!(
             view.rows_shown > 0 && view.rows_shown < 504,
@@ -781,7 +855,14 @@ mod tests {
             row("we://call/2/t/newer", "Task", "Newer, other call", 800),
             row("we://call/1/t/mid", "Task", "Mid, this call", 200),
         ]);
-        let all = select_existing(&existing, "we://call/1/", usize::MAX, None, Compact::Yes);
+        let all = select_existing(
+            &existing,
+            "we://call/1/",
+            usize::MAX,
+            None,
+            Compact::Yes,
+            &HashSet::new(),
+        );
         assert_eq!(
             shown_ids(&all),
             vec![
@@ -794,7 +875,14 @@ mod tests {
 
         // A budget for two rows shows the two in scope, though older.
         let budget = row_cost(&all, "P1") + row_cost(&all, "P2");
-        let two = select_existing(&existing, "we://call/1/", budget, None, Compact::Yes);
+        let two = select_existing(
+            &existing,
+            "we://call/1/",
+            budget,
+            None,
+            Compact::Yes,
+            &HashSet::new(),
+        );
         assert_eq!(
             shown_ids(&two),
             vec!["we://call/1/t/mid", "we://call/1/t/old"]
@@ -808,7 +896,14 @@ mod tests {
             row("soa://b", "Task", "B", 100),
             row("soa://c", "Task", "C", 200),
         ]);
-        let view = select_existing(&existing, "", usize::MAX, None, Compact::Yes);
+        let view = select_existing(
+            &existing,
+            "",
+            usize::MAX,
+            None,
+            Compact::Yes,
+            &HashSet::new(),
+        );
         assert_eq!(shown_ids(&view), vec!["soa://a", "soa://c", "soa://b"]);
 
         // RFC 3339 timestamps order the same way.
@@ -816,7 +911,7 @@ mod tests {
         rfc.get_mut("soa://a").unwrap()[0].updated_at = "2026-11-18T10:00:00.000Z".into();
         rfc.get_mut("soa://b").unwrap()[0].updated_at = "2026-11-18T12:00:00.000Z".into();
         rfc.get_mut("soa://c").unwrap()[0].updated_at = "2026-11-18T11:00:00.000Z".into();
-        let view = select_existing(&rfc, "", usize::MAX, None, Compact::Yes);
+        let view = select_existing(&rfc, "", usize::MAX, None, Compact::Yes, &HashSet::new());
         assert_eq!(shown_ids(&view), vec!["soa://b", "soa://c", "soa://a"]);
     }
 
@@ -859,7 +954,21 @@ mod tests {
             row("soa://task/second", "Task", "Second", 200),
             row("soa://task/third", "Task", "Third", 100),
         ]);
-        let view = select_existing(&existing, "", usize::MAX, None, Compact::Yes);
+        let view = select_existing(
+            &existing,
+            "",
+            usize::MAX,
+            None,
+            Compact::Yes,
+            &HashSet::new(),
+        );
+        assert_eq!(
+            (1..=3)
+                .map(|n| view.handles.id_of(&format!("P{n}")).unwrap())
+                .collect::<Vec<_>>(),
+            shown_ids(&view),
+            "handles in fill order"
+        );
         let answer = parse_interpretation_response(
             r#"[
               {"class":"Task","id":"P3","title":"Third, renamed","blocks":["P1","new:Task:1"]},
@@ -890,7 +999,14 @@ mod tests {
     fn an_unknown_handle_goes_the_way_of_an_unknown_id() {
         let shapes = vec![shape_from_sdna("Task", TASK_SDNA)];
         let existing = existing_of(vec![row("soa://task/only", "Task", "Only", 1)]);
-        let view = select_existing(&existing, "", usize::MAX, None, Compact::Yes);
+        let view = select_existing(
+            &existing,
+            "",
+            usize::MAX,
+            None,
+            Compact::Yes,
+            &HashSet::new(),
+        );
         let answer =
             parse_interpretation_response(r#"[{"class":"Task","id":"P9","title":"Fresh"}]"#)
                 .unwrap();
@@ -921,7 +1037,14 @@ mod tests {
         let mut r = row("soa://sg/1", "ConversationSubgroup", "Payments", 1);
         r.properties.insert("summary".into(), full.clone());
         let existing = existing_of(vec![r]);
-        let view = select_existing(&existing, "", usize::MAX, None, Compact::Yes);
+        let view = select_existing(
+            &existing,
+            "",
+            usize::MAX,
+            None,
+            Compact::Yes,
+            &HashSet::new(),
+        );
         assert_eq!(view.shown["P1"][0].properties["summary"], full);
 
         // The model rewords the start and keeps the end.
@@ -936,13 +1059,115 @@ mod tests {
         assert_eq!(resolved[0].props["summary"], serde_json::json!(edited));
     }
 
+    /// Lal on #1806: a real id `P1` must not be redirected to the row that
+    /// got handle `P1`.
+    #[test]
+    fn a_handle_never_takes_the_name_of_a_real_id() {
+        let shapes = vec![shape_from_sdna("Task", TASK_WITH_RELATION_SDNA)];
+        let existing = existing_of(vec![
+            row("P1", "Task", "A record whose id reads like a handle", 300),
+            row("soa://task/other", "Task", "Other", 200),
+        ]);
+        let view = select_existing(
+            &existing,
+            "",
+            usize::MAX,
+            None,
+            Compact::Yes,
+            &HashSet::new(),
+        );
+        assert_eq!(shown_ids(&view), vec!["P1", "soa://task/other"]);
+        assert_eq!(view.handles.id_of("P1"), None, "no handle P1");
+        assert_eq!(view.handles.id_of("P2"), Some("P1"));
+        assert_eq!(view.handles.id_of("P3"), Some("soa://task/other"));
+
+        let answer = parse_interpretation_response(
+            r#"[{"class":"Task","id":"P3","title":"Other v2","blocks":["P2"]}]"#,
+        )
+        .unwrap();
+        let resolved = view.handles.resolve(answer, &shapes);
+        assert_eq!(resolved[0].id.as_deref(), Some("soa://task/other"));
+        assert_eq!(resolved[0].props["blocks"], serde_json::json!(["P1"]));
+    }
+
+    /// Lal on #1806: `active_flows[].subject` names a row by its full id, so
+    /// that row keeps its full id in `existing`, and the model can tie the
+    /// flow to it.
+    #[tokio::test]
+    async fn a_row_a_flow_rides_on_keeps_its_full_id() {
+        use crate::perspectives::flow_context::ContentionStatus;
+        ensure_db_init();
+        let shapes = vec![shape_from_sdna("Task", TASK_SDNA)];
+        let existing = existing_of(vec![
+            row("soa://task/flowed", "Task", "Ship the release", 2),
+            row("soa://task/plain", "Task", "Ship the docs", 1),
+        ]);
+        let flow = FlowContext {
+            flow_name: "Delivery".into(),
+            instance_uri: "ad4m://flow/instance/1".into(),
+            subject: "soa://task/flowed".into(),
+            current_state: "doing".into(),
+            flow_interpretation_hint: None,
+            reachable_next_states: vec![],
+            consensus_rule: None,
+            contested: ContentionStatus::NotContested,
+        };
+        let transcript = [TranscriptTurn::from_speaker_text(
+            "Ana",
+            "The release is done.",
+        )];
+        let task = ensure_interpretation_task_for_model(None).unwrap();
+        let view = existing_for_prompt(
+            &task,
+            &shapes,
+            &transcript,
+            &existing,
+            std::slice::from_ref(&flow),
+            &HashMap::new(),
+            "",
+            None,
+            Compact::Yes,
+        )
+        .await;
+        assert_eq!(view.rows_shown, 2);
+        assert!(view.shown.contains_key("soa://task/flowed"));
+        assert_eq!(view.handles.id_of("P1"), Some("soa://task/plain"));
+
+        let prompt = build_interpretation_input(
+            &shapes,
+            &transcript,
+            &view.shown,
+            std::slice::from_ref(&flow),
+            &HashMap::new(),
+        );
+        let json: serde_json::Value = serde_json::from_str(&prompt).unwrap();
+        let ids: Vec<&str> = json["classes"][0]["existing"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["id"].as_str().unwrap())
+            .collect();
+        assert!(
+            ids.contains(&json["active_flows"][0]["subject"].as_str().unwrap()),
+            "the flow's subject is a row id in the prompt: {ids:?}"
+        );
+        assert!(!prompt.contains("soa://task/plain"));
+    }
+
     #[test]
     fn a_prompt_that_is_not_compact_keeps_full_ids_and_values() {
         let long = "y".repeat(500);
         let mut r = row("soa://task/a", "Task", "A", 1);
         r.properties.insert("owner".into(), long.clone());
         let existing = existing_of(vec![r]);
-        let view = select_existing(&existing, "", usize::MAX, None, Compact::No);
+        let view = select_existing(
+            &existing,
+            "",
+            usize::MAX,
+            None,
+            Compact::No,
+            &HashSet::new(),
+        );
         assert_eq!(view.shown["soa://task/a"][0].properties["owner"], long);
         assert_eq!(view.handles, Handles::default());
     }
@@ -952,12 +1177,26 @@ mod tests {
     #[test]
     fn staging_504_rows_before_and_after() {
         let existing = staging_like_rows();
-        let before = select_existing(&existing, "", usize::MAX, None, Compact::No);
-        let compact = select_existing(&existing, "", usize::MAX, None, Compact::Yes);
+        let before = select_existing(
+            &existing,
+            "",
+            usize::MAX,
+            None,
+            Compact::No,
+            &HashSet::new(),
+        );
+        let compact = select_existing(
+            &existing,
+            "",
+            usize::MAX,
+            None,
+            Compact::Yes,
+            &HashSet::new(),
+        );
         // 65,536 window; about 12k tokens of system prompt, examples, schema
         // and a 100-turn transcript (6.6k).
         let budget = existing_budget_tokens(Some(65_536), 12_000);
-        let after = select_existing(&existing, "", budget, None, Compact::Yes);
+        let after = select_existing(&existing, "", budget, None, Compact::Yes, &HashSet::new());
         println!(
             "#1804 existing block, 504 rows: before {} tokens (est.), short handles {} tokens, \
              budget {budget} -> {} rows, {} tokens",
