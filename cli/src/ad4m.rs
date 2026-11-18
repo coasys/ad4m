@@ -23,6 +23,7 @@ mod neighbourhoods;
 mod perspectives;
 mod repl;
 mod runtime;
+mod tui;
 
 use crate::{
     agent::*, expression::*, languages::*, neighbourhoods::*, perspectives::*, runtime::*,
@@ -127,6 +128,9 @@ enum Domain {
         #[arg(long)]
         allow_insecure_remote: bool,
     },
+
+    /// Admin and debug screens: executor status, perspectives, and links
+    Tui,
 }
 
 async fn get_ad4m_client(args: &ClapApp, domain: &Domain) -> Result<Ad4mClient> {
@@ -196,6 +200,13 @@ async fn main() -> Result<()> {
         Domain::Neighbourhoods { command } => neighbourhoods::run(ad4m_client, command).await?,
         Domain::Runtime { command } => runtime::run(ad4m_client, command).await?,
         Domain::Expression { command } => expression::run(ad4m_client, command).await?,
+        Domain::Tui => {
+            let executor_url = normalize_base_url(&match &args.executor_url {
+                Some(url) => url.clone(),
+                None => crate::startup::get_executor_url()?,
+            });
+            tui::run(ad4m_client, executor_url).await?;
+        }
         Domain::Log => {
             let file = executor_data_path().join("ad4m.log");
             let log = std::fs::read_to_string(file.clone()).with_context(|| {
@@ -209,4 +220,15 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod command_tests {
+    use super::*;
+
+    #[test]
+    fn tui_is_a_command() {
+        let app = ClapApp::try_parse_from(["ad4m", "tui"]).unwrap();
+        assert!(matches!(app.domain, Domain::Tui));
+    }
 }
