@@ -18,14 +18,14 @@
 
 use crate::agent::{did_for_context, AgentContext};
 use crate::perspectives::interpretation::{
-    run_interpretation_with_harness_and_model, run_interpretation_with_strategy_and_model,
-    DedupStrategy, InterpretationRunCursor, TranscriptTurn,
+    run_interpretation_with_harness_and_model, run_interpretation_with_strategy_and_model_linked,
+    DedupStrategy, InterpretationRunCursor, SliceScopeLink, TranscriptTurn,
 };
 use crate::perspectives::model_query::load_shape_from_store;
 use crate::perspectives::model_query::types::Scope;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::presence::is_online;
-use crate::types::{Link, LinkStatus};
+use crate::types::{Link, LinkQuery, LinkStatus};
 
 use super::claim::{batch_key, confirm_claim, renew_claim, settle_claim, try_claim, ClaimOutcome};
 use super::config::AutoProcessorConfig;
@@ -1466,6 +1466,14 @@ pub async fn run_one_pass(
             item_ids: item_ids.clone(),
             batch_key: batch_key_hex.clone(),
         });
+    // Link each committed slice before the next slice loads existing
+    // records. The snapshot stays the one taken above, so a slice's new
+    // bases are still absent from it and still receive the parent edge.
+    let slice_link = cfg.mint_scope.as_ref().map(|mint_scope| SliceScopeLink {
+        mint_scope,
+        pre_existing: &pre_existing_uris,
+        processor_id: &cfg.processor_id,
+    });
 
     // Fork: harness-dispatched pass when the operator opted in via
     // `AutoProcessorConfig.max_tool_calls > 0`; otherwise the classic
@@ -1534,7 +1542,7 @@ pub async fn run_one_pass(
         }
         (None, _) => {
             let outcome = abandon_on_err!(
-                run_interpretation_with_strategy_and_model(
+                run_interpretation_with_strategy_and_model_linked(
                     perspective,
                     &shapes,
                     &transcript,
@@ -1553,6 +1561,7 @@ pub async fn run_one_pass(
                     emit_ctx.as_ref(),
                     // Same flow targeting as the harness branch above.
                     Some(&cfg.flows),
+                    slice_link.as_ref(),
                 )
                 .await
             );
@@ -1710,7 +1719,10 @@ pub async fn run_one_pass(
 /// The interpretation has already committed them and the processed-turn
 /// cursor. Leaving without these links keeps them out of the subtree, and
 /// the cursor then suppresses the turns, so a later pass does not repair it.
-async fn link_fresh_bases(
+///
+/// The overflow split calls this after each committed slice, with the same
+/// pre-pass snapshot, before the next slice reads existing records.
+pub(crate) async fn link_fresh_bases(
     perspective: &mut PerspectiveInstance,
     mint_scope: Option<&crate::perspectives::model_query::types::Scope>,
     bases: &[String],
@@ -1777,7 +1789,28 @@ pub(crate) async fn write_mint_scope_links(
             );
         }
     };
+    // add_link stamps a new timestamp, so a second call is a second link.
+    // A split writes this edge after each committed slice, and the pass
+    // writes it again when interpretation returns. Skip an edge that is
+    // already there.
     for base in bases {
+        let already = perspective
+            .get_links(&LinkQuery {
+                source: Some(parent_id.clone()),
+                predicate: Some(predicate.clone()),
+                target: Some(base.clone()),
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "auto_processor `{processor_id}`: mint_scope lookup({parent_id} -> {base}) \
+                     failed: {e:#}"
+                )
+            })?;
+        if !already.is_empty() {
+            continue;
+        }
         perspective
             .add_link(
                 Link {

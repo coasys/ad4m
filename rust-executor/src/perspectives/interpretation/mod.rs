@@ -40,6 +40,10 @@
 mod dedup;
 mod graph;
 mod overflow;
+pub(crate) use overflow::SliceScopeLink;
+pub(crate) use run::{
+    run_interpretation_observed_linked, run_interpretation_with_strategy_and_model_linked,
+};
 pub(crate) mod overlay;
 mod parse;
 mod prompt;

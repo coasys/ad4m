@@ -18,6 +18,7 @@ use crate::ai_service::harness::{run_with_tools, HarnessConfig};
 use crate::perspectives::model_query::types::{ModelShape, Scope};
 use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClassOption};
 use crate::types::LinkStatus;
+use anyhow::Context;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -514,7 +515,33 @@ pub async fn run_interpretation_observed(
     scope: Option<&Scope>,
     emit_ctx: Option<&crate::perspectives::auto_processor::events::InterpretationEmitContext>,
 ) -> anyhow::Result<Vec<String>> {
-    run_interpretation_with_strategy_and_model(
+    run_interpretation_observed_linked(
+        perspective,
+        shapes,
+        transcript,
+        base_prefix,
+        context,
+        scope,
+        emit_ctx,
+        None,
+    )
+    .await
+}
+
+/// [`run_interpretation_observed`] that links each committed slice under
+/// `slice_link` before the next slice reads existing records.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_interpretation_observed_linked(
+    perspective: &mut PerspectiveInstance,
+    shapes: &[ModelShape],
+    transcript: &[TranscriptTurn],
+    base_prefix: &str,
+    context: &AgentContext,
+    scope: Option<&Scope>,
+    emit_ctx: Option<&crate::perspectives::auto_processor::events::InterpretationEmitContext>,
+    slice_link: Option<&super::SliceScopeLink<'_>>,
+) -> anyhow::Result<Vec<String>> {
+    run_interpretation_with_strategy_and_model_linked(
         perspective,
         shapes,
         transcript,
@@ -527,6 +554,7 @@ pub async fn run_interpretation_observed(
         false,
         emit_ctx,
         None,
+        slice_link,
     )
     .await
     .map(|out| out.bases)
@@ -619,6 +647,43 @@ pub async fn run_interpretation_with_strategy_and_model(
     emit_ctx: Option<&crate::perspectives::auto_processor::events::InterpretationEmitContext>,
     flow_filter: Option<&[String]>,
 ) -> anyhow::Result<InterpretationOutcome> {
+    run_interpretation_with_strategy_and_model_linked(
+        perspective,
+        shapes,
+        transcript,
+        base_prefix,
+        context,
+        dedup_strategy,
+        model_override,
+        scope,
+        cursor,
+        emit_debug_events,
+        emit_ctx,
+        flow_filter,
+        None,
+    )
+    .await
+}
+
+/// [`run_interpretation_with_strategy_and_model`] that links each committed
+/// slice before the next slice loads existing records. The link type stays
+/// crate-private, so this entry point does too.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_interpretation_with_strategy_and_model_linked(
+    perspective: &mut PerspectiveInstance,
+    shapes: &[ModelShape],
+    transcript: &[TranscriptTurn],
+    base_prefix: &str,
+    context: &AgentContext,
+    dedup_strategy: &DedupStrategy,
+    model_override: Option<&str>,
+    scope: Option<&Scope>,
+    cursor: Option<&InterpretationRunCursor>,
+    emit_debug_events: bool,
+    emit_ctx: Option<&crate::perspectives::auto_processor::events::InterpretationEmitContext>,
+    flow_filter: Option<&[String]>,
+    slice_link: Option<&super::SliceScopeLink<'_>>,
+) -> anyhow::Result<InterpretationOutcome> {
     super::overflow::split_overflowing_batch(
         perspective,
         shapes,
@@ -632,6 +697,7 @@ pub async fn run_interpretation_with_strategy_and_model(
         emit_debug_events,
         emit_ctx,
         flow_filter,
+        slice_link,
     )
     .await
 }
@@ -773,7 +839,7 @@ pub(super) async fn run_interpretation_once(
                     // A size failure retries once with thinking off.
                     .prompt_interpretation_pass(task_id, prompt, Some(stick_no_thinking.as_ref()))
                     .await
-                    .map_err(|e| anyhow::anyhow!("AIService::prompt failed: {e:#}"))?;
+                    .context("AIService::prompt failed")?;
 
                 if let Some(ctx) = emit_ctx_cloned.as_ref() {
                     emit(
@@ -885,10 +951,9 @@ pub(super) async fn run_interpretation_once(
         }
         Err(e) => {
             log::error!(
-                "❌ 🧠 interpretation failed model={} latency={}ms err={}",
+                "❌ 🧠 interpretation failed model={} latency={}ms err={e:#}",
                 model_override.unwrap_or("<default>"),
                 interpretation_started.elapsed().as_millis(),
-                e
             );
             Err(e)
         }

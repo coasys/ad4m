@@ -418,9 +418,40 @@ fn interpretation_reply_needs_no_thinking(result: &PromptResult) -> bool {
     result.text.trim().is_empty() || result.stop_reason.as_deref() == Some("length")
 }
 
+/// The local window check refused the prompt. A split matches this error.
+/// A sentence that merely contains the same words is not this error.
+#[derive(Debug)]
+pub(crate) struct ContextBudgetExceeded {
+    pub prompt_tokens: usize,
+    pub window: usize,
+    pub room: usize,
+    pub min_output: usize,
+}
+
+impl std::fmt::Display for ContextBudgetExceeded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "context budget: the prompt is about {} tokens and the model's window is {}, leaving {}, under the {} an answer needs. Shorten the input or raise the endpoint's max_num_ctx.",
+            self.prompt_tokens, self.window, self.room, self.min_output
+        )
+    }
+}
+
+impl std::error::Error for ContextBudgetExceeded {}
+
+fn is_local_context_budget(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.is::<ContextBudgetExceeded>())
+}
+
 /// The server refused the request because it did not fit the context window.
 /// Our own pre-flight budget error is not that: retrying it cannot help.
 fn context_was_exceeded(error: &anyhow::Error) -> bool {
+    if is_local_context_budget(error) {
+        return false;
+    }
     let text = error.to_string().to_ascii_lowercase();
     if text.contains("context budget:") {
         return false;
@@ -432,13 +463,13 @@ fn context_was_exceeded(error: &anyhow::Error) -> bool {
 
 /// The prompt will not fit the model window: the budget check said so, or the
 /// server refused it as a context overflow. A transport failure is not this.
-/// The whole error chain counts, so a wrapped `AIService::prompt failed: …`
-/// still matches.
+/// The whole error chain counts, so a wrapped `AIService::prompt failed`
+/// still matches. A lookalike sentence does not.
 pub(crate) fn prompt_does_not_fit(error: &anyhow::Error) -> bool {
-    let text = format!("{error:#}").to_ascii_lowercase();
-    if text.contains("context budget:") {
+    if is_local_context_budget(error) {
         return true;
     }
+    let text = format!("{error:#}").to_ascii_lowercase();
     context_was_exceeded(&anyhow::anyhow!("{text}"))
 }
 
@@ -945,11 +976,13 @@ impl AIService {
         };
         let room = window.saturating_sub(prompt_tokens);
         if room < MIN_OUTPUT {
-            return Err(anyhow::anyhow!(
-                "context budget: the prompt is about {prompt_tokens} tokens and the model's \
-                 window is {window}, leaving {room}, under the {MIN_OUTPUT} an answer needs. \
-                 Shorten the input or raise the endpoint's max_num_ctx."
-            ));
+            return Err(ContextBudgetExceeded {
+                prompt_tokens,
+                window,
+                room,
+                min_output: MIN_OUTPUT,
+            }
+            .into());
         }
         Ok(Some(room.min(MAX_OUTPUT) as u32))
     }
@@ -2496,6 +2529,37 @@ mod tests {
         assert!(super::context_was_exceeded(&length));
         assert!(!super::context_was_exceeded(&budget));
         assert!(!super::context_was_exceeded(&transport));
+    }
+
+    /// A sentence that looks like the budget error is not one. Only the error
+    /// the budget check returns splits a batch. A server overflow still does.
+    #[test]
+    fn overflow_review_budget_lookalike_is_not_an_overflow() {
+        let real = AIService::interpretation_max_output_tokens(Some(100), 90)
+            .expect_err("a prompt with no room is a budget error");
+        assert!(
+            prompt_does_not_fit(&real),
+            "the budget check's own error must split, got {real:#}"
+        );
+        let wrapped = real.context("AIService::prompt failed");
+        assert!(
+            prompt_does_not_fit(&wrapped),
+            "wrapping the budget error must not hide it, got {wrapped:#}"
+        );
+
+        let lookalike = anyhow::anyhow!(
+            "context budget: the prompt is about 10 tokens and the model's window is 20, leaving 0"
+        );
+        assert!(
+            !prompt_does_not_fit(&lookalike),
+            "a matching sentence is not the budget error and must not retire a source"
+        );
+
+        let server = anyhow::anyhow!("context length exceeded");
+        assert!(
+            prompt_does_not_fit(&server.context("AIService::prompt failed")),
+            "a server context overflow must still split"
+        );
     }
 
     fn request_json(request: &mockito::Request) -> serde_json::Value {
