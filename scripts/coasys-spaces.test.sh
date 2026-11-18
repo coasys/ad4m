@@ -227,11 +227,11 @@ test_test_records_llm_registration() {
         COASYS_SPACES_LLM_ENDPOINT_KIND=LLAMA_SERVER \
             COASYS_SPACES_LLM_NATIVE_TOOLS=true \
             COASYS_SPACES_LLM_REQUEST_TIMEOUT_SECS=900 \
-            COASYS_SPACES_LLM_MAX_NUM_CTX=57344 \
+            COASYS_SPACES_LLM_MAX_NUM_CTX=90112 \
             bash "$SCRIPT" test 2>&1
     )" && fail "test ran without WE's pnpm"
     grep -qF "names no packageManager" <<<"$out" || fail "did not stop at pnpm: $out"
-    local line="llm kind LLAMA_SERVER nativeTools true requestTimeoutSecs 900 maxNumCtx 57344"
+    local line="llm kind LLAMA_SERVER nativeTools true requestTimeoutSecs 900 maxNumCtx 90112"
     grep -qF "$line" "$COASYS_SPACES_ARTIFACTS/run.txt" ||
         fail "registration not recorded: $(cat "$COASYS_SPACES_ARTIFACTS/run.txt" 2>/dev/null)"
 }

@@ -1155,18 +1155,18 @@ jobs:
       COASYS_SPACES_LLM_BASE_URL: http://127.0.0.1:12460/v1
       COASYS_SPACES_LLM_MODEL: qwen3.8-27b-ud-q4_k_m
       # Empty: do not make an Ollama /api/create variant. llama-server's slot is
-      # already 65536 tokens, and /api/create is not that server.
+      # already 98304 tokens, and /api/create is not that server.
       COASYS_SPACES_LLM_NUM_CTX: ""
       # WE#468's real tier (apps/we-web/e2e/coasys-spaces/models.mjs realLlm)
       # reads these and sends them on ai.addEndpoint / ai.addModel. Unset, the
       # harness registers OPEN_AI_COMPATIBLE with the executor's defaults.
       # LLAMA_SERVER is what turns thinking off. native tools stay on so the
       # Qwen parser is not handed a prompt-injected tool list. 900s covers a
-      # few minutes queued on the one slot. 57344 is the 65536 window minus 8192.
+      # few minutes queued on the one slot. 90112 is the 98304 window minus 8192.
       COASYS_SPACES_LLM_ENDPOINT_KIND: LLAMA_SERVER
       COASYS_SPACES_LLM_NATIVE_TOOLS: "true"
       COASYS_SPACES_LLM_REQUEST_TIMEOUT_SECS: "900"
-      COASYS_SPACES_LLM_MAX_NUM_CTX: "57344"
+      COASYS_SPACES_LLM_MAX_NUM_CTX: "90112"
       # Its own directory, which preflight empties; one coasys-spaces runs at a time (serial
       # group nightly-llm).
       COASYS_SPACES_ARTIFACTS: /tmp/coasys-spaces-artifacts

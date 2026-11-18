@@ -130,7 +130,7 @@ processing.
 WE `apps/we-web/tests/live/coasys-spaces/`): a Coasys space, a call, its
 transcript (executor Whisper), extraction on staging's llama-server
 (`http://127.0.0.1:12460/v1`, model `qwen3.8-27b-ud-q4_k_m`), and flows.
-That server is already running (`llama-qwen27b.service`, one 65536-token slot)
+That server is already running (`llama-qwen27b.service`, one 98304-token slot)
 and already holds the GPU. The job does not start it and does not load a model.
 `COASYS_SPACES_LLM_NUM_CTX` is empty, so `llm-check` does not make a context
 variant. `/api/create` runs only when the server is Ollama (`/api/version`
@@ -141,7 +141,7 @@ already that large is used as it is. The job also sets
 `COASYS_SPACES_LLM_ENDPOINT_KIND=LLAMA_SERVER`,
 `COASYS_SPACES_LLM_NATIVE_TOOLS=true`,
 `COASYS_SPACES_LLM_REQUEST_TIMEOUT_SECS=900` and
-`COASYS_SPACES_LLM_MAX_NUM_CTX=57344`. The script passes those through;
+`COASYS_SPACES_LLM_MAX_NUM_CTX=90112`. The script passes those through;
 WE's real tier (we#468) registers them on the endpoint. The 900s limit
 includes time queued on the one slot. It uses this commit's executor and SDK:
 

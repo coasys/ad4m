@@ -41,7 +41,7 @@
 #   COASYS_SPACES_LLM_REQUEST_TIMEOUT_SECS, COASYS_SPACES_LLM_MAX_NUM_CTX
 #                               passed through to the suite. This script does not
 #                               interpret them. The nightly job sets LLAMA_SERVER,
-#                               true, 900 and 57344. WE's real tier reads them
+#                               true, 900 and 90112. WE's real tier reads them
 #                               (we#468); unset, that harness keeps its defaults.
 #   SOCIAL_DNA_PACKAGE          passed to the suite when set
 set -euo pipefail
