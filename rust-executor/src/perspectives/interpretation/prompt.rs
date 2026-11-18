@@ -1,5 +1,6 @@
 use super::{
-    class_label, instances_by_class, relation_predicates, ExistingInstances, TranscriptTurn,
+    class_label, instances_by_class, relation_predicates, ExistingInstances, InstanceContext,
+    TranscriptTurn,
 };
 use crate::perspectives::flow_context::{render_consensus_rule, ContentionStatus, FlowContext};
 use crate::perspectives::model_query::types::ModelShape;
@@ -158,30 +159,7 @@ pub fn build_interpretation_input(
             let name = name.as_str();
             let existing_json: Vec<serde_json::Value> = existing_by_class
                 .get(name)
-                .map(|rows| {
-                    rows.iter()
-                        .map(|r| {
-                            // `properties` is the current secondary-scalar
-                            // state (e.g. rolling `summary` on a
-                            // ConversationSubgroup). Rendered only when
-                            // present so the prompt stays compact for
-                            // identity-only classes.
-                            let mut entry = serde_json::Map::new();
-                            entry.insert("id".into(), serde_json::json!(r.id));
-                            entry.insert("title".into(), serde_json::json!(r.title));
-                            entry.insert("class".into(), serde_json::json!(r.class));
-                            if !r.properties.is_empty() {
-                                let props: serde_json::Map<String, serde_json::Value> = r
-                                    .properties
-                                    .iter()
-                                    .map(|(k, v)| (k.clone(), serde_json::json!(v)))
-                                    .collect();
-                                entry.insert("properties".into(), serde_json::Value::Object(props));
-                            }
-                            serde_json::Value::Object(entry)
-                        })
-                        .collect()
-                })
+                .map(|rows| rows.iter().map(|r| existing_entry_json(r)).collect())
                 .unwrap_or_default();
             // `"hint"` is the prompt-facing key (short, cheap in tokens and what
             // the system prompt + few-shot examples reference); its value is the
@@ -242,6 +220,28 @@ pub fn build_interpretation_input(
         );
     }
     out.to_string()
+}
+
+/// One `existing` entry as the prompt shows it: `{id, title, class}`, plus
+/// `properties` when the instance has secondary scalars. Also what the
+/// `existing` budget counts a row's tokens from (`existing_budget`).
+pub(crate) fn existing_entry_json(r: &InstanceContext) -> serde_json::Value {
+    // `properties` is the current secondary-scalar state (e.g. rolling
+    // `summary` on a ConversationSubgroup). Rendered only when present so
+    // the prompt stays compact for identity-only classes.
+    let mut entry = serde_json::Map::new();
+    entry.insert("id".into(), serde_json::json!(r.id));
+    entry.insert("title".into(), serde_json::json!(r.title));
+    entry.insert("class".into(), serde_json::json!(r.class));
+    if !r.properties.is_empty() {
+        let props: serde_json::Map<String, serde_json::Value> = r
+            .properties
+            .iter()
+            .map(|(k, v)| (k.clone(), serde_json::json!(v)))
+            .collect();
+        entry.insert("properties".into(), serde_json::Value::Object(props));
+    }
+    serde_json::Value::Object(entry)
 }
 
 /// Render one live [`FlowContext`] as the JSON object the LLM sees under
