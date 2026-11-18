@@ -50,6 +50,12 @@ where
         let raw = match prompt_fn(attempt).await {
             Ok(r) => r,
             Err(e) => {
+                // A prompt that does not fit the window will not fit on a
+                // retry. Surface it once so the caller can split the batch
+                // instead of asking the model again.
+                if crate::ai_service::prompt_does_not_fit(&e) {
+                    return Err(e);
+                }
                 log::warn!("interpretation: prompt attempt {attempt} failed: {e:#}");
                 last_err = Some(e);
                 continue;
@@ -595,7 +601,43 @@ pub struct InterpretationOutcome {
     pub flow_proposals: Vec<String>,
 }
 
+/// [`run_interpretation_with_strategy`] with a per-call model override.
+///
+/// A batch whose prompt does not fit the model window is split in half and
+/// each half is run on its own. See [`super::overflow`].
 pub async fn run_interpretation_with_strategy_and_model(
+    perspective: &mut PerspectiveInstance,
+    shapes: &[ModelShape],
+    transcript: &[TranscriptTurn],
+    base_prefix: &str,
+    context: &AgentContext,
+    dedup_strategy: &DedupStrategy,
+    model_override: Option<&str>,
+    scope: Option<&Scope>,
+    cursor: Option<&InterpretationRunCursor>,
+    emit_debug_events: bool,
+    emit_ctx: Option<&crate::perspectives::auto_processor::events::InterpretationEmitContext>,
+    flow_filter: Option<&[String]>,
+) -> anyhow::Result<InterpretationOutcome> {
+    super::overflow::split_overflowing_batch(
+        perspective,
+        shapes,
+        transcript,
+        base_prefix,
+        context,
+        dedup_strategy,
+        model_override,
+        scope,
+        cursor,
+        emit_debug_events,
+        emit_ctx,
+        flow_filter,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn run_interpretation_once(
     perspective: &mut PerspectiveInstance,
     shapes: &[ModelShape],
     transcript: &[TranscriptTurn],

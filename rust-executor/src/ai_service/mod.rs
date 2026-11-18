@@ -65,6 +65,17 @@ pub(crate) fn estimate_token_count(text: &str) -> usize {
     (chars + 3) / 4
 }
 
+/// At least 10% above a chars/4 estimate, rounded up.
+///
+/// A llama-server `/tokenize` of a staging interpretation prompt was 76,870
+/// tokens against an estimate of 70,206. Ceil(70,206 × 1.1) is 77,227, above
+/// that measurement, so the window check refuses a prompt the raw estimate
+/// would send. Billing stays on [`estimate_token_count`]; only the
+/// interpretation budget uses this.
+pub(crate) fn interpretation_budget_tokens(estimated: usize) -> usize {
+    estimated.saturating_mul(11).saturating_add(9) / 10
+}
+
 /// Estimated bytes one context token occupies once a chat request is
 /// rendered: serialized message JSON is denser than the prose
 /// [`estimate_token_count`] bills at (~4 chars/token) — tools, argument
@@ -417,6 +428,18 @@ fn context_was_exceeded(error: &anyhow::Error) -> bool {
     let about_context = text.contains("context") || text.contains("n_ctx");
     let over = text.contains("exceed") || text.contains("too long") || text.contains("too large");
     about_context && over
+}
+
+/// The prompt will not fit the model window: the budget check said so, or the
+/// server refused it as a context overflow. A transport failure is not this.
+/// The whole error chain counts, so a wrapped `AIService::prompt failed: …`
+/// still matches.
+pub(crate) fn prompt_does_not_fit(error: &anyhow::Error) -> bool {
+    let text = format!("{error:#}").to_ascii_lowercase();
+    if text.contains("context budget:") {
+        return true;
+    }
+    context_was_exceeded(&anyhow::anyhow!("{text}"))
 }
 
 /// A system prompt, its examples as alternating user/assistant turns, then `prompt`.
@@ -1155,7 +1178,12 @@ impl AIService {
         let model_id = Self::replace_model_variables(&task.model_id)?;
         // The input is the whole conversation `prompt_with` sends: the task's
         // system prompt and examples count against the window as much as the prompt.
-        let input_tokens = estimate_turns_tokens(&turns_for_task(&task, prompt.clone()));
+        // The chars/4 estimate runs low against a real tokenizer; charge the
+        // margin before comparing it to the window.
+        let input_tokens = interpretation_budget_tokens(estimate_turns_tokens(&turns_for_task(
+            &task,
+            prompt.clone(),
+        )));
         let window = self.resolved_context_tokens(&model_id).await;
         let cap = Self::interpretation_max_output_tokens(window, input_tokens)?;
 

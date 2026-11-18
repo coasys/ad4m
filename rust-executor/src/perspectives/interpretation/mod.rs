@@ -39,6 +39,7 @@
 
 mod dedup;
 mod graph;
+mod overflow;
 pub(crate) mod overlay;
 mod parse;
 mod prompt;
