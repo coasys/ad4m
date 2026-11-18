@@ -119,9 +119,30 @@ pub async fn gather_transcript_model(
     text_property: &str,
     query_json: &str,
 ) -> anyhow::Result<GatheredTranscript> {
+    gather_transcript_model_within(
+        perspective,
+        class,
+        text_property,
+        query_json,
+        crate::perspectives::perspective_instance::MODEL_QUERY_SHAPE_WAIT,
+    )
+    .await
+}
+
+/// [`gather_transcript_model`] with the shape-wait budget as a parameter:
+/// the auto-processor tick passes `Duration::ZERO`, as a subscription
+/// recheck does — a missing shape fails the read, and the write that could
+/// deliver it wakes the loop.
+pub(crate) async fn gather_transcript_model_within(
+    perspective: &PerspectiveInstance,
+    class: &str,
+    text_property: &str,
+    query_json: &str,
+    shape_wait: std::time::Duration,
+) -> anyhow::Result<GatheredTranscript> {
     let query_json = with_text_provenance(query_json, text_property)?;
     let result_json = perspective
-        .model_query(class, &query_json)
+        .model_query_within(class, &query_json, shape_wait)
         .await
         .map_err(|e| anyhow::anyhow!("gather_transcript_model: model_query failed: {e:#}"))?;
     let result: serde_json::Value = serde_json::from_str(&result_json)

@@ -178,13 +178,14 @@ pub(super) fn contains_patterns(
 }
 
 /// Whether `scope` reads containment: `{ id }`, or a `Traverse` that names no
-/// predicate.
+/// predicate — and no `path`, which names its predicates per hop instead.
 pub fn is_containment_scope(scope: &Scope) -> bool {
     matches!(
         scope,
         Scope::Contained(_)
             | Scope::Traverse {
                 predicate: None,
+                path: None,
                 ..
             }
     )

@@ -329,6 +329,21 @@ pub enum Scope {
         /// class; only the rows are.
         #[serde(default)]
         predicate: Option<String>,
+        /// A different predicate at each hop: `["we://children",
+        /// "we://thread"]` from a conversation is its direct children through
+        /// the first and their replies through the second — the union of every
+        /// hop, not only the deepest, each record reported once. The length is
+        /// the depth, and `direction` applies to every hop.
+        ///
+        /// This is the level walk `levels` makes with its own relation named
+        /// per level rather than the same one throughout, and no per-anchor
+        /// breadth: a hop follows every link, not `levels[i]` of them. It is
+        /// refused alongside `predicate` (it is a list of them), `transitive`
+        /// and `max_depth` (a path bounds itself by length), `levels` (the
+        /// same walk with one predicate), and `limit_per_anchor` (it has no
+        /// breadth to set — one named per hop would need a parallel list).
+        #[serde(default)]
+        path: Option<Vec<String>>,
         /// Follow the predicate as far as it goes, rather than one step.
         ///
         /// Note the path reports only its endpoints: SPARQL property paths bind

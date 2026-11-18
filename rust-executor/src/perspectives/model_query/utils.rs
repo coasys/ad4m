@@ -154,6 +154,41 @@ pub(super) fn values_or_str_filter(var: &str, ids: &[String]) -> String {
     }
 }
 
+/// [`values_or_str_filter`]'s page constraint wrapped in a sub-SELECT
+/// projecting `?{var}`, for a group that also binds `?{var}` in a triple
+/// pattern the ids are meant to narrow.
+///
+/// A bare `VALUES ?{var} { ... }` beside that pattern is a leaf the join
+/// reorderer can put inside a lateral (for-loop) join — and there it is
+/// re-evaluated once per outer row, not used as an index: a 50k-id page
+/// beside a 50k-link predicate iterated the 50k values for each of the 50k
+/// link rows (~70 s). A sub-SELECT's `Project` is never for-loop-joinable,
+/// so the ids either drive the joins (each a seek; the plan the reorderer
+/// picks when the page is its smallest input) or hash-join once against a
+/// single scan of the other side. Measured on a 50k-link predicate: ~1 ms
+/// for a 1-id page, ~30 ms for 100, ~600 ms for 50,000 — no size threshold.
+///
+/// `fallback_bgp` is the group pattern binding `?{var}` when an id is not an
+/// emittable IRI (the STR-filter case): it runs inside the sub-SELECT, so it
+/// must restrict the scan itself.
+pub(super) fn values_subselect(var: &str, ids: &[String], fallback_bgp: &str) -> String {
+    if ids.iter().all(|id| emittable_iri(id)) {
+        let iris = ids
+            .iter()
+            .map(|id| format!("<{id}>"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        format!("{{ SELECT ?{var} WHERE {{ VALUES ?{var} {{ {iris} }} }} }}")
+    } else {
+        let strs = ids
+            .iter()
+            .map(|id| format!("\"{}\"", escape_sparql_string(id)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("{{ SELECT ?{var} WHERE {{ {fallback_bgp} FILTER(STR(?{var}) IN ({strs})) }} }}")
+    }
+}
+
 /// The complement of [`values_or_str_filter`]: one SPARQL line excluding `ids`
 /// from `?{var}`.
 ///

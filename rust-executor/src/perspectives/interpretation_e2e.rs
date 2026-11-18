@@ -2175,8 +2175,13 @@ async fn auto_processor_two_users_one_executor_no_double_processing() {
     let mut last_err: Option<String> = None;
 
     for attempt in 1..=attempts {
-        let (mut perspective, _shapes, ctx_main) =
-            setup_interpretation_e2e(&[("ConversationSubgroup", CONVERSATION_SUBGROUP_SDNA)]).await;
+        let (mut perspective, _shapes, ctx_main) = setup_interpretation_e2e(&[
+            ("ConversationSubgroup", CONVERSATION_SUBGROUP_SDNA),
+            // The transcript is a model query over this class — the seeded
+            // ns://type flags conform only if the shape is registered.
+            ("ns://Message", MESSAGE_SDNA),
+        ])
+        .await;
 
         // Two managed users on the one executor — distinct DIDs so the claim
         // election has two real candidates.

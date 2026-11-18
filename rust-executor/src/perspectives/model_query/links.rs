@@ -29,8 +29,11 @@
 //! verdict next to the plain `members` array, which stays as it is.
 //!
 //! The read is one extra query over the requested predicates, run after
-//! hydration and restricted to the returned page in Rust (a `VALUES` source
-//! constraint would join as a nested loop — one predicate scan per id).
+//! hydration and restricted to the returned page by a sub-SELECT on the
+//! instance ids (`utils::values_subselect`: a bare `VALUES` next to the
+//! triple pattern joined inside the for-loop and was re-iterated per link
+//! row; the sub-SELECT drives seeks for a small page and hash-joins one
+//! predicate scan for a large one).
 //! That placement is deliberate: the instance query and its
 //! hydration are left byte-for-byte as they were, so an annotation link cannot
 //! move `updatedAt`, `author` or a property value, and both instance-query plans
@@ -49,11 +52,11 @@
 use deno_core::anyhow::{anyhow, Error};
 use serde::de::DeserializeOwned;
 use serde_json::{json, Map, Value};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 
 use super::sparql_builder::{link_status_filter, local_status_filter, proof_valid_filter};
 use super::types::{IncludeValue, ModelQueryInput, ModelShape, ShapeResolver};
-use super::utils::emittable_iri;
+use super::utils::{emittable_iri, values_subselect};
 use crate::perspectives::sparql_store::{status_from_str, EvalStop, SparqlStore};
 use crate::types::LinkStatus;
 
@@ -211,10 +214,12 @@ pub(super) async fn attach_links(
     if keys.is_empty() || instances.is_empty() {
         return Ok(());
     }
-    let ids: HashSet<String> = instances
+    let mut ids: Vec<String> = instances
         .iter()
         .filter_map(|i| i["id"].as_str().map(str::to_string))
         .collect();
+    ids.sort();
+    ids.dedup();
 
     let mut predicates: Vec<&str> = keys.iter().map(|(_, p)| p.as_str()).collect();
     predicates.sort();
@@ -223,17 +228,25 @@ pub(super) async fn attach_links(
     // source -> predicate -> rows
     let mut found: BTreeMap<String, BTreeMap<String, Vec<Value>>> = BTreeMap::new();
     if !ids.is_empty() {
-        // The predicates scan as constants; the sources are filtered on the
-        // rows. A `VALUES ?source { ... }` here would join as a nested loop —
-        // one scan of the predicate per page id — which put a 50k-turn
-        // transcript read over a minute; a constant-predicate scan is ~5 µs
-        // per link. The trade: a small page pays for the whole predicate,
-        // still one indexed scan.
+        // The page ids constrain `?source` through a sub-SELECT
+        // (`values_subselect`), not a bare `VALUES ?source { ... }` and not a
+        // predicate scan filtered here. Beside `?source ?predicate ?target` a
+        // bare VALUES lands inside the for-loop join and is re-iterated once
+        // per link row (~70 s for a 50k-id page on a 50k-link predicate); a
+        // predicate-only scan pays the whole predicate for a one-instance
+        // page (~600 ms here). The sub-SELECT keeps the ids out of the loop:
+        // they drive index seeks when the page is small and hash-join a
+        // single predicate scan when it is large.
         let predicate_values = predicates
             .iter()
             .map(|p| format!("<{p}>"))
             .collect::<Vec<_>>()
             .join(" ");
+        let source_constraint = values_subselect(
+            "source",
+            &ids,
+            &format!("VALUES ?predicate {{ {predicate_values} }} ?source ?predicate ?target ."),
+        );
         let local_status = local_status_filter(shape);
         let link_status = link_status_filter(link_status);
         let proof_valid = proof_valid_filter(include_unverified);
@@ -241,6 +254,7 @@ pub(super) async fn attach_links(
         // an OPTIONAL chain that a required pattern follows, so they run as cartesian products.
         let sparql = format!(
             r#"SELECT ?source ?predicate ?target ?wireTarget ?author ?timestamp ?proofKey ?proofSig ?proofValid ?rowStatus WHERE {{
+    {source_constraint}
     VALUES ?predicate {{ {predicate_values} }}
     ?source ?predicate ?target .
     ?_reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?predicate ?target )>> .
@@ -257,9 +271,6 @@ pub(super) async fn attach_links(
         for row in &rows {
             let s = |var: &str| row[var].as_str().unwrap_or("").to_string();
             let source = s("source");
-            if !ids.contains(&source) {
-                continue;
-            }
             let predicate = s("predicate");
             let mut link = decorated_link(row);
             // Spelled as `perspective.get` spells it (`"SHARED"` / `"LOCAL"`),
@@ -718,6 +729,169 @@ mod tests {
             assert_eq!(row["author"], signer.did.as_str());
             assert_eq!(row["proof"]["valid"], true);
             assert_eq!(row["status"], "SHARED");
+        }
+    }
+
+    /// Measures the `__links` read's SPARQL shapes against a 50k-link
+    /// predicate, for a page of 1, 100 and 50,000 instance ids:
+    ///
+    /// - `values`: the pre-#1795 form, `VALUES ?source` + `VALUES ?predicate`
+    ///   before the triple pattern;
+    /// - `scan`: the interim form, `VALUES ?predicate` alone, sources filtered
+    ///   in Rust (adds ~0 ms to the number printed);
+    /// - `values+filter-pred`: `VALUES ?source` beside the pattern, the
+    ///   predicate set as a `FILTER(?predicate IN (...))`;
+    /// - `const-pred`: `VALUES ?source` with the predicate a constant;
+    /// - `filter-in`: the scan plus a `FILTER(?source IN (...))`;
+    /// - `subselect`: `VALUES ?source` inside a sub-SELECT — the shipped form
+    ///   (`values_subselect`). `attach-links` below runs the real function.
+    ///
+    /// On this store (oxigraph, in-memory): `values`, `values+filter-pred`
+    /// and `const-pred` are quadratic through the for-loop join (~68 s at a
+    /// 50k page), `scan` pays the whole predicate even for a 1-id page
+    /// (~600 ms), `filter-in` matches ids row-wise (~15 s at 50k), `subselect`
+    /// is ~1 ms at 1, ~30 ms at 100 and ~600 ms at 50,000. Runs ~4 minutes:
+    /// the quadratic references are kept in the table on purpose.
+    ///
+    /// `cargo test --release --offline -p ad4m-executor links_page_cost -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn links_page_cost() {
+        use super::super::sparql_builder::{local_status_filter, proof_valid_filter};
+        use super::super::test_helpers::{prop, shape};
+        use crate::agent::signatures::TestSigner;
+        use crate::types::{Link, LinkExpression, LinkStatus};
+
+        const N: usize = 50_000;
+        let signer = TestSigner::generate();
+        let store = SparqlStore::new(None).unwrap();
+        let started = std::time::Instant::now();
+        for i in 0..N {
+            let e = signer.sign(
+                Link {
+                    source: format!("we://s{i}"),
+                    predicate: Some("we://name".into()),
+                    target: format!("literal:string:v{i}"),
+                }
+                .normalize(),
+            );
+            store
+                .add_link(&LinkExpression {
+                    author: e.author,
+                    timestamp: e.timestamp,
+                    data: e.data,
+                    proof: e.proof,
+                    status: Some(LinkStatus::Shared),
+                })
+                .unwrap();
+        }
+        println!("seeded {N} links in {:?}", started.elapsed());
+
+        let shape = shape("Thing", vec![prop("name", "we://name")]);
+        let local_status = local_status_filter(&shape);
+        let proof_valid = proof_valid_filter(None);
+        let tail = |triple: &str, term: &str| {
+            format!(
+                r#"SELECT ?source ?target ?wireTarget ?author ?timestamp ?proofKey ?proofSig ?proofValid ?rowStatus WHERE {{
+{triple}    ?_reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( {term} )>> .
+    ?_reifier <ad4m://ontology/author> ?author .
+    ?_reifier <ad4m://ontology/timestamp> ?timestamp .
+{proof_valid}    OPTIONAL {{ ?_reifier <ad4m://ontology/proofKey> ?proofKey . }}
+    OPTIONAL {{ ?_reifier <ad4m://ontology/proofSignature> ?proofSig . }}
+    OPTIONAL {{ ?_reifier <ad4m://ontology/proofValid> ?proofValid . }}
+    OPTIONAL {{ ?_reifier <ad4m://ontology/wireTarget> ?wireTarget . }}
+    OPTIONAL {{ ?_reifier <ad4m://ontology/status> ?rowStatus . }}
+{local_status}}}"#
+            )
+        };
+
+        let stop = crate::perspectives::sparql_store::EvalStop::none();
+        for page in [1usize, 100, 50_000] {
+            let ids: Vec<String> = (0..page).map(|i| format!("we://s{i}")).collect();
+            let values_src = format!(
+                "VALUES ?source {{ {} }}",
+                ids.iter()
+                    .map(|i| format!("<{i}>"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
+            let filter_in = format!(
+                "FILTER(?source IN ({}))",
+                ids.iter()
+                    .map(|i| format!("<{i}>"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            let variants: Vec<(&str, String)> = vec![
+                (
+                    "values",
+                    tail(
+                        &format!(
+                            "    {values_src}\n    VALUES ?predicate {{ <we://name> }}\n    ?source ?predicate ?target .\n"
+                        ),
+                        "?source ?predicate ?target",
+                    ),
+                ),
+                (
+                    "scan",
+                    tail(
+                        "    VALUES ?predicate { <we://name> }\n    ?source ?predicate ?target .\n",
+                        "?source ?predicate ?target",
+                    ),
+                ),
+                (
+                    "values+filter-pred",
+                    tail(
+                        &format!(
+                            "    {values_src}\n    ?source ?predicate ?target .\n    FILTER(?predicate IN (<we://name>))\n"
+                        ),
+                        "?source ?predicate ?target",
+                    ),
+                ),
+                (
+                    "const-pred",
+                    tail(
+                        &format!("    {values_src}\n    ?source <we://name> ?target .\n"),
+                        "?source <we://name> ?target",
+                    ),
+                ),
+                (
+                    "filter-in",
+                    tail(
+                        &format!(
+                            "    VALUES ?predicate {{ <we://name> }}\n    ?source ?predicate ?target .\n    {filter_in}\n"
+                        ),
+                        "?source ?predicate ?target",
+                    ),
+                ),
+                (
+                    "subselect",
+                    tail(
+                        &format!(
+                            "    {{ SELECT ?source WHERE {{ {values_src} }} }}\n    VALUES ?predicate {{ <we://name> }}\n    ?source ?predicate ?target .\n"
+                        ),
+                        "?source ?predicate ?target",
+                    ),
+                ),
+            ];
+            for (name, sparql) in variants {
+                let t = std::time::Instant::now();
+                let rows: Vec<Value> =
+                    serde_json::from_str(&store.query_async(&stop, &sparql).await.unwrap())
+                        .unwrap();
+                println!(
+                    "page {page:>6} {name:>18}: {:>8?} ({} rows)",
+                    t.elapsed(),
+                    rows.len()
+                );
+            }
+            let keys: Vec<(String, String)> = vec![("name".into(), "we://name".into())];
+            let mut instances: Vec<Value> = ids.iter().map(|id| json!({ "id": id })).collect();
+            let t = std::time::Instant::now();
+            attach_links(&stop, &store, &shape, &keys, None, None, &mut instances)
+                .await
+                .unwrap();
+            println!("page {page:>6} {:>18}: {:>8?}", "attach-links", t.elapsed());
         }
     }
 }

@@ -113,7 +113,7 @@ static QUERY_SUBSCRIPTION_CHECK_INTERVAL: u64 = 200; // 200ms
 /// that spent most of its budget waiting still has headroom to
 /// execute the query itself before the outer WS timeout fires.
 /// Local-only perspectives never enter the wait path.
-const MODEL_QUERY_SHAPE_WAIT: Duration = Duration::from_secs(20);
+pub(crate) const MODEL_QUERY_SHAPE_WAIT: Duration = Duration::from_secs(20);
 
 fn notification_pool_name(uuid: &str) -> String {
     format!("notification_{}", uuid)
@@ -668,7 +668,7 @@ pub struct PerspectiveInstance {
     /// per-commit batch `record_changed_predicates` feeds
     /// `changed_predicates` — `None` when a diff carried a predicate-less
     /// link, which no trigger can rule out — not a second write log.
-    commit_writes: tokio::sync::broadcast::Sender<CommitWrite>,
+    pub(crate) commit_writes: tokio::sync::broadcast::Sender<CommitWrite>,
     commit_debounce_timer: Arc<Mutex<Option<tokio::time::Instant>>>,
     immediate_commits_remaining: Arc<Mutex<usize>>,
     /// Held by `commit` from its pending-queue check until the diff is sent or
@@ -4251,9 +4251,10 @@ impl PerspectiveInstance {
     }
 
     /// [`Self::model_query`] with the shape-wait budget as a parameter, so
-    /// tests can exercise its expiry without waiting the production 20 s.
-    #[cfg(test)]
-    async fn model_query_within(
+    /// callers that must not wait (the auto-processor tick, like a
+    /// subscription recheck) pass `Duration::ZERO`, and tests can exercise
+    /// its expiry without waiting the production 20 s.
+    pub(super) async fn model_query_within(
         &self,
         class_name: &str,
         query_json: &str,
@@ -4608,6 +4609,47 @@ impl PerspectiveInstance {
             .triggers
             .values()
             .any(|t| t.matches(writes, &mut lookups))
+    }
+
+    /// Mark each processor's kept transcript stale when `writes` may change
+    /// what its scope returns: the processor's trigger matches, or the batch
+    /// carries a config predicate or could not be classified (`None` — a
+    /// predicate-less diff, or a `Lagged` receiver that missed one), which
+    /// stales every declared processor. A batch that matches nothing leaves
+    /// the kept reads valid though the write generation moved, so a tick
+    /// with turns pending does not re-read the whole transcript after an
+    /// unrelated write (#1795).
+    fn auto_processor_mark_stale(
+        &self,
+        watcher: &mut crate::perspectives::auto_processor::watcher::WatcherState,
+        writes: Option<&subscription_triggers::Writes>,
+    ) {
+        use crate::perspectives::auto_processor::config::config_write_predicates;
+        let stale_all =
+            |watcher: &mut crate::perspectives::auto_processor::watcher::WatcherState| {
+                let ids: Vec<String> = watcher.triggers.keys().cloned().collect();
+                watcher.reads.mark_transcripts_stale(ids);
+            };
+        let Some(writes) = writes else {
+            return stale_all(watcher);
+        };
+        if writes
+            .predicates
+            .iter()
+            .any(|p| config_write_predicates().contains(p))
+        {
+            return stale_all(watcher);
+        }
+        let hits: Vec<String> = {
+            let mut lookups = subscription_triggers::StoreLookups::new(&self.sparql_store);
+            watcher
+                .triggers
+                .iter()
+                .filter(|(_, trigger)| trigger.matches(writes, &mut lookups))
+                .map(|(id, _)| id.clone())
+                .collect()
+        };
+        watcher.reads.mark_transcripts_stale(hits);
     }
 
     /// The trigger a model subscription over `cfg`'s transcript scope would
@@ -6853,7 +6895,10 @@ impl PerspectiveInstance {
                         .await
                     {
                         // Let the rest of a burst of writes land first, and
-                        // keep the back-off since the last read.
+                        // keep the back-off since the last read. The batches
+                        // that woke the wait are matched again by the tick's
+                        // own feed (`commit_feed`), which marks only the
+                        // scopes they can actually change stale.
                         WaitEnd::Write => {
                             let since_read = last_read
                                 .map(|(_, at)| at.elapsed().as_millis() as u64)
@@ -6874,6 +6919,23 @@ impl PerspectiveInstance {
             };
             if end == WaitEnd::Teardown {
                 break;
+            }
+            // Every commit the receiver already holds: coalesce them before
+            // the generation is captured, since this tick's reads see them
+            // and the next wait must not wake on them again. Each is matched
+            // — a batch that could change a scope marks its kept transcript
+            // stale; `Lagged` or a predicate-less one stales them all.
+            loop {
+                use tokio::sync::broadcast::error::TryRecvError;
+                match commits.try_recv() {
+                    Ok(write) => {
+                        self.auto_processor_mark_stale(&mut watcher, write.as_deref());
+                    }
+                    Err(TryRecvError::Lagged(_)) => {
+                        self.auto_processor_mark_stale(&mut watcher, None);
+                    }
+                    Err(TryRecvError::Empty) | Err(TryRecvError::Closed) => break,
+                }
             }
             // Writes up to here are seen by this tick; one landing during it
             // (the pass's own, or a peer's) is matched by the next wait.
@@ -6992,7 +7054,49 @@ impl PerspectiveInstance {
             return TickOutcome::Idle;
         }
 
+        // Every commit since the last tick, matched as the loop's wait would
+        // match it. The watch loop drains its own receiver to decide whether
+        // to wake at all; this feed — the watcher's own — is what marks a
+        // kept transcript stale for a tick that got here another way (a test
+        // driving `run_one_pass`, a base-rate poll), so a write is evaluated
+        // against the same trigger rules wherever the tick ran. `Lagged` or
+        // an unclassifiable batch stales them all.
+        {
+            // The receiver leaves `watcher` for the drain so the matcher can
+            // borrow it mutably to write the stale marks.
+            let (mut commits, seen_generation) = watcher
+                .commit_feed
+                .take()
+                .unwrap_or_else(|| (self.commit_writes.subscribe(), generation));
+            let mut classified = false;
+            loop {
+                use tokio::sync::broadcast::error::TryRecvError;
+                match commits.try_recv() {
+                    Ok(write) => {
+                        classified = true;
+                        self.auto_processor_mark_stale(watcher, write.as_deref());
+                    }
+                    Err(TryRecvError::Lagged(_)) => {
+                        classified = true;
+                        self.auto_processor_mark_stale(watcher, None);
+                    }
+                    Err(TryRecvError::Empty) | Err(TryRecvError::Closed) => break,
+                }
+            }
+            // The store moved without a commit for the feed to read — a
+            // write applied outside the commit path, which no trigger can
+            // classify. Treat it the way `Lagged` is treated.
+            if !classified && generation != seen_generation {
+                self.auto_processor_mark_stale(watcher, None);
+            }
+            watcher.commit_feed = Some((commits, generation));
+        }
+
         // 1. Record new-since-last-processed turns per config (payload kept).
+        // A config whose reads fail keeps its pending queue as it is — the
+        // turns stay pending rather than draining a batch a failed read may
+        // have made stale.
+        let mut read_failed: std::collections::HashSet<String> = std::collections::HashSet::new();
         for cfg in configs.iter() {
             let processed_rows = match watcher.reads.processed(&cfg.processor_id, generation) {
                 Some(rows) => rows,
@@ -7006,6 +7110,7 @@ impl PerspectiveInstance {
                             cfg.processor_id,
                             uuid
                         );
+                        read_failed.insert(cfg.processor_id.clone());
                         continue;
                     }
                 },
@@ -7021,30 +7126,32 @@ impl PerspectiveInstance {
             // or past a batch cap) are checked again: a run may have consumed
             // them since, or they may have left the window.
             watcher.retain_pending(&cfg.processor_id, |t| queueable(&t.id, &t.timestamp));
-            // A kept read is reused while the generation holds, unless a
+            // A kept read is reused while no matching write invalidated it
+            // (the loop's wake trigger marks `stale_transcripts`), unless a
             // turn it keeps without text has become queueable (its run aged
             // out of the window) or it dropped an unresolved text past its
             // retry clock ([`UNRESOLVED_TEXT_RETRY_MS`]: an expression
-            // arriving is not a store write, so the generation never moves
-            // for it).
-            let kept = watcher.reads.transcript(cfg).filter(|(at, turns, retry)| {
-                *at == generation
+            // arriving is not a store write, so no write ever marks it).
+            let kept = watcher.reads.transcript(cfg).filter(|(_, turns, retry)| {
+                !watcher.reads.transcript_stale(&cfg.processor_id)
                     && !retry.is_some_and(|due| now_ms >= due)
                     && !turns.iter().any(|t| {
                         matches!(t, CachedTurn::Consumed { .. }) && queueable(t.id(), t.timestamp())
                     })
             });
-            // Anything but an unchanged generation reads the whole
-            // transcript again: a model-query read has no partial-read
-            // equivalent, and the wake trigger already kept writes that
-            // could not change the scope from reaching this tick.
+            // An invalidated read re-runs the whole transcript: a model-query
+            // read has no partial-read equivalent.
             let transcript = match kept {
                 Some((_, turns, _)) => turns,
-                _ => match crate::perspectives::interpretation::gather_transcript_model(
+                _ => match crate::perspectives::interpretation::gather_transcript_model_within(
                     self,
                     &cfg.source_class,
                     &cfg.source_text,
                     &cfg.transcript_query_json(),
+                    // A subscription recheck does not wait for a shape, and
+                    // neither does a tick: a missing shape fails this read,
+                    // which the next write that could deliver it wakes.
+                    Duration::ZERO,
                 )
                 .await
                 {
@@ -7071,10 +7178,19 @@ impl PerspectiveInstance {
                             cfg.processor_id,
                             uuid
                         );
+                        read_failed.insert(cfg.processor_id.clone());
                         continue;
                     }
                 },
             };
+            // A pending turn that left the scope since it was queued — its
+            // parent link removed, its text unlinked — is not in this read:
+            // drop it before the drain rather than interpret it anyway.
+            if watcher.has_pending_for([cfg.processor_id.as_str()]) {
+                let live: std::collections::HashSet<&str> =
+                    transcript.iter().map(|t| t.id()).collect();
+                watcher.retain_pending(&cfg.processor_id, |t| live.contains(t.id.as_str()));
+            }
             for turn in transcript.iter() {
                 // A turn kept without text was not queueable at this tick's `now_ms` (checked above).
                 let CachedTurn::Full(pending) = turn else {
@@ -7113,8 +7229,13 @@ impl PerspectiveInstance {
             watcher.waiting_for_model = false;
         }
 
-        // 2. Drain + run a pass per config.
+        // 2. Drain + run a pass per config. A config whose reads failed this
+        // tick keeps its turns pending and skips the drain: the cursor rows
+        // that decide what is consumed could not be read.
         for cfg in configs.iter() {
+            if read_failed.contains(&cfg.processor_id) {
+                continue;
+            }
             let Some(batch) = watcher.drain_ready_batch(cfg, now_ms) else {
                 continue;
             };

@@ -147,13 +147,20 @@ export interface AddAutoProcessorConfig {
    * limited to `parent` and `where` (`{ "parent": {"id": "...", "predicate": "..."} }`,
    * `{ "where": { "body": {"contains": "..."} } }`). The processor owns
    * ordering, hydration and pagination; any other key is refused.
+   *
+   * This narrows what the processor READS, not where it writes: upsert
+   * candidates and minted children are configured with `existingScope`
+   * and `mintScope` below.
    */
   sourceQuery?: string;
   /**
-   * URI namespace new interpreted instances are minted under (the "spawn
-   * scope"), e.g. `soa://project/42/`. Omit for a per-processor default
-   * (`ad4m://autoprocessor/<processorId>/instance/`). Point this and
-   * `sourceQuery` at the same subtree to confine a processor to it.
+   * URI namespace new interpreted instances are minted under, e.g.
+   * `soa://project/42/` — a prefix on the generated ids, not a scope:
+   * nothing is linked under it. Omit for a per-processor default
+   * (`ad4m://autoprocessor/<processorId>/instance/`). To confine the
+   * writes themselves, set `existingScope` (which existing instances may
+   * be upserted) and `mintScope` (which parent new instances are linked
+   * under) below.
    */
   basePrefix?: string;
   /** Class URIs (SHACL `target_class`) to materialize each pass. */

@@ -85,12 +85,25 @@ or writes the graph. Split plan: spec items 3, 7, 8.
 - `SparqlStore` bumps a write generation after every committed write (`write_generation`,
   `watch_writes`). The auto-processor watch loop no longer wakes on the generation alone:
   `check_subscribed_queries` broadcasts each commit's `subscription_triggers::Writes` (added
-  and removed link terms) on a `commit_writes` watch channel, and the loop sleeps on that
-  (60 s fallback). A processor builds a `subscription_triggers::ModelTrigger` from its
+  and removed link terms) on `commit_writes`, a **bounded** `broadcast` channel
+  (`COMMIT_WRITES_CAPACITY`, 256 commits — it bounds memory, not correctness), and the loop
+  sleeps on that (60 s fallback). A receiver that lags past the buffer gets `Lagged`, which
+  must be treated as a wake: a missed write could have matched. A processor builds a
+  `subscription_triggers::ModelTrigger` from its
   `source_class` + `source_query` — the same rules a model subscription would get — and the
   loop wakes only when a committed write's `Writes` match it (`ModelTrigger::matches`) or
   carry a config predicate (`config_write_predicates` → reload). `None` writes (a diff
-  carried a predicate-less link) and an unbuilt trigger wake conservatively. A wake re-runs
+  carried a predicate-less link) and an unbuilt trigger wake conservatively. A
+  one-hop `parent` scope also gates `joins`/`scan` matches to nodes linked to a
+  scope anchor through the scope's edge predicates (`TriggerRules::scoped`), so
+  a class-flag write under another parent does not wake a scoped subscription
+  or processor; deeper walks (`transitive`, `levels`, a multi-hop `path`) stay
+  ungated, because one neighbour read cannot prove membership. While turns are
+  pending, the kept transcript's freshness is decided by the same trigger —
+  `auto_processor_mark_stale` records a matched write (or a `Lagged` /
+  unclassifiable one) against the read's scope key so the tick re-reads instead
+  of draining stale turns; pending turns that fell out of the scope are dropped
+  before drain, and a failed re-read keeps them pending and skips the drain. A wake re-runs
   the transcript as a full model query; `TickReads` (config, transcript, cursor) is still
   kept while the generation is unchanged, the transcript keeping text only for turns that
   may still be queued. The transcript query requests `links` provenance for

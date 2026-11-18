@@ -701,6 +701,23 @@ pub async fn load_processors(
     Ok(out)
 }
 
+/// Report why this instance's stored `sourceQuery` is refused, through the
+/// same throttle `load_processors` uses to report a skipped node
+/// ([`first_report_for`]). The warning names the field — and consumes the
+/// instance's one report, so the generic "missing / unparseable fields"
+/// line does not also print for the same node.
+fn report_bad_source_query(instance: &serde_json::Value, why: &str) {
+    let id = instance["id"].as_str().unwrap_or("<no id>");
+    if first_report_for(id) {
+        log::warn!(
+            "load_processors: AutoProcessor instance `{id}` has an invalid sourceQuery \
+             ({why}); skipping (further occurrences suppressed). Instance as read: {instance}"
+        );
+    } else {
+        log::debug!("load_processors: still skipping `{id}` (invalid sourceQuery)");
+    }
+}
+
 /// Map one hydrated `model_query` instance onto an [`AutoProcessorConfig`], or
 /// `None` when a field is missing or does not parse.
 fn config_from_instance(instance: &serde_json::Value) -> Option<AutoProcessorConfig> {
@@ -777,19 +794,28 @@ fn config_from_instance(instance: &serde_json::Value) -> Option<AutoProcessorCon
         return None;
     }
 
-    // `sourceQuery`: absent → whole-class scope. Present but carrying keys
-    // the processor owns (order, limit, …) or unparseable → the whole config
-    // is refused, the same policy every other malformed field gets: a
-    // silently weakened scope reads content the processor never opted into.
-    let source_query = match scalar("sourceQuery") {
-        Some(json) => match validate_source_query(&json) {
-            Ok(_) => Some(json),
-            Err(e) => {
-                log::warn!("config_from_instance: bad sourceQuery: {e:#}");
+    // `sourceQuery`: absent → whole-class scope. Presence is checked before
+    // `scalar_string`, which reads an empty literal (like any non-scalar) as
+    // absent — a stored-but-empty `sourceQuery` is a malformed config, not
+    // an omission. Present but carrying keys the processor owns (order,
+    // limit, …) or unparseable → the whole config is refused, the same
+    // policy every other malformed field gets: a silently weakened scope
+    // reads content the processor never opted into.
+    let source_query = match instance.get("sourceQuery") {
+        None => None,
+        Some(_) => match scalar("sourceQuery") {
+            Some(json) => match validate_source_query(&json) {
+                Ok(_) => Some(json),
+                Err(e) => {
+                    report_bad_source_query(instance, &format!("{e:#}"));
+                    return None;
+                }
+            },
+            None => {
+                report_bad_source_query(instance, "present but empty or not a scalar");
                 return None;
             }
         },
-        None => None,
     };
 
     // Scope JSON blobs — a present-but-unparseable value is a config error
@@ -1664,6 +1690,33 @@ mod tests {
         )
         .await
         .expect("inject disallowed key");
+        let loaded = load_processors(&p).await.expect("load");
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].processor_id, "good");
+    }
+
+    /// A stored empty `sourceQuery` is a malformed value, not an omission:
+    /// `scalar_string` reads `""` as absent, so presence must be checked
+    /// first, or the node would load with a whole-class scope it never
+    /// declared.
+    #[tokio::test]
+    async fn load_skips_node_with_empty_source_query() {
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        write_processor(&mut p, &sample_config("good"), Some(false), &ctx)
+            .await
+            .expect("write good");
+        write_processor(&mut p, &sample_config("empty-scope"), Some(false), &ctx)
+            .await
+            .expect("write empty-scope");
+        p.update_subject(
+            class_option(),
+            processor_node("empty-scope"),
+            serde_json::json!({ "sourceQuery": "" }),
+            None,
+            &ctx,
+        )
+        .await
+        .expect("empty sourceQuery");
         let loaded = load_processors(&p).await.expect("load");
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].processor_id, "good");

@@ -228,9 +228,10 @@ the processor is not loaded.
 When set, the window is the engine-owned bound:
 
 - **Scope (in Rust, after gather):** drop rows whose `timestamp` is
-  older than `now - source_window_ms`. Apps should *also* `FILTER` in
-  SPARQL so Oxigraph never materialises the rest; the Rust drop is the
-  safety net when they don’t.
+  older than `now - source_window_ms`. Apps can *also* bound
+  `timestamp` in the scope's `where` (`source_query`) so the store
+  never materialises the rest; the Rust drop is the safety net when
+  they don't.
 - **Cursor:** only load `sources` from runs of this processor whose
   `ran_at >= now - source_window_ms`. `ran_at` is already on
   `InterpretationRun` (unix millis, stored as a string).

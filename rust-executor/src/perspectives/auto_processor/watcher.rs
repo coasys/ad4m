@@ -245,7 +245,7 @@ pub struct ProcessorPending {
 /// processor and hands back a ready batch when the debounce window elapses.
 /// Pure state — no I/O, no clock — so the debounce + cap rules are testable
 /// with hand-picked `now_ms` values.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default)]
 pub struct WatcherState {
     per_processor: BTreeMap<String, ProcessorPending>,
     /// Per-batch (keyed by [`crate::perspectives::auto_processor::claim::batch_key`])
@@ -284,6 +284,20 @@ pub struct WatcherState {
         String,
         crate::perspectives::perspective_instance::subscription_triggers::ModelTrigger,
     >,
+    /// The tick's own feed of committed writes, subscribed on first use and
+    /// drained at the start of `run_auto_processor_tick` — the receiver and
+    /// the write generation the last drain saw: the writes a tick runs
+    /// after are evaluated against `triggers` whether the tick came from
+    /// the loop's wait or a direct drive (`run_one_pass` in tests). A
+    /// generation that moved without a single write for the feed to
+    /// classify means the write bypassed the commit path entirely (a store
+    /// write applied directly, as a peer's link sync does in tests) — with
+    /// no terms to match it stales every kept transcript, the same answer
+    /// an unclassifiable batch gives.
+    pub(crate) commit_feed: Option<(
+        tokio::sync::broadcast::Receiver<crate::perspectives::perspective_instance::CommitWrite>,
+        u64,
+    )>,
 }
 
 impl WatcherState {
@@ -305,10 +319,11 @@ impl WatcherState {
 /// `source_window_ms` filters, deferrals) is applied to the kept rows at
 /// each tick, exactly as to fresh ones.
 ///
-/// The configs, transcript and cursor rows are all read again after any
-/// write whose committed batch matched a processor's wake trigger
-/// (`WatcherState::triggers`) — a write that cannot change a scope never
-/// reaches a tick at all (#1794).
+/// The configs and cursor rows are read again whenever the generation moved;
+/// a transcript is read again only when a write could change it — the
+/// loop's wake trigger decides (`stale_transcripts`), so an unrelated write
+/// that moves the generation does not re-read a kept scope, while a
+/// predicate-less batch or `Lagged` stales them all conservatively.
 #[derive(Debug, Default, Clone)]
 pub(crate) struct TickReads {
     configs: Option<(u64, Arc<Vec<AutoProcessorConfig>>)>,
@@ -317,6 +332,9 @@ pub(crate) struct TickReads {
     transcripts: BTreeMap<String, KeptTranscript>,
     /// Per processor id: the cursor rows, not yet windowed.
     processed: BTreeMap<String, (u64, Arc<Vec<ProcessedSource>>)>,
+    /// Processor ids whose kept transcript a matching (or unclassifiable)
+    /// write invalidated since it was read.
+    stale_transcripts: HashSet<String>,
 }
 
 /// A transcript read [`TickReads`] keeps: the generation it is up to date
@@ -389,6 +407,8 @@ impl TickReads {
             .retain(|id, _| declared.contains(id.as_str()));
         self.processed
             .retain(|id, _| declared.contains(id.as_str()));
+        self.stale_transcripts
+            .retain(|id| declared.contains(id.as_str()));
         let configs = Arc::new(configs);
         self.configs = Some((generation, configs.clone()));
         configs
@@ -405,6 +425,21 @@ impl TickReads {
             .get(&cfg.processor_id)
             .filter(|k| k.scope == cfg.scope_key())
             .map(|k| (k.generation, k.turns.clone(), k.retry_unresolved_ms))
+    }
+
+    /// Mark `ids`' kept transcripts stale: a write that could change their
+    /// scope landed since they were read, so the next tick reads them again
+    /// even though nothing else may have changed. Called from the loop when
+    /// a committed batch matches a processor's wake trigger, and for every
+    /// declared processor when a batch could not be classified.
+    pub(crate) fn mark_transcripts_stale(&mut self, ids: impl IntoIterator<Item = String>) {
+        self.stale_transcripts.extend(ids);
+    }
+
+    /// Whether `processor_id`'s kept transcript was invalidated since it was
+    /// read.
+    pub(crate) fn transcript_stale(&self, processor_id: &str) -> bool {
+        self.stale_transcripts.contains(processor_id)
     }
 
     /// Keep `turns`, with the text only of those `queueable` accepts, one per
@@ -426,6 +461,7 @@ impl TickReads {
             .collect();
         turns.sort_by(transcript_cmp);
         let turns = Arc::new(turns);
+        self.stale_transcripts.remove(&cfg.processor_id);
         self.transcripts.insert(
             cfg.processor_id.clone(),
             KeptTranscript {

@@ -395,12 +395,85 @@ async fn the_watch_loop_sleeps_until_a_link_changes() {
         .expect("loop task");
 }
 
+/// The wait itself, without the loop: `wait_for_tick` runs every committed
+/// batch through the trigger before it decides — an out-of-scope write is
+/// evaluated (`matched` is invoked) and the wait ends `Elapsed`, not `Write`;
+/// an in-scope one ends it `Write`. `Elapsed` alone cannot distinguish "the
+/// write was ruled out" from "the write never arrived", so the matcher is
+/// counted.
+#[tokio::test]
+async fn the_wait_evaluates_a_write_and_only_a_match_ends_it() {
+    use super::watcher::{wait_for_tick, WaitEnd};
+    use crate::types::{Link, LinkStatus};
+
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
+    write_processor(&mut p, &config("waited", 600_000, None), Some(false), &ctx)
+        .await
+        .expect("write_processor");
+    let mut watcher = WatcherState::new();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    // Builds the wake trigger the loop would test against.
+    p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
+    let mut rx = p.commit_writes.subscribe();
+    let teardown = p.is_teardown.clone();
+
+    p.add_link(
+        Link {
+            source: "note://reactions".into(),
+            predicate: Some("ns://reaction".into()),
+            target: "literal:string:r1".into(),
+        },
+        LinkStatus::Local,
+        None,
+        &ctx,
+    )
+    .await
+    .expect("unrelated link");
+    let evaluated = std::cell::Cell::new(0usize);
+    let end = wait_for_tick(&teardown, 400, Some(&mut rx), None, |w| {
+        evaluated.set(evaluated.get() + 1);
+        p.auto_processor_writes_match(&watcher, w)
+    })
+    .await;
+    assert!(
+        evaluated.get() >= 1,
+        "the out-of-scope write was never evaluated, so `Elapsed` proves nothing"
+    );
+    assert_eq!(
+        end,
+        WaitEnd::Elapsed,
+        "an out-of-scope write ended the wait"
+    );
+
+    // Positive control: an in-scope write ends the same wait.
+    seed_message(
+        &mut p,
+        &ctx,
+        "msg://1",
+        "did:key:alice",
+        "first",
+        "ns://body",
+    )
+    .await;
+    let end = wait_for_tick(&teardown, 2_000, Some(&mut rx), None, |w| {
+        p.auto_processor_writes_match(&watcher, w)
+    })
+    .await;
+    assert_eq!(
+        end,
+        WaitEnd::Write,
+        "an in-scope write did not end the wait"
+    );
+}
+
 /// Writes that cannot touch the scope (a predicate the model trigger has no
 /// rule for: reactions, other agents' outputs, claims, a peer syncing) do not
 /// wake an idle loop at all (#1794): `check_subscribed_queries` reports them
 /// to the commit feed, the processor's `ModelTrigger` rules them out, and the
-/// loop sleeps on. Here an unrelated link lands every 100 ms for 3 s; the
-/// transcript read count must not move.
+/// loop sleeps on. The control write after them — received last, so every
+/// earlier write was evaluated by then — wakes the loop for exactly one more
+/// transcript read; had any unrelated write woken it, the count would be
+/// higher.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unrelated_writes_do_not_wake_an_idle_loop() {
     use crate::types::{Link, LinkStatus};
@@ -445,9 +518,7 @@ async fn unrelated_writes_do_not_wake_an_idle_loop() {
     }
     let seen = transcript_queries(&p);
 
-    let start = tokio::time::Instant::now();
-    let mut i = 0;
-    while start.elapsed() < Duration::from_secs(3) {
+    for i in 0..20 {
         p.add_link(
             Link {
                 source: "note://reactions".into(),
@@ -460,15 +531,34 @@ async fn unrelated_writes_do_not_wake_an_idle_loop() {
         )
         .await
         .expect("unrelated link");
-        i += 1;
-        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
+    // Positive control, received after every unrelated write: it wakes the
+    // loop, which reads the transcript once. Waiting for that read also
+    // waits out every earlier evaluation — and a wake on any of the 20
+    // would have produced one more read than this.
+    seed_message(
+        &mut p,
+        &ctx,
+        "msg://2",
+        "did:key:alice",
+        "second",
+        "ns://body",
+    )
+    .await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while transcript_queries(&p) == seen {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the in-scope write never woke the loop"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(
         transcript_queries(&p),
-        seen,
-        "{} unrelated writes woke the loop into a transcript read",
-        i
+        seen + 1,
+        "exactly the control write woke the loop"
     );
 
     p.teardown_background_tasks().await;
@@ -771,10 +861,15 @@ async fn with_no_model_pending_turns_back_off_to_the_idle_delay() {
 
 /// The loop itself, with no model and a turn pending: after the tick that
 /// finds no model it waits for a write or the idle fallback, instead of
-/// ticking every 0.5 s. Counted by how often a tick asked for a model.
+/// ticking every 0.5 s. Counted by how often a tick asked for a model. The
+/// observation is deterministic, not an elapsed window: out-of-scope writes
+/// the wait evaluates must not tick it, and the in-scope control write after
+/// them — received last, so every earlier write was evaluated by then —
+/// ticks it exactly once more.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn with_no_model_the_watch_loop_stops_polling() {
     use super::watcher::test_hooks::{PassHooks, HOOKS};
+    use crate::types::{Link, LinkStatus};
     use std::sync::atomic::Ordering;
 
     let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
@@ -810,13 +905,47 @@ async fn with_no_model_the_watch_loop_stops_polling() {
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    tokio::time::sleep(Duration::from_secs(3)).await;
-    let ticks = checks.load(Ordering::Relaxed);
-    println!("{ticks} ticks in ~3 s with a turn pending and no model");
+    let parked = checks.load(Ordering::Relaxed);
+
+    for i in 0..10 {
+        p.add_link(
+            Link {
+                source: "note://reactions".into(),
+                predicate: Some("ns://reaction".into()),
+                target: format!("literal:string:r{i}"),
+            },
+            LinkStatus::Local,
+            None,
+            &ctx,
+        )
+        .await
+        .expect("unrelated link");
+    }
+
+    // Positive control, received after every unrelated write: an in-scope
+    // turn ends the wait, whose tick asks for a model once more.
+    seed_message(
+        &mut p,
+        &ctx,
+        "msg://2",
+        "did:key:alice",
+        "second",
+        "ns://body",
+    )
+    .await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while checks.load(Ordering::Relaxed) == parked {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the in-scope write never woke the loop"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     assert_eq!(
-        ticks, 1,
-        "with no model and no write the loop ticked {ticks} times in ~3 s; \
-         polling at 0.5 s would be about 6"
+        checks.load(Ordering::Relaxed),
+        parked + 1,
+        "only the in-scope write ticked the parked loop; \
+         a poll at 0.5 s would have ticked many times by now"
     );
 
     p.teardown_background_tasks().await;

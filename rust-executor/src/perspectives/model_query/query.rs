@@ -18,9 +18,8 @@ use super::links::{attach_links, resolve_link_keys};
 use super::projection::resolve_projections;
 use super::relations::{resolve_includes_recursive, resolve_reverse_relations};
 use super::sparql_builder::{
-    all_where_pushable, build_count_sparql, build_instance_sparql, level_limits,
-    link_status_filter, local_status_filter, per_anchor_limit, proof_valid_filter, LinkGuard,
-    ANCHOR_VAR,
+    all_where_pushable, build_count_sparql, build_instance_sparql, link_status_filter,
+    local_status_filter, per_anchor_limit, proof_valid_filter, LinkGuard, ANCHOR_VAR,
 };
 use super::types::{
     InstanceQueryPlan, ModelQueryInput, ModelQueryResult, ModelShape, OrderDirection, Scope,
@@ -32,19 +31,41 @@ use deno_core::anyhow::Error;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-/// The anchors, predicate and direction a `levels` walk starts from.
+/// The walk a scope asks the executor to make, as `(anchors, direction,
+/// hops)` — one `(predicate, per-anchor breadth)` per level: `levels` names
+/// both over one predicate, `path` names the predicates and bounds none.
 ///
-/// `None` for any scope that is not a traversal over a predicate — the walk is meaningless without
-/// a relation to follow, and the caller falls back to asking once. (A containment traversal with
-/// `levels` is refused before this is asked.)
-fn walk_roots(query: &ModelQueryInput) -> Option<(Vec<String>, String, ScopeDirection)> {
+/// `None` for any scope that does not describe a bounded level walk —
+/// including a `Traverse` with none of `levels`/`path`, which the store
+/// answers in one step.
+fn walk_spec(
+    query: &ModelQueryInput,
+) -> Option<(Vec<String>, ScopeDirection, Vec<(String, Option<usize>)>)> {
     match &query.parent {
         Some(Scope::Traverse {
             ids,
             predicate: Some(predicate),
             direction,
+            levels: Some(levels),
             ..
-        }) => Some((ids.clone(), predicate.clone(), *direction)),
+        }) => Some((
+            ids.clone(),
+            *direction,
+            levels
+                .iter()
+                .map(|limit| (predicate.clone(), Some(*limit)))
+                .collect(),
+        )),
+        Some(Scope::Traverse {
+            ids,
+            direction,
+            path: Some(path),
+            ..
+        }) => Some((
+            ids.clone(),
+            *direction,
+            path.iter().map(|p| (p.clone(), None)).collect(),
+        )),
         _ => None,
     }
 }
@@ -230,7 +251,8 @@ fn slice_per_anchor(rows: &mut Vec<Value>, n: usize) {
     );
 }
 
-/// Walk a relation level by level, keeping `levels[depth]` results per anchor at each depth.
+/// Walk `hops` level by level — each hop its own predicate and per-anchor
+/// breadth (`None`: every link) — unioning what each level reaches.
 ///
 /// This is the whole reason the walk belongs in the executor. A caller can drive it — ask for one
 /// level, use the ids as the next level's anchors — but each step is then a network round trip, and
@@ -250,9 +272,8 @@ async fn walk_levels(
     resolver: &dyn ShapeResolver,
     pagination: &SparqlPagination,
     roots: Vec<String>,
-    predicate: &str,
     direction: ScopeDirection,
-    levels: &[usize],
+    hops: &[(String, Option<usize>)],
 ) -> Result<Vec<String>, Error> {
     let mut ordered: Vec<String> = Vec::new();
     // Seeded with the roots so that a cycle back to an anchor neither returns
@@ -260,7 +281,7 @@ async fn walk_levels(
     let mut seen: HashSet<String> = roots.iter().cloned().collect();
     let mut frontier = roots;
 
-    for (depth, limit) in levels.iter().enumerate() {
+    for (depth, (predicate, limit)) in hops.iter().enumerate() {
         if frontier.is_empty() {
             break;
         }
@@ -269,12 +290,13 @@ async fn walk_levels(
         let mut level_input = query_input.clone();
         level_input.parent = Some(Scope::Traverse {
             ids: frontier.clone(),
-            predicate: Some(predicate.to_string()),
+            predicate: Some(predicate.clone()),
             transitive: false,
             direction,
-            limit_per_anchor: Some(*limit),
+            limit_per_anchor: *limit,
             levels: None,
             max_depth: None,
+            path: None,
         });
         // Paging belongs to the caller's whole result, not to a level of the walk.
         level_input.limit = None;
@@ -321,7 +343,7 @@ async fn walk_levels(
             // reading as `slice_per_anchor`, which the non-walking path still uses.)
             if let Some(anchor) = row[ANCHOR_VAR].as_str() {
                 let used = kept.entry(anchor.to_string()).or_insert(0);
-                if *used >= *limit {
+                if limit.is_some_and(|limit| *used >= limit) {
                     continue;
                 }
                 *used += 1;
@@ -331,7 +353,7 @@ async fn walk_levels(
             next.push(id.to_string());
         }
         log::debug!(
-            "Walk depth {depth}: kept {} of {} rows across {} anchors at a breadth of {limit}",
+            "Walk depth {depth}: kept {} of {} rows across {} anchors at a breadth of {limit:?}",
             next.len(),
             rows.len(),
             kept.len()
@@ -482,6 +504,45 @@ pub(super) async fn execute_model_query_inner(
         }
     }
 
+    // A `path` is its own way of saying what `predicate`, `levels` and
+    // `maxDepth` say: every combination is refused rather than read as one
+    // or the other.
+    if let Some(Scope::Traverse {
+        predicate,
+        transitive,
+        limit_per_anchor,
+        levels,
+        max_depth,
+        path: Some(path),
+        ..
+    }) = &query_input.parent
+    {
+        if path.is_empty() {
+            return Err(Error::msg(
+                "Traverse scope: `path` must name at least one predicate — an empty walk reaches \
+                 nothing, and the empty answer looks like an empty graph.",
+            ));
+        }
+        if predicate.is_some() || levels.is_some() {
+            return Err(Error::msg(
+                "Traverse scope: `path` names a predicate per hop, so it is mutually exclusive \
+                 with `predicate` and `levels`. Use one.",
+            ));
+        }
+        if *transitive || max_depth.is_some() {
+            return Err(Error::msg(
+                "Traverse scope: `path` bounds itself by length — `transitive` and `maxDepth` \
+                 have no place beside it.",
+            ));
+        }
+        if limit_per_anchor.is_some() {
+            return Err(Error::msg(
+                "Traverse scope: `path` follows every link at each hop. A per-anchor breadth \
+                 would need one per hop; use `levels` to bound a single-predicate walk.",
+            ));
+        }
+    }
+
     // A transitive scope over containment, bounded by `maxDepth`, or under a
     // guard that restricts links is walked here and handed to the builder as
     // pairs (see `ModelQueryInput::walked`), so the rows, the page and the
@@ -516,7 +577,7 @@ pub(super) async fn execute_model_query_inner(
         Some(Scope::Traverse {
             levels: Some(_),
             ..
-        })
+        }) | Some(Scope::Traverse { path: Some(_), .. })
     );
     if is_count_only
         && count_only_can_skip_the_walk
@@ -612,7 +673,7 @@ pub(super) async fn execute_model_query_inner(
     // away. No global LIMIT is emitted in that case — the ordering is what
     // matters, and the truncation is per anchor.
     let anchor_limit = per_anchor_limit(query_input);
-    let walk = level_limits(query_input).cloned();
+    let walk = walk_spec(query_input);
 
     // A per-anchor limit picks its N *in the store*, so the store has to be able to express the
     // order that decides which N. Only the first key is emitted, and a key the builder cannot
@@ -776,8 +837,8 @@ pub(super) async fn execute_model_query_inner(
             // Phase one either asks once, or walks a level at a time — the difference being where
             // the ids come from. Phase two is the same either way: one hydration for whatever it
             // settled on, which is what keeps a three-level walk to a single pass over records.
-            let ordered_ids: Vec<String> = match (&walk, walk_roots(query_input)) {
-                (Some(levels), Some((roots, predicate, direction))) => {
+            let ordered_ids: Vec<String> = match &walk {
+                Some((roots, direction, hops)) => {
                     walk_levels(
                         stop,
                         store,
@@ -787,10 +848,9 @@ pub(super) async fn execute_model_query_inner(
                         sparql_pagination
                             .as_ref()
                             .expect("a walk forces the two-phase plan, which needs pagination"),
-                        roots,
-                        &predicate,
-                        direction,
-                        levels,
+                        roots.clone(),
+                        *direction,
+                        hops,
                     )
                     .await?
                 }

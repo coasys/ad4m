@@ -131,9 +131,14 @@ export interface ContainedScope {
   field?: never;
 }
 
-/** Whether this traversal follows containment rather than a named predicate. */
+/** Whether this traversal follows containment rather than named predicates. */
 export function isContainmentTraversal(scope: Scope): scope is TraverseByContainment {
-  return isTraverseScope(scope) && !('predicate' in scope && scope.predicate) && !('model' in scope && scope.model);
+  return (
+    isTraverseScope(scope) &&
+    !('predicate' in scope && scope.predicate) &&
+    !('model' in scope && scope.model) &&
+    !('path' in scope && scope.path)
+  );
 }
 
 /** Whether this scope is the containment form, `{ id }` alone. */
@@ -153,7 +158,11 @@ export function isContainedScope(scope: Scope): scope is ContainedScope {
  * or by the model and relation that own it. See {@link TraverseByPredicate} and
  * {@link TraverseByModel}.
  */
-export type TraverseScope = TraverseByPredicate | TraverseByModel | TraverseByContainment;
+export type TraverseScope =
+  | TraverseByPredicate
+  | TraverseByModel
+  | TraverseByContainment
+  | TraverseByPath;
 
 /**
  * A traversal over containment, through the built-in `Container`: it names no
@@ -190,6 +199,28 @@ export interface TraverseByPredicate extends TraverseOptions {
 export interface TraverseByModel extends TraverseOptions {
   model: typeof Ad4mModel;
   field?: string;
+}
+
+/**
+ * A traversal naming a different predicate at each hop — the form a thread
+ * read takes: `['we://children', 'we://thread']` from a conversation is its
+ * direct children through the first predicate **and** their replies through
+ * the second, as one flat result in breadth-first order.
+ *
+ * The result is the union of every hop, not only the deepest: a two-predicate
+ * path reports the level-1 records and the level-2 records alike, each once.
+ * `direction` applies to every hop; the anchors are excluded from their own
+ * result, as with `transitive` and `levels`.
+ *
+ * The path's length is the depth, so it is refused alongside `predicate` and
+ * `levels` (other ways to name the relation), `transitive` and `maxDepth`
+ * (other ways to bound it), and `limitPerAnchor` (it follows every link at
+ * each hop — a per-anchor breadth would need one number per hop).
+ */
+export interface TraverseByPath extends TraverseOptions {
+  path: string[];
+  predicate?: never;
+  model?: never;
 }
 
 /** Everything a traversal says that is not how it names its predicate. */

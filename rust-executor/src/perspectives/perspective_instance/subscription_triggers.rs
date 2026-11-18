@@ -23,7 +23,10 @@
 //!    sort reads it on every linked target, flagged or not).
 //! 2. **`joins`**: a flag predicate written (or removed) with one of the
 //!    flag values of a class the subscription scans. This is how a new
-//!    record enters, and how a deleted one leaves the count.
+//!    record enters, and how a deleted one leaves the count. Under a
+//!    one-hop parent scope the flagged node must also sit inside it —
+//!    linked to an anchor through the scope's edge — since a record under
+//!    another parent can never be in the result (#1795).
 //! 3. **`near`**: a predicate read on records in the result, written on a
 //!    node that is in the last result or is a parent-scope anchor. For a node
 //!    in the last result this is a fast path: `scan` (a top-level record
@@ -237,6 +240,15 @@ pub(super) struct TriggerRules {
     /// A parent scope whose predicate is not known (`Scope::Model` without a
     /// `field`): any write touching an anchor re-runs.
     anchors_any_predicate: bool,
+    /// A one-hop parent scope narrows `joins` (a flag write) to nodes
+    /// already linked to an anchor through the scope's edge: a record under
+    /// another parent can never be in the result, so its create or delete
+    /// cannot change it. The edge predicates the scope follows; `All` when
+    /// it follows any (`Scope::Model` without a `field`). `None` when the
+    /// query has no parent — or when the scope's membership is deeper than
+    /// one link (transitive / `levels`) and one neighbour read cannot decide
+    /// it, so flag writes stay ungated.
+    scoped: Option<Predicates>,
     /// A containment step in from the anchors: predicate a holder class is
     /// recognised by → the edge predicates that class holds through. A write
     /// of one re-runs when its source links an anchor through one of them:
@@ -295,6 +307,15 @@ impl TriggerRules {
         }
         self.anchors.extend(other.anchors);
         self.anchors_any_predicate |= other.anchors_any_predicate;
+        // The merged trigger gates flag writes only when every class's
+        // scope does; a class without one admits them from anywhere.
+        self.scoped = match (self.scoped.take(), other.scoped) {
+            (Some(mut a), Some(b)) => {
+                a.extend(b);
+                Some(a)
+            }
+            _ => None,
+        };
         for (predicate, edges) in other.holders {
             self.holders.entry(predicate).or_default().extend(edges);
         }
@@ -789,12 +810,19 @@ impl Walk<'_> {
             Scope::Raw { id, predicate } => {
                 self.rules.anchors.insert(id.clone());
                 self.rules.near.add(predicate);
+                self.rules.scoped = Some(Predicates::Some([predicate.clone()].into()));
             }
             Scope::Model { id, field, .. } => {
                 self.rules.anchors.insert(id.clone());
                 match field {
-                    Some(field) => self.rules.near.add(field),
-                    None => self.rules.anchors_any_predicate = true,
+                    Some(field) => {
+                        self.rules.near.add(field);
+                        self.rules.scoped = Some(Predicates::Some([field.clone()].into()));
+                    }
+                    None => {
+                        self.rules.anchors_any_predicate = true;
+                        self.rules.scoped = Some(Predicates::All);
+                    }
                 }
             }
             Scope::Traverse {
@@ -803,6 +831,7 @@ impl Walk<'_> {
                 transitive,
                 levels,
                 direction,
+                path,
                 ..
             } => {
                 // One step in: the rows hold an anchor. A node that becomes a
@@ -812,6 +841,7 @@ impl Walk<'_> {
                 if predicate.is_none()
                     && !*transitive
                     && levels.is_none()
+                    && path.is_none()
                     && *direction == ScopeDirection::In
                 {
                     for edge in self.containment {
@@ -830,13 +860,21 @@ impl Walk<'_> {
                 self.rules.anchors.extend(ids.iter().cloned());
                 // A containment traversal follows every edge's predicate, and
                 // a node that becomes a holder changes it too (see
-                // `Scope::Contained` below).
-                let followed: Vec<String> = match predicate {
-                    Some(predicate) => vec![predicate.clone()],
-                    None => watched_predicates(self.containment),
+                // `Scope::Contained` below). The scope gate below takes only
+                // the edges — a `recognised_by` flag links a holder to its
+                // flag value, not a member to an anchor.
+                let edges: Vec<String> = self
+                    .containment
+                    .iter()
+                    .map(|e| e.predicate.clone())
+                    .collect();
+                let followed: Vec<String> = match (predicate, path) {
+                    (Some(predicate), _) => vec![predicate.clone()],
+                    (None, Some(path)) => path.clone(),
+                    (None, None) => watched_predicates(self.containment),
                 };
-                for predicate in &followed {
-                    if *transitive || levels.is_some() {
+                for (hop, predicate) in followed.iter().enumerate() {
+                    if *transitive || levels.is_some() || hop > 0 {
                         // Below the first level, a link's ends are neither
                         // anchors nor (when a level limit cut them) result
                         // nodes.
@@ -845,16 +883,36 @@ impl Walk<'_> {
                         self.rules.near.add(predicate);
                     }
                 }
+                // A single hop: scope membership is one neighbour read.
+                if !*transitive && levels.is_none() {
+                    let edges = match (predicate, path) {
+                        (Some(predicate), _) => vec![predicate.clone()],
+                        // Only a one-hop path is provable by one lookup; a
+                        // longer one's flags could sit on unseen intermediates.
+                        (None, Some(path)) if path.len() == 1 => path.clone(),
+                        (None, Some(_)) => Vec::new(),
+                        (None, None) => edges,
+                    };
+                    if !edges.is_empty() {
+                        self.rules.scoped = Some(Predicates::Some(edges.into_iter().collect()));
+                    }
+                }
             }
             // Every edge's predicate on the anchor, and the predicates its
             // holder classes are recognised by: a flag written on the anchor
             // turns its existing links on that class's predicate into
-            // containment.
+            // containment. The gate takes only the edge predicates.
             Scope::Contained(c) => {
                 self.rules.anchors.insert(c.id.clone());
                 for predicate in watched_predicates(self.containment) {
                     self.rules.near.add(&predicate);
                 }
+                self.rules.scoped = Some(Predicates::Some(
+                    self.containment
+                        .iter()
+                        .map(|e| e.predicate.clone())
+                        .collect(),
+                ));
             }
         }
     }
@@ -935,7 +993,20 @@ impl ModelTrigger {
             .get(predicate)
             .is_some_and(|values| values.contains(target) || values.contains(canonical))
         {
-            return true;
+            // Under a one-hop parent scope the flag counts only when the
+            // node is already in it: a class flag under another parent
+            // cannot change a result that reads only this scope (#1795).
+            // Its edge write is `near` the anchor and wakes on its own.
+            match &rules.scoped {
+                None => return true,
+                _ if self.nodes.contains(source) || rules.anchors.contains(source) => {
+                    return true;
+                }
+                Some(edges) if store.linked_through(source, edges, &rules.anchors) => {
+                    return true;
+                }
+                Some(_) => {}
+            }
         }
         if rules.anchors_any_predicate && spellings.iter().any(|e| rules.anchors.contains(*e)) {
             return true;
@@ -963,10 +1034,18 @@ impl ModelTrigger {
         let both = [source, target];
         let ends = if *literal { &both[..1] } else { &both[..] };
         if let Some(flags) = rules.scan.get(predicate) {
-            if ends
-                .iter()
-                .any(|e| flags.iter().any(|f| store.has_flag(e, f)))
-            {
+            // `scan` reads "a node of the queried class" — under a one-hop
+            // scope that still has to mean in scope: a flagged node under
+            // another parent is a Post, but not one this result reads.
+            if ends.iter().any(|e| {
+                flags.iter().any(|f| store.has_flag(e, f))
+                    && (self.nodes.contains(*e)
+                        || rules.anchors.contains(*e)
+                        || match &rules.scoped {
+                            None => true,
+                            Some(edges) => store.linked_through(e, edges, &rules.anchors),
+                        })
+            }) {
                 return true;
             }
         }

@@ -792,6 +792,7 @@ pub(super) fn build_query_patterns(
                 limit_per_anchor: _,
                 levels: _,
                 max_depth: _,
+                path: _,
             } => {
                 // An anchor that cannot be written as a term contributes no
                 // results; it must not widen the query to everything else.
@@ -3297,6 +3298,7 @@ mod traverse_scope_tests {
             limit_per_anchor,
             levels: None,
             max_depth: None,
+            path: None,
         }
     }
 
