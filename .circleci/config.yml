@@ -1149,8 +1149,8 @@ jobs:
       WE_REF: << pipeline.parameters.we-ref >>
       COASYS_SPACES_TIER: real
       COASYS_SPACES_LLM_BASE_URL: http://localhost:11434/v1
-      # This job still asks Ollama for this tag. llm-e2e does not: it uses
-      # staging's llama-server. The two share nightly-llm so they do not overlap.
+      # This job and llm-e2e share nightly-llm so they do not use the host GPU
+      # at the same time. llm-e2e talks to staging's llama-server.
       COASYS_SPACES_LLM_MODEL: qwen3.8-27b-48k
       # Its own directory, which preflight empties; one coasys-spaces runs at a time (serial
       # group nightly-llm).
@@ -1351,15 +1351,14 @@ workflows:
   # Nightly against `dev`. An API trigger (or a Project Trigger) sets
   # `run-nightly-llm`. In-config cron does not reach this project.
   # Same resource class (Marvin). llm-e2e talks to staging's llama-server,
-  # which already holds the GPU; coasys-spaces still loads an Ollama model.
-  # llm-e2e, the SFU wind tunnel and coasys-spaces start together and do not
-  # build on each other's result: an llm-e2e failure must not skip the
-  # tunnel, and a tunnel failure must not skip llm-e2e. Three API triggers
-  # fire this pipeline every night on one host. Each job has its own serial
-  # group, so a second trigger waits instead of sharing ports, DIDs and the
-  # GPU with the first. llm-e2e and coasys-spaces share one group
-  # (`nightly-llm`): the llama-server slot and Ollama's model must not run
-  # at the same time.
+  # which already holds the GPU. llm-e2e, the SFU wind tunnel and
+  # coasys-spaces start together and do not build on each other's result:
+  # an llm-e2e failure must not skip the tunnel, and a tunnel failure must
+  # not skip llm-e2e. Three API triggers fire this pipeline every night on
+  # one host. Each job has its own serial group, so a second trigger waits
+  # instead of sharing ports, DIDs and the GPU with the first. llm-e2e and
+  # coasys-spaces share one group (`nightly-llm`) so the two jobs do not
+  # use the host GPU at the same time.
   nightly-llm-e2e:
     when: << pipeline.parameters.run-nightly-llm >>
     jobs:

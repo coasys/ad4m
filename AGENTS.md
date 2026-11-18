@@ -148,10 +148,9 @@ The job halts green when the same ad4m commit, WE commit, tier and model already
 passed on the host (`~/.local/state/ad4m-ci/coasys-spaces/last-success`). Set
 `COASYS_SPACES_FORCE=1` to run anyway. A checkout with changes (a run by hand
 with local edits) runs, but neither skips nor records a pass. It shares the
-serial group `nightly-llm` with `llm-e2e`. That job talks to staging's
-llama-server, which already holds the GPU, and this job still loads an
-Ollama model, so they run one after the other. Screenshots, traces and logs
-are under the job's artifacts, `coasys-spaces/`.
+serial group `nightly-llm` with `llm-e2e`, so the two jobs do not use the
+host GPU at the same time. Screenshots, traces and logs are under the job's
+artifacts, `coasys-spaces/`.
 
 Each step is a subcommand of `scripts/coasys-spaces.sh`. `bash
 scripts/coasys-spaces.sh all` runs the whole job on a machine with Ollama and the
