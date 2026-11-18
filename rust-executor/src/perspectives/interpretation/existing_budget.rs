@@ -25,10 +25,10 @@
 //! still get the full existing set, so a row the prompt did not show still
 //! stops a duplicate.
 
+use super::class_label;
 use super::dedup::{cosine_similarity, embed_via_ai_service};
-use super::prompt::existing_entry_json;
+use super::prompt::{build_interpretation_input_showing, existing_entry_json};
 use super::types::{ExistingInstances, InstanceContext, ProposedInstance, TranscriptTurn};
-use super::{build_interpretation_input, class_label};
 use crate::ai_service::{estimate_task_prompt_tokens, estimate_token_count};
 use crate::perspectives::flow_context::FlowContext;
 use crate::perspectives::model_query::types::ModelShape;
@@ -149,7 +149,7 @@ impl Handles {
 pub(crate) struct PromptExisting {
     /// The rows to render, keyed by the id the prompt names them by (a handle
     /// when compact, else the full id). Pass this, not the full set, to
-    /// [`build_interpretation_input`].
+    /// [`build_interpretation_input_showing`].
     pub shown: ExistingInstances,
     pub handles: Handles,
     /// Distinct instances in the full existing set.
@@ -471,12 +471,14 @@ pub(crate) async fn existing_for_prompt(
         Ok(service) => service.context_window_tokens(&task.model_id).await,
         Err(_) => None,
     };
-    let without_rows = build_interpretation_input(
+    // The `existing_shown` line counted at its longest.
+    let without_rows = build_interpretation_input_showing(
         shapes,
         transcript,
         &ExistingInstances::new(),
         active_flows,
         speaker_names,
+        Some((existing.len().saturating_sub(1), existing.len())),
     );
     let other_tokens = estimate_task_prompt_tokens(task, &without_rows);
     let budget = existing_budget_tokens(window, other_tokens);
@@ -1155,6 +1157,40 @@ mod tests {
     }
 
     #[test]
+    fn the_prompt_says_how_many_rows_it_shows_only_when_some_are_left_out() {
+        let shapes = vec![shape_from_sdna("Task", TASK_SDNA)];
+        let transcript = [TranscriptTurn::from_speaker_text("Ana", "hello")];
+        let existing = existing_of(vec![row("soa://a", "Task", "A", 1)]);
+        let build = |rows| {
+            let prompt = build_interpretation_input_showing(
+                &shapes,
+                &transcript,
+                &existing,
+                &[],
+                &HashMap::new(),
+                rows,
+            );
+            serde_json::from_str::<serde_json::Value>(&prompt).unwrap()
+        };
+        assert_eq!(
+            build(Some((1, 5)))["existing_shown"],
+            "`existing` shows 1 of 5 rows. Rows that are not shown are still checked for duplicates."
+        );
+        assert!(build(Some((1, 1))).get("existing_shown").is_none());
+        assert_eq!(
+            build(None),
+            serde_json::from_str::<serde_json::Value>(&build_interpretation_input(
+                &shapes,
+                &transcript,
+                &existing,
+                &[],
+                &HashMap::new()
+            ))
+            .unwrap()
+        );
+    }
+
+    #[test]
     fn a_prompt_that_is_not_compact_keeps_full_ids_and_values() {
         let long = "y".repeat(500);
         let mut r = row("soa://task/a", "Task", "A", 1);
@@ -1359,6 +1395,14 @@ mod tests {
         assert!(
             !prompt.contains("Budget review"),
             "precondition: the prompt leaves the oldest row out"
+        );
+        let json: serde_json::Value = serde_json::from_str(&prompt).unwrap();
+        let line = json["existing_shown"]
+            .as_str()
+            .expect("existing_shown line");
+        assert!(
+            line.ends_with("of 42 rows. Rows that are not shown are still checked for duplicates."),
+            "{line}"
         );
 
         let after = existing_instance_context(&perspective, &shapes, None)

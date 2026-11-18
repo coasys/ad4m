@@ -71,6 +71,36 @@ pub fn build_interpretation_input(
     active_flows: &[FlowContext],
     speaker_names: &HashMap<String, String>,
 ) -> String {
+    build_interpretation_input_showing(
+        shapes,
+        transcript,
+        existing,
+        active_flows,
+        speaker_names,
+        None,
+    )
+}
+
+/// The `existing_shown` line: how many of the existing rows the prompt shows.
+pub(crate) fn existing_shown_line(shown: usize, total: usize) -> String {
+    format!(
+        "`existing` shows {shown} of {total} rows. Rows that are not shown are still checked \
+         for duplicates."
+    )
+}
+
+/// [`build_interpretation_input`] for an `existing` set that is a budgeted
+/// part of the full one (`existing_budget`). `rows` is (rows shown, rows in
+/// the full set). When some rows are left out, the prompt gets an
+/// `existing_shown` line ([`existing_shown_line`]) that says so.
+pub(crate) fn build_interpretation_input_showing(
+    shapes: &[ModelShape],
+    transcript: &[TranscriptTurn],
+    existing: &ExistingInstances,
+    active_flows: &[FlowContext],
+    speaker_names: &HashMap<String, String>,
+    rows: Option<(usize, usize)>,
+) -> String {
     // Group the id-keyed source by class once for the per-class `existing`
     // blocks below (deterministically ordered — see `instances_by_class`).
     let existing_by_class = instances_by_class(existing);
@@ -211,6 +241,9 @@ pub fn build_interpretation_input(
         })
         .collect();
     let mut out = serde_json::json!({ "classes": classes, "transcript": turns });
+    if let Some((shown, total)) = rows.filter(|(shown, total)| shown < total) {
+        out["existing_shown"] = serde_json::json!(existing_shown_line(shown, total));
+    }
     if !active_flows.is_empty() {
         out["active_flows"] = serde_json::Value::Array(
             active_flows
@@ -372,13 +405,19 @@ You receive a JSON object with these fields:
     `hint` describing when to instantiate it, a list of `fields` (each with a
     `name`, optional `hint`, and `required` flag), a `relations` list of
     forward instance-reference slots (each with a `name`, `targetClass`,
-    `cardinality`, and optional `hint`), and an `existing` array of instances already present in
-    the graph for that class. Each existing entry is `{id, title, class}`, and
+    `cardinality`, and optional `hint`), and an `existing` array with instances already in
+    the graph for that class. `existing` can be a partial view: when the graph holds
+    more instances than the prompt has room for, it shows only some of them, and
+    `existing_shown` says how many. Each existing entry is `{id, title, class}`, and
     may also carry a `properties` object holding the instance's current
     secondary-scalar values (e.g. a rolling summary). `id` is the stable
     handle you emit to update that entry; `title` is its identity label; the
     optional `properties` object shows its *current state* so you can judge
     whether new turns continue that instance or belong to a fresh one.
+  - `existing_shown` (OPTIONAL — present only when `existing` leaves rows
+    out): how many rows the `existing` arrays show. An instance that is not
+    shown still exists. The engine still checks your output against it for
+    duplicates.
   - `transcript`: an array of turns `{speaker, text}` and, when known,
     `timestamp` (the source link's RFC3339 time). Use `speaker` for identity
     reasoning. When two different participants share the same display name,
