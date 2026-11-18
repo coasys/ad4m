@@ -33,6 +33,7 @@
 //! - [`describe`] — `describe_perspective` and the schema-as-data projection
 //! - [`create`] — `instance_create`
 //! - [`query`] — `instance_query` + `instance_get`
+//! - [`search`] — `instance_search`: rows by the meaning of their title
 //! - [`update`] — `instance_update` + `instance_remove`
 //! - [`collections`] — `instance_add_to_collection` + `instance_remove_from_collection`
 //! - [`children`] — class-agnostic `add_child` / `get_children` on the
@@ -59,6 +60,7 @@ pub mod commands;
 pub mod create;
 pub mod describe;
 pub mod query;
+pub mod search;
 pub mod template_tools;
 pub mod transcript;
 pub mod update;
@@ -73,6 +75,7 @@ pub use commands::ExecuteCommandsParams;
 pub use create::InstanceCreateParams;
 pub use describe::DescribePerspectiveParams;
 pub use query::{InstanceGetParams, InstanceQueryParams};
+pub use search::InstanceSearchParams;
 pub use transcript::InstanceTranscriptParams;
 pub use update::{InstanceRemoveParams, InstanceUpdateParams};
 pub(crate) use validate::{

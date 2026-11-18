@@ -620,6 +620,7 @@ const NOT_WRAPPED: &[&str] = &[
     "instance_query",
     "instance_remove",
     "instance_remove_from_collection",
+    "instance_search",
     "instance_transcript",
     "instance_update",
     "template_read",
@@ -906,6 +907,18 @@ fn perspective_tools() -> Vec<PerspectiveTool> {
                     perspective_id: uuid,
                     class_name: CLASS.into(),
                     base_uri: "matrix://e".into(),
+                }))
+                .await
+            })
+        }),
+        tool("instance_search", Read, |h, uuid| {
+            Box::pin(async move {
+                h.instance_search(Parameters(instances::InstanceSearchParams {
+                    perspective_id: uuid,
+                    text: "matrix".into(),
+                    class_name: None,
+                    k: None,
+                    parent: None,
                 }))
                 .await
             })
