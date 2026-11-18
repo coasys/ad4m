@@ -2408,6 +2408,7 @@ async fn e2e_semantic_dedup_pure_drops_paraphrase_keeps_distinct() {
         &DedupStrategy::Semantic {
             model: "interpretation-embed".to_string(),
             threshold: 0.6,
+            unclear_from: 0.6,
         },
     )
     .await
@@ -2480,6 +2481,7 @@ async fn e2e_run_interpretation_honours_parent_scope() {
     let semantic = DedupStrategy::Semantic {
         model: "interpretation-embed".to_string(),
         threshold: 0.6,
+        unclear_from: 0.6,
     };
     let in_scope = Scope::Raw {
         id: "soa://parent/b".into(),
@@ -2551,4 +2553,268 @@ async fn e2e_run_interpretation_honours_parent_scope() {
         minted >= 1,
         "out-of-scope run must NOT dedup against the parent-B seed — expected a new staging task under ext/"
     );
+}
+
+/// The numbers behind [`DEFAULT_SEMANTIC_THRESHOLD`] and [`DEFAULT_UNCLEAR_FROM`]: title
+/// pairs scored by the embedding model of the e2e suite (nomic-embed-text). Rewordings of one
+/// item must reach the unclear band, so none is missed; unrelated items must not; different
+/// items on one subject must stay below the merge threshold, so none is merged.
+///
+/// [`DEFAULT_SEMANTIC_THRESHOLD`]: crate::perspectives::interpretation::DEFAULT_SEMANTIC_THRESHOLD
+/// [`DEFAULT_UNCLEAR_FROM`]: crate::perspectives::interpretation::DEFAULT_UNCLEAR_FROM
+#[tokio::test]
+#[ignore = "llm-e2e"]
+async fn e2e_title_similarity_bands_of_the_default_embedding_model() {
+    use crate::perspectives::interpretation::embedding_cache::embed_rows;
+    use crate::perspectives::interpretation::search::cosine;
+    use crate::perspectives::interpretation::{DEFAULT_SEMANTIC_THRESHOLD, DEFAULT_UNCLEAR_FROM};
+
+    let _ = setup_interpretation_e2e(&[("Task", TASK_SDNA)]).await;
+    super::interpretation_test_support::register_interpretation_embedding_model().await;
+
+    let same = [
+        (
+            "Finish the WebRTC call module",
+            "Wrap up the WebRTC calling module",
+        ),
+        ("Provision the staging database", "Set up the staging DB"),
+        ("Update the CI documentation", "Refresh the docs for CI"),
+        (
+            "Membrane admission for neighbourhoods",
+            "Admission rules for neighbourhood membranes",
+        ),
+        (
+            "Harness by default for interpretation",
+            "Make the tool harness the default interpretation path",
+        ),
+        (
+            "Embedding cache in SQLite",
+            "Cache vectors in an SQLite table",
+        ),
+        (
+            "Release 0.13.1 before IIW",
+            "Cut the 0.13.1 release ahead of IIW",
+        ),
+    ];
+    let related = [
+        (
+            "Finish the WebRTC call module",
+            "Fix audio echo in WebRTC calls",
+        ),
+        (
+            "Provision the staging database",
+            "Migrate the production database",
+        ),
+        ("Update the CI documentation", "Fix the flaky CI job"),
+        (
+            "Membrane admission for neighbourhoods",
+            "Neighbourhood invite links",
+        ),
+        (
+            "Harness by default for interpretation",
+            "Compaction of the harness context",
+        ),
+        ("Embedding cache in SQLite", "Seal SQLite tables at rest"),
+        ("Release 0.13.1 before IIW", "Prepare the IIW demo"),
+    ];
+    let unrelated = [
+        (
+            "Finish the WebRTC call module",
+            "Book flights for the retreat",
+        ),
+        (
+            "Provision the staging database",
+            "Birthday party for the team",
+        ),
+        ("Update the CI documentation", "Buy a new office chair"),
+        (
+            "Membrane admission for neighbourhoods",
+            "Weekly budget review",
+        ),
+        (
+            "Harness by default for interpretation",
+            "Logo colours for the website",
+        ),
+        ("Embedding cache in SQLite", "Hiring a designer"),
+        ("Release 0.13.1 before IIW", "Lunch order for Friday"),
+    ];
+    async fn scores(pairs: &[(&str, &str)], group: &str) -> Vec<f32> {
+        let rows: Vec<(String, String)> = pairs
+            .iter()
+            .enumerate()
+            .flat_map(|(i, (a, b))| {
+                [
+                    (format!("{group}/{i}/a"), a.to_string()),
+                    (format!("{group}/{i}/b"), b.to_string()),
+                ]
+            })
+            .collect();
+        let (vectors, _) = embed_rows("bands", "interpretation-embed", &rows)
+            .await
+            .expect("embed");
+        let s: Vec<f32> = vectors.chunks(2).map(|v| cosine(&v[0], &v[1])).collect();
+        eprintln!(
+            "[bands] {group}: {}",
+            s.iter()
+                .map(|x| format!("{x:.3}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        s
+    }
+    let (same, related, unrelated) = (
+        scores(&same, "same").await,
+        scores(&related, "related").await,
+        scores(&unrelated, "unrelated").await,
+    );
+
+    assert!(
+        same.iter().all(|s| *s >= DEFAULT_UNCLEAR_FROM),
+        "a rewording below unclearFrom is a missed duplicate: {same:?}"
+    );
+    assert!(
+        same.iter().any(|s| *s >= DEFAULT_SEMANTIC_THRESHOLD),
+        "the threshold merges no rewording at all: {same:?}"
+    );
+    assert!(
+        related.iter().all(|s| *s < DEFAULT_SEMANTIC_THRESHOLD),
+        "a different item at or above the threshold is a wrong merge: {related:?}"
+    );
+    assert!(
+        unrelated.iter().all(|s| *s < DEFAULT_UNCLEAR_FROM),
+        "an unrelated item reaches the model as unclear: {unrelated:?}"
+    );
+}
+
+/// `instance_search` through the executor's embedding path: a paraphrase of a row's title
+/// finds that row first, and the rows about other things score lower. Then the same search
+/// again reads every row vector from the cache.
+#[tokio::test]
+#[ignore = "llm-e2e"]
+async fn e2e_instance_search_ranks_a_paraphrase_above_unrelated_rows() {
+    use crate::perspectives::interpretation::search::{search_instances, Scoring};
+
+    let (mut perspective, shapes, ctx) = setup_interpretation_e2e(&[("Task", TASK_SDNA)]).await;
+    super::interpretation_test_support::register_interpretation_embedding_model().await;
+    for (base, title) in [
+        ("soa://seed/webrtc", "Finish the WebRTC call module"),
+        ("soa://seed/retreat", "Book flights for the retreat"),
+        ("soa://seed/chair", "Buy a new office chair"),
+        ("soa://seed/budget", "Weekly budget review"),
+        ("soa://seed/logo", "Logo colours for the website"),
+    ] {
+        seed_instance(&mut perspective, &ctx, &shapes[0], base, title).await;
+    }
+
+    let result = search_instances(
+        &perspective,
+        "wrap up the module for WebRTC calls",
+        Some("Task"),
+        Some(5),
+        None,
+    )
+    .await
+    .expect("search");
+    eprintln!("[search] {:#?}", result.hits);
+    assert!(
+        matches!(result.scoring, Scoring::Embedding { .. }),
+        "{:?}",
+        result.scoring
+    );
+    assert_eq!(result.searched, 5);
+    assert_eq!(result.hits[0].id, "soa://seed/webrtc", "{:#?}", result.hits);
+    assert!(
+        result.hits[0].score > result.hits[1].score + 0.1,
+        "the paraphrase must stand clear of the next row: {:#?}",
+        result.hits
+    );
+}
+
+/// Timings for the PR: embedding 500 and 5,000 titles into the cache, and one search over
+/// 50,000 cached vectors (the read from the table and the cosine; the search text is one
+/// model call). `--nocapture` prints them.
+#[tokio::test]
+#[ignore = "llm-e2e"]
+async fn e2e_instance_embedding_timings() {
+    use crate::perspectives::interpretation::embedding_cache::{
+        embed_rows, resolve_embedding_model, text_sha256,
+    };
+    use crate::perspectives::interpretation::search::{rank_rows, Candidate};
+    use std::time::Instant;
+
+    let _ = setup_interpretation_e2e(&[("Task", TASK_SDNA)]).await;
+    super::interpretation_test_support::register_interpretation_embedding_model().await;
+    let title = |i: usize| {
+        format!(
+            "Item {i}: review the plan for part {} of the release",
+            i * 7
+        )
+    };
+
+    for n in [500usize, 5_000] {
+        let rows: Vec<(String, String)> = (0..n).map(|i| (format!("t{n}/{i}"), title(i))).collect();
+        let started = Instant::now();
+        let (_, stats) = embed_rows(&format!("timing-{n}"), "interpretation-embed", &rows)
+            .await
+            .expect("embed");
+        let cold = started.elapsed();
+        let started = Instant::now();
+        let (_, warm_stats) = embed_rows(&format!("timing-{n}"), "interpretation-embed", &rows)
+            .await
+            .expect("embed");
+        eprintln!(
+            "[timing] embed {n} rows: cold {cold:?} ({} embedded), warm {:?} ({} cached)",
+            stats.embedded,
+            started.elapsed(),
+            warm_stats.cached
+        );
+    }
+
+    let (model_id, key) = resolve_embedding_model("interpretation-embed").expect("model");
+    let dim = crate::perspectives::interpretation::embedding_cache::embed_rows(
+        "timing-dim",
+        &model_id,
+        &[("d".into(), "dimension probe".into())],
+    )
+    .await
+    .expect("embed")
+    .0[0]
+        .len();
+    const N: usize = 50_000;
+    let candidates: Vec<Candidate> = (0..N)
+        .map(|i| Candidate {
+            id: format!("big/{i}"),
+            class: "Task".into(),
+            title: title(i),
+        })
+        .collect();
+    let rows: Vec<crate::db::InstanceEmbeddingRow> = candidates
+        .iter()
+        .enumerate()
+        .map(|(i, c)| crate::db::InstanceEmbeddingRow {
+            instance_id: c.id.clone(),
+            text_sha256: text_sha256(&c.title),
+            vector: (0..dim)
+                .map(|d| ((i * 31 + d) % 97) as f32 / 97.0)
+                .collect(),
+        })
+        .collect();
+    crate::db_backend::db_backend()
+        .put_instance_embeddings("timing-50k", &key, &rows)
+        .expect("store");
+    let started = Instant::now();
+    let result = rank_rows(
+        "timing-50k",
+        "review the release plan",
+        &candidates,
+        10,
+        Some(&model_id),
+    )
+    .await;
+    eprintln!(
+        "[timing] search over {N} cached vectors (dim {dim}): {:?}, scoring {:?}",
+        started.elapsed(),
+        result.scoring
+    );
+    assert_eq!(result.searched, N);
 }

@@ -55,8 +55,28 @@ pub enum DedupStrategy {
         /// Cosine similarity above which two identity strings are considered
         /// the same instance.
         threshold: f32,
+        /// The start of the unclear band: a harness pass shows an existing row whose
+        /// score is from `unclear_from` up to `threshold` in the `{class}_create` reply,
+        /// and the model decides (`propose_same_as`). At or above `threshold` the
+        /// executor merges; below `unclear_from` the row is not shown. A value at or
+        /// above `threshold` turns the band off. `unclearFrom` in the processor's
+        /// `dedupStrategy` JSON, default [`DEFAULT_UNCLEAR_FROM`].
+        unclear_from: f32,
     },
 }
+
+/// The merge threshold of the strategy an absent `dedupStrategy` gets on an executor with
+/// an embedding model. Test `e2e_title_similarity_bands_of_the_default_embedding_model`
+/// (nomic-embed-text): rewordings of one item score 0.774 to 0.961, different items on one
+/// subject 0.553 to 0.718. At 0.85 the executor merges only the close rewordings; the
+/// other rewordings go to the model as unclear.
+pub const DEFAULT_SEMANTIC_THRESHOLD: f32 = 0.85;
+
+/// The start of the unclear band, when `dedupStrategy` names none. In the same test each
+/// rewording scores at or above 0.70, so none is missed; one different item in seven
+/// on the same subject goes to the model as unclear; no unrelated item (0.302 to 0.406)
+/// does.
+pub const DEFAULT_UNCLEAR_FROM: f32 = 0.70;
 
 impl Default for DedupStrategy {
     fn default() -> Self {
@@ -73,7 +93,26 @@ impl DedupStrategy {
     pub fn semantic_from_env(threshold: f32) -> Self {
         let model = std::env::var("INTERPRETATION_EMBED_MODEL")
             .unwrap_or_else(|_| "interpretation-embed".to_string());
-        Self::Semantic { model, threshold }
+        Self::Semantic {
+            model,
+            threshold,
+            unclear_from: DEFAULT_UNCLEAR_FROM,
+        }
+    }
+
+    /// The strategy of a processor with no `dedupStrategy` (Nico, 2026-11-18): semantic with
+    /// this executor's default embedding model ([`DEFAULT_SEMANTIC_THRESHOLD`],
+    /// [`DEFAULT_UNCLEAR_FROM`]) when it has one, else normalized strings. Read at each
+    /// pass, so a model the operator adds later applies from the next pass.
+    pub fn for_absent_config() -> Self {
+        match super::embedding_cache::default_embedding_model() {
+            Some(model) => Self::Semantic {
+                model,
+                threshold: DEFAULT_SEMANTIC_THRESHOLD,
+                unclear_from: DEFAULT_UNCLEAR_FROM,
+            },
+            None => Self::NormalizedString,
+        }
     }
 }
 
@@ -462,7 +501,9 @@ pub async fn filter_already_present_with_strategy(
         DedupStrategy::NormalizedString => {
             Ok(filter_already_present(instances, existing, identity_props))
         }
-        DedupStrategy::Semantic { model, threshold } => {
+        DedupStrategy::Semantic {
+            model, threshold, ..
+        } => {
             filter_already_present_semantic(instances, existing, identity_props, model, *threshold)
                 .await
         }
@@ -485,7 +526,9 @@ pub async fn resolve_already_present_with_strategy(
         DedupStrategy::NormalizedString => {
             Ok(resolve_already_present(instances, existing, identity_props))
         }
-        DedupStrategy::Semantic { model, threshold } => {
+        DedupStrategy::Semantic {
+            model, threshold, ..
+        } => {
             resolve_already_present_semantic(instances, existing, identity_props, model, *threshold)
                 .await
         }
@@ -845,6 +888,7 @@ mod tests {
         let semantic = DedupStrategy::Semantic {
             model: "not-registered".into(),
             threshold: 0.9,
+            unclear_from: DEFAULT_UNCLEAR_FROM,
         };
 
         let kept = filter_already_present_with_strategy(
@@ -963,6 +1007,7 @@ mod tests {
         let missing = DedupStrategy::Semantic {
             model: "interpretation-embed".into(),
             threshold: 0.9,
+            unclear_from: DEFAULT_UNCLEAR_FROM,
         };
         let kept = filter_already_present_with_strategy(
             proposed.clone(),
@@ -977,6 +1022,7 @@ mod tests {
         let named = DedupStrategy::Semantic {
             model: "embed".into(),
             threshold: 0.9,
+            unclear_from: DEFAULT_UNCLEAR_FROM,
         };
         let kept =
             filter_already_present_with_strategy(proposed, &existing, &identity_props, &named)

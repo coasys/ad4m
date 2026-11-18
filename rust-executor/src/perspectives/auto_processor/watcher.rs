@@ -953,17 +953,19 @@ where
 /// runner-default behaviour of every existing caller.
 ///
 /// Wire shape (matches what `write_processor` stores):
-/// * `None` → default (`NormalizedString`).
+/// * `None` → [`DedupStrategy::for_absent_config`]: semantic with the executor's default
+///   embedding model when it has one, else `NormalizedString`.
 /// * `{"kind":"normalized"}` → `NormalizedString`.
-/// * `{"kind":"semantic","base_url":..., "model":..., "threshold":<f32>}`
-///    → `Semantic { .. }`.
+/// * `{"kind":"semantic","model":..., "threshold":<f32>, "unclearFrom":<f32>}`
+///    → `Semantic { .. }`. `unclearFrom` is optional
+///    ([`crate::perspectives::interpretation::DEFAULT_UNCLEAR_FROM`]).
 ///
 /// Hand-rolled rather than `serde` derive on the enum so this PR does not
 /// add a serde dependency to the interpretation module — the dedup enum
 /// itself keeps its current shape.
 pub fn parse_dedup_strategy_json(blob: Option<&str>) -> DedupStrategy {
     let Some(json) = blob else {
-        return DedupStrategy::default();
+        return DedupStrategy::for_absent_config();
     };
     let value: serde_json::Value = match serde_json::from_str(json) {
         Ok(v) => v,
@@ -988,8 +990,16 @@ pub fn parse_dedup_strategy_json(blob: Option<&str>) -> DedupStrategy {
                 .get("threshold")
                 .and_then(|v| v.as_f64())
                 .map(|f| f as f32);
+            let unclear_from = value.get("unclearFrom").and_then(|v| v.as_f64()).map_or(
+                crate::perspectives::interpretation::DEFAULT_UNCLEAR_FROM,
+                |f| f as f32,
+            );
             match (model, threshold) {
-                (Some(model), Some(threshold)) => DedupStrategy::Semantic { model, threshold },
+                (Some(model), Some(threshold)) => DedupStrategy::Semantic {
+                    model,
+                    threshold,
+                    unclear_from,
+                },
                 _ => {
                     log::warn!(
                         "parse_dedup_strategy_json: semantic strategy missing required fields \
@@ -2432,9 +2442,46 @@ mod tests {
     // ---- parse_dedup_strategy_json -----------------------------------------
 
     #[test]
-    fn parse_dedup_none_returns_default() {
+    fn parse_dedup_none_without_an_embedding_model_compares_strings() {
+        crate::db::Ad4mDb::init_global_instance(":memory:").unwrap();
         assert!(matches!(
             parse_dedup_strategy_json(None),
+            DedupStrategy::NormalizedString
+        ));
+    }
+
+    /// Nico 2026-11-18: an absent `dedupStrategy` is semantic when the executor has an
+    /// embedding model, with its default model and the default bands.
+    #[tokio::test]
+    async fn parse_dedup_none_with_an_embedding_model_is_semantic() {
+        use crate::perspectives::interpretation::{
+            DEFAULT_SEMANTIC_THRESHOLD, DEFAULT_UNCLEAR_FROM,
+        };
+        crate::db::Ad4mDb::init_global_instance(":memory:").unwrap();
+        crate::ai_service::AIService::init_global_instance()
+            .await
+            .unwrap();
+        let mut server = mockito::Server::new_async().await;
+        let (id, _) = crate::perspectives::interpretation::embedding_cache::tests::word_embedder(
+            &mut server,
+            "absent-embed",
+        )
+        .await;
+        match parse_dedup_strategy_json(None) {
+            DedupStrategy::Semantic {
+                model,
+                threshold,
+                unclear_from,
+            } => {
+                assert_eq!(model, id);
+                assert_eq!(threshold, DEFAULT_SEMANTIC_THRESHOLD);
+                assert_eq!(unclear_from, DEFAULT_UNCLEAR_FROM);
+            }
+            other => panic!("expected Semantic, got {other:?}"),
+        }
+        // An explicit strategy stays what it says.
+        assert!(matches!(
+            parse_dedup_strategy_json(Some(r#"{"kind":"normalized"}"#)),
             DedupStrategy::NormalizedString
         ));
     }
@@ -2453,9 +2500,25 @@ mod tests {
             r#"{"kind":"semantic","model":"nomic","threshold":0.8}"#,
         ));
         match strat {
-            DedupStrategy::Semantic { model, threshold } => {
+            DedupStrategy::Semantic {
+                model,
+                threshold,
+                unclear_from,
+            } => {
                 assert_eq!(model, "nomic");
                 assert!((threshold - 0.8).abs() < 1e-4);
+                assert_eq!(
+                    unclear_from,
+                    crate::perspectives::interpretation::DEFAULT_UNCLEAR_FROM
+                );
+            }
+            other => panic!("expected Semantic, got {other:?}"),
+        }
+        match parse_dedup_strategy_json(Some(
+            r#"{"kind":"semantic","model":"nomic","threshold":0.8,"unclearFrom":0.6}"#,
+        )) {
+            DedupStrategy::Semantic { unclear_from, .. } => {
+                assert!((unclear_from - 0.6).abs() < 1e-4)
             }
             other => panic!("expected Semantic, got {other:?}"),
         }
