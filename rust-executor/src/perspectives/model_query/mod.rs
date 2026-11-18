@@ -86,9 +86,9 @@
 //! | [`builtin_classes`] | Built-in abstract classes (`ad4m://TextContent`, `ad4m://Container`), addressed by URI and never stored |
 //! | [`containment`] | Containment through `Container`: the edge set, and the patterns and rows that read it |
 
+pub(crate) mod abstract_classes;
 #[cfg(test)]
 mod activity_order_tests;
-pub(crate) mod abstract_classes;
 pub(crate) mod builtin_classes;
 #[cfg(test)]
 mod collection_provenance_tests;

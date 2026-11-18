@@ -13,11 +13,11 @@
 //! `get_readable_perspective`, the guards of the perspective RPC methods that
 //! write and read.
 
+use super::walk::{class_shapes, millis, name_children, rows_pointing_to, Neighbour};
 use super::{
     error_json, link_target, pretty, run_model_query, Ad4mMcpHandler, DEFAULT_QUERY_LIMIT,
     MAX_QUERY_LIMIT,
 };
-use super::walk::{class_shapes, millis, name_children, rows_pointing_to, Neighbour};
 use crate::perspectives::model_query::builtin_classes::CONTAINER_URI;
 use rmcp::{handler::server::wrapper::Parameters, tool};
 use schemars::JsonSchema;
@@ -130,7 +130,9 @@ impl Ad4mMcpHandler {
         };
         let limit = p.limit.unwrap_or(DEFAULT_QUERY_LIMIT).min(MAX_QUERY_LIMIT);
         if via != Via::Containment {
-            return self.children_via_relations(&perspective, &parent, via, limit).await;
+            return self
+                .children_via_relations(&perspective, &parent, via, limit)
+                .await;
         }
         // One Container row: its `children` are everything it holds, oldest
         // first, and `__links.children` the links behind them.

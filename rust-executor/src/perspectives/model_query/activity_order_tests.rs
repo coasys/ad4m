@@ -66,14 +66,7 @@ fn seed(store: &SparqlStore) {
         "literal:string:Topic%201%20renamed",
         10,
     );
-    add(
-        store,
-        &a,
-        "pt://item/x",
-        "pt://about",
-        "pt://topic/2",
-        20,
-    );
+    add(store, &a, "pt://item/x", "pt://about", "pt://topic/2", 20);
 }
 
 async fn ids(store: &SparqlStore, q: ModelQueryInput) -> Vec<String> {
@@ -159,8 +152,5 @@ async fn activity_order_holds_with_a_filter() {
         limit: Some(2),
         ..Default::default()
     };
-    assert_eq!(
-        ids(&store, q).await,
-        vec!["pt://topic/2", "pt://topic/1"]
-    );
+    assert_eq!(ids(&store, q).await, vec!["pt://topic/2", "pt://topic/1"]);
 }

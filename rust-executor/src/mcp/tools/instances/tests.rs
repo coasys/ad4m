@@ -732,7 +732,9 @@ async fn relation_targets_are_iri_gated_on_every_write_path() {
                     filter: None,
                     parent: None,
                     limit: None,
-                    offset: None, order: None, fields: None,
+                    offset: None,
+                    order: None,
+                    fields: None,
                 }))
                 .await,
         )["count"]
@@ -1110,7 +1112,9 @@ async fn instance_tools_round_trip_typed_data() {
                 filter: None,
                 parent: None,
                 limit: None,
-                offset: None, order: None, fields: None,
+                offset: None,
+                order: None,
+                fields: None,
             }))
             .await,
     );
@@ -1132,7 +1136,9 @@ async fn instance_tools_round_trip_typed_data() {
                 filter: None,
                 parent: Some(channel.clone()),
                 limit: None,
-                offset: None, order: None, fields: None,
+                offset: None,
+                order: None,
+                fields: None,
             }))
             .await,
     );
@@ -1146,7 +1152,9 @@ async fn instance_tools_round_trip_typed_data() {
                 filter: Some(props(&[("body", json!({"contains": "Second"}))])),
                 parent: None,
                 limit: None,
-                offset: None, order: None, fields: None,
+                offset: None,
+                order: None,
+                fields: None,
             }))
             .await,
     );
@@ -1161,7 +1169,9 @@ async fn instance_tools_round_trip_typed_data() {
                 filter: None,
                 parent: None,
                 limit: Some(1),
-                offset: None, order: None, fields: None,
+                offset: None,
+                order: None,
+                fields: None,
             }))
             .await,
     );
@@ -1176,7 +1186,9 @@ async fn instance_tools_round_trip_typed_data() {
                 filter: Some(props(&[("subject", json!("x"))])),
                 parent: None,
                 limit: None,
-                offset: None, order: None, fields: None,
+                offset: None,
+                order: None,
+                fields: None,
             }))
             .await,
     );
@@ -1261,7 +1273,9 @@ async fn instance_tools_round_trip_typed_data() {
                 filter: None,
                 parent: None,
                 limit: None,
-                offset: None, order: None, fields: None,
+                offset: None,
+                order: None,
+                fields: None,
             }))
             .await,
     );
@@ -1277,7 +1291,9 @@ async fn instance_tools_round_trip_typed_data() {
                 filter: None,
                 parent: None,
                 limit: None,
-                offset: None, order: None, fields: None,
+                offset: None,
+                order: None,
+                fields: None,
             }))
             .await,
     );
@@ -1663,7 +1679,8 @@ async fn add_child_and_get_children_are_class_agnostic() {
             .get_children(Parameters(GetChildrenParams {
                 perspective_id: uuid.clone(),
                 parent: "my-room".into(),
-                limit: None, via: None,
+                limit: None,
+                via: None,
             }))
             .await,
     );
@@ -1687,7 +1704,8 @@ async fn add_child_and_get_children_are_class_agnostic() {
             .get_children(Parameters(GetChildrenParams {
                 perspective_id: uuid.clone(),
                 parent: "my-room".into(),
-                limit: Some(1), via: None,
+                limit: Some(1),
+                via: None,
             }))
             .await,
     );
@@ -1701,7 +1719,8 @@ async fn add_child_and_get_children_are_class_agnostic() {
             .get_children(Parameters(GetChildrenParams {
                 perspective_id: uuid.clone(),
                 parent: wrapped_parent.clone(),
-                limit: None, via: None,
+                limit: None,
+                via: None,
             }))
             .await,
     );
@@ -1713,7 +1732,8 @@ async fn add_child_and_get_children_are_class_agnostic() {
             .get_children(Parameters(GetChildrenParams {
                 perspective_id: uuid.clone(),
                 parent: "nobody-home".into(),
-                limit: None, via: None,
+                limit: None,
+                via: None,
             }))
             .await,
     );
@@ -1739,7 +1759,8 @@ async fn add_child_and_get_children_are_class_agnostic() {
             .get_children(Parameters(GetChildrenParams {
                 perspective_id: uuid.clone(),
                 parent: "ad4m://self".into(),
-                limit: None, via: None,
+                limit: None,
+                via: None,
             }))
             .await,
     );
@@ -1923,7 +1944,9 @@ async fn legacy_literal_ids_round_trip_through_the_instance_tools() {
                 filter: None,
                 parent: Some("literal://string:my-channel".into()),
                 limit: None,
-                offset: None, order: None, fields: None,
+                offset: None,
+                order: None,
+                fields: None,
             }))
             .await,
     );
@@ -2087,7 +2110,9 @@ async fn instance_query_clamps_an_oversized_limit_without_hiding_the_total() {
                         filter: None,
                         parent: None,
                         limit,
-                        offset: None, order: None, fields: None,
+                        offset: None,
+                        order: None,
+                        fields: None,
                     }))
                     .await,
             )
@@ -2179,7 +2204,9 @@ async fn create_failing_after_the_subject_is_staged_leaves_no_instance() {
                 filter: None,
                 parent: None,
                 limit: None,
-                offset: None, order: None, fields: None,
+                offset: None,
+                order: None,
+                fields: None,
             }))
             .await,
     );
@@ -3550,7 +3577,8 @@ async fn a_we_calls_blocks_are_its_children() {
             .get_children(Parameters(GetChildrenParams {
                 perspective_id: uuid.clone(),
                 parent: call.clone(),
-                limit: None, via: None,
+                limit: None,
+                via: None,
             }))
             .await,
     );
@@ -3583,7 +3611,9 @@ async fn a_we_calls_blocks_are_its_children() {
                 filter: None,
                 parent: Some(call.clone()),
                 limit: None,
-                offset: None, order: None, fields: None,
+                offset: None,
+                order: None,
+                fields: None,
             }))
             .await,
     );
@@ -3651,7 +3681,8 @@ async fn a_we_calls_blocks_are_its_children() {
             .get_children(Parameters(GetChildrenParams {
                 perspective_id: uuid.clone(),
                 parent: plain.into(),
-                limit: None, via: None,
+                limit: None,
+                via: None,
             }))
             .await,
     );
@@ -4627,7 +4658,9 @@ async fn in_list_gates_instance_create() {
                 filter: None,
                 parent: None,
                 limit: None,
-                offset: None, order: None, fields: None,
+                offset: None,
+                order: None,
+                fields: None,
             }))
             .await,
     )["count"]
@@ -5139,7 +5172,12 @@ const WALK_ITEM_SDNA: &str = r#"{
   ]
 }"#;
 
-async fn create(handler: &Ad4mMcpHandler, uuid: &str, class: &str, values: &[(&str, Value)]) -> String {
+async fn create(
+    handler: &Ad4mMcpHandler,
+    uuid: &str,
+    class: &str,
+    values: &[(&str, Value)],
+) -> String {
     let created = parse(
         &handler
             .instance_create(Parameters(InstanceCreateParams {
@@ -5157,7 +5195,14 @@ async fn create(handler: &Ad4mMcpHandler, uuid: &str, class: &str, values: &[(&s
     created["base_uri"].as_str().unwrap().to_string()
 }
 
-async fn query(handler: &Ad4mMcpHandler, uuid: &str, class: &str, order: Option<&str>, fields: Option<&str>, filter: Option<Map<String, Value>>) -> Value {
+async fn query(
+    handler: &Ad4mMcpHandler,
+    uuid: &str,
+    class: &str,
+    order: Option<&str>,
+    fields: Option<&str>,
+    filter: Option<Map<String, Value>>,
+) -> Value {
     parse(
         &handler
             .instance_query(Parameters(InstanceQueryParams {
@@ -5185,13 +5230,43 @@ fn walk_ids(rows: &Value, key: &str) -> Vec<String> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn get_children_via_relations_walks_declared_parent_links() {
-    let (handler, uuid, _guard) =
-        setup_with(&[("Topic", WALK_TOPIC_SDNA), ("Item", WALK_ITEM_SDNA)], false).await;
+    let (handler, uuid, _guard) = setup_with(
+        &[("Topic", WALK_TOPIC_SDNA), ("Item", WALK_ITEM_SDNA)],
+        false,
+    )
+    .await;
     let topic = create(&handler, &uuid, "Topic", &[("title", json!("Budget"))]).await;
     let other = create(&handler, &uuid, "Topic", &[("title", json!("Hiring"))]).await;
-    let a = create(&handler, &uuid, "Item", &[("title", json!("Cut costs")), ("about", json!(topic.clone()))]).await;
-    let b = create(&handler, &uuid, "Item", &[("title", json!("Raise prices")), ("about", json!(topic.clone()))]).await;
-    let _c = create(&handler, &uuid, "Item", &[("title", json!("Post the job")), ("about", json!(other.clone()))]).await;
+    let a = create(
+        &handler,
+        &uuid,
+        "Item",
+        &[
+            ("title", json!("Cut costs")),
+            ("about", json!(topic.clone())),
+        ],
+    )
+    .await;
+    let b = create(
+        &handler,
+        &uuid,
+        "Item",
+        &[
+            ("title", json!("Raise prices")),
+            ("about", json!(topic.clone())),
+        ],
+    )
+    .await;
+    let _c = create(
+        &handler,
+        &uuid,
+        "Item",
+        &[
+            ("title", json!("Post the job")),
+            ("about", json!(other.clone())),
+        ],
+    )
+    .await;
 
     let children = |via: Option<&str>| {
         let handler = &handler;
@@ -5219,7 +5294,11 @@ async fn get_children_via_relations_walks_declared_parent_links() {
     // Relations: the two items that name the topic, oldest first, each with
     // class, title and the relation.
     let pointing = children(Some("relations")).await;
-    assert_eq!(walk_ids(&pointing, "children"), vec![a.clone(), b.clone()], "{pointing}");
+    assert_eq!(
+        walk_ids(&pointing, "children"),
+        vec![a.clone(), b.clone()],
+        "{pointing}"
+    );
     assert_eq!(pointing["children"][0]["class"], "Item");
     assert_eq!(pointing["children"][0]["title"], "Cut costs");
     assert_eq!(pointing["children"][0]["via"], "about");
@@ -5250,22 +5329,43 @@ async fn get_children_via_relations_walks_declared_parent_links() {
 
     // A wrong `via` names the valid ones.
     let bad = children(Some("sideways")).await;
-    assert!(bad["error"].as_str().unwrap().contains("'containment', 'relations' or 'all'"), "{bad}");
+    assert!(
+        bad["error"]
+            .as_str()
+            .unwrap()
+            .contains("'containment', 'relations' or 'all'"),
+        "{bad}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn instance_query_orders_by_activity_and_returns_outline_rows() {
-    let (handler, uuid, _guard) =
-        setup_with(&[("Topic", WALK_TOPIC_SDNA), ("Item", WALK_ITEM_SDNA)], false).await;
+    let (handler, uuid, _guard) = setup_with(
+        &[("Topic", WALK_TOPIC_SDNA), ("Item", WALK_ITEM_SDNA)],
+        false,
+    )
+    .await;
     let first = create(&handler, &uuid, "Topic", &[("title", json!("First"))]).await;
     let second = create(&handler, &uuid, "Topic", &[("title", json!("Second"))]).await;
     let third = create(&handler, &uuid, "Topic", &[("title", json!("Third"))]).await;
 
     let by_creation = query(&handler, &uuid, "Topic", Some("createdAt"), None, None).await;
-    assert_eq!(walk_ids(&by_creation, "instances"), vec![third.clone(), second.clone(), first.clone()]);
+    assert_eq!(
+        walk_ids(&by_creation, "instances"),
+        vec![third.clone(), second.clone(), first.clone()]
+    );
 
     // An item attaches to the first topic: it is now the most active.
-    let item = create(&handler, &uuid, "Item", &[("title", json!("Follow up")), ("about", json!(first.clone()))]).await;
+    let item = create(
+        &handler,
+        &uuid,
+        "Item",
+        &[
+            ("title", json!("Follow up")),
+            ("about", json!(first.clone())),
+        ],
+    )
+    .await;
     let by_activity = query(&handler, &uuid, "Topic", Some("activity"), None, None).await;
     assert_eq!(
         walk_ids(&by_activity, "instances"),
@@ -5279,7 +5379,11 @@ async fn instance_query_orders_by_activity_and_returns_outline_rows() {
     assert_eq!(row["id"], item.as_str());
     assert_eq!(row["title"], "Follow up");
     assert_eq!(row["about"], first.as_str(), "{outline}");
-    assert_eq!(row.as_object().unwrap().len(), 3, "outline keys only: {row}");
+    assert_eq!(
+        row.as_object().unwrap().len(),
+        3,
+        "outline keys only: {row}"
+    );
 
     // A filter on the relation walks to the rows that point to a node.
     let pointing = query(

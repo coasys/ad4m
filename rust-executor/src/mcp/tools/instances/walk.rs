@@ -96,7 +96,10 @@ pub(crate) fn forward_relations(shape: &ModelShape) -> Vec<(&str, &str)> {
 /// The property names an outline row reads: the identity property and the
 /// forward relations.
 pub(crate) fn outline_properties(shape: &ModelShape) -> Vec<String> {
-    let mut names: Vec<String> = identity_name(shape).map(str::to_string).into_iter().collect();
+    let mut names: Vec<String> = identity_name(shape)
+        .map(str::to_string)
+        .into_iter()
+        .collect();
     names.extend(
         forward_relations(shape)
             .into_iter()

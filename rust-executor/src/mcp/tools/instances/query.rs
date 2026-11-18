@@ -1,10 +1,10 @@
 //! `instance_query` + `instance_get` — read instances of any subject class.
 
+use super::walk::{order_json, outline_properties, outline_row, Fields};
 use super::{
     error_json, fetch_instance, instance_uri, link_target, normalize_filter, not_found, pretty,
     resolve_class, run_model_query, Ad4mMcpHandler, DEFAULT_QUERY_LIMIT, MAX_QUERY_LIMIT,
 };
-use super::walk::{order_json, outline_properties, outline_row, Fields};
 use rmcp::{handler::server::wrapper::Parameters, tool};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
