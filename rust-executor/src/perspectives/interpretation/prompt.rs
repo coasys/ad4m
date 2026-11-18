@@ -81,25 +81,50 @@ pub fn build_interpretation_input(
     )
 }
 
-/// The `existing_shown` line: how many of the existing rows the prompt shows.
-pub(crate) fn existing_shown_line(shown: usize, total: usize) -> String {
-    format!(
-        "`existing` shows {shown} of {total} rows. Rows that are not shown are still checked \
-         for duplicates."
-    )
+/// How many existing instances a budgeted prompt shows, and whether the pass
+/// checks its output against the instances the prompt leaves out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ExistingShown {
+    /// Distinct instances the prompt shows. An instance in two classes is in
+    /// two `existing` arrays and counts once.
+    pub shown: usize,
+    /// Distinct instances in the full existing set.
+    pub total: usize,
+    /// Whether the pass dedups its output against the full set. The
+    /// single-shot path always does; the harness path only with
+    /// `dedup_on_drain` (the auto-processor), not on the WS-RPC call.
+    pub unshown_checked: bool,
+}
+
+/// The `existing_shown` line: how many of the existing instances the prompt
+/// shows, and whether the ones it does not show are checked for duplicates.
+pub(crate) fn existing_shown_line(counts: &ExistingShown) -> String {
+    let ExistingShown { shown, total, .. } = counts;
+    if counts.unshown_checked {
+        format!(
+            "`existing` shows {shown} of {total} instances. Instances that are not shown are \
+             still checked for duplicates."
+        )
+    } else {
+        format!(
+            "`existing` shows {shown} of {total} instances. Instances that are not shown are \
+             not checked for duplicates: query the class before you create an instance that \
+             may already exist."
+        )
+    }
 }
 
 /// [`build_interpretation_input`] for an `existing` set that is a budgeted
-/// part of the full one (`existing_budget`). `rows` is (rows shown, rows in
-/// the full set). When some rows are left out, the prompt gets an
-/// `existing_shown` line ([`existing_shown_line`]) that says so.
+/// part of the full one (`existing_budget`). When `counts` says some
+/// instances are left out, the prompt gets an `existing_shown` line
+/// ([`existing_shown_line`]) that says so.
 pub(crate) fn build_interpretation_input_showing(
     shapes: &[ModelShape],
     transcript: &[TranscriptTurn],
     existing: &ExistingInstances,
     active_flows: &[FlowContext],
     speaker_names: &HashMap<String, String>,
-    rows: Option<(usize, usize)>,
+    counts: Option<ExistingShown>,
 ) -> String {
     // Group the id-keyed source by class once for the per-class `existing`
     // blocks below (deterministically ordered — see `instances_by_class`).
@@ -241,8 +266,8 @@ pub(crate) fn build_interpretation_input_showing(
         })
         .collect();
     let mut out = serde_json::json!({ "classes": classes, "transcript": turns });
-    if let Some((shown, total)) = rows.filter(|(shown, total)| shown < total) {
-        out["existing_shown"] = serde_json::json!(existing_shown_line(shown, total));
+    if let Some(counts) = counts.filter(|c| c.shown < c.total) {
+        out["existing_shown"] = serde_json::json!(existing_shown_line(&counts));
     }
     if !active_flows.is_empty() {
         out["active_flows"] = serde_json::Value::Array(
@@ -414,10 +439,11 @@ You receive a JSON object with these fields:
     handle you emit to update that entry; `title` is its identity label; the
     optional `properties` object shows its *current state* so you can judge
     whether new turns continue that instance or belong to a fresh one.
-  - `existing_shown` (OPTIONAL — present only when `existing` leaves rows
-    out): how many rows the `existing` arrays show. An instance that is not
-    shown still exists. The engine still checks your output against it for
-    duplicates.
+  - `existing_shown` (OPTIONAL — present only when `existing` leaves
+    instances out): how many distinct instances the `existing` arrays show
+    (an instance in two classes counts once), and whether the engine checks
+    your output against the instances that are not shown. An instance that
+    is not shown still exists.
   - `transcript`: an array of turns `{speaker, text}` and, when known,
     `timestamp` (the source link's RFC3339 time). Use `speaker` for identity
     reasoning. When two different participants share the same display name,

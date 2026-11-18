@@ -33,17 +33,16 @@
 //!
 //! # Endpoint + retry
 //!
-//! Uses the standard `setup_interpretation_e2e` harness: OpenAI-compatible
-//! endpoint at `INTERPRETATION_E2E_BASE_URL` (default `localhost:11434/v1`,
-//! i.e. Ollama on Marvin or over an SSH tunnel from a dev box), model
-//! `INTERPRETATION_E2E_MODEL` (default `qwen3.8-27b-48k`). Retries the whole
+//! Uses the standard `setup_interpretation_e2e` harness: llama-server at
+//! `INTERPRETATION_E2E_BASE_URL` (default `http://127.0.0.1:12460/v1`), model
+//! `INTERPRETATION_E2E_MODEL` (default `qwen3.8-27b-ud-q4_k_m`). Retries the whole
 //! pass up to 3× to soak up single-sample LLM flake, matching the
 //! sibling generic-interpretation e2e tests.
 //!
 //! # CI gating (PR #943)
 //!
 //! Gated behind `#[ignore = "llm-e2e"]` — regular CI skips it; the nightly
-//! `llm-e2e` workflow on `dev` runs it against Marvin's local Ollama. Same
+//! `llm-e2e` workflow runs it against the host's llama-server. Same
 //! discipline as `interpretation_e2e.rs` / `interpretation_harness_e2e.rs`.
 //! Run locally with `cargo test --release --lib
 //! perspectives::flow_context::real_llm_e2e -- --ignored --test-threads=1
