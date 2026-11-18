@@ -134,7 +134,7 @@ enum Domain {
     Tui,
 }
 
-async fn get_ad4m_client(args: &ClapApp, domain: &Domain) -> Result<Ad4mClient> {
+async fn get_ad4m_client(args: &ClapApp, domain: &Domain) -> Result<(Ad4mClient, String)> {
     let executor_url = normalize_base_url(&if let Some(custom_url) = args.executor_url.clone() {
         custom_url
     } else {
@@ -173,7 +173,7 @@ async fn get_ad4m_client(args: &ClapApp, domain: &Domain) -> Result<Ad4mClient> 
         .await
         .with_context(|| format!("cannot connect to {executor_url}"))?;
 
-    Ok(ad4m_client)
+    Ok((ad4m_client, executor_url))
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -190,7 +190,7 @@ async fn main() -> Result<()> {
         .await;
     }
 
-    let ad4m_client = get_ad4m_client(&args, &args.domain).await?;
+    let (ad4m_client, executor_url) = get_ad4m_client(&args, &args.domain).await?;
 
     match args.domain {
         Domain::Login { .. } => unreachable!("login returns above"),
@@ -201,10 +201,6 @@ async fn main() -> Result<()> {
         Domain::Runtime { command } => runtime::run(ad4m_client, command).await?,
         Domain::Expression { command } => expression::run(ad4m_client, command).await?,
         Domain::Tui => {
-            let executor_url = normalize_base_url(&match &args.executor_url {
-                Some(url) => url.clone(),
-                None => crate::startup::get_executor_url()?,
-            });
             tui::run(ad4m_client, executor_url).await?;
         }
         Domain::Log => {
@@ -230,6 +226,18 @@ mod command_tests {
     fn tui_is_a_command() {
         let app = ClapApp::try_parse_from(["ad4m", "tui"]).unwrap();
         assert!(matches!(app.domain, Domain::Tui));
+    }
+
+    #[test]
+    fn allow_insecure_remote_reaches_tui() {
+        for argv in [
+            ["ad4m", "--allow-insecure-remote", "tui"],
+            ["ad4m", "tui", "--allow-insecure-remote"],
+        ] {
+            let app = ClapApp::try_parse_from(argv).unwrap();
+            assert!(app.allow_insecure_remote, "{argv:?}");
+            assert!(matches!(app.domain, Domain::Tui));
+        }
     }
 }
 
