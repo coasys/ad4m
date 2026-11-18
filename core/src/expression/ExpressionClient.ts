@@ -15,6 +15,12 @@ export class ExpressionClient {
     static MAX_MEM_ENTRIES = 200;
     /** Maximum total size (in bytes of JSON) of the expressions kept in memory. */
     static MAX_MEM_BYTES = 5 * 1024 * 1024; // 5 MB
+    /**
+     * TTL of every cached expression, in memory and in the persistent cache
+     * (ms). A language may change what a URL returns, and no event tells the
+     * client, so a cached expression expires instead of staying stale.
+     */
+    static EXPRESSION_TTL_MS = 5 * 60_000; // 5 minutes
 
     // A `get` miss is its own `expression.get`, so it waits for no slower
     // expression and has its own call timeout. The misses of the `getMany`
@@ -30,6 +36,8 @@ export class ExpressionClient {
                 entry && 'code' in entry ? new RpcError(entry.code, entry.message) : entry as ExpressionRendered | null),
             maxBatch: MAX_URLS_PER_CALL,
             persistent: createPersistentCache<StoredEntry<ExpressionRendered>>('ad4m-expression-cache', 'expressions'),
+            maxAgeMs: () => ExpressionClient.EXPRESSION_TTL_MS,
+            persistentMaxAgeMs: () => ExpressionClient.EXPRESSION_TTL_MS,
             limits: () => ({ entries: ExpressionClient.MAX_MEM_ENTRIES, bytes: ExpressionClient.MAX_MEM_BYTES }),
         });
     }

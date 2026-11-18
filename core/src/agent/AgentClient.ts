@@ -122,12 +122,6 @@ export class AgentClient {
   }
 
   /**
-   * @deprecated Does nothing. The own profile now expires after
-   * `REMOTE_AGENT_TTL_MS` like every other profile.
-   */
-  setSelfDid(_did: string): void {}
-
-  /**
    * Invalidate a specific DID's cache entry in both L1 and L2.
    */
   invalidateByDid(did: string): void {
