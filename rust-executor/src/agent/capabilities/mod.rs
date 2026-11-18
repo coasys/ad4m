@@ -185,8 +185,10 @@ pub async fn track_last_seen(agent_did: &str) {
 /// Record activity by the account that owns `agent_did` at `now` in `users.last_seen`, at most
 /// once per [`LAST_SEEN_WRITE_THROTTLE_S`](crate::presence::LAST_SEEN_WRITE_THROTTLE_S). Both the in-memory cache path and the DB path decide
 /// through [`last_seen_write_due`], the same rule the presence readers are tested against
-/// (#1070). The cache only avoids DB lookups: a cached value is never fresher than the DB, so it
-/// cannot suppress a write the DB path would make.
+/// (#1070). The cache stores the minimum of the DB value and `now` (#1675). A future DB
+/// value must not stay in the cache: a direct write stamps server time and does not touch
+/// the cache, and the future value would skip a due write until the cache TTL. A cached
+/// value older than the DB only sends the decision on to the DB path.
 pub(crate) async fn track_last_seen_at(agent_did: &str, now: i64) {
     let agent_did = agent_did.to_string();
 
@@ -262,7 +264,9 @@ pub(crate) async fn track_last_seen_at(agent_did: &str, now: i64) {
             agent_did.clone(),
             LastSeenCacheEntry {
                 last_checked: now,
-                last_seen_value: last_seen_val,
+                // A future DB value must not stay here. A direct write stamps
+                // server time and does not touch this cache (#1675).
+                last_seen_value: last_seen_val.min(now),
             },
         );
     }
