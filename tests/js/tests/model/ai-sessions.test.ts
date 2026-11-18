@@ -40,7 +40,7 @@ import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
 import { Ad4mClient, LinkQuery, SHACLShape } from "@coasys/ad4m";
 import type { AISession, AISessionChanged, AISessionMessage } from "@coasys/ad4m";
-import { addE2eLlm, startAgent, waitUntil } from "../../helpers/index.js";
+import { addE2eLlm, e2eMaxNumCtx, startAgent, waitUntil } from "../../helpers/index.js";
 
 const expect = chai.expect;
 chai.use(chaiAsPromised);
@@ -48,6 +48,9 @@ chai.use(chaiAsPromised);
 // A turn is a detached task; the reply row settles whenever the model is done.
 // The request may wait behind staging on the one llama-server slot, then generate.
 const TURN_TIMEOUT_MS = 600_000;
+// The budget the executor sizes prompts to. The big-result test checks the
+// stored tool result is larger than this window.
+const MAX_NUM_CTX = e2eMaxNumCtx();
 
 /** The fields the test reads off a transcript entry's `content`. */
 type StepContent = {
