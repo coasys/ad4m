@@ -128,6 +128,31 @@ async fn collection_items_are_found_by_their_coerced_value() {
     assert!(stored_targets(&p, &base, "ns://count").await.is_empty());
 }
 
+/// A hard-wired class is the executor's to register: the first `create` of
+/// one on a perspective that has never stored it registers it and writes.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_first_create_of_a_hard_wired_class_registers_it() {
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+    let created = create(
+        &mut p,
+        &ctx,
+        InstanceCreate {
+            class_name: "FlowInstance".into(),
+            properties: Some(Map::from_iter([
+                ("flowUri".to_string(), json!("ns://flow")),
+                ("subject".to_string(), json!("ns://subject")),
+            ])),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("a hard-wired class needs no registration");
+    assert_eq!(
+        stored_targets(&p, &created.base_uri, "ad4m://flow/base").await,
+        vec!["ns://subject"]
+    );
+}
+
 /// `resolve_class` reads the shape registry only: every key `class_keys`
 /// gives resolves to its one class, a name two classes share to neither.
 mod resolve_class {

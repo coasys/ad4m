@@ -209,7 +209,7 @@ impl Drop for Executor {
 
 /// The test class: one required single-valued `title`, one optional
 /// `xsd://boolean` `done`, one `hasMany` collection `tags` — the smallest
-/// shape `perspective.addSdna` accepts that can prove a collection edit
+/// shape `perspective.registerShapes` accepts that can prove a collection edit
 /// rides the collection RPCs, modelled on the hardwired
 /// `flow_instance.json`.
 const NOTE_SDNA: &str = r#"{
@@ -289,13 +289,10 @@ async fn model_batch_subscription_reconnect_and_flow() {
     client
         .ws()
         .call::<Value>(
-            "perspective.addSdna",
+            "perspective.registerShapes",
             json!({
                 "uuid": uuid,
-                "name": "IntegrationNote",
-                "sdnaCode": "",
-                "sdnaType": "subject_class",
-                "shaclJson": NOTE_SDNA,
+                "shapes": [serde_json::from_str::<Value>(NOTE_SDNA).unwrap()],
             }),
         )
         .await
