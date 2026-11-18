@@ -364,8 +364,12 @@ pub fn check_signed_with_provenance<T: serde::Serialize>(
             LinkVerdict::CantCheck
         }
         // Asked about and unanswered (the discovery cap, an index not answering): not a key
-        // no log lists, so its unanchored link waits too.
-        (LinkVerdict::Valid, KeyLookup::Unknown) if signer.is_some_and(|k| map.is_pending(k)) => {
+        // no log lists, so its unanchored link waits too. Not one this executor signs itself:
+        // a local identity's log is pinned in the map, so an own key the map does not know has
+        // none.
+        (LinkVerdict::Valid, KeyLookup::Unknown)
+            if signer.is_some_and(|k| map.is_pending(k)) && !own(&expr.author) =>
+        {
             LinkVerdict::CantCheck
         }
         _ => verdict,
@@ -4105,5 +4109,31 @@ mod link_check_tests {
         );
         drop(hold);
         assert!(!map.is_pending(&key), "the batch is done: its hold went");
+    }
+
+    /// The local write path does not wait on an unanswered prepare for the unanchored link one
+    /// of this executor's own agents signs now: a local identity's log is pinned in the key map
+    /// from start, so a local agent's key the map does not know has no log. An executor that
+    /// runs without the agent language gets no answer for its own key, and its own writes
+    /// (a class's SHACL among them) must still count. A peer's link by the same key waits.
+    #[tokio::test]
+    async fn an_own_unanchored_link_counts_while_the_prepare_is_unanswered() {
+        let store = Arc::new(FakeStore::new(vec![]));
+        store.key_index_down.store(true, Ordering::SeqCst);
+        let resolver = resolver_on(store);
+        let link: Expression<Link> = TestSigner::generate().sign(link());
+        let _hold = resolver.prepare(&[(link.author.clone(), None)]).await;
+        let map = resolver.cache.key_map();
+
+        assert_eq!(
+            check_signed_with_provenance(&link, map, None, NOW, |_| true).verdict,
+            LinkVerdict::Valid,
+            "this executor's own agent signed it now"
+        );
+        assert_eq!(
+            check_signed_with(&link, map, None, NOW).verdict,
+            LinkVerdict::CantCheck,
+            "the same link from a peer waits for the answer"
+        );
     }
 }
