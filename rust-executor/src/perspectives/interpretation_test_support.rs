@@ -1097,10 +1097,22 @@ pub(crate) fn proposal(
     }
 }
 
-/// Seed the perspective with `(msg_uri, author, body_text)` triples wired as
-/// two direct links per message: `<msg> <ns://body> <literal:string:...>` and
-/// `<msg> <ns://author> <did:key:...>`. Mirrors the shape a Flux-style channel
-/// perspective would present and the SPARQL queries in these tests target.
+/// The source class of the auto-processor transcript tests: a `ns://Message`
+/// instance is its `ns://type` flag plus a `ns://body` literal. The transcript
+/// reader takes a turn's speaker and timestamp from the instance's link
+/// metadata (the writer's DID and the link's time), so `author` below stays a
+/// plain link — it no longer reaches the transcript.
+pub(crate) const MESSAGE_SDNA: &str = r#"{
+  "target_class":"ns://Message",
+  "properties":[
+    {"path":"ns://type","name":"type","has_value":"ns://message","min_count":1,"max_count":1},
+    {"path":"ns://body","name":"body","resolve_language":"literal","min_count":1,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://body","target":"value"}]}
+  ]
+}"#;
+
+/// Seed the perspective with a conforming `ns://Message`: the `ns://type`
+/// flag plus `<msg> <ns://body> <literal:string:...>` and
+/// `<msg> <ns://author> <did:key:...>` links, signed by `ctx`'s agent.
 pub(crate) async fn seed_message(
     perspective: &mut crate::perspectives::perspective_instance::PerspectiveInstance,
     ctx: &crate::agent::AgentContext,
@@ -1110,6 +1122,19 @@ pub(crate) async fn seed_message(
     body_predicate: &str,
 ) {
     use crate::types::{Link, LinkStatus};
+    perspective
+        .add_link(
+            Link {
+                source: msg_uri.into(),
+                predicate: Some("ns://type".into()),
+                target: "ns://message".into(),
+            },
+            LinkStatus::Local,
+            None,
+            ctx,
+        )
+        .await
+        .expect("seed_message type");
     perspective
         .add_link(
             Link {

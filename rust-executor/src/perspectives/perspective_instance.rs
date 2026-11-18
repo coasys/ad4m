@@ -72,7 +72,7 @@ pub(crate) use abstract_classes::faults::fail_next_index;
 mod subscriptions;
 pub(crate) use subscriptions::{result_json, SubscriptionIdTaken};
 // Which writes re-run a model subscription (#1237).
-mod subscription_triggers;
+pub(crate) mod subscription_triggers;
 // Registering this executor's owners with the link language.
 mod local_agents;
 // Committing a batch only if the links it expects still stand.
@@ -507,6 +507,16 @@ impl SubscribedQuery {
     }
 }
 
+/// One committed diff's links as [`subscription_triggers::Writes`], for the
+/// auto-processor loops' trigger matching — `None` when a diff carried a
+/// predicate-less link, which no trigger can rule out.
+pub(crate) type CommitWrite = Option<Arc<subscription_triggers::Writes>>;
+
+/// How many committed diffs the `commit_writes` channel buffers while a
+/// watch loop is busy. A loop that lags past it wakes anyway (`Lagged`
+/// matches conservatively), so this only bounds memory.
+const COMMIT_WRITES_CAPACITY: usize = 256;
+
 /// A batch with its creation timestamp, for timeout-based cleanup.
 struct TimestampedBatch {
     diff: PerspectiveDiff,
@@ -652,6 +662,13 @@ pub struct PerspectiveInstance {
     trigger_subscription_check: Arc<AtomicBool>,
     /// Predicates of links changed since last subscription check.
     changed_predicates: Arc<Mutex<ChangedPredicates>>,
+    /// Every committed diff's [`subscription_triggers::Writes`], broadcast for
+    /// the auto-processor watch loops (#1794): they test it against their
+    /// model-subscription triggers and wake only on a match. This is the same
+    /// per-commit batch `record_changed_predicates` feeds
+    /// `changed_predicates` — `None` when a diff carried a predicate-less
+    /// link, which no trigger can rule out — not a second write log.
+    commit_writes: tokio::sync::broadcast::Sender<CommitWrite>,
     commit_debounce_timer: Arc<Mutex<Option<tokio::time::Instant>>>,
     immediate_commits_remaining: Arc<Mutex<usize>>,
     /// Held by `commit` from its pending-queue check until the diff is sent or
@@ -799,6 +816,7 @@ impl PerspectiveInstance {
             trigger_notification_check: Arc::new(AtomicBool::new(false)),
             trigger_subscription_check: Arc::new(AtomicBool::new(false)),
             changed_predicates: Arc::new(Mutex::new(ChangedPredicates::NoneRecorded)),
+            commit_writes: tokio::sync::broadcast::channel(COMMIT_WRITES_CAPACITY).0,
             commit_debounce_timer: Arc::new(Mutex::new(None)),
             immediate_commits_remaining: Arc::new(Mutex::new(IMMEDIATE_COMMITS_COUNT)),
             commit_order: Arc::new(Mutex::new(())),
@@ -4535,16 +4553,22 @@ impl PerspectiveInstance {
     /// Record the links of a diff into `changed_predicates`. A link without a
     /// predicate makes it `CheckAll` (check everything).
     async fn record_changed_predicates(&self, diff: &DecoratedPerspectiveDiff) {
+        // Collect the diff's links; a predicate-less one means check everything.
+        let writes =
+            subscription_triggers::writes_of(diff.additions.iter().chain(diff.removals.iter()));
+
+        // The auto-processor loops match their triggers against the same
+        // batch, and must see it even while the subscription side has already
+        // collapsed to CheckAll. Ignored when no loop runs (no receivers):
+        // `send` only fails then, and there is nothing to wake.
+        let _ = self.commit_writes.send(writes.clone().map(Arc::new));
+
         let mut changed = self.changed_predicates.lock().await;
 
         // If already CheckAll, it's sticky — nothing to do
         if matches!(*changed, ChangedPredicates::CheckAll) {
             return;
         }
-
-        // Collect the diff's links; a predicate-less one means check everything.
-        let writes =
-            subscription_triggers::writes_of(diff.additions.iter().chain(diff.removals.iter()));
 
         let Some(writes) = writes else {
             *changed = ChangedPredicates::CheckAll;
@@ -4557,6 +4581,47 @@ impl PerspectiveInstance {
             ChangedPredicates::Specific(existing) => existing.extend(writes),
             ChangedPredicates::CheckAll => unreachable!(),
         }
+    }
+
+    /// Whether a committed write batch can create, complete or change an
+    /// in-scope instance of any declared processor (`watcher.triggers`), or
+    /// touches an `AutoProcessor` config node (its property predicates — a
+    /// config write or removal). This is the same `matches` call
+    /// [`Self::check_subscribed_queries`] makes, over the same batch, so a
+    /// write that could not change a processor's read never wakes its loop
+    /// nor queries the store.
+    pub(crate) fn auto_processor_writes_match(
+        &self,
+        watcher: &crate::perspectives::auto_processor::watcher::WatcherState,
+        writes: &subscription_triggers::Writes,
+    ) -> bool {
+        use crate::perspectives::auto_processor::config::config_write_predicates;
+        if writes
+            .predicates
+            .iter()
+            .any(|p| config_write_predicates().contains(p))
+        {
+            return true;
+        }
+        let mut lookups = subscription_triggers::StoreLookups::new(&self.sparql_store);
+        watcher
+            .triggers
+            .values()
+            .any(|t| t.matches(writes, &mut lookups))
+    }
+
+    /// The trigger a model subscription over `cfg`'s transcript scope would
+    /// build, fed the result of the last read for its `near`/`via` node set
+    /// (empty before the first read: `joins`/`scan`/`any` still catch writes
+    /// that create or complete an instance).
+    fn auto_processor_trigger(
+        &self,
+        cfg: &crate::perspectives::auto_processor::config::AutoProcessorConfig,
+    ) -> subscription_triggers::ModelTrigger {
+        let classes = crate::perspectives::model_query::QueryClasses::One(cfg.source_class.clone());
+        let query_json = cfg.transcript_query_json();
+        let targets = self.trigger_targets(&classes, &query_json);
+        self.build_model_trigger_for(&targets, &query_json, "")
     }
 
     fn spawn_prolog_facts_update(
@@ -6722,11 +6787,13 @@ impl PerspectiveInstance {
     /// (60 s, or when a deferral ends). A tick reuses the store reads of the
     /// one before while no write landed in between (`TickReads`), so an idle
     /// perspective costs no query at all, and after writes that only added
-    /// links it reads only the turns they add (`delta_read`). Each tick:
+    /// links it reads the scope's transcript in full — a model query has no
+    /// safe partial-read equivalent. Each tick:
     ///   1. Load every `AutoProcessorConfig` declared on this perspective's
     ///      shared graph (`load_processors`). Zero configs = no-op tick.
-    ///   2. Per config, run its `source_scope_query` to gather the current
-    ///      transcript (`?speaker` `?text` `?timestamp`), drop turns older
+    ///   2. Per config, run its transcript model query (`source_class` +
+    ///      `source_text` + `source_query`) to gather the current
+    ///      transcript, drop turns older
     ///      than `source_window_ms` when set, hash each remaining turn, and
     ///      skip IDs already in this processor's `InterpretationRun.sources`
     ///      (windowed by `ran_at` only when `source_window_ms` is set).
@@ -6754,7 +6821,10 @@ impl PerspectiveInstance {
 
         let uuid = self.uuid.clone();
         let mut watcher = WatcherState::new();
-        let mut writes = self.sparql_store.watch_writes();
+        // Committed diffs as `Writes`, tested against the processors'
+        // model-subscription triggers: the loop wakes only when a write can
+        // change what a processor reads (#1794).
+        let mut commits = self.commit_writes.subscribe();
         // The first pass runs after one base tick, whatever the store does.
         let mut wait = Some(AUTO_PROCESSOR_TICK_MS);
         // The last tick that found the store changed, so it read it, and its
@@ -6771,12 +6841,17 @@ impl PerspectiveInstance {
 
         loop {
             let end = match wait {
-                Some(ms) => wait_for_tick(&self.is_teardown, ms, None, None).await,
+                Some(ms) => wait_for_tick(&self.is_teardown, ms, None, None, |_| false).await,
                 None => {
                     let now_ms = chrono::Utc::now().timestamp_millis();
                     let ms = idle_wait_ms(&watcher, now_ms);
                     let models = models.as_mut().filter(|_| waiting_for_model);
-                    match wait_for_tick(&self.is_teardown, ms, Some(&mut writes), models).await {
+                    let matches = |w: &subscription_triggers::Writes| {
+                        self.auto_processor_writes_match(&watcher, w)
+                    };
+                    match wait_for_tick(&self.is_teardown, ms, Some(&mut commits), models, matches)
+                        .await
+                    {
                         // Let the rest of a burst of writes land first, and
                         // keep the back-off since the last read.
                         WaitEnd::Write => {
@@ -6789,6 +6864,7 @@ impl PerspectiveInstance {
                                 floor.max(AUTO_PROCESSOR_TICK_MS),
                                 None,
                                 None,
+                                |_| false,
                             )
                             .await
                         }
@@ -6800,8 +6876,8 @@ impl PerspectiveInstance {
                 break;
             }
             // Writes up to here are seen by this tick; one landing during it
-            // (the pass's own, or a peer's) wakes the next.
-            let generation = *writes.borrow_and_update();
+            // (the pass's own, or a peer's) is matched by the next wait.
+            let generation = self.sparql_store.write_generation();
             if last_read.is_none_or(|(g, _)| g != generation) {
                 last_read = Some((generation, tokio::time::Instant::now()));
             }
@@ -6870,7 +6946,6 @@ impl PerspectiveInstance {
         use crate::perspectives::auto_processor::{
             config::load_processors,
             cursor::{load_processed_sources, processed_ids_in_window, turn_in_source_window},
-            delta_read::{delta_query, DeltaRead},
             events::{emit, AutoProcessorEvent, AutoProcessorStep},
             watcher::{
                 model_available, run_one_pass, CachedTurn, PassOutcome, PendingTurn, TickOutcome,
@@ -6883,7 +6958,22 @@ impl PerspectiveInstance {
         let configs = match watcher.reads.configs(generation) {
             Some(cs) => cs,
             None => match load_processors(self).await {
-                Ok(cs) => watcher.reads.set_configs(generation, cs),
+                Ok(cs) => {
+                    let cs = watcher.reads.set_configs(generation, cs);
+                    // (Re)build each processor's wake trigger from its scope.
+                    // Their `near`/`via` node sets are re-fed by this tick's
+                    // transcript reads (the generation just changed, so each
+                    // kept read is stale anyway).
+                    watcher
+                        .triggers
+                        .retain(|id, _| cs.iter().any(|c| &c.processor_id == id));
+                    for cfg in cs.iter() {
+                        watcher
+                            .triggers
+                            .insert(cfg.processor_id.clone(), self.auto_processor_trigger(cfg));
+                    }
+                    cs
+                }
                 Err(e) => {
                     log::warn!(
                         "auto_processor_tick [{}]: load_processors failed: {e:#}",
@@ -6937,67 +7027,35 @@ impl PerspectiveInstance {
                     matches!(t, CachedTurn::Consumed { .. }) && queueable(t.id(), t.timestamp())
                 })
             });
-            // After writes that only added links, read what they can add to
-            // the kept read (late turns with old timestamps included, see
-            // `delta_read`). Anything else (no kept read, a removal or reload
-            // since, a log that no longer reaches back, a scope query a delta
-            // cannot follow) reads the whole transcript.
-            let delta = match &kept {
-                Some((kept_at, _)) if *kept_at == generation => None,
-                Some((kept_at, _)) => self
-                    .sparql_store
-                    .additions_since(*kept_at, generation)
-                    .map(|added| delta_query(&cfg.source_scope_query, &added))
-                    .filter(|d| *d != DeltaRead::Full),
-                None => None,
-            };
-            let transcript = match (kept, delta) {
-                (Some((kept_at, turns)), _) if kept_at == generation => turns,
-                (kept, Some(delta)) => {
-                    // Release the kept copy, so the merge can take it over.
-                    drop(kept);
-                    let gained = match delta {
-                        DeltaRead::Query(query) => {
-                            crate::perspectives::interpretation::gather_transcript_sparql(
-                                self, &query,
-                            )
-                            .await
-                        }
-                        _ => Ok(Vec::new()),
-                    };
-                    match gained {
-                        Ok(t) => watcher.reads.merge_transcript(
+            // Anything but an unchanged generation reads the whole
+            // transcript again: a model-query read has no partial-read
+            // equivalent, and the wake trigger already kept writes that
+            // could not change the scope from reaching this tick.
+            let transcript = match kept {
+                Some((kept_at, turns)) if kept_at == generation => turns,
+                _ => match crate::perspectives::interpretation::gather_transcript_model(
+                    self,
+                    &cfg.source_class,
+                    &cfg.source_text,
+                    &cfg.transcript_query_json(),
+                )
+                .await
+                {
+                    Ok((result_json, t)) => {
+                        // Feed the read's nodes to the wake trigger, so a
+                        // write that edits an in-scope instance's links
+                        // (`near`/`via` rules) wakes the loop.
+                        watcher.set_trigger_result(&cfg.processor_id, &result_json);
+                        watcher.reads.set_transcript(
                             cfg,
                             generation,
                             t.iter().map(PendingTurn::from_transcript).collect(),
                             queueable,
-                        ),
-                        Err(e) => {
-                            log::warn!(
-                                "auto_processor `{}` [{}]: reading the turns added since the last \
-                                 tick failed: {e:#}",
-                                cfg.processor_id,
-                                uuid
-                            );
-                            continue;
-                        }
+                        )
                     }
-                }
-                _ => match crate::perspectives::interpretation::gather_transcript_sparql(
-                    self,
-                    &cfg.source_scope_query,
-                )
-                .await
-                {
-                    Ok(t) => watcher.reads.set_transcript(
-                        cfg,
-                        generation,
-                        t.iter().map(PendingTurn::from_transcript).collect(),
-                        queueable,
-                    ),
                     Err(e) => {
                         log::warn!(
-                            "auto_processor `{}` [{}]: gather_transcript_sparql failed: {e:#}",
+                            "auto_processor `{}` [{}]: gather_transcript_model failed: {e:#}",
                             cfg.processor_id,
                             uuid
                         );

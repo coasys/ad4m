@@ -22,7 +22,7 @@ import { addOllamaLlm, waitUntil } from "../helpers/index";
 import fs from "fs";
 import { v4 as uuidv4 } from "uuid";
 import { expect } from "chai";
-import { ConversationSubgroup } from "./model/auto-processor-models";
+import { ChannelMessage, ConversationSubgroup } from "./model/auto-processor-models";
 import { LinkLangConfig, holochainLinkLang, publishLinkLanguage } from "../utils/linkLangConfig";
 
 const DIFF_SYNC_OFFICIAL = fs.readFileSync("./scripts/perspective-diff-sync-hash").toString();
@@ -33,19 +33,14 @@ const BASE_URL = process.env.INTERPRETATION_E2E_BASE_URL || "http://localhost:11
 const MAX_NUM_CTX = Number(process.env.INTERPRETATION_E2E_MAX_NUM_CTX) || 49152;
 const MODEL = process.env.INTERPRETATION_E2E_MODEL || "qwen3.8-27b-48k";
 
-// Speaker and timestamp come off the body link's reifier, not an app-level
-// `ns://author` predicate: `?timestamp` is required (it is what makes a turn
-// identifiable to the processed-turn cursor) and only the reifier carries it.
-// Note the consequence here: `?speaker` is the DID that *signed* the link, so
-// each peer's own messages carry that peer as the speaker — which is what the
-// authorship election runs on.
-const SCOPE_QUERY = `SELECT ?speaker ?text ?timestamp WHERE {
-  ?m <ns://body> ?text .
-  ?r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?m <ns://body> ?text )>> .
-  ?r <ad4m://ontology/author> ?speaker .
-  ?r <ad4m://ontology/timestamp> ?timestamp .
-}
-ORDER BY ?timestamp`;
+// The transcript scope is a model query now (#1794): the processor reads the
+// `ns://Message` class and takes each turn's speaker and timestamp from the
+// instance's own link metadata — the DID that *signed* its links and their
+// time. So each peer's own messages carry that peer as the speaker — which is
+// what the authorship election runs on — and a link whose signature does not
+// verify never reaches the transcript.
+const SOURCE_CLASS = "ns://Message";
+const SOURCE_TEXT = "body";
 
 async function registerLlm(ad4m: any): Promise<void> {
   const modelId = await addOllamaLlm(ad4m, "interpretation-llm", BASE_URL, MODEL, MAX_NUM_CTX);
@@ -152,6 +147,8 @@ export default function autoProcessorNeighbourhoodTests(
 
         await ConversationSubgroup.register(aliceP);
         await ConversationSubgroup.register(bobP);
+        await ChannelMessage.register(aliceP);
+        await ChannelMessage.register(bobP);
 
         // One merged stream: each executor reports its own passes, tagged with
         // the DID that ran them, so "who did what" is readable from one list.
@@ -161,7 +158,8 @@ export default function autoProcessorNeighbourhoodTests(
 
         await aliceP.addAutoProcessor({
           processorId,
-          sourceScopeQuery: SCOPE_QUERY,
+          sourceClass: SOURCE_CLASS,
+          sourceText: SOURCE_TEXT,
           interpretationClasses: ["ns://ConversationSubgroup"],
           debounceMs: 200,
           batchMin: 2,
@@ -175,11 +173,12 @@ export default function autoProcessorNeighbourhoodTests(
         await pollUntil(async () => {
             try {
                 const bobLinks = await bobP.get(new LinkQuery({ source: `ad4m://autoprocessor/${processorId}` }));
-                // The config has 6+ required properties (processor_id, source_scope_query,
-                // interpretation_class, debounce_ms, batch_max, claim_ttl_ms). Poll until
+                // The config has 7+ required properties (processor_id, source_class,
+                // source_text, interpretation_class, debounce_ms, batch_max,
+                // claim_ttl_ms). Poll until
                 // all required links sync — passing on the first link lets the watcher
                 // load a partial config and race the claim mechanism.
-                return bobLinks.length >= 6;
+                return bobLinks.length >= 7;
             } catch { return false; }
         }, { timeoutMs: 180000, intervalMs: 500, label: "AutoProcessorConfig fully syncs to Bob" });
 
@@ -187,6 +186,7 @@ export default function autoProcessorNeighbourhoodTests(
       }
 
       async function say(p: PerspectiveProxy, uri: string, body: string) {
+        await p.add(new Link({ source: uri, predicate: "ns://type", target: "ns://message" }));
         await p.add(new Link({ source: uri, predicate: "ns://body", target: `literal:string:${body}` }));
       }
 

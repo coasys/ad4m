@@ -77,9 +77,11 @@ const MAX_TRACKED_LINKS: usize = 10_000;
 /// query it might save.
 const MAX_NEIGHBOURS: usize = 2_000;
 
-/// The writes of one subscription-check batch.
+/// The writes of one subscription-check batch. `pub(crate)`: the
+/// auto-processor watch loops name it in their wake-feed receiver
+/// (#1794); its internals stay `pub(super)`.
 #[derive(Debug, Clone, Default)]
-pub(super) struct Writes {
+pub(crate) struct Writes {
     /// Every predicate written or removed. Raw SPARQL subscriptions match on
     /// these alone.
     pub(super) predicates: HashSet<String>,
@@ -869,8 +871,10 @@ fn has_quantifier(clause: &std::collections::BTreeMap<String, WhereCondition>) -
 
 /// A model subscription's trigger: its rules, and the nodes of its last
 /// result. Cheap to clone; [`ModelTrigger::with_result`] replaces the nodes.
+/// `pub(crate)`: the auto-processor watch loops keep one per processor,
+/// built exactly as a model subscription's is (#1794).
 #[derive(Debug, Clone)]
-pub(super) struct ModelTrigger {
+pub(crate) struct ModelTrigger {
     rules: Arc<TriggerRules>,
     /// Every `id` in the last result, at any depth, in both the spelling the
     /// result used and its canonical link-target spelling.
@@ -886,7 +890,7 @@ impl ModelTrigger {
     }
 
     /// The same rules, watching the nodes of `result`.
-    pub(super) fn with_result(&self, result: &str) -> Self {
+    pub(crate) fn with_result(&self, result: &str) -> Self {
         ModelTrigger {
             rules: self.rules.clone(),
             nodes: Arc::new(result_nodes(result)),

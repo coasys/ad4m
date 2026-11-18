@@ -4,6 +4,24 @@
 [`InterpretationRun`](interpretation-provenance-design.md) provenance node.
 Nothing in this doc is implemented yet.
 
+> **Superseded scope (issue #1794).** `source_scope_query` no longer
+> exists: a free SPARQL scope bypassed signature verification,
+> `resolveLanguage` decoding and class-shape conformance. The scope is
+> now a **model query** built by the processor from three config fields —
+> `source_class` (the message class), `source_text` (the class property
+> holding the message text) and optional `source_query` (a
+> `ModelQueryInput` restricted to `parent` + `where` keys). Each turn is
+> one class-conforming instance, read with default provenance (invalid
+> signatures withheld): `speaker` is the DID that signed the instance's
+> links, `timestamp` their earliest timestamp, `text` the hydrated
+> `source_text` value, ordered by timestamp then id. Wherever this doc
+> says “run `source_scope_query`” or “the scope query binds `?speaker`
+> `?text` `?timestamp`”, read “run the model query”; speaker/timestamp
+> semantics are the reifier semantics this doc derived — they are the
+> signer's DID and link time, not an `ns://author` property. The cursor
+> SPARQL (§3f query 2) and everything about `InterpretationRun.sources`
+> is unchanged.
+
 Two related gaps in the polling watcher, fixed together:
 
 1. The watch tick hashes SPARQL rows into IDs and throws the rows away.
@@ -170,13 +188,12 @@ idempotency. Message URI would be stronger against clock-collision; we
 are not requiring `?id` in the scope query. Timestamp is the minimum
 extra identity that keeps content-hash IDs workable.
 
-`source_scope_query` therefore binds **`?speaker`, `?text`, and
-`?timestamp`**. The known-good query takes both speaker and timestamp
-from the body-link reifier (`ad4m://ontology/author` /
-`ad4m://ontology/timestamp`). A query that omits `?timestamp` is invalid
-for the AutoProcessor gatherer (fail the tick with a log, do not silently
-collapse). Apps may still bind `?speaker` from a model-specific author
-property if they need a logical author other than the link signer.
+Every turn therefore carries **`speaker`, `text`, and `timestamp`**.
+Speaker and timestamp are the reifier semantics
+(`ad4m://ontology/author` / `ad4m://ontology/timestamp` — the DID that
+signed the link and the link's time); under the model-query scope they
+are the signer and timestamp of the instance's own links, so the
+guarantee this section derived holds without an app-supplied binding.
 
 ### 3e. Bound both queries by a time window
 
@@ -231,27 +248,17 @@ Two SPARQL queries per processor per tick (or on cache miss); subtract
 in Rust. Do **not** wrap the user’s `source_scope_query` with
 `FILTER NOT EXISTS` / SPARQL `SHA256`.
 
-**Known-good scope query** (copy this; a missing `?timestamp` fails the
-tick). Author and timestamp are **not** on the quoted triple. The store
-writes a reifier node (`sparql_store.rs`): direct `?m <ns://body> ?text`,
-plus `<link:HASH> rdf:reifies <<( ?m <ns://body> ?text )>>`, plus
-`ad4m://ontology/author` and `ad4m://ontology/timestamp` on that reifier
-(the same fields [`gather_transcript`] reads off the link expression).
-Reach them through `rdf:reifies`:
+Author and timestamp are **not** on the quoted triple. The store writes a
+reifier node (`sparql_store.rs`): direct `?m <ns://body> ?text`, plus
+`<link:HASH> rdf:reifies <<( ?m <ns://body> ?text )>>`, plus
+`ad4m://ontology/author` and `ad4m://ontology/timestamp` on that reifier.
+Under #1794 query 1 is no longer SPARQL at all — it is the model query the
+processor builds from `source_class` / `source_text` / `source_query`,
+which hydrates each instance's text and reads signer/timestamp off the
+link metadata directly. Only the cursor is still engine-owned SPARQL:
 
 ```sparql
-# 1. Scope — from AutoProcessorConfig (app-owned).
-#    MUST bind ?speaker ?text ?timestamp.
-#    SHOULD FILTER ?timestamp to the recent window.
-SELECT ?speaker ?text ?timestamp WHERE {
-  ?m <ns://body> ?text .
-  ?r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?m <ns://body> ?text )>> .
-  ?r <ad4m://ontology/author> ?speaker .
-  ?r <ad4m://ontology/timestamp> ?timestamp .
-  FILTER (?timestamp >= "…rfc3339 of now - source_window_ms…")
-}
-
-# 2. Cursor — engine-owned. `ran_at` is OPTIONAL because it only matters
+# Cursor — engine-owned. `ran_at` is OPTIONAL because it only matters
 #    when a window is set, and is filtered in Rust: the stored value is a
 #    `literal:string:` IRI, so `xsd:integer(?ran_at)` does not apply to it.
 SELECT ?id ?ran_at WHERE {

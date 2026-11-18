@@ -1488,16 +1488,18 @@ async fn auto_processor_pass_lands_interpretation_instance() {
     use crate::perspectives::auto_processor::watcher::{
         run_one_pass, PassOutcome, PendingTurn, WatcherState,
     };
-    use crate::perspectives::interpretation::{
-        gather_transcript_sparql, BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY,
-    };
+    use crate::perspectives::interpretation::gather_transcript_model;
+    use crate::perspectives::interpretation_test_support::MESSAGE_SDNA;
     use crate::types::{LinkQuery, LinkStatus};
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    let (mut perspective, _shapes, ctx) =
-        setup_interpretation_e2e(&[("Intention", INTENTION_SDNA)]).await;
+    let (mut perspective, _shapes, ctx) = setup_interpretation_e2e(&[
+        ("Intention", INTENTION_SDNA),
+        ("ns://Message", MESSAGE_SDNA),
+    ])
+    .await;
 
-    // Seed two transcript turns as (msg -> body, msg -> author) link pairs.
+    // Seed two transcript turns as conforming ns://Message instances.
     // Both are first-person commitments so gemma3:12b classifies them as
     // Intentions with reasonable reliability.
     for (uri, author, body) in [
@@ -1512,6 +1514,19 @@ async fn auto_processor_pass_lands_interpretation_instance() {
             "I plan to review the diff first thing tomorrow morning.",
         ),
     ] {
+        perspective
+            .add_link(
+                Link {
+                    source: uri.into(),
+                    predicate: Some("ns://type".into()),
+                    target: "ns://message".into(),
+                },
+                LinkStatus::Local,
+                None,
+                &ctx,
+            )
+            .await
+            .expect("seed type");
         perspective
             .add_link(
                 Link {
@@ -1543,7 +1558,9 @@ async fn auto_processor_pass_lands_interpretation_instance() {
     // Write the processor config into the shared graph.
     let cfg = AutoProcessorConfig {
         processor_id: "smoke-auto-processor".into(),
-        source_scope_query: BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY.into(),
+        source_class: "ns://Message".into(),
+        source_text: "body".into(),
+        source_query: None,
         interpretation_classes: vec!["ns://Intention".into()],
         debounce_ms: 50,
         batch_min: 1,
@@ -1573,13 +1590,19 @@ async fn auto_processor_pass_lands_interpretation_instance() {
     // run. The polling loop itself is not driven here; the pure state and its
     // debounce/cap contract are covered by unit tests in
     // `auto_processor::watcher::tests`.
-    let transcript = gather_transcript_sparql(&perspective, &cfg_loaded.source_scope_query)
-        .await
-        .expect("gather_transcript_sparql");
+    let transcript = gather_transcript_model(
+        &perspective,
+        &cfg_loaded.source_class,
+        &cfg_loaded.source_text,
+        &cfg_loaded.transcript_query_json(),
+    )
+    .await
+    .expect("gather_transcript_model")
+    .1;
     assert_eq!(
         transcript.len(),
         2,
-        "SPARQL scope must surface both seeded turns; got {transcript:#?}"
+        "the model-query scope must surface both seeded turns; got {transcript:#?}"
     );
 
     let mut watcher = WatcherState::new();
@@ -1684,16 +1707,19 @@ async fn auto_processor_two_configs_no_cross_contamination() {
     use crate::perspectives::auto_processor::watcher::{
         run_one_pass, PassOutcome, PendingTurn, WatcherState,
     };
-    use crate::perspectives::interpretation::{
-        gather_transcript_sparql, BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY,
-    };
+    use crate::perspectives::interpretation::gather_transcript_model;
+    use crate::perspectives::interpretation_test_support::MESSAGE_SDNA;
     use crate::types::{LinkQuery, LinkStatus};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     // Both classes registered on the same perspective so each processor's
     // shape resolves under `load_shape_from_store`.
-    let (mut perspective, _shapes, ctx) =
-        setup_interpretation_e2e(&[("Intention", INTENTION_SDNA), ("Task", TASK_SDNA)]).await;
+    let (mut perspective, _shapes, ctx) = setup_interpretation_e2e(&[
+        ("Intention", INTENTION_SDNA),
+        ("Task", TASK_SDNA),
+        ("ns://Message", MESSAGE_SDNA),
+    ])
+    .await;
 
     // Seed one clear first-person commitment (Intention-shaped) and one
     // clear third-person assignment (Task-shaped). Note that whichever way
@@ -1713,6 +1739,19 @@ async fn auto_processor_two_configs_no_cross_contamination() {
             "Alice, can you get the CI dashboards live by Friday?",
         ),
     ] {
+        perspective
+            .add_link(
+                Link {
+                    source: uri.into(),
+                    predicate: Some("ns://type".into()),
+                    target: "ns://message".into(),
+                },
+                LinkStatus::Local,
+                None,
+                &ctx,
+            )
+            .await
+            .expect("seed type");
         perspective
             .add_link(
                 Link {
@@ -1741,11 +1780,11 @@ async fn auto_processor_two_configs_no_cross_contamination() {
             .expect("seed author");
     }
 
-    let source_scope = BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY;
-
     let intent_cfg = AutoProcessorConfig {
         processor_id: "pc-intent-proc".into(),
-        source_scope_query: source_scope.into(),
+        source_class: "ns://Message".into(),
+        source_text: "body".into(),
+        source_query: None,
         interpretation_classes: vec!["ns://Intention".into()],
         debounce_ms: 50,
         batch_min: 1,
@@ -1755,7 +1794,9 @@ async fn auto_processor_two_configs_no_cross_contamination() {
     };
     let task_cfg = AutoProcessorConfig {
         processor_id: "pc-task-proc".into(),
-        source_scope_query: source_scope.into(),
+        source_class: "ns://Message".into(),
+        source_text: "body".into(),
+        source_query: None,
         interpretation_classes: vec!["ns://Task".into()],
         debounce_ms: 50,
         batch_min: 1,
@@ -1776,13 +1817,14 @@ async fn auto_processor_two_configs_no_cross_contamination() {
         .expect("load_processors");
     assert_eq!(loaded.len(), 2, "both processors written and loaded back");
 
-    let transcript = gather_transcript_sparql(&perspective, source_scope)
+    let transcript = gather_transcript_model(&perspective, "ns://Message", "body", "{}")
         .await
-        .expect("gather_transcript_sparql");
+        .expect("gather_transcript_model")
+        .1;
     assert_eq!(
         transcript.len(),
         2,
-        "SPARQL scope must surface both seeded turns; got {transcript:#?}"
+        "the model-query scope must surface both seeded turns; got {transcript:#?}"
     );
 
     // Feed both processors the same turns via one WatcherState. Per-processor
@@ -1965,16 +2007,23 @@ async fn auto_processor_high_level_signal_driven_pass() {
     let mut last_err: Option<String> = None;
 
     for attempt in 1..=attempts {
-        let (mut perspective, _shapes, ctx) =
-            setup_interpretation_e2e(&[("ConversationSubgroup", CONVERSATION_SUBGROUP_SDNA)]).await;
+        let (mut perspective, _shapes, ctx) = setup_interpretation_e2e(&[
+            ("ConversationSubgroup", CONVERSATION_SUBGROUP_SDNA),
+            (
+                "ns://Message",
+                crate::perspectives::interpretation_test_support::MESSAGE_SDNA,
+            ),
+        ])
+        .await;
 
-        // Seed a channel's worth of messages on one topic — link pairs, exactly
-        // as a Flux channel perspective holds them.
+        // Seed a channel's worth of messages on one topic — conforming
+        // ns://Message instances, as a Flux channel perspective holds them.
         for (uri, author, body) in [
             ("msg://c1", "did:key:ana", "Our webhook retries keep dropping during payment outages — we lose the failed events."),
             ("msg://c2", "did:key:ben", "Right, the payments queue has no way to replay what got dropped last time."),
         ] {
             for (pred, target) in [
+                ("ns://type", "ns://message".to_string()),
                 ("ns://body", format!("literal:string:{body}")),
                 ("ns://author", author.to_string()),
             ] {
@@ -1993,8 +2042,9 @@ async fn auto_processor_high_level_signal_driven_pass() {
         // Write the processor into the shared graph — the loop reads it back.
         let cfg = AutoProcessorConfig {
             processor_id: processor_id.into(),
-            source_scope_query:
-                crate::perspectives::interpretation::BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY.into(),
+            source_class: "ns://Message".into(),
+            source_text: "body".into(),
+            source_query: None,
             interpretation_classes: vec!["ns://ConversationSubgroup".into()],
             debounce_ms: 50,
             batch_min: 2,
@@ -2149,6 +2199,7 @@ async fn auto_processor_two_users_one_executor_no_double_processing() {
             ("msg://s2", "did:key:ben", "Right, the payments queue has no way to replay what got dropped last time."),
         ] {
             for (pred, target) in [
+                ("ns://type", "ns://message".to_string()),
                 ("ns://body", format!("literal:string:{body}")),
                 ("ns://author", author.to_string()),
             ] {
@@ -2165,8 +2216,9 @@ async fn auto_processor_two_users_one_executor_no_double_processing() {
         }
         let cfg = AutoProcessorConfig {
             processor_id: processor_id.into(),
-            source_scope_query:
-                crate::perspectives::interpretation::BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY.into(),
+            source_class: "ns://Message".into(),
+            source_text: "body".into(),
+            source_query: None,
             interpretation_classes: vec!["ns://ConversationSubgroup".into()],
             debounce_ms: 100,
             batch_min: 2,
@@ -2267,10 +2319,12 @@ async fn auto_processor_election_only_online_participants_process() {
     use crate::db::Ad4mDb;
     use crate::perspectives::auto_processor::config::AutoProcessorConfig;
     use crate::perspectives::auto_processor::watcher::{run_one_pass, PassOutcome, PendingTurn};
-    use crate::perspectives::interpretation::BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY;
-    use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
+    use crate::perspectives::interpretation_test_support::{
+        setup_perspective_no_llm, MESSAGE_SDNA,
+    };
 
-    let (mut perspective, _shapes, _ctx_main) = setup_perspective_no_llm(&[]).await;
+    let (mut perspective, _shapes, _ctx_main) =
+        setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
 
     // Four managed participants, each a real key + a listable user row (so the
     // co-located `online_agents` path can report their presence).
@@ -2302,7 +2356,9 @@ async fn auto_processor_election_only_online_participants_process() {
 
     let cfg = AutoProcessorConfig {
         processor_id: "election".into(),
-        source_scope_query: BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY.into(),
+        source_class: "ns://Message".into(),
+        source_text: "body".into(),
+        source_query: None,
         interpretation_classes: vec!["ns://ConversationSubgroup".into()],
         batch_min: 1,
         batch_max: 32,

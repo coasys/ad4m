@@ -132,7 +132,9 @@ mod tests {
         ensure_interpretation_overlay_classes, mint_interpretation_run, InterpretationRunCursor,
         InterpretationRunMeta,
     };
-    use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
+    use crate::perspectives::interpretation_test_support::{
+        setup_perspective_no_llm, MESSAGE_SDNA,
+    };
 
     #[test]
     fn turn_in_source_window_keeps_recent_drops_old() {
@@ -154,7 +156,8 @@ mod tests {
 
     #[tokio::test]
     async fn load_processed_source_ids_scopes_to_processor_and_ran_at_window() {
-        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        let (mut p, _shapes, ctx) =
+            setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
         ensure_interpretation_overlay_classes(&mut p, &ctx)
             .await
             .expect("overlay classes");
@@ -259,7 +262,8 @@ mod tests {
         use crate::types::{Link, LinkStatus};
         use ad4m_client::literal::Literal;
 
-        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        let (mut p, _shapes, ctx) =
+            setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
         let run_uri = "ad4m://interp/run/no-ran-at";
         let source_target = Literal::from_string("ddd444".to_string())
             .to_url()
@@ -308,7 +312,8 @@ mod tests {
 
     #[tokio::test]
     async fn one_shot_run_without_processor_is_invisible_to_cursor() {
-        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        let (mut p, _shapes, ctx) =
+            setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
         ensure_interpretation_overlay_classes(&mut p, &ctx)
             .await
             .expect("overlay classes");
@@ -336,12 +341,11 @@ mod tests {
     async fn tick_skips_turns_already_in_windowed_cursor() {
         use crate::perspectives::auto_processor::config::{write_processor, AutoProcessorConfig};
         use crate::perspectives::auto_processor::watcher::{PendingTurn, WatcherState};
-        use crate::perspectives::interpretation::{
-            gather_transcript_sparql, BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY,
-        };
+        use crate::perspectives::interpretation::gather_transcript_model;
         use crate::perspectives::interpretation_test_support::seed_message;
 
-        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        let (mut p, _shapes, ctx) =
+            setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
         seed_message(
             &mut p,
             &ctx,
@@ -353,7 +357,9 @@ mod tests {
         .await;
         let cfg = AutoProcessorConfig {
             processor_id: "cursor-skip".into(),
-            source_scope_query: BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY.into(),
+            source_class: "ns://Message".into(),
+            source_text: "body".into(),
+            source_query: None,
             interpretation_classes: vec!["ns://Task".into()],
             debounce_ms: 50,
             batch_min: 1,
@@ -365,7 +371,7 @@ mod tests {
             .await
             .expect("write_processor");
 
-        let turns = gather_transcript_sparql(&p, BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY)
+        let (_r, turns) = gather_transcript_model(&p, "ns://Message", "body", "{}")
             .await
             .expect("gather");
         assert_eq!(turns.len(), 1);
@@ -420,10 +426,11 @@ mod tests {
     async fn tick_reports_pending_only_while_a_new_turn_waits() {
         use crate::perspectives::auto_processor::config::{write_processor, AutoProcessorConfig};
         use crate::perspectives::auto_processor::watcher::WatcherState;
-        use crate::perspectives::interpretation::BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY;
+
         use crate::perspectives::interpretation_test_support::seed_message;
 
-        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        let (mut p, _shapes, ctx) =
+            setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
         seed_message(
             &mut p,
             &ctx,
@@ -444,7 +451,9 @@ mod tests {
 
         let cfg = AutoProcessorConfig {
             processor_id: "idle-backoff".into(),
-            source_scope_query: BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY.into(),
+            source_class: "ns://Message".into(),
+            source_text: "body".into(),
+            source_query: None,
             interpretation_classes: vec!["ns://Task".into()],
             // Longer than the test, so the batch never drains and no pass runs.
             debounce_ms: 600_000,
@@ -478,10 +487,11 @@ mod tests {
     async fn tick_stays_pending_across_a_drained_retry_batch() {
         use crate::perspectives::auto_processor::config::{write_processor, AutoProcessorConfig};
         use crate::perspectives::auto_processor::watcher::WatcherState;
-        use crate::perspectives::interpretation::BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY;
+
         use crate::perspectives::interpretation_test_support::seed_message;
 
-        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        let (mut p, _shapes, ctx) =
+            setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
         seed_message(
             &mut p,
             &ctx,
@@ -493,7 +503,9 @@ mod tests {
         .await;
         let cfg = AutoProcessorConfig {
             processor_id: "retry-pending".into(),
-            source_scope_query: BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY.into(),
+            source_class: "ns://Message".into(),
+            source_text: "body".into(),
+            source_query: None,
             interpretation_classes: vec!["ns://Task".into()],
             debounce_ms: 50,
             batch_min: 1,
@@ -540,12 +552,14 @@ mod tests {
     async fn tick_ignores_the_queue_of_an_undeclared_processor() {
         use crate::perspectives::auto_processor::config::{write_processor, AutoProcessorConfig};
         use crate::perspectives::auto_processor::watcher::{PendingTurn, WatcherState};
-        use crate::perspectives::interpretation::BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY;
 
-        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        let (mut p, _shapes, ctx) =
+            setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
         let cfg = AutoProcessorConfig {
             processor_id: "declared".into(),
-            source_scope_query: BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY.into(),
+            source_class: "ns://Message".into(),
+            source_text: "body".into(),
+            source_query: None,
             interpretation_classes: vec!["ns://Task".into()],
             debounce_ms: 50,
             batch_min: 1,
@@ -585,18 +599,19 @@ mod tests {
     async fn tick_enqueues_only_turns_added_since_the_last_run() {
         use crate::perspectives::auto_processor::config::{write_processor, AutoProcessorConfig};
         use crate::perspectives::auto_processor::watcher::{PendingTurn, WatcherState};
-        use crate::perspectives::interpretation::{
-            gather_transcript_sparql, BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY,
-        };
+        use crate::perspectives::interpretation::gather_transcript_model;
         use crate::perspectives::interpretation_test_support::seed_message;
 
-        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        let (mut p, _shapes, ctx) =
+            setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
         for (uri, body) in [("msg://1", "first"), ("msg://2", "second")] {
             seed_message(&mut p, &ctx, uri, "did:key:alice", body, "ns://body").await;
         }
         let cfg = AutoProcessorConfig {
             processor_id: "incremental".into(),
-            source_scope_query: BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY.into(),
+            source_class: "ns://Message".into(),
+            source_text: "body".into(),
+            source_query: None,
             interpretation_classes: vec!["ns://Task".into()],
             debounce_ms: 50,
             batch_min: 1,
@@ -609,7 +624,7 @@ mod tests {
             .expect("write_processor");
 
         // The first pass consumed exactly the two turns present at the time.
-        let first_two = gather_transcript_sparql(&p, BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY)
+        let (_r, first_two) = gather_transcript_model(&p, "ns://Message", "body", "{}")
             .await
             .expect("gather");
         assert_eq!(first_two.len(), 2);
@@ -670,17 +685,20 @@ mod tests {
     async fn tick_enqueues_repeated_text_said_at_different_times() {
         use crate::perspectives::auto_processor::config::{write_processor, AutoProcessorConfig};
         use crate::perspectives::auto_processor::watcher::WatcherState;
-        use crate::perspectives::interpretation::BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY;
+
         use crate::perspectives::interpretation_test_support::seed_message;
 
-        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        let (mut p, _shapes, ctx) =
+            setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
         seed_message(&mut p, &ctx, "msg://1", "did:key:alice", "yes", "ns://body").await;
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         seed_message(&mut p, &ctx, "msg://2", "did:key:alice", "yes", "ns://body").await;
 
         let cfg = AutoProcessorConfig {
             processor_id: "repeated-text".into(),
-            source_scope_query: BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY.into(),
+            source_class: "ns://Message".into(),
+            source_text: "body".into(),
+            source_query: None,
             interpretation_classes: vec!["ns://Task".into()],
             debounce_ms: 50,
             batch_min: 1,
@@ -717,10 +735,11 @@ mod tests {
             next_event_matching, subscribe, AutoProcessorStep,
         };
         use crate::perspectives::auto_processor::watcher::WatcherState;
-        use crate::perspectives::interpretation::BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY;
+
         use crate::perspectives::interpretation_test_support::seed_message;
 
-        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        let (mut p, _shapes, ctx) =
+            setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
         for (uri, body) in [
             ("msg://1", "one"),
             ("msg://2", "two"),
@@ -732,7 +751,9 @@ mod tests {
         }
         let cfg = AutoProcessorConfig {
             processor_id: "capped".into(),
-            source_scope_query: BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY.into(),
+            source_class: "ns://Message".into(),
+            source_text: "body".into(),
+            source_query: None,
             interpretation_classes: vec!["ns://Task".into()],
             debounce_ms: 50,
             batch_min: 1,
@@ -794,10 +815,11 @@ mod tests {
             next_event_matching, subscribe, AutoProcessorStep,
         };
         use crate::perspectives::auto_processor::watcher::WatcherState;
-        use crate::perspectives::interpretation::BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY;
+
         use crate::perspectives::interpretation_test_support::seed_message;
 
-        let (mut p, _shapes, main_ctx) = setup_perspective_no_llm(&[]).await;
+        let (mut p, _shapes, main_ctx) =
+            setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
         let email = "batch-ready-user@test";
         let user_ctx = AgentContext::managed(crate::test_utils::create_test_user(email));
         let user_did = did_for_context(&user_ctx).expect("user did");
@@ -818,7 +840,9 @@ mod tests {
         .await;
         let cfg = AutoProcessorConfig {
             processor_id: "as-user".into(),
-            source_scope_query: BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY.into(),
+            source_class: "ns://Message".into(),
+            source_text: "body".into(),
+            source_query: None,
             interpretation_classes: vec!["ns://Task".into()],
             debounce_ms: 50,
             batch_min: 1,
@@ -855,10 +879,11 @@ mod tests {
             load_processors, write_processor, AutoProcessorConfig,
         };
         use crate::perspectives::auto_processor::watcher::WatcherState;
-        use crate::perspectives::interpretation::BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY;
+
         use crate::perspectives::interpretation_test_support::seed_message;
 
-        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        let (mut p, _shapes, ctx) =
+            setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
         seed_message(
             &mut p,
             &ctx,
@@ -870,7 +895,9 @@ mod tests {
         .await;
         let cfg = AutoProcessorConfig {
             processor_id: "window-drop".into(),
-            source_scope_query: BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY.into(),
+            source_class: "ns://Message".into(),
+            source_text: "body".into(),
+            source_query: None,
             interpretation_classes: vec!["ns://Task".into()],
             debounce_ms: 50,
             batch_min: 1,
@@ -907,10 +934,11 @@ mod tests {
     async fn tick_omitted_window_does_not_drop_old_turns() {
         use crate::perspectives::auto_processor::config::{write_processor, AutoProcessorConfig};
         use crate::perspectives::auto_processor::watcher::WatcherState;
-        use crate::perspectives::interpretation::BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY;
+
         use crate::perspectives::interpretation_test_support::seed_message;
 
-        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        let (mut p, _shapes, ctx) =
+            setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
         seed_message(
             &mut p,
             &ctx,
@@ -922,7 +950,9 @@ mod tests {
         .await;
         let cfg = AutoProcessorConfig {
             processor_id: "no-window".into(),
-            source_scope_query: BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY.into(),
+            source_class: "ns://Message".into(),
+            source_text: "body".into(),
+            source_query: None,
             interpretation_classes: vec!["ns://Task".into()],
             debounce_ms: 50,
             batch_min: 1,

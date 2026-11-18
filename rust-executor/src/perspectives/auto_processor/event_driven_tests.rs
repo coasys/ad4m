@@ -6,15 +6,16 @@ use super::config::{processor_node, write_processor, AutoProcessorConfig};
 use super::events::{next_event_matching, subscribe, AutoProcessorStep};
 use super::watcher::{PendingTurn, WatcherState};
 use crate::perspectives::interpretation::{
-    ensure_interpretation_overlay_classes, gather_transcript_sparql, mint_interpretation_run,
-    InterpretationRunCursor, InterpretationRunMeta, BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY,
+    ensure_interpretation_overlay_classes, gather_transcript_model, mint_interpretation_run,
+    InterpretationRunCursor, InterpretationRunMeta,
 };
-use crate::perspectives::interpretation_test_support::{seed_message, setup_perspective_no_llm};
+use crate::perspectives::interpretation_test_support::{
+    seed_message, setup_perspective_no_llm, MESSAGE_SDNA,
+};
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use std::time::Duration;
 
-/// How many times this perspective's store read a transcript: the scope
-/// query, or a read of what it gained from added links (`delta_read`).
+/// How many times this perspective's store read a transcript.
 fn transcript_queries(p: &PerspectiveInstance) -> usize {
     p.sparql_store
         .queries_run()
@@ -23,19 +24,11 @@ fn transcript_queries(p: &PerspectiveInstance) -> usize {
         .count()
 }
 
-/// Every transcript read selects `?speaker`; no config or cursor read does.
+/// The transcript's model query selects the instances conforming to the
+/// source class: it names the class flag's target. No config or cursor read
+/// does.
 fn is_transcript_read(query: &str) -> bool {
-    query.contains("?speaker")
-}
-
-/// The rows every transcript read of this store returned so far.
-fn transcript_rows(p: &PerspectiveInstance) -> usize {
-    p.sparql_store
-        .query_rows_run()
-        .iter()
-        .filter(|(q, _)| is_transcript_read(q))
-        .map(|(_, rows)| rows)
-        .sum()
+    query.contains("ns://message")
 }
 
 /// Every store read: SPARQL queries and link index scans.
@@ -50,7 +43,9 @@ fn config(
 ) -> AutoProcessorConfig {
     AutoProcessorConfig {
         processor_id: processor_id.into(),
-        source_scope_query: BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY.into(),
+        source_class: "ns://Message".into(),
+        source_text: "body".into(),
+        source_query: None,
         interpretation_classes: vec!["ns://Task".into()],
         debounce_ms,
         batch_min: 1,
@@ -96,9 +91,10 @@ async fn mint_run(
 }
 
 async fn turn_ids(p: &PerspectiveInstance) -> Vec<PendingTurn> {
-    gather_transcript_sparql(p, BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY)
+    gather_transcript_model(p, "ns://Message", "body", "{}")
         .await
         .expect("gather")
+        .1
         .iter()
         .map(PendingTurn::from_transcript)
         .collect()
@@ -116,7 +112,7 @@ fn pending_texts(watcher: &WatcherState, processor_id: &str) -> Vec<String> {
 /// perspective whose links did not change is not queried again.
 #[tokio::test]
 async fn a_tick_without_link_changes_queries_nothing_when_no_processor_is_declared() {
-    let (p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+    let (p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
     let mut watcher = WatcherState::new();
     let now_ms = chrono::Utc::now().timestamp_millis();
 
@@ -143,7 +139,7 @@ async fn a_tick_without_link_changes_queries_nothing_when_no_processor_is_declar
 /// query. A new turn is read on the next tick, and queued once.
 #[tokio::test]
 async fn a_tick_rereads_the_transcript_only_after_a_link_change() {
-    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
     seed_message(
         &mut p,
         &ctx,
@@ -217,7 +213,7 @@ async fn a_tick_rereads_the_transcript_only_after_a_link_change() {
 #[tokio::test]
 async fn reused_reads_queue_only_new_turns_and_follow_the_window() {
     const WINDOW: i64 = 60_000;
-    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
     seed_message(&mut p, &ctx, "msg://1", "did:key:alice", "old", "ns://body").await;
     write_processor(
         &mut p,
@@ -316,7 +312,7 @@ async fn reused_reads_queue_only_new_turns_and_follow_the_window() {
 /// wakes for a new turn, queues it once, and ends promptly on teardown.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_watch_loop_sleeps_until_a_link_changes() {
-    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
     seed_message(
         &mut p,
         &ctx,
@@ -398,17 +394,17 @@ async fn the_watch_loop_sleeps_until_a_link_changes() {
         .expect("loop task");
 }
 
-/// Writes that add no turn (reactions, other agents' outputs, claims, a peer
-/// syncing) wake an idle loop, but they must not make it read more often than
-/// the idle back-off it replaced: a write-woken tick waits out the back-off
-/// (doubling from the base tick up to 4 s) since the last read that found the
-/// store changed. Here an unrelated link lands every 100 ms for 3 s; the
-/// reads must be at least the first back-off step (1 s) apart.
+/// Writes that cannot touch the scope (a predicate the model trigger has no
+/// rule for: reactions, other agents' outputs, claims, a peer syncing) do not
+/// wake an idle loop at all (#1794): `check_subscribed_queries` reports them
+/// to the commit feed, the processor's `ModelTrigger` rules them out, and the
+/// loop sleeps on. Here an unrelated link lands every 100 ms for 3 s; the
+/// transcript read count must not move.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn unrelated_writes_do_not_make_an_idle_loop_read_more_often_than_the_back_off() {
+async fn unrelated_writes_do_not_wake_an_idle_loop() {
     use crate::types::{Link, LinkStatus};
 
-    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
     seed_message(
         &mut p,
         &ctx,
@@ -446,8 +442,7 @@ async fn unrelated_writes_do_not_make_an_idle_loop_read_more_often_than_the_back
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    let mut reads = vec![tokio::time::Instant::now()];
-    let mut seen = transcript_queries(&p);
+    let seen = transcript_queries(&p);
 
     let start = tokio::time::Instant::now();
     let mut i = 0;
@@ -466,30 +461,13 @@ async fn unrelated_writes_do_not_make_an_idle_loop_read_more_often_than_the_back
         .expect("unrelated link");
         i += 1;
         tokio::time::sleep(Duration::from_millis(100)).await;
-        let now = transcript_queries(&p);
-        if now > seen {
-            reads.extend(std::iter::repeat_n(tokio::time::Instant::now(), now - seen));
-            seen = now;
-        }
     }
 
-    let gaps: Vec<u128> = reads
-        .windows(2)
-        .map(|w| (w[1] - w[0]).as_millis())
-        .collect();
-    println!(
-        "{} transcript reads in ~3 s of unrelated writes, gaps {gaps:?} ms",
-        reads.len()
-    );
-    assert!(
-        reads.len() <= 3,
-        "{} transcript reads in ~3 s of unrelated writes (gaps {gaps:?} ms); \
-         the back-off allows at most 3",
-        reads.len()
-    );
-    assert!(
-        gaps.iter().all(|g| *g >= 800),
-        "reads closer than the first back-off step: gaps {gaps:?} ms"
+    assert_eq!(
+        transcript_queries(&p),
+        seen,
+        "{} unrelated writes woke the loop into a transcript read",
+        i
     );
 
     p.teardown_background_tasks().await;
@@ -505,7 +483,7 @@ async fn unrelated_writes_do_not_make_an_idle_loop_read_more_often_than_the_back
 async fn a_kept_transcript_holds_no_text_for_consumed_turns() {
     use super::watcher::CachedTurn;
 
-    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
     seed_message(
         &mut p,
         &ctx,
@@ -569,7 +547,7 @@ async fn a_kept_transcript_holds_no_text_for_consumed_turns() {
 async fn id_comparisons_in_two_ticks_over(n: usize) -> (u64, u64) {
     use super::watcher::id_comparisons;
 
-    let (p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+    let (p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
     let cfg = config("many", 600_000, None);
     let generation = p.sparql_store.write_generation();
     let mut watcher = WatcherState::new();
@@ -651,7 +629,7 @@ async fn with_no_model_pending_turns_back_off_to_the_idle_delay() {
         next_tick_delay_ms, TickOutcome, AUTO_PROCESSOR_IDLE_TICK_MAX_MS, AUTO_PROCESSOR_TICK_MS,
     };
 
-    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
     seed_message(
         &mut p,
         &ctx,
@@ -713,7 +691,7 @@ async fn with_no_model_the_watch_loop_stops_polling() {
     use super::watcher::test_hooks::{PassHooks, HOOKS};
     use std::sync::atomic::Ordering;
 
-    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
     seed_message(
         &mut p,
         &ctx,
@@ -762,31 +740,38 @@ async fn with_no_model_the_watch_loop_stops_polling() {
         .expect("loop task");
 }
 
-/// A body link signed by `signer` at `at`, as a peer's link arrives.
-fn body_link(
+/// The two links of a conforming `ns://Message` — the class flag, then the
+/// body — signed by `signer` at `at`, as a peer's links arrive.
+fn message_links(
     signer: &crate::agent::signatures::TestSigner,
     msg: &str,
     text: &str,
     at: chrono::DateTime<chrono::Utc>,
-) -> crate::types::LinkExpression {
-    let data = crate::types::Link {
-        source: msg.into(),
-        predicate: Some("ns://body".into()),
-        target: format!("literal:string:{text}"),
-    }
-    .normalize();
-    let signed = signer.sign_at(data, at);
-    crate::types::LinkExpression {
-        author: signed.author,
-        timestamp: signed.timestamp,
-        data: signed.data,
-        proof: signed.proof,
-        status: Some(crate::types::LinkStatus::Local),
-    }
+) -> Vec<crate::types::LinkExpression> {
+    let sign = |predicate: &str, target: &str| {
+        let data = crate::types::Link {
+            source: msg.into(),
+            predicate: Some(predicate.into()),
+            target: target.into(),
+        }
+        .normalize();
+        let signed = signer.sign_at(data, at);
+        crate::types::LinkExpression {
+            author: signed.author,
+            timestamp: signed.timestamp,
+            data: signed.data,
+            proof: signed.proof,
+            status: Some(crate::types::LinkStatus::Local),
+        }
+    };
+    vec![
+        sign("ns://type", "ns://message"),
+        sign("ns://body", &format!("literal:string:{text}")),
+    ]
 }
 
-/// The ids of the kept transcript, and of a fresh read of the same query:
-/// a read brought up to date from added links must hold the same turns.
+/// The ids of the kept transcript, and of a fresh model-query read of the
+/// same scope: the kept read must hold the same turns.
 async fn kept_and_fresh_ids(
     p: &PerspectiveInstance,
     watcher: &WatcherState,
@@ -794,12 +779,18 @@ async fn kept_and_fresh_ids(
 ) -> (Vec<String>, Vec<String>) {
     let (_, kept) = watcher.reads.transcript(cfg).expect("a kept read");
     let mut kept: Vec<String> = kept.iter().map(|t| t.id().to_string()).collect();
-    let mut fresh: Vec<String> = gather_transcript_sparql(p, &cfg.source_scope_query)
-        .await
-        .expect("fresh read")
-        .iter()
-        .map(|t| PendingTurn::from_transcript(t).id)
-        .collect();
+    let mut fresh: Vec<String> = gather_transcript_model(
+        p,
+        &cfg.source_class,
+        &cfg.source_text,
+        &cfg.transcript_query_json(),
+    )
+    .await
+    .expect("fresh read")
+    .1
+    .iter()
+    .map(|t| PendingTurn::from_transcript(t).id)
+    .collect();
     kept.sort();
     kept.dedup();
     fresh.sort();
@@ -807,92 +798,12 @@ async fn kept_and_fresh_ids(
     (kept, fresh)
 }
 
-/// Josh's profile, part 2: in a busy conversation every write moves the
-/// store's generation, so with turns pending each tick read all N turns
-/// again. After the first read, a tick reads only what the links added since
-/// can add: a new message is one row, an unrelated link none.
-#[tokio::test]
-async fn a_write_after_the_first_read_reads_only_the_new_turns() {
-    const N: usize = 200;
-    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
-    for i in 0..N {
-        seed_message(
-            &mut p,
-            &ctx,
-            &format!("msg://{i}"),
-            "did:key:alice",
-            &format!("turn {i}"),
-            "ns://body",
-        )
-        .await;
-    }
-    let cfg = config("delta", 600_000, None);
-    write_processor(&mut p, &cfg, Some(false), &ctx)
-        .await
-        .expect("write_processor");
-
-    let mut watcher = WatcherState::new();
-    let now_ms = chrono::Utc::now().timestamp_millis();
-    let rows = transcript_rows(&p);
-    p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
-    assert_eq!(
-        transcript_rows(&p) - rows,
-        N,
-        "the first tick reads every turn"
-    );
-
-    seed_message(
-        &mut p,
-        &ctx,
-        "msg://new",
-        "did:key:alice",
-        "new",
-        "ns://body",
-    )
-    .await;
-    let rows = transcript_rows(&p);
-    p.run_auto_processor_tick(&mut watcher, now_ms + 500, &ctx)
-        .await;
-    assert_eq!(
-        transcript_rows(&p) - rows,
-        1,
-        "a tick after a new message reads that message, not all {} turns",
-        N + 1
-    );
-    let pending = pending_texts(&watcher, "delta");
-    assert_eq!(pending.len(), N + 1);
-    assert_eq!(pending.last().map(String::as_str), Some("new"));
-
-    p.add_link(
-        crate::types::Link {
-            source: "note://reactions".into(),
-            predicate: Some("ns://reaction".into()),
-            target: "literal:string:r".into(),
-        },
-        crate::types::LinkStatus::Local,
-        None,
-        &ctx,
-    )
-    .await
-    .expect("unrelated link");
-    let rows = transcript_rows(&p);
-    p.run_auto_processor_tick(&mut watcher, now_ms + 1_000, &ctx)
-        .await;
-    assert_eq!(
-        transcript_rows(&p) - rows,
-        0,
-        "an unrelated link adds no row"
-    );
-
-    let (kept, fresh) = kept_and_fresh_ids(&p, &watcher, &cfg).await;
-    assert_eq!(kept, fresh, "the merged read holds what a full read holds");
-}
-
 /// A turn that arrives late, stamped before every turn already read (a peer's
-/// link syncing in), is read from what was added, not missed for being old.
+/// link syncing in), is not missed for being old: the next tick reads the
+/// scope in full and queues it.
 #[tokio::test]
-async fn a_late_turn_with_an_older_timestamp_is_read_from_the_links_added() {
-    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+async fn a_late_turn_with_an_older_timestamp_is_queued() {
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
     for i in 0..20 {
         seed_message(
             &mut p,
@@ -914,63 +825,51 @@ async fn a_late_turn_with_an_older_timestamp_is_read_from_the_links_added() {
 
     let signer = crate::agent::signatures::TestSigner::generate();
     let yesterday = chrono::Utc::now() - chrono::Duration::days(1);
-    p.sparql_store
-        .add_link(&body_link(&signer, "msg://late", "late", yesterday))
-        .expect("a peer's link");
-    let rows = transcript_rows(&p);
+    for l in message_links(&signer, "msg://late", "late", yesterday) {
+        p.sparql_store.add_link(&l).expect("a peer's link");
+    }
     p.run_auto_processor_tick(&mut watcher, now_ms + 500, &ctx)
         .await;
-    assert_eq!(transcript_rows(&p) - rows, 1, "only the late turn is read");
-    assert_eq!(
-        pending_texts(&watcher, "late").last().map(String::as_str),
-        Some("late"),
-        "the late turn is queued"
+    assert!(
+        pending_texts(&watcher, "late").iter().any(|t| t == "late"),
+        "the late turn is queued; got {:?}",
+        pending_texts(&watcher, "late")
     );
     let (kept, fresh) = kept_and_fresh_ids(&p, &watcher, &cfg).await;
     assert_eq!(kept, fresh);
 }
 
-/// WE's scope query (a channel's messages, directly or in a thread, flagged
-/// as input): an old message enters the scope when its thread link lands
-/// after its body. The row is read from the added link, though no new turn
-/// link was written.
+/// `source_query.parent` limits the transcript to children of that parent:
+/// an old message enters the scope when its parent link lands after its
+/// body, and the next tick picks it up.
 #[tokio::test]
-async fn a_link_that_brings_an_old_message_into_scope_is_read_from_the_links_added() {
-    const SCOPE: &str = r#"SELECT ?speaker ?text ?timestamp WHERE {
-  { <ns://chan> <ns://child> ?m . }
-  UNION
-  { <ns://chan> <ns://child> ?line . ?line <ns://thread> ?m . }
-  ?m <ns://flag> <ns://text-block> .
-  ?m <ns://source> ?source .
-  FILTER(?source IN ("input", "typed"))
-  ?m <ns://body> ?text .
-  ?r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?m <ns://body> ?text )>> .
-  ?r <ad4m://ontology/author> ?speaker .
-  ?r <ad4m://ontology/timestamp> ?timestamp .
-}
-ORDER BY ?timestamp"#;
-    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+async fn a_link_that_brings_an_old_message_into_a_parent_scope_is_queued() {
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
     let link = |s: &str, pr: &str, t: &str| crate::types::Link {
         source: s.into(),
         predicate: Some(pr.into()),
         target: t.into(),
     };
-    let mut links = vec![
+    p.add_link(
         link("ns://chan", "ns://child", "msg://1"),
-        link("ns://chan", "ns://child", "line://1"),
-    ];
+        crate::types::LinkStatus::Local,
+        None,
+        &ctx,
+    )
+    .await
+    .expect("child link");
     for m in ["msg://1", "msg://2"] {
-        links.push(link(m, "ns://flag", "ns://text-block"));
-        links.push(link(m, "ns://source", "literal:string:input"));
-        links.push(link(m, "ns://body", &format!("literal:string:{m}")));
-    }
-    for l in links {
-        p.add_link(l, crate::types::LinkStatus::Local, None, &ctx)
-            .await
-            .expect("link");
+        for l in [
+            link(m, "ns://type", "ns://message"),
+            link(m, "ns://body", &format!("literal:string:{m}")),
+        ] {
+            p.add_link(l, crate::types::LinkStatus::Local, None, &ctx)
+                .await
+                .expect("link");
+        }
     }
     let cfg = AutoProcessorConfig {
-        source_scope_query: SCOPE.into(),
+        source_query: Some(r#"{"parent":{"id":"ns://chan","predicate":"ns://child"}}"#.into()),
         ..config("we", 600_000, None)
     };
     write_processor(&mut p, &cfg, Some(false), &ctx)
@@ -982,46 +881,31 @@ ORDER BY ?timestamp"#;
     assert_eq!(pending_texts(&watcher, "we"), vec!["msg://1"]);
 
     p.add_link(
-        link("line://1", "ns://thread", "msg://2"),
+        link("ns://chan", "ns://child", "msg://2"),
         crate::types::LinkStatus::Local,
         None,
         &ctx,
     )
     .await
-    .expect("thread link");
-    let reads = transcript_queries(&p);
-    let rows = transcript_rows(&p);
+    .expect("child link");
     p.run_auto_processor_tick(&mut watcher, now_ms + 500, &ctx)
         .await;
     assert_eq!(pending_texts(&watcher, "we"), vec!["msg://1", "msg://2"]);
-    assert_eq!(transcript_queries(&p) - reads, 1);
-    assert_eq!(
-        transcript_rows(&p) - rows,
-        1,
-        "only the message it brought in"
-    );
-    assert!(
-        p.sparql_store
-            .queries_run()
-            .last()
-            .is_some_and(|q| q.contains("VALUES")),
-        "a read of what the thread link added, not the scope query"
-    );
     let (kept, fresh) = kept_and_fresh_ids(&p, &watcher, &cfg).await;
     assert_eq!(kept, fresh);
 }
 
-/// A removal (a deleted message, or the old half of an edit) may take rows
-/// away, which a read of what was added cannot see: the tick reads the whole
-/// transcript again, and the kept read no longer holds the removed turn.
+/// A removal (a deleted message, or the old half of an edit) takes rows away:
+/// the tick reads the whole transcript again, and the kept read no longer
+/// holds the removed turn.
 #[tokio::test]
 async fn a_removal_reads_the_whole_transcript_again() {
-    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
     let signer = crate::agent::signatures::TestSigner::generate();
     let start = chrono::Utc::now() - chrono::Duration::minutes(10);
-    let links: Vec<_> = (0..10)
+    let links: Vec<Vec<_>> = (0..10)
         .map(|i| {
-            body_link(
+            message_links(
                 &signer,
                 &format!("msg://{i}"),
                 &format!("turn {i}"),
@@ -1029,7 +913,7 @@ async fn a_removal_reads_the_whole_transcript_again() {
             )
         })
         .collect();
-    for l in &links {
+    for l in links.iter().flatten() {
         p.sparql_store.add_link(l).expect("link");
     }
     let cfg = config("removal", 600_000, None);
@@ -1040,72 +924,13 @@ async fn a_removal_reads_the_whole_transcript_again() {
     let now_ms = chrono::Utc::now().timestamp_millis();
     p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
 
-    p.sparql_store.remove_link(&links[3]).expect("remove");
-    let rows = transcript_rows(&p);
+    // Removing the flag link takes msg://3 out of the class.
+    p.sparql_store.remove_link(&links[3][0]).expect("remove");
     p.run_auto_processor_tick(&mut watcher, now_ms + 500, &ctx)
         .await;
-    assert_eq!(transcript_rows(&p) - rows, 9, "a full read");
     let (kept, fresh) = kept_and_fresh_ids(&p, &watcher, &cfg).await;
     assert_eq!(kept, fresh);
     assert_eq!(kept.len(), 9);
-
-    // Added links after that are read from the log again.
-    p.sparql_store
-        .add_link(&body_link(
-            &signer,
-            "msg://10",
-            "turn 10",
-            chrono::Utc::now(),
-        ))
-        .expect("link");
-    let rows = transcript_rows(&p);
-    p.run_auto_processor_tick(&mut watcher, now_ms + 1_000, &ctx)
-        .await;
-    assert_eq!(transcript_rows(&p) - rows, 1);
-}
-
-/// A long run of writes that are not additions (removals, here of a link the
-/// store does not hold) keeps the store's write log bounded, and the tick
-/// after them reads the whole transcript.
-#[tokio::test]
-async fn a_long_run_of_removals_keeps_the_write_log_bounded_and_the_next_tick_reads_in_full() {
-    use crate::perspectives::write_log::WRITE_LOG_MAX_ENTRIES;
-
-    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
-    let signer = crate::agent::signatures::TestSigner::generate();
-    let start = chrono::Utc::now() - chrono::Duration::minutes(10);
-    for i in 0..10 {
-        p.sparql_store
-            .add_link(&body_link(
-                &signer,
-                &format!("msg://{i}"),
-                &format!("turn {i}"),
-                start + chrono::Duration::seconds(i),
-            ))
-            .expect("link");
-    }
-    let cfg = config("bounded", 600_000, None);
-    write_processor(&mut p, &cfg, Some(false), &ctx)
-        .await
-        .expect("write_processor");
-    let mut watcher = WatcherState::new();
-    let now_ms = chrono::Utc::now().timestamp_millis();
-    p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
-
-    let ghost = body_link(&signer, "msg://ghost", "never stored", start);
-    for _ in 0..3 * WRITE_LOG_MAX_ENTRIES {
-        p.sparql_store.remove_link(&ghost).expect("remove");
-    }
-    assert!(
-        p.sparql_store.write_log_entries() <= WRITE_LOG_MAX_ENTRIES,
-        "{} log entries after {} removals",
-        p.sparql_store.write_log_entries(),
-        3 * WRITE_LOG_MAX_ENTRIES
-    );
-    let rows = transcript_rows(&p);
-    p.run_auto_processor_tick(&mut watcher, now_ms + 500, &ctx)
-        .await;
-    assert_eq!(transcript_rows(&p) - rows, 10, "the tick reads in full");
 }
 
 /// Josh's open question 1 and Lal's P2-2: a loop waiting after a `NoModel`
@@ -1118,7 +943,7 @@ async fn a_model_becoming_ready_wakes_a_loop_waiting_for_one() {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
-    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
     seed_message(
         &mut p,
         &ctx,
@@ -1193,12 +1018,12 @@ async fn a_model_becoming_ready_wakes_a_loop_waiting_for_one() {
 async fn a_late_older_turn_is_merged_where_a_fresh_read_puts_it() {
     use super::watcher::turn_id;
 
-    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
     let signer = crate::agent::signatures::TestSigner::generate();
     let start = chrono::Utc::now() - chrono::Duration::minutes(10);
-    let links: Vec<_> = (0..4)
+    let links: Vec<Vec<_>> = (0..4)
         .map(|i| {
-            body_link(
+            message_links(
                 &signer,
                 &format!("msg://{i}"),
                 &format!("turn {i}"),
@@ -1209,10 +1034,10 @@ async fn a_late_older_turn_is_merged_where_a_fresh_read_puts_it() {
     let ids: Vec<String> = links
         .iter()
         .enumerate()
-        .map(|(i, l)| turn_id(&l.author, &format!("turn {i}"), &l.timestamp))
+        .map(|(i, l)| turn_id(&l[1].author, &format!("turn {i}"), &l[1].timestamp))
         .collect();
     // Turns 1 to 3 first; turn 0, the oldest, arrives late.
-    for l in &links[1..] {
+    for l in links[1..].iter().flatten() {
         p.sparql_store.add_link(l).expect("link");
     }
     let cfg = config("ordered", 600_000, None);
@@ -1225,16 +1050,11 @@ async fn a_late_older_turn_is_merged_where_a_fresh_read_puts_it() {
     merged.defer_turns("ordered", &ids, now_ms, 10_000);
     p.run_auto_processor_tick(&mut merged, now_ms, &ctx).await;
 
-    p.sparql_store.add_link(&links[0]).expect("the late turn");
+    for l in &links[0] {
+        p.sparql_store.add_link(l).expect("the late turn");
+    }
     p.run_auto_processor_tick(&mut merged, now_ms + 500, &ctx)
         .await;
-    assert!(
-        p.sparql_store
-            .queries_run()
-            .last()
-            .is_some_and(|q| q.contains("VALUES")),
-        "the late turn was merged from a read of what was added"
-    );
 
     let mut fresh = WatcherState::new();
     fresh.defer_turns("ordered", &ids, now_ms, 10_000);
@@ -1272,4 +1092,101 @@ async fn a_late_older_turn_is_merged_where_a_fresh_read_puts_it() {
         batch_ids(fresh.drain_ready_batch(&drain, now_ms + 20_500)),
         "the first FIFO batch is the fresh read's"
     );
+}
+
+/// A forged message — a signature over other data, carried on this link —
+/// does not verify, and default model-query provenance withholds it (#1113):
+/// the instance loses its `body` and never becomes a turn. A peer without
+/// the key cannot put words into the transcript, and a speaker name in the
+/// LLM input can only come from a link that verifies.
+#[tokio::test]
+async fn a_forged_message_is_not_in_the_transcript() {
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
+    let signer = crate::agent::signatures::TestSigner::generate();
+    let at = chrono::Utc::now() - chrono::Duration::minutes(5);
+    let real = message_links(&signer, "msg://real", "real text", at);
+    for l in &real {
+        p.sparql_store.add_link(l).expect("link");
+    }
+    // What a peer without the key can gossip: the signer's signature over a
+    // different body, asserted on this one.
+    let mut forged = message_links(&signer, "msg://forged", "decoy", at);
+    forged[1].data.target = "literal:string:forged text".into();
+    assert!(
+        !forged[1].compute_proof_valid(),
+        "the fixture must not verify"
+    );
+    for l in forged {
+        p.sparql_store.add_link(&l).expect("forged link");
+    }
+
+    let cfg = config("proof", 600_000, None);
+    write_processor(&mut p, &cfg, Some(false), &ctx)
+        .await
+        .expect("write_processor");
+    let mut watcher = WatcherState::new();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
+
+    let items = &watcher.pending_for("proof").expect("pending").items;
+    assert_eq!(
+        items.iter().map(|t| t.text.as_str()).collect::<Vec<_>>(),
+        vec!["real text"]
+    );
+    // A turn's speaker and timestamp are the instance's own link metadata:
+    // the DID that signed it and the earliest of its link timestamps.
+    assert_eq!(items[0].speaker, signer.did);
+    assert_eq!(items[0].timestamp, real[1].timestamp);
+}
+
+/// The scope is the class, not the predicate: a node carrying the text
+/// property without the class flag does not conform, so the model query
+/// never returns it and its "body" never becomes a turn.
+#[tokio::test]
+async fn a_text_predicate_without_the_class_flag_is_not_in_the_transcript() {
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
+    let signer = crate::agent::signatures::TestSigner::generate();
+    let at = chrono::Utc::now() - chrono::Duration::minutes(5);
+    for l in message_links(&signer, "msg://real", "real text", at) {
+        p.sparql_store.add_link(&l).expect("link");
+    }
+    // A signed, verified body link — but no flag: the node does not conform.
+    let bare = message_links(&signer, "msg://bare", "bare body", at)[1].clone();
+    p.sparql_store.add_link(&bare).expect("body-only link");
+
+    let cfg = config("shape", 600_000, None);
+    write_processor(&mut p, &cfg, Some(false), &ctx)
+        .await
+        .expect("write_processor");
+    let mut watcher = WatcherState::new();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
+
+    assert_eq!(pending_texts(&watcher, "shape"), vec!["real text"]);
+}
+
+/// `source_query.where` narrows the scope the way a model subscription's
+/// would: only conforming instances whose `body` matches become turns.
+#[tokio::test]
+async fn a_where_clause_filters_the_transcript() {
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
+    let signer = crate::agent::signatures::TestSigner::generate();
+    let at = chrono::Utc::now() - chrono::Duration::minutes(5);
+    for (msg, text) in [("msg://keep", "keep me"), ("msg://drop", "another")] {
+        for l in message_links(&signer, msg, text, at) {
+            p.sparql_store.add_link(&l).expect("link");
+        }
+    }
+    let cfg = AutoProcessorConfig {
+        source_query: Some(r#"{"where":{"body":{"contains":"keep"}}}"#.into()),
+        ..config("w", 600_000, None)
+    };
+    write_processor(&mut p, &cfg, Some(false), &ctx)
+        .await
+        .expect("write_processor");
+    let mut watcher = WatcherState::new();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
+
+    assert_eq!(pending_texts(&watcher, "w"), vec!["keep me"]);
 }

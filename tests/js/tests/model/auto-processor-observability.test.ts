@@ -38,7 +38,7 @@ import type {
   AutoProcessorStep,
 } from "@coasys/ad4m";
 import { addOllamaLlm, startAgent, waitUntil } from "../../helpers/index.js";
-import { ConversationSubgroup } from "./auto-processor-models.js";
+import { ChannelMessage, ConversationSubgroup } from "./auto-processor-models.js";
 
 const BASE_URL = process.env.INTERPRETATION_E2E_BASE_URL || "http://localhost:11434/v1";
 // Ask for the window the Modelfile already loaded (qwen3.8-27b-48k: 49152). The provider reads
@@ -46,16 +46,11 @@ const BASE_URL = process.env.INTERPRETATION_E2E_BASE_URL || "http://localhost:11
 const MAX_NUM_CTX = Number(process.env.INTERPRETATION_E2E_MAX_NUM_CTX) || 49152;
 const MODEL = process.env.INTERPRETATION_E2E_MODEL || "qwen3.8-27b-48k";
 
-// Same scope query the other WS auto-processor tests use — reifier carries
-// author + timestamp, `?timestamp` is what makes a turn identifiable to the
-// processed-turn cursor.
-const SCOPE_QUERY = `SELECT ?speaker ?text ?timestamp WHERE {
-  ?m <ns://body> ?text .
-  ?r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?m <ns://body> ?text )>> .
-  ?r <ad4m://ontology/author> ?speaker .
-  ?r <ad4m://ontology/timestamp> ?timestamp .
-}
-ORDER BY ?timestamp`;
+// Same source class the other WS auto-processor tests use (#1794): the
+// processor reads `ns://Message` instances through a model query and takes
+// each turn's speaker + timestamp from the instance's link metadata.
+const SOURCE_CLASS = "ns://Message";
+const SOURCE_TEXT = "body";
 
 const SUBGROUP_CLASS = "ns://ConversationSubgroup";
 
@@ -120,6 +115,7 @@ describeIfLLM("AutoProcessor observability — events + debug output (PR #903)",
     // the class the pass materialises.
     await ConversationSubgroup.register(p);
     await InterpretationRun.register(p);
+    await ChannelMessage.register(p);
     events = [];
     nbEvents = [];
     p.on("auto-processor-event", (e) => events.push(e));
@@ -135,6 +131,10 @@ describeIfLLM("AutoProcessor observability — events + debug output (PR #903)",
   async function say(text: string) {
     const uri = `msg://${seq}/${Math.random().toString(36).slice(2)}`;
     await p.add(
+      new Link({ source: uri, predicate: "ns://type", target: "ns://message" }),
+      "local",
+    );
+    await p.add(
       new Link({ source: uri, predicate: "ns://body", target: `literal:string:${text}` }),
       "local",
     );
@@ -143,7 +143,8 @@ describeIfLLM("AutoProcessor observability — events + debug output (PR #903)",
   async function addProcessor(overrides: Record<string, unknown> = {}) {
     await p.addAutoProcessor({
       processorId: `proc-${seq}`,
-      sourceScopeQuery: SCOPE_QUERY,
+      sourceClass: SOURCE_CLASS,
+      sourceText: SOURCE_TEXT,
       interpretationClasses: [SUBGROUP_CLASS],
       debounceMs: 100,
       batchMin: 2,

@@ -90,84 +90,46 @@ pub(crate) fn decode_transcript_body(uri: &str) -> Option<String> {
     }
 }
 
-/// Known-good AutoProcessor `source_scope_query` over `ns://body` messages.
-/// Binds `?speaker`, `?text`, and `?timestamp` from the **body link's reifier**
-/// (`ad4m://ontology/author` + `ad4m://ontology/timestamp`) — the shape
-/// [`gather_transcript_sparql`] requires, and the same fields
-/// [`gather_transcript`] already reads off the link expression. Copy this (or
-/// the same reifier pattern on a different body predicate). Timestamp and
-/// author are metadata on the reifier node, not on the quoted triple and not
-/// a separate `ns://author` property (apps may still bind `?speaker` from
-/// such a property if their model needs a logical author ≠ link signer).
-pub const BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY: &str = r#"SELECT ?speaker ?text ?timestamp WHERE {
-  ?m <ns://body> ?text .
-  ?r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?m <ns://body> ?text )>> .
-  ?r <ad4m://ontology/author> ?speaker .
-  ?r <ad4m://ontology/timestamp> ?timestamp .
-}
-ORDER BY ?timestamp"#;
-
-/// Assemble an interpretation transcript from an arbitrary SPARQL SELECT
-/// against the perspective. The query MUST bind `?speaker`, `?text`, and
-/// `?timestamp` in its solutions — each row becomes a [`TranscriptTurn`] in
-/// the order the store returned them. `?text` may be either a plain string
-/// literal (returned as-is) or a `literal:string:...` URI (decoded via
-/// [`decode_literal_string`]); rows that decode to non-string literals or
-/// bind speaker/text uncleanly are skipped. A row that binds speaker+text
-/// but not `?timestamp` fails the whole gather (do not silently collapse
-/// identical bodies) — use [`BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY`] as the
-/// known-good reifier pattern.
+/// Assemble an interpretation transcript as a model query over the
+/// processor's message class (#1794). One hydrated instance is one turn:
+/// `speaker` is the instance's `author` and `timestamp` its creation
+/// timestamp — hydration reports both off the instance's **earliest link** —
+/// and `text` is the `text_property` value as hydration decoded it
+/// (language-resolved, literal-decoded). Reading through the model query is
+/// the point: only shape-conforming instances become turns, and links whose
+/// signature does not verify never hydrate (#1113, default provenance —
+/// `includeUnverified` is never set here).
 ///
-/// This is the generic counterpart to [`gather_transcript`]: a caller supplies
-/// an arbitrary scope query (the AutoProcessor reads one off its config; tests
-/// pass one directly) so interpretation can run over just the relevant subset
-/// of the perspective instead of the full channel. Callers that just want the
-/// flat "all messages on this source under this predicate" view should keep
-/// using the source+predicate wrapper.
-pub async fn gather_transcript_sparql(
+/// `query_json` is the restricted scope merged with the fields a turn needs
+/// — see `AutoProcessorConfig::transcript_query_json`. The raw result JSON
+/// is returned beside the turns because the watch loop feeds it to its wake
+/// trigger: the trigger's `near`/`via` rules are defined over the nodes of
+/// the last read, so an edit to an in-scope instance's links wakes it.
+pub async fn gather_transcript_model(
     perspective: &PerspectiveInstance,
-    sparql: &str,
-) -> anyhow::Result<Vec<TranscriptTurn>> {
-    let rows_json = perspective
-        .sparql_query(sparql.to_string())
-        .map_err(|e| anyhow::anyhow!("gather_transcript_sparql: SPARQL query failed: {e:#}"))?;
-    let rows: Vec<serde_json::Value> = serde_json::from_str(&rows_json)
-        .map_err(|e| anyhow::anyhow!("gather_transcript_sparql: bad SPARQL result JSON: {e:#}"))?;
+    class: &str,
+    text_property: &str,
+    query_json: &str,
+) -> anyhow::Result<(String, Vec<TranscriptTurn>)> {
+    let result_json = perspective
+        .model_query(class, query_json)
+        .await
+        .map_err(|e| anyhow::anyhow!("gather_transcript_model: model_query failed: {e:#}"))?;
+    let result: serde_json::Value = serde_json::from_str(&result_json)
+        .map_err(|e| anyhow::anyhow!("gather_transcript_model: bad model_query result: {e:#}"))?;
 
-    let mut out = Vec::with_capacity(rows.len());
-    for row in rows {
-        let Some(speaker) = row.get("speaker").and_then(|v| v.as_str()) else {
+    let mut out = Vec::new();
+    for instance in result["instances"].as_array().into_iter().flatten() {
+        let (Some(speaker), Some(timestamp)) = (
+            instance.get("author").and_then(|v| v.as_str()),
+            instance.get("timestamp").and_then(|v| v.as_str()),
+        ) else {
+            // An instance is its links; one carrying neither author nor
+            // timestamp cannot be ordered into a transcript.
             continue;
         };
-        let Some(raw_text) = row.get("text").and_then(|v| v.as_str()) else {
+        let Some(text) = scalar_text(instance.get(text_property)) else {
             continue;
-        };
-        let Some(timestamp) = row
-            .get("timestamp")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-        else {
-            anyhow::bail!(
-                "gather_transcript_sparql: row binds ?speaker/?text but not ?timestamp. \
-                 source_scope_query must SELECT ?timestamp via the link reifier \
-                 (`?r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?m <pred> ?text )>>` \
-                 then `?r <ad4m://ontology/timestamp> ?timestamp` and typically \
-                 `?r <ad4m://ontology/author> ?speaker`). See \
-                 BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY."
-            );
-        };
-        let text = if raw_text.starts_with("literal:") {
-            match decode_transcript_body(raw_text) {
-                Some(s) => s,
-                None => continue, // non-string literal — not a message body
-            }
-        } else if let Some(data) = serde_json::from_str::<serde_json::Value>(raw_text)
-            .ok()
-            .and_then(|v| v.get("data").and_then(|d| d.as_str()).map(String::from))
-        {
-            data
-        } else {
-            raw_text.to_string()
         };
         out.push(TranscriptTurn {
             speaker: speaker.to_string(),
@@ -175,7 +137,19 @@ pub async fn gather_transcript_sparql(
             timestamp: timestamp.to_string(),
         });
     }
-    Ok(out)
+    Ok((result_json, out))
+}
+
+/// The turn text off a hydrated scalar (`parse_literal_value` output): a
+/// string as-is, a number or bool stringified. Anything else — an absent
+/// property, a node target, an array — is not a message body.
+fn scalar_text(value: Option<&serde_json::Value>) -> Option<String> {
+    match value? {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
 }
 
 /// Build a DID → display-name map for every speaker DID in `turns`.
@@ -487,67 +461,6 @@ mod tests {
             .expect("gather");
         assert_eq!(turns.len(), 1, "envelope body must yield a turn");
         assert_eq!(turns[0].text, "hello from the envelope");
-    }
-
-    /// SPARQL-based gather over an envelope-shaped body. This is the exact
-    /// codepath the AutoProcessor takes in production. Pre-fix, the row bound
-    /// `?text` to the `literal:json:` envelope, `decode_literal_string` returned
-    /// None, and the row was silently dropped — the tick then fired successfully
-    /// producing nothing, indistinguishable from a conversation with no content.
-    #[tokio::test]
-    async fn gather_transcript_sparql_reads_expression_envelope_body() {
-        use crate::types::{Link, LinkStatus};
-        use ad4m_client::literal::Literal;
-
-        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
-
-        // Seed one message with an envelope body + author + timestamp on the message
-        // itself (a simpler shape than the reifier pattern — the point here is the
-        // decode step, not the reifier plumbing).
-        let envelope = Literal::from_json(serde_json::json!({
-            "author": "did:key:z6Mkalice",
-            "timestamp": "2026-08-18T16:18:21.287Z",
-            "data": "hello via sparql",
-            "proof": { "key": "did:key:z6Mkalice#z6Mkalice", "signature": "deadbeef" },
-        }))
-        .to_url()
-        .unwrap();
-
-        for (predicate, target) in [
-            ("ns://body", envelope.as_str()),
-            ("ns://author", "did:key:z6Mkalice"),
-            ("ns://ts", "2026-08-18T16:18:21.287Z"),
-        ] {
-            p.add_link(
-                Link {
-                    source: "msg://sparql-envelope-1".into(),
-                    predicate: Some(predicate.into()),
-                    target: target.into(),
-                },
-                LinkStatus::Local,
-                None,
-                &ctx,
-            )
-            .await
-            .expect("seed link");
-        }
-
-        let sparql = r#"SELECT ?speaker ?text ?timestamp WHERE {
-            ?m <ns://body> ?text .
-            ?m <ns://author> ?speaker .
-            ?m <ns://ts> ?timestamp .
-        }"#;
-        let turns = gather_transcript_sparql(&p, sparql)
-            .await
-            .expect("gather via sparql");
-        assert_eq!(
-            turns.len(),
-            1,
-            "envelope body must survive the SPARQL gather"
-        );
-        assert_eq!(turns[0].text, "hello via sparql");
-        assert_eq!(turns[0].speaker, "did:key:z6Mkalice");
-        assert_eq!(turns[0].timestamp, "2026-08-18T16:18:21.287Z");
     }
 
     #[tokio::test]

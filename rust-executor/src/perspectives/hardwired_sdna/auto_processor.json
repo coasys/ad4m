@@ -6,7 +6,9 @@
   ],
   "properties": [
     {"path": "ad4m://processor_id",      "name": "processorId",         "identity": true, "min_count": 1, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://processor_id", "target": "value"}]},
-    {"path": "ad4m://source_scope_query","name": "sourceScopeQuery",                      "min_count": 1, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://source_scope_query", "target": "value"}]},
+    {"path": "ad4m://source_class",      "name": "sourceClass",                          "min_count": 1, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://source_class", "target": "value"}]},
+    {"path": "ad4m://source_text",       "name": "sourceText",                           "min_count": 1, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://source_text", "target": "value"}]},
+    {"path": "ad4m://source_query",      "name": "sourceQuery",                          "min_count": 0, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://source_query", "target": "value"}]},
     {"path": "ad4m://base_prefix",       "name": "basePrefix",                            "min_count": 0, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://base_prefix", "target": "value"}]},
     {"path": "ad4m://interpretation_class","name": "interpretationClasses","collection": true,"datatype": "xsd://string", "min_count": 1, "setter": [{"action": "addLink", "source": "this", "predicate": "ad4m://interpretation_class", "target": "value"}]},
     {"path": "ad4m://flow",              "name": "flows",               "collection": true,"datatype": "xsd://string", "min_count": 0, "setter": [{"action": "addLink", "source": "this", "predicate": "ad4m://flow", "target": "value"}]},

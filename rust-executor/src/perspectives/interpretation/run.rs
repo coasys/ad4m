@@ -1953,22 +1953,17 @@ mod tests {
         );
     }
 
+    /// #1794: the transcript is a model query now. One conforming
+    /// `ns://Message` = one turn; `speaker`/`timestamp` are the instance's
+    /// author/creation metadata — the writing agent's DID and the link's
+    /// time — not any `ns://author` property a writer may claim.
     #[tokio::test]
-    async fn gather_transcript_sparql_returns_speaker_text_and_timestamp() {
-        // The generic SPARQL gather must:
-        //   1. run an arbitrary SELECT against the perspective's Oxigraph store,
-        //   2. bind `?speaker` from the body-link reifier (`ad4m://ontology/author`
-        //      = the signing agent, NOT a separate ns://author property),
-        //   3. bind `?text` and, when it's a `literal:string:...` URI, decode it,
-        //   4. bind `?timestamp` from the same reifier,
-        //   5. preserve caller-visible ordering by returning rows as SPARQL gave
-        //      them (deterministic when ORDER BY is in the query).
+    async fn gather_transcript_model_returns_speaker_text_and_timestamp() {
         use crate::agent::did_for_context;
-        use crate::perspectives::interpretation::graph::{
-            gather_transcript_sparql, BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY,
-        };
+        use crate::perspectives::interpretation::graph::gather_transcript_model;
+        use crate::perspectives::interpretation_test_support::MESSAGE_SDNA;
         let (mut perspective, _shapes, ctx) =
-            setup_perspective_no_llm(&[("Intention", INTENTION_SDNA)]).await;
+            setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
         let me = did_for_context(&ctx).expect("test agent DID");
         seed_message(
             &mut perspective,
@@ -1979,8 +1974,8 @@ mod tests {
             "ns://body",
         )
         .await;
-        // Link timestamps are RFC3339 millis; sleep so ORDER BY ?timestamp is
-        // deterministic rather than a same-millisecond tie (undefined order).
+        // Link timestamps are RFC3339 millis; sleep so ordering is
+        // deterministic rather than a same-millisecond tie.
         std::thread::sleep(std::time::Duration::from_millis(2));
         seed_message(
             &mut perspective,
@@ -1992,9 +1987,9 @@ mod tests {
         )
         .await;
 
-        let turns = gather_transcript_sparql(&perspective, BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY)
+        let (_result, turns) = gather_transcript_model(&perspective, "ns://Message", "body", "{}")
             .await
-            .expect("gather_transcript_sparql");
+            .expect("gather_transcript_model");
         assert_eq!(turns.len(), 2, "got {turns:#?}");
         assert_eq!(turns[0].text, "hello world");
         assert_eq!(turns[1].text, "second turn");
@@ -2003,28 +1998,24 @@ mod tests {
         assert_eq!(turns[1].speaker, me);
         assert!(
             !turns[0].timestamp.is_empty() && !turns[1].timestamp.is_empty(),
-            "reifier timestamp must be bound; got {turns:#?}"
-        );
-        assert_ne!(
-            turns[0].timestamp, turns[1].timestamp,
-            "sequentially seeded links must have distinct timestamps"
+            "instance timestamp must be hydrated; got {turns:#?}"
         );
         assert!(
             turns[0].timestamp < turns[1].timestamp,
-            "ORDER BY ?timestamp must be chronological; got {turns:#?}"
+            "turns must come out chronological; got {turns:#?}"
         );
     }
 
+    /// A node carrying the text predicate without the class flag does not
+    /// conform, so it never reaches the transcript; and `where` in the
+    /// scope query narrows the instances the class yields.
     #[tokio::test]
-    async fn gather_transcript_sparql_scopes_to_predicate() {
-        // Proves this is a real scope, not a rebranded gather-everything. Seed one
-        // "body"-predicated message and one "system-log" message; a query that
-        // filters on `ns://body` must return exactly the first.
-        use crate::perspectives::interpretation::graph::{
-            gather_transcript_sparql, BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY,
-        };
+    async fn gather_transcript_model_enforces_shape_and_where() {
+        use crate::perspectives::interpretation::graph::gather_transcript_model;
+        use crate::perspectives::interpretation_test_support::MESSAGE_SDNA;
+        use crate::types::{Link, LinkStatus};
         let (mut perspective, _shapes, ctx) =
-            setup_perspective_no_llm(&[("Intention", INTENTION_SDNA)]).await;
+            setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
         seed_message(
             &mut perspective,
             &ctx,
@@ -2034,52 +2025,138 @@ mod tests {
             "ns://body",
         )
         .await;
-        seed_message(
-            &mut perspective,
-            &ctx,
-            "msg://bot",
-            "did:key:bot",
-            "system boot",
-            "ns://system_log",
-        )
-        .await;
-
-        let scoped = gather_transcript_sparql(&perspective, BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY)
+        // A body link with no `ns://type` flag: the node has the text
+        // property but does not conform to `ns://Message`.
+        perspective
+            .add_link(
+                Link {
+                    source: "msg://shapeless".into(),
+                    predicate: Some("ns://body".into()),
+                    target: "literal:string:forged-looking".into(),
+                },
+                LinkStatus::Local,
+                None,
+                &ctx,
+            )
             .await
-            .expect("gather_transcript_sparql");
-        assert_eq!(
-            scoped.len(),
-            1,
-            "scoped query must exclude messages under other predicates; got {scoped:#?}"
-        );
-        assert_eq!(scoped[0].text, "I'll ship the doc");
+            .expect("seed shapeless");
+
+        let (_result, turns) = gather_transcript_model(&perspective, "ns://Message", "body", "{}")
+            .await
+            .expect("gather_transcript_model");
+        assert_eq!(turns.len(), 1, "got {turns:#?}");
+        assert_eq!(turns[0].text, "I'll ship the doc");
+
+        // `where` is a caller-side scope the model query applies.
+        let (_result, filtered) = gather_transcript_model(
+            &perspective,
+            "ns://Message",
+            "body",
+            r#"{"where":{"body":{"contains":"ship"}}}"#,
+        )
+        .await
+        .expect("gather_transcript_model where");
+        assert_eq!(filtered.len(), 1, "got {filtered:#?}");
+        let (_result, empty) = gather_transcript_model(
+            &perspective,
+            "ns://Message",
+            "body",
+            r#"{"where":{"body":{"contains":"nothing-matches"}}}"#,
+        )
+        .await
+        .expect("gather_transcript_model where empty");
+        assert!(empty.is_empty(), "got {empty:#?}");
     }
 
+    /// #1794/#1113: a link whose signature does not verify is withheld by
+    /// default — a forged "message from another member" never reaches the
+    /// transcript, so it cannot reach the author election, the speaker
+    /// names or the output attribution. Uses real signatures.
     #[tokio::test]
-    async fn gather_transcript_sparql_rejects_missing_timestamp() {
-        use crate::perspectives::interpretation::graph::gather_transcript_sparql;
+    async fn gather_transcript_model_withholds_forged_links() {
+        use crate::agent::signatures::TestSigner;
+        use crate::perspectives::interpretation::graph::gather_transcript_model;
+        use crate::perspectives::interpretation_test_support::MESSAGE_SDNA;
+        use crate::types::{Link, LinkExpression, LinkStatus};
         let (mut perspective, _shapes, ctx) =
-            setup_perspective_no_llm(&[("Intention", INTENTION_SDNA)]).await;
+            setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
+
+        // A real message from another member: `TestSigner` is a different
+        // agent than the test's main agent, so its DID is its speaker.
+        let other = TestSigner::generate();
+        let signed = |source: &str, predicate: &str, target: &str| {
+            let mut l = LinkExpression::from(other.sign_at(
+                Link {
+                    source: source.to_string(),
+                    predicate: Some(predicate.to_string()),
+                    target: target.to_string(),
+                },
+                chrono::Utc::now(),
+            ));
+            l.status = Some(LinkStatus::Shared);
+            l
+        };
+        perspective
+            .sparql_store
+            .add_link(&signed("msg://other-1", "ns://type", "ns://message"))
+            .expect("seed other type");
+        perspective
+            .sparql_store
+            .add_link(&signed(
+                "msg://other-1",
+                "ns://body",
+                "literal:string:real words",
+            ))
+            .expect("seed other body");
+
+        // A forged "message from that member": links that carry its author
+        // but a signature that does not cover them — what a peer without
+        // the key can gossip (#1113).
+        let mut forged_flag = signed("msg://other-1", "ns://type", "ns://message");
+        forged_flag.data.source = "msg://forged-1".to_string();
+        assert!(
+            !forged_flag.compute_proof_valid(),
+            "the fixture must not verify"
+        );
+        let mut forged_body = signed(
+            "msg://forged-1",
+            "ns://body",
+            "literal:string:words never said",
+        );
+        forged_body.data.source = "msg://forged-2".to_string();
+        assert!(!forged_body.compute_proof_valid());
+        perspective
+            .sparql_store
+            .add_link(&forged_flag)
+            .expect("seed forged flag");
+        perspective
+            .sparql_store
+            .add_link(&forged_body)
+            .expect("seed forged body");
+
         seed_message(
             &mut perspective,
             &ctx,
-            "msg://1",
-            "did:key:alice",
-            "hello",
+            "msg://mine",
+            "did:key:me",
+            "my words",
             "ns://body",
         )
         .await;
-        let err = gather_transcript_sparql(
-            &perspective,
-            "SELECT ?speaker ?text WHERE { ?m <ns://body> ?text . ?m <ns://author> ?speaker . }",
-        )
-        .await
-        .expect_err("query without ?timestamp must fail");
-        let msg = format!("{err:#}");
+
+        let (_result, turns) = gather_transcript_model(&perspective, "ns://Message", "body", "{}")
+            .await
+            .expect("gather_transcript_model");
+        assert_eq!(turns.len(), 2, "got {turns:#?}");
         assert!(
-            msg.contains("?timestamp"),
-            "error must mention the missing binding; got {msg}"
+            turns.iter().all(|t| t.text != "words never said"),
+            "forged text must not reach the transcript; got {turns:#?}"
         );
+        let others_turn = turns
+            .iter()
+            .find(|t| t.text == "real words")
+            .expect("other member's signed message");
+        assert_eq!(others_turn.speaker, other.did);
     }
 
     // ---- interpretation_task_name_for_model + ensure_..._for_model --------

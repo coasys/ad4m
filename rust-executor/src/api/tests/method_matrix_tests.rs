@@ -630,7 +630,8 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
     ("perspective.addAutoProcessor", || {
         json!({
             "processorId": "p",
-            "sourceScopeQuery": "SELECT * {}",
+            "sourceClass": "ns://Message",
+            "sourceText": "body",
             "interpretationClasses": ["C"],
             "debounceMs": 0,
             "batchMax": 1,
