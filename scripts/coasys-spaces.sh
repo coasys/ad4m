@@ -285,7 +285,21 @@ cmd_we() {
     pnpm install --no-frozen-lockfile
     check_override ad4m "$core"
     check_override ad4m-connect "$connect"
-    PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=1 pnpm --filter "$WE_PACKAGE" exec playwright-core install chromium
+    # `pnpm exec` only finds a bin of the filtered package. WE dev declares
+    # playwright-core on @we/app-web. The e2e harness (coasys/we#468) moves it
+    # to @we/e2e, and filtering the app then fails with "playwright-core not found".
+    log "installing Chromium with $(chromium_package)"
+    PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=1 pnpm --filter "$(chromium_package)" exec playwright-core install chromium
+}
+
+# The package whose playwright-core installs Chromium. See cmd_we.
+chromium_package() {
+    local pkg="$WE_DIR/packages/e2e/package.json"
+    if [ -f "$pkg" ] && jq -e '.dependencies["playwright-core"] // .devDependencies["playwright-core"]' >/dev/null "$pkg"; then
+        echo @we/e2e
+        return
+    fi
+    echo "$WE_PACKAGE"
 }
 
 # Fails unless we-web resolves @coasys/<name> to the packed tarball.
@@ -424,6 +438,7 @@ case "${1:-}" in
     executor) cmd_executor ;;
     sdk) cmd_sdk ;;
     we) cmd_we ;;
+    chromium-package) chromium_package ;;
     llm-check) cmd_llm_check ;;
     build-web) cmd_build_web ;;
     test) cmd_test ;;

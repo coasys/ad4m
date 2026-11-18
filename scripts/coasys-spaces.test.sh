@@ -202,6 +202,20 @@ test_sdk_needs_the_checkout_at_ad4m_sha() {
     grep -qF "not AD4M_SHA $SHA" <<<"$out" || fail "the mismatch is not reported: $out"
 }
 
+# Chromium is installed with whichever package declares playwright-core. The e2e harness
+# (WE#468) puts it on @we/e2e; the tree before that puts it on @we/app-web.
+test_chromium_package() {
+    mkdir -p "$COASYS_SPACES_WORK/we/apps/we-web"
+    echo '{"name":"@we/app-web"}' >"$COASYS_SPACES_WORK/we/apps/we-web/package.json"
+    [ "$(bash "$SCRIPT" chromium-package)" = "@we/app-web" ] ||
+        fail "without @we/e2e, Chromium is not installed from @we/app-web: $(bash "$SCRIPT" chromium-package)"
+
+    mkdir -p "$COASYS_SPACES_WORK/we/packages/e2e"
+    echo '{"name":"@we/e2e","dependencies":{"playwright-core":"1.64.1"}}' >"$COASYS_SPACES_WORK/we/packages/e2e/package.json"
+    [ "$(bash "$SCRIPT" chromium-package)" = "@we/e2e" ] ||
+        fail "an @we/e2e that depends on playwright-core is not used: $(bash "$SCRIPT" chromium-package)"
+}
+
 # A WE without the suite fails the test step; pnpm --filter would run nothing and pass.
 test_test_needs_the_suite() {
     mkdir -p "$COASYS_SPACES_WORK/we/apps/we-web"
@@ -304,7 +318,7 @@ test_llm_context_window() {
 for t in test_executor_from_zst test_executor_from_gz test_executor_missing \
     test_executor_checksum_mismatch test_executor_other_commit test_executor_size_mismatch \
     test_executor_unknown_file test_preflight test_dirty_checkout_is_not_recorded test_record_needs_we_sha test_we_ref_must_be_a_name \
-    test_sdk_needs_the_checkout_at_ad4m_sha test_test_needs_the_suite test_llm_check \
+    test_sdk_needs_the_checkout_at_ad4m_sha test_chromium_package test_test_needs_the_suite test_llm_check \
     test_llm_context_window; do
     echo "$t"
     setup
