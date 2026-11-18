@@ -1050,8 +1050,11 @@ jobs:
       - run:
           name: JS LLM-E2E (auto-processor multi-user)
           # Not under tests/model/, so `test-model` does not pick it up.
+          # prepare-test publishes perspective-diff-sync. Bob joins that
+          # neighbourhood so he can write Alice's perspective; a private
+          # one is owner-scoped. The integration step prepares again.
           command: |
-            cd ./tests/js && LLM_E2E=1 pnpm exec ts-mocha -p tsconfig.json --timeout 1200000 --exit tests/auto-processor-multi-user.test.ts
+            cd ./tests/js && pnpm run prepare-test && LLM_E2E=1 pnpm exec ts-mocha -p tsconfig.json --timeout 1200000 --exit tests/auto-processor-multi-user.test.ts
           no_output_timeout: 60m
       - run:
           name: JS LLM-E2E (integration — includes auto-processor-neighbourhood)

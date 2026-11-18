@@ -55,9 +55,12 @@ fi
 if [[ -z "${SKIP_JS:-}" ]]; then
   echo "=== JS LLM-E2E ==="
   export LLM_E2E=1
-  # tests/js expects `pnpm run prepare-test` to have run at least once
-  # (the integration leg). The multi-user file is not part of `test-model`.
+  # prepare-test publishes perspective-diff-sync. The multi-user suite
+  # joins that neighbourhood (a private perspective is owner-scoped), and
+  # the integration leg needs the same publish. The multi-user file is
+  # not part of `test-model`.
   if ! (cd tests/js && pnpm run test-model \
+      && pnpm run prepare-test \
       && pnpm exec ts-mocha -p tsconfig.json --timeout 1200000 --exit \
            tests/auto-processor-multi-user.test.ts \
       && pnpm run test-integration); then

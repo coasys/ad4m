@@ -8,11 +8,14 @@
  * Reproduction:
  *   1. Start one executor with `enable_multi_user`.
  *   2. Create + log in two managed users (Alice, Bob).
- *   3. Register an AutoProcessorConfig on a perspective owned by Alice's
- *      session.
- *   4. Alice + Bob each post a message via their own JWT'd Ad4mClient — the
+ *   3. Alice publishes that perspective as a neighbourhood and Bob joins it.
+ *      A private perspective is owner-scoped, so Bob's `byUUID` is null
+ *      until the join adds him to the owners list. `pnpm run prepare-test`
+ *      must have published perspective-diff-sync first.
+ *   4. Register an AutoProcessorConfig on that shared perspective.
+ *   5. Alice + Bob each post a message via their own JWT'd Ad4mClient — the
  *      link's author is the managed user's DID.
- *   5. Wait for a ConversationSubgroup to appear.
+ *   6. Wait for a ConversationSubgroup to appear.
  *
  * Pre-fix: no per-user loop runs, the main-agent loop stands down on every
  * tick, no subgroup appears, `waitUntil` times out. Post-fix: the supervisor
@@ -24,10 +27,11 @@
  * processor passes reach it the same way as single-user passes.
  */
 import path from "path";
-import { Ad4mClient, Link, PerspectiveProxy } from "@coasys/ad4m";
+import { Ad4mClient, Link, Perspective, PerspectiveProxy } from "@coasys/ad4m";
 import type { AutoProcessorEvent } from "@coasys/ad4m";
 import fs from "fs-extra";
 import { fileURLToPath } from "url";
+import { v4 as uuidv4 } from "uuid";
 import { expect } from "chai";
 import {
   baseUrl,
@@ -151,9 +155,27 @@ describeIfLLM("AutoProcessor runs for managed users on a hosted node", function 
   });
 
   it("processes utterances authored by managed users without a main-agent loop", async () => {
-    // Alice creates the perspective, registers the extraction class, and
-    // configures one auto-processor over the body-message scope.
+    // Alice creates the perspective. Bob joins it, then she registers the
+    // extraction class and one auto-processor over the body-message scope.
     const handle = await alice!.perspective.add("auto-processor-managed-users");
+    // Owner-scoped: Bob cannot resolve Alice's private perspective. Joining
+    // the neighbourhood she publishes adds him as an owner of this same
+    // perspective (one executor, one graph). The hash file is written by
+    // `pnpm run prepare-test`.
+    const linkLangHash = fs
+      .readFileSync(path.join(__dirname, "../scripts/perspective-diff-sync-hash"), "utf8")
+      .trim();
+    const socialContext = await alice!.languages.applyTemplateAndPublish(
+      linkLangHash,
+      JSON.stringify({ uid: uuidv4(), name: "auto-processor managed users" }),
+    );
+    const neighbourhoodUrl = await alice!.neighbourhood.publishFromPerspective(
+      handle.uuid,
+      socialContext.address,
+      new Perspective(),
+    );
+    await bob!.neighbourhood.joinFromUrl(neighbourhoodUrl);
+
     const aliceP = (await alice!.perspective.byUUID(handle.uuid)) as PerspectiveProxy;
     await ConversationSubgroup.register(aliceP);
 
@@ -170,20 +192,17 @@ describeIfLLM("AutoProcessor runs for managed users on a hosted node", function 
       claimTtlMs: 60_000,
     } as any);
 
-    // `perspective.add` assigns the caller as the owner, so a strict
-    // ownership regime would make Bob's `byUUID` return `null`
-    // (CodeRabbit #881 review). On the current hosted-node/multi-user
-    // path Bob is a managed user on Alice's executor, so he does see the
-    // perspective, but assert it here so a future ownership tightening
-    // surfaces a clear diagnostic instead of a silent NPE on `bobP.add`.
     const bobPRaw = await bob!.perspective.byUUID(handle.uuid);
     expect(
       bobPRaw,
-      "Bob (managed user on the same executor) must resolve Alice's perspective — " +
-        "if this fails, publish the perspective as a neighbourhood or add Bob " +
-        "as an owner before this line.",
+      "Bob must resolve the neighbourhood he just joined — the join adds him " +
+        "to the owners of Alice's perspective on this executor.",
     ).to.exist;
     const bobP = bobPRaw as PerspectiveProxy;
+    // The pass runs as whichever managed user wins the claim. That user's
+    // session is the one that receives `processed`; Alice's socket stays
+    // quiet when Bob wins.
+    bobP.on("auto-processor-event", (e) => events.push(e));
 
     // One turn from each managed user's own JWT'd client — so each link is
     // signed by that user's DID and the body link's reifier carries the
@@ -212,7 +231,9 @@ describeIfLLM("AutoProcessor runs for managed users on a hosted node", function 
     let subgroups: ConversationSubgroup[] = [];
     await waitUntil(
       async () => {
-        subgroups = await ConversationSubgroup.findAll(aliceP);
+        const aliceGroups = await ConversationSubgroup.findAll(aliceP);
+        const bobGroups = await ConversationSubgroup.findAll(bobP);
+        subgroups = aliceGroups.length >= bobGroups.length ? aliceGroups : bobGroups;
         const processedCount = events.filter((e) => e.step === "processed").length;
         return processedCount >= 1 && subgroups.length >= 1;
       },
