@@ -12,7 +12,6 @@
 
 use anyhow::anyhow;
 use std::sync::Arc;
-use std::time::Instant;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 use super::providers::audio::{
@@ -25,6 +24,15 @@ use crate::types::{ModelType, TranscriptionTextFilter};
 
 /// What every feed carries: 16 kHz mono `f32`.
 pub(crate) const SAMPLE_RATE: u32 = 16_000;
+
+/// The most audio one utterance may carry. The HTTP feed, realtime and service admission
+/// share this ceiling.
+pub(crate) const MAX_UTTERANCE_BYTES: usize = 10 * 1024 * 1024;
+/// [`MAX_UTTERANCE_BYTES`] of `f32` samples.
+pub(crate) const MAX_UTTERANCE_SAMPLES: usize = MAX_UTTERANCE_BYTES / std::mem::size_of::<f32>();
+/// Utterances that may wait on one stream, not counting the one the worker is processing.
+/// A ninth waiting utterance is refused. This is not a cap of eight in flight in total.
+pub(super) const MAX_WAITING_UTTERANCES: usize = 8;
 
 /// Silero's window at [`SAMPLE_RATE`]: 512 samples, 32 ms.
 pub(crate) const VAD_WINDOW: usize = 512;
@@ -207,10 +215,49 @@ pub(crate) fn wav_pcm16(samples: &[f32]) -> Vec<u8> {
     wav
 }
 
+/// What the worker did with one accepted utterance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UtteranceOutcome {
+    Transcribed,
+    Silence,
+    Empty,
+    UpstreamFailed,
+    InsufficientCredits,
+    GateFailed,
+}
+
+impl UtteranceOutcome {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Transcribed => "transcribed",
+            Self::Silence => "silence",
+            Self::Empty => "empty",
+            Self::UpstreamFailed => "upstream_failed",
+            Self::InsufficientCredits => "insufficient_credits",
+            Self::GateFailed => "gate_failed",
+        }
+    }
+}
+
+/// Timing from server admission. The log's `latency_ms` is [`Self::upstream_ms`] when a
+/// call was made. It is not the wait in the queue, and it does not include the browser.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UtteranceCompletion {
+    pub queue_wait_ms: u128,
+    pub total_ms: u128,
+    /// The upstream call only. `None` when the worker made no call.
+    pub upstream_ms: Option<u128>,
+    pub outcome: UtteranceOutcome,
+    /// Utterances still queued after this one was taken.
+    pub waiting_depth: usize,
+}
+
 /// One fed utterance, and where its outcome goes.
 pub(super) struct Utterance {
     pub samples: Vec<f32>,
     pub done: oneshot::Sender<Result<()>>,
+    /// When admission accepted it. Queue wait starts here.
+    pub enqueued_at: tokio::time::Instant,
 }
 
 /// A stream on an endpoint. Its worker takes the utterances in the order they were fed.
@@ -228,17 +275,84 @@ pub(super) struct RemoteStream {
     pub listeners: broadcast::Sender<String>,
     /// `None` once the gate failed.
     pub gate: Option<SpeechGate>,
+    /// The completion record the worker logs. Production passes `None`.
+    pub completions: Option<mpsc::UnboundedSender<UtteranceCompletion>>,
+}
+
+struct Finished {
+    result: Result<()>,
+    upstream_ms: Option<u128>,
+    outcome: UtteranceOutcome,
+    audio_ms: u64,
+    words: usize,
+    streamed: bool,
+}
+
+impl Finished {
+    fn early(result: Result<()>, outcome: UtteranceOutcome, audio_ms: u64) -> Self {
+        Self {
+            result,
+            upstream_ms: None,
+            outcome,
+            audio_ms,
+            words: 0,
+            streamed: false,
+        }
+    }
 }
 
 impl RemoteStream {
     /// Transcribe each utterance in turn until the stream closes (its sender is dropped);
     /// the ones already fed are still answered.
-    pub(super) async fn run(mut self, mut utterances: mpsc::UnboundedReceiver<Utterance>) {
+    pub(super) async fn run(mut self, mut utterances: mpsc::Receiver<Utterance>) {
         while let Some(utterance) = utterances.recv().await {
-            let outcome = self.transcribe(utterance.samples).await;
-            let _ = utterance.done.send(outcome);
+            let queue_wait_ms = utterance.enqueued_at.elapsed().as_millis();
+            // Still waiting after this utterance was taken. The channel is the counter.
+            let waiting_depth = utterances.len();
+            let finished = self.transcribe(utterance.samples).await;
+            let total_ms = utterance.enqueued_at.elapsed().as_millis();
+            let completion = UtteranceCompletion {
+                queue_wait_ms,
+                total_ms,
+                upstream_ms: finished.upstream_ms,
+                outcome: finished.outcome,
+                waiting_depth,
+            };
+            self.log_completion(&finished, &completion);
+            if let Some(tx) = &self.completions {
+                let _ = tx.send(completion);
+            }
+            let _ = utterance.done.send(finished.result);
         }
         log::info!("Transcription stream {} closed", self.stream_id);
+    }
+
+    /// `latency_ms` is the upstream call. It is omitted when there was no call.
+    fn log_completion(&self, done: &Finished, completion: &UtteranceCompletion) {
+        let outcome = completion.outcome.label();
+        if let Some(latency_ms) = completion.upstream_ms {
+            log::info!(
+                "transcription stream={} model={} audio_ms={} queue_wait_ms={} total_ms={} latency_ms={latency_ms} outcome={outcome} words={} streamed={} waiting_depth={}",
+                self.stream_id,
+                self.remote_model,
+                done.audio_ms,
+                completion.queue_wait_ms,
+                completion.total_ms,
+                done.words,
+                done.streamed,
+                completion.waiting_depth,
+            );
+        } else {
+            log::info!(
+                "transcription stream={} model={} audio_ms={} queue_wait_ms={} total_ms={} outcome={outcome} waiting_depth={}",
+                self.stream_id,
+                self.remote_model,
+                done.audio_ms,
+                completion.queue_wait_ms,
+                completion.total_ms,
+                completion.waiting_depth,
+            );
+        }
     }
 
     /// One upstream call, for an utterance the gate takes as speech. Each piece of text a
@@ -246,46 +360,64 @@ impl RemoteStream {
     /// from the whole transcript. A failure is logged, acted on for the endpoint
     /// (`endpoints::after_failed_request`) and returned to the feed; nothing more is
     /// published, and only what was published is billed.
-    async fn transcribe(&mut self, samples: Vec<f32>) -> Result<()> {
-        if samples.is_empty() {
-            return Ok(());
-        }
+    async fn transcribe(&mut self, samples: Vec<f32>) -> Finished {
         let audio_ms = samples.len() as u64 * 1000 / SAMPLE_RATE as u64;
+        if samples.is_empty() {
+            return Finished::early(Ok(()), UtteranceOutcome::Empty, audio_ms);
+        }
         // Silero takes milliseconds per second of audio: on a blocking thread, not on a
         // worker of the runtime. The gate goes along and comes back with its state; when it
         // panicked it does not come back, and the stream sends no more audio.
         let Some(gate) = self.gate.take() else {
-            return Err(anyhow!(
-                "The speech gate of this stream failed: it transcribes no more audio"
-            ));
+            return Finished::early(
+                Err(anyhow!(
+                    "The speech gate of this stream failed: it transcribes no more audio"
+                )),
+                UtteranceOutcome::GateFailed,
+                audio_ms,
+            );
         };
-        let (gate, samples, speech_ratio) = tokio::task::spawn_blocking(move || {
+        let (gate, samples, speech_ratio) = match tokio::task::spawn_blocking(move || {
             let mut gate = gate;
             let ratio = gate.speech_ratio(&samples);
             (gate, samples, ratio)
         })
         .await
-        .map_err(|e| anyhow!("The speech gate failed: {e}"))?;
+        {
+            Ok(parts) => parts,
+            Err(e) => {
+                return Finished::early(
+                    Err(anyhow!("The speech gate failed: {e}")),
+                    UtteranceOutcome::GateFailed,
+                    audio_ms,
+                );
+            }
+        };
         self.gate = Some(gate);
         if speech_ratio < VAD_MIN_SPEECH_RATIO {
             log::debug!(
                 "transcription stream={} audio_ms={audio_ms} dropped by the speech gate (speech_ratio={speech_ratio:.2})",
                 self.stream_id
             );
-            return Ok(());
+            return Finished::early(Ok(()), UtteranceOutcome::Silence, audio_ms);
         }
         // Checked again here, not only when the utterance was fed: utterances queue, and the
         // bill of one lands before the next is sent.
         if let Some(agent_did) = self.agent_did.as_deref() {
-            crate::billing::check_compute_credits(agent_did)
-                .map_err(|_| anyhow!("Insufficient compute credits"))?;
+            if crate::billing::check_compute_credits(agent_did).is_err() {
+                return Finished::early(
+                    Err(anyhow!("Insufficient compute credits")),
+                    UtteranceOutcome::InsufficientCredits,
+                    audio_ms,
+                );
+            }
         }
         let audio = AudioFile {
             bytes: wav_pcm16(&samples),
             file_name: "utterance.wav".into(),
             mime: "audio/wav".into(),
         };
-        let started = Instant::now();
+        let started = tokio::time::Instant::now();
         let (pieces_tx, mut pieces) = mpsc::unbounded_channel::<String>();
         let call = self
             .client
@@ -315,25 +447,32 @@ impl RemoteStream {
                 if words > 0 {
                     bill_transcription(self.agent_did.as_deref(), &self.model_id, words);
                 }
-                return Err(anyhow!(TranscribeFailure::of(&e).to_string()));
+                return Finished {
+                    result: Err(anyhow!(TranscribeFailure::of(&e).to_string())),
+                    upstream_ms: Some(started.elapsed().as_millis()),
+                    outcome: UtteranceOutcome::UpstreamFailed,
+                    audio_ms,
+                    words,
+                    streamed: !published.is_empty(),
+                };
             }
         };
         let words = text.split_whitespace().count();
-        log::info!(
-            "transcription stream={} model={} audio_ms={audio_ms} latency_ms={} words={words} streamed={}",
-            self.stream_id,
-            self.remote_model,
-            started.elapsed().as_millis(),
-            !published.is_empty()
-        );
-        if words == 0 {
-            return Ok(());
+        let upstream_ms = started.elapsed().as_millis();
+        if words > 0 {
+            bill_transcription(self.agent_did.as_deref(), &self.model_id, words);
         }
-        bill_transcription(self.agent_did.as_deref(), &self.model_id, words);
-        if published.is_empty() {
+        if words > 0 && published.is_empty() {
             publish_text(&self.stream_id, &self.user_did, &text, &self.listeners).await;
         }
-        Ok(())
+        Finished {
+            result: Ok(()),
+            upstream_ms: Some(upstream_ms),
+            outcome: UtteranceOutcome::Transcribed,
+            audio_ms,
+            words,
+            streamed: !published.is_empty(),
+        }
     }
 
     /// Publish one streamed piece as the upstream sent it, its spacing kept: a piece that is
@@ -465,8 +604,9 @@ mod tests {
             user_did: "did:key:owner".into(),
             listeners,
             gate: None,
+            completions: None,
         };
-        assert!(stream.transcribe(vec![0.0; 16_000]).await.is_err());
+        assert!(stream.transcribe(vec![0.0; 16_000]).await.result.is_err());
     }
 
     #[test]

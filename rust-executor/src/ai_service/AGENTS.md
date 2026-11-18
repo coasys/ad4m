@@ -191,7 +191,14 @@ The executor still runs no model in-process: `local/` installs and supervises mo
 
 - A stream (`endpoint_transcriber` builds its client) runs a `RemoteStream` worker: each fed utterance becomes a 16 kHz mono PCM16 WAV and one
   `providers::audio::RemoteTranscribe` call. The worker takes utterances from a channel
-  filled under the stream-map lock, so text comes out in the order fed. A feed answers
+  filled under the stream-map lock, so text comes out in the order fed. The channel holds
+  eight waiting utterances. One more is in the worker. A ninth waiting utterance is refused
+  at once (`UtteranceQueueFull`) and is not transcribed, published or billed. Admission
+  uses `try_send` and does not wait for capacity under the stream-map lock. Audio past the
+  shared 10 MiB float32 ceiling (`MAX_UTTERANCE_SAMPLES`, the same limit as the HTTP feed
+  and realtime) is refused before it is queued. `latency_ms` is the upstream call only.
+  `queue_wait_ms` is the wait from admission to dequeue. `total_ms` runs from admission
+  through the gate, the WAV, the call, billing and publication. A feed answers
   after its transcript is published; an upstream failure is the feed's error (no URL in
   it). A streaming upstream can fail after it sent pieces: those pieces stay published and
   their words are billed; nothing more is published.

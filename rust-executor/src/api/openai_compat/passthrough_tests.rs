@@ -2248,6 +2248,114 @@ async fn realtime_refuses_a_commit_past_the_pending_bound() {
     assert_eq!(refused, 1);
 }
 
+/// The service queue is full from outside the socket, so the session's own eight-commit
+/// guard is not what refuses this commit. The refused audio stays in the buffer and one
+/// later commit sends it.
+#[tokio::test]
+async fn realtime_maps_a_full_utterance_queue_to_rate_limit_and_keeps_the_audio() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Barrier};
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let mut server = mockito::Server::new_async().await;
+    {
+        let calls = calls.clone();
+        let entered = entered.clone();
+        let release = release.clone();
+        server
+            .mock("POST", "/v1/audio/transcriptions")
+            .with_header("content-type", "application/json")
+            .with_chunked_body(move |w| {
+                let n = calls.fetch_add(1, Ordering::SeqCst);
+                if n == 0 {
+                    entered.wait();
+                    release.wait();
+                }
+                write!(w, "{}", json!({ "text": format!("c{n}") }))
+            })
+            .create_async()
+            .await;
+    }
+    realtime_world(&server).await;
+    let (client, mut frames) = realtime(RequestContext::operator_for_test());
+    let created = open_stt(&client, &mut frames).await;
+    let sid = created["session_id"]
+        .as_str()
+        .expect("session id")
+        .to_string();
+    let service = crate::ai_service::AIService::global_instance()
+        .await
+        .unwrap();
+    let operator = RequestContext::operator_for_test();
+    let speech = crate::ai_service::transcription::speech_fixture();
+    let chunk = speech[..64_000].to_vec();
+
+    let first = service
+        .queue_utterance(&sid, chunk.clone(), &operator)
+        .await
+        .expect("the first utterance");
+    let entered = entered.clone();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        tokio::task::spawn_blocking(move || entered.wait()),
+    )
+    .await
+    .expect("the held utterance never reached the upstream")
+    .unwrap();
+
+    let mut waiting = Vec::new();
+    for _ in 0..8 {
+        waiting.push(
+            service
+                .queue_utterance(&sid, chunk.clone(), &operator)
+                .await
+                .expect("a waiting slot was refused"),
+        );
+    }
+    send(&client, append_speech());
+    send(&client, json!({"type": "input_audio_buffer.commit"}));
+    let refused = next_event(&mut frames).await;
+    assert_eq!(refused["error"]["code"], "rate_limit_exceeded", "{refused}");
+    assert!(
+        refused["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .to_ascii_lowercase()
+            .contains("full"),
+        "{refused}"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "refused audio was sent");
+
+    let release = release.clone();
+    tokio::task::spawn_blocking(move || release.wait())
+        .await
+        .unwrap();
+    first.await.expect("the utterance in progress");
+    for answer in waiting {
+        answer.await.expect("a waiting utterance");
+    }
+
+    let mut deltas = Vec::new();
+    while deltas.len() < 9 {
+        let event = next_event(&mut frames).await;
+        assert_eq!(
+            event["type"], "conversation.item.input_audio_transcription.delta",
+            "{event}"
+        );
+        deltas.push(event["delta"].as_str().unwrap().to_string());
+    }
+    send(&client, json!({"type": "input_audio_buffer.commit"}));
+    let retried = next_event(&mut frames).await;
+    assert_eq!(
+        retried["type"], "conversation.item.input_audio_transcription.delta",
+        "{retried}"
+    );
+    assert_eq!(retried["delta"], "c9", "{retried}");
+    assert_eq!(calls.load(Ordering::SeqCst), 10);
+}
+
 /// A caller who pays: hosting is not free, and `USER`'s account holds `credits`.
 fn paying_user(credits: f64) {
     Ad4mDb::with_global_instance(|db| {
