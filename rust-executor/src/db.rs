@@ -3448,9 +3448,15 @@ impl Ad4mDb {
         Ok(())
     }
 
-    /// Records that the managed agent `agent_did` was just active (its account's last_seen).
+    /// Records that the managed agent `agent_did` was just active (its account's last_seen),
+    /// stamped with server time.
     pub fn update_agent_last_seen(&self, agent_did: &str) -> Ad4mDbResult<()> {
-        let timestamp = chrono::Utc::now().timestamp();
+        self.update_agent_last_seen_at(agent_did, chrono::Utc::now().timestamp())
+    }
+
+    /// Records activity of `agent_did` at `timestamp` (unix seconds).
+    /// [`update_agent_last_seen`] stamps server time through this.
+    pub fn update_agent_last_seen_at(&self, agent_did: &str, timestamp: i64) -> Ad4mDbResult<()> {
         self.conn.execute(
             "UPDATE users SET last_seen = ?1 WHERE did = ?2 AND did != ''",
             params![timestamp, agent_did],

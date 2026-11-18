@@ -73,6 +73,7 @@ macro_rules! ad4m_db_methods {
             fn get_username_by_did(&self, did: &str) -> Ad4mDbResult<Option<String>>;
             fn update_user_last_seen(&self, email: &str) -> Ad4mDbResult<()>;
             fn update_agent_last_seen(&self, agent_did: &str) -> Ad4mDbResult<()>;
+            fn update_agent_last_seen_at(&self, agent_did: &str, timestamp: i64) -> Ad4mDbResult<()>;
             fn get_user_by_did(&self, agent_did: &str) -> Ad4mDbResult<Option<UserInfo>>;
             fn list_users(&self) -> Ad4mDbResult<Vec<UserInfo>>;
             fn list_user_statistics(&self) -> Ad4mDbResult<Vec<UserStatistics>>;
