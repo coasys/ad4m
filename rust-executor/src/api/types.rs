@@ -329,12 +329,15 @@ pub struct ExportRequest {
 }
 
 #[derive(Deserialize, TS)]
+#[ts(optional_fields)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct ImportRequest {
     #[serde(rename = "type")]
     pub import_type: String,
     pub file_path: String,
+    // Required when `type` is "perspective": the perspective to load into.
+    pub perspective_uuid: Option<String>,
 }
 
 #[derive(Deserialize, TS)]

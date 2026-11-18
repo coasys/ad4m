@@ -219,6 +219,7 @@ regex = "1.5.4"
 json5 = "0.4"
 serde_yaml = "0.9"
 rayon = "1.7.0"  # For parallel processing in filtering optimization
+memchr = "2"     # String skipping in the perspective-import byte scan
 lettre = "0.11"  # For sending verification emails via SMTP
 
 include_dir = "0.6.0"

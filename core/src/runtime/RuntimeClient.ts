@@ -146,7 +146,7 @@ export class RuntimeClient {
 
     async importDb(filePath: string): Promise<ImportResult> {
         const result = await this.#apiClient.call('runtime.importData', { type: "db", filePath })
-        if ('success' in result) throw new Error('runtime.importData answered a perspective import for type "db"')
+        if ('imported' in result) throw new Error('runtime.importData answered a perspective import for type "db"')
         return result
     }
 
@@ -166,9 +166,10 @@ export class RuntimeClient {
         return this.#apiClient.call('runtime.exportData', { type: "perspective", perspectiveUuid: uuid, filePath })
     }
 
-    async importPerspective(filePath: string): Promise<boolean> {
-        const result = await this.#apiClient.call('runtime.importData', { type: "perspective", filePath })
-        return 'success' in result && result.success
+    async importPerspective(uuid: string, filePath: string): Promise<{ imported: number, skipped: number }> {
+        const result = await this.#apiClient.call('runtime.importData', { type: "perspective", perspectiveUuid: uuid, filePath })
+        if ('imported' in result) return result
+        throw new Error('runtime.importData answered a db import for type "perspective"')
     }
 
     async multiUserEnabled(): Promise<boolean> {

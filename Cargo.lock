@@ -114,6 +114,7 @@ dependencies = [
  "log",
  "lru 0.12.5",
  "maplit",
+ "memchr",
  "mockito",
  "multibase",
  "multihash",

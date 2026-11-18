@@ -153,11 +153,14 @@ scripts/coasys-spaces.test.sh` tests the script.
 (`pnpm --filter @we/app-web test:feed-scale`, WE `apps/we-web/tests/live/feed-scale/`).
 It needs no model and no GPU, and has its own serial group, `nightly-feed-scale`.
 
-- The suite seeds `FEED_SCALE_MESSAGES` (1000000) TextBlock messages through the
-  executor's own write path: each message's flag link is signed by one of 40 seed
-  agents (its author and time, which the Feed shows), and its other 11 links go in
-  batches through `addLinks`. Then WE web opens the space in Chromium five times
-  (cold, then warm) and loads the newest page and one older page.
+- The suite seeds `FEED_SCALE_MESSAGES` (1000000) TextBlock messages, 12 links each.
+  It generates every link already signed by the message's author (one of 40 seed
+  agents; the Feed shows its author and time) into one file, on all cores, and loads the
+  file into the space's perspective with `runtime.importData` (`type: "perspective"`,
+  Oxigraph's bulk loader; nothing goes to the link language). Then WE web opens the
+  space in Chromium five times (cold, then warm) and loads the newest page and one
+  older page. The links file (~6 GB at a million) lives in the data dir, beside the
+  store.
 - WE registers an auto-processor for the space's own collection when the space opens
   (`we-call-<collection>`, intended behaviour). The suite removes it for the seeding
   only, which is setup. The app registers it again for the loads, and the job measures

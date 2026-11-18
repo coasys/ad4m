@@ -19,8 +19,9 @@
     { "job": "feed-scale", "metric": "executor.cpu_seconds.ui_phase", "min_delta": 60, "_metric": "The executor's CPU over the loads, the space's own watch over its messages included: the auto-processor's cost lands here." },
     { "job": "feed-scale", "metric": "executor.idle_cpu_percent.*", "factor": 2.0, "min_delta": 50, "_min_delta": "One busy core is 100. After the loads the space's watch keeps 1 to 2 cores busy; after the seeding the executor idles at 3 to 5." },
     { "job": "feed-scale", "metric": "executor.rss.*", "factor": 1.3, "min_delta": 512 },
-    { "job": "feed-scale", "metric": "seed.seconds", "min_delta": 600 },
-    { "job": "feed-scale", "metric": "seed.links_per_second", "min_delta": 500 },
+    { "job": "feed-scale", "metric": "seed.generate_s", "min_delta": 30, "_metric": "The suite's own work (signing 12M links into a file), not the executor's: a change here is the host or the suite." },
+    { "job": "feed-scale", "metric": "seed.import_s", "min_delta": 60 },
+    { "job": "feed-scale", "metric": "seed.links_per_second", "min_delta": 50000, "_metric": "The executor's import rate (links over seed.import_s)." },
     { "job": "feed-scale", "metric": "seed.links", "factor": 1.1, "min_delta": 1, "_factor": "Fixed by the suite (12 links a message): a change is a change in what is seeded, not in the executor." }
   ]
 }

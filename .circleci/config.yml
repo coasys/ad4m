@@ -1313,7 +1313,7 @@ jobs:
   #
   # The shell steps are in scripts/feed-scale.sh, which also runs by hand (`all`). The
   # executor, SDK, WE and we-web steps are coasys-spaces.sh's, run in this job's work dir.
-  # The suite seeds through the executor's own write path, keeps its data off /tmp (a
+  # The suite seeds by `runtime.importData` of a file of signed links, keeps its data off /tmp (a
   # tmpfs on this host), and writes metrics.json; `perf` hands that to scripts/perf/record
   # and lets scripts/perf/check judge it against the history, by the `feed-scale` rules in
   # scripts/perf/thresholds.json. The job halts green when this

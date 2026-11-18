@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # The nightly feed-scale check: WE's `test:feed-scale` (apps/we-web/tests/live/feed-scale/) against
 # the executor and the SDK of one ad4m commit. A space holding FEED_SCALE_MESSAGES messages (a
-# million) of WE's real message class, written through the executor's own write path, opened in
-# Chromium: how long the Feed's newest page and the page before it take, how long the executor
-# answers the Feed's query meanwhile, its memory, the CPU it uses over the loads (WE's watch over
-# the space's messages included), and how long the seeding took. No model, no GPU.
+# million) of WE's real message class, generated signed into a file and loaded by the executor's
+# perspective import, opened in Chromium: how long the Feed's newest page and the page before it
+# take, how long the executor answers the Feed's query meanwhile, its memory, the CPU it uses over
+# the loads (WE's watch over the space's messages included), and how long the import took. No
+# model, no GPU.
 # The nightly job `feed-scale` in .circleci/config.yml runs one step per subcommand; `all` runs
 # them in order, for a run by hand.
 #
@@ -45,8 +46,9 @@
 #   EXECUTOR_PUBLISH_DIR    the published executors (/mnt/hdd/executor-artifacts)
 #   FEED_SCALE_MESSAGES     messages seeded (1000000); a run at another size is its own series
 #   FEED_SCALE_MIN_FREE_GB  free GB on <work> the test step insists on before it seeds (40; a
-#                           million-message store is ~12 GB on disk and the seeding peaks higher)
-#   FEED_SCALE_*            every other knob of the suite (runs, seeding mode and tuning, page
+#                           million-message store is ~12 GB on disk, and its links file ~6 GB,
+#                           twice that while the file is put together)
+#   FEED_SCALE_*            every other knob of the suite (runs, generation workers, page
 #                           timeout) passes through to it; see the suite's README
 #   PERF_HISTORY_*          where scripts/perf keeps the history (a git repository; see the header
 #                           of scripts/perf/perf.mjs). PERF_ARTIFACTS_DIR: <artifacts>/perf
@@ -234,7 +236,7 @@ cmd_test() {
     } | tee "$ARTIFACTS/run.txt"
     empty_data
     local free_kb suite_pid rc=0
-    # A million-message store is ~12 GB on disk and the seeding peaks higher; starting under
+    # A million-message store is ~12 GB on disk, its links file up to 12 GB more; starting under
     # the minimum is a suite that dies half-way, mid-measurement.
     free_kb="$(df -k --output=avail "$WORK" | tail -1 | tr -d ' ')"
     [ "$free_kb" -ge "$((MIN_FREE_GB * 1024 * 1024))" ] ||

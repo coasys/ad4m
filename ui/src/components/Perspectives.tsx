@@ -208,7 +208,9 @@ const Perspectives = (props: Props) => {
       });
 
       if (filePath && typeof filePath === 'string') {
-        await client!.runtime.importPerspective(filePath);
+        const fileName = filePath.split(/[\\/]/).pop()!.replace(/\.[^.]*$/, '');
+        const perspective = await client!.perspective.add(fileName || 'Imported perspective');
+        await client!.runtime.importPerspective(perspective.uuid, filePath);
         await fetchPerspective(); // Refresh the list
         alert('Perspective imported successfully');
       }
