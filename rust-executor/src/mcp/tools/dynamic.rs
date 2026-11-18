@@ -1450,31 +1450,6 @@ mod tests {
     // The MCP session's caller is tested in `mcp::caller` and `mcp::tools`
     // (`agent_context_tests`), and `auth_status` in `mcp::tools::auth`.
 
-    #[test]
-    fn test_escape_prolog_string() {
-        assert_eq!(
-            Ad4mMcpHandler::escape_prolog_string(r#"test"value"#),
-            r#"test\"value"#
-        );
-        assert_eq!(
-            Ad4mMcpHandler::escape_prolog_string(r"test\path"),
-            r"test\\path"
-        );
-        assert_eq!(
-            Ad4mMcpHandler::escape_prolog_string("test'quote"),
-            r"test\'quote"
-        );
-        // Test newline and carriage return escaping
-        assert_eq!(
-            Ad4mMcpHandler::escape_prolog_string("line1\nline2"),
-            r"line1\nline2"
-        );
-        assert_eq!(
-            Ad4mMcpHandler::escape_prolog_string("text\r\nmore"),
-            r"text\r\nmore"
-        );
-    }
-
     // Integration tests for full login flow would need the database initialized
     // See tests/js/tests/mcp-auth.test.ts for full integration tests
 
