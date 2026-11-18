@@ -44,7 +44,20 @@ impl Ad4mMcpHandler {
 
             let classes = shacl::load_classes(&perspective).await;
 
+            // A name two classes share is no key: `class_keys` names those
+            // classes by their target class IRI, and an IRI cannot name a
+            // tool — the instance_* tools take one. A `task_*` tool generated
+            // for the shared name could only ever dispatch to one of them.
+            let class_keys: std::collections::HashSet<String> = perspective
+                .class_keys()
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
+
             for class in &classes {
+                if !class_keys.contains(&class.name) {
+                    continue;
+                }
                 if !seen_classes.insert(class.name_lower.clone()) {
                     continue;
                 }
@@ -367,8 +380,11 @@ impl Ad4mMcpHandler {
             }
         };
 
-        // Find actual class name (preserving original case). A write checks the write guard
-        // here already, so a caller who may not write is refused as the write would refuse it.
+        // Find the class the tool name's class part resolves to (a tool name is
+        // lowercased), through the same lookup the instance_* tools use: a name
+        // two registered classes share is refused as ambiguous rather than
+        // resolved to one of them. A write checks the write guard here already,
+        // so a caller who may not write is refused as the write would refuse it.
         let class_name = {
             let writes = !matches!(operation, "query" | "list" | "get");
             let perspective = if writes {
@@ -382,15 +398,11 @@ impl Ad4mMcpHandler {
                 Ok(p) => p,
                 Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
             };
-            let name = match shacl::find_class_name(&perspective, class_name_lower).await {
-                Some(name) => name,
-                None => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Subject class '{}' not found in perspective {}",
-                        class_name_lower, perspective_id
-                    ))]));
-                }
-            };
+            let (name, _shape) =
+                match super::instances::resolve_class(&perspective, class_name_lower).await {
+                    Ok(resolved) => resolved,
+                    Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+                };
             // The generated tools of an abstract class (#1435) only read: the
             // write tools write links at one class's predicates.
             let writes = matches!(

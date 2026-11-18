@@ -5218,3 +5218,134 @@ fn an_ambiguous_class_error_names_the_candidate_iris() {
     assert!(text.contains("a://Task"), "{text}");
     assert!(text.contains("b://Task"), "{text}");
 }
+
+/// `a://Task` and `b://Task` share the name `Task`.
+const TASK_A_SDNA: &str = r#"{
+  "target_class": "a://Task",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"rdf://type","target":"a://Task"}
+  ],
+  "properties": [
+    {"path":"a://task_title","name":"title","datatype":"xsd:string","min_count":1,"max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"a://task_title","target":"value"}]}
+  ]
+}"#;
+
+const TASK_B_SDNA: &str = r#"{
+  "target_class": "b://Task",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"rdf://type","target":"b://Task"}
+  ],
+  "properties": [
+    {"path":"b://task_title","name":"title","datatype":"xsd:string","min_count":1,"max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"b://task_title","target":"value"}]}
+  ]
+}"#;
+
+fn tool_text(result: &rmcp::model::CallToolResult) -> String {
+    result
+        .content
+        .iter()
+        .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The generated per-class tools dispatch through the same class lookup as
+/// the `instance_*` tools: on a name two classes share they write into
+/// neither, the refusal names both IRIs, and no `task_*` tool is generated
+/// (`class_keys` names those classes by IRI).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_generated_write_on_a_shared_name_is_refused_naming_both_iris() {
+    let (handler, uuid, _guard) = setup_with(
+        &[
+            ("TaskA", TASK_A_SDNA),
+            ("TaskB", TASK_B_SDNA),
+            ("Channel", CHANNEL_SDNA),
+        ],
+        true,
+    )
+    .await;
+
+    let names: Vec<String> = handler
+        .generate_dynamic_tools()
+        .await
+        .iter()
+        .map(|t| t.name.to_string())
+        .collect();
+    assert!(
+        !names.iter().any(|n| n.starts_with("task_")),
+        "a shared name generates no tools: {names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n == "channel_create"),
+        "a unique name still generates its tools: {names:?}"
+    );
+
+    for (tool, args) in [
+        (
+            "task_create",
+            props(&[("perspective_id", json!(uuid)), ("title", json!("t"))]),
+        ),
+        (
+            "task_set_title",
+            props(&[
+                ("perspective_id", json!(uuid)),
+                ("expression_address", json!("ad4m://obj/x")),
+                ("value", json!("v")),
+            ]),
+        ),
+    ] {
+        let result = handler
+            .handle_dynamic_tool(tool, Some(args))
+            .await
+            .expect("the tool answers");
+        assert_eq!(result.is_error, Some(true), "{tool}: {result:?}");
+        let text = tool_text(&result);
+        assert!(
+            text.contains("a://Task") && text.contains("b://Task"),
+            "{tool} names both IRIs: {text}"
+        );
+    }
+
+    // Nothing was written: no instance typed against either class, no title.
+    let perspective = crate::perspectives::get_perspective(&uuid).expect("perspective");
+    for (predicate, target) in [
+        ("rdf://type", Some("a://Task")),
+        ("rdf://type", Some("b://Task")),
+        ("a://task_title", None),
+    ] {
+        let links = perspective
+            .get_links(&crate::types::LinkQuery {
+                predicate: Some(predicate.into()),
+                target: target.map(Into::into),
+                ..Default::default()
+            })
+            .await
+            .expect("get_links");
+        assert!(
+            links.is_empty(),
+            "{predicate} → {target:?} written by a refused tool: {links:?}"
+        );
+    }
+}
+
+/// With one class of the name the generated write resolves it and creates.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_generated_write_on_a_unique_name_still_creates() {
+    let (handler, uuid, _guard) = setup_with(&[("Task", TASK_A_SDNA)], true).await;
+    let created = handler
+        .handle_dynamic_tool(
+            "task_create",
+            Some(props(&[
+                ("perspective_id", json!(uuid)),
+                ("title", json!("t")),
+            ])),
+        )
+        .await
+        .expect("the tool answers");
+    assert_ne!(created.is_error, Some(true), "{}", tool_text(&created));
+    let out = parse(&tool_text(&created));
+    assert_eq!(out["created"], true, "{out}");
+    assert_eq!(out["class_name"], "Task", "{out}");
+}

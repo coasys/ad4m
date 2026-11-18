@@ -305,10 +305,13 @@ pub(crate) async fn resolve_class(
         Err(_) => {
             // Case-insensitive next — agents get the casing wrong often enough
             // that a hard failure is not worth it — on a name one class owns.
+            // A Unicode fold, like the lowercased lookups elsewhere:
+            // `Ärger` answers to `ärger`.
             let registry = perspective.shape_registry().unwrap_or_default();
+            let folded = class_name.to_lowercase();
             let matches: Vec<&ShapeSummary> = registry
                 .iter()
-                .filter(|s| s.name.eq_ignore_ascii_case(class_name))
+                .filter(|s| s.name.to_lowercase() == folded)
                 .collect();
             match matches.as_slice() {
                 [] => Err(InstanceError::UnknownClass {

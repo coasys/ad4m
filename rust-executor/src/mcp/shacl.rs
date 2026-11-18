@@ -232,28 +232,6 @@ fn shape_to_shacl_class(class_name: &str, shape: &ModelShape) -> ShaclClass {
     }
 }
 
-/// Find the original-cased class name from a lowercase name. The shape
-/// registry (`class_names`) is the only class lookup: a name that exists only
-/// as an `rdf://type ad4m://SubjectClass` link — without a registered shape —
-/// is not a class.
-pub async fn find_class_name(
-    perspective: &PerspectiveInstance,
-    class_name_lower: &str,
-) -> Option<String> {
-    let class_names = match perspective.class_names() {
-        Ok(names) => names,
-        Err(_) => return None,
-    };
-
-    for name in &class_names {
-        if name.to_lowercase() == class_name_lower {
-            return Some(name.clone());
-        }
-    }
-
-    None
-}
-
 /// Resolve a property name to its predicate URI for a given class.
 /// This is the common operation needed by MCP tools to read/write properties.
 /// Matching is case-insensitive because dynamic tool names are lowercased.

@@ -167,6 +167,22 @@ mod resolve_class {
         (p, ctx)
     }
 
+    /// A class with one required `title`, registered at `target_class`.
+    fn titled_sdna(target_class: &str) -> String {
+        format!(
+            r#"{{
+  "target_class": "{target_class}",
+  "constructor_actions": [
+    {{"action":"addLink","source":"this","predicate":"rdf://type","target":"{target_class}"}}
+  ],
+  "properties": [
+    {{"path":"{target_class}.title","name":"title","datatype":"xsd:string","min_count":1,"max_count":1,"writable":true,
+     "setter":[{{"action":"setSingleTarget","source":"this","predicate":"{target_class}.title","target":"value"}}]}}
+  ]
+}}"#
+        )
+    }
+
     /// Every key `class_keys()` gives resolves: a unique name, or a target
     /// class IRI when the name is shared.
     #[tokio::test(flavor = "multi_thread")]
@@ -221,6 +237,42 @@ mod resolve_class {
             .expect("a unique name resolves case-insensitively");
         assert_eq!(key, "Counted");
         assert_eq!(shape.target_class, "ns://Counted");
+    }
+
+    /// The fold is Unicode, not ASCII: `ns://Ärger` answers to `ärger`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_non_ascii_name_resolves_through_its_lowercase_fold() {
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        p.register_shape_json(&titled_sdna("ns://Ärger"), &ctx)
+            .await
+            .expect("register");
+        let (key, shape) = resolve_class(&p, "ärger")
+            .await
+            .expect("a unique name resolves through its lowercase fold");
+        assert_eq!(key, "Ärger");
+        assert_eq!(shape.target_class, "ns://Ärger");
+    }
+
+    /// `a://Ärger` and `b://Ärger` fold to one non-ASCII spelling: asked by
+    /// it, the refusal names both IRIs rather than resolving to one.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn two_names_folding_to_one_non_ascii_spelling_are_ambiguous() {
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        for iri in ["a://Ärger", "b://Ärger"] {
+            p.register_shape_json(&titled_sdna(iri), &ctx)
+                .await
+                .expect("register");
+        }
+        let error = resolve_class(&p, "ärger")
+            .await
+            .expect_err("two classes folding to one name resolves to neither");
+        let data = serde_json::to_value(&error).expect("serialize");
+        assert_eq!(data["kind"], "ambiguousClass", "{data}");
+        assert_eq!(
+            data["candidates"],
+            json!(["a://Ärger", "b://Ärger"]),
+            "{data}"
+        );
     }
 
     /// A class that exists only as an `rdf://type ad4m://SubjectClass` link
