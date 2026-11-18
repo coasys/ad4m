@@ -1396,9 +1396,10 @@ async fn run_interpretation_handler(
     // Mint-scope child links: same rule as AutoProcessor — only freshly
     // created bases get an extra `mintScope.id --predicate--> new_base` edge
     // so upserts of pre-existing instances don't get re-parented into the
-    // caller's scope. Written outside the interpretation batch (the watcher
-    // takes the same approach): if this write fails the base is orphaned,
-    // but a subsequent call will upsert by identity and re-attempt.
+    // caller's scope. Written after the slice commits (the watcher takes
+    // the same approach). A failed link write leaves that base unlinked:
+    // the source is consumed and the next pass's snapshot treats the base
+    // as pre-existing, so nothing retries the link.
     if let Some(mint_scope) = body.mint_scope.as_ref() {
         let created = crate::perspectives::auto_processor::watcher::partition_created(
             &bases,
