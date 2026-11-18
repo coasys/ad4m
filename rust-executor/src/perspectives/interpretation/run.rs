@@ -1486,14 +1486,21 @@ pub async fn run_interpretation_with_harness_and_model(
     })
 }
 
+/// The static AD4M read tools a pass sees, beside its classes' own: `instance_search`, to find
+/// a row of an earlier pass or source that the prompt does not show (#1804).
+const PASS_STATIC_READS: &[&str] = &["instance_search"];
+
 /// Which AD4M tools a pass sees: the read tools generated for `offered` classes, by exact
-/// name. Not a name prefix: offered classes come from graph state neighbourhood peers write,
-/// and a class named `List` would otherwise admit the static `list_perspectives`.
+/// name, and [`PASS_STATIC_READS`]. Not a name prefix: offered classes come from graph state
+/// neighbourhood peers write, and a class named `List` would otherwise admit the static
+/// `list_perspectives`.
 fn offered_class_tools(
     offered: &[crate::mcp::shacl::ShaclClass],
 ) -> impl Fn(&ToolSchema) -> bool + Send + Sync + 'static {
     let names = crate::mcp::tools::Ad4mMcpHandler::class_tool_names(offered);
-    move |t: &ToolSchema| is_read_only(t) && names.contains(&t.name)
+    move |t: &ToolSchema| {
+        is_read_only(t) && (names.contains(&t.name) || PASS_STATIC_READS.contains(&t.name.as_str()))
+    }
 }
 
 /// The MCP context of an interpretation pass on `perspective`. The pass runs in-process but
@@ -1889,7 +1896,10 @@ mod pass_session_tests {
                 .map(|c| c.to_uppercase().chain(chars).collect())
                 .unwrap_or_default();
             let admits = offered_class_tools(&[bare_class(&class_name)]);
-            for name in &statics {
+            for name in statics
+                .iter()
+                .filter(|n| !PASS_STATIC_READS.contains(&n.as_str()))
+            {
                 assert!(
                     !admits(&read_tool(name)),
                     "a class named `{class_name}` admits the static tool `{name}`"
@@ -1902,6 +1912,10 @@ mod pass_session_tests {
             assert!(admits(&read_tool(own)), "`{own}` is the class's own tool");
         }
         assert!(!admits(&read_tool("note_query")), "another class's tool");
+        assert!(
+            admits(&read_tool("instance_search")),
+            "the pass's static read"
+        );
     }
 
     // The pass reaches its own perspective, not the rest of its user's, even through a static
