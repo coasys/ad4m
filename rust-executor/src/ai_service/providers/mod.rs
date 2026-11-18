@@ -49,12 +49,11 @@ pub fn chat_client(endpoint: &Endpoint) -> Result<Box<dyn RemoteChat>> {
     Ok(match endpoint.kind.protocol() {
         ModelApiType::OpenAi => {
             // The client's own timer is the one a stream sees (`within_endpoint_limits`
-            // does not time a stream out). Use the endpoint's bound when it sets one,
-            // so a request waiting on a busy local server is not cut at the default.
-            let timeout = endpoint
-                .request_timeout_secs
-                .map(|secs| std::time::Duration::from_secs(u64::from(secs)))
-                .unwrap_or(http::CHAT_REQUEST_TIMEOUT);
+            // does not time a stream out). `request_timeout` is that bound: the
+            // endpoint's value when it sets one, including a value over 600 s, else
+            // the 600 s default. A second copy here would cap a stream again.
+            let timeout =
+                crate::ai_service::endpoints::request_timeout(endpoint, http::CHAT_REQUEST_TIMEOUT);
             Box::new(openai::OpenAiChat::with_timeout(
                 api_key,
                 base_url,
@@ -402,11 +401,22 @@ pub trait RemoteChat: Send + Sync {
     fn context_window_fallback_tokens(&self) -> Option<u32> {
         None
     }
+
+    /// The HTTP timeout this client was built with.
+    ///
+    /// A stream sees only this timer. `within_endpoint_limits` does not time a
+    /// stream out. The default is [`http::CHAT_REQUEST_TIMEOUT`] (600 s), which
+    /// is what Anthropic and Ollama use. An OpenAI-protocol client reports the
+    /// bound [`chat_client`] passed in.
+    fn client_timeout(&self) -> std::time::Duration {
+        http::CHAT_REQUEST_TIMEOUT
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::EndpointKind;
 
     fn url(s: &str) -> url::Url {
         url::Url::parse(s).expect("test URL parses")
@@ -443,6 +453,75 @@ mod tests {
                 client.supports_native_tools(),
                 "disagreement for {api_type:?}"
             );
+        }
+    }
+
+    /// Every kind whose chat client is the OpenAI one.
+    fn openai_protocol_kinds() -> [EndpointKind; 5] {
+        [
+            EndpointKind::LlamaServer,
+            EndpointKind::Vllm,
+            EndpointKind::OpenAi,
+            EndpointKind::OpenAiAudio,
+            EndpointKind::OpenAiCompatible,
+        ]
+    }
+
+    fn endpoint_with_timeout(kind: EndpointKind, timeout: Option<u32>) -> crate::types::Endpoint {
+        let mut endpoint =
+            crate::types::Endpoint::for_test("e", kind, "https://example.test/v1", "");
+        endpoint.request_timeout_secs = timeout;
+        endpoint
+    }
+
+    fn timeout_of(endpoint: &crate::types::Endpoint) -> std::time::Duration {
+        // The value the factory must use. The tests compare the built client to
+        // this, so a second copy of the rule cannot pass.
+        crate::ai_service::endpoints::request_timeout(endpoint, http::CHAT_REQUEST_TIMEOUT)
+    }
+
+    // A configured `request_timeout_secs` is the OpenAI chat client's bound.
+    #[test]
+    fn an_openai_chat_client_uses_a_configured_request_timeout() {
+        for kind in openai_protocol_kinds() {
+            let endpoint = endpoint_with_timeout(kind, Some(42));
+            let client = chat_client(&endpoint).unwrap();
+            assert_eq!(client.client_timeout(), timeout_of(&endpoint), "{kind:?}");
+            assert_eq!(
+                client.client_timeout(),
+                std::time::Duration::from_secs(42),
+                "{kind:?}"
+            );
+        }
+    }
+
+    // Unset: the route default, 600 s. Same helper as the configured case.
+    #[test]
+    fn an_openai_chat_client_uses_the_default_when_the_request_timeout_is_unset() {
+        for kind in openai_protocol_kinds() {
+            let endpoint = endpoint_with_timeout(kind, None);
+            let client = chat_client(&endpoint).unwrap();
+            assert_eq!(
+                timeout_of(&endpoint),
+                http::CHAT_REQUEST_TIMEOUT,
+                "{kind:?}"
+            );
+            assert_eq!(client.client_timeout(), timeout_of(&endpoint), "{kind:?}");
+        }
+    }
+
+    // Before c2721424f the client always waited 600 s, so 900 s was capped.
+    #[test]
+    fn an_openai_chat_client_keeps_a_request_timeout_over_600_seconds() {
+        for kind in openai_protocol_kinds() {
+            let endpoint = endpoint_with_timeout(kind, Some(900));
+            let client = chat_client(&endpoint).unwrap();
+            assert_eq!(
+                timeout_of(&endpoint),
+                std::time::Duration::from_secs(900),
+                "{kind:?}"
+            );
+            assert_eq!(client.client_timeout(), timeout_of(&endpoint), "{kind:?}");
         }
     }
 }

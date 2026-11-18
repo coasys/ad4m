@@ -30,6 +30,9 @@ const REQUEST_TIMEOUT: Duration = super::http::CHAT_REQUEST_TIMEOUT;
 
 pub struct OpenAiChat {
     http: reqwest::Client,
+    /// The bound given to `http`. reqwest does not return it. Tests read this
+    /// so a factory change is visible without waiting out the timer.
+    timeout: Duration,
     api_key: String,
     /// Fully resolved, e.g. `https://api.groq.com/openai/v1/chat/completions`.
     endpoint: String,
@@ -63,6 +66,7 @@ impl OpenAiChat {
             http: super::http::credentialed_http(timeout)
                 .build()
                 .expect("the HTTP client builds"),
+            timeout,
             api_key: api_key.to_string(),
             endpoint: super::http::versioned_endpoint(base_url, "chat/completions"),
             kind,
@@ -392,6 +396,10 @@ impl StreamState {
 impl RemoteChat for OpenAiChat {
     fn supports_native_tools(&self) -> bool {
         true
+    }
+
+    fn client_timeout(&self) -> Duration {
+        self.timeout
     }
 
     async fn chat(&self, request: ChatRequest) -> Result<ChatReply> {
