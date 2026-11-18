@@ -2,9 +2,14 @@
 
 export type RuntimeImportPerspectiveResult = { 
 /**
- * Links the bulk loader stored.
+ * Links the load wrote.
  */
 imported: number, 
+/**
+ * Links a tombstone ends — a stored one or one earlier in the file:
+ * not written.
+ */
+covered: number, 
 /**
  * Links refused: in the store's own metadata vocabulary.
  */

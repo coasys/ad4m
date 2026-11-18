@@ -103,6 +103,10 @@ mod join_tests;
 #[path = "perspective_instance_pending_diffs_tests.rs"]
 mod pending_diffs_tests;
 
+#[cfg(test)]
+#[path = "perspective_instance_import_tests.rs"]
+mod import_tests;
+
 static MAX_COMMIT_BYTES: usize = 3_000_000; //3MiB
 static MAX_PENDING_DIFFS_COUNT: usize = 150;
 static MAX_PENDING_SECONDS: u64 = 3;

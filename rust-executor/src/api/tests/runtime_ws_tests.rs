@@ -261,7 +261,7 @@ async fn operator_imports_a_perspective_snapshot_into_the_store() {
         )
         .await
         .unwrap();
-    assert_eq!(result, json!({ "imported": 3, "skipped": 0 }));
+    assert_eq!(result, json!({ "imported": 3, "covered": 0, "skipped": 0 }));
 
     let stored = perspective
         .get_links(&crate::types::LinkQuery {

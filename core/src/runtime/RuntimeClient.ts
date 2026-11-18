@@ -1,7 +1,7 @@
 import {ApiClient, CallOptions } from '../apiClient'
 import { Perspective, PerspectiveExpression } from "../perspectives/Perspective"
 import { RuntimeInfo, SentMessage, NotificationInput, NotificationUpdate, Notification, ImportResult, UserStatistics } from "./RuntimeTypes"
-import type { HostRate, LogTail, RuntimeConfig, SetConfigResult, UnytVersionInfo } from "../generated/api"
+import type { HostRate, LogTail, RuntimeConfig, RuntimeImportPerspectiveResult, SetConfigResult, UnytVersionInfo } from "../generated/api"
 import { LanguageMeta } from "../language/LanguageMeta"
 
 export class RuntimeClient {
@@ -166,7 +166,7 @@ export class RuntimeClient {
         return this.#apiClient.call('runtime.exportData', { type: "perspective", perspectiveUuid: uuid, filePath })
     }
 
-    async importPerspective(uuid: string, filePath: string): Promise<{ imported: number, skipped: number }> {
+    async importPerspective(uuid: string, filePath: string): Promise<RuntimeImportPerspectiveResult> {
         const result = await this.#apiClient.call('runtime.importData', { type: "perspective", perspectiveUuid: uuid, filePath })
         if ('imported' in result) return result
         throw new Error('runtime.importData answered a db import for type "perspective"')

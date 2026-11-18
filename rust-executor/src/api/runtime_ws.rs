@@ -216,6 +216,7 @@ async fn import_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
                 .map_err(|e| WsRpcError::internal(e.to_string()))?;
             Ok(serde_json::to_value(RuntimeImportPerspectiveResult {
                 imported: stats.imported,
+                covered: stats.covered,
                 skipped: stats.skipped,
             })?)
         }
@@ -780,7 +781,9 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     // An import writes rows as they are in the file: notifications with their `granted` flag
     // and `owner_did`, users with their password hashes — or, for `type: "perspective"`,
     // every link of a snapshot into any perspective on the executor. Only the operator
-    // imports, as only the operator grants notifications.
+    // imports, as only the operator grants notifications. A perspective import yields the
+    // same result as writing each link through the normal write path, in file order,
+    // except that nothing is sent to the link language and no per-link diff is published.
     map.method::<ImportRequest, RuntimeImportResult>("runtime.importData", import_data)
         .long()
         .guard(Guard::Operator);
@@ -1048,8 +1051,11 @@ pub enum RuntimeImportResult {
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct RuntimeImportPerspectiveResult {
-    /// Links the bulk loader stored.
+    /// Links the load wrote.
     pub imported: usize,
+    /// Links a tombstone ends — a stored one or one earlier in the file:
+    /// not written.
+    pub covered: usize,
     /// Links refused: in the store's own metadata vocabulary.
     pub skipped: usize,
 }
