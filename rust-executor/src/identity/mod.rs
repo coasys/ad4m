@@ -673,6 +673,7 @@ async fn keep_local_all(cache: &KelCache, scids: &[String]) {
 /// The module, once [`init`] ran.
 pub fn service() -> Result<Arc<IdentityService>, WsRpcError> {
     SERVICE.get().cloned().ok_or_else(|| WsRpcError {
+        data: None,
         code: 503,
         message: "unavailable: the identity module has not started".into(),
     })

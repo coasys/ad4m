@@ -204,7 +204,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-266 methods: Cap 87, CapAnyPointer 1, Executor 48, Open 10, Operator 42, Owns 74, UserOrOperator 4. Local only (the operator on this machine): 17.
+271 methods: Cap 87, CapAnyPointer 1, Executor 48, Open 10, Operator 42, Owns 79, UserOrOperator 4. Local only (the operator on this machine): 17.
 
 | Method | Guard |
 |---|---|
@@ -358,6 +358,11 @@ the guard checked:
 | `perspective.getShaclNames` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.getShaclTargetClass` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.getSubjectData` | `Owns(Perspective uuid, perspective:READ)` |
+| `perspective.instanceAddToCollection` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.instanceCreate` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.instanceRemove` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.instanceRemoveFromCollection` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.instanceUpdate` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.interpretationOverlays` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.linkMutations` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.mintFlowReceipt` | `Owns(Perspective uuid, perspective:UPDATE)` |

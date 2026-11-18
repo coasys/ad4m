@@ -271,6 +271,7 @@ impl Refusal {
         WsRpcError {
             code: self.status,
             message: self.message.clone(),
+            data: None,
         }
     }
 }
@@ -435,6 +436,7 @@ pub fn classify(did: &str) -> Result<Option<BotRow>, WsRpcError> {
                 "{BOTS_UNAVAILABLE}: the bot registry did not load, so no managed agent's \
                  session is served until the executor restarts"
             ),
+            data: None,
         });
     }
     Ok(registered(did))
