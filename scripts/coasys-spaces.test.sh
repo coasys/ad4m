@@ -253,7 +253,8 @@ test_llm_check() {
     serve_models "llama3:8b" "gemma3:12b"
     COASYS_SPACES_LLM_MODEL=gemma3:12b bash "$SCRIPT" llm-check >/dev/null 2>&1 || fail "llm-check failed with the model served"
     out="$(COASYS_SPACES_LLM_MODEL=gemma3:27b bash "$SCRIPT" llm-check 2>&1)" && fail "llm-check passed without the model"
-    grep -qF "ollama pull gemma3:27b" <<<"$out" || fail "a missing model does not say what to pull: $out"
+    grep -qF "systemctl --user status llama-qwen27b" <<<"$out" || fail "a missing model does not name llama-qwen27b: $out"
+    grep -qF "ollama pull" <<<"$out" && fail "a missing model still says to ollama pull: $out"
     kill "$SERVER"
     wait "$SERVER" 2>/dev/null
     # Ollama's /v1/models lists an untagged model as `<name>:latest`; the bare name is that model.
@@ -266,6 +267,7 @@ test_llm_check() {
     wait "$SERVER" 2>/dev/null
     out="$(bash "$SCRIPT" llm-check 2>&1)" && fail "llm-check passed with no server"
     grep -qF "does not answer" <<<"$out" || fail "no server is not reported as such: $out"
+    grep -qF "systemctl --user status llama-qwen27b" <<<"$out" || fail "no server does not name llama-qwen27b: $out"
     COASYS_SPACES_TIER=stub bash "$SCRIPT" llm-check >/dev/null 2>&1 || fail "the stub tier needs no model server"
     unset COASYS_SPACES_LLM_BASE_URL
 }
