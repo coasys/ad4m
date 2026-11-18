@@ -450,19 +450,26 @@ mod tests {
     #[test]
     fn a_link_with_a_bare_name_is_read_whole() {
         // `root` is no absolute IRI: VALUES cannot hold it without a base.
-        for link in [
-            body("root"),
+        // A bare source, restricted through the subject variable:
+        assert_eq!(
+            delta_query(BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY, &[body("root")]),
+            DeltaRead::Full
+        );
+        // A bare target, restricted through the object variable; the same
+        // query with an absolute target is read by its terms.
+        let q = "SELECT ?o WHERE { <msg://1> <ns://to> ?o }";
+        let to = |target: &str| {
             added(
                 "msg://1",
-                "ns://body",
-                Term::NamedNode(NamedNode::new_unchecked("root")),
-            ),
-        ] {
-            assert_eq!(
-                delta_query(BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY, &[link]),
-                DeltaRead::Full
-            );
-        }
+                "ns://to",
+                Term::NamedNode(NamedNode::new_unchecked(target)),
+            )
+        };
+        assert!(matches!(
+            delta_query(q, &[to("msg://2")]),
+            DeltaRead::Query(_)
+        ));
+        assert_eq!(delta_query(q, &[to("root")]), DeltaRead::Full);
     }
 
     #[test]
