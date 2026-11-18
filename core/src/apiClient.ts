@@ -11,16 +11,22 @@ export interface WsEvent {
 
 /** Error thrown by ApiClient when an RPC call fails. */
 export class RpcError extends Error {
-    /** Error code (maps to HTTP status semantics: 400, 401, 403, 404, 500). */
+    /** Error code (maps to HTTP status semantics: 400, 401, 403, 404, 422, 500). */
     readonly status: number
     /** Raw error message from server. */
     readonly body: string
+    /**
+     * Structured detail the executor attached (`error.data`), when it did: e.g. the
+     * `InstanceError` of a refused `perspective.instance*` write.
+     */
+    readonly data?: unknown
 
-    constructor(status: number, body: string) {
+    constructor(status: number, body: string, data?: unknown) {
         super(`RPC error ${status}: ${body}`)
         this.name = "RpcError"
         this.status = status
         this.body = body
+        this.data = data
     }
 }
 
@@ -383,7 +389,7 @@ export class ApiClient {
             if (parsed.type === undefined) {
                 const pending = this._pendingCalls.get(parsed.id as string)
                 if (!pending) return // late reply to a timed-out or aborted call, or a cancel ack
-                const error = parsed.error as { code?: number; message?: string } | undefined
+                const error = parsed.error as { code?: number; message?: string; data?: unknown } | undefined
                 if (!error) {
                     // A socket-bound call's reply on a socket `setToken` replaced names
                     // state that dies when this socket does: refuse it, so the caller's
@@ -395,7 +401,7 @@ export class ApiClient {
                     }
                     return
                 }
-                const rpcError = new RpcError(error.code ?? 500, error.message ?? 'Unknown error')
+                const rpcError = new RpcError(error.code ?? 500, error.message ?? 'Unknown error', error.data)
                 // Read the socket's standing before the settle lets a drained superseded one go.
                 const superseded = this._superseded.has(ws)
                 pending.reject(rpcError)
