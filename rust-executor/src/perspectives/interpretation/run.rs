@@ -680,6 +680,8 @@ pub async fn run_interpretation_with_strategy_and_model(
             base_prefix,
             embed_model.as_deref(),
             Compact::Yes,
+            // The answer always goes through `resolve_already_present*`.
+            true,
         )
         .await;
         let prompt = build_interpretation_input_showing(
@@ -688,7 +690,7 @@ pub async fn run_interpretation_with_strategy_and_model(
             &shown.shown,
             &active_flows,
             &speaker_names,
-            Some((shown.rows_shown, shown.rows_total)),
+            Some(shown.counts(true)),
         );
 
         let service = crate::ai_service::AIService::global_instance()
@@ -1145,6 +1147,7 @@ pub async fn run_interpretation_with_harness_and_model(
         base_prefix,
         None,
         Compact::No,
+        dedup_on_drain,
     )
     .await;
     let prompt = build_interpretation_input_showing(
@@ -1153,7 +1156,7 @@ pub async fn run_interpretation_with_harness_and_model(
         &shown.shown,
         &active_flows,
         &speaker_names,
-        Some((shown.rows_shown, shown.rows_total)),
+        Some(shown.counts(dedup_on_drain)),
     );
 
     // Build per-class propose shapes from the perspective's SHACL classes,
