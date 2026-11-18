@@ -281,9 +281,12 @@ pub async fn existing_instance_context(
             .map(|p| p.name.clone())
             .collect();
 
-        let mut requested = Vec::with_capacity(1 + scalar_names.len());
+        let mut requested = Vec::with_capacity(2 + scalar_names.len());
         requested.push(idp_name.clone());
         requested.extend(scalar_names.iter().cloned());
+        // The newest link's timestamp, for the recency order of the prompt's
+        // `existing` rows (`existing_budget`). Kept apart from `properties`.
+        requested.push("updatedAt".to_string());
         // Build the model-query as structured JSON so an optional `scope`
         // (a `Scope`) can be spliced in as the query's `parent` filter —
         // constraining the existing-instance set to a sub-graph/tree rather
@@ -343,6 +346,11 @@ pub async fn existing_instance_context(
                             title: title.to_string(),
                             class: class.clone(),
                             properties,
+                            updated_at: inst
+                                .get("updatedAt")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string(),
                         })
                     })
                     .collect()

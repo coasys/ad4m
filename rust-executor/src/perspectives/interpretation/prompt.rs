@@ -844,6 +844,7 @@ mod tests {
             title: "Draft the design doc".to_string(),
             class: "Task".to_string(),
             properties: BTreeMap::new(),
+            updated_at: String::new(),
         }]);
         let input = build_interpretation_input(
             &shapes,
@@ -908,6 +909,7 @@ mod tests {
             title: "Payments infrastructure".to_string(),
             class: "ConversationSubgroup".to_string(),
             properties,
+            updated_at: String::new(),
         }]);
         let input = build_interpretation_input(
             &shapes,

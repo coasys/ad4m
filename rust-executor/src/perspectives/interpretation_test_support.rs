@@ -944,6 +944,7 @@ pub(crate) fn existing_ids(ids: &[&str]) -> ExistingInstances {
                 title: String::new(),
                 class: String::new(),
                 properties: BTreeMap::new(),
+                updated_at: String::new(),
             })
             .collect(),
     )
@@ -962,6 +963,7 @@ pub(crate) fn existing_by_identity(entries: &[(&str, &str)]) -> ExistingInstance
                 title: (*title).to_string(),
                 class: (*class).to_string(),
                 properties: BTreeMap::new(),
+                updated_at: String::new(),
             })
             .collect(),
     )

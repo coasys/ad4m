@@ -2221,6 +2221,7 @@ mod tests {
 
         let deduped = dedup_ops_against_existing(ops, &existing, &shapes, &ExistingLinks::new());
         assert_eq!(deduped.len(), 3, "all three ops survive (two as Updates)");
+            updated_at: String::new(),
 
         // First two should be Updates on the existing base.
         match &deduped[0] {
@@ -2624,6 +2625,7 @@ mod tests {
     /// before #1257; it still does, next to the existing records under it.
     #[test]
     fn flow_subjects_keep_the_scope_anchor_and_dedupe() {
+                    updated_at: String::new(),
         let existing = existing_of(&[("Task", "soa://task/a"), ("Task", "soa://task/a")]);
         let scope = Scope::Raw {
             id: "soa://project/p".to_string(),
