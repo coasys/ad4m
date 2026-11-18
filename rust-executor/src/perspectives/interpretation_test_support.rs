@@ -4,18 +4,15 @@
 //! e2e suite in `interpretation_e2e.rs` share one set of fixtures + one harness
 //! (DRY). Nothing here is compiled outside `cfg(test)`.
 //!
-//! The real-LLM harness targets the host's llama-server (OpenAI-shaped `/v1`,
-//! `EndpointKind::LlamaServer`), env-overridable via `INTERPRETATION_E2E_BASE_URL` /
-//! `INTERPRETATION_E2E_MODEL` / `INTERPRETATION_E2E_ENDPOINT_KIND` /
-//! `INTERPRETATION_E2E_API_KEY` / `INTERPRETATION_E2E_MAX_NUM_CTX` /
-//! `INTERPRETATION_E2E_REQUEST_TIMEOUT_SECS`. The defaults are staging's server
-//! at `http://127.0.0.1:12460/v1`, model `qwen3.8-27b-ud-q4_k_m`. That server
-//! is started with `--jinja`, so tool definitions come back as `tool_calls`.
-//! The model flag `native_tools` is set: an OpenAI-shaped endpoint leaves it
-//! off otherwise, and the prompt-injected path is what Ollama's Qwen parser
-//! answers with a 500. Embeddings stay on Ollama's `nomic-embed-text`
-//! (`INTERPRETATION_EMBED_*`, default `http://127.0.0.1:11434/v1`): the chat
-//! server does not serve them.
+//! The real-LLM harness targets Ollama's **native** `/api/chat` endpoint
+//! (`ModelApiType::Ollama`), env-overridable via `INTERPRETATION_E2E_BASE_URL` /
+//! `INTERPRETATION_E2E_MODEL` / `INTERPRETATION_E2E_API_KEY` /
+//! `INTERPRETATION_E2E_MAX_NUM_CTX`; the defaults hit Ollama at
+//! `localhost:11434` (directly on the CI runner = Marvin, or over an SSH
+//! tunnel from a dev box). The OpenAI-compatible `/v1` endpoint cannot carry
+//! native tool calls the way the harness needs them — the model answers with
+//! `<tool_call>` text and Ollama's tool parser fails the request outright —
+//! and it ignores `options.num_ctx`.
 
 #![cfg(test)]
 
@@ -265,65 +262,9 @@ pub(crate) async fn setup_perspective_no_llm(
     (perspective, shapes, ctx)
 }
 
-// ---- real-LLM harness (llama-server /v1) ------------------------------------
+// ---- real-LLM harness (Ollama native /api/chat) ----------------------------
 
-/// The chat server's one slot (`-c 65536`). A request that fills it is refused.
-const E2E_SERVER_SLOT_TOKENS: u32 = 65_536;
-/// Default context budget: the slot minus room for the chat template and the
-/// server's reasoning budget (2048). Requests stay under the slot.
-const E2E_MAX_NUM_CTX_DEFAULT: u32 = E2E_SERVER_SLOT_TOKENS - 8_192;
-/// One completion may wait behind another request on the single slot, then
-/// generate. Long enough for a few minutes of queueing, not unbounded.
-const E2E_REQUEST_TIMEOUT_DEFAULT: u32 = 900;
-
-fn e2e_max_num_ctx() -> u32 {
-    let requested = std::env::var("INTERPRETATION_E2E_MAX_NUM_CTX")
-        .ok()
-        .and_then(|v| v.parse::<u32>().ok())
-        .filter(|n| *n > 0)
-        .unwrap_or(E2E_MAX_NUM_CTX_DEFAULT);
-    if requested >= E2E_SERVER_SLOT_TOKENS {
-        eprintln!(
-            "[e2e] INTERPRETATION_E2E_MAX_NUM_CTX={requested} is not under the llama-server \
-             slot ({E2E_SERVER_SLOT_TOKENS}); using {E2E_MAX_NUM_CTX_DEFAULT}"
-        );
-        E2E_MAX_NUM_CTX_DEFAULT
-    } else {
-        requested
-    }
-}
-
-fn e2e_request_timeout_secs() -> u32 {
-    std::env::var("INTERPRETATION_E2E_REQUEST_TIMEOUT_SECS")
-        .ok()
-        .and_then(|v| v.parse::<u32>().ok())
-        .filter(|n| *n > 0)
-        .unwrap_or(E2E_REQUEST_TIMEOUT_DEFAULT)
-        .clamp(60, 1_800)
-}
-
-/// `LLAMA_SERVER` is the kind whose client sends `tools` as definitions and
-/// `chat_template_kwargs.enable_thinking`. llama-server was started with
-/// `--jinja`, which is what turns those definitions into native tool calls.
-fn e2e_llm_kind() -> crate::types::EndpointKind {
-    use crate::types::EndpointKind::{LlamaServer, Ollama, OpenAi, OpenAiCompatible, Vllm};
-    match std::env::var("INTERPRETATION_E2E_ENDPOINT_KIND")
-        .unwrap_or_else(|_| "LLAMA_SERVER".into())
-        .as_str()
-    {
-        "LLAMA_SERVER" => LlamaServer,
-        "OLLAMA" => Ollama,
-        "OPEN_AI" => OpenAi,
-        "OPEN_AI_COMPATIBLE" => OpenAiCompatible,
-        "VLLM" => Vllm,
-        other => panic!(
-            "INTERPRETATION_E2E_ENDPOINT_KIND={other} is not a chat endpoint kind. \
-             llama-server --jinja wants LLAMA_SERVER"
-        ),
-    }
-}
-
-/// Stand up `AIService` with the llama-server default model on top of
+/// Stand up `AIService` with the Ollama-backed default model on top of
 /// [`setup_perspective_no_llm`]. Returns everything a test needs to drive
 /// interpretation (optionally after pre-seeding the perspective).
 pub(crate) async fn setup_interpretation_e2e(
@@ -356,28 +297,27 @@ pub(crate) async fn setup_interpretation_e2e(
         .await
         .expect("AIService global instance");
     let base_url = std::env::var("INTERPRETATION_E2E_BASE_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:12460/v1".into());
-    let model = std::env::var("INTERPRETATION_E2E_MODEL")
-        .unwrap_or_else(|_| "qwen3.8-27b-ud-q4_k_m".into());
-    let kind = e2e_llm_kind();
-    let max_num_ctx = e2e_max_num_ctx();
-    eprintln!(
-        "[e2e] interpretation against model '{model}' at {base_url} ({kind:?}, \
-         max_num_ctx={max_num_ctx})"
-    );
-    // `native_tools: Some(true)`: LlamaServer speaks OpenAI's wire, and an
-    // OpenAI-shaped model sends tools only when the flag says so. Without it
-    // the harness writes `<tool_call>` into the prompt. llama-server `--jinja`
-    // honours the definitions and returns `tool_calls`. `max_num_ctx` is the
-    // budget the executor sizes the prompt to; it is not sent to the server
-    // (the slot is fixed at 65536) and stays under that slot.
+        .unwrap_or_else(|_| "http://localhost:11434/v1".into());
+    let model =
+        std::env::var("INTERPRETATION_E2E_MODEL").unwrap_or_else(|_| "qwen3.8-27b-48k".into());
+    eprintln!("[e2e] interpretation against model '{model}' at {base_url}");
+    // The native Ollama endpoint: tools go to `/api/chat` as definitions. On an
+    // OpenAI-shaped endpoint they are written into the prompt, and Ollama 0.40's Qwen
+    // parser answers the `<tool_call>` text with a 500. The provider sends the tag's
+    // Modelfile `num_ctx` (49152 on qwen3.8-27b-48k; its base window is 262144). The cap
+    // keeps any other model at the staging server's 49152-token residency too: a request
+    // at another `num_ctx` makes Ollama reload the model, a ~3 min reload per ping-pong.
     let endpoint = e2e_endpoint(
         "e2e-llm",
-        kind,
+        crate::types::EndpointKind::Ollama,
         &base_url,
-        &std::env::var("INTERPRETATION_E2E_API_KEY").unwrap_or_default(),
-        Some(max_num_ctx),
-        Some(e2e_request_timeout_secs()),
+        &std::env::var("INTERPRETATION_E2E_API_KEY").unwrap_or_else(|_| "ollama".into()),
+        Some(
+            std::env::var("INTERPRETATION_E2E_MAX_NUM_CTX")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(49_152),
+        ),
     );
     let model_id = service
         .add_model(ModelInput {
@@ -385,7 +325,7 @@ pub(crate) async fn setup_interpretation_e2e(
             model_type: ModelType::Llm,
             endpoint_id: endpoint.id,
             remote_model: model,
-            native_tools: Some(true),
+            native_tools: None,
         })
         .await
         .expect("add_model");
@@ -399,19 +339,14 @@ pub(crate) async fn setup_interpretation_e2e(
 }
 
 /// Register (and load) the `AIService` embedding model the `DedupStrategy::Semantic` path
-/// embeds identity strings with.
+/// embeds identity strings with. Its name is the one `semantic_from_env` passes to `embed`
+/// (`INTERPRETATION_EMBED_MODEL`, default `interpretation-embed`).
 ///
-/// `INTERPRETATION_EMBED_MODEL` is both the name `semantic_from_env` looks up and the
-/// remote model id. Set, it is the Ollama tag (`nomic-embed-text` in CI). Unset, the
-/// registered name is `interpretation-embed` and the remote id is `nomic-embed-text`.
-/// Callers that name the model themselves must use `semantic_from_env`, or a set
-/// variable registers a model they do not look up and dedup compares strings.
-///
-/// The endpoint is OpenAI-shaped at `INTERPRETATION_EMBED_BASE_URL` (default Ollama at
-/// `http://127.0.0.1:11434/v1`). It does not follow the LLM URL: llama-server is a
-/// chat slot and does not embed. `INTERPRETATION_EMBED_API_KEY` when the endpoint
-/// wants one. Only the semantic-dedup e2e needs it, so it isn't part of the
-/// default setup.
+/// The model is that remote model (the same variable, default `nomic-embed-text`) on an
+/// OpenAI-shaped endpoint at `INTERPRETATION_EMBED_BASE_URL`, else at the LLM's
+/// `INTERPRETATION_E2E_BASE_URL` (Ollama serves both), with `INTERPRETATION_EMBED_API_KEY`
+/// (default `ollama`, as the LLM's). Only the one semantic-dedup e2e needs it, so it isn't
+/// part of the default setup.
 pub(crate) async fn register_interpretation_embedding_model() {
     use crate::types::{ModelInput, ModelType};
     let service = crate::ai_service::AIService::global_instance()
@@ -419,15 +354,15 @@ pub(crate) async fn register_interpretation_embedding_model() {
         .expect("AIService global instance");
     let model = std::env::var("INTERPRETATION_EMBED_MODEL").ok();
     let base_url = std::env::var("INTERPRETATION_EMBED_BASE_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:11434/v1".into());
+        .or_else(|_| std::env::var("INTERPRETATION_E2E_BASE_URL"))
+        .unwrap_or_else(|_| "http://localhost:11434/v1".into());
     let remote_model = model.clone().unwrap_or_else(|| "nomic-embed-text".into());
     eprintln!("[e2e] semantic dedup embeds with '{remote_model}' at {base_url}");
     let endpoint = e2e_endpoint(
         "e2e-embed",
         crate::types::EndpointKind::OpenAiCompatible,
         &base_url,
-        &std::env::var("INTERPRETATION_EMBED_API_KEY").unwrap_or_default(),
-        None,
+        &std::env::var("INTERPRETATION_EMBED_API_KEY").unwrap_or_else(|_| "ollama".into()),
         None,
     );
     service
@@ -442,28 +377,25 @@ pub(crate) async fn register_interpretation_embedding_model() {
         .expect("add_model(Embedding)");
 }
 
-/// The `kind` endpoint at `base_url` with `api_key`, `max_num_ctx` and
-/// `request_timeout_secs`: the one saved already, else a new one named `name`,
-/// saved without a probe. The LLM is llama-server; embeddings are a separate
-/// OpenAI-shaped endpoint on Ollama.
+/// The `kind` endpoint at `base_url` with `api_key` and `max_num_ctx`: the one saved
+/// already, else a new one named `name`, saved without a probe. The LLM and the embedding
+/// model share an Ollama but not an endpoint: the LLM's is native Ollama, the embedding
+/// model's OpenAI-shaped.
 fn e2e_endpoint(
     name: &str,
     kind: crate::types::EndpointKind,
     base_url: &str,
     api_key: &str,
     max_num_ctx: Option<u32>,
-    request_timeout_secs: Option<u32>,
 ) -> crate::types::Endpoint {
     let mut endpoint = crate::types::Endpoint::for_test(name, kind, base_url, api_key);
     endpoint.max_num_ctx = max_num_ctx;
-    endpoint.request_timeout_secs = request_timeout_secs;
     let saved = Ad4mDb::with_global_instance(|db| db.get_endpoints())
         .expect("read the endpoints")
         .into_iter()
         .find(|e| {
             e.kind == endpoint.kind
                 && e.max_num_ctx == endpoint.max_num_ctx
-                && e.request_timeout_secs == endpoint.request_timeout_secs
                 && e.base_url == endpoint.base_url
                 && e.api_key.expose_for_compare(api_key)
         });

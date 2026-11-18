@@ -30,10 +30,10 @@ import { startAgent } from "../../helpers/index.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-// LLM E2E gate. Skipped unless `LLM_E2E=1`. The nightly `llm-e2e` job sets
-// that and runs this file with the rest of `test-model`. The file writes
-// graph links by hand and does not call a model. Run locally with
-// `LLM_E2E=1`, or the umbrella `./scripts/run-llm-e2e.sh` at the repo root.
+// LLM E2E gate — this suite drives the executor's real LLM path. Skipped by
+// default (unset `LLM_E2E`); the nightly `llm-e2e` workflow on `dev` runs it
+// against Marvin's Ollama. Run locally with `LLM_E2E=1`, or the umbrella
+// `./scripts/run-llm-e2e.sh` at the repo root.
 const describeIfLLM: Mocha.SuiteFunction = (process.env.LLM_E2E === "1"
   ? describe
   : (describe.skip as unknown as Mocha.SuiteFunction));

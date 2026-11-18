@@ -1,8 +1,8 @@
 //! Real-LLM end-to-end tests for the tool-calling harness dispatch of
 //! generic interpretation.
 //!
-//! Sister suite to `interpretation_e2e.rs`. Same fixtures, same llama-server
-//! endpoint (see that file's header for env-overrides) — but
+//! Sister suite to `interpretation_e2e.rs`. Same fixtures, same Ollama
+//! endpoint (see that file's header for env-overrides + tunnel notes) — but
 //! these drive the harness path (`run_interpretation_with_harness_and_model`)
 //! rather than the single-shot JSON-blob path.
 //!
@@ -23,7 +23,7 @@
 //!      contract Nico surfaced in the 2026-08-24 review
 //!
 //! Gated behind `#[ignore = "llm-e2e"]` — regular CI skips them; the nightly
-//! `llm-e2e` workflow runs them against the host's llama-server.
+//! `llm-e2e` workflow on `dev` runs them all against Marvin's local Ollama.
 //!
 //! Run this suite locally:
 //!   cargo test --release --lib perspectives::interpretation_harness_e2e \

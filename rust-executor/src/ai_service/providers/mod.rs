@@ -47,21 +47,7 @@ pub fn chat_client(endpoint: &Endpoint) -> Result<Box<dyn RemoteChat>> {
     let api_key = endpoint.api_key.expose();
     let base_url = endpoint.base_url.clone();
     Ok(match endpoint.kind.protocol() {
-        ModelApiType::OpenAi => {
-            // The client's own timer is the one a stream sees (`within_endpoint_limits`
-            // does not time a stream out). Use the endpoint's bound when it sets one,
-            // so a request waiting on a busy local server is not cut at the default.
-            let timeout = endpoint
-                .request_timeout_secs
-                .map(|secs| std::time::Duration::from_secs(u64::from(secs)))
-                .unwrap_or(http::CHAT_REQUEST_TIMEOUT);
-            Box::new(openai::OpenAiChat::with_timeout(
-                api_key,
-                base_url,
-                endpoint.kind,
-                timeout,
-            ))
-        }
+        ModelApiType::OpenAi => Box::new(openai::OpenAiChat::new(api_key, base_url, endpoint.kind)),
         ModelApiType::Anthropic => Box::new(anthropic::AnthropicChat::new(api_key, base_url)),
         ModelApiType::Ollama => Box::new(ollama::OllamaChat::new(
             api_key,
