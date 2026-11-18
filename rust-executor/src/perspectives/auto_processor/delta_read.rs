@@ -23,7 +23,7 @@
 
 use crate::perspectives::sparql_store::is_link_metadata;
 use crate::perspectives::write_log::AddedLink;
-use oxigraph::model::Term;
+use oxigraph::model::{NamedNode, Term};
 use spargebra::algebra::{Expression, GraphPattern};
 use spargebra::term::{GroundTerm, NamedNodePattern, TermPattern, TriplePattern};
 use spargebra::{Query, SparqlParser};
@@ -287,11 +287,11 @@ fn restriction(
         TermPattern::Variable(subject) => {
             let mut values = Vec::new();
             for link in added.iter().filter(direct) {
-                values.push(GroundTerm::NamedNode(link.source.clone()));
+                values.push(absolute(&link.source)?);
             }
             if reifier_fact {
                 for link in added {
-                    values.push(GroundTerm::NamedNode(link.reifier.clone()));
+                    values.push(absolute(&link.reifier)?);
                 }
             }
             Some((!values.is_empty()).then(|| (subject.clone(), dedup(values))))
@@ -318,8 +318,8 @@ fn restriction(
                     let values = matching
                         .iter()
                         .filter(|l| term_matches(object, &l.target))
-                        .map(|l| GroundTerm::NamedNode(l.predicate.clone()))
-                        .collect::<Vec<_>>();
+                        .map(|l| absolute(&l.predicate))
+                        .collect::<Option<Vec<_>>>()?;
                     Some((!values.is_empty()).then(|| (p.clone(), dedup(values))))
                 }
                 (object, NamedNodePattern::NamedNode(_)) if is_ground(object) => {
@@ -356,12 +356,22 @@ fn ground_terms<'a>(terms: impl Iterator<Item = &'a Term>) -> Option<Vec<GroundT
     let mut out = Vec::new();
     for term in terms {
         out.push(match term {
-            Term::NamedNode(n) => GroundTerm::NamedNode(n.clone()),
+            Term::NamedNode(n) => absolute(n)?,
             Term::Literal(l) => GroundTerm::Literal(l.clone()),
             _ => return None,
         });
     }
     Some(dedup(out))
+}
+
+/// `node` as a VALUES term, or `None` when it is not an absolute IRI. The
+/// store keeps a link's terms as written, so a bare name such as `root` can
+/// be a node; the delta query is parsed without a base IRI, which rejects
+/// it. `None` makes the caller read the whole transcript instead.
+fn absolute(node: &NamedNode) -> Option<GroundTerm> {
+    NamedNode::new(node.as_str())
+        .ok()
+        .map(GroundTerm::NamedNode)
 }
 
 fn dedup(mut values: Vec<GroundTerm>) -> Vec<GroundTerm> {
@@ -435,6 +445,24 @@ mod tests {
         assert!(q.contains("<link://msg://1/ns://body>"), "{q}");
         assert!(q.contains("ORDER BY"), "the query's order is kept: {q}");
         crate::perspectives::sparql_store::validate_readonly_query(&q).expect("valid SPARQL");
+    }
+
+    #[test]
+    fn a_link_with_a_bare_name_is_read_whole() {
+        // `root` is no absolute IRI: VALUES cannot hold it without a base.
+        for link in [
+            body("root"),
+            added(
+                "msg://1",
+                "ns://body",
+                Term::NamedNode(NamedNode::new_unchecked("root")),
+            ),
+        ] {
+            assert_eq!(
+                delta_query(BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY, &[link]),
+                DeltaRead::Full
+            );
+        }
     }
 
     #[test]
