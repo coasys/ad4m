@@ -1955,8 +1955,9 @@ impl SparqlStore {
                 continue;
             };
             // A reifier's annotations can carry the same literal; they are
-            // not links.
-            if source.as_str().starts_with("link:") {
+            // not links. Told apart by predicate, as the store refuses them:
+            // a `link:` source alone is an IRI an application may write.
+            if is_link_metadata(quad.predicate.as_str()) {
                 continue;
             }
             out.push((
@@ -2489,6 +2490,39 @@ mod tests {
 
     fn new_service() -> SparqlStore {
         SparqlStore::new(None).unwrap()
+    }
+
+    /// `neighbours` reads application links only. A link whose source is a
+    /// `link:` IRI is one an application may write (a parent scope anchored
+    /// at `link:board`), so it is read; the reifier annotations on the same
+    /// node are not links, and are skipped by their predicate.
+    #[test]
+    fn neighbours_reads_a_link_from_a_link_iri_but_not_its_annotations() {
+        let svc = new_service();
+        let signer = TestSigner::generate();
+        svc.add_link(&make_link(&signer, "link:board", "we://child", "post://1"))
+            .unwrap();
+        svc.add_link(&make_link(
+            &signer,
+            "post://2",
+            "we://tag",
+            "literal:string:hot",
+        ))
+        .unwrap();
+
+        let around_post = svc.neighbours("post://1", None, 100).unwrap().unwrap();
+        assert_eq!(
+            around_post,
+            vec![("we://child".to_string(), "link:board".to_string())]
+        );
+        let around_value = svc
+            .neighbours("literal:string:hot", None, 100)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            around_value,
+            vec![("we://tag".to_string(), "post://2".to_string())]
+        );
     }
 
     /// `apply_diff` removes before it adds, so a link removed and re-added

@@ -57,12 +57,70 @@ async fn side_by_side_beside_a_getter_and_a_link_is_refused() {
     assert!(err.contains("per-link `author`"), "{err}");
 }
 
+/// A `some`/`none` quantifier is answered by its `FILTER [NOT] EXISTS` and
+/// nowhere else: post-hydration the linked records are gone, so the filter
+/// fails closed on one. Beside a condition the store cannot take — here a
+/// comparison on a property stored as expressions on a `resolveLanguage`,
+/// which is decided after hydration — the quantifier's half would still
+/// push, and the filter would drop every row on the quantifier it cannot
+/// see: "no rows" for a query the data satisfies. Refused like a per-link
+/// `author`, which is store-only for the same reason.
+#[tokio::test]
+async fn a_quantifier_beside_a_condition_the_store_cannot_take_is_refused() {
+    let (store, mut task_shape, resolver) = task_review_fixture();
+    let mut body = prop("body", "ns://body");
+    body.resolve_language = Some("lang://words".to_string());
+    let mut note = prop("note", "ns://note");
+    note.resolve_language = Some("literal".to_string());
+    task_shape.properties.extend([body, note]);
+    resolver.register("Task", task_shape.clone());
+    store
+        .add_link(&link(
+            ADMIN,
+            "ns://t/honest",
+            "ns://note",
+            &lit("hello"),
+            "2026-01-01T00:00:02.000Z",
+        ))
+        .unwrap();
+
+    let err = refused_on_every_plan_of(
+        &store,
+        &task_shape,
+        &resolver,
+        json!({ "reviews": { "some": {} }, "body": { "contains": "needle" } }),
+    )
+    .await;
+    assert!(err.contains("quantifier"), "{err}");
+
+    // Alone, or beside a leaf the store can take, the same quantifier answers.
+    assert_eq!(
+        ids_on_every_plan_of(
+            &store,
+            &task_shape,
+            &resolver,
+            json!({ "reviews": { "some": {} } })
+        )
+        .await,
+        vec!["ns://t/forged", "ns://t/honest"],
+    );
+    assert_eq!(
+        ids_on_every_plan_of(
+            &store,
+            &task_shape,
+            &resolver,
+            json!({ "reviews": { "some": {} }, "note": "hello" })
+        )
+        .await,
+        vec!["ns://t/honest"],
+    );
+}
+
 /// A per-link `author` inside a quantifier's nested clause, where the nested
 /// clause cannot be answered in the store, is refused like the top-level case.
 /// The flag is carried up out of the quantifier to the refusal. Without that,
 /// the query would return no rows only because the post-hydration filter
-/// happens to fail closed on every quantifier. Red when that propagation is
-/// removed.
+/// happens to fail closed on every quantifier.
 #[tokio::test]
 async fn a_per_link_author_inside_an_unpushable_quantifier_is_refused() {
     let (store, task_shape, resolver) = task_review_fixture();
@@ -78,22 +136,17 @@ async fn a_per_link_author_inside_an_unpushable_quantifier_is_refused() {
     let err = refused_on_every_plan_of(&store, &task_shape, &resolver, nested(true)).await;
     assert!(err.contains("per-link `author`"), "{err}");
 
-    // The control: without the `author` the same declined quantifier is not
-    // refused. It returns no rows, because the post-hydration filter cannot
-    // evaluate a quantifier and fails closed.
-    assert!(
-        ids_on_every_plan_of(&store, &task_shape, &resolver, nested(false))
-            .await
-            .is_empty()
-    );
+    // Without the `author` the same declined quantifier is refused all the
+    // same: the quantifier alone is store-only.
+    let err = refused_on_every_plan_of(&store, &task_shape, &resolver, nested(false)).await;
+    assert!(err.contains("quantifier"), "{err}");
 }
 
 /// `author` nested under a getter property inside a quantifier's nested clause
 /// is the malformed-`author` error, the same as at the top level. The nested
-/// clause's error is carried up out of the quantifier to the refusal. Without
-/// that, nothing is refused, and the query returns no rows only because the
-/// post-hydration filter fails closed on every quantifier. Red when that
-/// propagation is removed.
+/// clause's error is carried up out of the quantifier to the refusal — it is
+/// reported, not just the store-only verdict the quantifier would produce on
+/// its own.
 #[tokio::test]
 async fn a_nested_author_under_a_getter_inside_a_quantifier_is_an_error() {
     use super::super::types::ShapeResolver;
@@ -126,8 +179,12 @@ async fn a_nested_author_under_a_getter_inside_a_quantifier_is_an_error() {
     assert!(err.contains("not a property stored as a link"), "{err}");
     assert!(!err.contains("per-link `author`"), "{err}");
 
-    // The control: without the `author` the same clause is not an error.
-    ids_on_every_plan_of(&store, &task_shape, &resolver, nested(json!("approved"))).await;
+    // The control: without the `author` there is no malformed condition, so
+    // the refusal is the quantifier's store-only one, not this error.
+    let err =
+        refused_on_every_plan_of(&store, &task_shape, &resolver, nested(json!("approved"))).await;
+    assert!(!err.contains("not a property stored as a link"), "{err}");
+    assert!(err.contains("quantifier"), "{err}");
 }
 
 /// `author` nested under something with no link to check is malformed.

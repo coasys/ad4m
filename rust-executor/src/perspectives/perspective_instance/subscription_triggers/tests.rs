@@ -789,6 +789,45 @@ async fn a_quantified_records_flag_inside_the_scope_reruns() {
     assert_eq!(ids(&last_result(&p, &id).await), vec!["ns://p1"]);
 }
 
+/// The same, when the quantified class IS the subscribed class: a Comment
+/// query whose `where` reads its `replies`, themselves Comments. A reply is
+/// not under the anchor, yet its flag write makes the in-scope comment
+/// match, so a flag a quantifier scans is never gated, even when the
+/// subscribed class carries it too. Red when the gate keyed on the
+/// subscribed class's flags alone (#1795).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_self_referential_quantifier_reruns_on_a_reply_flag() {
+    let mut p = blog().await;
+    record(&mut p, "ns://c1", "Comment", &[]).await;
+    add(&mut p, "ns://board", "ns://child", "ns://c1").await;
+    // r1's relation to the in-scope comment and its `where` value land
+    // before its flag: only the flag write itself can wake the check.
+    add(&mut p, "ns://c1", "ns://reply", "ns://r1").await;
+    add(&mut p, "ns://r1", "ns://text", "literal:string:hot").await;
+    check(&p).await;
+
+    let (id, first) = subscribe(
+        &p,
+        "Comment",
+        json!({
+            "parent": { "id": "ns://board", "predicate": "ns://child" },
+            "where": { "replies": { "some": { "text": "hot" } } }
+        }),
+    )
+    .await;
+    assert!(ids(&first).is_empty(), "{first}");
+
+    add(&mut p, "ns://r1", FLAG, "ns://comment").await;
+    check(&p).await;
+
+    assert_eq!(
+        reruns::count(&id),
+        1,
+        "a reply's flag must wake the comment it makes match"
+    );
+    assert_eq!(ids(&last_result(&p, &id).await), vec!["ns://c1"]);
+}
+
 /// A `path` scope — children through one predicate, replies through another.
 /// A write on either hop's predicate wakes the query; a write on an
 /// unrelated predicate does not. Flag writes stay conservative: a two-hop

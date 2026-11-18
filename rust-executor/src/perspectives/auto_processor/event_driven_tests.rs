@@ -669,6 +669,26 @@ async fn a_kept_transcript_holds_no_text_for_consumed_turns() {
     assert_eq!(pending_texts(&watcher, "lean"), vec!["open"]);
 }
 
+/// `MESSAGE_SDNA` plus a required `ns://priority` the seeded message
+/// lacks.
+const MESSAGE_SDNA_V2: &str = r#"{
+  "target_class":"ns://Message",
+  "properties":[
+    {"path":"ns://type","name":"type","has_value":"ns://message","min_count":1,"max_count":1},
+    {"path":"ns://body","name":"body","resolve_language":"literal","min_count":1,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://body","target":"value"}]},
+    {"path":"ns://priority","name":"priority","min_count":1,"max_count":1}
+  ]
+}"#;
+
+/// `MESSAGE_SDNA` with `body` moved to `ns://body2`.
+const MESSAGE_SDNA_BODY2: &str = r#"{
+  "target_class":"ns://Message",
+  "properties":[
+    {"path":"ns://type","name":"type","has_value":"ns://message","min_count":1,"max_count":1},
+    {"path":"ns://body2","name":"body","resolve_language":"literal","min_count":1,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://body2","target":"value"}]}
+  ]
+}"#;
+
 /// A shape-only write — nothing the transcript's trigger matches, no
 /// `ns://type` or `ns://body` link moves — still invalidates the kept read:
 /// the shape it was read under is gone. The edit below adds a required
@@ -683,17 +703,6 @@ async fn a_kept_transcript_holds_no_text_for_consumed_turns() {
 async fn a_schema_write_stales_the_kept_transcript() {
     use crate::perspectives::perspective_instance::SdnaType;
     use crate::types::{Link, LinkStatus};
-
-    /// `MESSAGE_SDNA` plus a required `ns://priority` the seeded message
-    /// lacks.
-    const MESSAGE_SDNA_V2: &str = r#"{
-      "target_class":"ns://Message",
-      "properties":[
-        {"path":"ns://type","name":"type","has_value":"ns://message","min_count":1,"max_count":1},
-        {"path":"ns://body","name":"body","resolve_language":"literal","min_count":1,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://body","target":"value"}]},
-        {"path":"ns://priority","name":"priority","min_count":1,"max_count":1}
-      ]
-    }"#;
 
     let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
     seed_message(
@@ -759,6 +768,267 @@ async fn a_schema_write_stales_the_kept_transcript() {
         pending_texts(&watcher, "schema").is_empty(),
         "the message no longer conforms, so its turn is dropped"
     );
+
+    // The trigger's predicate rules were compiled from the same shape the
+    // kept read ran under, so the schema write must rebuild it, not only
+    // stale the read: with `body` moved to `ns://body2` the old rules still
+    // watch `ns://body`, and a data write on the new predicate would match
+    // nothing — neither wake nor stale (#1795).
+    p.add_sdna(
+        "ns://Message".into(),
+        String::new(),
+        SdnaType::SubjectClass,
+        Some(MESSAGE_SDNA_BODY2.into()),
+        &ctx,
+    )
+    .await
+    .expect("add_sdna body2");
+    p.run_auto_processor_tick(&mut watcher, now_ms + 1500, &ctx)
+        .await;
+    let reads = transcript_queries(&p);
+
+    p.add_link(
+        Link {
+            source: "msg://1".into(),
+            predicate: Some("ns://body2".into()),
+            target: "literal:string:hi".into(),
+        },
+        LinkStatus::Local,
+        None,
+        &ctx,
+    )
+    .await
+    .expect("body2 link");
+    p.run_auto_processor_tick(&mut watcher, now_ms + 2000, &ctx)
+        .await;
+    assert_eq!(
+        transcript_queries(&p),
+        reads + 1,
+        "a data write on the new predicate must wake and stale the kept transcript"
+    );
+    assert_eq!(
+        pending_texts(&watcher, "schema"),
+        vec!["hi"],
+        "the re-read sees the message conform to the new shape"
+    );
+}
+
+/// An edit to only the `resolveLanguage`/`transform`/`getter` link of a
+/// stored property shape carries no SHACL-vocabulary predicate, yet it IS
+/// the shape — the classifier must see it through the source: the node an
+/// existing `sh://property` link names. The same predicate on instance
+/// data, which a `@Property` decorator emits onto every instance's
+/// property URI, must not stale (#1795).
+#[tokio::test]
+async fn a_shape_detail_edit_stales_the_kept_transcript() {
+    use crate::types::{Link, LinkStatus, PerspectiveDiff};
+
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
+    seed_message(
+        &mut p,
+        &ctx,
+        "msg://1",
+        "did:key:alice",
+        "hello",
+        "ns://body",
+    )
+    .await;
+    write_processor(&mut p, &config("shape", 600_000, None), Some(false), &ctx)
+        .await
+        .expect("write_processor");
+    let mut watcher = WatcherState::new();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
+    assert_eq!(pending_texts(&watcher, "shape"), vec!["hello"]);
+    let reads = transcript_queries(&p);
+    assert_eq!(reads, 1);
+
+    // The decorator's per-instance spelling of the same predicate is data:
+    // `msg://1.body` is named by no `sh://property` link.
+    p.add_link(
+        Link {
+            source: "msg://1.body".into(),
+            predicate: Some("ad4m://resolveLanguage".into()),
+            target: "literal:string:literal".into(),
+        },
+        LinkStatus::Local,
+        None,
+        &ctx,
+    )
+    .await
+    .expect("instance resolveLanguage");
+    p.run_auto_processor_tick(&mut watcher, now_ms + 500, &ctx)
+        .await;
+    assert_eq!(
+        transcript_queries(&p),
+        reads,
+        "resolveLanguage on an instance property URI is data, not schema"
+    );
+
+    // A local write on the shape's property node — `ns://ns://Message.body`
+    // here (the fixture names the class by URI) — is the stored shape.
+    p.add_link(
+        Link {
+            source: "ns://ns://Message.body".into(),
+            predicate: Some("ad4m://getter".into()),
+            target: "literal:string:body-getter".into(),
+        },
+        LinkStatus::Local,
+        None,
+        &ctx,
+    )
+    .await
+    .expect("shape getter");
+    p.run_auto_processor_tick(&mut watcher, now_ms + 1000, &ctx)
+        .await;
+    assert_eq!(
+        transcript_queries(&p),
+        reads + 1,
+        "a getter edit on a property shape must stale the kept transcript"
+    );
+    let reads = transcript_queries(&p);
+
+    // A peer's diff lands the same classification through
+    // `persist_remote_diff`'s feed entry: signed links are applied before
+    // the tick drains, so the property node already answers as a shape.
+    let signer = crate::agent::signatures::TestSigner::generate();
+    let data = crate::types::Link {
+        source: "ns://ns://Message.body".into(),
+        predicate: Some("ad4m://transform".into()),
+        target: "literal:string:{}".into(),
+    }
+    .normalize();
+    let signed = signer.sign(data);
+    p.diff_from_link_language(PerspectiveDiff {
+        additions: vec![crate::types::LinkExpression::from(signed)],
+        removals: vec![],
+    })
+    .await
+    .expect("peer diff");
+    p.run_auto_processor_tick(&mut watcher, now_ms + 1500, &ctx)
+        .await;
+    assert_eq!(
+        transcript_queries(&p),
+        reads + 1,
+        "a peer diff editing only a shape detail must stale the kept transcript"
+    );
+}
+
+/// The links of `sdna_json`'s shape, signed as a peer would send them.
+fn peer_shape_diff(sdna_json: &str) -> crate::types::PerspectiveDiff {
+    let signer = crate::agent::signatures::TestSigner::generate();
+    crate::types::PerspectiveDiff {
+        additions: crate::perspectives::shacl_parser::parse_shacl_to_links(
+            sdna_json,
+            "ns://Message",
+        )
+        .expect("shape links")
+        .into_iter()
+        .map(|l| crate::types::LinkExpression::from(signer.sign(l.normalize())))
+        .collect(),
+        removals: vec![],
+    }
+}
+
+/// A peer's schema diff must drop the shape cache before its feed entry
+/// can wake a tick: the entry stales every kept transcript, and a tick
+/// draining it re-reads at once — under the shape the write replaced, if
+/// the cache were still warm — and marks that read fresh (#1795). The
+/// broadcast hook samples the store where the entry goes out: the write
+/// generation already moved AND a fresh shape read is already the new
+/// one, so no tick can ever read the new generation under the old shape.
+#[tokio::test]
+async fn a_peer_schema_diff_clears_the_shape_cache_before_its_feed_entry() {
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
+    seed_message(
+        &mut p,
+        &ctx,
+        "msg://1",
+        "did:key:alice",
+        "hello",
+        "ns://body",
+    )
+    .await;
+    write_processor(&mut p, &config("order", 50, None), Some(false), &ctx)
+        .await
+        .expect("write_processor");
+    let mut watcher = WatcherState::new();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
+    assert_eq!(pending_texts(&watcher, "order"), vec!["hello"]);
+    assert_eq!(transcript_queries(&p), 1);
+
+    // Where the feed entry goes out, sample what a draining tick would
+    // read: the generation the diff's writes took, and the shape the
+    // transcript re-read parses.
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+    {
+        let p2 = p.clone();
+        let seen = seen.clone();
+        *p.ingest_broadcast_hook.lock().unwrap() = Some(Box::new(move || {
+            let shape = p2.get_shape("ns://Message").expect("shape read");
+            *seen.lock().unwrap() = Some((
+                p2.sparql_store.write_generation(),
+                shape
+                    .properties
+                    .iter()
+                    .any(|prop| prop.predicate == "ns://priority"),
+            ));
+        }));
+    }
+
+    p.diff_from_link_language(peer_shape_diff(MESSAGE_SDNA_V2))
+        .await
+        .expect("peer schema diff");
+
+    let (generation, new_shape) = seen
+        .lock()
+        .unwrap()
+        .expect("the schema diff broadcast a feed entry");
+    assert_eq!(
+        generation,
+        p.sparql_store.write_generation(),
+        "the diff's writes are generation-visible when the entry goes out"
+    );
+    assert!(
+        new_shape,
+        "a tick draining the entry must already read the new shape"
+    );
+
+    // The driven tick stands in for the one the entry wakes: the message
+    // lacks `ns://priority`, so under the new shape it no longer conforms.
+    p.run_auto_processor_tick(&mut watcher, now_ms + 500, &ctx)
+        .await;
+    assert_eq!(transcript_queries(&p), 2);
+    assert!(
+        pending_texts(&watcher, "order").is_empty(),
+        "the re-read under the new shape drops the message"
+    );
+
+    // The same ordering on the loop's own timer: the schema write's feed
+    // entry wakes its wait, and the tick re-reads once.
+    let looping = p.clone();
+    let loop_ctx = ctx.clone();
+    let handle = tokio::spawn(async move { looping.auto_processor_watch_loop(loop_ctx).await });
+    let reads = transcript_queries(&p);
+
+    p.diff_from_link_language(peer_shape_diff(MESSAGE_SDNA_BODY2))
+        .await
+        .expect("second peer schema diff");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while transcript_queries(&p) == reads {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the loop's timer-driven tick never re-read the transcript"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    p.teardown_background_tasks().await;
+    tokio::time::timeout(Duration::from_secs(2), handle)
+        .await
+        .expect("teardown ends the loop promptly")
+        .expect("loop task");
 }
 
 /// A fed write is only half of coverage: an entry's arrival says nothing
@@ -925,22 +1195,34 @@ async fn a_write_landing_mid_tick_is_covered_without_a_stale_all() {
 
     // An unrelated entry carrying a generation above the store's — what a
     // fed write committing after the tick's generation read leaves behind.
-    let mut writes = subscription_triggers::writes_of_links(
-        [crate::types::Link {
-            source: "note://reactions".into(),
-            predicate: Some("ns://reaction".into()),
-            target: "literal:string:+1".into(),
-        }]
-        .iter(),
-    )
-    .expect("predicated link");
-    writes.generations = vec![p.sparql_store.write_generation() + 1];
+    let reaction = crate::types::Link {
+        source: "note://reactions".into(),
+        predicate: Some("ns://reaction".into()),
+        target: "literal:string:+1".into(),
+    };
+    let generation = p.sparql_store.write_generation();
+    let mut writes =
+        subscription_triggers::writes_of_links([reaction.clone()].iter()).expect("predicated link");
+    writes.generations = vec![generation + 1];
     p.commit_writes
         .send(Some(std::sync::Arc::new(writes)))
         .expect("the feed is watched");
 
+    // This tick drains the entry while the store still reads `generation`.
     p.run_auto_processor_tick(&mut watcher, now_ms + 500, &ctx)
         .await;
+
+    // The write commits. Straight into the store, so the store moves to
+    // `generation + 1` without a second entry: only the coverage the drain
+    // above proved can account for it. A drain that dropped what it proved
+    // past the generation it read would see a gap here and re-read.
+    let mut committed = crate::types::LinkExpression::from(
+        crate::agent::signatures::TestSigner::generate().sign(reaction),
+    );
+    committed.status = Some(crate::types::LinkStatus::Shared);
+    p.sparql_store.add_link(&committed).expect("commit");
+    assert_eq!(p.sparql_store.write_generation(), generation + 1);
+
     p.run_auto_processor_tick(&mut watcher, now_ms + 1_000, &ctx)
         .await;
     assert_eq!(
@@ -1944,7 +2226,19 @@ async fn a_where_on_the_text_drops_the_row_whose_resolved_value_fails() {
     let mut watcher = WatcherState::new();
     let now_ms = chrono::Utc::now().timestamp_millis();
     let outcome = p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
+    // The body resolves: an unfiltered read returns it decoded, so the
+    // `where`, not a failed fetch, is what drops it below.
+    let unfiltered = crate::perspectives::interpretation::gather_transcript_model(
+        &p,
+        "ns://Message",
+        "body",
+        "{}",
+    )
+    .await
+    .expect("unfiltered read");
     stop_test_language("QmResolvedWhereLang").await;
+    let texts: Vec<&str> = unfiltered.turns.iter().map(|t| t.text.as_str()).collect();
+    assert_eq!(texts, vec!["other words"]);
     assert_eq!(
         outcome,
         TickOutcome::Idle,
@@ -2006,7 +2300,18 @@ async fn a_not_where_on_the_text_drops_the_row_whose_resolved_value_matches() {
     let mut watcher = WatcherState::new();
     let now_ms = chrono::Utc::now().timestamp_millis();
     let outcome = p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
+    // As above: the body resolves, so the negation is what drops it.
+    let unfiltered = crate::perspectives::interpretation::gather_transcript_model(
+        &p,
+        "ns://Message",
+        "body",
+        "{}",
+    )
+    .await
+    .expect("unfiltered read");
     stop_test_language("QmResolvedNotLang").await;
+    let texts: Vec<&str> = unfiltered.turns.iter().map(|t| t.text.as_str()).collect();
+    assert_eq!(texts, vec!["resolved words"]);
     assert_eq!(
         outcome,
         TickOutcome::Idle,

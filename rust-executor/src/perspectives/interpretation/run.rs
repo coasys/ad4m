@@ -2387,6 +2387,63 @@ mod tests {
         assert_eq!(turns[0].speaker, author.did);
     }
 
+    /// A `where` on a language-backed property the language cannot serve
+    /// yet is undecided, and `matches_where` keeps such a row. The turn is
+    /// held as an unresolved text is — not built on a condition nobody
+    /// checked — and the read reports `has_unresolved`, so it is retried.
+    #[tokio::test]
+    async fn gather_transcript_model_holds_a_turn_whose_where_property_is_unresolved() {
+        use crate::agent::signatures::TestSigner;
+        use crate::perspectives::interpretation::graph::gather_transcript_model;
+        use crate::types::{Link, LinkExpression, LinkStatus};
+        const LABELLED_SDNA: &str = r#"{
+  "target_class":"ns://Message",
+  "properties":[
+    {"path":"ns://type","name":"type","has_value":"ns://message","min_count":1,"max_count":1},
+    {"path":"ns://body","name":"body","resolve_language":"literal","min_count":1,"max_count":1},
+    {"path":"ns://label","name":"label","resolve_language":"QmUnavailableLabelLang","max_count":1}
+  ]
+}"#;
+        let (perspective, _shapes, _ctx) =
+            setup_perspective_no_llm(&[("ns://Message", LABELLED_SDNA)]).await;
+        let author = TestSigner::generate();
+        for (predicate, target) in [
+            ("ns://type", "ns://message"),
+            ("ns://body", "literal:string:words"),
+            ("ns://label", "QmUnavailableLabelLang://x"),
+        ] {
+            let mut l = LinkExpression::from(author.sign(Link {
+                source: "msg://labelled".into(),
+                predicate: Some(predicate.into()),
+                target: target.into(),
+            }));
+            l.status = Some(LinkStatus::Shared);
+            perspective.sparql_store.add_link(&l).expect("link");
+        }
+
+        // The instance hydrates: without the `where`, its turn is read.
+        let unfiltered = gather_transcript_model(&perspective, "ns://Message", "body", "{}")
+            .await
+            .expect("gather_transcript_model");
+        assert_eq!(unfiltered.turns.len(), 1, "got {:#?}", unfiltered.turns);
+        assert_eq!(unfiltered.turns[0].text, "words");
+
+        let held = gather_transcript_model(
+            &perspective,
+            "ns://Message",
+            "body",
+            r#"{"where":{"label":"hi"}}"#,
+        )
+        .await
+        .expect("gather_transcript_model");
+        assert!(
+            held.turns.is_empty(),
+            "an undecided where must not admit the turn; got {:#?}",
+            held.turns
+        );
+        assert!(held.has_unresolved, "the held turn must be retried");
+    }
+
     // ---- interpretation_task_name_for_model + ensure_..._for_model --------
 
     /// Default (None) is the shared name; Some(model) yields a distinct

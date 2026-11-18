@@ -530,7 +530,9 @@ async fn test_where_on_resolved_language_values_filters_the_pushed_window() {
 /// count wait for the post-hydration filter. One row resolves to a body the
 /// condition keeps, the other to one it drops: the total is the filtered 1,
 /// not the 2 the pushed conditions alone admit, and the slice takes from
-/// the filtered rows (#1795 item 14).
+/// the filtered rows (#1795 item 14). The limit is 1 with `msg://drop`
+/// sorting first, so a slice that ran before the filter would keep it and
+/// return nothing.
 #[tokio::test]
 async fn test_limit_per_anchor_counts_after_the_resolved_value_filter() {
     use crate::agent::signatures::TestSigner;
@@ -571,7 +573,7 @@ async fn test_limit_per_anchor_counts_after_the_resolved_value_filter() {
             predicate: Some("ns://child".to_string()),
             transitive: false,
             direction: ScopeDirection::Out,
-            limit_per_anchor: Some(10),
+            limit_per_anchor: Some(1),
             levels: None,
             max_depth: None,
             path: None,

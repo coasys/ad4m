@@ -60,11 +60,14 @@
 //!
 //! A per-link author (nested, or the per-link half of side-by-side) can only
 //! be answered in the store, where every link still carries its own author.
-//! After hydration an instance has one `author`, so if any part of the query
-//! has to be evaluated there, [`refuse_unanswerable_link_author`] returns an
-//! `Err` instead of answering against the wrong author. The flag is carried
-//! up out of relation quantifiers' nested clauses, so the refusal does not
-//! depend on the post-hydration filter failing closed on quantifiers.
+//! A `some`/`none` quantifier likewise exists only as its `FILTER [NOT]
+//! EXISTS` — after hydration the linked records it asked about are gone. So
+//! if any part of the query has to be evaluated after hydration,
+//! [`refuse_unanswerable_link_author`] returns an `Err` instead of answering
+//! against the wrong author or dropping rows on a quantifier that never ran.
+//! The flag (`store_only` on `CompiledWhere`) is carried up out of relation
+//! quantifiers' nested clauses, so the refusal does not depend on the
+//! post-hydration filter failing closed on quantifiers.
 //!
 //! `author` nested under a condition with no link (a getter property,
 //! `timestamp`, `id`) is an `Err` too, as are `eq` combined with another value
@@ -86,28 +89,32 @@ const ONT_AUTHOR: &str = "ad4m://ontology/author";
 const ONT_TIMESTAMP: &str = "ad4m://ontology/timestamp";
 const ONT_STATUS: &str = "ad4m://ontology/status";
 
-/// What the where compiler learnt about `author` while compiling a clause.
+/// What the where compiler learnt about store-only constructs while
+/// compiling a clause.
 ///
 /// Threaded through the compiler by `&mut`, the same way the variable counter
 /// is, and merged up from a relation quantifier's nested clause, so the answer
 /// covers every level of the query.
 #[derive(Debug, Default, Clone)]
-pub(super) struct LinkAuthorState {
-    /// A per-link author condition was compiled somewhere in the query.
-    pub(super) per_link: bool,
+pub(super) struct StoreOnlyState {
+    /// A construct only the store can decide was compiled somewhere in the
+    /// query: a per-link `author`, or a `some`/`none` relation quantifier —
+    /// an `EXISTS` over the linked records, which post-hydration cannot
+    /// re-check either.
+    pub(super) store_only: bool,
     /// The first malformed condition met: `author` where there is no link,
     /// `eq` beside another value operator, an unrenderable author value.
     pub(super) error: Option<String>,
 }
 
-impl LinkAuthorState {
+impl StoreOnlyState {
     pub(super) fn fail(&mut self, message: String) {
         self.error.get_or_insert(message);
     }
 
     /// Fold in what a separately compiled nested clause found.
-    pub(super) fn merge(&mut self, per_link: bool, error: Option<String>) {
-        self.per_link |= per_link;
+    pub(super) fn merge(&mut self, store_only: bool, error: Option<String>) {
+        self.store_only |= store_only;
         if let Some(e) = error {
             self.fail(e);
         }
@@ -410,13 +417,15 @@ pub(super) fn instance_author_filter(
     ))
 }
 
-/// Refuse a query whose `author` cannot be answered correctly.
+/// Refuse a query whose store-only constructs cannot be answered correctly.
 ///
-/// After hydration an instance has one `author`, its earliest link's, so a
-/// per-link condition cannot be answered there. Letting it fall through would
-/// bring back the laundering this module removes. A query is answered in the
-/// store only when its where clause compiles in full, so that is the test.
-/// Malformed `author`/`eq` conditions are refused here too, with the reason.
+/// After hydration an instance has one `author`, its earliest link's, and the
+/// linked records a `some`/`none` quantifier asked about are gone, so neither
+/// a per-link condition nor a quantifier can be answered there. Letting them
+/// fall through would bring back the laundering this module removes, or drop
+/// rows on a check that never ran. A query is answered in the store only when
+/// its where clause compiles in full, so that is the test. Malformed
+/// `author`/`eq` conditions are refused here too, with the reason.
 pub(super) fn refuse_unanswerable_link_author(
     query: &ModelQueryInput,
     shape: &ModelShape,
@@ -426,20 +435,22 @@ pub(super) fn refuse_unanswerable_link_author(
         return Ok(());
     };
     let compiled = compile_where_clause(wc, shape, Some(resolver), LinkGuard::of(query));
-    if let Some(error) = compiled.link_author_error {
+    if let Some(error) = compiled.error {
         return Err(anyhow!("where: {error}"));
     }
     // What forbids the query is a condition emitted *nowhere*: the
     // post-hydration filter re-checks the value half then, never the link's
-    // author, which is gone post-hydration.
-    if compiled.link_author_scoped && !compiled.complete {
+    // author or the quantifier, both gone post-hydration.
+    if compiled.store_only && !compiled.complete {
         return Err(anyhow!(
             "where: a per-link `author` (nested under a property, or a top-level `author` \
-             beside property conditions) is answered in the store. Part of this query can \
-             only be evaluated after hydration (for example `timestamp`, a getter property, \
-             a relation quantifier or an operator the store cannot express), where an \
-             instance has a single author (its earliest link's) and the per-link answer is \
-             gone. Refusing rather than matching against the wrong author."
+             beside property conditions) or a `some`/`none` relation quantifier is \
+             answered in the store and nowhere else. Part of this query can only be \
+             evaluated after hydration (for example `timestamp`, a getter property, a \
+             property stored as expressions on a `resolveLanguage`, or an operator the \
+             store cannot express), where an instance has a single author (its earliest \
+             link's) and the linked records a quantifier asks about are gone. Refusing \
+             rather than matching against the wrong author or an unchecked quantifier."
         ));
     }
     Ok(())

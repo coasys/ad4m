@@ -2,7 +2,8 @@ use super::*;
 use crate::perspectives::interpretation::types::{
     ExistingInstances, ExistingLinks, InstanceContext, TranscriptTurn,
 };
-use crate::perspectives::model_query::types::{ModelShape, Scope};
+use crate::perspectives::model_query::types::{ModelShape, Scope, WhereCondition};
+use crate::perspectives::model_query::ModelQueryInput;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -140,6 +141,11 @@ pub(crate) async fn gather_transcript_model_within(
     query_json: &str,
     shape_wait: std::time::Duration,
 ) -> anyhow::Result<GatheredTranscript> {
+    // The names the query's `where` reads on an instance's row: a row that
+    // holds one of them in `__unresolved` was kept by `matches_where` on a
+    // verdict it could not see, so its turn must be held like an
+    // unresolved text — not built on an undecided condition (#1795).
+    let where_names = where_property_names(query_json);
     let query_json = with_text_provenance(query_json, text_property)?;
     let result_json = perspective
         .model_query_within(class, &query_json, shape_wait)
@@ -154,11 +160,19 @@ pub(crate) async fn gather_transcript_model_within(
         // The resolver marks a `resolveLanguage` value it could not fetch:
         // the raw expression URL sits where the text should be, so there is
         // no turn to take — and none to retire, since the same target may
-        // resolve once the language serves it.
+        // resolve once the language serves it. A `where`-referenced
+        // property counts the same: the row was kept on a condition the
+        // read could not decide.
+        let held = |names: &Vec<serde_json::Value>| {
+            names.iter().any(|n| {
+                n.as_str()
+                    .is_some_and(|name| name == text_property || where_names.contains(name))
+            })
+        };
         if instance
             .get(crate::perspectives::model_query::UNRESOLVED_KEY)
             .and_then(|v| v.as_array())
-            .is_some_and(|names| names.iter().any(|n| n.as_str() == Some(text_property)))
+            .is_some_and(&held)
         {
             has_unresolved = true;
             continue;
@@ -219,6 +233,36 @@ fn with_text_provenance(query_json: &str, text_property: &str) -> anyhow::Result
         }
     }
     Ok(query.to_string())
+}
+
+/// The instance properties the query's `where` reads, through `OR`/`AND`
+/// branches. A relation quantifier's nested clause reads another class's
+/// properties, so it is not walked. An unparsable query yields none: the
+/// model query refuses it anyway.
+fn where_property_names(query_json: &str) -> HashSet<String> {
+    fn walk(clause: &BTreeMap<String, WhereCondition>, out: &mut HashSet<String>) {
+        for (key, condition) in clause {
+            match condition {
+                WhereCondition::SubClauses(branches) if key == "OR" || key == "AND" => {
+                    for branch in branches {
+                        walk(branch, out);
+                    }
+                }
+                _ => {
+                    out.insert(key.clone());
+                }
+            }
+        }
+    }
+    let mut out = HashSet::new();
+    if let Ok(ModelQueryInput {
+        where_clause: Some(clause),
+        ..
+    }) = serde_json::from_str::<ModelQueryInput>(query_json)
+    {
+        walk(&clause, &mut out);
+    }
+    out
 }
 
 /// The turn text off a hydrated scalar (`parse_literal_value` output): a

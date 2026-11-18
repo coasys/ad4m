@@ -27,7 +27,7 @@ use std::collections::BTreeMap;
 use super::containment::{contains_patterns, has_child_only};
 use super::link_author::{
     instance_author_filter, is_link_leaf, link_author_join, may_hold_link_author,
-    side_by_side_author, side_by_side_scopes, split_leaf, LinkAuthorState,
+    side_by_side_author, side_by_side_scopes, split_leaf, StoreOnlyState,
 };
 use super::types::{
     ContainedScope, InstanceQueryPlan, ModelQueryInput, ModelShape, OrderDirection, Scope,
@@ -1182,16 +1182,19 @@ pub(super) struct CompiledWhere {
     /// for a construct nothing re-checks there (a relation quantifier's nested
     /// clause), which reads this list to refuse instead.
     pub(super) expression_backed: Vec<String>,
-    /// Whether a per-link `author` condition was compiled anywhere in the
-    /// clause, including a relation quantifier's nested clause (see
-    /// [`super::link_author`]).
+    /// Whether a construct only the store can decide was compiled anywhere in
+    /// the clause, at any depth: a per-link `author` (see
+    /// [`super::link_author`]) or a `some`/`none` relation quantifier.
     ///
-    /// Such a condition cannot be re-checked after hydration, so a clause that
-    /// sets this and is not `complete` is refused rather than run.
-    pub(super) link_author_scoped: bool,
-    /// A malformed `author` or `eq` condition, with the reason. The query is
-    /// refused with it.
-    pub(super) link_author_error: Option<String>,
+    /// Neither can be re-checked after hydration — the instance carries one
+    /// `author`, and the linked records a quantifier asks about are gone — so
+    /// a clause that sets this and is not `complete` is refused rather than
+    /// run.
+    pub(super) store_only: bool,
+    /// The first malformed or unanswerable condition met (`author`, `eq`, a
+    /// quantifier's nested clause), with the reason. The query is refused
+    /// with it.
+    pub(super) error: Option<String>,
 }
 
 /// `None` when a condition produced no patterns at all.
@@ -1249,7 +1252,7 @@ pub(super) fn compile_where_clause(
     guard: LinkGuard,
 ) -> CompiledWhere {
     let mut seq = 0usize;
-    let mut la = LinkAuthorState::default();
+    let mut la = StoreOnlyState::default();
     let mut expression_backed = Vec::new();
     let (patterns, complete) = compile_where_clause_seq(
         wc,
@@ -1264,8 +1267,8 @@ pub(super) fn compile_where_clause(
         patterns,
         complete,
         expression_backed,
-        link_author_scoped: la.per_link,
-        link_author_error: la.error,
+        store_only: la.store_only,
+        error: la.error,
     }
 }
 
@@ -1282,11 +1285,12 @@ pub(super) fn compile_where_clause(
 /// The counter advances once per leaf, so variables *within* a leaf still share a
 /// suffix and correlate as they must.
 ///
-/// `la` collects what [`super::link_author`] needs to know about `author`:
-/// whether a per-link one was compiled, and any malformed one. A top-level
-/// `author` is side-by-side when this object has a link-backed sibling: it then
-/// adds its instance-level filter here and scopes those siblings' links. It
-/// never reaches into a sub-clause, and a sub-clause's never reaches out.
+/// `la` collects what [`super::link_author`] needs to know about store-only
+/// constructs: whether a per-link `author` or a relation quantifier was
+/// compiled, and any malformed one. A top-level `author` is side-by-side when
+/// this object has a link-backed sibling: it then adds its instance-level
+/// filter here and scopes those siblings' links. It never reaches into a
+/// sub-clause, and a sub-clause's never reaches out.
 /// `expression_backed` collects the leaves declined because their property
 /// stores an expression on a `resolveLanguage` (see [`compile_leaf_condition`]).
 ///
@@ -1300,7 +1304,7 @@ fn compile_where_clause_seq(
     resolver: Option<&dyn ShapeResolver>,
     guard: LinkGuard,
     seq: &mut usize,
-    la: &mut LinkAuthorState,
+    la: &mut StoreOnlyState,
     expression_backed: &mut Vec<String>,
 ) -> (Vec<String>, bool) {
     let mut patterns = Vec::new();
@@ -1311,7 +1315,7 @@ fn compile_where_clause_seq(
     // because the per-link half forbids the post-hydration fallback.
     let side_author = side_by_side_author(wc, shape);
     if let Some(author) = side_author {
-        la.per_link = true;
+        la.store_only = true;
         let tag = *seq;
         *seq += 1;
         match instance_author_filter(shape, author, &tag.to_string(), guard) {
@@ -1442,7 +1446,7 @@ fn compile_where_clause_seq(
 /// The condition's own nested `author` (`{ eq: X, author: A }`) and the
 /// `scoping` authors of a side-by-side `author` restrict the link that
 /// satisfies the value condition; see [`super::link_author`]. A per-link author
-/// sets `la.per_link`, and a malformed one is recorded in `la.error`.
+/// sets `la.store_only`, and a malformed one is recorded in `la.error`.
 ///
 /// `expression_backed` records the one decline that is a rule, not a gap: a
 /// value comparison on a property whose `resolveLanguage` is a language. The
@@ -1458,7 +1462,7 @@ fn compile_leaf_condition(
     guard: LinkGuard,
     seq: &mut usize,
     scoping: &[&WhereCondition],
-    la: &mut LinkAuthorState,
+    la: &mut StoreOnlyState,
     expression_backed: &mut Vec<String>,
 ) -> Option<Vec<String>> {
     let mut out: Vec<String> = Vec::new();
@@ -1496,7 +1500,7 @@ fn compile_leaf_condition(
         .chain(scoping.iter().copied())
         .collect();
     if !authors.is_empty() {
-        la.per_link = true;
+        la.store_only = true;
     }
 
     // What restricts the link behind a triple this leaf emits: its author when
@@ -1722,6 +1726,12 @@ fn compile_leaf_condition(
                 }
             }
             WhereCondition::Ops(ops) if ops.some.is_some() || ops.none.is_some() => {
+                // The `FILTER [NOT] EXISTS` this becomes is the only answer a
+                // quantifier ever gets: post-hydration the linked records are
+                // gone and `matches_ops` fails closed on `some`/`none`. That
+                // makes the clause store-only, so any decline below — or beside
+                // this leaf — is refused rather than returned as an empty page.
+                la.store_only = true;
                 // Every decline below ends the same way for the caller: the
                 // clause is incomplete, the post-hydration filter rejects every
                 // row, and the query returns nothing. That is the sound answer
@@ -2488,7 +2498,7 @@ mod where_compiler_tests {
         let compiled = compile_where_clause(&clause, &s, None, LinkGuard::ANY);
 
         assert!(!compiled.complete);
-        let error = compiled.link_author_error.expect("the pair is refused");
+        let error = compiled.error.expect("the pair is refused");
         assert!(error.contains("`body`"), "{error}");
     }
 
@@ -2816,7 +2826,7 @@ fn compile_relation_quantifier(
     guard: LinkGuard,
     leaf_id: usize,
     authors: &[&WhereCondition],
-    la: &mut LinkAuthorState,
+    la: &mut StoreOnlyState,
 ) -> Option<String> {
     // The caller found `prop` *by* this name, so the two cannot disagree.
     let prop_name = prop.name.as_str();
@@ -2910,20 +2920,17 @@ fn compile_relation_quantifier(
             );
             // Uncompiled, the clause can still hold a per-link `author`, and
             // the refusal must hear of it from its syntax.
-            la.per_link |= may_hold_link_author(inner);
+            la.store_only |= may_hold_link_author(inner);
             return None;
         };
 
         let compiled = compile_where_clause(inner, target_shape.as_ref(), resolver, guard);
-        // Carried up before the clause can be declined below: a per-link
-        // `author` in a nested clause the store cannot answer in full must
+        // Carried up before the clause can be declined below: a store-only
+        // construct in a nested clause the store cannot answer in full must
         // reach `refuse_unanswerable_link_author`. The post-hydration filter
         // happens to fail closed on every quantifier too, but that is not what
         // this refusal may rest on.
-        la.merge(
-            compiled.link_author_scoped,
-            compiled.link_author_error.clone(),
-        );
+        la.merge(compiled.store_only, compiled.error.clone());
         // An expression-backed leaf is the one decline that is a rule, not a
         // gap: the store can compare only the raw expression IRI, and no
         // post-hydration pass re-checks a quantifier — so the query would
@@ -3171,9 +3178,7 @@ mod relation_quantifier_tests {
         let compiled = compile_where_clause(&clause, &s, Some(&r), LinkGuard::ANY);
 
         assert!(!compiled.complete);
-        let error = compiled
-            .link_author_error
-            .expect("the quantifier is refused");
+        let error = compiled.error.expect("the quantifier is refused");
         assert!(error.contains("`body`"), "{error}");
     }
 

@@ -324,8 +324,8 @@ Tick:
 4. Drain a ready batch of `PendingTurn`s → `run_one_pass` (no re-gather).
 5. On Won, write `processor` + `sources` on the new `InterpretationRun`.
 
-`source_scope_query` stays an app concern (which conversation, plus a
-time filter). Processed state stays engine bookkeeping. Apps do not
+`sourceQuery` (`parent` and `where` over `sourceClass`) stays an app
+concern: which conversation, and which of its instances count. Processed state stays engine bookkeeping. Apps do not
 write `FILTER NOT EXISTS { processed }`.
 
 ---

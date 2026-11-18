@@ -168,17 +168,21 @@ impl Writes {
     /// on such a batch whatever its data predicates are, so the
     /// auto-processor marks every processor stale (`auto_processor_mark_stale`).
     /// With per-link detail gone (a batch past [`MAX_TRACKED_LINKS`]) a
-    /// predicate whose link *could* be a schema write reads as one:
+    /// predicate whose link *could* be a schema write reads as one —
+    /// `&|_| true` answers the source question yes there:
     /// over-marking costs a re-read, under-marking keeps a stale read.
-    pub(super) fn touches_shacl(&self) -> bool {
+    /// `is_property_shape` tells whether a link's source is a node an
+    /// existing `sh://property` link names; `super::shacl_write_link`
+    /// needs it for the predicates instance data also carries.
+    pub(super) fn touches_shacl(&self, is_property_shape: &dyn Fn(&str) -> bool) -> bool {
         match &self.links {
-            Some(links) => links
-                .iter()
-                .any(|l| super::shacl_write_link(&l.predicate, &l.target)),
+            Some(links) => links.iter().any(|l| {
+                super::shacl_write_link(&l.source, &l.predicate, &l.target, is_property_shape)
+            }),
             None => self
                 .predicates
                 .iter()
-                .any(|p| super::shacl_write_link(p, "ad4m://SubjectClass")),
+                .any(|p| super::shacl_write_link("", p, "ad4m://SubjectClass", &|_| true)),
         }
     }
 }
@@ -307,6 +311,12 @@ pub(super) struct TriggerRules {
     /// one enters the result by linking to a member, not to an anchor, so
     /// the parent-edge gate would miss it (#1795).
     direct_flags: HashSet<Flag>,
+    /// The flags of the classes a `where` quantifier scans, in both
+    /// spellings. A flag here is never gated, even when the subscribed
+    /// class carries it too: a self-referential quantifier (`Comment` with
+    /// `replies: { some: … }`) reads records of the same flag that enter
+    /// the result by linking to a member, not by sitting under an anchor.
+    quantified_flags: HashSet<Flag>,
 }
 
 impl TriggerRules {
@@ -373,6 +383,13 @@ impl TriggerRules {
             self.holders.entry(predicate).or_default().extend(edges);
         }
         self.direct_flags.extend(other.direct_flags);
+        self.quantified_flags.extend(other.quantified_flags);
+    }
+
+    /// Whether the parent-scope gate applies to a write of `flag`: it is
+    /// the subscribed class's own, and no quantified class shares it.
+    fn gated(&self, flag: &Flag) -> bool {
+        self.direct_flags.contains(flag) && !self.quantified_flags.contains(flag)
     }
 }
 
@@ -654,14 +671,17 @@ impl Walk<'_> {
                 })
             })
             .collect();
-        if direct {
-            for flag in &flags {
-                self.rules.direct_flags.insert(flag.clone());
-                self.rules.direct_flags.insert(Flag {
-                    predicate: flag.predicate.clone(),
-                    value: canonical_target(&flag.value),
-                });
-            }
+        let recorded = if direct {
+            &mut self.rules.direct_flags
+        } else {
+            &mut self.rules.quantified_flags
+        };
+        for flag in &flags {
+            recorded.insert(flag.clone());
+            recorded.insert(Flag {
+                predicate: flag.predicate.clone(),
+                value: canonical_target(&flag.value),
+            });
         }
         if flags.is_empty() {
             // No flag, so instance-ness is not a one-triple lookup: any write
@@ -1099,7 +1119,7 @@ impl ModelTrigger {
             // record enters the result by linking to a member, not by
             // sitting under an anchor.
             let direct = [target, canonical].iter().any(|value| {
-                rules.direct_flags.contains(&Flag {
+                rules.gated(&Flag {
                     predicate: predicate.clone(),
                     value: (*value).clone(),
                 })
@@ -1152,7 +1172,7 @@ impl ModelTrigger {
                     store.has_flag(e, f)
                         && (self.nodes.contains(*e)
                             || rules.anchors.contains(*e)
-                            || !rules.direct_flags.contains(f)
+                            || !rules.gated(f)
                             || match &rules.scoped {
                                 None => true,
                                 Some(edges) => store.linked_through(e, edges, &rules.anchors),
