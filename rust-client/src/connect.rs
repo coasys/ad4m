@@ -100,7 +100,9 @@ impl AppInfo {
 pub struct ConnectOptions {
     pub app: AppInfo,
     /// An explicit executor URL (`http(s)://` or `ws(s)://` — the latter is
-    /// normalized like TS `wsUrlToHttpBase`); wins over every other source.
+    /// normalized like TS `wsUrlToHttpBase`). When set, it is the only
+    /// candidate: a failure is not replaced by a remembered URL or the
+    /// local executor.
     pub url: Option<String>,
     /// An explicit port → `http://127.0.0.1:{port}`.
     pub port: Option<u16>,
@@ -169,6 +171,10 @@ pub trait ConnectPrompts {
     }
 
     /// `email` was sent a sign-in code: return what the user typed.
+    ///
+    /// The answer `resend` (any letter case) is not sent to the executor.
+    /// The flow emails a new code and asks again. A sign-in code is six
+    /// digits, so this word is not a code.
     fn email_code<'a>(
         &'a mut self,
         email: &'a str,
@@ -202,22 +208,18 @@ pub enum ConnectStatus {
     WaitingForApproval { request_id: String },
     /// `email` was sent a sign-in code.
     WaitingForEmailCode { email: String },
-    /// The last code was refused — the prompt shows again. An emailed code
-    /// that expired by time also ends here, and so does every code after it:
-    /// see [`EmailCodeExpired`](Self::EmailCodeExpired).
+    /// The last code was refused. The prompt shows again. The user may type
+    /// another code, or `resend` to email a new one. A code that expired by
+    /// time is reported the same way: the executor deletes the challenge,
+    /// so another guess cannot succeed until the user asks for a new code.
     CodeRejected,
     /// The pending request died (expired, or five wrong codes); a fresh one
     /// is requested next.
     RequestExpired,
-    /// The emailed code's challenge is no longer valid: the executor
-    /// invalidated it after five wrong codes. A new code is requested next.
-    ///
-    /// Despite the name, this does not detect a code that expired by time.
-    /// The executor answers an expired code like a wrong one ("Invalid
-    /// verification code"), and deletes the challenge, so the flow reports
-    /// [`CodeRejected`](Self::CodeRejected) and asks again, and no later code
-    /// can succeed. The user ends that by cancelling (the prompt returns an
-    /// error) and running `connect` again, which emails a new code.
+    /// A new email code is being requested. The executor says this after
+    /// five wrong codes. The user can also ask for it by answering `resend`
+    /// after [`CodeRejected`](Self::CodeRejected), which covers a code that
+    /// expired by time.
     EmailCodeExpired,
 }
 
@@ -523,7 +525,7 @@ impl TokenStore {
     }
 
     fn key(url: &str, app: &str) -> String {
-        format!("{url}|{app}")
+        format!("{}|{app}", normalize_base_url(url))
     }
 
     fn dir(&self) -> &std::path::Path {
@@ -663,11 +665,24 @@ impl TokenStore {
 
     pub fn set_token(&self, url: &str, app: &str, token: &str) -> Result<()> {
         let version = self.version.clone();
-        let key = Self::key(url, app);
+        let canonical = normalize_base_url(url);
+        let app = app.to_string();
         let token = token.to_string();
+        let key = Self::key(&canonical, &app);
         self.transact(move |store| {
             let session = store.versions.entry(version).or_default();
-            let changed = session.tokens.get(&key) != Some(&token);
+            // Drop any other spelling of this executor, including one that
+            // still carries a password or a query.
+            let extras = session
+                .tokens
+                .keys()
+                .any(|existing| existing != &key && key_matches(existing, &canonical, &app));
+            let changed = extras || session.tokens.get(&key) != Some(&token);
+            if extras {
+                session.tokens.retain(|existing, _| {
+                    existing == &key || !key_matches(existing, &canonical, &app)
+                });
+            }
             session.tokens.insert(key, token);
             (changed, ())
         })
@@ -729,7 +744,7 @@ impl TokenStore {
         let version = self.version.clone();
         let app = app.to_string();
         let entry = RememberedUrl {
-            url: url.to_string(),
+            url: normalize_base_url(url),
             pinned,
         };
         self.transact(move |store| {
@@ -806,28 +821,40 @@ fn take_number(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> u128 {
 }
 
 /// `major.minor` of a version (`0.13` for `0.13.1-staging.5`). `None` when
-/// `version` is not `major.minor.patch` with an optional prerelease.
+/// `version` is not `major.minor.patch` with an optional `-prerelease`.
+///
+/// Matches TS `minorLine`: the patch must be followed by `-` or the end of
+/// the string. `0.13.0.1` and `0.13.0+build` are not prefixes.
 fn minor_line(version: &str) -> Option<&str> {
-    let mut parts = version.split('.');
-    let major = parts.next()?;
-    let minor = parts.next()?;
-    let patch = parts.next()?;
-    if !is_digits(major) || !is_digits(minor) {
+    let bytes = version.as_bytes();
+    let mut i = 0;
+    let major_len = count_digits(bytes, i);
+    if major_len == 0 || bytes.get(i + major_len) != Some(&b'.') {
         return None;
     }
-    let patch_digits = patch.split(['-', '+']).next().unwrap_or("");
-    if !is_digits(patch_digits) {
+    i += major_len + 1;
+    let minor_len = count_digits(bytes, i);
+    if minor_len == 0 || bytes.get(i + minor_len) != Some(&b'.') {
         return None;
     }
-    let end = major.len() + 1 + minor.len();
-    version
-        .get(end..)?
-        .starts_with('.')
-        .then_some(&version[..end])
+    let minor_end = i + minor_len;
+    i = minor_end + 1;
+    let patch_len = count_digits(bytes, i);
+    if patch_len == 0 {
+        return None;
+    }
+    i += patch_len;
+    match bytes.get(i) {
+        None | Some(b'-') => version.get(..minor_end),
+        _ => None,
+    }
 }
 
-fn is_digits(s: &str) -> bool {
-    !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
+fn count_digits(bytes: &[u8], start: usize) -> usize {
+    let Some(tail) = bytes.get(start..) else {
+        return 0;
+    };
+    tail.iter().take_while(|byte| byte.is_ascii_digit()).count()
 }
 
 /// Whether `prefix` may give its session to `current`: an older version of
@@ -938,16 +965,79 @@ fn apply_adopt(store: &mut StoreFile, version: &str, url: &str, app: &str, plan:
 
 // ── URL resolution ──
 
-/// `ws(s)://` → `http(s)://`, trailing `/` off (TS `wsUrlToHttpBase`).
+/// One canonical executor identity (TS `wsUrlToHttpBase`, plus host case,
+/// default ports, and no secrets).
+///
+/// Parsed once, before a connection, a token key, or an error line.
+/// `ws(s)://` becomes `http(s)://`. Userinfo, query, and fragment are
+/// dropped, so a password cannot reach a token key or a diagnostic. The
+/// host is lower case. A default port (`:80` for `http`/`ws`, `:443` for
+/// `https`/`wss`) is omitted. A trailing slash that is only the empty
+/// path is omitted.
 pub fn normalize_base_url(url: &str) -> String {
-    let u = url.trim().trim_end_matches('/');
-    u.strip_prefix("ws://")
-        .map(|rest| format!("http://{rest}"))
-        .or_else(|| {
-            u.strip_prefix("wss://")
-                .map(|rest| format!("https://{rest}"))
-        })
-        .unwrap_or_else(|| u.to_string())
+    let trimmed = url.trim();
+    let Ok(parsed) = reqwest::Url::parse(trimmed) else {
+        return redact_unparsed(trimmed);
+    };
+    let scheme = match parsed.scheme() {
+        "ws" => "http",
+        "wss" => "https",
+        other => other,
+    };
+    let Some(host) = parsed.host_str() else {
+        return redact_unparsed(trimmed);
+    };
+    // `host_str` for IPv6 has no brackets. A colon belongs only to an IPv6
+    // address here: a domain host has none.
+    let host = if host.contains(':') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    };
+    let mut out = format!("{scheme}://{host}");
+    // `port()` is `None` when the port is the default for the scheme, so
+    // `:80` and `:443` fall out after the ws→http / wss→https rename.
+    if let Some(port) = parsed.port() {
+        out.push(':');
+        out.push_str(&port.to_string());
+    }
+    let path = parsed.path().trim_end_matches('/');
+    if !path.is_empty() && path != "/" {
+        out.push_str(path);
+    }
+    out
+}
+
+/// A string that is not a URL. Still drop a userinfo, query, or fragment
+/// so a password is not echoed when parsing fails.
+fn redact_unparsed(raw: &str) -> String {
+    let trimmed = raw.trim().trim_end_matches('/');
+    let (scheme, rest) = match trimmed.split_once("://") {
+        Some((scheme, rest)) => (Some(scheme), rest),
+        None => (None, trimmed),
+    };
+    let rest = rest.split(['?', '#']).next().unwrap_or(rest);
+    let rest = rest.rsplit_once('@').map(|(_, host)| host).unwrap_or(rest);
+    let rest = rest.trim_end_matches('/');
+    match scheme {
+        Some(scheme) => format!("{scheme}://{rest}"),
+        None => rest.to_string(),
+    }
+}
+
+/// Refuse to send credentials to a plaintext executor that is not on
+/// loopback, unless `allow_insecure_remote` is set.
+///
+/// `ad4m login` calls this before either path opens a socket. The admin
+/// credential would otherwise ride the socket URL.
+pub fn refuse_insecure_remote(base_url: &str, allow_insecure_remote: bool) -> Result<()> {
+    if allow_insecure_remote || !plaintext_remote(base_url) {
+        return Ok(());
+    }
+    Err(ConnectError::InsecureTransport {
+        url: base_url.to_string(),
+    }
+    .into())
 }
 
 /// Whether credentials sent to `base_url` travel unencrypted off this
@@ -1088,9 +1178,7 @@ impl<E: ExecutorIo> Ad4mConnect<E> {
         let (url, pinned) = self.resolve_url().await?;
         // Before any token goes out (it rides the socket URL) or any prompt
         // is asked (F5).
-        if !self.opts.insecure_remote && plaintext_remote(&url) {
-            return Err(ConnectError::InsecureTransport { url }.into());
-        }
+        refuse_insecure_remote(&url, self.opts.insecure_remote)?;
         self.url = Some(url.clone());
         self.pinned = pinned;
 
@@ -1273,19 +1361,20 @@ impl<E: ExecutorIo> Ad4mConnect<E> {
     }
 
     /// Ordered candidates, each with whether it was chosen (pinned) rather
-    /// than discovered: explicit url → explicit port → this app's pinned
-    /// remembered URL → `~/.ad4m/executor-port` → this app's discovered
-    /// remembered URL → the default port. First `/health` win.
+    /// than discovered. An explicit URL is the only candidate. Otherwise:
+    /// explicit port → this app's pinned remembered URL →
+    /// `~/.ad4m/executor-port` → this app's discovered remembered URL →
+    /// the default port. First `/health` win.
     fn candidates(&self) -> Result<Vec<(String, bool)>> {
+        if let Some(url) = &self.opts.url {
+            return Ok(vec![(normalize_base_url(url), true)]);
+        }
         let mut out: Vec<(String, bool)> = Vec::new();
         let mut push = |u: String, pinned: bool| {
             if !out.iter().any(|(seen, _)| *seen == u) {
                 out.push((u, pinned));
             }
         };
-        if let Some(url) = &self.opts.url {
-            push(normalize_base_url(url), true);
-        }
         if let Some(port) = self.opts.port {
             push(format!("http://127.0.0.1:{port}"), true);
         }
@@ -1493,6 +1582,17 @@ impl<E: ExecutorIo> Ad4mConnect<E> {
         });
         loop {
             let code = prompts.email_code(&email).await?;
+            // `resend` is not a code. An expired challenge is reported as a
+            // wrong code and then deleted, so the user must be able to ask
+            // for a new email instead of typing guesses that cannot succeed.
+            if code.eq_ignore_ascii_case("resend") {
+                prompts.status(ConnectStatus::EmailCodeExpired);
+                self.request_verification(rpc, &email).await?;
+                prompts.status(ConnectStatus::WaitingForEmailCode {
+                    email: email.clone(),
+                });
+                continue;
+            }
             match rpc
                 .call(
                     "user.verifyEmail",
@@ -1511,8 +1611,9 @@ impl<E: ExecutorIo> Ad4mConnect<E> {
                         .ok_or_else(|| anyhow!("user.verifyEmail did not answer a string"))?
                         .to_string())
                 }
-                // A wrong code (the executor says the same for one past its
-                // expiry): ask again.
+                // A wrong code, or one past its expiry (the executor says
+                // the same and deletes the challenge). Ask again. The user
+                // can answer `resend`.
                 Err(e) if says_rpc(&e, EMAIL_CODE_INVALID) => {
                     prompts.status(ConnectStatus::CodeRejected)
                 }
@@ -1903,16 +2004,9 @@ mod tests {
         o.token_dir = Some(store_dir.clone());
         let s: Ad4mConnect<FakeIo> = Ad4mConnect::with_io(o, FakeIo::unhealthy()).unwrap();
         let urls = |s: &Ad4mConnect<FakeIo>| -> Vec<(String, bool)> { s.candidates().unwrap() };
-        assert_eq!(
-            urls(&s),
-            vec![
-                ("http://explicit:1".to_string(), true), // normalized (trailing /)
-                ("http://127.0.0.1:2000".to_string(), true), // explicit port
-                ("http://stored.example:9000".to_string(), true), // pinned, ws→http
-                ("http://127.0.0.1:14444".to_string(), false), // executor-port file
-                ("http://127.0.0.1:12000".to_string(), false), // default
-            ]
-        );
+        // The named URL is the only candidate. Port, remembered URL, the
+        // port file, and the default port are not fallbacks.
+        assert_eq!(urls(&s), vec![("http://explicit:1".to_string(), true)]);
 
         // Found by discovery last time: after the port file.
         remember_discovered(&store, "http://127.0.0.1:14111");
@@ -3147,6 +3241,213 @@ mod tests {
                 url: "http://b:2".to_string(),
                 pinned: true
             })
+        );
+    }
+
+    /// A password, query, or fragment in the login URL must not survive
+    /// into a token key or a later error line. Host case and default ports
+    /// name one executor.
+    #[test]
+    fn normalize_base_url_strips_secrets_and_canonicalizes_host_and_port() {
+        assert_eq!(
+            normalize_base_url("https://alice:password@NODE.example:443/api?token=secret#frag"),
+            "https://node.example/api"
+        );
+        assert_eq!(
+            normalize_base_url("HTTP://Node.Example:80/"),
+            "http://node.example"
+        );
+        assert_eq!(
+            normalize_base_url("ws://NODE.example:80/"),
+            "http://node.example"
+        );
+        assert_eq!(
+            normalize_base_url("wss://NODE.example:443"),
+            "https://node.example"
+        );
+        let with_secret = normalize_base_url("http://alice:password@node.example/x?y=secret#z");
+        assert!(
+            !with_secret.contains("password") && !with_secret.contains("secret"),
+            "{with_secret}"
+        );
+    }
+
+    /// `set_token` keys the store on the canonical URL, so a password in the
+    /// login URL is not written, and another spelling of that host finds it.
+    #[test]
+    fn a_url_password_does_not_become_the_token_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TokenStore::new(dir.path());
+        store
+            .set_token("https://alice:password@NODE.example:443/?x=1", "cli", "jwt")
+            .unwrap();
+        let raw = std::fs::read_to_string(store.path()).unwrap();
+        assert!(!raw.contains("password"), "{raw}");
+        assert!(!raw.contains("alice"), "{raw}");
+        assert!(!raw.contains("x=1"), "{raw}");
+        assert_eq!(
+            store
+                .token("https://node.example", "cli")
+                .unwrap()
+                .as_deref(),
+            Some("jwt")
+        );
+        assert_eq!(
+            store
+                .token("HTTPS://NODE.example:443", "cli")
+                .unwrap()
+                .as_deref(),
+            Some("jwt")
+        );
+    }
+
+    /// `ad4m login <url>` names one executor. A down remote must not become
+    /// a successful login to the healthy local executor.
+    #[tokio::test]
+    async fn an_explicit_url_does_not_fall_back_to_a_healthy_local_executor() {
+        let dir = tempfile::tempdir().unwrap();
+        let port_file = dir.path().join("executor-port");
+        std::fs::write(&port_file, "12000").unwrap();
+        let mut o = opts();
+        o.url = Some("http://remote.example:12000".to_string());
+        o.use_stored_url = false;
+        o.executor_port_file = Some(port_file);
+        o.token_dir = Some(dir.path().join("tokens"));
+        let mut io = FakeIo::new(|token, method, _| match (token, method) {
+            ("", "agent.status") => Ok(authed_status()),
+            (_, other) => Err(rpc_err(404, &format!("unexpected {other}"))),
+        });
+        io.healthy = Arc::new(|url| {
+            if url.contains("127.0.0.1") || url.contains("localhost") {
+                Ok(())
+            } else {
+                Err(anyhow!("connection refused"))
+            }
+        });
+        let mut s = Ad4mConnect::with_io(o, io).unwrap();
+        match s.connect(&mut NoPrompts).await {
+            Ok(state) => panic!(
+                "logged in via a fallback executor: {state:?} url={:?}",
+                s.url()
+            ),
+            Err(err) => match err.downcast_ref::<ConnectError>() {
+                Some(ConnectError::ExecutorNotFound { tried }) => {
+                    assert!(
+                        tried.iter().any(|url| url.contains("remote.example")),
+                        "{tried:?}"
+                    );
+                    assert!(
+                        tried.iter().all(|url| !url.contains("127.0.0.1")),
+                        "fell back to a local executor: {tried:?}"
+                    );
+                }
+                other => panic!("expected ExecutorNotFound, got {other:?}: {err}"),
+            },
+        }
+        assert!(
+            s.io.opened().is_empty(),
+            "opened a socket on a fallback: {:?}",
+            s.io.opened()
+        );
+    }
+
+    /// An expired email code is reported like a wrong one, and the challenge
+    /// is gone. The user can ask for a new code instead of typing forever.
+    #[tokio::test]
+    async fn an_expired_email_code_can_be_resent() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut o = opts();
+        o.email = Some("ada@example.com".to_string());
+        let requests = Arc::new(Mutex::new(0u32));
+        let requests2 = requests.clone();
+        let codes = Arc::new(Mutex::new(Vec::new()));
+        let codes2 = codes.clone();
+        let io = FakeIo::new(move |token, method, params| match (token, method) {
+            (_, "agent.status") if token.is_empty() => Err(rpc_err(403, "missing capability")),
+            (_, "agent.status") => Ok(authed_status()),
+            (_, "agent.isLocked") => Ok(Value::Bool(false)),
+            (_, "user.multiUserEnabled") => Ok(Value::Bool(true)),
+            (_, "user.requestVerification") => {
+                *requests2.lock().unwrap() += 1;
+                Ok(json!({
+                    "success": true,
+                    "message": "sent",
+                    "requiresPassword": false,
+                    "isExistingUser": true,
+                }))
+            }
+            (_, "user.verifyEmail") => {
+                let code = params["code"].as_str().unwrap_or("").to_string();
+                codes2.lock().unwrap().push(code.clone());
+                if code == "222222" {
+                    Ok(Value::String("jwt-new".to_string()))
+                } else {
+                    Err(rpc_err(500, "Invalid verification code"))
+                }
+            }
+            (_, other) => Err(rpc_err(404, &format!("unknown {other}"))),
+        });
+        let mut s = session(dir.path(), io, o);
+        let mut prompts = ScriptedPrompts {
+            email_codes: ["111111".into(), "resend".into(), "222222".into()].into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            s.connect(&mut prompts).await.unwrap(),
+            AuthState::Authenticated
+        );
+        assert_eq!(
+            *requests.lock().unwrap(),
+            2,
+            "typing resend must email a new code"
+        );
+        assert_eq!(
+            codes.lock().unwrap().clone(),
+            vec!["111111".to_string(), "222222".to_string()],
+            "resend must not be submitted as a code"
+        );
+        assert!(prompts.statuses.contains(&ConnectStatus::CodeRejected));
+    }
+
+    /// #1610's prefix is `major.minor.patch` then `-` or the end. `0.13.0.1`
+    /// is not that prefix, so it is not adopted and not removed.
+    #[test]
+    fn a_four_component_version_is_not_a_minor_line() {
+        assert_eq!(
+            minor_line("0.13.0.1"),
+            None,
+            "0.13.0.1 is not major.minor.patch"
+        );
+        assert_eq!(minor_line("0.13.0.1-extra"), None);
+        assert_eq!(minor_line("0.13.0+build"), None);
+        assert_eq!(minor_line("0.13.0"), Some("0.13"));
+        assert_eq!(minor_line("0.13.1-staging.5"), Some("0.13"));
+        assert_eq!(minor_line("some-app"), None);
+
+        let dir = tempfile::tempdir().unwrap();
+        write_store(
+            dir.path(),
+            r#"{
+                "versions": {
+                    "0.13.0.1": { "tokens": { "http://node:1|cli": "malformed" } },
+                    "0.13.0": { "tokens": { "http://node:1|cli": "real-older" } }
+                }
+            }"#,
+        );
+        let store = TokenStore::with_version(dir.path(), "0.13.1");
+        assert_eq!(
+            store.token("http://node:1", "cli").unwrap().as_deref(),
+            Some("real-older"),
+            "0.13.0.1 must not beat the real older prefix"
+        );
+        let raw = std::fs::read_to_string(dir.path().join("tokens.json")).unwrap();
+        assert!(
+            raw.contains("\"0.13.0.1\""),
+            "the malformed prefix was removed: {raw}"
+        );
+        assert!(
+            raw.contains("malformed"),
+            "the malformed token was removed: {raw}"
         );
     }
 }

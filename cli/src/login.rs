@@ -9,8 +9,8 @@ use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 
 use ad4m_client::connect::{
-    normalize_base_url, Ad4mConnect, AppInfo, AuthState, ConnectOptions, ConnectPrompts,
-    ConnectStatus, TokenStore,
+    normalize_base_url, refuse_insecure_remote, Ad4mConnect, AppInfo, AuthState, ConnectOptions,
+    ConnectPrompts, ConnectStatus, TokenStore,
 };
 use ad4m_client::Ad4mClient;
 use anyhow::{anyhow, bail, Context, Result};
@@ -34,6 +34,18 @@ pub fn token_dir() -> PathBuf {
 pub fn stored_token(executor_url: &str) -> Result<Option<String>> {
     let url = normalize_base_url(executor_url);
     TokenStore::new(token_dir()).token(&url, APP_NAME)
+}
+
+/// Refuse a plaintext executor that is not on loopback, unless
+/// `allow_insecure_remote` is set.
+///
+/// `login` and `get_ad4m_client` both call this, before a token is placed
+/// in a socket URL. One function, so the policy is not copied.
+pub(crate) fn credential_transport(url: &str, allow_insecure_remote: bool) -> Result<()> {
+    let url = normalize_base_url(url);
+    #[cfg(test)]
+    transport_probe::record(allow_insecure_remote);
+    refuse_insecure_remote(&url, allow_insecure_remote)
 }
 
 /// Whether `url` is a loopback executor (`localhost`, 127.0.0.0/8, `::1`).
@@ -65,6 +77,8 @@ pub async fn login(
     if url.is_empty() {
         bail!("login needs an executor URL");
     }
+    // Same function `get_ad4m_client` calls. Before either path opens a socket.
+    credential_transport(&url, allow_insecure_remote)?;
     if let Some(credential) = admin_credential {
         if credential.trim().is_empty() {
             bail!("the admin credential is empty");
@@ -83,9 +97,10 @@ pub async fn login(
 
     let mut session = Ad4mConnect::new(opts)?;
     let state = session.connect(&mut TermPrompts).await?;
+    let logged_in = session.url().unwrap_or(&url).to_string();
     match state {
         AuthState::Authenticated => {
-            println!("Logged in to {url}");
+            println!("Logged in to {logged_in}");
             println!("Token file: {}", session.store().path().display());
             Ok(())
         }
@@ -174,6 +189,7 @@ impl ConnectPrompts for TermPrompts {
         let email = email.to_string();
         async move {
             say(&format!("A sign-in code was emailed to {email}."));
+            say("Type the code. Type resend to email a new code.");
             ask("code> ", true)
         }
     }
@@ -207,11 +223,96 @@ impl ConnectPrompts for TermPrompts {
             ConnectStatus::WaitingForEmailCode { email } => {
                 say(&format!("Waiting for the code emailed to {email}..."));
             }
-            ConnectStatus::CodeRejected => say("That code did not take. Try again."),
+            ConnectStatus::CodeRejected => {
+                say("That code did not take. Type another code, or type resend to email a new one.")
+            }
             ConnectStatus::RequestExpired => say("The request expired. Asking again..."),
             ConnectStatus::EmailCodeExpired => {
                 say("That code is no longer valid. Sending a new one...");
             }
         }
+    }
+}
+
+/// Counts calls to [`credential_transport`] so a test can tell a deliberate
+/// allow from a path that never asked. Present only in the test build.
+#[cfg(test)]
+pub(crate) mod transport_probe {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::OnceLock;
+
+    static CALLS: AtomicUsize = AtomicUsize::new(0);
+    static LAST_ALLOW: AtomicBool = AtomicBool::new(false);
+    static TOKEN_DIR: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+
+    pub(crate) fn reset() {
+        CALLS.store(0, Ordering::SeqCst);
+        LAST_ALLOW.store(false, Ordering::SeqCst);
+    }
+
+    pub(crate) fn record(allow: bool) {
+        CALLS.fetch_add(1, Ordering::SeqCst);
+        LAST_ALLOW.store(allow, Ordering::SeqCst);
+    }
+
+    pub(crate) fn calls() -> usize {
+        CALLS.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn last_allow() -> bool {
+        LAST_ALLOW.load(Ordering::SeqCst)
+    }
+
+    /// Serializes tests that set `AD4M_TOKEN_DIR`.
+    /// An async mutex so the guard can be held while a dial is awaited.
+    pub(crate) async fn token_dir_lock() -> tokio::sync::MutexGuard<'static, ()> {
+        TOKEN_DIR
+            .get_or_init(|| tokio::sync::Mutex::new(()))
+            .lock()
+            .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// `ad4m login http://remote --admin-credential` must refuse before the
+    /// credential is placed in a plaintext socket URL.
+    #[tokio::test]
+    async fn a_plaintext_remote_admin_login_does_not_open_a_socket() {
+        let _lock = transport_probe::token_dir_lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let previous = std::env::var_os("AD4M_TOKEN_DIR");
+        std::env::set_var("AD4M_TOKEN_DIR", dir.path());
+        let result = tokio::time::timeout(
+            Duration::from_secs(3),
+            login(
+                "http://203.0.113.55:9",
+                None,
+                Some("admin-secret-should-not-travel"),
+                false,
+            ),
+        )
+        .await;
+        match previous {
+            Some(value) => std::env::set_var("AD4M_TOKEN_DIR", value),
+            None => std::env::remove_var("AD4M_TOKEN_DIR"),
+        }
+        let err = match result {
+            Ok(Err(err)) => err,
+            Ok(Ok(())) => panic!("logged in to a plaintext remote"),
+            Err(_) => panic!("login blocked on a socket instead of refusing plaintext"),
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("plaintext"),
+            "expected a plaintext refusal, got {msg}"
+        );
+        assert!(
+            !msg.contains("admin-secret-should-not-travel"),
+            "the admin credential leaked into the error: {msg}"
+        );
     }
 }

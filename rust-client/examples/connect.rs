@@ -73,6 +73,7 @@ impl ConnectPrompts for TermPrompts {
         let email = email.to_string();
         async move {
             println!("A sign-in code was emailed to {email}.");
+            println!("Type the code. Type resend to email a new code.");
             ask_secret("code> ")
         }
     }
@@ -102,7 +103,11 @@ impl ConnectPrompts for TermPrompts {
             ConnectStatus::WaitingForEmailCode { email } => {
                 println!("Waiting for the code emailed to {email}…")
             }
-            ConnectStatus::CodeRejected => println!("That code did not take — try again."),
+            ConnectStatus::CodeRejected => {
+                println!(
+                    "That code did not take. Type another code, or type resend to email a new one."
+                )
+            }
             ConnectStatus::RequestExpired => {
                 println!("The request expired; asking again…")
             }
