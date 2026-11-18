@@ -5,11 +5,11 @@
  *   register SoA subject classes  ->  p.runInterpretation(transcript)  ->
  *   typed instances written into the perspective, queryable via the model API.
  *
- * Requires a reachable LLM (Ollama over the OpenAI-compatible API). On the
- * self-hosted CI runner (Marvin) the endpoint is local; from a dev box, tunnel
- * it. Endpoint + model are env-overridable to match the Rust e2e suite:
- *   INTERPRETATION_E2E_BASE_URL (default http://localhost:11434/v1)
- *   INTERPRETATION_E2E_MODEL    (default qwen3.8-27b-48k)
+ * Requires staging's llama-server (OpenAI-compatible `/v1`). Endpoint + model
+ * are env-overridable to match the Rust e2e suite (`addE2eLlm`):
+ *   INTERPRETATION_E2E_BASE_URL (default http://127.0.0.1:12460/v1)
+ *   INTERPRETATION_E2E_MODEL    (default qwen3.8-27b-ud-q4_k_m)
+ *   INTERPRETATION_E2E_ENDPOINT_KIND (default LLAMA_SERVER)
  *
  * Run with (from tests/js, executor built + `pnpm run prepare-test` once):
  *   pnpm ts-mocha -p tsconfig.json --timeout 1200000 --exit tests/model/run-interpretation.test.ts
@@ -17,14 +17,9 @@
 
 import { expect } from "chai";
 import { Ad4mClient, LinkQuery, PerspectiveProxy } from "@coasys/ad4m";
-import { addOllamaLlm, startAgent } from "../../helpers/index.js";
+import { addE2eLlm, startAgent } from "../../helpers/index.js";
 import { ExtBelief, ExtQuestion, ExtTask } from "./interpretation-models.js";
 
-const BASE_URL = process.env.INTERPRETATION_E2E_BASE_URL || "http://localhost:11434/v1";
-// Ask for the window the Modelfile already loaded (qwen3.8-27b-48k: 49152). The provider reads
-// it from /api/show too; the pin also holds a model without a Modelfile num_ctx to staging's residency.
-const MAX_NUM_CTX = Number(process.env.INTERPRETATION_E2E_MAX_NUM_CTX) || 49152;
-const MODEL = process.env.INTERPRETATION_E2E_MODEL || "qwen3.8-27b-48k";
 const BASE_PREFIX = "soa://ext/";
 
 async function typeOf(p: PerspectiveProxy, base: string): Promise<string | undefined> {
@@ -50,14 +45,15 @@ async function titleOf(p: PerspectiveProxy, base: string): Promise<string | unde
 
 // LLM E2E gate — this suite drives the executor's real LLM path. Skipped by
 // default (unset `LLM_E2E`); the nightly `llm-e2e` workflow on `dev` runs it
-// against Marvin's Ollama. Run locally with `LLM_E2E=1`, or the umbrella
+// against the host's llama-server. Run locally with `LLM_E2E=1`, or the umbrella
 // `./scripts/run-llm-e2e.sh` at the repo root.
 const describeIfLLM: Mocha.SuiteFunction = (process.env.LLM_E2E === "1"
   ? describe
   : (describe.skip as unknown as Mocha.SuiteFunction));
 
 describeIfLLM("perspective.runInterpretation (WS + real LLM)", function () {
-  this.timeout(1_200_000);
+  // One pass may wait behind staging on the single llama-server slot.
+  this.timeout(2_400_000);
 
   let ad4m: Ad4mClient;
   let stop: (() => Promise<void>) | null = null;
@@ -68,8 +64,7 @@ describeIfLLM("perspective.runInterpretation (WS + real LLM)", function () {
     ad4m = agent.client;
     stop = agent.stop;
 
-    // Register the Ollama-backed default LLM the extractor prompts against.
-    const modelId = await addOllamaLlm(ad4m, "interpretation-llm", BASE_URL, MODEL, MAX_NUM_CTX);
+    const modelId = await addE2eLlm(ad4m, "interpretation-llm");
     await ad4m.ai.setDefaultModel("LLM", modelId);
 
     p = await ad4m.perspective.add("run-interpretation-test");

@@ -13,7 +13,10 @@
 //!      known items *and* handed the `id`s it needs to update or link them.
 //!   2. Render those, plus each class's `interpretation_hint`, scalar fields and
 //!      forward relations, and the transcript, into a single prompt
-//!      (`build_interpretation_input`).
+//!      (`build_interpretation_input`). The prompt shows only the rows that fit
+//!      a share of the model's window, the pass's own records first, with short
+//!      handles (`P1`) for ids (`existing_budget`); the steps below read the
+//!      full set.
 //!   3. Ask the configured LLM (`AIService::prompt` on the task registered by
 //!      `ensure_interpretation_task`), retrying the parse a few times because local
 //!      models emit half-valid JSON (`retry_interpretation_parse` +
@@ -38,6 +41,7 @@
 //! fixtures/harness in `interpretation_test_support.rs`.
 
 mod dedup;
+mod existing_budget;
 mod graph;
 mod overflow;
 pub(crate) use overflow::SliceScopeLink;
