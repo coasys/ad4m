@@ -1528,6 +1528,9 @@ pub async fn run_one_pass(
                     // re-proposed instances must collapse to updates (not
                     // unbounded duplicate creates). James Weir PR #911 review.
                     true,
+                    // The processor's strategy, as on the single-shot path (#1804): it
+                    // sets the bands of the duplicate check.
+                    &dedup,
                     // No per-pass credit gate on the auto-processor path:
                     // the watcher runs as an internal service (no user
                     // session to bill against) and each completion still

@@ -11,7 +11,7 @@ use super::{
 use crate::agent::AgentContext;
 use crate::ai_service::harness::flow_propose::{FlowProposalBuffer, FlowTransitionProposeProvider};
 use crate::ai_service::harness::propose::{
-    class_propose_shape_from_shacl, ProposalBuffer, ProposeWritesProvider,
+    class_propose_shape_from_shacl, ProposalBuffer, ProposeWritesProvider, SameAsBuffer,
 };
 use crate::ai_service::harness::provider::{
     is_read_only, BoundArgsProvider, FilteredProvider, ToolProvider, ToolSchema,
@@ -172,6 +172,8 @@ pub async fn strip_noop_updates(
 ///   auto-processor re-proposes the same instance across passes.
 /// - Intra-batch `Create` dedup: if two `Create`s in the same drain match on
 ///   (class, normalized identity), only the first survives.
+/// - A link to or from a `Create` that the two rules above removed points to the row
+///   that took its place ([`remap_bases`]); without it the link names an id nothing writes.
 /// - `AddLinks` whose `(source, predicate, target)` triples all exist in
 ///   `existing_links` are dropped entirely; partially-new link sets are
 ///   filtered down to the novel triples.
@@ -183,22 +185,16 @@ pub(crate) fn dedup_ops_against_existing(
     shapes: &[ModelShape],
     existing_links: &ExistingLinks,
 ) -> Vec<InterpretationOp> {
-    let identity_props: HashMap<String, String> = shapes
-        .iter()
-        .filter_map(|s| {
-            identity_property(s).map(|idp| (class_label(&s.target_class, shapes), idp.name.clone()))
-        })
-        .collect();
+    let identity_props = identity_props_of(shapes);
 
     // Pre-existing graph identities → (normalized value → existing base), per class.
     let mut existing_norm_to_base: HashMap<String, HashMap<String, String>> = HashMap::new();
     for entries in existing.values() {
         for inst in entries {
-            let Some(idp_name) = identity_props.get(&inst.class) else {
+            if !identity_props.contains_key(&inst.class) {
                 continue;
-            };
+            }
             // InstanceContext stores the identity value in `title`.
-            let _ = idp_name; // identity prop name used for Create.values lookup below
             existing_norm_to_base
                 .entry(inst.class.clone())
                 .or_default()
@@ -207,12 +203,14 @@ pub(crate) fn dedup_ops_against_existing(
         }
     }
 
-    // Intra-batch: (class, normalized identity) → index of the first Create
-    // we kept, so a later same-key Create is dropped.
-    let mut seen_in_batch: HashMap<String, HashMap<String, usize>> = HashMap::new();
+    // Intra-batch: (class, normalized identity) → base of the first Create we kept, so a
+    // later same-key Create is dropped and its links go to that base.
+    let mut seen_in_batch: HashMap<String, HashMap<String, String>> = HashMap::new();
+    // A removed Create's base → the base that took its place.
+    let mut replaced: HashMap<String, String> = HashMap::new();
 
     let mut out = Vec::with_capacity(ops.len());
-    for (idx, op) in ops.into_iter().enumerate() {
+    for op in ops {
         match op {
             InterpretationOp::Create {
                 base,
@@ -249,6 +247,7 @@ pub(crate) fn dedup_ops_against_existing(
                         "harness dedup: Create({class}, {:?}) → Update on existing {existing_base}",
                         id_value,
                     );
+                    replaced.insert(base, existing_base.clone());
                     out.push(InterpretationOp::Update {
                         base: existing_base,
                         class,
@@ -259,27 +258,30 @@ pub(crate) fn dedup_ops_against_existing(
 
                 // Intra-batch dedup: drop if we already kept a Create with the
                 // same (class, normalized identity) earlier in this drain.
-                if seen_in_batch
-                    .get(&class)
-                    .and_then(|m| m.get(&normalized))
-                    .is_some()
-                {
+                if let Some(kept) = seen_in_batch.get(&class).and_then(|m| m.get(&normalized)) {
                     log::debug!(
                         "harness dedup: dropping intra-batch duplicate Create({class}, {:?})",
                         id_value,
                     );
+                    replaced.insert(base, kept.clone());
                     continue;
                 }
                 seen_in_batch
                     .entry(class.clone())
                     .or_default()
-                    .insert(normalized, idx);
+                    .insert(normalized, base.clone());
                 out.push(InterpretationOp::Create {
                     base,
                     class,
                     values,
                 });
             }
+            other => out.push(other),
+        }
+    }
+    remap_bases(out, &replaced)
+        .into_iter()
+        .filter_map(|op| match op {
             InterpretationOp::AddLinks { source, links } => {
                 let novel: Vec<_> = links
                     .into_iter()
@@ -296,18 +298,134 @@ pub(crate) fn dedup_ops_against_existing(
                     log::debug!(
                         "harness dedup: dropping AddLinks on {source} — all triples already exist"
                     );
-                    continue;
+                    return None;
                 }
-                out.push(InterpretationOp::AddLinks {
+                Some(InterpretationOp::AddLinks {
                     source,
                     links: novel,
-                });
+                })
             }
-            // Update ops pass through — their base already exists.
-            op @ InterpretationOp::Update { .. } => out.push(op),
+            op => Some(op),
+        })
+        .collect()
+}
+
+/// Class label → name of its identity property, for the classes that declare one.
+fn identity_props_of(shapes: &[ModelShape]) -> HashMap<String, String> {
+    shapes
+        .iter()
+        .filter_map(|s| {
+            identity_property(s).map(|idp| (class_label(&s.target_class, shapes), idp.name.clone()))
+        })
+        .collect()
+}
+
+/// `ops` with every base in `replaced` (a Create the drain removed) changed to the base
+/// that took its place: link sources and targets, and Update bases.
+fn remap_bases(
+    ops: Vec<InterpretationOp>,
+    replaced: &HashMap<String, String>,
+) -> Vec<InterpretationOp> {
+    if replaced.is_empty() {
+        return ops;
+    }
+    let to = |base: String| replaced.get(&base).cloned().unwrap_or(base);
+    ops.into_iter()
+        .map(|op| match op {
+            InterpretationOp::AddLinks { source, links } => InterpretationOp::AddLinks {
+                source: to(source),
+                links: links
+                    .into_iter()
+                    .map(|mut link| {
+                        link.source = to(link.source);
+                        link.target = to(link.target);
+                        link
+                    })
+                    .collect(),
+            },
+            InterpretationOp::Update {
+                base,
+                class,
+                values,
+            } => InterpretationOp::Update {
+                base: to(base),
+                class,
+                values,
+            },
+            create @ InterpretationOp::Create { .. } => create,
+        })
+        .collect()
+}
+
+/// The ops a harness pass writes, from what it buffered. First the merges: each
+/// `propose_same_as` decision of the model (the last one for a row wins), then, when
+/// `dedup_on_drain` is on (the processor's path), each clear match of the duplicate check
+/// that the model did not decide on ([`merge_into_existing`]). Then, with `dedup_on_drain`,
+/// [`dedup_ops_against_existing`]. A new row with neither stays.
+pub(crate) async fn drain_pass_ops(
+    ops: Vec<InterpretationOp>,
+    same_as: Vec<(String, String)>,
+    duplicates: &super::duplicates::PassDuplicates,
+    dedup_on_drain: bool,
+    existing: &ExistingInstances,
+    shapes: &[ModelShape],
+    existing_links: &ExistingLinks,
+) -> Vec<InterpretationOp> {
+    let mut merges: HashMap<String, String> = same_as.into_iter().collect();
+    if dedup_on_drain {
+        for (new, existing) in duplicates.clear_merges(&ops).await {
+            merges.entry(new).or_insert(existing);
         }
     }
-    out
+    let ops = merge_into_existing(ops, &merges, shapes);
+    if dedup_on_drain {
+        dedup_ops_against_existing(ops, existing, shapes, existing_links)
+    } else {
+        ops
+    }
+}
+
+/// Merge each new row of `merges` (a Create's base → an existing row) into its existing
+/// row: the Create becomes an Update of that row without the title (the existing row keeps
+/// its own), and every link to or from the new row points to the existing one. A merge
+/// with no other value writes no Update. A merge of a base that no Create of `ops` has is
+/// ignored.
+pub(crate) fn merge_into_existing(
+    ops: Vec<InterpretationOp>,
+    merges: &HashMap<String, String>,
+    shapes: &[ModelShape],
+) -> Vec<InterpretationOp> {
+    if merges.is_empty() {
+        return ops;
+    }
+    let identity_props = identity_props_of(shapes);
+    let mut replaced: HashMap<String, String> = HashMap::new();
+    let mut out = Vec::with_capacity(ops.len());
+    for op in ops {
+        match op {
+            InterpretationOp::Create {
+                base,
+                class,
+                mut values,
+            } if merges.contains_key(&base) => {
+                let existing = merges[&base].clone();
+                log::info!("interpretation: merging new {class} {base} into {existing}");
+                if let Some(idp) = identity_props.get(&class) {
+                    values.remove(idp);
+                }
+                replaced.insert(base, existing.clone());
+                if !values.is_empty() {
+                    out.push(InterpretationOp::Update {
+                        base: existing,
+                        class,
+                        values,
+                    });
+                }
+            }
+            op => out.push(op),
+        }
+    }
+    remap_bases(out, &replaced)
 }
 
 /// Persist a planned set of [`InterpretationOp`]s into the perspective, inside a
@@ -1102,6 +1220,7 @@ pub async fn run_interpretation_with_harness_and_model(
     caller: Option<Arc<crate::agent::session::Session>>,
     emit_ctx: Option<&crate::perspectives::auto_processor::events::InterpretationEmitContext>,
     dedup_on_drain: bool,
+    dedup_strategy: &DedupStrategy,
     credit_gate: Option<Arc<dyn crate::ai_service::harness::CreditGate>>,
     flow_filter: Option<&[String]>,
 ) -> anyhow::Result<InterpretationOutcome> {
@@ -1222,12 +1341,25 @@ pub async fn run_interpretation_with_harness_and_model(
     // not "mutate the graph." The buffer is drained after the loop.
     let buffer = ProposalBuffer::new();
     let classes_offered = propose_shapes.len();
-    let write_provider: Arc<dyn ToolProvider> = Arc::new(ProposeWritesProvider::new(
-        ad4m_filtered,
-        propose_shapes,
-        buffer.clone(),
-        base_prefix.to_string(),
+    // The duplicate bands (#1804): each `{class}_create` reply names the existing rows the
+    // new row may be, and `propose_same_as` records the model's decision.
+    let duplicates = Arc::new(super::duplicates::PassDuplicates::new(
+        perspective,
+        shapes,
+        &existing_ctx,
+        dedup_strategy,
+        dedup_on_drain,
     ));
+    let same_as = SameAsBuffer::new();
+    let write_provider: Arc<dyn ToolProvider> = Arc::new(
+        ProposeWritesProvider::new(
+            ad4m_filtered,
+            propose_shapes,
+            buffer.clone(),
+            base_prefix.to_string(),
+        )
+        .with_duplicate_check(duplicates.clone(), same_as.clone()),
+    );
     // One `{Flow}_propose_transition` tool per active flow; calls are
     // validated against the flow's reachable states and buffered.
     let flow_buffer = FlowProposalBuffer::new();
@@ -1291,12 +1423,16 @@ pub async fn run_interpretation_with_harness_and_model(
     // Drain the buffered ops. When `dedup_on_drain` is active (auto-processor
     // path), collapse duplicate Creates and filter stale AddLinks before
     // handing off to the overlay gate.
-    let ops = buffer.drain();
-    let ops = if dedup_on_drain {
-        dedup_ops_against_existing(ops, &existing_ctx, shapes, &existing_links)
-    } else {
-        ops
-    };
+    let ops = drain_pass_ops(
+        buffer.drain(),
+        same_as.drain(),
+        &duplicates,
+        dedup_on_drain,
+        &existing_ctx,
+        shapes,
+        &existing_links,
+    )
+    .await;
     // CI-visible diagnostic: pairs with the per-round log in `run_with_tools`.
     // When the harness silently returns zero bases it's almost always because
     // the LLM chose to answer instead of tool-calling, so the buffer is empty
@@ -2346,6 +2482,55 @@ mod tests {
             }
             other => panic!("expected Create, got {other:?}"),
         }
+    }
+
+    // A link from or to a Create that the drain removed points to the row that took its
+    // place: the existing row for a match on the graph, the first Create for an intra-batch
+    // duplicate. Without it the link names an id that nothing writes.
+    #[tokio::test]
+    async fn dedup_ops_links_of_a_removed_create_go_to_the_row_that_replaced_it() {
+        let (_perspective, shapes, _ctx) =
+            setup_perspective_no_llm(&[("Intention", INTENTION_SDNA)]).await;
+        let existing = existing_by_identity(&[("Intention", "Ship the MVP")]);
+        let old = "test://existing/Intention/0";
+        let create = |base: &str, title: &str| InterpretationOp::Create {
+            base: base.to_string(),
+            class: "Intention".to_string(),
+            values: serde_json::Map::from_iter([("title".to_string(), serde_json::json!(title))]),
+        };
+        let link = |source: &str, target: &str| Link {
+            source: source.to_string(),
+            predicate: Some("ns://follows".to_string()),
+            target: target.to_string(),
+        };
+        let ops = vec![
+            create("soa://new/mvp", "ship the mvp"),
+            create("soa://new/docs", "Write the docs"),
+            create("soa://new/docs-again", "WRITE the docs"),
+            InterpretationOp::AddLinks {
+                source: "soa://new/docs-again".to_string(),
+                links: vec![link("soa://new/docs-again", "soa://new/mvp")],
+            },
+        ];
+
+        let deduped = dedup_ops_against_existing(ops, &existing, &shapes, &ExistingLinks::new());
+        let links: Vec<(String, String)> = deduped
+            .iter()
+            .filter_map(|op| match op {
+                InterpretationOp::AddLinks { source, links } => {
+                    assert_eq!(source, "soa://new/docs");
+                    Some(links.clone())
+                }
+                _ => None,
+            })
+            .flatten()
+            .map(|l| (l.source, l.target))
+            .collect();
+        assert_eq!(
+            links,
+            vec![("soa://new/docs".to_string(), old.to_string())],
+            "{deduped:#?}"
+        );
     }
 
     #[tokio::test]

@@ -41,6 +41,7 @@
 //! fixtures/harness in `interpretation_test_support.rs`.
 
 mod dedup;
+mod duplicates;
 pub(crate) mod embedding_cache;
 mod existing_budget;
 mod graph;
