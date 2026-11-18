@@ -20,10 +20,7 @@ impl PerspectiveInstance {
     /// writer lock for the whole load: a concurrent `add_link` waits, and
     /// nothing sees a half-imported graph on the write side (reads use
     /// snapshots and see the load once committed).
-    pub(crate) async fn import_links_file(
-        &self,
-        path: &Path,
-    ) -> Result<LinkImportStats, Error> {
+    pub(crate) async fn import_links_file(&self, path: &Path) -> Result<LinkImportStats, Error> {
         let store = self.sparql_store.clone();
         let path = path.to_path_buf();
         let stats = tokio::task::spawn_blocking(move || store.import_links_file(&path))
@@ -38,7 +35,8 @@ impl PerspectiveInstance {
         // matching against a diff that never ran.
         self.clear_shape_cache();
         *self.changed_predicates.lock().await = ChangedPredicates::CheckAll;
-        self.trigger_subscription_check.store(true, Ordering::Release);
+        self.trigger_subscription_check
+            .store(true, Ordering::Release);
 
         Ok(stats)
     }

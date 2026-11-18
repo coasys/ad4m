@@ -194,7 +194,9 @@ async fn operator_imports_a_perspective_snapshot_into_the_store() {
     use crate::perspectives::perspective_instance::PerspectiveInstance;
     use crate::perspectives::register_perspective;
     use crate::types::domain::Perspective as DomainPerspective;
-    use crate::types::{DecoratedLinkExpression, Link, LinkStatus, PerspectiveHandle, PerspectiveState};
+    use crate::types::{
+        DecoratedLinkExpression, Link, LinkStatus, PerspectiveHandle, PerspectiveState,
+    };
 
     let uuid = uuid::Uuid::new_v4().to_string();
     let perspective = PerspectiveInstance::new(

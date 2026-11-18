@@ -1434,9 +1434,7 @@ impl ElementScan {
             // A closer at the array's own level ends it: `]` where an
             // element or the array's end was due. `]` right after `,`
             // is a trailing comma; `}` here never fits.
-            if b == b']'
-                && (self.pos == ElementPos::Open || self.pos == ElementPos::Element)
-            {
+            if b == b']' && (self.pos == ElementPos::Open || self.pos == ElementPos::Element) {
                 self.done = true;
             } else {
                 self.surprise = true;
@@ -1573,16 +1571,17 @@ struct SegmentQuads {
 /// fresh write ([`ProofWrite::Whole`]) with the verdict computed from
 /// its signature, never taken from the file, and a link in the store's
 /// metadata vocabulary is skipped and counted.
-fn build_segment_quads(
-    bytes: &[u8],
-    elements: &[(u32, u32)],
-) -> Result<SegmentQuads, Error> {
+fn build_segment_quads(bytes: &[u8], elements: &[(u32, u32)]) -> Result<SegmentQuads, Error> {
     let mut quads = Vec::with_capacity(elements.len() * 9);
     let mut skipped = 0;
     for &(start, end) in elements {
         let decorated: DecoratedLinkExpression =
             serde_json::from_slice(&bytes[start as usize..end as usize]).map_err(|e| {
-                anyhow!("Perspective import: malformed link at byte {}: {}", start, e)
+                anyhow!(
+                    "Perspective import: malformed link at byte {}: {}",
+                    start,
+                    e
+                )
             })?;
         let link = LinkExpression::from(decorated);
         if is_link_metadata(link.data.predicate.as_deref().unwrap_or("")) {
@@ -1590,7 +1589,12 @@ fn build_segment_quads(
             continue;
         }
         let status = link.status.clone().unwrap_or(LinkStatus::Shared);
-        let write = link_quads(&link, &status, link.compute_proof_valid(), ProofWrite::Whole)?;
+        let write = link_quads(
+            &link,
+            &status,
+            link.compute_proof_valid(),
+            ProofWrite::Whole,
+        )?;
         quads.extend(write.quads.into_iter().map(Ok));
     }
     Ok(SegmentQuads {
@@ -2684,10 +2688,7 @@ impl SparqlStore {
     /// than replacing them; importing into a populated store is safe for
     /// additions but does not deduplicate re-asserted proofs the way
     /// [`write_link_quads_proof`] does.
-    pub fn import_links_file(
-        &self,
-        path: &std::path::Path,
-    ) -> Result<LinkImportStats, Error> {
+    pub fn import_links_file(&self, path: &std::path::Path) -> Result<LinkImportStats, Error> {
         let _writer = self
             .writer
             .lock()
@@ -2705,12 +2706,10 @@ impl SparqlStore {
             .unwrap_or(1);
         let (seg_tx, seg_rx) = std::sync::mpsc::sync_channel::<LinkSegment>(n_workers);
         let seg_rx = Arc::new(Mutex::new(seg_rx));
-        let (quad_tx, quad_rx) =
-            std::sync::mpsc::sync_channel::<Result<SegmentQuads, Error>>(4);
+        let (quad_tx, quad_rx) = std::sync::mpsc::sync_channel::<Result<SegmentQuads, Error>>(4);
 
-        let file = std::fs::File::open(path).map_err(|e| {
-            anyhow!("Failed to open perspective import file {:?}: {}", path, e)
-        })?;
+        let file = std::fs::File::open(path)
+            .map_err(|e| anyhow!("Failed to open perspective import file {:?}: {}", path, e))?;
 
         std::thread::scope(|scope| -> Result<LinkImportStats, Error> {
             let parser = scope.spawn(move || {
@@ -2719,19 +2718,17 @@ impl SparqlStore {
             for _ in 0..n_workers {
                 let seg_rx = Arc::clone(&seg_rx);
                 let quad_tx = quad_tx.clone();
-                scope.spawn(move || {
-                    loop {
-                        let segment = match seg_rx.lock() {
-                            Ok(rx) => rx.recv(),
-                            Err(_) => return,
-                        };
-                        let Ok(segment) = segment else { return };
-                        if quad_tx
-                            .send(build_segment_quads(&segment.bytes, &segment.elements))
-                            .is_err()
-                        {
-                            return;
-                        }
+                scope.spawn(move || loop {
+                    let segment = match seg_rx.lock() {
+                        Ok(rx) => rx.recv(),
+                        Err(_) => return,
+                    };
+                    let Ok(segment) = segment else { return };
+                    if quad_tx
+                        .send(build_segment_quads(&segment.bytes, &segment.elements))
+                        .is_err()
+                    {
+                        return;
                     }
                 });
             }
@@ -6573,7 +6570,11 @@ mod tests {
     fn export_file(links: Vec<DecoratedLinkExpression>) -> tempfile::NamedTempFile {
         let file = tempfile::NamedTempFile::new().unwrap();
         let snapshot = crate::types::domain::Perspective { links };
-        std::fs::write(file.path(), serde_json::to_string_pretty(&snapshot).unwrap()).unwrap();
+        std::fs::write(
+            file.path(),
+            serde_json::to_string_pretty(&snapshot).unwrap(),
+        )
+        .unwrap();
         file
     }
 
@@ -6774,8 +6775,15 @@ mod tests {
             std::fs::write(file.path(), input).unwrap();
             let svc = new_service();
             let err = svc.import_links_file(file.path()).unwrap_err().to_string();
-            assert!(err.contains("is not a perspective export"), "{input}: {err}");
-            assert_eq!(svc.get_all_links(&EvalStop::none()).unwrap().len(), 0, "{input}");
+            assert!(
+                err.contains("is not a perspective export"),
+                "{input}: {err}"
+            );
+            assert_eq!(
+                svc.get_all_links(&EvalStop::none()).unwrap().len(),
+                0,
+                "{input}"
+            );
         }
     }
 
@@ -6804,7 +6812,11 @@ mod tests {
             let (scan, ranges) = scanned_ranges(input, step);
             assert!(scan.done && !scan.surprise, "step {step}");
             let elements: Vec<&str> = ranges.iter().map(|&(s, e)| &input[s..e]).collect();
-            assert_eq!(elements, [r#"{"a":1,"b":"} ,["}"#, r#"{"a":2}"#], "step {step}");
+            assert_eq!(
+                elements,
+                [r#"{"a":1,"b":"} ,["}"#, r#"{"a":2}"#],
+                "step {step}"
+            );
         }
     }
 
@@ -6815,24 +6827,20 @@ mod tests {
         for (input, done, surprise) in [
             (r#"{"links":[{}]}"#, true, false),
             (r#"{"links":[]}"#, true, false),
-            (r#"{"links":"x"}"#, false, true),        // not an array
-            (r#"{"links":42}"#, false, true),         // not an array
-            (r#"{"links":[1,2]}"#, false, true),      // non-object element
-            (r#"{"links":[[1]]}"#, false, true),      // non-object element
+            (r#"{"links":"x"}"#, false, true),   // not an array
+            (r#"{"links":42}"#, false, true),    // not an array
+            (r#"{"links":[1,2]}"#, false, true), // non-object element
+            (r#"{"links":[[1]]}"#, false, true), // non-object element
             (r#"{"links":[{"a":1},]}"#, false, true), // trailing comma
-            (r#"{"links":[}"#, false, true),          // wrong closer
-            (r#"{"links":[{"a":1}}"#, false, true),   // root closed early
-            (r#"{"links":[{}]"#, true, false),        // array closed: tail ignored
-            (r#"{"links":[{"a":1]"#, false, false),   // `]` ends the element
-            (r#"{"links":[{"a":1"#, false, false),    // truncated
-            (r#"{"other":[]}"#, false, false),        // no links key at all
+            (r#"{"links":[}"#, false, true),     // wrong closer
+            (r#"{"links":[{"a":1}}"#, false, true), // root closed early
+            (r#"{"links":[{}]"#, true, false),   // array closed: tail ignored
+            (r#"{"links":[{"a":1]"#, false, false), // `]` ends the element
+            (r#"{"links":[{"a":1"#, false, false), // truncated
+            (r#"{"other":[]}"#, false, false),   // no links key at all
         ] {
             let (scan, _) = scanned_ranges(input, 4);
-            assert_eq!(
-                (scan.done, scan.surprise),
-                (done, surprise),
-                "{input}"
-            );
+            assert_eq!((scan.done, scan.surprise), (done, surprise), "{input}");
         }
     }
 
@@ -6843,13 +6851,11 @@ mod tests {
         let signer = TestSigner::generate();
         let file = tempfile::NamedTempFile::new().unwrap();
         let snapshot = crate::types::domain::Perspective {
-            links: vec![
-                (
-                    make_link(&signer, "ad4m://s", "ad4m://p", "ad4m://t"),
-                    LinkStatus::Shared,
-                )
-                    .into(),
-            ],
+            links: vec![(
+                make_link(&signer, "ad4m://s", "ad4m://p", "ad4m://t"),
+                LinkStatus::Shared,
+            )
+                .into()],
         };
         std::fs::write(file.path(), serde_json::to_string(&snapshot).unwrap()).unwrap();
 
@@ -6900,7 +6906,6 @@ mod tests {
             "export file: {} MB",
             file.as_ref().metadata().unwrap().len() / 1_000_000
         );
-
 
         let dir = tempfile::tempdir().unwrap();
         let svc = SparqlStore::new(Some(dir.path().to_str().unwrap())).unwrap();
