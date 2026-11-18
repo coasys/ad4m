@@ -12,7 +12,7 @@ import { loadHardwareClasses, loadManifest, loadMatrixPlan, type Manifest, type 
 import { evidenceRelPath, loadAllEvidence, validateEvidence } from "../helpers/ai-wind-tunnel/evidence.js";
 import { executorCommit } from "../helpers/ai-wind-tunnel/executor.js";
 import { fingerprintId, gpuBudget, isIntegratedAmdName, rocmUsable } from "../helpers/ai-wind-tunnel/fingerprint.js";
-import { cellFit, classify, fallbackClasses, memoryFit, type ClassInput } from "../helpers/ai-wind-tunnel/hardware-class.js";
+import { cellFit, classify, classInput, fallbackClasses, memoryFit, type ClassInput } from "../helpers/ai-wind-tunnel/hardware-class.js";
 import { streamCompletion } from "../helpers/ai-wind-tunnel/http.js";
 import { runtimeLibDirs } from "../helpers/ai-wind-tunnel/install.js";
 import { buildMatrix, parseList, resolveModel } from "../helpers/ai-wind-tunnel/matrix.js";
@@ -22,7 +22,7 @@ import { drmClientBytes, MemorySampler, once, spawnLogged, waitForHttp } from ".
 import { assertAttachedModel, canBeSttReference, SkipError } from "../helpers/ai-wind-tunnel/providers/types.js";
 import { chatTranscriptionRequest, parseChatTranscript, parseSherpaResult, sherpaFrame, startAudioFront } from "../helpers/ai-wind-tunnel/providers/audio-front.js";
 import { containerMemoryArgs } from "../helpers/ai-wind-tunnel/providers/docker.js";
-import { llamaVariants, sttInstruction } from "../helpers/ai-wind-tunnel/providers/llama-server.js";
+import { llamaServerFlags, llamaVariants, sttInstruction } from "../helpers/ai-wind-tunnel/providers/llama-server.js";
 import { runtimeVariants } from "../helpers/ai-wind-tunnel/providers/nemo-speech.js";
 import { ollamaBackendFromLog } from "../helpers/ai-wind-tunnel/providers/ollama.js";
 import { deriveRecommendations, parseParams } from "../helpers/ai-wind-tunnel/recommend.js";
@@ -151,6 +151,22 @@ describe("AI wind tunnel (unit)", () => {
       const cells = buildMatrix(loadMatrixPlan(), loadManifest(), [...PROVIDERS], [...SERVICES]);
       expect(cells.length).to.be.greaterThan(10);
       for (const c of cells) expect(Boolean(c.unsupported) !== Boolean(c.model), `${c.provider} ${c.service}`).to.be.true;
+    });
+    it("starts the 27B cell with its own flags: MTP, one slot, a reasoning budget, the message as one element", () => {
+      const cells = buildMatrix(loadMatrixPlan(), loadManifest(), ["llama-server"], ["llm"]);
+      const model = cells.find((c) => c.model?.modelId === "qwen3.8-27b-ud-q4_k_m")?.model;
+      const message = "Thinking budget reached. Now give the final answer.";
+      expect(model?.context).to.equal(65536);
+      expect(model?.serverFlags).to.include(message);
+      expect(model?.serverFlags?.filter((f) => f === message)).to.have.length(1);
+      const flags = llamaServerFlags(model!, "llm", true);
+      expect(flags).to.deep.equal(model!.serverFlags);
+      expect(flags).to.not.include("off");
+      expect(flags.indexOf("--reasoning-budget-message") + 1).to.equal(flags.indexOf(message));
+      // A cell that does not name flags still turns thinking off, and does not inherit the 27B's budget.
+      expect(llamaServerFlags({ context: 8192 }, "llm", true)).to.deep.equal(["-c", "8192", "-ngl", "999", "--reasoning", "off"]);
+      expect(llamaServerFlags({}, "embeddings", false)).to.deep.equal(["-c", "8192", "--embeddings"]);
+      expect(llamaServerFlags({}, "stt", true)).to.deep.equal(["-c", "4096", "-np", "1", "-ngl", "999", "--reasoning", "off"]);
     });
   });
 
@@ -631,6 +647,27 @@ describe("AI wind tunnel (unit)", () => {
       expect(fallbackClasses("cpu-16gb", rules)).to.deep.equal(["cpu-16gb", "cpu-8gb"]);
       expect(fallbackClasses("nvidia-12gb", rules)).to.deep.equal(["nvidia-12gb", "nvidia-8gb", "cpu-8gb"]);
       expect(fallbackClasses("unknown", rules)).to.deep.equal(["unknown"]);
+    });
+    it("goes on from a narrower class to the class it narrows, which never reaches it", () => {
+      expect(fallbackClasses("amd-strix-halo-128", rules)).to.deep.equal([
+        "amd-strix-halo-128",
+        "amd-igpu-uma-128",
+        "amd-igpu-uma-64",
+        "amd-igpu-uma-32",
+        "amd-igpu-uma-16",
+        "cpu-128gb",
+        "cpu-64gb",
+        "cpu-32gb",
+        "cpu-16gb",
+        "cpu-8gb",
+      ]);
+      expect(fallbackClasses("amd-igpu-uma-128", rules)).to.not.include("amd-strix-halo-128");
+      for (const r of rules.filter((r) => r.fallback)) expect(rules.map((x) => x.class)).to.include(r.fallback);
+    });
+    it("reads the CPU brand of the fingerprint, matching it case-insensitively", () => {
+      const input = classInput({ os: "linux", arch: "x64", cpu: { model: "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S", cores: 16, threads: 32 }, memoryBytes: 130996502528, gpus: [{ vendor: "amd", name: "Strix Halo", vramBytes: 536870912, unified: true }], backends: ["cpu", "vulkan"] } as unknown as Fingerprint);
+      expect(input.cpuBrand).to.equal("AMD RYZEN AI MAX+ 395 w/ Radeon 8060S");
+      expect(classify(input, rules)).to.equal("amd-strix-halo-128");
     });
     it("fits a model in min(GPU budget - 1 GiB, RAM - 4 GiB)", () => {
       expect(memoryFit(5 * GIB, 32 * GIB, 8 * GIB)).to.deep.include({ fits: true, budgetBytes: 7 * GIB });

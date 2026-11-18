@@ -46,6 +46,7 @@
 //! | `sfu-room-roster`             | (inline)      | listed DIDs and the departed DID | Who is in a call room now         |
 //! | `flow-state-changed`          | (inline)      | `agentDid` if it reads the perspective; else the main agent's to `Operator` | A flow instance's state moved on that agent's replica (#1424) |
 //! | `identity-fork`               | (inline)      | the local agents that speak for the identity | The key-log cache found two logs (a different valid event at a held seq) and kept its own (a store answering a shorter log raises none) |
+//! | `config-changed`              | (inline)      | the operator           | `runtime.setConfig` wrote keys to the config file; they take effect at the next start |
 //!
 //! Every session also needs the event's capability (`Event::capability`).
 
@@ -142,6 +143,7 @@ pub fn event_specs() -> Vec<EventSpec> {
         EventSpec::of::<crate::sfu::SfuSessionReplaced>(SfuSessionReplaced, false),
         EventSpec::of::<FlowStateChangedEvent>(FlowStateChanged, true),
         EventSpec::of::<crate::identity::types::IdentityForkEvent>(IdentityFork, false),
+        EventSpec::of::<crate::config_rpc::ConfigChanged>(ConfigChanged, false),
     ]
 }
 
@@ -275,7 +277,8 @@ fn payload_key(topic: Topic) -> Option<&'static str> {
         | Topic::SfuRoomRoster
         | Topic::SfuSessionReplaced
         | Topic::FlowStateChanged
-        | Topic::IdentityFork => None,
+        | Topic::IdentityFork
+        | Topic::ConfigChanged => None,
     }
 }
 
@@ -747,7 +750,11 @@ mod audience_matrix_tests {
             .acts_as_did()
             .expect("the main agent has a DID");
         let main = main.to_string();
-        assert_eq!(sessions[1].1.acts_as_did(), Some(main.as_str()), "app");
+        assert_eq!(
+            sessions[1].1.acts_as_did().as_deref(),
+            Some(main.as_str()),
+            "app"
+        );
 
         // The sessions that hold a user token's capabilities, or every capability.
         let readers = ["operator", "app", "permit app", "user A", "user B"];
@@ -807,6 +814,12 @@ mod audience_matrix_tests {
                 "no-did".into(),
                 event(Topic::AgentUpdated, Audience::Dids(vec![])),
                 vec![],
+            ),
+            // `runtime.setConfig` wrote the config file: the operator only.
+            (
+                "config-changed".into(),
+                event(Topic::ConfigChanged, Audience::Operator),
+                vec!["operator"],
             ),
         ];
         // Agent topics go to the agent the payload names (`matches_agent_did` before), or to
@@ -1448,8 +1461,9 @@ mod audience_matrix_tests {
     // `send_signal` and `send_broadcast` deliver to this executor's own agents in a
     // neighbourhood through `event_recipients`: a signal to an owner is published here (once,
     // naming it), a signal to anyone else goes to the link language; a broadcast reaches every
-    // owner but the main agent when the main agent sent it. Without a link language the
-    // remote part fails after the local delivery.
+    // owner, its sender too, without loopback: the main agent like any managed agent, so two
+    // clients of one agent hear each other. Without a link language the remote part fails
+    // after the local delivery.
     #[tokio::test]
     async fn signals_to_this_executors_agents_are_delivered_here() {
         use crate::perspectives::perspective_instance::PerspectiveInstance;
@@ -1508,16 +1522,24 @@ mod audience_matrix_tests {
             author: main.clone(),
             ..Default::default()
         };
+        let mut expected = vec![to(A), to(&main)];
+        expected.sort_by(|x, y| x.1.cmp(&y.1));
         let _ = with_main.send_broadcast(from_main, false).await;
-        assert_eq!(signals(), vec![to(A)], "the main agent sent it");
+        assert_eq!(
+            signals(),
+            expected,
+            "the main agent gets the broadcast it sent, as any owner does"
+        );
         let from_a = PerspectiveExpression {
             author: A.into(),
             ..Default::default()
         };
         let _ = with_main.send_broadcast(from_a, false).await;
-        let mut expected = vec![to(A), to(&main)];
-        expected.sort_by(|x, y| x.1.cmp(&y.1));
-        assert_eq!(signals(), expected);
+        assert_eq!(
+            signals(),
+            expected,
+            "a managed agent gets its own broadcast"
+        );
     }
 
     // A triggered notification carries `triggerMatch`, query results from its perspective. It
@@ -2310,6 +2332,13 @@ mod event_spec_tests {
                     seq: 1,
                     ours: "QmA".into(),
                     theirs: "QmB".into(),
+                }),
+            ),
+            (
+                Topic::ConfigChanged,
+                serde_json::to_value(crate::config_rpc::ConfigChanged {
+                    keys: vec!["mcp_port".into()],
+                    restart_pending: true,
                 }),
             ),
         ];

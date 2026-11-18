@@ -399,6 +399,12 @@ jobs:
           name: Test install-hc-toolchain.sh
           command: bash scripts/install-hc-toolchain.test.sh
       - run:
+          # Scratch workdirs + fake cargo, no network; about a second. The snapshot's
+          # stamp and the host-wide cache's digests (a kept workdir must not embed
+          # another commit's snapshot).
+          name: Test build-deno-snapshot.sh
+          command: bash rust-executor/scripts/build-deno-snapshot.test.sh
+      - run:
           # Scratch git repos, no network; about two seconds. Runs the fix_workdir
           # block above against healthy and deliberately broken workdirs (#1325).
           name: Test the fix_workdir step
@@ -494,19 +500,30 @@ jobs:
             # mktemp makes the directory 700. nginx reads it as www-data.
             chmod 755 "$dest"
             chmod 644 "$dest"/*
-            find "$root" -mindepth 1 -maxdepth 1 -regextype posix-extended -regex '.*/[0-9a-f]{40}' -mtime +35 -exec rm -rf {} +
-            find "$root" -mindepth 1 -maxdepth 1 \( -name '.staging.*' -o -name '.old.*' \) -mmin +60 -exec rm -rf {} +
+            # Cleanup only: the publish above is done. Builds publish here at the same time,
+            # and another build's .staging/.old dir can go away while find reads the dir.
+            # find then exits 1 (-ignore_readdir_race does not cover it). The next build
+            # removes whatever this one skipped.
+            find "$root" -mindepth 1 -maxdepth 1 -regextype posix-extended -regex '.*/[0-9a-f]{40}' -mtime +35 -exec rm -rf {} + || true
+            find "$root" -mindepth 1 -maxdepth 1 \( -name '.staging.*' -o -name '.old.*' \) -mmin +60 -exec rm -rf {} + || true
             echo "published https://executor.ad4m.dev/$CIRCLE_SHA1/manifest.json"
             ls -l "$dest" && cat "$dest/manifest.json"
       - run:
           # clippy and rust-tests compile on other runners. These generated files are
           # embedded by that compile (include_bytes!/include!/include_dir!) and are
-          # not in git.
+          # not in git. The stamp (.inputs) goes with the snapshot: the workdir
+          # keeps what this restores. Without it, another commit's snapshot sat
+          # under this workdir's old stamp, the next build there said "up to
+          # date" and embedded it (deno panics: the snapshot's op count is not
+          # the binary's). The stamp now also holds the outputs' digest, so
+          # build-deno-snapshot.sh rebuilds such a mix anyway; with the stamp
+          # restored too, a later build of this commit there needs no rebuild.
           name: Stash generated Rust compile inputs for clippy and rust-tests
           command: |
             CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-/var/lib/ci-artifacts}"
             dst="$CI_ARTIFACT_DIR/${CIRCLE_SHA1}/compile-inputs.tar"
             tar -cf "$dst.tmp" \
+              rust-executor/CUSTOM_DENO_SNAPSHOT.inputs \
               rust-executor/CUSTOM_DENO_SNAPSHOT.bin \
               rust-executor/CUSTOM_DENO_SNAPSHOT.residual_esm.rs \
               rust-executor/CUSTOM_DENO_SNAPSHOT.residual_js.rs \
@@ -627,6 +644,31 @@ jobs:
           # the crate's `pnpm test` script.
           name: rust-executor tests
           command: cd rust-executor && cargo test --release -- --test-threads=1
+          no_output_timeout: 30m
+
+  # The Rust client: unit tests plus its real-executor integration test.
+  # ad4m-executor comes from the build job's stash; AD4M_REQUIRE_EXECUTOR
+  # turns a missing binary into a failure instead of a silent skip (F11).
+  # The job compiles Rust, so it belongs to the marvin pool (marvin-light
+  # compiles none). The run also resolves its own dependency graph:
+  # restored binaries provide no OpenSSL headers, and a bare
+  # `cargo test -p ad4m-client` selects openssl-sys without `vendored` —
+  # the feature that, in `ad4m`'s graph, only lair_keystore's
+  # bundled-sqlcipher-vendored-openssl path switches on. ad4m-client's own
+  # `vendored` feature does the same through tokio-tungstenite's
+  # native-tls-vendored, so the test invocation carries the vendored
+  # graph on a host with no system OpenSSL.
+  rust-client-tests:
+    machine: true
+    resource_class: coasys/marvin
+    steps:
+      - fix_workdir
+      - checkout
+      - setup_env
+      - restore_binaries
+      - run:
+          name: ad4m-client tests (unit + real-executor integration)
+          command: AD4M_REQUIRE_EXECUTOR=1 cargo test -p ad4m-client --features vendored
           no_output_timeout: 30m
 
   js-unit-tests:
@@ -1207,6 +1249,9 @@ workflows:
           requires:
             - build
       - rust-tests:
+          requires:
+            - build
+      - rust-client-tests:
           requires:
             - build
       - integration-tests-js:

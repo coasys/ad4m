@@ -1099,6 +1099,72 @@ mod tests {
         device(data, 64, vec![igpu], backends)
     }
 
+    /// An AMD APU with 122 GiB of RAM and 61 GiB of GTT, as amdgpu's sysfs reports it, and
+    /// the CPU brand `brand`.
+    fn amd_apu_128(data: &Data, brand: &str) -> LocalHardware {
+        let mut igpu = gpu(GpuVendor::Amd, GpuType::Integrated, 0);
+        igpu.vram_bytes = Some(GIB / 2);
+        igpu.shared_bytes = Some(61 * GIB);
+        igpu.source = "sysfs".into();
+        let mut hardware = device(
+            data,
+            122,
+            vec![igpu],
+            vec![Backend::Cpu, Backend::Vulkan, Backend::Rocm],
+        );
+        hardware.cpu.brand = brand.into();
+        crate::ai_service::local::hardware::finish(&mut hardware, &data.classes);
+        hardware
+    }
+
+    /// The embedded data: a Strix Halo (Ryzen AI Max, 128 GB unified) chats on Qwen3.8 27B
+    /// with the flags the wind tunnel measured on it, and keeps its class family's
+    /// embeddings and speech. Another AMD APU with as much memory keeps the 4B.
+    #[test]
+    fn strix_halo_defaults_to_qwen3_8_27b_and_other_amd_apus_keep_theirs() {
+        let data = crate::ai_service::local::data::embedded().unwrap();
+        let llm = |plan: &LocalPlan| {
+            plan.models
+                .iter()
+                .find(|m| m.service == Service::Llm)
+                .cloned()
+                .unwrap()
+        };
+
+        let strix = amd_apu_128(data, "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S");
+        assert_eq!(strix.hardware_class, "amd-strix-halo-128");
+        let plan = plan(data, &strix, &nothing_installed);
+        assert!(plan.fits, "{:?}", plan.reasons);
+        let chat = llm(&plan);
+        assert_eq!(chat.model_id, "qwen3.8-27b-ud-q4_k_m");
+        assert_eq!(chat.basis, Basis::Measured);
+        assert_eq!(chat.from_class, "amd-strix-halo-128");
+        assert!(!chat.evidence.is_empty());
+        let flags = chat.server_flags.join(" ");
+        for flag in ["-c 65536", "-np 1", "-ngl 999", "--spec-type draft-mtp"] {
+            assert!(flags.contains(flag), "{flag} missing from {flags}");
+        }
+        let llama = plan
+            .runtimes
+            .iter()
+            .find(|r| r.runtime_id == "llama-server")
+            .unwrap();
+        assert_eq!(llama.build, "linux-x64-vulkan");
+        let others: Vec<_> = plan
+            .models
+            .iter()
+            .filter(|m| m.service != Service::Llm)
+            .map(|m| m.from_class.as_str())
+            .collect();
+        assert_eq!(others, vec!["amd-igpu-uma-128", "amd-igpu-uma-128"]);
+
+        let point = amd_apu_128(data, "AMD Ryzen AI 9 HX 370 w/ Radeon 890M");
+        assert_eq!(point.hardware_class, "amd-igpu-uma-128");
+        let chat = llm(&super::plan(data, &point, &nothing_installed));
+        assert_eq!(chat.model_id, "qwen3.5-4b-q4_k_m");
+        assert_eq!(chat.from_class, "amd-igpu-uma-128");
+    }
+
     /// The ROCm build runs on the CPU without the system ROCm libraries: where Vulkan runs,
     /// a recommended ROCm build becomes Vulkan, with the reason. Without Vulkan it stays.
     #[test]
@@ -1147,12 +1213,54 @@ mod tests {
         assert_eq!(default_flags(Service::Llm), vec!["--reasoning", "off"]);
     }
 
-    /// The embedded data on the smoke-test device: a Strix Halo APU, 128 GB, Vulkan. The
-    /// wind tunnel measured this class: Qwen3.5 4B on Vulkan, nomic (measured on ROCm, here
-    /// on the chat model's Vulkan llama-server), Parakeet v3 on nemo-speech's Vulkan build
-    /// with its device flag.
+    /// A reasoning-budget message with spaces is one server flag, from the recommendation
+    /// JSON through the plan. Joining and splitting on spaces would truncate it.
     #[test]
-    fn the_embedded_data_plans_the_measured_set_on_strix_halo() {
+    fn a_spaced_reasoning_budget_message_stays_one_server_flag() {
+        let message = "Thinking budget reached. Now give the final answer.";
+        let mut budgeted = recommendation("big", "llama-server", true);
+        budgeted["serverFlags"] = json!([
+            "-c",
+            "65536",
+            "-np",
+            "1",
+            "--reasoning-budget",
+            "2048",
+            "--reasoning-budget-message",
+            message
+        ]);
+        let mut recommendations = full();
+        recommendations["gpu-12gb"]["llm"] = budgeted;
+        let data = data(recommendations);
+        let plan = plan(&data, &nvidia_12(&data, 32), &nothing_installed);
+        let carried = plan
+            .models
+            .iter()
+            .find(|m| m.service == Service::Llm)
+            .unwrap();
+        assert_eq!(
+            carried
+                .server_flags
+                .iter()
+                .filter(|f| f.as_str() == message)
+                .count(),
+            1
+        );
+        let at = carried
+            .server_flags
+            .iter()
+            .position(|f| f == "--reasoning-budget-message")
+            .unwrap();
+        assert_eq!(carried.server_flags[at + 1], message);
+        assert!(!carried.server_flags[at + 1].contains('"'));
+    }
+
+    /// The embedded data on an AMD APU, 128 GB, Vulkan, whose CPU brand is not a Ryzen AI
+    /// Max (so not `amd-strix-halo-128`). The wind tunnel measured this class: Qwen3.5 4B on
+    /// Vulkan, nomic (measured on ROCm, here on the chat model's Vulkan llama-server),
+    /// Parakeet v3 on nemo-speech's Vulkan build with its device flag.
+    #[test]
+    fn the_embedded_data_plans_the_measured_set_on_an_amd_apu_with_128_gb() {
         let data = crate::ai_service::local::data::embedded().unwrap();
         let mut strix = gpu(GpuVendor::Amd, GpuType::Integrated, 0);
         strix.vram_bytes = Some(GIB / 2);
@@ -1280,8 +1388,9 @@ mod tests {
     }
 
     /// An RTX 3090 (24 GB, CUDA) is nvidia-24gb. The wind tunnel measured Qwen3.8 27B
-    /// there, at a 64k context, on llama-server's CUDA build; nomic rides the same server.
-    /// No STT cell passed, so transcription is the manifest default, not a measured pick.
+    /// there, at a 64k context, one slot, MTP and a 2048-token reasoning budget, on
+    /// llama-server's CUDA build; nomic rides the same server. No STT cell passed, so
+    /// transcription is the manifest default, not a measured pick.
     #[test]
     fn the_embedded_data_plans_qwen3_8_27b_on_nvidia_24gb() {
         let data = crate::ai_service::local::data::embedded().unwrap();
@@ -1302,9 +1411,28 @@ mod tests {
         assert_eq!(llm.model_id, "qwen3.8-27b-ud-q4_k_m");
         assert_eq!(llm.basis, Basis::Measured);
         assert_eq!(llm.from_class, "nvidia-24gb");
+        // The message has spaces. Joining the flags and comparing the string would hide a
+        // split; the budget message has to be one element.
+        let message = "Thinking budget reached. Now give the final answer.";
         assert_eq!(
-            llm.server_flags.join(" "),
-            "-c 65536 -ngl 999 --reasoning off"
+            llm.server_flags,
+            vec![
+                "-c",
+                "65536",
+                "-np",
+                "1",
+                "-ngl",
+                "999",
+                "--jinja",
+                "--spec-type",
+                "draft-mtp",
+                "--spec-draft-n-max",
+                "4",
+                "--reasoning-budget",
+                "2048",
+                "--reasoning-budget-message",
+                message,
+            ]
         );
         let embed = plan
             .models

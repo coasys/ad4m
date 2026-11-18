@@ -46,6 +46,7 @@ use super::ws_handler::{HandlerMap, NoParams, WsRpcError};
 /// unless they raced the boot sequence.
 fn service() -> Result<Arc<crate::sfu::SfuService>, WsRpcError> {
     get_sfu_service().ok_or_else(|| WsRpcError {
+        data: None,
         code: 503,
         message: "SFU service not yet available".to_string(),
     })
@@ -70,7 +71,6 @@ fn parse<P: DeserializeOwned>(params: Value) -> Result<P, WsRpcError> {
 fn caller_did(ctx: &RequestContext) -> Result<String, WsRpcError> {
     ctx.session
         .acts_as_did()
-        .map(str::to_string)
         .ok_or_else(|| WsRpcError::unauthorized("Caller DID not resolved"))
 }
 

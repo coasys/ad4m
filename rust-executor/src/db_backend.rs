@@ -393,6 +393,10 @@ macro_rules! ad4m_db_methods {
             fn add_join(&self, join: &JoinRow) -> Ad4mDbResult<()>;
             fn join(&self, offer_id: &str) -> Ad4mDbResult<Option<JoinRow>>;
 
+            // Re-key of the main agent: the rows that move to its new DID (`db/rekey.rs`)
+            fn move_notification_owner(&self, old: &str, new: &str) -> Ad4mDbResult<usize>;
+            fn move_flow_rows(&self, old: &str, new: &str) -> Ad4mDbResult<usize>;
+            fn clear_joins(&self) -> Ad4mDbResult<usize>;
             // AI sessions (`ai_sessions/`): a run's state lives in these tables,
             // never only in memory. Every method scopes by `owner_did` (`None` = the main
             // agent), so a caller can never reach another agent's session.

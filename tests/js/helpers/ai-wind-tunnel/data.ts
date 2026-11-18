@@ -61,6 +61,8 @@ export interface PlanModel {
   voice?: string;
   /** llama-server's context in tokens (`-c`); left out: 8192. A model meant for long prompts is measured at the context it is recommended with. */
   context?: number;
+  /** llama-server flags for this cell, used as given. A value with spaces is one element. */
+  serverFlags?: string[];
 }
 
 export interface MatrixPlan {
@@ -81,9 +83,13 @@ export interface ClassRule {
   class: string;
   family: string;
   tierGb: number;
+  /** A narrower class of this one: its fallback chain goes on with this class's. */
+  fallback?: string;
   match: {
     os?: string;
     arch?: string;
+    /** The CPU brand contains one of these, ignoring case. */
+    cpuBrandAny?: string[];
     gpuVendor?: string;
     unifiedMemory?: boolean;
     backendAny?: string[];

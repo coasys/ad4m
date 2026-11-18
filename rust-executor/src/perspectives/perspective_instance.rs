@@ -78,6 +78,8 @@ mod local_agents;
 // Committing a batch only if the links it expects still stand.
 mod expected_links;
 pub use expected_links::{ExpectedLinks, LinksChanged};
+// A batch's effective view of the graph for the validated write core.
+mod batch_view;
 
 #[cfg(test)]
 #[path = "perspective_instance_subscription_tests.rs"]
@@ -3090,33 +3092,49 @@ impl PerspectiveInstance {
 
         let mut sdna_links: Vec<Link> = Vec::new();
 
-        // For SubjectClass refresh: if a class with this name already exists
-        // we must purge the prior SHACL graph before writing new triples.
+        // For SubjectClass refresh: if this class already exists we must
+        // purge the prior SHACL graph before writing new triples.
         // Without this, divergent old/new SHACL property triples coexist in
         // the store and the loader produces non-deterministic shapes.
         //
         // When `shacl_links` is `None` and the class already exists, we
         // preserve the historical no-op behaviour: nothing to refresh.
         if matches!(sdna_type, SdnaType::SubjectClass) {
-            // Check for any existing SubjectClass with this name, regardless of namespace
-            // We query by target (ad4m://SubjectClass) and then filter by class name
             let all_class_links = self.get_links_local(&LinkQuery {
                 predicate: Some("rdf://type".to_string()),
                 target: Some("ad4m://SubjectClass".to_string()),
                 ..Default::default()
             })?;
 
-            // Collect any existing class URIs that match this name
+            // A new shape refreshes only the class with its own target-class
+            // URI: `flux://Message` and `we://Message` are different classes,
+            // and a match on the name alone lets one app delete the other's.
+            // Without a shape nothing is deleted, so a class of this name in
+            // any namespace counts as already registered.
+            let incoming_target_class_uris: Option<Vec<&str>> = shacl_links.as_ref().map(|links| {
+                links
+                    .iter()
+                    .filter(|link| {
+                        link.predicate.as_deref() == Some("rdf://type")
+                            && link.target == "ad4m://SubjectClass"
+                    })
+                    .map(|link| link.source.as_str())
+                    .collect()
+            });
+
             let existing_target_class_uris: Vec<String> = all_class_links
                 .iter()
                 .filter_map(|(link, _)| {
                     let source = &link.data.source;
-                    let matches = source
-                        .split("://")
-                        .last()
-                        .and_then(|s| s.split('/').last())
-                        .map(|class_name| class_name == name)
-                        .unwrap_or(false);
+                    let matches = match &incoming_target_class_uris {
+                        Some(uris) => uris.contains(&source.as_str()),
+                        None => source
+                            .split("://")
+                            .last()
+                            .and_then(|s| s.split('/').last())
+                            .map(|class_name| class_name == name)
+                            .unwrap_or(false),
+                    };
                     if matches {
                         Some(source.clone())
                     } else {
@@ -5113,8 +5131,6 @@ impl PerspectiveInstance {
         payload: PerspectiveExpression,
         loopback: bool,
     ) -> Result<(), AnyError> {
-        use crate::agent::AgentService;
-
         let current_perspective_handle = self.persisted.lock().await.clone();
 
         if loopback {
@@ -5129,18 +5145,13 @@ impl PerspectiveInstance {
         }
 
         // Route the broadcast to every local agent that owns the neighbourhood (its
-        // `event_recipients`), each copy naming that agent. The main agent does not get its
-        // own broadcast back: loopback handles that.
+        // `event_recipients`), each copy naming that agent. The sender's own agent gets it
+        // too, the main agent like any managed agent: its other clients (devices) must hear
+        // it, and a client drops its own messages. With `loopback` every owner gets it twice.
         if current_perspective_handle.shared_url.is_some() {
-            let main_agent_did = AgentService::with_global_instance(|s| s.did.clone());
             let mut signal = payload.clone();
             signal.verify_signatures();
             for recipient in super::event_recipients(&current_perspective_handle) {
-                let main_sent_it = main_agent_did.as_deref() == Some(recipient.as_str())
-                    && payload.author == recipient;
-                if main_sent_it {
-                    continue;
-                }
                 super::publish_telepresence_signal(
                     current_perspective_handle.clone(),
                     signal.clone(),
@@ -6691,12 +6702,27 @@ impl PerspectiveInstance {
         log::debug!("Fallback sync loop ended for perspective {}", uuid);
     }
 
-    /// Auto-processor watch loop (P-B2b2 polling MVP).
+    /// Auto-processor watch loop.
     ///
-    /// One instance per perspective, joined into `start_background_tasks`.
-    /// Every tick (`AUTO_PROCESSOR_TICK_MS` while turns are pending, backing
-    /// off to `AUTO_PROCESSOR_IDLE_TICK_MAX_MS` while idle, see
-    /// [`next_tick_delay_ms`](crate::perspectives::auto_processor::watcher::next_tick_delay_ms)):
+    /// One instance per perspective, joined into `start_background_tasks`
+    /// (and one per online managed user, from
+    /// `managed_user_auto_processor_supervisor`). It ticks every
+    /// `AUTO_PROCESSOR_TICK_MS` while turns are pending and the executor has
+    /// an LLM to run them. While idle, or while turns wait for a model
+    /// (`TickOutcome::NoModel`: nothing is drained), it sleeps until the
+    /// perspective's store takes a write (a link added or removed, by anyone:
+    /// local, a link language, the pass itself), waits `AUTO_PROCESSOR_TICK_MS` more so a burst of writes makes one
+    /// tick, and ticks. A write-woken tick also waits out the idle back-off
+    /// since the last tick that read the store (doubling from
+    /// `AUTO_PROCESSOR_TICK_MS` to `AUTO_PROCESSOR_IDLE_TICK_MAX_MS`, see
+    /// [`next_tick_delay_ms`](crate::perspectives::auto_processor::watcher::next_tick_delay_ms)),
+    /// so a store busy with writes that add no turn is read no more often
+    /// than the poll this replaced. With no write it ticks after
+    /// [`idle_wait_ms`](crate::perspectives::auto_processor::watcher::idle_wait_ms)
+    /// (60 s, or when a deferral ends). A tick reuses the store reads of the
+    /// one before while no write landed in between (`TickReads`), so an idle
+    /// perspective costs no query at all, and after writes that only added
+    /// links it reads only the turns they add (`delta_read`). Each tick:
     ///   1. Load every `AutoProcessorConfig` declared on this perspective's
     ///      shared graph (`load_processors`). Zero configs = no-op tick.
     ///   2. Per config, run its `source_scope_query` to gather the current
@@ -6714,47 +6740,89 @@ impl PerspectiveInstance {
     ///      `ShapesMissing` and `EmptyTranscript` do not write sources, so the
     ///      ids are retried once the shape or transcript lands.
     ///
-    /// This is the "polling MVP". The event-driven variant
-    /// (subscribe to `Topic::LinkAdded` events, record `link.data.source`
-    /// deltas) is a follow-up optimisation — the coordination correctness
-    /// envelope is the same because the `ProcessingClaim` (P-A) is the real
-    /// double-processing guard, not the trigger latency.
+    /// The trigger only decides *when* a tick runs; the `ProcessingClaim`
+    /// (P-A) is the double-processing guard, not the trigger latency.
     /// `context` is the agent this executor runs passes as — production passes
     /// the main agent; a multi-user test spawns one loop per managed user so the
     /// `ProcessingClaim` election runs across distinct DIDs on one executor.
     pub(crate) async fn auto_processor_watch_loop(&self, context: AgentContext) {
         use crate::perspectives::auto_processor::watcher::{
-            next_tick_delay_ms, WatcherState, AUTO_PROCESSOR_TICK_MS,
+            idle_wait_ms, model_readiness, next_tick_delay_ms, wait_for_tick, TickOutcome, WaitEnd,
+            WatcherState, AUTO_PROCESSOR_TICK_MS,
         };
         use std::time::{SystemTime, UNIX_EPOCH};
 
         let uuid = self.uuid.clone();
         let mut watcher = WatcherState::new();
-        let mut delay_ms = AUTO_PROCESSOR_TICK_MS;
+        let mut writes = self.sparql_store.watch_writes();
+        // The first pass runs after one base tick, whatever the store does.
+        let mut wait = Some(AUTO_PROCESSOR_TICK_MS);
+        // The last tick that found the store changed, so it read it, and its
+        // generation. A write-woken idle tick runs no sooner than `idle_floor_ms`
+        // after it: writes that add no turn must not make the loop read the
+        // store more often than the idle back-off did.
+        let mut last_read: Option<(u64, tokio::time::Instant)> = None;
+        let mut idle_floor_ms = AUTO_PROCESSOR_TICK_MS;
+        // After a `NoModel` tick the idle wait also ends when a model may have
+        // become available, so a model configured while turns wait is used at
+        // once rather than after the next write or the idle fallback.
+        let mut models = model_readiness().await;
+        let mut waiting_for_model = false;
 
-        while !self.is_teardown.load(Ordering::Acquire) {
-            // Sleep in base-tick slices so teardown is observed as promptly
-            // while backed off as at the base rate.
-            let mut remaining = delay_ms;
-            while remaining > 0 {
-                if self.is_teardown.load(Ordering::Acquire) {
-                    return;
+        loop {
+            let end = match wait {
+                Some(ms) => wait_for_tick(&self.is_teardown, ms, None, None).await,
+                None => {
+                    let now_ms = chrono::Utc::now().timestamp_millis();
+                    let ms = idle_wait_ms(&watcher, now_ms);
+                    let models = models.as_mut().filter(|_| waiting_for_model);
+                    match wait_for_tick(&self.is_teardown, ms, Some(&mut writes), models).await {
+                        // Let the rest of a burst of writes land first, and
+                        // keep the back-off since the last read.
+                        WaitEnd::Write => {
+                            let since_read = last_read
+                                .map(|(_, at)| at.elapsed().as_millis() as u64)
+                                .unwrap_or(u64::MAX);
+                            let floor = idle_floor_ms.saturating_sub(since_read);
+                            wait_for_tick(
+                                &self.is_teardown,
+                                floor.max(AUTO_PROCESSOR_TICK_MS),
+                                None,
+                                None,
+                            )
+                            .await
+                        }
+                        other => other,
+                    }
                 }
-                let step = remaining.min(AUTO_PROCESSOR_TICK_MS);
-                sleep(Duration::from_millis(step)).await;
-                remaining -= step;
+            };
+            if end == WaitEnd::Teardown {
+                break;
             }
-            if self.is_teardown.load(Ordering::Acquire) {
-                return;
+            // Writes up to here are seen by this tick; one landing during it
+            // (the pass's own, or a peer's) wakes the next.
+            let generation = *writes.borrow_and_update();
+            if last_read.is_none_or(|(g, _)| g != generation) {
+                last_read = Some((generation, tokio::time::Instant::now()));
             }
             let now_ms = match SystemTime::now().duration_since(UNIX_EPOCH) {
                 Ok(d) => d.as_millis() as i64,
                 Err(_) => continue, // clock before epoch — skip tick
             };
-            let had_pending = self
+            // A readiness change from here on wakes the next wait.
+            if let Some(rx) = models.as_mut() {
+                rx.borrow_and_update();
+            }
+            let outcome = self
                 .run_auto_processor_tick(&mut watcher, now_ms, &context)
                 .await;
-            delay_ms = next_tick_delay_ms(delay_ms, had_pending);
+            waiting_for_model = outcome == TickOutcome::NoModel;
+            if waiting_for_model && models.is_none() {
+                models = model_readiness().await;
+            }
+            let polls = outcome.polls_at_base_rate();
+            wait = polls.then_some(AUTO_PROCESSOR_TICK_MS);
+            idle_floor_ms = next_tick_delay_ms(idle_floor_ms, polls);
         }
 
         log::debug!("auto_processor_watch_loop ended for perspective {}", uuid);
@@ -6769,106 +6837,214 @@ impl PerspectiveInstance {
     /// Loads every declared `AutoProcessorConfig`, records new-since-processed
     /// transcript turns into `watcher` (gather minus this processor's
     /// `InterpretationRun.sources`, optionally windowed), then drains and runs
-    /// any ready batch.
+    /// any ready batch. The config, transcript and cursor reads are kept in
+    /// `watcher` and reused while the store's write generation is unchanged;
+    /// after writes that only added links the kept transcript is brought up
+    /// to date with a read of what they add (`TickReads::merge_transcript`).
+    /// The windows and deferrals are applied at `now_ms` either way.
     ///
     /// `context` is the agent this executor runs the pass as — the production
     /// loop passes the main agent; a multi-user test passes each managed user's
     /// context so the `ProcessingClaim` election runs across distinct DIDs
     /// (proving two users on one executor don't double-process).
     ///
-    /// Returns whether a declared processor had turns pending after recording,
-    /// i.e. whether the loop must keep polling at the base rate (#1072). It is
-    /// sampled before draining, so a drained batch that is retried (stand-down,
-    /// awaiting author, missing shapes, pass error) keeps the base rate: the
-    /// next tick re-records it. `false` when no processor is declared or every
-    /// gathered turn was already processed or deferred. If loading the
-    /// processors fails, any queued turn counts. A per-config query failure
-    /// records nothing for that config, so a failing scope query backs off
-    /// instead of logging a warning twice a second.
+    /// Returns [`TickOutcome::Pending`] when a declared processor had turns
+    /// pending after recording, i.e. the loop must keep polling at the base
+    /// rate (#1072). It is sampled before draining, so a drained batch that is
+    /// retried (stand-down, awaiting author, missing shapes, pass error) keeps
+    /// the base rate: the next tick re-records it. `Idle` when no processor is
+    /// declared or every gathered turn was already processed or deferred. If
+    /// loading the processors fails, any queued turn counts. A per-config
+    /// query failure records nothing for that config, so a failing scope
+    /// query backs off instead of logging a warning twice a second.
+    /// `NoModel` when turns are pending but the executor has no LLM: nothing
+    /// is drained, and the loop backs off as if idle (#1682).
+    ///
+    /// [`TickOutcome::Pending`]: crate::perspectives::auto_processor::watcher::TickOutcome
     pub(crate) async fn run_auto_processor_tick(
         &self,
         watcher: &mut crate::perspectives::auto_processor::watcher::WatcherState,
         now_ms: i64,
         context: &AgentContext,
-    ) -> bool {
+    ) -> crate::perspectives::auto_processor::watcher::TickOutcome {
         use crate::perspectives::auto_processor::{
             config::load_processors,
-            cursor::{load_processed_source_ids, turn_in_source_window},
+            cursor::{load_processed_sources, processed_ids_in_window, turn_in_source_window},
+            delta_read::{delta_query, DeltaRead},
             events::{emit, AutoProcessorEvent, AutoProcessorStep},
-            watcher::{run_one_pass, PassOutcome, PendingTurn},
+            watcher::{
+                model_available, run_one_pass, CachedTurn, PassOutcome, PendingTurn, TickOutcome,
+            },
         };
 
         let uuid = self.uuid.clone();
-        let configs = match load_processors(self).await {
-            Ok(cs) => cs,
-            Err(e) => {
-                log::warn!(
-                    "auto_processor_tick [{}]: load_processors failed: {e:#}",
-                    uuid
-                );
-                return watcher.has_pending();
-            }
+        // Read before any query, so a write during one makes the next tick read again.
+        let generation = self.sparql_store.write_generation();
+        let configs = match watcher.reads.configs(generation) {
+            Some(cs) => cs,
+            None => match load_processors(self).await {
+                Ok(cs) => watcher.reads.set_configs(generation, cs),
+                Err(e) => {
+                    log::warn!(
+                        "auto_processor_tick [{}]: load_processors failed: {e:#}",
+                        uuid
+                    );
+                    return if watcher.has_pending() {
+                        TickOutcome::Pending
+                    } else {
+                        TickOutcome::Idle
+                    };
+                }
+            },
         };
         if configs.is_empty() {
-            return false;
+            return TickOutcome::Idle;
         }
 
         // 1. Record new-since-last-processed turns per config (payload kept).
-        for cfg in &configs {
-            let transcript = match crate::perspectives::interpretation::gather_transcript_sparql(
-                self,
-                &cfg.source_scope_query,
-            )
-            .await
-            {
-                Ok(t) => t,
-                Err(e) => {
-                    log::warn!(
-                        "auto_processor `{}` [{}]: gather_transcript_sparql failed: {e:#}",
-                        cfg.processor_id,
-                        uuid
-                    );
-                    continue;
-                }
-            };
-            let processed = match load_processed_source_ids(
-                self,
-                &cfg.processor_id,
-                now_ms,
-                cfg.source_window_ms,
-            )
-            .await
-            {
-                Ok(s) => s,
-                Err(e) => {
-                    log::warn!(
-                        "auto_processor `{}` [{}]: load_processed_source_ids failed: {e:#}",
-                        cfg.processor_id,
-                        uuid
-                    );
-                    continue;
-                }
-            };
-            for turn in &transcript {
-                if let Some(window_ms) = cfg.source_window_ms {
-                    if !turn_in_source_window(&turn.timestamp, now_ms, window_ms) {
+        for cfg in configs.iter() {
+            let processed_rows = match watcher.reads.processed(&cfg.processor_id, generation) {
+                Some(rows) => rows,
+                None => match load_processed_sources(self, &cfg.processor_id).await {
+                    Ok(rows) => watcher
+                        .reads
+                        .set_processed(&cfg.processor_id, generation, rows),
+                    Err(e) => {
+                        log::warn!(
+                            "auto_processor `{}` [{}]: load_processed_source_ids failed: {e:#}",
+                            cfg.processor_id,
+                            uuid
+                        );
                         continue;
                     }
+                },
+            };
+            let processed = processed_ids_in_window(&processed_rows, now_ms, cfg.source_window_ms);
+            // Inside the window and not consumed: may be queued (unless deferred).
+            let queueable = |id: &str, timestamp: &str| {
+                cfg.source_window_ms
+                    .is_none_or(|w| turn_in_source_window(timestamp, now_ms, w))
+                    && !processed.contains(id)
+            };
+            // Turns queued at an earlier tick (kept while no model was set,
+            // or past a batch cap) are checked again: a run may have consumed
+            // them since, or they may have left the window.
+            watcher.retain_pending(&cfg.processor_id, |t| queueable(&t.id, &t.timestamp));
+            // A kept read is reused unless a turn it keeps without text has
+            // become queueable (its run aged out of the window).
+            let kept = watcher.reads.transcript(cfg).filter(|(_, turns)| {
+                !turns.iter().any(|t| {
+                    matches!(t, CachedTurn::Consumed { .. }) && queueable(t.id(), t.timestamp())
+                })
+            });
+            // After writes that only added links, read what they can add to
+            // the kept read (late turns with old timestamps included, see
+            // `delta_read`). Anything else (no kept read, a removal or reload
+            // since, a log that no longer reaches back, a scope query a delta
+            // cannot follow) reads the whole transcript.
+            let delta = match &kept {
+                Some((kept_at, _)) if *kept_at == generation => None,
+                Some((kept_at, _)) => self
+                    .sparql_store
+                    .additions_since(*kept_at, generation)
+                    .map(|added| delta_query(&cfg.source_scope_query, &added))
+                    .filter(|d| *d != DeltaRead::Full),
+                None => None,
+            };
+            let transcript = match (kept, delta) {
+                (Some((kept_at, turns)), _) if kept_at == generation => turns,
+                (kept, Some(delta)) => {
+                    // Release the kept copy, so the merge can take it over.
+                    drop(kept);
+                    let gained = match delta {
+                        DeltaRead::Query(query) => {
+                            crate::perspectives::interpretation::gather_transcript_sparql(
+                                self, &query,
+                            )
+                            .await
+                        }
+                        _ => Ok(Vec::new()),
+                    };
+                    match gained {
+                        Ok(t) => watcher.reads.merge_transcript(
+                            cfg,
+                            generation,
+                            t.iter().map(PendingTurn::from_transcript).collect(),
+                            queueable,
+                        ),
+                        Err(e) => {
+                            log::warn!(
+                                "auto_processor `{}` [{}]: reading the turns added since the last \
+                                 tick failed: {e:#}",
+                                cfg.processor_id,
+                                uuid
+                            );
+                            continue;
+                        }
+                    }
                 }
-                let pending = PendingTurn::from_transcript(turn);
-                if processed.contains(&pending.id)
+                _ => match crate::perspectives::interpretation::gather_transcript_sparql(
+                    self,
+                    &cfg.source_scope_query,
+                )
+                .await
+                {
+                    Ok(t) => watcher.reads.set_transcript(
+                        cfg,
+                        generation,
+                        t.iter().map(PendingTurn::from_transcript).collect(),
+                        queueable,
+                    ),
+                    Err(e) => {
+                        log::warn!(
+                            "auto_processor `{}` [{}]: gather_transcript_sparql failed: {e:#}",
+                            cfg.processor_id,
+                            uuid
+                        );
+                        continue;
+                    }
+                },
+            };
+            for turn in transcript.iter() {
+                // A turn kept without text was not queueable at this tick's `now_ms` (checked above).
+                let CachedTurn::Full(pending) = turn else {
+                    continue;
+                };
+                if !queueable(&pending.id, &pending.timestamp)
                     || watcher.is_deferred(&cfg.processor_id, &pending.id, now_ms)
                 {
                     continue;
                 }
-                watcher.record_item(&cfg.processor_id, pending, now_ms);
+                watcher.record_item(&cfg.processor_id, pending.clone(), now_ms);
             }
         }
 
         let had_pending = watcher.has_pending_for(configs.iter().map(|c| c.processor_id.as_str()));
+        if !had_pending {
+            return TickOutcome::Idle;
+        }
+        // Every pass prompts the default LLM. Without one, a drained batch
+        // would be claimed and fail, and the loop would retry it twice a
+        // second for as long as the executor has no model. Leave the turns
+        // queued instead (their debounce clocks keep running, so they drain
+        // on the first tick that finds a model) and let the loop back off.
+        if !model_available().await {
+            if !watcher.waiting_for_model {
+                log::info!(
+                    "auto_processor [{uuid}]: turns are waiting but no LLM is configured; \
+                     backing off until a tick finds one"
+                );
+                watcher.waiting_for_model = true;
+            }
+            return TickOutcome::NoModel;
+        }
+        if watcher.waiting_for_model {
+            log::info!("auto_processor [{uuid}]: an LLM is configured; processing resumes");
+            watcher.waiting_for_model = false;
+        }
 
         // 2. Drain + run a pass per config.
-        for cfg in &configs {
+        for cfg in configs.iter() {
             let Some(batch) = watcher.drain_ready_batch(cfg, now_ms) else {
                 continue;
             };
@@ -6950,7 +7126,7 @@ impl PerspectiveInstance {
                 }
             }
         }
-        had_pending
+        TickOutcome::Pending
     }
 
     /// Reset the fallback sync interval to 30 seconds when new links are added
@@ -9641,6 +9817,92 @@ mod tests {
             .get_shape("Recipe")
             .expect("re-parse after invalidation");
         assert!(!Arc::ptr_eq(&first, &second));
+    }
+
+    /// Two apps that each define `Message` in their own namespace must not
+    /// delete each other's shape: a refresh replaces only the class with the
+    /// same target-class URI, not every class whose last segment is `Message`.
+    #[tokio::test]
+    async fn test_add_sdna_refresh_keeps_same_named_class_of_another_namespace() {
+        fn class_links(perspective: &PerspectiveInstance, target_class: &str) -> Vec<String> {
+            let shape_uri = format!("{target_class}Shape");
+            let mut links: Vec<String> = perspective
+                .get_links_local(&LinkQuery::default())
+                .expect("get_links_local")
+                .into_iter()
+                .map(|(l, _)| l.data)
+                .filter(|l| {
+                    l.source == target_class
+                        || l.source == shape_uri
+                        || l.source.starts_with(&format!("{target_class}."))
+                })
+                .map(|l| format!("{} {:?} {}", l.source, l.predicate, l.target))
+                .collect();
+            links.sort();
+            links
+        }
+        let ctx = AgentContext::main_agent();
+        let mut perspective = setup().await;
+        let register = |namespace: &str, path: &str| {
+            cache_test_shacl("Message", namespace).replace(
+                &format!("\"{namespace}name\""),
+                &format!("\"{namespace}{path}\""),
+            )
+        };
+
+        perspective
+            .add_sdna(
+                "Message".to_string(),
+                String::new(),
+                SdnaType::SubjectClass,
+                Some(register("flux://", "name")),
+                &ctx,
+            )
+            .await
+            .expect("register flux://Message");
+        let flux_links = class_links(&perspective, "flux://Message");
+        assert!(
+            flux_links.iter().any(|l| l.contains("rdf://type")),
+            "{flux_links:?}"
+        );
+
+        perspective
+            .add_sdna(
+                "Message".to_string(),
+                String::new(),
+                SdnaType::SubjectClass,
+                Some(register("we://", "name")),
+                &ctx,
+            )
+            .await
+            .expect("register we://Message");
+        assert_eq!(
+            class_links(&perspective, "flux://Message"),
+            flux_links,
+            "registering we://Message must not touch flux://Message"
+        );
+
+        // Re-registering the same URI still replaces its shape.
+        perspective
+            .add_sdna(
+                "Message".to_string(),
+                String::new(),
+                SdnaType::SubjectClass,
+                Some(register("we://", "body")),
+                &ctx,
+            )
+            .await
+            .expect("refresh we://Message");
+        let we_links = class_links(&perspective, "we://Message");
+        assert!(
+            we_links.iter().any(|l| l.contains("we://body")),
+            "{we_links:?}"
+        );
+        assert!(
+            !we_links.iter().any(|l| l.contains("we://name")),
+            "the refresh purges the old property: {we_links:?}"
+        );
+        assert_eq!(class_links(&perspective, "flux://Message"), flux_links);
     }
 
     /// A shape `parse_shacl_to_links` refuses must leave the store untouched

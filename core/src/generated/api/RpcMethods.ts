@@ -41,6 +41,8 @@ import type { Apps } from "./Apps";
 import type { CallSessionInfo } from "./CallSessionInfo";
 import type { ClaimOfferParams } from "./ClaimOfferParams";
 import type { ClaimOfferResult } from "./ClaimOfferResult";
+import type { CollectionItemAdded } from "./CollectionItemAdded";
+import type { CollectionItemRemoved } from "./CollectionItemRemoved";
 import type { ComputeLogEntry } from "./ComputeLogEntry";
 import type { CosignInceptParams } from "./CosignInceptParams";
 import type { CreateExpressionRequest } from "./CreateExpressionRequest";
@@ -49,6 +51,7 @@ import type { CreateUserRequest } from "./CreateUserRequest";
 import type { DecoratedLinkExpression } from "./DecoratedLinkExpression";
 import type { DecoratedPerspective } from "./DecoratedPerspective";
 import type { DetectedEndpoint } from "./DetectedEndpoint";
+import type { DeviceKeys } from "./DeviceKeys";
 import type { DeviceView } from "./DeviceView";
 import type { DidResolutionResult } from "./DidResolutionResult";
 import type { DiscoveredModel } from "./DiscoveredModel";
@@ -75,6 +78,9 @@ import type { IdentityLog } from "./IdentityLog";
 import type { IdentityStatus } from "./IdentityStatus";
 import type { ImportAgentRequest } from "./ImportAgentRequest";
 import type { ImportRequest } from "./ImportRequest";
+import type { InstanceCreated } from "./InstanceCreated";
+import type { InstanceRemoved } from "./InstanceRemoved";
+import type { InstanceUpdated } from "./InstanceUpdated";
 import type { InteractionMeta } from "./InteractionMeta";
 import type { JoinNeighbourhoodRequest } from "./JoinNeighbourhoodRequest";
 import type { JoinStatus } from "./JoinStatus";
@@ -94,6 +100,8 @@ import type { LocalAiRemoveParams } from "./LocalAiRemoveParams";
 import type { LocalAiStatus } from "./LocalAiStatus";
 import type { LockAgentRequest } from "./LockAgentRequest";
 import type { LogParams } from "./LogParams";
+import type { LogTail } from "./LogTail";
+import type { LogTailParams } from "./LogTailParams";
 import type { Model } from "./Model";
 import type { ModelStatus } from "./ModelStatus";
 import type { NeighbourhoodBroadcastParams } from "./NeighbourhoodBroadcastParams";
@@ -130,6 +138,11 @@ import type { PerspectiveFlowValidOutputsParams } from "./PerspectiveFlowValidOu
 import type { PerspectiveGetAllShaclParams } from "./PerspectiveGetAllShaclParams";
 import type { PerspectiveGetSubjectDataParams } from "./PerspectiveGetSubjectDataParams";
 import type { PerspectiveHandle } from "./PerspectiveHandle";
+import type { PerspectiveInstanceAddToCollectionParams } from "./PerspectiveInstanceAddToCollectionParams";
+import type { PerspectiveInstanceCreateParams } from "./PerspectiveInstanceCreateParams";
+import type { PerspectiveInstanceRemoveFromCollectionParams } from "./PerspectiveInstanceRemoveFromCollectionParams";
+import type { PerspectiveInstanceRemoveParams } from "./PerspectiveInstanceRemoveParams";
+import type { PerspectiveInstanceUpdateParams } from "./PerspectiveInstanceUpdateParams";
 import type { PerspectiveLinkDiff } from "./PerspectiveLinkDiff";
 import type { PerspectiveLinkMutationsParams } from "./PerspectiveLinkMutationsParams";
 import type { PerspectiveMintFlowReceiptParams } from "./PerspectiveMintFlowReceiptParams";
@@ -172,6 +185,7 @@ import type { RunAgentRequest } from "./RunAgentRequest";
 import type { RunInterpretationRequest } from "./RunInterpretationRequest";
 import type { RunInterpretationWithHarnessRequest } from "./RunInterpretationWithHarnessRequest";
 import type { RuntimeComputeLogParams } from "./RuntimeComputeLogParams";
+import type { RuntimeConfig } from "./RuntimeConfig";
 import type { RuntimeFriendStatusParams } from "./RuntimeFriendStatusParams";
 import type { RuntimeGrantNotificationParams } from "./RuntimeGrantNotificationParams";
 import type { RuntimeImportResult } from "./RuntimeImportResult";
@@ -183,6 +197,8 @@ import type { RuntimeUnytSendHotParams } from "./RuntimeUnytSendHotParams";
 import type { RuntimeUnytWalletHistoryParams } from "./RuntimeUnytWalletHistoryParams";
 import type { RuntimeUpdateNotificationParams } from "./RuntimeUpdateNotificationParams";
 import type { SentMessage } from "./SentMessage";
+import type { SetConfigParams } from "./SetConfigParams";
+import type { SetConfigResult } from "./SetConfigResult";
 import type { SetHostRatesRequest } from "./SetHostRatesRequest";
 import type { SetHotWalletAddressRequest } from "./SetHotWalletAddressRequest";
 import type { SetMultiUserRequest } from "./SetMultiUserRequest";
@@ -305,12 +321,14 @@ export interface RpcMethods {
   "hosting.walletHistory": { params: Record<string, never>; result: JsonValue };
   "identity.claimOffer": { params: ClaimOfferParams; result: ClaimOfferResult };
   "identity.cosignIncept": { params: CosignInceptParams; result: JsonValue };
+  "identity.custodyStatus": { params: Record<string, never>; result: DeviceKeys };
   "identity.devices": { params: Record<string, never>; result: Array<DeviceView> };
   "identity.joinStatus": { params: JoinStatusParams; result: JoinStatus };
   "identity.log": { params: LogParams; result: IdentityLog };
   "identity.offers": { params: OffersParams; result: Array<OfferListing> };
   "identity.openOffer": { params: OpenOfferParams; result: OfferOpened };
   "identity.publish": { params: PublishParams; result: SignedHead };
+  "identity.rekey": { params: Record<string, never>; result: DeviceKeys };
   "identity.resetLog": { params: ResetLogParams; result: boolean };
   "identity.resolve": { params: ResolveParams; result: DidResolutionResult };
   "identity.status": { params: Record<string, never>; result: IdentityStatus };
@@ -357,6 +375,11 @@ export interface RpcMethods {
   "perspective.getShaclNames": { params: PerspectiveUuidParams; result: Array<string> };
   "perspective.getShaclTargetClass": { params: PerspectiveShaclNameParams; result: string | null };
   "perspective.getSubjectData": { params: PerspectiveGetSubjectDataParams; result: string };
+  "perspective.instanceAddToCollection": { params: PerspectiveInstanceAddToCollectionParams; result: CollectionItemAdded };
+  "perspective.instanceCreate": { params: PerspectiveInstanceCreateParams; result: InstanceCreated };
+  "perspective.instanceRemove": { params: PerspectiveInstanceRemoveParams; result: InstanceRemoved };
+  "perspective.instanceRemoveFromCollection": { params: PerspectiveInstanceRemoveFromCollectionParams; result: CollectionItemRemoved };
+  "perspective.instanceUpdate": { params: PerspectiveInstanceUpdateParams; result: InstanceUpdated };
   "perspective.interpretationOverlays": { params: PerspectiveUuidParams; result: Array<OverlayView> };
   "perspective.linkMutations": { params: PerspectiveLinkMutationsParams; result: PerspectiveLinkDiff };
   "perspective.mintFlowReceipt": { params: PerspectiveMintFlowReceiptParams; result: PerspectiveMintFlowReceiptResult };
@@ -390,6 +413,7 @@ export interface RpcMethods {
   "runtime.addHcAgentInfos": { params: AddAgentInfosRequest; result: boolean };
   "runtime.addLinkLanguageTemplates": { params: LinkLanguageTemplatesRequest; result: Array<string> };
   "runtime.computeLog": { params: RuntimeComputeLogParams; result: Array<ComputeLogEntry> };
+  "runtime.config": { params: Record<string, never>; result: RuntimeConfig };
   "runtime.createNotification": { params: NotificationInput; result: string };
   "runtime.deleteNotification": { params: RuntimeNotificationIdParams; result: boolean };
   "runtime.exportData": { params: ExportRequest; result: boolean };
@@ -403,6 +427,7 @@ export interface RpcMethods {
   "runtime.inbox": { params: Record<string, never>; result: Array<PerspectiveExpression> };
   "runtime.info": { params: Record<string, never>; result: RuntimeInfo };
   "runtime.linkLanguageTemplates": { params: Record<string, never>; result: Array<LanguageMeta> };
+  "runtime.logTail": { params: LogTailParams; result: LogTail };
   "runtime.networkMetrics": { params: Record<string, never>; result: string };
   "runtime.notifications": { params: Record<string, never>; result: Array<Notification> };
   "runtime.openLink": { params: OpenLinkRequest; result: boolean };
@@ -410,8 +435,10 @@ export interface RpcMethods {
   "runtime.quit": { params: Record<string, never>; result: boolean };
   "runtime.removeFriends": { params: FriendsListRequest; result: Array<string> };
   "runtime.removeLinkLanguageTemplates": { params: LinkLanguageTemplatesRequest; result: Array<string> };
+  "runtime.restart": { params: Record<string, never>; result: boolean };
   "runtime.restartHolochain": { params: Record<string, never>; result: boolean };
   "runtime.sendFriendMessage": { params: RuntimeSendFriendMessageParams; result: boolean };
+  "runtime.setConfig": { params: SetConfigParams; result: SetConfigResult };
   "runtime.setFreeHostingEnabled": { params: RuntimeSetFreeHostingEnabledParams; result: boolean };
   "runtime.setHostRates": { params: SetHostRatesRequest; result: boolean };
   "runtime.setStatus": { params: SetStatusRequest; result: boolean };
@@ -493,6 +520,7 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "hosting.info",
   "hosting.wallet",
   "hosting.walletHistory",
+  "identity.custodyStatus",
   "identity.devices",
   "identity.joinStatus",
   "identity.log",
@@ -527,6 +555,7 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "perspective.subjectClassesOf",
   "perspective.verifyFlowReceipt",
   "runtime.computeLog",
+  "runtime.config",
   "runtime.freeHostingEnabled",
   "runtime.friendStatus",
   "runtime.friends",
@@ -535,6 +564,7 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "runtime.inbox",
   "runtime.info",
   "runtime.linkLanguageTemplates",
+  "runtime.logTail",
   "runtime.networkMetrics",
   "runtime.notifications",
   "runtime.outbox",
