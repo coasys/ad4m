@@ -987,9 +987,11 @@ pub fn normalize_base_url(url: &str) -> String {
     let Some(host) = parsed.host_str() else {
         return redact_unparsed(trimmed);
     };
-    // `host_str` for IPv6 has no brackets. A colon belongs only to an IPv6
-    // address here: a domain host has none.
-    let host = if host.contains(':') {
+    // `host_str` already brackets an IPv6 address (`[::1]`). Wrapping again
+    // turns `http://[::1]:12000` into `http://[[::1]]:12000`. Wrap only when
+    // the host is not already bracketed. A colon still means an IPv6
+    // literal; a domain host has none.
+    let host = if host.contains(':') && !host.starts_with('[') {
         format!("[{host}]")
     } else {
         host.to_string()
@@ -3270,6 +3272,30 @@ mod tests {
             !with_secret.contains("password") && !with_secret.contains("secret"),
             "{with_secret}"
         );
+    }
+
+    /// IPv6 loopback with an explicit port stays singly bracketed.
+    /// `Url::host_str` already includes `[` `]`, so a second wrap would
+    /// turn this into `http://[[::1]]:12000`.
+    #[test]
+    fn normalize_base_url_keeps_ipv6_loopback_with_an_explicit_port() {
+        assert_eq!(
+            normalize_base_url("http://[::1]:12000"),
+            "http://[::1]:12000"
+        );
+        assert_eq!(
+            normalize_base_url("http://[::1]:12000/"),
+            "http://[::1]:12000"
+        );
+    }
+
+    /// An IPv6 host whose port is the scheme default stays singly
+    /// bracketed, and that default port is omitted.
+    #[test]
+    fn normalize_base_url_keeps_ipv6_with_a_default_port() {
+        assert_eq!(normalize_base_url("http://[::1]:80"), "http://[::1]");
+        assert_eq!(normalize_base_url("https://[::1]:443"), "https://[::1]");
+        assert_eq!(normalize_base_url("ws://[::1]:80/"), "http://[::1]");
     }
 
     /// `set_token` keys the store on the canonical URL, so a password in the
