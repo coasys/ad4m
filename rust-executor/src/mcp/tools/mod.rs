@@ -748,24 +748,13 @@ impl Ad4mMcpHandler {
     /// Resolve a literal value from a link target URI.
     /// Delegates to rust-client's `Literal` implementation for proper URL decoding.
     pub(crate) fn resolve_literal_value(target: &str) -> String {
-        use ad4m_client::literal::Literal;
-        if let Ok(literal) = Literal::from_url(target.to_string()) {
-            match literal.get() {
-                Ok(value) => value.to_string(),
-                Err(_) => target.to_string(),
-            }
-        } else {
-            target.to_string()
-        }
+        crate::perspectives::instances::resolve_literal_value(target)
     }
 
     /// Encode a string value as a `literal:string:` URL.
     /// Uses rust-client's `Literal` for proper URL encoding.
     pub(crate) fn encode_literal(value: &str) -> String {
-        use ad4m_client::literal::Literal;
-        Literal::from_string(value.to_string())
-            .to_url()
-            .unwrap_or_else(|_| format!("literal:string:{}", value))
+        crate::perspectives::instances::encode_literal(value)
     }
 
     /// Wrap a bare string as a literal URI; pass an already-URI value through.
@@ -857,56 +846,14 @@ impl Ad4mMcpHandler {
         value: &str,
         agent_context: &crate::agent::AgentContext,
     ) -> String {
-        // Short-circuit only when the value is a well-formed absolute IRI —
-        // the same predicate the SPARQL query builder uses to gate its
-        // `UNION { ?s <pred> <val> }` IRI arm. Sharing the check keeps write
-        // and read agreeing on what "already a URI" means; otherwise values
-        // like `"Note: buy milk"` would slip through and become invalid
-        // `NamedNode::new_unchecked` targets that no query can match.
-        if crate::perspectives::model_query::is_safe_iri_target(value) {
-            return value.to_string();
-        }
-
-        // Resolve the original-cased property name from SHACL.
-        // Dynamic tools lowercase the property name (e.g. "isconversation"),
-        // but the SHACL links store the original case (e.g. "isConversation").
-        let original_property_name = {
-            let props: Vec<crate::mcp::shacl::ShaclProperty> =
-                crate::mcp::shacl::load_class_properties(perspective, class_name).await;
-            let prop_lower = property_name.to_lowercase();
-            props
-                .into_iter()
-                .find(|p| p.name == property_name || p.name.to_lowercase() == prop_lower)
-                .map(|p| p.name)
-                .unwrap_or_else(|| property_name.to_string())
-        };
-
-        // Try to parse as JSON to recover native types (bool, number).
-        // MCP tool schemas declare all values as strings, so "false" arrives
-        // as the string "false" — but the language controller needs json!(false).
-        let json_value: serde_json::Value = serde_json::from_str(value)
-            .unwrap_or_else(|_| serde_json::Value::String(value.to_string()));
-
-        match perspective
-            .resolve_property_value(
-                class_name,
-                &original_property_name,
-                &json_value,
-                agent_context,
-            )
-            .await
-        {
-            Ok(url) => url,
-            Err(e) => {
-                log::warn!(
-                    "Failed to resolve property value for {}.{}: {}, falling back to encode_literal",
-                    class_name,
-                    original_property_name,
-                    e
-                );
-                Self::encode_literal(value)
-            }
-        }
+        crate::perspectives::instances::property_target(
+            perspective,
+            class_name,
+            property_name,
+            value,
+            agent_context,
+        )
+        .await
     }
 }
 

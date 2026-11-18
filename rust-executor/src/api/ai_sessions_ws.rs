@@ -36,6 +36,7 @@ fn session_error(e: SessionError) -> WsRpcError {
     match e {
         SessionError::NotFound(_) => WsRpcError::not_found(e.to_string()),
         SessionError::Busy | SessionError::TooManyTurns => WsRpcError {
+            data: None,
             code: 409,
             message: e.to_string(),
         },
