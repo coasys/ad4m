@@ -2,7 +2,7 @@ use super::*;
 use crate::perspectives::interpretation::types::{
     ExistingInstances, ExistingLinks, InstanceContext, TranscriptTurn,
 };
-use crate::perspectives::model_query::types::{ModelShape, Scope, WhereCondition};
+use crate::perspectives::model_query::types::{ModelShape, Scope};
 use crate::perspectives::model_query::ModelQueryInput;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -235,34 +235,17 @@ fn with_text_provenance(query_json: &str, text_property: &str) -> anyhow::Result
     Ok(query.to_string())
 }
 
-/// The instance properties the query's `where` reads, through `OR`/`AND`
-/// branches. A relation quantifier's nested clause reads another class's
-/// properties, so it is not walked. An unparsable query yields none: the
-/// model query refuses it anyway.
+/// The instance properties the query's `where` reads (see
+/// [`crate::perspectives::model_query::where_property_names`]). An
+/// unparsable query yields none: the model query refuses it anyway.
 fn where_property_names(query_json: &str) -> HashSet<String> {
-    fn walk(clause: &BTreeMap<String, WhereCondition>, out: &mut HashSet<String>) {
-        for (key, condition) in clause {
-            match condition {
-                WhereCondition::SubClauses(branches) if key == "OR" || key == "AND" => {
-                    for branch in branches {
-                        walk(branch, out);
-                    }
-                }
-                _ => {
-                    out.insert(key.clone());
-                }
-            }
-        }
+    match serde_json::from_str::<ModelQueryInput>(query_json) {
+        Ok(ModelQueryInput {
+            where_clause: Some(clause),
+            ..
+        }) => crate::perspectives::model_query::where_property_names(&clause),
+        _ => HashSet::new(),
     }
-    let mut out = HashSet::new();
-    if let Ok(ModelQueryInput {
-        where_clause: Some(clause),
-        ..
-    }) = serde_json::from_str::<ModelQueryInput>(query_json)
-    {
-        walk(&clause, &mut out);
-    }
-    out
 }
 
 /// The turn text off a hydrated scalar (`parse_literal_value` output): a

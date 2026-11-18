@@ -865,26 +865,42 @@ async fn a_shape_detail_edit_stales_the_kept_transcript() {
         "resolveLanguage on an instance property URI is data, not schema"
     );
 
-    // A local write on the shape's property node — `ns://ns://Message.body`
-    // here (the fixture names the class by URI) — is the stored shape.
+    // A local write on the shape's property node — `ns://ns://Message.type`
+    // here (the fixture names the class by URI) — is the stored shape. The
+    // flag property declares no `resolveLanguage`, so the shape the tick
+    // reads shows whether it took the edit.
+    let type_language = |p: &PerspectiveInstance| {
+        p.get_shape("ns://Message")
+            .expect("shape")
+            .properties
+            .iter()
+            .find(|prop| prop.name == "type")
+            .and_then(|prop| prop.resolve_language.clone())
+    };
+    assert_eq!(type_language(&p), None);
     p.add_link(
         Link {
-            source: "ns://ns://Message.body".into(),
-            predicate: Some("ad4m://getter".into()),
-            target: "literal:string:body-getter".into(),
+            source: "ns://ns://Message.type".into(),
+            predicate: Some("ad4m://resolveLanguage".into()),
+            target: "literal:string:literal".into(),
         },
         LinkStatus::Local,
         None,
         &ctx,
     )
     .await
-    .expect("shape getter");
+    .expect("shape resolveLanguage");
     p.run_auto_processor_tick(&mut watcher, now_ms + 1000, &ctx)
         .await;
     assert_eq!(
         transcript_queries(&p),
         reads + 1,
-        "a getter edit on a property shape must stale the kept transcript"
+        "a resolveLanguage edit on a property shape must stale the kept transcript"
+    );
+    assert_eq!(
+        type_language(&p).as_deref(),
+        Some("literal"),
+        "the re-read parses the edited shape, not the cached one"
     );
     let reads = transcript_queries(&p);
 
@@ -930,15 +946,13 @@ fn peer_shape_diff(sdna_json: &str) -> crate::types::PerspectiveDiff {
     }
 }
 
-/// A peer's schema diff must drop the shape cache before its feed entry
-/// can wake a tick: the entry stales every kept transcript, and a tick
-/// draining it re-reads at once — under the shape the write replaced, if
-/// the cache were still warm — and marks that read fresh (#1795). The
-/// broadcast hook samples the store where the entry goes out: the write
-/// generation already moved AND a fresh shape read is already the new
-/// one, so no tick can ever read the new generation under the old shape.
+/// The tick that drains a peer's schema diff re-reads under the new shape:
+/// the entry stales every kept transcript, and a re-read under the shape
+/// the write replaced, from a cache still warm, would be marked fresh
+/// (#1795). The tick drops the shape cache where it marks the reads stale,
+/// so no write path's ordering decides which shape it parses.
 #[tokio::test]
-async fn a_peer_schema_diff_clears_the_shape_cache_before_its_feed_entry() {
+async fn a_peer_schema_diff_is_re_read_under_the_new_shape() {
     let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
     seed_message(
         &mut p,
@@ -958,42 +972,9 @@ async fn a_peer_schema_diff_clears_the_shape_cache_before_its_feed_entry() {
     assert_eq!(pending_texts(&watcher, "order"), vec!["hello"]);
     assert_eq!(transcript_queries(&p), 1);
 
-    // Where the feed entry goes out, sample what a draining tick would
-    // read: the generation the diff's writes took, and the shape the
-    // transcript re-read parses.
-    let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
-    {
-        let p2 = p.clone();
-        let seen = seen.clone();
-        *p.ingest_broadcast_hook.lock().unwrap() = Some(Box::new(move || {
-            let shape = p2.get_shape("ns://Message").expect("shape read");
-            *seen.lock().unwrap() = Some((
-                p2.sparql_store.write_generation(),
-                shape
-                    .properties
-                    .iter()
-                    .any(|prop| prop.predicate == "ns://priority"),
-            ));
-        }));
-    }
-
     p.diff_from_link_language(peer_shape_diff(MESSAGE_SDNA_V2))
         .await
         .expect("peer schema diff");
-
-    let (generation, new_shape) = seen
-        .lock()
-        .unwrap()
-        .expect("the schema diff broadcast a feed entry");
-    assert_eq!(
-        generation,
-        p.sparql_store.write_generation(),
-        "the diff's writes are generation-visible when the entry goes out"
-    );
-    assert!(
-        new_shape,
-        "a tick draining the entry must already read the new shape"
-    );
 
     // The driven tick stands in for the one the entry wakes: the message
     // lacks `ns://priority`, so under the new shape it no longer conforms.

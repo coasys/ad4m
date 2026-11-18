@@ -1759,13 +1759,6 @@ async fn add_auto_processor_handler(
     if body.max_wait_ms.is_some_and(|w| w < 0) {
         return Err(WsRpcError::bad_request("`maxWaitMs` must be >= 0 when set"));
     }
-    // Same rule `write_processor` applies, answered at the boundary: an
-    // invalid `sourceQuery` is a 400, not a write that the loader then
-    // silently skips.
-    if let Some(source_query) = &body.source_query {
-        crate::perspectives::auto_processor::config::validate_source_query(source_query)
-            .map_err(|e| WsRpcError::bad_request(format!("`sourceQuery`: {e:#}")))?;
-    }
 
     let mut perspective = guarded_perspective(&params).await?;
     let agent_context = ctx.acts_as();
@@ -1798,6 +1791,12 @@ async fn add_auto_processor_handler(
         max_tool_calls: body.max_tool_calls,
         emit_debug_events: emit_debug_events_write.unwrap_or(false),
     };
+    // Same rule `write_processor` applies, answered at the boundary: an
+    // invalid source scope (`sourceQuery` grammar, a `where` key the class
+    // lacks, a getter `sourceText`) is the caller's error, a 400 — not a
+    // 500, and not a write the loader then silently skips.
+    crate::perspectives::auto_processor::config::check_source_scope(&perspective, &cfg)
+        .map_err(|e| WsRpcError::bad_request(format!("source scope: {e:#}")))?;
     write_processor(
         &mut perspective,
         &cfg,

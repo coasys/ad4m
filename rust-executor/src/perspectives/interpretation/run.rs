@@ -2428,20 +2428,26 @@ mod tests {
         assert_eq!(unfiltered.turns.len(), 1, "got {:#?}", unfiltered.turns);
         assert_eq!(unfiltered.turns[0].text, "words");
 
-        let held = gather_transcript_model(
-            &perspective,
-            "ns://Message",
-            "body",
+        // Under `NOT`, and under `NOT` inside `AND`, the same property is
+        // as undecided as at the top.
+        for where_json in [
             r#"{"where":{"label":"hi"}}"#,
-        )
-        .await
-        .expect("gather_transcript_model");
-        assert!(
-            held.turns.is_empty(),
-            "an undecided where must not admit the turn; got {:#?}",
-            held.turns
-        );
-        assert!(held.has_unresolved, "the held turn must be retried");
+            r#"{"where":{"NOT":{"label":"blocked"}}}"#,
+            r#"{"where":{"AND":[{"NOT":{"label":"blocked"}}]}}"#,
+        ] {
+            let held = gather_transcript_model(&perspective, "ns://Message", "body", where_json)
+                .await
+                .expect("gather_transcript_model");
+            assert!(
+                held.turns.is_empty(),
+                "{where_json}: an undecided where must not admit the turn; got {:#?}",
+                held.turns
+            );
+            assert!(
+                held.has_unresolved,
+                "{where_json}: the held turn must be retried"
+            );
+        }
     }
 
     // ---- interpretation_task_name_for_model + ensure_..._for_model --------

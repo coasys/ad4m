@@ -86,7 +86,7 @@ impl AbstractIndex {
             };
             // `namespace://Class.prop`, as the SHACL writer and the shape
             // loader name it.
-            let Some((_, prop)) = prop_uri.rsplit_once('.') else {
+            let Some(prop) = super::shape::loaded_property_name(prop_uri) else {
                 continue;
             };
             let json = super::shape::decode_literal_string_target(raw);

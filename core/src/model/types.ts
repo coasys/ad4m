@@ -216,9 +216,15 @@ export interface TraverseByModel extends TraverseOptions {
  * which reached nodes are *returned*, never which are walked through — a
  * reply under a direct child that fails the class or `where` is still
  * returned when the reply itself passes. Every edge keeps the proof and
- * link-status guards the rest of the query honours. `levels` answers
- * differently on purpose: each of its levels is a scoped read, so a node it
- * filters out does end that walk.
+ * link-status guards the rest of the query honours, and only the edges are
+ * guarded: an intermediate node of a foreign class, or one carrying a forged
+ * class flag, is walked through when its membership edges are valid. `levels`
+ * answers differently on purpose: each of its levels is a scoped read, so a
+ * node it filters out does end that walk.
+ *
+ * The walk has no frontier cap beyond the path's length: each hop is one
+ * guarded query over the whole frontier of the hop before it, so its cost
+ * grows with the number of nodes reached, not with the page asked for.
  *
  * The path's length is the depth, so it is refused alongside `predicate` and
  * `levels` (other ways to name the relation), `transitive` and `maxDepth`

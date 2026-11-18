@@ -347,9 +347,16 @@ pub enum Scope {
         /// only which reached nodes are returned, never which are walked
         /// through — a reply under a child that fails either is still
         /// returned when the reply itself passes. Every edge keeps the
-        /// query's proof and link-status guards. `levels` answers
-        /// differently on purpose: each of its levels is a scoped read, so a
-        /// node it filters out does end that walk.
+        /// query's proof and link-status guards, and only the edges are
+        /// guarded: an intermediate node of a foreign class, or one carrying
+        /// a forged class flag, is walked through when its membership edges
+        /// are valid. `levels` answers differently on purpose: each of its
+        /// levels is a scoped read, so a node it filters out does end that
+        /// walk.
+        ///
+        /// No frontier cap beyond the path's length: each hop is one guarded
+        /// query over the whole frontier of the hop before it, so the cost
+        /// grows with the nodes reached, not with the page asked for.
         ///
         /// This is the level walk `levels` makes with its own relation named
         /// per level rather than the same one throughout, and no per-anchor
@@ -490,6 +497,17 @@ const TRAVERSE_ONLY_KEYS: [&str; 9] = [
     "max_depth",
 ];
 
+/// Traverse keys a `path` replaces (see [`Scope::Traverse::path`]).
+const PATH_COMPETING_KEYS: [&str; 7] = [
+    "predicate",
+    "transitive",
+    "levels",
+    "limitPerAnchor",
+    "limit_per_anchor",
+    "maxDepth",
+    "max_depth",
+];
+
 impl<'de> Deserialize<'de> for Scope {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -507,6 +525,20 @@ impl<'de> Deserialize<'de> for Scope {
                      `limitPerAnchor`, `maxDepth`) cannot sit beside `id`, `model` or `field` — \
                      the untagged parse would drop it, reading a different scope than was sent",
                 ));
+            }
+            // Presence, not value: past the parse, `transitive: false` and an
+            // absent `transitive` are the same `false`, so only the keys can
+            // tell a caller who named a competing field.
+            if object.contains_key("path") {
+                if let Some(key) = PATH_COMPETING_KEYS
+                    .iter()
+                    .find(|k| object.contains_key(**k))
+                {
+                    return Err(serde::de::Error::custom(format!(
+                        "scope: `{key}` cannot sit beside `path` — a path names one predicate \
+                         per hop and bounds itself by its length"
+                    )));
+                }
             }
         }
         Ok(

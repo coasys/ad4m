@@ -1675,7 +1675,11 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
                 .clone()
                 .unwrap_or_else(|| extract_local_name(&prop.path))
         })
-        .filter(|name| RESERVED_PROPERTY_NAMES.contains(&name.as_str()))
+        .filter(|name| {
+            let loaded =
+                crate::perspectives::model_query::shape::loaded_property_name(name).unwrap_or(name);
+            RESERVED_PROPERTY_NAMES.contains(&loaded)
+        })
         .collect();
     if !reserved_collisions.is_empty() {
         return Err(anyhow::anyhow!(
@@ -2458,6 +2462,27 @@ mod tests {
         }"#;
         let err = parse_shacl_to_links(shacl_json, "Post").unwrap_err();
         assert!(format!("{err}").contains("timestamp"));
+    }
+
+    /// The loader reads a property's name off its shape URI
+    /// (`namespace://Class.name`) after the last `.`, so `prefix.__links`
+    /// loads as `__links`: the guard checks the name the loader will see.
+    #[test]
+    fn parse_shacl_to_links_rejects_a_reserved_name_after_a_dot() {
+        for reserved in RESERVED_PROPERTY_NAMES {
+            let shacl_json = format!(
+                r#"{{
+                    "target_class": "book://Post",
+                    "properties": [
+                        {{ "path": "book://x", "name": "prefix.{reserved}", "datatype": "xsd://string" }}
+                    ]
+                }}"#
+            );
+            assert!(
+                parse_shacl_to_links(&shacl_json, "Post").is_err(),
+                "'prefix.{reserved}' loads as '{reserved}' and should be rejected"
+            );
+        }
     }
 
     /// A property with an ordinary name is unaffected — the guard must not

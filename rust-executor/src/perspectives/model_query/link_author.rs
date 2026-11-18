@@ -426,7 +426,7 @@ pub(super) fn instance_author_filter(
 /// rows on a check that never ran. A query is answered in the store only when
 /// its where clause compiles in full, so that is the test. Malformed
 /// `author`/`eq` conditions are refused here too, with the reason.
-pub(super) fn refuse_unanswerable_link_author(
+pub(crate) fn refuse_unanswerable_link_author(
     query: &ModelQueryInput,
     shape: &ModelShape,
     resolver: &dyn ShapeResolver,

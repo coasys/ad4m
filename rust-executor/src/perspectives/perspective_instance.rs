@@ -162,25 +162,31 @@ fn shacl_write_link(
     }
 }
 
-/// Whether `node` is named as a property shape by an existing
-/// `sh://property` link — the discriminator `shacl_write_link` applies to
-/// the predicates instance data also carries. A failed read counts as
-/// one: over-marking costs a shape re-parse, under-marking keeps a stale
-/// shape.
+/// Whether `node` is the target of an existing `sh://property` link — a
+/// property shape, which a class's node shape names that way. The
+/// discriminator `shacl_write_link` applies to the predicates instance
+/// data also carries. A failed read counts as one: over-marking costs a
+/// shape re-parse, under-marking keeps a stale shape.
 pub(super) fn is_property_shape_node(
     store: &crate::perspectives::sparql_store::SparqlStore,
     node: &str,
 ) -> bool {
-    match store.neighbours(node, Some("sh://property"), 1) {
-        Ok(Some(links)) => !links.is_empty(),
-        _ => true,
-    }
+    store
+        .query_links(
+            &crate::perspectives::sparql_store::EvalStop::none(),
+            None,
+            Some("sh://property"),
+            Some(node),
+            None,
+            None,
+            Some(1),
+        )
+        .map_or(true, |links| !links.is_empty())
 }
 
 /// True iff any link is a schema write ([`shacl_write_link`]). Used by
 /// `diff_from_link_language` to decide whether to invalidate the shape
-/// cache, and by `persist_remote_diff` to clear it before the diff's feed
-/// entry can wake a tick. The scan is one loop — cheap next to the
+/// cache. The scan is one loop — cheap next to the
 /// SPARQL write, and `is_property_shape` reads only on the predicates
 /// that need it. `Writes::touches_shacl` makes the same
 /// classification over a committed batch for the auto-processor's
@@ -850,12 +856,6 @@ pub struct PerspectiveInstance {
     /// concurrent local write in that gap deterministically (#1146).
     #[cfg(test)]
     pub(crate) ingest_gap_hook: Arc<std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>>,
-    /// Test-only hook run once by `persist_remote_diff` right before the
-    /// applied diff's feed entry is broadcast, so a test can read the
-    /// state a tick would see at that moment — the store generation and
-    /// whether the shape cache already reflects the diff (#1795).
-    #[cfg(test)]
-    pub(crate) ingest_broadcast_hook: Arc<std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>>,
     /// Test-only: makes the next [`Self::commit_batch`] fail, dropping the
     /// batch as a real failure does. Compiled out in non-test builds — see
     /// [`Self::fail_next_commit_batch`].
@@ -968,8 +968,6 @@ impl PerspectiveInstance {
             #[cfg(test)]
             ingest_gap_hook: Arc::new(std::sync::Mutex::new(None)),
             #[cfg(test)]
-            ingest_broadcast_hook: Arc::new(std::sync::Mutex::new(None)),
-            #[cfg(test)]
             fail_next_commit: Arc::new(AtomicBool::new(false)),
             #[cfg(test)]
             force_shape_sync_wait: Arc::new(AtomicBool::new(false)),
@@ -1078,6 +1076,22 @@ impl PerspectiveInstance {
             cache: &self.shape_cache,
             store: &self.sparql_store,
         }
+    }
+
+    /// The refusals a model query over `shape` makes before it reads — a
+    /// store-only condition the store cannot finish, a comparison on a
+    /// language-backed property it cannot make, a malformed condition —
+    /// without reading. For a caller that registers a query to run later.
+    pub(crate) fn refuse_unanswerable_query(
+        &self,
+        shape: &ModelShape,
+        query: &crate::perspectives::model_query::ModelQueryInput,
+    ) -> Result<(), AnyError> {
+        crate::perspectives::model_query::refuse_unanswerable_link_author(
+            query,
+            shape,
+            &self.shape_resolver(),
+        )
     }
 
     pub async fn start_background_tasks(self) {
@@ -4831,7 +4845,11 @@ impl PerspectiveInstance {
             // so rebuild them alongside the stale mark: `set_trigger_result`
             // feeds new result nodes into the old rules, and a write to a
             // predicate the new shape introduced would then neither wake nor
-            // stale.
+            // stale. The shape cache goes first: the re-read this mark
+            // causes and the rebuilt triggers must both parse the new shape,
+            // and no write path is guaranteed to have dropped it before its
+            // feed entry was drained.
+            self.clear_shape_cache();
             if let Some(configs) = watcher.reads.configs_snapshot() {
                 for cfg in configs.iter() {
                     watcher

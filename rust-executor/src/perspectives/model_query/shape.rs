@@ -42,6 +42,14 @@ impl std::fmt::Display for MissingShape {
 
 impl std::error::Error for MissingShape {}
 
+/// The property name the shape loader reads off a property-shape URI, which
+/// the SHACL writer forms as `namespace://Class.<name>`: the segment after the
+/// last `.`. So a declared name with a dot loads as its last segment, and the
+/// writer's reserved-name guard checks that segment, not the declared name.
+pub(crate) fn loaded_property_name(uri_or_name: &str) -> Option<&str> {
+    uri_or_name.rsplit_once('.').map(|(_, name)| name)
+}
+
 /// Public (crate-level) entry point for loading a shape from the SHACL store.
 ///
 /// Delegates to [`load_shape`].
@@ -262,9 +270,8 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
         };
 
         // Extract local property name from prop_uri: "namespace://ClassName.propName" -> "propName"
-        let name = prop_uri
-            .rsplit_once('.')
-            .map(|(_, n)| n.to_string())
+        let name = loaded_property_name(prop_uri)
+            .map(str::to_string)
             .unwrap_or_else(|| {
                 path.rsplit(&['/', '#', ':'][..])
                     .next()

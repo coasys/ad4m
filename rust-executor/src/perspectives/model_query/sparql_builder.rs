@@ -3739,6 +3739,32 @@ mod traverse_scope_tests {
         );
     }
 
+    /// A `path` refuses every field it replaces when the field is present,
+    /// whatever its value: `transitive: false` parses to the same `false` as
+    /// an absent key, so a check on the parsed value lets it through.
+    #[test]
+    fn a_path_scope_refuses_a_competing_key_whatever_its_value() {
+        for (key, value) in [
+            ("transitive", serde_json::json!(false)),
+            ("predicate", serde_json::json!("test://child")),
+            ("levels", serde_json::json!([2])),
+            ("limitPerAnchor", serde_json::json!(3)),
+            ("maxDepth", serde_json::json!(1)),
+        ] {
+            let mut json = serde_json::json!({ "ids": "test://a", "path": ["test://child"] });
+            json[key] = value;
+            let err = serde_json::from_value::<Scope>(json)
+                .expect_err("a competing key beside `path` must be refused");
+            assert!(err.to_string().contains(key), "{key}: {err}");
+        }
+        serde_json::from_value::<Scope>(serde_json::json!({
+            "ids": "test://a",
+            "path": ["test://child"],
+            "direction": "out",
+        }))
+        .expect("`direction` applies to every hop of a path");
+    }
+
     #[test]
     fn traverse_scope_ids_accept_a_bare_string() {
         let scope: Scope = serde_json::from_value(serde_json::json!({

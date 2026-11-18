@@ -130,28 +130,6 @@ impl PerspectiveInstance {
             })
             .collect::<Vec<_>>();
 
-        // A schema write's feed entry stales every kept transcript, and a
-        // tick draining it re-reads at once — so the shape cache must not
-        // still hold the shape the write replaced. `diff_from_link_language`
-        // clears it only after this returns; without a clear here a tick in
-        // between would re-read under the old shape and mark the result
-        // fresh anyway (#1795). Classify the same links the entry carries.
-        if super::perspective_instance::inbound_touches_shacl(
-            additions
-                .iter()
-                .map(|l| &l.data)
-                .chain(removals.iter().map(|l| &l.data))
-                .chain(effects.retracted.iter().map(|l| &l.data)),
-            &|node| super::perspective_instance::is_property_shape_node(&self.sparql_store, node),
-        ) {
-            self.clear_shape_cache();
-        }
-
-        #[cfg(test)]
-        if let Some(hook) = self.ingest_broadcast_hook.lock().unwrap().take() {
-            hook();
-        }
-
         // The feed entry right after the writes — what was applied, plus the
         // retracted links the published diff reports — tagged with the
         // generations the writes took, so a draining tick can prove the feed

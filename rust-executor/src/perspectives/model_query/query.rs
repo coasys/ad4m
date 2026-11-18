@@ -1294,11 +1294,10 @@ pub(super) fn returned(query: &ModelQueryInput) -> Option<Vec<String>> {
     Some(keep)
 }
 
-/// Every property the `where` and the `order` name, read as [`matches_where`] and
-/// [`sort_instances`] read them: the values the post-hydration filter and sort need, so the ones a
-/// language holds are resolved before them. A name too many costs a fetch per row; a name missing
-/// would filter or sort on the undecoded value.
-fn read_before_window(query: &ModelQueryInput) -> HashSet<String> {
+/// The instance properties a `where` clause reads, through `OR`, `AND` and
+/// `NOT`. A relation quantifier's nested clause reads another class, so its
+/// key is the relation's name and its body is not walked.
+pub(crate) fn where_property_names(clause: &BTreeMap<String, WhereCondition>) -> HashSet<String> {
     fn walk(clause: &BTreeMap<String, WhereCondition>, names: &mut HashSet<String>) {
         for (name, condition) in clause {
             match (name.as_str(), condition) {
@@ -1316,10 +1315,21 @@ fn read_before_window(query: &ModelQueryInput) -> HashSet<String> {
             }
         }
     }
-    let mut names: HashSet<String> = HashSet::new();
-    if let Some(clause) = &query.where_clause {
-        walk(clause, &mut names);
-    }
+    let mut names = HashSet::new();
+    walk(clause, &mut names);
+    names
+}
+
+/// Every property the `where` and the `order` name, read as [`matches_where`] and
+/// [`sort_instances`] read them: the values the post-hydration filter and sort need, so the ones a
+/// language holds are resolved before them. A name too many costs a fetch per row; a name missing
+/// would filter or sort on the undecoded value.
+fn read_before_window(query: &ModelQueryInput) -> HashSet<String> {
+    let mut names = query
+        .where_clause
+        .as_ref()
+        .map(where_property_names)
+        .unwrap_or_default();
     // A dotted sort key (`file.name`) reads a field of the decoded `file`.
     names.extend(
         query

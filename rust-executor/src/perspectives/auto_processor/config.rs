@@ -275,10 +275,21 @@ pub(crate) fn validate_source_query(
 }
 
 /// `where` keys that are clause grammar, not property names: `producedByFlow`
-/// is extracted before the query runs, and `author`/`base`/`id` name the
-/// instance's synthetic fields rather than a shape property.
-const WHERE_GRAMMAR_KEYS: [&str; 7] =
-    ["AND", "OR", "NOT", "author", "base", "id", "producedByFlow"];
+/// is extracted before the query runs, and `author`/`base`/`id`/`timestamp`/
+/// `createdAt`/`updatedAt` name the fields hydration gives every instance
+/// rather than a shape property.
+const WHERE_GRAMMAR_KEYS: [&str; 10] = [
+    "AND",
+    "OR",
+    "NOT",
+    "author",
+    "base",
+    "id",
+    "timestamp",
+    "createdAt",
+    "updatedAt",
+    "producedByFlow",
+];
 
 /// Every `where` leaf must name a property of the source class (or the
 /// grammar keys). Any other key compiles to nothing and is rejected by
@@ -326,18 +337,44 @@ fn validate_source_query_where(
     }
 }
 
-/// `source_query` validity for one config at whatever the local store can
-/// prove: the JSON grammar always; the `where` property names when the
-/// source class's shape is here to check against (a shape that has not
-/// synced yet is not a refusal — the loader re-checks on every read).
-fn check_source_query(
+/// The source scope's validity for one config at whatever the local store
+/// can prove: the `source_query` JSON grammar always; when the source
+/// class's shape is here to check against (a shape that has not synced yet
+/// is not a refusal — the loader re-checks on every read), the `where`
+/// property names, that `source_text` is a stored property (a turn's
+/// speaker and time come off its text link, which a getter's computed
+/// value does not have), and the refusals the transcript query itself
+/// would make when it runs.
+pub(crate) fn check_source_scope(
     perspective: &PerspectiveInstance,
-    source_class: &str,
-    source_query: &str,
+    cfg: &AutoProcessorConfig,
 ) -> anyhow::Result<()> {
-    let input = validate_source_query(source_query)?;
-    if let Ok(shape) = perspective.get_shape(source_class) {
-        validate_source_query_where(&input, &shape)?;
+    let input = cfg
+        .source_query
+        .as_deref()
+        .map(validate_source_query)
+        .transpose()?;
+    if let Ok(shape) = perspective.get_shape(&cfg.source_class) {
+        if shape
+            .properties
+            .iter()
+            .any(|p| p.name == cfg.source_text && p.getter.is_some())
+        {
+            anyhow::bail!(
+                "source_text `{}` is a getter on `{}`: a turn needs the stored link its \
+                 speaker and time come from",
+                cfg.source_text,
+                shape.target_class
+            );
+        }
+        if let Some(input) = &input {
+            validate_source_query_where(input, &shape)?;
+        }
+        // The query a tick runs, refused now rather than on every tick:
+        // otherwise the processor registers and never produces a turn.
+        let transcript: crate::perspectives::model_query::ModelQueryInput =
+            serde_json::from_str(&cfg.transcript_query_json())?;
+        perspective.refuse_unanswerable_query(&shape, &transcript)?;
     }
     Ok(())
 }
@@ -461,14 +498,12 @@ pub async fn write_processor(
     if cfg.source_text.trim().is_empty() {
         anyhow::bail!("write_processor: `{}` has no source_text", cfg.processor_id);
     }
-    if let Some(source_query) = &cfg.source_query {
-        check_source_query(perspective, &cfg.source_class, source_query).map_err(|e| {
-            anyhow::anyhow!(
-                "write_processor: `{}` bad source_query: {e:#}",
-                cfg.processor_id
-            )
-        })?;
-    }
+    check_source_scope(perspective, cfg).map_err(|e| {
+        anyhow::anyhow!(
+            "write_processor: `{}` bad source scope: {e:#}",
+            cfg.processor_id
+        )
+    })?;
     ensure_auto_processor_class(perspective, context).await?;
 
     let node = processor_node(&cfg.processor_id);
@@ -734,14 +769,11 @@ pub async fn load_processors(
         match config_from_instance(instance) {
             Some(cfg) => {
                 // Grammar was checked in `config_from_instance`; this is the
-                // half that needs the store: `where` leaves must name the
-                // source class's own properties when its shape is here.
-                if let Some(source_query) = &cfg.source_query {
-                    if let Err(e) = check_source_query(perspective, &cfg.source_class, source_query)
-                    {
-                        report_bad_source_query(instance, &format!("{e:#}"));
-                        continue;
-                    }
+                // half that needs the store: the source class's shape, when
+                // it is here.
+                if let Err(e) = check_source_scope(perspective, &cfg) {
+                    report_bad_source_query(instance, &format!("{e:#}"));
+                    continue;
                 }
                 log_flow_selection_once(&cfg);
                 out.push(cfg);
@@ -792,11 +824,11 @@ fn report_bad_source_query(instance: &serde_json::Value, why: &str) {
     let id = instance["id"].as_str().unwrap_or("<no id>");
     if first_report_for(id) {
         log::warn!(
-            "load_processors: AutoProcessor instance `{id}` has an invalid sourceQuery \
+            "load_processors: AutoProcessor instance `{id}` has an invalid source scope \
              ({why}); skipping (further occurrences suppressed). Instance as read: {instance}"
         );
     } else {
-        log::debug!("load_processors: still skipping `{id}` (invalid sourceQuery)");
+        log::debug!("load_processors: still skipping `{id}` (invalid source scope)");
     }
 }
 
@@ -1739,6 +1771,109 @@ mod tests {
                 "unexpected error for {bad}: {err}"
             );
         }
+    }
+
+    /// A `where` key must name a property of the source class or a field
+    /// every hydrated instance carries: `timestamp`, `createdAt` and
+    /// `updatedAt` are such fields, beside `author`, `base` and `id`. A
+    /// name that is neither would read an empty transcript forever.
+    #[tokio::test]
+    async fn source_query_where_names_a_property_or_a_hydrated_field() {
+        use crate::perspectives::interpretation_test_support::MESSAGE_SDNA;
+        let (mut p, _shapes, ctx) =
+            setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
+        let scoped = |where_json: &str| AutoProcessorConfig {
+            source_class: "ns://Message".into(),
+            source_text: "body".into(),
+            source_query: Some(format!(r#"{{"where":{where_json}}}"#)),
+            ..sample_config("where-names")
+        };
+        for field in ["timestamp", "createdAt", "updatedAt"] {
+            write_processor(
+                &mut p,
+                &scoped(&format!(r#"{{"{field}":{{"gt":0}}}}"#)),
+                Some(false),
+                &ctx,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("`{field}` is a hydrated field: {e}"));
+        }
+        let err = write_processor(&mut p, &scoped(r#"{"bdoy":"x"}"#), Some(false), &ctx)
+            .await
+            .expect_err("a typo is not a property");
+        assert!(err.to_string().contains("bdoy"), "{err}");
+    }
+
+    /// What the transcript query would refuse on every tick is refused on
+    /// write: `author` beside a value comparison on a language-backed
+    /// property can be answered neither in the store nor after hydration.
+    #[tokio::test]
+    async fn a_source_query_the_transcript_read_would_refuse_is_refused_on_write() {
+        use crate::perspectives::interpretation_test_support::MESSAGE_SDNA;
+        let on_language = MESSAGE_SDNA.replace(
+            "\"resolve_language\":\"literal\"",
+            "\"resolve_language\":\"QmSomeLang\"",
+        );
+        let (mut p, _shapes, ctx) =
+            setup_perspective_no_llm(&[("ns://Message", &on_language)]).await;
+        let cfg = AutoProcessorConfig {
+            source_class: "ns://Message".into(),
+            source_text: "body".into(),
+            source_query: Some(
+                r#"{"where":{"body":{"contains":"approved","author":"did:key:a"}}}"#.into(),
+            ),
+            ..sample_config("refused")
+        };
+        let err = write_processor(&mut p, &cfg, Some(false), &ctx)
+            .await
+            .expect_err("unanswerable on every tick");
+        assert!(err.to_string().contains("author"), "{err}");
+    }
+
+    /// A turn's speaker and time come off its text link, so `sourceText`
+    /// must name a stored property. A getter computes its value from other
+    /// links and has none: refused on write, and a node edited to name one
+    /// is skipped on load.
+    #[tokio::test]
+    async fn source_text_on_a_getter_is_refused_on_write_and_skipped_on_load() {
+        const GETTER_SDNA: &str = r#"{
+  "target_class":"ns://Message",
+  "properties":[
+    {"path":"ns://type","name":"type","has_value":"ns://message","min_count":1,"max_count":1},
+    {"path":"ns://body","name":"body","resolve_language":"literal","min_count":1,"max_count":1},
+    {"path":"ns://summary","name":"summary","getter":"SELECT ?target WHERE { <Base> <ns://body> ?target . } LIMIT 1"}
+  ]
+}"#;
+        let (mut p, _shapes, ctx) =
+            setup_perspective_no_llm(&[("ns://Message", GETTER_SDNA)]).await;
+        let on = |id: &str, text: &str| AutoProcessorConfig {
+            source_class: "ns://Message".into(),
+            source_text: text.into(),
+            ..sample_config(id)
+        };
+        let err = write_processor(&mut p, &on("computed", "summary"), Some(false), &ctx)
+            .await
+            .expect_err("a getter has no text link");
+        assert!(err.to_string().contains("summary"), "{err}");
+
+        write_processor(&mut p, &on("stored", "body"), Some(false), &ctx)
+            .await
+            .expect("a stored property is a text");
+        write_processor(&mut p, &on("edited", "body"), Some(false), &ctx)
+            .await
+            .expect("write edited");
+        p.update_subject(
+            class_option(),
+            processor_node("edited"),
+            serde_json::json!({ "sourceText": "summary" }),
+            None,
+            &ctx,
+        )
+        .await
+        .expect("edit sourceText to the getter");
+        let loaded = load_processors(&p).await.expect("load");
+        let ids: Vec<&str> = loaded.iter().map(|c| c.processor_id.as_str()).collect();
+        assert_eq!(ids, vec!["stored"]);
     }
 
     /// `parent` and `where` are the scope the config may name — they
