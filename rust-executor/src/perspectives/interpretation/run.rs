@@ -1,5 +1,7 @@
+use super::dedup::semantic_embedding_model;
+use super::existing_budget::{existing_for_prompt, Compact};
 use super::{
-    apply_with_overlay, build_interpretation_input, build_speaker_name_map, class_label,
+    apply_with_overlay, build_interpretation_input_showing, build_speaker_name_map, class_label,
     ensure_interpretation_task_for_model, existing_instance_context, existing_relation_links,
     identity_property, normalize_identity, parse_interpretation_output,
     plan_interpretation_ops_resolved, resolve_already_present_with_strategy, DedupStrategy,
@@ -665,12 +667,30 @@ pub async fn run_interpretation_with_strategy_and_model(
         )
         .await;
         let speaker_names = build_speaker_name_map(transcript);
-        let prompt = build_interpretation_input(
+        // The prompt shows a budgeted, compact view of `existing` (#1804);
+        // everything after the model's answer still reads the full set.
+        let embed_model = semantic_embedding_model(dedup_strategy);
+        let shown = existing_for_prompt(
+            &task,
             shapes,
             transcript,
             &existing_ctx,
             &active_flows,
             &speaker_names,
+            base_prefix,
+            embed_model.as_deref(),
+            Compact::Yes,
+            // The answer always goes through `resolve_already_present*`.
+            true,
+        )
+        .await;
+        let prompt = build_interpretation_input_showing(
+            shapes,
+            transcript,
+            &shown.shown,
+            &active_flows,
+            &speaker_names,
+            Some(shown.counts(true)),
         );
 
         let service = crate::ai_service::AIService::global_instance()
@@ -757,6 +777,8 @@ pub async fn run_interpretation_with_strategy_and_model(
             }
         })
         .await?;
+        // Handles (`P3`) back to full ids.
+        let instances = shown.handles.resolve(instances, shapes);
 
         // Hard dedup guarantee: even if the model ignored the `existing` hint, an
         // already-present (class, identity value) never becomes a *new* instance.
@@ -1112,12 +1134,29 @@ pub async fn run_interpretation_with_harness_and_model(
     )
     .await;
     let speaker_names = build_speaker_name_map(transcript);
-    let prompt = build_interpretation_input(
+    // Budgeted like the single-shot path (#1804), but with full ids and
+    // values: the tools take ids, and the model can `_get` the rest. No
+    // dedup strategy here, so the rows that do not all fit go by recency.
+    let shown = existing_for_prompt(
+        &task,
         shapes,
         transcript,
         &existing_ctx,
         &active_flows,
         &speaker_names,
+        base_prefix,
+        None,
+        Compact::No,
+        dedup_on_drain,
+    )
+    .await;
+    let prompt = build_interpretation_input_showing(
+        shapes,
+        transcript,
+        &shown.shown,
+        &active_flows,
+        &speaker_names,
+        Some(shown.counts(dedup_on_drain)),
     );
 
     // Build per-class propose shapes from the perspective's SHACL classes,
@@ -2187,6 +2226,7 @@ mod tests {
             title: "Ship the MVP".to_string(),
             class: "Intention".to_string(),
             properties: std::collections::BTreeMap::new(),
+            updated_at: String::new(),
         }]);
 
         let ops = vec![
@@ -2590,6 +2630,7 @@ mod tests {
                     title: format!("title of {id}"),
                     class: class.to_string(),
                     properties: Default::default(),
+                    updated_at: String::new(),
                 });
         }
         out

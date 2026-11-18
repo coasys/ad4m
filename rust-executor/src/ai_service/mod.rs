@@ -401,6 +401,12 @@ fn estimate_turns_tokens(turns: &[ChatTurn]) -> usize {
             .sum::<usize>()
 }
 
+/// The estimated input tokens of `prompt` sent on `task`: its system prompt and
+/// examples included, counted as [`AIService::prompt_interpretation_pass`] counts them.
+pub(crate) fn estimate_task_prompt_tokens(task: &AITask, prompt: &str) -> usize {
+    estimate_turns_tokens(&turns_for_task(task, prompt.to_string()))
+}
+
 /// A reasoning reply that did not produce a usable answer: nothing came back,
 /// or the provider cut it at the output cap / window.
 fn interpretation_reply_needs_no_thinking(result: &PromptResult) -> bool {
@@ -987,6 +993,13 @@ impl AIService {
             }
         }
         Self::model_context_tokens(model_id)
+    }
+
+    /// The context window `model_id`'s requests run at, in tokens, when it is
+    /// known: the same value [`Self::prompt_interpretation_pass`] checks a
+    /// prompt against. Interpretation sizes its `existing` block from it.
+    pub(crate) async fn context_window_tokens(&self, model_id: &str) -> Option<usize> {
+        self.resolved_context_tokens(model_id).await
     }
 
     /// How many bytes of one outgoing request's message list the model's

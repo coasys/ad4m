@@ -2380,6 +2380,7 @@ async fn e2e_semantic_dedup_pure_drops_paraphrase_keeps_distinct() {
             title: "Finish the WebRTC call module".to_string(),
             class: "Task".to_string(),
             properties: BTreeMap::new(),
+            updated_at: String::new(),
         }],
     )]
     .into_iter()
