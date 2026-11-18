@@ -18,9 +18,8 @@ use super::links::{attach_links, hydration_carries_links, resolve_link_keys};
 use super::projection::resolve_projections;
 use super::relations::{resolve_includes_recursive, resolve_reverse_relations};
 use super::sparql_builder::{
-    all_where_pushable, build_count_sparql, build_instance_sparql, compile_where_clause,
-    link_status_filter, local_status_filter, per_anchor_limit, proof_valid_filter, LinkGuard,
-    ANCHOR_VAR,
+    all_where_pushable, build_count_sparql, build_instance_sparql, link_status_filter,
+    local_status_filter, per_anchor_limit, proof_valid_filter, LinkGuard, ANCHOR_VAR,
 };
 use super::types::{
     InstanceQueryPlan, ModelQueryInput, ModelQueryResult, ModelShape, OrderDirection, Scope,
@@ -636,6 +635,11 @@ pub(super) async fn execute_model_query_inner(
     // full pipeline was just taught not to report; leaving it here would mean the same walk answers
     // two different figures depending on whether the caller asked for rows alongside it, and
     // `count()` in TypeScript is exactly `limit: 0`. A walk has to be walked to be counted.
+    //
+    // Whether the store alone decides every `where` condition. Compiled once:
+    // it chooses the COUNT fast path, the pushed window, whether the
+    // post-hydration filter runs below, and where a per-anchor slice lands.
+    let where_pushable = all_where_pushable(query_input, shape, Some(resolver));
     let is_count_only = query_input.limit == Some(0);
     let count_only_can_skip_the_walk = !matches!(
         query_input.parent,
@@ -644,10 +648,7 @@ pub(super) async fn execute_model_query_inner(
             ..
         }) | Some(Scope::Traverse { path: Some(_), .. })
     );
-    if is_count_only
-        && count_only_can_skip_the_walk
-        && all_where_pushable(query_input, shape, Some(resolver))
-    {
+    if is_count_only && count_only_can_skip_the_walk && where_pushable {
         if let Some(sparql) = build_count_sparql(shape, query_input, Some(resolver)) {
             let result_json = store.query(stop, &sparql)?;
             let results: Vec<Value> = serde_json::from_str(&result_json)?;
@@ -728,8 +729,7 @@ pub(super) async fn execute_model_query_inner(
             }
         }
     };
-    let can_push_pagination =
-        all_where_pushable(query_input, shape, Some(resolver)) && order_fully_pushable;
+    let can_push_pagination = where_pushable && order_fully_pushable;
 
     // A per-anchor limit forces the two-phase shape even with no global limit.
     // The whole value of slicing per anchor is that it happens on the id phase,
@@ -891,6 +891,14 @@ pub(super) async fn execute_model_query_inner(
     // so we can restore it after hydration (which uses BTreeMap, alphabetical order).
     let mut pagination_source_order: Option<Vec<String>> = None;
 
+    // When the `where` filter cannot run fully in the store, a per-anchor
+    // slice taken at phase one would both count and cut rows the filter has
+    // not had a chance to remove — and the rows it kept from below the fold
+    // are gone by the time the filter runs. The (source, anchor) pairs are
+    // then kept here instead, so the slice lands after the post-hydration
+    // filter and the total counts what the filter kept, before the slice.
+    let mut anchor_rows: Option<Vec<Value>> = None;
+
     let raw_results: Vec<Value> = match query_plan {
         InstanceQueryPlan::Single(sparql) => {
             let result_json = store.query_async(stop, &sparql).await?;
@@ -924,12 +932,18 @@ pub(super) async fn execute_model_query_inner(
                     let page_json = store.query_async(stop, &pagination_subquery).await?;
                     let mut page_results: Vec<Value> = serde_json::from_str(&page_json)?;
                     if let Some(n) = anchor_limit {
-                        slice_per_anchor(&mut page_results, n);
+                        if where_pushable {
+                            slice_per_anchor(&mut page_results, n);
+                        }
                     }
-                    page_results
+                    let ids = page_results
                         .iter()
                         .filter_map(|r| r["source"].as_str().map(|s| s.to_string()))
-                        .collect()
+                        .collect();
+                    if anchor_limit.is_some() && !where_pushable {
+                        anchor_rows = Some(page_results);
+                    }
+                    ids
                 }
             };
 
@@ -1039,20 +1053,8 @@ pub(super) async fn execute_model_query_inner(
 
     // Apply post-hydration where-clause filters
     if let Some(ref where_clause) = query_input.where_clause {
-        let compiled = compile_where_clause(
-            where_clause,
-            shape,
-            Some(resolver),
-            LinkGuard::of(query_input),
-        );
-        if !compiled.complete {
-            // `all_emitted` tells the filter which reading to apply: every
-            // leaf reached the store (the re-run exists for a widened
-            // `resolveLanguage` candidate), so store-only constructs — a
-            // relation quantifier's EXISTS, a per-link `author` — were applied
-            // and are trusted; a declined leaf gives no such guarantee, and
-            // they fail closed as they always have.
-            instances.retain(|inst| matches_where(inst, where_clause, shape, compiled.all_emitted));
+        if !where_pushable {
+            instances.retain(|inst| matches_where(inst, where_clause, shape));
         }
     }
 
@@ -1088,6 +1090,12 @@ pub(super) async fn execute_model_query_inner(
     };
     let total_count = if walk.is_some() {
         instances.len()
+    } else if anchor_rows.is_some() {
+        // The deferred per-anchor slice has not run yet, so `instances` here
+        // is the filtered set the slice draws from — the "how many match"
+        // the total reports. A store COUNT cannot give it: the pushed
+        // conditions alone admit rows the post-hydration filter removed.
+        instances.len()
     } else if let Some(total) = page_total {
         total
     } else if sparql_pagination.is_some() {
@@ -1109,6 +1117,22 @@ pub(super) async fn execute_model_query_inner(
     } else {
         instances.len()
     };
+
+    // The per-anchor slice deferred past the post-hydration filter lands
+    // here: the phase-one rows, in their order, cut to the instances the
+    // filter kept, then sliced as the pushed path slices them. The total
+    // above was taken before this cut — the filtered set the slice draws from.
+    if let Some(mut rows) = anchor_rows {
+        let limit = anchor_limit.expect("anchor rows exist only under a per-anchor limit");
+        let surviving: HashSet<&str> = instances
+            .iter()
+            .filter_map(|inst| inst["id"].as_str())
+            .collect();
+        rows.retain(|r| r["source"].as_str().is_some_and(|s| surviving.contains(s)));
+        slice_per_anchor(&mut rows, limit);
+        let kept: HashSet<&str> = rows.iter().filter_map(|r| r["source"].as_str()).collect();
+        instances.retain(|inst| inst["id"].as_str().is_some_and(|id| kept.contains(id)));
+    }
 
     // Apply ordering and pagination
     let mut paginated: Vec<Value> = if window_pushed {

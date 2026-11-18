@@ -406,12 +406,11 @@ async fn test_where_clause_literal_prop_with_raw_uri_value() {
 }
 
 // -----------------------------------------------------------------------
-// A `where` comparison over a `resolveLanguage` property keeps a raw
-// expression IRI as a candidate (the widened disjunct) — which the store
-// can never see resolve. So the clause reports itself incomplete and the
-// post-hydration check decides the row: the exact-count fast path and the
-// pushed window must both stay off, or the answer covers candidates the
-// filter would have dropped (#1795 P1).
+// A `where` comparison over a `resolveLanguage` property can compare only
+// the raw expression IRI in the store — never the resolved value — so it is
+// never pushed. The post-hydration check decides the row: the exact-count
+// fast path and the pushed window must both stay off, or the answer covers
+// rows the filter would have dropped (#1795).
 // -----------------------------------------------------------------------
 
 const EXPR_WHERE_SHAPE_JSON: &str = r#"{
@@ -426,7 +425,7 @@ const EXPR_WHERE_SHAPE_JSON: &str = r#"{
         "body": {
             "predicate": "ns://body",
             "required": false,
-            "resolveLanguage": "literal"
+            "resolveLanguage": "QmWherePagedLang"
         }
     },
     "relations": {}
@@ -434,9 +433,9 @@ const EXPR_WHERE_SHAPE_JSON: &str = r#"{
 
 /// Two conforming rows: `msg://keep` whose body is a decodable literal that
 /// contains `needle`, and `msg://drop` whose body is a raw expression URL —
-/// a candidate to the pushed `contains` — which the test language resolves
-/// to a body the condition excludes. `msg://drop` has the earlier type
-/// timestamp so a pushed `LIMIT 1` would pick it.
+/// which the test language resolves to a body the condition excludes.
+/// `msg://drop` has the earlier type timestamp so a pushed `LIMIT 1` would
+/// pick it.
 async fn seed_expr_where_store() -> SparqlStore {
     use crate::agent::signatures::TestSigner;
     use crate::perspectives::interpretation_test_support::serve_test_language;
@@ -524,6 +523,73 @@ async fn test_where_on_resolved_language_values_filters_the_pushed_window() {
     );
     assert_eq!(result.instances[0]["id"], json!("msg://keep"));
     assert_eq!(result.total_count, 1);
+}
+
+/// `limitPerAnchor` slices per anchor at the id phase — but a `where` the
+/// store cannot fully answer is still open then, so both the slice and the
+/// count wait for the post-hydration filter. One row resolves to a body the
+/// condition keeps, the other to one it drops: the total is the filtered 1,
+/// not the 2 the pushed conditions alone admit, and the slice takes from
+/// the filtered rows (#1795 item 14).
+#[tokio::test]
+async fn test_limit_per_anchor_counts_after_the_resolved_value_filter() {
+    use crate::agent::signatures::TestSigner;
+    use crate::perspectives::interpretation_test_support::{
+        serve_test_language, stop_test_language,
+    };
+
+    let store = SparqlStore::new(None).unwrap();
+    for (source, predicate, target, ts) in [
+        ("we://conv", "ns://child", "msg://drop", "1700000000000"),
+        ("we://conv", "ns://child", "msg://keep", "1700000000001"),
+        ("msg://drop", "ns://type", "ns://msg", "1700000000002"),
+        (
+            "msg://drop",
+            "ns://body",
+            "QmWherePagedLang://expr",
+            "1700000000003",
+        ),
+        ("msg://keep", "ns://type", "ns://msg", "1700000000004"),
+        (
+            "msg://keep",
+            "ns://body",
+            "literal:string:needle",
+            "1700000000005",
+        ),
+    ] {
+        store
+            .add_link(&make_link(source, predicate, target, ts))
+            .unwrap();
+    }
+    let expression = serde_json::to_string(&TestSigner::generate().sign("other words"))
+        .expect("expression json");
+    serve_test_language("QmWherePagedLang", expression).await;
+
+    let query = ModelQueryInput {
+        parent: Some(Scope::Traverse {
+            ids: vec!["we://conv".to_string()],
+            predicate: Some("ns://child".to_string()),
+            transitive: false,
+            direction: ScopeDirection::Out,
+            limit_per_anchor: Some(10),
+            levels: None,
+            max_depth: None,
+            path: None,
+        }),
+        where_clause: Some(contains_where("body", "needle")),
+        ..Default::default()
+    };
+    let result = fixture_query_from_json(&store, "Msg", &query, EXPR_WHERE_SHAPE_JSON)
+        .await
+        .unwrap();
+    stop_test_language("QmWherePagedLang").await;
+
+    assert_eq!(
+        result.total_count, 1,
+        "the count is of filtered rows, not pushed candidates"
+    );
+    assert_eq!(result.instances.len(), 1);
+    assert_eq!(result.instances[0]["id"], json!("msg://keep"));
 }
 
 /// A `path` element is interpolated into the level walk's guarded SPARQL,

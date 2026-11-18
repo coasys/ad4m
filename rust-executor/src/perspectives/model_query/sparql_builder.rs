@@ -1165,25 +1165,23 @@ pub(super) struct CompiledWhere {
     /// ever excluding a row the full clause would have kept.
     pub(super) patterns: Vec<String>,
     /// Whether the store alone decides the row: every condition reached
-    /// `patterns` *and* none of them is a candidate the store cannot finish
-    /// (a widened `resolveLanguage` comparison keeps a raw expression IRI the
-    /// store cannot see resolve — [`compile_leaf_condition`]).
+    /// `patterns`. A declined leaf (an unknown property, a getter, an
+    /// expression-backed comparison — [`compile_leaf_condition`]) falls to the
+    /// post-hydration filter instead.
     ///
     /// When false the caller must still filter post-hydration, and must not push
     /// pagination — a `LIMIT` over a partially-filtered set returns the wrong
-    /// rows, silently — nor an exact `COUNT` over candidates that may yet drop.
+    /// rows, silently — nor an exact `COUNT` over rows that may yet drop.
     /// This flag is the single source of that answer; deriving it separately
     /// from the emission is what let the two disagree.
     pub(super) complete: bool,
-    /// Whether *every* condition in the clause reached `patterns` — the
-    /// pre-widening sense of `complete`.
-    ///
-    /// A declined leaf is what `refuse_unanswerable_link_author` and a relation
-    /// quantifier's nested clause cannot survive: their answers exist only in
-    /// the store, so a condition emitted nowhere could not have been applied.
-    /// A widened leaf is not a decline — its candidate pattern was applied,
-    /// and post-hydration re-checks the value half, not the whole clause.
-    pub(super) all_emitted: bool,
+    /// The leaves declined because their property stores an expression on a
+    /// `resolveLanguage`: the store can compare only the raw expression IRI,
+    /// never the resolved value, so no comparison on them is pushed. They are
+    /// decided after hydration — a fine answer for an ordinary leaf, but not
+    /// for a construct nothing re-checks there (a relation quantifier's nested
+    /// clause), which reads this list to refuse instead.
+    pub(super) expression_backed: Vec<String>,
     /// Whether a per-link `author` condition was compiled anywhere in the
     /// clause, including a relation quantifier's nested clause (see
     /// [`super::link_author`]).
@@ -1252,12 +1250,20 @@ pub(super) fn compile_where_clause(
 ) -> CompiledWhere {
     let mut seq = 0usize;
     let mut la = LinkAuthorState::default();
-    let (patterns, all_emitted, needs_recheck) =
-        compile_where_clause_seq(wc, shape, resolver, guard, &mut seq, &mut la, false);
+    let mut expression_backed = Vec::new();
+    let (patterns, complete) = compile_where_clause_seq(
+        wc,
+        shape,
+        resolver,
+        guard,
+        &mut seq,
+        &mut la,
+        &mut expression_backed,
+    );
     CompiledWhere {
         patterns,
-        complete: all_emitted && !needs_recheck,
-        all_emitted,
+        complete,
+        expression_backed,
         link_author_scoped: la.per_link,
         link_author_error: la.error,
     }
@@ -1281,20 +1287,13 @@ pub(super) fn compile_where_clause(
 /// `author` is side-by-side when this object has a link-backed sibling: it then
 /// adds its instance-level filter here and scopes those siblings' links. It
 /// never reaches into a sub-clause, and a sub-clause's never reaches out.
-/// What [`compile_where_clause_seq`] learnt beside the patterns themselves:
+/// `expression_backed` collects the leaves declined because their property
+/// stores an expression on a `resolveLanguage` (see [`compile_leaf_condition`]).
 ///
-/// - `all_emitted` — every condition produced patterns; nothing was declined.
-///   This is the coverage a store-only construct (a per-link `author`, a
-///   relation quantifier) needs before the clause may run at all.
-/// - `needs_recheck` — an emitted pattern is a candidate, not a verdict: a
-///   widened `resolveLanguage` comparison admits a raw expression IRI whose
-///   resolved value the store cannot see. The row must be re-decided after
-///   hydration, so `CompiledWhere::complete` stays false.
-///
-/// The two travel separately because the answers are used differently: a
-/// widened leaf is still *emitted*, so it neither forbids a per-link `author`
-/// nor declines a quantifier's nested clause — but it does put the row back
-/// on the post-hydration filter and out of the pushed `COUNT`/window.
+/// The bool the seq reports is "every condition produced patterns" — the
+/// coverage a store-only construct (a per-link `author`, a relation
+/// quantifier's nested clause) needs before the clause may run at all, and
+/// what `CompiledWhere::complete` reports.
 fn compile_where_clause_seq(
     wc: &BTreeMap<String, WhereCondition>,
     shape: &ModelShape,
@@ -1302,11 +1301,10 @@ fn compile_where_clause_seq(
     guard: LinkGuard,
     seq: &mut usize,
     la: &mut LinkAuthorState,
-    negated: bool,
-) -> (Vec<String>, bool, bool) {
+    expression_backed: &mut Vec<String>,
+) -> (Vec<String>, bool) {
     let mut patterns = Vec::new();
-    let mut all_emitted = true;
-    let mut needs_recheck = false;
+    let mut complete = true;
 
     // Side-by-side: sugar for the bare instance-level `author` plus the same
     // `author` nested under every link-backed sibling. Both halves are pushed,
@@ -1324,7 +1322,7 @@ fn compile_where_clause_seq(
                      `{ contains: text }`"
                         .to_string(),
                 );
-                all_emitted = false;
+                complete = false;
             }
         }
     }
@@ -1334,15 +1332,20 @@ fn compile_where_clause_seq(
             "AND" => match condition {
                 WhereCondition::SubClauses(branches) => {
                     for branch in branches {
-                        let (p, emitted, recheck) = compile_where_clause_seq(
-                            branch, shape, resolver, guard, seq, la, negated,
+                        let (p, emitted) = compile_where_clause_seq(
+                            branch,
+                            shape,
+                            resolver,
+                            guard,
+                            seq,
+                            la,
+                            expression_backed,
                         );
                         patterns.extend(p);
-                        all_emitted &= emitted;
-                        needs_recheck |= recheck;
+                        complete &= emitted;
                     }
                 }
-                _ => all_emitted = false,
+                _ => complete = false,
             },
             "OR" => match condition {
                 WhereCondition::SubClauses(branches) if !branches.is_empty() => {
@@ -1353,43 +1356,50 @@ fn compile_where_clause_seq(
                     // what decides whether the declined `OR` may fall back to
                     // post-hydration at all.
                     for branch in branches {
-                        let (p, emitted, recheck) = compile_where_clause_seq(
-                            branch, shape, resolver, guard, seq, la, negated,
+                        let (p, emitted) = compile_where_clause_seq(
+                            branch,
+                            shape,
+                            resolver,
+                            guard,
+                            seq,
+                            la,
+                            expression_backed,
                         );
-                        // A widened arm is still a full arm — the UNION may
-                        // carry candidate patterns; the row they keep is
-                        // re-decided after hydration either way.
                         if !emitted || !binds_source(&p) {
                             ok = false;
                             continue;
                         }
-                        needs_recheck |= recheck;
                         arms.push(format!("{{\n{}\n    }}", p.join("\n")));
                     }
                     if ok {
                         patterns.push(format!("    {}", arms.join(" UNION ")));
                     } else {
-                        all_emitted = false;
+                        complete = false;
                     }
                 }
-                _ => all_emitted = false,
+                _ => complete = false,
             },
             "NOT" => match condition.as_not_clause() {
                 Some(branch) => {
-                    let (p, emitted, recheck) = compile_where_clause_seq(
-                        &branch, shape, resolver, guard, seq, la, !negated,
+                    let (p, emitted) = compile_where_clause_seq(
+                        &branch,
+                        shape,
+                        resolver,
+                        guard,
+                        seq,
+                        la,
+                        expression_backed,
                     );
                     if emitted && !p.is_empty() {
                         patterns.push(format!(
                             "    FILTER NOT EXISTS {{\n{}\n    }}",
                             p.join("\n")
                         ));
-                        needs_recheck |= recheck;
                     } else {
-                        all_emitted = false;
+                        complete = false;
                     }
                 }
-                None => all_emitted = false,
+                None => complete = false,
             },
             // A side-by-side `author` was emitted above and rides on the
             // siblings' reifier joins. A bare one falls through to the leaf
@@ -1400,7 +1410,7 @@ fn compile_where_clause_seq(
                     .filter(|_| side_by_side_scopes(prop_name, condition, shape))
                     .into_iter()
                     .collect();
-                let (leaf, widened) = compile_leaf_condition(
+                match compile_leaf_condition(
                     prop_name.as_str(),
                     condition,
                     shape,
@@ -1409,25 +1419,16 @@ fn compile_where_clause_seq(
                     seq,
                     &scoping,
                     la,
-                    negated,
-                );
-                match leaf {
-                    Some(p) => {
-                        patterns.extend(p);
-                        // A leaf that widened for an undecodable expression
-                        // IRI emitted a *candidate* filter: the store admits
-                        // the raw IRI but cannot see the value resolve, so
-                        // hydration has to decide the row — the clause is not
-                        // fully pushed and the caller must re-check it.
-                        needs_recheck |= widened;
-                    }
-                    None => all_emitted = false,
+                    expression_backed,
+                ) {
+                    Some(p) => patterns.extend(p),
+                    None => complete = false,
                 }
             }
         }
     }
 
-    (patterns, all_emitted, needs_recheck)
+    (patterns, complete)
 }
 
 /// Compile one `(property, condition)` pair into SPARQL patterns.
@@ -1443,27 +1444,12 @@ fn compile_where_clause_seq(
 /// satisfies the value condition; see [`super::link_author`]. A per-link author
 /// sets `la.per_link`, and a malformed one is recorded in `la.error`.
 ///
-/// A value comparison pushed for a `resolveLanguage` property is answered
-/// over `var`'s decoded form, but a stored target the language has not yet
-/// served is a raw expression IRI — decodable storage is the `literal:`
-/// encoding (`literal:string:`, signed `literal:json:` envelopes), and
-/// `parse_literal` hands anything else back unchanged. Comparing the raw
-/// IRI to the condition wrongly rejects a row whose resolved value may
-/// match, and the row never reaches hydration to be marked `__unresolved`,
-/// so nothing re-reads it once the expression arrives. The disjunct keeps
-/// an undecodable IRI instead: the conservative answer for a row the store
-/// cannot judge (#1795).
-fn unresolved_expression_or(var: &str) -> String {
-    format!("(isIRI({var}) && !STRSTARTS(STR({var}), \"literal:\"))")
-}
-
-/// Returns the leaf's patterns and whether they are candidates the store
-/// cannot finish: `true` when a comparison can meet a raw expression IRI it
-/// cannot decode — whether or not the widening disjunct is emitted (inside
-/// `NOT EXISTS` it is deliberately not, so the IRI correctly fails the inner
-/// pattern today; the store just can never see the value resolve). Either way
-/// the patterns are candidates, not a verdict, and the caller reports the
-/// clause incomplete so the row is re-checked after hydration.
+/// `expression_backed` records the one decline that is a rule, not a gap: a
+/// value comparison on a property whose `resolveLanguage` is a language. The
+/// store holds the raw expression IRI and can compare only that — never the
+/// resolved value — so the comparison is decided after hydration or not at
+/// all. That "not at all" is what a nested-clause construct (a quantifier)
+/// reads the list for, to refuse rather than silently not filter.
 fn compile_leaf_condition(
     prop_name: &str,
     condition: &WhereCondition,
@@ -1473,35 +1459,17 @@ fn compile_leaf_condition(
     seq: &mut usize,
     scoping: &[&WhereCondition],
     la: &mut LinkAuthorState,
-    negated: bool,
-) -> (Option<Vec<String>>, bool) {
+    expression_backed: &mut Vec<String>,
+) -> Option<Vec<String>> {
     let mut out: Vec<String> = Vec::new();
-    let mut unresolved_widening = false;
-    // A `None` from a join, a predicate check or a quantifier declines the
-    // leaf — `?` no longer applies now that the recheck flag returns beside
-    // the patterns, so the decline spells out the tuple it returns.
     macro_rules! or_decline {
         ($e:expr) => {
             match $e {
                 Some(v) => v,
-                None => return (None, unresolved_widening),
+                None => return None,
             }
         };
     }
-    // In a positive position a raw expression IRI counts as "not yet decodable"
-    // — keep the row so hydration can mark it `__unresolved`. Inside `FILTER
-    // NOT EXISTS` the same IRI must NOT satisfy the inner pattern (it is not a
-    // proven match), or the negation would drop rows the read cannot evaluate.
-    // Either way the comparison is a candidate, not a verdict, which the
-    // widened flag reports.
-    let undecidable_or = |var: &str, unresolved_widening: &mut bool| -> String {
-        *unresolved_widening = true;
-        if negated {
-            String::new()
-        } else {
-            format!(" || {}", unresolved_expression_or(var))
-        }
-    };
     // One id per leaf: variables inside a leaf share it, because they are meant
     // to correlate. Variables across leaves never do.
     let leaf_id = *seq;
@@ -1512,7 +1480,7 @@ fn compile_leaf_condition(
         Ok(parts) => parts,
         Err(reason) => {
             la.fail(format!("`{prop_name}`: {reason}"));
-            return (None, unresolved_widening);
+            return None;
         }
     };
     if nested_author.is_some() && !is_link_leaf(prop_name, shape) {
@@ -1521,7 +1489,7 @@ fn compile_leaf_condition(
              (a getter property, `timestamp`, `id` or an unknown name), so there is no link \
              whose author could be checked"
         ));
-        return (None, unresolved_widening);
+        return None;
     }
     let authors: Vec<&WhereCondition> = nested_author
         .into_iter()
@@ -1594,7 +1562,7 @@ fn compile_leaf_condition(
             }
             _ => {}
         }
-        return (finish(out), unresolved_widening);
+        return finish(out);
     }
 
     // Relation-based where.
@@ -1618,7 +1586,7 @@ fn compile_leaf_condition(
         // has no predicate, and `<>` is a relative IRI that matches nothing
         // while reporting the clause pushed.
         if prop.predicate.is_empty() {
-            return (None, unresolved_widening);
+            return None;
         }
         let safe_pred = or_decline!(validate_iri(&prop.predicate).ok());
         let direction = prop.direction.as_deref().unwrap_or("forward");
@@ -1632,8 +1600,31 @@ fn compile_leaf_condition(
             };
             let join = or_decline!(author_join(subject, safe_pred, object, ""));
             out.push(format!("    {subject} <{safe_pred}> {object} .{join}"));
-            return (finish(out), unresolved_widening);
+            return finish(out);
         };
+        // A value comparison on a property whose `resolveLanguage` is a
+        // language compares the raw expression IRI — the store never sees the
+        // resolved value — so it is declined, not approximated. `some`/`none`
+        // passes through to `compile_relation_quantifier`, which answers for
+        // its own nested clause: refusing, because no post-hydration pass
+        // re-checks a quantifier.
+        if prop
+            .resolve_language
+            .as_deref()
+            .is_some_and(|lang| lang != "literal")
+            && !matches!(condition, WhereCondition::Ops(ops) if ops.some.is_some() || ops.none.is_some())
+        {
+            expression_backed.push(prop_name.to_string());
+            if !authors.is_empty() {
+                la.fail(format!(
+                    "where: `{prop_name}` asks a value condition and a per-link `author` on a \
+                     property stored as expressions on a `resolveLanguage`: post-hydration \
+                     cannot re-check which authored link carried the value, so the pair \
+                     cannot be answered."
+                ));
+            }
+            return None;
+        }
         match condition {
             WhereCondition::String(val) => {
                 if emittable_iri(val) {
@@ -1756,7 +1747,7 @@ fn compile_leaf_condition(
                          nothing else, so the pair cannot be answered together. The query \
                          will return no rows."
                     );
-                    return (None, unresolved_widening);
+                    return None;
                 }
                 let (inner, negate) = match (&ops.some, &ops.none) {
                     (Some(inner), None) => (inner, false),
@@ -1768,7 +1759,7 @@ fn compile_leaf_condition(
                             "where: `{prop_name}` sets both `some` and `none`, which has no \
                              single reading. The query will return no rows."
                         );
-                        return (None, unresolved_widening);
+                        return None;
                     }
                 };
                 let quantified = or_decline!(compile_relation_quantifier(
@@ -1778,7 +1769,7 @@ fn compile_leaf_condition(
             }
             _ => {}
         }
-        return (finish(out), unresolved_widening);
+        return finish(out);
     }
 
     // Property-based where
@@ -1788,7 +1779,7 @@ fn compile_leaf_condition(
         .find(|p| &p.name == prop_name && !p.is_collection && !p.predicate.is_empty())
     {
         if validate_iri(&prop.predicate).is_err() {
-            return (None, unresolved_widening);
+            return None;
         }
         let safe_name = format!(
             "{}_{leaf_id}",
@@ -1803,8 +1794,31 @@ fn compile_leaf_condition(
                 prop.predicate,
                 or_decline!(author_join("?source", &prop.predicate, &var, ""))
             ));
-            return (finish(out), unresolved_widening);
+            return finish(out);
         };
+        // A value comparison on a property whose `resolveLanguage` is a
+        // language can compare only the raw expression IRI — never the
+        // resolved value — so it is declined, not approximated: the row is
+        // decided after hydration, where the resolved value lives. With an
+        // `author` on the leaf there is no second chance at all: post-hydration
+        // cannot tell which authored link carried the value, so the pair is
+        // refused rather than answered against the wrong link.
+        if prop
+            .resolve_language
+            .as_deref()
+            .is_some_and(|lang| lang != "literal")
+        {
+            expression_backed.push(prop_name.to_string());
+            if !authors.is_empty() {
+                la.fail(format!(
+                    "where: `{prop_name}` asks a value condition and a per-link `author` on a \
+                     property stored as expressions on a `resolveLanguage`: post-hydration \
+                     cannot re-check which authored link carried the value, so the pair \
+                     cannot be answered."
+                ));
+            }
+            return None;
+        }
         match condition {
             WhereCondition::String(val) => {
                 if is_literal_prop {
@@ -1832,12 +1846,12 @@ fn compile_leaf_condition(
                         out.push(format!("    ?source <{}> {typed} .{join}", prop.predicate));
                     }
                 } else {
-                    // Expression-resolved storage (signed literal envelope
-                    // or custom resolveLanguage): the stored term is the
-                    // envelope/expression, never a NamedNode equal to
-                    // `val`. Unwrap with `fn/parse_literal` and compare on
-                    // the decoded value. (Emitting `<val>` here would also
-                    // be an invalid relative IRI for non-absolute values.)
+                    // `resolveLanguage: "literal"` storage (signed literal
+                    // envelope): the stored term is the envelope, never a
+                    // NamedNode equal to `val`. Unwrap with `fn/parse_literal`
+                    // and compare on the decoded value. (Emitting `<val>` here
+                    // would also be an invalid relative IRI for non-absolute
+                    // values.)
                     let var = format!("?_pw_{safe_name}");
                     let escaped = escape_sparql_string(val);
                     out.push(format!(
@@ -1846,8 +1860,7 @@ fn compile_leaf_condition(
                         or_decline!(author_join("?source", &prop.predicate, &var, ""))
                     ));
                     out.push(format!(
-                        "    FILTER(<ad4m://fn/parse_literal>({var}) = \"{escaped}\"{})",
-                        undecidable_or(&var, &mut unresolved_widening)
+                        "    FILTER(<ad4m://fn/parse_literal>({var}) = \"{escaped}\")"
                     ));
                 }
             }
@@ -1867,8 +1880,7 @@ fn compile_leaf_condition(
                         or_decline!(author_join("?source", &prop.predicate, &var, ""))
                     ));
                     out.push(format!(
-                        "    FILTER(<ad4m://fn/parse_literal>({var}) = \"{n}\"{})",
-                        undecidable_or(&var, &mut unresolved_widening)
+                        "    FILTER(<ad4m://fn/parse_literal>({var}) = \"{n}\")"
                     ));
                 }
             }
@@ -1885,8 +1897,7 @@ fn compile_leaf_condition(
                         or_decline!(author_join("?source", &prop.predicate, &var, ""))
                     ));
                     out.push(format!(
-                        "    FILTER(<ad4m://fn/parse_literal>({var}) = \"{b}\"{})",
-                        undecidable_or(&var, &mut unresolved_widening)
+                        "    FILTER(<ad4m://fn/parse_literal>({var}) = \"{b}\")"
                     ));
                 }
             }
@@ -1920,8 +1931,7 @@ fn compile_leaf_condition(
                         or_decline!(author_join("?source", &prop.predicate, &var, ""))
                     ));
                     out.push(format!(
-                        "    FILTER(<ad4m://fn/parse_literal>({var}) IN ({values_list}){})",
-                        undecidable_or(&var, &mut unresolved_widening)
+                        "    FILTER(<ad4m://fn/parse_literal>({var}) IN ({values_list}))"
                     ));
                 }
             }
@@ -1955,8 +1965,7 @@ fn compile_leaf_condition(
                         or_decline!(author_join("?source", &prop.predicate, &var, ""))
                     ));
                     out.push(format!(
-                        "    FILTER(<ad4m://fn/parse_literal>({var}) IN ({values_list}){})",
-                        undecidable_or(&var, &mut unresolved_widening)
+                        "    FILTER(<ad4m://fn/parse_literal>({var}) IN ({values_list}))"
                     ));
                 }
             }
@@ -2082,26 +2091,19 @@ fn compile_leaf_condition(
                 // requested, so this constrains nothing and should not narrow to
                 // "the property exists" — or every requested one was unrenderable.
                 if filters.is_empty() || unhandled {
-                    return (None, unresolved_widening);
+                    return None;
                 }
                 let conjunction = filters.join(" && ");
-                if is_literal_prop {
-                    out.push(format!("    FILTER({conjunction})"));
-                } else {
-                    out.push(format!(
-                        "    FILTER({conjunction}{})",
-                        undecidable_or(&var, &mut unresolved_widening)
-                    ));
-                }
+                out.push(format!("    FILTER({conjunction})"));
             }
             // SubClauses/SubClause are OR/AND/NOT combinators evaluated
             // Rust-side; the outer loop skips them before reaching here.
             WhereCondition::SubClauses(_) | WhereCondition::SubClause(_) => {}
         }
-        return (finish(out), unresolved_widening);
+        return finish(out);
     }
 
-    (None, unresolved_widening)
+    None
 }
 
 #[cfg(test)]
@@ -2323,6 +2325,7 @@ mod tests {
 mod where_compiler_tests {
     use super::*;
     use crate::perspectives::model_query::test_helpers::{prop, relation, shape};
+    use crate::perspectives::model_query::types::WhereOps;
 
     fn wc(pairs: Vec<(&str, WhereCondition)>) -> BTreeMap<String, WhereCondition> {
         pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect()
@@ -2399,46 +2402,60 @@ mod where_compiler_tests {
         assert!(!compiled.complete, "but the clause is not fully covered");
     }
 
-    // ---- unresolved-expression widening is a candidate, not a verdict ----
+    // ---- expression-backed leaves are never pushed ----
 
-    /// A property with `resolveLanguage` set, the leaf kind whose stored
-    /// target can be a raw expression IRI the store cannot decode.
-    fn expr_shape() -> ModelShape {
+    /// A `resolveLanguage: "literal"` property — the signed-envelope storage
+    /// the store can decode — keeps its exact pushdown.
+    fn literal_expr_shape() -> ModelShape {
         let mut body = prop("body", "we://body");
         body.resolve_language = Some("literal".to_string());
         shape("Post", vec![prop("title", "we://title"), body])
     }
 
+    /// A property on a real `resolveLanguage`: the store holds the raw
+    /// expression IRI, which is all it could ever compare.
+    fn lang_shape() -> ModelShape {
+        let mut body = prop("body", "we://body");
+        body.resolve_language = Some("lang://words".to_string());
+        shape("Post", vec![prop("title", "we://title"), body])
+    }
+
     #[test]
-    fn test_unresolved_widening_reports_the_clause_incomplete() {
-        // The disjunct keeping an undecodable expression IRI as a candidate
-        // (`isIRI && !literal:`) admits it forever — including after the value
-        // resolves to a non-match, which only the post-hydration check can
-        // see. Emitting it must report the clause incomplete, or the caller
-        // skips that check (and with it the exact count and window pushdown's
-        // safety).
-        let s = expr_shape();
+    fn a_literal_expression_property_keeps_its_pushdown() {
+        let s = literal_expr_shape();
         let clause = wc(vec![("body", WhereCondition::String("x".to_string()))]);
 
         let compiled = compile_where_clause(&clause, &s, None, LinkGuard::ANY);
 
+        assert!(compiled.complete);
         assert!(
-            !compiled.patterns.is_empty(),
-            "the candidate filter is still emitted"
-        );
-        assert!(
-            !compiled.complete,
-            "but it is not the verdict — the row is re-checked after hydration"
+            compiled.patterns.join("\n").contains("parse_literal"),
+            "the envelope is unwrapped in the store: {}",
+            compiled.patterns.join("\n")
         );
     }
 
     #[test]
-    fn test_negated_unresolved_comparison_reports_incomplete() {
-        // Inside `FILTER NOT EXISTS` the widening is deliberately not emitted —
-        // the raw IRI correctly fails the inner pattern today — but the store
-        // can never see the value resolve either, so the pushed negation
-        // cannot retire the row and the clause is likewise incomplete.
-        let s = expr_shape();
+    fn a_language_backed_leaf_is_never_pushed() {
+        // The store can compare only the raw expression IRI — which can
+        // neither prove a match nor a non-match — so the comparison is
+        // decided on the resolved value after hydration.
+        let s = lang_shape();
+        let clause = wc(vec![("body", WhereCondition::String("x".to_string()))]);
+
+        let compiled = compile_where_clause(&clause, &s, None, LinkGuard::ANY);
+
+        assert!(compiled.patterns.is_empty());
+        assert!(!compiled.complete);
+        assert_eq!(compiled.expression_backed, vec!["body".to_string()]);
+    }
+
+    #[test]
+    fn a_language_backed_leaf_under_not_is_decided_on_the_value() {
+        // A pushed `NOT EXISTS` would test the raw IRI — `NOT {body: "expr"}`
+        // must read the resolved value, so the clause falls to the
+        // post-hydration filter instead of emitting a partial pattern.
+        let s = lang_shape();
         let clause = wc(vec![(
             "NOT",
             WhereCondition::SubClause(branch(vec![(
@@ -2447,7 +2464,32 @@ mod where_compiler_tests {
             )])),
         )]);
 
-        assert!(!compile_where_clause(&clause, &s, None, LinkGuard::ANY).complete);
+        let compiled = compile_where_clause(&clause, &s, None, LinkGuard::ANY);
+
+        assert!(compiled.patterns.is_empty());
+        assert!(!compiled.complete);
+    }
+
+    #[test]
+    fn author_plus_value_on_a_language_backed_property_is_refused() {
+        // The per-link answer — did *this authored link* carry the value —
+        // exists in the store only, but the value exists post-hydration only:
+        // neither layer can answer the pair, so the query is refused.
+        let s = lang_shape();
+        let clause = wc(vec![(
+            "body",
+            WhereCondition::Ops(WhereOps {
+                eq: Some(Box::new(WhereCondition::String("x".to_string()))),
+                author: Some(Box::new(WhereCondition::String("did:a".to_string()))),
+                ..Default::default()
+            }),
+        )]);
+
+        let compiled = compile_where_clause(&clause, &s, None, LinkGuard::ANY);
+
+        assert!(!compiled.complete);
+        let error = compiled.link_author_error.expect("the pair is refused");
+        assert!(error.contains("`body`"), "{error}");
     }
 
     // ---- OR -> UNION -----------------------------------------------------
@@ -2882,12 +2924,22 @@ fn compile_relation_quantifier(
             compiled.link_author_scoped,
             compiled.link_author_error.clone(),
         );
-        // `all_emitted`, not `complete`: a widened `resolveLanguage` leaf in
-        // the nested clause emits a candidate pattern — the EXISTS' best
-        // answer, since no post-hydration pass can re-check a quantifier.
-        // Reporting it incomplete would only cost the query its pushdown
-        // without gaining a verification that can never run.
-        if !compiled.all_emitted || compiled.patterns.is_empty() {
+        // An expression-backed leaf is the one decline that is a rule, not a
+        // gap: the store can compare only the raw expression IRI, and no
+        // post-hydration pass re-checks a quantifier — so the query would
+        // silently not filter what it was asked to. Refuse it, naming the
+        // property, rather than returning no rows with no reason.
+        if !compiled.expression_backed.is_empty() {
+            la.fail(format!(
+                "where: the `some`/`none` quantifier on `{prop_name}` asks about `{}`, \
+                 whose values are stored as expressions on a `resolveLanguage`: the store \
+                 can compare only the raw expression IRI and nothing re-checks a quantifier \
+                 after hydration, so the condition cannot be answered.",
+                compiled.expression_backed.join("`, `")
+            ));
+            return None;
+        }
+        if !compiled.complete || compiled.patterns.is_empty() {
             log::warn!(
                 "where: the nested clause on relation `{prop_name}` could not be compiled to \
                  SPARQL in full. A partial EXISTS would match rows the clause rejects, so it \
@@ -3095,6 +3147,34 @@ mod relation_quantifier_tests {
         let compiled = compile_where_clause(&clause, &s, Some(&r), LinkGuard::ANY);
         assert!(!compiled.complete);
         assert!(compiled.patterns.is_empty());
+    }
+
+    #[test]
+    fn a_quantifier_over_a_language_backed_property_is_refused() {
+        // The nested `body` is stored as an expression on a `resolveLanguage`,
+        // so the store can compare only the raw IRI — and no post-hydration
+        // pass re-checks a quantifier. Returning no rows silently would look
+        // like "no comments match"; it is refused instead, naming `body`.
+        let s = post_shape();
+        let mut body = prop("body", "we://body");
+        body.resolve_language = Some("lang://words".to_string());
+        let r = StaticShapeResolver::new();
+        r.register("Comment", shape("Comment", vec![body]));
+        let clause = wc(vec![(
+            "comments",
+            ops_with(
+                Some(vec![("body", WhereCondition::String("x".to_string()))]),
+                None,
+            ),
+        )]);
+
+        let compiled = compile_where_clause(&clause, &s, Some(&r), LinkGuard::ANY);
+
+        assert!(!compiled.complete);
+        let error = compiled
+            .link_author_error
+            .expect("the quantifier is refused");
+        assert!(error.contains("`body`"), "{error}");
     }
 
     #[test]

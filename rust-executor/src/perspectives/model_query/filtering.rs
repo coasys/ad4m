@@ -27,21 +27,18 @@ use std::collections::BTreeMap;
 /// combinator that assumption let a role gate's DID condition pass for every
 /// candidate.
 ///
-/// `store_applied` says every condition in the clause reached the store — the
-/// clause is being re-run only because a widened `resolveLanguage` comparison
-/// emitted a *candidate* the store cannot finish. The conditions only the
-/// store can answer (a relation quantifier's `EXISTS`, a per-link `author`)
-/// were decided there, so this pass trusts them and re-checks just the value
-/// halves it can see. With `store_applied` false some condition was emitted
-/// nowhere, and those same leaves must fail closed in [`matches_ops`].
+/// Runs only when the clause was not pushed to the store in full, so every
+/// condition is decided here on the hydrated value. The conditions only the
+/// store could have answered (a relation quantifier's `EXISTS`, a per-link
+/// `author`) were refused at compile time — one that still reaches this pass
+/// fails closed in [`matches_ops`].
 pub(super) fn matches_where(
     instance: &Value,
     where_clause: &BTreeMap<String, WhereCondition>,
     shape: &ModelShape,
-    store_applied: bool,
 ) -> bool {
     !matches!(
-        where_verdict(instance, where_clause, shape, store_applied),
+        where_verdict(instance, where_clause, shape),
         Verdict::Reject
     )
 }
@@ -66,7 +63,6 @@ fn where_verdict(
     instance: &Value,
     where_clause: &BTreeMap<String, WhereCondition>,
     shape: &ModelShape,
-    store_applied: bool,
 ) -> Verdict {
     let mut undecidable = false;
     for (prop_name, condition) in where_clause {
@@ -87,7 +83,7 @@ fn where_verdict(
             let mut branch_unknown = false;
             let mut branch_match = false;
             for branch in branches {
-                match where_verdict(instance, branch, shape, store_applied) {
+                match where_verdict(instance, branch, shape) {
                     Verdict::Match => {
                         branch_match = true;
                         break;
@@ -112,7 +108,7 @@ fn where_verdict(
                 return Verdict::Reject;
             };
             for branch in branches {
-                match where_verdict(instance, branch, shape, store_applied) {
+                match where_verdict(instance, branch, shape) {
                     Verdict::Match => {}
                     Verdict::Unknown => undecidable = true,
                     Verdict::Reject => return Verdict::Reject,
@@ -126,7 +122,7 @@ fn where_verdict(
             let Some(branch) = condition.as_not_clause() else {
                 return Verdict::Reject;
             };
-            match where_verdict(instance, &branch, shape, store_applied) {
+            match where_verdict(instance, &branch, shape) {
                 Verdict::Match => return Verdict::Reject,
                 // An undecidable branch cannot prove the negation either way.
                 Verdict::Unknown => undecidable = true,
@@ -205,21 +201,6 @@ fn where_verdict(
         }
 
         let val = &instance[prop_name];
-        if store_applied {
-            if let WhereCondition::Ops(ops) = condition {
-                // Constructs only the store could answer: a quantifier's
-                // `EXISTS` over linked records hydration does not produce,
-                // and a per-link `author` on a link hydration collapsed —
-                // the hydrated value belongs to one link, not provably the
-                // one the store matched. Applied there and unreplayable
-                // here, the leaf is undecidable, not trusted-true: inside a
-                // `NOT` it must not collapse the branch to a proven match.
-                if ops.some.is_some() || ops.none.is_some() || ops.author.is_some() {
-                    undecidable = true;
-                    continue;
-                }
-            }
-        }
         if !matches_condition(val, condition) {
             return Verdict::Reject;
         }
@@ -983,7 +964,7 @@ mod tests {
             WhereCondition::String("active".to_string()),
         );
         where_clause.insert("priority".to_string(), WhereCondition::Number(5.0));
-        assert!(matches_where(&instance, &where_clause, &s, false));
+        assert!(matches_where(&instance, &where_clause, &s));
 
         let mut where_clause2 = BTreeMap::new();
         where_clause2.insert(
@@ -991,7 +972,7 @@ mod tests {
             WhereCondition::String("active".to_string()),
         );
         where_clause2.insert("priority".to_string(), WhereCondition::Number(10.0));
-        assert!(!matches_where(&instance, &where_clause2, &s, false));
+        assert!(!matches_where(&instance, &where_clause2, &s));
     }
 
     #[test]
@@ -1006,14 +987,14 @@ mod tests {
             "id".to_string(),
             WhereCondition::String("test://wrong".to_string()),
         );
-        assert!(!matches_where(&instance, &wrong, &s, false));
+        assert!(!matches_where(&instance, &wrong, &s));
 
         let mut right = BTreeMap::new();
         right.insert(
             "id".to_string(),
             WhereCondition::String("test://1".to_string()),
         );
-        assert!(matches_where(&instance, &right, &s, false));
+        assert!(matches_where(&instance, &right, &s));
     }
 
     #[test]
@@ -1026,14 +1007,14 @@ mod tests {
             "id".to_string(),
             WhereCondition::StringArray(vec!["test://2".to_string(), "test://3".to_string()]),
         );
-        assert!(!matches_where(&instance, &excluded, &s, false));
+        assert!(!matches_where(&instance, &excluded, &s));
 
         let mut included = BTreeMap::new();
         included.insert(
             "id".to_string(),
             WhereCondition::StringArray(vec!["test://1".to_string(), "test://2".to_string()]),
         );
-        assert!(matches_where(&instance, &included, &s, false));
+        assert!(matches_where(&instance, &included, &s));
     }
 
     #[test]
@@ -1048,14 +1029,14 @@ mod tests {
             "base".to_string(),
             WhereCondition::String("test://wrong".to_string()),
         );
-        assert!(!matches_where(&instance, &wrong, &s, false));
+        assert!(!matches_where(&instance, &wrong, &s));
 
         let mut right = BTreeMap::new();
         right.insert(
             "base".to_string(),
             WhereCondition::String("test://1".to_string()),
         );
-        assert!(matches_where(&instance, &right, &s, false));
+        assert!(matches_where(&instance, &right, &s));
     }
 
     #[test]
@@ -1071,7 +1052,7 @@ mod tests {
                 ..Default::default()
             }),
         );
-        assert!(matches_where(&instance, &where_clause, &s, false));
+        assert!(matches_where(&instance, &where_clause, &s));
     }
 
     /// String/StringArray on a collection is contains-semantics, not a skip.
@@ -1108,11 +1089,11 @@ mod tests {
         ];
         for (name, instance, prop, condition, expected) in cases {
             let wc = make_where(vec![(prop, condition)]);
-            assert_eq!(matches_where(&instance, &wc, &s, false), expected, "{name}");
+            assert_eq!(matches_where(&instance, &wc, &s), expected, "{name}");
             // Inside an `OR` the compiler declined, the same answer. This is
             // the route the role gate reached the skip by.
             let or = make_where(vec![("OR", WhereCondition::SubClauses(vec![wc]))]);
-            assert_eq!(matches_where(&instance, &or, &s, false), expected, "{name} (inside OR)");
+            assert_eq!(matches_where(&instance, &or, &s), expected, "{name} (inside OR)");
         }
     }
 
@@ -1354,7 +1335,7 @@ mod tests {
                 make_where(vec![("name", WhereCondition::String("Bob".to_string()))]),
             ]),
         )]);
-        assert!(matches_where(&instance, &wc, &shape, false));
+        assert!(matches_where(&instance, &wc, &shape));
     }
 
     #[test]
@@ -1374,7 +1355,7 @@ mod tests {
                 make_where(vec![("name", WhereCondition::String("Bob".to_string()))]),
             ]),
         )]);
-        assert!(!matches_where(&instance, &wc, &shape, false));
+        assert!(!matches_where(&instance, &wc, &shape));
     }
 
     #[test]
@@ -1382,7 +1363,7 @@ mod tests {
         let shape = empty_shape();
         let instance = json!({ "status": "active" });
         let wc = make_where(vec![("OR", WhereCondition::SubClauses(vec![]))]);
-        assert!(!matches_where(&instance, &wc, &shape, false));
+        assert!(!matches_where(&instance, &wc, &shape));
     }
 
     #[test]
@@ -1392,7 +1373,7 @@ mod tests {
         let shape = empty_shape();
         let instance = json!({ "status": "active" });
         let wc = make_where(vec![("OR", WhereCondition::String("bogus".to_string()))]);
-        assert!(!matches_where(&instance, &wc, &shape, false));
+        assert!(!matches_where(&instance, &wc, &shape));
     }
 
     #[test]
@@ -1410,7 +1391,7 @@ mod tests {
                 make_where(vec![("role", WhereCondition::String("admin".to_string()))]),
             ]),
         )]);
-        assert!(matches_where(&instance, &wc, &shape, false));
+        assert!(matches_where(&instance, &wc, &shape));
     }
 
     #[test]
@@ -1428,7 +1409,7 @@ mod tests {
                 make_where(vec![("role", WhereCondition::String("admin".to_string()))]),
             ]),
         )]);
-        assert!(!matches_where(&instance, &wc, &shape, false));
+        assert!(!matches_where(&instance, &wc, &shape));
     }
 
     #[test]
@@ -1437,7 +1418,7 @@ mod tests {
         let instance = json!({ "status": "active" });
         let wc = make_where(vec![("AND", WhereCondition::SubClauses(vec![]))]);
         // all() on empty iterator is true
-        assert!(matches_where(&instance, &wc, &shape, false));
+        assert!(matches_where(&instance, &wc, &shape));
     }
 
     #[test]
@@ -1445,7 +1426,7 @@ mod tests {
         let shape = empty_shape();
         let instance = json!({ "status": "active" });
         let wc = make_where(vec![("AND", WhereCondition::Number(1.0))]);
-        assert!(!matches_where(&instance, &wc, &shape, false));
+        assert!(!matches_where(&instance, &wc, &shape));
     }
 
     #[test]
@@ -1461,7 +1442,7 @@ mod tests {
                 WhereCondition::String("deleted".to_string()),
             )])),
         )]);
-        assert!(matches_where(&instance, &wc, &shape, false));
+        assert!(matches_where(&instance, &wc, &shape));
     }
 
     #[test]
@@ -1476,7 +1457,7 @@ mod tests {
                 WhereCondition::String("deleted".to_string()),
             )])),
         )]);
-        assert!(!matches_where(&instance, &wc, &shape, false));
+        assert!(!matches_where(&instance, &wc, &shape));
     }
 
     #[test]
@@ -1484,7 +1465,7 @@ mod tests {
         let shape = empty_shape();
         let instance = json!({ "status": "active" });
         let wc = make_where(vec![("NOT", WhereCondition::Bool(true))]);
-        assert!(!matches_where(&instance, &wc, &shape, false));
+        assert!(!matches_where(&instance, &wc, &shape));
     }
 
     #[test]
@@ -1513,9 +1494,9 @@ mod tests {
             m
         };
 
-        assert!(matches_where(&instance_pass, &wc, &shape, false));
-        assert!(!matches_where(&instance_fail_role, &wc, &shape, false));
-        assert!(!matches_where(&instance_fail_name, &wc, &shape, false));
+        assert!(matches_where(&instance_pass, &wc, &shape));
+        assert!(!matches_where(&instance_fail_role, &wc, &shape));
+        assert!(!matches_where(&instance_fail_name, &wc, &shape));
     }
 
     #[test]
@@ -1539,15 +1520,10 @@ mod tests {
             ]),
         )]);
 
-        assert!(matches_where(&json!({ "a": "1" }), &wc, &shape, false));
-        assert!(matches_where(&json!({ "a": "2" }), &wc, &shape, false));
-        assert!(matches_where(&json!({ "b": "x" }), &wc, &shape, false));
-        assert!(!matches_where(
-            &json!({ "a": "3", "b": "y" }),
-            &wc,
-            &shape,
-            false
-        ));
+        assert!(matches_where(&json!({ "a": "1" }), &wc, &shape));
+        assert!(matches_where(&json!({ "a": "2" }), &wc, &shape));
+        assert!(matches_where(&json!({ "b": "x" }), &wc, &shape));
+        assert!(!matches_where(&json!({ "a": "3", "b": "y" }), &wc, &shape,));
     }
 
     /// The reproducer for the leak the `id` arm used to have.
@@ -1581,20 +1557,13 @@ mod tests {
             &json!({ "id": "test://post/1" }),
             &wc,
             &shape,
-            false
         ));
-        assert!(matches_where(
-            &json!({ "id": "draft-note" }),
-            &wc,
-            &shape,
-            false
-        ));
+        assert!(matches_where(&json!({ "id": "draft-note" }), &wc, &shape,));
         // The one that used to be admitted along with everything else.
         assert!(!matches_where(
             &json!({ "id": "test://post/2" }),
             &wc,
             &shape,
-            false
         ));
     }
 
@@ -1620,19 +1589,16 @@ mod tests {
             &json!({ "id": "test://post/1" }),
             &wc,
             &shape,
-            false
         ));
         assert!(matches_where(
             &json!({ "id": "test://post/9", "computed": "x" }),
             &wc,
             &shape,
-            false
         ));
         assert!(!matches_where(
             &json!({ "id": "test://post/9", "computed": "y" }),
             &wc,
             &shape,
-            false
         ));
     }
 
@@ -1654,13 +1620,11 @@ mod tests {
             &json!({ "id": "test://post/1" }),
             &wc,
             &shape,
-            false
         ));
         assert!(matches_where(
             &json!({ "id": "test://post/2" }),
             &wc,
             &shape,
-            false
         ));
     }
 
@@ -1682,7 +1646,7 @@ mod tests {
             "body",
             WhereCondition::String("resolved words".to_string()),
         )]);
-        assert!(matches_where(&instance, &wc, &shape, false));
+        assert!(matches_where(&instance, &wc, &shape));
     }
 
     /// Undecidable does not mean admitted: a sibling leaf that *proves* the
@@ -1700,7 +1664,7 @@ mod tests {
             ("body", WhereCondition::String("resolved words".to_string())),
             ("kind", WhereCondition::String("task".to_string())),
         ]);
-        assert!(!matches_where(&instance, &wc, &shape, false));
+        assert!(!matches_where(&instance, &wc, &shape));
     }
 
     /// `NOT` over an undecidable branch cannot prove the negation either, so
@@ -1720,7 +1684,7 @@ mod tests {
                 WhereCondition::String("resolved words".to_string()),
             )])),
         )]);
-        assert!(matches_where(&instance, &wc, &shape, false));
+        assert!(matches_where(&instance, &wc, &shape));
     }
 
     /// `OR` with one undecidable branch and no proven one stays open — only
@@ -1744,6 +1708,6 @@ mod tests {
                 )]),
             ]),
         )]);
-        assert!(matches_where(&instance, &wc, &shape, false));
+        assert!(matches_where(&instance, &wc, &shape));
     }
 }

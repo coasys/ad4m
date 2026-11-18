@@ -123,6 +123,16 @@ async fn turn_ids(p: &PerspectiveInstance) -> Vec<PendingTurn> {
         .collect()
 }
 
+/// `MESSAGE_SDNA` with `body` on a real `resolveLanguage` — the shape of a
+/// text property whose stored target is an expression IRI the store cannot
+/// decode, so a `where` on it is decided after hydration.
+fn message_sdna_on_language(language: &str) -> String {
+    MESSAGE_SDNA.replace(
+        "\"resolve_language\":\"literal\"",
+        &format!("\"resolve_language\":\"{language}\""),
+    )
+}
+
 fn pending_texts(watcher: &WatcherState, processor_id: &str) -> Vec<String> {
     watcher
         .pending_for(processor_id)
@@ -1795,11 +1805,11 @@ async fn a_where_clause_filters_the_transcript() {
 }
 
 /// The same `where` must not reject a row whose `resolveLanguage` fetch
-/// failed: the stored target is the raw expression URL, which any value
-/// comparison answers no to, yet the resolved value may match. The row has
-/// to reach hydration marked `__unresolved` — it is not a turn yet, but the
-/// retry clock re-reads it once the language serves the expression, and the
-/// turn is then admitted without a store write (#1795).
+/// failed: a value comparison on an expression-backed property is never
+/// pushed, and the hydrated raw URL is `__unresolved` — undecidable, not a
+/// non-match. The row is not a turn yet, but the retry clock re-reads it
+/// once the language serves the expression, and the turn is then admitted
+/// without a store write (#1795).
 #[tokio::test]
 async fn a_where_on_the_text_keeps_an_unresolvable_row_for_retry() {
     use super::watcher::{TickOutcome, UNRESOLVED_TEXT_RETRY_MS};
@@ -1809,7 +1819,11 @@ async fn a_where_on_the_text_keeps_an_unresolvable_row_for_retry() {
     };
     use crate::types::{Link, LinkStatus};
 
-    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[(
+        "ns://Message",
+        &message_sdna_on_language("QmUnavailableWhereLang"),
+    )])
+    .await;
     let cfg = AutoProcessorConfig {
         source_query: Some(r#"{"where":{"body":{"contains":"resolved"}}}"#.into()),
         ..config("wu", 600_000, None)
@@ -1876,11 +1890,11 @@ async fn a_where_on_the_text_keeps_an_unresolvable_row_for_retry() {
     assert_eq!(pending_texts(&watcher, "wu"), vec!["resolved words"]);
 }
 
-/// The mirror of the retry test: the widened disjunct admits the raw
-/// expression IRI at the store *forever* — it never stops matching once the
-/// language serves the value, so a resolved body that does not satisfy the
-/// `where` must be rejected by the post-hydration check, which runs only
-/// because the clause reports itself incomplete (#1795 P1).
+/// The mirror of the retry test: a value comparison on an expression-backed
+/// property is decided on the resolved value, after hydration — so a body
+/// that does not satisfy the `where` is dropped, even though the raw
+/// expression URL the store holds is all a pushed comparison could see
+/// (#1795).
 #[tokio::test]
 async fn a_where_on_the_text_drops_the_row_whose_resolved_value_fails() {
     use super::watcher::TickOutcome;
@@ -1890,7 +1904,11 @@ async fn a_where_on_the_text_drops_the_row_whose_resolved_value_fails() {
     };
     use crate::types::{Link, LinkStatus};
 
-    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[(
+        "ns://Message",
+        &message_sdna_on_language("QmResolvedWhereLang"),
+    )])
+    .await;
     let cfg = AutoProcessorConfig {
         source_query: Some(r#"{"where":{"body":{"contains":"resolved"}}}"#.into()),
         ..config("wr", 600_000, None)
@@ -1900,9 +1918,8 @@ async fn a_where_on_the_text_drops_the_row_whose_resolved_value_fails() {
         .expect("write_processor");
 
     // The language is already up and the expression decodes to a body the
-    // `where` excludes. The stored target is still the raw expression URL,
-    // which the pushed `contains` cannot reject — only the post-hydration
-    // filter can.
+    // `where` excludes. The comparison is not pushed — only the
+    // post-hydration filter can reject the row.
     let expression = serde_json::to_string(&TestSigner::generate().sign("other words"))
         .expect("expression json");
     serve_test_language("QmResolvedWhereLang", expression).await;
@@ -1939,11 +1956,10 @@ async fn a_where_on_the_text_drops_the_row_whose_resolved_value_fails() {
     );
 }
 
-/// The `NOT` case: the pushed `FILTER NOT EXISTS` emits no widening, so a raw
-/// expression IRI correctly fails the inner pattern — and keeps doing so
-/// after the value resolves, which the store cannot see. A resolved body
-/// matching the negated condition must be rejected post-hydration, not kept
-/// as a turn.
+/// The `NOT` case: `NOT {body: {contains: "resolved"}}` cannot be pushed
+/// either — the inner comparison would test the raw expression IRI — so the
+/// whole negation is decided on the resolved value. A body matching the
+/// negated condition must be rejected post-hydration, not kept as a turn.
 #[tokio::test]
 async fn a_not_where_on_the_text_drops_the_row_whose_resolved_value_matches() {
     use super::watcher::TickOutcome;
@@ -1953,7 +1969,11 @@ async fn a_not_where_on_the_text_drops_the_row_whose_resolved_value_matches() {
     };
     use crate::types::{Link, LinkStatus};
 
-    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[(
+        "ns://Message",
+        &message_sdna_on_language("QmResolvedNotLang"),
+    )])
+    .await;
     let cfg = AutoProcessorConfig {
         source_query: Some(r#"{"where":{"NOT":{"body":{"contains":"resolved"}}}}"#.into()),
         ..config("wn", 600_000, None)

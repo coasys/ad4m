@@ -429,12 +429,10 @@ pub(super) fn refuse_unanswerable_link_author(
     if let Some(error) = compiled.link_author_error {
         return Err(anyhow!("where: {error}"));
     }
-    // `all_emitted`, not `complete`: a widened `resolveLanguage` leaf emits a
-    // candidate the post-hydration filter re-decides, but the per-link `author`
-    // itself was still applied in the store, so the refusal does not bite. What
-    // forbids the query is a condition emitted *nowhere* — the filter re-checks
-    // the value half then, never the link's author, which is gone post-hydration.
-    if compiled.link_author_scoped && !compiled.all_emitted {
+    // What forbids the query is a condition emitted *nowhere*: the
+    // post-hydration filter re-checks the value half then, never the link's
+    // author, which is gone post-hydration.
+    if compiled.link_author_scoped && !compiled.complete {
         return Err(anyhow!(
             "where: a per-link `author` (nested under a property, or a top-level `author` \
              beside property conditions) is answered in the store. Part of this query can \
