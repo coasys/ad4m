@@ -692,6 +692,91 @@ mod tests {
         );
     }
 
+    /// #1675. The cache stores the `last_seen` it read from the DB. A direct
+    /// write (`update_agent_last_seen`, the lease heartbeat and the watcher's
+    /// first touch) then stamps server time and does not touch the cache. A
+    /// future DB value stays in the cache and, until `CACHE_TTL_SECONDS`, the
+    /// cache path says the write is not due. The DB path would write.
+    ///
+    /// The seeded value is inside the accepted skew, so the fill does not
+    /// write. A value past the skew is due, and the successful write replaces
+    /// the cache entry with `now`, which hides this. The check is one second
+    /// past the throttle: exactly one throttle is not due.
+    #[tokio::test]
+    async fn track_last_seen_writes_one_throttle_after_a_direct_write_replaces_a_future_value() {
+        use crate::db::Ad4mDb;
+        use crate::presence::{LAST_SEEN_CLOCK_SKEW_S, LAST_SEEN_WRITE_THROTTLE_S};
+        crate::perspectives::interpretation_test_support::ensure_db_init();
+
+        let email = "track-last-seen-future@test";
+        let did = "did:key:track-last-seen-future";
+        let now = chrono::Utc::now().timestamp();
+        let future = now + LAST_SEEN_CLOCK_SKEW_S;
+
+        Ad4mDb::with_global_instance(|db| {
+            db.import_from_json(
+                serde_json::json!({
+                    "users": [{
+                        "username": email,
+                        "did": did,
+                        "password_hash": "x",
+                        "last_seen": future,
+                    }]
+                }),
+                None,
+            )
+        })
+        .expect("seed user");
+        let stored = || {
+            Ad4mDb::with_global_instance(|db| db.get_user_by_did(did))
+                .expect("read user")
+                .expect("user")
+                .last_seen
+        };
+        assert_eq!(stored(), Some(future));
+
+        track_last_seen_at(did, now).await;
+        assert_eq!(
+            stored(),
+            Some(future),
+            "the future value is inside the skew, so filling the cache does not write"
+        );
+
+        crate::db_backend::db_backend()
+            .update_agent_last_seen(did)
+            .expect("direct write");
+        let after_direct = stored().expect("direct write stored a timestamp");
+        assert!(
+            after_direct < future,
+            "direct write stamps server time, earlier than the seeded future value \
+             (server {after_direct}, seeded {future})"
+        );
+        let check_at = after_direct + LAST_SEEN_WRITE_THROTTLE_S + 1;
+        assert!(
+            check_at - now < CACHE_TTL_SECONDS,
+            "the check must still hit the cache filled at {now} (check {check_at})"
+        );
+
+        // Both writes stamp wall-clock seconds. The second has to move or a
+        // real write is invisible next to the direct write.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while chrono::Utc::now().timestamp() <= after_direct {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "wall clock did not move past the direct write"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        track_last_seen_at(did, check_at).await;
+        assert_ne!(
+            stored(),
+            Some(after_direct),
+            "one second past one throttle after the direct write must record activity; \
+             a cache that kept the future DB value skips this write (#1675)"
+        );
+    }
+
     #[test]
     fn all_capability_is_expected() {
         let all_capability = &ALL_CAPABILITY;
