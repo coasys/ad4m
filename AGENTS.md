@@ -128,7 +128,13 @@ variant. `/api/create` runs only when the server is Ollama (`/api/version`
 returns a version) and `COASYS_SPACES_LLM_NUM_CTX` is set: a hand run against
 Ollama can still make a variant such as `coasys-spaces-gemma3-12b:ctx16384`
 when the model's own `num_ctx` is smaller. A model whose own `num_ctx` is
-already that large is used as it is. It uses this commit's executor and SDK:
+already that large is used as it is. The job also sets
+`COASYS_SPACES_LLM_ENDPOINT_KIND=LLAMA_SERVER`,
+`COASYS_SPACES_LLM_NATIVE_TOOLS=true`,
+`COASYS_SPACES_LLM_REQUEST_TIMEOUT_SECS=900` and
+`COASYS_SPACES_LLM_MAX_NUM_CTX=57344`. The script passes those through;
+WE's real tier (we#468) registers them on the endpoint. The 900s limit
+includes time queued on the one slot. It uses this commit's executor and SDK:
 
 - The executor is the one the `build` job published for the commit
   (`$EXECUTOR_PUBLISH_DIR/<sha>/manifest.json`, sha256 checked). If there is none,

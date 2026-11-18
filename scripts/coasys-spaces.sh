@@ -37,6 +37,12 @@
 #                               (16384 when unset; empty: leave the model as the server has it).
 #                               The nightly job sets this empty. llama-server has no /api/create,
 #                               and this script does not call it unless /api/version says Ollama.
+#   COASYS_SPACES_LLM_ENDPOINT_KIND, COASYS_SPACES_LLM_NATIVE_TOOLS,
+#   COASYS_SPACES_LLM_REQUEST_TIMEOUT_SECS, COASYS_SPACES_LLM_MAX_NUM_CTX
+#                               passed through to the suite. This script does not
+#                               interpret them. The nightly job sets LLAMA_SERVER,
+#                               true, 900 and 57344. WE's real tier reads them
+#                               (we#468); unset, that harness keeps its defaults.
 #   SOCIAL_DNA_PACKAGE          passed to the suite when set
 set -euo pipefail
 
@@ -400,7 +406,6 @@ cmd_test() {
       if (pkg.name !== process.argv[2] || !pkg.scripts?.["test:spaces"]) process.exit(1);
     ' "$WE_DIR/apps/we-web/package.json" "$WE_PACKAGE" ||
         die "WE $WE_REF has no $WE_PACKAGE with a test:spaces script at apps/we-web"
-    use_we_pnpm
     mkdir -p "$ARTIFACTS"
     {
         echo "ad4m $AD4M_SHA"
@@ -408,13 +413,21 @@ cmd_test() {
         echo "executor $(cat "$WORK/executor.source" 2>/dev/null || echo "?")"
         echo "tier $TIER"
         [ "$TIER" = real ] && echo "model $(served_model) at $LLM_BASE_URL"
+        # The four values the nightly job sets and the suite registers. Written
+        # before pnpm, so a later install failure still shows what would be sent.
+        echo "llm kind ${COASYS_SPACES_LLM_ENDPOINT_KIND:-unset} nativeTools ${COASYS_SPACES_LLM_NATIVE_TOOLS:-unset} requestTimeoutSecs ${COASYS_SPACES_LLM_REQUEST_TIMEOUT_SECS:-unset} maxNumCtx ${COASYS_SPACES_LLM_MAX_NUM_CTX:-unset}"
         echo "social dna ${SOCIAL_DNA_PACKAGE:-fixture}"
     } | tee "$ARTIFACTS/run.txt"
+    use_we_pnpm
     cd "$WE_DIR"
     AD4M_EXECUTOR="$EXECUTOR" \
         COASYS_SPACES_TIER="$TIER" \
         COASYS_SPACES_LLM_BASE_URL="$LLM_BASE_URL" \
         COASYS_SPACES_LLM_MODEL="$(served_model)" \
+        COASYS_SPACES_LLM_ENDPOINT_KIND="${COASYS_SPACES_LLM_ENDPOINT_KIND:-}" \
+        COASYS_SPACES_LLM_NATIVE_TOOLS="${COASYS_SPACES_LLM_NATIVE_TOOLS:-}" \
+        COASYS_SPACES_LLM_REQUEST_TIMEOUT_SECS="${COASYS_SPACES_LLM_REQUEST_TIMEOUT_SECS:-}" \
+        COASYS_SPACES_LLM_MAX_NUM_CTX="${COASYS_SPACES_LLM_MAX_NUM_CTX:-}" \
         COASYS_SPACES_ARTIFACTS="$ARTIFACTS" \
         pnpm --filter "$WE_PACKAGE" test:spaces 2>&1 | tee "$ARTIFACTS/test-spaces.log"
 }

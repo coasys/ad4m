@@ -1092,6 +1092,16 @@ jobs:
       # Empty: do not make an Ollama /api/create variant. llama-server's slot is
       # already 65536 tokens, and /api/create is not that server.
       COASYS_SPACES_LLM_NUM_CTX: ""
+      # WE#468's real tier (apps/we-web/e2e/coasys-spaces/models.mjs realLlm)
+      # reads these and sends them on ai.addEndpoint / ai.addModel. Unset, the
+      # harness registers OPEN_AI_COMPATIBLE with the executor's defaults.
+      # LLAMA_SERVER is what turns thinking off. native tools stay on so the
+      # Qwen parser is not handed a prompt-injected tool list. 900s covers a
+      # few minutes queued on the one slot. 57344 is the 65536 window minus 8192.
+      COASYS_SPACES_LLM_ENDPOINT_KIND: LLAMA_SERVER
+      COASYS_SPACES_LLM_NATIVE_TOOLS: "true"
+      COASYS_SPACES_LLM_REQUEST_TIMEOUT_SECS: "900"
+      COASYS_SPACES_LLM_MAX_NUM_CTX: "57344"
       # Its own directory, which preflight empties; one coasys-spaces runs at a time (serial
       # group nightly-llm).
       COASYS_SPACES_ARTIFACTS: /tmp/coasys-spaces-artifacts
@@ -1140,8 +1150,8 @@ jobs:
           # Model calls share staging's one llama-server slot and may wait a few
           # minutes in the queue, then generate. The suite prints a wait line
           # each minute, so this bound is silence, not the length of a call.
-          # The per-call limit is the executor's default (600s, queue included);
-          # WE's harness does not set the endpoint's requestTimeoutSecs.
+          # The per-call limit is COASYS_SPACES_LLM_REQUEST_TIMEOUT_SECS (900),
+          # which the harness sets on the endpoint. The executor default is 600s.
           name: Run the coasys-spaces suite (WE test:spaces)
           command: bash scripts/coasys-spaces.sh test
           no_output_timeout: 60m
