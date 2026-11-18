@@ -152,6 +152,7 @@ async fn model_subscribe_refuses_a_cursor() {
         let mut params = json!({
             "uuid": p.0,
             "query_json": json!({ "limit": 5, "after": after }).to_string(),
+            "subscriptionId": "cursor-sub",
         });
         params
             .as_object_mut()
@@ -166,7 +167,8 @@ async fn model_subscribe_refuses_a_cursor() {
     // Without a cursor the same query subscribes.
     call(
         "perspective.modelSubscribe",
-        json!({ "uuid": p.0, "class_name": "Todo", "query_json": r#"{"limit":5}"# }),
+        json!({ "uuid": p.0, "class_name": "Todo", "query_json": r#"{"limit":5}"#,
+                "subscriptionId": "cursor-sub" }),
         admin_conn_ctx("c"),
     )
     .await
