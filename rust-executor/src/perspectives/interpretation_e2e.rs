@@ -2398,14 +2398,14 @@ async fn e2e_semantic_dedup_pure_drops_paraphrase_keeps_distinct() {
         mk("Update the CI documentation"),       // unrelated → keep
     ];
 
+    // The registered name follows `INTERPRETATION_EMBED_MODEL` when CI sets it
+    // (the remote tag, `nomic-embed-text`). A hardcoded `interpretation-embed`
+    // misses that model and the path compares strings, which keeps a paraphrase.
     let kept = filter_already_present_with_strategy(
         proposed,
         &existing,
         &identity_props,
-        &DedupStrategy::Semantic {
-            model: "interpretation-embed".to_string(),
-            threshold: 0.6,
-        },
+        &DedupStrategy::semantic_from_env(0.6),
     )
     .await
     .expect("semantic dedup");
@@ -2474,10 +2474,9 @@ async fn e2e_run_interpretation_honours_parent_scope() {
         "Reminder for the team: we still need to provision the staging database — it's blocking QA."
             .to_string(),
     )];
-    let semantic = DedupStrategy::Semantic {
-        model: "interpretation-embed".to_string(),
-        threshold: 0.6,
-    };
+    // Same registered name as `register_interpretation_embedding_model`:
+    // `INTERPRETATION_EMBED_MODEL` when set, else `interpretation-embed`.
+    let semantic = DedupStrategy::semantic_from_env(0.6);
     let in_scope = Scope::Raw {
         id: "soa://parent/b".into(),
         predicate: "ns://contains".into(),

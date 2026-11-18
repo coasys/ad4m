@@ -399,14 +399,18 @@ pub(crate) async fn setup_interpretation_e2e(
 }
 
 /// Register (and load) the `AIService` embedding model the `DedupStrategy::Semantic` path
-/// embeds identity strings with. Its name is the one `semantic_from_env` passes to `embed`
-/// (`INTERPRETATION_EMBED_MODEL`, default `interpretation-embed`).
+/// embeds identity strings with.
 ///
-/// The model is that remote model (the same variable, default `nomic-embed-text`) on an
-/// OpenAI-shaped endpoint at `INTERPRETATION_EMBED_BASE_URL` (default Ollama at
+/// `INTERPRETATION_EMBED_MODEL` is both the name `semantic_from_env` looks up and the
+/// remote model id. Set, it is the Ollama tag (`nomic-embed-text` in CI). Unset, the
+/// registered name is `interpretation-embed` and the remote id is `nomic-embed-text`.
+/// Callers that name the model themselves must use `semantic_from_env`, or a set
+/// variable registers a model they do not look up and dedup compares strings.
+///
+/// The endpoint is OpenAI-shaped at `INTERPRETATION_EMBED_BASE_URL` (default Ollama at
 /// `http://127.0.0.1:11434/v1`). It does not follow the LLM URL: llama-server is a
 /// chat slot and does not embed. `INTERPRETATION_EMBED_API_KEY` when the endpoint
-/// wants one. Only the one semantic-dedup e2e needs it, so it isn't part of the
+/// wants one. Only the semantic-dedup e2e needs it, so it isn't part of the
 /// default setup.
 pub(crate) async fn register_interpretation_embedding_model() {
     use crate::types::{ModelInput, ModelType};
