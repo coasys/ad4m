@@ -440,6 +440,15 @@ fn effective_strategy(strategy: &DedupStrategy) -> std::borrow::Cow<'_, DedupStr
     Cow::Owned(DedupStrategy::NormalizedString)
 }
 
+/// The embedding model of a semantic `strategy` when this executor has it,
+/// else `None`: the model the `existing` block's similarity order embeds with.
+pub(crate) fn semantic_embedding_model(strategy: &DedupStrategy) -> Option<String> {
+    match effective_strategy(strategy).as_ref() {
+        DedupStrategy::Semantic { model, .. } => Some(model.clone()),
+        DedupStrategy::NormalizedString => None,
+    }
+}
+
 /// Strategy dispatcher: pick the string or semantic dedup path based on
 /// `strategy`, preserving [`ProposedInstance`] order in both cases so
 /// downstream `new:<Class>:<n>` ordinals still line up.
@@ -554,6 +563,7 @@ mod tests {
             title: "Ship the MVP".to_string(),
             class: "Task".to_string(),
             properties: BTreeMap::new(),
+            updated_at: String::new(),
         }]);
         let mut identity_props = HashMap::new();
         identity_props.insert("Task".to_string(), "title".to_string());
@@ -563,7 +573,6 @@ mod tests {
         assert_eq!(res.len(), 4, "length preserved — nothing dropped");
         assert_eq!(res[0], Resolution::Keep);
         assert_eq!(
-            updated_at: String::new(),
             res[1],
             Resolution::DupOfExisting("soa://existing/task/1".to_string())
         );
@@ -764,6 +773,7 @@ mod tests {
             title: "Ship the MVP".to_string(),
             class: "Task".to_string(),
             properties: BTreeMap::new(),
+            updated_at: String::new(),
         }]);
         let string_res: Vec<Resolution> =
             resolve_already_present(proposed_str, &existing, &identity_props)
@@ -773,7 +783,6 @@ mod tests {
 
         // --- semantic path via the pure fns, mirroring `resolve_already_present_semantic` ---
         let mut existing_vecs: HashMap<String, Vec<Vec<f32>>> = HashMap::new();
-            updated_at: String::new(),
         existing_vecs.insert("Task".to_string(), vec![vec![1.0, 0.0, 0.0]]); // Ship the MVP
         let mut existing_ids: HashMap<String, Vec<String>> = HashMap::new();
         existing_ids.insert("Task".to_string(), vec![base.clone()]);
@@ -1039,6 +1048,7 @@ mod tests {
             title: "Ship the MVP".to_string(),
             class: "Task".to_string(),
             properties: BTreeMap::new(),
+            updated_at: String::new(),
         }]);
         let mut identity_props = HashMap::new();
         identity_props.insert("Task".to_string(), "title".to_string());
@@ -1048,7 +1058,6 @@ mod tests {
             .iter()
             .filter_map(|i| i.props.get("title").and_then(|v| v.as_str()))
             .collect();
-            updated_at: String::new(),
         assert_eq!(
             kept_titles,
             vec!["Alpha", "Ship the MVP", "Omega"],
@@ -1094,6 +1103,7 @@ mod tests {
             title: "Ship the MVP".to_string(),
             class: "Task".to_string(),
             properties: BTreeMap::new(),
+            updated_at: String::new(),
         }]);
         let kept = filter_already_present(proposed, &existing_trusted, &identity_props);
         assert_eq!(kept.len(), 1, "a trusted id bypasses dedup; got {kept:#?}");
@@ -1103,7 +1113,6 @@ mod tests {
     fn filter_already_present_dedupes_within_same_response() {
         // The LLM sometimes emits the same (class, identity) twice in one response
         // (verbatim, or under whitespace/case variation). Without intra-response
-            updated_at: String::new(),
         // dedup those slip past `filter_already_present` because the pre-existing
         // `known` set does not yet contain them — and `run_interpretation` then
         // mints two subjects for the same identity. Fix: accumulate accepted

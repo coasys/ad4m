@@ -1,3 +1,5 @@
+use super::dedup::semantic_embedding_model;
+use super::existing_budget::{existing_for_prompt, Compact};
 use super::{
     apply_with_overlay, build_interpretation_input, build_speaker_name_map, class_label,
     ensure_interpretation_task_for_model, existing_instance_context, existing_relation_links,
@@ -665,10 +667,25 @@ pub async fn run_interpretation_with_strategy_and_model(
         )
         .await;
         let speaker_names = build_speaker_name_map(transcript);
-        let prompt = build_interpretation_input(
+        // The prompt shows a budgeted, compact view of `existing` (#1804);
+        // everything after the model's answer still reads the full set.
+        let embed_model = semantic_embedding_model(dedup_strategy);
+        let shown = existing_for_prompt(
+            &task,
             shapes,
             transcript,
             &existing_ctx,
+            &active_flows,
+            &speaker_names,
+            base_prefix,
+            embed_model.as_deref(),
+            Compact::Yes,
+        )
+        .await;
+        let prompt = build_interpretation_input(
+            shapes,
+            transcript,
+            &shown.shown,
             &active_flows,
             &speaker_names,
         );
@@ -757,6 +774,8 @@ pub async fn run_interpretation_with_strategy_and_model(
             }
         })
         .await?;
+        // Handles (`P3`) back to full ids, cut values back to full text.
+        let instances = shown.handles.resolve(instances, shapes);
 
         // Hard dedup guarantee: even if the model ignored the `existing` hint, an
         // already-present (class, identity value) never becomes a *new* instance.
@@ -1112,10 +1131,25 @@ pub async fn run_interpretation_with_harness_and_model(
     )
     .await;
     let speaker_names = build_speaker_name_map(transcript);
-    let prompt = build_interpretation_input(
+    // Budgeted like the single-shot path (#1804), but with full ids and
+    // values: the tools take ids, and the model can `_get` the rest. No
+    // dedup strategy here, so the rows that do not all fit go by recency.
+    let shown = existing_for_prompt(
+        &task,
         shapes,
         transcript,
         &existing_ctx,
+        &active_flows,
+        &speaker_names,
+        base_prefix,
+        None,
+        Compact::No,
+    )
+    .await;
+    let prompt = build_interpretation_input(
+        shapes,
+        transcript,
+        &shown.shown,
         &active_flows,
         &speaker_names,
     );
@@ -2187,6 +2221,7 @@ mod tests {
             title: "Ship the MVP".to_string(),
             class: "Intention".to_string(),
             properties: std::collections::BTreeMap::new(),
+            updated_at: String::new(),
         }]);
 
         let ops = vec![
@@ -2221,7 +2256,6 @@ mod tests {
 
         let deduped = dedup_ops_against_existing(ops, &existing, &shapes, &ExistingLinks::new());
         assert_eq!(deduped.len(), 3, "all three ops survive (two as Updates)");
-            updated_at: String::new(),
 
         // First two should be Updates on the existing base.
         match &deduped[0] {
@@ -2591,6 +2625,7 @@ mod tests {
                     title: format!("title of {id}"),
                     class: class.to_string(),
                     properties: Default::default(),
+                    updated_at: String::new(),
                 });
         }
         out
@@ -2625,7 +2660,6 @@ mod tests {
     /// before #1257; it still does, next to the existing records under it.
     #[test]
     fn flow_subjects_keep_the_scope_anchor_and_dedupe() {
-                    updated_at: String::new(),
         let existing = existing_of(&[("Task", "soa://task/a"), ("Task", "soa://task/a")]);
         let scope = Scope::Raw {
             id: "soa://project/p".to_string(),
