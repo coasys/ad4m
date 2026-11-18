@@ -774,7 +774,7 @@ pub async fn run_interpretation_with_strategy_and_model(
             }
         })
         .await?;
-        // Handles (`P3`) back to full ids, cut values back to full text.
+        // Handles (`P3`) back to full ids.
         let instances = shown.handles.resolve(instances, shapes);
 
         // Hard dedup guarantee: even if the model ignored the `existing` hint, an

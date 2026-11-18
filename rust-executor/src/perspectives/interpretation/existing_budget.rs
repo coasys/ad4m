@@ -14,10 +14,10 @@
 //!   processor's scope minted) come first. Then, when the pass has a semantic
 //!   dedup embedding model, the rows most similar to the transcript; else, and
 //!   when embedding fails, the most recently changed rows.
-//! - **Smaller rows** (the single-shot path only, see [`Compact`]): each id is
-//!   shown as a short handle (`P1`, `P2`, ...) and long secondary values are
-//!   cut to [`SHOWN_VALUE_MAX_CHARS`]. [`Handles`] maps the model's output back
-//!   to the full ids and values.
+//! - **Short ids** (the single-shot path only, see [`Compact`]): each id is
+//!   shown as a short handle (`P1`, `P2`, ...). [`Handles`] maps the model's
+//!   output back to the full ids. Values are always shown whole: a row that
+//!   does not fit is left out, never shortened.
 //!
 //! The selection only changes what the prompt shows. Dedup
 //! (`resolve_already_present*`, `dedup_ops_against_existing`) and the planner
@@ -46,20 +46,16 @@ pub(crate) const OUTPUT_RESERVE_TOKENS: usize = 8_192;
 /// on the endpoint and no answer from the model server).
 pub(crate) const ASSUMED_WINDOW_TOKENS: usize = 65_536;
 
-/// The most characters of one secondary value (e.g. a `summary`) a compact
-/// prompt shows. The rest is cut and marked with [`CUT_MARKER`].
-pub(crate) const SHOWN_VALUE_MAX_CHARS: usize = 200;
-
-/// Appended to a value the prompt shows cut.
-pub(crate) const CUT_MARKER: &str = "…";
+/// The most characters of one secondary value in the text an existing row is
+/// embedded from (the similarity order only; the prompt shows values whole).
+const EMBED_VALUE_MAX_CHARS: usize = 200;
 
 /// The most characters of one transcript turn sent to the embedding model.
 const EMBED_TURN_MAX_CHARS: usize = 1_000;
 
-/// Whether the prompt shows short handles and cut values, or full ids and
-/// values. The single-shot path reads the model's answer back through
-/// [`Handles`], so it is compact. The harness path is not: its tools take
-/// full ids and write values as given.
+/// Whether the prompt shows short handles or full ids. The single-shot path
+/// reads the model's answer back through [`Handles`], so it is compact. The
+/// harness path is not: its tools take full ids.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Compact {
     Yes,
@@ -83,9 +79,6 @@ pub(crate) fn existing_budget_tokens(window: Option<usize>, other_tokens: usize)
 pub(crate) struct Handles {
     /// Handle (`P1`) → full id.
     to_id: HashMap<String, String>,
-    /// (full id, property) → (the text the prompt showed, the full value),
-    /// for every value the prompt showed cut.
-    cut: HashMap<(String, String), (String, String)>,
 }
 
 impl Handles {
@@ -97,13 +90,8 @@ impl Handles {
     /// The model's proposals with every handle replaced by its full id: the
     /// upsert `id` and the refs in each forward relation field. A string that
     /// is not a handle stays as it is, so an unknown handle goes the way an
-    /// unknown id goes today (the planner routes it to a `Create`).
-    ///
-    /// A cut value the model wrote back on an update gets its full text back:
-    /// a value that starts with what the prompt showed (with or without
-    /// [`CUT_MARKER`]) becomes the full value plus what the model added. So
-    /// an echoed value is a no-op and a grown one (a rolling `summary`) keeps
-    /// the part the prompt did not show.
+    /// unknown id goes today (the planner routes it to a `Create`). Values
+    /// pass through unchanged: the prompt showed them whole.
     pub(crate) fn resolve(
         &self,
         instances: Vec<ProposedInstance>,
@@ -137,9 +125,6 @@ impl Handles {
                         }
                     }
                 }
-                if let Some(id) = inst.id.clone() {
-                    self.restore_cut_values(&id, &mut inst.props);
-                }
                 inst
             })
             .collect()
@@ -154,24 +139,6 @@ impl Handles {
             }
             serde_json::Value::Array(items) => items.iter_mut().for_each(|v| self.resolve_refs(v)),
             _ => {}
-        }
-    }
-
-    fn restore_cut_values(&self, id: &str, props: &mut HashMap<String, serde_json::Value>) {
-        for (name, value) in props.iter_mut() {
-            let Some((shown, full)) = self.cut.get(&(id.to_string(), name.clone())) else {
-                continue;
-            };
-            let Some(text) = value.as_str() else {
-                continue;
-            };
-            let head = shown.strip_suffix(CUT_MARKER).unwrap_or(shown);
-            let rest = text
-                .strip_prefix(shown.as_str())
-                .or_else(|| text.strip_prefix(head));
-            if let Some(rest) = rest {
-                *value = serde_json::Value::String(format!("{full}{rest}"));
-            }
         }
     }
 }
@@ -202,16 +169,6 @@ fn timestamp_millis(ts: &str) -> i64 {
     })
 }
 
-/// `value` cut to [`SHOWN_VALUE_MAX_CHARS`] characters plus [`CUT_MARKER`],
-/// or `None` when it is short enough to show whole.
-fn cut_value(value: &str) -> Option<String> {
-    if value.chars().count() <= SHOWN_VALUE_MAX_CHARS {
-        return None;
-    }
-    let head: String = value.chars().take(SHOWN_VALUE_MAX_CHARS).collect();
-    Some(format!("{head}{CUT_MARKER}"))
-}
-
 /// Pick the rows of `existing` that fit in `budget_tokens`, best first:
 ///
 /// 1. rows whose id starts with `base_prefix` (the pass's own records);
@@ -221,8 +178,7 @@ fn cut_value(value: &str) -> Option<String> {
 /// An instance in several classes is one unit: all its rows or none. The fill
 /// stops at the first unit that does not fit, so a lower-ranked row never
 /// takes the place of a higher-ranked one. With [`Compact::Yes`] each shown
-/// id becomes a handle `P1`, `P2`, ... in rank order and long secondary
-/// values are cut.
+/// id becomes a handle `P1`, `P2`, ... in rank order.
 pub(crate) fn select_existing(
     existing: &ExistingInstances,
     base_prefix: &str,
@@ -264,21 +220,11 @@ pub(crate) fn select_existing(
             Compact::Yes => format!("P{}", out.rows_shown + 1),
             Compact::No => id.clone(),
         };
-        let mut cut = Vec::new();
         let shown_rows: Vec<InstanceContext> = rows
             .iter()
-            .map(|r| {
-                let mut row = r.clone();
-                row.id = shown_id.clone();
-                if compact == Compact::Yes {
-                    for (name, value) in row.properties.iter_mut() {
-                        if let Some(short) = cut_value(value) {
-                            cut.push((name.clone(), short.clone(), value.clone()));
-                            *value = short;
-                        }
-                    }
-                }
-                row
+            .map(|r| InstanceContext {
+                id: shown_id.clone(),
+                ..r.clone()
             })
             .collect();
         // Each row costs its JSON plus the comma between rows.
@@ -293,9 +239,6 @@ pub(crate) fn select_existing(
         out.rows_shown += 1;
         if compact == Compact::Yes {
             out.handles.to_id.insert(shown_id.clone(), id.clone());
-            for (name, short, full) in cut {
-                out.handles.cut.insert((id.clone(), name), (short, full));
-            }
         }
         out.shown.insert(shown_id, shown_rows);
     }
@@ -303,7 +246,7 @@ pub(crate) fn select_existing(
 }
 
 /// One text per existing instance for the similarity order: its identity
-/// value and its secondary values (cut as a compact prompt shows them).
+/// value and its secondary values, each cut to [`EMBED_VALUE_MAX_CHARS`].
 fn row_text(rows: &[InstanceContext]) -> String {
     let mut parts: Vec<String> = Vec::new();
     for r in rows {
@@ -312,7 +255,7 @@ fn row_text(rows: &[InstanceContext]) -> String {
         }
         let props: BTreeMap<&String, &String> = r.properties.iter().collect();
         for value in props.values() {
-            parts.push(cut_value(value).unwrap_or_else(|| (*value).clone()));
+            parts.push(value.chars().take(EMBED_VALUE_MAX_CHARS).collect());
         }
     }
     parts.join(". ")
@@ -745,8 +688,12 @@ mod tests {
         }
     }
 
+    /// Lal's P1 on #1806: the prompt used to cut long values, and an edit
+    /// of the visible part deleted the hidden rest. Now a compact prompt
+    /// shows the value whole, and the model's edit reaches the planner as
+    /// written.
     #[test]
-    fn a_cut_value_written_back_gets_its_full_text() {
+    fn a_compact_prompt_shows_long_values_whole_and_an_edit_passes_unchanged() {
         let shapes = vec![shape_from_sdna(
             "ConversationSubgroup",
             CONVERSATION_SUBGROUP_SDNA,
@@ -754,43 +701,20 @@ mod tests {
         let full = format!("{}END", "x".repeat(400));
         let mut r = row("soa://sg/1", "ConversationSubgroup", "Payments", 1);
         r.properties.insert("summary".into(), full.clone());
-        r.properties.insert("note".into(), "short".into());
         let existing = existing_of(vec![r]);
         let view = select_existing(&existing, "", usize::MAX, None, Compact::Yes);
+        assert_eq!(view.shown["P1"][0].properties["summary"], full);
 
-        let shown = &view.shown["P1"][0];
-        let shown_summary = &shown.properties["summary"];
-        assert_eq!(
-            shown_summary.chars().count(),
-            SHOWN_VALUE_MAX_CHARS + CUT_MARKER.chars().count()
-        );
-        assert!(!shown_summary.contains("END"));
-        assert_eq!(
-            shown.properties["note"], "short",
-            "short values are shown whole"
-        );
-
-        let echoed = format!(
-            r#"[{{"class":"ConversationSubgroup","id":"P1","name":"Payments","summary":{}}}]"#,
-            serde_json::json!(shown_summary)
+        // The model rewords the start and keeps the end.
+        let edited = format!("{}END", "y".repeat(400));
+        let answer = format!(
+            r#"[{{"class":"ConversationSubgroup","id":"P1","name":"Payments","summary":"{edited}"}}]"#
         );
         let resolved = view
             .handles
-            .resolve(parse_interpretation_response(&echoed).unwrap(), &shapes);
-        assert_eq!(resolved[0].props["summary"], serde_json::json!(full));
-
-        // Grown without the marker: the hidden part stays, the new text follows.
-        let head: String = full.chars().take(SHOWN_VALUE_MAX_CHARS).collect();
-        let grown = format!(
-            r#"[{{"class":"ConversationSubgroup","id":"P1","name":"Payments","summary":"{head} Then refunds."}}]"#
-        );
-        let resolved = view
-            .handles
-            .resolve(parse_interpretation_response(&grown).unwrap(), &shapes);
-        assert_eq!(
-            resolved[0].props["summary"],
-            serde_json::json!(format!("{full} Then refunds."))
-        );
+            .resolve(parse_interpretation_response(&answer).unwrap(), &shapes);
+        assert_eq!(resolved[0].id.as_deref(), Some("soa://sg/1"));
+        assert_eq!(resolved[0].props["summary"], serde_json::json!(edited));
     }
 
     #[test]
@@ -816,14 +740,14 @@ mod tests {
         let budget = existing_budget_tokens(Some(65_536), 12_000);
         let after = select_existing(&existing, "", budget, None, Compact::Yes);
         println!(
-            "#1804 existing block, 504 rows: before {} tokens (est.), compact rows {} tokens, \
+            "#1804 existing block, 504 rows: before {} tokens (est.), short handles {} tokens, \
              budget {budget} -> {} rows, {} tokens",
             before.tokens, compact.tokens, after.rows_shown, after.tokens
         );
         assert_eq!(before.rows_shown, 504);
         assert!(
-            compact.tokens * 10 < before.tokens * 7,
-            "rows shrink by over 30%"
+            compact.tokens * 5 < before.tokens * 4,
+            "short handles shrink the rows by over 20%"
         );
         assert!(after.tokens <= budget);
         assert!(after.rows_shown < 504);
