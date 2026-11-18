@@ -1305,8 +1305,9 @@ fn compile_where_clause_seq(
             "AND" => match condition {
                 WhereCondition::SubClauses(branches) => {
                     for branch in branches {
-                        let (p, c) =
-                            compile_where_clause_seq(branch, shape, resolver, guard, seq, la, negated);
+                        let (p, c) = compile_where_clause_seq(
+                            branch, shape, resolver, guard, seq, la, negated,
+                        );
                         patterns.extend(p);
                         complete &= c;
                     }
@@ -1322,8 +1323,9 @@ fn compile_where_clause_seq(
                     // what decides whether the declined `OR` may fall back to
                     // post-hydration at all.
                     for branch in branches {
-                        let (p, c) =
-                            compile_where_clause_seq(branch, shape, resolver, guard, seq, la, negated);
+                        let (p, c) = compile_where_clause_seq(
+                            branch, shape, resolver, guard, seq, la, negated,
+                        );
                         if !c || !binds_source(&p) {
                             ok = false;
                             continue;
@@ -1340,8 +1342,9 @@ fn compile_where_clause_seq(
             },
             "NOT" => match condition.as_not_clause() {
                 Some(branch) => {
-                    let (p, c) =
-                        compile_where_clause_seq(&branch, shape, resolver, guard, seq, la, !negated);
+                    let (p, c) = compile_where_clause_seq(
+                        &branch, shape, resolver, guard, seq, la, !negated,
+                    );
                     if c && !p.is_empty() {
                         patterns.push(format!(
                             "    FILTER NOT EXISTS {{\n{}\n    }}",
@@ -1995,10 +1998,7 @@ fn compile_leaf_condition(
                 if is_literal_prop {
                     out.push(format!("    FILTER({conjunction})"));
                 } else {
-                    out.push(format!(
-                        "    FILTER({conjunction}{})",
-                        undecidable_or(&var)
-                    ));
+                    out.push(format!("    FILTER({conjunction}{})", undecidable_or(&var)));
                 }
             }
             // SubClauses/SubClause are OR/AND/NOT combinators evaluated

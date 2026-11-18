@@ -7070,8 +7070,7 @@ impl PerspectiveInstance {
                         // move re-reads the same configs, and rebuilding then
                         // would both drop the fed nodes and re-read a kept
                         // transcript nothing could have changed.
-                        let changed =
-                            prev.as_ref().is_none_or(|p| !p.iter().any(|o| o == cfg));
+                        let changed = prev.as_ref().is_none_or(|p| !p.iter().any(|o| o == cfg));
                         if changed || !watcher.triggers.contains_key(&cfg.processor_id) {
                             watcher
                                 .triggers
@@ -7144,11 +7143,8 @@ impl PerspectiveInstance {
             // as a feed-bypassing write — which then stales them all, the way
             // `Lagged` is treated.
             if generation != seen_generation && covered_through < generation {
-                match tokio::time::timeout(
-                    std::time::Duration::from_millis(200),
-                    commits.recv(),
-                )
-                .await
+                match tokio::time::timeout(std::time::Duration::from_millis(200), commits.recv())
+                    .await
                 {
                     Ok(Ok(write)) => {
                         if let Some(w) = write.as_deref() {
