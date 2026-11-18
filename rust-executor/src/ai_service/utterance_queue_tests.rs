@@ -461,36 +461,41 @@ async fn closing_a_full_stream_drains_every_accepted_utterance() {
 /// queued and is still transcribed.
 #[tokio::test]
 async fn a_dropped_feed_future_keeps_its_queue_slot() {
-    let service = AIService::empty();
-    let hold = Hold::new();
-    let id = open_held(&service, &hold, None).await;
-    let operator = RequestContext::operator_for_test();
-    let (feed_a, mut waiting) = fill_to_capacity(&service, &hold, &id, &operator).await;
-    drop(waiting.pop().unwrap());
-    let refused = service
-        .queue_utterance(&id, speech_prefix(64_010), &operator)
-        .await;
-    let Err(error) = refused else {
-        panic!("dropping a feed future freed a queue slot");
-    };
-    assert!(
-        error.to_string().to_ascii_lowercase().contains("full"),
-        "{error}"
-    );
-    hold.release.notify_one();
-    feed_a.await.expect("the utterance in progress");
-    for answer in waiting {
-        answer.await.expect("a waiting utterance");
-    }
-    // The dropped utterance is last. Its answer is gone, so the worker takes it
-    // after the answers this test still holds.
-    tokio::time::timeout(std::time::Duration::from_secs(15), async {
-        while hold.calls.load(Ordering::SeqCst) < 9 {
-            tokio::task::yield_now().await;
+    // A broken queue bound can leave a feed waiting forever; fail instead of hanging CI.
+    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        let service = AIService::empty();
+        let hold = Hold::new();
+        let id = open_held(&service, &hold, None).await;
+        let operator = RequestContext::operator_for_test();
+        let (feed_a, mut waiting) = fill_to_capacity(&service, &hold, &id, &operator).await;
+        drop(waiting.pop().unwrap());
+        let refused = service
+            .queue_utterance(&id, speech_prefix(64_010), &operator)
+            .await;
+        let Err(error) = refused else {
+            panic!("dropping a feed future freed a queue slot");
+        };
+        assert!(
+            error.to_string().to_ascii_lowercase().contains("full"),
+            "{error}"
+        );
+        hold.release.notify_one();
+        feed_a.await.expect("the utterance in progress");
+        for answer in waiting {
+            answer.await.expect("a waiting utterance");
         }
+        // The dropped utterance is last. Its answer is gone, so the worker takes it
+        // after the answers this test still holds.
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            while hold.calls.load(Ordering::SeqCst) < 9 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the dropped feed's audio was not transcribed");
     })
     .await
-    .expect("the dropped feed's audio was not transcribed");
+    .expect("the test did not finish within 60 s");
 }
 
 /// A dead worker fails the utterances it had accepted. A later feed hears that it closed.
