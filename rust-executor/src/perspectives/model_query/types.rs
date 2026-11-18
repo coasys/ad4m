@@ -284,7 +284,15 @@ where
 /// scoping (e.g. AutoProcessor's `existing_scope` / `mint_scope` fields — the
 /// former constrains dedup lookups; the latter turns each new mint into a
 /// child link under the given node).
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+///
+/// `Deserialize` is manual (below): an untagged enum takes the first variant
+/// that parses and drops the keys it does not name, so the impl looks at the
+/// keys first to catch the mixtures no variant can see — `path` beside `id`,
+/// say, which would otherwise read as the `Raw` scope with the walk dropped.
+/// `Serialize` stays derived with `untagged` (the attribute only affects the
+/// derived impl): each variant writes as its flat field map, the same shape
+/// `ScopeRepr` parses back.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(untagged)]
 pub enum Scope {
     Model {
@@ -334,6 +342,14 @@ pub enum Scope {
         /// the first and their replies through the second — the union of every
         /// hop, not only the deepest, each record reported once. The length is
         /// the depth, and `direction` applies to every hop.
+        ///
+        /// A path read is an edge walk: class conformance and `where` decide
+        /// only which reached nodes are returned, never which are walked
+        /// through — a reply under a child that fails either is still
+        /// returned when the reply itself passes. Every edge keeps the
+        /// query's proof and link-status guards. `levels` answers
+        /// differently on purpose: each of its levels is a scoped read, so a
+        /// node it filters out does end that walk.
         ///
         /// This is the level walk `levels` makes with its own relation named
         /// per level rather than the same one throughout, and no per-anchor
@@ -420,6 +436,106 @@ pub enum Scope {
 #[serde(deny_unknown_fields)]
 pub struct ContainedScope {
     pub id: String,
+}
+
+/// The untagged wire form [`Scope::deserialize`] parses into, kept private so
+/// the public impl can inspect the keys first — an untagged parse drops the
+/// keys its chosen variant does not declare.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum ScopeRepr {
+    Model {
+        model: String,
+        id: String,
+        field: Option<String>,
+    },
+    Raw {
+        id: String,
+        predicate: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    Traverse {
+        #[serde(deserialize_with = "deserialize_ids_flex")]
+        ids: Vec<String>,
+        #[serde(default)]
+        predicate: Option<String>,
+        #[serde(default)]
+        path: Option<Vec<String>>,
+        #[serde(default)]
+        transitive: bool,
+        #[serde(default)]
+        direction: ScopeDirection,
+        #[serde(default, alias = "limit_per_anchor")]
+        limit_per_anchor: Option<usize>,
+        #[serde(default)]
+        levels: Option<Vec<usize>>,
+        #[serde(default, alias = "max_depth")]
+        max_depth: Option<usize>,
+    },
+    Contained(ContainedScope),
+}
+
+/// Keys only the traverse variant reads. Beside `id`, `model` or `field` —
+/// the one-anchor variants' keys — they are silently dropped by the untagged
+/// parse, answering a different scope than was sent.
+const TRAVERSE_ONLY_KEYS: [&str; 9] = [
+    "ids",
+    "path",
+    "transitive",
+    "direction",
+    "levels",
+    "limitPerAnchor",
+    "limit_per_anchor",
+    "maxDepth",
+    "max_depth",
+];
+
+impl<'de> Deserialize<'de> for Scope {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        if let Some(object) = value.as_object() {
+            let mixed = ["id", "model", "field"]
+                .iter()
+                .any(|k| object.contains_key(*k))
+                && TRAVERSE_ONLY_KEYS.iter().any(|k| object.contains_key(*k));
+            if mixed {
+                return Err(serde::de::Error::custom(
+                    "scope: a traverse key (`ids`, `path`, `transitive`, `direction`, `levels`, \
+                     `limitPerAnchor`, `maxDepth`) cannot sit beside `id`, `model` or `field` — \
+                     the untagged parse would drop it, reading a different scope than was sent",
+                ));
+            }
+        }
+        Ok(
+            match ScopeRepr::deserialize(value).map_err(serde::de::Error::custom)? {
+                ScopeRepr::Model { model, id, field } => Scope::Model { model, id, field },
+                ScopeRepr::Raw { id, predicate } => Scope::Raw { id, predicate },
+                ScopeRepr::Traverse {
+                    ids,
+                    predicate,
+                    path,
+                    transitive,
+                    direction,
+                    limit_per_anchor,
+                    levels,
+                    max_depth,
+                } => Scope::Traverse {
+                    ids,
+                    predicate,
+                    path,
+                    transitive,
+                    direction,
+                    limit_per_anchor,
+                    levels,
+                    max_depth,
+                },
+                ScopeRepr::Contained(c) => Scope::Contained(c),
+            },
+        )
+    }
 }
 
 /// Which way a traversal follows its predicate.

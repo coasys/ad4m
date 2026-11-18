@@ -345,6 +345,34 @@ async fn walk_levels(
         let mut kept: HashMap<String, usize> = HashMap::new();
         let mut next = Vec::new();
         let mut next_seen: HashSet<String> = HashSet::new();
+        // A `path` hop carries no breadth (`limit.is_none()`) and is an edge
+        // walk: every edge target carries the next hop, whether or not the
+        // queried class or `where` admits it — those filters decide only
+        // which nodes are returned. The scoped level query above cannot give
+        // this frontier (it already dropped the non-conforming rows), so the
+        // next depth comes from a one-hop guarded reach over the same
+        // frontier. `levels` keeps the opposite rule — its frontier is the
+        // rows the level query reported — so this runs only for `path`.
+        if limit.is_none() {
+            let edges = [ContainmentEdge {
+                predicate: predicate.clone(),
+                holder: None,
+            }];
+            let pairs = guarded_reach(
+                stop,
+                store,
+                &frontier,
+                &edges,
+                direction,
+                LinkGuard::of(query_input),
+                Some(1),
+            )?;
+            for (_, node) in pairs {
+                if next_seen.insert(node.clone()) {
+                    next.push(node);
+                }
+            }
+        }
         for row in &rows {
             let Some(id) = row["source"].as_str() else {
                 continue;
@@ -365,13 +393,13 @@ async fn walk_levels(
                 ordered.push(id.to_string());
                 reported = true;
             }
-            // The frontier is de-duplicated per depth, not per output: a
-            // `path` hop (`limit.is_none()`) walks a node reported at an
-            // earlier depth because the next hop follows a different
-            // predicate, which `levels` never needs (see `seen` above). Once
-            // per depth suffices — two parents reaching it through the same
-            // hop are one walk, not two.
-            if (limit.is_none() || reported) && next_seen.insert(id.to_string()) {
+            // The frontier is de-duplicated per depth, not per output: under
+            // `levels` a reported node was already walked through the hop's
+            // one predicate, so only newly reported nodes walk on. A `path`
+            // hop does not use these rows for its frontier at all — it walks
+            // the guarded edge reach above, so a node reported at an earlier
+            // depth still walks at the next (its hop predicates differ).
+            if limit.is_some() && reported && next_seen.insert(id.to_string()) {
                 next.push(id.to_string());
             }
         }

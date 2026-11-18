@@ -91,6 +91,11 @@ pub(crate) struct Writes {
     /// Each link written or removed, or `None` once the batch passed
     /// [`MAX_TRACKED_LINKS`].
     links: Option<HashSet<Written>>,
+    /// The store's write generation as the sender saw it: a coverage
+    /// watermark, "the feed has described every classified commit through
+    /// here", so a drained feed can tell tail writes it never saw from a
+    /// store that simply did not move. `0` = untagged.
+    pub(crate) generation: u64,
 }
 
 /// One written or removed link, with what every subscription's check needs
@@ -112,6 +117,7 @@ impl Writes {
         Writes {
             predicates: HashSet::new(),
             links: Some(HashSet::new()),
+            generation: 0,
         }
     }
 
@@ -144,6 +150,13 @@ impl Writes {
         }
     }
 
+    /// Whether the batch wrote `predicate`, for tests that must check the
+    /// matcher saw one specific batch — not whatever the feed carried first.
+    #[cfg(test)]
+    pub(crate) fn wrote(&self, predicate: &str) -> bool {
+        self.predicates.contains(predicate)
+    }
+
     /// Whether the batch is a schema write — the classification
     /// `inbound_touches_shacl` makes over a diff for the shape cache, made
     /// over these links. A kept transcript read under the old shape is stale
@@ -172,6 +185,7 @@ impl From<HashSet<String>> for Writes {
         Writes {
             predicates,
             links: None,
+            generation: 0,
         }
     }
 }
@@ -274,6 +288,13 @@ pub(super) struct TriggerRules {
     /// of one re-runs when its source links an anchor through one of them:
     /// the node just became (or stopped being) a holder of an anchor.
     holders: HashMap<String, Predicates>,
+    /// The subscribed class's own flag links, in both the flag value's and
+    /// its canonical spelling. Only these are gated by `scoped` (`joins`,
+    /// `scan`): a flag of a class the query scans through a `where`
+    /// quantifier belongs to records that are not scope members themselves —
+    /// one enters the result by linking to a member, not to an anchor, so
+    /// the parent-edge gate would miss it (#1795).
+    direct_flags: HashSet<Flag>,
 }
 
 impl TriggerRules {
@@ -339,6 +360,7 @@ impl TriggerRules {
         for (predicate, edges) in other.holders {
             self.holders.entry(predicate).or_default().extend(edges);
         }
+        self.direct_flags.extend(other.direct_flags);
     }
 }
 
@@ -522,7 +544,7 @@ pub(super) fn build_rules(
         containment,
     };
     walk.rules.any.extend(extra_any);
-    walk.scan_class(&shape, query.where_clause.as_ref());
+    walk.scan_class(&shape, query.where_clause.as_ref(), true);
     walk.query(&shape, &query);
     if let Some(parent) = &query.parent {
         walk.parent(parent);
@@ -594,12 +616,15 @@ impl Walk<'_> {
     }
 
     /// A class whose records can enter the result through a write on the
-    /// record itself: the subscribed class, and every class a `where`
-    /// quantifier reads.
+    /// record itself: the subscribed class (`direct`), and every class a
+    /// `where` quantifier reads. Only the subscribed class's flags are
+    /// remembered in `direct_flags`: the parent-scope gate proves a member
+    /// out of scope, and a quantified class's records are not members.
     fn scan_class(
         &mut self,
         shape: &ModelShape,
         where_clause: Option<&std::collections::BTreeMap<String, WhereCondition>>,
+        direct: bool,
     ) {
         self.watch_class(shape);
         let flags: Vec<Flag> = shape
@@ -613,6 +638,15 @@ impl Walk<'_> {
                 })
             })
             .collect();
+        if direct {
+            for flag in &flags {
+                self.rules.direct_flags.insert(flag.clone());
+                self.rules.direct_flags.insert(Flag {
+                    predicate: flag.predicate.clone(),
+                    value: canonical_target(&flag.value),
+                });
+            }
+        }
         if flags.is_empty() {
             // No flag, so instance-ness is not a one-triple lookup: any write
             // to the class's predicates re-runs, as before #1237.
@@ -665,7 +699,7 @@ impl Walk<'_> {
                         return;
                     };
                     for inner in [&ops.some, &ops.none].into_iter().flatten() {
-                        self.scan_class(&target, Some(inner));
+                        self.scan_class(&target, Some(inner), false);
                     }
                 }
                 _ => {}
@@ -891,16 +925,43 @@ impl Walk<'_> {
                 let followed: Vec<String> = match (predicate, path) {
                     (Some(predicate), _) => vec![predicate.clone()],
                     (None, Some(path)) => path.clone(),
-                    (None, None) => watched_predicates(self.containment),
+                    // A containment scope's edges are same-level alternatives
+                    // — every one is the scope's one edge read, not a deeper
+                    // hop, so the `hop > 0` below must not see them as a
+                    // path. And they are not `watched_predicates`: a holder
+                    // flag's predicate is no edge.
+                    (None, None) => edges.clone(),
                 };
                 for (hop, predicate) in followed.iter().enumerate() {
-                    if *transitive || levels.is_some() || hop > 0 {
-                        // Below the first level, a link's ends are neither
-                        // anchors nor (when a level limit cut them) result
-                        // nodes.
+                    if *transitive || levels.is_some() || (path.is_some() && hop > 0) {
+                        // Below the first level of a `path` — and anywhere
+                        // under a scope deeper than one link — a link's ends
+                        // are neither anchors nor (when a level limit cut
+                        // them) result nodes.
                         self.rules.any.insert(predicate.clone());
                     } else {
                         self.rules.near.add(predicate);
+                    }
+                }
+                // A holder class's flag is not an edge the scope follows,
+                // but a write of one still moves the result: on the anchor
+                // (a holder under `direction: "out"`), on a result node, or —
+                // `direction: "in"`, one hop out — on a node linked to an
+                // anchor through that class's edge (the `holders` rule
+                // above). Deeper than one hop, none of those reads decides
+                // it, so it re-runs outright.
+                if predicate.is_none() && path.is_none() {
+                    for edge in self.containment {
+                        let Some(holder) = &edge.holder else {
+                            continue;
+                        };
+                        for recognised_by in holder.recognised_by() {
+                            if *transitive || levels.is_some() {
+                                self.rules.any.insert(recognised_by);
+                            } else {
+                                self.rules.near.add(&recognised_by);
+                            }
+                        }
                     }
                 }
                 // A single hop: scope membership is one neighbour read.
@@ -1017,9 +1078,19 @@ impl ModelTrigger {
             // node is already in it: a class flag under another parent
             // cannot change a result that reads only this scope (#1795).
             // Its edge write is `near` the anchor and wakes on its own.
+            // The gate proves a scope MEMBER out of scope, so it applies
+            // only to the subscribed class's own flags: a quantified class's
+            // record enters the result by linking to a member, not by
+            // sitting under an anchor.
+            let direct = [target, canonical].iter().any(|value| {
+                rules.direct_flags.contains(&Flag {
+                    predicate: predicate.clone(),
+                    value: (*value).clone(),
+                })
+            });
             match &rules.scoped {
                 None => return true,
-                _ if self.nodes.contains(source) || rules.anchors.contains(source) => {
+                _ if !direct || self.nodes.contains(source) || rules.anchors.contains(source) => {
                     return true;
                 }
                 Some(edges) if store.linked_through(source, edges, &rules.anchors) => {
@@ -1056,15 +1127,21 @@ impl ModelTrigger {
         if let Some(flags) = rules.scan.get(predicate) {
             // `scan` reads "a node of the queried class" — under a one-hop
             // scope that still has to mean in scope: a flagged node under
-            // another parent is a Post, but not one this result reads.
+            // another parent is a Post, but not one this result reads. The
+            // gate decides membership of the QUERIED class only; a
+            // quantifier-scanned class's flag skips it for the reason
+            // `joins` gives above.
             if ends.iter().any(|e| {
-                flags.iter().any(|f| store.has_flag(e, f))
-                    && (self.nodes.contains(*e)
-                        || rules.anchors.contains(*e)
-                        || match &rules.scoped {
-                            None => true,
-                            Some(edges) => store.linked_through(e, edges, &rules.anchors),
-                        })
+                flags.iter().any(|f| {
+                    store.has_flag(e, f)
+                        && (self.nodes.contains(*e)
+                            || rules.anchors.contains(*e)
+                            || !rules.direct_flags.contains(f)
+                            || match &rules.scoped {
+                                None => true,
+                                Some(edges) => store.linked_through(e, edges, &rules.anchors),
+                            })
+                })
             }) {
                 return true;
             }

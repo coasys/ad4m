@@ -58,8 +58,12 @@ pub async fn load_processed_sources(
         "where": { "processor": processor_node(processor_id) },
     })
     .to_string();
+    // Zero shape-wait, like the transcript read on the same tick: the marker
+    // check above means a missing shape here is a partial sync, and the tick
+    // must not stall 20 s on it — the run-class SHACL write wakes the loop
+    // and the error keeps the processor's turns pending for the retry.
     let result_json = perspective
-        .model_query(INTERP_RUN_CLASS, &query)
+        .model_query_within(INTERP_RUN_CLASS, &query, std::time::Duration::ZERO)
         .await
         .map_err(|e| anyhow::anyhow!("load_processed_sources: model_query failed: {e:#}"))?;
     let result: serde_json::Value = serde_json::from_str(&result_json)
@@ -1015,19 +1019,43 @@ mod tests {
         .expect("mint verified run");
 
         // The forgery carries the right triples but proofs that do not cover
-        // them — the shape a gossiped run arrives in (#1113).
+        // them — the shape a gossiped run arrives in (#1113). The last link
+        // sits on the *verified* run itself: its identity and processor
+        // links are real, so only the per-source proof check keeps the forged
+        // `sources` out of the cursor.
         let attacker = TestSigner::generate();
-        for (predicate, target) in [
-            ("ad4m://interp/run_id", "literal:string:forged"),
-            ("ad4m://interp/processor", "ad4m://autoprocessor/proc-a"),
-            ("ad4m://interp/sources", "literal:string:fake222"),
+        for (signed_source, stored_source, predicate, target) in [
+            (
+                "ad4m://interp/run/forged",
+                "ad4m://interp/run/tampered",
+                "ad4m://interp/run_id",
+                "literal:string:forged",
+            ),
+            (
+                "ad4m://interp/run/forged",
+                "ad4m://interp/run/tampered",
+                "ad4m://interp/processor",
+                "ad4m://autoprocessor/proc-a",
+            ),
+            (
+                "ad4m://interp/run/forged",
+                "ad4m://interp/run/tampered",
+                "ad4m://interp/sources",
+                "literal:string:fake222",
+            ),
+            (
+                "ad4m://interp/run/forged",
+                "ad4m://interp/run/run-real",
+                "ad4m://interp/sources",
+                "literal:string:fake333",
+            ),
         ] {
             let mut l = LinkExpression::from(attacker.sign(Link {
-                source: "ad4m://interp/run/forged".into(),
+                source: signed_source.into(),
                 predicate: Some(predicate.into()),
                 target: target.into(),
             }));
-            l.data.source = "ad4m://interp/run/tampered".into();
+            l.data.source = stored_source.into();
             l.status = Some(LinkStatus::Shared);
             assert!(
                 !l.compute_proof_valid(),
@@ -1042,6 +1070,10 @@ mod tests {
         assert!(
             ids.contains("real111"),
             "the verified run still retires its sources; got {ids:?}"
+        );
+        assert!(
+            !ids.contains("fake333"),
+            "an unverifiable `sources` link on a valid run retires nothing; got {ids:?}"
         );
         assert!(
             !ids.contains("fake222"),

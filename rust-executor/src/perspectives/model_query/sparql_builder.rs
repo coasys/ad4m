@@ -1240,7 +1240,7 @@ pub(super) fn compile_where_clause(
     let mut seq = 0usize;
     let mut la = LinkAuthorState::default();
     let (patterns, complete) =
-        compile_where_clause_seq(wc, shape, resolver, guard, &mut seq, &mut la);
+        compile_where_clause_seq(wc, shape, resolver, guard, &mut seq, &mut la, false);
     CompiledWhere {
         patterns,
         complete,
@@ -1274,6 +1274,7 @@ fn compile_where_clause_seq(
     guard: LinkGuard,
     seq: &mut usize,
     la: &mut LinkAuthorState,
+    negated: bool,
 ) -> (Vec<String>, bool) {
     let mut patterns = Vec::new();
     let mut complete = true;
@@ -1305,7 +1306,7 @@ fn compile_where_clause_seq(
                 WhereCondition::SubClauses(branches) => {
                     for branch in branches {
                         let (p, c) =
-                            compile_where_clause_seq(branch, shape, resolver, guard, seq, la);
+                            compile_where_clause_seq(branch, shape, resolver, guard, seq, la, negated);
                         patterns.extend(p);
                         complete &= c;
                     }
@@ -1322,7 +1323,7 @@ fn compile_where_clause_seq(
                     // post-hydration at all.
                     for branch in branches {
                         let (p, c) =
-                            compile_where_clause_seq(branch, shape, resolver, guard, seq, la);
+                            compile_where_clause_seq(branch, shape, resolver, guard, seq, la, negated);
                         if !c || !binds_source(&p) {
                             ok = false;
                             continue;
@@ -1339,7 +1340,8 @@ fn compile_where_clause_seq(
             },
             "NOT" => match condition.as_not_clause() {
                 Some(branch) => {
-                    let (p, c) = compile_where_clause_seq(&branch, shape, resolver, guard, seq, la);
+                    let (p, c) =
+                        compile_where_clause_seq(&branch, shape, resolver, guard, seq, la, !negated);
                     if c && !p.is_empty() {
                         patterns.push(format!(
                             "    FILTER NOT EXISTS {{\n{}\n    }}",
@@ -1369,6 +1371,7 @@ fn compile_where_clause_seq(
                     seq,
                     &scoping,
                     la,
+                    negated,
                 ) {
                     Some(p) => patterns.extend(p),
                     None => complete = false,
@@ -1392,6 +1395,21 @@ fn compile_where_clause_seq(
 /// `scoping` authors of a side-by-side `author` restrict the link that
 /// satisfies the value condition; see [`super::link_author`]. A per-link author
 /// sets `la.per_link`, and a malformed one is recorded in `la.error`.
+///
+/// A value comparison pushed for a `resolveLanguage` property is answered
+/// over `var`'s decoded form, but a stored target the language has not yet
+/// served is a raw expression IRI — decodable storage is the `literal:`
+/// encoding (`literal:string:`, signed `literal:json:` envelopes), and
+/// `parse_literal` hands anything else back unchanged. Comparing the raw
+/// IRI to the condition wrongly rejects a row whose resolved value may
+/// match, and the row never reaches hydration to be marked `__unresolved`,
+/// so nothing re-reads it once the expression arrives. The disjunct keeps
+/// an undecodable IRI instead: the conservative answer for a row the store
+/// cannot judge (#1795).
+fn unresolved_expression_or(var: &str) -> String {
+    format!("(isIRI({var}) && !STRSTARTS(STR({var}), \"literal:\"))")
+}
+
 fn compile_leaf_condition(
     prop_name: &str,
     condition: &WhereCondition,
@@ -1401,8 +1419,20 @@ fn compile_leaf_condition(
     seq: &mut usize,
     scoping: &[&WhereCondition],
     la: &mut LinkAuthorState,
+    negated: bool,
 ) -> Option<Vec<String>> {
     let mut out: Vec<String> = Vec::new();
+    // In a positive position a raw expression IRI counts as "not yet decodable"
+    // — keep the row so hydration can mark it `__unresolved`. Inside `FILTER
+    // NOT EXISTS` the same IRI must NOT satisfy the inner pattern (it is not a
+    // proven match), or the negation would drop rows the read cannot evaluate.
+    let undecidable_or = |var: &str| -> String {
+        if negated {
+            String::new()
+        } else {
+            format!(" || {}", unresolved_expression_or(var))
+        }
+    };
     // One id per leaf: variables inside a leaf share it, because they are meant
     // to correlate. Variables across leaves never do.
     let leaf_id = *seq;
@@ -1723,7 +1753,8 @@ fn compile_leaf_condition(
                         author_join("?source", &prop.predicate, &var, "")?
                     ));
                     out.push(format!(
-                        "    FILTER(<ad4m://fn/parse_literal>({var}) = \"{escaped}\")"
+                        "    FILTER(<ad4m://fn/parse_literal>({var}) = \"{escaped}\"{})",
+                        undecidable_or(&var)
                     ));
                 }
             }
@@ -1743,7 +1774,8 @@ fn compile_leaf_condition(
                         author_join("?source", &prop.predicate, &var, "")?
                     ));
                     out.push(format!(
-                        "    FILTER(<ad4m://fn/parse_literal>({var}) = \"{n}\")"
+                        "    FILTER(<ad4m://fn/parse_literal>({var}) = \"{n}\"{})",
+                        undecidable_or(&var)
                     ));
                 }
             }
@@ -1760,7 +1792,8 @@ fn compile_leaf_condition(
                         author_join("?source", &prop.predicate, &var, "")?
                     ));
                     out.push(format!(
-                        "    FILTER(<ad4m://fn/parse_literal>({var}) = \"{b}\")"
+                        "    FILTER(<ad4m://fn/parse_literal>({var}) = \"{b}\"{})",
+                        undecidable_or(&var)
                     ));
                 }
             }
@@ -1794,7 +1827,8 @@ fn compile_leaf_condition(
                         author_join("?source", &prop.predicate, &var, "")?
                     ));
                     out.push(format!(
-                        "    FILTER(<ad4m://fn/parse_literal>({var}) IN ({values_list}))"
+                        "    FILTER(<ad4m://fn/parse_literal>({var}) IN ({values_list}){})",
+                        undecidable_or(&var)
                     ));
                 }
             }
@@ -1828,7 +1862,8 @@ fn compile_leaf_condition(
                         author_join("?source", &prop.predicate, &var, "")?
                     ));
                     out.push(format!(
-                        "    FILTER(<ad4m://fn/parse_literal>({var}) IN ({values_list}))"
+                        "    FILTER(<ad4m://fn/parse_literal>({var}) IN ({values_list}){})",
+                        undecidable_or(&var)
                     ));
                 }
             }
@@ -1956,7 +1991,15 @@ fn compile_leaf_condition(
                 if filters.is_empty() || unhandled {
                     return None;
                 }
-                out.push(format!("    FILTER({})", filters.join(" && ")));
+                let conjunction = filters.join(" && ");
+                if is_literal_prop {
+                    out.push(format!("    FILTER({conjunction})"));
+                } else {
+                    out.push(format!(
+                        "    FILTER({conjunction}{})",
+                        undecidable_or(&var)
+                    ));
+                }
             }
             // SubClauses/SubClause are OR/AND/NOT combinators evaluated
             // Rust-side; the outer loop skips them before reaching here.

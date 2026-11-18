@@ -12,7 +12,7 @@ or writes the graph. Split plan: spec items 3, 7, 8.
 | `perspective_instance.rs` (7.6k) | **The** instance: link CRUD + batches, neighbourhood sync/commit loops, SDNA/SHACL registration, subject create/update/read, `execute_commands`, query subscriptions, notifications, telepresence signals, Prolog facade, auto-processor tick. One `impl`; being split into `perspective_instance/` |
 | `sparql_store.rs` | Per-perspective oxigraph store. Links stored as reified triples. `add_link/remove_link`, `query_links`, `query_arbitrary` (read-only SPARQL from clients), custom SPARQL fns (`parse_literal`, `strip_html`), named-graph → reifier migration |
 | `write_log.rs` | Removed (#1794): the auto-processor's wake feed is now `subscription_triggers::Writes`, the per-commit write info `check_subscribed_queries` already builds |
-| `model_query/` | Typed queries over SHACL shapes: `shape.rs` loads `ModelShape` from SHACL triples → `sparql_builder.rs` → `SparqlStore` → `hydration.rs` → `filtering.rs` → `getters.rs`/`relations.rs`/`projection.rs`. Entry: `execute_model_query` (`query.rs`). `mod.rs` has the pipeline diagram. Traversal (`walk_levels`): output de-dupes per node; the next-depth frontier de-dupes per depth — under a multi-hop `path` a node reported at one depth still walks at the next (its hop predicates differ); under `levels` only newly reported nodes walk on |
+| `model_query/` | Typed queries over SHACL shapes: `shape.rs` loads `ModelShape` from SHACL triples → `sparql_builder.rs` → `SparqlStore` → `hydration.rs` → `filtering.rs` → `getters.rs`/`relations.rs`/`projection.rs`. Entry: `execute_model_query` (`query.rs`). `mod.rs` has the pipeline diagram. A `path` read is an edge walk: every edge keeps the proof and link-status guards, but class conformance and `where` apply only to the reached nodes that are returned — an intermediate that fails either is walked through (`levels` keeps its per-level cut). Traversal (`walk_levels`): output de-dupes per node; the next-depth frontier de-dupes per depth — under a multi-hop `path` a node reported at one depth still walks at the next (its hop predicates differ); under `levels` only newly reported nodes walk on. A pushed `where` comparison on a `resolveLanguage` property keeps an undecodable expression IRI (a raw IRI, not a `literal:` value) for hydration to mark `__unresolved` rather than rejecting it at the store, so the retry clock can admit the row when the language arrives |
 | `shacl_parser.rs` | Writer side: SHACL class JSON → links (`parse_shacl_to_links`), flow JSON ↔ links (`parse_flow_to_links`, `parse_flow_from_links`). Types `SHACLShape`, `SHACLFlow`, `AD4MAction` |
 | `instances/` | Validated instance writes (create, update, remove, collection items) against a class's SHACL shape: the shared core of the MCP `instance_*` tools and the `perspective.instance*` RPC methods. See `instances/AGENTS.md` |
 | `subject_classes_of.rs` | Which classes a URI conforms to (SPARQL) |
@@ -87,8 +87,10 @@ or writes the graph. Split plan: spec items 3, 7, 8.
   `check_subscribed_queries` broadcasts each commit's `subscription_triggers::Writes` (added
   and removed link terms) on `commit_writes`, a **bounded** `broadcast` channel
   (`COMMIT_WRITES_CAPACITY`, 256 commits — it bounds memory, not correctness), and the loop
-  sleeps on that (60 s fallback). A receiver that lags past the buffer gets `Lagged`, which
-  must be treated as a wake: a missed write could have matched. A processor builds a
+  sleeps on that (60 s fallback). Entries are drained independently: a matching diff is
+  still readable after any number of unrelated diffs while all of them fit in the buffer —
+  an unrelated write costs an evaluation, never coverage. A receiver that lags past the
+  buffer gets `Lagged`, which must be treated as a wake: a missed write could have matched. A processor builds a
   `subscription_triggers::ModelTrigger` from its
   `source_class` + `source_query` — the same rules a model subscription would get — and the
   loop wakes only when a committed write's `Writes` match it (`ModelTrigger::matches`) or

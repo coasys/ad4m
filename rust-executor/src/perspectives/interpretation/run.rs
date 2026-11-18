@@ -1992,18 +1992,25 @@ mod tests {
             .expect("gather_transcript_model")
             .turns;
         assert_eq!(turns.len(), 2, "got {turns:#?}");
-        assert_eq!(turns[0].text, "hello world");
-        assert_eq!(turns[1].text, "second turn");
+        // The read promises no order (the queue sorts by text-link timestamp
+        // later), so turns are matched by text and their metadata checked
+        // per turn.
+        let by_text: std::collections::HashMap<
+            &str,
+            &crate::perspectives::interpretation::types::TranscriptTurn,
+        > = turns.iter().map(|t| (t.text.as_str(), t)).collect();
+        let hello = by_text["hello world"];
+        let second = by_text["second turn"];
         // Speaker is the link signer (test agent), not the ns://author target.
-        assert_eq!(turns[0].speaker, me);
-        assert_eq!(turns[1].speaker, me);
+        assert_eq!(hello.speaker, me);
+        assert_eq!(second.speaker, me);
         assert!(
-            !turns[0].timestamp.is_empty() && !turns[1].timestamp.is_empty(),
+            !hello.timestamp.is_empty() && !second.timestamp.is_empty(),
             "instance timestamp must be hydrated; got {turns:#?}"
         );
         assert!(
-            turns[0].timestamp < turns[1].timestamp,
-            "turns must come out chronological; got {turns:#?}"
+            hello.timestamp < second.timestamp,
+            "the earlier-written turn must carry the earlier timestamp; got {turns:#?}"
         );
     }
 

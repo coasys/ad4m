@@ -156,10 +156,12 @@ pub struct AutoProcessorConfig {
     /// URI namespace new interpreted instances are minted under (the "spawn
     /// scope"), e.g. `soa://project/42/`. `None` falls back to a per-processor
     /// default (`ad4m://autoprocessor/<id>/instance/`), preserving the original
-    /// behaviour when a config omits `ad4m://base_prefix`. Existing instances to
-    /// upsert into are gathered from the perspective's registered classes; a
-    /// caller that wants create+update confined to one subtree points both this
-    /// and `source_query` at that subtree.
+    /// behaviour when a config omits `ad4m://base_prefix`. This is only the
+    /// namespace of the minted URIs — it does not constrain which existing
+    /// instances are upserted (that is [`Self::existing_scope`]) nor parent
+    /// the new instances (that is [`Self::mint_scope`]), so a processor
+    /// reading project A can still update a matching instance under project
+    /// B's prefix unless `existing_scope` says otherwise.
     pub base_prefix: Option<String>,
     /// Class URIs (SHACL `target_class`) the interpretation engine is asked
     /// to materialize on each pass. Must contain at least one entry;
@@ -270,6 +272,74 @@ pub(crate) fn validate_source_query(
     }
     serde_json::from_value(value)
         .map_err(|e| anyhow::anyhow!("source_query does not parse as a model query: {e:#}"))
+}
+
+/// `where` keys that are clause grammar, not property names: `producedByFlow`
+/// is extracted before the query runs, and `author`/`base`/`id` name the
+/// instance's synthetic fields rather than a shape property.
+const WHERE_GRAMMAR_KEYS: [&str; 7] =
+    ["AND", "OR", "NOT", "author", "base", "id", "producedByFlow"];
+
+/// Every `where` leaf must name a property of the source class (or the
+/// grammar keys). Any other key compiles to nothing and is rejected by
+/// post-hydration filtering — either way the transcript reads empty forever,
+/// a typo indistinguishable from a quiet channel. Recurses through the
+/// clause-level combinators only: `some`/`none` bodies name properties of
+/// the *related* class, which this shape cannot check.
+fn validate_source_query_where(
+    input: &crate::perspectives::model_query::ModelQueryInput,
+    shape: &crate::perspectives::model_query::ModelShape,
+) -> anyhow::Result<()> {
+    use crate::perspectives::model_query::types::WhereCondition;
+    fn check(
+        clause: &std::collections::BTreeMap<String, WhereCondition>,
+        shape: &crate::perspectives::model_query::ModelShape,
+    ) -> anyhow::Result<()> {
+        for (key, condition) in clause {
+            match key.as_str() {
+                "AND" | "OR" => {
+                    if let WhereCondition::SubClauses(branches) = condition {
+                        for branch in branches {
+                            check(branch, shape)?;
+                        }
+                    }
+                }
+                "NOT" => {
+                    if let Some(branch) = condition.as_not_clause() {
+                        check(&branch, shape)?;
+                    }
+                }
+                k if WHERE_GRAMMAR_KEYS.contains(&k) => {}
+                k if shape.properties.iter().any(|p| p.name == k) => {}
+                k => anyhow::bail!(
+                    "source_query.where key `{k}` is not a property of source class \
+                     `{}`; the scope would match nothing",
+                    shape.target_class
+                ),
+            }
+        }
+        Ok(())
+    }
+    match &input.where_clause {
+        Some(clause) => check(clause, shape),
+        None => Ok(()),
+    }
+}
+
+/// `source_query` validity for one config at whatever the local store can
+/// prove: the JSON grammar always; the `where` property names when the
+/// source class's shape is here to check against (a shape that has not
+/// synced yet is not a refusal — the loader re-checks on every read).
+fn check_source_query(
+    perspective: &PerspectiveInstance,
+    source_class: &str,
+    source_query: &str,
+) -> anyhow::Result<()> {
+    let input = validate_source_query(source_query)?;
+    if let Ok(shape) = perspective.get_shape(source_class) {
+        validate_source_query_where(&input, &shape)?;
+    }
+    Ok(())
 }
 
 impl AutoProcessorConfig {
@@ -386,11 +456,13 @@ pub async fn write_processor(
             cfg.processor_id
         );
     }
-    if cfg.source_text.is_empty() {
+    // Whitespace is no property name either: `scalar_string` on load reads
+    // " " back as a value, so it must be refused here, not just `""`.
+    if cfg.source_text.trim().is_empty() {
         anyhow::bail!("write_processor: `{}` has no source_text", cfg.processor_id);
     }
     if let Some(source_query) = &cfg.source_query {
-        validate_source_query(source_query).map_err(|e| {
+        check_source_query(perspective, &cfg.source_class, source_query).map_err(|e| {
             anyhow::anyhow!(
                 "write_processor: `{}` bad source_query: {e:#}",
                 cfg.processor_id
@@ -661,6 +733,16 @@ pub async fn load_processors(
     for instance in result["instances"].as_array().into_iter().flatten() {
         match config_from_instance(instance) {
             Some(cfg) => {
+                // Grammar was checked in `config_from_instance`; this is the
+                // half that needs the store: `where` leaves must name the
+                // source class's own properties when its shape is here.
+                if let Some(source_query) = &cfg.source_query {
+                    if let Err(e) = check_source_query(perspective, &cfg.source_class, source_query)
+                    {
+                        report_bad_source_query(instance, &format!("{e:#}"));
+                        continue;
+                    }
+                }
                 log_flow_selection_once(&cfg);
                 out.push(cfg);
             }
@@ -861,6 +943,13 @@ fn config_from_instance(instance: &serde_json::Value) -> Option<AutoProcessorCon
         }
     };
     let emit_debug_events = parse_bool("emitDebugEvents")?.unwrap_or(false);
+
+    // `scalar_string` reads an empty literal as absent but a whitespace one
+    // as a value — a stored `" "` would survive hydration to name nothing
+    // readable. Fail it closed like the other malformed fields.
+    if scalar("sourceText").is_none_or(|s| s.trim().is_empty()) {
+        return None;
+    }
 
     Some(AutoProcessorConfig {
         processor_id: scalar("processorId")?,

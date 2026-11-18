@@ -1511,7 +1511,9 @@ pub fn parse_flow_from_links(links: &[Link], flow_uri: &str) -> Result<SHACLFlow
 ///
 /// `__links` is written only when a query asks for `links` (#1046 §3/§4), after
 /// every property — the same silent-overwrite direction as the second group.
-const RESERVED_PROPERTY_NAMES: [&str; 7] = [
+/// `__unresolved` is written whenever a `resolveLanguage` fetch fails: a class
+/// property of that name would mask the marker the transcript read retires on.
+const RESERVED_PROPERTY_NAMES: [&str; 8] = [
     "id",
     "baseExpression",
     "createdAt",
@@ -1519,6 +1521,7 @@ const RESERVED_PROPERTY_NAMES: [&str; 7] = [
     "author",
     "timestamp",
     "__links",
+    "__unresolved",
 ];
 
 /// Make the property-shape-level `local: true` authoritative by pushing it

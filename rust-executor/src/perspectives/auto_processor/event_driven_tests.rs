@@ -36,6 +36,29 @@ fn all_queries(p: &PerspectiveInstance) -> usize {
     p.sparql_store.queries_run().len() + p.sparql_store.link_scans_run()
 }
 
+/// The next commit-feed batch carrying `predicate`, on a deadline: a bare
+/// `recv()` hangs a regressed test at the suite timeout, and settling for
+/// whatever batch arrived first would let the assertion below it pass on a
+/// write it was not about.
+async fn recv_edge(
+    commits: &mut tokio::sync::broadcast::Receiver<
+        crate::perspectives::perspective_instance::CommitWrite,
+    >,
+    predicate: &str,
+) -> std::sync::Arc<crate::perspectives::perspective_instance::subscription_triggers::Writes> {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match commits.recv().await {
+                Ok(Some(writes)) if writes.wrote(predicate) => return writes,
+                Ok(_) => {}
+                Err(e) => panic!("commit feed: {e}"),
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("no commit-feed batch carrying `{predicate}` within 5 s"))
+}
+
 fn config(
     processor_id: &str,
     debounce_ms: i64,
@@ -432,7 +455,12 @@ async fn the_wait_evaluates_a_write_and_only_a_match_ends_it() {
     .expect("unrelated link");
     let evaluated = std::cell::Cell::new(0usize);
     let end = wait_for_tick(&teardown, 400, Some(&mut rx), None, |w| {
-        evaluated.set(evaluated.get() + 1);
+        // Only the reaction batch counts: a setup write broadcast by a
+        // spawned task can land in the feed first, and "any batch was
+        // evaluated" would then prove nothing about this one.
+        if w.wrote("ns://reaction") {
+            evaluated.set(evaluated.get() + 1);
+        }
         p.auto_processor_writes_match(&watcher, w)
     })
     .await;
@@ -1499,6 +1527,88 @@ async fn a_where_clause_filters_the_transcript() {
     assert_eq!(pending_texts(&watcher, "w"), vec!["keep me"]);
 }
 
+/// The same `where` must not reject a row whose `resolveLanguage` fetch
+/// failed: the stored target is the raw expression URL, which any value
+/// comparison answers no to, yet the resolved value may match. The row has
+/// to reach hydration marked `__unresolved` — it is not a turn yet, but the
+/// retry clock re-reads it once the language serves the expression, and the
+/// turn is then admitted without a store write (#1795).
+#[tokio::test]
+async fn a_where_on_the_text_keeps_an_unresolvable_row_for_retry() {
+    use super::watcher::{TickOutcome, UNRESOLVED_TEXT_RETRY_MS};
+    use crate::agent::signatures::TestSigner;
+    use crate::perspectives::interpretation_test_support::{
+        serve_test_language, stop_test_language,
+    };
+    use crate::types::{Link, LinkStatus};
+
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
+    let cfg = AutoProcessorConfig {
+        source_query: Some(r#"{"where":{"body":{"contains":"resolved"}}}"#.into()),
+        ..config("wu", 600_000, None)
+    };
+    write_processor(&mut p, &cfg, Some(false), &ctx)
+        .await
+        .expect("write_processor");
+
+    // The message's body lives on a language that is not loaded; the stored
+    // target is the raw expression URL, which `contains "resolved"` cannot
+    // prove false of the resolved value.
+    for (predicate, target) in [
+        ("ns://type", "ns://message"),
+        ("ns://body", "QmUnavailableWhereLang://expr1"),
+    ] {
+        p.add_link(
+            Link {
+                source: "msg://wu".into(),
+                predicate: Some(predicate.into()),
+                target: target.into(),
+            },
+            LinkStatus::Shared,
+            None,
+            &ctx,
+        )
+        .await
+        .expect("seed message link");
+    }
+
+    let mut watcher = WatcherState::new();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let outcome = p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
+    assert_eq!(
+        outcome,
+        TickOutcome::Idle,
+        "nothing to queue: an unresolvable text is not a turn"
+    );
+    assert!(
+        pending_texts(&watcher, "wu").is_empty(),
+        "the expression URL must not be queued as the body"
+    );
+
+    // The language comes up and serves the expression — without a store
+    // write. The `where` cannot reject the row on the raw URL, so the read
+    // carried `__unresolved`, the retry clock re-reads, and the turn —
+    // whose resolved text matches — is queued.
+    let expression = serde_json::to_string(&TestSigner::generate().sign("resolved words"))
+        .expect("expression json");
+    serve_test_language("QmUnavailableWhereLang", expression).await;
+    let outcome = p
+        .run_auto_processor_tick(&mut watcher, now_ms + UNRESOLVED_TEXT_RETRY_MS, &ctx)
+        .await;
+    stop_test_language("QmUnavailableWhereLang").await;
+    assert_eq!(
+        outcome,
+        TickOutcome::Pending,
+        "the resolved text satisfies the where and the turn waits out its debounce"
+    );
+    assert_eq!(
+        transcript_queries(&p),
+        2,
+        "past the retry clock the kept read is not trusted"
+    );
+    assert_eq!(pending_texts(&watcher, "wu"), vec!["resolved words"]);
+}
+
 /// A `path` scope — `{"parent":{"ids":C,"path":["ns://child","we://thread"]}}`
 /// — reads a conversation's children and, one hop further, their replies:
 /// both become pending turns while a message under another conversation
@@ -1575,11 +1685,7 @@ async fn a_path_scope_reads_children_and_their_replies() {
     )
     .await
     .expect("foreign edge");
-    let writes = commits
-        .recv()
-        .await
-        .expect("commit feed")
-        .expect("classified writes");
+    let writes = recv_edge(&mut commits, "ns://child").await;
     assert!(
         !p.auto_processor_writes_match(&watcher, &writes),
         "a child edge under another conversation must not wake the loop"
@@ -1593,11 +1699,7 @@ async fn a_path_scope_reads_children_and_their_replies() {
         p.add_link(link(s, pr, t), LinkStatus::Local, None, &ctx)
             .await
             .expect("in-scope edge");
-        let writes = commits
-            .recv()
-            .await
-            .expect("commit feed")
-            .expect("classified writes");
+        let writes = recv_edge(&mut commits, pr).await;
         assert!(
             p.auto_processor_writes_match(&watcher, &writes),
             "{s} -{pr}-> {t} must wake the loop"

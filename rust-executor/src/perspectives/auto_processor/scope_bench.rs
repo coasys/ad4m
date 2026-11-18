@@ -414,8 +414,11 @@ async fn scope_read_and_wake_costs() {
         let burst_at = Instant::now();
         let burst_links = seed(&p, &signer, n + 1, 1_000);
         let burst_seed_ms = burst_at.elapsed().as_millis();
+        // The `Writes` construction is the feed's work, not the matcher's —
+        // timing it inside would bill 2,000 links' collecting to the match.
+        let burst_writes = writes(&burst_links);
         let t = Instant::now();
-        let burst_match = p.auto_processor_writes_match(&watcher, &writes(&burst_links));
+        let burst_match = p.auto_processor_writes_match(&watcher, &burst_writes);
         let burst_match_us = t.elapsed().as_micros();
         let t = Instant::now();
         let burst = gather_transcript_model(&p, &cfg.source_class, &cfg.source_text, &query_json)

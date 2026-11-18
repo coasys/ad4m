@@ -31,6 +31,34 @@ pub(super) fn matches_where(
     where_clause: &BTreeMap<String, WhereCondition>,
     shape: &ModelShape,
 ) -> bool {
+    !matches!(
+        where_verdict(instance, where_clause, shape),
+        Verdict::Reject
+    )
+}
+
+/// What a `where` clause could prove about an instance. `Reject` is a proven
+/// non-match; `Unknown` is a leaf that could not be evaluated because the
+/// property it names is marked [`UNRESOLVED_KEY`](super::UNRESOLVED_KEY) — the
+/// raw expression target stands in for the value and proves neither match nor
+/// non-match. An `Unknown` row is kept: the conservative direction for a
+/// consumer that retires rows by this read is to re-ask once the expression
+/// arrives (an expression becoming servable is not a store write, so nothing
+/// else would), and the `__unresolved` marker travels with the row so it can
+/// tell "kept pending a fetch" from a real value.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Verdict {
+    Match,
+    Unknown,
+    Reject,
+}
+
+fn where_verdict(
+    instance: &Value,
+    where_clause: &BTreeMap<String, WhereCondition>,
+    shape: &ModelShape,
+) -> Verdict {
+    let mut undecidable = false;
     for (prop_name, condition) in where_clause {
         // --- Logical combinators ---
 
@@ -39,30 +67,46 @@ pub(super) fn matches_where(
         // rather than silently skipping the filter on malformed input.
         if prop_name == "OR" {
             let WhereCondition::SubClauses(branches) = condition else {
-                return false;
+                return Verdict::Reject;
             };
             if branches.is_empty() {
-                return false;
+                return Verdict::Reject;
             }
-            if !branches
-                .iter()
-                .any(|branch| matches_where(instance, branch, shape))
-            {
-                return false;
+            // Reject only when every branch is proven false; a branch that
+            // cannot be evaluated leaves the disjunction open.
+            let mut branch_unknown = false;
+            let mut branch_match = false;
+            for branch in branches {
+                match where_verdict(instance, branch, shape) {
+                    Verdict::Match => {
+                        branch_match = true;
+                        break;
+                    }
+                    Verdict::Unknown => branch_unknown = true,
+                    Verdict::Reject => {}
+                }
             }
-            continue;
+            if branch_match {
+                continue;
+            }
+            if branch_unknown {
+                undecidable = true;
+                continue;
+            }
+            return Verdict::Reject;
         }
 
         // AND: instance must match every branch. Fails closed on malformed input.
         if prop_name == "AND" {
             let WhereCondition::SubClauses(branches) = condition else {
-                return false;
+                return Verdict::Reject;
             };
-            if !branches
-                .iter()
-                .all(|branch| matches_where(instance, branch, shape))
-            {
-                return false;
+            for branch in branches {
+                match where_verdict(instance, branch, shape) {
+                    Verdict::Match => {}
+                    Verdict::Unknown => undecidable = true,
+                    Verdict::Reject => return Verdict::Reject,
+                }
             }
             continue;
         }
@@ -70,10 +114,13 @@ pub(super) fn matches_where(
         // NOT: instance must NOT match the branch. Fails closed on malformed input.
         if prop_name == "NOT" {
             let Some(branch) = condition.as_not_clause() else {
-                return false;
+                return Verdict::Reject;
             };
-            if matches_where(instance, &branch, shape) {
-                return false;
+            match where_verdict(instance, &branch, shape) {
+                Verdict::Match => return Verdict::Reject,
+                // An undecidable branch cannot prove the negation either way.
+                Verdict::Unknown => undecidable = true,
+                Verdict::Reject => {}
             }
             continue;
         }
@@ -102,8 +149,15 @@ pub(super) fn matches_where(
                 prop_name.as_str()
             };
             if !matches_condition(&instance[lookup_key], condition) {
-                return false;
+                return Verdict::Reject;
             }
+            continue;
+        }
+
+        // A leaf on a property whose `resolveLanguage` fetch failed is
+        // undecidable: the raw target stands in for the value.
+        if unresolved_names(instance).any(|n| n == prop_name) {
+            undecidable = true;
             continue;
         }
 
@@ -135,17 +189,32 @@ pub(super) fn matches_where(
             .any(|p| p.name == *prop_name && p.is_collection)
         {
             if !collection_contains(&instance[prop_name], condition) {
-                return false;
+                return Verdict::Reject;
             }
             continue;
         }
 
         let val = &instance[prop_name];
         if !matches_condition(val, condition) {
-            return false;
+            return Verdict::Reject;
         }
     }
-    true
+    if undecidable {
+        Verdict::Unknown
+    } else {
+        Verdict::Match
+    }
+}
+
+/// The property names whose `resolveLanguage` fetch failed on this
+/// instance, recorded under [`UNRESOLVED_KEY`](super::UNRESOLVED_KEY).
+fn unresolved_names(instance: &Value) -> impl Iterator<Item = &str> {
+    instance
+        .get(super::UNRESOLVED_KEY)
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.as_str())
 }
 
 /// Check whether a single JSON value matches a where condition.
@@ -1551,5 +1620,88 @@ mod tests {
             &wc,
             &shape
         ));
+    }
+
+    // ---- `__unresolved` rows -------------------------------------------------
+
+    /// A leaf that names a property the resolver marked `__unresolved` holds
+    /// the raw expression URL, so the condition can prove nothing: the row is
+    /// kept for a consumer (the transcript read) to re-ask once the language
+    /// serves the expression — an arrival that is not a store write.
+    #[test]
+    fn an_unresolved_leaf_cannot_reject_the_row() {
+        let shape = empty_shape();
+        let instance = json!({
+            "id": "msg://a",
+            "body": "QmLang://expr1",
+            "__unresolved": ["body"],
+        });
+        let wc = make_where(vec![(
+            "body",
+            WhereCondition::String("resolved words".to_string()),
+        )]);
+        assert!(matches_where(&instance, &wc, &shape));
+    }
+
+    /// Undecidable does not mean admitted: a sibling leaf that *proves* the
+    /// row out of scope still rejects it.
+    #[test]
+    fn an_unresolved_leaf_loses_to_a_proven_sibling() {
+        let shape = empty_shape();
+        let instance = json!({
+            "id": "msg://a",
+            "body": "QmLang://expr1",
+            "kind": "note",
+            "__unresolved": ["body"],
+        });
+        let wc = make_where(vec![
+            ("body", WhereCondition::String("resolved words".to_string())),
+            ("kind", WhereCondition::String("task".to_string())),
+        ]);
+        assert!(!matches_where(&instance, &wc, &shape));
+    }
+
+    /// `NOT` over an undecidable branch cannot prove the negation either, so
+    /// it does not reject.
+    #[test]
+    fn not_over_an_unresolved_leaf_cannot_reject_the_row() {
+        let shape = empty_shape();
+        let instance = json!({
+            "id": "msg://a",
+            "body": "QmLang://expr1",
+            "__unresolved": ["body"],
+        });
+        let wc = make_where(vec![(
+            "NOT",
+            WhereCondition::SubClause(make_where(vec![(
+                "body",
+                WhereCondition::String("resolved words".to_string()),
+            )])),
+        )]);
+        assert!(matches_where(&instance, &wc, &shape));
+    }
+
+    /// `OR` with one undecidable branch and no proven one stays open — only
+    /// every branch proven false rejects.
+    #[test]
+    fn or_with_an_undecidable_branch_stays_open() {
+        let shape = empty_shape();
+        let instance = json!({
+            "id": "msg://a",
+            "body": "QmLang://expr1",
+            "kind": "note",
+            "__unresolved": ["body"],
+        });
+        let wc = make_where(vec![(
+            "OR",
+            WhereCondition::SubClauses(vec![
+                make_where(vec![("kind", WhereCondition::String("task".to_string()))]),
+                make_where(vec![(
+                    "body",
+                    WhereCondition::String("resolved words".to_string()),
+                )]),
+            ]),
+        )]);
+        assert!(matches_where(&instance, &wc, &shape));
     }
 }

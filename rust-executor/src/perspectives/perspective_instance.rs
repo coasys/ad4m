@@ -4570,7 +4570,18 @@ impl PerspectiveInstance {
         // batch, and must see it even while the subscription side has already
         // collapsed to CheckAll. Ignored when no loop runs (no receivers):
         // `send` only fails then, and there is nothing to wake.
-        let _ = self.commit_writes.send(writes.clone().map(Arc::new));
+        //
+        // The generation tag is a watermark: this runs after the diff's own
+        // writes committed, so the value covers them (and possibly a
+        // concurrent diff's — only ever forwards, never short). A receiver
+        // draining the feed can then tell "commits up to generation N were
+        // all classified" from "the store moved past what the feed
+        // describes".
+        let feed = writes.clone().map(|mut w| {
+            w.generation = self.sparql_store.write_generation();
+            Arc::new(w)
+        });
+        let _ = self.commit_writes.send(feed);
 
         let mut changed = self.changed_predicates.lock().await;
 
@@ -7038,6 +7049,7 @@ impl PerspectiveInstance {
             Some(cs) => cs,
             None => match load_processors(self).await {
                 Ok(cs) => {
+                    let prev = watcher.reads.configs_snapshot();
                     let cs = watcher.reads.set_configs(generation, cs);
                     // (Re)build each processor's wake trigger from its scope.
                     // Their `near`/`via` node sets are re-fed when a
@@ -7048,9 +7060,26 @@ impl PerspectiveInstance {
                         .triggers
                         .retain(|id, _| cs.iter().any(|c| &c.processor_id == id));
                     for cfg in cs.iter() {
-                        watcher
-                            .triggers
-                            .insert(cfg.processor_id.clone(), self.auto_processor_trigger(cfg));
+                        // A rebuilt trigger has no result nodes, so its
+                        // `near`/`via` rules cannot see a write that edits an
+                        // instance the kept transcript returned — and the
+                        // commit feed below is drained before any read could
+                        // re-feed it. Rebuild and stale the kept transcript
+                        // only when the config set actually changed or the
+                        // trigger is absent: an unrelated write's generation
+                        // move re-reads the same configs, and rebuilding then
+                        // would both drop the fed nodes and re-read a kept
+                        // transcript nothing could have changed.
+                        let changed =
+                            prev.as_ref().is_none_or(|p| !p.iter().any(|o| o == cfg));
+                        if changed || !watcher.triggers.contains_key(&cfg.processor_id) {
+                            watcher
+                                .triggers
+                                .insert(cfg.processor_id.clone(), self.auto_processor_trigger(cfg));
+                            watcher
+                                .reads
+                                .mark_transcripts_stale([cfg.processor_id.clone()]);
+                        }
                     }
                     cs
                 }
@@ -7085,25 +7114,55 @@ impl PerspectiveInstance {
                 .commit_feed
                 .take()
                 .unwrap_or_else(|| (self.commit_writes.subscribe(), generation));
-            let mut classified = false;
+            // How far the drained feed described: each entry tags the
+            // generation its sender saw, so the highest tag is the feed's
+            // coverage watermark — every commit the store counted through
+            // that point was sent to be classified.
+            let mut covered_through: u64 = 0;
             loop {
                 use tokio::sync::broadcast::error::TryRecvError;
                 match commits.try_recv() {
                     Ok(write) => {
-                        classified = true;
+                        if let Some(w) = write.as_deref() {
+                            covered_through = covered_through.max(w.generation);
+                        }
                         self.auto_processor_mark_stale(watcher, write.as_deref());
                     }
                     Err(TryRecvError::Lagged(_)) => {
-                        classified = true;
                         self.auto_processor_mark_stale(watcher, None);
                     }
                     Err(TryRecvError::Empty) | Err(TryRecvError::Closed) => break,
                 }
             }
-            // The store moved without a commit for the feed to read — a
-            // write applied outside the commit path, which no trigger can
-            // classify. Treat it the way `Lagged` is treated.
-            if !classified && generation != seen_generation {
+            // The store moved past what the feed accounts for — a write
+            // applied outside the commit path, which no trigger can
+            // classify, or one sent after the generation was read. An entry
+            // having arrived is not proof of coverage; the watermark is.
+            // A commit's feed entry is broadcast from a spawned task and can
+            // lag the generation bump by a scheduling slice, so give an
+            // in-flight entry one bounded wait before treating the shortfall
+            // as a feed-bypassing write — which then stales them all, the way
+            // `Lagged` is treated.
+            if generation != seen_generation && covered_through < generation {
+                match tokio::time::timeout(
+                    std::time::Duration::from_millis(200),
+                    commits.recv(),
+                )
+                .await
+                {
+                    Ok(Ok(write)) => {
+                        if let Some(w) = write.as_deref() {
+                            covered_through = covered_through.max(w.generation);
+                        }
+                        self.auto_processor_mark_stale(watcher, write.as_deref());
+                    }
+                    Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {
+                        self.auto_processor_mark_stale(watcher, None);
+                    }
+                    _ => {}
+                }
+            }
+            if generation != seen_generation && covered_through < generation {
                 self.auto_processor_mark_stale(watcher, None);
             }
             watcher.commit_feed = Some((commits, generation));
@@ -7222,7 +7281,15 @@ impl PerspectiveInstance {
             }
         }
 
-        let had_pending = watcher.has_pending_for(configs.iter().map(|c| c.processor_id.as_str()));
+        // Only a processor whose reads succeeded keeps the base-rate tick.
+        // A failed read's turns stay queued — but nothing in a failed read
+        // advances their clocks' inputs, so polling every 500 ms just to
+        // fail the same reads again is churn; the queue is kept, a matching
+        // write still wakes the loop, and the idle fallback still ticks.
+        let had_pending = configs.iter().any(|c| {
+            !read_failed.contains(&c.processor_id)
+                && watcher.has_pending_for([c.processor_id.as_str()])
+        });
         if !had_pending {
             return TickOutcome::Idle;
         }

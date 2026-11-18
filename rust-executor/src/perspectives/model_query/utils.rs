@@ -178,14 +178,19 @@ pub(super) fn values_subselect(var: &str, ids: &[String], fallback_bgp: &str) ->
             .map(|id| format!("<{id}>"))
             .collect::<Vec<_>>()
             .join(" ");
-        format!("{{ SELECT ?{var} WHERE {{ VALUES ?{var} {{ {iris} }} }} }}")
+        format!("{{ SELECT DISTINCT ?{var} WHERE {{ VALUES ?{var} {{ {iris} }} }} }}")
     } else {
         let strs = ids
             .iter()
             .map(|id| format!("\"{}\"", escape_sparql_string(id)))
             .collect::<Vec<_>>()
             .join(", ");
-        format!("{{ SELECT ?{var} WHERE {{ {fallback_bgp} FILTER(STR(?{var}) IN ({strs})) }} }}")
+        // DISTINCT: `fallback_bgp` binds `?{var}` once per matching link, so a
+        // subject with several of them would repeat and multiply every row
+        // the sub-SELECT joins into (`__links` rows in hydration).
+        format!(
+            "{{ SELECT DISTINCT ?{var} WHERE {{ {fallback_bgp} FILTER(STR(?{var}) IN ({strs})) }} }}"
+        )
     }
 }
 

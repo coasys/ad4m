@@ -212,6 +212,14 @@ export interface TraverseByModel extends TraverseOptions {
  * `direction` applies to every hop; the anchors are excluded from their own
  * result, as with `transitive` and `levels`.
  *
+ * A path read is an edge walk: class conformance and `where` decide only
+ * which reached nodes are *returned*, never which are walked through — a
+ * reply under a direct child that fails the class or `where` is still
+ * returned when the reply itself passes. Every edge keeps the proof and
+ * link-status guards the rest of the query honours. `levels` answers
+ * differently on purpose: each of its levels is a scoped read, so a node it
+ * filters out does end that walk.
+ *
  * The path's length is the depth, so it is refused alongside `predicate` and
  * `levels` (other ways to name the relation), `transitive` and `maxDepth`
  * (other ways to bound it), and `limitPerAnchor` (it follows every link at

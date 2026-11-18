@@ -8688,6 +8688,27 @@ async fn a_path_walk_filters_every_hop_with_where() {
     );
 }
 
+/// `where` is a filter on the returned nodes, not on the walk: `block2` is
+/// not `"edited"`, yet the path still reaches through it to `reply2`, which
+/// is. The class-conformance twin is
+/// [`a_path_walk_passes_through_a_non_conforming_intermediate`].
+#[tokio::test]
+async fn a_path_walk_passes_through_a_where_failing_intermediate() {
+    let store = text_block_store();
+    let mut where_clause = BTreeMap::new();
+    where_clause.insert(
+        "source".to_string(),
+        WhereCondition::String("edited".to_string()),
+    );
+
+    let ids = path_walk(&store, Some(where_clause)).await;
+    assert_eq!(
+        ids,
+        vec!["we://block3", "we://reply2"],
+        "`block2` fails `where` yet still carries the path on to `reply2`: {ids:?}"
+    );
+}
+
 /// Every field that answers the same question another way is refused beside
 /// `path`, not silently preferred.
 #[tokio::test]
@@ -8896,12 +8917,13 @@ async fn a_path_walk_walks_a_node_it_reported_at_an_earlier_depth_in_reverse() {
     );
 }
 
-/// A node the shape does not select is not a frontier node either — the same
-/// answer `levels` gives, where every hop's rows are the scoped query's rows.
-/// `b` without its flag link cannot carry the walk on to `c`; it is dropped
-/// at hop 1 and never walked, so the path ends there.
+/// A `path` read is an edge walk: class conformance decides only which
+/// reached nodes are returned, never which are walked through. `b` without
+/// its flag link still carries the walk on to `c` — and `c`, conforming, is
+/// returned. `levels` answers differently on purpose: every hop's rows are
+/// the scoped query's rows, so there `b` would end the walk.
 #[tokio::test]
-async fn a_path_walk_does_not_pass_through_a_non_conforming_node() {
+async fn a_path_walk_passes_through_a_non_conforming_intermediate() {
     let store = SparqlStore::new(None).unwrap();
     let mut t = 1000;
     for (source, predicate, target) in [
@@ -8920,9 +8942,9 @@ async fn a_path_walk_does_not_pass_through_a_non_conforming_node() {
             ))
             .unwrap();
     }
-    // `b` and `c` never get their `we://TextBlock` flag, so `b` is neither
-    // reported nor walked and `c` is unreachable.
-    for id in ["we://a"] {
+    // `b` never gets its `we://TextBlock` flag: it is walked through but not
+    // returned. `a` and `c` conform, so both are returned.
+    for id in ["we://a", "we://c"] {
         t += 1;
         store
             .add_link(&make_link(
@@ -8936,8 +8958,8 @@ async fn a_path_walk_does_not_pass_through_a_non_conforming_node() {
     let ids = shared_node_walk(&store, "we://root", ScopeDirection::Out).await;
     assert_eq!(
         ids,
-        vec!["we://a"],
-        "a non-conforming intermediate ends the path, as `levels` ends it: {ids:?}"
+        vec!["we://a", "we://c"],
+        "`b` fails conformance yet still carries the path on to `c`: {ids:?}"
     );
 }
 

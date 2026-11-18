@@ -750,6 +750,45 @@ async fn a_flag_write_under_another_parent_does_not_rerun() {
     assert_eq!(now, vec!["ns://p4", "ns://p5"]);
 }
 
+/// A Comment linked to an in-scope Post is not linked to the anchor through
+/// the scope's edge — it is not a scope member. Its flag write is a `joins`
+/// match whose parent-edge gate must not apply: the gate proves a member
+/// out of scope, and a quantified record under an in-scope member is not a
+/// member itself. Red when `joins`/`scan` gated every scanned class's flag
+/// (#1795 review round 2, item 12).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_quantified_records_flag_inside_the_scope_reruns() {
+    let mut p = blog().await;
+    record(&mut p, "ns://p1", "Post", &[]).await;
+    add(&mut p, "ns://board", "ns://child", "ns://p1").await;
+    // c1's relation to the in-scope post and its `where` value land before
+    // its flag: only the flag write itself can wake the check.
+    add(&mut p, "ns://p1", "ns://comment", "ns://c1").await;
+    add(&mut p, "ns://c1", "ns://text", "literal:string:hot").await;
+    check(&p).await;
+
+    let (id, first) = subscribe(
+        &p,
+        "Post",
+        json!({
+            "parent": { "id": "ns://board", "predicate": "ns://child" },
+            "where": { "comments": { "some": { "text": "hot" } } }
+        }),
+    )
+    .await;
+    assert!(ids(&first).is_empty(), "{first}");
+
+    add(&mut p, "ns://c1", FLAG, "ns://comment").await;
+    check(&p).await;
+
+    assert_eq!(
+        reruns::count(&id),
+        1,
+        "a flag on a quantified record linked in scope must wake"
+    );
+    assert_eq!(ids(&last_result(&p, &id).await), vec!["ns://p1"]);
+}
+
 /// A `path` scope — children through one predicate, replies through another.
 /// A write on either hop's predicate wakes the query; a write on an
 /// unrelated predicate does not. Flag writes stay conservative: a two-hop
@@ -772,19 +811,41 @@ async fn a_path_scope_wakes_on_either_hop() {
     check(&p).await;
     assert_eq!(reruns::count(&id), 0, "unrelated predicate: {id}");
 
-    // Hop 1: an edge on the first path predicate under the anchor.
+    // Hop 1: an edge on the first path predicate under the anchor. The flag
+    // and the edge get their own checks, or the rerun could have been the
+    // flag's conservative wake instead of the edge's.
     record(&mut p, "ns://block", "Post", &[]).await;
+    check(&p).await;
+    assert_eq!(
+        reruns::count(&id),
+        1,
+        "a class-flag write is conservatively a wake at depth"
+    );
     add(&mut p, "ns://conv", "ns://child", "ns://block").await;
     check(&p).await;
-    assert_eq!(reruns::count(&id), 1, "the first hop's edge must wake");
+    assert_eq!(
+        reruns::count(&id),
+        2,
+        "the first hop's edge must wake on its own"
+    );
     assert_eq!(ids(&last_result(&p, &id).await), vec!["ns://block"]);
 
     // Hop 2: a reply edge on the second path predicate, under a node whose
     // membership the trigger cannot see — the predicate alone must wake it.
     record(&mut p, "ns://reply", "Post", &[]).await;
+    check(&p).await;
+    assert_eq!(
+        reruns::count(&id),
+        3,
+        "a class-flag write is conservatively a wake at depth"
+    );
     add(&mut p, "ns://block", "ns://thread", "ns://reply").await;
     check(&p).await;
-    assert_eq!(reruns::count(&id), 2, "the second hop's edge must wake");
+    assert_eq!(
+        reruns::count(&id),
+        4,
+        "the second hop's edge must wake on its own"
+    );
     let mut now = ids(&last_result(&p, &id).await);
     now.sort();
     assert_eq!(now, vec!["ns://block", "ns://reply"]);
@@ -796,7 +857,7 @@ async fn a_path_scope_wakes_on_either_hop() {
     check(&p).await;
     assert_eq!(
         reruns::count(&id),
-        3,
+        5,
         "a class-flag write is conservatively a wake at depth"
     );
     assert!(
@@ -810,7 +871,7 @@ async fn a_path_scope_wakes_on_either_hop() {
     check(&p).await;
     assert_eq!(
         reruns::count(&id),
-        3,
+        5,
         "an edge under another anchor must not wake"
     );
 }

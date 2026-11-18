@@ -397,6 +397,12 @@ impl TickReads {
             .map(|(_, c)| c.clone())
     }
 
+    /// The last-loaded config set whatever its generation — for comparing a
+    /// reload against what the watcher already knew.
+    pub(crate) fn configs_snapshot(&self) -> Option<Arc<Vec<AutoProcessorConfig>>> {
+        self.configs.as_ref().map(|(_, c)| c.clone())
+    }
+
     /// Keep `configs`, and drop the reads of processors no longer declared.
     pub(crate) fn set_configs(
         &mut self,
