@@ -360,9 +360,10 @@ describeIfLLM("ai.session* — persistent AI sessions (WS + real LLM)", function
 
     const adds = toolSteps(msgs, "add_link");
     expect(adds.length, "the turn called add_link").to.be.greaterThan(0);
-    // `writes` on the step row is the executor's own answer to "did this
-    // change something" (agent_session::tool_writes), the flag a client
-    // colours write steps from instead of guessing at the name.
+    // `writes` on the step row is the tool's declared intent
+    // (agent_session::tool_writes), recorded before the call runs. A refused
+    // or failed write still has writes: true. The client does not guess from
+    // the name.
     expect(
       stepContent(adds[0]).writes,
       "the add_link step is marked a write",

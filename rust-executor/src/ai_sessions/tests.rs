@@ -619,9 +619,9 @@ async fn a_tool_step_row_says_whether_its_call_writes() {
     let alice = user(did, everything());
     let session = create(&alice);
 
-    // One read call and one write call: each step's row carries `writes`
-    // answered by `agent_session::tool_writes` — the flag a client colors
-    // "changed something" from instead of guessing at the name.
+    // One read call and one write call. Each step's row carries `writes`,
+    // the tool's declared intent (`agent_session::tool_writes`), recorded
+    // before the call runs. A refused or failed write still has `writes: true`.
     let first = service::send(
         &alice,
         &session.id,
