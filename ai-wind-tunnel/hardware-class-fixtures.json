@@ -3,13 +3,33 @@
   "description": "Classifier inputs and the class each must get from hardware-classes.json. Every classifier (TS in tests/js, Rust in the executor) runs these. Memory in bytes.",
   "fixtures": [
     {
-      "name": "AMD Strix Halo, 128 GB unified, ROCm and Vulkan",
+      "name": "AMD Strix Halo (Ryzen AI Max+ 395), 128 GB unified, ROCm and Vulkan",
+      "input": { "os": "linux", "arch": "x64", "cpuBrand": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S", "memoryBytes": 130996502528, "backends": ["cpu", "rocm", "vulkan"], "gpus": [{ "vendor": "amd", "vramBytes": 536870912, "unified": true }] },
+      "expected": "amd-strix-halo-128"
+    },
+    {
+      "name": "AMD Strix Halo (Ryzen AI Max 390), 128 GB unified, Windows, Vulkan",
+      "input": { "os": "windows", "arch": "x64", "cpuBrand": "AMD Ryzen AI Max 390 w/ Radeon 8050S", "memoryBytes": 137438953472, "backends": ["cpu", "vulkan"], "gpus": [{ "vendor": "amd", "vramBytes": 536870912, "unified": true }] },
+      "expected": "amd-strix-halo-128"
+    },
+    {
+      "name": "AMD Strix Halo, 128 GB unified, without a GPU backend falls to cpu",
+      "input": { "os": "linux", "arch": "x64", "cpuBrand": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S", "memoryBytes": 130996502528, "backends": ["cpu"], "gpus": [{ "vendor": "amd", "vramBytes": 536870912, "unified": true }] },
+      "expected": "cpu-128gb"
+    },
+    {
+      "name": "AMD Strix Point (Ryzen AI 9 HX 370), 128 GB: an AMD iGPU, not Strix Halo",
+      "input": { "os": "linux", "arch": "x64", "cpuBrand": "AMD Ryzen AI 9 HX 370 w/ Radeon 890M", "memoryBytes": 133143986176, "backends": ["cpu", "rocm", "vulkan"], "gpus": [{ "vendor": "amd", "vramBytes": 536870912, "unified": true }] },
+      "expected": "amd-igpu-uma-128"
+    },
+    {
+      "name": "AMD iGPU, 128 GB unified, CPU brand not read",
       "input": { "os": "linux", "arch": "x64", "memoryBytes": 130996502528, "backends": ["cpu", "rocm", "vulkan"], "gpus": [{ "vendor": "amd", "vramBytes": 536870912, "unified": true }] },
       "expected": "amd-igpu-uma-128"
     },
     {
       "name": "AMD Strix Halo, 64 GB unified, Vulkan only",
-      "input": { "os": "linux", "arch": "x64", "memoryBytes": 66571993088, "backends": ["cpu", "vulkan"], "gpus": [{ "vendor": "amd", "vramBytes": 4294967296, "unified": true }] },
+      "input": { "os": "linux", "arch": "x64", "cpuBrand": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S", "memoryBytes": 66571993088, "backends": ["cpu", "vulkan"], "gpus": [{ "vendor": "amd", "vramBytes": 4294967296, "unified": true }] },
       "expected": "amd-igpu-uma-64"
     },
     {

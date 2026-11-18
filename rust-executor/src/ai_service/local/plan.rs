@@ -1099,6 +1099,72 @@ mod tests {
         device(data, 64, vec![igpu], backends)
     }
 
+    /// An AMD APU with 122 GiB of RAM and 61 GiB of GTT, as amdgpu's sysfs reports it, and
+    /// the CPU brand `brand`.
+    fn amd_apu_128(data: &Data, brand: &str) -> LocalHardware {
+        let mut igpu = gpu(GpuVendor::Amd, GpuType::Integrated, 0);
+        igpu.vram_bytes = Some(GIB / 2);
+        igpu.shared_bytes = Some(61 * GIB);
+        igpu.source = "sysfs".into();
+        let mut hardware = device(
+            data,
+            122,
+            vec![igpu],
+            vec![Backend::Cpu, Backend::Vulkan, Backend::Rocm],
+        );
+        hardware.cpu.brand = brand.into();
+        crate::ai_service::local::hardware::finish(&mut hardware, &data.classes);
+        hardware
+    }
+
+    /// The embedded data: a Strix Halo (Ryzen AI Max, 128 GB unified) chats on Qwen3.8 27B
+    /// with the flags the wind tunnel measured on it, and keeps its class family's
+    /// embeddings and speech. Another AMD APU with as much memory keeps the 4B.
+    #[test]
+    fn strix_halo_defaults_to_qwen3_8_27b_and_other_amd_apus_keep_theirs() {
+        let data = crate::ai_service::local::data::embedded().unwrap();
+        let llm = |plan: &LocalPlan| {
+            plan.models
+                .iter()
+                .find(|m| m.service == Service::Llm)
+                .cloned()
+                .unwrap()
+        };
+
+        let strix = amd_apu_128(data, "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S");
+        assert_eq!(strix.hardware_class, "amd-strix-halo-128");
+        let plan = plan(data, &strix, &nothing_installed);
+        assert!(plan.fits, "{:?}", plan.reasons);
+        let chat = llm(&plan);
+        assert_eq!(chat.model_id, "qwen3.8-27b-ud-q4_k_m");
+        assert_eq!(chat.basis, Basis::Measured);
+        assert_eq!(chat.from_class, "amd-strix-halo-128");
+        assert!(!chat.evidence.is_empty());
+        let flags = chat.server_flags.join(" ");
+        for flag in ["-c 65536", "-np 1", "-ngl 999", "--spec-type draft-mtp"] {
+            assert!(flags.contains(flag), "{flag} missing from {flags}");
+        }
+        let llama = plan
+            .runtimes
+            .iter()
+            .find(|r| r.runtime_id == "llama-server")
+            .unwrap();
+        assert_eq!(llama.build, "linux-x64-vulkan");
+        let others: Vec<_> = plan
+            .models
+            .iter()
+            .filter(|m| m.service != Service::Llm)
+            .map(|m| m.from_class.as_str())
+            .collect();
+        assert_eq!(others, vec!["amd-igpu-uma-128", "amd-igpu-uma-128"]);
+
+        let point = amd_apu_128(data, "AMD Ryzen AI 9 HX 370 w/ Radeon 890M");
+        assert_eq!(point.hardware_class, "amd-igpu-uma-128");
+        let chat = llm(&super::plan(data, &point, &nothing_installed));
+        assert_eq!(chat.model_id, "qwen3.5-4b-q4_k_m");
+        assert_eq!(chat.from_class, "amd-igpu-uma-128");
+    }
+
     /// The ROCm build runs on the CPU without the system ROCm libraries: where Vulkan runs,
     /// a recommended ROCm build becomes Vulkan, with the reason. Without Vulkan it stays.
     #[test]
@@ -1189,12 +1255,12 @@ mod tests {
         assert!(!carried.server_flags[at + 1].contains('"'));
     }
 
-    /// The embedded data on the smoke-test device: a Strix Halo APU, 128 GB, Vulkan. The
-    /// wind tunnel measured this class: Qwen3.5 4B on Vulkan, nomic (measured on ROCm, here
-    /// on the chat model's Vulkan llama-server), Parakeet v3 on nemo-speech's Vulkan build
-    /// with its device flag.
+    /// The embedded data on an AMD APU, 128 GB, Vulkan, whose CPU brand is not a Ryzen AI
+    /// Max (so not `amd-strix-halo-128`). The wind tunnel measured this class: Qwen3.5 4B on
+    /// Vulkan, nomic (measured on ROCm, here on the chat model's Vulkan llama-server),
+    /// Parakeet v3 on nemo-speech's Vulkan build with its device flag.
     #[test]
-    fn the_embedded_data_plans_the_measured_set_on_strix_halo() {
+    fn the_embedded_data_plans_the_measured_set_on_an_amd_apu_with_128_gb() {
         let data = crate::ai_service::local::data::embedded().unwrap();
         let mut strix = gpu(GpuVendor::Amd, GpuType::Integrated, 0);
         strix.vram_bytes = Some(GIB / 2);
