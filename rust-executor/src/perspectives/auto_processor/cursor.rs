@@ -9,6 +9,7 @@
 use super::config::processor_node;
 use crate::perspectives::interpretation::decode_literal_string;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
+use crate::perspectives::sparql_store::EvalStop;
 use std::collections::HashSet;
 
 /// True when `timestamp` (RFC3339 on the body-link reifier) is inside
@@ -69,23 +70,45 @@ pub async fn load_processed_sources(
     perspective: &PerspectiveInstance,
     processor_id: &str,
 ) -> anyhow::Result<Vec<ProcessedSource>> {
+    load_processed_sources_stopped(perspective, processor_id, &EvalStop::none()).await
+}
+
+/// [`load_processed_sources`] under `stop`. The cursor query and the decode
+/// of its rows end when the call's gate fires.
+pub(crate) async fn load_processed_sources_stopped(
+    perspective: &PerspectiveInstance,
+    processor_id: &str,
+    stop: &EvalStop,
+) -> anyhow::Result<Vec<ProcessedSource>> {
+    if let Some(err) = stop.stopped_err("cursor") {
+        return Err(anyhow::anyhow!(err));
+    }
     let rows_json = perspective
-        .sparql_query(processed_ids_query(processor_id))
+        .sparql_query_stopped(stop, &processed_ids_query(processor_id))
         .map_err(|e| anyhow::anyhow!("load_processed_source_ids: SPARQL failed: {e:#}"))?;
+    if let Some(err) = stop.stopped_err("cursor") {
+        return Err(anyhow::anyhow!(err));
+    }
     let rows: Vec<serde_json::Value> = serde_json::from_str(&rows_json)
         .map_err(|e| anyhow::anyhow!("load_processed_source_ids: bad SPARQL JSON: {e:#}"))?;
-    Ok(rows
-        .into_iter()
-        .filter_map(|row| {
-            let id = decode_binding(row.get("id")?.as_str()?);
-            let ran_at_ms = row
-                .get("ran_at")
-                .and_then(|v| v.as_str())
-                .map(decode_binding)
-                .and_then(|s| s.parse::<i64>().ok());
-            Some(ProcessedSource { id, ran_at_ms })
-        })
-        .collect())
+    let mut out = Vec::with_capacity(rows.len());
+    for (i, row) in rows.into_iter().enumerate() {
+        if i % 32 == 0 {
+            if let Some(err) = stop.stopped_err("cursor") {
+                return Err(anyhow::anyhow!(err));
+            }
+        }
+        let Some(id) = row.get("id").and_then(|v| v.as_str()).map(decode_binding) else {
+            continue;
+        };
+        let ran_at_ms = row
+            .get("ran_at")
+            .and_then(|v| v.as_str())
+            .map(decode_binding)
+            .and_then(|s| s.parse::<i64>().ok());
+        out.push(ProcessedSource { id, ran_at_ms });
+    }
+    Ok(out)
 }
 
 /// The turn ids `rows` retire at `now_ms`. When `window_ms` is `Some`, only

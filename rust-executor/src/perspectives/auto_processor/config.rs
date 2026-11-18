@@ -33,7 +33,10 @@ use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClas
 use crate::types::{Link, LinkExpression, LinkQuery, LinkStatus};
 
 use super::scalar_string;
-use crate::perspectives::hardwired_class::{ensure_subject_class, subject_class_registered};
+use crate::perspectives::hardwired_class::{
+    ensure_subject_class, subject_class_registered_stopped,
+};
+use crate::perspectives::sparql_store::EvalStop;
 
 /// Instances already reported as unloadable, so each is complained about once.
 ///
@@ -518,9 +521,18 @@ fn class_option() -> SubjectClassOption {
 pub async fn load_processors(
     perspective: &PerspectiveInstance,
 ) -> anyhow::Result<Vec<AutoProcessorConfig>> {
+    load_processors_stopped(perspective, &EvalStop::none()).await
+}
+
+/// [`load_processors`] under `stop`. A fired stop ends the class scan and the
+/// model query, and the instance walk checks it every few rows.
+pub(crate) async fn load_processors_stopped(
+    perspective: &PerspectiveInstance,
+    stop: &EvalStop,
+) -> anyhow::Result<Vec<AutoProcessorConfig>> {
     // The watcher polls this on every perspective, most of which never declare
     // a processor: no registered class ⇒ no shape to query ⇒ nothing to load.
-    if !subject_class_registered(perspective, AUTO_PROCESSOR_TARGET_CLASS).await? {
+    if !subject_class_registered_stopped(perspective, AUTO_PROCESSOR_TARGET_CLASS, stop).await? {
         return Ok(Vec::new());
     }
     // Property names MUST match the camelCase names in AUTO_PROCESSOR_SDNA
@@ -535,14 +547,27 @@ pub async fn load_processors(
     })
     .to_string();
     let result_json = perspective
-        .model_query(AUTO_PROCESSOR_CLASS, &query)
+        .model_query_stopped(stop, AUTO_PROCESSOR_CLASS, &query)
         .await
         .map_err(|e| anyhow::anyhow!("load_processors: model_query failed: {e:#}"))?;
+    if let Some(err) = stop.stopped_err("load_processors") {
+        return Err(anyhow::anyhow!(err));
+    }
     let result: serde_json::Value = serde_json::from_str(&result_json)
         .map_err(|e| anyhow::anyhow!("load_processors: bad model_query result: {e:#}"))?;
 
     let mut out = Vec::new();
-    for instance in result["instances"].as_array().into_iter().flatten() {
+    for (instance_i, instance) in result["instances"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        if instance_i % 8 == 0 {
+            if let Some(err) = stop.stopped_err("load_processors") {
+                return Err(anyhow::anyhow!(err));
+            }
+        }
         match config_from_instance(instance) {
             Some(cfg) => {
                 log_flow_selection_once(&cfg);

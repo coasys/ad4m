@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, HashSet};
 
 mod read;
 mod write;
+pub(crate) use read::gather_transcript_sparql_stopped;
 pub use read::*;
 pub use write::*;
 

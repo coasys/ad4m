@@ -587,7 +587,8 @@ async fn id_comparisons_in_two_ticks_over(n: usize) -> (u64, u64) {
         .collect();
     watcher
         .reads
-        .set_transcript(&cfg, generation, turns, |_, _| true);
+        .set_transcript(&cfg, generation, turns, |_, _| true)
+        .expect("kept transcript");
 
     let now_ms = chrono::Utc::now().timestamp_millis();
     let before = id_comparisons();
@@ -1272,4 +1273,421 @@ async fn a_late_older_turn_is_merged_where_a_fresh_read_puts_it() {
         batch_ids(fresh.drain_ready_batch(&drain, now_ms + 20_500)),
         "the first FIFO batch is the fresh read's"
     );
+}
+
+async fn one_turn(processor_id: &str) -> (PerspectiveInstance, crate::agent::AgentContext, i64) {
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+    seed_message(
+        &mut p,
+        &ctx,
+        "msg://1",
+        "did:key:alice",
+        "hello",
+        "ns://body",
+    )
+    .await;
+    write_processor(
+        &mut p,
+        &config(processor_id, 600_000, None),
+        Some(false),
+        &ctx,
+    )
+    .await
+    .expect("write_processor");
+    (p, ctx, chrono::Utc::now().timestamp_millis())
+}
+
+async fn wait_until(mut ready: impl FnMut() -> bool, limit: Duration) -> bool {
+    let start = std::time::Instant::now();
+    while start.elapsed() < limit {
+        if ready() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    ready()
+}
+
+/// The transcript read must not run on the Tokio worker. A current-thread
+/// runtime sleeps 30ms while that read is held; the sleep ends inside the
+/// hold, and the read's thread is not the runtime's.
+#[tokio::test(flavor = "current_thread")]
+async fn prepare_read_does_not_block_the_runtime_timer() {
+    use super::read_offload::probe::{self, Hold, Park};
+    use super::read_offload::Stage;
+
+    let runtime_thread = std::thread::current().id();
+    let (p, ctx, now_ms) = one_turn("timer").await;
+    let _guard = probe::install(
+        Park::Only(Stage::Source),
+        Hold::Timed(Duration::from_millis(200)),
+        None,
+        None,
+    );
+    let mut watcher = WatcherState::new();
+    let tick = tokio::spawn(async move {
+        p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
+        (p, watcher)
+    });
+    assert!(
+        wait_until(|| probe::hold_start().is_some(), Duration::from_secs(2)).await,
+        "the transcript read did not start"
+    );
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    let fired = std::time::Instant::now();
+    let start = probe::hold_start().expect("hold start");
+    assert!(
+        probe::hold_end().is_none_or(|end| fired <= end),
+        "the runtime timer fired after the transcript read released the worker"
+    );
+    assert!(fired >= start);
+    assert_ne!(
+        probe::query_thread(),
+        Some(runtime_thread),
+        "the transcript read ran on the runtime thread"
+    );
+    tokio::time::timeout(Duration::from_secs(3), tick)
+        .await
+        .expect("the tick ends")
+        .expect("tick task");
+}
+
+/// Four prepares at once share two read slots. One tick holds one slot for
+/// the whole read, so the overlap is the number of ticks, not the number of
+/// queries inside a tick.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn at_most_two_prepare_reads_run_at_once() {
+    use super::read_offload::probe::{self, Hold, Park};
+    use super::read_offload::read_slot_count;
+
+    let mut ready = Vec::new();
+    for i in 0..4 {
+        let (p, ctx, now_ms) = one_turn(&format!("cap-{i}")).await;
+        let context = if i % 2 == 0 {
+            ctx
+        } else {
+            crate::agent::AgentContext::managed(format!("did:key:z{i}"))
+        };
+        ready.push((p, context, now_ms));
+    }
+    let _guard = probe::install(
+        Park::All,
+        Hold::UntilRelease {
+            limit: Duration::from_secs(8),
+        },
+        None,
+        None,
+    );
+    let mut tasks = Vec::new();
+    for (p, ctx, now_ms) in ready {
+        tasks.push(tokio::spawn(async move {
+            let mut watcher = WatcherState::new();
+            p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
+        }));
+    }
+    let cap = read_slot_count();
+    let mut last = usize::MAX;
+    let mut stable = 0u32;
+    let start = std::time::Instant::now();
+    while start.elapsed() < Duration::from_secs(8) {
+        let cur = probe::current();
+        if cur == last && cur > 0 {
+            stable += 1;
+            if stable >= 20 {
+                break;
+            }
+        } else {
+            stable = 0;
+            last = cur;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        probe::current(),
+        cap,
+        "peak {} entered {} cap {cap}",
+        probe::peak(),
+        probe::entered()
+    );
+    assert!(
+        probe::peak() <= cap,
+        "peak {} passed the read cap {cap}",
+        probe::peak()
+    );
+    drop(_guard);
+    for task in tasks {
+        tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .expect("tick ends")
+            .expect("tick task");
+    }
+}
+
+/// Aborting a tick cancels the read it is inside. The slot stays taken until
+/// that read leaves `query_internal`, so another tick cannot start one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn aborting_a_prepare_cancels_the_read_and_holds_the_slot() {
+    use super::read_offload::probe::{self, Hold, Park};
+    use super::read_offload::{available_permits, read_slot_count};
+    use crate::perspectives::sparql_store::eval_count;
+
+    let cap = read_slot_count();
+    let mut ready = Vec::new();
+    for i in 0..cap {
+        ready.push(one_turn(&format!("abort-{i}")).await);
+    }
+    let (extra_p, extra_ctx, extra_now) = one_turn("abort-extra").await;
+    let baseline = eval_count::running();
+    let _guard = probe::install(
+        Park::All,
+        Hold::UntilRelease {
+            limit: Duration::from_secs(8),
+        },
+        None,
+        None,
+    );
+    let mut tasks = Vec::new();
+    for (p, ctx, now_ms) in ready {
+        tasks.push(tokio::spawn(async move {
+            let mut watcher = WatcherState::new();
+            p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
+        }));
+    }
+    assert!(
+        wait_until(|| probe::current() == cap, Duration::from_secs(5)).await,
+        "the read slots did not fill: current {} cap {cap}",
+        probe::current()
+    );
+    let entered = probe::entered();
+    let extra = tokio::spawn(async move {
+        let mut watcher = WatcherState::new();
+        extra_p
+            .run_auto_processor_tick(&mut watcher, extra_now, &extra_ctx)
+            .await;
+    });
+    tasks.remove(0).abort();
+    assert!(
+        wait_until(probe::stopping, Duration::from_secs(2)).await,
+        "aborting the tick did not stop the read it was inside"
+    );
+    assert!(
+        probe::stopping_while_running(),
+        "the stop was recorded after the eval had already ended"
+    );
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        probe::entered(),
+        entered,
+        "a tick started a read while the aborted one still held the slot"
+    );
+    assert_eq!(available_permits(), 0, "the aborted read released its slot");
+    probe::set_pass();
+    tokio::time::timeout(Duration::from_secs(10), extra)
+        .await
+        .expect("extra tick ends")
+        .expect("extra tick");
+    for task in tasks {
+        tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .expect("tick ends")
+            .expect("tick task");
+    }
+    assert_eq!(eval_count::running(), baseline);
+    assert!(
+        probe::entered() > entered,
+        "the extra tick never entered a read"
+    );
+}
+
+async fn deadline_then_queues(stage: super::read_offload::Stage, processor_id: &str) {
+    use super::read_offload::probe::{self, Hold, Park};
+    use super::watcher::TickOutcome;
+    use crate::perspectives::sparql_store::eval_count;
+
+    let (p, ctx, now_ms) = one_turn(processor_id).await;
+    let baseline = eval_count::running();
+    let _guard = probe::install(
+        Park::Only(stage),
+        Hold::Timed(Duration::from_millis(500)),
+        None,
+        Some((stage, Duration::from_millis(80))),
+    );
+    let mut watcher = WatcherState::new();
+    let outcome = p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
+    assert!(
+        probe::saw_stop() && probe::stop_was_deadline(),
+        "stage {stage:?} did not stop on its deadline (saw {} deadline {})",
+        probe::saw_stop(),
+        probe::stop_was_deadline()
+    );
+    assert_eq!(eval_count::running(), baseline);
+    assert!(
+        pending_texts(&watcher, processor_id).is_empty(),
+        "a stopped read queued a turn"
+    );
+    match stage {
+        super::read_offload::Stage::Config => {
+            assert!(watcher
+                .reads
+                .configs(p.sparql_store.write_generation())
+                .is_none());
+            assert_eq!(outcome, TickOutcome::Idle);
+        }
+        super::read_offload::Stage::Cursor => {
+            assert!(watcher
+                .reads
+                .processed(processor_id, p.sparql_store.write_generation())
+                .is_none());
+        }
+        super::read_offload::Stage::Source => {
+            assert!(watcher
+                .reads
+                .transcript(&config(processor_id, 600_000, None))
+                .is_none());
+        }
+    }
+    drop(_guard);
+    p.run_auto_processor_tick(&mut watcher, now_ms + 500, &ctx)
+        .await;
+    assert_eq!(pending_texts(&watcher, processor_id), vec!["hello"]);
+}
+
+#[tokio::test]
+async fn a_config_read_deadline_does_not_keep_a_partial_config() {
+    deadline_then_queues(super::read_offload::Stage::Config, "deadline-config").await;
+}
+
+#[tokio::test]
+async fn a_cursor_read_deadline_does_not_keep_a_partial_cursor() {
+    deadline_then_queues(super::read_offload::Stage::Cursor, "deadline-cursor").await;
+}
+
+#[tokio::test]
+async fn a_source_read_deadline_does_not_keep_a_partial_transcript() {
+    deadline_then_queues(super::read_offload::Stage::Source, "deadline-source").await;
+}
+
+/// A panic in the read is a failed tick. The watcher comes back, and the next
+/// tick still queues the turn.
+#[tokio::test]
+async fn a_panicked_prepare_is_a_pending_tick() {
+    use super::read_offload::probe::{self, Hold, Park};
+    use super::read_offload::Stage;
+    use super::watcher::TickOutcome;
+
+    let (p, ctx, now_ms) = one_turn("panic").await;
+    let generation = p.sparql_store.write_generation();
+    let _guard = probe::install(
+        Park::Only(Stage::Source),
+        Hold::Timed(Duration::from_millis(50)),
+        Some(Stage::Source),
+        None,
+    );
+    let mut watcher = WatcherState::new();
+    let outcome = p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
+    assert_eq!(outcome, TickOutcome::Pending);
+    assert!(
+        watcher.reads.configs(generation).is_some(),
+        "the panic lost the watcher"
+    );
+    drop(_guard);
+    p.run_auto_processor_tick(&mut watcher, now_ms + 500, &ctx)
+        .await;
+    assert_eq!(pending_texts(&watcher, "panic"), vec!["hello"]);
+}
+
+/// A link written while the transcript query is parked is not in the
+/// generation captured before that query. The next tick reads again.
+#[tokio::test]
+async fn a_write_during_the_read_is_read_again_on_the_next_tick() {
+    use super::read_offload::probe::{self, Hold, Park};
+    use super::read_offload::Stage;
+
+    let (p, ctx, now_ms) = one_turn("during").await;
+    let writer = p.clone();
+    let _guard = probe::install(
+        Park::Only(Stage::Source),
+        Hold::UntilRelease {
+            limit: Duration::from_secs(5),
+        },
+        None,
+        None,
+    );
+    let tick = tokio::spawn(async move {
+        let mut watcher = WatcherState::new();
+        p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
+        (p, watcher, ctx)
+    });
+    assert!(
+        wait_until(|| probe::hold_start().is_some(), Duration::from_secs(3)).await,
+        "the transcript read did not start"
+    );
+    let signer = crate::agent::signatures::TestSigner::generate();
+    writer
+        .sparql_store
+        .add_link(&body_link(&signer, "msg://2", "second", chrono::Utc::now()))
+        .expect("write during the read");
+    probe::set_pass();
+    let (p, mut watcher, ctx) = tokio::time::timeout(Duration::from_secs(5), tick)
+        .await
+        .expect("tick ends")
+        .expect("tick task");
+    drop(_guard);
+    let after_hold = transcript_queries(&p);
+    p.run_auto_processor_tick(&mut watcher, now_ms + 500, &ctx)
+        .await;
+    assert!(
+        transcript_queries(&p) > after_hold,
+        "the next tick reused a transcript tagged with the generation from before the write"
+    );
+    let texts = pending_texts(&watcher, "during");
+    assert!(texts.contains(&"hello".to_string()));
+    assert!(texts.contains(&"second".to_string()));
+}
+
+/// `OPTIONAL` is not a monotone delta. The tick reads the whole scope query,
+/// and the kept turns are the fresh read's turns.
+#[tokio::test]
+async fn an_optional_scope_is_read_in_full_and_matches_a_fresh_read() {
+    const SCOPE: &str = r#"SELECT ?speaker ?text ?timestamp WHERE {
+  ?m <ns://body> ?text .
+  ?r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?m <ns://body> ?text )>> .
+  ?r <ad4m://ontology/author> ?speaker .
+  ?r <ad4m://ontology/timestamp> ?timestamp .
+  OPTIONAL { ?m <ns://flag> ?flag }
+}
+ORDER BY ?timestamp"#;
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+    seed_message(&mut p, &ctx, "msg://1", "did:key:alice", "one", "ns://body").await;
+    let cfg = AutoProcessorConfig {
+        source_scope_query: SCOPE.into(),
+        ..config("optional", 600_000, None)
+    };
+    write_processor(&mut p, &cfg, Some(false), &ctx)
+        .await
+        .expect("write_processor");
+    let mut watcher = WatcherState::new();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
+    seed_message(&mut p, &ctx, "msg://2", "did:key:alice", "two", "ns://body").await;
+    let before = transcript_queries(&p);
+    p.run_auto_processor_tick(&mut watcher, now_ms + 500, &ctx)
+        .await;
+    assert_eq!(transcript_queries(&p) - before, 1);
+    let last = p
+        .sparql_store
+        .queries_run()
+        .iter()
+        .rev()
+        .find(|query| is_transcript_read(query))
+        .expect("a transcript read")
+        .clone();
+    assert!(last.contains("OPTIONAL"), "the full scope query ran");
+    assert!(
+        !last.contains("VALUES"),
+        "OPTIONAL was answered with a delta"
+    );
+    let (kept, fresh) = kept_and_fresh_ids(&p, &watcher, &cfg).await;
+    assert_eq!(kept, fresh);
+    assert_eq!(pending_texts(&watcher, "optional"), vec!["one", "two"]);
 }

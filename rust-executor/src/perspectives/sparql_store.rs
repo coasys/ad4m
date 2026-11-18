@@ -230,6 +230,78 @@ pub(crate) fn query_deadline() -> Duration {
     )
 }
 
+std::thread_local! {
+    /// Stop bound for store reads that have no `EvalStop` parameter (shape
+    /// load, the abstract-class index). Unset means [`EvalStop::none`].
+    static BOUND_STOP: std::cell::RefCell<Option<EvalStop>> = const { std::cell::RefCell::new(None) };
+    /// Set while an auto-processor prepare drives queries with
+    /// `Handle::block_on` on a blocking worker. A nested `spawn_blocking`
+    /// from there would take a second pool thread.
+    static INLINE_QUERY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Bind `stop` for the current thread until the guard drops.
+pub(crate) struct BoundStop {
+    prev: Option<EvalStop>,
+}
+
+impl BoundStop {
+    pub(crate) fn bind(stop: &EvalStop) -> Self {
+        let prev = BOUND_STOP.with(|slot| slot.replace(Some(stop.clone())));
+        Self { prev }
+    }
+}
+
+impl Drop for BoundStop {
+    fn drop(&mut self) {
+        BOUND_STOP.with(|slot| *slot.borrow_mut() = self.prev.take());
+    }
+}
+
+/// The bound stop, or [`EvalStop::none`] when the thread has not bound one.
+pub(crate) fn bound_or_none() -> EvalStop {
+    BOUND_STOP.with(|slot| slot.borrow().clone().unwrap_or_else(EvalStop::none))
+}
+
+/// Whether the bound stop has fired. False when nothing is bound.
+pub(crate) fn read_stopped() -> bool {
+    BOUND_STOP.with(|slot| slot.borrow().as_ref().is_some_and(EvalStop::is_stopped))
+}
+
+/// Run `query` under the stop bound on this thread, or [`EvalStop::none`]
+/// when the thread has not bound one. Shape load and the abstract-class
+/// index have no `EvalStop` parameter; the auto-processor prepare binds one
+/// so those reads end with the stage that asked for them.
+pub(crate) fn query_bound(store: &SparqlStore, query: &str) -> Result<String, Error> {
+    let stop = bound_or_none();
+    if let Some(err) = stop.stopped_err("query") {
+        return Err(err);
+    }
+    store.query(&stop, query)
+}
+
+/// Run SPARQL on this thread instead of `spawn_blocking`.
+pub(crate) struct InlineQuery {
+    prev: bool,
+}
+
+impl InlineQuery {
+    pub(crate) fn enter() -> Self {
+        let prev = INLINE_QUERY.with(|flag| flag.replace(true));
+        Self { prev }
+    }
+}
+
+impl Drop for InlineQuery {
+    fn drop(&mut self) {
+        INLINE_QUERY.with(|flag| flag.set(self.prev));
+    }
+}
+
+fn queries_inline() -> bool {
+    INLINE_QUERY.with(|flag| flag.get())
+}
+
 /// The gate one WS query call runs under: the configured deadline, the
 /// request's cancel (`request.cancel` + the connection closing), and one of
 /// the connection's running-query slots. Waiting for the slot is part of the
@@ -2179,6 +2251,8 @@ impl SparqlStore {
             .push(query_string.to_string());
         #[cfg(test)]
         let _eval_count = eval_count::one();
+        #[cfg(test)]
+        crate::perspectives::auto_processor::read_offload::probe_query(stop, query_string)?;
 
         let results = self
             .sparql_evaluator(stop)
@@ -2275,6 +2349,11 @@ impl SparqlStore {
     /// `stop` decides when the eval ends: the gate that owns it fires it and
     /// the eval stops itself, reporting why.
     pub async fn query_async(&self, stop: &EvalStop, query_string: &str) -> Result<String, Error> {
+        // Already on the auto-processor prepare worker: the query runs here,
+        // under `stop`, instead of taking another blocking-pool thread.
+        if queries_inline() {
+            return self.query(stop, query_string);
+        }
         let store = self.clone();
         let stop = stop.clone();
         let query = query_string.to_string();
@@ -2298,6 +2377,9 @@ impl SparqlStore {
         stop: &EvalStop,
         query_string: &str,
     ) -> Result<String, Error> {
+        if queries_inline() {
+            return self.query_arbitrary(stop, query_string);
+        }
         let store = self.clone();
         let stop = stop.clone();
         let query = query_string.to_string();

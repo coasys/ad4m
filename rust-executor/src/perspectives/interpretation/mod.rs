@@ -46,6 +46,7 @@ mod run;
 mod types;
 
 pub use dedup::*;
+pub(crate) use graph::gather_transcript_sparql_stopped;
 pub use graph::*;
 pub use overlay::InterpretationRunCursor;
 pub(crate) use overlay::*;

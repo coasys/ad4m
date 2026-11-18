@@ -16,7 +16,6 @@
 
 use super::types::{ModelShape, ShapeProperty, ShapeRelation, WhereCondition};
 use super::utils::escape_sparql_string;
-use crate::perspectives::sparql_store::EvalStop;
 use crate::perspectives::sparql_store::SparqlStore;
 use deno_core::anyhow::{anyhow, Error};
 use serde_json::Value;
@@ -79,7 +78,7 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
         "#
     );
 
-    let result_json = store.query(&EvalStop::none(), &query)?;
+    let result_json = crate::perspectives::sparql_store::query_bound(store, &query)?;
     let results: Vec<Value> = serde_json::from_str(&result_json)?;
 
     if results.is_empty() {
@@ -139,7 +138,7 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
         "#
     );
 
-    let props_json = store.query(&EvalStop::none(), &props_query)?;
+    let props_json = crate::perspectives::sparql_store::query_bound(store, &props_query)?;
     let prop_results: Vec<Value> = serde_json::from_str(&props_json)?;
 
     // Property shapes can fan into multiple rows because their `rdf://type`
@@ -160,7 +159,13 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
     let mut properties: Vec<ShapeProperty> = Vec::new();
     let mut include_relations: Vec<ShapeRelation> = Vec::new();
 
-    for prop_uri in &prop_order {
+    for (prop_i, prop_uri) in prop_order.iter().enumerate() {
+        if prop_i % 32 == 0 && crate::perspectives::sparql_store::read_stopped() {
+            let stop = crate::perspectives::sparql_store::bound_or_none();
+            return Err(stop
+                .stopped_err("shape load")
+                .unwrap_or_else(|| anyhow!("shape load stopped")));
+        }
         let rows = match grouped.get(prop_uri) {
             Some(r) => r,
             None => continue,
@@ -374,8 +379,7 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
         LIMIT 1
         "#
     );
-    let class_hint = store
-        .query(&EvalStop::none(), &class_hint_query)
+    let class_hint = crate::perspectives::sparql_store::query_bound(store, &class_hint_query)
         .ok()
         .and_then(|json| serde_json::from_str::<Vec<Value>>(&json).ok())
         .and_then(|rows| {
@@ -413,7 +417,8 @@ fn initial_value_from_constructor(
         LIMIT 1
         "#
     );
-    let shape_result_json = store.query(&EvalStop::none(), &shape_query).ok()?;
+    let shape_result_json =
+        crate::perspectives::sparql_store::query_bound(store, &shape_query).ok()?;
     let shape_rows: Vec<Value> = serde_json::from_str(&shape_result_json).ok()?;
     let shape_uri = shape_rows.first()?["shapeUri"].as_str()?.to_string();
 
@@ -426,7 +431,8 @@ fn initial_value_from_constructor(
         LIMIT 1
         "#
     );
-    let ctor_result_json = store.query(&EvalStop::none(), &ctor_query).ok()?;
+    let ctor_result_json =
+        crate::perspectives::sparql_store::query_bound(store, &ctor_query).ok()?;
     let ctor_rows: Vec<Value> = serde_json::from_str(&ctor_result_json).ok()?;
     let ctor_literal = ctor_rows.first()?["ctor"].as_str()?.to_string();
 

@@ -55,7 +55,9 @@ impl AbstractIndex {
             }}
             "#
         );
-        let rows: Vec<Value> = serde_json::from_str(&store.query(&EvalStop::none(), &marked)?)?;
+        let rows: Vec<Value> = serde_json::from_str(
+            &crate::perspectives::sparql_store::query_bound(store, &marked)?,
+        )?;
         let abstract_classes = rows
             .iter()
             .filter_map(|r| r["targetClass"].as_str())
@@ -73,10 +75,18 @@ impl AbstractIndex {
             }}
             "#
         );
-        let rows: Vec<Value> = serde_json::from_str(&store.query(&EvalStop::none(), &aliased)?)?;
+        let rows: Vec<Value> = serde_json::from_str(
+            &crate::perspectives::sparql_store::query_bound(store, &aliased)?,
+        )?;
         let mut aliases: HashMap<String, HashMap<String, BTreeMap<String, String>>> =
             HashMap::new();
-        for row in &rows {
+        for (row_i, row) in rows.iter().enumerate() {
+            if row_i % 32 == 0 && crate::perspectives::sparql_store::read_stopped() {
+                let stop = crate::perspectives::sparql_store::bound_or_none();
+                return Err(stop.stopped_err("abstract class index").unwrap_or_else(|| {
+                    deno_core::anyhow::anyhow!("abstract class index stopped")
+                }));
+            }
             let (Some(class_uri), Some(prop_uri), Some(raw)) = (
                 row["targetClass"].as_str(),
                 row["prop"].as_str(),
