@@ -600,6 +600,69 @@ pub struct InterpretationOutcome {
     pub mode: &'static str,
 }
 
+/// A pass never rewrites the content of a row outside its scope (#1804): an
+/// update of such a row keeps its relation values and drops its property
+/// values. Rows of other sources (an earlier call) keep their title and
+/// text; a new row can still attach to them.
+///
+/// The scope is the rows under `base_prefix` and, when the pass has an
+/// existing scope, the rows in it (`existing`). Without an existing scope
+/// and with an empty `base_prefix`, each row is in scope.
+pub(crate) fn keep_content_outside_scope(
+    ops: Vec<InterpretationOp>,
+    shapes: &[ModelShape],
+    base_prefix: &str,
+    scope: Option<&Scope>,
+    existing: &ExistingInstances,
+) -> Vec<InterpretationOp> {
+    if base_prefix.is_empty() && scope.is_none() {
+        return ops;
+    }
+    let in_scope = |id: &str| {
+        (!base_prefix.is_empty() && id.starts_with(base_prefix))
+            || (scope.is_some() && existing.contains_key(id))
+    };
+    ops.into_iter()
+        .filter_map(|op| match op {
+            InterpretationOp::Update {
+                base,
+                class,
+                values,
+            } if !in_scope(&base) => {
+                let relations: std::collections::HashSet<&str> = shapes
+                    .iter()
+                    .filter(|s| class_label(&s.target_class, shapes) == class)
+                    .flat_map(|s| s.include_relations.iter())
+                    .filter(|r| r.direction == "forward")
+                    .map(|r| r.name.as_str())
+                    .collect();
+                let dropped: Vec<String> = values
+                    .keys()
+                    .filter(|k| !relations.contains(k.as_str()))
+                    .cloned()
+                    .collect();
+                let values: serde_json::Map<String, serde_json::Value> = values
+                    .into_iter()
+                    .filter(|(k, _)| relations.contains(k.as_str()))
+                    .collect();
+                if !dropped.is_empty() {
+                    log::info!(
+                        "interpretation: {base} is outside the pass scope; its content stays \
+                         (dropped: {})",
+                        dropped.join(", ")
+                    );
+                }
+                (!values.is_empty()).then_some(InterpretationOp::Update {
+                    base,
+                    class,
+                    values,
+                })
+            }
+            op => Some(op),
+        })
+        .collect()
+}
+
 /// The tool-call cap of a harness pass whose config or request leaves
 /// `maxToolCalls` out (#1804). Each proposal counts against the cap, and a
 /// new row with a parent costs two calls, so it is above the harness default.
@@ -894,6 +957,7 @@ async fn run_single_shot(
         // Filter no-op Updates: the LLM occasionally re-emits an unchanged existing
         // entry, and applying that would clear-and-rewrite scalar links for nothing.
         let ops = strip_noop_updates(perspective, shapes, planned).await?;
+        let ops = keep_content_outside_scope(ops, shapes, base_prefix, scope, &existing_ctx);
 
         // Apply the writes AND the provenance overlay (#883): every create/update
         // also instantiates/updates an `InterpretationOverlay` over the same base
@@ -1509,6 +1573,7 @@ pub(crate) async fn run_harness_pass(
     } else {
         ops
     };
+    let ops = keep_content_outside_scope(ops, shapes, base_prefix, scope, &existing_ctx);
     // CI-visible diagnostic: pairs with the per-round log in `run_with_tools`.
     // When the harness silently returns zero bases it's almost always because
     // the LLM chose to answer instead of tool-calling, so the buffer is empty

@@ -109,6 +109,7 @@ pub(super) struct OverlayWrite {
 /// overlays. The run node is minted when there is at least one overlay to
 /// anchor, **or** when an AutoProcessor cursor must be recorded (even if the
 /// LLM wrote nothing — those turns are still consumed).
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn apply_with_overlay(
     perspective: &mut PerspectiveInstance,
     shapes: &[ModelShape],
