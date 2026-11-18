@@ -13,15 +13,27 @@
  *    `caughtUp: true`, `from: null`, `firedProposals: []`, `to` in
  *    `Ready`/`Mid`. `from: null` says Bob had no row before it; no normal
  *    event comes first, so the history was not replayed to him as a settle.
+ *    The executor does not fold that catch-up into a later settle: the
+ *    first pass publishes `caughtUp: true` and returns, and every later
+ *    event has `caughtUp: false`.
  *  - The catch-up may land on any prefix of Alice's history. The
  *    server-link-language delivers her commits as separate diffs, often
  *    more than 160 ms apart, and the debounced pass can run between them:
  *    the instance has arrived, the Begin vote has not. Bob is then caught
  *    up at `Ready`, and his next event is an ordinary Ready → Mid with
- *    Begin fired. p-diff-sync may deliver it in one diff or in several.
+ *    Begin fired. A pass can also derive `Mid` as the genesis of a
+ *    definition that has not yet shown `Ready`, mark nothing, and publish
+ *    the catch-up at `Mid`. Begin is then still unmarked. p-diff-sync may
+ *    deliver the history in one diff or in several.
+ *  - `to: "Mid"` is therefore not "Begin is in the bookkeeping". The test
+ *    waits until `flowFired` contains Begin and Bob's definition names
+ *    Ready, Mid and Done, and only then lets Alice settle Finish. An
+ *    ordinary event in that wait may report Begin (and, if the recorded
+ *    state has to move back to Ready first, one event with no proposals).
+ *    It may not report any other proposal.
  *  - `flowStates()` and `FlowInstance.findAll` then read `Mid` on Bob's side.
- *  - When Alice settles Mid → Done, Bob gets an ordinary event
- *    (`caughtUp: false`, `from: "Mid"`, the settling proposal fired).
+ *  - When Alice settles Mid → Done, Bob gets one ordinary event
+ *    (`caughtUp: false`, `from: "Mid"`, only the Finish proposal fired).
  *
  * The moment between the links arriving and the catch-up is a debounce
  * inside the join's own sync, so "not derived yet" is not observable here
@@ -135,21 +147,29 @@ export default function flowReplicaJoinTests(
           firedProposals: [],
           caughtUp: true,
         });
-        // Caught up before Alice's Begin vote arrived: the vote then settles
-        // Ready → Mid for Bob as an ordinary event.
-        const settledIn = first.to === "Ready" ? 1 : 0;
-        if (settledIn) {
-          await waitUntil(() => forInstance().length > 1, 60_000, "Bob's event for Ready → Mid");
-          expect(forInstance()[1], "the rest of the history settles in").to.deep.equal({
-            perspectiveUuid: bobP.uuid,
-            agentDid: bobDid,
-            instance: inst.uri,
-            from: "Ready",
-            to: "Mid",
-            firedProposals: [begin.proposalUri],
-            caughtUp: false,
-          });
-        }
+        // `to === "Mid"` does not mean Begin was marked. Wait until it is,
+        // and until Bob can see every state, before Alice settles Finish.
+        await waitUntil(
+          async () => {
+            try {
+              const fired = await bobP.flowFired(inst.uri);
+              const def = await bobP.getFlow("JoinCatchUpFlow");
+              const names = new Set((def?.states ?? []).map((s) => s.name));
+              const state = (await bobP.flowStates([inst.uri]))[0]?.currentState;
+              return (
+                fired.includes(begin.proposalUri) &&
+                names.has("Ready") &&
+                names.has("Mid") &&
+                names.has("Done") &&
+                state === "Mid"
+              );
+            } catch {
+              return false; // the definition may still be arriving
+            }
+          },
+          180_000,
+          "Bob has marked Begin and holds the whole definition at Mid",
+        );
 
         const states = await bobP.flowStates([inst.uri]);
         expect(states.map((s) => [s.instance, s.currentState])).to.deep.equal([[inst.uri, "Mid"]]);
@@ -166,19 +186,48 @@ export default function flowReplicaJoinTests(
           { timeoutMs: 90_000, intervalMs: 2_000, label: "Bob's findAll sees Alice's run" },
         );
         expect(bobView[0].currentStateName, "findAll reads the caught-up state").to.equal("Mid");
-        expect(forInstance(), "and nothing was replayed as a settle").to.have.lengthOf(
-          1 + settledIn,
-        );
+
+        const history = forInstance();
+        expect(history[0], "the catch-up stays the first event").to.deep.equal(first);
+        const afterCatchUp = history.slice(1);
+        expect(
+          afterCatchUp.every((e) => e.caughtUp === false),
+          "events after the catch-up are ordinary",
+        ).to.equal(true);
+        if (afterCatchUp.length === 0) {
+          expect(history, "Begin was marked during the catch-up, so nothing was replayed").to.have.lengthOf(
+            1,
+          );
+        } else if (afterCatchUp.length === 1) {
+          expect(afterCatchUp[0], "the historical Begin settles as an ordinary event").to.deep.equal({
+            perspectiveUuid: bobP.uuid,
+            agentDid: bobDid,
+            instance: inst.uri,
+            from: first.to,
+            to: "Mid",
+            firedProposals: [begin.proposalUri],
+            caughtUp: false,
+          });
+        } else {
+          expect(
+            afterCatchUp.map((e) => [e.from, e.to, e.firedProposals, e.caughtUp]),
+            "a partial definition may step back to Ready, then Begin settles",
+          ).to.deep.equal([
+            [first.to, "Ready", [], false],
+            ["Ready", "Mid", [begin.proposalUri], false],
+          ]);
+        }
 
         // ── A new settle is an ordinary event for Bob ───────────────────────
+        const historyCount = forInstance().length;
         const finish = await inst.proposeTransition("Done");
         expect(finish.outcomes.map((o) => o.toState)).to.deep.equal(["Done"]);
         await waitUntil(
-          () => forInstance().length > 1 + settledIn,
+          () => forInstance().length > historyCount,
           180_000,
           "Bob's event for Mid → Done",
         );
-        expect(forInstance()[1 + settledIn]).to.deep.equal({
+        expect(forInstance()[historyCount]).to.deep.equal({
           perspectiveUuid: bobP.uuid,
           agentDid: bobDid,
           instance: inst.uri,
