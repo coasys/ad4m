@@ -885,7 +885,8 @@ export class SHACLFlow {
       l.source === flowUri && l.predicate === "ad4m://interpretationHint"
     );
     if (flowHintLink) {
-      flow.interpretationHint = decodeOptionalHint(flowHintLink.target);
+      const hint = decodeOptionalHint(flowHintLink.target);
+      if (hint !== undefined) flow.interpretationHint = hint;
     }
 
     // Find typed I/O (flow-level, design §4.1). Both arrays validated
@@ -934,7 +935,8 @@ export class SHACLFlow {
       l.source === flowUri && l.predicate === "ad4m://creationHint"
     );
     if (creationHintLink) {
-      flow.creationHint = decodeOptionalHint(creationHintLink.target);
+      const hint = decodeOptionalHint(creationHintLink.target);
+      if (hint !== undefined) flow.creationHint = hint;
     }
 
     // Find flow-level `context` — same ModelQuery-shape guard as
