@@ -6926,6 +6926,10 @@ impl PerspectiveInstance {
                     .is_none_or(|w| turn_in_source_window(timestamp, now_ms, w))
                     && !processed.contains(id)
             };
+            // Turns queued at an earlier tick (kept while no model was set,
+            // or past a batch cap) are checked again: a run may have consumed
+            // them since, or they may have left the window.
+            watcher.retain_pending(&cfg.processor_id, |t| queueable(&t.id, &t.timestamp));
             // A kept read is reused unless a turn it keeps without text has
             // become queueable (its run aged out of the window).
             let kept = watcher.reads.transcript(cfg).filter(|(_, turns)| {

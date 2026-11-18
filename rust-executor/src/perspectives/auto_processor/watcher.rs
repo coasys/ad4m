@@ -537,6 +537,28 @@ impl WatcherState {
         }
     }
 
+    /// Drop queued turns of `processor_id` that `keep` rejects, and their ids.
+    /// A turn queued at an earlier tick can since have been consumed by a
+    /// completed run (here or on a peer) or have left the source window; the
+    /// drain hands the queue over as it is, so the tick prunes it first.
+    pub fn retain_pending(
+        &mut self,
+        processor_id: &str,
+        mut keep: impl FnMut(&PendingTurn) -> bool,
+    ) {
+        let Some(entry) = self.per_processor.get_mut(processor_id) else {
+            return;
+        };
+        let ids = &mut entry.ids;
+        entry.items.retain(|turn| {
+            let kept = keep(turn);
+            if !kept {
+                ids.remove(&QueuedId(turn.id.clone()));
+            }
+            kept
+        });
+    }
+
     /// Read-only view of a processor's pending state (tests + observability).
     pub fn pending_for(&self, processor_id: &str) -> Option<&ProcessorPending> {
         self.per_processor.get(processor_id)
@@ -1940,6 +1962,24 @@ mod tests {
 
     fn ids(turns: &[PendingTurn]) -> Vec<String> {
         turns.iter().map(|t| t.id.clone()).collect()
+    }
+
+    /// A queued turn that a run consumed while the processor waited (no
+    /// model, or past a batch cap) is pruned before the drain, and its id can
+    /// be queued again later.
+    #[test]
+    fn retain_pending_drops_turns_that_are_no_longer_queueable() {
+        let mut w = WatcherState::new();
+        rec(&mut w, "p", "a", 0);
+        rec(&mut w, "p", "b", 0);
+        rec(&mut w, "p", "c", 0);
+        w.retain_pending("p", |t| t.id != "b");
+        assert_eq!(ids(&w.pending_for("p").unwrap().items), vec!["a", "c"]);
+        // The pruned id is free again: a fresh record queues it.
+        rec(&mut w, "p", "b", 1);
+        assert_eq!(ids(&w.pending_for("p").unwrap().items), vec!["a", "c", "b"]);
+        // An unknown processor is a no-op.
+        w.retain_pending("q", |_| false);
     }
 
     // ---- turn_id -----------------------------------------------------------
