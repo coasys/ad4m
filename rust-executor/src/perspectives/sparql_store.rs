@@ -1253,9 +1253,16 @@ impl SparqlStore {
         *self.writes.borrow()
     }
 
-    /// Bump the write generation after a write committed (or may have).
-    fn note_write(&self) {
-        self.writes.send_modify(|g| *g = g.wrapping_add(1));
+    /// Bump the write generation after a write committed (or may have) and
+    /// return the generation it took. The commit paths report it on their
+    /// feed entries so a draining tick can prove every store write had one.
+    fn note_write(&self) -> u64 {
+        let mut generation = 0;
+        self.writes.send_modify(|g| {
+            *g = g.wrapping_add(1);
+            generation = *g;
+        });
+        generation
     }
 
     /// Returns the number of quads in the store (for diagnostics).
@@ -1279,16 +1286,21 @@ impl SparqlStore {
     /// crash before the commit, leaves none of them, and readers never see a
     /// direct triple without its reifier and annotations. Every link the
     /// store holds comes through here, so this is where a link in the store's
-    /// own metadata vocabulary is refused ([`is_link_metadata`]).
-    fn insert_link_triples(&self, link: &LinkExpression) -> Result<(), Error> {
-        self.write_link(link, false).map(|_| ())
+    /// own metadata vocabulary is refused ([`is_link_metadata`]). Returns the
+    /// write generation the write took.
+    fn insert_link_triples(&self, link: &LinkExpression) -> Result<u64, Error> {
+        // `skip_local` is off: the write either commits (its generation) or
+        // fails.
+        self.write_link(link, false)
+            .map(|g| g.expect("an unguarded insert commits"))
     }
 
     /// [`Self::insert_link_triples`]; with `skip_local`, a link this store
-    /// holds as `Local` is left alone and `false` returned (#1146). The
+    /// holds as `Local` is left alone and `None` returned (#1146). The
     /// check and the write are one transaction under the writer lock, so no
-    /// other write lands between them.
-    fn write_link(&self, link: &LinkExpression, skip_local: bool) -> Result<bool, Error> {
+    /// other write lands between them. `Some` carries the write generation
+    /// the write took, reported under that same lock.
+    fn write_link(&self, link: &LinkExpression, skip_local: bool) -> Result<Option<u64>, Error> {
         // Status must be decided by the caller, not defaulted here. A silent
         // `None => Shared` fallback would let any write path that forgot to
         // set it mislabel a local link as shared — the kind of quiet
@@ -1311,28 +1323,30 @@ impl SparqlStore {
             .map_err(|_| anyhow!("SPARQL store writer lock poisoned"))?;
         let mut tx = self.store.start_transaction()?;
         if skip_local && is_stored_local(&tx, link)? {
-            return Ok(false);
+            return Ok(None);
         }
         write_link_quads(&mut tx, link, status)?;
         tx.commit()?;
-        self.note_write();
-        Ok(true)
+        Ok(Some(self.note_write()))
     }
 
-    /// Insert triples for a link into the store.
-    pub fn add_link(&self, link: &LinkExpression) -> Result<(), Error> {
+    /// Insert triples for a link into the store. Returns the write
+    /// generation the write took.
+    pub fn add_link(&self, link: &LinkExpression) -> Result<u64, Error> {
         self.insert_link_triples(link)
     }
 
     /// A link language's addition: insert `link` unless this store holds it
-    /// as `Local` (#1146). Returns whether it was inserted.
-    pub(crate) fn add_remote_link(&self, link: &LinkExpression) -> Result<bool, Error> {
+    /// as `Local` (#1146). Returns the write generation the write took, or
+    /// `None` when the link was skipped as stored `Local`.
+    pub(crate) fn add_remote_link(&self, link: &LinkExpression) -> Result<Option<u64>, Error> {
         self.write_link(link, true)
     }
 
     /// A link language's removal: remove `link` unless this store holds it
-    /// as `Local` (#1146). Returns whether it was applied.
-    pub(crate) fn remove_remote_link(&self, link: &LinkExpression) -> Result<bool, Error> {
+    /// as `Local` (#1146). Returns the write generation the write took, or
+    /// `None` when the link was skipped as stored `Local`.
+    pub(crate) fn remove_remote_link(&self, link: &LinkExpression) -> Result<Option<u64>, Error> {
         self.delete_link(link, true)
     }
 
@@ -1379,15 +1393,19 @@ impl SparqlStore {
         Ok(())
     }
 
-    /// Remove all triples for a link from the store.
-    pub fn remove_link(&self, link: &LinkExpression) -> Result<(), Error> {
-        self.delete_link(link, false).map(|_| ())
+    /// Remove all triples for a link from the store. Returns the write
+    /// generation the write took.
+    pub fn remove_link(&self, link: &LinkExpression) -> Result<u64, Error> {
+        // `skip_local` is off: the write either commits or fails.
+        self.delete_link(link, false)
+            .map(|g| g.expect("an unguarded delete commits"))
     }
 
     /// [`Self::remove_link`]; with `skip_local`, a link this store holds as
-    /// `Local` is left alone and `false` returned (#1146), checked in the
-    /// same transaction as the removal.
-    fn delete_link(&self, link: &LinkExpression, skip_local: bool) -> Result<bool, Error> {
+    /// `Local` is left alone and `None` returned (#1146), checked in the
+    /// same transaction as the removal. `Some` carries the write generation
+    /// the write took.
+    fn delete_link(&self, link: &LinkExpression, skip_local: bool) -> Result<Option<u64>, Error> {
         // No link in the metadata vocabulary was stored, and removing one
         // would delete the annotation it names on another link's reifier.
         refuse_link_metadata(link)?;
@@ -1399,12 +1417,11 @@ impl SparqlStore {
             .map_err(|_| anyhow!("SPARQL store writer lock poisoned"))?;
         let mut tx = self.store.start_transaction()?;
         if skip_local && is_stored_local(&tx, link)? {
-            return Ok(false);
+            return Ok(None);
         }
         remove_link_quads(&mut tx, link)?;
         tx.commit()?;
-        self.note_write();
-        Ok(true)
+        Ok(Some(self.note_write()))
     }
 
     /// Apply a diff in one transaction, removals before additions. Removal
@@ -1412,12 +1429,13 @@ impl SparqlStore {
     /// would delete a link that is removed and re-added unchanged. Readers see
     /// the store before or after the whole diff. An addition without a status
     /// is skipped, as `add_link` refuses it; a link in the store's metadata
-    /// vocabulary fails the whole diff, as `add_link` and `remove_link` refuse it.
+    /// vocabulary fails the whole diff, as `add_link` and `remove_link` refuse
+    /// it. Returns the write generation the whole diff took.
     pub fn apply_diff(
         &self,
         removals: &[LinkExpression],
         additions: &[LinkExpression],
-    ) -> Result<(), Error> {
+    ) -> Result<u64, Error> {
         for link in removals.iter().chain(additions) {
             refuse_link_metadata(link)?;
         }
@@ -1442,8 +1460,7 @@ impl SparqlStore {
             write_link_quads(&mut tx, link, status)?;
         }
         tx.commit()?;
-        self.note_write();
-        Ok(())
+        Ok(self.note_write())
     }
 
     /// Return all links in the store using a SPARQL 1.2 reifier query.

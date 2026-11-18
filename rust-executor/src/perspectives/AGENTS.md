@@ -84,8 +84,12 @@ or writes the graph. Split plan: spec items 3, 7, 8.
   `is_teardown`; `teardown_background_tasks` must be called on remove.
 - `SparqlStore` bumps a write generation after every committed write (`write_generation`,
   `watch_writes`). The auto-processor watch loop no longer wakes on the generation alone:
-  `check_subscribed_queries` broadcasts each commit's `subscription_triggers::Writes` (added
-  and removed link terms) on `commit_writes`, a **bounded** `broadcast` channel
+  `write_link_diff` and `persist_remote_diff` broadcast each batch's
+  `subscription_triggers::Writes` (added and removed link terms) on `commit_writes`
+  right where its store writes commit (`broadcast_commit_write`, under `persist_lock`,
+  so an entry's place in the channel is its commit's place in the write order), each
+  entry carrying `generations` — the write generations its own writes took, one for a
+  transactional diff, one per link for the fallback — a **bounded** `broadcast` channel
   (`COMMIT_WRITES_CAPACITY`, 256 commits — it bounds memory, not correctness), and the loop
   sleeps on that (60 s fallback). Entries are drained independently: a matching diff is
   still readable after any number of unrelated diffs while all of them fit in the buffer —
@@ -107,7 +111,17 @@ or writes the graph. Split plan: spec items 3, 7, 8.
   SHACL/SDNA batch changes the shape every kept read ran under, whatever the
   trigger's predicates), or a `Lagged` / unclassifiable one against the
   read's scope key so the tick re-reads instead
-  of draining stale turns; pending turns that fell out of the scope are dropped
+  of draining stale turns. The tick's own feed drain (`watcher.commit_feed`)
+  must first prove coverage: the `generations` of all drained entries have to
+  account for every generation in `(seen, current]`, `seen` being the
+  watermark the last drain proved. On full coverage only matched transcripts
+  stale and `seen` advances through the proven generations — including any
+  proven above the generation the tick read (a fed write that landed
+  mid-tick), which the drain keeps so the next tick does not owe it. A gap —
+  a store write outside the commit path, a `Lagged` hole, a `None` entry —
+  stales everything and moves `seen` past the tick's generation. There is no
+  in-flight wait: a write that has taken its generation but not yet broadcast
+  reads as a gap and stales all once, conservatively. Pending turns that fell out of the scope are dropped
   before drain, and a failed re-read keeps them pending and skips the drain. A wake re-runs
   the transcript as a full model query; `TickReads` (config, transcript, cursor) is still
   kept while the generation is unchanged, the transcript keeping text only for turns that

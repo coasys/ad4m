@@ -285,18 +285,20 @@ pub struct WatcherState {
         crate::perspectives::perspective_instance::subscription_triggers::ModelTrigger,
     >,
     /// The tick's own feed of committed writes, subscribed on first use and
-    /// drained at the start of `run_auto_processor_tick` — the receiver and
-    /// the write generation the last drain saw: the writes a tick runs
-    /// after are evaluated against `triggers` whether the tick came from
-    /// the loop's wait or a direct drive (`run_one_pass` in tests). A
-    /// generation that moved without a single write for the feed to
-    /// classify means the write bypassed the commit path entirely (a store
-    /// write applied directly, as a peer's link sync does in tests) — with
-    /// no terms to match it stales every kept transcript, the same answer
-    /// an unclassifiable batch gives.
+    /// drained at the start of `run_auto_processor_tick` — the receiver,
+    /// the write generation the drained entries provably cover through
+    /// (`seen`), and any generations proven above it that a mid-tick write
+    /// left over. The writes a tick runs after are evaluated against
+    /// `triggers` whether the tick came from the loop's wait or a direct
+    /// drive (`run_one_pass` in tests). A generation past `seen` that no
+    /// drained entry accounts for is a write that bypassed the commit path
+    /// entirely (a store write applied directly, as a peer's link sync does
+    /// in tests, or a `Lagged` hole): nothing classified it, so every kept
+    /// transcript is stale.
     pub(crate) commit_feed: Option<(
         tokio::sync::broadcast::Receiver<crate::perspectives::perspective_instance::CommitWrite>,
         u64,
+        std::collections::BTreeSet<u64>,
     )>,
 }
 

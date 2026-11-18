@@ -751,6 +751,273 @@ async fn a_schema_write_stales_the_kept_transcript() {
     );
 }
 
+/// A fed write is only half of coverage: an entry's arrival says nothing
+/// about the writes before it. Here an in-scope write bypasses the feed (a
+/// raw `sparql_store` write, the way a peer's links land in these tests) and
+/// an unrelated fed write lands after it — its entry classified, matching
+/// nothing. The generation the raw write took has no entry, so the tick must
+/// treat the gap as unclassifiable and re-read the kept transcript — which
+/// picks the bypassed turn up — rather than trusting the unrelated entry's
+/// say-so.
+#[tokio::test]
+async fn an_unfed_write_before_a_fed_one_stales_the_kept_transcript() {
+    use crate::types::{Link, LinkStatus};
+
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
+    seed_message(
+        &mut p,
+        &ctx,
+        "msg://1",
+        "did:key:alice",
+        "first",
+        "ns://body",
+    )
+    .await;
+    write_processor(&mut p, &config("gap", 600_000, None), Some(false), &ctx)
+        .await
+        .expect("write_processor");
+    let mut watcher = WatcherState::new();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
+    assert_eq!(pending_texts(&watcher, "gap"), vec!["first"]);
+    let reads = transcript_queries(&p);
+    assert_eq!(reads, 1);
+
+    // The write the feed never sees.
+    let signer = crate::agent::signatures::TestSigner::generate();
+    for l in message_links(&signer, "msg://raw", "raw", chrono::Utc::now()) {
+        p.sparql_store.add_link(&l).expect("unfed write");
+    }
+    // An unrelated fed write after it: classified, matching nothing.
+    p.add_link(
+        Link {
+            source: "note://reactions".into(),
+            predicate: Some("ns://reaction".into()),
+            target: "literal:string:+1".into(),
+        },
+        LinkStatus::Local,
+        None,
+        &ctx,
+    )
+    .await
+    .expect("unrelated link");
+
+    p.run_auto_processor_tick(&mut watcher, now_ms + 500, &ctx)
+        .await;
+    assert_eq!(
+        transcript_queries(&p),
+        reads + 1,
+        "a generation no entry accounts for must re-read the kept transcript"
+    );
+    assert_eq!(
+        pending_texts(&watcher, "gap"),
+        vec!["first", "raw"],
+        "the bypassed in-scope write is in the transcript it staled"
+    );
+}
+
+/// The gap does not need a matching write to matter: a feed-bypassing write
+/// and an unrelated fed one, both outside the scope, still re-read the kept
+/// transcript. The fed entry alone proves nothing about the generation the
+/// raw write took — coverage is every generation since the last drain
+/// having an entry, not the newest entry reaching the store's count.
+#[tokio::test]
+async fn a_feed_bypassing_write_stales_the_kept_transcript() {
+    use crate::types::{Link, LinkStatus};
+
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
+    seed_message(
+        &mut p,
+        &ctx,
+        "msg://1",
+        "did:key:alice",
+        "first",
+        "ns://body",
+    )
+    .await;
+    write_processor(&mut p, &config("raw", 600_000, None), Some(false), &ctx)
+        .await
+        .expect("write_processor");
+    let mut watcher = WatcherState::new();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
+    let reads = transcript_queries(&p);
+    assert_eq!(reads, 1);
+
+    // An unrelated write the feed never sees, then an unrelated fed write.
+    let signer = crate::agent::signatures::TestSigner::generate();
+    let raw = crate::types::Link {
+        source: "note://raw".into(),
+        predicate: Some("ns://reaction".into()),
+        target: "literal:string:raw".into(),
+    }
+    .normalize();
+    let signed = signer.sign(raw);
+    let mut unfed = crate::types::LinkExpression::from(signed);
+    unfed.status = Some(LinkStatus::Local);
+    p.sparql_store.add_link(&unfed).expect("unfed write");
+    p.add_link(
+        Link {
+            source: "note://reactions".into(),
+            predicate: Some("ns://reaction".into()),
+            target: "literal:string:+1".into(),
+        },
+        LinkStatus::Local,
+        None,
+        &ctx,
+    )
+    .await
+    .expect("unrelated link");
+
+    p.run_auto_processor_tick(&mut watcher, now_ms + 500, &ctx)
+        .await;
+    assert_eq!(
+        transcript_queries(&p),
+        reads + 1,
+        "a generation no entry accounts for must re-read the kept transcript"
+    );
+    assert_eq!(
+        pending_texts(&watcher, "raw"),
+        vec!["first"],
+        "nothing in scope changed; the re-read returns the same turns"
+    );
+}
+
+/// A fed write that lands mid-tick — after the tick read the store's
+/// generation — leaves an entry carrying a generation above the one the
+/// tick saw. The drain proves coverage past the generation it read, so the
+/// next tick owes nothing: no gap, no stale-all, the kept transcript is
+/// reused. Sending on `commit_writes` is what the commit path does; the
+/// store staying at `generation` is what "mid-tick" means — the write had
+/// not committed when the tick looked.
+#[tokio::test]
+async fn a_write_landing_mid_tick_is_covered_without_a_stale_all() {
+    use crate::perspectives::perspective_instance::subscription_triggers;
+
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
+    seed_message(
+        &mut p,
+        &ctx,
+        "msg://1",
+        "did:key:alice",
+        "first",
+        "ns://body",
+    )
+    .await;
+    write_processor(&mut p, &config("mid", 600_000, None), Some(false), &ctx)
+        .await
+        .expect("write_processor");
+    let mut watcher = WatcherState::new();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
+    let reads = transcript_queries(&p);
+    assert_eq!(reads, 1);
+
+    // An unrelated entry carrying a generation above the store's — what a
+    // fed write committing after the tick's generation read leaves behind.
+    let mut writes = subscription_triggers::writes_of_links(
+        [crate::types::Link {
+            source: "note://reactions".into(),
+            predicate: Some("ns://reaction".into()),
+            target: "literal:string:+1".into(),
+        }]
+        .iter(),
+    )
+    .expect("predicated link");
+    writes.generations = vec![p.sparql_store.write_generation() + 1];
+    p.commit_writes
+        .send(Some(std::sync::Arc::new(writes)))
+        .expect("the feed is watched");
+
+    p.run_auto_processor_tick(&mut watcher, now_ms + 500, &ctx)
+        .await;
+    p.run_auto_processor_tick(&mut watcher, now_ms + 1_000, &ctx)
+        .await;
+    assert_eq!(
+        transcript_queries(&p),
+        reads,
+        "coverage proven past the generation read: the next tick owes nothing"
+    );
+    assert_eq!(pending_texts(&watcher, "mid"), vec!["first"]);
+}
+
+/// The link-by-link fallback of `write_link_diff` still broadcasts one feed
+/// entry — carrying one generation per link the fallback wrote — so a diff
+/// `apply_diff` refuses whole stays covered: one entry, N generations, no
+/// stale-all. The refusal below is a link in the store's metadata
+/// vocabulary, which `apply_diff` fails the diff on and the fallback then
+/// skips per link.
+#[tokio::test]
+async fn a_fallback_diff_feeds_one_entry_with_every_generation_it_took() {
+    use crate::agent::signatures::TestSigner;
+    use crate::types::PerspectiveDiff;
+
+    const N: usize = 3;
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
+    seed_message(
+        &mut p,
+        &ctx,
+        "msg://1",
+        "did:key:alice",
+        "first",
+        "ns://body",
+    )
+    .await;
+    write_processor(&mut p, &config("fb", 600_000, None), Some(false), &ctx)
+        .await
+        .expect("write_processor");
+    let mut watcher = WatcherState::new();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
+    let reads = transcript_queries(&p);
+    assert_eq!(reads, 1);
+
+    let signer = TestSigner::generate();
+    let link = |predicate: &str, target: &str| {
+        let signed = signer.sign(
+            crate::types::Link {
+                source: "note://reactions".into(),
+                predicate: Some(predicate.into()),
+                target: target.into(),
+            }
+            .normalize(),
+        );
+        let mut l = crate::types::LinkExpression::from(signed);
+        l.status = Some(crate::types::LinkStatus::Local);
+        l
+    };
+    let mut additions: Vec<_> = (0..N)
+        .map(|i| link("ns://reaction", &format!("literal:string:r{i}")))
+        .collect();
+    additions.push(link("ad4m://ontology/note", "literal:string:x"));
+
+    let mut rx = p.commit_writes.subscribe();
+    let before = p.sparql_store.write_generation();
+    p.persist_link_diff(&PerspectiveDiff::from(additions, Vec::new()))
+        .await
+        .expect("persist_link_diff");
+
+    let entry = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("a feed entry within 5 s")
+        .expect("the feed is open")
+        .expect("the batch carried only predicated links");
+    let expected: Vec<u64> = (before + 1..=before + N as u64).collect();
+    assert_eq!(
+        entry.generations, expected,
+        "one generation per link the fallback wrote — the refused one took none"
+    );
+    assert_eq!(p.sparql_store.write_generation(), before + N as u64);
+
+    p.run_auto_processor_tick(&mut watcher, now_ms + 500, &ctx)
+        .await;
+    assert_eq!(
+        transcript_queries(&p),
+        reads,
+        "every generation accounted for: the kept transcript is reused"
+    );
+}
+
 /// Hand `watcher` a kept read of `n` pending turns, as if the store had
 /// answered them at the current generation, and tick twice over it: the
 /// first tick queues them (every id is new), the second re-records them as

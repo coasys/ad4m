@@ -68,7 +68,7 @@ use crate::perspectives::model_query::{
     WhereCondition,
 };
 use crate::perspectives::sparql_store::{canonical_target, stored_as_literal, SparqlStore};
-use crate::types::DecoratedLinkExpression;
+use crate::types::{DecoratedLinkExpression, Link};
 
 /// Past this many distinct links in one batch, a batch keeps only its
 /// predicates and every model subscription falls back to predicate matching.
@@ -92,11 +92,14 @@ pub(crate) struct Writes {
     /// Each link written or removed, or `None` once the batch passed
     /// [`MAX_TRACKED_LINKS`].
     links: Option<HashSet<Written>>,
-    /// The store's write generation as the sender saw it: a coverage
-    /// watermark, "the feed has described every classified commit through
-    /// here", so a drained feed can tell tail writes it never saw from a
-    /// store that simply did not move. `0` = untagged.
-    pub(crate) generation: u64,
+    /// The write generations this batch's own store writes took: one for a
+    /// diff committed in a single transaction, one per link on the
+    /// link-by-link fallback. The feed entry it rides lets a draining tick
+    /// prove the feed covers the store's movement — every generation since
+    /// the last proven one must have an entry — so it is filled by the
+    /// commit path, not by `writes_of`. Empty for a `Writes` built outside
+    /// a commit (subscription checks, tests).
+    pub(crate) generations: Vec<u64>,
 }
 
 /// One written or removed link, with what every subscription's check needs
@@ -118,7 +121,7 @@ impl Writes {
         Writes {
             predicates: HashSet::new(),
             links: Some(HashSet::new()),
-            generation: 0,
+            generations: Vec::new(),
         }
     }
 
@@ -143,6 +146,7 @@ impl Writes {
     /// Fold another batch's writes into this one.
     pub(super) fn extend(&mut self, other: Writes) {
         self.predicates.extend(other.predicates);
+        self.generations.extend(other.generations);
         match (&mut self.links, other.links) {
             (Some(mine), Some(theirs)) if mine.len() + theirs.len() <= MAX_TRACKED_LINKS => {
                 mine.extend(theirs)
@@ -186,7 +190,7 @@ impl From<HashSet<String>> for Writes {
         Writes {
             predicates,
             links: None,
-            generation: 0,
+            generations: Vec::new(),
         }
     }
 }
@@ -196,10 +200,17 @@ impl From<HashSet<String>> for Writes {
 pub(crate) fn writes_of<'a>(
     links: impl IntoIterator<Item = &'a DecoratedLinkExpression>,
 ) -> Option<Writes> {
+    writes_of_links(links.into_iter().map(|l| &l.data))
+}
+
+/// [`writes_of`] over `Link`s, the store's plain form: a `PerspectiveDiff`
+/// (`LinkExpression`) or a mixed applied-plus-retracted set maps to them by
+/// `&l.data` and feeds the feed entry the same terms.
+pub(crate) fn writes_of_links<'a>(links: impl IntoIterator<Item = &'a Link>) -> Option<Writes> {
     let mut writes = Writes::new();
     for link in links {
-        let predicate = link.data.predicate.as_deref()?;
-        writes.record(&link.data.source, predicate, &link.data.target);
+        let predicate = link.predicate.as_deref()?;
+        writes.record(&link.source, predicate, &link.target);
     }
     Some(writes)
 }

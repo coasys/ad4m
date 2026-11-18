@@ -517,7 +517,11 @@ impl SubscribedQuery {
 
 /// One committed diff's links as [`subscription_triggers::Writes`], for the
 /// auto-processor loops' trigger matching — `None` when a diff carried a
-/// predicate-less link, which no trigger can rule out.
+/// predicate-less link, which no trigger can rule out. The `Writes` carries
+/// the write generations the diff's own store writes took
+/// ([`subscription_triggers::Writes::generations`]): a draining tick proves
+/// the feed covers the store's movement by them, so a `None` entry carries
+/// none — it stales every kept read as unclassifiable anyway.
 pub(crate) type CommitWrite = Option<Arc<subscription_triggers::Writes>>;
 
 /// How many committed diffs the `commit_writes` channel buffers while a
@@ -4516,29 +4520,51 @@ impl PerspectiveInstance {
             .collect();
 
         // One store transaction for the whole diff, so a batch lands as one
-        // write. On failure nothing was written; fall back to one link at a
-        // time.
-        match self.sparql_store.apply_diff(&removals, &additions) {
-            Ok(()) => return Ok(effects),
-            Err(e) => log::warn!(
-                "Failed to apply link diff to SPARQL store in one transaction, \
-                 writing links one by one: {:?}",
-                e
-            ),
-        }
+        // write — one generation. On failure nothing was written; fall back
+        // to one link at a time, one generation each.
+        let generations = match self.sparql_store.apply_diff(&removals, &additions) {
+            Ok(g) => vec![g],
+            Err(e) => {
+                log::warn!(
+                    "Failed to apply link diff to SPARQL store in one transaction, \
+                     writing links one by one: {:?}",
+                    e
+                );
+                let mut generations = Vec::new();
+                // Removals first
+                for removal in &removals {
+                    match self.sparql_store.remove_link(removal) {
+                        Ok(g) => generations.push(g),
+                        Err(e) => {
+                            log::warn!("Failed to remove link from SPARQL store: {:?}", e)
+                        }
+                    }
+                }
+                // Additions after
+                for addition in &additions {
+                    match self.sparql_store.add_link(addition) {
+                        Ok(g) => generations.push(g),
+                        Err(e) => {
+                            log::warn!("Failed to add link to SPARQL store: {:?}", e)
+                        }
+                    }
+                }
+                generations
+            }
+        };
 
-        // Removals first
-        for removal in &removals {
-            if let Err(e) = self.sparql_store.remove_link(removal) {
-                log::warn!("Failed to remove link from SPARQL store: {:?}", e);
-            }
-        }
-        // Additions after
-        for addition in &additions {
-            if let Err(e) = self.sparql_store.add_link(addition) {
-                log::warn!("Failed to add link to SPARQL store: {:?}", e);
-            }
-        }
+        // The feed entry right after the write, with the generations this
+        // diff's own writes took: the draining tick can then prove the feed
+        // covers the store's movement. Its terms are the links the diff
+        // wrote — the removals with the retracted folded in, the additions
+        // without the covered — the same set the published diff carries
+        // after `fold_into`.
+        self.broadcast_commit_write(
+            subscription_triggers::writes_of_links(
+                removals.iter().chain(additions.iter()).map(|l| &l.data),
+            ),
+            generations,
+        );
 
         // EXPERIMENT: removed per-write flush. The fix-branch added a flush
         // call here to reclaim memtable memory, but flushing on EVERY single
@@ -4559,29 +4585,37 @@ impl PerspectiveInstance {
         Ok(effects)
     }
 
+    /// Broadcast one committed write batch to the auto-processor feed
+    /// ([`Self::commit_writes`]), right where its store writes commit — under
+    /// `persist_lock`, so an entry's place in the channel is its commit's
+    /// place in the write order and a draining tick can prove coverage by the
+    /// `generations` the batch's own writes took (`Some` entries only; a
+    /// predicate-less diff feeds `None` and stales every kept read as
+    /// unclassifiable). A tick that falls into the small window between a
+    /// write's `note_write` and this send sees a gap and stales all once —
+    /// conservative and rare. Ignored when no loop runs (no receivers):
+    /// `send` only fails then, and there is nothing to wake.
+    pub(crate) fn broadcast_commit_write(
+        &self,
+        writes: Option<subscription_triggers::Writes>,
+        generations: Vec<u64>,
+    ) {
+        let feed = writes.map(|mut w| {
+            w.generations = generations;
+            Arc::new(w)
+        });
+        let _ = self.commit_writes.send(feed);
+    }
+
     /// Record the links of a diff into `changed_predicates`. A link without a
-    /// predicate makes it `CheckAll` (check everything).
+    /// predicate makes it `CheckAll` (check everything). The `commit_writes`
+    /// feed the auto-processor loops match is sent earlier, at the write
+    /// itself (`broadcast_commit_write`); this spawned record only feeds the
+    /// subscription side, which has no coverage to prove.
     async fn record_changed_predicates(&self, diff: &DecoratedPerspectiveDiff) {
         // Collect the diff's links; a predicate-less one means check everything.
         let writes =
             subscription_triggers::writes_of(diff.additions.iter().chain(diff.removals.iter()));
-
-        // The auto-processor loops match their triggers against the same
-        // batch, and must see it even while the subscription side has already
-        // collapsed to CheckAll. Ignored when no loop runs (no receivers):
-        // `send` only fails then, and there is nothing to wake.
-        //
-        // The generation tag is a watermark: this runs after the diff's own
-        // writes committed, so the value covers them (and possibly a
-        // concurrent diff's — only ever forwards, never short). A receiver
-        // draining the feed can then tell "commits up to generation N were
-        // all classified" from "the store moved past what the feed
-        // describes".
-        let feed = writes.clone().map(|mut w| {
-            w.generation = self.sparql_store.write_generation();
-            Arc::new(w)
-        });
-        let _ = self.commit_writes.send(feed);
 
         let mut changed = self.changed_predicates.lock().await;
 
@@ -7104,64 +7138,75 @@ impl PerspectiveInstance {
         // to wake at all; this feed — the watcher's own — is what marks a
         // kept transcript stale for a tick that got here another way (a test
         // driving `run_one_pass`, a base-rate poll), so a write is evaluated
-        // against the same trigger rules wherever the tick ran. `Lagged` or
-        // an unclassifiable batch stales them all.
+        // against the same trigger rules wherever the tick ran. An entry's
+        // arrival is not proof of coverage: coverage is proven when every
+        // write generation since the last drain came with an entry. `Lagged`,
+        // an unclassifiable batch or a write no entry accounts for (a store
+        // write outside the commit path) stales them all.
         {
             // The receiver leaves `watcher` for the drain so the matcher can
-            // borrow it mutably to write the stale marks.
-            let (mut commits, seen_generation) = watcher
-                .commit_feed
-                .take()
-                .unwrap_or_else(|| (self.commit_writes.subscribe(), generation));
-            // How far the drained feed described: each entry tags the
-            // generation its sender saw, so the highest tag is the feed's
-            // coverage watermark — every commit the store counted through
-            // that point was sent to be classified.
-            let mut covered_through: u64 = 0;
+            // borrow it mutably to write the stale marks. `covered` starts
+            // with the generations an earlier drain proved above `seen` (a
+            // write that landed mid-tick); each drained entry adds the
+            // generations its own store writes took.
+            let (mut commits, mut seen, mut covered) =
+                watcher.commit_feed.take().unwrap_or_else(|| {
+                    (
+                        self.commit_writes.subscribe(),
+                        generation,
+                        std::collections::BTreeSet::new(),
+                    )
+                });
+            let mut drained = Vec::new();
+            let mut unclassifiable = false;
             loop {
                 use tokio::sync::broadcast::error::TryRecvError;
                 match commits.try_recv() {
                     Ok(write) => {
-                        if let Some(w) = write.as_deref() {
-                            covered_through = covered_through.max(w.generation);
+                        match write.as_deref() {
+                            Some(w) => covered.extend(w.generations.iter().copied()),
+                            // A predicate-less batch: nothing to match on.
+                            None => unclassifiable = true,
                         }
-                        self.auto_processor_mark_stale(watcher, write.as_deref());
+                        drained.push(write);
                     }
-                    Err(TryRecvError::Lagged(_)) => {
-                        self.auto_processor_mark_stale(watcher, None);
-                    }
+                    // Entries the buffer dropped held generations the feed
+                    // can no longer account for.
+                    Err(TryRecvError::Lagged(_)) => unclassifiable = true,
                     Err(TryRecvError::Empty) | Err(TryRecvError::Closed) => break,
                 }
             }
-            // The store moved past what the feed accounts for — a write
-            // applied outside the commit path, which no trigger can
-            // classify, or one sent after the generation was read. An entry
-            // having arrived is not proof of coverage; the watermark is.
-            // A commit's feed entry is broadcast from a spawned task and can
-            // lag the generation bump by a scheduling slice, so give an
-            // in-flight entry one bounded wait before treating the shortfall
-            // as a feed-bypassing write — which then stales them all, the way
-            // `Lagged` is treated.
-            if generation != seen_generation && covered_through < generation {
-                match tokio::time::timeout(std::time::Duration::from_millis(200), commits.recv())
-                    .await
-                {
-                    Ok(Ok(write)) => {
-                        if let Some(w) = write.as_deref() {
-                            covered_through = covered_through.max(w.generation);
-                        }
-                        self.auto_processor_mark_stale(watcher, write.as_deref());
-                    }
-                    Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {
-                        self.auto_processor_mark_stale(watcher, None);
-                    }
-                    _ => {}
+            // The feed covers the tick when every generation in (seen,
+            // generation] came with an entry. `proven` is the highest
+            // generation it proves from `seen` up — possibly past
+            // `generation`, which is the mid-tick case: a fed write whose
+            // entry landed after the generation was read is still covered,
+            // and `seen` must not be parked below what the feed proved.
+            let covered_through = |up_to: u64| (seen + 1..=up_to).all(|g| covered.contains(&g));
+            let mut proven = seen;
+            while covered.contains(&(proven + 1)) {
+                proven += 1;
+            }
+            if !unclassifiable && covered_through(generation) {
+                // Every store write the tick sees arrived classified: mark
+                // only the transcripts a matching entry can change.
+                for write in &drained {
+                    self.auto_processor_mark_stale(watcher, write.as_deref());
                 }
-            }
-            if generation != seen_generation && covered_through < generation {
+                seen = proven;
+            } else {
+                // A gap: stale every kept transcript — the write no entry
+                // classified could have touched any scope — and trust the
+                // reads this tick makes past it. `seen` takes the larger of
+                // the generation this tick reads at and what the feed still
+                // proves above it.
                 self.auto_processor_mark_stale(watcher, None);
+                seen = generation.max(proven);
             }
-            watcher.commit_feed = Some((commits, generation));
+            // Generations proven above `seen` stay: the next drain must not
+            // ask for them again.
+            covered.retain(|g| *g > seen);
+            watcher.commit_feed = Some((commits, seen, covered));
         }
 
         // 1. Record new-since-last-processed turns per config (payload kept).

@@ -268,7 +268,11 @@ graph for provenance/audit. They simply are not read by the tick.
 
 ### 3f. How the tick reads it
 
-Two model queries per processor per tick (or on cache miss); subtract
+Two model queries per processor per tick (or on cache miss — a kept read is
+kept only while the tick's commit-feed drain proves coverage: every write
+generation since the last drain must come with a feed entry, and only
+entries matching the processor's trigger stale its read; an unclassifiable
+entry, a `Lagged` hole or a write with no entry stales them all); subtract
 in Rust.
 
 Author and timestamp are **not** on the quoted triple. The store writes a
