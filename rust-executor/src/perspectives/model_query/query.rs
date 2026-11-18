@@ -365,6 +365,12 @@ fn total_from_short_page(
     }
 }
 
+/// The order key that sorts instances by last activity ([`SortKey::Activity`]):
+/// the newest link an instance is the source or the target of. A row that an
+/// earlier run wrote, a row changed since, and a node a new row attached to
+/// all count as recent.
+pub const ACTIVITY_ORDER_KEY: &str = "activity";
+
 /// Execute a model query against the Oxigraph store.
 ///
 /// This is the main public entry point.  It delegates to
@@ -558,7 +564,11 @@ pub(super) async fn execute_model_query_inner(
             Some(order) => {
                 order.len() == 1 && {
                     let name = &order[0].0;
-                    if name == "timestamp" || name == "createdAt" || name == "updatedAt" {
+                    if name == "timestamp"
+                        || name == "createdAt"
+                        || name == "updatedAt"
+                        || name == ACTIVITY_ORDER_KEY
+                    {
                         true
                     } else if shape
                         .properties
@@ -658,12 +668,21 @@ pub(super) async fn execute_model_query_inner(
     // taken one of its parent's places. That is the same trade `limit_per_anchor` has always made,
     // and the alternative — fetching a level whole to filter it — is what the limit exists to avoid.
     let scope_needs_phases = anchor_limit.is_some() || walk.is_some();
+    // Last activity is read in the store only (it counts the links that point
+    // to a row, which hydration does not read), so an `activity` order always
+    // takes the two-phase plan.
+    let order_by_activity = query_input
+        .order
+        .as_ref()
+        .and_then(|o| o.first())
+        .is_some_and(|(key, _)| key == ACTIVITY_ORDER_KEY);
     // A containment walk with no order keeps the walk's order, which the
     // store cannot sort by: it is applied below, with the window, after
     // hydration.
     let sparql_pagination = if walk_order.is_some() {
         None
     } else if scope_needs_phases
+        || order_by_activity
         || (can_push_pagination && (query_input.limit.is_some() || query_input.offset.is_some()))
     {
         let direction = query_input
@@ -678,6 +697,8 @@ pub(super) async fn execute_model_query_inner(
                 let key = &order[0].0;
                 if key == "timestamp" || key == "createdAt" || key == "updatedAt" {
                     SortKey::Timestamp
+                } else if key == ACTIVITY_ORDER_KEY {
+                    SortKey::Activity
                 } else if let Some(prop) = shape
                     .properties
                     .iter()

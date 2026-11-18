@@ -829,6 +829,10 @@ pub(super) enum SortKey {
     /// Emits a double-OPTIONAL join in the pagination subquery:
     /// `?source <rel_pred> ?_rel . ?_rel <prop_pred> ?_sort_val`.
     RelationProperty { rel_pred: String, prop_pred: String },
+    /// Sort by last activity: the newest timestamp of any link the instance
+    /// is the source of (its creation and its `updatedAt`) or the target of
+    /// (a row that attached to it). Order key `activity`.
+    Activity,
 }
 
 // ---------------------------------------------------------------------------

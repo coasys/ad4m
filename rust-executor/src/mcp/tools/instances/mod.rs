@@ -63,6 +63,7 @@ pub mod template_tools;
 pub mod transcript;
 pub mod update;
 pub(crate) mod validate;
+pub(crate) mod walk;
 
 #[cfg(test)]
 mod tests;

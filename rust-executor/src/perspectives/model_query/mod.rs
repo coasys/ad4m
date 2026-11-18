@@ -86,6 +86,8 @@
 //! | [`builtin_classes`] | Built-in abstract classes (`ad4m://TextContent`, `ad4m://Container`), addressed by URI and never stored |
 //! | [`containment`] | Containment through `Container`: the edge set, and the patterns and rows that read it |
 
+#[cfg(test)]
+mod activity_order_tests;
 pub(crate) mod abstract_classes;
 pub(crate) mod builtin_classes;
 #[cfg(test)]
@@ -135,7 +137,7 @@ pub(crate) use filtering::matches_condition;
 pub(crate) use getters::conformance_predicates;
 pub use getters::evaluate_getters_batch;
 pub(crate) use links::{links_rows, links_trigger_predicates};
-pub use query::{execute_model_query, execute_model_query_stopped};
+pub use query::{execute_model_query, execute_model_query_stopped, ACTIVITY_ORDER_KEY};
 pub use relations::resolve_reverse_relations;
 pub(crate) use shape::{load_shape_from_store, MissingShape};
 pub use types::{

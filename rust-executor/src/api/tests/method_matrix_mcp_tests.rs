@@ -874,7 +874,7 @@ fn perspective_tools() -> Vec<PerspectiveTool> {
                 h.get_children(Parameters(instances::GetChildrenParams {
                     perspective_id: uuid,
                     parent: "matrix://s".into(),
-                    limit: None,
+                    limit: None, via: None,
                 }))
                 .await
             })
@@ -895,7 +895,7 @@ fn perspective_tools() -> Vec<PerspectiveTool> {
                     filter: None,
                     parent: None,
                     limit: None,
-                    offset: None,
+                    offset: None, order: None, fields: None,
                 }))
                 .await
             })
