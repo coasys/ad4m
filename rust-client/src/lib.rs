@@ -16,16 +16,26 @@ extern crate tokio;
 extern crate urlencoding;
 
 pub mod agent;
+pub mod batch;
 pub mod expressions;
+pub mod flow;
+pub mod instances;
 pub mod languages;
 pub mod literal;
+pub mod model;
 pub mod neighbourhoods;
 pub mod perspective_proxy;
 pub mod perspectives;
 pub mod runtime;
 pub mod subject_proxy;
+pub mod subscription;
 pub mod types;
 pub mod ws_rpc;
+
+#[cfg(test)]
+mod drift;
+#[cfg(test)]
+pub(crate) mod testkit;
 
 pub struct Ad4mClient {
     pub agent: AgentClient,
@@ -59,5 +69,12 @@ impl Ad4mClient {
         events: serde_json::Value,
     ) -> Result<tokio::sync::broadcast::Receiver<serde_json::Value>> {
         self.ws.watch_events(events).await
+    }
+
+    /// The shared RPC socket — `Model`, `FlowApi` and `Batch` take it, so a
+    /// caller builds one client and hands pieces of it to each:
+    /// `Model::new(client.ws(), uuid, "Recipe")`.
+    pub fn ws(&self) -> &Arc<WsRpcClient> {
+        &self.ws
     }
 }

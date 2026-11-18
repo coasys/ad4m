@@ -285,6 +285,7 @@ fn an_activity_entry_names_the_action_the_space_the_reason_and_the_outcome() {
     let failed = WsRpcError {
         code: 404,
         message: "not found".into(),
+        data: None,
     };
     assert_eq!(log::answered(Err(&failed)), "failed:404");
 }

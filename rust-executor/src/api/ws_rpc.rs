@@ -6,7 +6,7 @@
 //!
 //! **Request:**  `{ "id": "<correlation-id>", "type": "<operation>", "params": {...} }`
 //! **Response:** `{ "id": "<correlation-id>", "result": ... }` or
-//!               `{ "id": "<correlation-id>", "error": { "code": N, "message": "..." } }`
+//!               `{ "id": "<correlation-id>", "error": { "code": N, "message": "...", "data"?: ... } }`
 //! **Events:**   `{ "type": "<event-type>", ...payload }` (no `id`)
 
 use axum::{
@@ -673,6 +673,7 @@ impl Connection {
                             Some(permit) => Some(permit),
                             None => {
                                 return Err(WsRpcError {
+                                    data: None,
                                     code: 499,
                                     message: "Request cancelled by client".to_string(),
                                 });
@@ -692,7 +693,7 @@ impl Connection {
                 } => {
                     match result {
                         Ok(val) => json!({"id": id, "result": val}),
-                        Err(e) => json!({"id": id, "error": {"code": e.code, "message": e.message}}),
+                        Err(e) => json!({"id": id, "error": e.to_wire()}),
                     }
                 }
             };
