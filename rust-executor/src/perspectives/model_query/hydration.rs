@@ -217,7 +217,16 @@ pub(super) fn hydrate_one(shape: &ModelShape, inst: &InstanceLinks) -> Option<Va
                     let current_ts = prop_timestamps.get(prop.name.as_str()).copied();
                     if current_ts.is_none() || current_ts.map(|t| ts > t).unwrap_or(true) {
                         prop_timestamps.insert(prop.name.as_str(), ts);
-                        let val = parse_literal_value(target);
+                        // A `resolveLanguage` target stays raw: its value is
+                        // for `resolve_language_transforms` to produce, and
+                        // decoding a `literal:` envelope here would erase the
+                        // distinction between it and an expression URL once
+                        // the decoded text itself looks like `scheme://...`.
+                        let val = if prop.resolve_language.is_some() {
+                            Value::String(target.clone())
+                        } else {
+                            parse_literal_value(target)
+                        };
                         obj.insert(prop.name.clone(), val);
                     }
                 }
@@ -359,8 +368,15 @@ pub(super) fn hydrate_one(shape: &ModelShape, inst: &InstanceLinks) -> Option<Va
     Some(Value::Object(obj))
 }
 
+/// Instance key naming the `resolveLanguage` properties whose expression
+/// the language could not serve on this read — the resolver keeps the raw
+/// target as the value, so a consumer must not mistake it for the resolved
+/// one. Reserved like [`links::LINKS_KEY`] is: an array of property names,
+/// never a property value.
+pub(crate) const UNRESOLVED_KEY: &str = "__unresolved";
+
 /// The keys a `properties` selection never strips.
-pub(super) const ALWAYS_KEPT: [&str; 2] = ["id", "baseExpression"];
+pub(super) const ALWAYS_KEPT: [&str; 3] = ["id", "baseExpression", UNRESOLVED_KEY];
 
 /// Strip an instance down to only the requested properties.
 ///

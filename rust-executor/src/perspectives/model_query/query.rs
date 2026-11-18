@@ -26,7 +26,7 @@ use super::types::{
     InstanceQueryPlan, ModelQueryInput, ModelQueryResult, ModelShape, OrderDirection, Scope,
     ScopeDirection, ShapeResolver, SortKey, SparqlPagination, WhereCondition,
 };
-use super::utils::{validate_iri, values_or_str_filter, MAX_INCLUDE_DEPTH};
+use super::utils::{parse_literal_value, validate_iri, values_or_str_filter, MAX_INCLUDE_DEPTH};
 use crate::perspectives::sparql_store::{EvalStop, SparqlStore};
 use deno_core::anyhow::Error;
 use serde_json::Value;
@@ -1211,6 +1211,14 @@ pub(super) async fn resolve_language_transforms(
             // directly — never re-interpreted as an expression URL.
             let is_expr = !prop.is_deterministic_literal();
             let resolved: Option<Value> = match &current {
+                // Hydration keeps a `resolveLanguage` target raw so this is
+                // where an envelope (`literal:string:...`) and an expression
+                // URL part ways: the envelope decodes without a fetch — the
+                // decoded text may itself look like `scheme://...` and must
+                // never be re-read as one.
+                Value::String(uri) if is_expr && uri.starts_with("literal:") => {
+                    Some(parse_literal_value(uri))
+                }
                 Value::String(uri) if is_expr && !uri.starts_with("literal:") => {
                     match crate::languages::LanguageController::parse_expr_url(uri) {
                         Ok((lang, expr_addr)) => {
@@ -1228,6 +1236,7 @@ pub(super) async fn resolve_language_transforms(
                                         prop.name,
                                         e
                                     );
+                                    mark_unresolved(instance, &prop.name);
                                     instance[&prop.name] = current;
                                     continue;
                                 }
@@ -1241,8 +1250,16 @@ pub(super) async fn resolve_language_transforms(
                                         _ => data,
                                     })
                                 }
-                                // Not a fetchable expression — fall back to the raw value
-                                _ => Some(current.clone()),
+                                // The expression is not there to serve — it
+                                // has not arrived or the language failed on
+                                // it. The raw target stays as the value;
+                                // marking it `__unresolved` is what lets a
+                                // consumer tell "URL kept for lack of a
+                                // fetch" from "URL is the value".
+                                _ => {
+                                    mark_unresolved(instance, &prop.name);
+                                    Some(current.clone())
+                                }
                             }
                         }
                         Err(_) => Some(current.clone()),
@@ -1262,4 +1279,21 @@ pub(super) async fn resolve_language_transforms(
         }
     }
     Ok(())
+}
+
+/// Record `name` under [`UNRESOLVED_KEY`](super::hydration::UNRESOLVED_KEY)
+/// on `instance`: the property's `resolveLanguage` fetch failed, so the raw
+/// target stands in for its value.
+fn mark_unresolved(instance: &mut Value, name: &str) {
+    let Value::Object(obj) = instance else {
+        return;
+    };
+    let entry = obj
+        .entry(super::hydration::UNRESOLVED_KEY.to_string())
+        .or_insert_with(|| Value::Array(Vec::new()));
+    if let Value::Array(names) = entry {
+        if !names.iter().any(|n| n.as_str() == Some(name)) {
+            names.push(Value::String(name.to_string()));
+        }
+    }
 }

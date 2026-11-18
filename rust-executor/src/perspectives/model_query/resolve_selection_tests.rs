@@ -38,9 +38,11 @@ fn returns_only_what_was_asked_for() {
         properties: Some(strings(&["name"])),
         ..Default::default()
     };
+    // `__unresolved` is never a selection: it is a key the resolver can
+    // leave on an instance, so it is always kept, like `id`.
     assert_eq!(
         sorted(returned(&query)),
-        Some(strings(&["baseExpression", "id", "name"]))
+        Some(strings(&["__unresolved", "baseExpression", "id", "name"]))
     );
 }
 
@@ -53,7 +55,13 @@ fn returns_what_an_include_hands_back() {
     .unwrap();
     assert_eq!(
         sorted(returned(&query)),
-        Some(strings(&["baseExpression", "body", "id", "name"]))
+        Some(strings(&[
+            "__unresolved",
+            "baseExpression",
+            "body",
+            "id",
+            "name"
+        ]))
     );
 }
 

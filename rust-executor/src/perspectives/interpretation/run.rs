@@ -1987,9 +1987,10 @@ mod tests {
         )
         .await;
 
-        let (_result, turns) = gather_transcript_model(&perspective, "ns://Message", "body", "{}")
+        let turns = gather_transcript_model(&perspective, "ns://Message", "body", "{}")
             .await
-            .expect("gather_transcript_model");
+            .expect("gather_transcript_model")
+            .turns;
         assert_eq!(turns.len(), 2, "got {turns:#?}");
         assert_eq!(turns[0].text, "hello world");
         assert_eq!(turns[1].text, "second turn");
@@ -2041,30 +2042,33 @@ mod tests {
             .await
             .expect("seed shapeless");
 
-        let (_result, turns) = gather_transcript_model(&perspective, "ns://Message", "body", "{}")
+        let turns = gather_transcript_model(&perspective, "ns://Message", "body", "{}")
             .await
-            .expect("gather_transcript_model");
+            .expect("gather_transcript_model")
+            .turns;
         assert_eq!(turns.len(), 1, "got {turns:#?}");
         assert_eq!(turns[0].text, "I'll ship the doc");
 
         // `where` is a caller-side scope the model query applies.
-        let (_result, filtered) = gather_transcript_model(
+        let filtered = gather_transcript_model(
             &perspective,
             "ns://Message",
             "body",
             r#"{"where":{"body":{"contains":"ship"}}}"#,
         )
         .await
-        .expect("gather_transcript_model where");
+        .expect("gather_transcript_model where")
+        .turns;
         assert_eq!(filtered.len(), 1, "got {filtered:#?}");
-        let (_result, empty) = gather_transcript_model(
+        let empty = gather_transcript_model(
             &perspective,
             "ns://Message",
             "body",
             r#"{"where":{"body":{"contains":"nothing-matches"}}}"#,
         )
         .await
-        .expect("gather_transcript_model where empty");
+        .expect("gather_transcript_model where empty")
+        .turns;
         assert!(empty.is_empty(), "got {empty:#?}");
     }
 
@@ -2144,9 +2148,10 @@ mod tests {
         )
         .await;
 
-        let (_result, turns) = gather_transcript_model(&perspective, "ns://Message", "body", "{}")
+        let turns = gather_transcript_model(&perspective, "ns://Message", "body", "{}")
             .await
-            .expect("gather_transcript_model");
+            .expect("gather_transcript_model")
+            .turns;
         assert_eq!(turns.len(), 2, "got {turns:#?}");
         assert!(
             turns.iter().all(|t| t.text != "words never said"),
@@ -2157,6 +2162,132 @@ mod tests {
             .find(|t| t.text == "real words")
             .expect("other member's signed message");
         assert_eq!(others_turn.speaker, other.did);
+    }
+
+    /// When an edit lands as a *newer* text link by a different signer, the
+    /// turn's speaker is that link's signer — hydration's `author` is the
+    /// earliest link's, which would attribute the editor's words to the
+    /// instance's creator. The timestamp is the text link's too, so the edit
+    /// orders where it was written, not where the instance was created.
+    #[tokio::test]
+    async fn gather_transcript_model_speaker_is_the_text_link_signer() {
+        use crate::agent::signatures::TestSigner;
+        use crate::perspectives::interpretation::graph::gather_transcript_model;
+        use crate::perspectives::interpretation_test_support::MESSAGE_SDNA;
+        use crate::types::{Link, LinkExpression, LinkStatus};
+        let (perspective, _shapes, _ctx) =
+            setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
+
+        let alice = TestSigner::generate();
+        let bob = TestSigner::generate();
+        let alice_at = chrono::Utc::now() - chrono::Duration::seconds(10);
+        let bob_at = chrono::Utc::now();
+
+        let signed = |signer: &TestSigner,
+                      predicate: &str,
+                      target: &str,
+                      at: chrono::DateTime<chrono::Utc>| {
+            let mut l = LinkExpression::from(signer.sign_at(
+                Link {
+                    source: "msg://edit".into(),
+                    predicate: Some(predicate.into()),
+                    target: target.into(),
+                },
+                at,
+            ));
+            l.status = Some(LinkStatus::Shared);
+            l
+        };
+
+        // Alice creates the message; Bob writes the (only) body later. Both
+        // links verify — the question is whose words `body` is.
+        perspective
+            .sparql_store
+            .add_link(&signed(&alice, "ns://type", "ns://message", alice_at))
+            .expect("alice flag");
+        let bob_body = signed(&bob, "ns://body", "literal:string:edited words", bob_at);
+        perspective
+            .sparql_store
+            .add_link(&bob_body)
+            .expect("bob body");
+
+        let turns = gather_transcript_model(&perspective, "ns://Message", "body", "{}")
+            .await
+            .expect("gather_transcript_model")
+            .turns;
+        assert_eq!(turns.len(), 1, "got {turns:#?}");
+        let turn = &turns[0];
+        assert_eq!(turn.text, "edited words");
+        assert_eq!(
+            turn.speaker, bob.did,
+            "speaker must be the text link's signer, not the instance creator {}",
+            alice.did
+        );
+        assert_eq!(
+            turn.timestamp, bob_body.timestamp,
+            "the turn orders where the text was written"
+        );
+    }
+
+    /// A `resolveLanguage` value the language cannot serve yet is not a
+    /// message body: the expression URL must not reach the interpretation
+    /// input. The turn is dropped from the read — and once the language
+    /// serves the expression, a later read returns it resolved.
+    #[tokio::test]
+    async fn gather_transcript_model_drops_unresolvable_language_text() {
+        use crate::agent::signatures::TestSigner;
+        use crate::perspectives::interpretation::graph::gather_transcript_model;
+        use crate::perspectives::interpretation_test_support::{
+            serve_test_language, stop_test_language, MESSAGE_SDNA,
+        };
+        use crate::types::{Link, LinkExpression, LinkStatus};
+        let (perspective, _shapes, _ctx) =
+            setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
+
+        // `resolveLanguage: "literal"` makes `body` expression-resolved, so
+        // a target on another language is fetched through the language
+        // controller. That language is not loaded here: the fetch fails.
+        let author = TestSigner::generate();
+        let signed = |predicate: &str, target: &str| {
+            let mut l = LinkExpression::from(author.sign(Link {
+                source: "msg://lang".into(),
+                predicate: Some(predicate.into()),
+                target: target.into(),
+            }));
+            l.status = Some(LinkStatus::Shared);
+            l
+        };
+        perspective
+            .sparql_store
+            .add_link(&signed("ns://type", "ns://message"))
+            .expect("type link");
+        perspective
+            .sparql_store
+            .add_link(&signed("ns://body", "QmUnavailableLang://expr1"))
+            .expect("body link");
+
+        let turns = gather_transcript_model(&perspective, "ns://Message", "body", "{}")
+            .await
+            .expect("gather_transcript_model")
+            .turns;
+        assert!(
+            turns.is_empty(),
+            "an unresolvable text must not reach the transcript; got {turns:#?}"
+        );
+
+        // The language comes up and serves the expression; the next read
+        // resolves the same target to the text.
+        let expression =
+            serde_json::to_string(&author.sign("resolved words")).expect("expression json");
+        serve_test_language("QmUnavailableLang", expression).await;
+        let turns = gather_transcript_model(&perspective, "ns://Message", "body", "{}")
+            .await
+            .expect("gather_transcript_model")
+            .turns;
+        stop_test_language("QmUnavailableLang").await;
+        assert_eq!(turns.len(), 1, "got {turns:#?}");
+        assert_eq!(turns[0].text, "resolved words");
+        assert_eq!(turns[0].speaker, author.did);
     }
 
     // ---- interpretation_task_name_for_model + ensure_..._for_model --------

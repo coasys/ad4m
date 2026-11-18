@@ -93,7 +93,17 @@ or writes the graph. Split plan: spec items 3, 7, 8.
   carried a predicate-less link) and an unbuilt trigger wake conservatively. A wake re-runs
   the transcript as a full model query; `TickReads` (config, transcript, cursor) is still
   kept while the generation is unchanged, the transcript keeping text only for turns that
-  may still be queued. With turns pending but no default
+  may still be queued. The transcript query requests `links` provenance for
+  `source_text`, and each turn's speaker/timestamp come from the link row hydration
+  selected for the text — a body link signed by someone other than the instance creator
+  attributes to its own signer; an instance with no provable text-link row is skipped.
+  A turn whose `source_text` `resolveLanguage` fails (the resolver marks the property
+  under `__unresolved`) is likewise skipped: it is never queued or cursor-recorded, and
+  a transcript read that held unresolved turns expires on `UNRESOLVED_TEXT_RETRY_MS`
+  rather than the write generation, so a later language install admits the turn without
+  a store write. The cursor is a model query too (`load_processed_sources` over
+  `InterpretationRun`, scoped `where processor = …`), so unverifiable run links cannot
+  mark turns processed. With turns pending but no default
   LLM set and spawned (`watcher::model_available`), a tick drains nothing and returns
   `TickOutcome::NoModel`, and the loop backs off as if idle, waiting on writes and on
   `AIService::watch_llm_readiness` (bumped by `set_default_model` and by every LLM worker

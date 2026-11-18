@@ -94,7 +94,7 @@ async fn turn_ids(p: &PerspectiveInstance) -> Vec<PendingTurn> {
     gather_transcript_model(p, "ns://Message", "body", "{}")
         .await
         .expect("gather")
-        .1
+        .turns
         .iter()
         .map(PendingTurn::from_transcript)
         .collect()
@@ -268,7 +268,8 @@ async fn reused_reads_queue_only_new_turns_and_follow_the_window() {
         transcript_reads + 1,
         "a consumed turn coming back is read again, once"
     );
-    assert_eq!(all_queries(&p), reads + 1, "and nothing else is read");
+    // A transcript read is the scope query plus its `links` provenance read.
+    assert_eq!(all_queries(&p), reads + 2, "and nothing else is read");
     let reads = all_queries(&p);
     p.run_auto_processor_tick(&mut watcher, now_ms + WINDOW / 2 + 1_500, &ctx)
         .await;
@@ -521,7 +522,7 @@ async fn a_kept_transcript_holds_no_text_for_consumed_turns() {
 
     let mut watcher = WatcherState::new();
     p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
-    let (kept_at, kept) = watcher
+    let (kept_at, kept, _) = watcher
         .reads
         .transcript(&cfg)
         .expect("the tick kept its read");
@@ -565,7 +566,7 @@ async fn id_comparisons_in_two_ticks_over(n: usize) -> (u64, u64) {
         .collect();
     watcher
         .reads
-        .set_transcript(&cfg, generation, turns, |_, _| true);
+        .set_transcript(&cfg, generation, turns, |_, _| true, None);
 
     let now_ms = chrono::Utc::now().timestamp_millis();
     let before = id_comparisons();
@@ -615,6 +616,91 @@ async fn a_tick_over_50k_kept_turns_records_them_in_linear_time() {
              about one comparison per turn"
         );
     }
+}
+
+/// A turn whose `resolveLanguage` text the language cannot serve is not a
+/// turn yet: it is not queued, and — the subtle half — it is not *consumed*
+/// either. Kept reads are trusted while the store's write generation holds,
+/// but an expression arriving is not a store write, so a read that dropped an
+/// unresolved text carries a retry clock of its own: past it, the tick
+/// re-reads the transcript even though no link changed.
+#[tokio::test]
+async fn an_unresolvable_text_is_neither_queued_nor_consumed() {
+    use super::watcher::{TickOutcome, UNRESOLVED_TEXT_RETRY_MS};
+    use crate::agent::signatures::TestSigner;
+    use crate::perspectives::interpretation_test_support::{
+        serve_test_language, stop_test_language,
+    };
+    use crate::types::{Link, LinkStatus};
+
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
+    write_processor(&mut p, &config("lang", 600_000, None), Some(false), &ctx)
+        .await
+        .expect("write_processor");
+
+    // The message's body lives on a language that is not loaded: the
+    // resolveLanguage fetch fails. `body` carries `resolveLanguage: literal`
+    // in the SDNA, which is what makes it an expression-resolved property.
+    for (predicate, target) in [
+        ("ns://type", "ns://message"),
+        ("ns://body", "QmUnavailableLang://expr1"),
+    ] {
+        p.add_link(
+            Link {
+                source: "msg://lang".into(),
+                predicate: Some(predicate.into()),
+                target: target.into(),
+            },
+            LinkStatus::Shared,
+            None,
+            &ctx,
+        )
+        .await
+        .expect("seed message link");
+    }
+
+    let mut watcher = WatcherState::new();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let outcome = p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
+    assert_eq!(
+        outcome,
+        TickOutcome::Idle,
+        "nothing to queue: an unresolvable text is not a turn"
+    );
+    assert!(
+        pending_texts(&watcher, "lang").is_empty(),
+        "the expression URL must not be queued as the body"
+    );
+
+    // A tick just inside the retry clock still trusts the kept read — the
+    // retry is at the loop's idle cadence, not every poll.
+    let outcome = p
+        .run_auto_processor_tick(&mut watcher, now_ms + 500, &ctx)
+        .await;
+    assert_eq!(outcome, TickOutcome::Idle);
+    let queries_at_idle = transcript_queries(&p);
+    assert_eq!(queries_at_idle, 1);
+
+    // The language comes up and serves the expression — without a store
+    // write. Past the retry clock, the next tick re-reads and queues it.
+    let expression = serde_json::to_string(&TestSigner::generate().sign("resolved words"))
+        .expect("expression json");
+    serve_test_language("QmUnavailableLang", expression).await;
+    let outcome = p
+        .run_auto_processor_tick(&mut watcher, now_ms + UNRESOLVED_TEXT_RETRY_MS, &ctx)
+        .await;
+    stop_test_language("QmUnavailableLang").await;
+    assert_eq!(
+        outcome,
+        TickOutcome::Pending,
+        "now the turn waits out its debounce"
+    );
+    assert_eq!(
+        transcript_queries(&p),
+        2,
+        "past the retry clock the kept read is not trusted"
+    );
+    assert_eq!(pending_texts(&watcher, "lang"), vec!["resolved words"]);
 }
 
 /// Josh's profile, part 3: on an executor with no model a processor's turns
@@ -777,7 +863,7 @@ async fn kept_and_fresh_ids(
     watcher: &WatcherState,
     cfg: &AutoProcessorConfig,
 ) -> (Vec<String>, Vec<String>) {
-    let (_, kept) = watcher.reads.transcript(cfg).expect("a kept read");
+    let (_, kept, _) = watcher.reads.transcript(cfg).expect("a kept read");
     let mut kept: Vec<String> = kept.iter().map(|t| t.id().to_string()).collect();
     let mut fresh: Vec<String> = gather_transcript_model(
         p,
@@ -787,7 +873,7 @@ async fn kept_and_fresh_ids(
     )
     .await
     .expect("fresh read")
-    .1
+    .turns
     .iter()
     .map(|t| PendingTurn::from_transcript(t).id)
     .collect();
@@ -1062,7 +1148,7 @@ async fn a_late_older_turn_is_merged_where_a_fresh_read_puts_it() {
         .await;
 
     let order = |w: &WatcherState| -> Vec<String> {
-        let (_, turns) = w.reads.transcript(&cfg).expect("a kept read");
+        let (_, turns, _) = w.reads.transcript(&cfg).expect("a kept read");
         turns.iter().map(|t| t.id().to_string()).collect()
     };
     assert_eq!(order(&merged), ids, "the merged read is in timestamp order");

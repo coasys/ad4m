@@ -312,14 +312,28 @@ impl WatcherState {
 #[derive(Debug, Default, Clone)]
 pub(crate) struct TickReads {
     configs: Option<(u64, Arc<Vec<AutoProcessorConfig>>)>,
-    /// Per processor id: the generation it is up to date with, the scope it
-    /// read (`AutoProcessorConfig::scope_key`), and the turns it returned.
-    /// Only the turns that could still be queued keep their text (see
-    /// [`CachedTurn`]). One copy per processor and per loop, and one loop
-    /// runs per perspective and per online managed user.
-    transcripts: BTreeMap<String, (u64, ScopeKey, Arc<Vec<CachedTurn>>)>,
+    /// One copy per processor and per loop, and one loop runs per
+    /// perspective and per online managed user.
+    transcripts: BTreeMap<String, KeptTranscript>,
     /// Per processor id: the cursor rows, not yet windowed.
     processed: BTreeMap<String, (u64, Arc<Vec<ProcessedSource>>)>,
+}
+
+/// A transcript read [`TickReads`] keeps: the generation it is up to date
+/// with, the scope it read (`AutoProcessorConfig::scope_key`), and the
+/// turns it returned — only turns that could still be queued keep their
+/// text (see [`CachedTurn`]).
+#[derive(Debug, Clone)]
+struct KeptTranscript {
+    generation: u64,
+    scope: ScopeKey,
+    turns: Arc<Vec<CachedTurn>>,
+    /// Wall-clock ms at which this read stops being trusted even though the
+    /// generation holds, `Some` when it dropped an unresolved text: an
+    /// expression becoming fetchable is not a store write, so the
+    /// generation does not move and the kept read would hide that turn
+    /// forever without a retry clock.
+    retry_unresolved_ms: Option<i64>,
 }
 
 /// What defines the scope a kept transcript was read for
@@ -380,26 +394,29 @@ impl TickReads {
         configs
     }
 
-    /// The kept transcript of `cfg`'s scope, with the generation it is up
-    /// to date with.
+    /// The kept transcript of `cfg`'s scope: the generation it is up to date
+    /// with, the turns, and the retry clock a read that dropped unresolved
+    /// text carries (see [`KeptTranscript`]).
     pub(crate) fn transcript(
         &self,
         cfg: &AutoProcessorConfig,
-    ) -> Option<(u64, Arc<Vec<CachedTurn>>)> {
+    ) -> Option<(u64, Arc<Vec<CachedTurn>>, Option<i64>)> {
         self.transcripts
             .get(&cfg.processor_id)
-            .filter(|(_, key, _)| *key == cfg.scope_key())
-            .map(|(g, _, turns)| (*g, turns.clone()))
+            .filter(|k| k.scope == cfg.scope_key())
+            .map(|k| (k.generation, k.turns.clone(), k.retry_unresolved_ms))
     }
 
     /// Keep `turns`, with the text only of those `queueable` accepts, one per
-    /// turn id, in [`transcript_cmp`] order (creation timestamp, then id).
+    /// turn id, in [`transcript_cmp`] order (text-link timestamp, then id).
+    /// `retry_unresolved_ms` is [`KeptTranscript::retry_unresolved_ms`].
     pub(crate) fn set_transcript(
         &mut self,
         cfg: &AutoProcessorConfig,
         generation: u64,
         turns: Vec<PendingTurn>,
         queueable: impl Fn(&str, &str) -> bool,
+        retry_unresolved_ms: Option<i64>,
     ) -> Arc<Vec<CachedTurn>> {
         let mut seen = HashSet::new();
         let mut turns: Vec<CachedTurn> = turns
@@ -411,7 +428,12 @@ impl TickReads {
         let turns = Arc::new(turns);
         self.transcripts.insert(
             cfg.processor_id.clone(),
-            (generation, cfg.scope_key(), turns.clone()),
+            KeptTranscript {
+                generation,
+                scope: cfg.scope_key(),
+                turns: turns.clone(),
+                retry_unresolved_ms,
+            },
         );
         turns
     }
@@ -736,6 +758,14 @@ pub async fn model_readiness() -> Option<tokio::sync::watch::Receiver<u64>> {
 /// store query ([`TickReads`]), so this fallback only re-applies the
 /// time-based filters (`source_window_ms`) to what the loop already read.
 pub const AUTO_PROCESSOR_IDLE_FALLBACK_MS: u64 = 60_000;
+
+/// How long a kept transcript read that dropped an unresolved text
+/// (`resolveLanguage` fetch failed) stays trusted before the tick re-reads
+/// it, on the idle fallback's cadence. An expression becoming fetchable is
+/// not a store write, so the write generation does not move and the kept
+/// read would hide the turn forever without this; re-reading every poll
+/// would run the transcript query twice a second while any turn is pending.
+pub(crate) const UNRESOLVED_TEXT_RETRY_MS: i64 = AUTO_PROCESSOR_IDLE_FALLBACK_MS as i64;
 
 /// How long an idle loop (no turn pending) waits for a link write before it
 /// ticks anyway: [`AUTO_PROCESSOR_IDLE_FALLBACK_MS`], or less when a deferral

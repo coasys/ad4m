@@ -28,8 +28,10 @@
 //! `links: ["members"]` gives each member its own author, timestamp and
 //! verdict next to the plain `members` array, which stays as it is.
 //!
-//! The read is one extra query over the page that is actually returned, run
-//! after hydration. That placement is deliberate: the instance query and its
+//! The read is one extra query over the requested predicates, run after
+//! hydration and restricted to the returned page in Rust (a `VALUES` source
+//! constraint would join as a nested loop — one predicate scan per id).
+//! That placement is deliberate: the instance query and its
 //! hydration are left byte-for-byte as they were, so an annotation link cannot
 //! move `updatedAt`, `author` or a property value, and both instance-query plans
 //! (single and two-phase) are covered by the same code instead of by two copies
@@ -47,11 +49,11 @@
 use deno_core::anyhow::{anyhow, Error};
 use serde::de::DeserializeOwned;
 use serde_json::{json, Map, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use super::sparql_builder::{link_status_filter, local_status_filter, proof_valid_filter};
 use super::types::{IncludeValue, ModelQueryInput, ModelShape, ShapeResolver};
-use super::utils::{emittable_iri, values_or_str_filter};
+use super::utils::emittable_iri;
 use crate::perspectives::sparql_store::{status_from_str, EvalStop, SparqlStore};
 use crate::types::LinkStatus;
 
@@ -209,7 +211,7 @@ pub(super) async fn attach_links(
     if keys.is_empty() || instances.is_empty() {
         return Ok(());
     }
-    let ids: Vec<String> = instances
+    let ids: HashSet<String> = instances
         .iter()
         .filter_map(|i| i["id"].as_str().map(str::to_string))
         .collect();
@@ -221,7 +223,12 @@ pub(super) async fn attach_links(
     // source -> predicate -> rows
     let mut found: BTreeMap<String, BTreeMap<String, Vec<Value>>> = BTreeMap::new();
     if !ids.is_empty() {
-        let source_constraint = values_or_str_filter("source", &ids);
+        // The predicates scan as constants; the sources are filtered on the
+        // rows. A `VALUES ?source { ... }` here would join as a nested loop —
+        // one scan of the predicate per page id — which put a 50k-turn
+        // transcript read over a minute; a constant-predicate scan is ~5 µs
+        // per link. The trade: a small page pays for the whole predicate,
+        // still one indexed scan.
         let predicate_values = predicates
             .iter()
             .map(|p| format!("<{p}>"))
@@ -234,7 +241,6 @@ pub(super) async fn attach_links(
         // an OPTIONAL chain that a required pattern follows, so they run as cartesian products.
         let sparql = format!(
             r#"SELECT ?source ?predicate ?target ?wireTarget ?author ?timestamp ?proofKey ?proofSig ?proofValid ?rowStatus WHERE {{
-    {source_constraint}
     VALUES ?predicate {{ {predicate_values} }}
     ?source ?predicate ?target .
     ?_reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?predicate ?target )>> .
@@ -251,6 +257,9 @@ pub(super) async fn attach_links(
         for row in &rows {
             let s = |var: &str| row[var].as_str().unwrap_or("").to_string();
             let source = s("source");
+            if !ids.contains(&source) {
+                continue;
+            }
             let predicate = s("predicate");
             let mut link = decorated_link(row);
             // Spelled as `perspective.get` spells it (`"SHARED"` / `"LOCAL"`),
@@ -466,6 +475,65 @@ mod tests {
             links_trigger_predicates(&top, &query, &resolver),
             vec!["we://leaf_note", "we://mid_tombstone", "we://top_tombstone"]
         );
+    }
+
+    /// A `__links` read whose page is large: the whole-transcript gather
+    /// asks for every in-scope instance's text link at once. Restricting the
+    /// read with `VALUES ?source { ... }` joined as a nested loop — one scan
+    /// of the predicate per id — and a 20k-id page took ~10 s; scanning the
+    /// predicate once and filtering the sources on the rows is ~200 ms.
+    #[tokio::test]
+    async fn links_for_a_large_page_stay_fast() {
+        use super::super::test_helpers::{prop, shape};
+        use crate::agent::signatures::TestSigner;
+        use crate::types::{Link, LinkExpression};
+
+        let signer = TestSigner::generate();
+        let store = SparqlStore::new(None).unwrap();
+        for i in 0..20_000 {
+            let e = signer.sign(
+                Link {
+                    source: format!("we://s{i}"),
+                    predicate: Some("we://name".into()),
+                    target: format!("literal:string:v{i}"),
+                }
+                .normalize(),
+            );
+            store
+                .add_link(&LinkExpression {
+                    author: e.author,
+                    timestamp: e.timestamp,
+                    data: e.data,
+                    proof: e.proof,
+                    status: Some(LinkStatus::Shared),
+                })
+                .unwrap();
+        }
+        let shape = shape("Thing", vec![prop("name", "we://name")]);
+        let keys: Vec<(String, String)> = vec![("name".into(), "we://name".into())];
+        let mut instances: Vec<Value> = (0..20_000)
+            .map(|i| json!({ "id": format!("we://s{i}") }))
+            .collect();
+        let started = std::time::Instant::now();
+        attach_links(
+            &crate::perspectives::sparql_store::EvalStop::none(),
+            &store,
+            &shape,
+            &keys,
+            None,
+            None,
+            &mut instances,
+        )
+        .await
+        .unwrap();
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "__links for a 20k-instance page took {elapsed:?}"
+        );
+        let row = &instances[17][LINKS_KEY]["name"][0];
+        assert_eq!(row["data"]["target"], "literal:string:v17");
+        assert_eq!(row["author"], signer.did.as_str());
     }
 
     /// Two agents write the same triple in the same millisecond. The store

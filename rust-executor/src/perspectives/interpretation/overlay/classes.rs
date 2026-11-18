@@ -16,7 +16,7 @@ pub(crate) const INTERP_OVERLAY_CLASS: &str = "InterpretationOverlay";
 /// registration.
 const INTERP_OVERLAY_TARGET_CLASS: &str = "ad4m://InterpretationOverlay";
 /// Target-class URI of [`INTERP_RUN_CLASS`] — used to detect prior registration.
-const INTERP_RUN_TARGET_CLASS: &str = "ad4m://InterpretationRun";
+pub(crate) const INTERP_RUN_TARGET_CLASS: &str = "ad4m://InterpretationRun";
 
 /// Hard-wired SDNA for the [`INTERP_RUN_CLASS`] subject class. No dedicated
 /// `ad4m://type` flag — Nico 2026-08-19: "type flags are an anti-pattern

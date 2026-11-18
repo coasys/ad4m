@@ -1598,7 +1598,7 @@ async fn auto_processor_pass_lands_interpretation_instance() {
     )
     .await
     .expect("gather_transcript_model")
-    .1;
+    .turns;
     assert_eq!(
         transcript.len(),
         2,
@@ -1820,7 +1820,7 @@ async fn auto_processor_two_configs_no_cross_contamination() {
     let transcript = gather_transcript_model(&perspective, "ns://Message", "body", "{}")
         .await
         .expect("gather_transcript_model")
-        .1;
+        .turns;
     assert_eq!(
         transcript.len(),
         2,

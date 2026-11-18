@@ -285,13 +285,14 @@ impl AutoProcessorConfig {
     }
 
     /// The model query the transcript read runs: the caller's `parent` /
-    /// `where` scope, plus the fields a turn is built from. The processor
-    /// selects the text property and the per-instance author/timestamp
-    /// hydration emits (the earliest link's), and orders the result itself
-    /// in [`super::watcher::transcript_cmp`] order — never the config's.
+    /// `where` scope, plus the text property a turn is built from.
+    /// `gather_transcript_model` adds `links: [source_text]` itself so the
+    /// turn's speaker/timestamp come off the selected text link's row, and
+    /// orders the result in [`super::watcher::transcript_cmp`] order — never
+    /// the config's.
     pub(crate) fn transcript_query_json(&self) -> String {
         let mut query = serde_json::json!({
-            "properties": [&self.source_text, "author", "timestamp"],
+            "properties": [&self.source_text],
         });
         if let Some(source_query) = &self.source_query {
             if let Ok(serde_json::Value::Object(scope)) = serde_json::from_str(source_query) {
@@ -332,7 +333,11 @@ pub fn processor_node(processor_id: &str) -> String {
 }
 
 /// Idempotently register the hard-wired [`AUTO_PROCESSOR_CLASS`] subject class.
-/// Refreshes the SHACL if an older registration predates the `flows` selection.
+/// Refreshes the SHACL if an older registration predates the `source_class`
+/// selection: `ad4m://flow` cannot be the marker — the pre-`source_class`
+/// shape already carries it for `flows`, so an old stored shape would pass
+/// the freshness check and its missing setters would silently drop every new
+/// field a processor is written with.
 pub async fn ensure_auto_processor_class(
     perspective: &mut PerspectiveInstance,
     context: &AgentContext,
@@ -342,7 +347,7 @@ pub async fn ensure_auto_processor_class(
         AUTO_PROCESSOR_CLASS,
         AUTO_PROCESSOR_TARGET_CLASS,
         AUTO_PROCESSOR_SDNA,
-        Some("ad4m://flow"),
+        Some("ad4m://source_class"),
         context,
     )
     .await
@@ -903,6 +908,86 @@ mod tests {
             .expect("write_processor");
         let loaded = load_processors(&p).await.expect("load_processors");
         assert_eq!(loaded, vec![cfg]);
+    }
+
+    /// The class as a pre-`source_class` executor stored it — the verbatim
+    /// `auto_processor.json` at the parent commit: `sourceScopeQuery`
+    /// instead of `sourceClass`/`sourceText`/`sourceQuery`, but already
+    /// carrying `ad4m://flow` (which made it a bad refresh marker).
+    const OLD_AUTO_PROCESSOR_SDNA: &str = r#"{
+  "target_class": "ad4m://AutoProcessor",
+  "interpretation_hint": "An automatic interpretation processor: the content it watches, the classes it materializes, and its batching/claim timings.",
+  "constructor_actions": [
+    {"action": "addLink", "source": "this", "predicate": "ad4m://processor_id", "target": "placeholder"}
+  ],
+  "properties": [
+    {"path": "ad4m://processor_id",      "name": "processorId",         "identity": true, "min_count": 1, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://processor_id", "target": "value"}]},
+    {"path": "ad4m://source_scope_query","name": "sourceScopeQuery",                      "min_count": 1, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://source_scope_query", "target": "value"}]},
+    {"path": "ad4m://base_prefix",       "name": "basePrefix",                            "min_count": 0, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://base_prefix", "target": "value"}]},
+    {"path": "ad4m://interpretation_class","name": "interpretationClasses","collection": true,"datatype": "xsd://string", "min_count": 1, "setter": [{"action": "addLink", "source": "this", "predicate": "ad4m://interpretation_class", "target": "value"}]},
+    {"path": "ad4m://flow",              "name": "flows",               "collection": true,"datatype": "xsd://string", "min_count": 0, "setter": [{"action": "addLink", "source": "this", "predicate": "ad4m://flow", "target": "value"}]},
+    {"path": "ad4m://debounce_ms",       "name": "debounceMs",                            "min_count": 1, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://debounce_ms", "target": "value"}]},
+    {"path": "ad4m://batch_min",         "name": "batchMin",                              "min_count": 0, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://batch_min", "target": "value"}]},
+    {"path": "ad4m://batch_max",         "name": "batchMax",                              "min_count": 1, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://batch_max", "target": "value"}]},
+    {"path": "ad4m://max_wait_ms",       "name": "maxWaitMs",                             "min_count": 0, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://max_wait_ms", "target": "value"}]},
+    {"path": "ad4m://claim_ttl_ms",      "name": "claimTtlMs",                            "min_count": 1, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://claim_ttl_ms", "target": "value"}]},
+    {"path": "ad4m://source_window_ms",  "name": "sourceWindowMs",                        "min_count": 0, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://source_window_ms", "target": "value"}]},
+    {"path": "ad4m://dedup_strategy",    "name": "dedupStrategy",                         "min_count": 0, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://dedup_strategy", "target": "value"}]},
+    {"path": "ad4m://existing_scope",    "name": "existingScope",                         "min_count": 0, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://existing_scope", "target": "value"}]},
+    {"path": "ad4m://mint_scope",        "name": "mintScope",                             "min_count": 0, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://mint_scope", "target": "value"}]},
+    {"path": "ad4m://max_tool_calls",    "name": "maxToolCalls",                          "min_count": 0, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://max_tool_calls", "target": "value"}]},
+    {"path": "ad4m://emit_debug_events", "name": "emitDebugEvents",                       "min_count": 0, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://emit_debug_events", "target": "value"}]}
+  ]
+}"#;
+
+    /// Re-registering a processor on a perspective that still stores the old
+    /// `sourceScopeQuery` shape must upgrade the class first — the stored
+    /// shape has no setters for `sourceClass`/`sourceText`/`sourceQuery`, so
+    /// without the refresh `create_subject` drops every new field with only a
+    /// log line and the write reports success while `load_processors` sees
+    /// nothing. The refresh replaces the shape wholesale: `source_scope_query`
+    /// must be gone afterwards, not just joined by the new paths.
+    #[tokio::test]
+    async fn write_processor_upgrades_a_stored_old_shape() {
+        use crate::perspectives::hardwired_class::shacl_path_present;
+        use crate::perspectives::perspective_instance::SdnaType;
+
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        p.add_sdna(
+            AUTO_PROCESSOR_CLASS.to_string(),
+            String::new(),
+            SdnaType::SubjectClass,
+            Some(OLD_AUTO_PROCESSOR_SDNA.to_string()),
+            &ctx,
+        )
+        .await
+        .expect("store old shape");
+        assert!(
+            shacl_path_present(&p, AUTO_PROCESSOR_TARGET_CLASS, "ad4m://source_scope_query")
+                .await
+                .expect("shacl_path_present"),
+            "fixture check: the stored shape is the old one"
+        );
+
+        let cfg = sample_config("upgraded");
+        write_processor(&mut p, &cfg, Some(false), &ctx)
+            .await
+            .expect("write_processor");
+
+        assert!(
+            shacl_path_present(&p, AUTO_PROCESSOR_TARGET_CLASS, "ad4m://source_class")
+                .await
+                .expect("shacl_path_present"),
+            "the write must refresh the stored shape to the current SDNA"
+        );
+        assert!(
+            !shacl_path_present(&p, AUTO_PROCESSOR_TARGET_CLASS, "ad4m://source_scope_query")
+                .await
+                .expect("shacl_path_present"),
+            "the refresh replaces the shape — no `source_scope_query` left"
+        );
+        let loaded = load_processors(&p).await.expect("load_processors");
+        assert_eq!(loaded, vec![cfg], "every new field must land and load");
     }
 
     /// The config lives in the *shared* graph: every link the subject class

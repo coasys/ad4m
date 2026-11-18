@@ -1208,3 +1208,39 @@ pub(crate) async fn seed_flow(
             .expect("add_link(flow definition)");
     }
 }
+
+/// Serve `lang` as a loaded language whose `expressionGet` answers
+/// `expression_json` (and `isImmutableExpression` `false`): the "language
+/// becomes available" half of a `resolveLanguage` test. The runtime map is
+/// global, so a test must remove it again with [`stop_test_language`]; the
+/// answerer task ends when the channel closes with it.
+pub(crate) async fn serve_test_language(lang: &str, expression_json: String) {
+    use crate::languages::language_runtime::{LanguageOperation, LanguageRuntimeRequest};
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<LanguageRuntimeRequest>();
+    let handle = crate::languages::language_runtime_handle::LanguageRuntimeHandle::from_channel(
+        lang.to_string(),
+        tx,
+    );
+    crate::languages::LanguageController::global_instance()
+        .set_runtime_for_test(lang, Some(handle))
+        .await;
+    tokio::spawn(async move {
+        while let Some(req) = rx.recv().await {
+            if let LanguageOperation::Execute(script, _) = req.operation {
+                let result = if script.contains("isImmutableExpression") {
+                    "false".to_string()
+                } else {
+                    expression_json.clone()
+                };
+                let _ = req.response_tx.send(Ok(result));
+            }
+        }
+    });
+}
+
+/// Remove the runtime [`serve_test_language`] registered for `lang`.
+pub(crate) async fn stop_test_language(lang: &str) {
+    crate::languages::LanguageController::global_instance()
+        .set_runtime_for_test(lang, None)
+        .await;
+}

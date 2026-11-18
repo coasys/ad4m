@@ -167,9 +167,10 @@ async fn scope_read_and_wake_costs() {
         let mut turns = 0usize;
         for _ in 0..5 {
             let t = Instant::now();
-            let (_, transcript) = gather_transcript_model(&p, "ns://Message", "body", "{}")
+            let transcript = gather_transcript_model(&p, "ns://Message", "body", "{}")
                 .await
-                .expect("model read");
+                .expect("model read")
+                .turns;
             model_ms.push(t.elapsed().as_millis());
             turns = transcript.len();
             let t = Instant::now();
@@ -188,9 +189,10 @@ async fn scope_read_and_wake_costs() {
         let burst_match = p.auto_processor_writes_match(&watcher, &in_scope);
         let burst_match_us = t.elapsed().as_micros();
         let t = Instant::now();
-        let (_, burst) = gather_transcript_model(&p, "ns://Message", "body", "{}")
+        let burst = gather_transcript_model(&p, "ns://Message", "body", "{}")
             .await
-            .expect("burst read");
+            .expect("burst read")
+            .turns;
         let burst_read_ms = t.elapsed().as_millis();
         assert!(burst_match);
         assert_eq!(burst.len(), turns + 1_000);

@@ -42,18 +42,6 @@ pub async fn gather_transcript(
     Ok(out)
 }
 
-/// Decode a `literal:` URI to a plain `String`, but only when it holds a
-/// string value. Reuses `ad4m-client`'s `Literal` (the canonical
-/// parse/serialize type); non-string literals (number/bool/json) and
-/// non-literal URIs yield `None`.
-pub(crate) fn decode_literal_string(uri: &str) -> Option<String> {
-    use ad4m_client::literal::{Literal, LiteralValue};
-    match Literal::from_url(uri.to_string()).ok()?.get().ok()? {
-        LiteralValue::String(s) => Some(s),
-        _ => None,
-    }
-}
-
 /// Decode a transcript body from a `literal:` URI, resolving an **expression
 /// envelope** as well as a bare string.
 ///
@@ -66,11 +54,12 @@ pub(crate) fn decode_literal_string(uri: &str) -> Option<String> {
 /// literal:json:{"author":"did:key:…","timestamp":"…","data":"the words","proof":{…}}
 /// ```
 ///
-/// [`decode_literal_string`] answers `None` for that (it is `LiteralValue::Json`,
-/// not `String`), which made both gathers silently skip every row and report an
-/// empty transcript — indistinguishable from a conversation with nothing in it.
-/// The fixtures write `ns://body` as a bare literal, so the path had only ever
-/// been exercised against text no ORM model produces.
+/// A decoder that only accepts `LiteralValue::String` answers `None` for
+/// that (it is `LiteralValue::Json`, not `String`), which made both gathers
+/// silently skip every row and report an empty transcript —
+/// indistinguishable from a conversation with nothing in it. The fixtures
+/// write `ns://body` as a bare literal, so the path had only ever been
+/// exercised against text no ORM model produces.
 ///
 /// So: a string literal is the body; a JSON envelope carrying a string `data` is
 /// the body inside it; anything else is still not a message body.
@@ -90,45 +79,88 @@ pub(crate) fn decode_transcript_body(uri: &str) -> Option<String> {
     }
 }
 
+/// The transcript read: the turns, beside the raw model-query JSON the
+/// watch loop feeds to its wake trigger.
+pub struct GatheredTranscript {
+    /// The model-query result as returned — the trigger's `near`/`via` rules
+    /// are defined over the nodes of the last read, so an edit to an
+    /// in-scope instance's links wakes it.
+    pub result_json: String,
+    /// Turns whose required text resolved.
+    pub turns: Vec<TranscriptTurn>,
+    /// At least one in-scope instance's `text_property` failed its
+    /// `resolveLanguage` fetch on this read: such a turn is dropped — the
+    /// expression URL is not the words — but it is not consumed either. An
+    /// expression arriving is not a store write, so the generation does not
+    /// move and a caller keeping reads by generation must not treat this
+    /// one as final.
+    pub has_unresolved: bool,
+}
+
 /// Assemble an interpretation transcript as a model query over the
 /// processor's message class (#1794). One hydrated instance is one turn:
-/// `speaker` is the instance's `author` and `timestamp` its creation
-/// timestamp — hydration reports both off the instance's **earliest link** —
-/// and `text` is the `text_property` value as hydration decoded it
-/// (language-resolved, literal-decoded). Reading through the model query is
-/// the point: only shape-conforming instances become turns, and links whose
-/// signature does not verify never hydrate (#1113, default provenance —
-/// `includeUnverified` is never set here).
+/// `text` is the `text_property` value as hydration decoded it
+/// (language-resolved, literal-decoded), and `speaker`/`timestamp` are the
+/// **text link's** — read off its `__links` row — not the instance's, whose
+/// `author` is the earliest link's and would attribute an edit written by
+/// another signer to the instance's creator. Ordering by the text link's
+/// timestamp places an edit where its words were written, not where the
+/// instance was created. Reading through the model query is the point: only
+/// shape-conforming instances become turns, and links whose signature does
+/// not verify never hydrate (#1113, default provenance — `includeUnverified`
+/// is never set here).
 ///
 /// `query_json` is the restricted scope merged with the fields a turn needs
-/// — see `AutoProcessorConfig::transcript_query_json`. The raw result JSON
-/// is returned beside the turns because the watch loop feeds it to its wake
-/// trigger: the trigger's `near`/`via` rules are defined over the nodes of
-/// the last read, so an edit to an in-scope instance's links wakes it.
+/// — see `AutoProcessorConfig::transcript_query_json`; `text_property` is
+/// added to `links` so the selected link's provenance comes back with it.
 pub async fn gather_transcript_model(
     perspective: &PerspectiveInstance,
     class: &str,
     text_property: &str,
     query_json: &str,
-) -> anyhow::Result<(String, Vec<TranscriptTurn>)> {
+) -> anyhow::Result<GatheredTranscript> {
+    let query_json = with_text_provenance(query_json, text_property)?;
     let result_json = perspective
-        .model_query(class, query_json)
+        .model_query(class, &query_json)
         .await
         .map_err(|e| anyhow::anyhow!("gather_transcript_model: model_query failed: {e:#}"))?;
     let result: serde_json::Value = serde_json::from_str(&result_json)
         .map_err(|e| anyhow::anyhow!("gather_transcript_model: bad model_query result: {e:#}"))?;
 
     let mut out = Vec::new();
+    let mut has_unresolved = false;
     for instance in result["instances"].as_array().into_iter().flatten() {
-        let (Some(speaker), Some(timestamp)) = (
-            instance.get("author").and_then(|v| v.as_str()),
-            instance.get("timestamp").and_then(|v| v.as_str()),
-        ) else {
-            // An instance is its links; one carrying neither author nor
-            // timestamp cannot be ordered into a transcript.
+        // The resolver marks a `resolveLanguage` value it could not fetch:
+        // the raw expression URL sits where the text should be, so there is
+        // no turn to take — and none to retire, since the same target may
+        // resolve once the language serves it.
+        if instance
+            .get(crate::perspectives::model_query::UNRESOLVED_KEY)
+            .and_then(|v| v.as_array())
+            .is_some_and(|names| names.iter().any(|n| n.as_str() == Some(text_property)))
+        {
+            has_unresolved = true;
+            continue;
+        }
+        let Some(text) = scalar_text(instance.get(text_property)) else {
             continue;
         };
-        let Some(text) = scalar_text(instance.get(text_property)) else {
+        // Rows are timestamp-ordered (see `attach_links`), so the last is
+        // the link hydration selected for a scalar. A hydrated scalar with
+        // no row here means the link left between the two reads — skipping
+        // is the safe direction, never fall back to the instance's.
+        let Some(link) = instance
+            .get(crate::perspectives::model_query::LINKS_KEY)
+            .and_then(|links| links.get(text_property))
+            .and_then(|rows| rows.as_array())
+            .and_then(|rows| rows.last())
+        else {
+            continue;
+        };
+        let (Some(speaker), Some(timestamp)) = (
+            link.get("author").and_then(|v| v.as_str()),
+            link.get("timestamp").and_then(|v| v.as_str()),
+        ) else {
             continue;
         };
         out.push(TranscriptTurn {
@@ -137,7 +169,32 @@ pub async fn gather_transcript_model(
             timestamp: timestamp.to_string(),
         });
     }
-    Ok((result_json, out))
+    Ok(GatheredTranscript {
+        result_json,
+        turns: out,
+        has_unresolved,
+    })
+}
+
+/// Add `text_property` to the query's `links` selection: the per-link
+/// provenance (`__links`) a turn's speaker and timestamp are read from. The
+/// restricted scope cannot name `links` (`validate_source_query`), so the
+/// key is always absent or already ours.
+fn with_text_provenance(query_json: &str, text_property: &str) -> anyhow::Result<String> {
+    let mut query: serde_json::Value = serde_json::from_str(query_json)
+        .map_err(|e| anyhow::anyhow!("gather_transcript_model: bad query JSON: {e:#}"))?;
+    let obj = query
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("gather_transcript_model: query must be an object"))?;
+    let entry = obj
+        .entry("links".to_string())
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    if let serde_json::Value::Array(keys) = entry {
+        if !keys.iter().any(|k| k.as_str() == Some(text_property)) {
+            keys.push(serde_json::Value::String(text_property.to_string()));
+        }
+    }
+    Ok(query.to_string())
 }
 
 /// The turn text off a hydrated scalar (`parse_literal_value` output): a

@@ -6949,6 +6949,7 @@ impl PerspectiveInstance {
             events::{emit, AutoProcessorEvent, AutoProcessorStep},
             watcher::{
                 model_available, run_one_pass, CachedTurn, PassOutcome, PendingTurn, TickOutcome,
+                UNRESOLVED_TEXT_RETRY_MS,
             },
         };
 
@@ -7020,19 +7021,25 @@ impl PerspectiveInstance {
             // or past a batch cap) are checked again: a run may have consumed
             // them since, or they may have left the window.
             watcher.retain_pending(&cfg.processor_id, |t| queueable(&t.id, &t.timestamp));
-            // A kept read is reused unless a turn it keeps without text has
-            // become queueable (its run aged out of the window).
-            let kept = watcher.reads.transcript(cfg).filter(|(_, turns)| {
-                !turns.iter().any(|t| {
-                    matches!(t, CachedTurn::Consumed { .. }) && queueable(t.id(), t.timestamp())
-                })
+            // A kept read is reused while the generation holds, unless a
+            // turn it keeps without text has become queueable (its run aged
+            // out of the window) or it dropped an unresolved text past its
+            // retry clock ([`UNRESOLVED_TEXT_RETRY_MS`]: an expression
+            // arriving is not a store write, so the generation never moves
+            // for it).
+            let kept = watcher.reads.transcript(cfg).filter(|(at, turns, retry)| {
+                *at == generation
+                    && !retry.is_some_and(|due| now_ms >= due)
+                    && !turns.iter().any(|t| {
+                        matches!(t, CachedTurn::Consumed { .. }) && queueable(t.id(), t.timestamp())
+                    })
             });
             // Anything but an unchanged generation reads the whole
             // transcript again: a model-query read has no partial-read
             // equivalent, and the wake trigger already kept writes that
             // could not change the scope from reaching this tick.
             let transcript = match kept {
-                Some((kept_at, turns)) if kept_at == generation => turns,
+                Some((_, turns, _)) => turns,
                 _ => match crate::perspectives::interpretation::gather_transcript_model(
                     self,
                     &cfg.source_class,
@@ -7041,16 +7048,21 @@ impl PerspectiveInstance {
                 )
                 .await
                 {
-                    Ok((result_json, t)) => {
+                    Ok(read) => {
                         // Feed the read's nodes to the wake trigger, so a
                         // write that edits an in-scope instance's links
                         // (`near`/`via` rules) wakes the loop.
-                        watcher.set_trigger_result(&cfg.processor_id, &result_json);
+                        watcher.set_trigger_result(&cfg.processor_id, &read.result_json);
                         watcher.reads.set_transcript(
                             cfg,
                             generation,
-                            t.iter().map(PendingTurn::from_transcript).collect(),
+                            read.turns
+                                .iter()
+                                .map(PendingTurn::from_transcript)
+                                .collect(),
                             queueable,
+                            read.has_unresolved
+                                .then_some(now_ms + UNRESOLVED_TEXT_RETRY_MS),
                         )
                     }
                     Err(e) => {
