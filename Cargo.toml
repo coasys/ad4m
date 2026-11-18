@@ -59,6 +59,15 @@ sqlx-mysql = { git = "https://github.com/coasys/sqlx.git", branch = "sqlite-libs
 sqlx-postgres = { git = "https://github.com/coasys/sqlx.git", branch = "sqlite-libsqlite3-sys-0.38-compat" }
 sqlx-sqlite = { git = "https://github.com/coasys/sqlx.git", branch = "sqlite-libsqlite3-sys-0.38-compat" }
 
+# The WE renderer's executor adapter (we-ad4m, a git dependency) pins
+# `ad4m-client` from this repository at a fixed rev. The CLI builds against
+# the workspace's own `rust-client`; without this patch the two sources give
+# `ad4m-client` (and so `WsRpcClient`) two distinct Cargo identities, and the
+# shared socket could not cross the adapter boundary. Patch it to the
+# workspace crate so there is exactly one client.
+[patch."https://github.com/coasys/ad4m.git"]
+ad4m-client = { path = "rust-client" }
+
 # kitsune2 patches deliberately removed 2026-08-25 (Nico approved plan A).
 #
 # Historical context: these patches used to pin kitsune2 to a lucksus fork
