@@ -47,6 +47,7 @@ pub(crate) mod overlay;
 mod parse;
 mod prompt;
 mod run;
+pub(crate) mod seed;
 mod types;
 pub(crate) mod walk_tools;
 
