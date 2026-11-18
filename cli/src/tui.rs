@@ -5,16 +5,22 @@
 //! `3` open those screens. Tab moves to the next screen. The open screen
 //! loads again every two seconds. A slow load does not block `q` or Ctrl-C.
 //! The links screen shows at most 200 links.
+//!
+//! `o` on the perspectives screen opens the selected space in the read-only
+//! Coasys view (`tui_space`); F10 or `q` returns, Ctrl-C exits the TUI.
 
 use std::future::Future;
 use std::io::{self, Stdout};
 use std::pin::Pin;
 use std::time::{Duration, Instant};
 
+use crate::tui_space::{self, SpaceApp};
 use ad4m_client::connect::normalize_base_url;
 use ad4m_client::types::{AgentStatus, LinkExpression, PerspectiveHandle, RuntimeInfo};
 use ad4m_client::Ad4mClient;
 use anyhow::{Context, Result};
+use we_ad4m::SpaceRow;
+use we_tui::KeyResult as SpaceKeyResult;
 use crossterm::{
     cursor::{Hide, Show},
     event::{
@@ -79,6 +85,14 @@ struct Model {
     /// Bumped when the user asks for a new load. An in-flight result from an
     /// older generation is dropped, so `r` and a screen change are not overwritten.
     refresh_gen: u64,
+    /// The open Coasys space view — admin refresh is suspended while set.
+    space: Option<SpaceApp>,
+    /// The row `o` asked for — the drive loop opens it, so an assembly
+    /// error lands in `error` instead of inside key handling.
+    requested_open: Option<SpaceRow>,
+    /// The drawn surface changed completely (a space opened or closed) —
+    /// clear the terminal before the next draw.
+    needs_clear: bool,
 }
 
 impl Model {
@@ -97,6 +111,9 @@ impl Model {
             error: None,
             loaded_at: None,
             refresh_gen: 0,
+            space: None,
+            requested_open: None,
+            needs_clear: false,
         }
     }
 
@@ -138,6 +155,13 @@ impl Model {
         } else if self.link_selected >= self.links.len() {
             self.link_selected = self.links.len() - 1;
         }
+    }
+
+    /// The selected *visible* row as a `SpaceRow` — `o`'s target. Empty
+    /// selection (an empty or fully filtered list) opens nothing.
+    fn selected_space(&self) -> Option<SpaceRow> {
+        let index = self.visible().get(self.selected).copied()?;
+        Some(tui_space::space_row(&self.perspectives[index]))
     }
 }
 
@@ -230,7 +254,7 @@ pub(crate) fn links_title(uuid: Option<&str>, shown: usize) -> String {
 }
 
 fn should_start_refresh(model: &Model, inflight: bool) -> bool {
-    model.stale() && !inflight
+    model.space.is_none() && model.stale() && !inflight
 }
 
 fn invalidate(model: &mut Model) {
@@ -238,9 +262,11 @@ fn invalidate(model: &mut Model) {
     model.loaded_at = None;
 }
 
-pub(crate) fn key_quits(key: &KeyEvent) -> bool {
+/// `q` quits the admin screens; inside the Coasys view it is the renderer's
+/// own back key (or input text), so only Ctrl-C exits there.
+pub(crate) fn key_quits(key: &KeyEvent, app_open: bool) -> bool {
     match key.code {
-        KeyCode::Char('q') => true,
+        KeyCode::Char('q') => !app_open,
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => true,
         _ => false,
     }
@@ -393,24 +419,28 @@ type BoxedRefresh<'a> = Pin<Box<dyn Future<Output = RefreshOutcome> + Send + 'a>
 /// `biased` polls the sleep first. When the slice has elapsed it does not poll
 /// the refresh, so that future can go back into `inflight` unharmed. A quit
 /// drops it. The key source runs only after the slice, never behind the RPC.
-async fn refresh_or_quit<F, K>(inflight: &mut Option<F>, mut next_key: K) -> Result<DriveEvent>
+async fn refresh_or_quit<F, K>(
+    inflight: &mut Option<F>,
+    app_open: bool,
+    mut next_key: K,
+) -> Result<DriveEvent>
 where
     F: Future<Output = RefreshOutcome> + Unpin,
     K: FnMut() -> io::Result<Option<KeyEvent>>,
 {
     let Some(mut pending) = inflight.take() else {
         tokio::time::sleep(INPUT_SLICE).await;
-        return drive_key(next_key()?);
+        return drive_key(next_key()?, app_open);
     };
 
     tokio::select! {
         biased;
         _ = tokio::time::sleep(INPUT_SLICE) => {
             match next_key()? {
-                Some(key) if key_quits(&key) => Ok(DriveEvent::Quit),
+                Some(key) if key_quits(&key, app_open) => Ok(DriveEvent::Quit),
                 other => {
                     *inflight = Some(pending);
-                    drive_key(other)
+                    drive_key(other, app_open)
                 }
             }
         }
@@ -418,9 +448,9 @@ where
     }
 }
 
-fn drive_key(key: Option<KeyEvent>) -> Result<DriveEvent> {
+fn drive_key(key: Option<KeyEvent>, app_open: bool) -> Result<DriveEvent> {
     Ok(match key {
-        Some(key) if key_quits(&key) => DriveEvent::Quit,
+        Some(key) if key_quits(&key, app_open) => DriveEvent::Quit,
         Some(key) => DriveEvent::Key(key),
         None => DriveEvent::Tick,
     })
@@ -669,17 +699,58 @@ async fn drive(
             let request = model.refresh_request();
             inflight = Some(Box::pin(fetch(client, request)));
         }
-        session
+        if let Some(row) = model.requested_open.take() {
+            open_space(client, model, row);
+        }
+        let terminal = session
             .terminal
             .as_mut()
-            .context("tui terminal is not open")?
-            .draw(|frame| draw(frame, model))?;
-        match refresh_or_quit(&mut inflight, poll_key).await? {
+            .context("tui terminal is not open")?;
+        if model.needs_clear {
+            model.needs_clear = false;
+            terminal.clear()?;
+        }
+        // The session's live updates and live-member reads land through the
+        // poll — ~50 ms slices keep an unfinished load responsive.
+        if let Some(space) = model.space.as_mut() {
+            space.app.session.poll();
+        }
+        terminal.draw(|frame| draw(frame, model))?;
+        match refresh_or_quit(&mut inflight, model.space.is_some(), poll_key).await? {
             DriveEvent::Quit => return Ok(()),
             DriveEvent::Refresh(outcome) => apply_outcome(model, *outcome),
             DriveEvent::Key(key) => handle_key(model, &key),
             DriveEvent::Tick => {}
         }
+    }
+}
+
+/// Assemble the Coasys view of `row` over the CLI's shared socket. A
+/// failure leaves the admin model untouched apart from `error`, so the
+/// screen it returns to is fully usable.
+fn open_space(client: &Ad4mClient, model: &mut Model, row: SpaceRow) {
+    let conn = tui_space::connection(client);
+    match tui_space::open(&conn, row) {
+        Ok(space) => {
+            model.space = Some(space);
+            model.needs_clear = true;
+            model.error = None;
+            // Drop a refresh already in flight: the perspectives list must
+            // stay exactly what the user selected from.
+            invalidate(model);
+        }
+        Err(error) => {
+            model.error = Some(format!("Coasys view failed: {error}"));
+        }
+    }
+}
+
+/// F10 or the renderer's own quit: drop the view (its live-member tasks and
+/// subscriptions stop), repaint the admin screen and resume its refresh.
+fn close_space(model: &mut Model) {
+    if model.space.take().is_some() {
+        model.needs_clear = true;
+        invalidate(model);
     }
 }
 
@@ -691,6 +762,23 @@ fn select_screen(model: &mut Model, screen: Screen) {
 }
 
 fn handle_key(model: &mut Model, key: &KeyEvent) {
+    // Inside the Coasys view every key is the renderer's; the admin keys
+    // stay out of its way. F10 is the unconditional way back (`q` may be
+    // input text). we-tui answers `Quit` for `q` and Ctrl-C alike; the
+    // drive loop already exits on Ctrl-C, so a Quit here means "back".
+    if model.space.is_some() {
+        match key.code {
+            KeyCode::F(10) => close_space(model),
+            _ => {
+                if let Some(space) = model.space.as_mut() {
+                    if space.app.handle_key(*key) == SpaceKeyResult::Quit {
+                        close_space(model);
+                    }
+                }
+            }
+        }
+        return;
+    }
     match key.code {
         KeyCode::Char('1') => select_screen(model, Screen::Status),
         KeyCode::Char('2') => select_screen(model, Screen::Perspectives),
@@ -708,6 +796,9 @@ fn handle_key(model: &mut Model, key: &KeyEvent) {
         KeyCode::Up | KeyCode::Char('k') => move_selection(model, -1),
         KeyCode::Down | KeyCode::Char('j') => move_selection(model, 1),
         KeyCode::Enter if model.screen == Screen::Perspectives => open_selected(model),
+        KeyCode::Char('o') if model.screen == Screen::Perspectives => {
+            model.requested_open = model.selected_space();
+        }
         KeyCode::Esc if model.screen == Screen::Links => model.screen = Screen::Perspectives,
         _ => {}
     }
@@ -752,7 +843,11 @@ fn open_selected(model: &mut Model) {
     invalidate(model);
 }
 
-fn draw(frame: &mut Frame, model: &Model) {
+fn draw(frame: &mut Frame, model: &mut Model) {
+    if model.space.is_some() {
+        draw_space(frame, model);
+        return;
+    }
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .margin(1)
@@ -762,7 +857,7 @@ fn draw(frame: &mut Frame, model: &Model) {
             Constraint::Length(3),
             Constraint::Length(3),
         ])
-        .split(frame.size());
+        .split(frame.area());
 
     let header = header_text(model.screen, &model.executor_url);
     let title = Paragraph::new(Line::from(vec![Span::styled(
@@ -790,10 +885,47 @@ fn draw(frame: &mut Frame, model: &Model) {
     frame.render_widget(error_line, chunks[2]);
 
     let help = Paragraph::new(
-        "1 status  2 perspectives  3 links  tab next  j/k move  enter open  n neighbourhoods  r refresh  q quit",
+        "1 status  2 perspectives  3 links  tab next  j/k move  enter links  o open coasys  n neighbourhoods  r refresh  q quit",
     )
     .block(Block::default().borders(Borders::ALL).title("Keys"));
     frame.render_widget(help, chunks[3]);
+}
+
+/// The Coasys view: a header naming the space, the renderer's own frame in
+/// between, and the read-only/dropped-call notice on the last row.
+fn draw_space(frame: &mut Frame, model: &mut Model) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(0),
+            Constraint::Length(3),
+        ])
+        .split(frame.area());
+    let Some(space) = model.space.as_mut() else {
+        return;
+    };
+    let header = format!(" {}  ·  {}", space.space.name, space.space.uuid);
+    let title = Paragraph::new(Line::from(vec![Span::styled(
+        header,
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )]))
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("ad4m tui — Coasys"),
+    );
+    frame.render_widget(title, chunks[0]);
+    space.render_into(frame.buffer_mut(), chunks[1]);
+    let notice = space.notice_line();
+    let note = Paragraph::new(notice).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("F10 back · Ctrl-C quit"),
+    );
+    frame.render_widget(note, chunks[2]);
 }
 
 fn draw_status(frame: &mut Frame, model: &Model, area: ratatui::layout::Rect) {
@@ -1095,7 +1227,7 @@ mod tests {
             let (tx, mut inflight) = pending_refresh();
             let event = tokio::time::timeout(
                 Duration::from_millis(500),
-                refresh_or_quit(&mut inflight, move || Ok(Some(key))),
+                refresh_or_quit(&mut inflight, false, move || Ok(Some(key))),
             )
             .await
             .expect("quit waited on the refresh")
@@ -1115,7 +1247,7 @@ mod tests {
             let (tx, mut inflight) = pending_refresh();
             let event = tokio::time::timeout(
                 Duration::from_millis(500),
-                refresh_or_quit(&mut inflight, move || Ok(Some(key))),
+                refresh_or_quit(&mut inflight, false, move || Ok(Some(key))),
             )
             .await
             .expect("input waited on the refresh")
