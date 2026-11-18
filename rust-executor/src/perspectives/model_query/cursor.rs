@@ -1,0 +1,516 @@
+//! Keyset cursors for `model_query` (`after` in, `nextCursor` out).
+//!
+//! A query without `after` pages by `offset` and gets no `nextCursor`.
+//! `after: ""` asks for the first page in cursor mode; each reply's
+//! `nextCursor` (present only while a full page came back) continues from the
+//! last row of that page.
+//!
+//! Supported for the timestamp order only: no `order`, or a single
+//! `timestamp` / `createdAt` / `updatedAt` key, either direction, with a
+//! `where` the store can evaluate, a `limit`, no non-zero `offset`, and no
+//! per-anchor limit or walk. The page is then selected in SPARQL by
+//! `(first timestamp, id)`: rows inserted before the cursor position cannot
+//! shift later pages, unlike `offset`. The id breaks timestamp ties, so the
+//! order is total and pages neither repeat nor skip a row.
+//!
+//! Any other query that sends `after` (even `""`) is refused: a caller that
+//! asked for cursor paging and got none back would read the missing
+//! `nextCursor` as the last page.
+//!
+//! `updatedAt` pages by the same key as the pushed `updatedAt` order: the
+//! instance's first link timestamp.
+
+use base64::Engine;
+use deno_core::anyhow::{anyhow, Error};
+use serde::{Deserialize, Serialize};
+
+use super::types::{IncludeValue, ModelQueryInput, OrderDirection};
+
+/// Position after the last row of a page: its first-link timestamp and id,
+/// plus the direction the page was read in.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(super) struct KeysetCursor {
+    pub(super) ts: String,
+    pub(super) id: String,
+    pub(super) desc: bool,
+}
+
+const ENGINE: base64::engine::GeneralPurpose = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+impl KeysetCursor {
+    pub(super) fn new(ts: String, id: String, direction: OrderDirection) -> Self {
+        Self {
+            ts,
+            id,
+            desc: matches!(direction, OrderDirection::DESC),
+        }
+    }
+
+    pub(super) fn encode(&self) -> String {
+        ENGINE.encode(serde_json::to_vec(self).expect("cursor serializes"))
+    }
+
+    pub(super) fn decode(s: &str) -> Result<Self, Error> {
+        let bytes = ENGINE
+            .decode(s)
+            .map_err(|_| anyhow!("Invalid `after` cursor"))?;
+        serde_json::from_slice(&bytes).map_err(|_| anyhow!("Invalid `after` cursor"))
+    }
+
+    pub(super) fn direction(&self) -> OrderDirection {
+        if self.desc {
+            OrderDirection::DESC
+        } else {
+            OrderDirection::ASC
+        }
+    }
+}
+
+/// Does an `include` sub-query, at any depth, send `after`? An include runs
+/// below depth 0, where a cursor has no keyset and no `nextCursor` to answer
+/// with, so it is refused up front rather than dropped.
+pub(super) fn include_sends_cursor(query: &ModelQueryInput) -> bool {
+    query.include.as_ref().is_some_and(|map| {
+        map.values().any(|v| match v {
+            IncludeValue::SubQuery(sub) => sub.after.is_some() || include_sends_cursor(sub),
+            IncludeValue::Bool(_) => false,
+        })
+    })
+}
+
+/// Is `order` one the cursor supports (the timestamp order)?
+pub(super) fn is_timestamp_order(order: &Option<Vec<(String, OrderDirection)>>) -> bool {
+    match order {
+        None => true,
+        Some(keys) => {
+            keys.len() == 1 && matches!(keys[0].0.as_str(), "timestamp" | "createdAt" | "updatedAt")
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn round_trips_and_keeps_direction() {
+        let c = KeysetCursor::new(
+            "2026-01-01T00:00:00.000Z".into(),
+            "ns://a\"b".into(),
+            OrderDirection::DESC,
+        );
+        let back = KeysetCursor::decode(&c.encode()).unwrap();
+        assert_eq!(back, c);
+        assert!(matches!(back.direction(), OrderDirection::DESC));
+    }
+
+    #[test]
+    fn rejects_garbage() {
+        assert!(KeysetCursor::decode("not a cursor!").is_err());
+        assert!(KeysetCursor::decode(&ENGINE.encode(b"{}")).is_err());
+    }
+
+    #[test]
+    fn timestamp_order_detection() {
+        assert!(is_timestamp_order(&None));
+        assert!(is_timestamp_order(&Some(vec![(
+            "createdAt".into(),
+            OrderDirection::DESC
+        )])));
+        assert!(is_timestamp_order(&Some(vec![(
+            "updatedAt".into(),
+            OrderDirection::ASC
+        )])));
+        assert!(!is_timestamp_order(&Some(vec![(
+            "title".into(),
+            OrderDirection::ASC
+        )])));
+        assert!(!is_timestamp_order(&Some(vec![
+            ("timestamp".into(), OrderDirection::ASC),
+            ("title".into(), OrderDirection::ASC)
+        ])));
+    }
+}
+
+/// End to end through `execute_model_query` on a real store.
+#[cfg(test)]
+mod pipeline_tests {
+    use super::super::query::execute_model_query;
+    use super::super::test_helpers::StaticShapeResolver;
+    use super::super::types::{ModelQueryInput, ModelQueryResult, ModelShape};
+    use super::super::utils::literal_percent_encode;
+    use crate::perspectives::sparql_store::SparqlStore;
+    use crate::types::{ExpressionProof, Link, LinkExpression, LinkStatus};
+    use serde_json::{json, Value};
+
+    const SHAPE_JSON: &str = r#"{
+        "className": "Todo",
+        "properties": {
+            "kind": { "predicate": "ns://kind", "required": true, "flag": true, "initial": "ns://todo" },
+            "title": { "predicate": "ns://title", "required": false, "resolveLanguage": "literal" }
+        }
+    }"#;
+
+    fn link(source: &str, predicate: &str, target: &str, ts: &str) -> LinkExpression {
+        LinkExpression {
+            author: "did:key:zA".into(),
+            timestamp: ts.into(),
+            data: Link {
+                source: source.into(),
+                predicate: Some(predicate.into()),
+                target: target.into(),
+            },
+            proof: ExpressionProof {
+                key: "key".into(),
+                signature: "sig".into(),
+            },
+            status: Some(LinkStatus::Shared),
+        }
+    }
+
+    fn add(store: &SparqlStore, id: &str, second: u32) {
+        let ts = format!("2026-01-01T00:00:{second:02}.000Z");
+        store
+            .add_link(&link(id, "ns://kind", "ns://todo", &ts))
+            .unwrap();
+        let title = format!("literal:string:{}", literal_percent_encode(id));
+        store
+            .add_link(&link(id, "ns://title", &title, &ts))
+            .unwrap();
+    }
+
+    /// Ten todos; `ns://t03` and `ns://t04` share a timestamp (a tie the
+    /// cursor must break by id).
+    fn store() -> SparqlStore {
+        let store = SparqlStore::new(None).unwrap();
+        for (i, second) in [
+            (0, 10),
+            (1, 11),
+            (2, 12),
+            (3, 13),
+            (4, 13),
+            (5, 15),
+            (6, 16),
+            (7, 17),
+            (8, 18),
+            (9, 19),
+        ] {
+            add(&store, &format!("ns://t{i:02}"), second);
+        }
+        store
+    }
+
+    async fn run(
+        store: &SparqlStore,
+        query: Value,
+    ) -> Result<ModelQueryResult, deno_core::anyhow::Error> {
+        let (resolver, shape) = StaticShapeResolver::from_json("Todo", SHAPE_JSON).unwrap();
+        let shape: ModelShape = (*shape).clone();
+        let mut input: ModelQueryInput = serde_json::from_value(query).unwrap();
+        input.include_unverified = Some(true);
+        execute_model_query(store, &shape, &input, &resolver).await
+    }
+
+    fn ids(r: &ModelQueryResult) -> Vec<String> {
+        r.instances
+            .iter()
+            .map(|i| i["id"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    /// Walk every page; returns the concatenated ids and the page count.
+    async fn walk(store: &SparqlStore, mut query: Value, limit: usize) -> (Vec<String>, usize) {
+        let mut all = vec![];
+        let mut after = String::new();
+        for pages in 1..50 {
+            query["after"] = json!(after);
+            query["limit"] = json!(limit);
+            let r = run(store, query.clone()).await.unwrap();
+            assert!(r.instances.len() <= limit);
+            all.extend(ids(&r));
+            match r.next_cursor {
+                Some(c) => after = c,
+                None => return (all, pages),
+            }
+        }
+        panic!("cursor never ended");
+    }
+
+    fn expected(desc: bool) -> Vec<String> {
+        let mut all: Vec<String> = (0..10).map(|i| format!("ns://t{i:02}")).collect();
+        if desc {
+            all.reverse();
+        }
+        all
+    }
+
+    #[tokio::test]
+    async fn cursor_pages_cover_every_row_once_in_order() {
+        let store = store();
+        let (paged, pages) = walk(&store, json!({}), 3).await;
+        // Timestamp order, the tie (t03, t04) broken by id.
+        assert_eq!(paged, expected(false), "every row once, in order");
+        assert_eq!(pages, 4, "3+3+3+1");
+    }
+
+    #[tokio::test]
+    async fn cursor_pages_on_every_timestamp_key_in_both_directions() {
+        let store = store();
+        for key in ["timestamp", "createdAt", "updatedAt"] {
+            for (dir, desc) in [("ASC", false), ("DESC", true)] {
+                let (paged, _) = walk(&store, json!({ "order": { key: dir } }), 4).await;
+                assert_eq!(paged, expected(desc), "{key} {dir}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn exact_multiple_ends_with_an_empty_page() {
+        let store = store();
+        let (paged, pages) = walk(&store, json!({}), 5).await;
+        assert_eq!(paged.len(), 10);
+        assert_eq!(pages, 3, "5 + 5 + empty");
+    }
+
+    #[tokio::test]
+    async fn an_insert_before_the_cursor_does_not_shift_the_next_page() {
+        let store = store();
+        let first = run(&store, json!({ "after": "", "limit": 3 }))
+            .await
+            .unwrap();
+        assert_eq!(ids(&first), vec!["ns://t00", "ns://t01", "ns://t02"]);
+        // A row that sorts before the cursor arrives between the two reads.
+        add(&store, "ns://early", 1);
+        let second = run(
+            &store,
+            json!({ "after": first.next_cursor.unwrap(), "limit": 3, "count": true }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            ids(&second),
+            vec!["ns://t03", "ns://t04", "ns://t05"],
+            "offset 3 would now repeat ns://t02"
+        );
+        assert_eq!(second.total_count, Some(11));
+    }
+
+    #[tokio::test]
+    async fn a_descending_insert_before_the_cursor_does_not_shift_the_next_page() {
+        let store = store();
+        let q = json!({ "after": "", "limit": 3, "order": { "createdAt": "DESC" } });
+        let first = run(&store, q).await.unwrap();
+        assert_eq!(ids(&first), vec!["ns://t09", "ns://t08", "ns://t07"]);
+        add(&store, "ns://late", 59);
+        let second = run(
+            &store,
+            json!({ "after": first.next_cursor.unwrap(), "limit": 3, "order": { "createdAt": "DESC" } }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(ids(&second), vec!["ns://t06", "ns://t05", "ns://t04"]);
+    }
+
+    /// The SDK sends `offset: 0` on the first page; it skips nothing, so
+    /// cursor mode accepts it on every page.
+    #[tokio::test]
+    async fn offset_zero_is_no_offset_in_cursor_mode() {
+        let store = store();
+        let first = run(&store, json!({ "after": "", "limit": 3, "offset": 0 }))
+            .await
+            .unwrap();
+        assert_eq!(ids(&first), vec!["ns://t00", "ns://t01", "ns://t02"]);
+        let cursor = first
+            .next_cursor
+            .expect("cursor mode: a full page has a successor");
+        let second = run(&store, json!({ "after": cursor, "limit": 3, "offset": 0 }))
+            .await
+            .expect("offset 0 combines with a cursor");
+        assert_eq!(ids(&second)[0], "ns://t03");
+    }
+
+    /// A short page tells its total only from the start of the set: the last
+    /// page after a cursor holds the rows after the cursor, not every row.
+    #[tokio::test]
+    async fn a_short_page_after_a_cursor_counts_every_row() {
+        let store = store();
+        let first = run(&store, json!({ "after": "", "limit": 8, "count": true }))
+            .await
+            .unwrap();
+        assert_eq!(first.instances.len(), 8);
+        assert_eq!(first.total_count, Some(10));
+        let last = run(
+            &store,
+            json!({ "after": first.next_cursor.unwrap(), "limit": 8, "count": true }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(ids(&last), vec!["ns://t08", "ns://t09"]);
+        assert!(last.next_cursor.is_none(), "a short page is the last");
+        assert_eq!(
+            last.total_count,
+            Some(10),
+            "not the 2 rows after the cursor"
+        );
+
+        // A short first cursor page is the whole set, as at offset 0.
+        let whole = run(&store, json!({ "after": "", "limit": 20, "count": true }))
+            .await
+            .unwrap();
+        assert_eq!(whole.instances.len(), 10);
+        assert_eq!(whole.total_count, Some(10));
+    }
+
+    #[tokio::test]
+    async fn no_after_means_no_next_cursor() {
+        let store = store();
+        let r = run(&store, json!({ "limit": 3 })).await.unwrap();
+        assert_eq!(r.instances.len(), 3);
+        assert!(r.next_cursor.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_cursor_on_an_unsupported_query_is_refused() {
+        let store = store();
+        let first = run(&store, json!({ "after": "", "limit": 3 }))
+            .await
+            .unwrap();
+        let cursor = first.next_cursor.unwrap();
+
+        for after in [json!(""), json!(cursor.clone())] {
+            let err = run(
+                &store,
+                json!({ "after": after, "limit": 3, "order": { "title": "ASC" } }),
+            )
+            .await
+            .expect_err("a property order has no keyset");
+            assert!(err.to_string().contains("timestamp order"), "{err}");
+            assert!(
+                run(
+                    &store,
+                    json!({ "after": after, "limit": 3, "order": { "timestamp": "ASC", "title": "ASC" } })
+                )
+                .await
+                .is_err(),
+                "a multi-key order has no keyset"
+            );
+        }
+        assert!(
+            run(
+                &store,
+                json!({ "after": "", "order": { "timestamp": "ASC" } })
+            )
+            .await
+            .is_err(),
+            "a cursor needs a page size"
+        );
+        assert!(
+            run(
+                &store,
+                json!({ "after": cursor.clone(), "limit": 3, "offset": 1 })
+            )
+            .await
+            .is_err(),
+            "after and offset do not combine"
+        );
+        assert!(
+            run(
+                &store,
+                json!({ "after": cursor, "limit": 3, "order": { "timestamp": "DESC" } })
+            )
+            .await
+            .is_err(),
+            "cursor from the other direction"
+        );
+        assert!(run(&store, json!({ "after": "garbage", "limit": 3 }))
+            .await
+            .is_err());
+    }
+
+    /// Every page size puts a page boundary on every row once, so the tie
+    /// (t03, t04) is split by a cursor in each direction. In DESC the id
+    /// comparison has to run downwards too, or the walk skips t03.
+    #[tokio::test]
+    async fn a_tie_split_by_a_page_boundary_pages_in_both_directions() {
+        let store = store();
+        for limit in 1..=10 {
+            for (dir, desc) in [("ASC", false), ("DESC", true)] {
+                let (paged, _) =
+                    walk(&store, json!({ "order": { "createdAt": dir } }), limit).await;
+                assert_eq!(paged, expected(desc), "limit {limit} {dir}");
+            }
+        }
+    }
+
+    /// The executor filters or slices these after the id page, so a `limit`
+    /// page in the store would not be the page the caller gets.
+    #[tokio::test]
+    async fn a_cursor_on_a_post_hydration_filter_or_a_sliced_scope_is_refused() {
+        let store = store();
+        let (resolver, shape) = StaticShapeResolver::from_json("Todo", SHAPE_JSON).unwrap();
+        let residual: ModelQueryInput =
+            serde_json::from_value(json!({ "where": { "nosuch": "x" } })).unwrap();
+        assert!(
+            !super::super::sparql_builder::all_where_pushable(&residual, &shape, Some(&resolver)),
+            "precondition: the store cannot evaluate this `where`"
+        );
+        for query in [
+            json!({ "after": "", "limit": 3, "where": { "nosuch": "x" } }),
+            json!({ "after": "", "limit": 3,
+                    "parent": { "ids": ["ns://a"], "predicate": "ns://child", "limitPerAnchor": 2 } }),
+            json!({ "after": "", "limit": 3,
+                    "parent": { "ids": ["ns://a"], "predicate": "ns://child", "levels": [2] } }),
+        ] {
+            let err = run(&store, query.clone())
+                .await
+                .expect_err(&format!("refused: {query}"));
+            assert!(err.to_string().contains("`after`"), "{query}: {err}");
+        }
+    }
+
+    /// An include runs below depth 0, where a cursor would be dropped: its
+    /// first page would come back without a `nextCursor` and read as the last.
+    /// Refused whether or not the relation holds anything.
+    #[tokio::test]
+    async fn a_cursor_in_an_include_sub_query_is_refused() {
+        const WITH_SUBTASKS: &str = r#"{
+            "className": "Todo",
+            "properties": {
+                "kind": { "predicate": "ns://kind", "required": true, "flag": true, "initial": "ns://todo" }
+            },
+            "relations": {
+                "subtasks": { "predicate": "ns://sub", "kind": "hasMany", "targetClassName": "Todo" }
+            }
+        }"#;
+        let store = store();
+        store
+            .add_link(&link(
+                "ns://t00",
+                "ns://sub",
+                "ns://t01",
+                "2026-01-01T00:00:20.000Z",
+            ))
+            .unwrap();
+        let (resolver, shape) = StaticShapeResolver::from_json("Todo", WITH_SUBTASKS).unwrap();
+        let shape: ModelShape = (*shape).clone();
+        for include in [
+            json!({ "subtasks": { "after": "", "limit": 1 } }),
+            json!({ "subtasks": { "include": { "subtasks": { "after": "" } } } }),
+        ] {
+            let mut input: ModelQueryInput =
+                serde_json::from_value(json!({ "include": include })).unwrap();
+            input.include_unverified = Some(true);
+            let err = execute_model_query(&store, &shape, &input, &resolver)
+                .await
+                .expect_err(&format!("refused: {include}"));
+            assert!(err.to_string().contains("`include`"), "{include}: {err}");
+        }
+        // Without `after` the same include reads.
+        let mut input: ModelQueryInput =
+            serde_json::from_value(json!({ "include": { "subtasks": { "limit": 1 } } })).unwrap();
+        input.include_unverified = Some(true);
+        execute_model_query(&store, &shape, &input, &resolver)
+            .await
+            .unwrap();
+    }
+}
