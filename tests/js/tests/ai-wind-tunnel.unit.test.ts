@@ -12,7 +12,7 @@ import { loadHardwareClasses, loadManifest, loadMatrixPlan, type Manifest, type 
 import { evidenceRelPath, loadAllEvidence, validateEvidence } from "../helpers/ai-wind-tunnel/evidence.js";
 import { executorCommit } from "../helpers/ai-wind-tunnel/executor.js";
 import { fingerprintId, gpuBudget, isIntegratedAmdName, rocmUsable } from "../helpers/ai-wind-tunnel/fingerprint.js";
-import { cellFit, classify, fallbackClasses, memoryFit, type ClassInput } from "../helpers/ai-wind-tunnel/hardware-class.js";
+import { cellFit, classify, classInput, fallbackClasses, memoryFit, type ClassInput } from "../helpers/ai-wind-tunnel/hardware-class.js";
 import { streamCompletion } from "../helpers/ai-wind-tunnel/http.js";
 import { runtimeLibDirs } from "../helpers/ai-wind-tunnel/install.js";
 import { buildMatrix, parseList, resolveModel } from "../helpers/ai-wind-tunnel/matrix.js";
@@ -647,6 +647,27 @@ describe("AI wind tunnel (unit)", () => {
       expect(fallbackClasses("cpu-16gb", rules)).to.deep.equal(["cpu-16gb", "cpu-8gb"]);
       expect(fallbackClasses("nvidia-12gb", rules)).to.deep.equal(["nvidia-12gb", "nvidia-8gb", "cpu-8gb"]);
       expect(fallbackClasses("unknown", rules)).to.deep.equal(["unknown"]);
+    });
+    it("goes on from a narrower class to the class it narrows, which never reaches it", () => {
+      expect(fallbackClasses("amd-strix-halo-128", rules)).to.deep.equal([
+        "amd-strix-halo-128",
+        "amd-igpu-uma-128",
+        "amd-igpu-uma-64",
+        "amd-igpu-uma-32",
+        "amd-igpu-uma-16",
+        "cpu-128gb",
+        "cpu-64gb",
+        "cpu-32gb",
+        "cpu-16gb",
+        "cpu-8gb",
+      ]);
+      expect(fallbackClasses("amd-igpu-uma-128", rules)).to.not.include("amd-strix-halo-128");
+      for (const r of rules.filter((r) => r.fallback)) expect(rules.map((x) => x.class)).to.include(r.fallback);
+    });
+    it("reads the CPU brand of the fingerprint, matching it case-insensitively", () => {
+      const input = classInput({ os: "linux", arch: "x64", cpu: { model: "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S", cores: 16, threads: 32 }, memoryBytes: 130996502528, gpus: [{ vendor: "amd", name: "Strix Halo", vramBytes: 536870912, unified: true }], backends: ["cpu", "vulkan"] } as unknown as Fingerprint);
+      expect(input.cpuBrand).to.equal("AMD RYZEN AI MAX+ 395 w/ Radeon 8060S");
+      expect(classify(input, rules)).to.equal("amd-strix-halo-128");
     });
     it("fits a model in min(GPU budget - 1 GiB, RAM - 4 GiB)", () => {
       expect(memoryFit(5 * GIB, 32 * GIB, 8 * GIB)).to.deep.include({ fits: true, budgetBytes: 7 * GIB });

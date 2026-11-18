@@ -275,6 +275,10 @@ pub struct ClassRule {
     /// Classes of one family are ordered by `tier_gb`.
     pub family: String,
     pub tier_gb: f64,
+    /// The class this one narrows (one chip of a wider class): the chain goes on with that
+    /// class's chain, and no other class's chain reaches this one.
+    #[serde(default)]
+    pub fallback: Option<String>,
     #[serde(rename = "match")]
     pub conditions: Conditions,
 }
@@ -286,6 +290,8 @@ pub struct ClassRule {
 pub struct Conditions {
     pub os: Option<String>,
     pub arch: Option<String>,
+    /// The CPU brand contains one of these, ignoring case (`Ryzen AI Max`: Strix Halo).
+    pub cpu_brand_any: Option<Vec<String>>,
     pub gpu_vendor: Option<String>,
     pub unified_memory: Option<bool>,
     /// At least one of these backends is usable.
@@ -302,6 +308,9 @@ pub struct ClassInput {
     pub os: String,
     /// `x64`, `arm64`.
     pub arch: String,
+    /// The CPU brand, e.g. `AMD RYZEN AI MAX+ 395 w/ Radeon 8060S`; empty when not read.
+    #[serde(default)]
+    pub cpu_brand: String,
     pub memory_bytes: u64,
     /// `cpu`, `cuda`, `rocm`, `vulkan`, `metal`.
     pub backends: Vec<String>,
@@ -325,6 +334,12 @@ impl Conditions {
         let same = |want: &Option<String>, value: &str| want.as_deref().is_none_or(|w| w == value);
         if !same(&self.os, &input.os) || !same(&self.arch, &input.arch) {
             return false;
+        }
+        if let Some(any) = &self.cpu_brand_any {
+            let brand = input.cpu_brand.to_lowercase();
+            if !any.iter().any(|b| brand.contains(&b.to_lowercase())) {
+                return false;
+            }
         }
         if let Some(any) = &self.backend_any {
             if !any.iter().any(|b| input.backends.contains(b)) {
@@ -367,11 +382,9 @@ impl HardwareClasses {
     /// The classes to look in for a recommendation, nearest first: the class, the smaller
     /// tiers of its family (largest first), then the cpu family at the same or a smaller
     /// tier (what runs on less memory runs on more; a GPU class runs what a CPU class of
-    /// its memory runs). The wind tunnel's `fallbackClasses`.
+    /// its memory runs). A class with a `fallback` goes on with that class's chain instead
+    /// of the cpu family. The wind tunnel's `fallbackClasses`.
     pub fn chain(&self, class: &str) -> Vec<String> {
-        let Some(own) = self.rules.iter().find(|r| r.class == class) else {
-            return vec![class.to_string()];
-        };
         let smaller = |family: &str, tier: f64| {
             let mut rules: Vec<&ClassRule> = self
                 .rules
@@ -385,12 +398,23 @@ impl HardwareClasses {
                 .collect::<Vec<_>>()
         };
         let mut chain = vec![class.to_string()];
-        chain.extend(smaller(&own.family, own.tier_gb));
-        if own.family != "cpu" {
-            chain.extend(smaller("cpu", own.tier_gb));
-        }
         let mut seen = std::collections::BTreeSet::new();
-        chain.retain(|c| seen.insert(c.clone()));
+        let mut next = Some(class.to_string());
+        while let Some(current) = next.take() {
+            let Some(own) = self.rules.iter().find(|r| r.class == current) else {
+                break;
+            };
+            seen.insert(current.clone());
+            chain.push(current.clone());
+            chain.extend(smaller(&own.family, own.tier_gb));
+            match &own.fallback {
+                Some(fallback) if !seen.contains(fallback) => next = Some(fallback.clone()),
+                _ if own.family != "cpu" => chain.extend(smaller("cpu", own.tier_gb)),
+                _ => {}
+            }
+        }
+        let mut unique = std::collections::BTreeSet::new();
+        chain.retain(|c| unique.insert(c.clone()));
         chain
     }
 }
@@ -561,6 +585,25 @@ mod tests {
             vec!["nvidia-12gb", "nvidia-8gb", "cpu-8gb"]
         );
         assert_eq!(classes.chain("cpu-16gb"), vec!["cpu-16gb", "cpu-8gb"]);
+        // A narrower class goes on with the class it narrows; that class never reaches it.
+        assert_eq!(
+            classes.chain("amd-strix-halo-128"),
+            vec![
+                "amd-strix-halo-128",
+                "amd-igpu-uma-128",
+                "amd-igpu-uma-64",
+                "amd-igpu-uma-32",
+                "amd-igpu-uma-16",
+                "cpu-128gb",
+                "cpu-64gb",
+                "cpu-32gb",
+                "cpu-16gb",
+                "cpu-8gb"
+            ]
+        );
+        assert!(!classes
+            .chain("amd-igpu-uma-128")
+            .contains(&"amd-strix-halo-128".to_string()));
         assert_eq!(classes.chain("unknown"), vec!["unknown"]);
     }
 
