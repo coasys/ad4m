@@ -31,16 +31,19 @@ use deno_core::anyhow::Error;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+/// One hop of a bounded level walk: the predicate to follow and the
+/// per-anchor breadth `levels` sets — `None` under `path`, which bounds
+/// none.
+type WalkHop = (String, Option<usize>);
+
 /// The walk a scope asks the executor to make, as `(anchors, direction,
-/// hops)` — one `(predicate, per-anchor breadth)` per level: `levels` names
-/// both over one predicate, `path` names the predicates and bounds none.
+/// hops)` — one [`WalkHop`] per level: `levels` names both over one
+/// predicate, `path` names the predicates and bounds none.
 ///
 /// `None` for any scope that does not describe a bounded level walk —
 /// including a `Traverse` with none of `levels`/`path`, which the store
 /// answers in one step.
-fn walk_spec(
-    query: &ModelQueryInput,
-) -> Option<(Vec<String>, ScopeDirection, Vec<(String, Option<usize>)>)> {
+fn walk_spec(query: &ModelQueryInput) -> Option<(Vec<String>, ScopeDirection, Vec<WalkHop>)> {
     match &query.parent {
         Some(Scope::Traverse {
             ids,

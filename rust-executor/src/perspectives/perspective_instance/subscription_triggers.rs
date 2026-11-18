@@ -158,7 +158,7 @@ impl From<HashSet<String>> for Writes {
 
 /// Collect a diff's links into [`Writes`]. `None` when a link has no
 /// predicate, which leaves nothing to match on: check every subscription.
-pub(super) fn writes_of<'a>(
+pub(crate) fn writes_of<'a>(
     links: impl IntoIterator<Item = &'a DecoratedLinkExpression>,
 ) -> Option<Writes> {
     let mut writes = Writes::new();

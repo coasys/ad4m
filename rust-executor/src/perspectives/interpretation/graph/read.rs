@@ -701,4 +701,96 @@ mod tests {
         assert!(!inst.properties.contains_key("name"));
         assert!(!inst.properties.contains_key("type"));
     }
+
+    /// Before #1795 the watch tick read the transcript with the
+    /// `source_scope_query` reifier pattern — `?speaker`/`?text`/`?timestamp`
+    /// off the body link's reifier — and the processed set stored
+    /// `turn_id(speaker, text, timestamp)` per row. The model-query read
+    /// takes speaker and timestamp off the same link (its `__links` row),
+    /// so it mints the same id: an upgraded processor keeps its processed
+    /// set because the id inputs did not change. Pinned here so the
+    /// provenance change can never silently orphan it.
+    #[tokio::test]
+    async fn a_turn_keeps_the_id_the_sparql_scope_made_for_it() {
+        use crate::agent::signatures::TestSigner;
+        use crate::perspectives::auto_processor::watcher::{turn_id, PendingTurn};
+        use crate::perspectives::sparql_store::EvalStop;
+        use crate::types::{Link, LinkExpression, LinkStatus};
+
+        // The known-good pre-#1795 scope query —
+        // BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY at c0441ac4c~1 — verbatim.
+        const OLD_SCOPE: &str = "SELECT ?speaker ?text ?timestamp WHERE {
+  ?m <ns://body> ?text .
+  ?r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?m <ns://body> ?text )>> .
+  ?r <ad4m://ontology/author> ?speaker .
+  ?r <ad4m://ontology/timestamp> ?timestamp .
+}
+ORDER BY ?timestamp";
+
+        let (p, _shapes, _ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
+        let signer = TestSigner::generate();
+        let at = chrono::Utc::now();
+        let signed = |predicate: &str, target: &str| {
+            let mut l = LinkExpression::from(
+                signer.sign_at(
+                    Link {
+                        source: "msg://1".into(),
+                        predicate: Some(predicate.into()),
+                        target: target.into(),
+                    }
+                    .normalize(),
+                    at,
+                ),
+            );
+            l.status = Some(LinkStatus::Shared);
+            l
+        };
+        p.sparql_store
+            .add_link(&signed("ns://type", "ns://message"))
+            .expect("flag");
+        p.sparql_store
+            .add_link(&signed("ns://body", "literal:string:the words"))
+            .expect("body");
+
+        // The read the watcher makes now.
+        let model = gather_transcript_model(&p, "ns://Message", "body", "{}")
+            .await
+            .expect("model read")
+            .turns;
+        assert_eq!(model.len(), 1, "got {model:#?}");
+
+        // The read it made before, with the row→turn conversion
+        // `gather_transcript_sparql` applied verbatim.
+        let json = p
+            .sparql_store
+            .query_arbitrary(&EvalStop::none(), OLD_SCOPE)
+            .expect("sparql read");
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&json).expect("rows json");
+        assert_eq!(rows.len(), 1, "got {rows:#?}");
+        let row = &rows[0];
+        let raw_text = row["text"].as_str().expect("?text");
+        let old_turn = TranscriptTurn {
+            speaker: row["speaker"].as_str().expect("?speaker").to_string(),
+            text: if raw_text.starts_with("literal:") {
+                decode_transcript_body(raw_text).expect("a string literal body")
+            } else if let Some(data) = serde_json::from_str::<serde_json::Value>(raw_text)
+                .ok()
+                .and_then(|v| v.get("data").and_then(|d| d.as_str()).map(String::from))
+            {
+                data
+            } else {
+                raw_text.to_string()
+            },
+            timestamp: row["timestamp"].as_str().expect("?timestamp").to_string(),
+        };
+
+        assert_eq!(model[0].speaker, old_turn.speaker);
+        assert_eq!(model[0].text, old_turn.text);
+        assert_eq!(model[0].timestamp, old_turn.timestamp);
+        assert_eq!(
+            PendingTurn::from_transcript(&model[0]).id,
+            turn_id(&old_turn.speaker, &old_turn.text, &old_turn.timestamp),
+            "the processed-set id must be the one the SPARQL scope minted"
+        );
+    }
 }

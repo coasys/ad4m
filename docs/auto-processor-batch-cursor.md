@@ -206,7 +206,10 @@ signed the link and the link's time); under the model-query scope they
 are the signer and timestamp of the link the text was read from — so an
 edit lands at the moment the text was written, not when the instance was
 created — and the guarantee this section derived holds without an
-app-supplied binding.
+app-supplied binding. Upgraded processors keep their processed set,
+because the id inputs did not change: the same `(speaker, text,
+timestamp)` the scope query bound is what the model query's `__links`
+row carries.
 
 ### 3e. Bound both queries by a time window
 

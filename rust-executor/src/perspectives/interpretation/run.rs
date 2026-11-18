@@ -2007,6 +2007,92 @@ mod tests {
         );
     }
 
+    /// The queue order the watcher sees is the transcript order — the text
+    /// links' timestamps — not the order the instances come back in. Here
+    /// the two disagree on purpose: `msg://a` sorts before `msg://z` by
+    /// instance id but its body link was signed ten minutes later, so an
+    /// instance-ordered queue would hand the pass `[a, z]` while the
+    /// conversation order is `[z, a]`.
+    #[tokio::test]
+    async fn the_pending_queue_orders_by_text_link_timestamp() {
+        use crate::agent::signatures::TestSigner;
+        use crate::perspectives::auto_processor::config::{write_processor, AutoProcessorConfig};
+        use crate::perspectives::auto_processor::watcher::WatcherState;
+        use crate::perspectives::interpretation_test_support::MESSAGE_SDNA;
+        use crate::types::{LinkExpression, LinkStatus};
+
+        let (mut perspective, _shapes, ctx) =
+            setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
+        let signer = TestSigner::generate();
+        let signed =
+            |source: &str, predicate: &str, target: &str, at: chrono::DateTime<chrono::Utc>| {
+                let mut l = LinkExpression::from(
+                    signer.sign_at(
+                        Link {
+                            source: source.to_string(),
+                            predicate: Some(predicate.to_string()),
+                            target: target.to_string(),
+                        }
+                        .normalize(),
+                        at,
+                    ),
+                );
+                l.status = Some(LinkStatus::Shared);
+                l
+            };
+        let t0 = chrono::Utc::now() - chrono::Duration::minutes(10);
+        for (msg, body, at) in [
+            ("msg://z", "literal:string:z words", t0),
+            (
+                "msg://a",
+                "literal:string:a words",
+                t0 + chrono::Duration::minutes(10),
+            ),
+        ] {
+            perspective
+                .sparql_store
+                .add_link(&signed(msg, "ns://type", "ns://message", at))
+                .expect("flag");
+            perspective
+                .sparql_store
+                .add_link(&signed(msg, "ns://body", body, at))
+                .expect("body");
+        }
+
+        let cfg = AutoProcessorConfig {
+            processor_id: "ordered".into(),
+            source_class: "ns://Message".into(),
+            source_text: "body".into(),
+            source_query: None,
+            interpretation_classes: vec!["ns://Task".into()],
+            debounce_ms: 600_000,
+            batch_min: 1,
+            batch_max: 32,
+            claim_ttl_ms: 60_000,
+            ..Default::default()
+        };
+        write_processor(&mut perspective, &cfg, Some(false), &ctx)
+            .await
+            .expect("write_processor");
+        let mut watcher = WatcherState::new();
+        perspective
+            .run_auto_processor_tick(&mut watcher, chrono::Utc::now().timestamp_millis(), &ctx)
+            .await;
+
+        let texts: Vec<&str> = watcher
+            .pending_for("ordered")
+            .expect("the tick queues both turns")
+            .items
+            .iter()
+            .map(|t| t.text.as_str())
+            .collect();
+        assert_eq!(
+            texts,
+            ["z words", "a words"],
+            "the queue must follow the text links' timestamps, not instance order"
+        );
+    }
+
     /// A node carrying the text predicate without the class flag does not
     /// conform, so it never reaches the transcript; and `where` in the
     /// scope query narrows the instances the class yields.
@@ -2115,7 +2201,11 @@ mod tests {
 
         // A forged "message from that member": links that carry its author
         // but a signature that does not cover them — what a peer without
-        // the key can gossip (#1113).
+        // the key can gossip (#1113). The forged flag AND the forged body
+        // sit on the same node: `msg://forged-1` is a shape-complete
+        // `ns://Message` whose links simply do not verify, so the proof
+        // filter is the only thing dropping it — a missing body or flag
+        // would fail conformance with verification off.
         let mut forged_flag = signed("msg://other-1", "ns://type", "ns://message");
         forged_flag.data.source = "msg://forged-1".to_string();
         assert!(
@@ -2123,11 +2213,11 @@ mod tests {
             "the fixture must not verify"
         );
         let mut forged_body = signed(
-            "msg://forged-1",
+            "msg://forged-2",
             "ns://body",
             "literal:string:words never said",
         );
-        forged_body.data.source = "msg://forged-2".to_string();
+        forged_body.data.source = "msg://forged-1".to_string();
         assert!(!forged_body.compute_proof_valid());
         perspective
             .sparql_store

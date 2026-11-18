@@ -1405,3 +1405,107 @@ async fn a_where_clause_filters_the_transcript() {
 
     assert_eq!(pending_texts(&watcher, "w"), vec!["keep me"]);
 }
+
+/// A `path` scope — `{"parent":{"ids":C,"path":["ns://child","we://thread"]}}`
+/// — reads a conversation's children and, one hop further, their replies:
+/// both become pending turns while a message under another conversation
+/// never does (#1795). The wake half rides the same scope: the `ns://child`
+/// edge under a different anchor cannot change the read, so the trigger
+/// rules it out, while the same edge under the scoped anchor and a
+/// `we://thread` edge off a scoped message both wake it.
+#[tokio::test]
+async fn a_path_scope_reads_children_and_their_replies() {
+    use crate::types::{Link, LinkStatus};
+
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
+    let link = |source: &str, predicate: &str, target: &str| Link {
+        source: source.into(),
+        predicate: Some(predicate.into()),
+        target: target.into(),
+    };
+
+    // Conversation C holds a direct child; that child threads a reply one
+    // `we://thread` hop deeper. Another conversation holds a message the
+    // path cannot reach.
+    for (s, pr, t) in [
+        ("we://conv", "ns://child", "msg://direct"),
+        ("msg://direct", "we://thread", "msg://reply"),
+        ("we://other-conv", "ns://child", "msg://other"),
+    ] {
+        p.add_link(link(s, pr, t), LinkStatus::Local, None, &ctx)
+            .await
+            .expect("scope edge");
+    }
+    for (msg, text) in [
+        ("msg://direct", "direct"),
+        ("msg://reply", "reply"),
+        ("msg://other", "other conv"),
+    ] {
+        for l in [
+            link(msg, "ns://type", "ns://message"),
+            link(msg, "ns://body", &format!("literal:string:{text}")),
+        ] {
+            p.add_link(l, LinkStatus::Local, None, &ctx)
+                .await
+                .expect("message link");
+        }
+    }
+
+    let cfg = AutoProcessorConfig {
+        source_query: Some(
+            r#"{"parent":{"ids":"we://conv","path":["ns://child","we://thread"]}}"#.into(),
+        ),
+        ..config("path", 600_000, None)
+    };
+    write_processor(&mut p, &cfg, Some(false), &ctx)
+        .await
+        .expect("write_processor");
+    let mut watcher = WatcherState::new();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
+    assert_eq!(
+        pending_texts(&watcher, "path"),
+        vec!["direct", "reply"],
+        "hop one and hop two queue; the foreign conversation's message does not"
+    );
+
+    // The wake check is over the same `Writes` the commit feed reports.
+    // The membership edge under another conversation is ruled out…
+    let mut commits = p.commit_writes.subscribe();
+    p.add_link(
+        link("we://other-conv", "ns://child", "msg://late"),
+        LinkStatus::Local,
+        None,
+        &ctx,
+    )
+    .await
+    .expect("foreign edge");
+    let writes = commits
+        .recv()
+        .await
+        .expect("commit feed")
+        .expect("classified writes");
+    assert!(
+        !p.auto_processor_writes_match(&watcher, &writes),
+        "a child edge under another conversation must not wake the loop"
+    );
+    // …while the same edge under the anchor — and the thread edge that
+    // would carry a new reply — both do.
+    for (s, pr, t) in [
+        ("we://conv", "ns://child", "msg://new"),
+        ("msg://reply", "we://thread", "msg://deeper"),
+    ] {
+        p.add_link(link(s, pr, t), LinkStatus::Local, None, &ctx)
+            .await
+            .expect("in-scope edge");
+        let writes = commits
+            .recv()
+            .await
+            .expect("commit feed")
+            .expect("classified writes");
+        assert!(
+            p.auto_processor_writes_match(&watcher, &writes),
+            "{s} -{pr}-> {t} must wake the loop"
+        );
+    }
+}
