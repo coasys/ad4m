@@ -14,7 +14,8 @@
 //!   (the records this processor's scope minted). (b) The most recently
 //!   changed rows, up to half of the budget (a) left. (c) The rest: the rows
 //!   most similar to the transcript when the pass has a semantic dedup
-//!   embedding model, else (and when embedding fails) more recent rows.
+//!   embedding model. Without similarity scores (no model, or embedding
+//!   failed), (b) takes all of the budget (a) left and there is no (c).
 //! - **Short ids** (the single-shot path only, see [`Compact`]): each id is
 //!   shown as a short handle (`P1`, `P2`, ...). [`Handles`] maps the model's
 //!   output back to the full ids. Values are always shown whole: a row that
@@ -27,7 +28,7 @@
 
 use super::class_label;
 use super::dedup::{cosine_similarity, embed_via_ai_service};
-use super::prompt::{build_interpretation_input_showing, existing_entry_json};
+use super::prompt::{build_interpretation_input_showing, existing_entry_json, ExistingShown};
 use super::types::{ExistingInstances, InstanceContext, ProposedInstance, TranscriptTurn};
 use crate::ai_service::{estimate_task_prompt_tokens, estimate_token_count};
 use crate::perspectives::flow_context::FlowContext;
@@ -172,6 +173,17 @@ pub(crate) struct PromptExisting {
     pub stages: Vec<(&'static str, usize)>,
 }
 
+impl PromptExisting {
+    /// The counts for the prompt's `existing_shown` line.
+    pub(crate) fn counts(&self, unshown_checked: bool) -> ExistingShown {
+        ExistingShown {
+            shown: self.rows_shown,
+            total: self.rows_total,
+            unshown_checked,
+        }
+    }
+}
+
 /// Milliseconds since the epoch of a stored timestamp (epoch milliseconds or
 /// RFC 3339); 0 when it is empty or neither.
 pub(super) fn timestamp_millis(ts: &str) -> i64 {
@@ -224,29 +236,18 @@ fn scope_stage<'a>(newest_first: &[&'a String], base_prefix: &str) -> FillStage<
     }
 }
 
-/// (b) The most recently changed rows, at most half of what (a) left.
-fn recent_stage<'a>(newest_first: &[&'a String]) -> FillStage<'a> {
+/// (b) The most recently changed rows, with `share` of what (a) left.
+fn recent_stage<'a>(newest_first: &[&'a String], share: f64) -> FillStage<'a> {
     FillStage {
         name: "recent",
         rows: newest_first.to_vec(),
-        share: 0.5,
+        share,
     }
 }
 
-/// (c) The rest of the budget: the rows most similar to the batch when there
-/// are `scores` (rows without a score last, newest first); else more of the
-/// most recent rows.
-fn rest_stage<'a>(
-    newest_first: &[&'a String],
-    scores: Option<&HashMap<String, f32>>,
-) -> FillStage<'a> {
-    let Some(scores) = scores else {
-        return FillStage {
-            name: "more_recent",
-            rows: newest_first.to_vec(),
-            share: 1.0,
-        };
-    };
+/// (c) The rest of the budget: the rows most similar to the batch (rows
+/// without a score last, newest first).
+fn similar_stage<'a>(newest_first: &[&'a String], scores: &HashMap<String, f32>) -> FillStage<'a> {
     let mut rows = newest_first.to_vec();
     // Stable: equal scores keep the recency order. `None` sorts after every
     // score.
@@ -262,20 +263,25 @@ fn rest_stage<'a>(
 }
 
 /// The fill stages in order (Nico, 2026-11-18): (a) the pass's own records,
-/// (b) the most recent rows up to half of the rest, (c) the most similar (or
-/// more recent) rows. A new stage, for example the structural neighbours of
-/// (a), goes into this list.
+/// (b) the most recent rows up to half of the rest, (c) the most similar
+/// rows. Without `scores`, (b) gets all of the rest: two recency stages of
+/// half each can leave out a row that one stage would take. A new stage, for
+/// example the structural neighbours of (a), goes into this list.
 fn fill_stages<'a>(
     existing: &'a ExistingInstances,
     base_prefix: &str,
     scores: Option<&HashMap<String, f32>>,
 ) -> Vec<FillStage<'a>> {
     let newest_first = by_recency(existing);
-    vec![
-        scope_stage(&newest_first, base_prefix),
-        recent_stage(&newest_first),
-        rest_stage(&newest_first, scores),
-    ]
+    let scope = scope_stage(&newest_first, base_prefix);
+    match scores {
+        Some(scores) => vec![
+            scope,
+            recent_stage(&newest_first, 0.5),
+            similar_stage(&newest_first, scores),
+        ],
+        None => vec![scope, recent_stage(&newest_first, 1.0)],
+    }
 }
 
 /// Pick the rows of `existing` that fit in `budget_tokens`, stage by stage
@@ -459,10 +465,12 @@ pub(crate) async fn similarity_scores(
 }
 
 /// The `existing` rows for one pass's prompt: the budget from the model's
-/// window and the rest of the prompt, then [`select_existing`]. The
+/// window and the rest of the prompt, then [`select_existing`].
+/// `unshown_checked` is [`ExistingShown::unshown_checked`] of the pass: it
+/// picks the wording of the `existing_shown` line the budget counts. The
 /// similarity order runs only when `embed_model` is set and
-/// [`needs_similarity`]. Logs one line: rows total, rows shown, estimated
-/// tokens, rows per fill stage.
+/// [`needs_similarity`]. Logs rows total, rows shown, estimated tokens and
+/// the budget at info, and the rows per fill stage at debug.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn existing_for_prompt(
     task: &AITask,
@@ -474,6 +482,7 @@ pub(crate) async fn existing_for_prompt(
     base_prefix: &str,
     embed_model: Option<&str>,
     compact: Compact,
+    unshown_checked: bool,
 ) -> PromptExisting {
     let window = match crate::ai_service::AIService::global_instance().await {
         Ok(service) => service.context_window_tokens(&task.model_id).await,
@@ -486,14 +495,18 @@ pub(crate) async fn existing_for_prompt(
         &ExistingInstances::new(),
         active_flows,
         speaker_names,
-        Some((existing.len().saturating_sub(1), existing.len())),
+        Some(ExistingShown {
+            shown: existing.len().saturating_sub(1),
+            total: existing.len(),
+            unshown_checked,
+        }),
     );
     let other_tokens = estimate_task_prompt_tokens(task, &without_rows);
     let budget = existing_budget_tokens(window, other_tokens);
 
     let flow_subjects: HashSet<String> = active_flows.iter().map(|f| f.subject.clone()).collect();
     let mut view = select_existing(existing, base_prefix, budget, None, compact, &flow_subjects);
-    if let Some(model) = embed_model.filter(|_| needs_similarity(budget, &view)) {
+    if let Some(model) = embed_model.filter(|_| needs_similarity(&view)) {
         if let Some(scores) = similarity_scores(model, transcript, existing).await {
             view = select_existing(
                 existing,
@@ -505,14 +518,9 @@ pub(crate) async fn existing_for_prompt(
             );
         }
     }
-    let stages: Vec<String> = view
-        .stages
-        .iter()
-        .map(|(name, n)| format!("{name}:{n}"))
-        .collect();
     log::info!(
         "🧠 interpretation existing rows_total={} rows_shown={} tokens_est={} budget={} \
-         window={} stages={}",
+         window={}",
         view.rows_total,
         view.rows_shown,
         view.tokens,
@@ -521,16 +529,30 @@ pub(crate) async fn existing_for_prompt(
             || format!("{ASSUMED_WINDOW_TOKENS} (assumed)"),
             |w| w.to_string()
         ),
-        stages.join(",")
+    );
+    log::debug!(
+        "interpretation existing stages={}",
+        view.stages
+            .iter()
+            .map(|(name, n)| format!("{name}:{n}"))
+            .collect::<Vec<_>>()
+            .join(",")
     );
     view
 }
 
-/// Whether the similarity order can change what `view` shows: some rows are
-/// left out and the budget is not 0. Embedding every row costs one call per
-/// 64 texts, so it does not run when nothing more could be shown.
-fn needs_similarity(budget: usize, view: &PromptExisting) -> bool {
-    budget > 0 && view.rows_shown < view.rows_total
+/// Whether the similarity order can change what `view` (the fill without
+/// scores) shows: some rows are left out, and a row outside the scope fits in
+/// what the scope stage left. The recency stage of `view` offers every such
+/// row all of that room, so it took a row exactly when one fits. Embedding
+/// every row costs one call per 64 texts, so it does not run when nothing
+/// more could be shown, for example when the scope rows use the whole budget.
+fn needs_similarity(view: &PromptExisting) -> bool {
+    view.rows_shown < view.rows_total
+        && view
+            .stages
+            .iter()
+            .any(|(name, taken)| *name == "recent" && *taken > 0)
 }
 
 #[cfg(test)]
@@ -653,9 +675,137 @@ mod tests {
         let budget = 10 * cost + cost / 2;
         let view = select_existing(&existing, "", budget, None, Compact::No, &HashSet::new());
         assert_eq!(shown_ids(&view), ids((10..20).rev()));
-        assert_eq!(
-            view.stages,
-            vec![("scope", 0), ("recent", 5), ("more_recent", 5)]
+        assert_eq!(view.stages, vec![("scope", 0), ("recent", 10)]);
+    }
+
+    /// CodeRabbit on #1806: without scores no similarity stage follows, so
+    /// the recency order gets all of the budget in one stage. Rows of about
+    /// 240, 180 and 40 tokens, newest first, and a budget of 400: a half-cap
+    /// stage skips the 240 row, takes the 180 one, and the rest (220) skips
+    /// the 240 row again.
+    #[test]
+    fn without_scores_the_recency_fallback_gets_the_whole_budget() {
+        let sized = |id: &str, chars: usize, updated: i64| {
+            let mut r = row(id, "Task", id, updated);
+            r.properties.insert("summary".into(), "z".repeat(chars));
+            r
+        };
+        let a = sized("soa://a", 900, 3);
+        let b = sized("soa://b", 660, 2);
+        let c = sized("soa://c", 100, 1);
+        let cost = |r: &InstanceContext| {
+            select_existing(
+                &existing_of(vec![r.clone()]),
+                "",
+                usize::MAX,
+                None,
+                Compact::No,
+                &HashSet::new(),
+            )
+            .tokens
+        };
+        let (ca, cb, cc) = (cost(&a), cost(&b), cost(&c));
+        let budget = 400;
+        assert!(ca > budget / 2 && cb <= budget / 2 && cb + cc > budget / 2);
+        assert!(ca + cb > budget && ca + cc <= budget, "{ca} {cb} {cc}");
+
+        let view = select_existing(
+            &existing_of(vec![a, b, c]),
+            "",
+            budget,
+            None,
+            Compact::No,
+            &HashSet::new(),
+        );
+        assert_eq!(shown_ids(&view), vec!["soa://a", "soa://c"]);
+    }
+
+    /// CodeRabbit on #1806: when the pass's own rows use the whole budget,
+    /// no other row can be shown, so no row is embedded.
+    #[test]
+    fn a_scope_that_fills_the_budget_skips_the_similarity_order() {
+        let (existing, _, cost) = twenty_rows();
+        let full = select_existing(
+            &existing,
+            "soa://t/",
+            3 * cost,
+            None,
+            Compact::No,
+            &HashSet::new(),
+        );
+        assert_eq!(full.rows_shown, 3);
+        assert!(!needs_similarity(&full), "{:?}", full.stages);
+
+        // Scope rows `soa://t/00`..`09` leave room for 5 more.
+        let room = select_existing(
+            &existing,
+            "soa://t/0",
+            15 * cost,
+            None,
+            Compact::No,
+            &HashSet::new(),
+        );
+        assert_eq!(room.stages[0], ("scope", 10));
+        assert!(needs_similarity(&room));
+    }
+
+    /// CodeRabbit on #1806: the line counts distinct instances. An instance in
+    /// two classes is in two `existing` arrays and counts once.
+    #[test]
+    fn the_shown_line_counts_an_instance_in_two_classes_once() {
+        let shapes = vec![
+            shape_from_sdna("Task", TASK_SDNA),
+            shape_from_sdna("Question", QUESTION_SDNA),
+        ];
+        let transcript = [TranscriptTurn::from_speaker_text("Ana", "hello")];
+        let existing = existing_of(vec![
+            row("soa://both", "Task", "Both", 2),
+            row("soa://both", "Question", "Both", 2),
+            row("soa://old", "Task", "Old", 1),
+        ]);
+        let both = select_existing(
+            &existing_of(vec![
+                row("soa://both", "Task", "Both", 2),
+                row("soa://both", "Question", "Both", 2),
+            ]),
+            "",
+            usize::MAX,
+            None,
+            Compact::No,
+            &HashSet::new(),
+        );
+        let view = select_existing(
+            &existing,
+            "",
+            both.tokens,
+            None,
+            Compact::No,
+            &HashSet::new(),
+        );
+        assert_eq!((view.rows_shown, view.rows_total), (1, 2));
+        let prompt: serde_json::Value = serde_json::from_str(&build_interpretation_input_showing(
+            &shapes,
+            &transcript,
+            &view.shown,
+            &[],
+            &HashMap::new(),
+            Some(view.counts(true)),
+        ))
+        .unwrap();
+        let entries: usize = prompt["classes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["existing"].as_array().map_or(0, Vec::len))
+            .sum();
+        assert_eq!(entries, 2, "one instance, two `existing` entries");
+        assert!(
+            prompt["existing_shown"]
+                .as_str()
+                .unwrap()
+                .starts_with("`existing` shows 1 of 2 instances."),
+            "{}",
+            prompt["existing_shown"]
         );
     }
 
@@ -730,11 +880,11 @@ mod tests {
         let none = select_existing(&existing, "", 0, None, Compact::Yes, &HashSet::new());
         assert_eq!(none.rows_shown, 0);
         assert!(
-            !needs_similarity(0, &none),
+            !needs_similarity(&none),
             "nothing can be shown: no embedding call"
         );
         let some = select_existing(&existing, "", 3 * cost, None, Compact::Yes, &HashSet::new());
-        assert!(needs_similarity(3 * cost, &some));
+        assert!(needs_similarity(&some));
         let all = select_existing(
             &existing,
             "",
@@ -743,7 +893,7 @@ mod tests {
             Compact::Yes,
             &HashSet::new(),
         );
-        assert!(!needs_similarity(usize::MAX, &all), "all rows shown");
+        assert!(!needs_similarity(&all), "all rows shown");
     }
 
     /// The token cost of one row as the prompt shows it, plus its comma.
@@ -1137,6 +1287,7 @@ mod tests {
             "",
             None,
             Compact::Yes,
+            true,
         )
         .await;
         assert_eq!(view.rows_shown, 2);
@@ -1180,11 +1331,27 @@ mod tests {
             );
             serde_json::from_str::<serde_json::Value>(&prompt).unwrap()
         };
+        let counts = |shown, total, unshown_checked| {
+            Some(ExistingShown {
+                shown,
+                total,
+                unshown_checked,
+            })
+        };
         assert_eq!(
-            build(Some((1, 5)))["existing_shown"],
-            "`existing` shows 1 of 5 rows. Rows that are not shown are still checked for duplicates."
+            build(counts(1, 5, true))["existing_shown"],
+            "`existing` shows 1 of 5 instances. Instances that are not shown are still checked \
+             for duplicates."
         );
-        assert!(build(Some((1, 1))).get("existing_shown").is_none());
+        // The WS-RPC harness call does not dedup on drain: the line must not
+        // say it does.
+        assert_eq!(
+            build(counts(1, 5, false))["existing_shown"],
+            "`existing` shows 1 of 5 instances. Instances that are not shown are not checked \
+             for duplicates: query the class before you create an instance that may already \
+             exist."
+        );
+        assert!(build(counts(1, 1, true)).get("existing_shown").is_none());
         assert_eq!(
             build(None),
             serde_json::from_str::<serde_json::Value>(&build_interpretation_input(
@@ -1409,7 +1576,9 @@ mod tests {
             .as_str()
             .expect("existing_shown line");
         assert!(
-            line.ends_with("of 42 rows. Rows that are not shown are still checked for duplicates."),
+            line.ends_with(
+                "of 42 instances. Instances that are not shown are still checked for duplicates."
+            ),
             "{line}"
         );
 

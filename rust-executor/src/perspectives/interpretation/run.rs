@@ -807,6 +807,8 @@ async fn run_single_shot(
             base_prefix,
             embed_model.as_deref(),
             Compact::Yes,
+            // The answer always goes through `resolve_already_present*`.
+            true,
         )
         .await;
         let prompt = build_interpretation_input_showing(
@@ -815,7 +817,7 @@ async fn run_single_shot(
             &shown.shown,
             &active_flows,
             &speaker_names,
-            Some((shown.rows_shown, shown.rows_total)),
+            Some(shown.counts(true)),
         );
 
         // The model: the AI service, or the source a test passes.
@@ -1376,7 +1378,7 @@ pub(crate) async fn run_harness_pass(
         &speaker_names,
         None,
     );
-    let seed_graph = read_seed_graph(
+    let mut seed_graph = read_seed_graph(
         perspective,
         shapes,
         &existing_ctx,
@@ -1385,6 +1387,7 @@ pub(crate) async fn run_harness_pass(
         scope,
     )
     .await;
+    seed_graph.unshown_checked = dedup_on_drain;
     let (seed_budget_tokens, window) = seed_budget(&task, &without_seed).await;
     let seed = build_seed(&existing_ctx, &seed_graph, seed_budget_tokens);
     log_seed(&seed, seed_budget_tokens, window);

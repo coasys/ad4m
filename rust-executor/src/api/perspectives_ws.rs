@@ -1352,7 +1352,9 @@ async fn run_interpretation_handler(
                     // `runInterpretationWithHarness`.
                     Some(ctx.session.clone()),
                     emit_ctx.as_ref(),
-                    false,
+                    // Dedup on drain: the single-shot answer of this method
+                    // was always checked against all rows; the harness keeps that.
+                    true,
                     Some(std::sync::Arc::new(WsHarnessCreditGate::new(
                         ctx.user_did().map(str::to_string),
                     ))),

@@ -58,8 +58,7 @@ you must decide about that row.
 
 Create each new item with `<class>_create`. Link it to its parent with \
 `<class>_propose_link_child`, with the id of the parent exactly as a tool or the \
-seed showed it. Do not create an item that is already in the graph. The engine \
-also checks new items for duplicates against all rows.
+seed showed it. Do not create an item that is already in the graph.
 
 When all items are written, stop. Do not write a summary.";
 
@@ -89,6 +88,9 @@ pub(crate) struct SeedGraph {
     pub other_rows: HashMap<String, SeedRow>,
     /// Rows of the offered classes in the graph.
     pub rows_total: usize,
+    /// Whether the pass checks new rows for duplicates against all rows
+    /// (dedup on drain). The note tells the model only what is true.
+    pub unshown_checked: bool,
 }
 
 /// The seed of one pass.
@@ -106,11 +108,14 @@ pub(crate) struct Seed {
 }
 
 /// The note that ends the seed.
-pub(crate) fn seed_note(shown: usize, total: usize) -> String {
-    format!(
-        "The seed shows {shown} of {total} rows. Use the tools to find other rows. Rows that \
-         you do not see are still checked for duplicates."
-    )
+pub(crate) fn seed_note(shown: usize, total: usize, unshown_checked: bool) -> String {
+    let check = if unshown_checked {
+        "Rows that you do not see are still checked for duplicates."
+    } else {
+        "Rows that you do not see are not checked for duplicates: find a row before you \
+         create it."
+    };
+    format!("The seed shows {shown} of {total} rows. Use the tools to find other rows. {check}")
 }
 
 /// Pick and render the seed from `graph` within `budget_tokens`. Pure: the
@@ -252,7 +257,7 @@ fn render(
 
     let rows_total = graph.rows_total.max(named.len());
     let json = json!({
-        "note": seed_note(named.len(), rows_total),
+        "note": seed_note(named.len(), rows_total, graph.unshown_checked),
         "outline": lines.join("\n"),
         "focus": focus_rows,
     });
@@ -509,6 +514,7 @@ pub(crate) async fn read_seed_graph(
         parents,
         other_rows,
         rows_total,
+        unshown_checked: false,
     }
 }
 
@@ -681,6 +687,17 @@ pub(crate) mod tests {
             "{}",
             seed.json["note"]
         );
+    }
+
+    // The note says whether rows the model does not see are checked for
+    // duplicates: only a pass that dedups on drain checks them.
+    #[test]
+    fn the_note_says_whether_unshown_rows_are_checked() {
+        let (existing, mut graph) = flat(1);
+        let note = |g: &SeedGraph| build_seed(&existing, g, usize::MAX).json["note"].clone();
+        assert!(note(&graph).as_str().unwrap().contains("are not checked"));
+        graph.unshown_checked = true;
+        assert!(note(&graph).as_str().unwrap().contains("are still checked"));
     }
 
     #[test]
