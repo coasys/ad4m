@@ -59,6 +59,13 @@ sqlx-mysql = { git = "https://github.com/coasys/sqlx.git", branch = "sqlite-libs
 sqlx-postgres = { git = "https://github.com/coasys/sqlx.git", branch = "sqlite-libsqlite3-sys-0.38-compat" }
 sqlx-sqlite = { git = "https://github.com/coasys/sqlx.git", branch = "sqlite-libsqlite3-sys-0.38-compat" }
 
+# The CLI's Coasys space screen (#1779) depends on coasys/we's renderer
+# crates by git rev. we-ad4m pins ad4m-client by git rev too; this patch makes
+# that pin resolve to this workspace's rust-client, so the CLI's socket
+# (`Arc<WsRpcClient>`) and the adapter's are one type.
+[patch."https://github.com/coasys/ad4m.git"]
+ad4m-client = { path = "rust-client" }
+
 # kitsune2 patches deliberately removed 2026-08-25 (Nico approved plan A).
 #
 # Historical context: these patches used to pin kitsune2 to a lucksus fork

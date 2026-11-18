@@ -762,7 +762,7 @@ fn draw(frame: &mut Frame, model: &Model) {
             Constraint::Length(3),
             Constraint::Length(3),
         ])
-        .split(frame.size());
+        .split(frame.area());
 
     let header = header_text(model.screen, &model.executor_url);
     let title = Paragraph::new(Line::from(vec![Span::styled(

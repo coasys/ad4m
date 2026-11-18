@@ -44,11 +44,23 @@ serde = { version = "1.0", features = ["derive"] }
 colour = "0.7.0"
 syntect = "5.0"
 serde_cbor = "0.11"
-ratatui = "0.26.0"
-crossterm = "0.27.0"
+ratatui = "0.30.2"
+crossterm = "0.29.0"
+# The WE renderer crates for `ad4m tui`'s Coasys space screen (#1779). Git
+# deps at one rev: they are not published. The root manifest patches their
+# ad4m-client pin to this workspace's rust-client.
+we-tui = { git = "https://github.com/coasys/we.git", rev = "aebab9a2e0532000bac8458585a55fa080c0333f" }
+we-session = { git = "https://github.com/coasys/we.git", rev = "aebab9a2e0532000bac8458585a55fa080c0333f" }
+we-template = { git = "https://github.com/coasys/we.git", rev = "aebab9a2e0532000bac8458585a55fa080c0333f" }
+we-data = { git = "https://github.com/coasys/we.git", rev = "aebab9a2e0532000bac8458585a55fa080c0333f" }
+we-screen = { git = "https://github.com/coasys/we.git", rev = "aebab9a2e0532000bac8458585a55fa080c0333f" }
+we-expr = { git = "https://github.com/coasys/we.git", rev = "aebab9a2e0532000bac8458585a55fa080c0333f" }
+we-catalog = { git = "https://github.com/coasys/we.git", rev = "aebab9a2e0532000bac8458585a55fa080c0333f" }
+we-ad4m = { git = "https://github.com/coasys/we.git", rev = "aebab9a2e0532000bac8458585a55fa080c0333f" }
 
 [dev-dependencies]
 tempfile = "3"
+we-ad4m = { git = "https://github.com/coasys/we.git", rev = "aebab9a2e0532000bac8458585a55fa080c0333f", features = ["testkit"] }
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemallocator = { version = "0.6", features = ["unprefixed_malloc_on_supported_platforms"] }
