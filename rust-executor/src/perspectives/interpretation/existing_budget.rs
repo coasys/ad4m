@@ -835,7 +835,7 @@ mod tests {
     /// deduped, since dedup reads the full existing set.
     #[tokio::test]
     async fn a_pass_dedups_against_a_row_its_prompt_did_not_show() {
-        use crate::types::{AiCapability, EndpointInput, EndpointKind, ModelInput, ModelType};
+        use crate::types::{AiCapability, EndpointKind, ModelInput, ModelType};
 
         let (mut perspective, shapes, ctx) = setup_perspective_no_llm(&[("Task", TASK_SDNA)]).await;
         let task_shape = &shapes[0];
@@ -916,29 +916,36 @@ mod tests {
         let service = crate::ai_service::AIService::global_instance()
             .await
             .unwrap();
-        let endpoint = service
-            .add_endpoint(EndpointInput {
-                name: "budget-llm".into(),
-                kind: EndpointKind::Vllm,
-                base_url: url::Url::parse(&server.url()).unwrap(),
-                api_key: None,
-                capabilities: Some(vec![AiCapability::Chat]),
-                max_num_ctx: Some(window as u32),
-                request_timeout_secs: None,
-                max_concurrent: None,
-            })
-            .await
-            .unwrap();
-        let model_id = service
-            .add_model(ModelInput {
-                name: "budget-llm".into(),
+        // Straight into the database, under a fresh id and key: the global
+        // database outlives each test, and a mock server's URL can repeat an
+        // earlier test's endpoint.
+        let endpoint = crate::types::Endpoint {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: format!("budget-llm-{}", uuid::Uuid::new_v4()),
+            kind: EndpointKind::Vllm,
+            base_url: url::Url::parse(&server.url()).unwrap(),
+            // A key of its own: the database refuses a second endpoint on
+            // the same URL with the same key.
+            api_key: crate::secret::Secret::new(uuid::Uuid::new_v4().to_string()),
+            capabilities: vec![AiCapability::Chat],
+            max_num_ctx: Some(window as u32),
+            request_timeout_secs: None,
+            max_concurrent: None,
+            managed: false,
+            health: Default::default(),
+        };
+        crate::db::Ad4mDb::with_global_instance(|db| db.insert_endpoint(&endpoint)).unwrap();
+        let model_id = crate::db::Ad4mDb::with_global_instance(|db| {
+            db.add_model(&ModelInput {
+                name: format!("budget-llm-{}", uuid::Uuid::new_v4()),
                 model_type: ModelType::Llm,
-                endpoint_id: endpoint.id,
+                endpoint_id: endpoint.id.clone(),
                 remote_model: "stub".into(),
                 native_tools: None,
             })
-            .await
-            .unwrap();
+        })
+        .unwrap();
+        service.reload_model(model_id.clone()).await.unwrap();
         service
             .set_default_model(ModelType::Llm, model_id)
             .await
