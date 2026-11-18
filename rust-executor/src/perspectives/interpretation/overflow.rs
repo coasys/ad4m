@@ -979,10 +979,17 @@ mod tests {
 
     /// existing_scope and mint_scope are the same parent. Half 2 must see the
     /// record half 1 minted, and must not mint a second one with the same title.
+    ///
+    /// The `existing` block only gets a quarter of what the window leaves after
+    /// the prompt and the answer reserve (#1806), so the window leaves room for
+    /// that reserve plus 2,000 tokens. The turns are long enough that the
+    /// unsplit batch still overflows that window.
     #[tokio::test]
     async fn overflow_review_next_half_sees_the_linked_record() {
+        let slack =
+            crate::perspectives::interpretation::existing_budget::OUTPUT_RESERVE_TOKENS + 2_000;
         let mut batch =
-            prepare_split("overflow-dedup", 12_000, 12_000, 2_000, true, false, false).await;
+            prepare_split("overflow-dedup", 60_000, 60_000, slack, true, false, false).await;
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let mut upstream = mockito::Server::new_async().await;
         let alpha = upstream
