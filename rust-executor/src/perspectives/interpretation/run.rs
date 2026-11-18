@@ -16,7 +16,7 @@ use crate::ai_service::harness::propose::{
     class_propose_shape_from_shacl, ProposalBuffer, ProposeWritesProvider,
 };
 use crate::ai_service::harness::provider::{BoundArgsProvider, ToolProvider};
-use crate::ai_service::harness::{run_with_tools, HarnessConfig};
+use crate::ai_service::harness::{run_with_tools_outcome, HarnessConfig};
 use crate::perspectives::model_query::types::{ModelShape, Scope};
 use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClassOption};
 use crate::types::LinkStatus;
@@ -595,8 +595,19 @@ pub struct InterpretationOutcome {
     /// URIs of the `FlowTransitionProposal`s the deterministic flow pass
     /// minted after this pass's writes were committed.
     pub flow_proposals: Vec<String>,
+    /// How the pass ran ([`RUN_MODE_SINGLE_SHOT`], [`RUN_MODE_HARNESS`] or
+    /// [`RUN_MODE_FALLBACK`]), as its run record says.
+    pub mode: &'static str,
 }
 
+/// The run record's `mode` for a single-shot pass.
+pub const RUN_MODE_SINGLE_SHOT: &str = "single-shot";
+/// The run record's `mode` for a harness pass.
+pub const RUN_MODE_HARNESS: &str = "harness";
+/// The run record's `mode` for a harness pass that fell back to single-shot.
+pub const RUN_MODE_FALLBACK: &str = "fallback";
+
+#[allow(clippy::too_many_arguments)]
 pub async fn run_interpretation_with_strategy_and_model(
     perspective: &mut PerspectiveInstance,
     shapes: &[ModelShape],
@@ -610,6 +621,43 @@ pub async fn run_interpretation_with_strategy_and_model(
     emit_debug_events: bool,
     emit_ctx: Option<&crate::perspectives::auto_processor::events::InterpretationEmitContext>,
     flow_filter: Option<&[String]>,
+) -> anyhow::Result<InterpretationOutcome> {
+    run_single_shot(
+        perspective,
+        shapes,
+        transcript,
+        base_prefix,
+        context,
+        dedup_strategy,
+        model_override,
+        scope,
+        cursor,
+        emit_debug_events,
+        emit_ctx,
+        flow_filter,
+        RUN_MODE_SINGLE_SHOT,
+        None,
+    )
+    .await
+}
+
+/// The single-shot pass, with the `mode` its run record gets.
+#[allow(clippy::too_many_arguments)]
+async fn run_single_shot(
+    perspective: &mut PerspectiveInstance,
+    shapes: &[ModelShape],
+    transcript: &[TranscriptTurn],
+    base_prefix: &str,
+    context: &AgentContext,
+    dedup_strategy: &DedupStrategy,
+    model_override: Option<&str>,
+    scope: Option<&Scope>,
+    cursor: Option<&InterpretationRunCursor>,
+    emit_debug_events: bool,
+    emit_ctx: Option<&crate::perspectives::auto_processor::events::InterpretationEmitContext>,
+    flow_filter: Option<&[String]>,
+    mode: &'static str,
+    completions: Option<Arc<dyn crate::ai_service::harness::CompletionSource>>,
 ) -> anyhow::Result<InterpretationOutcome> {
     // The task row `prompt` reads (see `ensure_interpretation_task_for_model`).
     let task = ensure_interpretation_task_for_model(model_override)?;
@@ -691,9 +739,17 @@ pub async fn run_interpretation_with_strategy_and_model(
             Some((shown.rows_shown, shown.rows_total)),
         );
 
-        let service = crate::ai_service::AIService::global_instance()
-            .await
-            .map_err(|e| anyhow::anyhow!("run_interpretation: AIService not ready: {e:#}"))?;
+        // The model: the AI service, or the source a test passes.
+        let service = match &completions {
+            Some(_) => None,
+            None => Some(
+                crate::ai_service::AIService::global_instance()
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!("run_interpretation: AIService not ready: {e:#}")
+                    })?,
+            ),
+        };
 
         // Mid-pass observability (Nico 2026-08-20 + CodeRabbit #903 CR #6):
         // `LlmRequestSent` fires right before EACH `service.prompt` call and
@@ -718,6 +774,8 @@ pub async fn run_interpretation_with_strategy_and_model(
             flow_proposals: llm_proposals,
         } = retry_interpretation_parse(|_attempt| {
             let service = service.clone();
+            let completions = completions.clone();
+            let model_id = task.model_id.clone();
             let task_id = task.task_id.clone();
             let prompt = prompt.clone();
             let capture = debug_response_capture.clone();
@@ -743,13 +801,30 @@ pub async fn run_interpretation_with_strategy_and_model(
                     .await;
                 }
 
-                let result = service
-                    // Internal caller (interpretation runner) — no user auth context; billing skipped.
-                    // Reasoning first, capped so thinking cannot overflow the window.
-                    // A size failure retries once with thinking off.
-                    .prompt_interpretation_pass(task_id, prompt, Some(stick_no_thinking.as_ref()))
-                    .await
-                    .map_err(|e| anyhow::anyhow!("AIService::prompt failed: {e:#}"))?;
+                let text = match (completions, service) {
+                    (Some(source), _) => {
+                        let messages = [serde_json::json!({ "role": "user", "content": prompt })];
+                        source
+                            .complete(&model_id, &messages, Vec::new())
+                            .await?
+                            .content
+                    }
+                    (None, Some(service)) => {
+                        service
+                            // Internal caller (interpretation runner) — no user auth context; billing skipped.
+                            // Reasoning first, capped so thinking cannot overflow the window.
+                            // A size failure retries once with thinking off.
+                            .prompt_interpretation_pass(
+                                task_id,
+                                prompt,
+                                Some(stick_no_thinking.as_ref()),
+                            )
+                            .await
+                            .map_err(|e| anyhow::anyhow!("AIService::prompt failed: {e:#}"))?
+                            .text
+                    }
+                    (None, None) => unreachable!("the service is read when no source is given"),
+                };
 
                 if let Some(ctx) = emit_ctx_cloned.as_ref() {
                     emit(
@@ -761,17 +836,17 @@ pub async fn run_interpretation_with_strategy_and_model(
                         .with_agent_did(&ctx.agent_did)
                         .with_items(&ctx.item_ids)
                         .with_batch_key(&ctx.batch_key)
-                        .with_llm_output(result.text.clone()),
+                        .with_llm_output(text.clone()),
                     )
                     .await;
                 }
 
                 if emit_debug_events {
                     if let Ok(mut slot) = capture.lock() {
-                        *slot = Some(result.text.clone());
+                        *slot = Some(text.clone());
                     }
                 }
-                Ok(result.text)
+                Ok(text)
             }
         })
         .await?;
@@ -837,6 +912,7 @@ pub async fn run_interpretation_with_strategy_and_model(
             context,
             cursor,
             debug.as_ref(),
+            Some(mode),
             &llm_proposals,
             &flow_subjects,
             flow_filter,
@@ -847,6 +923,7 @@ pub async fn run_interpretation_with_strategy_and_model(
             bases,
             debug,
             flow_proposals,
+            mode,
         })
     }
     .await;
@@ -934,6 +1011,7 @@ pub(crate) async fn apply_ops_and_run_flow_passes(
     context: &AgentContext,
     cursor: Option<&InterpretationRunCursor>,
     debug: Option<&crate::perspectives::interpretation::InterpretationDebug>,
+    mode: Option<&str>,
     llm_proposals: &[crate::perspectives::interpretation::LlmFlowProposal],
     flow_subjects: &[String],
     flow_filter: Option<&[String]>,
@@ -952,6 +1030,7 @@ pub(crate) async fn apply_ops_and_run_flow_passes(
         context,
         cursor,
         debug,
+        mode,
     )
     .await?;
 
@@ -1080,10 +1159,18 @@ async fn run_flow_post_pass(
 /// dropped, and `AddLinks` whose triples already exist are filtered out.
 /// This bounds duplicate accretion on the indefinitely-running processor.
 ///
-/// The final answer text from the harness is discarded — the LLM already
-/// wrote via tools, and any narrative it emits is not consumed by the
-/// interpretation pipeline. (If we later want a try-parse-as-fallback, it
-/// hooks in here.)
+/// **Fallback (#1804).** The pass runs single-shot one time on the same
+/// batch, with `dedup_strategy` and `emit_debug_events`, when the harness
+/// loop:
+///
+/// - degraded: the model server failed a round two times (#1738);
+/// - made no tool call: the model answered with text only, or with nothing;
+/// - returned an error, for example a 4xx answer.
+///
+/// The proposals buffered before then are dropped: the harness writes
+/// nothing before its drain, so each row is written one time. The run record
+/// says `mode: fallback`. A loop that reached its cap keeps its proposals.
+/// If the fallback fails too, its error is the pass's error.
 ///
 /// `max_tool_calls` = 0 is treated as "no harness path"; callers should
 /// route to [`run_interpretation_with_strategy_and_model`] instead of
@@ -1104,6 +1191,71 @@ pub async fn run_interpretation_with_harness_and_model(
     dedup_on_drain: bool,
     credit_gate: Option<Arc<dyn crate::ai_service::harness::CreditGate>>,
     flow_filter: Option<&[String]>,
+    dedup_strategy: &DedupStrategy,
+    emit_debug_events: bool,
+) -> anyhow::Result<InterpretationOutcome> {
+    run_harness_pass(
+        perspective,
+        shapes,
+        transcript,
+        base_prefix,
+        context,
+        model_override,
+        scope,
+        cursor,
+        max_tool_calls,
+        caller,
+        emit_ctx,
+        dedup_on_drain,
+        credit_gate,
+        flow_filter,
+        dedup_strategy,
+        emit_debug_events,
+        None,
+    )
+    .await
+}
+
+/// Why a harness loop's result is not used, so the pass falls back to
+/// single-shot; `None` when it is used.
+pub(crate) fn fallback_reason(
+    result: &anyhow::Result<crate::ai_service::harness::HarnessOutcome>,
+) -> Option<String> {
+    use crate::ai_service::harness::HarnessEnd;
+    match result {
+        Err(e) => Some(format!("the harness failed: {e:#}")),
+        Ok(o) if o.end == HarnessEnd::Degraded => {
+            Some("the model server failed two times (degraded)".to_string())
+        }
+        Ok(o) if o.end == HarnessEnd::Finished && o.tool_calls == 0 => {
+            Some("the model made no tool call".to_string())
+        }
+        Ok(_) => None,
+    }
+}
+
+/// [`run_interpretation_with_harness_and_model`] with the completion source
+/// the loop talks to: `None` is the AI service (the model the task names);
+/// tests pass a scripted source.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_harness_pass(
+    perspective: &mut PerspectiveInstance,
+    shapes: &[ModelShape],
+    transcript: &[TranscriptTurn],
+    base_prefix: &str,
+    context: &AgentContext,
+    model_override: Option<&str>,
+    scope: Option<&Scope>,
+    cursor: Option<&InterpretationRunCursor>,
+    max_tool_calls: u32,
+    caller: Option<Arc<crate::agent::session::Session>>,
+    emit_ctx: Option<&crate::perspectives::auto_processor::events::InterpretationEmitContext>,
+    dedup_on_drain: bool,
+    credit_gate: Option<Arc<dyn crate::ai_service::harness::CreditGate>>,
+    flow_filter: Option<&[String]>,
+    dedup_strategy: &DedupStrategy,
+    emit_debug_events: bool,
+    completions: Option<Arc<dyn crate::ai_service::harness::CompletionSource>>,
 ) -> anyhow::Result<InterpretationOutcome> {
     // Same task-row selection as the single-shot path so the model + system
     // prompt + few-shots + billing meta come from the same row the operator
@@ -1237,24 +1389,33 @@ pub async fn run_interpretation_with_harness_and_model(
     // OpenAI-compat bridge: real CompletionSource that talks to AIService
     // via the tool-grammar constrained-decoding path Josh cherry-picked
     // into /v1. Local + remote models both go through this one seam.
-    let service = crate::ai_service::AIService::global_instance()
-        .await
-        .map_err(|e| anyhow::anyhow!("run_interpretation_harness: AIService not ready: {e:#}"))?;
+    // A test's source also answers the single-shot fallback.
+    let completions_for_fallback = completions.clone();
+    let bridge: Arc<dyn crate::ai_service::harness::CompletionSource> = match completions {
+        Some(source) => source,
+        None => {
+            let service = crate::ai_service::AIService::global_instance()
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!("run_interpretation_harness: AIService not ready: {e:#}")
+                })?;
+            // A pass with a caller bills the agent it acts as (by DID); the caller's session
+            // named that agent. An executor-owned pass (no caller) bills no one.
+            let bill_to = context
+                .managed_did()
+                .map(str::to_string)
+                .filter(|_| has_caller);
+            Arc::new(
+                crate::api::openai_compat::harness_bridge::OpenAiCompatBridge::new(
+                    Arc::new(service),
+                    bill_to,
+                ),
+            )
+        }
+    };
     // Sized from the window the model's requests actually run at — the same
     // resolved `num_ctx` the bridge trims its outgoing list to.
-    let tool_result_max_bytes = service.tool_result_max_bytes(&task.model_id).await;
-    // A pass with a caller bills the agent it acts as (by DID); the caller's session named that
-    // agent. An executor-owned pass (no caller) bills no one.
-    let bill_to = context
-        .managed_did()
-        .map(str::to_string)
-        .filter(|_| has_caller);
-    let bridge = Arc::new(
-        crate::api::openai_compat::harness_bridge::OpenAiCompatBridge::new(
-            Arc::new(service),
-            bill_to,
-        ),
-    );
+    let tool_result_max_bytes = bridge.tool_result_max_bytes(&task.model_id).await;
 
     // The guide, then one user message carrying the interpretation prompt.
     // OpenAiCompatBridge prepends the tools-system-prompt automatically
@@ -1265,9 +1426,10 @@ pub async fn run_interpretation_with_harness_and_model(
     ];
 
     // Drive the loop. The returned text is discarded — the LLM wrote via
-    // propose_* tools, which populated `buffer`. If the LLM emitted a final
-    // narrative it's not consumed here (see doc comment above).
-    let _final_text = run_with_tools(
+    // propose_* tools, which populated `buffer`. How the loop ended decides
+    // whether the pass falls back to single-shot (see the doc above).
+    let pass_started = std::time::Instant::now();
+    let harness = run_with_tools_outcome(
         &task.model_id,
         initial_messages,
         provider,
@@ -1283,7 +1445,44 @@ pub async fn run_interpretation_with_harness_and_model(
         emit_ctx.map(|ctx| ctx as &dyn crate::ai_service::harness::ToolObserver),
         credit_gate,
     )
-    .await?;
+    .await;
+    if let Some(reason) = fallback_reason(&harness) {
+        // Nothing was written: the buffers are dropped, and the single-shot
+        // pass writes each row one time.
+        let dropped = buffer.drain().len();
+        let _ = flow_buffer.drain();
+        log::warn!(
+            "harness: falling back to single-shot: {reason}; dropped_proposals={dropped} \
+             model={} harness_ms={}",
+            task.model_id,
+            pass_started.elapsed().as_millis(),
+        );
+        return run_single_shot(
+            perspective,
+            shapes,
+            transcript,
+            base_prefix,
+            context,
+            dedup_strategy,
+            model_override,
+            scope,
+            cursor,
+            emit_debug_events,
+            emit_ctx,
+            flow_filter,
+            RUN_MODE_FALLBACK,
+            completions_for_fallback,
+        )
+        .await;
+    }
+    let harness = harness.expect("an error falls back above");
+    log::info!(
+        "harness: pass ended end={:?} tool_calls={}/{} harness_ms={}",
+        harness.end,
+        harness.tool_calls,
+        max_tool_calls,
+        pass_started.elapsed().as_millis(),
+    );
 
     // Drain the buffered ops. When `dedup_on_drain` is active (auto-processor
     // path), collapse duplicate Creates and filter stale AddLinks before
@@ -1324,6 +1523,7 @@ pub async fn run_interpretation_with_harness_and_model(
         context,
         cursor,
         None,
+        Some(RUN_MODE_HARNESS),
         &flow_buffer.drain(),
         &flow_subjects,
         flow_filter,
@@ -1344,6 +1544,7 @@ pub async fn run_interpretation_with_harness_and_model(
         // loop; per-tool-call events carry the debug surface instead.
         debug: None,
         flow_proposals,
+        mode: RUN_MODE_HARNESS,
     })
 }
 
@@ -2418,6 +2619,7 @@ mod tests {
             uuid::Uuid::new_v4().to_string(),
             "1700000000000".to_string(),
             ctx,
+            None,
             None,
             None,
             &[],

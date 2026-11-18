@@ -1527,6 +1527,10 @@ pub async fn run_one_pass(
                     // only on the flows this processor selected. An empty
                     // selection = flow-blind pass.
                     Some(&cfg.flows),
+                    // The single-shot fallback (#1804) runs with the
+                    // processor's dedup and debug settings.
+                    &dedup,
+                    cfg.emit_debug_events,
                 )
                 .await
             );
@@ -1868,6 +1872,7 @@ pub(crate) mod test_hooks {
             ran_at: chrono::Utc::now().timestamp_millis().to_string(),
             debug_prompt: None,
             debug_response: None,
+            mode: None,
         };
         mint_interpretation_run(perspective, &meta, Some(cursor), None, context).await?;
         if hooks.lose_lease_in_interpretation {

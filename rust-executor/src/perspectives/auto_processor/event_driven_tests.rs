@@ -83,6 +83,7 @@ async fn mint_run(
             ran_at: ran_at.to_string(),
             debug_prompt: None,
             debug_response: None,
+            mode: None,
         },
         Some(&InterpretationRunCursor {
             processor: processor_node(processor_id),

@@ -627,7 +627,7 @@ pub(crate) fn log_seed(seed: &Seed, budget: usize, window: Option<usize>) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::perspectives::interpretation::InstanceContext;
     use crate::perspectives::interpretation::{existing_instance_context, existing_relation_links};
@@ -751,7 +751,7 @@ mod tests {
         assert_eq!(out["seed"], seed.json);
     }
 
-    const TOPIC_SDNA: &str = r#"{
+    pub(crate) const TOPIC_SDNA: &str = r#"{
   "target_class":"ns://Topic",
   "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://type","target":"ns://topic"}],
   "properties":[
@@ -760,7 +760,7 @@ mod tests {
   ]
 }"#;
 
-    const NOTE_SDNA: &str = r#"{
+    pub(crate) const NOTE_SDNA: &str = r#"{
   "target_class":"ns://Note",
   "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://type","target":"ns://note"}],
   "properties":[
@@ -771,7 +771,7 @@ mod tests {
 }"#;
 
     /// A Note class with no relation: Fixture B of the design.
-    const FLAT_NOTE_SDNA: &str = r#"{
+    pub(crate) const FLAT_NOTE_SDNA: &str = r#"{
   "target_class":"ns://Note",
   "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://type","target":"ns://note"}],
   "properties":[

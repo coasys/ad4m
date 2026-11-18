@@ -1579,6 +1579,10 @@ async fn run_interpretation_with_harness_handler(
             // `flows` request field can narrow this later (per-run flow
             // targeting, Nico 2026-09-04 — processor configs already have it).
             None,
+            // The single-shot fallback (#1804) uses the default dedup, as
+            // `runInterpretation` does, and no debug capture.
+            &crate::perspectives::interpretation::DedupStrategy::default(),
+            false,
         ),
     )
     .await
