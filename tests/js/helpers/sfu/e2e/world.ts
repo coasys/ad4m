@@ -28,7 +28,8 @@ const TST_TMP = path.join(TESTS_JS, "tst-tmp");
 export interface WorldSpec {
   /** A label for data directories and users, so worlds never share state. */
   id: string;
-  users: { name: string }[];
+  /** `main`: the executor's main agent, called with the operator's credential, not a managed user. */
+  users: { name: string; main?: boolean }[];
   neighbourhoods: {
     name: string;
     owner: string;
@@ -124,7 +125,11 @@ export async function startWorld(spec: WorldSpec): Promise<World> {
     phase("generate the main agent");
 
     const users: Record<string, WorldUser> = {};
-    for (const { name } of spec.users) {
+    for (const { name, main } of spec.users) {
+      if (main) {
+        users[name] = { name, port, token: `${spec.id}-admin`, did: (await admin.agent.status()).did!, client: admin };
+        continue;
+      }
       const email = `${spec.id}-${name}@example.com`;
       const created = await admin.agent.createUser(email, "password");
       if (!created.success) throw new Error(`creating ${name} failed: ${created.error}`);

@@ -313,6 +313,7 @@ pub async fn create(params: CreateBotParams) -> Result<CreatedBot, WsRpcError> {
         Err(e) => Some(WsRpcError {
             code: e.code,
             message: e.message.clone(),
+            data: e.data.clone(),
         }),
     };
     if let Some(refusal) = refusal {
@@ -368,6 +369,7 @@ pub async fn set_grant(
         return Err(WsRpcError {
             code: 409,
             message: "bot-revoked: a revoked grant never changes".to_string(),
+            data: None,
         });
     }
     if params.version != bot.grant.version {
@@ -461,6 +463,7 @@ fn version_conflict(current: u64) -> WsRpcError {
     WsRpcError {
         code: 409,
         message: format!("version: the grant changed, its version is now {current}"),
+        data: None,
     }
 }
 

@@ -71,6 +71,7 @@ impl Pending {
                     "{}: the activity log could not be written, so the call does not run",
                     super::LOG_UNAVAILABLE
                 ),
+                data: None,
             }
         })?;
         Ok(Pending {
