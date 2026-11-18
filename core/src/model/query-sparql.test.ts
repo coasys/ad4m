@@ -737,4 +737,13 @@ describe('where `eq` and per-link `author` (#1114)', () => {
     expect(buildWhereCondition('test://p', { eq: 'x' } as any)).toBe(buildWhereCondition('test://p', 'x'));
     expect(() => buildWhereCondition('test://p', { eq: 'x', author: 'did:a' } as any)).toThrow(/per-link/);
   });
+
+  it('getter where compilation percent-encodes !\'()* in the literal-string alternative', () => {
+    expect(buildWhereCondition('test://p', "a b!'()*")).toBe(
+      `?target <test://p> ?_wc0 . FILTER(STR(?_wc0) = "a b!\\'()*" || STR(?_wc0) = "literal:string:a%20b%21%27%28%29%2A")`,
+    );
+    expect(buildWhereCondition('test://p', ["a b!'()*"])).toBe(
+      `?target <test://p> ?_wc0 . FILTER(STR(?_wc0) IN ("a b!\\'()*", "literal:string:a%20b%21%27%28%29%2A"))`,
+    );
+  });
 });

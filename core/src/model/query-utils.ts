@@ -8,7 +8,7 @@
  */
 
 import type { WhereCondition, Where, ModelMetadata } from "./types";
-import { escapeQueryString } from "../utils";
+import { encodeRFC3986URIComponent, escapeQueryString } from "../utils";
 
 /**
  * Format a JavaScript value for embedding in a query expression.
@@ -107,12 +107,7 @@ export function buildWhereCondition(
      */
     function formatLiteralFilter(varName: string, v: any): string {
         const raw = escapeQueryString(String(v));
-        const encoded = encodeURIComponent(String(v))
-            .replace(/!/g, '%21')
-            .replace(/'/g, '%27')
-            .replace(/\(/g, '%28')
-            .replace(/\)/g, '%29')
-            .replace(/\*/g, '%2A');
+        const encoded = encodeRFC3986URIComponent(String(v));
         if (typeof v === 'string') {
             return `FILTER(STR(${varName}) = "${raw}" || STR(${varName}) = "literal:string:${encoded}")`;
         } else if (typeof v === 'number') {
@@ -129,9 +124,7 @@ export function buildWhereCondition(
             const varName = `?_wc${varSuffix}`;
             const inValues = (condition as any[]).flatMap(v => {
                 const raw = escapeQueryString(String(v));
-                const encoded = encodeURIComponent(String(v))
-                    .replace(/!/g, '%21').replace(/'/g, '%27')
-                    .replace(/\(/g, '%28').replace(/\)/g, '%29').replace(/\*/g, '%2A');
+                const encoded = encodeRFC3986URIComponent(String(v));
                 return [`"${raw}"`, `"literal:string:${encoded}"`];
             }).join(', ');
             return `?target <${escapedPredicate}> ${varName} . FILTER(STR(${varName}) IN (${inValues}))`;
