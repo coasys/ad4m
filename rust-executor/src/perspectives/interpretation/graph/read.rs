@@ -284,9 +284,11 @@ pub async fn existing_instance_context(
         let mut requested = Vec::with_capacity(2 + scalar_names.len());
         requested.push(idp_name.clone());
         requested.extend(scalar_names.iter().cloned());
-        // The newest link's timestamp, for the recency order of the prompt's
-        // `existing` rows (`existing_budget`). Kept apart from `properties`.
+        // The newest and the first link's timestamps, for the recency order
+        // of the prompt's `existing` rows (`existing_budget`). Kept apart
+        // from `properties`.
         requested.push("updatedAt".to_string());
+        requested.push("createdAt".to_string());
         // Build the model-query as structured JSON so an optional `scope`
         // (a `Scope`) can be spliced in as the query's `parent` filter —
         // constraining the existing-instance set to a sub-graph/tree rather
@@ -346,11 +348,10 @@ pub async fn existing_instance_context(
                             title: title.to_string(),
                             class: class.clone(),
                             properties,
-                            updated_at: inst
-                                .get("updatedAt")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or_default()
-                                .to_string(),
+                            updated_at: later_timestamp(
+                                inst.get("updatedAt").and_then(|v| v.as_str()),
+                                inst.get("createdAt").and_then(|v| v.as_str()),
+                            ),
                         })
                     })
                     .collect()
@@ -362,6 +363,18 @@ pub async fn existing_instance_context(
         }
     }
     Ok(out)
+}
+
+/// The later of an instance's `updatedAt` and `createdAt`, as stored; empty
+/// when it has neither. A row that an earlier interpretation run wrote counts
+/// as recent either way.
+fn later_timestamp(updated: Option<&str>, created: Option<&str>) -> String {
+    use crate::perspectives::interpretation::existing_budget::timestamp_millis as millis;
+    match (updated, created) {
+        (Some(u), Some(c)) if millis(c) > millis(u) => c.to_string(),
+        (Some(u), _) => u.to_string(),
+        (None, c) => c.unwrap_or_default().to_string(),
+    }
 }
 
 /// Read the relation edges already present in the graph for the given shapes'
@@ -420,6 +433,15 @@ mod tests {
     use super::*;
 
     use crate::perspectives::interpretation_test_support::*;
+
+    #[test]
+    fn an_instance_is_as_recent_as_its_later_timestamp() {
+        assert_eq!(later_timestamp(Some("200"), Some("100")), "200");
+        assert_eq!(later_timestamp(Some("100"), Some("200")), "200");
+        assert_eq!(later_timestamp(None, Some("100")), "100");
+        assert_eq!(later_timestamp(Some("100"), None), "100");
+        assert_eq!(later_timestamp(None, None), "");
+    }
 
     /// A body stored by a property with `resolveLanguage` — which `@Property` sets by default — is a
     /// signed expression envelope, not a bare string. Reading only the bare form made both gathers
