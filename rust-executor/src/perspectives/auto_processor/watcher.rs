@@ -957,8 +957,8 @@ where
 ///   embedding model when it has one, else `NormalizedString`.
 /// * `{"kind":"normalized"}` → `NormalizedString`.
 /// * `{"kind":"semantic","model":..., "threshold":<f32>, "unclearFrom":<f32>}`
-///    → `Semantic { .. }`. `unclearFrom` is optional
-///    ([`crate::perspectives::interpretation::DEFAULT_UNCLEAR_FROM`]).
+///   → `Semantic { .. }`. `unclearFrom` is optional
+///   ([`crate::perspectives::interpretation::DEFAULT_UNCLEAR_FROM`]).
 ///
 /// Hand-rolled rather than `serde` derive on the enum so this PR does not
 /// add a serde dependency to the interpretation module — the dedup enum
