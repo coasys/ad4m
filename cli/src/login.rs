@@ -9,8 +9,8 @@ use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 
 use ad4m_client::connect::{
-    normalize_base_url, Ad4mConnect, AppInfo, AuthState, ConnectOptions, ConnectPrompts,
-    ConnectStatus, TokenStore,
+    normalize_base_url, refuse_insecure_remote, Ad4mConnect, AppInfo, AuthState, ConnectOptions,
+    ConnectPrompts, ConnectStatus, TokenStore,
 };
 use ad4m_client::Ad4mClient;
 use anyhow::{anyhow, bail, Context, Result};
@@ -65,6 +65,9 @@ pub async fn login(
     if url.is_empty() {
         bail!("login needs an executor URL");
     }
+    // Before either path. The admin branch used to open the socket first,
+    // so the credential traveled in the URL with no transport check.
+    refuse_insecure_remote(&url, allow_insecure_remote)?;
     if let Some(credential) = admin_credential {
         if credential.trim().is_empty() {
             bail!("the admin credential is empty");
@@ -83,9 +86,10 @@ pub async fn login(
 
     let mut session = Ad4mConnect::new(opts)?;
     let state = session.connect(&mut TermPrompts).await?;
+    let logged_in = session.url().unwrap_or(&url).to_string();
     match state {
         AuthState::Authenticated => {
-            println!("Logged in to {url}");
+            println!("Logged in to {logged_in}");
             println!("Token file: {}", session.store().path().display());
             Ok(())
         }
@@ -174,6 +178,7 @@ impl ConnectPrompts for TermPrompts {
         let email = email.to_string();
         async move {
             say(&format!("A sign-in code was emailed to {email}."));
+            say("Type the code. Type resend to email a new code.");
             ask("code> ", true)
         }
     }
@@ -207,11 +212,56 @@ impl ConnectPrompts for TermPrompts {
             ConnectStatus::WaitingForEmailCode { email } => {
                 say(&format!("Waiting for the code emailed to {email}..."));
             }
-            ConnectStatus::CodeRejected => say("That code did not take. Try again."),
+            ConnectStatus::CodeRejected => {
+                say("That code did not take. Type another code, or type resend to email a new one.")
+            }
             ConnectStatus::RequestExpired => say("The request expired. Asking again..."),
             ConnectStatus::EmailCodeExpired => {
                 say("That code is no longer valid. Sending a new one...");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// `ad4m login http://remote --admin-credential` must refuse before the
+    /// credential is placed in a plaintext socket URL.
+    #[tokio::test]
+    async fn a_plaintext_remote_admin_login_does_not_open_a_socket() {
+        let dir = tempfile::tempdir().unwrap();
+        let previous = std::env::var_os("AD4M_TOKEN_DIR");
+        std::env::set_var("AD4M_TOKEN_DIR", dir.path());
+        let result = tokio::time::timeout(
+            Duration::from_secs(3),
+            login(
+                "http://203.0.113.55:9",
+                None,
+                Some("admin-secret-should-not-travel"),
+                false,
+            ),
+        )
+        .await;
+        match previous {
+            Some(value) => std::env::set_var("AD4M_TOKEN_DIR", value),
+            None => std::env::remove_var("AD4M_TOKEN_DIR"),
+        }
+        let err = match result {
+            Ok(Err(err)) => err,
+            Ok(Ok(())) => panic!("logged in to a plaintext remote"),
+            Err(_) => panic!("login blocked on a socket instead of refusing plaintext"),
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("plaintext"),
+            "expected a plaintext refusal, got {msg}"
+        );
+        assert!(
+            !msg.contains("admin-secret-should-not-travel"),
+            "the admin credential leaked into the error: {msg}"
+        );
     }
 }
