@@ -1,5 +1,6 @@
 use super::dedup::semantic_embedding_model;
 use super::existing_budget::{existing_for_prompt, Compact};
+use super::walk_tools::WalkToolsProvider;
 use super::{
     apply_with_overlay, build_interpretation_input_showing, build_speaker_name_map, class_label,
     ensure_interpretation_task_for_model, existing_instance_context, existing_relation_links,
@@ -13,9 +14,7 @@ use crate::ai_service::harness::flow_propose::{FlowProposalBuffer, FlowTransitio
 use crate::ai_service::harness::propose::{
     class_propose_shape_from_shacl, ProposalBuffer, ProposeWritesProvider,
 };
-use crate::ai_service::harness::provider::{
-    is_read_only, BoundArgsProvider, FilteredProvider, ToolProvider, ToolSchema,
-};
+use crate::ai_service::harness::provider::{BoundArgsProvider, ToolProvider};
 use crate::ai_service::harness::{run_with_tools, HarnessConfig};
 use crate::perspectives::model_query::types::{ModelShape, Scope};
 use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClassOption};
@@ -1197,25 +1196,20 @@ pub async fn run_interpretation_with_harness_and_model(
         )]),
     ));
 
-    // Narrow the Ad4m tool surface to (a) class-scoped tools for the offered
-    // classes only, and (b) read verbs only. Rationale: a smaller local LLM
-    // like `gemma3:12b` faced with 60+ generic tools (`add_perspective`,
-    // neighbourhood/agent/runtime helpers, dynamic write verbs on every
-    // registered class) tends to hallucinate simpler tool names and skips
-    // the propose-write path — observed in CI job 22252 on `5c34ed868`,
-    // where the LLM called dynamic `extintention_create` (bypassing the
-    // overlay) and never touched `extintention_propose_create`. Filtering
-    // down to the ~2 classes × ~3 read verbs the pass actually needs
-    // forces the LLM through the propose-write wrappers below.
-    let offered_classes: Vec<_> = all_shacl_classes
+    // Narrow the AD4M tool surface to the walk tools (#1804): the generic
+    // `instance_query`, `get_children` and `instance_get`, with `class_name`
+    // an enum of the offered classes, and no per-class reads. A small local
+    // model faced with 60+ generic tools (`add_perspective`, neighbourhood
+    // helpers, dynamic write verbs) hallucinates simpler tool names and skips
+    // the propose-write path (CI job 22252 on `5c34ed868`), so the list stays
+    // narrow: three reads, plus the proposal writers below.
+    let offered_classes: Vec<String> = all_shacl_classes
         .iter()
         .filter(|c| requested_class_names.contains_key(&c.name))
-        .cloned()
+        .map(|c| c.name.clone())
         .collect();
-    let ad4m_filtered: Arc<dyn ToolProvider> = Arc::new(FilteredProvider::new(
-        ad4m_bound,
-        offered_class_tools(&offered_classes),
-    ));
+    let ad4m_filtered: Arc<dyn ToolProvider> =
+        Arc::new(WalkToolsProvider::new(ad4m_bound, offered_classes));
 
     // Wrap in ProposeWritesProvider so the LLM also sees the two synthetic
     // per-class writers whose side-effect is "queue an InterpretationOp",
@@ -1350,16 +1344,6 @@ pub async fn run_interpretation_with_harness_and_model(
     })
 }
 
-/// Which AD4M tools a pass sees: the read tools generated for `offered` classes, by exact
-/// name. Not a name prefix: offered classes come from graph state neighbourhood peers write,
-/// and a class named `List` would otherwise admit the static `list_perspectives`.
-fn offered_class_tools(
-    offered: &[crate::mcp::shacl::ShaclClass],
-) -> impl Fn(&ToolSchema) -> bool + Send + Sync + 'static {
-    let names = crate::mcp::tools::Ad4mMcpHandler::class_tool_names(offered);
-    move |t: &ToolSchema| is_read_only(t) && names.contains(&t.name)
-}
-
 /// The MCP context of an interpretation pass on `perspective`. The pass runs in-process but
 /// has no request headers, so its reach is `Network`: a tokenless fallback inside it is
 /// anonymous. Its dynamic tool list names the classes of `perspective` only.
@@ -1388,9 +1372,9 @@ pub(crate) async fn pass_mcp_context(
         // fallback inside a pass is anonymous, never the operator.
         crate::agent::capabilities::ListenerReach::Network,
         // The harness bridge's `list_tool_schemas` includes the dynamic
-        // per-class tools only under this flag, and a pass takes the full
-        // generated surface before `offered_class_tools` narrows it.
-        // Set explicitly so the intent is visible at the construction site.
+        // per-class tools only under this flag. A pass narrows the surface to
+        // the walk tools (`WalkToolsProvider`); the flag stays on so the MCP
+        // context of a pass is the one its tests pin.
         true,
     )
     .scoped_to(&perspective.uuid)
@@ -1408,7 +1392,7 @@ pub(crate) async fn pass_mcp_context(
 ///   perspectives only, so the pass reaches no user's perspective.
 ///
 /// Either way the session may only query this perspective, so even a tool outside the pass's
-/// offered ones ([`offered_class_tools`]) would reach nothing else of the agent's. The pass
+/// offered ones ([`WalkToolsProvider`]) would reach nothing else of the agent's. The pass
 /// writes through its proposal buffer.
 ///
 /// [`Session::in_process`]: crate::agent::session::Session::in_process
@@ -1714,58 +1698,6 @@ mod pass_session_tests {
             assert!(!answer.contains(B_SECRET), "{tool} read B: {answer}");
             assert!(!answer.contains(&b.uuid), "{tool} named B: {answer}");
         }
-    }
-
-    /// A class with no properties, named `name`.
-    fn bare_class(name: &str) -> crate::mcp::shacl::ShaclClass {
-        crate::mcp::shacl::ShaclClass {
-            name: name.to_string(),
-            name_lower: name.to_lowercase(),
-            properties: vec![],
-            shape_uri: None,
-            all_predicates: vec![],
-        }
-    }
-
-    /// A read tool named `name`, as the filter sees it.
-    fn read_tool(name: &str) -> crate::ai_service::harness::provider::ToolSchema {
-        crate::ai_service::harness::provider::ToolSchema {
-            name: name.to_string(),
-            description: String::new(),
-            parameters: json!({}),
-            side_effect: crate::ai_service::harness::provider::SideEffect::Read,
-        }
-    }
-
-    // Offered classes come from SHACL in the perspective, shared graph state that
-    // neighbourhood peers write: a class named after a static tool's first word (`List`,
-    // `Query`, `Get`, `Instance`, ...) must not admit that static tool.
-    #[test]
-    fn an_offered_class_admits_its_own_tools_and_no_static_tool() {
-        let statics = Ad4mMcpHandler::static_tool_names();
-        assert!(statics.iter().any(|n| n == "list_perspectives"));
-        let mut words: Vec<&str> = statics.iter().filter_map(|n| n.split('_').next()).collect();
-        words.extend(["List", "Query", "Get"]);
-        for word in words {
-            let mut chars = word.chars();
-            let class_name: String = chars
-                .next()
-                .map(|c| c.to_uppercase().chain(chars).collect())
-                .unwrap_or_default();
-            let admits = offered_class_tools(&[bare_class(&class_name)]);
-            for name in &statics {
-                assert!(
-                    !admits(&read_tool(name)),
-                    "a class named `{class_name}` admits the static tool `{name}`"
-                );
-            }
-        }
-
-        let admits = offered_class_tools(&[bare_class("List")]);
-        for own in ["list_query", "list_list", "list_get"] {
-            assert!(admits(&read_tool(own)), "`{own}` is the class's own tool");
-        }
-        assert!(!admits(&read_tool("note_query")), "another class's tool");
     }
 
     // The pass reaches its own perspective, not the rest of its user's, even through a static
