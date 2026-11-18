@@ -1609,6 +1609,128 @@ async fn a_where_on_the_text_keeps_an_unresolvable_row_for_retry() {
     assert_eq!(pending_texts(&watcher, "wu"), vec!["resolved words"]);
 }
 
+/// The mirror of the retry test: the widened disjunct admits the raw
+/// expression IRI at the store *forever* — it never stops matching once the
+/// language serves the value, so a resolved body that does not satisfy the
+/// `where` must be rejected by the post-hydration check, which runs only
+/// because the clause reports itself incomplete (#1795 P1).
+#[tokio::test]
+async fn a_where_on_the_text_drops_the_row_whose_resolved_value_fails() {
+    use super::watcher::TickOutcome;
+    use crate::agent::signatures::TestSigner;
+    use crate::perspectives::interpretation_test_support::{
+        serve_test_language, stop_test_language,
+    };
+    use crate::types::{Link, LinkStatus};
+
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
+    let cfg = AutoProcessorConfig {
+        source_query: Some(r#"{"where":{"body":{"contains":"resolved"}}}"#.into()),
+        ..config("wr", 600_000, None)
+    };
+    write_processor(&mut p, &cfg, Some(false), &ctx)
+        .await
+        .expect("write_processor");
+
+    // The language is already up and the expression decodes to a body the
+    // `where` excludes. The stored target is still the raw expression URL,
+    // which the pushed `contains` cannot reject — only the post-hydration
+    // filter can.
+    let expression = serde_json::to_string(&TestSigner::generate().sign("other words"))
+        .expect("expression json");
+    serve_test_language("QmResolvedWhereLang", expression).await;
+    for (predicate, target) in [
+        ("ns://type", "ns://message"),
+        ("ns://body", "QmResolvedWhereLang://expr1"),
+    ] {
+        p.add_link(
+            Link {
+                source: "msg://wr".into(),
+                predicate: Some(predicate.into()),
+                target: target.into(),
+            },
+            LinkStatus::Shared,
+            None,
+            &ctx,
+        )
+        .await
+        .expect("seed message link");
+    }
+
+    let mut watcher = WatcherState::new();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let outcome = p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
+    stop_test_language("QmResolvedWhereLang").await;
+    assert_eq!(
+        outcome,
+        TickOutcome::Idle,
+        "a resolved body that fails the `where` is not a turn"
+    );
+    assert!(
+        pending_texts(&watcher, "wr").is_empty(),
+        "the resolved `other words` must not queue under `contains: resolved`"
+    );
+}
+
+/// The `NOT` case: the pushed `FILTER NOT EXISTS` emits no widening, so a raw
+/// expression IRI correctly fails the inner pattern — and keeps doing so
+/// after the value resolves, which the store cannot see. A resolved body
+/// matching the negated condition must be rejected post-hydration, not kept
+/// as a turn.
+#[tokio::test]
+async fn a_not_where_on_the_text_drops_the_row_whose_resolved_value_matches() {
+    use super::watcher::TickOutcome;
+    use crate::agent::signatures::TestSigner;
+    use crate::perspectives::interpretation_test_support::{
+        serve_test_language, stop_test_language,
+    };
+    use crate::types::{Link, LinkStatus};
+
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
+    let cfg = AutoProcessorConfig {
+        source_query: Some(r#"{"where":{"NOT":{"body":{"contains":"resolved"}}}}"#.into()),
+        ..config("wn", 600_000, None)
+    };
+    write_processor(&mut p, &cfg, Some(false), &ctx)
+        .await
+        .expect("write_processor");
+
+    let expression = serde_json::to_string(&TestSigner::generate().sign("resolved words"))
+        .expect("expression json");
+    serve_test_language("QmResolvedNotLang", expression).await;
+    for (predicate, target) in [
+        ("ns://type", "ns://message"),
+        ("ns://body", "QmResolvedNotLang://expr1"),
+    ] {
+        p.add_link(
+            Link {
+                source: "msg://wn".into(),
+                predicate: Some(predicate.into()),
+                target: target.into(),
+            },
+            LinkStatus::Shared,
+            None,
+            &ctx,
+        )
+        .await
+        .expect("seed message link");
+    }
+
+    let mut watcher = WatcherState::new();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let outcome = p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
+    stop_test_language("QmResolvedNotLang").await;
+    assert_eq!(
+        outcome,
+        TickOutcome::Idle,
+        "a body matching the negated `contains` is not a turn"
+    );
+    assert!(
+        pending_texts(&watcher, "wn").is_empty(),
+        "`resolved words` must not queue under `NOT contains: resolved`"
+    );
+}
+
 /// A `path` scope — `{"parent":{"ids":C,"path":["ns://child","we://thread"]}}`
 /// — reads a conversation's children and, one hop further, their replies:
 /// both become pending turns while a message under another conversation

@@ -97,7 +97,7 @@ pub fn is_safe_iri_target(s: &str) -> bool {
 /// would break or inject into a SPARQL IRI token, including all control and
 /// whitespace characters (e.g. `\n`, `\r`, `\t`, U+00A0) which `validate_iri`
 /// previously let through and which would emit malformed `<…>` IRIREFs.
-pub(super) fn validate_iri(s: &str) -> Result<&str, Error> {
+pub(crate) fn validate_iri(s: &str) -> Result<&str, Error> {
     if s.chars().any(|c| c.is_control() || c.is_whitespace())
         || s.contains('>')
         || s.contains('<')

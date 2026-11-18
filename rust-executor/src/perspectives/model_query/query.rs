@@ -18,8 +18,9 @@ use super::links::{attach_links, hydration_carries_links, resolve_link_keys};
 use super::projection::resolve_projections;
 use super::relations::{resolve_includes_recursive, resolve_reverse_relations};
 use super::sparql_builder::{
-    all_where_pushable, build_count_sparql, build_instance_sparql, link_status_filter,
-    local_status_filter, per_anchor_limit, proof_valid_filter, LinkGuard, ANCHOR_VAR,
+    all_where_pushable, build_count_sparql, build_instance_sparql, compile_where_clause,
+    link_status_filter, local_status_filter, per_anchor_limit, proof_valid_filter, LinkGuard,
+    ANCHOR_VAR,
 };
 use super::types::{
     InstanceQueryPlan, ModelQueryInput, ModelQueryResult, ModelShape, OrderDirection, Scope,
@@ -574,6 +575,15 @@ pub(super) async fn execute_model_query_inner(
                  nothing, and the empty answer looks like an empty graph.",
             ));
         }
+        // Every hop is interpolated into the level walk's guarded SPARQL
+        // (`contains_patterns`), so each must be a valid IRI before the
+        // walk runs — refused, not answered with no rows, which a caller
+        // cannot tell from an empty graph.
+        if let Some(bad) = path.iter().find(|hop| validate_iri(hop).is_err()) {
+            return Err(Error::msg(format!(
+                "Traverse scope: `path` element `{bad}` is not a valid IRI."
+            )));
+        }
         if predicate.is_some() || levels.is_some() {
             return Err(Error::msg(
                 "Traverse scope: `path` names a predicate per hop, so it is mutually exclusive \
@@ -1029,8 +1039,20 @@ pub(super) async fn execute_model_query_inner(
 
     // Apply post-hydration where-clause filters
     if let Some(ref where_clause) = query_input.where_clause {
-        if !all_where_pushable(query_input, shape, Some(resolver)) {
-            instances.retain(|inst| matches_where(inst, where_clause, shape));
+        let compiled = compile_where_clause(
+            where_clause,
+            shape,
+            Some(resolver),
+            LinkGuard::of(query_input),
+        );
+        if !compiled.complete {
+            // `all_emitted` tells the filter which reading to apply: every
+            // leaf reached the store (the re-run exists for a widened
+            // `resolveLanguage` candidate), so store-only constructs — a
+            // relation quantifier's EXISTS, a per-link `author` — were applied
+            // and are trusted; a declined leaf gives no such guarantee, and
+            // they fail closed as they always have.
+            instances.retain(|inst| matches_where(inst, where_clause, shape, compiled.all_emitted));
         }
     }
 

@@ -406,6 +406,158 @@ async fn test_where_clause_literal_prop_with_raw_uri_value() {
 }
 
 // -----------------------------------------------------------------------
+// A `where` comparison over a `resolveLanguage` property keeps a raw
+// expression IRI as a candidate (the widened disjunct) — which the store
+// can never see resolve. So the clause reports itself incomplete and the
+// post-hydration check decides the row: the exact-count fast path and the
+// pushed window must both stay off, or the answer covers candidates the
+// filter would have dropped (#1795 P1).
+// -----------------------------------------------------------------------
+
+const EXPR_WHERE_SHAPE_JSON: &str = r#"{
+    "className": "Msg",
+    "properties": {
+        "type": {
+            "predicate": "ns://type",
+            "required": true,
+            "flag": true,
+            "initial": "ns://msg"
+        },
+        "body": {
+            "predicate": "ns://body",
+            "required": false,
+            "resolveLanguage": "literal"
+        }
+    },
+    "relations": {}
+}"#;
+
+/// Two conforming rows: `msg://keep` whose body is a decodable literal that
+/// contains `needle`, and `msg://drop` whose body is a raw expression URL —
+/// a candidate to the pushed `contains` — which the test language resolves
+/// to a body the condition excludes. `msg://drop` has the earlier type
+/// timestamp so a pushed `LIMIT 1` would pick it.
+async fn seed_expr_where_store() -> SparqlStore {
+    use crate::agent::signatures::TestSigner;
+    use crate::perspectives::interpretation_test_support::serve_test_language;
+
+    let store = SparqlStore::new(None).unwrap();
+    for (source, predicate, target, ts) in [
+        ("msg://drop", "ns://type", "ns://msg", "1700000000000"),
+        (
+            "msg://drop",
+            "ns://body",
+            "QmWherePagedLang://expr",
+            "1700000000001",
+        ),
+        ("msg://keep", "ns://type", "ns://msg", "1700000000002"),
+        (
+            "msg://keep",
+            "ns://body",
+            "literal:string:needle",
+            "1700000000003",
+        ),
+    ] {
+        store
+            .add_link(&make_link(source, predicate, target, ts))
+            .unwrap();
+    }
+    let expression = serde_json::to_string(&TestSigner::generate().sign("other words"))
+        .expect("expression json");
+    serve_test_language("QmWherePagedLang", expression).await;
+    store
+}
+
+fn contains_where(prop: &str, needle: &str) -> BTreeMap<String, WhereCondition> {
+    let mut clause = BTreeMap::new();
+    clause.insert(
+        prop.to_string(),
+        serde_json::from_value::<WhereCondition>(json!({ "contains": needle })).unwrap(),
+    );
+    clause
+}
+
+#[tokio::test]
+async fn test_where_on_resolved_language_values_filters_the_count() {
+    use crate::perspectives::interpretation_test_support::stop_test_language;
+
+    let store = seed_expr_where_store().await;
+    let query = ModelQueryInput {
+        where_clause: Some(contains_where("body", "needle")),
+        limit: Some(0),
+        ..Default::default()
+    };
+    let result = fixture_query_from_json(&store, "Msg", &query, EXPR_WHERE_SHAPE_JSON)
+        .await
+        .unwrap();
+    stop_test_language("QmWherePagedLang").await;
+
+    assert!(
+        result.instances.is_empty(),
+        "a count-only query returns no rows"
+    );
+    assert_eq!(
+        result.total_count, 1,
+        "the count must not include a candidate whose resolved value fails the `where`"
+    );
+}
+
+#[tokio::test]
+async fn test_where_on_resolved_language_values_filters_the_pushed_window() {
+    use crate::perspectives::interpretation_test_support::stop_test_language;
+
+    let store = seed_expr_where_store().await;
+    let query = ModelQueryInput {
+        where_clause: Some(contains_where("body", "needle")),
+        limit: Some(1),
+        ..Default::default()
+    };
+    let result = fixture_query_from_json(&store, "Msg", &query, EXPR_WHERE_SHAPE_JSON)
+        .await
+        .unwrap();
+    stop_test_language("QmWherePagedLang").await;
+
+    assert_eq!(
+        result.instances.len(),
+        1,
+        "the window must not keep a candidate whose resolved value fails the `where`"
+    );
+    assert_eq!(result.instances[0]["id"], json!("msg://keep"));
+    assert_eq!(result.total_count, 1);
+}
+
+/// A `path` element is interpolated into the level walk's guarded SPARQL,
+/// so a malformed one — here a `>` that would break out of the IRI — is
+/// refused rather than executed or silently answered with no rows (#1795 A).
+#[tokio::test]
+async fn test_traverse_path_rejects_a_non_iri_element() {
+    let store = SparqlStore::new(None).unwrap();
+    let query = ModelQueryInput {
+        parent: Some(Scope::Traverse {
+            ids: vec!["we://conv".to_string()],
+            predicate: None,
+            transitive: false,
+            direction: ScopeDirection::Out,
+            limit_per_anchor: None,
+            levels: None,
+            max_depth: None,
+            path: Some(vec![
+                "ns://child".to_string(),
+                "ns://bad>inject".to_string(),
+            ]),
+        }),
+        ..Default::default()
+    };
+    let err = fixture_query_from_json(&store, "Msg", &query, EXPR_WHERE_SHAPE_JSON)
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("not a valid IRI"),
+        "unexpected error: {err}"
+    );
+}
+
+// -----------------------------------------------------------------------
 // Integration test: shared predicate across multiple @HasMany relations
 //
 // This simulates the real Channel model from Flux where 8+ relations

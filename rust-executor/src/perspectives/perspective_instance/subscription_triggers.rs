@@ -62,6 +62,7 @@ use serde_json::Value;
 
 use crate::perspectives::model_query::containment::{watched_predicates, ContainmentEdge};
 use crate::perspectives::model_query::types::{ScopeDirection, ShapeProperty};
+use crate::perspectives::model_query::utils::validate_iri;
 use crate::perspectives::model_query::{
     conformance_predicates, IncludeValue, ModelQueryInput, ModelShape, Scope, ShapeResolver,
     WhereCondition,
@@ -452,15 +453,19 @@ impl super::PerspectiveInstance {
         trigger_predicates.sort();
         trigger_predicates.dedup();
 
-        let trigger_sparql = if trigger_predicates.is_empty() {
+        // A predicate is interpolated as `<{p}>`: one that is not a valid IRI
+        // can never match a stored link — and must not be spliced into the
+        // SPARQL text either.
+        let patterns: Vec<String> = trigger_predicates
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| validate_iri(p).is_ok())
+            .map(|(i, p)| format!("{{ ?s <{}> ?o{} . }}", p, i))
+            .collect();
+        let trigger_sparql = if patterns.is_empty() {
             // Fallback: match any triple (always re-check)
             "SELECT ?s ?p ?o WHERE { ?s ?p ?o . } LIMIT 1".to_string()
         } else {
-            let patterns: Vec<String> = trigger_predicates
-                .iter()
-                .enumerate()
-                .map(|(i, p)| format!("{{ ?s <{}> ?o{} . }}", p, i))
-                .collect();
             format!(
                 "SELECT ?s ?p ?o WHERE {{ {} }} LIMIT 1",
                 patterns.join(" UNION ")
