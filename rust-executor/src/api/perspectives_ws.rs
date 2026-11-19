@@ -1327,9 +1327,19 @@ async fn run_interpretation_handler(
     // `model_query_handler` / `evaluate_getters_handler`, but with a longer
     // budget appropriate for the interpretation pass (see
     // `RUN_INTERPRETATION_TIMEOUT_SECS`).
+    // Same per-slice link as the watcher. A later half that fails has
+    // already committed earlier halves, and this handler only links after
+    // `Ok`. The trailing link below stays, and skips an edge already written.
+    let slice_link = body.mint_scope.as_ref().map(|mint_scope| {
+        crate::perspectives::interpretation::SliceScopeLink {
+            mint_scope,
+            pre_existing: &pre_existing_uris,
+            processor_id: "runInterpretation",
+        }
+    });
     let bases = match tokio::time::timeout(
         Duration::from_secs(RUN_INTERPRETATION_TIMEOUT_SECS),
-        crate::perspectives::interpretation::run_interpretation_observed(
+        crate::perspectives::interpretation::run_interpretation_observed_linked(
             &mut perspective,
             &shapes,
             &transcript,
@@ -1342,6 +1352,7 @@ async fn run_interpretation_handler(
             // pre-scope default that #883 originally added the plumbing for.
             body.existing_scope.as_ref(),
             emit_ctx.as_ref(),
+            slice_link.as_ref(),
         ),
     )
     .await
@@ -1385,9 +1396,10 @@ async fn run_interpretation_handler(
     // Mint-scope child links: same rule as AutoProcessor — only freshly
     // created bases get an extra `mintScope.id --predicate--> new_base` edge
     // so upserts of pre-existing instances don't get re-parented into the
-    // caller's scope. Written outside the interpretation batch (the watcher
-    // takes the same approach): if this write fails the base is orphaned,
-    // but a subsequent call will upsert by identity and re-attempt.
+    // caller's scope. Written after the slice commits (the watcher takes
+    // the same approach). A failed link write leaves that base unlinked:
+    // the source is consumed and the next pass's snapshot treats the base
+    // as pre-existing, so nothing retries the link.
     if let Some(mint_scope) = body.mint_scope.as_ref() {
         let created = crate::perspectives::auto_processor::watcher::partition_created(
             &bases,
