@@ -60,6 +60,7 @@ we-ad4m = { git = "https://github.com/coasys/we.git", rev = "aebab9a2e0532000bac
 
 [dev-dependencies]
 tempfile = "3"
+tokio-tungstenite = "0.21"
 we-ad4m = { git = "https://github.com/coasys/we.git", rev = "aebab9a2e0532000bac8458585a55fa080c0333f", features = ["testkit"] }
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]

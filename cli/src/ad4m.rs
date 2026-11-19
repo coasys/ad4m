@@ -24,6 +24,7 @@ mod perspectives;
 mod repl;
 mod runtime;
 mod tui;
+mod tui_space;
 
 use crate::{
     agent::*, expression::*, languages::*, neighbourhoods::*, perspectives::*, runtime::*,
@@ -431,6 +432,66 @@ mod client_transport_tests {
             "credential leaked into the error: {msg}"
         );
         assert_shared_check(true);
+    }
+
+    fn tui_app(url: &str, admin: Option<&str>, allow: bool) -> ClapApp {
+        ClapApp {
+            domain: Domain::Tui,
+            ..runtime_app(url, admin, allow)
+        }
+    }
+
+    /// The Coasys screen in `ad4m tui` runs on the socket `get_ad4m_client`
+    /// opened, after the shared transport check. It never dials again.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn coasys_reuses_guarded_socket() {
+        let (_lock, _dir, _guard) = hold_token_dir().await;
+        let fake = crate::tui_space::fake_ws::FakeWs::start().await;
+        let app = tui_app(&fake.url, None, false);
+        let (client, url) = get_ad4m_client(&app, &app.domain).await.unwrap();
+        assert_shared_check(false);
+        assert_eq!(url, fake.url);
+
+        let conn = crate::tui_space::connection(&client);
+        assert!(Arc::ptr_eq(conn.ws(), client.ws()));
+        let row = we_ad4m::SpaceRow {
+            uuid: "space-1".to_string(),
+            name: "Town".to_string(),
+            shared_url: None,
+        };
+        let mut screen = crate::tui_space::open(&conn, row).unwrap();
+        let area = ratatui::layout::Rect::new(0, 0, 100, 30);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while fake.methods().is_empty() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the app sent nothing on the shared socket"
+            );
+            screen.tick();
+            screen.draw(&mut ratatui::buffer::Buffer::empty(area), area);
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(fake.accepted(), 1, "the app dialed a second socket");
+        drop(screen);
+        assert!(client.ws().is_connected(), "closing the app closed the socket");
+
+        // `tui` keeps the shared transport rules, before any socket.
+        transport_probe::reset();
+        let remote = tui_app("http://203.0.113.55:9", Some(SECRET), false);
+        let msg = connect_error(&remote).await;
+        assert!(msg.contains("plaintext"), "{msg}");
+        assert!(!msg.contains(SECRET), "{msg}");
+        assert_shared_check(false);
+        transport_probe::reset();
+        let opted_in = tui_app("http://0.0.0.0:1", Some(SECRET), true);
+        let msg = connect_error(&opted_in).await;
+        assert!(!msg.contains("plaintext"), "{msg}");
+        assert_shared_check(true);
+        transport_probe::reset();
+        let tls = tui_app("https://example.invalid:443", Some(SECRET), false);
+        let msg = connect_error(&tls).await;
+        assert!(!msg.contains("plaintext"), "{msg}");
+        assert_shared_check(false);
     }
 
     #[test]

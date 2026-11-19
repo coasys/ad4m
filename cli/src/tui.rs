@@ -5,6 +5,11 @@
 //! `3` open those screens. Tab moves to the next screen. The open screen
 //! loads again every two seconds. A slow load does not block `q` or Ctrl-C.
 //! The links screen shows at most 200 links.
+//!
+//! On the perspectives screen, `o` opens the selected perspective in the
+//! Coasys app, read-only ([`crate::tui_space`]). While it is open the admin
+//! screens do not load, and every key except F10 and Ctrl-C goes to the app.
+//! F10, or the app's own quit, comes back to the perspectives list.
 
 use std::future::Future;
 use std::io::{self, Stdout};
@@ -15,6 +20,9 @@ use ad4m_client::connect::normalize_base_url;
 use ad4m_client::types::{AgentStatus, LinkExpression, PerspectiveHandle, RuntimeInfo};
 use ad4m_client::Ad4mClient;
 use anyhow::{Context, Result};
+use we_ad4m::{Connection, SpaceRow};
+
+use crate::tui_space::{self, CoasysScreen, SpaceKey};
 use crossterm::{
     cursor::{Hide, Show},
     event::{
@@ -74,6 +82,10 @@ struct Model {
     links: Vec<LinkExpression>,
     link_selected: usize,
     open_uuid: Option<String>,
+    /// The perspective `o` asked to open in the Coasys app.
+    open_request: Option<SpaceRow>,
+    /// The open Coasys app. While it is set the admin screens do not load.
+    space: Option<CoasysScreen>,
     error: Option<String>,
     loaded_at: Option<Instant>,
     /// Bumped when the user asks for a new load. An in-flight result from an
@@ -94,6 +106,8 @@ impl Model {
             links: Vec::new(),
             link_selected: 0,
             open_uuid: None,
+            open_request: None,
+            space: None,
             error: None,
             loaded_at: None,
             refresh_gen: 0,
@@ -752,6 +766,22 @@ fn open_selected(model: &mut Model) {
     invalidate(model);
 }
 
+/// Open the perspective `o` asked for, over the TUI's own socket.
+fn open_coasys(model: &mut Model, conn: &Connection) {
+    open_coasys_with(model, |row| tui_space::open(conn, row));
+}
+
+fn open_coasys_with(
+    _model: &mut Model,
+    _open: impl FnOnce(SpaceRow) -> Result<CoasysScreen, String>,
+) {
+}
+
+/// A key while the Coasys app is open. `true`: leave the TUI.
+fn space_key(_model: &mut Model, _key: KeyEvent) -> bool {
+    false
+}
+
 fn draw(frame: &mut Frame, model: &Model) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -1124,6 +1154,199 @@ mod tests {
             assert!(inflight.is_some());
             assert!(!tx.is_closed());
         }
+    }
+
+    fn press(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn ctrl_c() -> KeyEvent {
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+    }
+
+    fn perspectives_model() -> Model {
+        let mut model = Model::new("http://127.0.0.1:1".to_string());
+        model.screen = Screen::Perspectives;
+        model.perspectives = vec![
+            perspective(Some("Local"), "local-1", false),
+            perspective(Some("Town"), "nh-1", true),
+            perspective(Some("Garden"), "nh-2", true),
+        ];
+        model
+    }
+
+    async fn fake_client() -> (tui_space::fake_ws::FakeWs, Ad4mClient) {
+        let fake = tui_space::fake_ws::FakeWs::start().await;
+        let client = Ad4mClient::connect(fake.url.clone(), String::new())
+            .await
+            .unwrap();
+        (fake, client)
+    }
+
+    /// Paint one frame of the open app; `None` when no app is open.
+    fn draw_app(model: &mut Model) -> Option<String> {
+        let area = ratatui::layout::Rect::new(0, 0, 120, 40);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        let space = model.space.as_mut()?;
+        space.tick();
+        space.draw(&mut buf, area);
+        Some(we_tui::buffer_text(&buf, area))
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn open_coasys_uses_filtered_selection() {
+        let (_fake, client) = fake_client().await;
+        let conn = tui_space::connection(&client);
+
+        // Under the neighbourhood filter, the second visible row is nh-2.
+        let mut model = perspectives_model();
+        handle_key(&mut model, &press(KeyCode::Char('n')));
+        handle_key(&mut model, &press(KeyCode::Char('j')));
+        handle_key(&mut model, &press(KeyCode::Char('o')));
+        open_coasys(&mut model, &conn);
+        let space = model.space.as_ref().expect("o opened the app");
+        assert_eq!(space.space.uuid, "nh-2");
+        assert_eq!(space.space.name, "Garden");
+        assert_eq!(space.route(), "/space/nh-2");
+        assert!(space.header().contains("nh-2"), "{}", space.header());
+        assert!(space.header().contains("read-only"), "{}", space.header());
+        let text = draw_app(&mut model).unwrap();
+        assert!(text.contains("Coasys (read-only)  Garden  nh-2"), "{text}");
+        assert!(text.contains("/space/nh-2"), "{text}");
+
+        // No visible row: `o` does nothing.
+        let mut empty = Model::new("http://127.0.0.1:1".to_string());
+        empty.screen = Screen::Perspectives;
+        handle_key(&mut empty, &press(KeyCode::Char('o')));
+        open_coasys(&mut empty, &conn);
+        assert!(empty.space.is_none());
+        assert!(empty.error.is_none());
+        assert!(empty.screen == Screen::Perspectives);
+        let mut hidden = Model::new("http://127.0.0.1:1".to_string());
+        hidden.screen = Screen::Perspectives;
+        hidden.perspectives = vec![perspective(Some("Local"), "local-1", false)];
+        handle_key(&mut hidden, &press(KeyCode::Char('n')));
+        handle_key(&mut hidden, &press(KeyCode::Char('o')));
+        open_coasys(&mut hidden, &conn);
+        assert!(hidden.space.is_none(), "o opened a row the filter hides");
+
+        // `o` is a perspectives-screen key only.
+        let mut status = perspectives_model();
+        status.screen = Screen::Status;
+        handle_key(&mut status, &press(KeyCode::Char('o')));
+        open_coasys(&mut status, &conn);
+        assert!(status.space.is_none());
+
+        // Enter still opens the links of the selected row.
+        let mut links = perspectives_model();
+        handle_key(&mut links, &press(KeyCode::Char('j')));
+        handle_key(&mut links, &press(KeyCode::Enter));
+        assert!(links.screen == Screen::Links);
+        assert_eq!(links.open_uuid.as_deref(), Some("nh-1"));
+        assert!(links.space.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn coasys_back_preserves_admin_state() {
+        let (_fake, client) = fake_client().await;
+        let conn = tui_space::connection(&client);
+        let base = std::sync::Arc::strong_count(client.ws()) - 1; // minus `conn`
+
+        let mut model = perspectives_model();
+        handle_key(&mut model, &press(KeyCode::Char('j')));
+        model.loaded_at = Some(Instant::now());
+        let gen = model.refresh_gen;
+        handle_key(&mut model, &press(KeyCode::Char('o')));
+        open_coasys(&mut model, &conn);
+        assert!(model.space.is_some());
+        draw_app(&mut model).unwrap();
+        assert!(
+            std::sync::Arc::strong_count(client.ws()) > base + 1,
+            "the app holds no clone of the shared socket"
+        );
+        // The admin refresh is suspended while the app is open, and an
+        // outcome that was in flight is dropped.
+        model.loaded_at = None;
+        assert!(!should_start_refresh(&model, false));
+        assert_ne!(model.refresh_gen, gen);
+
+        // Admin keys go to the app: `1` and Tab do not change screens.
+        for key in [press(KeyCode::Char('1')), press(KeyCode::Tab)] {
+            assert!(!space_key(&mut model, key));
+            assert!(model.space.is_some());
+        }
+        assert!(model.screen == Screen::Perspectives);
+
+        // F10: back to the list, selection kept, refresh resumed.
+        assert!(!space_key(&mut model, press(KeyCode::F(10))));
+        assert!(model.space.is_none());
+        assert!(model.screen == Screen::Perspectives);
+        assert_eq!(model.selected, 1);
+        assert!(should_start_refresh(&model, false));
+
+        // The app's reads let go of the socket; the socket stays open.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while std::sync::Arc::strong_count(client.ws()) > base + 1 {
+            assert!(
+                Instant::now() < deadline,
+                "the closed app still holds {} clones of the socket",
+                std::sync::Arc::strong_count(client.ws()) - base - 1
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(client.ws().is_connected());
+
+        // Open again: the same row. The app's own quit (`q`) is back too.
+        handle_key(&mut model, &press(KeyCode::Char('o')));
+        open_coasys(&mut model, &conn);
+        assert_eq!(model.space.as_ref().unwrap().space.uuid, "nh-1");
+        draw_app(&mut model).unwrap();
+        assert!(!space_key(&mut model, press(KeyCode::Char('q'))));
+        assert!(model.space.is_none());
+        assert_eq!(model.selected, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn coasys_pending_load_still_exits() {
+        // The peer never answers: every read the app starts stays pending.
+        let (fake, client) = fake_client().await;
+        let conn = tui_space::connection(&client);
+        let mut model = perspectives_model();
+        handle_key(&mut model, &press(KeyCode::Char('o')));
+        open_coasys(&mut model, &conn);
+        assert!(model.space.is_some());
+        let started = Instant::now();
+        for _ in 0..5 {
+            draw_app(&mut model).unwrap();
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "drawing waited on the pending reads"
+        );
+        assert!(!fake.methods().is_empty(), "the app started no read");
+        assert!(!space_key(&mut model, press(KeyCode::F(10))));
+        assert!(model.space.is_none(), "F10 did not leave a pending app");
+
+        handle_key(&mut model, &press(KeyCode::Char('o')));
+        open_coasys(&mut model, &conn);
+        draw_app(&mut model).unwrap();
+        assert!(space_key(&mut model, ctrl_c()), "Ctrl-C did not leave the TUI");
+
+        // A failed open leaves the admin screens usable.
+        let mut failed = perspectives_model();
+        handle_key(&mut failed, &press(KeyCode::Char('o')));
+        open_coasys_with(&mut failed, |row| {
+            tui_space::open_bundle("{ not a bundle", &conn, row)
+        });
+        assert!(failed.space.is_none());
+        assert!(failed.screen == Screen::Perspectives);
+        let error = failed.error.clone().expect("the failure is shown");
+        assert!(error.contains("Coasys"), "{error}");
+        handle_key(&mut failed, &press(KeyCode::Char('j')));
+        assert_eq!(failed.selected, 1);
+        handle_key(&mut failed, &press(KeyCode::Char('1')));
+        assert!(failed.screen == Screen::Status);
+        assert_eq!(fake.accepted(), 1, "the app dialed a second socket");
     }
 
     struct FakeOps {
