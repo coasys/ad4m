@@ -1,8 +1,8 @@
 //! The validated writes against a real perspective.
 
 use super::write::{
-    add_to_collection, create, remove_from_collection, InstanceAddToCollection, InstanceCreate,
-    InstanceRemoveFromCollection,
+    add_to_collection, create, remove_from_collection, update, InstanceAddToCollection,
+    InstanceCreate, InstanceRemoveFromCollection, InstanceUpdate,
 };
 use crate::agent::AgentContext;
 use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
@@ -422,4 +422,144 @@ mod decoded_literal {
         assert_eq!(decoded_literal("literal:boolean:true"), "true");
         assert_eq!(decoded_literal("ns://item"), "ns://item");
     }
+}
+
+/// An `update` patch names a collection's full member list: with no declared
+/// `ad4m://setter` the collection is replaced through its own predicate —
+/// members not in the list leave, `[]` clears.
+#[tokio::test(flavor = "multi_thread")]
+async fn update_replaces_a_collections_member_list() {
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("Counted", COUNTED_SDNA)]).await;
+    let base = create(
+        &mut p,
+        &ctx,
+        InstanceCreate {
+            class_name: "Counted".into(),
+            properties: Some(Map::from_iter([
+                ("title".to_string(), json!("t")),
+                ("counts".to_string(), json!([1, 2])),
+                ("flags".to_string(), json!([true])),
+            ])),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("create")
+    .base_uri;
+
+    assert_eq!(
+        stored_targets(&p, &base, "ns://count").await,
+        vec!["literal:number:1", "literal:number:2"]
+    );
+
+    update(
+        &mut p,
+        &ctx,
+        InstanceUpdate {
+            class_name: "Counted".into(),
+            base_uri: base.clone(),
+            properties: Map::from_iter([("counts".to_string(), json!([2, 3]))]),
+            batch_id: None,
+        },
+    )
+    .await
+    .expect("update");
+    assert_eq!(
+        stored_targets(&p, &base, "ns://count").await,
+        vec!["literal:number:2", "literal:number:3"],
+        "the member list is replaced, not appended"
+    );
+
+    update(
+        &mut p,
+        &ctx,
+        InstanceUpdate {
+            class_name: "Counted".into(),
+            base_uri: base.clone(),
+            properties: Map::from_iter([("counts".to_string(), json!([]))]),
+            batch_id: None,
+        },
+    )
+    .await
+    .expect("update");
+    assert!(
+        stored_targets(&p, &base, "ns://count").await.is_empty(),
+        "an empty list clears"
+    );
+    // The untouched collection stays.
+    assert_eq!(
+        stored_targets(&p, &base, "ns://flag").await,
+        vec!["literal:boolean:true"]
+    );
+}
+
+/// A scalar `hasOne` relation: `adder`/`remover`, no `ad4m://setter`.
+const PINNED_SDNA: &str = r#"{
+  "target_class": "ns://PinPost",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"rdf://type","target":"ns://PinPost"}
+  ],
+  "properties": [
+    {"path":"ns://pin_title","name":"title","datatype":"xsd:string","min_count":1,"max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://pin_title","target":"value"}]},
+    {"path":"ns://pinned","name":"pinned","relation_kind":"hasOne","target_class_name":"Comment",
+     "class":"ns://CommentShape","node_kind":"IRI","max_count":1,"writable":true,
+     "adder":[{"action":"addLink","source":"this","predicate":"ns://pinned","target":"value"}],
+     "remover":[{"action":"removeLink","source":"this","predicate":"ns://pinned","target":"value"}]}
+  ]
+}"#;
+
+/// A `hasOne` relation writes through its `adder`/`remover` pair: a scalar in
+/// the patch replaces the one member, so the old pin leaves when a new one
+/// is set.
+#[tokio::test(flavor = "multi_thread")]
+async fn update_replaces_a_scalar_relation_member() {
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("PinPost", PINNED_SDNA)]).await;
+    let base = create(
+        &mut p,
+        &ctx,
+        InstanceCreate {
+            class_name: "PinPost".into(),
+            properties: Some(Map::from_iter([("title".to_string(), json!("t"))])),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("create")
+    .base_uri;
+
+    update(
+        &mut p,
+        &ctx,
+        InstanceUpdate {
+            class_name: "PinPost".into(),
+            base_uri: base.clone(),
+            properties: Map::from_iter([("pinned".to_string(), json!("ns://c1"))]),
+            batch_id: None,
+        },
+    )
+    .await
+    .expect("update");
+    assert_eq!(
+        stored_targets(&p, &base, "ns://pinned").await,
+        vec!["ns://c1"]
+    );
+
+    update(
+        &mut p,
+        &ctx,
+        InstanceUpdate {
+            class_name: "PinPost".into(),
+            base_uri: base.clone(),
+            properties: Map::from_iter([("pinned".to_string(), json!("ns://c2"))]),
+            batch_id: None,
+        },
+    )
+    .await
+    .expect("update");
+    assert_eq!(
+        stored_targets(&p, &base, "ns://pinned").await,
+        vec!["ns://c2"],
+        "the scalar relation replaces its one member"
+    );
 }

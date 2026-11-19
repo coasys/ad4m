@@ -477,3 +477,142 @@ async fn abstract_update_groups_by_concrete_name() {
     assert_eq!(updates.len(), 1, "one grouped update: {calls:?}");
     assert_eq!(updates[0]["params"], json!({"title": "z"}));
 }
+
+// --- `perspective.instance*` on a mounted class -----------------------------
+//
+// The validated writes run the same lifecycle actions `*_subject` runs — on a
+// mounted class those are `call`s, so `instanceCreate`/`instanceUpdate`/
+// `instanceRemove` reach the language and the returned delta lands in the
+// perspective.
+
+mod instance_writes {
+    use super::*;
+    use crate::perspectives::instances::{
+        create as instance_create, remove as instance_remove, update as instance_update,
+        InstanceCreate, InstanceRemove, InstanceUpdate,
+    };
+    use crate::perspectives::perspective_instance::mounts_tests::{
+        create as create_in_language, mounted, things,
+    };
+    use serde_json::Map;
+
+    /// `instanceCreate` on a mounted class calls the language's constructor;
+    /// its minted address is the instance's id, every supplied value —
+    /// collections too — is a constructor parameter, and the record reads
+    /// back as an instance at once.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn create_calls_the_constructor_and_returns_its_address() {
+        let lang = load_mount_test_language().await;
+        let (mut p, ctx) = mounted(&lang).await;
+
+        let created = instance_create(
+            &mut p,
+            &ctx,
+            InstanceCreate {
+                class_name: "MountThing".into(),
+                properties: Some(Map::from_iter([
+                    ("title".to_string(), json!("a")),
+                    ("tags".to_string(), json!(["x", "y"])),
+                ])),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("instance create");
+
+        assert_eq!(created.base_uri, format!("{lang}://t1"));
+        assert_eq!(
+            calls(&lang).await,
+            vec![json!({"address": "class/MountThing", "name": "create",
+                        "params": {"title": "a", "tags": ["x", "y"]}})]
+        );
+        let found = things(&p).await;
+        assert_eq!(
+            found.len(),
+            1,
+            "the minted record is an instance: {found:?}"
+        );
+        assert_eq!(found[0]["title"], "a");
+        assert_eq!(found[0]["tags"], json!(["x", "y"]));
+    }
+
+    /// `instanceUpdate` sends the patch to the record's address as the
+    /// grouped setter call — scalars and the collection replace (`tags`) in
+    /// one `update` — and the delta it answers lands in the perspective. An
+    /// empty string clears through the setter like any value.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn update_calls_the_setters_and_applies_the_delta() {
+        let lang = load_mount_test_language().await;
+        create_in_language(&lang, json!({"title": "a", "tags": ["x", "y"]})).await;
+        let (mut p, ctx) = mounted(&lang).await;
+        let base = format!("{lang}://t1");
+
+        instance_update(
+            &mut p,
+            &ctx,
+            InstanceUpdate {
+                class_name: "MountThing".into(),
+                base_uri: base.clone(),
+                properties: Map::from_iter([
+                    ("done".to_string(), json!(true)),
+                    ("tags".to_string(), json!(["b"])),
+                    ("title".to_string(), json!("")),
+                ]),
+                batch_id: None,
+            },
+        )
+        .await
+        .expect("instance update");
+
+        let updates: Vec<Value> = calls(&lang)
+            .await
+            .into_iter()
+            .filter(|c| c["name"] == "update")
+            .collect();
+        assert_eq!(updates.len(), 1, "one grouped update call: {updates:?}");
+        assert_eq!(updates[0]["address"], "t1");
+        // `done` declares no datatype: it is a string-typed property, so
+        // validation coerces `true` to "true" before the call sees it.
+        assert_eq!(
+            updates[0]["params"],
+            json!({"done": "true", "tags": ["b"], "title": ""})
+        );
+
+        let found = things(&p).await;
+        assert_eq!(found[0]["title"], "");
+        assert_eq!(found[0]["done"], "true");
+        assert_eq!(found[0]["tags"], json!(["b"]));
+    }
+
+    /// `instanceRemove` runs the `call` destructor at the record's address
+    /// before the link cascade: the language sees `delete`, its record goes,
+    /// and the mirrored links leave the perspective.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn remove_calls_the_destructor() {
+        let lang = load_mount_test_language().await;
+        create_in_language(&lang, json!({"title": "a"})).await;
+        let (mut p, ctx) = mounted(&lang).await;
+        let base = format!("{lang}://t1");
+
+        instance_remove(
+            &mut p,
+            &ctx,
+            InstanceRemove {
+                class_name: "MountThing".into(),
+                base_uri: base,
+                batch_id: None,
+            },
+        )
+        .await
+        .expect("instance remove");
+
+        let deletes: Vec<Value> = calls(&lang)
+            .await
+            .into_iter()
+            .filter(|c| c["name"] == "delete")
+            .collect();
+        assert_eq!(deletes.len(), 1);
+        assert_eq!(deletes[0]["address"], "t1");
+        assert!(things(&p).await.is_empty(), "the record is gone");
+    }
+}
