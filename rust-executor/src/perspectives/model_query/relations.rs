@@ -170,12 +170,20 @@ pub(super) async fn resolve_includes_recursive(
             sub_query.include_unverified = include_unverified;
         }
 
-        // Checked here, where the include is recognised, rather than down in
-        // hydration: both resolvers return early when the relation holds no
-        // targets, so validating later would accept the query on an empty
-        // collection and reject the same query on a full one. Whether a request
-        // is answerable must not depend on the data it is asking about.
+        // A relation's declared `polymorphic` (carried in its shape as
+        // `ad4m://polymorphic`) is the default for its include, at every depth,
+        // as the SDK applies it at the top. An explicit value, `false` too, wins.
+        if sub_query.polymorphic.is_none() && rel.polymorphic {
+            sub_query.polymorphic = Some(true);
+        }
+
+        // Both checks are made here, where the include is recognised, rather
+        // than down in hydration: both resolvers return early when the relation
+        // holds no targets, so validating later would accept the query on an
+        // empty collection and reject the same query on a full one. Whether a
+        // request is answerable must not depend on the data it is asking about.
         reject_pagination_on_polymorphic(rel_name, &sub_query)?;
+        reject_untyped_without_polymorphic(rel, &sub_query)?;
 
         if rel.direction == "reverse" {
             resolve_reverse_include(stop, store, instances, rel, &sub_query, resolver, depth)
@@ -221,6 +229,27 @@ fn reject_pagination_on_polymorphic(
              polymorphic include, because the read runs one query per class present and a \
              limit would apply to each of them separately. Drop them and the relation's own \
              link order decides what survives, or read one class at a time."
+        ));
+    }
+    Ok(())
+}
+
+/// Refuse an include of an untyped relation that is not read polymorphically.
+///
+/// An untyped relation names no class, so there is no shape to hydrate its
+/// targets against. Unchecked, that surfaced as a shape lookup for the empty
+/// string, which failed the whole query with a message naming neither the
+/// relation nor the fix.
+fn reject_untyped_without_polymorphic(
+    rel: &ShapeRelation,
+    sub_query: &ModelQueryInput,
+) -> Result<(), Error> {
+    if rel.target_class_name.is_empty() && !sub_query.polymorphic.unwrap_or(false) {
+        return Err(anyhow!(
+            "include on relation '{}': the relation declares no target class, so its \
+             targets cannot be hydrated. Either give it a target, or read it with \
+             `polymorphic: true` to hydrate each target as the class it actually is.",
+            rel.name
         ));
     }
     Ok(())
@@ -319,6 +348,19 @@ pub(super) fn choose<'a>(matched: &'a [String], preferred: &[String]) -> Option<
         .or_else(|| matched.first())
 }
 
+/// Every class in `matched`, in the order [`choose`] picks from: the caller's
+/// preferred classes the target conforms to, then the rest by specificity.
+/// The head is what `choose` returns.
+fn candidates(matched: &[String], preferred: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for class in preferred.iter().chain(matched) {
+        if matched.contains(class) && !out.contains(class) {
+            out.push(class.clone());
+        }
+    }
+    out
+}
+
 async fn hydrate_polymorphic(
     stop: &EvalStop,
     store: &SparqlStore,
@@ -343,78 +385,103 @@ async fn hydrate_polymorphic(
     // first. Hydration needs exactly one shape per target, so one is chosen —
     // whichever the caller asked for, falling back to the most specific.
     // The rest are not lost: they ride back on the instance below.
+    //
+    // `subject_classes_of` reads every link, where the group query reads only
+    // the links `linkStatus` / `includeUnverified` admit. A target classified
+    // through a link the read does not admit (a Local type link under a Shared
+    // read) is not returned by its class's query; it is retried as its next
+    // candidate until a query returns it or none is left, so it is read as the
+    // class the admitted links support rather than dropped.
     let preferred = sub_query.prefer_classes.as_deref().unwrap_or(&[]);
-    let mut by_class: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut pending: Vec<(String, Vec<String>)> = Vec::new();
     for id in target_ids {
-        if let Some(class_name) = classes.get(id).and_then(|names| choose(names, preferred)) {
-            by_class
-                .entry(class_name.clone())
-                .or_default()
-                .push(id.clone());
-        } else {
-            // A target matching no registered class is skipped rather than
-            // hydrated as something it is not. It stays absent from the
-            // relation, which is the same outcome a non-conforming target has
-            // always had — but from the outside it looks like a child that
-            // simply is not there, and in a live neighbourhood it may only look
-            // that way until the type link arrives. Leave a trail.
-            log::debug!(
-                "polymorphic include on '{relation_name}': '{id}' matches no registered class, skipping"
-            );
+        match classes.get(id).map(|names| candidates(names, preferred)) {
+            Some(cands) if !cands.is_empty() => pending.push((id.clone(), cands)),
+            _ => {
+                // A target matching no registered class is skipped rather than
+                // hydrated as something it is not. It stays absent from the
+                // relation, which is the same outcome a non-conforming target has
+                // always had — but from the outside it looks like a child that
+                // simply is not there, and in a live neighbourhood it may only look
+                // that way until the type link arrives. Leave a trail.
+                log::debug!(
+                    "polymorphic include on '{relation_name}': '{id}' matches no registered class, skipping"
+                );
+            }
         }
     }
 
-    for (class_name, ids) in by_class {
-        let target_shape = match resolver.get_shape(&class_name) {
-            Ok(s) => s,
-            Err(e) => {
-                log::warn!("polymorphic include: no shape for '{class_name}': {e}");
-                continue;
-            }
-        };
+    while !pending.is_empty() {
+        let mut by_class: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for (id, cands) in &pending {
+            by_class
+                .entry(cands[0].clone())
+                .or_default()
+                .push(id.clone());
+        }
 
-        let mut group_query = sub_query.clone();
-        let mut wc = group_query.where_clause.take().unwrap_or_default();
-        wc.insert("id".to_string(), WhereCondition::StringArray(ids));
-        group_query.where_clause = Some(wc);
-        // Already rejected above, so there is nothing here to drop — cleared
-        // only so a group query cannot inherit one by some later edit.
-        group_query.limit = None;
-        group_query.offset = None;
-
-        let result = Box::pin(execute_model_query_inner(
-            stop,
-            store,
-            target_shape.as_ref(),
-            &group_query,
-            resolver,
-            depth + 1,
-        ))
-        .await?;
-
-        for mut inst in result.instances {
-            if let Some(id) = inst["id"].as_str().map(|s| s.to_string()) {
-                if let Some(obj) = inst.as_object_mut() {
-                    obj.insert(
-                        SUBJECT_CLASS_KEY.to_string(),
-                        Value::String(class_name.clone()),
-                    );
-                    // The readings this one was chosen over. Costs nothing to
-                    // return — the classification that picked the head had to
-                    // produce the whole set to rank it.
-                    let all = classes
-                        .get(&id)
-                        .cloned()
-                        .unwrap_or_else(|| vec![class_name.clone()]);
-                    obj.insert(
-                        SUBJECT_CLASSES_KEY.to_string(),
-                        Value::Array(all.into_iter().map(Value::String).collect()),
-                    );
+        for (class_name, ids) in by_class {
+            let target_shape = match resolver.get_shape(&class_name) {
+                Ok(s) => s,
+                Err(e) => {
+                    log::warn!("polymorphic include: no shape for '{class_name}': {e}");
+                    continue;
                 }
-                ordered_ids.push(id.clone());
-                hydrated.insert(id, inst);
+            };
+
+            let mut group_query = sub_query.clone();
+            let mut wc = group_query.where_clause.take().unwrap_or_default();
+            wc.insert("id".to_string(), WhereCondition::StringArray(ids));
+            group_query.where_clause = Some(wc);
+            // Already rejected above, so there is nothing here to drop — cleared
+            // only so a group query cannot inherit one by some later edit.
+            group_query.limit = None;
+            group_query.offset = None;
+
+            let result = Box::pin(execute_model_query_inner(
+                stop,
+                store,
+                target_shape.as_ref(),
+                &group_query,
+                resolver,
+                depth + 1,
+            ))
+            .await?;
+
+            for mut inst in result.instances {
+                if let Some(id) = inst["id"].as_str().map(|s| s.to_string()) {
+                    if let Some(obj) = inst.as_object_mut() {
+                        obj.insert(
+                            SUBJECT_CLASS_KEY.to_string(),
+                            Value::String(class_name.clone()),
+                        );
+                        // The readings this one was chosen over. Costs nothing to
+                        // return — the classification that picked the head had to
+                        // produce the whole set to rank it.
+                        let all = classes
+                            .get(&id)
+                            .cloned()
+                            .unwrap_or_else(|| vec![class_name.clone()]);
+                        obj.insert(
+                            SUBJECT_CLASSES_KEY.to_string(),
+                            Value::Array(all.into_iter().map(Value::String).collect()),
+                        );
+                    }
+                    ordered_ids.push(id.clone());
+                    hydrated.insert(id, inst);
+                }
             }
         }
+
+        // Not returned under its class: try the next one.
+        pending = pending
+            .into_iter()
+            .filter(|(id, _)| !hydrated.contains_key(id))
+            .filter_map(|(id, mut cands)| {
+                cands.remove(0);
+                (!cands.is_empty()).then_some((id, cands))
+            })
+            .collect();
     }
 
     Ok(())
@@ -666,18 +733,9 @@ async fn resolve_forward_include(
         )
         .await?;
     } else {
-        if rel.target_class_name.is_empty() {
-            // An untyped relation names no class, so there is no shape to
-            // hydrate its targets against. This used to surface as a shape
-            // lookup for the empty string, which failed the whole query with a
-            // message naming neither the relation nor the fix.
-            return Err(anyhow!(
-                "include on relation '{}': the relation declares no target class, so its \
-                 targets cannot be hydrated. Either give it a target, or read it with \
-                 `polymorphic: true` to hydrate each target as the class it actually is.",
-                rel.name
-            ));
-        }
+        // `resolve_includes_recursive` has refused an untyped relation that is
+        // not polymorphic (`reject_untyped_without_polymorphic`), so the target
+        // class named here is never empty.
         let target_shape = resolver.get_shape(&rel.target_class_name)?;
         if let Some(page) = &page {
             let parent_ids: Vec<String> = instances
@@ -879,17 +937,8 @@ async fn resolve_reverse_include(
             )
             .await?;
         } else {
-            if rel.target_class_name.is_empty() {
-                // Same shape of failure as the forward path, and the same fix:
-                // an untyped relation names no class, so there is nothing to
-                // hydrate its sources against.
-                return Err(anyhow!(
-                    "include on relation '{}': the relation declares no target class, so its \
-                     targets cannot be hydrated. Either give it a target, or read it with \
-                     `polymorphic: true` to hydrate each target as the class it actually is.",
-                    rel.name
-                ));
-            }
+            // As on the forward path: an untyped relation was refused by
+            // `reject_untyped_without_polymorphic`, so the class is never empty.
             let target_shape = resolver.get_shape(&rel.target_class_name)?;
             if let Some(page) = &page {
                 // The sources were read above over the same predicate and

@@ -668,6 +668,27 @@ describe('SHACLShape', () => {
       expect(round.properties[0].relationKind).toBe('hasMany');
     });
 
+    it('emits, parses and round-trips polymorphic through links and JSON', () => {
+      const shape = new SHACLShape('ns://Placement');
+      shape.addProperty({ name: 'node', path: 'ns://placed', relationKind: 'hasOne', polymorphic: true });
+      shape.addProperty({ name: 'plain', path: 'ns://plain', relationKind: 'hasOne' });
+      const links = shape.toLinks();
+      const polyLinks = links.filter(l => l.predicate === 'ad4m://polymorphic');
+      expect(polyLinks).toHaveLength(1);
+      expect(polyLinks[0].source).toContain('Placement.node');
+      expect(polyLinks[0].target).toBe('literal:true');
+
+      const round = SHACLShape.fromLinks(links, shape.nodeShapeUri);
+      expect(round.properties.find(p => p.name === 'node')?.polymorphic).toBe(true);
+      expect(round.properties.find(p => p.name === 'plain')?.polymorphic).toBeUndefined();
+
+      const json = shape.toJSON();
+      expect((json as any).properties.find((p: any) => p.name === 'node').polymorphic).toBe(true);
+      const fromJson = SHACLShape.fromJSON(json);
+      expect(fromJson.properties.find(p => p.name === 'node')?.polymorphic).toBe(true);
+      expect(fromJson.properties.find(p => p.name === 'plain')?.polymorphic).toBeUndefined();
+    });
+
     it('emits and parses targetClassName', () => {
       const shape = new SHACLShape('ns://Recipe');
       shape.addProperty({
