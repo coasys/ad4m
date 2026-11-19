@@ -69,7 +69,7 @@ impl PerspectiveInstance {
             if queries.contains_key(&id) {
                 return Err(SubscriptionIdTaken(id).into());
             }
-            log::info!(
+            log::debug!(
                 "🔗 subscription {} created for connection {} [{}]",
                 id,
                 query.connection,
@@ -177,7 +177,7 @@ impl PerspectiveInstance {
             before - queries.len()
         };
         if removed > 0 {
-            log::info!("🔗 {} subscription(s) dropped [{}]", removed, self.uuid);
+            log::debug!("🔗 {} subscription(s) dropped [{}]", removed, self.uuid);
         }
         removed
     }
