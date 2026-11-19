@@ -1061,10 +1061,7 @@ impl ModelShape {
 /// typically supply a static implementation pre-populated with `ModelShape`
 /// instances.
 pub trait ShapeResolver: Send + Sync {
-    fn get_shape(
-        &self,
-        class_name: &str,
-    ) -> Result<std::sync::Arc<ModelShape>, deno_core::anyhow::Error>;
+    fn get_shape(&self, class_name: &str) -> Result<std::sync::Arc<ModelShape>, anyhow::Error>;
 }
 
 /// SPARQL execution plan for an instance query.

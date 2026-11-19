@@ -14,7 +14,7 @@
 //!    hydrated child instances.  This supports arbitrary nesting depth
 //!    (bounded by [`MAX_INCLUDE_DEPTH`](super::utils::MAX_INCLUDE_DEPTH)).
 
-use deno_core::anyhow::{anyhow, Error};
+use anyhow::{anyhow, Error};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 
