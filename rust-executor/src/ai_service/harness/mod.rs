@@ -1240,7 +1240,7 @@ fn retry_warn_line(round: usize, error: &anyhow::Error) -> String {
 /// `HTTP 500` when the error carries an upstream status, else the error's
 /// own text. Named so a caller whose run still fails can see the status the
 /// model server answered with.
-fn upstream_status_label(error: &anyhow::Error) -> String {
+pub(crate) fn upstream_status_label(error: &anyhow::Error) -> String {
     error
         .chain()
         .find_map(|cause| {

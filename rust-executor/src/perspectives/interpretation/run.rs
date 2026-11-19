@@ -1314,7 +1314,12 @@ pub(crate) fn fallback_reason(
 ) -> Option<String> {
     use crate::ai_service::harness::HarnessEnd;
     match result {
-        Err(e) => Some(format!("the harness failed: {e:#}")),
+        // The status only: an upstream error's Display carries the response
+        // body, which can echo the prompt, and this goes to a WARN line.
+        Err(e) => Some(format!(
+            "the harness failed ({})",
+            crate::ai_service::harness::upstream_status_label(e)
+        )),
         Ok(o) if o.end == HarnessEnd::Degraded => {
             Some("the model server failed two times (degraded)".to_string())
         }
