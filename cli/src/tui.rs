@@ -708,7 +708,14 @@ async fn drive(
             .context("tui terminal is not open")?;
         if model.needs_clear {
             model.needs_clear = false;
-            terminal.clear()?;
+            // A clear is cosmetic — the buffer diff already repaints every
+            // changed cell. `Terminal::clear` snapshots the cursor first,
+            // which a terminal that cannot answer the position query fails
+            // on; losing the session to that is wrong, so a failed clear is
+            // a notice, not an exit.
+            if let Err(error) = terminal.clear() {
+                model.error = Some(format!("terminal clear failed: {error}"));
+            }
         }
         // The session's live updates and live-member reads land through the
         // poll — ~50 ms slices keep an unfinished load responsive.
