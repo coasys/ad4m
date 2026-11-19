@@ -78,6 +78,9 @@ pub struct SfuPeer {
     /// When ICE last reported `Disconnected` without coming back, or `None`.
     /// See [`ICE_DISCONNECT_GRACE`].
     pub disconnected_since: Option<Instant>,
+    /// Whether ICE has reached `Connected` or `Completed` on this peer. A
+    /// later fall back to `Checking` means its path failed.
+    pub had_path: bool,
     /// An ICE restart the client asked for (`sfu.callRestartIce`), from the
     /// request until its answer lands or the offer's retry budget ends.
     /// The offer SDP lives in [`PendingNegotiation`].
@@ -197,6 +200,7 @@ impl SfuPeer {
             is_pipe,
             channels: HashMap::new(),
             disconnected_since: None,
+            had_path: false,
             ice_restart: None,
             drops_logged: HashSet::new(),
             write_errors_logged: HashSet::new(),
@@ -204,12 +208,25 @@ impl SfuPeer {
     }
 
     /// Track an ICE state change: `Disconnected` starts the disconnect
-    /// clock, any other state stops it.
+    /// clock, and `Checking` starts it afresh once the peer has had a path:
+    /// its nominated pair failed and no new one is nominated. After a
+    /// NAT rebinding, str0m still takes the client's media from the new
+    /// address but sends nothing until the client nominates that address,
+    /// which Firefox never does, and the state stays `Checking` (sfu-soak5).
+    /// Any other state stops the clock.
     pub fn on_ice_state(&mut self, state: IceConnectionState, now: Instant) {
         self.disconnected_since = match state {
             IceConnectionState::Disconnected => self.disconnected_since.or(Some(now)),
+            // A fresh clock: checking again after a restart's answer is a new try.
+            IceConnectionState::Checking if self.had_path => Some(now),
             _ => None,
         };
+        if matches!(
+            state,
+            IceConnectionState::Connected | IceConnectionState::Completed
+        ) {
+            self.had_path = true;
+        }
     }
 
     /// Whether the peer stayed disconnected past its grace and is to be
@@ -2642,6 +2659,40 @@ mod tests {
     /// The first data each side received at or after `from`.
     fn resumed(seen: &Seen, from: Duration) -> Option<Duration> {
         seen.data.iter().copied().find(|t| *t >= from)
+    }
+
+    /// A NAT rebinding moves a caller's public port without the caller knowing
+    /// (sfu-soak5, 2026-11-19). str0m accepts the caller's media from the new
+    /// port at once, but sends only on a pair the caller nominates. Firefox
+    /// never nominates the new one, so when the old pair fails ICE goes back to
+    /// `Checking`, not `Disconnected`, and stays there. The SFU keeps forwarding
+    /// the caller's media to everyone and sends the caller nothing. Its own
+    /// checks are answered, so it never restarts. A peer that had a path and
+    /// lost it is dropped after the grace, like a disconnected one; the
+    /// client's roster check then rebuilds the call.
+    #[test]
+    fn a_peer_stuck_checking_after_it_lost_its_path_is_dropped() {
+        let (_, mut peer) = connected_pair();
+        let t0 = Instant::now();
+        peer.on_ice_state(IceConnectionState::Checking, t0);
+        assert!(
+            !peer.stayed_disconnected(t0 + ICE_DISCONNECT_GRACE * 3),
+            "a peer still connecting for the first time is not dropped"
+        );
+        peer.on_ice_state(IceConnectionState::Completed, t0 + Duration::from_secs(1));
+        peer.on_ice_state(IceConnectionState::Connected, t0 + Duration::from_secs(20));
+        let lost = t0 + Duration::from_secs(40);
+        peer.on_ice_state(IceConnectionState::Checking, lost);
+        assert!(!peer.stayed_disconnected(lost + ICE_DISCONNECT_GRACE / 2));
+        assert!(
+            peer.stayed_disconnected(lost + ICE_DISCONNECT_GRACE),
+            "a peer that lost its path and stayed checking for the grace is dropped"
+        );
+        peer.on_ice_state(IceConnectionState::Completed, lost + Duration::from_secs(5));
+        assert!(
+            !peer.stayed_disconnected(lost + ICE_DISCONNECT_GRACE * 2),
+            "a path found again stops the clock"
+        );
     }
 
     /// Without a restart, a caller that moved is lost: the SFU drops it once
