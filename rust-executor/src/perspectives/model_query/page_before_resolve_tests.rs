@@ -18,7 +18,8 @@ use crate::types::{ExpressionProof, Link, LinkExpression, LinkStatus};
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use web_time::Instant;
 
 /// A file language served by the test, one call at a time as a language
 /// runtime serves them, `latency` per `expressionGet`. `gets` counts those.

@@ -244,7 +244,7 @@ async fn test_perf_guarded_selection_paginated_query() {
         by_name.clone(),
         opted_in(by_name),
     ] {
-        let start = std::time::Instant::now();
+        let start = web_time::Instant::now();
         let got = run(&store, q.clone()).await;
         let elapsed = start.elapsed();
         assert_eq!(got.instances.len(), 50, "{q}");
@@ -317,7 +317,7 @@ async fn test_perf_exists_guard_binds_the_reifier() {
         rows.sort();
         rows
     };
-    let start = std::time::Instant::now();
+    let start = web_time::Instant::now();
     let got = rows(&guarded);
     let elapsed = start.elapsed();
     eprintln!("exists guard over 3000 rows, 9001 signed links: {elapsed:?}");
