@@ -24,6 +24,7 @@ mod perspectives;
 mod repl;
 mod runtime;
 mod tui;
+mod tui_space;
 
 use crate::{
     agent::*, expression::*, languages::*, neighbourhoods::*, perspectives::*, runtime::*,

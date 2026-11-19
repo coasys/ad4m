@@ -407,7 +407,7 @@ async fn interactive_perspective_selector(ad4m_client: Ad4mClient) -> Result<()>
                     Constraint::Length(2),
                     Constraint::Length(3),
                 ])
-                .split(f.size());
+                .split(f.area());
 
             // Title
             let title = Paragraph::new(Line::from(vec![Span::styled(

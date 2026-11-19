@@ -44,11 +44,26 @@ serde = { version = "1.0", features = ["derive"] }
 colour = "0.7.0"
 syntect = "5.0"
 serde_cbor = "0.11"
-ratatui = "0.26.0"
-crossterm = "0.27.0"
+# The WE renderer's terminal frontend. Pinned to the same rev as the whole
+# renderer pin (we @ port/bugs1); its ratatui/crossterm types cross
+# `TuiApp::render_into`/`handle_key`, so the CLI's own must match exactly.
+we-tui = { git = "https://github.com/coasys/we.git", rev = "aebab9a2e0532000bac8458585a55fa080c0333f" }
+we-session = { git = "https://github.com/coasys/we.git", rev = "aebab9a2e0532000bac8458585a55fa080c0333f" }
+we-template = { git = "https://github.com/coasys/we.git", rev = "aebab9a2e0532000bac8458585a55fa080c0333f" }
+we-data = { git = "https://github.com/coasys/we.git", rev = "aebab9a2e0532000bac8458585a55fa080c0333f" }
+we-screen = { git = "https://github.com/coasys/we.git", rev = "aebab9a2e0532000bac8458585a55fa080c0333f" }
+we-expr = { git = "https://github.com/coasys/we.git", rev = "aebab9a2e0532000bac8458585a55fa080c0333f" }
+we-catalog = { git = "https://github.com/coasys/we.git", rev = "aebab9a2e0532000bac8458585a55fa080c0333f" }
+we-ad4m = { git = "https://github.com/coasys/we.git", rev = "aebab9a2e0532000bac8458585a55fa080c0333f" }
+ratatui = "0.30.2"
+crossterm = "0.29.0"
 
 [dev-dependencies]
 tempfile = "3"
+# The live-executor test rig (`we_ad4m::testkit`) — tests only.
+we-ad4m = { git = "https://github.com/coasys/we.git", rev = "aebab9a2e0532000bac8458585a55fa080c0333f", features = ["testkit"] }
+# A bare WebSocket upgrade so `Ad4mClient::connect` has a peer in tests.
+tokio-tungstenite = "0.21"
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemallocator = { version = "0.6", features = ["unprefixed_malloc_on_supported_platforms"] }

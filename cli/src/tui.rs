@@ -5,12 +5,16 @@
 //! `3` open those screens. Tab moves to the next screen. The open screen
 //! loads again every two seconds. A slow load does not block `q` or Ctrl-C.
 //! The links screen shows at most 200 links.
+//!
+//! `o` on the perspectives screen opens the selected space in the read-only
+//! Coasys view (`tui_space`); F10 or `q` returns, Ctrl-C exits the TUI.
 
 use std::future::Future;
 use std::io::{self, Stdout};
 use std::pin::Pin;
 use std::time::{Duration, Instant};
 
+use crate::tui_space::{self, SpaceApp};
 use ad4m_client::connect::normalize_base_url;
 use ad4m_client::types::{AgentStatus, LinkExpression, PerspectiveHandle, RuntimeInfo};
 use ad4m_client::Ad4mClient;
@@ -29,16 +33,18 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
     Frame, Terminal,
 };
+use we_ad4m::SpaceRow;
+use we_tui::KeyResult as SpaceKeyResult;
 
 const REFRESH: Duration = Duration::from_secs(2);
 /// How often the input loop looks for a key while a refresh is in flight.
 const INPUT_SLICE: Duration = Duration::from_millis(50);
 const LINK_LIMIT: i64 = 200;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Screen {
     Status,
     Perspectives,
@@ -79,6 +85,14 @@ struct Model {
     /// Bumped when the user asks for a new load. An in-flight result from an
     /// older generation is dropped, so `r` and a screen change are not overwritten.
     refresh_gen: u64,
+    /// The open Coasys space view — admin refresh is suspended while set.
+    space: Option<SpaceApp>,
+    /// The row `o` asked for — the drive loop opens it, so an assembly
+    /// error lands in `error` instead of inside key handling.
+    requested_open: Option<SpaceRow>,
+    /// The drawn surface changed completely (a space opened or closed) —
+    /// clear the terminal before the next draw.
+    needs_clear: bool,
 }
 
 impl Model {
@@ -97,6 +111,9 @@ impl Model {
             error: None,
             loaded_at: None,
             refresh_gen: 0,
+            space: None,
+            requested_open: None,
+            needs_clear: false,
         }
     }
 
@@ -138,6 +155,13 @@ impl Model {
         } else if self.link_selected >= self.links.len() {
             self.link_selected = self.links.len() - 1;
         }
+    }
+
+    /// The selected *visible* row as a `SpaceRow` — `o`'s target. Empty
+    /// selection (an empty or fully filtered list) opens nothing.
+    fn selected_space(&self) -> Option<SpaceRow> {
+        let index = self.visible().get(self.selected).copied()?;
+        Some(tui_space::space_row(&self.perspectives[index]))
     }
 }
 
@@ -230,7 +254,7 @@ pub(crate) fn links_title(uuid: Option<&str>, shown: usize) -> String {
 }
 
 fn should_start_refresh(model: &Model, inflight: bool) -> bool {
-    model.stale() && !inflight
+    model.space.is_none() && model.stale() && !inflight
 }
 
 fn invalidate(model: &mut Model) {
@@ -238,9 +262,11 @@ fn invalidate(model: &mut Model) {
     model.loaded_at = None;
 }
 
-pub(crate) fn key_quits(key: &KeyEvent) -> bool {
+/// `q` quits the admin screens; inside the Coasys view it is the renderer's
+/// own back key (or input text), so only Ctrl-C exits there.
+pub(crate) fn key_quits(key: &KeyEvent, app_open: bool) -> bool {
     match key.code {
-        KeyCode::Char('q') => true,
+        KeyCode::Char('q') => !app_open,
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => true,
         _ => false,
     }
@@ -393,24 +419,28 @@ type BoxedRefresh<'a> = Pin<Box<dyn Future<Output = RefreshOutcome> + Send + 'a>
 /// `biased` polls the sleep first. When the slice has elapsed it does not poll
 /// the refresh, so that future can go back into `inflight` unharmed. A quit
 /// drops it. The key source runs only after the slice, never behind the RPC.
-async fn refresh_or_quit<F, K>(inflight: &mut Option<F>, mut next_key: K) -> Result<DriveEvent>
+async fn refresh_or_quit<F, K>(
+    inflight: &mut Option<F>,
+    app_open: bool,
+    mut next_key: K,
+) -> Result<DriveEvent>
 where
     F: Future<Output = RefreshOutcome> + Unpin,
     K: FnMut() -> io::Result<Option<KeyEvent>>,
 {
     let Some(mut pending) = inflight.take() else {
         tokio::time::sleep(INPUT_SLICE).await;
-        return drive_key(next_key()?);
+        return drive_key(next_key()?, app_open);
     };
 
     tokio::select! {
         biased;
         _ = tokio::time::sleep(INPUT_SLICE) => {
             match next_key()? {
-                Some(key) if key_quits(&key) => Ok(DriveEvent::Quit),
+                Some(key) if key_quits(&key, app_open) => Ok(DriveEvent::Quit),
                 other => {
                     *inflight = Some(pending);
-                    drive_key(other)
+                    drive_key(other, app_open)
                 }
             }
         }
@@ -418,9 +448,9 @@ where
     }
 }
 
-fn drive_key(key: Option<KeyEvent>) -> Result<DriveEvent> {
+fn drive_key(key: Option<KeyEvent>, app_open: bool) -> Result<DriveEvent> {
     Ok(match key {
-        Some(key) if key_quits(&key) => DriveEvent::Quit,
+        Some(key) if key_quits(&key, app_open) => DriveEvent::Quit,
         Some(key) => DriveEvent::Key(key),
         None => DriveEvent::Tick,
     })
@@ -669,17 +699,87 @@ async fn drive(
             let request = model.refresh_request();
             inflight = Some(Box::pin(fetch(client, request)));
         }
-        session
+        if let Some(row) = model.requested_open.take() {
+            open_space(client, model, row, &mut inflight);
+        }
+        let terminal = session
             .terminal
             .as_mut()
-            .context("tui terminal is not open")?
-            .draw(|frame| draw(frame, model))?;
-        match refresh_or_quit(&mut inflight, poll_key).await? {
+            .context("tui terminal is not open")?;
+        if model.needs_clear {
+            model.needs_clear = false;
+            // A transition clear is cosmetic — the buffer diff repaints
+            // every changed cell anyway. `Terminal::clear` snapshots the
+            // cursor first (`ESC[6n`, up to a two-second wait on a terminal
+            // that does not answer), so the frame is blanked through the
+            // buffer instead: a `Clear`-widget frame resets every cell and
+            // the same diff machinery paints the blanks. A failed draw is
+            // still a notice, not an exit.
+            if let Err(error) = terminal.draw(|frame| {
+                frame.render_widget(Clear, frame.area());
+            }) {
+                model.error = Some(format!("terminal clear failed: {error}"));
+            }
+        }
+        // The session's live updates and live-member reads land through the
+        // poll — ~50 ms slices keep an unfinished load responsive.
+        if let Some(space) = model.space.as_mut() {
+            space.app.session.poll();
+        }
+        terminal.draw(|frame| draw(frame, model))?;
+        match refresh_or_quit(&mut inflight, model.space.is_some(), poll_key).await? {
             DriveEvent::Quit => return Ok(()),
             DriveEvent::Refresh(outcome) => apply_outcome(model, *outcome),
             DriveEvent::Key(key) => handle_key(model, &key),
             DriveEvent::Tick => {}
         }
+    }
+}
+
+/// Assemble the Coasys view of `row` over the CLI's shared socket. A
+/// failure leaves the admin model untouched apart from `error` — and the
+/// in-flight refresh, still valid for the screen it returns to. A
+/// successful open drops that future: its generation can never match
+/// again, so it is cancelled rather than letting the next admin refresh
+/// queue behind it.
+fn open_space(
+    client: &Ad4mClient,
+    model: &mut Model,
+    row: SpaceRow,
+    inflight: &mut Option<BoxedRefresh<'_>>,
+) {
+    let conn = tui_space::connection(client);
+    open_space_as(model, row, |row| tui_space::open(&conn, row), inflight);
+}
+
+fn open_space_as(
+    model: &mut Model,
+    row: SpaceRow,
+    assemble: impl FnOnce(SpaceRow) -> Result<SpaceApp, String>,
+    inflight: &mut Option<BoxedRefresh<'_>>,
+) {
+    match assemble(row) {
+        Ok(space) => {
+            model.space = Some(space);
+            model.needs_clear = true;
+            model.error = None;
+            *inflight = None;
+            // Drop a refresh already in flight: the perspectives list must
+            // stay exactly what the user selected from.
+            invalidate(model);
+        }
+        Err(error) => {
+            model.error = Some(format!("Coasys view failed: {error}"));
+        }
+    }
+}
+
+/// F10 or the renderer's own quit: drop the view (its live-member tasks and
+/// subscriptions stop), repaint the admin screen and resume its refresh.
+fn close_space(model: &mut Model) {
+    if model.space.take().is_some() {
+        model.needs_clear = true;
+        invalidate(model);
     }
 }
 
@@ -691,6 +791,23 @@ fn select_screen(model: &mut Model, screen: Screen) {
 }
 
 fn handle_key(model: &mut Model, key: &KeyEvent) {
+    // Inside the Coasys view every key is the renderer's; the admin keys
+    // stay out of its way. F10 is the unconditional way back (`q` may be
+    // input text). we-tui answers `Quit` for `q` and Ctrl-C alike; the
+    // drive loop already exits on Ctrl-C, so a Quit here means "back".
+    if model.space.is_some() {
+        match key.code {
+            KeyCode::F(10) => close_space(model),
+            _ => {
+                if let Some(space) = model.space.as_mut() {
+                    if space.app.handle_key(*key) == SpaceKeyResult::Quit {
+                        close_space(model);
+                    }
+                }
+            }
+        }
+        return;
+    }
     match key.code {
         KeyCode::Char('1') => select_screen(model, Screen::Status),
         KeyCode::Char('2') => select_screen(model, Screen::Perspectives),
@@ -708,6 +825,9 @@ fn handle_key(model: &mut Model, key: &KeyEvent) {
         KeyCode::Up | KeyCode::Char('k') => move_selection(model, -1),
         KeyCode::Down | KeyCode::Char('j') => move_selection(model, 1),
         KeyCode::Enter if model.screen == Screen::Perspectives => open_selected(model),
+        KeyCode::Char('o') if model.screen == Screen::Perspectives => {
+            model.requested_open = model.selected_space();
+        }
         KeyCode::Esc if model.screen == Screen::Links => model.screen = Screen::Perspectives,
         _ => {}
     }
@@ -752,7 +872,11 @@ fn open_selected(model: &mut Model) {
     invalidate(model);
 }
 
-fn draw(frame: &mut Frame, model: &Model) {
+fn draw(frame: &mut Frame, model: &mut Model) {
+    if model.space.is_some() {
+        draw_space(frame, model);
+        return;
+    }
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .margin(1)
@@ -762,7 +886,7 @@ fn draw(frame: &mut Frame, model: &Model) {
             Constraint::Length(3),
             Constraint::Length(3),
         ])
-        .split(frame.size());
+        .split(frame.area());
 
     let header = header_text(model.screen, &model.executor_url);
     let title = Paragraph::new(Line::from(vec![Span::styled(
@@ -790,10 +914,47 @@ fn draw(frame: &mut Frame, model: &Model) {
     frame.render_widget(error_line, chunks[2]);
 
     let help = Paragraph::new(
-        "1 status  2 perspectives  3 links  tab next  j/k move  enter open  n neighbourhoods  r refresh  q quit",
+        "1 status  2 perspectives  3 links  tab next  j/k move  enter links  o open coasys  n neighbourhoods  r refresh  q quit",
     )
     .block(Block::default().borders(Borders::ALL).title("Keys"));
     frame.render_widget(help, chunks[3]);
+}
+
+/// The Coasys view: a header naming the space, the renderer's own frame in
+/// between, and the read-only/dropped-call notice on the last row.
+fn draw_space(frame: &mut Frame, model: &mut Model) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(0),
+            Constraint::Length(3),
+        ])
+        .split(frame.area());
+    let Some(space) = model.space.as_mut() else {
+        return;
+    };
+    let header = format!(" {}  ·  {}", space.space.name, space.space.uuid);
+    let title = Paragraph::new(Line::from(vec![Span::styled(
+        header,
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )]))
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("ad4m tui — Coasys"),
+    );
+    frame.render_widget(title, chunks[0]);
+    space.render_into(frame.buffer_mut(), chunks[1]);
+    let notice = space.notice_line();
+    let note = Paragraph::new(notice).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("F10 back · Ctrl-C quit"),
+    );
+    frame.render_widget(note, chunks[2]);
 }
 
 fn draw_status(frame: &mut Frame, model: &Model, area: ratatui::layout::Rect) {
@@ -877,6 +1038,7 @@ mod tests {
     use ad4m_client::types::{
         ExpressionProof, Link, Neighbourhood, NeighbourhoodExpression, Perspective,
     };
+    use std::sync::Arc;
 
     fn proof() -> ExpressionProof {
         ExpressionProof {
@@ -888,6 +1050,15 @@ mod tests {
     }
 
     fn perspective(name: Option<&str>, uuid: &str, neighbourhood: bool) -> PerspectiveHandle {
+        perspective_shared(name, uuid, neighbourhood, None)
+    }
+
+    fn perspective_shared(
+        name: Option<&str>,
+        uuid: &str,
+        neighbourhood: bool,
+        shared_url: Option<&str>,
+    ) -> PerspectiveHandle {
         PerspectiveHandle {
             name: name.map(str::to_string),
             neighbourhood: neighbourhood.then(|| NeighbourhoodExpression {
@@ -899,7 +1070,7 @@ mod tests {
                 proof: proof(),
                 timestamp: "2026-11-18T00:00:00Z".to_string(),
             }),
-            shared_url: None,
+            shared_url: shared_url.map(str::to_string),
             uuid: uuid.to_string(),
             state: None,
         }
@@ -1095,7 +1266,7 @@ mod tests {
             let (tx, mut inflight) = pending_refresh();
             let event = tokio::time::timeout(
                 Duration::from_millis(500),
-                refresh_or_quit(&mut inflight, move || Ok(Some(key))),
+                refresh_or_quit(&mut inflight, false, move || Ok(Some(key))),
             )
             .await
             .expect("quit waited on the refresh")
@@ -1103,6 +1274,236 @@ mod tests {
             assert!(matches!(event, DriveEvent::Quit));
             assert!(inflight.is_none(), "quit must drop the in-flight refresh");
             assert!(tx.is_closed());
+        }
+    }
+
+    #[test]
+    fn open_coasys_uses_filtered_selection() {
+        let mut model = Model::new("http://127.0.0.1:1".to_string());
+        model.screen = Screen::Perspectives;
+        model.perspectives = vec![
+            perspective(Some("Local"), "local-1", false),
+            perspective_shared(Some("Town"), "nh-1", true, Some("perspective://nh-1")),
+        ];
+        // With the neighbourhood filter on, the visible row is the shared one.
+        model.neighbourhoods_only = true;
+        handle_key(
+            &mut model,
+            &KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE),
+        );
+        let row = model
+            .requested_open
+            .take()
+            .expect("o requests the visible row");
+        assert_eq!(row.uuid, "nh-1");
+        assert_eq!(row.name, "Town");
+        assert_eq!(row.shared_url.as_deref(), Some("perspective://nh-1"));
+
+        // An empty filtered list requests nothing.
+        model.perspectives = vec![perspective(Some("Local"), "local-1", false)];
+        handle_key(
+            &mut model,
+            &KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE),
+        );
+        assert!(model.requested_open.is_none());
+
+        // Enter still opens the links screen for the selected row.
+        model.neighbourhoods_only = false;
+        handle_key(
+            &mut model,
+            &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        assert_eq!(model.screen, Screen::Links);
+        assert_eq!(model.open_uuid.as_deref(), Some("local-1"));
+
+        // 'o' away from the perspectives screen does nothing.
+        handle_key(
+            &mut model,
+            &KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE),
+        );
+        assert!(model.requested_open.is_none());
+    }
+
+    #[tokio::test]
+    async fn coasys_back_preserves_admin_state() {
+        let (url, _server) = crate::tui_space::silent_ws_server().await;
+        let conn = we_ad4m::Connection::open(tokio::runtime::Handle::current(), &url, "")
+            .await
+            .unwrap();
+        let mut model = Model::new(url);
+        model.screen = Screen::Perspectives;
+        model.perspectives = vec![
+            perspective(Some("Local"), "local-1", false),
+            perspective(Some("Town"), "nh-1", true),
+        ];
+        model.selected = 1;
+        model.loaded_at = Some(Instant::now());
+
+        // A refresh really in flight when 'o' lands: the open drops the
+        // future — the sender sees it cancelled — so the fresh refresh
+        // after F10 does not queue behind it.
+        let (tx, mut inflight) = pending_refresh();
+        let row = model.selected_space().unwrap();
+        open_space_as(
+            &mut model,
+            row,
+            |row| crate::tui_space::open(&conn, row),
+            &mut inflight,
+        );
+        let stats = model.space.as_ref().unwrap().source.clone();
+        assert!(model.space.is_some());
+        assert!(inflight.is_none(), "opening drops the in-flight refresh");
+        assert!(
+            tx.is_closed(),
+            "the dropped refresh is cancelled, not parked"
+        );
+        assert!(
+            !should_start_refresh(&model, inflight.is_some()),
+            "refresh is suspended"
+        );
+        assert!(model.stale(), "opening drops an in-flight result");
+
+        // F10: back to the same admin screen, selection kept.
+        handle_key(
+            &mut model,
+            &KeyEvent::new(KeyCode::F(10), KeyModifiers::NONE),
+        );
+        assert!(model.space.is_none());
+        assert_eq!(model.selected, 1);
+        assert!(
+            should_start_refresh(&model, inflight.is_some()),
+            "back on the admin screen resumes its refresh"
+        );
+        // The view's handle on the source is gone — the subscriptions its
+        // `stops` senders held are released when it drops.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            Arc::strong_count(&stats),
+            1,
+            "the space's subscriptions are released on drop"
+        );
+
+        // Back in: the same space reopens, the same row stays selected.
+        let row = model.selected_space().unwrap();
+        open_space_as(
+            &mut model,
+            row,
+            |row| crate::tui_space::open(&conn, row),
+            &mut inflight,
+        );
+        assert_eq!(model.space.as_ref().unwrap().space.uuid, "nh-1");
+        close_space(&mut model);
+        assert_eq!(model.selected, 1);
+    }
+
+    #[tokio::test]
+    async fn coasys_pending_load_still_exits() {
+        // The peer answers nothing — live-member reads and $queries stay
+        // pending — yet F10 and Ctrl-C still work.
+        let (url, _server) = crate::tui_space::silent_ws_server().await;
+        let conn = we_ad4m::Connection::open(tokio::runtime::Handle::current(), &url, "")
+            .await
+            .unwrap();
+        let row = SpaceRow {
+            uuid: "pending".to_string(),
+            name: "pending".to_string(),
+            shared_url: None,
+        };
+        let mut model = Model::new(url);
+        model.space = Some(crate::tui_space::open(&conn, row.clone()).unwrap());
+        model.space.as_mut().unwrap().app.session.poll();
+        assert!(key_quits(
+            &KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            model.space.is_some()
+        ));
+        handle_key(
+            &mut model,
+            &KeyEvent::new(KeyCode::F(10), KeyModifiers::NONE),
+        );
+        assert!(model.space.is_none());
+
+        // A failed open leaves the admin UI exactly as usable as before —
+        // including the refresh still in flight for it.
+        let (tx, mut inflight) = pending_refresh();
+        open_space_as(
+            &mut model,
+            row,
+            |_| Err("assembly broke".to_string()),
+            &mut inflight,
+        );
+        assert!(model.space.is_none());
+        assert!(
+            inflight.is_some() && !tx.is_closed(),
+            "a failed open keeps the refresh its screen still needs"
+        );
+        assert_eq!(
+            model.error.as_deref(),
+            Some("Coasys view failed: assembly broke")
+        );
+        handle_key(
+            &mut model,
+            &KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE),
+        );
+        assert_eq!(model.screen, Screen::Perspectives);
+        handle_key(
+            &mut model,
+            &KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE),
+        );
+        assert_eq!(model.screen, Screen::Status);
+    }
+
+    /// The notice row is painted on every space frame — and the read-only
+    /// fact stays on it when a dropped call or an unavailable read joins.
+    #[tokio::test]
+    async fn coasys_notice_row_is_on_every_space_frame() {
+        use ratatui::backend::TestBackend;
+        let (url, _server) = crate::tui_space::silent_ws_server().await;
+        let conn = we_ad4m::Connection::open(tokio::runtime::Handle::current(), &url, "")
+            .await
+            .unwrap();
+        let mut model = Model::new(url);
+        model.space = Some(
+            crate::tui_space::open(
+                &conn,
+                SpaceRow {
+                    uuid: "notice".to_string(),
+                    name: "notice".to_string(),
+                    shared_url: None,
+                },
+            )
+            .unwrap(),
+        );
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        let mut frame_text = |model: &mut Model| {
+            terminal.draw(|frame| draw(frame, model)).unwrap();
+            we_tui::buffer_text(
+                terminal.backend().buffer(),
+                ratatui::layout::Rect::new(0, 0, 120, 40),
+            )
+        };
+        let first = frame_text(&mut model);
+        assert!(first.contains("read-only view"), "{first}");
+
+        // A dropped call and a read nothing answered extend the row —
+        // the read-only fact must still be on it.
+        {
+            let space = model.space.as_mut().unwrap();
+            space
+                .app
+                .session
+                .host_mut_as::<we_template::StaticHost>()
+                .unwrap()
+                .dropped
+                .push("aStore.aCall".to_string());
+            space.provenance.note_unavailable("aStore.aMember");
+        }
+        let second = frame_text(&mut model);
+        for needle in [
+            "read-only view",
+            "dropped: aStore.aCall",
+            "unavailable reads: 1",
+        ] {
+            assert!(second.contains(needle), "{needle} missing:\n{second}");
         }
     }
 
@@ -1115,7 +1516,7 @@ mod tests {
             let (tx, mut inflight) = pending_refresh();
             let event = tokio::time::timeout(
                 Duration::from_millis(500),
-                refresh_or_quit(&mut inflight, move || Ok(Some(key))),
+                refresh_or_quit(&mut inflight, false, move || Ok(Some(key))),
             )
             .await
             .expect("input waited on the refresh")
