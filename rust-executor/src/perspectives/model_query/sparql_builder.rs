@@ -222,7 +222,7 @@ pub(super) fn build_instance_sparql(
     let pagination_suffix = if let Some(pg) = sparql_pagination {
         let mut suffix = String::new();
         match &pg.sort_key {
-            SortKey::Timestamp => match pg.direction {
+            SortKey::Timestamp | SortKey::CreatedAt => match pg.direction {
                 OrderDirection::DESC => suffix.push_str("\n    ORDER BY DESC(?_first_ts)"),
                 OrderDirection::ASC => suffix.push_str("\n    ORDER BY ASC(?_first_ts)"),
             },
@@ -302,6 +302,15 @@ pub(super) fn build_instance_sparql(
         }} GROUP BY ?source{anchor_group}{pagination_suffix}"#
                 )
             }
+            SortKey::CreatedAt => {
+                let links = hydrated_links(shape, query, &predicate_filter, "");
+                format!(
+                    r#"SELECT DISTINCT ?source{anchor_select} (MIN(?timestamp) AS ?_first_ts) WHERE {{
+{conformance}
+{where_extra}
+{links}        }} GROUP BY ?source{anchor_group}{pagination_suffix}"#
+                )
+            }
             SortKey::Property(predicate) => {
                 // `parse_literal` yields the lexical form for a typed literal
                 // and the inner `data` for a signed envelope — sorting a
@@ -352,9 +361,6 @@ pub(super) fn build_instance_sparql(
             predicate_filter,
         }
     } else {
-        let local_status = local_status_filter(shape);
-        let link_status = link_status_filter(query.link_status.as_ref());
-        let proof_valid = proof_valid_filter(query.include_unverified);
         // Required patterns before the first OPTIONAL, the same ordering
         // `links::attach_links` gives its own query.
         let (link_select, link_optionals) = if link_columns {
@@ -364,18 +370,6 @@ pub(super) fn build_instance_sparql(
             )
         } else {
             ("", "")
-        };
-        // The link rows: the reifier join, with `values` fixing the
-        // predicates and `optionals` the columns bound beyond the base five.
-        let link_rows = |values: &str, optionals: &str| {
-            format!(
-                r#"{values}    ?source ?predicate ?target .
-    ?_reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?predicate ?target )>> .
-    FILTER(isIRI(?source) && isIRI(?predicate))
-    ?_reifier <ad4m://ontology/author> ?author .
-    ?_reifier <ad4m://ontology/timestamp> ?timestamp .
-{link_status}{proof_valid}{optionals}{local_status}"#
-            )
         };
         let values_of = |predicates: Vec<&str>| {
             let values: String = predicates
@@ -399,11 +393,11 @@ pub(super) fn build_instance_sparql(
             let served: Vec<&str> = link_predicates.iter().map(String::as_str).collect();
             format!(
                 "    {{\n{}    }} UNION {{\n{}    }}\n",
-                link_rows(&values_of(served), link_optionals),
-                link_rows(&values_of(others), "")
+                hydrated_links(shape, query, &values_of(served), link_optionals),
+                hydrated_links(shape, query, &values_of(others), "")
             )
         } else {
-            link_rows(&predicate_filter, link_optionals)
+            hydrated_links(shape, query, &predicate_filter, link_optionals)
         };
         InstanceQueryPlan::Single(format!(
             r#"SELECT DISTINCT ?source ?predicate ?target ?author ?timestamp{link_select} WHERE {{
@@ -412,6 +406,31 @@ pub(super) fn build_instance_sparql(
 {rows}}}"#
         ))
     }
+}
+
+/// The links the single plan hydrates an instance from, each bound as
+/// `?source ?predicate ?target` with its `?author` and `?timestamp`: the
+/// predicates `values` names, under the read's link status, proof and `local`
+/// filters, with `optionals` binding further reifier columns. [`SortKey::CreatedAt`]
+/// takes its `MIN` over the same links, so it is the `timestamp` / `createdAt`
+/// the hydrated row carries.
+fn hydrated_links(
+    shape: &ModelShape,
+    query: &ModelQueryInput,
+    values: &str,
+    optionals: &str,
+) -> String {
+    let local_status = local_status_filter(shape);
+    let link_status = link_status_filter(query.link_status.as_ref());
+    let proof_valid = proof_valid_filter(query.include_unverified);
+    format!(
+        r#"{values}    ?source ?predicate ?target .
+    ?_reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?predicate ?target )>> .
+    FILTER(isIRI(?source) && isIRI(?predicate))
+    ?_reifier <ad4m://ontology/author> ?author .
+    ?_reifier <ad4m://ontology/timestamp> ?timestamp .
+{link_status}{proof_valid}{optionals}{local_status}"#
+    )
 }
 
 /// The link an order key reads, `subject <predicate> object`, as the pattern
@@ -3045,6 +3064,7 @@ mod relation_quantifier_tests {
             max_count: None,
             target_class_name: "Comment".to_string(),
             target_class_uri: String::new(),
+            polymorphic: false,
         });
         s
     }
@@ -3430,6 +3450,7 @@ mod relation_quantifier_tests {
             max_count: Some(1),
             target_class_name: "Agent".to_string(),
             target_class_uri: String::new(),
+            polymorphic: false,
         });
 
         let clause = wc(vec![("author", ops_with(None, Some(vec![])))]);

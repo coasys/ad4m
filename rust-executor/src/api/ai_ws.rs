@@ -759,13 +759,12 @@ pub async fn feed_transcription_stream(
         return Err(ApiError::BadRequest("Too many stream IDs (max 32)".into()));
     }
 
-    // Limit audio buffer to 10 MB (2.5M float32 samples)
-    const MAX_AUDIO_BYTES: usize = 10 * 1024 * 1024;
-    if body.len() > MAX_AUDIO_BYTES {
+    // The same 10 MiB float32 ceiling as service admission and realtime.
+    if body.len() > crate::ai_service::transcription::MAX_UTTERANCE_BYTES {
         return Err(ApiError::BadRequest(format!(
             "Audio buffer too large ({} bytes, max {})",
             body.len(),
-            MAX_AUDIO_BYTES
+            crate::ai_service::transcription::MAX_UTTERANCE_BYTES
         )));
     }
 

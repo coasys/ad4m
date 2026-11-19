@@ -4505,7 +4505,7 @@ impl PerspectiveInstance {
         if classes.names().is_empty() {
             return Ok(super::model_query::ModelQueryResult {
                 instances: vec![],
-                total_count: 0,
+                total_count: query_input.count.unwrap_or(false).then_some(0),
             });
         }
         // A built-in's own rows (`Container`) are read through its view.
@@ -4548,7 +4548,7 @@ impl PerspectiveInstance {
                 // handing the store an empty VALUES block.
                 return Ok(super::model_query::ModelQueryResult {
                     instances: vec![],
-                    total_count: 0,
+                    total_count: query_input.count.unwrap_or(false).then_some(0),
                 });
             }
         }

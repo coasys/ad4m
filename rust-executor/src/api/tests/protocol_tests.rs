@@ -371,6 +371,38 @@ async fn add_auto_processor_refuses_a_bad_source_scope_as_a_bad_request() {
     assert!(err.message.contains("bdoy"), "{}", err.message);
 }
 
+// ── perspective.flowFired ───────────────────────────
+
+#[tokio::test]
+async fn flow_fired_rejects_more_than_the_cap() {
+    use crate::api::perspectives_ws::MAX_FLOW_FIRED_INSTANCES;
+    init_agent();
+    let p = registered_perspective(&[("Todo", TODO_SDNA)]).await;
+    let at_cap: Vec<String> = (0..MAX_FLOW_FIRED_INSTANCES)
+        .map(|i| format!("test://run-{i}"))
+        .collect();
+    let reply = call(
+        "perspective.flowFired",
+        json!({ "uuid": p.0, "instances": at_cap }),
+        admin_ctx(),
+    )
+    .await
+    .expect("the cap itself is allowed");
+    assert_eq!(reply.as_array().unwrap().len(), MAX_FLOW_FIRED_INSTANCES);
+
+    // Duplicates count toward the cap: it bounds the reply, not the reads.
+    let over: Vec<&str> = vec!["test://same"; MAX_FLOW_FIRED_INSTANCES + 1];
+    let err = call(
+        "perspective.flowFired",
+        json!({ "uuid": p.0, "instances": over }),
+        admin_ctx(),
+    )
+    .await
+    .expect_err("over the cap");
+    assert_eq!(err.code, 400);
+    assert!(err.message.contains("the limit is"), "{}", err.message);
+}
+
 #[tokio::test]
 async fn agents_by_dids_rejects_more_than_the_cap() {
     use crate::api::agent_ws::MAX_AGENTS_BY_DIDS;
@@ -389,4 +421,26 @@ async fn agents_by_dids_rejects_more_than_the_cap() {
         .await
         .expect_err("over the cap");
     assert_eq!(err.code, 400);
+}
+
+#[tokio::test]
+async fn expressions_get_many_rejects_more_than_the_cap() {
+    use crate::api::expressions_ws::MAX_EXPRESSIONS_GET_MANY;
+    init_agent();
+    // URLs that do not parse resolve to `null` without a language lookup.
+    let at_cap: Vec<String> = (0..MAX_EXPRESSIONS_GET_MANY)
+        .map(|i| format!("not-an-expression-url-{i}"))
+        .collect();
+    let reply = call("expression.getMany", json!({ "urls": at_cap }), admin_ctx())
+        .await
+        .expect("the cap itself is allowed");
+    assert_eq!(reply.as_array().unwrap().len(), MAX_EXPRESSIONS_GET_MANY);
+
+    // Duplicates count toward the cap: it bounds the reply, not the lookups.
+    let over: Vec<&str> = vec!["not-an-expression-url"; MAX_EXPRESSIONS_GET_MANY + 1];
+    let err = call("expression.getMany", json!({ "urls": over }), admin_ctx())
+        .await
+        .expect_err("over the cap");
+    assert_eq!(err.code, 400);
+    assert!(err.message.contains("the limit is"), "{}", err.message);
 }

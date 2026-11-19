@@ -111,6 +111,8 @@ fn input(query: Value) -> ModelQueryInput {
     if input.include_unverified.is_none() {
         input.include_unverified = Some(true);
     }
+    // The tests compare `totalCount` with the rows.
+    input.count.get_or_insert(true);
     input
 }
 
@@ -197,12 +199,12 @@ async fn ids_on_every_plan_of(
         "single-phase and paginated plans disagree on {where_clause}"
     );
     assert_eq!(
-        count.total_count,
+        count.total_count.unwrap(),
         ids(&single).len(),
         "COUNT disagrees with the rows for {where_clause}"
     );
     assert_eq!(
-        single.total_count,
+        single.total_count.unwrap(),
         ids(&single).len(),
         "totalCount disagrees with the rows for {where_clause}"
     );

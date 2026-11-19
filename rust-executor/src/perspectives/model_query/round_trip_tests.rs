@@ -74,6 +74,40 @@ fn round_trip_preserves_basic_property() {
     assert_eq!(name.resolve_language.as_deref(), Some("literal"));
 }
 
+/// A relation's declared `polymorphic` survives JSON -> `ad4m://polymorphic`
+/// link -> `load_shape`, and a relation that does not declare it emits no link.
+#[test]
+fn round_trip_preserves_declared_polymorphic() {
+    let shacl_json = r#"{
+        "target_class": "ns://Placement",
+        "properties": [
+            { "path": "ns://node", "name": "node", "node_kind": "IRI",
+              "relation_kind": "hasOne", "target_class_name": "", "polymorphic": true },
+            { "path": "ns://plain", "name": "plain", "node_kind": "IRI",
+              "relation_kind": "hasOne", "target_class_name": "" }
+        ]
+    }"#;
+    let links = parse_shacl_to_links(shacl_json, "Placement").expect("parse SHACL");
+    let poly: Vec<_> = links
+        .iter()
+        .filter(|l| l.predicate.as_deref() == Some("ad4m://polymorphic"))
+        .collect();
+    assert_eq!(poly.len(), 1, "only the declaring relation emits it");
+    assert!(poly[0].source.ends_with("Placement.node"));
+    assert_eq!(poly[0].target, "literal:true");
+
+    let shape = round_trip("Placement", shacl_json);
+    let rel = |name: &str| {
+        shape
+            .include_relations
+            .iter()
+            .find(|r| r.name == name)
+            .unwrap_or_else(|| panic!("relation {name}"))
+    };
+    assert!(rel("node").polymorphic);
+    assert!(!rel("plain").polymorphic);
+}
+
 #[test]
 fn round_trip_preserves_getter() {
     let shacl_json = r#"{
