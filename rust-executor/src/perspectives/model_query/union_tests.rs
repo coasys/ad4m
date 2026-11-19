@@ -647,7 +647,10 @@ async fn union_hydrates_only_the_page() {
         );
         for (row, &i) in result.instances.iter().zip(&expected) {
             assert_eq!(row["__subjectClass"], class_of(i), "{q}: {row}");
-            assert_eq!(row["__subjectClasses"], serde_json::json!([class_of(i)]));
+            assert_eq!(
+                row["__subjectClasses"],
+                serde_json::json!([format!("app://models/{}", class_of(i))])
+            );
             assert_eq!(
                 row["file"],
                 serde_json::json!(format!("data:{};base64,{i}", file_type(i))),
@@ -719,7 +722,7 @@ async fn union_page_classifies_a_two_class_record_and_filters_after_hydration() 
             .map(|v| v.as_str().unwrap())
             .collect();
         all.sort();
-        assert_eq!(all, vec!["Clip", "Post"], "{q}");
+        assert_eq!(all, vec!["app://models/Clip", "app://models/Post"], "{q}");
     }
 
     // `timestamp` is matched after hydration.
