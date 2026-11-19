@@ -608,6 +608,16 @@ pub struct InterpretationOutcome {
 /// The scope is the rows under `base_prefix` and, when the pass has an
 /// existing scope, the rows in it (`existing`). Without an existing scope
 /// and with an empty `base_prefix`, each row is in scope.
+///
+/// A processor with a prefix per source (one per call) and no existing
+/// scope therefore cannot update a row of an earlier source, also at
+/// `maxToolCalls: 0`: a rolling summary over many calls stops growing. Give
+/// such a processor an `existingScope` that holds those rows, or a prefix
+/// that stays the same across sources, to allow those updates.
+///
+/// The match is a literal string prefix: `we://interpreted/call1` also
+/// matches `we://interpreted/call12/...`. End the prefix with a delimiter
+/// (`we://interpreted/call1/`).
 pub(crate) fn keep_content_outside_scope(
     ops: Vec<InterpretationOp>,
     shapes: &[ModelShape],
