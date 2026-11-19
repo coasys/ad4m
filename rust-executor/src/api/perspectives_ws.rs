@@ -1602,11 +1602,10 @@ async fn run_interpretation_with_harness_handler(
             body.max_tool_calls,
             caller,
             emit_ctx.as_ref(),
-            // WS-RPC is the one-shot path — dedup-on-drain stays off; the
-            // caller reaches for the harness specifically to trust the LLM
-            // to `_query` before proposing. The auto-processor watcher is
-            // the caller that passes `true`.
-            false,
+            // Dedup on drain, as `runInterpretation` and the watcher: a
+            // same-title duplicate must not depend on whether the harness
+            // succeeded or fell back (Lal on #1812).
+            true,
             credit_gate,
             // Direct WS runs default to all flows on the perspective; a
             // `flows` request field can narrow this later (per-run flow
