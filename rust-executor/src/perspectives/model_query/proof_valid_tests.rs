@@ -310,13 +310,14 @@ async fn proof_valid_where_does_not_select_on_a_forged_value() {
         "Recipe",
         &ModelQueryInput {
             limit: Some(0),
+            count: Some(true),
             ..by_forged_name()
         },
         PV_SHAPE_JSON,
     )
     .await
     .unwrap();
-    assert_eq!(count.total_count, 0, "counted by a forged value");
+    assert_eq!(count.total_count.unwrap(), 0, "counted by a forged value");
 }
 
 /// Genuine recipes `a`, `b`, `c` (typed at :10, :11, :12) with every order key
@@ -417,6 +418,7 @@ async fn proof_valid_unverified_links_do_not_reorder_a_page() {
         limit,
         offset,
         include_unverified,
+        count: Some(true),
         projections: Some(projections.clone()),
         ..Default::default()
     };
@@ -476,7 +478,7 @@ async fn proof_valid_unverified_links_do_not_reorder_a_page() {
         let all = pv_page(&dirty, &shape, &resolver, query(order, None, None, None)).await;
         assert_eq!(all.instances.len(), 3, "order {order:?}");
         assert_eq!(
-            first.total_count,
+            first.total_count.unwrap(),
             all.instances.len(),
             "order {order:?}: totalCount disagrees with the rows"
         );
