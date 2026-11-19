@@ -3,6 +3,7 @@ use serde_json::Value as JsonValue;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::runtime::Builder;
 use tokio::sync::{
@@ -15,7 +16,7 @@ use crate::languages::capability::{parse_capability_list, Capability};
 use crate::languages::LanguageContext;
 
 use super::language_runtime::{
-    LanguageOperation, LanguageRuntime, LanguageRuntimeRequest, RunningRequest,
+    LanguageOperation, LanguageRuntime, LanguageRuntimeRequest, QueuedRequests, RunningRequest,
 };
 
 /// How long a script call into a language (`Execute`) may run before the calls behind it stop
@@ -35,6 +36,14 @@ pub(crate) const LANGUAGE_CALL_DEADLINE: Duration = Duration::from_secs(60);
 /// Ids for `LanguageRuntimeRequest::id`.
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(0);
 
+/// What [`LanguageRuntimeHandle::queue_snapshot`] reports.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct QueueSnapshot {
+    pub depth: usize,
+    pub oldest_wait: Duration,
+    pub running_for: Option<Duration>,
+}
+
 /// Handle to a per-language runtime running in its own thread.
 /// Thin communication layer that sends requests to a LanguageRuntime
 /// via a channel.
@@ -47,6 +56,8 @@ pub struct LanguageRuntimeHandle {
     call_deadline: Duration,
     /// The request the runtime is running.
     running: RunningRequest,
+    /// The requests sent and not yet taken by the runtime (`queue_report`).
+    queued: QueuedRequests,
 }
 
 impl LanguageRuntimeHandle {
@@ -68,6 +79,8 @@ impl LanguageRuntimeHandle {
         let prefix_len = 8.min(addr.len());
         let running = RunningRequest::default();
         let runtime_running = running.clone();
+        let queued = QueuedRequests::default();
+        let runtime_queued = queued.clone();
 
         std::thread::Builder::new()
             .name(format!("lang-{}", &addr[..prefix_len]))
@@ -87,7 +100,9 @@ impl LanguageRuntimeHandle {
                         return;
                     }
 
-                    runtime.process_requests(rx, runtime_running).await;
+                    runtime
+                        .process_requests(rx, runtime_running, runtime_queued)
+                        .await;
                 });
             })
             .map_err(|e| format!("Failed to spawn language thread: {}", e))?;
@@ -99,6 +114,7 @@ impl LanguageRuntimeHandle {
             tx,
             call_deadline: LANGUAGE_CALL_DEADLINE,
             running,
+            queued,
         })
     }
 
@@ -115,6 +131,7 @@ impl LanguageRuntimeHandle {
             tx,
             call_deadline: LANGUAGE_CALL_DEADLINE,
             running: RunningRequest::default(),
+            queued: QueuedRequests::default(),
         }
     }
 
@@ -129,6 +146,22 @@ impl LanguageRuntimeHandle {
     #[cfg(test)]
     pub(crate) fn running_request(&self) -> RunningRequest {
         self.running.clone()
+    }
+
+    /// How many calls wait in this runtime's queue, how long the oldest has waited, and how
+    /// long the running call has run; `None` when nothing waits.
+    pub(crate) fn queue_snapshot(&self) -> Option<QueueSnapshot> {
+        let queued = self.queued.lock().unwrap();
+        let oldest = queued.values().min().copied()?;
+        Some(QueueSnapshot {
+            depth: queued.len(),
+            oldest_wait: oldest.elapsed(),
+            running_for: self
+                .running
+                .lock()
+                .unwrap()
+                .map(|(_, since)| since.elapsed()),
+        })
     }
 
     /// The error for a call that will not run because the language's running call has run for
@@ -194,20 +227,36 @@ impl LanguageRuntimeHandle {
             }
         }
         let id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
-        self.tx
-            .send(LanguageRuntimeRequest {
-                operation,
-                response_tx,
-                queued_at: Instant::now(),
-                id,
-            })
-            .map_err(|e| format!("Language runtime channel closed: {}", e))?;
+        let queued_at = Instant::now();
+        let started = Arc::new(std::sync::OnceLock::new());
+        self.queued.lock().unwrap().insert(id, queued_at);
+        if let Err(e) = self.tx.send(LanguageRuntimeRequest {
+            operation,
+            response_tx,
+            queued_at,
+            id,
+            started: started.clone(),
+        }) {
+            self.queued.lock().unwrap().remove(&id);
+            return Err(format!("Language runtime channel closed: {}", e));
+        }
 
         let response = if is_call {
             self.wait_for_call(id, response_rx).await
         } else {
             response_rx.await
         };
+        // Taken, answered or given up: no longer waiting, also for a runtime a test plays.
+        self.queued.lock().unwrap().remove(&id);
+        // For a caller that times its phases (`neighbourhood.sendBroadcast`): the time in
+        // the queue, then the time the call ran.
+        let ended = Instant::now();
+        let ran_from = started.get().copied().unwrap_or(ended);
+        crate::call_diag::phase(
+            "language_queue",
+            ran_from.saturating_duration_since(queued_at),
+        );
+        crate::call_diag::phase("language_call", ended.saturating_duration_since(ran_from));
         let result =
             response.map_err(|e| format!("Language runtime dropped without responding: {}", e))?;
 
