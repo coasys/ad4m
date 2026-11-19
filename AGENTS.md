@@ -290,10 +290,11 @@ device; room capacity comes from the
 space's policy (`maxMeshParticipants × 4`, 128 without one), and cascade
 per-node capacity only drives redirects; the server drops a peer only after
 10 s of ICE `Disconnected`, or, once the client asked for an ICE restart
-(`sfu.callRestartIce`), 10 s after the request or after the restart's answer;
+(`sfu.callRestartIce`), 15 s after the request. The restart's answer ends
+that grace and the 10 s disconnect clock starts again;
 on ICE `disconnected` or a network change the SDK restarts ICE in place (the
 SFU stays the only offerer: the restart comes as a server renegotiation
-offer), and rebuilds the call if that has not reconnected within 5 s; a
+offer), and rebuilds the call if that has not reconnected within 15 s; a
 failed connection is rebuilt at once, and a rebuild retries the join for
 120 s. The restart names the session's `participantId` (only that session
 restarts, never another device of the agent), and a manager with no session

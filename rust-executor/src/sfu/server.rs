@@ -148,10 +148,13 @@ pub struct IceRestart {
 pub const ICE_DISCONNECT_GRACE: Duration = Duration::from_secs(10);
 
 /// How long a peer whose client asked for an ICE restart is kept, from the
-/// request, however long it was disconnected before. The restart's answer
-/// ends it and restarts the disconnect clock: ICE checks again, but its state
-/// arrives only on the next poll.
-pub const ICE_RESTART_GRACE: Duration = Duration::from_secs(10);
+/// request, however long it was disconnected before. The first resend of
+/// that offer is due after 10 s. This grace is that wait plus 5 s, so the
+/// offer is published while the peer is still up and the client still has
+/// time to answer. A resend does not move the clock. The restart's answer
+/// ends the grace and the disconnect clock starts again: ICE checks again,
+/// but its state arrives only on the next poll.
+pub const ICE_RESTART_GRACE: Duration = Duration::from_secs(15);
 
 /// Wait before the first resend of an unanswered offer. The wait doubles
 /// after each resend: 10s, then 20s, then 40s. Two resends, then the peer
@@ -3595,6 +3598,29 @@ mod tests {
         assert_eq!(peer.pending.as_ref().unwrap().sdp, sdp);
         assert_eq!(peer.ice_restart.as_ref().unwrap().since, now);
         assert!(peer.stayed_disconnected(now + ICE_RESTART_GRACE));
+    }
+
+    /// The first resend of a lost restart offer is published while the
+    /// restart grace still holds the peer. The grace then ends on the
+    /// original request clock.
+    #[test]
+    fn a_restart_resend_is_published_while_the_peer_is_kept() {
+        let (_caller, mut peer) = connected_pair();
+        let now = Instant::now();
+        peer.on_ice_state(IceConnectionState::Disconnected, now);
+        peer.restart_ice(now);
+        let (sdp, _) = apply_deferred_tracks(&mut peer, now).expect("the restart is offered");
+        let pid = peer.id.clone();
+        let mut peers = HashMap::from([(pid.clone(), peer)]);
+        let due = sweep_offer_deadlines(&mut peers, now + OFFER_RETRY_BASE);
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].sdp, sdp);
+        assert!(
+            !peers[&pid].stayed_disconnected(now + OFFER_RETRY_BASE),
+            "the peer is dropped before the resend can be published"
+        );
+        assert!(peers[&pid].rtc.is_alive());
+        assert!(peers[&pid].stayed_disconnected(now + ICE_RESTART_GRACE));
     }
 
     /// Empty trickle text is end-of-candidates. A bad candidate stays an error.
