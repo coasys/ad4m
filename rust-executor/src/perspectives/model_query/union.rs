@@ -543,9 +543,7 @@ pub async fn execute_union_query_with_views(
             let mut conforms: Vec<String> = Vec::new();
             for class in classified.get(id).into_iter().flatten() {
                 for key in readers {
-                    if (*key == class || **key == class_name_of(class))
-                        && !conforms.contains(key)
-                    {
+                    if (*key == class || **key == class_name_of(class)) && !conforms.contains(key) {
                         conforms.push((*key).clone());
                     }
                 }
@@ -598,12 +596,14 @@ pub async fn execute_union_query_with_views(
         .map(|m| m.id.clone())
         .collect();
     if !unclassified.is_empty() {
-        classified.extend(crate::perspectives::subject_classes_of::subject_class_iris_of(
-            stop,
-            store,
-            resolver,
-            &unclassified,
-        )?);
+        classified.extend(
+            crate::perspectives::subject_classes_of::subject_class_iris_of(
+                stop,
+                store,
+                resolver,
+                &unclassified,
+            )?,
+        );
     }
 
     // 4. Hydrate the page as the caller asked, one query per chosen class.
