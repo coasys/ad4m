@@ -431,6 +431,8 @@ impl RemoteStream {
                 outcome = &mut call => break outcome,
             }
         };
+        // Only the upstream call: the drain, failure handling and billing below are not timed.
+        let upstream_ms = started.elapsed().as_millis();
         while let Ok(piece) = pieces.try_recv() {
             self.publish_piece(&piece, &mut published).await;
         }
@@ -449,7 +451,7 @@ impl RemoteStream {
                 }
                 return Finished {
                     result: Err(anyhow!(TranscribeFailure::of(&e).to_string())),
-                    upstream_ms: Some(started.elapsed().as_millis()),
+                    upstream_ms: Some(upstream_ms),
                     outcome: UtteranceOutcome::UpstreamFailed,
                     audio_ms,
                     words,
@@ -458,7 +460,6 @@ impl RemoteStream {
             }
         };
         let words = text.split_whitespace().count();
-        let upstream_ms = started.elapsed().as_millis();
         if words > 0 {
             bill_transcription(self.agent_did.as_deref(), &self.model_id, words);
         }
