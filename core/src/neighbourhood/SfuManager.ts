@@ -354,6 +354,10 @@ export class SfuManager {
     private unlistedTimer: ReturnType<typeof setTimeout> | null = null
     /** How long the roster may leave this session out before the call is rebuilt. */
     private static readonly UNLISTED_GRACE_MS = 3_000
+    /** How long after the socket is back ICE has to be connected before it is restarted. */
+    private static readonly ICE_CHECK_AFTER_SOCKET_MS = 2_000
+    /** Running from a socket reconnect or network change until ICE is looked at: see `checkIceSoon`. */
+    private iceCheckTimer: ReturnType<typeof setTimeout> | null = null
 
     constructor(
         neighbourhood: SfuNeighbourhoodApi,
@@ -500,6 +504,26 @@ export class SfuManager {
         })
     }
 
+    /**
+     * The socket is back (a reconnect, or a network change): restart ICE if
+     * it is not connected ICE_CHECK_AFTER_SOCKET_MS later. Media that kept
+     * flowing through a socket fault is left alone. A restart in flight is
+     * replaced: its request may have gone out on the dead socket. If that
+     * restart's offer is still unanswered, the executor sends it again and,
+     * once it is answered, restarts again for this network.
+     */
+    private checkIceSoon(): void {
+        if (this.iceCheckTimer) clearTimeout(this.iceCheckTimer)
+        this.iceCheckTimer = setTimeout(() => {
+            this.iceCheckTimer = null
+            const pc = this.state.peerConnection
+            if (!pc || this.reconnecting) return
+            if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") return
+            this.endRestart()
+            this.restartIce(pc)
+        }, SfuManager.ICE_CHECK_AFTER_SOCKET_MS)
+    }
+
     private endRestart(): void {
         if (this.restartTimer) {
             clearTimeout(this.restartTimer)
@@ -575,20 +599,12 @@ export class SfuManager {
             }
         }
 
-        // A network change: the path ICE uses is likely gone, though ICE may
-        // not have noticed yet. Restart it now, on the socket the change
-        // reconnected, with its own timeout. If a restart's offer is still
-        // unanswered (it went out over the old network and may never have
-        // arrived), the executor sends it again and, once it is answered,
-        // restarts again for this network. Listened to once per call, not
-        // per rebuild.
+        // A network change: the socket was redialled, and the path ICE uses
+        // may be gone too, or may not: a socket dropped for a late pong says
+        // nothing about media. See `checkIceSoon`. Listened to once per call,
+        // not per rebuild.
         if (!this.networkUnsubscribe) {
-            this.networkUnsubscribe = this.neighbourhood.onNetworkChange(() => {
-                const current = this.state.peerConnection
-                if (!current || this.reconnecting) return
-                this.endRestart()
-                this.restartIce(current)
-            })
+            this.networkUnsubscribe = this.neighbourhood.onNetworkChange(() => this.checkIceSoon())
         }
         // The socket came back: what a fault kept from the executor goes out now.
         if (!this.reconnectUnsubscribe && this.neighbourhood.onReconnect) {
@@ -944,6 +960,7 @@ export class SfuManager {
     private socketBack(): void {
         const pc = this.state.peerConnection
         if (!pc || this.reconnecting) return
+        this.checkIceSoon()
         this.offerQueue = this.offerQueue.then(async () => {
             const unsent = this.unsentAnswer
             if (unsent?.pc === pc && this.state.peerConnection === pc) await this.sendAnswer(unsent)
@@ -1036,6 +1053,10 @@ export class SfuManager {
         this.networkUnsubscribe = null
         this.reconnectUnsubscribe?.()
         this.reconnectUnsubscribe = null
+        if (this.iceCheckTimer) {
+            clearTimeout(this.iceCheckTimer)
+            this.iceCheckTimer = null
+        }
         this.unsentAnswer = null
         this.senders.clear()
         this.replacedTracks.clear()
