@@ -21,6 +21,10 @@ use std::sync::Arc;
 pub const DEFAULT_SEARCH_K: usize = 10;
 /// The most rows one search returns.
 pub const MAX_SEARCH_K: usize = 50;
+/// The most rows one search compares. `e2e_instance_embedding_timings` measured 0.8 to
+/// 3.8 s for one search over 50,000 cached vectors; a larger perspective is searched in
+/// part, and the result says so (narrow it with `class_name` or `parent`).
+pub const MAX_SEARCH_CANDIDATES: usize = 50_000;
 
 /// One row a search found.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -50,6 +54,9 @@ pub struct SearchResult {
     pub scoring: Scoring,
     /// Rows the search compared.
     pub searched: usize,
+    /// Rows with a title in scope, when there were more than [`MAX_SEARCH_CANDIDATES`]: the
+    /// search compared only the first of them.
+    pub capped_from: Option<usize>,
 }
 
 /// A row a search can return: its id, class and title.
@@ -158,11 +165,12 @@ pub(crate) async fn rank_rows(
                     .map(|(c, score)| hit(c, score))
                     .collect();
                 return SearchResult {
-                    hits: best(hits, k),
+                    hits: best_off_runtime(hits, k).await,
                     scoring: Scoring::Embedding {
                         model: model.to_string(),
                     },
                     searched,
+                    capped_from: None,
                 };
             }
             Err(e) => {
@@ -176,10 +184,18 @@ pub(crate) async fn rank_rows(
         .map(|c| hit(c, word_overlap(text, &c.title)))
         .collect();
     SearchResult {
-        hits: best(hits, k),
+        hits: best_off_runtime(hits, k).await,
         scoring: Scoring::WordOverlap { why },
         searched,
+        capped_from: None,
     }
+}
+
+/// [`best`] on a blocking thread: the sort of a large candidate set is not async work.
+async fn best_off_runtime(scored: Vec<SearchHit>, k: usize) -> Vec<SearchHit> {
+    tokio::task::spawn_blocking(move || best(scored, k))
+        .await
+        .unwrap_or_default()
 }
 
 fn hit(c: &Candidate, score: f32) -> SearchHit {
@@ -208,7 +224,9 @@ async fn embedding_scores(
         .into_iter()
         .next()
         .ok_or_else(|| anyhow::anyhow!("no vector for the search text"))?;
-    Ok(vectors.iter().map(|v| cosine(&query, v)).collect())
+    tokio::task::spawn_blocking(move || vectors.iter().map(|v| cosine(&query, v)).collect())
+        .await
+        .map_err(|e| anyhow::anyhow!("scoring failed: {e}"))
 }
 
 /// Cosine of two vectors; 0 when their lengths differ (vectors of two models).
@@ -261,12 +279,24 @@ pub async fn search_instances(
                 .collect()
         }
     };
-    let candidates = load_candidates(perspective, &classes, parent)
+    let mut candidates = load_candidates(perspective, &classes, parent)
         .await
         .map_err(SearchError::Read)?;
+    let capped_from = cap_candidates(&mut candidates, MAX_SEARCH_CANDIDATES);
     let k = k.unwrap_or(DEFAULT_SEARCH_K).clamp(1, MAX_SEARCH_K);
     let model = default_embedding_model();
-    Ok(rank_rows(&perspective.uuid, text, &candidates, k, model.as_deref()).await)
+    let mut result = rank_rows(&perspective.uuid, text, &candidates, k, model.as_deref()).await;
+    result.capped_from = capped_from;
+    Ok(result)
+}
+
+/// Keep the first `max` of `candidates`. `Some(count before)` when some were dropped.
+fn cap_candidates(candidates: &mut Vec<Candidate>, max: usize) -> Option<usize> {
+    let total = candidates.len();
+    (total > max).then(|| {
+        candidates.truncate(max);
+        total
+    })
 }
 
 #[cfg(test)]
@@ -281,6 +311,15 @@ mod tests {
                 title: title.to_string(),
             })
             .collect()
+    }
+
+    #[test]
+    fn a_search_compares_at_most_the_candidate_cap_and_says_from_how_many() {
+        let mut rows = candidates(&[("a", "x"), ("b", "y"), ("c", "z")]);
+        assert_eq!(cap_candidates(&mut rows, 3), None);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(cap_candidates(&mut rows, 2), Some(3));
+        assert_eq!(rows.len(), 2);
     }
 
     #[test]

@@ -73,23 +73,32 @@ pub(crate) async fn embed_rows(
 ) -> anyhow::Result<(Vec<Vec<f32>>, CacheStats)> {
     let (model_id, key) = resolve_embedding_model(model)
         .ok_or_else(|| anyhow::anyhow!("no EMBEDDING model '{model}' on this executor"))?;
-    let db = crate::db_backend::db_backend();
-    let ids: Vec<String> = rows.iter().map(|(id, _)| id.clone()).collect();
-    let stored: HashMap<String, InstanceEmbeddingRow> = db
-        .get_instance_embeddings(perspective, &key, &ids)?
-        .into_iter()
-        .map(|row| (row.instance_id.clone(), row))
-        .collect();
-
-    let hashes: Vec<String> = rows.iter().map(|(_, text)| text_sha256(text)).collect();
-    let mut out: Vec<Option<Vec<f32>>> = vec![None; rows.len()];
-    let mut missing: Vec<usize> = Vec::new();
-    for (i, (id, _)) in rows.iter().enumerate() {
-        match stored.get(id) {
-            Some(row) if row.text_sha256 == hashes[i] => out[i] = Some(row.vector.clone()),
-            _ => missing.push(i),
-        }
-    }
+    // The read and the hashing are synchronous work on the database lock: off the async
+    // worker, so a large perspective does not stall other tasks.
+    let (mut out, missing, hashes) = {
+        let perspective = perspective.to_string();
+        let key = key.clone();
+        let rows = rows.to_vec();
+        tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+            let ids: Vec<String> = rows.iter().map(|(id, _)| id.clone()).collect();
+            let stored: HashMap<String, InstanceEmbeddingRow> = crate::db_backend::db_backend()
+                .get_instance_embeddings(&perspective, &key, &ids)?
+                .into_iter()
+                .map(|row| (row.instance_id.clone(), row))
+                .collect();
+            let hashes: Vec<String> = rows.iter().map(|(_, text)| text_sha256(text)).collect();
+            let mut out: Vec<Option<Vec<f32>>> = vec![None; rows.len()];
+            let mut missing: Vec<usize> = Vec::new();
+            for (i, (id, _)) in rows.iter().enumerate() {
+                match stored.get(id) {
+                    Some(row) if row.text_sha256 == hashes[i] => out[i] = Some(row.vector.clone()),
+                    _ => missing.push(i),
+                }
+            }
+            Ok((out, missing, hashes))
+        })
+        .await??
+    };
     let stats = CacheStats {
         cached: rows.len() - missing.len(),
         embedded: missing.len(),
@@ -113,7 +122,18 @@ pub(crate) async fn embed_rows(
                 vector: vector.clone(),
             })
             .collect();
-        db.put_instance_embeddings(perspective, &key, &new_rows)?;
+        {
+            let perspective = perspective.to_string();
+            let key = key.clone();
+            tokio::task::spawn_blocking(move || {
+                crate::db_backend::db_backend().put_instance_embeddings(
+                    &perspective,
+                    &key,
+                    &new_rows,
+                )
+            })
+            .await??;
+        }
         for (&i, vector) in missing.iter().zip(vectors) {
             out[i] = Some(vector);
         }

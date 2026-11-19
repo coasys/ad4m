@@ -53,6 +53,13 @@ impl Ad4mMcpHandler {
                         "score": (h.score * 1000.0).round() / 1000.0,
                     })).collect::<Vec<_>>(),
                 });
+                if let Some(total) = result.capped_from {
+                    out["capped"] = json!(format!(
+                        "{total} rows have a title in scope; the search compared the first {}. \
+                         Narrow it with class_name or parent.",
+                        result.searched
+                    ));
+                }
                 match result.scoring {
                     Scoring::Embedding { model } => {
                         out["scoring"] = json!("embedding");
