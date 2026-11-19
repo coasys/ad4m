@@ -852,12 +852,14 @@ describe("Multi-User Simple integration tests", () => {
             console.log("User 1 DID:", user1Agent.did);
             console.log("User 2 DID:", user2Agent.did);
 
-            // Poll until agents are published and retrievable by DID
+            // Poll until agents are published and retrievable by DID. user.create replies
+            // before the publish (which queues behind other agents' publishes on the
+            // agent language), so this wait covers it: 30 s, the RPC timeout it used to get.
             await pollUntil(async () => {
                 const r1 = await adminAd4mClient!.agent.byDID(user1Agent.did);
                 const r2 = await adminAd4mClient!.agent.byDID(user2Agent.did);
                 return r1 !== null && r2 !== null;
-            }, { timeoutMs: 10000, label: "agents published and retrievable by DID" });
+            }, { timeoutMs: 30000, label: "agents published and retrievable by DID" });
 
             // Retrieve the users from the agent language by their DIDs
             try {

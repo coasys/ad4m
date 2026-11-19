@@ -279,6 +279,7 @@ async fn union_pages_on_the_creation_time_its_rows_carry() {
     task(&store, "app://t_mid", None, "open", "20");
 
     let paged_single = execute_model_query_inner(
+        &EvalStop::none(),
         &store,
         resolver.get_shape("Task").unwrap().as_ref(),
         &query(serde_json::json!({"limit": 2})),

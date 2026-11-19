@@ -1,5 +1,7 @@
+use super::dedup::semantic_embedding_model;
+use super::existing_budget::{existing_for_prompt, Compact};
 use super::{
-    apply_with_overlay, build_interpretation_input, build_speaker_name_map, class_label,
+    apply_with_overlay, build_interpretation_input_showing, build_speaker_name_map, class_label,
     ensure_interpretation_task_for_model, existing_instance_context, existing_relation_links,
     identity_property, normalize_identity, parse_interpretation_output,
     plan_interpretation_ops_resolved, resolve_already_present_with_strategy, DedupStrategy,
@@ -18,6 +20,7 @@ use crate::ai_service::harness::{run_with_tools, HarnessConfig};
 use crate::perspectives::model_query::types::{ModelShape, Scope};
 use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClassOption};
 use crate::types::LinkStatus;
+use anyhow::Context;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -25,6 +28,9 @@ use std::sync::Arc;
 /// retry-×5 loop: local models occasionally emit half-valid JSON, so we ask
 /// again a few times before giving up on the whole call.
 pub const INTERPRETATION_MAX_ATTEMPTS: u8 = 5;
+
+/// How much of an unparseable model response the debug log shows.
+const RAW_LOG_CHARS: usize = 500;
 
 /// Run `prompt_fn` up to [`INTERPRETATION_MAX_ATTEMPTS`] times, parsing each
 /// response as an [`InterpretationOutput`] (instances plus flow proposals). Returns the first successful parse;
@@ -47,6 +53,12 @@ where
         let raw = match prompt_fn(attempt).await {
             Ok(r) => r,
             Err(e) => {
+                // A prompt that does not fit the window will not fit on a
+                // retry. Surface it once so the caller can split the batch
+                // instead of asking the model again.
+                if crate::ai_service::prompt_does_not_fit(&e) {
+                    return Err(e);
+                }
                 log::warn!("interpretation: prompt attempt {attempt} failed: {e:#}");
                 last_err = Some(e);
                 continue;
@@ -57,6 +69,12 @@ where
             Err(e) => {
                 log::warn!(
                     "interpretation: parse attempt {attempt} failed: {e:#}; will retry (max {INTERPRETATION_MAX_ATTEMPTS})"
+                );
+                // The raw output is derived from the transcript: log only its head.
+                log::debug!(
+                    "interpretation: raw response that failed to parse ({} bytes), first {RAW_LOG_CHARS} chars: {}",
+                    raw.len(),
+                    raw.chars().take(RAW_LOG_CHARS).collect::<String>()
                 );
                 last_err = Some(e);
             }
@@ -499,7 +517,33 @@ pub async fn run_interpretation_observed(
     scope: Option<&Scope>,
     emit_ctx: Option<&crate::perspectives::auto_processor::events::InterpretationEmitContext>,
 ) -> anyhow::Result<Vec<String>> {
-    run_interpretation_with_strategy_and_model(
+    run_interpretation_observed_linked(
+        perspective,
+        shapes,
+        transcript,
+        base_prefix,
+        context,
+        scope,
+        emit_ctx,
+        None,
+    )
+    .await
+}
+
+/// [`run_interpretation_observed`] that links each committed slice under
+/// `slice_link` before the next slice reads existing records.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_interpretation_observed_linked(
+    perspective: &mut PerspectiveInstance,
+    shapes: &[ModelShape],
+    transcript: &[TranscriptTurn],
+    base_prefix: &str,
+    context: &AgentContext,
+    scope: Option<&Scope>,
+    emit_ctx: Option<&crate::perspectives::auto_processor::events::InterpretationEmitContext>,
+    slice_link: Option<&super::SliceScopeLink<'_>>,
+) -> anyhow::Result<Vec<String>> {
+    run_interpretation_with_strategy_and_model_linked(
         perspective,
         shapes,
         transcript,
@@ -512,6 +556,7 @@ pub async fn run_interpretation_observed(
         false,
         emit_ctx,
         None,
+        slice_link,
     )
     .await
     .map(|out| out.bases)
@@ -586,6 +631,10 @@ pub struct InterpretationOutcome {
     pub flow_proposals: Vec<String>,
 }
 
+/// [`run_interpretation_with_strategy`] with a per-call model override.
+///
+/// A batch whose prompt does not fit the model window is split in half and
+/// each half is run on its own. See [`super::overflow`].
 pub async fn run_interpretation_with_strategy_and_model(
     perspective: &mut PerspectiveInstance,
     shapes: &[ModelShape],
@@ -600,9 +649,78 @@ pub async fn run_interpretation_with_strategy_and_model(
     emit_ctx: Option<&crate::perspectives::auto_processor::events::InterpretationEmitContext>,
     flow_filter: Option<&[String]>,
 ) -> anyhow::Result<InterpretationOutcome> {
-    // Returns a task already spawned into its LLM worker, so `prompt` can use it
-    // immediately (see `ensure_interpretation_task_for_model`).
-    let task = ensure_interpretation_task_for_model(model_override).await?;
+    run_interpretation_with_strategy_and_model_linked(
+        perspective,
+        shapes,
+        transcript,
+        base_prefix,
+        context,
+        dedup_strategy,
+        model_override,
+        scope,
+        cursor,
+        emit_debug_events,
+        emit_ctx,
+        flow_filter,
+        None,
+    )
+    .await
+}
+
+/// [`run_interpretation_with_strategy_and_model`] that links each committed
+/// slice before the next slice loads existing records. The link type stays
+/// crate-private, so this entry point does too.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_interpretation_with_strategy_and_model_linked(
+    perspective: &mut PerspectiveInstance,
+    shapes: &[ModelShape],
+    transcript: &[TranscriptTurn],
+    base_prefix: &str,
+    context: &AgentContext,
+    dedup_strategy: &DedupStrategy,
+    model_override: Option<&str>,
+    scope: Option<&Scope>,
+    cursor: Option<&InterpretationRunCursor>,
+    emit_debug_events: bool,
+    emit_ctx: Option<&crate::perspectives::auto_processor::events::InterpretationEmitContext>,
+    flow_filter: Option<&[String]>,
+    slice_link: Option<&super::SliceScopeLink<'_>>,
+) -> anyhow::Result<InterpretationOutcome> {
+    super::overflow::split_overflowing_batch(
+        perspective,
+        shapes,
+        transcript,
+        base_prefix,
+        context,
+        dedup_strategy,
+        model_override,
+        scope,
+        cursor,
+        emit_debug_events,
+        emit_ctx,
+        flow_filter,
+        slice_link,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn run_interpretation_once(
+    perspective: &mut PerspectiveInstance,
+    shapes: &[ModelShape],
+    transcript: &[TranscriptTurn],
+    base_prefix: &str,
+    context: &AgentContext,
+    dedup_strategy: &DedupStrategy,
+    model_override: Option<&str>,
+    scope: Option<&Scope>,
+    cursor: Option<&InterpretationRunCursor>,
+    emit_debug_events: bool,
+    emit_ctx: Option<&crate::perspectives::auto_processor::events::InterpretationEmitContext>,
+    flow_filter: Option<&[String]>,
+) -> anyhow::Result<InterpretationOutcome> {
+    // The task row `prompt` reads (see `ensure_interpretation_task_for_model`).
+    let task = ensure_interpretation_task_for_model(model_override)?;
     let interpretation_started = std::time::Instant::now();
     let class_names: Vec<String> = shapes
         .iter()
@@ -646,20 +764,9 @@ pub async fn run_interpretation_with_strategy_and_model(
         // never blinds the extraction pass; the fallback is byte-for-byte
         // the pre-slice-10.2 prompt shape.
         //
-        // Flow subjects = the URIs the pass is actually interpreting.
-        // Prefer `cursor.sources` (the drained batch bases the auto-processor
-        // threaded through as `InterpretationRunCursor`); a dedup `Scope` is
-        // a legacy fallback for callers that predate the cursor (see J#1,
-        // PR #929 James review). Empty subjects → no flow context in the
-        // prompt (bounded), not the whole-perspective sweep the pre-fix
-        // `None` path did.
-        let flow_subjects: Vec<String> = if let Some(c) = cursor {
-            c.sources.clone()
-        } else if let Some(s) = scope {
-            vec![crate::perspectives::flow_context::scope_subject(s).to_string()]
-        } else {
-            Vec::new()
-        };
+        // Flow subjects = the records the prompt shows as `existing` (#1257);
+        // see [`flow_subjects_for_pass`].
+        let flow_subjects = flow_subjects_for_pass(&existing_ctx, scope);
         let active_flows = crate::perspectives::flow_context::gather_active_flow_contexts(
             perspective,
             context,
@@ -668,12 +775,30 @@ pub async fn run_interpretation_with_strategy_and_model(
         )
         .await;
         let speaker_names = build_speaker_name_map(transcript);
-        let prompt = build_interpretation_input(
+        // The prompt shows a budgeted, compact view of `existing` (#1804);
+        // everything after the model's answer still reads the full set.
+        let embed_model = semantic_embedding_model(dedup_strategy);
+        let shown = existing_for_prompt(
+            &task,
             shapes,
             transcript,
             &existing_ctx,
             &active_flows,
             &speaker_names,
+            base_prefix,
+            embed_model.as_deref(),
+            Compact::Yes,
+            // The answer always goes through `resolve_already_present*`.
+            true,
+        )
+        .await;
+        let prompt = build_interpretation_input_showing(
+            shapes,
+            transcript,
+            &shown.shown,
+            &active_flows,
+            &speaker_names,
+            Some(shown.counts(true)),
         );
 
         let service = crate::ai_service::AIService::global_instance()
@@ -695,6 +820,9 @@ pub async fn run_interpretation_with_strategy_and_model(
         // succeeds is by construction the final (parse-successful) attempt.
         let debug_response_capture: std::sync::Arc<std::sync::Mutex<Option<String>>> =
             std::sync::Arc::new(std::sync::Mutex::new(None));
+        // One no-reasoning retry per pass. Once a pass falls back, later parse
+        // retries stay there instead of spending another reasoning attempt.
+        let stick_no_thinking = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let InterpretationOutput {
             instances,
             flow_proposals: llm_proposals,
@@ -704,6 +832,7 @@ pub async fn run_interpretation_with_strategy_and_model(
             let prompt = prompt.clone();
             let capture = debug_response_capture.clone();
             let emit_ctx_cloned = emit_ctx.cloned();
+            let stick_no_thinking = stick_no_thinking.clone();
             async move {
                 use crate::perspectives::auto_processor::events::{
                     emit, AutoProcessorEvent, AutoProcessorStep,
@@ -726,9 +855,11 @@ pub async fn run_interpretation_with_strategy_and_model(
 
                 let result = service
                     // Internal caller (interpretation runner) — no user auth context; billing skipped.
-                    .prompt(task_id, prompt, None)
+                    // Reasoning first, capped so thinking cannot overflow the window.
+                    // A size failure retries once with thinking off.
+                    .prompt_interpretation_pass(task_id, prompt, Some(stick_no_thinking.as_ref()))
                     .await
-                    .map_err(|e| anyhow::anyhow!("AIService::prompt failed: {e:#}"))?;
+                    .context("AIService::prompt failed")?;
 
                 if let Some(ctx) = emit_ctx_cloned.as_ref() {
                     emit(
@@ -754,6 +885,8 @@ pub async fn run_interpretation_with_strategy_and_model(
             }
         })
         .await?;
+        // Handles (`P3`) back to full ids.
+        let instances = shown.handles.resolve(instances, shapes);
 
         // Hard dedup guarantee: even if the model ignored the `existing` hint, an
         // already-present (class, identity value) never becomes a *new* instance.
@@ -839,15 +972,58 @@ pub async fn run_interpretation_with_strategy_and_model(
             Ok(outcome)
         }
         Err(e) => {
-            log::error!(
-                "❌ 🧠 interpretation failed model={} latency={}ms err={}",
+            // A prompt that does not fit is split by the caller; that is
+            // recovery, not a failure an operator must see.
+            let level = if crate::ai_service::prompt_does_not_fit(&e) {
+                log::Level::Debug
+            } else {
+                log::Level::Error
+            };
+            log::log!(
+                level,
+                "❌ 🧠 interpretation failed model={} latency={}ms err={e:#}",
                 model_override.unwrap_or("<default>"),
                 interpretation_started.elapsed().as_millis(),
-                e
             );
             Err(e)
         }
     }
+}
+
+/// The subjects whose live flows go into an interpretation prompt: the ids of
+/// the records the prompt shows the model as `existing` (the candidates it
+/// may update), plus the dedup `scope`'s anchor when there is one. Sorted and
+/// deduplicated so the prompt is deterministic.
+///
+/// A `FlowInstance`'s subject is the record it governs (a task's URI), so
+/// flow context is keyed on records, not on what the run consumed. The
+/// auto-processor's `cursor.sources` are turn hashes (`turn_id`), which never
+/// match a subject: keying on them left every auto-processor prompt without
+/// flow context (#1257). They are not used here; they stay the cursor's record
+/// of the turns this run processed.
+///
+/// The bound from the #929 review (J#1: never sweep every flow in the
+/// perspective) holds: `existing` is already limited by the same dedup scope,
+/// and a flow can only matter to a record the model might update. The scope
+/// anchor keeps what the manual path (scope, no cursor) loaded before.
+pub(crate) fn flow_subjects_for_pass(
+    existing: &ExistingInstances,
+    scope: Option<&Scope>,
+) -> Vec<String> {
+    let mut subjects: Vec<String> = existing
+        .values()
+        .flatten()
+        .map(|inst| inst.id.clone())
+        .chain(
+            scope
+                .map(crate::perspectives::flow_context::scope_subject)
+                .map(str::to_string),
+        )
+        .filter(|s| !s.is_empty())
+        .collect();
+    subjects.sort();
+    subjects.dedup();
+    subjects
 }
 
 /// Shared tail of both interpretation paths (single-shot strategy and the
@@ -929,7 +1105,7 @@ pub(crate) async fn apply_ops_and_run_flow_passes(
 /// strategy and harness): the LLM's writes are on the graph now, so
 /// re-evaluate the guards of every flow anchored on `subjects` — the union
 /// of what this pass wrote (`bases`) and what the LLM was shown
-/// (`flow_subjects`, i.e. cursor sources / scope anchor). The LLM's own
+/// (`flow_subjects`, see [`flow_subjects_for_pass`]). The LLM's own
 /// proposals only contribute a rationale; the semantic check reuses the
 /// extraction task so both share one worker and billing scope.
 ///
@@ -1050,7 +1226,7 @@ pub async fn run_interpretation_with_harness_and_model(
     // prompt + few-shots + billing meta come from the same row the operator
     // configured — the harness pass is just a different loop, not a
     // different LLM identity.
-    let task = ensure_interpretation_task_for_model(model_override).await?;
+    let task = ensure_interpretation_task_for_model(model_override)?;
 
     // Same existing-instance snapshot as the single-shot path: goes into the
     // prompt so the LLM has context (and can name existing `id`s in
@@ -1062,16 +1238,9 @@ pub async fn run_interpretation_with_harness_and_model(
 
     // Slice 10.3c — same flow-context load as the single-shot path.
     // Silently-empty on failure so a broken flow definition can never
-    // blind the harness pass. Subjects derived from `cursor.sources`
-    // (drained batch bases) with legacy `scope` fallback (J#1, PR #929
-    // James review).
-    let flow_subjects: Vec<String> = if let Some(c) = cursor {
-        c.sources.clone()
-    } else if let Some(s) = scope {
-        vec![crate::perspectives::flow_context::scope_subject(s).to_string()]
-    } else {
-        Vec::new()
-    };
+    // blind the harness pass. Same subjects too: the records the prompt
+    // shows as `existing` (#1257).
+    let flow_subjects = flow_subjects_for_pass(&existing_ctx, scope);
     let active_flows = crate::perspectives::flow_context::gather_active_flow_contexts(
         perspective,
         context,
@@ -1080,12 +1249,29 @@ pub async fn run_interpretation_with_harness_and_model(
     )
     .await;
     let speaker_names = build_speaker_name_map(transcript);
-    let prompt = build_interpretation_input(
+    // Budgeted like the single-shot path (#1804), but with full ids and
+    // values: the tools take ids, and the model can `_get` the rest. No
+    // dedup strategy here, so the rows that do not all fit go by recency.
+    let shown = existing_for_prompt(
+        &task,
         shapes,
         transcript,
         &existing_ctx,
         &active_flows,
         &speaker_names,
+        base_prefix,
+        None,
+        Compact::No,
+        dedup_on_drain,
+    )
+    .await;
+    let prompt = build_interpretation_input_showing(
+        shapes,
+        transcript,
+        &shown.shown,
+        &active_flows,
+        &speaker_names,
+        Some(shown.counts(dedup_on_drain)),
     );
 
     // Build per-class propose shapes from the perspective's SHACL classes,
@@ -1175,6 +1361,9 @@ pub async fn run_interpretation_with_harness_and_model(
     let service = crate::ai_service::AIService::global_instance()
         .await
         .map_err(|e| anyhow::anyhow!("run_interpretation_harness: AIService not ready: {e:#}"))?;
+    // Sized from the window the model's requests actually run at — the same
+    // resolved `num_ctx` the bridge trims its outgoing list to.
+    let tool_result_max_bytes = service.tool_result_max_bytes(&task.model_id).await;
     // A pass with a caller bills the agent it acts as (by DID); the caller's session named that
     // agent. An executor-owned pass (no caller) bills no one.
     let bill_to = context
@@ -1204,8 +1393,15 @@ pub async fn run_interpretation_with_harness_and_model(
         initial_messages,
         provider,
         bridge,
-        HarnessConfig { max_tool_calls },
-        emit_ctx,
+        HarnessConfig {
+            max_tool_calls,
+            tool_result_max_bytes,
+            // The pass's final text is discarded — a model that made its
+            // propose_* calls and went quiet is a normal finish, and each
+            // nudge would cost a billed completion nobody reads.
+            empty_completion_nudges: 0,
+        },
+        emit_ctx.map(|ctx| ctx as &dyn crate::ai_service::harness::ToolObserver),
         credit_gate,
     )
     .await?;
@@ -1309,9 +1505,9 @@ pub(crate) async fn pass_mcp_context(
         // A pass has no request headers, so nothing shows it local: any tokenless
         // fallback inside a pass is anonymous, never the operator.
         crate::agent::capabilities::ListenerReach::Network,
-        // The harness reaches tools through `list_tool_schemas` /
-        // `call_tool_by_name`, which always include the dynamic per-class
-        // tools regardless of this flag (it only gates the MCP transport).
+        // The harness bridge's `list_tool_schemas` includes the dynamic
+        // per-class tools only under this flag, and a pass takes the full
+        // generated surface before `offered_class_tools` narrows it.
         // Set explicitly so the intent is visible at the construction site.
         true,
     )
@@ -2145,6 +2341,7 @@ mod tests {
             title: "Ship the MVP".to_string(),
             class: "Intention".to_string(),
             properties: std::collections::BTreeMap::new(),
+            updated_at: String::new(),
         }]);
 
         let ops = vec![
@@ -2536,5 +2733,125 @@ mod tests {
             live.is_empty(),
             "an updated (not created) item must not spawn, got {live:?}"
         );
+    }
+
+    fn existing_of(ids: &[(&str, &str)]) -> ExistingInstances {
+        let mut out: ExistingInstances = HashMap::new();
+        for (class, id) in ids {
+            out.entry(class.to_string())
+                .or_default()
+                .push(InstanceContext {
+                    id: id.to_string(),
+                    title: format!("title of {id}"),
+                    class: class.to_string(),
+                    properties: Default::default(),
+                    updated_at: String::new(),
+                });
+        }
+        out
+    }
+
+    /// #1257: the auto-processor passes a cursor of turn hashes and (usually)
+    /// no scope. Flow subjects must be the records the prompt shows as
+    /// `existing`, never the turn hashes, so a flow on an existing record
+    /// reaches the prompt.
+    #[test]
+    fn flow_subjects_are_the_existing_records_without_a_scope() {
+        let existing = existing_of(&[
+            ("Task", "soa://task/b"),
+            ("Task", "soa://task/a"),
+            ("Intention", "soa://intention/x"),
+        ]);
+        assert_eq!(
+            flow_subjects_for_pass(&existing, None),
+            vec!["soa://intention/x", "soa://task/a", "soa://task/b"],
+        );
+        // What the auto-processor's cursor carries: turn hashes. None of them
+        // may become a subject.
+        let turn_hash = crate::perspectives::auto_processor::watcher::turn_id(
+            "did:key:alice",
+            "Can you ship the parser?",
+            "2026-11-04T10:00:00Z",
+        );
+        assert!(!flow_subjects_for_pass(&existing, None).contains(&turn_hash));
+    }
+
+    /// The manual path (scope, no cursor) loaded the scope anchor's flows
+    /// before #1257; it still does, next to the existing records under it.
+    #[test]
+    fn flow_subjects_keep_the_scope_anchor_and_dedupe() {
+        let existing = existing_of(&[("Task", "soa://task/a"), ("Task", "soa://task/a")]);
+        let scope = Scope::Raw {
+            id: "soa://project/p".to_string(),
+            predicate: "ns://has_task".to_string(),
+        };
+        assert_eq!(
+            flow_subjects_for_pass(&existing, Some(&scope)),
+            vec!["soa://project/p", "soa://task/a"],
+        );
+        assert_eq!(
+            flow_subjects_for_pass(&HashMap::new(), Some(&scope)),
+            vec!["soa://project/p"],
+        );
+    }
+
+    /// Nothing existing and no scope: no subjects, so no flow is loaded
+    /// (the #929 J#1 bound: never a whole-perspective sweep).
+    #[test]
+    fn flow_subjects_are_empty_with_nothing_existing_and_no_scope() {
+        assert!(flow_subjects_for_pass(&HashMap::new(), None).is_empty());
+    }
+
+    /// #1257 end to end on a real perspective: a live FlowInstance whose
+    /// subject is an existing Task reaches `gather_active_flow_contexts`
+    /// through the subjects the run computes from `existing_instance_context`
+    /// (the auto-processor shape: no scope; its cursor holds only turn hashes).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn flow_context_loads_for_an_existing_record_without_a_scope() {
+        let (mut perspective, shapes, ctx) = setup_perspective_no_llm(&[("Task", TASK_SDNA)]).await;
+        seed_flow(
+            &mut perspective,
+            &ctx,
+            &delivery_flow_json_for("Task"),
+            "Delivery",
+        )
+        .await;
+        let task = "soa://flowctx/task/existing";
+        let other = "soa://flowctx/task/no-flow";
+        seed_instance(&mut perspective, &ctx, &shapes[0], task, "ship the parser").await;
+        seed_instance(&mut perspective, &ctx, &shapes[0], other, "write the docs").await;
+        let inst_uri = crate::perspectives::flow_classes::mint_flow_instance(
+            &mut perspective,
+            "delivery://DeliveryFlow",
+            task,
+            "identified",
+            "flowctx-1257",
+            None,
+            &ctx,
+        )
+        .await
+        .expect("mint_flow_instance");
+
+        let existing_ctx = existing_instance_context(&perspective, &shapes, None)
+            .await
+            .expect("existing_instance_context");
+        let subjects = flow_subjects_for_pass(&existing_ctx, None);
+        assert_eq!(subjects, vec![task.to_string(), other.to_string()]);
+
+        let flows = crate::perspectives::flow_context::gather_active_flow_contexts(
+            &perspective,
+            &ctx,
+            &subjects,
+            None,
+        )
+        .await;
+        assert_eq!(
+            flows.len(),
+            1,
+            "one live flow on the existing Task, got {flows:?}"
+        );
+        assert_eq!(flows[0].subject, task);
+        assert_eq!(flows[0].instance_uri, inst_uri);
+        assert_eq!(flows[0].current_state, "identified");
     }
 }

@@ -1,0 +1,209 @@
+//! Where a session's durable state is written: [`AiSessionStore`].
+//!
+//! One seam between the run code and the tables: the hosted platform may later move these
+//! rows to a central database, so nothing reads or writes `ai_sessions` /
+//! `ai_messages` without going through the trait. The shipped implementation runs on
+//! the executor's `DbBackend` — `LocalDb` and `SharedDb` both serve domain methods from the
+//! executor's SQLite — and nothing about a run lives only in memory here: a turn's status is
+//! the row's `status`, the running-task registry in `service` only holds the tokio handle.
+//!
+//! Every method takes the owner's DID (`None`: the main agent) and scopes to it, so a
+//! caller can never see or touch another agent's session, whichever store answers.
+
+use std::sync::{Arc, RwLock};
+
+use deno_core::error::AnyError;
+use serde_json::Value;
+
+use super::types::{
+    AiSession, AiSessionMessage, AiSessionMessageRole, AiSessionUpdate, AiTurnStatus,
+};
+use crate::db_backend::db_backend;
+
+/// The `ai_sessions` and `ai_messages` tables, behind one trait.
+pub trait AiSessionStore: Send + Sync {
+    /// `session`, written.
+    fn create_session(&self, session: &AiSession) -> Result<(), AnyError>;
+    /// The session `id` of `owner_did` (`None`: the main agent), `None` when it is missing
+    /// or another agent's.
+    fn session(&self, owner_did: Option<&str>, id: &str) -> Result<Option<AiSession>, AnyError>;
+    /// The session `id` whoever owns it: for the executor's own lookups, never for a
+    /// caller's word.
+    fn session_any(&self, id: &str) -> Result<Option<AiSession>, AnyError>;
+    /// Every session of `owner_did` (`None`: the main agent), newest first.
+    fn sessions(&self, owner_did: Option<&str>) -> Result<Vec<AiSession>, AnyError>;
+    /// The fields `update` names changed. `false`: no such session of this owner.
+    fn update_session(
+        &self,
+        owner_did: Option<&str>,
+        id: &str,
+        update: &AiSessionUpdate,
+    ) -> Result<bool, AnyError>;
+    /// The session `id` of `owner_did` and its transcript, gone. `false`: no such session
+    /// of this owner.
+    fn delete_session(&self, owner_did: Option<&str>, id: &str) -> Result<bool, AnyError>;
+
+    /// The transcript entry `id`, `role`, `content`, `status` appended to the session
+    /// `session_id` of `owner_did` with its next `seq`. `None`: no such session of this
+    /// owner.
+    fn append_message(
+        &self,
+        owner_did: Option<&str>,
+        id: &str,
+        session_id: &str,
+        role: AiSessionMessageRole,
+        content: &Value,
+        status: Option<AiTurnStatus>,
+    ) -> Result<Option<AiSessionMessage>, AnyError>;
+    /// The message `id` of a session `owner_did` owns.
+    fn message(
+        &self,
+        owner_did: Option<&str>,
+        id: &str,
+    ) -> Result<Option<AiSessionMessage>, AnyError>;
+    /// The turn's end written on `id`: `status`, `error`, `content_patch` merged into
+    /// `content`. `false`: no such message of this owner.
+    fn finish_message(
+        &self,
+        owner_did: Option<&str>,
+        id: &str,
+        status: AiTurnStatus,
+        error: Option<&str>,
+        content_patch: Option<&Value>,
+    ) -> Result<bool, AnyError>;
+    /// The newest `limit` transcript entries of the session, in `seq` order; with `before`,
+    /// only those older than that `seq`. Empty for a missing or foreign session.
+    fn messages(
+        &self,
+        owner_did: Option<&str>,
+        session_id: &str,
+        limit: u32,
+        before: Option<i64>,
+    ) -> Result<Vec<AiSessionMessage>, AnyError>;
+    /// Every `running` row — of the session `session_id`, or of the whole table when none is
+    /// named — marked `interrupted`. How many it caught.
+    fn interrupt_running(&self, session_id: Option<&str>) -> Result<u64, AnyError>;
+}
+
+/// [`AiSessionStore`] on the executor's `DbBackend`: the executor's SQLite tables on
+/// `LocalDb` and on `SharedDb` (domain methods stay local there; only the shared key-value
+/// records go to the Worker).
+pub struct DbAiSessionStore;
+
+impl AiSessionStore for DbAiSessionStore {
+    fn create_session(&self, session: &AiSession) -> Result<(), AnyError> {
+        db_backend().create_ai_session(session).map_err(Into::into)
+    }
+
+    fn session(&self, owner_did: Option<&str>, id: &str) -> Result<Option<AiSession>, AnyError> {
+        db_backend()
+            .get_ai_session(owner_did, id)
+            .map_err(Into::into)
+    }
+
+    fn session_any(&self, id: &str) -> Result<Option<AiSession>, AnyError> {
+        db_backend().get_ai_session_any(id).map_err(Into::into)
+    }
+
+    fn sessions(&self, owner_did: Option<&str>) -> Result<Vec<AiSession>, AnyError> {
+        db_backend().list_ai_sessions(owner_did).map_err(Into::into)
+    }
+
+    fn update_session(
+        &self,
+        owner_did: Option<&str>,
+        id: &str,
+        update: &AiSessionUpdate,
+    ) -> Result<bool, AnyError> {
+        db_backend()
+            .update_ai_session(owner_did, id, update)
+            .map_err(Into::into)
+    }
+
+    fn delete_session(&self, owner_did: Option<&str>, id: &str) -> Result<bool, AnyError> {
+        db_backend()
+            .delete_ai_session(owner_did, id)
+            .map_err(Into::into)
+    }
+
+    fn append_message(
+        &self,
+        owner_did: Option<&str>,
+        id: &str,
+        session_id: &str,
+        role: AiSessionMessageRole,
+        content: &Value,
+        status: Option<AiTurnStatus>,
+    ) -> Result<Option<AiSessionMessage>, AnyError> {
+        db_backend()
+            .append_ai_message(
+                owner_did,
+                id,
+                session_id,
+                role.as_str(),
+                &content.to_string(),
+                status.map(AiTurnStatus::as_str),
+            )
+            .map_err(Into::into)
+    }
+
+    fn message(
+        &self,
+        owner_did: Option<&str>,
+        id: &str,
+    ) -> Result<Option<AiSessionMessage>, AnyError> {
+        db_backend()
+            .get_ai_message(owner_did, id)
+            .map_err(Into::into)
+    }
+
+    fn finish_message(
+        &self,
+        owner_did: Option<&str>,
+        id: &str,
+        status: AiTurnStatus,
+        error: Option<&str>,
+        content_patch: Option<&Value>,
+    ) -> Result<bool, AnyError> {
+        db_backend()
+            .finish_ai_message(owner_did, id, status.as_str(), error, content_patch)
+            .map_err(Into::into)
+    }
+
+    fn messages(
+        &self,
+        owner_did: Option<&str>,
+        session_id: &str,
+        limit: u32,
+        before: Option<i64>,
+    ) -> Result<Vec<AiSessionMessage>, AnyError> {
+        db_backend()
+            .list_ai_messages(owner_did, session_id, limit, before)
+            .map_err(Into::into)
+    }
+
+    fn interrupt_running(&self, session_id: Option<&str>) -> Result<u64, AnyError> {
+        db_backend()
+            .interrupt_running_ai_messages(session_id)
+            .map_err(Into::into)
+    }
+}
+
+static STORE: RwLock<Option<Arc<dyn AiSessionStore>>> = RwLock::new(None);
+
+/// The store the run code uses. [`DbAiSessionStore`] until a test or a platform build
+/// sets another.
+pub fn ai_session_store() -> Arc<dyn AiSessionStore> {
+    match STORE.read().unwrap().as_ref() {
+        Some(store) => store.clone(),
+        None => Arc::new(DbAiSessionStore),
+    }
+}
+
+/// The store the run code uses from now on, or `None` for the default again. A test that
+/// sets one restores the default when it ends so the next test sees a clean table through
+/// its own backend.
+#[cfg(test)]
+pub fn set_ai_session_store(store: Option<Arc<dyn AiSessionStore>>) {
+    *STORE.write().unwrap() = store;
+}

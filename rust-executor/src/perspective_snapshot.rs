@@ -446,7 +446,14 @@ mod tests {
         for (uuid, count) in [("uuid-a", 3), ("uuid-b", 5)] {
             let dir = restored.path().join("perspectives").join(uuid);
             let store = SparqlStore::new(Some(dir.to_str().unwrap())).unwrap();
-            assert_eq!(store.get_all_links().unwrap().len(), count, "{uuid}");
+            assert_eq!(
+                store
+                    .get_all_links(&crate::perspectives::sparql_store::EvalStop::none(),)
+                    .unwrap()
+                    .len(),
+                count,
+                "{uuid}"
+            );
         }
     }
 

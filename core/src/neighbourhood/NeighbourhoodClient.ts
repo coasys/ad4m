@@ -16,6 +16,7 @@ import type {
     SfuQualityPreference,
     SfuRoomInfo,
     SfuRoomRoster,
+    SfuSessionReplaced,
     SfuStatus,
 } from "./SfuTypes"
 
@@ -167,30 +168,45 @@ export class NeighbourhoodClient {
         return this.#apiClient.call("sfu.listRooms", {})
     }
 
+    /**
+     * Join a call from `deviceId`. The executor replaces this agent's session
+     * from the same device (another tab) and keeps those from other devices.
+     * The result's `participantId` names the session in every later call.
+     * `sessionKey` is the caller's random key for the session: a rebuild
+     * sends it again; a key a later join from this device replaced is
+     * refused with `RpcError` status 409, and that session must stop.
+     */
     async sfuCallJoin(
         neighbourhoodUrl: string,
         roomName: string,
         sdpOffer: string,
+        deviceId: string,
+        sessionKey: string,
     ): Promise<CallSessionInfo> {
         return this.#apiClient.call("sfu.callJoin", {
             neighbourhoodUrl,
             roomName,
             sdpOffer,
+            deviceId,
+            sessionKey,
         })
     }
 
-    async sfuCallLeave(neighbourhoodUrl: string, roomName: string): Promise<boolean> {
-        return this.#apiClient.call("sfu.callLeave", { neighbourhoodUrl, roomName })
+    /** Leave the session `participantId`; `false` when it is not this agent's or is gone already. */
+    async sfuCallLeave(neighbourhoodUrl: string, roomName: string, participantId: string): Promise<boolean> {
+        return this.#apiClient.call("sfu.callLeave", { neighbourhoodUrl, roomName, participantId })
     }
 
     async sfuCallSetQualityPreference(
         neighbourhoodUrl: string,
         roomName: string,
+        participantId: string,
         preference: SfuQualityPreference,
     ): Promise<boolean> {
         return this.#apiClient.call("sfu.callSetQualityPreference", {
             neighbourhoodUrl,
             roomName,
+            participantId,
             preference,
         })
     }
@@ -198,13 +214,35 @@ export class NeighbourhoodClient {
     async sfuCallAnswerServerOffer(
         neighbourhoodUrl: string,
         roomName: string,
+        participantId: string,
         sdpAnswer: string,
     ): Promise<boolean> {
         return this.#apiClient.call("sfu.callAnswerServerOffer", {
             neighbourhoodUrl,
             roomName,
+            participantId,
             sdpAnswer,
         })
+    }
+
+    /** Ask the SFU to restart ICE on the session `participantId` (this
+     *  agent's, as its join returned it; any other is refused). The offer
+     *  arrives as an `sfu-call-renegotiation-offer` event for that session;
+     *  answer it with {@link sfuCallAnswerServerOffer}. */
+    async sfuCallRestartIce(neighbourhoodUrl: string, roomName: string, participantId: string): Promise<boolean> {
+        return this.#apiClient.call("sfu.callRestartIce", { neighbourhoodUrl, roomName, participantId })
+    }
+
+    /** Fires after a network change, once the client's socket is back on
+     *  the new network. See {@link ApiClient.onNetworkChange}. */
+    onNetworkChange(callback: () => void): () => void {
+        return this.#apiClient.onNetworkChange(callback)
+    }
+
+    /** Check the client's socket now: one that says nothing within a
+     *  deadline is treated as a network change. See {@link ApiClient.checkConnection}. */
+    checkConnection(): void {
+        this.#apiClient.checkConnection()
     }
 
     async sfuGetConfig(neighbourhoodUrl: string): Promise<SfuConfig> {
@@ -236,11 +274,13 @@ export class NeighbourhoodClient {
     async sfuAddIceCandidate(
         neighbourhoodUrl: string,
         roomName: string,
+        participantId: string,
         candidate: string,
     ): Promise<boolean> {
         return this.#apiClient.call("sfu.addIceCandidate", {
             neighbourhoodUrl,
             roomName,
+            participantId,
             candidate,
         })
     }
@@ -255,6 +295,7 @@ export class NeighbourhoodClient {
     async sfuSendData(
         neighbourhoodUrl: string,
         roomName: string,
+        participantId: string,
         channelLabel: string,
         data: string,
         binary: boolean = false,
@@ -262,6 +303,7 @@ export class NeighbourhoodClient {
         return this.#apiClient.call("sfu.sendData", {
             neighbourhoodUrl,
             roomName,
+            participantId,
             channelLabel,
             data,
             binary,
@@ -271,7 +313,9 @@ export class NeighbourhoodClient {
     /**
      * Subscribe to SFU data channel messages.  Returns an unsubscribe
      * function.  Messages arrive for every participant in the room;
-     * filter by `senderDid` if needed.
+     * filter by `senderDid` or `senderParticipantId` if needed. One sent by
+     * a session of this agent arrives here when the agent is in the call on
+     * another device too: it carries the sending session's participant id.
      */
     subscribeSfuDataChannel(
         callback: (message: SfuDataMessage) => void,
@@ -281,11 +325,23 @@ export class NeighbourhoodClient {
         return this.#apiClient.on("sfu-data", (message) => callback(message))
     }
 
-    /** Subscribe to the rosters of the call rooms this agent is in: who is in each, whenever that changes. */
+    /** Subscribe to the rosters of the call rooms this agent is in: who is in each, by session, whenever that changes. */
     subscribeSfuRoomRoster(
         callback: (roster: SfuRoomRoster) => void,
     ): () => void {
         return this.#apiClient.on("sfu-room-roster", (roster) => callback(roster))
+    }
+
+    /**
+     * Subscribe to the executor's notice that a session of this agent was
+     * replaced: a later join from the same device took its call over. The
+     * notice names the replaced session's participant id; the session that
+     * holds it stops and does not rejoin.
+     */
+    subscribeSfuSessionReplaced(
+        callback: (event: SfuSessionReplaced) => void,
+    ): () => void {
+        return this.#apiClient.on("sfu-session-replaced", (event) => callback(event))
     }
 
     /**
@@ -297,6 +353,8 @@ export class NeighbourhoodClient {
      *
      * The executor already sends each socket only its own DID's offers;
      * this subscription additionally filters on `targetDid` for safety.
+     * An agent in the call on two devices gets the offers of both: each
+     * names the session it is for (`participantId`).
      * Returns an unsubscribe function.
      */
     subscribeSfuCallRenegotiationOffer(
@@ -307,6 +365,7 @@ export class NeighbourhoodClient {
             if (event.targetDid !== targetDid) return
             callback({
                 targetDid: event.targetDid,
+                participantId: event.participantId,
                 neighbourhoodUrl: event.neighbourhoodUrl,
                 roomName: event.roomName,
                 sdpOffer: event.sdpOffer,

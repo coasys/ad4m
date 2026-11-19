@@ -21,6 +21,9 @@
 //! empty, and a secret file must not be readable by
 //! group or others (mode 0600 or 0400).
 
+use crate::ai_service::endpoints::config::{
+    AiDefaultsSetting, AiEndpointSetting, AiModelSetting, AiSettings,
+};
 use crate::config::{Ad4mConfig, SmtpConfig, TlsConfig, DEFAULT_PORT};
 use crate::secret::Secret;
 use serde::{Deserialize, Serialize};
@@ -223,12 +226,61 @@ pub struct ExecutorConfigFile {
     /// address. Unset: no probe.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sfu_stun_server: Option<String>,
+    /// `identity.storeUrl` and `identity.storeKeys`: the identity store the agent language
+    /// reaches and the keys its heads must be signed by.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub identity: Option<IdentityFileSettings>,
+    /// The folder of the executor's own rotated log files. Unset: stdout.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub log_dir: Option<String>,
+    /// AI endpoints registered at startup, by name. A key comes from the
+    /// environment variable an entry's `api_key_env` names.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ai_endpoints: Option<Vec<AiEndpointSetting>>,
+    /// AI models registered at startup, by name, on an endpoint named in
+    /// `ai_endpoints` (or registered before).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ai_models: Option<Vec<AiModelSetting>>,
+    /// The default model per type (`llm`, `embedding`, `transcription`), by name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ai_defaults: Option<AiDefaultsSetting>,
+    /// The per-user store of local AI runtimes and models (`ai.localInstall`).
+    /// Unset: the user's data directory, `ad4m/local-ai`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_ai_dir: Option<String>,
+    /// Start the installed local AI runtimes with the executor. Unset: true. It never
+    /// installs or downloads anything: only `ai.localInstall`, `ad4m-executor local-ai
+    /// install` and the Docker image's `INCLUDE_MODELS` do.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_ai_autostart: Option<bool>,
+    /// The device local AI runs its models on: `cpu`, `cuda`, `metal`, `vulkan` or `rocm`.
+    /// Unset: the best one detected.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_ai_device: Option<crate::ai_service::local::hardware::Backend>,
+}
+
+/// `identity` in the config file.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IdentityFileSettings {
+    /// The identity store's base URL, e.g. `https://store.ad4m.dev`. Unset: the store the
+    /// network's seed names (`identityStore`), else none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store_url: Option<String>,
+    /// The store's head keys (Ed25519 multikeys, `z6Mk…`). Unset: the seed's store keys when
+    /// `storeUrl` is unset too, else none (`identity::IdentitySettings::from_config`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store_keys: Option<Vec<String>>,
+    /// Let a DID URL's `src` reach loopback and private addresses (tests, local development).
+    /// Off by default: on a server a `src` comes from untrusted input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_private_src: Option<bool>,
 }
 
 /// Secret keys someone may paste into the config file, as JSON pointers,
 /// with where the secret belongs instead. Checked before parsing so the
 /// error says why, not just "unknown field".
-const INLINE_SECRETS: &[(&str, &str)] = &[
+pub(crate) const INLINE_SECRETS: &[(&str, &str)] = &[
     (
         "/admin_credential",
         "admin_credential is not allowed in the config file; set \
@@ -516,6 +568,21 @@ impl ExecutorConfigFile {
             sfu_udp_port: self.sfu_udp_port,
             sfu_public_addr: self.sfu_public_addr.clone(),
             sfu_stun_server: self.sfu_stun_server.clone(),
+            identity_store_url: self.identity.as_ref().and_then(|i| i.store_url.clone()),
+            identity_store_keys: self.identity.as_ref().and_then(|i| i.store_keys.clone()),
+            identity_allow_private_src: self.identity.as_ref().and_then(|i| i.allow_private_src),
+            log_dir: self.log_dir.clone(),
+            ai_settings: (self.ai_endpoints.is_some()
+                || self.ai_models.is_some()
+                || self.ai_defaults.is_some())
+            .then(|| AiSettings {
+                endpoints: self.ai_endpoints.clone().unwrap_or_default(),
+                models: self.ai_models.clone().unwrap_or_default(),
+                defaults: self.ai_defaults.clone().unwrap_or_default(),
+            }),
+            local_ai_dir: self.local_ai_dir.clone(),
+            local_ai_autostart: self.local_ai_autostart,
+            local_ai_device: self.local_ai_device,
             admin_credential: secrets.admin_credential.clone(),
             ..Ad4mConfig::unprepared()
         })
@@ -528,6 +595,44 @@ mod tests {
 
     fn parse(json: &str) -> Result<ExecutorConfigFile, ConfigFileError> {
         ExecutorConfigFile::parse(json)
+    }
+
+    /// `log_dir` reaches the executor's config.
+    #[test]
+    fn log_dir_reaches_the_executor_config() {
+        let config = parse(r#"{"log_dir": "/data/adam/logs"}"#)
+            .unwrap()
+            .to_ad4m_config(&ExecutorSecrets::default())
+            .unwrap();
+        assert_eq!(config.log_dir.as_deref(), Some("/data/adam/logs"));
+    }
+
+    /// `identity.storeUrl` and `identity.storeKeys` reach the executor's config.
+    #[test]
+    fn identity_keys_reach_the_executor_config() {
+        let file = parse(
+            r#"{"identity": {"storeUrl": "http://127.0.0.1:8080",
+                "storeKeys": ["z6MkA", "z6MkB"], "allowPrivateSrc": true}}"#,
+        )
+        .unwrap();
+        let config = file.to_ad4m_config(&ExecutorSecrets::default()).unwrap();
+        assert_eq!(
+            config.identity_store_url.as_deref(),
+            Some("http://127.0.0.1:8080")
+        );
+        assert_eq!(
+            config.identity_store_keys,
+            Some(vec!["z6MkA".to_string(), "z6MkB".to_string()])
+        );
+        assert_eq!(config.identity_allow_private_src, Some(true));
+        assert!(parse(r#"{"identity": {"storeUrls": "x"}}"#).is_err());
+        let unset = parse("{}")
+            .unwrap()
+            .to_ad4m_config(&ExecutorSecrets::default())
+            .unwrap();
+        assert_eq!(unset.identity_store_url, None);
+        assert_eq!(unset.identity_store_keys, None);
+        assert_eq!(unset.identity_allow_private_src, None);
     }
 
     /// The SFU keys an operator behind NAT sets reach the executor's config.
@@ -555,9 +660,85 @@ mod tests {
         assert_eq!(unset.sfu_public_addr, None);
     }
 
+    /// The AI keys reach the executor config; a key itself has no place in the file.
+    #[test]
+    fn ai_keys_reach_the_executor_config_and_an_inline_key_is_refused() {
+        let file = parse(
+            r#"{"ai_endpoints": [{"name": "openai", "kind": "OPEN_AI",
+                  "base_url": "https://api.openai.com/v1", "api_key_env": "OPENAI_API_KEY"}],
+                "ai_models": [{"name": "gpt", "model_type": "LLM", "endpoint": "openai",
+                  "remote_model": "gpt-5"}],
+                "ai_defaults": {"llm": "gpt"}}"#,
+        )
+        .unwrap();
+        let ai = file
+            .to_ad4m_config(&ExecutorSecrets::default())
+            .unwrap()
+            .ai_settings
+            .expect("set");
+        assert_eq!(
+            ai.endpoints[0].api_key_env.as_deref(),
+            Some("OPENAI_API_KEY")
+        );
+        assert_eq!(ai.models[0].endpoint, "openai");
+        assert_eq!(ai.defaults.llm.as_deref(), Some("gpt"));
+        assert!(parse("{}")
+            .unwrap()
+            .to_ad4m_config(&ExecutorSecrets::default())
+            .unwrap()
+            .ai_settings
+            .is_none());
+
+        let inline = parse(
+            r#"{"ai_endpoints": [{"name": "openai", "kind": "OPEN_AI",
+                  "base_url": "https://api.openai.com/v1", "api_key": "sk-inline"}]}"#,
+        );
+        assert!(
+            matches!(inline, Err(ConfigFileError::UnknownKey { ref key, .. }) if key.contains("api_key")),
+            "{inline:?}"
+        );
+    }
+
+    /// An endpoint URL with a user name or password in it is refused, naming the reason.
+    #[test]
+    fn an_ai_endpoint_url_with_credentials_is_refused() {
+        let refused = parse(
+            r#"{"ai_endpoints": [{"name": "openai", "kind": "OPEN_AI",
+                  "base_url": "https://alice:hunter2@api.openai.com/v1"}]}"#,
+        );
+        let message = format!("{}", refused.unwrap_err());
+        assert!(message.contains("user name or password"), "{message}");
+        assert!(!message.contains("hunter2"), "{message}");
+    }
+
     #[test]
     fn an_out_of_range_sfu_udp_port_is_refused() {
         assert!(parse(r#"{"sfu_udp_port": 70000}"#).is_err());
+    }
+
+    /// The local AI device is one of the backends a runtime build is made for.
+    #[test]
+    fn local_ai_device_names_a_backend_or_is_refused() {
+        use crate::ai_service::local::hardware::Backend;
+        for (name, backend) in [
+            ("cpu", Backend::Cpu),
+            ("cuda", Backend::Cuda),
+            ("metal", Backend::Metal),
+            ("vulkan", Backend::Vulkan),
+            ("rocm", Backend::Rocm),
+        ] {
+            let config = parse(&format!(r#"{{"local_ai_device": "{name}"}}"#))
+                .unwrap()
+                .to_ad4m_config(&ExecutorSecrets::default())
+                .unwrap();
+            assert_eq!(config.local_ai_device, Some(backend), "{name}");
+        }
+        for wrong in [r#""gpu""#, r#""CUDA""#, r#""auto""#, "1"] {
+            assert!(
+                parse(&format!(r#"{{"local_ai_device": {wrong}}}"#)).is_err(),
+                "{wrong} is not a device"
+            );
+        }
     }
 
     fn scratch_dir(name: &str) -> PathBuf {

@@ -1,0 +1,120 @@
+{
+  "cases": [
+    {
+      "chain": "vector-chain",
+      "from": 0,
+      "name": "same",
+      "ours": [
+        "QmS9Hr1MVwr8myXjfFqoKp6VnpagR5REw6NsQiqWvVUcDR",
+        "QmS9oaHTvGnu5eQrSmCJsoWBGYt7b3rgUpnyVpcGM4kyLi",
+        "QmdbL3DM5ffHL71XfXt7Ykz6u16c7cHV7cYvKN89ezR8Mz",
+        "QmXgMKhfSySvSCcGpGbBasGqc6twQpoArefup9rMufrb4F"
+      ],
+      "result": {
+        "kind": "same"
+      },
+      "theirs": [
+        "QmS9Hr1MVwr8myXjfFqoKp6VnpagR5REw6NsQiqWvVUcDR",
+        "QmS9oaHTvGnu5eQrSmCJsoWBGYt7b3rgUpnyVpcGM4kyLi",
+        "QmdbL3DM5ffHL71XfXt7Ykz6u16c7cHV7cYvKN89ezR8Mz",
+        "QmXgMKhfSySvSCcGpGbBasGqc6twQpoArefup9rMufrb4F"
+      ]
+    },
+    {
+      "chain": "vector-chain",
+      "from": 0,
+      "name": "they extend",
+      "ours": [
+        "QmS9Hr1MVwr8myXjfFqoKp6VnpagR5REw6NsQiqWvVUcDR",
+        "QmS9oaHTvGnu5eQrSmCJsoWBGYt7b3rgUpnyVpcGM4kyLi"
+      ],
+      "result": {
+        "from": 2,
+        "kind": "they-extend"
+      },
+      "theirs": [
+        "QmS9Hr1MVwr8myXjfFqoKp6VnpagR5REw6NsQiqWvVUcDR",
+        "QmS9oaHTvGnu5eQrSmCJsoWBGYt7b3rgUpnyVpcGM4kyLi",
+        "QmdbL3DM5ffHL71XfXt7Ykz6u16c7cHV7cYvKN89ezR8Mz",
+        "QmXgMKhfSySvSCcGpGbBasGqc6twQpoArefup9rMufrb4F"
+      ]
+    },
+    {
+      "chain": "vector-chain",
+      "from": 0,
+      "name": "we extend",
+      "ours": [
+        "QmS9Hr1MVwr8myXjfFqoKp6VnpagR5REw6NsQiqWvVUcDR",
+        "QmS9oaHTvGnu5eQrSmCJsoWBGYt7b3rgUpnyVpcGM4kyLi",
+        "QmdbL3DM5ffHL71XfXt7Ykz6u16c7cHV7cYvKN89ezR8Mz",
+        "QmXgMKhfSySvSCcGpGbBasGqc6twQpoArefup9rMufrb4F"
+      ],
+      "result": {
+        "from": 3,
+        "kind": "we-extend"
+      },
+      "theirs": [
+        "QmS9Hr1MVwr8myXjfFqoKp6VnpagR5REw6NsQiqWvVUcDR",
+        "QmS9oaHTvGnu5eQrSmCJsoWBGYt7b3rgUpnyVpcGM4kyLi",
+        "QmdbL3DM5ffHL71XfXt7Ykz6u16c7cHV7cYvKN89ezR8Mz"
+      ]
+    },
+    {
+      "chain": "vector-chain",
+      "from": 0,
+      "name": "fork",
+      "ours": [
+        "QmS9Hr1MVwr8myXjfFqoKp6VnpagR5REw6NsQiqWvVUcDR",
+        "QmS9oaHTvGnu5eQrSmCJsoWBGYt7b3rgUpnyVpcGM4kyLi",
+        "QmdbL3DM5ffHL71XfXt7Ykz6u16c7cHV7cYvKN89ezR8Mz",
+        "QmXgMKhfSySvSCcGpGbBasGqc6twQpoArefup9rMufrb4F"
+      ],
+      "result": {
+        "fork": {
+          "chain": "vector-chain",
+          "ours": "QmdbL3DM5ffHL71XfXt7Ykz6u16c7cHV7cYvKN89ezR8Mz",
+          "seq": 2,
+          "theirs": "QmSq8L191Ydt4P4vNgN781KvPw8a7aKXhHJqnUsEDxvn55"
+        },
+        "kind": "fork"
+      },
+      "theirs": [
+        "QmS9Hr1MVwr8myXjfFqoKp6VnpagR5REw6NsQiqWvVUcDR",
+        "QmS9oaHTvGnu5eQrSmCJsoWBGYt7b3rgUpnyVpcGM4kyLi",
+        "QmSq8L191Ydt4P4vNgN781KvPw8a7aKXhHJqnUsEDxvn55"
+      ]
+    },
+    {
+      "chain": "vector-chain",
+      "from": 2,
+      "name": "from 2",
+      "ours": [
+        "QmdbL3DM5ffHL71XfXt7Ykz6u16c7cHV7cYvKN89ezR8Mz",
+        "QmXgMKhfSySvSCcGpGbBasGqc6twQpoArefup9rMufrb4F"
+      ],
+      "result": {
+        "fork": {
+          "chain": "vector-chain",
+          "ours": "QmdbL3DM5ffHL71XfXt7Ykz6u16c7cHV7cYvKN89ezR8Mz",
+          "seq": 2,
+          "theirs": "QmSq8L191Ydt4P4vNgN781KvPw8a7aKXhHJqnUsEDxvn55"
+        },
+        "kind": "fork"
+      },
+      "theirs": [
+        "QmSq8L191Ydt4P4vNgN781KvPw8a7aKXhHJqnUsEDxvn55"
+      ]
+    },
+    {
+      "chain": "vector-chain",
+      "from": 5,
+      "name": "both empty",
+      "ours": [],
+      "result": {
+        "kind": "same"
+      },
+      "theirs": []
+    }
+  ],
+  "description": "compare(ours, theirs, from, chain): ours[i] and theirs[i] are the hashes at seq from + i."
+}

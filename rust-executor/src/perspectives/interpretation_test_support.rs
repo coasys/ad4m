@@ -4,10 +4,18 @@
 //! e2e suite in `interpretation_e2e.rs` share one set of fixtures + one harness
 //! (DRY). Nothing here is compiled outside `cfg(test)`.
 //!
-//! The real-LLM harness targets an **OpenAI-compatible endpoint** (Ollama),
-//! env-overridable via `INTERPRETATION_E2E_BASE_URL` / `INTERPRETATION_E2E_MODEL` /
-//! `INTERPRETATION_E2E_API_KEY`; the defaults hit Ollama at `localhost:11434`
-//! (directly on the CI runner = Marvin, or over an SSH tunnel from a dev box).
+//! The real-LLM harness targets the host's llama-server (OpenAI-shaped `/v1`,
+//! `EndpointKind::LlamaServer`), env-overridable via `INTERPRETATION_E2E_BASE_URL` /
+//! `INTERPRETATION_E2E_MODEL` / `INTERPRETATION_E2E_ENDPOINT_KIND` /
+//! `INTERPRETATION_E2E_API_KEY` / `INTERPRETATION_E2E_MAX_NUM_CTX` /
+//! `INTERPRETATION_E2E_REQUEST_TIMEOUT_SECS`. The defaults are staging's server
+//! at `http://127.0.0.1:12460/v1`, model `qwen3.8-27b-ud-q4_k_m`. That server
+//! is started with `--jinja`, so tool definitions come back as `tool_calls`.
+//! The model flag `native_tools` is set: an OpenAI-shaped endpoint leaves it
+//! off otherwise, and the prompt-injected path is what Ollama's Qwen parser
+//! answers with a 500. Embeddings stay on Ollama's `nomic-embed-text`
+//! (`INTERPRETATION_EMBED_*`, default `http://127.0.0.1:11434/v1`): the chat
+//! server does not serve them.
 
 #![cfg(test)]
 
@@ -257,16 +265,85 @@ pub(crate) async fn setup_perspective_no_llm(
     (perspective, shapes, ctx)
 }
 
-// ---- real-LLM harness (Ollama over the OpenAI-compatible API) --------------
+// ---- real-LLM harness (llama-server /v1) ------------------------------------
 
-/// Stand up `AIService` with the Ollama-backed default model on top of
+/// The chat server's one slot (`-c 65536`). A request that fills it is refused.
+const E2E_SERVER_SLOT_TOKENS: u32 = 65_536;
+/// Default context budget: the slot minus room for the chat template and the
+/// server's reasoning budget (2048). Requests stay under the slot.
+const E2E_MAX_NUM_CTX_DEFAULT: u32 = E2E_SERVER_SLOT_TOKENS - 8_192;
+/// One completion may wait behind another request on the single slot, then
+/// generate. Long enough for a few minutes of queueing, not unbounded.
+const E2E_REQUEST_TIMEOUT_DEFAULT: u32 = 900;
+
+fn e2e_max_num_ctx() -> u32 {
+    let requested = std::env::var("INTERPRETATION_E2E_MAX_NUM_CTX")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(E2E_MAX_NUM_CTX_DEFAULT);
+    if requested >= E2E_SERVER_SLOT_TOKENS {
+        eprintln!(
+            "[e2e] INTERPRETATION_E2E_MAX_NUM_CTX={requested} is not under the llama-server \
+             slot ({E2E_SERVER_SLOT_TOKENS}); using {E2E_MAX_NUM_CTX_DEFAULT}"
+        );
+        E2E_MAX_NUM_CTX_DEFAULT
+    } else {
+        requested
+    }
+}
+
+fn e2e_request_timeout_secs() -> u32 {
+    std::env::var("INTERPRETATION_E2E_REQUEST_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(E2E_REQUEST_TIMEOUT_DEFAULT)
+        .clamp(60, 1_800)
+}
+
+/// `LLAMA_SERVER` is the kind whose client sends `tools` as definitions and
+/// `chat_template_kwargs.enable_thinking`. llama-server was started with
+/// `--jinja`, which is what turns those definitions into native tool calls.
+fn e2e_llm_kind() -> crate::types::EndpointKind {
+    use crate::types::EndpointKind::{LlamaServer, Ollama, OpenAi, OpenAiCompatible, Vllm};
+    match std::env::var("INTERPRETATION_E2E_ENDPOINT_KIND")
+        .unwrap_or_else(|_| "LLAMA_SERVER".into())
+        .as_str()
+    {
+        "LLAMA_SERVER" => LlamaServer,
+        "OLLAMA" => Ollama,
+        "OPEN_AI" => OpenAi,
+        "OPEN_AI_COMPATIBLE" => OpenAiCompatible,
+        "VLLM" => Vllm,
+        other => panic!(
+            "INTERPRETATION_E2E_ENDPOINT_KIND={other} is not a chat endpoint kind. \
+             llama-server --jinja wants LLAMA_SERVER"
+        ),
+    }
+}
+
+/// Stand up `AIService` with the llama-server default model on top of
 /// [`setup_perspective_no_llm`]. Returns everything a test needs to drive
 /// interpretation (optionally after pre-seeding the perspective).
 pub(crate) async fn setup_interpretation_e2e(
     class_sdnas: &[(&str, &str)],
 ) -> (PerspectiveInstance, Vec<ModelShape>, AgentContext) {
     use crate::ai_service::AIService;
-    use crate::types::{ModelApiInput, ModelInput, ModelType};
+    use crate::types::{ModelInput, ModelType};
+
+    // Surface `log::warn!`/`log::debug!` diagnostics (harness per-round
+    // choices, raw responses on parse failure). Without an env_logger init,
+    // tests are blind to what the model actually emitted — observed
+    // 2026-08-24 when harness_intention_links_to_seeded_beliefs failed
+    // 8/8 and the placements list alone couldn't tell us which tool the
+    // model was reaching for. `try_init` makes this idempotent across
+    // scenarios, and defaulting RUST_LOG to `warn` if unset keeps output
+    // scoped to what the harness explicitly emits. `RUST_LOG=...interpretation=debug`
+    // adds the raw response on every parse retry.
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
+        .is_test(false) // route to stderr so --nocapture shows it
+        .try_init();
 
     let (perspective, shapes, ctx) = setup_perspective_no_llm(class_sdnas).await;
 
@@ -279,42 +356,39 @@ pub(crate) async fn setup_interpretation_e2e(
         .await
         .expect("AIService global instance");
     let base_url = std::env::var("INTERPRETATION_E2E_BASE_URL")
-        .unwrap_or_else(|_| "http://localhost:11434/v1".into());
-    let model = std::env::var("INTERPRETATION_E2E_MODEL").unwrap_or_else(|_| "gemma3:12b".into());
-    eprintln!("[e2e] interpretation against model '{model}' at {base_url}");
+        .unwrap_or_else(|_| "http://127.0.0.1:12460/v1".into());
+    let model = std::env::var("INTERPRETATION_E2E_MODEL")
+        .unwrap_or_else(|_| "qwen3.8-27b-ud-q4_k_m".into());
+    let kind = e2e_llm_kind();
+    let max_num_ctx = e2e_max_num_ctx();
+    eprintln!(
+        "[e2e] interpretation against model '{model}' at {base_url} ({kind:?}, \
+         max_num_ctx={max_num_ctx})"
+    );
+    // `native_tools: Some(true)`: LlamaServer speaks OpenAI's wire, and an
+    // OpenAI-shaped model sends tools only when the flag says so. Without it
+    // the harness writes `<tool_call>` into the prompt. llama-server `--jinja`
+    // honours the definitions and returns `tool_calls`. `max_num_ctx` is the
+    // budget the executor sizes the prompt to; it is not sent to the server
+    // (the slot is fixed at 65536) and stays under that slot.
+    let endpoint = e2e_endpoint(
+        "e2e-llm",
+        kind,
+        &base_url,
+        &std::env::var("INTERPRETATION_E2E_API_KEY").unwrap_or_default(),
+        Some(max_num_ctx),
+        Some(e2e_request_timeout_secs()),
+    );
     let model_id = service
         .add_model(ModelInput {
             name: "e2e interpretation LLM".into(),
             model_type: ModelType::Llm,
-            local: None,
-            api: Some(ModelApiInput {
-                base_url,
-                api_key: Some(
-                    std::env::var("INTERPRETATION_E2E_API_KEY")
-                        .unwrap_or_else(|_| "ollama".into())
-                        .into(),
-                ),
-                model,
-                api_type: crate::types::ModelApiType::OpenAi.to_string(),
-                max_num_ctx: None,
-            }),
+            endpoint_id: endpoint.id,
+            remote_model: model,
+            native_tools: Some(true),
         })
         .await
         .expect("add_model");
-    // Insert the interpretation task row BEFORE setting the default model:
-    // `register_interpretation_task` only writes the DB row (no spawn), and
-    // it's `set_default_model`'s respawn loop (over `model_id == "default"`
-    // tasks) that actually registers the task with the LLM worker. Priming it
-    // here makes every e2e test self-contained — otherwise running one in
-    // isolation (with no earlier test having inserted the row) leaves the task
-    // unspawned and the first `prompt()` fails with "Task ... not spawned".
-    //
-    // Do NOT call `ensure_interpretation_task` here: it spawns as part of its
-    // idempotency guarantee, and spawning resolves `model_id == "default"` at
-    // spawn-time via `get_default_model`. The default has not been set yet on
-    // this line, so the spawn would fail with "Task needs default model but no
-    // default set". `register_interpretation_task` (write-only) lets
-    // `set_default_model` do the spawn once the default is actually there.
     let _ = crate::perspectives::interpretation::register_interpretation_task();
     service
         .set_default_model(ModelType::Llm, model_id)
@@ -324,27 +398,80 @@ pub(crate) async fn setup_interpretation_e2e(
     (perspective, shapes, ctx)
 }
 
-/// Register (and load) an `AIService` embedding model named `interpretation-embed`
-/// — a local candle Bert (CPU) — so the `DedupStrategy::Semantic` path can embed
-/// identity strings through `AIService::embed` rather than any external endpoint.
-/// The channel is keyed by the model *name*, which is what `semantic_from_env`
-/// (default `interpretation-embed`) passes to `embed`. Idempotent-ish: only the
-/// one semantic-dedup e2e needs it, so it isn't part of the default setup (Bert
-/// load is not free).
+/// Register (and load) the `AIService` embedding model the `DedupStrategy::Semantic` path
+/// embeds identity strings with.
+///
+/// `INTERPRETATION_EMBED_MODEL` is both the name `semantic_from_env` looks up and the
+/// remote model id. Set, it is the Ollama tag (`nomic-embed-text` in CI). Unset, the
+/// registered name is `interpretation-embed` and the remote id is `nomic-embed-text`.
+/// Callers that name the model themselves must use `semantic_from_env`, or a set
+/// variable registers a model they do not look up and dedup compares strings.
+///
+/// The endpoint is OpenAI-shaped at `INTERPRETATION_EMBED_BASE_URL` (default Ollama at
+/// `http://127.0.0.1:11434/v1`). It does not follow the LLM URL: llama-server is a
+/// chat slot and does not embed. `INTERPRETATION_EMBED_API_KEY` when the endpoint
+/// wants one. Only the semantic-dedup e2e needs it, so it isn't part of the
+/// default setup.
 pub(crate) async fn register_interpretation_embedding_model() {
     use crate::types::{ModelInput, ModelType};
     let service = crate::ai_service::AIService::global_instance()
         .await
         .expect("AIService global instance");
+    let model = std::env::var("INTERPRETATION_EMBED_MODEL").ok();
+    let base_url = std::env::var("INTERPRETATION_EMBED_BASE_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:11434/v1".into());
+    let remote_model = model.clone().unwrap_or_else(|| "nomic-embed-text".into());
+    eprintln!("[e2e] semantic dedup embeds with '{remote_model}' at {base_url}");
+    let endpoint = e2e_endpoint(
+        "e2e-embed",
+        crate::types::EndpointKind::OpenAiCompatible,
+        &base_url,
+        &std::env::var("INTERPRETATION_EMBED_API_KEY").unwrap_or_default(),
+        None,
+        None,
+    );
     service
         .add_model(ModelInput {
-            name: "interpretation-embed".into(),
+            name: model.unwrap_or_else(|| "interpretation-embed".into()),
             model_type: ModelType::Embedding,
-            local: None,
-            api: None,
+            endpoint_id: endpoint.id,
+            remote_model,
+            native_tools: None,
         })
         .await
         .expect("add_model(Embedding)");
+}
+
+/// The `kind` endpoint at `base_url` with `api_key`, `max_num_ctx` and
+/// `request_timeout_secs`: the one saved already, else a new one named `name`,
+/// saved without a probe. The LLM is llama-server; embeddings are a separate
+/// OpenAI-shaped endpoint on Ollama.
+fn e2e_endpoint(
+    name: &str,
+    kind: crate::types::EndpointKind,
+    base_url: &str,
+    api_key: &str,
+    max_num_ctx: Option<u32>,
+    request_timeout_secs: Option<u32>,
+) -> crate::types::Endpoint {
+    let mut endpoint = crate::types::Endpoint::for_test(name, kind, base_url, api_key);
+    endpoint.max_num_ctx = max_num_ctx;
+    endpoint.request_timeout_secs = request_timeout_secs;
+    let saved = Ad4mDb::with_global_instance(|db| db.get_endpoints())
+        .expect("read the endpoints")
+        .into_iter()
+        .find(|e| {
+            e.kind == endpoint.kind
+                && e.max_num_ctx == endpoint.max_num_ctx
+                && e.request_timeout_secs == endpoint.request_timeout_secs
+                && e.base_url == endpoint.base_url
+                && e.api_key.expose_for_compare(api_key)
+        });
+    if let Some(saved) = saved {
+        return saved;
+    }
+    Ad4mDb::with_global_instance(|db| db.insert_endpoint(&endpoint)).expect("save the endpoint");
+    endpoint
 }
 
 /// Read back the links written under each affected `base`. Production
@@ -508,17 +635,6 @@ pub(crate) async fn run_harness_e2e(
     Vec<ModelShape>,
     Vec<(String, Vec<Link>)>,
 ) {
-    // Surface the harness `log::warn!` diagnostics (round=, tool_calls=,
-    // content_preview=) added in commit 5c34ed868. Without an env_logger
-    // init, tests are blind to the LLM's per-round choices — observed
-    // 2026-08-24 when harness_intention_links_to_seeded_beliefs failed
-    // 8/8 and the placements list alone couldn't tell us which tool the
-    // model was reaching for. `try_init` makes this idempotent across
-    // scenarios, and defaulting RUST_LOG to `warn` if unset keeps output
-    // scoped to what the harness explicitly emits.
-    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
-        .is_test(false) // route to stderr so --nocapture shows it
-        .try_init();
     let (mut perspective, shapes, ctx) = setup_interpretation_e2e(class_sdnas).await;
     let placements =
         run_interpretation_harness_e2e(&mut perspective, &shapes, transcript, &ctx, max_tool_calls)
@@ -896,6 +1012,7 @@ pub(crate) fn existing_ids(ids: &[&str]) -> ExistingInstances {
                 title: String::new(),
                 class: String::new(),
                 properties: BTreeMap::new(),
+                updated_at: String::new(),
             })
             .collect(),
     )
@@ -914,6 +1031,7 @@ pub(crate) fn existing_by_identity(entries: &[(&str, &str)]) -> ExistingInstance
                 title: (*title).to_string(),
                 class: (*class).to_string(),
                 properties: BTreeMap::new(),
+                updated_at: String::new(),
             })
             .collect(),
     )

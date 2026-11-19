@@ -62,7 +62,7 @@ use super::types::{
     ModelQueryInput, ModelQueryResult, ModelShape, OrderDirection, ProjectionInput, Scope,
     ShapeResolver, SortKey, WhereCondition,
 };
-use crate::perspectives::sparql_store::SparqlStore;
+use crate::perspectives::sparql_store::{EvalStop, SparqlStore};
 use deno_core::anyhow::{anyhow, Error};
 use serde_json::Value;
 use std::cmp::Ordering;
@@ -229,6 +229,7 @@ fn key_source(shape: &ModelShape, key: &str) -> Option<KeySource> {
 /// needing a value only the hydrated row has, or two the store sorts on
 /// differently (it binds one sort value per query).
 async fn members_from_ids(
+    stop: &EvalStop,
     store: &SparqlStore,
     shape: &ModelShape,
     select: &ModelQueryInput,
@@ -256,7 +257,7 @@ async fn members_from_ids(
         Some(_) => return Ok(None),
         None => SortKey::CreatedAt,
     };
-    let Some(rows) = select_ids(store, shape, select, resolver, sort_key).await? else {
+    let Some(rows) = select_ids(stop, store, shape, select, resolver, sort_key).await? else {
         return Ok(None);
     };
     Ok(Some(
@@ -282,6 +283,7 @@ async fn members_from_ids(
 /// hydrated as that class (with the projections an order key names), and each
 /// key read off the row.
 async fn members_from_rows(
+    stop: &EvalStop,
     store: &SparqlStore,
     shape: &ModelShape,
     select: &ModelQueryInput,
@@ -289,9 +291,10 @@ async fn members_from_rows(
     order: &[(String, OrderDirection)],
     sort_projections: Option<&HashMap<String, ProjectionInput>>,
 ) -> Result<Vec<(String, Vec<Value>)>, Error> {
-    let mut result = execute_model_query_inner(store, shape, select, resolver, 0).await?;
+    let mut result = execute_model_query_inner(stop, store, shape, select, resolver, 0).await?;
     if let Some(projs) = sort_projections.filter(|p| !p.is_empty()) {
         resolve_projections(
+            stop,
             store,
             &mut result.instances,
             projs,
@@ -371,7 +374,15 @@ pub async fn execute_union_query(
     query: &ModelQueryInput,
     resolver: &dyn ShapeResolver,
 ) -> Result<ModelQueryResult, Error> {
-    execute_union_query_with_views(store, classes, query, resolver, &HashMap::new()).await
+    execute_union_query_with_views(
+        &EvalStop::none(),
+        store,
+        classes,
+        query,
+        resolver,
+        &HashMap::new(),
+    )
+    .await
 }
 
 /// [`execute_union_query`], reading each class in `views` through its view
@@ -379,6 +390,7 @@ pub async fn execute_union_query(
 /// carry the abstract class's names. Records an `include` reaches are read
 /// through `resolver`, as their own class.
 pub async fn execute_union_query_with_views(
+    stop: &EvalStop,
     store: &SparqlStore,
     classes: &[String],
     query: &ModelQueryInput,
@@ -388,7 +400,7 @@ pub async fn execute_union_query_with_views(
     refuse_unanswerable(classes, query)?;
     // A walk is made once for the union, not once per class: every class
     // reads the same reached nodes, and their order is the walk's.
-    let walked_query = with_walk(store, query)?;
+    let walked_query = with_walk(stop, store, query)?;
     let query = walked_query.as_ref().unwrap_or(query);
     let walk_order = walk_order(query);
     let shape_of = |class: &str| match views.get(class) {
@@ -441,10 +453,13 @@ pub async fn execute_union_query_with_views(
     for class in &requested {
         let shape = shape_of(class)?;
         let members =
-            match members_from_ids(store, shape.as_ref(), &select, resolver, sort_keys).await? {
+            match members_from_ids(stop, store, shape.as_ref(), &select, resolver, sort_keys)
+                .await?
+            {
                 Some(members) => members,
                 None => {
                     members_from_rows(
+                        stop,
                         store,
                         shape.as_ref(),
                         &select,
@@ -506,7 +521,7 @@ pub async fn execute_union_query_with_views(
     let mut classified: HashMap<String, Vec<String>> = if shared.is_empty() {
         HashMap::new()
     } else {
-        crate::perspectives::subject_classes_of::subject_classes_of(store, resolver, &shared)?
+        crate::perspectives::subject_classes_of::subject_classes_of(stop, store, resolver, &shared)?
     };
     let preferred = query.prefer_classes.as_deref().unwrap_or(&[]);
     let mut union: Vec<Member> = Vec::with_capacity(all_ids.len());
@@ -575,6 +590,7 @@ pub async fn execute_union_query_with_views(
         .collect();
     if !unclassified.is_empty() {
         classified.extend(crate::perspectives::subject_classes_of::subject_classes_of(
+            stop,
             store,
             resolver,
             &unclassified,
@@ -605,7 +621,8 @@ pub async fn execute_union_query_with_views(
             count: None,
             ..query.clone()
         };
-        let result = execute_model_query_inner(store, shape.as_ref(), &fetch, resolver, 0).await?;
+        let result =
+            execute_model_query_inner(stop, store, shape.as_ref(), &fetch, resolver, 0).await?;
         for mut row in result.instances {
             let Some(id) = row["id"].as_str().map(str::to_string) else {
                 continue;

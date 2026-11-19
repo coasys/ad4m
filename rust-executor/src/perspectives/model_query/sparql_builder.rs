@@ -109,6 +109,21 @@ fn typed_number_literal(n: f64) -> Option<String> {
 /// page. The probe joins one reifier per link, so the checks sit on that same
 /// reifier. The probe is a required pattern, and conformance reads the same
 /// links, so a source whose probe link is withheld is not an instance at all.
+///
+/// Every branch binds the plain triple before its reifier, and the caller puts
+/// the probe first in the id phase's `WHERE`. Oxigraph's join planner
+/// (`sparopt::reorder_joins`) starts from the cheapest pattern and takes the
+/// first one on a tie. A reifier pattern `?_r rdf:reifies <<( ?source <p> o )>>`
+/// with `?source` free costs like a scan of every reifier, and so does a
+/// conformance check such as `?_rcf proofValid "true"`. With the plain triple
+/// `?source <p> <o>` first, the plan starts from the class's own instances,
+/// and each reifier is then a lookup by its complete triple term.
+///
+/// The plain triple adds no condition: the store writes a link's triple and
+/// its reifier in one transaction and removes the triple only with its last
+/// reifier (`SparqlStore::write_link_quads_proof`,
+/// `SparqlStore::remove_link_quads`), so the triple is present exactly when
+/// some reifier of it is. The guard still filters on the reifier.
 pub(super) fn build_timestamp_probe(shape: &ModelShape, guard: LinkGuard) -> String {
     let rdf_reifies = "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies";
     let ont_ts = "ad4m://ontology/timestamp";
@@ -128,7 +143,7 @@ pub(super) fn build_timestamp_probe(shape: &ModelShape, guard: LinkGuard) -> Str
     }) {
         let initial = prop.initial_value.as_ref().unwrap();
         return format!(
-            "?_r <{rdf_reifies}> <<( ?source <{}> <{initial}> )>> . ?_r <{ont_ts}> ?_first_ts_v .{verified}",
+            "?source <{0}> <{initial}> . ?_r <{rdf_reifies}> <<( ?source <{0}> <{initial}> )>> . ?_r <{ont_ts}> ?_first_ts_v .{verified}",
             prop.predicate
         );
     }
@@ -140,7 +155,7 @@ pub(super) fn build_timestamp_probe(shape: &ModelShape, guard: LinkGuard) -> Str
     {
         let safe_name = prop.name.replace(|c: char| !c.is_alphanumeric(), "_");
         return format!(
-            "?_r <{rdf_reifies}> <<( ?source <{}> ?_cf_{safe_name} )>> . ?_r <{ont_ts}> ?_first_ts_v .{verified}",
+            "?source <{0}> ?_cf_{safe_name} . ?_r <{rdf_reifies}> <<( ?source <{0}> ?_cf_{safe_name} )>> . ?_r <{ont_ts}> ?_first_ts_v .{verified}",
             prop.predicate
         );
     }
@@ -267,12 +282,14 @@ pub(super) fn build_instance_sparql(
     if let Some(pg) = sparql_pagination {
         let subquery_body = match &pg.sort_key {
             SortKey::Timestamp => {
+                // The probe goes first: see `build_timestamp_probe` for why the
+                // join planner needs its plain triple ahead of every other pattern.
                 let ts_probe = build_timestamp_probe(shape, guard);
                 format!(
                     r#"SELECT DISTINCT ?source{anchor_select} (MIN(?_first_ts_v) AS ?_first_ts) WHERE {{
+            {ts_probe}
 {conformance}
 {where_extra}
-            {ts_probe}
         }} GROUP BY ?source{anchor_group}{pagination_suffix}"#
                 )
             }
@@ -558,13 +575,20 @@ impl<'a> LinkGuard<'a> {
     /// `FILTER EXISTS` rather than a join, so two passing links over one triple
     /// do not return the subject twice: the reads that hydrate a relation use
     /// it. `predicate` is a term: `<iri>` or a variable. Empty when open.
+    ///
+    /// The checks on the reifier sit in an inner `FILTER EXISTS`, where
+    /// `?_pv` is bound. Side by side in one group, Oxigraph joins them to the
+    /// `rdf:reifies` pattern without a key (it does not reorder joins inside
+    /// an expression): a Cartesian product that scanned every reifier passing
+    /// the checks, for every row. On 76k links that was a full scan per
+    /// hydrated relation (`test_perf_exists_guard_binds_the_reifier`).
     pub(super) fn exists(&self, subject: &str, predicate: &str, object: &str) -> String {
         if self.is_open() {
             return String::new();
         }
         format!(
             " FILTER EXISTS {{ ?_pv <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> \
-             <<( {subject} {predicate} {object} )>> .{} }}",
+             <<( {subject} {predicate} {object} )>> . FILTER EXISTS {{{} }} }}",
             self.on_reifier("?_pv")
         )
     }
@@ -1035,6 +1059,14 @@ pub(super) fn shape_conformance_patterns(
     };
 
     let mut has_conformance = false;
+    // The flag triples with an IRI value go first, in shape order. Oxigraph's
+    // join planner (`sparopt::reorder_joins`) starts from the first of the
+    // cheapest patterns. A flag triple `?source <pred> <iri>` costs the same as
+    // the guard's `?_rcf_x proofValid "true"` of an earlier required property, but
+    // that check matches every verified link in the store, while the flag
+    // matches only the class's instances. The order of a conjunction does not
+    // change its result.
+    let mut leading_flags = 0;
     for prop in &shape.properties {
         if prop.is_required {
             if validate_iri(&prop.predicate).is_err() {
@@ -1050,7 +1082,11 @@ pub(super) fn shape_conformance_patterns(
                     // the whole query fail to parse. STR() matches the
                     // `new_unchecked` store term either way.
                     if emittable_iri(initial) {
-                        conformance_patterns.push(triple(&prop.predicate, &format!("<{initial}>")));
+                        conformance_patterns.insert(
+                            leading_flags,
+                            triple(&prop.predicate, &format!("<{initial}>")),
+                        );
+                        leading_flags += 1;
                     } else {
                         let escaped = escape_sparql_string(initial);
                         conformance_patterns.push(format!(

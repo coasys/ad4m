@@ -51,6 +51,7 @@ async fn run_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
     )
     .await
     .map_err(|_| WsRpcError {
+        data: None,
         code: 408,
         message: format!("runAgent timed out after {RUN_AGENT_TIMEOUT_SECS}s"),
     })?;
@@ -59,6 +60,7 @@ async fn run_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
         Ok(reply) => Ok(serde_json::to_value(reply)?),
         Err(AgentSessionError::Invalid(message)) => Err(WsRpcError::bad_request(message)),
         Err(e @ AgentSessionError::OutOfCredits) => Err(WsRpcError {
+            data: None,
             code: 402,
             message: e.to_string(),
         }),
