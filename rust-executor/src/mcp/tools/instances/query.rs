@@ -1,5 +1,6 @@
 //! `instance_query` + `instance_get` — read instances of any subject class.
 
+use super::walk::{order_json, outline_properties, outline_row, Fields};
 use super::{
     error_json, fetch_instance, instance_uri, link_target, normalize_filter, not_found, pretty,
     resolve_class, run_model_query, Ad4mMcpHandler, DEFAULT_QUERY_LIMIT, MAX_QUERY_LIMIT,
@@ -32,6 +33,15 @@ pub struct InstanceQueryParams {
     pub limit: Option<usize>,
     /// Number of instances to skip, for pagination.
     pub offset: Option<usize>,
+    /// Optional sort key. `activity`: the newest activity first (creation,
+    /// last change, or a row that attached to it). `createdAt`: the newest
+    /// first. A property name: ascending by its value. Default: creation
+    /// order, oldest first.
+    pub order: Option<String>,
+    /// How much of each instance to return. `full` (default): every
+    /// property. `outline`: `id`, `title` and the forward relation values
+    /// (the parent links), one short row each.
+    pub fields: Option<String>,
 }
 
 /// Parameters for reading one instance
@@ -48,7 +58,7 @@ pub struct InstanceGetParams {
 impl Ad4mMcpHandler {
     /// Query instances of any subject class, with typed property values.
     #[tool(
-        description = "List instances of a subject class with their property values. class_name is one of the class names from describe_perspective. Optional filter is a where clause on property values: exact match {\"status\": \"open\"}, IN {\"status\": [\"open\", \"doing\"]}, operators {\"count\": {\"gt\": 5}} / {\"title\": {\"contains\": \"mcp\"}} / {\"owner\": {\"not\": \"…\"}}, combinators \"OR\" / \"AND\" / \"NOT\"; \"id\" filters on the instance URI. Optional parent restricts to what one node contains (e.g. messages of a channel): its ad4m://has_child children, plus the children of its class's own children relation (e.g. a block's we://child), whatever the node is. Paginate with limit (default 100) and offset; total_count reports the full match count. Each instance has id (its base_uri), author, timestamp, and one key per property."
+        description = "List instances of a subject class with their property values. class_name is one of the class names from describe_perspective. Optional filter is a where clause on property values: exact match {\"status\": \"open\"}, IN {\"status\": [\"open\", \"doing\"]}, operators {\"count\": {\"gt\": 5}} / {\"title\": {\"contains\": \"mcp\"}} / {\"owner\": {\"not\": \"…\"}}, combinators \"OR\" / \"AND\" / \"NOT\"; \"id\" filters on the instance URI. Optional parent restricts to what one node contains (e.g. messages of a channel): its ad4m://has_child children, plus the children of its class's own children relation (e.g. a block's we://child), whatever the node is. Paginate with limit (default 100) and offset; total_count reports the full match count. Optional order: activity (newest activity first: created, changed, or a row attached to it), createdAt (newest first), or a property name (ascending). Optional fields: full (default; each instance has id (its base_uri), author, timestamp, and one key per property) or outline (id, title and the forward relation values, one short row each)."
     )]
     pub async fn instance_query(&self, params: Parameters<InstanceQueryParams>) -> String {
         let p = &params.0;
@@ -61,10 +71,23 @@ impl Ad4mMcpHandler {
             Err(e) => return e,
         };
 
+        let fields = match Fields::parse(p.fields.as_deref(), Fields::Full) {
+            Ok(fields) => fields,
+            Err(e) => return error_json(e),
+        };
         let mut query = json!({
             "limit": p.limit.unwrap_or(DEFAULT_QUERY_LIMIT).min(MAX_QUERY_LIMIT),
             "count": true
         });
+        if let Some(key) = p.order.as_deref().filter(|k| !k.trim().is_empty()) {
+            match order_json(&shape, key) {
+                Ok(order) => query["order"] = order,
+                Err(e) => return error_json(e),
+            }
+        }
+        if fields == Fields::Outline {
+            query["properties"] = json!(outline_properties(&shape));
+        }
         if let Some(offset) = p.offset {
             query["offset"] = json!(offset);
         }
@@ -81,6 +104,18 @@ impl Ad4mMcpHandler {
         }
 
         match run_model_query(&perspective, &class_name, &query).await {
+            Ok((instances, total)) if fields == Fields::Outline => {
+                let rows: Vec<Value> = instances
+                    .iter()
+                    .map(|instance| outline_row(&shape, instance))
+                    .collect();
+                pretty(&json!({
+                    "class_name": class_name,
+                    "count": rows.len(),
+                    "total_count": total,
+                    "instances": rows,
+                }))
+            }
             Ok((instances, total)) => pretty(&json!({
                 "class_name": class_name,
                 "count": instances.len(),
