@@ -11,6 +11,12 @@
 //! holds the perspective's data in a form that can give back its text, and the reads look
 //! rows up by the key columns only. When #1691 merges, this table joins its
 //! `SEALED_TABLES`: owner `perspective`, key the four key columns, sealed column `vector`.
+//!
+//! TODO(#1804): the rows of a removed instance stay until its perspective is removed. No
+//! single hook sees every removal (`instance_remove`, the SDK's `removeSubject`, raw link
+//! removals, a peer's synced diff), so this needs a sweep: drop the rows whose instance id
+//! no longer has a title in the perspective. Search never returns them: its candidates come
+//! from the live graph.
 
 use rusqlite::{params, Connection};
 
