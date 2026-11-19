@@ -308,10 +308,12 @@ the participant id); a session never receives its own media or its own
 `sfu-data` (`senderParticipantId`), but does receive its agent's other
 device; room capacity comes from the
 space's policy (`maxMeshParticipants × 4`, 128 without one), and cascade
-per-node capacity only drives redirects; the server drops a peer only after
+per-node capacity only drives redirects; the server drops a peer after
 10 s of ICE `Disconnected`, or, once the client asked for an ICE restart
 (`sfu.callRestartIce`), 15 s after the request. The restart's answer ends
-that grace and the 10 s disconnect clock starts again;
+that grace and the 10 s disconnect clock starts again. The deadline sweep
+also drops a peer when a server offer stays unanswered after both resends
+(resend at 10 s and at 30 s, drop at 70 s), even when ICE stays connected;
 on ICE `disconnected` or a network change the SDK restarts ICE in place (the
 SFU stays the only offerer: the restart comes as a server renegotiation
 offer), and rebuilds the call if that has not reconnected within 15 s; a
