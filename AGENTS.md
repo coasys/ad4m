@@ -301,8 +301,8 @@ tab's call (E19, E21). The executor publishes `sfu-room-roster` (to the
 listed DIDs, plus the departed session's DID on departure) after every join
 and departure, listing sessions (`participantId` + `agentDid`), and the SDK
 keys participants by participant id from it; when the roster stops listing
-this session (its `participantId`) for 3 s, the SDK rebuilds the call, but a
-replaced session never does; tracks are attributed only by the `trackMapping`
+this session (its `participantId`) for 3 s and `sfu.listRooms` does not list
+it either, the SDK rebuilds the call, but a replaced session never does; tracks are attributed only by the `trackMapping`
 mids (which name
 the participant id); a session never receives its own media or its own
 `sfu-data` (`senderParticipantId`), but does receive its agent's other
@@ -314,22 +314,33 @@ per-node capacity only drives redirects; the server drops a peer after
 that grace and the 10 s disconnect clock starts again. The deadline sweep
 also drops a peer when a server offer stays unanswered after both resends
 (resend at 10 s and at 30 s, drop at 70 s), even when ICE stays connected;
-on ICE `disconnected` or a network change the SDK restarts ICE in place (the
+on ICE `disconnected` the SDK restarts ICE in place (the
 SFU stays the only offerer: the restart comes as a server renegotiation
-offer), and rebuilds the call if that has not reconnected within 15 s; a
-failed connection is rebuilt at once, and a rebuild retries the join for
-120 s. The restart names the session's `participantId` (only that session
+offer), and rebuilds the call if that has not reconnected within 15 s; after
+a socket reconnect or a network change it restarts ICE only if ICE is not
+connected 2 s later; a failed connection is rebuilt at once, a rebuild
+retries the join for 120 s, and after 3 rebuilds in 2 min the SDK stops
+rebuilding and emits `error` until the user joins again. A rebuild keeps
+the participants and clears only their media. Only an SDP the connection
+cannot apply rebuilds from a renegotiation: an answer the socket lost (503,
+408) is sent again once the socket is back, then the SDK calls
+`sfu.callResume` (an executor without it answers 404 "Unknown type" and its
+own resend brings the offer). Of the server offers waiting, only the newest
+is applied, and each step of the offer queue gets 10 s. The restart names the session's `participantId` (only that session
 restarts, never another device of the agent), and a manager with no session
 (join not back, left, replaced) sends none. A room roster that leaves this
-session out for 3 s also rebuilds the call (the executor sends the departure
-roster to the departed DID too); a roster that lists it, as during a restart
+session out for 3 s also rebuilds the call once `sfu.listRooms` confirms it
+(the executor sends the departure roster to the departed DID too; a room read
+the socket fails keeps the call); a roster that lists it, as during a restart
 in place, changes nothing.
 `ApiClient` drops an executor socket whose ping stays unanswered for a ping
 interval (10 s, `PING_INTERVAL_MS`; longer while a large write it sent may
 still be crossing a 16 kB/s link) and dials a new one, so a
 socket a network switch left OPEN is noticed in 10 to 20 s. `online` redials
-at once; `change` on `navigator.connection` and ICE `disconnected` run
-`checkConnection`, which drops a socket silent for 2 s after its ping.
+at once; `change` on `navigator.connection` (only when its `type` or
+`navigator.onLine` changed) and ICE `disconnected` run `checkConnection`,
+which sends no probe when the socket delivered a message in the last 5 s and
+drops a socket only after two probes in a row got nothing for 8 s each.
 
 SFU behind NAT (`rust-executor/src/sfu/{server,reachability}.rs`): the SFU
 binds `sfu_bind_addr` on `sfu_udp_port` (0/unset: ephemeral; a fixed port
