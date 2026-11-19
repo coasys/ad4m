@@ -9677,6 +9677,79 @@ mod tests {
         assert!(!Arc::ptr_eq(&first, &second));
     }
 
+    fn task_shape_shacl() -> String {
+        r#"{
+            "target_class": "ns://Task",
+            "interpretation_hint": "keep this hint",
+            "constructor_actions": [
+                {"action": "addLink", "source": "this", "predicate": "ns://title", "target": "from-constructor"}
+            ],
+            "properties": [
+                {"path": "ns://title", "name": "title", "datatype": "xsd://string", "min_count": 1, "max_count": 1}
+            ]
+        }"#
+        .to_string()
+    }
+
+    /// Load `Task` once under a stop that fires on `needle`, then again with
+    /// the stop clear. A cancelled optional read must not be cached as absent.
+    async fn shape_after_cancelled_read(
+        needle: &str,
+    ) -> Arc<crate::perspectives::model_query::types::ModelShape> {
+        use crate::perspectives::auto_processor::read_offload::probe;
+        use crate::perspectives::sparql_store::{BoundStop, EvalGate};
+        use std::time::Duration;
+
+        let mut perspective = setup().await;
+        perspective
+            .add_sdna(
+                "Task".to_string(),
+                String::new(),
+                SdnaType::SubjectClass,
+                Some(task_shape_shacl()),
+                &AgentContext::main_agent(),
+            )
+            .await
+            .expect("add_sdna");
+        let gate = EvalGate::request(Duration::from_secs(30), None);
+        let stop = gate.stop();
+        let bound = BoundStop::bind(&stop);
+        let needle_guard = probe::cancel_on_query(needle);
+        let stopped = perspective.get_shape("Task");
+        drop(needle_guard);
+        drop(bound);
+        drop(gate);
+        assert!(
+            stopped.is_err(),
+            "a cancelled shape load returned Ok and can be cached: {stopped:?}"
+        );
+        perspective.get_shape("Task").expect("unstopped load")
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_constructor_read_is_not_cached_as_no_initial_value() {
+        let shape = shape_after_cancelled_read("ad4m://constructor").await;
+        let title = shape
+            .properties
+            .iter()
+            .find(|prop| prop.name == "title")
+            .expect("title property");
+        assert_eq!(title.initial_value.as_deref(), Some("from-constructor"));
+        assert_eq!(shape.interpretation_hint.as_deref(), Some("keep this hint"));
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_class_hint_read_is_not_cached_as_no_hint() {
+        let shape = shape_after_cancelled_read("SELECT ?hint").await;
+        assert_eq!(shape.interpretation_hint.as_deref(), Some("keep this hint"));
+        let title = shape
+            .properties
+            .iter()
+            .find(|prop| prop.name == "title")
+            .expect("title property");
+        assert_eq!(title.initial_value.as_deref(), Some("from-constructor"));
+    }
+
     /// Two apps that each define `Message` in their own namespace must not
     /// delete each other's shape: a refresh replaces only the class with the
     /// same target-class URI, not every class whose last segment is `Message`.

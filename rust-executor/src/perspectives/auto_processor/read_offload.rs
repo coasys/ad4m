@@ -555,6 +555,43 @@ pub(crate) mod probe {
     }
 
     static SPEC: Mutex<Option<Spec>> = Mutex::new(None);
+    /// When set, the next query whose text contains this needle cancels `stop`.
+    /// Active even while the hold probe is off, so a shape-load test can fire
+    /// one optional read without parking the rest.
+    static CANCEL_NEEDLE: Mutex<Option<String>> = Mutex::new(None);
+
+    pub(crate) struct CancelOnQuery {
+        prev: Option<String>,
+    }
+
+    impl Drop for CancelOnQuery {
+        fn drop(&mut self) {
+            *CANCEL_NEEDLE.lock().unwrap_or_else(|e| e.into_inner()) = self.prev.take();
+        }
+    }
+
+    /// Cancel the bound stop when a query contains `needle`.
+    pub(crate) fn cancel_on_query(needle: &str) -> CancelOnQuery {
+        let mut slot = CANCEL_NEEDLE.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = slot.clone();
+        *slot = Some(needle.to_string());
+        CancelOnQuery { prev }
+    }
+
+    fn cancel_if_needle(stop: &EvalStop, query: &str) -> bool {
+        let needle = CANCEL_NEEDLE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let Some(needle) = needle else {
+            return false;
+        };
+        if !query.contains(&needle) {
+            return false;
+        }
+        stop.cancel_for_test();
+        true
+    }
     /// Stages that have already taken their one hold. Reset by [`install`].
     static HELD_ONCE: Mutex<[bool; 3]> = Mutex::new([false; 3]);
 
@@ -729,6 +766,11 @@ pub(crate) mod probe {
         stop: &EvalStop,
         query: &str,
     ) -> Result<(), deno_core::anyhow::Error> {
+        if cancel_if_needle(stop, query) {
+            return Err(stop
+                .stopped_err("query")
+                .unwrap_or_else(|| deno_core::anyhow::anyhow!("query cancelled")));
+        }
         if !PROBE_ON.load(Ordering::Relaxed) {
             return Ok(());
         }

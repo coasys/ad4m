@@ -80,9 +80,16 @@ impl EvalStop {
     #[cfg(test)]
     pub(crate) fn cancelled() -> EvalStop {
         let stop = EvalStop::none();
-        stop.stop.mark(STOP_CANCELLED);
-        stop.token.cancel();
+        stop.cancel_for_test();
         stop
+    }
+
+    /// Mark this stop cancelled. Tests use it when a chosen query must fail
+    /// as a cancel rather than as a missing value.
+    #[cfg(test)]
+    pub(crate) fn cancel_for_test(&self) {
+        self.stop.mark(STOP_CANCELLED);
+        self.token.cancel();
     }
 
     /// Whether the eval carrying this stop must end. The evaluator checks the
