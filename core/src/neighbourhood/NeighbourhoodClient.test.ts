@@ -77,6 +77,7 @@ describe("NeighbourhoodClient SFU calls", () => {
     await client.sfuCallSetQualityPreference(url, "r", "P1", "low");
     await client.sfuSendData(url, "r", "P1", "chat", "hi");
     await client.sfuCallRestartIce(url, "r", "P1");
+    await client.sfuCallResume(url, "r", "P1");
 
     const sfu = FakeWebSocket.sent.filter((m) => m.type.startsWith("sfu."));
     expect(sfu).toEqual([
@@ -87,6 +88,7 @@ describe("NeighbourhoodClient SFU calls", () => {
       { type: "sfu.callSetQualityPreference", params: { neighbourhoodUrl: url, roomName: "r", participantId: "P1", preference: "low" } },
       { type: "sfu.sendData", params: { neighbourhoodUrl: url, roomName: "r", participantId: "P1", channelLabel: "chat", data: "hi", binary: false } },
       { type: "sfu.callRestartIce", params: { neighbourhoodUrl: url, roomName: "r", participantId: "P1" } },
+      { type: "sfu.callResume", params: { neighbourhoodUrl: url, roomName: "r", participantId: "P1" } },
     ]);
   });
 

@@ -1896,3 +1896,77 @@ test("an offer the connection cannot apply still rebuilds the call", async () =>
     expect(api.sfuCallJoin).toHaveBeenCalledTimes(2)
     expect(api.sfuCallAnswerServerOffer).not.toHaveBeenCalled()
 })
+
+// ── Resume after a socket reconnect (C6) ────────────────────────────────────
+
+test("after the socket reconnects the manager asks the executor to resume its session", async () => {
+    const api = fakeApi()
+    const manager = new SfuManager(api, ROOM, ME, URL)
+    await manager.join(fakeStream())
+    api.log.length = 0
+
+    api.emitReconnect()
+    await flush()
+
+    expect(api.sfuCallResume.mock.calls).toEqual([[URL, ROOM, MINE]])
+    expect(api.log).toEqual(["sfuCallResume"])
+    expect(api.sfuCallLeave).not.toHaveBeenCalled()
+})
+
+test("an answer the socket fault kept goes out before the resume", async () => {
+    const api = fakeApi()
+    const manager = new SfuManager(api, ROOM, ME, URL)
+    await manager.join(fakeStream())
+    api.sfuCallAnswerServerOffer.mockRejectedValueOnce(new RpcError(503, "WebSocket connection closed"))
+    api.emitOffer(offer("renegotiate"))
+    await flush()
+    api.log.length = 0
+
+    api.emitReconnect()
+    await flush()
+
+    expect(api.log).toEqual(["sfuCallAnswerServerOffer", "sfuCallResume"])
+})
+
+test("an executor without sfu.callResume: the manager waits for its resend, keeps the call, and asks again next time", async () => {
+    const api = fakeApi()
+    api.sfuCallResume.mockRejectedValue(new RpcError(404, "Unknown type: sfu.callResume"))
+    const manager = new SfuManager(api, ROOM, ME, URL)
+    const errors: unknown[] = []
+    manager.on("error", (e) => errors.push(e))
+    await manager.join(fakeStream())
+
+    api.emitReconnect()
+    await flush()
+    // The executor resends its pending offer on its own (10 s, 30 s).
+    api.emitOffer(offer("resent"))
+    await flush()
+    api.emitReconnect()
+    await flush()
+
+    expect(currentPc().remoteSdps()).toEqual(["server-answer", "resent"])
+    expect(api.sfuCallResume).toHaveBeenCalledTimes(2)
+    expect(api.sfuCallLeave).not.toHaveBeenCalled()
+    expect(errors).toEqual([])
+})
+
+test("an api without onReconnect or sfuCallResume still joins and keeps its call", async () => {
+    const api = fakeApi() as Partial<ReturnType<typeof fakeApi>>
+    delete api.onReconnect
+    delete api.sfuCallResume
+    const manager = new SfuManager(api as SfuNeighbourhoodApi, ROOM, ME, URL)
+    await manager.join(fakeStream())
+    expect(manager.getState().participantId).toBe(MINE)
+})
+
+test("no resume goes out without a session, and none after leave", async () => {
+    const api = fakeApi()
+    const manager = new SfuManager(api, ROOM, ME, URL)
+    api.emitReconnect()
+    await manager.join(fakeStream())
+    await manager.leave()
+    api.emitReconnect()
+    await flush()
+    expect(api.sfuCallResume).not.toHaveBeenCalled()
+    expect(api.reconnectHandlers.size).toBe(0)
+})

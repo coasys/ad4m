@@ -85,6 +85,15 @@ export interface SfuNeighbourhoodApi {
      *  first open). Optional: without it, an answer a socket fault kept goes
      *  out only when the executor sends its offer again. */
     onReconnect?(callback: () => void): () => void
+    /** Ask the executor to send this session's pending offer and the room's
+     *  roster again (`sfu.callResume`), after the socket came back. Optional:
+     *  an executor without the method answers 404 "Unknown type", and the
+     *  manager waits for the executor's own resend of the offer instead. */
+    sfuCallResume?(
+        neighbourhoodUrl: string,
+        roomName: string,
+        participantId: string,
+    ): Promise<boolean>
     /** Check the executor socket now; one found dead is redialled and
      *  `onNetworkChange` fires. Called when ICE goes disconnected, since a
      *  network switch the platform announced nothing for leaves that socket
@@ -927,14 +936,34 @@ export class SfuManager {
         }
     }
 
-    /** The executor socket opened again: send what a fault kept from it. */
+    /**
+     * The executor socket opened again: send what a fault kept from it, then
+     * ask for what the executor sent while it was down (an offer, a roster).
+     * The answer goes first, so a resumed offer is not one it already answers.
+     */
     private socketBack(): void {
         const pc = this.state.peerConnection
         if (!pc || this.reconnecting) return
         this.offerQueue = this.offerQueue.then(async () => {
             const unsent = this.unsentAnswer
             if (unsent?.pc === pc && this.state.peerConnection === pc) await this.sendAnswer(unsent)
+            await this.resume(pc)
         })
+    }
+
+    /** Ask the executor to send this session's pending offer and roster again. */
+    private async resume(pc: RTCPeerConnection): Promise<void> {
+        const participantId = this.state.participantId
+        if (!this.neighbourhood.sfuCallResume || !participantId || this.state.peerConnection !== pc) return
+        try {
+            await this.neighbourhood.sfuCallResume(this.neighbourhoodUrl, this.roomId, participantId)
+        } catch (err) {
+            if (err instanceof RpcError && err.status === 404 && err.body.startsWith("Unknown type")) {
+                console.info("SFU: this executor has no sfu.callResume; its own resend brings any pending offer")
+            } else {
+                console.warn("SFU: resuming the session failed; the executor's resend and the roster decide:", err)
+            }
+        }
     }
 
     /**
