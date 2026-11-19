@@ -326,8 +326,9 @@ idle) for the UI to show; a new `join` starts over. A rebuild keeps
 the participants and clears only their media. Only an SDP the connection
 cannot apply rebuilds from a renegotiation: an answer the socket lost (503,
 408) is sent again once the socket is back, then the SDK calls
-`sfu.callResume` (an executor without it answers 404 "Unknown type" and its
-own resend brings the offer). Of the server offers waiting, only the newest
+`sfu.callResume`; a resume refused other than by the socket (an executor
+without it answers 404 "Unknown type") rejoins if `sfu.listRooms` no longer
+lists the session, and otherwise waits for the executor's own resend. Of the server offers waiting, only the newest
 is applied, and each step of the offer queue gets 10 s. The restart names the session's `participantId` (only that session
 restarts, never another device of the agent), and a manager with no session
 (join not back, left, replaced) sends none. A room roster that leaves this

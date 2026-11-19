@@ -1904,6 +1904,8 @@ test("an answer the socket fault kept goes out before the resume", async () => {
 test("an executor without sfu.callResume: the manager waits for its resend, keeps the call, and asks again next time", async () => {
     const api = fakeApi()
     api.sfuCallResume.mockRejectedValue(new RpcError(404, "Unknown type: sfu.callResume"))
+    // The executor still holds the session: no rejoin.
+    api.sfuListRooms.mockResolvedValue([room([MINE, ME])])
     const manager = new SfuManager(api, ROOM, ME, URL)
     const errors: unknown[] = []
     manager.on("error", (e) => errors.push(e))
@@ -2480,4 +2482,74 @@ test("a call that gave up rebuilding ends: `call-ended` with reason gave-up, its
     api.emitReconnect()
     await flush()
     expect(api.sfuCallJoin).toHaveBeenCalledTimes(4)
+})
+
+// ── Round 2: a refused resume falls back to a rejoin when the session is gone ─
+
+test.each([
+    ["an executor without sfu.callResume (404)", new RpcError(404, "Unknown type: sfu.callResume")],
+    ["an executor that no longer has the session", new RpcError(500, "Session P1 is not in this call")],
+])("after a reconnect, %s whose room no longer lists this session: the call is rejoined", async (_name, refusal) => {
+    const api = fakeApi()
+    api.sfuCallResume.mockRejectedValue(refusal)
+    api.sfuListRooms.mockResolvedValue([room([pid(ALICE), ALICE])])
+    api.sfuCallJoin.mockResolvedValueOnce(session()).mockResolvedValueOnce(session({ participantId: "P2" }))
+    const manager = new SfuManager(api, ROOM, ME, URL)
+    await manager.join(fakeStream())
+
+    api.emitReconnect()
+    await flush()
+    await flush()
+
+    expect(api.sfuListRooms).toHaveBeenCalledTimes(1)
+    expect(api.sfuCallJoin).toHaveBeenCalledTimes(2)
+    expect(manager.getState().participantId).toBe("P2")
+    await manager.leave()
+})
+
+test("a resume refused with 404 while the room still lists this session keeps the call", async () => {
+    const api = fakeApi()
+    api.sfuCallResume.mockRejectedValue(new RpcError(404, "Unknown type: sfu.callResume"))
+    api.sfuListRooms.mockResolvedValue([room([MINE, ME])])
+    const manager = new SfuManager(api, ROOM, ME, URL)
+    await manager.join(fakeStream())
+
+    api.emitReconnect()
+    await flush()
+    await flush()
+
+    expect(api.sfuListRooms).toHaveBeenCalledTimes(1)
+    expect(api.sfuCallJoin).toHaveBeenCalledTimes(1)
+    expect(manager.getState().participantId).toBe(MINE)
+    await manager.leave()
+})
+
+test("a resume refused with 404 by an api that cannot read the room rejoins", async () => {
+    const api = fakeApi() as Partial<ReturnType<typeof fakeApi>> & ReturnType<typeof fakeApi>
+    api.sfuCallResume.mockRejectedValue(new RpcError(404, "Unknown type: sfu.callResume"))
+    delete (api as Partial<ReturnType<typeof fakeApi>>).sfuListRooms
+    const manager = new SfuManager(api as SfuNeighbourhoodApi, ROOM, ME, URL)
+    await manager.join(fakeStream())
+
+    api.emitReconnect()
+    await flush()
+    await flush()
+
+    expect(api.sfuCallJoin).toHaveBeenCalledTimes(2)
+    await manager.leave()
+})
+
+test("a resume the socket fails (503) changes nothing: the next reconnect asks again", async () => {
+    const api = fakeApi()
+    api.sfuCallResume.mockRejectedValueOnce(new RpcError(503, "WebSocket connection closed"))
+    const manager = new SfuManager(api, ROOM, ME, URL)
+    await manager.join(fakeStream())
+
+    api.emitReconnect()
+    await flush()
+    await flush()
+
+    expect(api.sfuListRooms).not.toHaveBeenCalled()
+    expect(api.sfuCallJoin).toHaveBeenCalledTimes(1)
+    await manager.leave()
 })

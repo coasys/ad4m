@@ -859,9 +859,9 @@ export class SfuManager {
     }
 
     /**
-     * A roster left this session out for the grace: ask the executor for the
-     * room before tearing a call down for one event. Rebuild if it does not
-     * list the session. A read the socket fault failed (503, 408) keeps the
+     * A roster left this session out for the grace, or the executor refused
+     * to resume it: ask the executor for the room before tearing a call down.
+     * Rebuild (a rejoin) if it does not list the session. A read the socket fault failed (503, 408) keeps the
      * call: ICE, and the next roster, still say if the session is gone. Any
      * other refusal, or an API without the read, rebuilds as the roster said.
      */
@@ -1102,18 +1102,31 @@ export class SfuManager {
         )
     }
 
-    /** Ask the executor to send this session's pending offer and roster again. */
+    /**
+     * Ask the executor to send this session's pending offer and roster again.
+     * A refusal that is not a socket fault (an executor without the method
+     * answers 404 "Unknown type"; one that lost the session refuses it) falls
+     * back to a rejoin if the room no longer lists this session
+     * (`confirmUnlisted`). Not on every 404: an executor without the method
+     * still holds a healthy session, and its own resend brings any offer.
+     */
     private async resume(pc: RTCPeerConnection): Promise<void> {
         const participantId = this.state.participantId
         if (!this.neighbourhood.sfuCallResume || !participantId || this.state.peerConnection !== pc) return
         try {
             await this.neighbourhood.sfuCallResume(this.neighbourhoodUrl, this.roomId, participantId)
         } catch (err) {
-            if (err instanceof RpcError && err.status === 404 && err.body.startsWith("Unknown type")) {
-                console.info("SFU: this executor has no sfu.callResume; its own resend brings any pending offer")
-            } else {
-                console.warn("SFU: resuming the session failed; the executor's resend and the roster decide:", err)
+            if (this.state.peerConnection !== pc || this.state.participantId !== participantId) return
+            if (isSocketFault(err)) {
+                console.warn("SFU: resuming the session failed with the socket; the next reconnect asks again:", err)
+                return
             }
+            if (err instanceof RpcError && err.status === 404 && err.body.startsWith("Unknown type")) {
+                console.info("SFU: this executor has no sfu.callResume; checking the room for this session")
+            } else {
+                console.warn("SFU: the executor refused to resume the session; checking the room for it:", err)
+            }
+            void this.confirmUnlisted(pc, participantId)
         }
     }
 
