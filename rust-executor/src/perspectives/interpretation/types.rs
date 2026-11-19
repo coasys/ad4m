@@ -108,6 +108,12 @@ pub struct InstanceContext {
     /// existing instance or belongs to a fresh one on a different topic.
     /// `BTreeMap` for deterministic prompt ordering across calls.
     pub properties: BTreeMap<String, String>,
+    /// When the instance last changed: the later of `updatedAt` (its newest
+    /// link's timestamp) and `createdAt`, as the store keeps it. Empty when
+    /// unknown. Only orders the
+    /// rows the prompt shows when they do not all fit (most recent first);
+    /// never rendered.
+    pub updated_at: String,
 }
 
 /// One transcript turn the interpretation engine (and AutoProcessor gather)

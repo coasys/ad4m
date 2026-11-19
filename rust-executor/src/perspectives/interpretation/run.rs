@@ -1,5 +1,7 @@
+use super::dedup::semantic_embedding_model;
+use super::existing_budget::{existing_for_prompt, Compact};
 use super::{
-    apply_with_overlay, build_interpretation_input, build_speaker_name_map, class_label,
+    apply_with_overlay, build_interpretation_input_showing, build_speaker_name_map, class_label,
     ensure_interpretation_task_for_model, existing_instance_context, existing_relation_links,
     identity_property, normalize_identity, parse_interpretation_output,
     plan_interpretation_ops_resolved, resolve_already_present_with_strategy, DedupStrategy,
@@ -18,6 +20,7 @@ use crate::ai_service::harness::{run_with_tools, HarnessConfig};
 use crate::perspectives::model_query::types::{ModelShape, Scope};
 use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClassOption};
 use crate::types::LinkStatus;
+use anyhow::Context;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -50,6 +53,12 @@ where
         let raw = match prompt_fn(attempt).await {
             Ok(r) => r,
             Err(e) => {
+                // A prompt that does not fit the window will not fit on a
+                // retry. Surface it once so the caller can split the batch
+                // instead of asking the model again.
+                if crate::ai_service::prompt_does_not_fit(&e) {
+                    return Err(e);
+                }
                 log::warn!("interpretation: prompt attempt {attempt} failed: {e:#}");
                 last_err = Some(e);
                 continue;
@@ -508,7 +517,33 @@ pub async fn run_interpretation_observed(
     scope: Option<&Scope>,
     emit_ctx: Option<&crate::perspectives::auto_processor::events::InterpretationEmitContext>,
 ) -> anyhow::Result<Vec<String>> {
-    run_interpretation_with_strategy_and_model(
+    run_interpretation_observed_linked(
+        perspective,
+        shapes,
+        transcript,
+        base_prefix,
+        context,
+        scope,
+        emit_ctx,
+        None,
+    )
+    .await
+}
+
+/// [`run_interpretation_observed`] that links each committed slice under
+/// `slice_link` before the next slice reads existing records.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_interpretation_observed_linked(
+    perspective: &mut PerspectiveInstance,
+    shapes: &[ModelShape],
+    transcript: &[TranscriptTurn],
+    base_prefix: &str,
+    context: &AgentContext,
+    scope: Option<&Scope>,
+    emit_ctx: Option<&crate::perspectives::auto_processor::events::InterpretationEmitContext>,
+    slice_link: Option<&super::SliceScopeLink<'_>>,
+) -> anyhow::Result<Vec<String>> {
+    run_interpretation_with_strategy_and_model_linked(
         perspective,
         shapes,
         transcript,
@@ -521,6 +556,7 @@ pub async fn run_interpretation_observed(
         false,
         emit_ctx,
         None,
+        slice_link,
     )
     .await
     .map(|out| out.bases)
@@ -595,7 +631,81 @@ pub struct InterpretationOutcome {
     pub flow_proposals: Vec<String>,
 }
 
+/// [`run_interpretation_with_strategy`] with a per-call model override.
+///
+/// A batch whose prompt does not fit the model window is split in half and
+/// each half is run on its own. See [`super::overflow`].
 pub async fn run_interpretation_with_strategy_and_model(
+    perspective: &mut PerspectiveInstance,
+    shapes: &[ModelShape],
+    transcript: &[TranscriptTurn],
+    base_prefix: &str,
+    context: &AgentContext,
+    dedup_strategy: &DedupStrategy,
+    model_override: Option<&str>,
+    scope: Option<&Scope>,
+    cursor: Option<&InterpretationRunCursor>,
+    emit_debug_events: bool,
+    emit_ctx: Option<&crate::perspectives::auto_processor::events::InterpretationEmitContext>,
+    flow_filter: Option<&[String]>,
+) -> anyhow::Result<InterpretationOutcome> {
+    run_interpretation_with_strategy_and_model_linked(
+        perspective,
+        shapes,
+        transcript,
+        base_prefix,
+        context,
+        dedup_strategy,
+        model_override,
+        scope,
+        cursor,
+        emit_debug_events,
+        emit_ctx,
+        flow_filter,
+        None,
+    )
+    .await
+}
+
+/// [`run_interpretation_with_strategy_and_model`] that links each committed
+/// slice before the next slice loads existing records. The link type stays
+/// crate-private, so this entry point does too.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_interpretation_with_strategy_and_model_linked(
+    perspective: &mut PerspectiveInstance,
+    shapes: &[ModelShape],
+    transcript: &[TranscriptTurn],
+    base_prefix: &str,
+    context: &AgentContext,
+    dedup_strategy: &DedupStrategy,
+    model_override: Option<&str>,
+    scope: Option<&Scope>,
+    cursor: Option<&InterpretationRunCursor>,
+    emit_debug_events: bool,
+    emit_ctx: Option<&crate::perspectives::auto_processor::events::InterpretationEmitContext>,
+    flow_filter: Option<&[String]>,
+    slice_link: Option<&super::SliceScopeLink<'_>>,
+) -> anyhow::Result<InterpretationOutcome> {
+    super::overflow::split_overflowing_batch(
+        perspective,
+        shapes,
+        transcript,
+        base_prefix,
+        context,
+        dedup_strategy,
+        model_override,
+        scope,
+        cursor,
+        emit_debug_events,
+        emit_ctx,
+        flow_filter,
+        slice_link,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn run_interpretation_once(
     perspective: &mut PerspectiveInstance,
     shapes: &[ModelShape],
     transcript: &[TranscriptTurn],
@@ -665,12 +775,30 @@ pub async fn run_interpretation_with_strategy_and_model(
         )
         .await;
         let speaker_names = build_speaker_name_map(transcript);
-        let prompt = build_interpretation_input(
+        // The prompt shows a budgeted, compact view of `existing` (#1804);
+        // everything after the model's answer still reads the full set.
+        let embed_model = semantic_embedding_model(dedup_strategy);
+        let shown = existing_for_prompt(
+            &task,
             shapes,
             transcript,
             &existing_ctx,
             &active_flows,
             &speaker_names,
+            base_prefix,
+            embed_model.as_deref(),
+            Compact::Yes,
+            // The answer always goes through `resolve_already_present*`.
+            true,
+        )
+        .await;
+        let prompt = build_interpretation_input_showing(
+            shapes,
+            transcript,
+            &shown.shown,
+            &active_flows,
+            &speaker_names,
+            Some(shown.counts(true)),
         );
 
         let service = crate::ai_service::AIService::global_instance()
@@ -731,7 +859,7 @@ pub async fn run_interpretation_with_strategy_and_model(
                     // A size failure retries once with thinking off.
                     .prompt_interpretation_pass(task_id, prompt, Some(stick_no_thinking.as_ref()))
                     .await
-                    .map_err(|e| anyhow::anyhow!("AIService::prompt failed: {e:#}"))?;
+                    .context("AIService::prompt failed")?;
 
                 if let Some(ctx) = emit_ctx_cloned.as_ref() {
                     emit(
@@ -757,6 +885,8 @@ pub async fn run_interpretation_with_strategy_and_model(
             }
         })
         .await?;
+        // Handles (`P3`) back to full ids.
+        let instances = shown.handles.resolve(instances, shapes);
 
         // Hard dedup guarantee: even if the model ignored the `existing` hint, an
         // already-present (class, identity value) never becomes a *new* instance.
@@ -842,11 +972,18 @@ pub async fn run_interpretation_with_strategy_and_model(
             Ok(outcome)
         }
         Err(e) => {
-            log::error!(
-                "❌ 🧠 interpretation failed model={} latency={}ms err={}",
+            // A prompt that does not fit is split by the caller; that is
+            // recovery, not a failure an operator must see.
+            let level = if crate::ai_service::prompt_does_not_fit(&e) {
+                log::Level::Debug
+            } else {
+                log::Level::Error
+            };
+            log::log!(
+                level,
+                "❌ 🧠 interpretation failed model={} latency={}ms err={e:#}",
                 model_override.unwrap_or("<default>"),
                 interpretation_started.elapsed().as_millis(),
-                e
             );
             Err(e)
         }
@@ -1112,12 +1249,29 @@ pub async fn run_interpretation_with_harness_and_model(
     )
     .await;
     let speaker_names = build_speaker_name_map(transcript);
-    let prompt = build_interpretation_input(
+    // Budgeted like the single-shot path (#1804), but with full ids and
+    // values: the tools take ids, and the model can `_get` the rest. No
+    // dedup strategy here, so the rows that do not all fit go by recency.
+    let shown = existing_for_prompt(
+        &task,
         shapes,
         transcript,
         &existing_ctx,
         &active_flows,
         &speaker_names,
+        base_prefix,
+        None,
+        Compact::No,
+        dedup_on_drain,
+    )
+    .await;
+    let prompt = build_interpretation_input_showing(
+        shapes,
+        transcript,
+        &shown.shown,
+        &active_flows,
+        &speaker_names,
+        Some(shown.counts(dedup_on_drain)),
     );
 
     // Build per-class propose shapes from the perspective's SHACL classes,
@@ -2555,6 +2709,7 @@ mod tests {
             title: "Ship the MVP".to_string(),
             class: "Intention".to_string(),
             properties: std::collections::BTreeMap::new(),
+            updated_at: String::new(),
         }]);
 
         let ops = vec![
@@ -2958,6 +3113,7 @@ mod tests {
                     title: format!("title of {id}"),
                     class: class.to_string(),
                     properties: Default::default(),
+                    updated_at: String::new(),
                 });
         }
         out

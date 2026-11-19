@@ -65,6 +65,17 @@ pub(crate) fn estimate_token_count(text: &str) -> usize {
     (chars + 3) / 4
 }
 
+/// At least 10% above a chars/4 estimate, rounded up.
+///
+/// A llama-server `/tokenize` of a staging interpretation prompt was 76,870
+/// tokens against an estimate of 70,206. Ceil(70,206 × 1.1) is 77,227, above
+/// that measurement, so the window check refuses a prompt the raw estimate
+/// would send. Billing stays on [`estimate_token_count`]; only the
+/// interpretation budget uses this.
+pub(crate) fn interpretation_budget_tokens(estimated: usize) -> usize {
+    estimated.saturating_mul(11).saturating_add(9) / 10
+}
+
 /// Estimated bytes one context token occupies once a chat request is
 /// rendered: serialized message JSON is denser than the prose
 /// [`estimate_token_count`] bills at (~4 chars/token) — tools, argument
@@ -401,22 +412,88 @@ fn estimate_turns_tokens(turns: &[ChatTurn]) -> usize {
             .sum::<usize>()
 }
 
+/// The estimated input tokens of `prompt` sent on `task`: its system prompt and
+/// examples included, counted as [`AIService::prompt_interpretation_pass`] counts them.
+pub(crate) fn estimate_task_prompt_tokens(task: &AITask, prompt: &str) -> usize {
+    estimate_turns_tokens(&turns_for_task(task, prompt.to_string()))
+}
+
 /// A reasoning reply that did not produce a usable answer: nothing came back,
 /// or the provider cut it at the output cap / window.
 fn interpretation_reply_needs_no_thinking(result: &PromptResult) -> bool {
     result.text.trim().is_empty() || result.stop_reason.as_deref() == Some("length")
 }
 
+/// The local window check refused the prompt. A split matches this error.
+/// A sentence that merely contains the same words is not this error.
+#[derive(Debug)]
+pub(crate) struct ContextBudgetExceeded {
+    pub prompt_tokens: usize,
+    pub window: usize,
+    pub room: usize,
+    pub min_output: usize,
+}
+
+impl std::fmt::Display for ContextBudgetExceeded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "context budget: the prompt is about {} tokens and the model's window is {}, leaving {}, under the {} an answer needs. Shorten the input or raise the endpoint's max_num_ctx.",
+            self.prompt_tokens, self.window, self.room, self.min_output
+        )
+    }
+}
+
+impl std::error::Error for ContextBudgetExceeded {}
+
+fn is_local_context_budget(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.is::<ContextBudgetExceeded>())
+}
+
 /// The server refused the request because it did not fit the context window.
 /// Our own pre-flight budget error is not that: retrying it cannot help.
 fn context_was_exceeded(error: &anyhow::Error) -> bool {
+    if is_local_context_budget(error) {
+        return false;
+    }
     let text = error.to_string().to_ascii_lowercase();
     if text.contains("context budget:") {
+        return false;
+    }
+    // Go servers (Ollama among them) report a timeout as "context deadline
+    // exceeded". That is a transient failure, not a window overflow.
+    if text.contains("deadline") {
         return false;
     }
     let about_context = text.contains("context") || text.contains("n_ctx");
     let over = text.contains("exceed") || text.contains("too long") || text.contains("too large");
     about_context && over
+}
+
+/// The prompt will not fit the model window: the budget check said so, or the
+/// server refused it as a context overflow. A transport failure is not this.
+/// The whole error chain counts, so a wrapped `AIService::prompt failed`
+/// still matches. A lookalike sentence does not.
+pub(crate) fn prompt_does_not_fit(error: &anyhow::Error) -> bool {
+    if is_local_context_budget(error) {
+        return true;
+    }
+    // A server answer is judged by its status and body only: the URL and the
+    // wrapping messages can hold "context" or "exceeded" by chance. A rate
+    // limit clears with time, so it never retires a source.
+    if let Some(answered) = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<providers::http::UpstreamStatus>())
+    {
+        if answered.status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            return false;
+        }
+        return context_was_exceeded(&anyhow::anyhow!("{}", answered.body));
+    }
+    let text = format!("{error:#}").to_ascii_lowercase();
+    context_was_exceeded(&anyhow::anyhow!("{text}"))
 }
 
 /// A system prompt, its examples as alternating user/assistant turns, then `prompt`.
@@ -922,11 +999,13 @@ impl AIService {
         };
         let room = window.saturating_sub(prompt_tokens);
         if room < MIN_OUTPUT {
-            return Err(anyhow::anyhow!(
-                "context budget: the prompt is about {prompt_tokens} tokens and the model's \
-                 window is {window}, leaving {room}, under the {MIN_OUTPUT} an answer needs. \
-                 Shorten the input or raise the endpoint's max_num_ctx."
-            ));
+            return Err(ContextBudgetExceeded {
+                prompt_tokens,
+                window,
+                room,
+                min_output: MIN_OUTPUT,
+            }
+            .into());
         }
         Ok(Some(room.min(MAX_OUTPUT) as u32))
     }
@@ -987,6 +1066,13 @@ impl AIService {
             }
         }
         Self::model_context_tokens(model_id)
+    }
+
+    /// The context window `model_id`'s requests run at, in tokens, when it is
+    /// known: the same value [`Self::prompt_interpretation_pass`] checks a
+    /// prompt against. Interpretation sizes its `existing` block from it.
+    pub(crate) async fn context_window_tokens(&self, model_id: &str) -> Option<usize> {
+        self.resolved_context_tokens(model_id).await
     }
 
     /// How many bytes of one outgoing request's message list the model's
@@ -1155,7 +1241,12 @@ impl AIService {
         let model_id = Self::replace_model_variables(&task.model_id)?;
         // The input is the whole conversation `prompt_with` sends: the task's
         // system prompt and examples count against the window as much as the prompt.
-        let input_tokens = estimate_turns_tokens(&turns_for_task(&task, prompt.clone()));
+        // The chars/4 estimate runs low against a real tokenizer; charge the
+        // margin before comparing it to the window.
+        let input_tokens = interpretation_budget_tokens(estimate_turns_tokens(&turns_for_task(
+            &task,
+            prompt.clone(),
+        )));
         let window = self.resolved_context_tokens(&model_id).await;
         let cap = Self::interpretation_max_output_tokens(window, input_tokens)?;
 
@@ -2468,6 +2559,82 @@ mod tests {
         assert!(super::context_was_exceeded(&length));
         assert!(!super::context_was_exceeded(&budget));
         assert!(!super::context_was_exceeded(&transport));
+    }
+
+    /// A sentence that looks like the budget error is not one. Only the error
+    /// the budget check returns splits a batch. A server overflow still does.
+    #[test]
+    fn overflow_review_budget_lookalike_is_not_an_overflow() {
+        let real = AIService::interpretation_max_output_tokens(Some(100), 90)
+            .expect_err("a prompt with no room is a budget error");
+        assert!(
+            prompt_does_not_fit(&real),
+            "the budget check's own error must split, got {real:#}"
+        );
+        let wrapped = real.context("AIService::prompt failed");
+        assert!(
+            prompt_does_not_fit(&wrapped),
+            "wrapping the budget error must not hide it, got {wrapped:#}"
+        );
+
+        let lookalike = anyhow::anyhow!(
+            "context budget: the prompt is about 10 tokens and the model's window is 20, leaving 0"
+        );
+        assert!(
+            !prompt_does_not_fit(&lookalike),
+            "a matching sentence is not the budget error and must not retire a source"
+        );
+
+        let throttled = anyhow::anyhow!(crate::ai_service::providers::http::UpstreamStatus {
+            url: "https://context.example/api/chat".into(),
+            status: reqwest::StatusCode::TOO_MANY_REQUESTS,
+            body: "rate limit exceeded".into(),
+            retry_after: None,
+        });
+        assert!(
+            !prompt_does_not_fit(&throttled.context("AIService::prompt failed")),
+            "a rate limit must not retire a source, whatever its URL says"
+        );
+        let deadline = anyhow::anyhow!(crate::ai_service::providers::http::UpstreamStatus {
+            url: "http://127.0.0.1:11434/api/chat".into(),
+            status: reqwest::StatusCode::GATEWAY_TIMEOUT,
+            body: "context deadline exceeded".into(),
+            retry_after: None,
+        });
+        assert!(
+            !prompt_does_not_fit(&deadline.context("AIService::prompt failed")),
+            "a timeout must leave its source retryable"
+        );
+        assert!(
+            !prompt_does_not_fit(&anyhow::anyhow!("context deadline exceeded")),
+            "a Go timeout message without a server status is not an overflow either"
+        );
+        let url_only = anyhow::anyhow!(crate::ai_service::providers::http::UpstreamStatus {
+            url: "https://context.example/api/chat".into(),
+            status: reqwest::StatusCode::BAD_REQUEST,
+            body: "quota exceeded".into(),
+            retry_after: None,
+        });
+        assert!(
+            !prompt_does_not_fit(&url_only),
+            "only the body names an overflow, not the URL"
+        );
+        let refused = anyhow::anyhow!(crate::ai_service::providers::http::UpstreamStatus {
+            url: "http://127.0.0.1:8080/v1/chat/completions".into(),
+            status: reqwest::StatusCode::BAD_REQUEST,
+            body: "the request exceeds the available context size".into(),
+            retry_after: None,
+        });
+        assert!(
+            prompt_does_not_fit(&refused.context("AIService::prompt failed")),
+            "a server that refuses the prompt as too long must still split"
+        );
+
+        let server = anyhow::anyhow!("context length exceeded");
+        assert!(
+            prompt_does_not_fit(&server.context("AIService::prompt failed")),
+            "a server context overflow must still split"
+        );
     }
 
     fn request_json(request: &mockito::Request) -> serde_json::Value {
