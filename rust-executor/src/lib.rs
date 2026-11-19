@@ -40,6 +40,7 @@ mod events;
 pub mod init;
 pub mod languages;
 pub mod log_files;
+pub mod log_filter;
 pub mod logging;
 mod neighbourhoods;
 mod pubsub;

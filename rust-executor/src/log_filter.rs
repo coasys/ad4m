@@ -1,0 +1,456 @@
+//! The log filter, changeable while the executor runs (`runtime.setLogFilter`,
+//! `runtime.logFilter`).
+//!
+//! env_logger fixes its filter when it is built. [`install`] puts a [`log::Log`] in front of
+//! it that asks [`state()`] instead: the startup filter (`RUST_LOG`, as env_logger reads it)
+//! plus an override an operator sets for a while. The override is a list of directives like
+//! `ws_rpc=debug,sfu=debug`; a target it names gets the override's level, every other target
+//! keeps the startup filter. It reverts by itself once its time is up (checked on the next
+//! log call and on every read of the status, so no timer runs).
+//!
+//! A directive name matches a target by whole path segments, anywhere in the path: `ws_rpc`
+//! matches `rust_executor::api::ws_rpc`, `api::ws_rpc` too, `rust_executor` every module of
+//! the crate. The most specific match decides: the one that reaches deepest into the target's
+//! path (`ws_rpc` over `rust_executor` for `rust_executor::api::ws_rpc`), then the longer name.
+
+use log::{LevelFilter, Log, Metadata, Record};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{LazyLock, RwLock};
+use std::time::{Duration, Instant};
+
+/// How long an override lasts when the caller names no time.
+pub const DEFAULT_TTL: Duration = Duration::from_secs(1800);
+
+/// The longest an override may last: a debug level left on fills the disk.
+pub const MAX_TTL: Duration = Duration::from_secs(4 * 3600);
+
+/// One directive of an override: a target name (or every target) and its level.
+#[derive(Debug, Clone, PartialEq)]
+struct Directive {
+    name: Option<String>,
+    level: LevelFilter,
+}
+
+#[derive(Debug, Clone)]
+struct Override {
+    spec: String,
+    directives: Vec<Directive>,
+    until: Instant,
+    until_wall: chrono::DateTime<chrono::Utc>,
+}
+
+impl Override {
+    /// The level the override gives `target`, if it names it.
+    fn level_for(&self, target: &str) -> Option<LevelFilter> {
+        self.directives
+            .iter()
+            .filter_map(|d| match &d.name {
+                None => Some(((0, 0), d.level)),
+                Some(name) => match_depth(target, name).map(|depth| ((depth, name.len()), d.level)),
+            })
+            // On a tie the later directive wins, as in env_logger.
+            .max_by_key(|(specificity, _)| *specificity)
+            .map(|(_, level)| level)
+    }
+
+    fn max_level(&self) -> LevelFilter {
+        self.directives
+            .iter()
+            .map(|d| d.level)
+            .max()
+            .unwrap_or(LevelFilter::Off)
+    }
+}
+
+/// How deep into `target`'s path directive name `name` matches (the number of the target's
+/// segments up to the end of the deepest match), or `None` when it does not: whole path
+/// segments, anywhere in the path.
+fn match_depth(target: &str, name: &str) -> Option<usize> {
+    let target: Vec<&str> = target.split("::").collect();
+    let name: Vec<&str> = name.split("::").collect();
+    (0..target.len())
+        .rev()
+        .find(|&i| target[i..].starts_with(&name))
+        .map(|i| i + name.len())
+}
+
+#[cfg(test)]
+fn names(target: &str, name: &str) -> bool {
+    match_depth(target, name).is_some()
+}
+
+/// Parse an override like `ws_rpc=debug,sfu=debug` or `debug`. Refuses what env_logger would
+/// skip with a message on stderr: an unknown level, an empty name, a `/regex` part.
+fn parse(spec: &str) -> Result<Vec<Directive>, String> {
+    let mut directives = Vec::new();
+    for part in spec.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+        if part.contains('/') {
+            return Err(format!("'{part}': a /regex filter is not supported"));
+        }
+        if part.starts_with('=') {
+            return Err(format!("'{part}': no target name"));
+        }
+        let mut halves = part.splitn(2, '=');
+        let first = halves.next().unwrap_or_default().trim();
+        let directive = match halves.next() {
+            Some(level) => Directive {
+                name: Some(first.to_string()),
+                level: level
+                    .trim()
+                    .parse()
+                    .map_err(|_| format!("'{part}': unknown level '{}'", level.trim()))?,
+            },
+            // A bare level applies to every target; a bare name is that name at trace.
+            None => match first.parse::<LevelFilter>() {
+                Ok(level) => Directive { name: None, level },
+                Err(_) => Directive {
+                    name: Some(first.to_string()),
+                    level: LevelFilter::Trace,
+                },
+            },
+        };
+        directives.push(directive);
+    }
+    if directives.is_empty() {
+        return Err("the filter names no directive".to_string());
+    }
+    Ok(directives)
+}
+
+/// What `runtime.logFilter` reports.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FilterStatus {
+    /// The startup filter (`RUST_LOG` as the executor started with it).
+    pub startup: String,
+    /// The override in force, if any.
+    pub current: Option<String>,
+    /// When the override reverts (RFC 3339, UTC).
+    pub reverts_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// The filter every log call asks: the startup filter plus an override.
+pub struct FilterState {
+    startup: RwLock<Option<(String, env_logger::filter::Filter)>>,
+    has_override: AtomicBool,
+    over: RwLock<Option<Override>>,
+}
+
+static STATE: LazyLock<FilterState> = LazyLock::new(|| FilterState {
+    startup: RwLock::new(None),
+    has_override: AtomicBool::new(false),
+    over: RwLock::new(None),
+});
+
+/// The executor's filter state.
+pub fn state() -> &'static FilterState {
+    &STATE
+}
+
+fn build_filter(spec: &str) -> env_logger::filter::Filter {
+    env_logger::filter::Builder::new().parse(spec).build()
+}
+
+impl FilterState {
+    /// Record the startup filter. Called once by [`install`].
+    fn set_startup(&self, spec: &str) {
+        *self.startup.write().unwrap() = Some((spec.to_string(), build_filter(spec)));
+    }
+
+    fn startup_spec(&self) -> String {
+        if let Some((spec, _)) = &*self.startup.read().unwrap() {
+            return spec.clone();
+        }
+        std::env::var("RUST_LOG").unwrap_or_default()
+    }
+
+    fn startup_enabled(&self, metadata: &Metadata) -> bool {
+        if let Some((_, filter)) = &*self.startup.read().unwrap() {
+            return filter.enabled(metadata);
+        }
+        // Not installed (unit tests): the filter the environment would give.
+        build_filter(&self.startup_spec()).enabled(metadata)
+    }
+
+    fn startup_max(&self) -> LevelFilter {
+        match &*self.startup.read().unwrap() {
+            Some((_, filter)) => filter.filter(),
+            None => build_filter(&self.startup_spec()).filter(),
+        }
+    }
+
+    /// The override in force; one whose time is up is removed here.
+    fn current(&self) -> Option<Override> {
+        if !self.has_override.load(Ordering::Relaxed) {
+            return None;
+        }
+        let over = self.over.read().unwrap().clone();
+        match over {
+            Some(over) if Instant::now() < over.until => Some(over),
+            Some(over) => {
+                self.revert_if(&over);
+                None
+            }
+            None => None,
+        }
+    }
+
+    /// Remove `expired` unless another override replaced it meanwhile.
+    fn revert_if(&self, expired: &Override) {
+        let reverted = {
+            let mut slot = self.over.write().unwrap();
+            if slot.as_ref().is_some_and(|o| o.until == expired.until) {
+                *slot = None;
+                self.has_override.store(false, Ordering::Relaxed);
+                true
+            } else {
+                false
+            }
+        };
+        if reverted {
+            log::set_max_level(self.startup_max());
+            // After the lock is gone: this line goes through the filter again.
+            crate::call_diag!(
+                log::Level::Info,
+                "log.filter-reverted",
+                "filter" => expired.spec,
+                "startup" => self.startup_spec(),
+            );
+        }
+    }
+
+    /// Whether a record with `metadata` is logged now.
+    pub fn enabled(&self, metadata: &Metadata) -> bool {
+        if let Some(over) = self.current() {
+            if let Some(level) = over.level_for(metadata.target()) {
+                return metadata.level() <= level;
+            }
+        }
+        self.startup_enabled(metadata)
+    }
+
+    /// Set `spec` as the override for `ttl` (at most [`MAX_TTL`]). An empty `spec` reverts to
+    /// the startup filter at once.
+    pub fn set_override(&self, spec: &str, ttl: Duration) -> Result<FilterStatus, String> {
+        if spec.trim().is_empty() {
+            let current = self.over.read().unwrap().clone();
+            if let Some(over) = current {
+                self.revert_if(&over);
+            }
+            return Ok(self.status());
+        }
+        if ttl.is_zero() || ttl > MAX_TTL {
+            return Err(format!(
+                "ttlSeconds must be between 1 and {}",
+                MAX_TTL.as_secs()
+            ));
+        }
+        let directives = parse(spec)?;
+        let over = Override {
+            spec: spec.trim().to_string(),
+            directives,
+            until: Instant::now() + ttl,
+            until_wall: chrono::Utc::now() + chrono::Duration::from_std(ttl).unwrap_or_default(),
+        };
+        let max = over.max_level().max(self.startup_max());
+        *self.over.write().unwrap() = Some(over.clone());
+        self.has_override.store(true, Ordering::Relaxed);
+        log::set_max_level(max);
+        crate::call_diag!(
+            log::Level::Warn,
+            "log.filter-set",
+            "filter" => over.spec,
+            "ttl_s" => ttl.as_secs(),
+            "reverts_at" => over.until_wall.to_rfc3339(),
+        );
+        Ok(self.status())
+    }
+
+    /// The startup filter, the override in force and when it reverts.
+    pub fn status(&self) -> FilterStatus {
+        let over = self.current();
+        FilterStatus {
+            startup: self.startup_spec(),
+            current: over.as_ref().map(|o| o.spec.clone()),
+            reverts_at: over.map(|o| o.until_wall),
+        }
+    }
+}
+
+/// The executor's logger: `inner` (an env_logger that passes every record to its output)
+/// behind [`state()`].
+pub struct ReloadableLogger {
+    inner: Box<dyn Log>,
+}
+
+impl ReloadableLogger {
+    pub fn new(inner: Box<dyn Log>) -> Self {
+        Self { inner }
+    }
+}
+
+impl Log for ReloadableLogger {
+    fn enabled(&self, metadata: &Metadata) -> bool {
+        state().enabled(metadata)
+    }
+
+    fn log(&self, record: &Record) {
+        if state().enabled(record.metadata()) {
+            self.inner.log(record);
+        }
+    }
+
+    fn flush(&self) {
+        self.inner.flush();
+    }
+}
+
+/// Install `inner` as the global logger behind the filter state, with `startup_spec` (the
+/// `RUST_LOG` the executor starts with) as the startup filter. `inner` must not filter
+/// itself: build it with `filter_level(LevelFilter::Trace)`.
+pub fn install(inner: Box<dyn Log>, startup_spec: &str) -> Result<(), log::SetLoggerError> {
+    state().set_startup(startup_spec);
+    log::set_boxed_logger(Box::new(ReloadableLogger::new(inner)))?;
+    log::set_max_level(state().startup_max());
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    const WS_RPC: &str = "rust_executor::api::ws_rpc";
+
+    fn meta(target: &str, level: log::Level) -> Metadata<'_> {
+        Metadata::builder().target(target).level(level).build()
+    }
+
+    /// A `Log` that keeps what reaches it.
+    #[derive(Clone, Default)]
+    struct Sink(Arc<Mutex<Vec<String>>>);
+
+    impl Log for Sink {
+        fn enabled(&self, _: &Metadata) -> bool {
+            true
+        }
+        fn log(&self, record: &Record) {
+            self.0.lock().unwrap().push(record.args().to_string());
+        }
+        fn flush(&self) {}
+    }
+
+    fn log_debug(logger: &ReloadableLogger, target: &str, text: &str) {
+        logger.log(
+            &Record::builder()
+                .target(target)
+                .level(log::Level::Debug)
+                .args(format_args!("{text}"))
+                .build(),
+        );
+    }
+
+    #[test]
+    fn a_name_matches_whole_path_segments_anywhere() {
+        assert!(names(WS_RPC, "ws_rpc"));
+        assert!(names(WS_RPC, "api::ws_rpc"));
+        assert!(names(WS_RPC, "rust_executor"));
+        assert!(names("rust_executor::sfu::server", "sfu"));
+        assert!(!names(WS_RPC, "rpc"));
+        assert!(!names(WS_RPC, "ws"));
+        assert!(!names("rust_executor::sfu_extra", "sfu"));
+    }
+
+    #[test]
+    fn a_filter_parses_into_directives_or_is_refused() {
+        assert_eq!(
+            parse("ws_rpc=debug, sfu=trace").unwrap(),
+            vec![
+                Directive {
+                    name: Some("ws_rpc".into()),
+                    level: LevelFilter::Debug
+                },
+                Directive {
+                    name: Some("sfu".into()),
+                    level: LevelFilter::Trace
+                },
+            ]
+        );
+        assert_eq!(parse("debug").unwrap()[0].name, None);
+        for bad in ["", "ws_rpc=loud", "=debug", "ws_rpc=debug/foo", " , "] {
+            assert!(parse(bad).is_err(), "{bad:?} was accepted");
+        }
+    }
+
+    #[test]
+    fn the_most_specific_name_decides() {
+        let over = Override {
+            spec: String::new(),
+            directives: parse("rust_executor=warn,ws_rpc=debug").unwrap(),
+            until: Instant::now() + Duration::from_secs(60),
+            until_wall: chrono::Utc::now(),
+        };
+        assert_eq!(over.level_for(WS_RPC), Some(LevelFilter::Debug));
+        assert_eq!(
+            over.level_for("rust_executor::sfu::server"),
+            Some(LevelFilter::Warn)
+        );
+        assert_eq!(over.level_for("holochain"), None);
+        // Deeper beats longer: `rust_executor::api::ws_rpc` is the more specific name.
+        let over = Override {
+            directives: parse("api::ws_rpc=error,ws_rpc=trace,api=info").unwrap(),
+            ..over
+        };
+        assert_eq!(over.level_for(WS_RPC), Some(LevelFilter::Error));
+        assert_eq!(
+            over.level_for("rust_executor::api::runtime_ws"),
+            Some(LevelFilter::Info)
+        );
+    }
+
+    /// `ws_rpc=debug` for one second: a debug line of the socket module passes, others stay
+    /// filtered, and after the second the startup filter is back by itself.
+    #[test]
+    fn an_override_lets_debug_through_until_its_time_is_up() {
+        let state = state();
+        state.set_startup("info");
+        let sink = Sink::default();
+        let logger = ReloadableLogger::new(Box::new(sink.clone()));
+
+        log_debug(&logger, WS_RPC, "before");
+        let status = state
+            .set_override("ws_rpc=debug", Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(status.current.as_deref(), Some("ws_rpc=debug"));
+        assert!(status.reverts_at.is_some());
+        assert!(state.enabled(&meta(WS_RPC, log::Level::Debug)));
+        assert!(!state.enabled(&meta("rust_executor::db", log::Level::Debug)));
+        assert!(state.enabled(&meta("rust_executor::db", log::Level::Info)));
+        log_debug(&logger, WS_RPC, "during");
+        log_debug(&logger, "rust_executor::db", "elsewhere");
+
+        std::thread::sleep(Duration::from_millis(1100));
+        log_debug(&logger, WS_RPC, "after");
+        assert_eq!(*sink.0.lock().unwrap(), vec!["during".to_string()]);
+        let status = state.status();
+        assert_eq!(status.current, None);
+        assert_eq!(status.reverts_at, None);
+        assert_eq!(status.startup, "info");
+    }
+
+    #[test]
+    fn an_empty_filter_reverts_at_once_and_a_bad_ttl_is_refused() {
+        let state = state();
+        state.set_startup("info");
+        state
+            .set_override("sfu=debug", Duration::from_secs(60))
+            .unwrap();
+        assert!(state.enabled(&meta("rust_executor::sfu::server", log::Level::Debug)));
+        assert_eq!(state.set_override("", DEFAULT_TTL).unwrap().current, None);
+        assert!(!state.enabled(&meta("rust_executor::sfu::server", log::Level::Debug)));
+        assert!(state.set_override("sfu=debug", Duration::ZERO).is_err());
+        assert!(state
+            .set_override("sfu=debug", MAX_TTL + Duration::from_secs(1))
+            .is_err());
+        assert_eq!(state.status().current, None);
+    }
+}
