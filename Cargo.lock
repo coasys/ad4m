@@ -4,7 +4,7 @@ version = 3
 
 [[package]]
 name = "ad4m"
-version = "0.13.1-staging.11"
+version = "0.13.1-staging.14"
 dependencies = [
  "ad4m-client",
  "ad4m-executor",
@@ -33,15 +33,20 @@ dependencies = [
 
 [[package]]
 name = "ad4m-client"
-version = "0.13.1-staging.11"
+version = "0.13.1-staging.14"
 dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "dirs 5.0.1",
+ "fd-lock 4.0.4",
  "futures-util",
+ "libc",
  "maplit",
  "rand 0.8.5",
  "regex",
+ "reqwest 0.11.27",
+ "rpassword",
  "serde",
  "serde_json",
  "tempfile",
@@ -53,7 +58,7 @@ dependencies = [
 
 [[package]]
 name = "ad4m-executor"
-version = "0.13.1-staging.11"
+version = "0.13.1-staging.14"
 dependencies = [
  "ad4m-client",
  "ad4m-hash-chain",
@@ -149,6 +154,7 @@ dependencies = [
  "sha2 0.10.9",
  "signal-hook",
  "sodoken",
+ "spargebra",
  "str0m",
  "sys_traits",
  "sysinfo 0.38.4",
@@ -249,7 +255,7 @@ dependencies = [
 
 [[package]]
 name = "ad4m-launcher"
-version = "0.13.1-staging.11"
+version = "0.13.1-staging.14"
 dependencies = [
  "ad4m-client",
  "ad4m-executor",
