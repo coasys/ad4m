@@ -1450,8 +1450,20 @@ test("a lost restart offer stays open until the executor can resend it", async (
         await jest.advanceTimersByTimeAsync(3_000)
         expect(api.sfuCallLeave).not.toHaveBeenCalled()
 
+        // The original peer must apply the resent offer and post its answer
+        // before ICE recovery. `connected` clears the restart timer on its own.
+        const peer = currentPc()
         api.emitOffer(offer("restart-offer"))
         await flush()
+        expect(peer.remoteSdps()).toContain("restart-offer")
+        expect(api.sfuCallAnswerServerOffer).toHaveBeenCalledTimes(1)
+        expect(api.sfuCallAnswerServerOffer).toHaveBeenCalledWith(
+            URL,
+            ROOM,
+            MINE,
+            JSON.stringify({ type: "answer", sdp: "local-answer" }),
+        )
+
         await iceState("connected")
         await jest.advanceTimersByTimeAsync(30_000)
         expect(api.sfuCallLeave).not.toHaveBeenCalled()
