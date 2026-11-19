@@ -1,0 +1,7 @@
+[package]
+name = "probe-deno"
+version = "0.1.0"
+edition = "2021"
+[workspace]
+[dependencies]
+deno_core = { version = "0.410.0", git = "https://github.com/coasys/deno.git", tag = "v2.9.5-coasys-4", features = ["v8", "reactor-tokio", "v8_use_custom_libcxx"] }

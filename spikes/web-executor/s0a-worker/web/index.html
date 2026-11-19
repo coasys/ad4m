@@ -1,0 +1,14 @@
+<!doctype html><meta charset="utf-8"><title>S0a</title>
+<pre id="out"></pre>
+<script type="module">
+const w = new Worker("./worker.js", { type: "module" });
+window.__events = []; window.__logs = []; let seq = 0; const pending = new Map();
+w.onmessage = ({ data }) => {
+  if (data.type === "reply") { const p = pending.get(data.data.id); pending.delete(data.data.id); p && p(data.data); }
+  else if (data.type === "event") window.__events.push({ ...data.data, t: data.t });
+  else if (data.type === "log") window.__logs.push(data.data);
+};
+w.onerror = (e) => window.__logs.push("WORKER ERROR " + e.message);
+window.rpc = (cmd, arg) => new Promise((res) => { const id = ++seq; pending.set(id, res); w.postMessage({ id, cmd, arg }); });
+window.__ready = true;
+</script>

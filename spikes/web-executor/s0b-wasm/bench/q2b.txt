@@ -1,0 +1,9 @@
+SELECT * WHERE { VALUES ?source { __VALUES__ } ?source ?predicate ?target . ?reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?predicate ?target )>> . ?reifier <ad4m://ontology/author> ?author . OPTIONAL { ?reifier <ad4m://ontology/status> ?status . } }
+----
+SELECT * WHERE { VALUES ?source { __VALUES__ } ?source ?predicate ?target . ?reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?predicate ?target )>> . OPTIONAL { ?reifier <ad4m://ontology/status> ?status . } OPTIONAL { ?reifier <ad4m://ontology/proofKey> ?k . } }
+----
+SELECT * WHERE { VALUES ?source { __VALUES__ } ?source ?predicate ?target . OPTIONAL { ?source <todo://title> ?t . } }
+----
+SELECT * WHERE { VALUES ?source { <todo://t9999> <todo://t9998> } ?source ?predicate ?target . ?reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?predicate ?target )>> . OPTIONAL { ?reifier <ad4m://ontology/status> ?status . } }
+----
+SELECT * WHERE { ?source <todo://state> <todo://done> . ?source ?predicate ?target . ?reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?predicate ?target )>> . OPTIONAL { ?reifier <ad4m://ontology/status> ?status . } } LIMIT 200

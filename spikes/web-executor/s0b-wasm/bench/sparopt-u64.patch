@@ -1,0 +1,95 @@
+--- a/src/optimizer.rs
++++ b/src/optimizer.rs
+@@ -671,7 +671,7 @@
+                         let join_cost = estimate_graph_pattern_size(&left, input_types)
+                             .saturating_mul(estimate_graph_pattern_size(&right, input_types))
+                             .saturating_div(
+-                                1_000_usize.saturating_pow(keys.len().try_into().unwrap()),
++                                1_000_u64.saturating_pow(keys.len().try_into().unwrap()),
+                             );
+ 
+                         if lateral_cost <= join_cost.saturating_mul(100) {
+@@ -938,9 +938,9 @@
+         .collect()
+ }
+ 
+-fn estimate_graph_pattern_size(pattern: &GraphPattern, input_types: &VariableTypes) -> usize {
++fn estimate_graph_pattern_size(pattern: &GraphPattern, input_types: &VariableTypes) -> u64 {
+     match pattern {
+-        GraphPattern::Values { bindings, .. } => bindings.len(),
++        GraphPattern::Values { bindings, .. } => bindings.len() as u64,
+         GraphPattern::QuadPattern {
+             subject,
+             predicate,
+@@ -996,7 +996,7 @@
+                             right,
+                             &infer_graph_pattern_types(right, input_types.clone()),
+                         ))
+-                        .saturating_div(1_000_usize.saturating_pow(keys.len().try_into().unwrap())),
++                        .saturating_div(1_000_u64.saturating_pow(keys.len().try_into().unwrap())),
+                 )
+             }
+         },
+@@ -1010,7 +1010,7 @@
+         GraphPattern::Union { inner } => inner
+             .iter()
+             .map(|inner| estimate_graph_pattern_size(inner, input_types))
+-            .fold(0, usize::saturating_add),
++            .fold(0, u64::saturating_add),
+         GraphPattern::Minus { left, .. } => estimate_graph_pattern_size(left, input_types),
+         GraphPattern::Filter { inner, .. }
+         | GraphPattern::Extend { inner, .. }
+@@ -1025,9 +1025,9 @@
+             start,
+             length,
+         } => {
+-            let inner = estimate_graph_pattern_size(inner, input_types).saturating_sub(*start);
++            let inner = estimate_graph_pattern_size(inner, input_types).saturating_sub(*start as u64);
+             if let Some(length) = length {
+-                min(inner, *length)
++                min(inner, *length as u64)
+             } else {
+                 inner
+             }
+@@ -1040,12 +1040,12 @@
+     right: &GraphPattern,
+     algorithm: &JoinAlgorithm,
+     input_types: &VariableTypes,
+-) -> usize {
++) -> u64 {
+     match algorithm {
+         JoinAlgorithm::HashBuildLeftProbeRight { keys } => {
+             estimate_graph_pattern_size(left, input_types)
+                 .saturating_mul(estimate_graph_pattern_size(right, input_types))
+-                .saturating_div(1_000_usize.saturating_pow(keys.len().try_into().unwrap()))
++                .saturating_div(1_000_u64.saturating_pow(keys.len().try_into().unwrap()))
+         }
+     }
+ }
+@@ -1055,7 +1055,7 @@
+     left_types: &VariableTypes,
+     right: &GraphPattern,
+     input_types: &VariableTypes,
+-) -> usize {
++) -> u64 {
+     estimate_graph_pattern_size(left, input_types)
+         .saturating_mul(estimate_graph_pattern_size(right, left_types))
+ }
+@@ -1064,7 +1064,7 @@
+     subject_bound: bool,
+     predicate_bound: bool,
+     object_bound: bool,
+-) -> usize {
++) -> u64 {
+     match (subject_bound, predicate_bound, object_bound) {
+         (true, true, true) => 1,
+         (true, true, false) => 10,
+@@ -1077,7 +1077,7 @@
+     }
+ }
+ 
+-fn estimate_path_size(start_bound: bool, path: &PropertyPathExpression, end_bound: bool) -> usize {
++fn estimate_path_size(start_bound: bool, path: &PropertyPathExpression, end_bound: bool) -> u64 {
+     match path {
+         PropertyPathExpression::NamedNode(_) => {
+             estimate_triple_pattern_size(start_bound, true, end_bound)

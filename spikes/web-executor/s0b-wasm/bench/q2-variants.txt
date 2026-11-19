@@ -1,0 +1,11 @@
+SELECT ?source ?predicate ?target ?author ?timestamp ?proofKey ?proofSig ?proofValid ?status ?wireTarget WHERE { VALUES ?source { __VALUES__ } ?source ?predicate ?target . ?reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?predicate ?target )>> . FILTER(isIRI(?source) && (true)) ?reifier <ad4m://ontology/author> ?author . ?reifier <ad4m://ontology/timestamp> ?timestamp . OPTIONAL { ?reifier <ad4m://ontology/proofKey> ?proofKey . } OPTIONAL { ?reifier <ad4m://ontology/proofSignature> ?proofSig . } OPTIONAL { ?reifier <ad4m://ontology/proofValid> ?proofValid . } OPTIONAL { ?reifier <ad4m://ontology/status> ?status . } OPTIONAL { ?reifier <ad4m://ontology/wireTarget> ?wireTarget . } }
+----
+SELECT ?source ?predicate ?target ?author ?timestamp WHERE { VALUES ?source { __VALUES__ } ?source ?predicate ?target . ?reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?predicate ?target )>> . FILTER(isIRI(?source) && (true)) ?reifier <ad4m://ontology/author> ?author . ?reifier <ad4m://ontology/timestamp> ?timestamp . }
+----
+SELECT ?source ?predicate ?target ?author ?timestamp WHERE { VALUES ?source { __VALUES__ } ?source ?predicate ?target . ?reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?predicate ?target )>> . ?reifier <ad4m://ontology/author> ?author . ?reifier <ad4m://ontology/timestamp> ?timestamp . }
+----
+SELECT ?source ?predicate ?target WHERE { VALUES ?source { __VALUES__ } ?source ?predicate ?target . }
+----
+SELECT ?source ?predicate ?target ?reifier WHERE { VALUES ?source { __VALUES__ } ?source ?predicate ?target . ?reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?predicate ?target )>> . }
+----
+SELECT ?predicate ?target ?author ?proofKey ?proofSig ?proofValid ?status WHERE { <todo://t9999> ?predicate ?target . ?reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( <todo://t9999> ?predicate ?target )>> . ?reifier <ad4m://ontology/author> ?author . OPTIONAL { ?reifier <ad4m://ontology/proofKey> ?proofKey . } OPTIONAL { ?reifier <ad4m://ontology/proofSignature> ?proofSig . } OPTIONAL { ?reifier <ad4m://ontology/proofValid> ?proofValid . } OPTIONAL { ?reifier <ad4m://ontology/status> ?status . } }

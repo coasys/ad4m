@@ -1,0 +1,26 @@
+<!doctype html><meta charset="utf-8"><body><script type="module">
+import init, * as m from '/pkg-web/s0b_oxigraph.js';
+const log = (s) => console.log('S0B ' + s);
+try {
+  let t = performance.now();
+  await init({ module_or_path: '/pkg-web/s0b_oxigraph_bg.wasm' });
+  log(`init_ms=${(performance.now() - t).toFixed(1)} (fetch+compile+instantiate, localhost)`);
+  const n = 50000;
+  m.reset();
+  const mem0 = m.memory_bytes();
+  t = performance.now();
+  const quads = m.load_links(n, false);
+  const loadMs = performance.now() - t;
+  const mem1 = m.memory_bytes();
+  log(`links=${n} quads=${quads} load_ms=${loadMs.toFixed(1)} delta=${mem1 - mem0} bytes_per_link=${((mem1 - mem0) / n).toFixed(0)}`);
+  const nq = m.prepare_queries(), reps = 10;
+  for (let i = 0; i < nq; i++) {
+    const rows = m.run_query(i); const ts = [];
+    for (let r = 0; r < reps; r++) { const s = performance.now(); m.run_query(i); ts.push(performance.now() - s); }
+    ts.sort((a, b) => a - b);
+    log(`${m.query_name(i)}\trows=${rows}\tmedian_ms=${ts[reps >> 1].toFixed(3)}\tmin_ms=${ts[0].toFixed(3)}`);
+  }
+  log(`mem_end=${m.memory_bytes()} ua=${navigator.userAgent}`);
+} catch (e) { log('ERROR ' + e + ' ' + e.stack); }
+log('END');
+</script>
