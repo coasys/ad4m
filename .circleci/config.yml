@@ -26,6 +26,10 @@ references:
 #   Rust (fmt). More runners, with small working dirs.
 # Only `build` gates the integration tests. clippy and rust-tests start after it and run
 # next to the integration tests. fmt, js-unit-tests and plugin-ad4m-tests start at once.
+# The heavy jobs (rust-tests, rust-client-tests, the integration suites) start with
+# `heavy_gate`: on a draft PR, a PR whose base is not dev, or a branch with no PR they halt
+# green at once (.circleci/scripts/should-run-heavy.sh). The full-ci label or [full-ci] in
+# the commit message runs them anyway.
 
 commands:
   fix_workdir:
@@ -125,6 +129,29 @@ commands:
               | grep -vxF -f <(printf '%s\n' $in_use /nonexistent) \
               | xargs -r -d '\n' rm -rf || true
             df -h /tmp | tail -1
+
+  heavy_gate:
+    description: "Halt a heavy job (green) on a draft PR, a PR whose base is not dev, or a branch with no PR"
+    steps:
+      - run:
+          # A stack of PRs pays the heavy suites once, at the PR that targets dev; the
+          # branches below it get fmt, build and clippy. dev, staging, main, tags and the
+          # nightly always run; so do a PR with the `full-ci` label and a head commit
+          # with [full-ci] in its message. The decision is in the script (tested in
+          # `build`); anything but its "skip" answer runs the suite, so a GitHub API
+          # failure costs a full run, never a skipped one. A halted job is green: a PR
+          # that gets ready or retargeted to dev without a push keeps that green until
+          # its workflow is rerun.
+          name: Stack gate (heavy suites only for non-draft PRs to dev)
+          environment:
+            HEAVY_GATE_FORCE: << pipeline.parameters.run-nightly-llm >>
+          command: |
+            rc=0
+            bash .circleci/scripts/should-run-heavy.sh || rc=$?
+            if [ "$rc" = 10 ]; then
+              circleci-agent step halt
+            fi
+            exit 0
 
   setup_env:
     description: "Set up build environment (Node, Rust, Deno, Go, pnpm)"
@@ -322,6 +349,7 @@ commands:
       - fix_workdir
       - checkout
       - test_artifacts_dir
+      - heavy_gate
       - when:
           condition: << parameters.local >>
           steps:
@@ -414,6 +442,10 @@ jobs:
           # coasys-spaces job's executor fetch, skip and model check.
           name: Test coasys-spaces.sh
           command: bash scripts/coasys-spaces.test.sh
+      - run:
+          # Fake curl with fixture PRs, no network; about a second. The heavy_gate decision.
+          name: Test should-run-heavy.sh
+          command: bash .circleci/scripts/should-run-heavy.test.sh
       - build_adam
       - build_integration_inputs
       - run:
@@ -637,6 +669,7 @@ jobs:
     steps:
       - fix_workdir
       - checkout
+      - heavy_gate
       - setup_env
       - restore_rust_compile_inputs
       - run:
@@ -664,6 +697,7 @@ jobs:
     steps:
       - fix_workdir
       - checkout
+      - heavy_gate
       - setup_env
       - restore_binaries
       - run:
