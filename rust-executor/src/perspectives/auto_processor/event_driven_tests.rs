@@ -991,13 +991,19 @@ async fn a_schema_write_seen_before_its_feed_entry_is_read_under_the_new_shape()
     );
 }
 
-/// A peer's diff is written link by link and broadcast after its last link:
-/// a tick between the two can read half a schema (a new property's path
-/// without its `sh://minCount`). Such a tick sees a write no entry explains,
-/// re-reads, and drains nothing; the next tick, which the feed explains,
-/// drains.
-#[tokio::test]
+/// A peer's diff is written link by link under `persist_lock` and broadcast
+/// before the lock is released. Paused half way — a new required property's
+/// path written, its `sh://minCount` not yet — the store holds a shape under
+/// which a message that lacks the property still conforms. A tick that runs
+/// meanwhile, for as long as the diff takes, must not start a pass under
+/// that half shape: it waits for the diff before it drains, sees the schema
+/// entry, and holds. Under the whole shape the message does not conform,
+/// so it never drains.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_tick_inside_a_diff_still_being_written_drains_nothing() {
+    use crate::perspectives::perspective_instance::subscription_triggers;
+    use crate::types::{Link, LinkExpression, LinkStatus};
+
     let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
     seed_message(
         &mut p,
@@ -1020,34 +1026,79 @@ async fn a_tick_inside_a_diff_still_being_written_drains_nothing() {
         "queued, inside its debounce"
     );
 
-    // The first link of a diff still being applied: in the store, with no
-    // feed entry yet.
-    let mut first = crate::types::LinkExpression::from(
-        crate::agent::signatures::TestSigner::generate().sign(crate::types::Link {
-            source: "ns://ns://Message".into(),
-            predicate: Some("sh://property".into()),
-            target: "ns://ns://Message.label".into(),
-        }),
-    );
-    first.status = Some(crate::types::LinkStatus::Shared);
-    p.sparql_store.add_link(&first).expect("a peer's link");
-    let reads = transcript_queries(&p);
+    // The diff: a required `label` the message does not have.
+    let signer = crate::agent::signatures::TestSigner::generate();
+    let link = |source: &str, predicate: &str, target: &str| {
+        let mut l = LinkExpression::from(signer.sign(Link {
+            source: source.into(),
+            predicate: Some(predicate.into()),
+            target: target.into(),
+        }));
+        l.status = Some(LinkStatus::Shared);
+        l
+    };
+    let label = "ns://ns://Message.label";
+    let first_half = [
+        link("ns://ns://MessageShape", "sh://property", label),
+        link(label, "rdf://type", "sh://PropertyShape"),
+        link(label, "sh://path", "ns://label"),
+    ];
+    let min_count = link(label, "sh://minCount", "literal:1^^xsd:integer");
 
-    p.run_auto_processor_tick(&mut watcher, now_ms + 2_000, &ctx)
-        .await;
-    assert_eq!(transcript_queries(&p), reads + 1, "the gap re-reads");
-    assert_eq!(
-        pending_texts(&watcher, "half-diff"),
-        vec!["hello"],
-        "a tick the feed cannot explain drains nothing"
+    let (half_written_tx, half_written_rx) = std::sync::mpsc::channel();
+    let (finish_tx, finish_rx) = std::sync::mpsc::channel::<()>();
+    let peer = p.clone();
+    let diff = std::thread::spawn(move || {
+        let _persisting = peer.persist_lock.lock().unwrap();
+        let mut generations: Vec<u64> = first_half
+            .iter()
+            .map(|l| peer.sparql_store.add_link(l).expect("first half"))
+            .collect();
+        half_written_tx.send(()).unwrap();
+        finish_rx.recv().unwrap();
+        generations.push(peer.sparql_store.add_link(&min_count).expect("minCount"));
+        let all: Vec<Link> = first_half
+            .iter()
+            .chain([&min_count])
+            .map(|l| l.data.clone())
+            .collect();
+        peer.broadcast_commit_write(
+            subscription_triggers::writes_of_links(all.iter()),
+            generations,
+        );
+    });
+    half_written_rx.recv().unwrap();
+
+    // Two ticks' worth of time inside the paused diff: the tick waits for it
+    // before any drain.
+    let ticking = p.clone();
+    let tick_ctx = ctx.clone();
+    let tick = tokio::spawn(async move {
+        ticking
+            .run_auto_processor_tick(&mut watcher, now_ms + 2_000, &tick_ctx)
+            .await;
+        watcher
+    });
+    tokio::time::sleep(Duration::from_millis(1_000)).await;
+    assert!(
+        !tick.is_finished(),
+        "the tick waits for the diff before it drains"
+    );
+    finish_tx.send(()).unwrap();
+    diff.join().unwrap();
+    let mut watcher = tick.await.unwrap();
+    assert!(
+        !watcher.last_pass_ms.contains_key("half-diff"),
+        "no pass under the half shape"
     );
 
     p.run_auto_processor_tick(&mut watcher, now_ms + 2_500, &ctx)
         .await;
     assert!(
-        pending_texts(&watcher, "half-diff").is_empty(),
-        "the next tick, with the store explained, drains"
+        !watcher.last_pass_ms.contains_key("half-diff"),
+        "under the whole shape the message does not conform: no pass"
     );
+    assert!(pending_texts(&watcher, "half-diff").is_empty());
 }
 
 /// The links of `sdna_json`'s shape, signed as a peer would send them.
