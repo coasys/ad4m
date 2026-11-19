@@ -1251,7 +1251,9 @@ async fn run_flow_post_pass(
 ///
 /// The proposals buffered before then are dropped: the harness writes
 /// nothing before its drain, so each row is written one time. The run record
-/// says `mode: fallback`. A loop that reached its cap keeps its proposals.
+/// says `mode: fallback`. A loop that reached its cap, and a loop whose
+/// proposals were all refused, fall back too: their result may be partial,
+/// and a used result consumes every source of the batch.
 /// If the fallback fails too, its error is the pass's error.
 ///
 /// `max_tool_calls` = 0 is treated as "no harness path"; callers should
@@ -1300,8 +1302,15 @@ pub async fn run_interpretation_with_harness_and_model(
 
 /// Why a harness loop's result is not used, so the pass falls back to
 /// single-shot; `None` when it is used.
+///
+/// A pass whose result is used is committed with the full cursor: each source
+/// counts as processed. So a pass that may have left work undone falls back:
+/// one that reached its cap (rows or links after the cap are missing), and
+/// one whose proposals were all refused (`accepted` is 0, `rejected` above 0).
 pub(crate) fn fallback_reason(
     result: &anyhow::Result<crate::ai_service::harness::HarnessOutcome>,
+    accepted: usize,
+    rejected: usize,
 ) -> Option<String> {
     use crate::ai_service::harness::HarnessEnd;
     match result {
@@ -1309,9 +1318,16 @@ pub(crate) fn fallback_reason(
         Ok(o) if o.end == HarnessEnd::Degraded => {
             Some("the model server failed two times (degraded)".to_string())
         }
+        Ok(o) if o.end == HarnessEnd::CapReached => Some(format!(
+            "the pass reached its cap of tool calls ({}); its writes may be partial",
+            o.tool_calls
+        )),
         Ok(o) if o.end == HarnessEnd::Finished && o.tool_calls == 0 => {
             Some("the model made no tool call".to_string())
         }
+        Ok(_) if accepted == 0 && rejected > 0 => Some(format!(
+            "each of the {rejected} proposals of the pass was refused"
+        )),
         Ok(_) => None,
     }
 }
@@ -1454,12 +1470,14 @@ pub(crate) async fn run_harness_pass(
     // not "mutate the graph." The buffer is drained after the loop.
     let buffer = ProposalBuffer::new();
     let classes_offered = propose_shapes.len();
-    let write_provider: Arc<dyn ToolProvider> = Arc::new(ProposeWritesProvider::new(
+    let writes = ProposeWritesProvider::new(
         ad4m_filtered,
         propose_shapes,
         buffer.clone(),
         base_prefix.to_string(),
-    ));
+    );
+    let rejected = writes.rejected();
+    let write_provider: Arc<dyn ToolProvider> = Arc::new(writes);
     // One `{Flow}_propose_transition` tool per active flow; calls are
     // validated against the flow's reachable states and buffered.
     let flow_buffer = FlowProposalBuffer::new();
@@ -1529,7 +1547,9 @@ pub(crate) async fn run_harness_pass(
         credit_gate,
     )
     .await;
-    if let Some(reason) = fallback_reason(&harness) {
+    let accepted = buffer.len() + flow_buffer.len();
+    let rejected = rejected.load(std::sync::atomic::Ordering::SeqCst);
+    if let Some(reason) = fallback_reason(&harness, accepted, rejected) {
         // Nothing was written: the buffers are dropped, and the single-shot
         // pass writes each row one time.
         let dropped = buffer.drain().len();

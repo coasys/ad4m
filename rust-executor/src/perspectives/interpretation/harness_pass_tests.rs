@@ -7,6 +7,7 @@ use super::run::{
 };
 use super::seed::tests::{FLAT_NOTE_SDNA, NOTE_SDNA, TOPIC_SDNA};
 use super::seed::HARNESS_GUIDE;
+use super::InterpretationRunCursor;
 use super::{DedupStrategy, InterpretationOutcome, TranscriptTurn};
 use crate::agent::AgentContext;
 use crate::ai_service::harness::provider::ToolSchema;
@@ -17,6 +18,8 @@ use crate::perspectives::interpretation_test_support::{
 use crate::perspectives::model_query::types::ModelShape;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::types::{Link, LinkQuery, LinkStatus};
+const INTERP_RUN_CLASS: &str = "InterpretationRun";
+use crate::perspectives::interpretation_test_support::model_instances;
 use anyhow::Result;
 use serde_json::{json, Value};
 use std::collections::VecDeque;
@@ -82,7 +85,17 @@ impl CompletionSource for Scripted {
             messages.to_vec(),
             tools.iter().map(|t| t.name.clone()).collect(),
         ));
-        let step = self.steps.lock().unwrap().pop_front();
+        let step = {
+            let mut steps = self.steps.lock().unwrap();
+            // A request with no tools (the wind-down, a best-effort answer,
+            // the single-shot fallback) skips the scripted tool calls.
+            if tools.is_empty() {
+                while matches!(steps.front(), Some(Step::Call(..) | Step::CallWith(..))) {
+                    steps.pop_front();
+                }
+            }
+            steps.pop_front()
+        };
         match step {
             Some(Step::Call(name, args)) => Ok(call(name, args)),
             Some(Step::CallWith(name, args)) => Ok(call(name, args(messages))),
@@ -149,6 +162,17 @@ async fn pass(
     ctx: &AgentContext,
     model: Arc<Scripted>,
 ) -> InterpretationOutcome {
+    pass_with_cursor(p, shapes, ctx, model, None).await
+}
+
+/// [`pass`] with the cursor of an auto-processor batch.
+async fn pass_with_cursor(
+    p: &mut PerspectiveInstance,
+    shapes: &[ModelShape],
+    ctx: &AgentContext,
+    model: Arc<Scripted>,
+    cursor: Option<&InterpretationRunCursor>,
+) -> InterpretationOutcome {
     let _registered = register(p).await;
     run_harness_pass(
         p,
@@ -161,7 +185,7 @@ async fn pass(
         ctx,
         None,
         None,
-        None,
+        cursor,
         10,
         None,
         None,
@@ -427,4 +451,63 @@ async fn an_update_never_rewrites_a_row_outside_the_scope() {
     assert_eq!(count(&titles, "budget"), 1, "{titles:?}");
     assert_eq!(count(&titles, "budget rewritten"), 0, "{titles:?}");
     assert_eq!(count(&titles, "quotes rewritten"), 1, "{titles:?}");
+}
+
+/// A batch whose sources the pass consumes: its run record holds them.
+fn batch_cursor() -> InterpretationRunCursor {
+    InterpretationRunCursor {
+        processor: crate::perspectives::auto_processor::config::processor_node("cap-test"),
+        sources: vec!["src://turn/1".to_string(), "src://turn/2".to_string()],
+    }
+}
+
+/// The pass consumed its sources only with the fallback's result: the one
+/// run record says `fallback`, the fallback row is written one time, and no
+/// harness proposal is.
+async fn assert_sources_go_with_the_fallback(steps: Vec<Step>) {
+    let (mut p, shapes, ctx) = graph_with_topic().await;
+    let model = Scripted::new(steps);
+    let cursor = batch_cursor();
+    let outcome = pass_with_cursor(&mut p, &shapes, &ctx, model.clone(), Some(&cursor)).await;
+    assert_eq!(outcome.mode, RUN_MODE_FALLBACK);
+    assert_eq!(model.left(), 0, "the whole script ran");
+    let runs = model_instances(&p, INTERP_RUN_CLASS, &["mode"]).await;
+    assert_eq!(
+        runs.len(),
+        1,
+        "one run record consumes the sources: {runs:?}"
+    );
+    assert_eq!(runs[0]["mode"], RUN_MODE_FALLBACK, "{runs:?}");
+    let titles = graph_titles_lower(&p, &shapes).await;
+    assert_eq!(count(&titles, "from fallback"), 1, "{titles:?}");
+    assert_eq!(count(&titles, "from harness"), 0, "{titles:?}");
+}
+
+// Lal P1 on #1812: a pass that reaches its cap (10 here) has left rows or
+// links undone. It must not consume its sources with the partial buffer.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pass_that_reaches_its_cap_falls_back_and_keeps_no_partial_write() {
+    let mut steps: Vec<Step> = (0..30)
+        .map(|_| {
+            Step::Call(
+                "note_create",
+                json!({"title": "From harness", "type": "ns://note"}),
+            )
+        })
+        .collect();
+    steps.push(Step::Say("Done."));
+    steps.push(Step::Say(FALLBACK_ANSWER));
+    assert_sources_go_with_the_fallback(steps).await;
+}
+
+// Lal P1 on #1812: a create refused by validation (no `type`), then a final
+// answer. A tool call was made, but nothing was written.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pass_whose_proposals_were_all_refused_falls_back() {
+    assert_sources_go_with_the_fallback(vec![
+        Step::Call("note_create", json!({"title": "From harness"})),
+        Step::Say("Done."),
+        Step::Say(FALLBACK_ANSWER),
+    ])
+    .await;
 }
