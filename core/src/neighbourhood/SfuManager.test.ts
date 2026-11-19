@@ -345,7 +345,7 @@ test("subscribes to offers and the roster before sfuCallJoin", async () => {
     expect(api.log.slice(0, 3)).toEqual(["subscribe-offer", "subscribe-roster", "sfuCallJoin"])
 })
 
-test("offers that arrive before the join completes apply after its answer, in arrival order", async () => {
+test("offers that arrive before the join completes apply after its answer, the newest only", async () => {
     const api = fakeApi()
     const join = deferred<CallSessionInfo>()
     api.sfuCallJoin.mockImplementation(() => join.promise)
@@ -363,8 +363,8 @@ test("offers that arrive before the join completes apply after its answer, in ar
     join.resolve(session())
     await joining
     await flush()
-    expect(pc.remoteSdps()).toEqual(["server-answer", "early-1", "early-2"])
-    expect(api.sfuCallAnswerServerOffer).toHaveBeenCalledTimes(2)
+    expect(pc.remoteSdps()).toEqual(["server-answer", "early-2"])
+    expect(api.sfuCallAnswerServerOffer).toHaveBeenCalledTimes(1)
     expect(api.sfuCallAnswerServerOffer).toHaveBeenCalledWith(
         URL,
         ROOM,
@@ -381,6 +381,7 @@ test("a second offer waits until the first one is answered", async () => {
     api.sfuCallAnswerServerOffer.mockImplementationOnce(() => answered.promise)
 
     api.emitOffer(offer("first"))
+    await flush()
     api.emitOffer(offer("second"))
     await flush()
     const pc = currentPc()
@@ -401,7 +402,9 @@ test("an offer the executor sends again after it was answered is not answered tw
     await manager.join(fakeStream())
 
     api.emitOffer(offer("restart"))
+    await flush()
     api.emitOffer(offer("restart"))
+    await flush()
     api.emitOffer(offer("next"))
     await flush()
 
@@ -417,6 +420,7 @@ test("an offer queued for a connection that has since been replaced is dropped",
     const answered = deferred<boolean>()
     api.sfuCallAnswerServerOffer.mockImplementationOnce(() => answered.promise)
     api.emitOffer(offer("first"))
+    await flush()
     api.emitOffer(offer("stale"))
     await flush()
 
@@ -2177,6 +2181,84 @@ test("a room read the executor refuses (not a socket fault) goes by the roster a
         await jest.advanceTimersByTimeAsync(3_000)
 
         expect(api.sfuCallLeave).toHaveBeenCalledTimes(1)
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
+// ── Offer queue: newest only, each step time-boxed (C7) ─────────────────────
+
+test("of several offers waiting, only the newest is applied; the track mappings of all are kept", async () => {
+    const api = fakeApi()
+    const join = deferred<CallSessionInfo>()
+    api.sfuCallJoin.mockImplementation(() => join.promise)
+    const { manager, participants } = recordedManager(api)
+    const joining = manager.join(fakeStream())
+    await flush()
+
+    api.emitOffer(offer("early-1", [mapped("1", ALICE, "audio")]))
+    api.emitOffer(offer("early-2", [mapped("2", BOB, "audio")]))
+    api.emitOffer(offer("early-3"))
+    join.resolve(session())
+    await joining
+    await flush()
+
+    const pc = currentPc()
+    expect(pc.remoteSdps()).toEqual(["server-answer", "early-3"])
+    expect(api.sfuCallAnswerServerOffer).toHaveBeenCalledTimes(1)
+    pc.receive(new FakeTrack("audio"), "1")
+    pc.receive(new FakeTrack("audio"), "2")
+    expect(participants()).toEqual([ALICE, BOB])
+})
+
+test("an offer step that hangs is given up after 10 s, and the next offer is applied", async () => {
+    fakeTimers()
+    try {
+        const api = fakeApi()
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream())
+        const pc = currentPc()
+        api.sfuCallAnswerServerOffer.mockImplementationOnce(() => new Promise(() => {}))
+
+        api.emitOffer(offer("first"))
+        await flush()
+        await jest.advanceTimersByTimeAsync(1_000)
+        api.emitOffer(offer("second"))
+        await jest.advanceTimersByTimeAsync(8_999)
+        expect(pc.remoteSdps()).toEqual(["server-answer", "first"])
+
+        await jest.advanceTimersByTimeAsync(1)
+        expect(pc.remoteSdps()).toEqual(["server-answer", "first", "second"])
+        expect(api.sfuCallAnswerServerOffer).toHaveBeenCalledTimes(2)
+        expect(api.sfuCallLeave).not.toHaveBeenCalled()
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
+test("an answer given up on that fails after a newer offer was answered is not kept for a resend", async () => {
+    fakeTimers()
+    try {
+        const api = fakeApi()
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream())
+        let timeOut!: (e: unknown) => void
+        api.sfuCallAnswerServerOffer.mockImplementationOnce(() => new Promise((_, reject) => { timeOut = reject }))
+
+        api.emitOffer(offer("first"))
+        await flush()
+        api.emitOffer(offer("second"))
+        await jest.advanceTimersByTimeAsync(10_000)
+        expect(api.sfuCallAnswerServerOffer).toHaveBeenCalledTimes(2)
+        api.sfuCallAnswerServerOffer.mockClear()
+
+        // The first answer's call times out only now.
+        timeOut(new RpcError(408, "RPC call 'sfu.callAnswerServerOffer' timed out after 30000ms"))
+        await flush()
+        api.emitReconnect()
+        await flush()
+        expect(api.sfuCallAnswerServerOffer).not.toHaveBeenCalled()
+        expect(api.sfuCallResume).toHaveBeenCalledTimes(1)
     } finally {
         jest.useRealTimers()
     }

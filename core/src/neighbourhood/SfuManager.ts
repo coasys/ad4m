@@ -335,8 +335,10 @@ export class SfuManager {
     private replacedTracks: Map<"audio" | "video", MediaStreamTrack | null> = new Map()
     /** The last quality preference set, for a rebuilt connection to restore. */
     private qualityPreference: SfuQualityPreference | null = null
-    /** Server offers waiting to be applied, in arrival order, one at a time. */
+    /** Server-offer work, one step at a time, each at most OFFER_STEP_TIMEOUT_MS. */
     private offerQueue: Promise<void> = Promise.resolve()
+    /** How long one step of `offerQueue` may hold the steps behind it. */
+    private static readonly OFFER_STEP_TIMEOUT_MS = 10_000
     /** The last server offer answered. The executor sends an unanswered
      *  restart offer again when asked twice; one that was answered meanwhile
      *  must not be answered again, or that answer lands on its next offer. */
@@ -345,6 +347,8 @@ export class SfuManager {
      *  connection is fine, so it goes out again once the socket is back, or
      *  when the executor sends its offer again. */
     private unsentAnswer: UnsentAnswer | null = null
+    /** The last server offer applied: only its answer is worth keeping for a resend. */
+    private lastOffer: string | null = null
     private reconnectUnsubscribe: (() => void) | null = null
     private renegotiationUnsubscribe: (() => void) | null = null
     private rosterUnsubscribe: (() => void) | null = null
@@ -911,8 +915,10 @@ export class SfuManager {
      * executor sends a socket only the events it watches, and a call
      * carries the pending watch ahead of itself, so no event the join
      * causes is lost. Offers wait for `joined` and then apply one at a
-     * time, in arrival order; one that arrives for a connection already
-     * replaced is dropped.
+     * time. Of the offers waiting when a step starts, only the newest is
+     * applied (the executor has one pending offer at a time, so the others
+     * are stale), with the track mappings of all of them, in arrival order.
+     * One that arrives for a connection already replaced is dropped.
      */
     private subscribeServerEvents(pc: RTCPeerConnection, joined: Promise<void>): void {
         // Join may run more than once (a reconnect). The prior
@@ -925,14 +931,17 @@ export class SfuManager {
         // The executor sends this agent's offers and notices to each of its
         // sessions; only those naming this session's participant id are ours,
         // and that id is known once the join returns.
+        const waiting: SfuCallRenegotiationOffer[] = []
         this.renegotiationUnsubscribe = this.neighbourhood.subscribeSfuCallRenegotiationOffer(
             this.agentDid,
             (event) => {
                 if (!ours(event)) return
+                waiting.push(event)
                 this.offerQueue = this.offerQueue
                     .then(() => joined)
                     .then(() => {
-                        if (event.participantId === this.state.participantId) return this.applyServerOffer(pc, event)
+                        const offers = waiting.splice(0).filter((e) => e.participantId === this.state.participantId)
+                        if (offers.length > 0) return this.timeBoxed(() => this.applyServerOffers(pc, offers))
                     })
             },
         )
@@ -957,18 +966,33 @@ export class SfuManager {
         for (const unsubscribe of previous) unsubscribe?.()
     }
 
-    /** Apply one server offer to `pc` and answer it, unless `pc` is no longer the call's. */
-    private async applyServerOffer(pc: RTCPeerConnection, event: SfuCallRenegotiationOffer): Promise<void> {
+    /** Run one step of `offerQueue`; after OFFER_STEP_TIMEOUT_MS the steps behind it go on without it. */
+    private timeBoxed(step: () => Promise<void>): Promise<void> {
+        let timer: ReturnType<typeof setTimeout> | undefined
+        const timeout = new Promise<void>((resolve) => {
+            timer = setTimeout(() => {
+                console.warn(`SFU: a server-offer step took over ${SfuManager.OFFER_STEP_TIMEOUT_MS} ms; going on without it`)
+                resolve()
+            }, SfuManager.OFFER_STEP_TIMEOUT_MS)
+        })
+        const run = step().catch((err) => console.warn("SFU: a server-offer step failed:", err))
+        return Promise.race([run, timeout]).finally(() => clearTimeout(timer))
+    }
+
+    /** Apply the newest of `offers` (in arrival order) to `pc` and answer it, with the track mappings of all. */
+    private async applyServerOffers(pc: RTCPeerConnection, offers: SfuCallRenegotiationOffer[]): Promise<void> {
+        const event = offers[offers.length - 1]
         if (this.state.peerConnection !== pc || event.sdpOffer === this.answeredOffer) return
         // The executor sent again an offer whose answer a socket fault kept:
         // that answer is still the one, and the offer is applied already.
         const unsent = this.unsentAnswer
         if (unsent?.pc === pc && unsent.sdpOffer === event.sdpOffer) return this.sendAnswer(unsent)
         // The mapping first: the tracks this offer adds arrive while it is applied.
-        for (const entry of event.trackMapping ?? []) {
+        for (const entry of offers.flatMap((offer) => offer.trackMapping ?? [])) {
             this.midToParticipant.set(entry.mid, { participantId: entry.participantId, did: entry.agentDid })
         }
         let sdpAnswer: string
+        this.lastOffer = event.sdpOffer
         try {
             await pc.setRemoteDescription(new RTCSessionDescription(JSON.parse(event.sdpOffer)))
             await pc.setLocalDescription(await pc.createAnswer())
@@ -1003,6 +1027,8 @@ export class SfuManager {
         } catch (err) {
             if (this.state.peerConnection !== answer.pc) return
             if (isSocketFault(err)) {
+                // A step given up on (`timeBoxed`) can fail after a newer offer was applied: its answer is stale.
+                if (answer.sdpOffer !== this.lastOffer) return
                 console.warn("SFU: the answer did not reach the executor; sending it again once the socket is back:", err)
                 this.unsentAnswer = answer
                 return
@@ -1020,11 +1046,13 @@ export class SfuManager {
         const pc = this.state.peerConnection
         if (!pc || this.reconnecting) return
         this.checkIceSoon()
-        this.offerQueue = this.offerQueue.then(async () => {
-            const unsent = this.unsentAnswer
-            if (unsent?.pc === pc && this.state.peerConnection === pc) await this.sendAnswer(unsent)
-            await this.resume(pc)
-        })
+        this.offerQueue = this.offerQueue.then(() =>
+            this.timeBoxed(async () => {
+                const unsent = this.unsentAnswer
+                if (unsent?.pc === pc && this.state.peerConnection === pc) await this.sendAnswer(unsent)
+                await this.resume(pc)
+            }),
+        )
     }
 
     /** Ask the executor to send this session's pending offer and roster again. */
