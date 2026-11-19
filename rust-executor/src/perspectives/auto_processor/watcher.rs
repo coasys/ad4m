@@ -300,6 +300,11 @@ pub struct WatcherState {
         u64,
         std::collections::BTreeSet<u64>,
     )>,
+    /// Per processor, the `now_ms` of the tick that last ran a pass for it.
+    /// A tick drains the processor with the oldest pass first and stops
+    /// draining once a pass moved the store, so every processor gets its
+    /// turn at the front.
+    pub(crate) last_pass_ms: BTreeMap<String, i64>,
 }
 
 impl WatcherState {

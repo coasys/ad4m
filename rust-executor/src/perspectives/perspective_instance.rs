@@ -4819,7 +4819,8 @@ impl PerspectiveInstance {
     /// what its scope returns: the processor's trigger matches, or the batch
     /// carries a config predicate, is a schema write, or could not be
     /// classified (`None` — a predicate-less diff, or a `Lagged` receiver
-    /// that missed one), which stales every declared processor. A batch that
+    /// that missed one), which stales every declared processor; a schema
+    /// write and an unclassified one also drop the shape cache. A batch that
     /// matches nothing leaves the kept reads valid though the write
     /// generation moved, so a tick with turns pending does not re-read the
     /// whole transcript after an unrelated write (#1795).
@@ -4834,10 +4835,12 @@ impl PerspectiveInstance {
                 let ids: Vec<String> = watcher.triggers.keys().cloned().collect();
                 watcher.reads.mark_transcripts_stale(ids);
             };
-        let Some(writes) = writes else {
-            return stale_all(watcher);
-        };
-        if writes.touches_shacl(&|node| is_property_shape_node(&self.sparql_store, node)) {
+        // A gap (`None`) is a write no entry classified: a peer's schema
+        // diff whose entry is not broadcast yet looks exactly like this, so
+        // it is treated as a schema write too.
+        let Some(writes) = writes
+            .filter(|w| !w.touches_shacl(&|node| is_property_shape_node(&self.sparql_store, node)))
+        else {
             // A schema write matches no data predicate, yet the shape the
             // kept reads were taken under is gone — the classification the
             // shape cache is dropped by (`inbound_touches_shacl`). The
@@ -4858,7 +4861,7 @@ impl PerspectiveInstance {
                 }
             }
             return stale_all(watcher);
-        }
+        };
         if writes
             .predicates
             .iter()
@@ -7522,13 +7525,39 @@ impl PerspectiveInstance {
         // 2. Drain + run a pass per config. A config whose reads failed this
         // tick keeps its turns pending and skips the drain: the cursor rows
         // that decide what is consumed could not be read.
-        for cfg in configs.iter() {
+        //
+        // Every queue was recorded from reads at `generation`. A pass writes
+        // (its claim, its run, its output), and a peer may write while it
+        // runs: once the store moved, a later queue may hold a turn the write
+        // consumed or took out of scope. So the drains stop after a pass that
+        // moved it, and the next tick re-reads under the feed's stale marks
+        // before it drains the rest. The first drain does not wait for a
+        // quiet store, or a busy neighbourhood would hold every pass. The
+        // processor whose last pass is oldest drains first, so a processor
+        // that writes on every tick does not keep the others out.
+        let mut order: Vec<_> = configs.iter().collect();
+        order.sort_by_key(|cfg| {
+            watcher
+                .last_pass_ms
+                .get(&cfg.processor_id)
+                .copied()
+                .unwrap_or(i64::MIN)
+        });
+        let mut passed = false;
+        for cfg in order {
+            if passed && self.sparql_store.write_generation() != generation {
+                break;
+            }
             if read_failed.contains(&cfg.processor_id) {
                 continue;
             }
             let Some(batch) = watcher.drain_ready_batch(cfg, now_ms) else {
                 continue;
             };
+            passed = true;
+            watcher
+                .last_pass_ms
+                .insert(cfg.processor_id.clone(), now_ms);
             // Hoisted above the `BatchReady` emit so that signal can carry the batch key too.
             // It is the first event of a pass, so a consumer that could not key it would have to
             // buffer everything until the pass's second event told it what row to open.

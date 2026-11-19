@@ -930,6 +930,67 @@ async fn a_shape_detail_edit_stales_the_kept_transcript() {
     );
 }
 
+/// A peer's schema diff moves the store before its feed entry is broadcast
+/// (`persist_remote_diff` writes, then broadcasts). A tick in between sees a
+/// write no entry classified: it must re-read under the stored shape, not
+/// the cached one, though nothing has dropped the cache yet.
+#[tokio::test]
+async fn a_schema_write_seen_before_its_feed_entry_is_read_under_the_new_shape() {
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
+    seed_message(
+        &mut p,
+        &ctx,
+        "msg://1",
+        "did:key:alice",
+        "hello",
+        "ns://body",
+    )
+    .await;
+    write_processor(
+        &mut p,
+        &config("gap-shape", 600_000, None),
+        Some(false),
+        &ctx,
+    )
+    .await
+    .expect("write_processor");
+    let mut watcher = WatcherState::new();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
+    let type_language = |p: &PerspectiveInstance| {
+        p.get_shape("ns://Message")
+            .expect("shape")
+            .properties
+            .iter()
+            .find(|prop| prop.name == "type")
+            .and_then(|prop| prop.resolve_language.clone())
+    };
+    assert_eq!(type_language(&p), None, "the tick cached the shape");
+
+    // Straight into the store: no feed entry, no cache drop.
+    let mut schema = crate::types::LinkExpression::from(
+        crate::agent::signatures::TestSigner::generate().sign(crate::types::Link {
+            source: "ns://ns://Message.type".into(),
+            predicate: Some("ad4m://resolveLanguage".into()),
+            target: "literal:string:literal".into(),
+        }),
+    );
+    schema.status = Some(crate::types::LinkStatus::Shared);
+    p.sparql_store
+        .add_link(&schema)
+        .expect("a peer's schema link");
+    let reads = transcript_queries(&p);
+
+    p.run_auto_processor_tick(&mut watcher, now_ms + 500, &ctx)
+        .await;
+    assert_eq!(transcript_queries(&p), reads + 1, "the gap stales the read");
+    assert_eq!(
+        type_language(&p),
+        Some("literal".to_string()),
+        "the re-read parsed the stored shape, not the cached one"
+    );
+}
+
 /// The links of `sdna_json`'s shape, signed as a peer would send them.
 fn peer_shape_diff(sdna_json: &str) -> crate::types::PerspectiveDiff {
     let signer = crate::agent::signatures::TestSigner::generate();
@@ -2400,4 +2461,46 @@ async fn a_path_scope_reads_children_and_their_replies() {
             "{s} -{pr}-> {t} must wake the loop"
         );
     }
+}
+
+/// A pass writes to the store, so the queues the tick recorded before it
+/// may be out of date: a later processor drains only on the next tick, after
+/// it re-read the store, and that tick drains it first.
+#[tokio::test]
+async fn a_pass_that_writes_leaves_the_next_drain_to_the_next_tick() {
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
+    seed_message(
+        &mut p,
+        &ctx,
+        "msg://1",
+        "did:key:alice",
+        "first",
+        "ns://body",
+    )
+    .await;
+    for id in ["a", "b"] {
+        write_processor(&mut p, &config(id, 0, None), Some(false), &ctx)
+            .await
+            .expect("write_processor");
+    }
+    let mut watcher = WatcherState::new();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+
+    let before = p.sparql_store.write_generation();
+    p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
+    assert!(
+        p.sparql_store.write_generation() > before,
+        "the pass wrote to the store"
+    );
+    assert!(pending_texts(&watcher, "a").is_empty(), "a drained");
+    assert_eq!(
+        pending_texts(&watcher, "b"),
+        vec!["first".to_string()],
+        "b waits for a tick that read the store after a's pass"
+    );
+
+    p.run_auto_processor_tick(&mut watcher, now_ms + 1, &ctx)
+        .await;
+    assert!(pending_texts(&watcher, "b").is_empty(), "b drained next");
+    assert_eq!(watcher.last_pass_ms.get("b"), Some(&(now_ms + 1)));
 }
