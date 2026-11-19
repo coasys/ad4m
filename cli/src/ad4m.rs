@@ -369,11 +369,11 @@ mod client_transport_tests {
         assert_shared_check(false);
     }
 
-    /// TLS to a non-loopback host is allowed. The dial fails closed (no such name).
+    /// TLS to a non-loopback host is allowed. `0.0.0.0` is not loopback; the dial is refused at once.
     #[tokio::test]
     async fn tls_remote_is_allowed() {
         let (_lock, _dir, _guard) = hold_token_dir().await;
-        let app = runtime_app("https://example.invalid:443", Some(SECRET), false);
+        let app = runtime_app("https://0.0.0.0:1", Some(SECRET), false);
         let msg = connect_error(&app).await;
         assert!(
             !msg.contains("plaintext"),
