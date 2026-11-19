@@ -4906,7 +4906,11 @@ impl PerspectiveInstance {
         // borrow it mutably to write the stale marks. `covered` starts with
         // the generations an earlier drain proved above `seen` (a write that
         // landed mid-tick); each drained entry adds the generations its own
-        // store writes took.
+        // store writes took. A new feed subscribes after any entry already
+        // sent, so it cannot prove what came before it: its first drain is a
+        // gap, which drops a shape cached before a schema write whose writer
+        // has not dropped it yet.
+        let mut unclassifiable = watcher.commit_feed.is_none();
         let (mut commits, mut seen, mut covered) =
             watcher.commit_feed.take().unwrap_or_else(|| {
                 (
@@ -4916,7 +4920,6 @@ impl PerspectiveInstance {
                 )
             });
         let mut drained = Vec::new();
-        let mut unclassifiable = false;
         loop {
             use tokio::sync::broadcast::error::TryRecvError;
             match commits.try_recv() {

@@ -991,6 +991,70 @@ async fn a_schema_write_seen_before_its_feed_entry_is_read_under_the_new_shape()
     );
 }
 
+/// A watcher's feed subscribes on its first tick, after any entry already
+/// sent. A schema write whose entry went out before that, and whose writer
+/// has not yet dropped the cached shape, is in neither the feed nor a gap
+/// the feed can see. The first drain counts as a gap, so the first tick
+/// reads under the stored shape, not the cached one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_first_tick_after_a_schema_entry_it_never_saw_reads_the_new_shape() {
+    use crate::perspectives::perspective_instance::subscription_triggers;
+
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
+    seed_message(
+        &mut p,
+        &ctx,
+        "msg://1",
+        "did:key:alice",
+        "hello",
+        "ns://body",
+    )
+    .await;
+    write_processor(
+        &mut p,
+        &config("first-tick-shape", 600_000, None),
+        Some(false),
+        &ctx,
+    )
+    .await
+    .expect("write_processor");
+    let type_language = |p: &PerspectiveInstance| {
+        p.get_shape("ns://Message")
+            .expect("shape")
+            .properties
+            .iter()
+            .find(|prop| prop.name == "type")
+            .and_then(|prop| prop.resolve_language.clone())
+    };
+    assert_eq!(type_language(&p), None, "the old shape is cached");
+
+    // Written and broadcast, but the writer has not dropped the cache yet.
+    let mut schema = crate::types::LinkExpression::from(
+        crate::agent::signatures::TestSigner::generate().sign(crate::types::Link {
+            source: "ns://ns://Message.type".into(),
+            predicate: Some("ad4m://resolveLanguage".into()),
+            target: "literal:string:literal".into(),
+        }),
+    );
+    schema.status = Some(crate::types::LinkStatus::Shared);
+    p.sparql_store
+        .add_link(&schema)
+        .expect("a peer's schema link");
+    p.broadcast_commit_write(
+        subscription_triggers::writes_of_links([schema.data].iter()),
+        vec![p.sparql_store.write_generation()],
+    );
+
+    let mut watcher = WatcherState::new();
+    p.run_auto_processor_tick(&mut watcher, chrono::Utc::now().timestamp_millis(), &ctx)
+        .await;
+    assert_eq!(
+        type_language(&p),
+        Some("literal".to_string()),
+        "the first tick read the stored shape, not the cached one"
+    );
+}
+
 /// A peer's diff is written link by link under `persist_lock` and broadcast
 /// before the lock is released. Paused half way — a new required property's
 /// path written, its `sh://minCount` not yet — the store holds a shape under
@@ -1474,6 +1538,13 @@ async fn id_comparisons_in_two_ticks_over(n: usize) -> (u64, u64) {
     let cfg = config("many", 600_000, None);
     let generation = p.sparql_store.write_generation();
     let mut watcher = WatcherState::new();
+    // A watcher that has ticked already: a new feed's first drain is a gap,
+    // which would drop the kept read below.
+    watcher.commit_feed = Some((
+        p.commit_writes.subscribe(),
+        generation,
+        std::collections::BTreeSet::new(),
+    ));
     watcher.reads.set_configs(generation, vec![cfg.clone()]);
     watcher
         .reads
