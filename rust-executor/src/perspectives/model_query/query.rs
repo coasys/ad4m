@@ -568,12 +568,9 @@ pub(super) async fn execute_model_query_inner(
                         || name == "createdAt"
                         || name == "updatedAt"
                         || name == ACTIVITY_ORDER_KEY
-                    {
-                        true
-                    } else if shape
-                        .properties
-                        .iter()
-                        .any(|p| p.name == *name && !p.is_collection && !p.predicate.is_empty())
+                        || shape.properties.iter().any(|p| {
+                            p.name == *name && !p.is_collection && !p.predicate.is_empty()
+                        })
                     {
                         true
                     } else if name.starts_with('$') {
