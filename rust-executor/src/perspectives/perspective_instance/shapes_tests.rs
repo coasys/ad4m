@@ -1186,3 +1186,61 @@ async fn a_class_name_two_peers_registered_answers_for_the_class_readers_find() 
         "b://Task"
     );
 }
+
+/// [`NOTE`] with an untyped relation `about` that declares `polymorphic`
+/// (`ad4m://polymorphic`, #1829), or not.
+fn note_with_polymorphic_about(polymorphic: Option<bool>) -> SHACLShape {
+    let mut shape = note();
+    let mut about: crate::perspectives::shacl_parser::PropertyShape = serde_json::from_str(
+        r#"{"path":"ns://about","name":"about","relation_kind":"hasOne","max_count":1}"#,
+    )
+    .unwrap();
+    about.polymorphic = polymorphic;
+    shape.properties.push(about);
+    shape
+}
+
+/// The registry owns `ad4m://polymorphic`: a declared relation registers
+/// once, reads back with its flag, and a shape that drops the flag removes
+/// the triple.
+#[tokio::test]
+async fn a_polymorphic_relation_registers_once_and_reads_back() {
+    let (mut perspective, _, ctx) = setup_perspective_no_llm(&[]).await;
+    let about = property_node("about");
+    let poly = note_with_polymorphic_about(Some(true));
+    perspective
+        .register_shapes(vec![poly.clone()], &ctx)
+        .await
+        .unwrap();
+    assert_eq!(
+        count(&perspective, &about, "ad4m://polymorphic", "literal:true"),
+        1
+    );
+
+    let again = perspective
+        .register_shapes(vec![poly.clone()], &ctx)
+        .await
+        .unwrap();
+    assert_eq!(again.unchanged, vec!["ns://Note".to_string()]);
+    assert!(again.written.is_empty());
+
+    let stored = perspective.shapes(Some(vec!["ns://Note".into()])).unwrap();
+    assert_eq!(stored[0].shape, stored_form(&poly));
+    let read = stored[0]
+        .shape
+        .properties
+        .iter()
+        .find(|p| p.name.as_deref() == Some("about"))
+        .unwrap();
+    assert_eq!(read.polymorphic, Some(true));
+
+    let plain = perspective
+        .register_shapes(vec![note_with_polymorphic_about(None)], &ctx)
+        .await
+        .unwrap();
+    assert_eq!(plain.written, vec!["ns://Note".to_string()]);
+    assert_eq!(
+        count(&perspective, &about, "ad4m://polymorphic", "literal:true"),
+        0
+    );
+}

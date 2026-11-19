@@ -1233,3 +1233,37 @@ mod per_parent_tests {
         ));
     }
 }
+
+#[cfg(test)]
+mod candidates_tests {
+    use super::*;
+
+    /// `hydrate_polymorphic` tries a target's classes in `candidates` order,
+    /// so its first try must be the class `choose` picks: a preferred key
+    /// matches a class IRI or that class's name.
+    #[test]
+    fn candidates_start_with_what_choose_picks() {
+        let s = |v: &[&str]| v.iter().map(|c| c.to_string()).collect::<Vec<_>>();
+        let matched = s(&["app://ImagePost", "a://Post", "b://Post"]);
+        for (preferred, want) in [
+            (s(&[]), s(&["app://ImagePost", "a://Post", "b://Post"])),
+            (
+                s(&["Post"]),
+                s(&["a://Post", "b://Post", "app://ImagePost"]),
+            ),
+            (
+                s(&["b://Post"]),
+                s(&["b://Post", "app://ImagePost", "a://Post"]),
+            ),
+            (
+                s(&["Missing", "ImagePost", "Post"]),
+                s(&["app://ImagePost", "a://Post", "b://Post"]),
+            ),
+        ] {
+            let got = candidates(&matched, &preferred);
+            assert_eq!(got, want, "preferred {preferred:?}");
+            assert_eq!(got.first(), choose(&matched, &preferred), "{preferred:?}");
+        }
+        assert!(candidates(&[], &s(&["Post"])).is_empty());
+    }
+}
