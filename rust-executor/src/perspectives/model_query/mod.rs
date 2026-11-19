@@ -91,6 +91,8 @@ pub(crate) mod builtin_classes;
 #[cfg(test)]
 mod collection_provenance_tests;
 pub(crate) mod containment;
+#[cfg(test)]
+mod contains_scan_tests;
 mod eval_transform;
 mod filtering;
 mod getters;

@@ -238,7 +238,7 @@ pub(super) fn may_hold_link_author(wc: &BTreeMap<String, WhereCondition>) -> boo
 ///
 /// Covers the shapes an author condition takes: a DID, a list of DIDs (`in`),
 /// and `not`/`contains`. Anything else returns `None`.
-fn author_expr(var: &str, cond: &WhereCondition) -> Option<String> {
+pub(super) fn author_expr(var: &str, cond: &WhereCondition) -> Option<String> {
     let quoted = |s: &str| format!("\"{}\"", escape_sparql_string(s));
     let list = |items: &[String]| items.iter().map(|s| quoted(s)).collect::<Vec<_>>();
     match cond {

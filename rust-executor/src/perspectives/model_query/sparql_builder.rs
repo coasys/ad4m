@@ -26,12 +26,12 @@ use std::collections::BTreeMap;
 
 use super::containment::{contains_patterns, has_child_only};
 use super::link_author::{
-    instance_author_filter, is_link_leaf, link_author_join, may_hold_link_author,
+    author_expr, instance_author_filter, is_link_leaf, link_author_join, may_hold_link_author,
     side_by_side_author, side_by_side_scopes, split_leaf, LinkAuthorState,
 };
 use super::types::{
     ContainedScope, InstanceQueryPlan, ModelQueryInput, ModelShape, OrderDirection, Scope,
-    ScopeDirection, ShapeResolver, SortKey, SparqlPagination, WhereCondition,
+    ScopeDirection, ShapeResolver, SortKey, SparqlPagination, WhereCondition, WhereOps,
 };
 use super::utils::{
     emittable_iri, escape_sparql_string, format_literal_number, looks_like_absolute_iri,
@@ -1208,7 +1208,9 @@ fn binds_source(patterns: &[String]) -> bool {
 /// - `OR` — a disjunction, so partial compilation is **not** sound: emitting only
 ///   the arms that compiled would exclude rows the missing arm would have
 ///   matched. Every branch must compile *and* bind `?source`, or the whole `OR`
-///   is left to post-hydration.
+///   is left to post-hydration. When every arm is `contains` on the same scalar
+///   property, with the same author constraint or none, the arms share one
+///   triple scan and the needles are OR-ed in one `FILTER` ([`try_fuse_same_property_contains`]).
 /// - `NOT` — same reasoning as `OR`; a partial `FILTER NOT EXISTS` excludes rows
 ///   it should keep. The branch need not bind `?source` itself, because
 ///   `FILTER NOT EXISTS` is evaluated per solution with outer bindings visible.
@@ -1227,6 +1229,158 @@ pub(super) fn compile_where_clause(
         complete,
         link_author_scoped: la.per_link,
         link_author_error: la.error,
+    }
+}
+
+/// One scan for an `OR` whose every arm is `contains` on the same scalar property.
+///
+/// A SPARQL `UNION` plans each arm on its own, so two `contains` arms on one
+/// predicate scan it twice. On a large `ad4m://TextContent` neighbourhood that
+/// second scan misses the model-query timeout (#1735). The author constraint
+/// is the same on every arm, so `author && (c1 || c2)` matches the same links
+/// as `(author && c1) || (author && c2)`: one triple, one reifier join, one
+/// `FILTER`.
+///
+/// `None`, and `seq` / `la` left untouched, for every other shape. The caller
+/// then emits a `UNION`. That covers different properties, different authors,
+/// equality, ranges, quantifiers, a collection and a property this shape does
+/// not store.
+fn try_fuse_same_property_contains(
+    branches: &[BTreeMap<String, WhereCondition>],
+    shape: &ModelShape,
+    guard: LinkGuard,
+    seq: &mut usize,
+    la: &mut LinkAuthorState,
+) -> Option<Vec<String>> {
+    if branches.len() < 2 {
+        return None;
+    }
+    let mut prop_name: Option<&str> = None;
+    let mut needles: Vec<String> = Vec::with_capacity(branches.len());
+    // `None` until the first arm. `Some(None)` means that arm had no author.
+    let mut shared_author: Option<Option<&WhereCondition>> = None;
+
+    for branch in branches {
+        if branch.len() != 1 {
+            return None;
+        }
+        let (name, cond) = branch.iter().next()?;
+        if matches!(
+            name.as_str(),
+            "AND" | "OR" | "NOT" | "author" | "id" | "base"
+        ) {
+            return None;
+        }
+        match prop_name {
+            None => prop_name = Some(name.as_str()),
+            Some(prev) if prev != name.as_str() => return None,
+            Some(_) => {}
+        }
+        // A malformed author is `Err` here. Decline, so the UNION path records
+        // it and refuses the query instead of scanning without the constraint.
+        let Ok((value, nested_author)) = split_leaf(cond) else {
+            return None;
+        };
+        let Some(WhereCondition::Ops(ops)) = value.as_deref() else {
+            return None;
+        };
+        if !contains_only(ops) {
+            return None;
+        }
+        let needle = match ops.contains.as_ref()? {
+            Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+        needles.push(needle);
+        match shared_author {
+            None => shared_author = Some(nested_author),
+            Some(prev) if same_author(prev, nested_author) => {}
+            Some(_) => return None,
+        }
+    }
+
+    let prop_name = prop_name?;
+    let prop = shape
+        .properties
+        .iter()
+        .find(|p| p.name == prop_name && !p.is_collection && !p.predicate.is_empty())?;
+    if validate_iri(&prop.predicate).is_err() {
+        return None;
+    }
+
+    let leaf_id = *seq;
+    let safe_name = format!(
+        "{}_{leaf_id}",
+        prop_name.replace(|c: char| !c.is_alphanumeric(), "_")
+    );
+    let var = format!("?_pw_{safe_name}");
+    let val_var = format!("?_pw_{safe_name}_v");
+    let authors: Vec<&WhereCondition> = shared_author.flatten().into_iter().collect();
+    let join = link_author_join(
+        &authors,
+        "?source",
+        &prop.predicate,
+        &var,
+        &leaf_id.to_string(),
+        guard,
+    )
+    .ok()?;
+    let join = join.map(|j| format!("\n{j}")).unwrap_or_default();
+
+    *seq += 1;
+    if !authors.is_empty() {
+        la.per_link = true;
+    }
+
+    let val_src = if prop.is_deterministic_literal() {
+        var.clone()
+    } else {
+        format!("<ad4m://fn/parse_literal>({var})")
+    };
+    let filter = needles
+        .iter()
+        .map(|needle| {
+            format!(
+                "CONTAINS(LCASE({val_var}), LCASE(\"{}\"))",
+                escape_sparql_string(needle)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" || ");
+
+    Some(vec![
+        format!("    ?source <{}> {var} .{join}", prop.predicate),
+        format!("    BIND(STR({val_src}) AS {val_var})"),
+        format!("    FILTER({filter})"),
+    ])
+}
+
+/// `contains` and nothing else. `author` has already been split off the value.
+fn contains_only(ops: &WhereOps) -> bool {
+    ops.contains.is_some()
+        && ops.not.is_none()
+        && ops.between.is_none()
+        && ops.lt.is_none()
+        && ops.lte.is_none()
+        && ops.gt.is_none()
+        && ops.gte.is_none()
+        && ops.some.is_none()
+        && ops.none.is_none()
+        && ops.eq.is_none()
+        && ops.author.is_none()
+}
+
+/// Both absent, or both render to the same author test. An unrenderable
+/// author is not "the same": fusion must decline and leave the refusal to the
+/// UNION path.
+fn same_author(a: Option<&WhereCondition>, b: Option<&WhereCondition>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => {
+            let left = author_expr("?v", a);
+            left.is_some() && left == author_expr("?v", b)
+        }
+        _ => false,
     }
 }
 
@@ -1295,6 +1449,12 @@ fn compile_where_clause_seq(
             },
             "OR" => match condition {
                 WhereCondition::SubClauses(branches) if !branches.is_empty() => {
+                    if let Some(fused) =
+                        try_fuse_same_property_contains(branches, shape, guard, seq, la)
+                    {
+                        patterns.extend(fused);
+                        continue;
+                    }
                     let mut arms = Vec::with_capacity(branches.len());
                     let mut ok = true;
                     // Every arm is compiled even after one fails, so that `la`
@@ -2426,6 +2586,165 @@ mod where_compiler_tests {
         let sparql = compiled.patterns.join("\n");
         assert!(sparql.contains("UNION"), "{sparql}");
         assert!(sparql.contains("we://body"), "{sparql}");
+    }
+
+    fn ops(value: serde_json::Value) -> WhereCondition {
+        serde_json::from_value(value).unwrap()
+    }
+
+    fn contains_branch(prop: &str, needle: &str) -> BTreeMap<String, WhereCondition> {
+        branch(vec![(prop, ops(serde_json::json!({ "contains": needle })))])
+    }
+
+    fn contains_not_author(
+        prop: &str,
+        needle: &str,
+        did: &str,
+    ) -> BTreeMap<String, WhereCondition> {
+        branch(vec![(
+            prop,
+            ops(serde_json::json!({ "contains": needle, "author": { "not": did } })),
+        )])
+    }
+
+    fn or_clause(arms: Vec<BTreeMap<String, WhereCondition>>) -> BTreeMap<String, WhereCondition> {
+        wc(vec![("OR", WhereCondition::SubClauses(arms))])
+    }
+
+    /// #1735: the mention waker ORs two `contains` on the same text, with the
+    /// same `author: { not }` on each arm. That is one scan, not a UNION.
+    #[test]
+    fn or_of_contains_on_one_property_scans_once() {
+        let s = test_shape();
+        let input = ModelQueryInput::default();
+        let compiled = compile_where_clause(
+            &or_clause(vec![
+                contains_not_author("title", "Hex", "did:key:self"),
+                contains_not_author("title", "did:key:self", "did:key:self"),
+            ]),
+            &s,
+            None,
+            LinkGuard::of(&input),
+        );
+
+        assert!(compiled.complete);
+        assert!(compiled.link_author_scoped);
+        let sparql = compiled.patterns.join("\n");
+        assert!(!sparql.contains("UNION"), "{sparql}");
+        assert!(sparql.contains(" || "), "{sparql}");
+        assert!(sparql.contains("LCASE(\"Hex\")"), "{sparql}");
+        assert!(sparql.contains("LCASE(\"did:key:self\")"), "{sparql}");
+        assert_eq!(sparql.matches("we://title").count(), 2, "{sparql}");
+        assert_eq!(sparql.matches("proofValid").count(), 1, "{sparql}");
+        assert_eq!(
+            sparql.matches("ad4m://ontology/author").count(),
+            1,
+            "{sparql}"
+        );
+        assert!(
+            !sparql.contains("parse_literal"),
+            "a deterministic literal is STR, not parse_literal: {sparql}"
+        );
+    }
+
+    /// A WE text property is a signed envelope. The shared scan still unwraps
+    /// it once.
+    #[test]
+    fn or_of_contains_on_an_expression_literal_parses_once() {
+        let mut s = test_shape();
+        s.properties[0].resolve_language = Some("literal".into());
+        let compiled = compile_where_clause(
+            &or_clause(vec![
+                contains_branch("title", "Hex"),
+                contains_branch("title", "did:key:self"),
+            ]),
+            &s,
+            None,
+            LinkGuard::ANY,
+        );
+
+        assert!(compiled.complete);
+        assert!(!compiled.link_author_scoped);
+        let sparql = compiled.patterns.join("\n");
+        assert!(!sparql.contains("UNION"), "{sparql}");
+        assert!(sparql.contains("parse_literal"), "{sparql}");
+        assert!(sparql.contains(" || "), "{sparql}");
+        assert_eq!(sparql.matches("we://title").count(), 1, "{sparql}");
+        assert!(!sparql.contains("proofValid"), "{sparql}");
+    }
+
+    #[test]
+    fn or_of_contains_on_different_properties_stays_a_union() {
+        let compiled = compile_where_clause(
+            &or_clause(vec![
+                contains_branch("title", "Hex"),
+                contains_branch("body", "Hex"),
+            ]),
+            &test_shape(),
+            None,
+            LinkGuard::ANY,
+        );
+        assert!(compiled.complete);
+        let sparql = compiled.patterns.join("\n");
+        assert!(sparql.contains("UNION"), "{sparql}");
+        assert!(sparql.contains("we://title"), "{sparql}");
+        assert!(sparql.contains("we://body"), "{sparql}");
+    }
+
+    #[test]
+    fn or_of_contains_with_different_authors_stays_a_union() {
+        let compiled = compile_where_clause(
+            &or_clause(vec![
+                contains_not_author("title", "Hex", "did:key:a"),
+                contains_not_author("title", "Hex", "did:key:b"),
+            ]),
+            &test_shape(),
+            None,
+            LinkGuard::ANY,
+        );
+        assert!(compiled.complete);
+        let sparql = compiled.patterns.join("\n");
+        assert!(sparql.contains("UNION"), "{sparql}");
+        assert!(sparql.contains("did:key:a"), "{sparql}");
+        assert!(sparql.contains("did:key:b"), "{sparql}");
+    }
+
+    /// A relation's `contains` is not this leaf. Fusing it would scan the
+    /// wrong shape; declining leaves the OR unanswered, which fails closed.
+    #[test]
+    fn or_of_contains_on_a_relation_is_not_fused() {
+        let compiled = compile_where_clause(
+            &or_clause(vec![
+                contains_branch("signals", "a"),
+                contains_branch("signals", "b"),
+            ]),
+            &test_shape(),
+            None,
+            LinkGuard::ANY,
+        );
+        assert!(!compiled.complete);
+        assert!(
+            compiled.patterns.is_empty(),
+            "no half-compiled relation scan: {}",
+            compiled.patterns.join("\n")
+        );
+    }
+
+    #[test]
+    fn or_with_a_malformed_author_is_refused() {
+        let bad = branch(vec![(
+            "title",
+            ops(serde_json::json!({ "contains": "a", "author": { "gt": 1 } })),
+        )]);
+        let compiled = compile_where_clause(
+            &or_clause(vec![bad, contains_not_author("title", "b", "did:key:self")]),
+            &test_shape(),
+            None,
+            LinkGuard::ANY,
+        );
+        assert!(!compiled.complete);
+        assert!(compiled.patterns.is_empty());
+        assert!(compiled.link_author_error.is_some());
     }
 }
 /// Rename every generated variable in `patterns` so they cannot collide with
