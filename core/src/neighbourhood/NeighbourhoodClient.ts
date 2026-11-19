@@ -239,6 +239,11 @@ export class NeighbourhoodClient {
         return this.#apiClient.onNetworkChange(callback)
     }
 
+    /** Fires after the client's socket opened again after a drop. See {@link ApiClient.onReconnect}. */
+    onReconnect(callback: () => void): () => void {
+        return this.#apiClient.onReconnect(callback)
+    }
+
     /** Check the client's socket now: one that says nothing within a
      *  deadline is treated as a network change. See {@link ApiClient.checkConnection}. */
     checkConnection(): void {

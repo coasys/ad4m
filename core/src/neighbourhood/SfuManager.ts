@@ -81,6 +81,10 @@ export interface SfuNeighbourhoodApi {
     ): Promise<boolean>
     /** Called after a network change, once calls reach the executor again. */
     onNetworkChange(callback: () => void): () => void
+    /** Fires after the executor socket opened again after a drop (not on the
+     *  first open). Optional: without it, an answer a socket fault kept goes
+     *  out only when the executor sends its offer again. */
+    onReconnect?(callback: () => void): () => void
     /** Check the executor socket now; one found dead is redialled and
      *  `onNetworkChange` fires. Called when ICE goes disconnected, since a
      *  network switch the platform announced nothing for leaves that socket
@@ -153,6 +157,21 @@ export interface SfuIceConfig {
 }
 
 // ── Constants ─────────────────────────────────────────────────────
+
+/** An answer made for a server offer, kept until the executor has it. */
+interface UnsentAnswer {
+    pc: RTCPeerConnection
+    sdpOffer: string
+    roomName: string
+    participantId: string
+    sdpAnswer: string
+}
+
+/** A failure of the signalling socket, not of the call: the socket closed
+ *  while the call was out (503) or the reply did not come in time (408). */
+function isSocketFault(err: unknown): boolean {
+    return err instanceof RpcError && (err.status === 503 || err.status === 408)
+}
 
 const DEFAULT_ICE_SERVERS: RTCIceServer[] = [
     { urls: "stun:stun.l.google.com:19302" },
@@ -304,6 +323,11 @@ export class SfuManager {
      *  restart offer again when asked twice; one that was answered meanwhile
      *  must not be answered again, or that answer lands on its next offer. */
     private answeredOffer: string | null = null
+    /** An answer a socket fault kept from the executor (503, 408): the
+     *  connection is fine, so it goes out again once the socket is back, or
+     *  when the executor sends its offer again. */
+    private unsentAnswer: UnsentAnswer | null = null
+    private reconnectUnsubscribe: (() => void) | null = null
     private renegotiationUnsubscribe: (() => void) | null = null
     private rosterUnsubscribe: (() => void) | null = null
     /** For the manager's call, not one join: a reconnect between its leave and its join still hears a notice. */
@@ -556,6 +580,10 @@ export class SfuManager {
                 this.endRestart()
                 this.restartIce(current)
             })
+        }
+        // The socket came back: what a fault kept from the executor goes out now.
+        if (!this.reconnectUnsubscribe && this.neighbourhood.onReconnect) {
+            this.reconnectUnsubscribe = this.neighbourhood.onReconnect(() => this.socketBack())
         }
 
         // Both kinds of local media, send-only, declared now whether or not a
@@ -848,29 +876,65 @@ export class SfuManager {
     /** Apply one server offer to `pc` and answer it, unless `pc` is no longer the call's. */
     private async applyServerOffer(pc: RTCPeerConnection, event: SfuCallRenegotiationOffer): Promise<void> {
         if (this.state.peerConnection !== pc || event.sdpOffer === this.answeredOffer) return
+        // The executor sent again an offer whose answer a socket fault kept:
+        // that answer is still the one, and the offer is applied already.
+        const unsent = this.unsentAnswer
+        if (unsent?.pc === pc && unsent.sdpOffer === event.sdpOffer) return this.sendAnswer(unsent)
         // The mapping first: the tracks this offer adds arrive while it is applied.
         for (const entry of event.trackMapping ?? []) {
             this.midToParticipant.set(entry.mid, { participantId: entry.participantId, did: entry.agentDid })
         }
+        let sdpAnswer: string
         try {
             await pc.setRemoteDescription(new RTCSessionDescription(JSON.parse(event.sdpOffer)))
             await pc.setLocalDescription(await pc.createAnswer())
-            await this.neighbourhood.sfuCallAnswerServerOffer(
-                this.neighbourhoodUrl,
-                event.roomName,
-                event.participantId,
-                JSON.stringify(pc.localDescription),
-            )
-            this.answeredOffer = event.sdpOffer
+            sdpAnswer = JSON.stringify(pc.localDescription)
         } catch (err) {
             if (this.state.peerConnection !== pc) return
-            // A renegotiation that fails leaves this connection out of step
-            // with the server — or the server has already dropped it. Either
-            // way the call is rebuilt; `reconnect` reports an error only if
-            // that fails too.
+            // An offer this connection cannot take leaves it out of step with
+            // the server: rebuild. `reconnect` reports an error only if that fails too.
             console.warn("SFU: renegotiation failed, rebuilding the connection:", err)
             void this.reconnect()
+            return
         }
+        await this.sendAnswer({ pc, sdpOffer: event.sdpOffer, roomName: event.roomName, participantId: event.participantId, sdpAnswer })
+    }
+
+    /**
+     * Send an answer to the executor. Nothing here rebuilds the call: a
+     * socket fault (503, 408) keeps the answer for the next socket or the
+     * executor's resend of the offer, and a refusal leaves the verdict to
+     * ICE and the roster, which see whether the session is really gone.
+     */
+    private async sendAnswer(answer: UnsentAnswer): Promise<void> {
+        try {
+            await this.neighbourhood.sfuCallAnswerServerOffer(
+                this.neighbourhoodUrl,
+                answer.roomName,
+                answer.participantId,
+                answer.sdpAnswer,
+            )
+            this.answeredOffer = answer.sdpOffer
+            if (this.unsentAnswer?.pc === answer.pc) this.unsentAnswer = null
+        } catch (err) {
+            if (this.state.peerConnection !== answer.pc) return
+            if (isSocketFault(err)) {
+                console.warn("SFU: the answer did not reach the executor; sending it again once the socket is back:", err)
+                this.unsentAnswer = answer
+                return
+            }
+            console.warn("SFU: the executor refused the answer; keeping the connection:", err)
+        }
+    }
+
+    /** The executor socket opened again: send what a fault kept from it. */
+    private socketBack(): void {
+        const pc = this.state.peerConnection
+        if (!pc || this.reconnecting) return
+        this.offerQueue = this.offerQueue.then(async () => {
+            const unsent = this.unsentAnswer
+            if (unsent?.pc === pc && this.state.peerConnection === pc) await this.sendAnswer(unsent)
+        })
     }
 
     /**
@@ -941,6 +1005,9 @@ export class SfuManager {
         this.endRestart()
         this.networkUnsubscribe?.()
         this.networkUnsubscribe = null
+        this.reconnectUnsubscribe?.()
+        this.reconnectUnsubscribe = null
+        this.unsentAnswer = null
         this.senders.clear()
         this.replacedTracks.clear()
         this.qualityPreference = null

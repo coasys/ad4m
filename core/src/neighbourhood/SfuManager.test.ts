@@ -104,6 +104,7 @@ import type {
     SfuCallRenegotiationOffer,
     SfuConfig,
     SfuDataMessage,
+    SfuRoomInfo,
     SfuRoomRoster,
     SfuSessionReplaced,
     TrackMapEntry,
@@ -173,6 +174,23 @@ function roster(
     return { neighbourhoodUrl: URL, roomName: ROOM, participants: listed, ...overrides }
 }
 
+/** The room as `sfu.listRooms` returns it, with the sessions given as `[participantId, did]`. */
+function room(...sessions: [string, string][]): SfuRoomInfo {
+    return {
+        neighbourhoodUrl: URL,
+        roomName: ROOM,
+        participantCount: sessions.length,
+        participants: sessions.map(([participantId, agentDid]) => ({
+            participantId,
+            agentDid,
+            hasAudio: false,
+            hasVideo: false,
+            isActiveSpeaker: false,
+        })),
+        createdAtMs: 0,
+    }
+}
+
 function replaced(participantId: string, overrides: Partial<SfuSessionReplaced> = {}): SfuSessionReplaced {
     return { targetDid: ME, neighbourhoodUrl: URL, roomName: ROOM, participantId, ...overrides }
 }
@@ -190,6 +208,7 @@ function fakeApi() {
     const rosterHandlers = new Set<(r: SfuRoomRoster) => void>()
     const replacedHandlers = new Set<(r: SfuSessionReplaced) => void>()
     const networkHandlers = new Set<() => void>()
+    const reconnectHandlers = new Set<() => void>()
     const api = {
         log,
         offerHandlers,
@@ -201,6 +220,11 @@ function fakeApi() {
         networkHandlers,
         emitNetworkChange() {
             for (const handler of networkHandlers) handler()
+        },
+        reconnectHandlers,
+        /** The executor socket opened again after a drop. */
+        emitReconnect() {
+            for (const handler of reconnectHandlers) handler()
         },
         emitOffer(event: SfuCallRenegotiationOffer) {
             for (const handler of offerHandlers) handler(event)
@@ -254,6 +278,16 @@ function fakeApi() {
             return () => { networkHandlers.delete(handler) }
         }),
         checkConnection: jest.fn(() => {}),
+        onReconnect: jest.fn((handler: () => void) => {
+            reconnectHandlers.add(handler)
+            return () => { reconnectHandlers.delete(handler) }
+        }),
+        sfuCallResume: jest.fn(async (_url: string, _room: string, _participantId: string) => {
+            log.push("sfuCallResume")
+            return true
+        }),
+        // The room read before an unlisted rebuild: by default the executor lists nobody.
+        sfuListRooms: jest.fn(async (): Promise<SfuRoomInfo[]> => []),
         sfuAddIceCandidate: jest.fn(async () => true),
         sfuSendData: jest.fn(async () => true),
         subscribeSfuDataChannel: jest.fn(() => () => {}),
@@ -1774,4 +1808,91 @@ test("a manager that left sends no restart for its old connection", async () => 
     await flush()
 
     expect(api.sfuCallRestartIce).not.toHaveBeenCalled()
+})
+
+// ── A socket fault on the answer keeps the call (C1) ───────────────────────
+
+test.each([
+    ["503 (the socket closed while the answer was out)", new RpcError(503, "WebSocket connection closed")],
+    ["408 (the answer timed out)", new RpcError(408, "RPC call 'sfu.callAnswerServerOffer' timed out after 30000ms")],
+])("a %s keeps the connection and the participant id, and the answer goes again once the socket is back", async (_name, fault) => {
+    const api = fakeApi()
+    const manager = new SfuManager(api, ROOM, ME, URL)
+    await manager.join(fakeStream())
+    await iceState("connected")
+    const pc = currentPc()
+    api.sfuCallAnswerServerOffer.mockRejectedValueOnce(fault)
+
+    api.emitOffer(offer("renegotiate"))
+    await flush()
+    expect(pc.closed).toBe(false)
+    expect(manager.getState().participantId).toBe(MINE)
+    expect(manager.getState().peerConnection).toBe(pc)
+    expect(api.sfuCallLeave).not.toHaveBeenCalled()
+    expect(api.sfuCallJoin).toHaveBeenCalledTimes(1)
+
+    api.emitReconnect()
+    await flush()
+    const answer = JSON.stringify({ type: "answer", sdp: "local-answer" })
+    expect(api.sfuCallAnswerServerOffer.mock.calls).toEqual([
+        [URL, ROOM, MINE, answer],
+        [URL, ROOM, MINE, answer],
+    ])
+    // Applied once: the second send is the same answer, not a second negotiation.
+    expect(pc.remoteSdps()).toEqual(["server-answer", "renegotiate"])
+
+    // Answered now: the executor's late resend of that offer gets nothing.
+    api.emitOffer(offer("renegotiate"))
+    api.emitReconnect()
+    await flush()
+    expect(api.sfuCallAnswerServerOffer).toHaveBeenCalledTimes(2)
+    expect(FakePeerConnection.instances).toHaveLength(1)
+})
+
+test("an offer the executor resends while its answer is unsent gets that answer, applied once", async () => {
+    const api = fakeApi()
+    const manager = new SfuManager(api, ROOM, ME, URL)
+    await manager.join(fakeStream())
+    const pc = currentPc()
+    api.sfuCallAnswerServerOffer.mockRejectedValueOnce(new RpcError(503, "WebSocket connection closed"))
+
+    api.emitOffer(offer("renegotiate"))
+    await flush()
+    api.emitOffer(offer("renegotiate"))
+    await flush()
+
+    expect(api.sfuCallAnswerServerOffer).toHaveBeenCalledTimes(2)
+    expect(pc.remoteSdps()).toEqual(["server-answer", "renegotiate"])
+    expect(api.sfuCallLeave).not.toHaveBeenCalled()
+})
+
+test("an executor that refuses the answer does not make the client rebuild", async () => {
+    // Whether the server still has the session is for the roster and ICE to say.
+    const api = fakeApi()
+    const manager = new SfuManager(api, ROOM, ME, URL)
+    await manager.join(fakeStream())
+    api.sfuCallAnswerServerOffer.mockRejectedValueOnce(new RpcError(500, "SFU answer failed"))
+
+    api.emitOffer(offer("renegotiate"))
+    await flush()
+
+    expect(currentPc().closed).toBe(false)
+    expect(api.sfuCallLeave).not.toHaveBeenCalled()
+    expect(manager.getState().participantId).toBe(MINE)
+})
+
+test("an offer the connection cannot apply still rebuilds the call", async () => {
+    const api = fakeApi()
+    const manager = new SfuManager(api, ROOM, ME, URL)
+    await manager.join(fakeStream())
+    const pc = currentPc()
+    jest.spyOn(pc, "setRemoteDescription").mockRejectedValueOnce(new Error("InvalidSessionDescription"))
+
+    api.emitOffer(offer("broken"))
+    await flush()
+
+    expect(pc.closed).toBe(true)
+    expect(api.sfuCallLeave).toHaveBeenCalledTimes(1)
+    expect(api.sfuCallJoin).toHaveBeenCalledTimes(2)
+    expect(api.sfuCallAnswerServerOffer).not.toHaveBeenCalled()
 })
