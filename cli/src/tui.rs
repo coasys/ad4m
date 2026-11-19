@@ -700,7 +700,7 @@ async fn drive(
             inflight = Some(Box::pin(fetch(client, request)));
         }
         if let Some(row) = model.requested_open.take() {
-            open_space(client, model, row);
+            open_space(client, model, row, &mut inflight);
         }
         let terminal = session
             .terminal
@@ -737,23 +737,33 @@ async fn drive(
 }
 
 /// Assemble the Coasys view of `row` over the CLI's shared socket. A
-/// failure leaves the admin model untouched apart from `error`, so the
-/// screen it returns to is fully usable.
-fn open_space(client: &Ad4mClient, model: &mut Model, row: SpaceRow) {
+/// failure leaves the admin model untouched apart from `error` — and the
+/// in-flight refresh, still valid for the screen it returns to. A
+/// successful open drops that future: its generation can never match
+/// again, so it is cancelled rather than letting the next admin refresh
+/// queue behind it.
+fn open_space(
+    client: &Ad4mClient,
+    model: &mut Model,
+    row: SpaceRow,
+    inflight: &mut Option<BoxedRefresh<'_>>,
+) {
     let conn = tui_space::connection(client);
-    open_space_as(model, row, |row| tui_space::open(&conn, row));
+    open_space_as(model, row, |row| tui_space::open(&conn, row), inflight);
 }
 
 fn open_space_as(
     model: &mut Model,
     row: SpaceRow,
     assemble: impl FnOnce(SpaceRow) -> Result<SpaceApp, String>,
+    inflight: &mut Option<BoxedRefresh<'_>>,
 ) {
     match assemble(row) {
         Ok(space) => {
             model.space = Some(space);
             model.needs_clear = true;
             model.error = None;
+            *inflight = None;
             // Drop a refresh already in flight: the perspectives list must
             // stay exactly what the user selected from.
             invalidate(model);
@@ -1329,11 +1339,28 @@ mod tests {
         model.selected = 1;
         model.loaded_at = Some(Instant::now());
 
+        // A refresh really in flight when 'o' lands: the open drops the
+        // future — the sender sees it cancelled — so the fresh refresh
+        // after F10 does not queue behind it.
+        let (tx, mut inflight) = pending_refresh();
         let row = model.selected_space().unwrap();
-        open_space_as(&mut model, row, |row| crate::tui_space::open(&conn, row));
+        open_space_as(
+            &mut model,
+            row,
+            |row| crate::tui_space::open(&conn, row),
+            &mut inflight,
+        );
         let stats = model.space.as_ref().unwrap().source.clone();
         assert!(model.space.is_some());
-        assert!(!should_start_refresh(&model, false), "refresh is suspended");
+        assert!(inflight.is_none(), "opening drops the in-flight refresh");
+        assert!(
+            tx.is_closed(),
+            "the dropped refresh is cancelled, not parked"
+        );
+        assert!(
+            !should_start_refresh(&model, inflight.is_some()),
+            "refresh is suspended"
+        );
         assert!(model.stale(), "opening drops an in-flight result");
 
         // F10: back to the same admin screen, selection kept.
@@ -1344,7 +1371,7 @@ mod tests {
         assert!(model.space.is_none());
         assert_eq!(model.selected, 1);
         assert!(
-            should_start_refresh(&model, false),
+            should_start_refresh(&model, inflight.is_some()),
             "back on the admin screen resumes its refresh"
         );
         // The view's handle on the source is gone — the subscriptions its
@@ -1358,7 +1385,12 @@ mod tests {
 
         // Back in: the same space reopens, the same row stays selected.
         let row = model.selected_space().unwrap();
-        open_space_as(&mut model, row, |row| crate::tui_space::open(&conn, row));
+        open_space_as(
+            &mut model,
+            row,
+            |row| crate::tui_space::open(&conn, row),
+            &mut inflight,
+        );
         assert_eq!(model.space.as_ref().unwrap().space.uuid, "nh-1");
         close_space(&mut model);
         assert_eq!(model.selected, 1);
@@ -1390,9 +1422,20 @@ mod tests {
         );
         assert!(model.space.is_none());
 
-        // A failed open leaves the admin UI exactly as usable as before.
-        open_space_as(&mut model, row, |_| Err("assembly broke".to_string()));
+        // A failed open leaves the admin UI exactly as usable as before —
+        // including the refresh still in flight for it.
+        let (tx, mut inflight) = pending_refresh();
+        open_space_as(
+            &mut model,
+            row,
+            |_| Err("assembly broke".to_string()),
+            &mut inflight,
+        );
         assert!(model.space.is_none());
+        assert!(
+            inflight.is_some() && !tx.is_closed(),
+            "a failed open keeps the refresh its screen still needs"
+        );
         assert_eq!(
             model.error.as_deref(),
             Some("Coasys view failed: assembly broke")
