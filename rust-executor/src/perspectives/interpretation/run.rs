@@ -1547,6 +1547,20 @@ pub(crate) async fn run_harness_pass(
         credit_gate,
     )
     .await;
+    // A credit halt ends the pass: the fallback's completions would not pass
+    // the caller's credit gate. Nothing is written and no source is consumed.
+    let credit_halted = match &harness {
+        Ok(o) => o.end == crate::ai_service::harness::HarnessEnd::CreditHalted,
+        Err(e) => crate::ai_service::harness::is_credit_refusal(e),
+    };
+    if credit_halted {
+        let _ = buffer.drain();
+        let _ = flow_buffer.drain();
+        anyhow::bail!(
+            "run_interpretation_harness: the credit gate stopped the pass; nothing was \
+             written, and it does not fall back to single-shot"
+        );
+    }
     let accepted = buffer.len() + flow_buffer.len();
     let rejected = rejected.load(std::sync::atomic::Ordering::SeqCst);
     if let Some(reason) = fallback_reason(&harness, accepted, rejected) {

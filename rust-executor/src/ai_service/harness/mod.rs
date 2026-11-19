@@ -575,6 +575,11 @@ impl std::fmt::Display for CreditRefused {
 
 impl std::error::Error for CreditRefused {}
 
+/// Whether `error` is a credit gate's refusal, not an upstream failure.
+pub(crate) fn is_credit_refusal(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<CreditRefused>().is_some()
+}
+
 /// How a [`run_with_tools_outcome`] loop ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HarnessEnd {
@@ -742,7 +747,18 @@ pub async fn run_with_tools_outcome(
                     config.empty_completion_nudges,
                 )
                 .await
-                .map(|text| HarnessOutcome::new(text, HarnessEnd::Degraded, calls_used));
+                .map(|text| HarnessOutcome::new(text, HarnessEnd::Degraded, calls_used))
+                .or_else(|e| {
+                    if is_credit_refusal(&e) {
+                        Ok(HarnessOutcome::new(
+                            String::new(),
+                            HarnessEnd::CreditHalted,
+                            calls_used,
+                        ))
+                    } else {
+                        Err(e)
+                    }
+                });
             }
         };
 
@@ -1160,9 +1176,11 @@ async fn best_effort_after_upstream_failure(
         if let Err(e) = gate.check().await {
             log::warn!(
                 "harness: credit gate refused the no-tools final request \
-                 after an upstream failure: {e}. Returning empty content."
+                 after an upstream failure: {e}. Halting."
             );
-            return Ok(String::new());
+            // A credit halt, not an upstream failure: the caller must not
+            // read it as a degraded run and spend further completions.
+            return Err(CreditRefused(e).into());
         }
     }
     messages.push(json!({

@@ -511,3 +511,117 @@ async fn a_pass_whose_proposals_were_all_refused_falls_back() {
     ])
     .await;
 }
+
+/// Allows the first `allowed` completions, then refuses.
+struct GateAfter {
+    allowed: usize,
+    checks: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl crate::ai_service::harness::CreditGate for GateAfter {
+    async fn check(&self) -> Result<()> {
+        let n = self
+            .checks
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if n < self.allowed {
+            Ok(())
+        } else {
+            anyhow::bail!("no credits left")
+        }
+    }
+}
+
+/// A pass with a credit gate that allows `allowed` completions.
+async fn gated_pass(
+    steps: Vec<Step>,
+    allowed: usize,
+) -> (Result<InterpretationOutcome>, Arc<Scripted>, Vec<String>) {
+    let (mut p, shapes, ctx) = graph_with_topic().await;
+    let model = Scripted::new(steps);
+    let _registered = register(&p).await;
+    let out = run_harness_pass(
+        &mut p,
+        &shapes,
+        &[TranscriptTurn::from_speaker_text(
+            "Nico",
+            "A second quote came in.",
+        )],
+        "run://pass/",
+        &ctx,
+        None,
+        None,
+        Some(&batch_cursor()),
+        10,
+        None,
+        None,
+        true,
+        Some(Arc::new(GateAfter {
+            allowed,
+            checks: Default::default(),
+        })),
+        None,
+        &DedupStrategy::default(),
+        false,
+        Some(model.clone()),
+    )
+    .await;
+    let titles = graph_titles_lower(&p, &shapes).await;
+    let consumed = p
+        .get_links(&LinkQuery {
+            predicate: Some("ad4m://interp/sources".to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(consumed.is_empty(), "no source is consumed: {consumed:?}");
+    (out, model, titles)
+}
+
+// CodeRabbit on #1812: a credit refusal must not fall back to single-shot
+// calls that the gate does not check. The pass fails, writes nothing, and
+// makes no further completion.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_credit_halt_returns_the_credit_error_and_does_not_fall_back() {
+    // Refused at the first round.
+    let (out, model, titles) = gated_pass(
+        vec![
+            Step::Call(
+                "note_create",
+                json!({"title": "From harness", "type": "ns://note"}),
+            ),
+            Step::Say(FALLBACK_ANSWER),
+        ],
+        0,
+    )
+    .await;
+    let err = out.expect_err("a credit halt is an error");
+    assert!(format!("{err:#}").contains("credit"), "{err:#}");
+    assert!(model.seen().is_empty(), "no completion after the refusal");
+    assert_eq!(count(&titles, "from fallback"), 0, "{titles:?}");
+
+    // The server fails two times; the gate refuses the best-effort answer.
+    let (out, model, titles) = gated_pass(
+        vec![
+            Step::Call(
+                "note_create",
+                json!({"title": "From harness", "type": "ns://note"}),
+            ),
+            Step::Fail(500),
+            Step::Fail(500),
+            Step::Say("Best effort."),
+            Step::Say(FALLBACK_ANSWER),
+        ],
+        3,
+    )
+    .await;
+    let err = out.expect_err("a credit halt is an error");
+    assert!(format!("{err:#}").contains("credit"), "{err:#}");
+    assert_eq!(
+        model.left(),
+        2,
+        "neither the best-effort answer nor the fallback ran"
+    );
+    assert_eq!(count(&titles, "from fallback"), 0, "{titles:?}");
+    assert_eq!(count(&titles, "from harness"), 0, "{titles:?}");
+}
