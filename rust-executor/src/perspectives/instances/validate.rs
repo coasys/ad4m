@@ -100,7 +100,8 @@ pub struct Cardinality {
 pub enum WriteMode {
     /// All required properties must be present; collections may be given as arrays.
     Create,
-    /// Partial patch of single-valued properties only.
+    /// Partial patch: the given properties and collection member lists
+    /// replace what is there.
     Update,
 }
 
@@ -177,11 +178,6 @@ fn matches_allowed(candidate: &Value, allowed: &Value) -> bool {
 pub(crate) fn coerce_scalar(info: &PropView<'_>, value: &Value) -> Result<Value, ValidationError> {
     let err = |problem: ValidationProblem| ValidationError::on(info, problem, Some(value));
 
-    if let Value::Array(items) = value {
-        return Err(err(ValidationProblem::ArrayForScalar {
-            length: items.len(),
-        }));
-    }
     if value.is_null() {
         return Err(err(ValidationProblem::Null));
     }
@@ -202,6 +198,23 @@ pub(crate) fn coerce_scalar(info: &PropView<'_>, value: &Value) -> Result<Value,
     }
 
     let wrong_type = || err(ValidationProblem::WrongType);
+
+    // A structured value on an open (`string`) datatype keeps the
+    // `literal:json:` encoding the subject writers have always used for it —
+    // a `metadata = {...}` property on a JSON-schema model round-trips whole.
+    // A typed scalar refuses it: an object is not a boolean.
+    match value {
+        Value::Array(items) if info.type_name() != "string" => {
+            return Err(err(ValidationProblem::ArrayForScalar {
+                length: items.len(),
+            }));
+        }
+        Value::Array(_) | Value::Object(_) if info.type_name() == "string" => {
+            return Ok(value.clone());
+        }
+        Value::Object(_) => return Err(wrong_type()),
+        _ => {}
+    }
     let coerced = match info.type_name().as_str() {
         "boolean" => match value {
             Value::Bool(_) => Ok(value.clone()),
@@ -263,8 +276,9 @@ pub(crate) fn coerce_scalar(info: &PropView<'_>, value: &Value) -> Result<Value,
 
 /// Validate a `properties` map against a class shape.
 ///
-/// On success returns the coerced scalar values (keyed by the property's canonical name) and,
-/// for `Create`, the collection items to link. On failure returns *every* problem found, not
+/// On success returns the coerced scalar values (keyed by the property's canonical name) and
+/// the collection member lists to write — `Create` writes them as the initial items, `Update`
+/// replaces the collection with them. On failure returns *every* problem found, not
 /// just the first, so the caller can fix its call in one round trip. Nothing is written by this
 /// function.
 pub fn validate_properties(
@@ -311,34 +325,29 @@ pub fn validate_properties(
         }
 
         if info.collection() {
-            match mode {
-                WriteMode::Update => errors.push(ValidationError::on(
-                    info,
-                    ValidationProblem::CollectionNotSettable,
-                    Some(value),
-                )),
-                WriteMode::Create => {
-                    let items: Vec<Value> = match value {
-                        Value::Array(items) => items.clone(),
-                        Value::Null => vec![],
-                        other => vec![other.clone()],
-                    };
-                    let mut coerced = Vec::with_capacity(items.len());
-                    let mut bad = false;
-                    for (index, item) in items.iter().enumerate() {
-                        match coerce_scalar(info, item) {
-                            Ok(v) => coerced.push(v),
-                            Err(mut e) => {
-                                e.item = Some(index);
-                                errors.push(e);
-                                bad = true;
-                            }
-                        }
-                    }
-                    if !bad && !coerced.is_empty() {
-                        out.collections.push((info.name().to_string(), coerced));
+            // Both modes take the full member list: create writes the
+            // initial items, update replaces them (empty clears).
+            let items: Vec<Value> = match value {
+                Value::Array(items) => items.clone(),
+                Value::Null => vec![],
+                other => vec![other.clone()],
+            };
+            let mut coerced = Vec::with_capacity(items.len());
+            let mut bad = false;
+            for (index, item) in items.iter().enumerate() {
+                match coerce_scalar(info, item) {
+                    Ok(v) => coerced.push(v),
+                    Err(mut e) => {
+                        e.item = Some(index);
+                        errors.push(e);
+                        bad = true;
                     }
                 }
+            }
+            // Create skips an empty list (nothing to write); update keeps
+            // it — an empty array is a replace-with-nothing.
+            if !bad && (!coerced.is_empty() || mode == WriteMode::Update) {
+                out.collections.push((info.name().to_string(), coerced));
             }
             continue;
         }

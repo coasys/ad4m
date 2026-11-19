@@ -625,6 +625,48 @@ impl PerspectiveInstance {
         Ok(())
     }
 
+    /// Replace `prop`'s members on `base` with the members `value` names,
+    /// through one `collectionSetter` synthesized from the property's `path`
+    /// and `local` flag — the write an `executeAction` caller makes of a
+    /// collection the class declares no `ad4m://setter` for. `instances`'s
+    /// update runs it for those; a declared setter (link or `call`) goes
+    /// through `update_subject` instead.
+    pub(crate) async fn replace_collection_without_setter(
+        &mut self,
+        class_name: &str,
+        prop: &str,
+        predicate: &str,
+        local: bool,
+        base: &str,
+        value: &Value,
+        batch_id: Option<String>,
+        context: &AgentContext,
+    ) -> Result<(), AnyError> {
+        let parameters: Vec<Parameter> = self
+            .members(class_name, prop, value, context)
+            .await?
+            .into_iter()
+            .map(|m| Parameter {
+                name: String::new(),
+                value: Value::String(m),
+            })
+            .collect();
+        self.execute_commands(
+            vec![Command {
+                source: Some("this".to_string()),
+                predicate: Some(predicate.to_string()),
+                target: Some("value".to_string()),
+                local: local.then_some(true),
+                action: Action::CollectionSetter,
+            }],
+            base.to_string(),
+            parameters,
+            batch_id,
+            context,
+        )
+        .await
+    }
+
     /// Delete the instance of `subject_class` at `base`: run the class's
     /// destructor. Through an abstract class, run the destructor of each
     /// target class, each command once; the record's other classes are left

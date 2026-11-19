@@ -69,6 +69,7 @@ use uuid::Uuid;
 mod abstract_classes;
 // `call` actions: shape actions that call into a language (design §3).
 mod call_actions;
+pub(crate) use call_actions::SetterKind;
 // Mounted languages: the language's records mirrored as Local links
 // (design §1, §2).
 mod mounts;
@@ -84,8 +85,12 @@ mod containment;
 pub(crate) mod mount_gates;
 // Class registration and the registry of shapes.
 mod shapes;
+// Name-keyed SDNA writes: `add_sdna`/`add_sdna_batch`, kept for mount
+// installs (their class names are not the target-class basename).
+mod sdna_writes;
 #[cfg(test)]
 pub(crate) use abstract_classes::faults::fail_next_index;
+pub use sdna_writes::SdnaType;
 pub use shapes::{RegisterResult, ShapeSummary};
 mod subscriptions;
 pub(crate) use subscriptions::{result_json, SubscriptionIdTaken};
@@ -5243,7 +5248,11 @@ impl PerspectiveInstance {
 
     /// The shape node of `class_name`'s property `property`: the one its
     /// shape lists under `sh://property` with that name.
-    fn property_node(&self, class_name: &str, property: &str) -> Result<Option<String>, AnyError> {
+    pub(crate) fn property_node(
+        &self,
+        class_name: &str,
+        property: &str,
+    ) -> Result<Option<String>, AnyError> {
         let Some(class) = find_class(&self.sparql_store, class_name)? else {
             return Ok(None);
         };

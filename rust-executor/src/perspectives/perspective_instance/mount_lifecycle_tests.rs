@@ -82,11 +82,7 @@ async fn sync_mount_of_a_language_never_mounted_is_refused() {
     assert!(error.to_string().contains("not mounted"), "{error}");
     assert!(lang_links(&p, &lang).await.is_empty());
     assert!(
-        !p.get_subject_classes_from_shacl()
-            .await
-            .unwrap()
-            .iter()
-            .any(|c| c == "MountThing"),
+        !p.class_names().unwrap().iter().any(|c| c == "MountThing"),
         "a refused sync installed the shapes"
     );
 }
