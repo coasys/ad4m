@@ -419,6 +419,7 @@ export class SfuManager {
         if (!stream || this.reconnecting) return
         const generation = this.generation
         if (++this.reconnectAttempts > SfuManager.MAX_RECONNECTS) {
+            this.stopReceiveWatch() // the call is over: nothing left to restart
             this.emit("error", new Error("SFU reconnect attempts exhausted"))
             return
         }
@@ -820,6 +821,10 @@ export class SfuManager {
      * send no RTP, but the SFU still reports on the media it receives from
      * this client, so the path back is there and a restart could not help.
      * A path that is gone carries neither.
+     *
+     * The interval lives as long as `pc` is the call's: a leave, a
+     * replacement, a rebuild, reconnects running out, or `pc` closing
+     * stops it.
      */
     private watchReceiving(pc: RTCPeerConnection): void {
         this.stopReceiveWatch()
@@ -828,6 +833,12 @@ export class SfuManager {
         let reports: { at: number; key: string } | null = null
         let sampling = false
         const watch = setInterval(async () => {
+            // A connection that is no longer the call's, or closed, is watched no more.
+            if (this.state.peerConnection !== pc || pc.connectionState === "closed") {
+                clearInterval(watch)
+                if (this.receiveWatch === watch) this.receiveWatch = null
+                return
+            }
             if (sampling) return
             if (!this.mayRestartForStall(pc)) {
                 rtp = reports = null

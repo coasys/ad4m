@@ -85,7 +85,10 @@ class FakePeerConnection {
     async createAnswer() { return { type: "answer", sdp: "local-answer" } }
     async setLocalDescription(d: RTCSessionDescriptionInit) { this.localDescription = d }
     async setRemoteDescription(d: RTCSessionDescriptionInit) { this.remoteDescriptions.push(d) }
-    close() { this.closed = true }
+    close() {
+        this.closed = true
+        this.connectionState = "closed"
+    }
     /** The transport's RTP both ways, and the RTCP reports the SFU sends on this client's own media. */
     async getStats() {
         if (this.flow.inbound) this.counters.inbound += 50
@@ -308,6 +311,20 @@ async function iceState(state: string) {
 
 beforeEach(() => {
     FakePeerConnection.instances = []
+})
+
+// A test that joins and never leaves ends with a live call, whose receive
+// watchdog (an interval) would keep Jest from exiting. Every manager that
+// joined in a test is left after it; `leave` stops it at once.
+const joinedManagers = new Set<SfuManager>()
+const realJoin = SfuManager.prototype.join
+SfuManager.prototype.join = function (this: SfuManager, localStream: MediaStream) {
+    joinedManagers.add(this)
+    return realJoin.call(this, localStream)
+}
+afterEach(() => {
+    for (const manager of joinedManagers) void manager.leave().catch(() => {})
+    joinedManagers.clear()
 })
 
 // ── Server events ─────────────────────────────────────────────────
@@ -1972,6 +1989,58 @@ describe("the receive-stall watchdog", () => {
 
         await jest.advanceTimersByTimeAsync(30_000)
         expect(api.sfuCallRestartIce).not.toHaveBeenCalled()
+    })
+
+    // Every way a call ends stops its interval: a live one is the only timer left
+    // after a call that is still up, and none after one that ended.
+    test("one interval per live call, and none once the call is left", async () => {
+        const { manager } = await flowingCall()
+        expect(jest.getTimerCount()).toBe(1)
+        await manager.leave()
+        expect(jest.getTimerCount()).toBe(0)
+    })
+
+    test("none once another tab replaced the session", async () => {
+        const { api } = await flowingCall()
+        api.emitReplaced(replaced(MINE))
+        await flush()
+        expect(jest.getTimerCount()).toBe(0)
+    })
+
+    test("a rebuild keeps only the new connection's interval", async () => {
+        const { pc } = await flowingCall()
+        await iceState("failed")
+        await flush()
+        expect(currentPc()).not.toBe(pc)
+        expect(jest.getTimerCount()).toBe(1)
+    })
+
+    test("none once the reconnects ran out", async () => {
+        const { manager } = await flowingCall()
+        const errors: unknown[] = []
+        manager.on("error", (e) => errors.push(e))
+        for (let i = 0; i < 4; i++) await iceState("failed")
+        expect(errors).toEqual([new Error("SFU reconnect attempts exhausted")])
+        expect(jest.getTimerCount()).toBe(0)
+    })
+
+    test("none once a rebuild gave up rejoining", async () => {
+        const { api, manager } = await flowingCall()
+        const errors: unknown[] = []
+        manager.on("error", (e) => errors.push(e))
+        api.sfuCallJoin.mockRejectedValue(new Error("Room is full"))
+        await iceState("failed")
+        await jest.advanceTimersByTimeAsync(130_000)
+        expect(errors).toEqual([new Error("Room is full")])
+        expect(jest.getTimerCount()).toBe(0)
+    })
+
+    test("none once its connection was closed under it", async () => {
+        // The app closed it through `getState()`, or the page is going away.
+        const { pc } = await flowingCall()
+        pc.close()
+        await jest.advanceTimersByTimeAsync(1_000)
+        expect(jest.getTimerCount()).toBe(0)
     })
 
     test("stops with the call", async () => {
