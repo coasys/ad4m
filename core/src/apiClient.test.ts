@@ -565,7 +565,7 @@ describe('ApiClient checkConnection', () => {
 
     const pings = (i: number) => socket(i).sent.filter(m => m.type === 'ping').length
 
-    it('pings at once; a socket silent for the deadline is dropped, the next dialled at once, and onNetworkChange fires when it opens', async () => {
+    it('pings at once; a socket silent for two probes is dropped, the next dialled at once, and onNetworkChange fires when it opens', async () => {
         const changed = jest.fn()
         client.onNetworkChange(changed)
         open()
@@ -574,7 +574,10 @@ describe('ApiClient checkConnection', () => {
 
         client.checkConnection()
         expect(pings(0)).toBe(1)
-        await jest.advanceTimersByTimeAsync(1_999)
+        // One missed probe pings again and keeps the socket.
+        await jest.advanceTimersByTimeAsync(8_000)
+        expect(pings(0)).toBe(2)
+        await jest.advanceTimersByTimeAsync(7_999)
         expect(TestSocket.instances).toHaveLength(1)
         expect(socket(0).readyState).toBe(1)
 
@@ -642,7 +645,7 @@ describe('ApiClient checkConnection', () => {
         client.checkConnection()
         client.checkConnection()
         expect(pings(0)).toBe(1)
-        await jest.advanceTimersByTimeAsync(1_500)
+        await jest.advanceTimersByTimeAsync(15_500)
         expect(TestSocket.instances).toHaveLength(2)
         socket(1).open()
         expect(changed).toHaveBeenCalledTimes(1)
@@ -681,10 +684,69 @@ describe('ApiClient checkConnection', () => {
         socket(0).open()
         socket(0).reply({ id: socket(0).sent[0].id, result: 1 })
         await promise
+        // A socket heard from in the last 5 s needs no probe.
+        await jest.advanceTimersByTimeAsync(5_000)
         client.checkConnection()
         expect(pings(0)).toBe(1)
         client.closeAll()
         expect(jest.getTimerCount()).toBe(0)
+    })
+
+    // A busy socket (large live-query results ahead of the pong) answers late,
+    // not never: one late pong must not drop a healthy call's socket.
+    it('keeps a socket whose pong comes back after 3 s', async () => {
+        const changed = jest.fn()
+        client.onNetworkChange(changed)
+        open()
+        socket(0).open()
+        client.checkConnection()
+        await jest.advanceTimersByTimeAsync(3_000)
+        socket(0).reply({ type: 'pong' })
+        await jest.advanceTimersByTimeAsync(5_000)
+        expect(TestSocket.instances).toHaveLength(1)
+        expect(socket(0).readyState).toBe(1)
+        expect(changed).not.toHaveBeenCalled()
+    })
+
+    it('keeps a socket after one missed probe; a message before the second deadline ends the check', async () => {
+        open()
+        socket(0).open()
+        client.checkConnection()
+        await jest.advanceTimersByTimeAsync(8_000)
+        expect(socket(0).readyState).toBe(1)
+        expect(pings(0)).toBe(2)
+        socket(0).reply({ type: 'pong' })
+        await jest.advanceTimersByTimeAsync(9_000)
+        expect(TestSocket.instances).toHaveLength(1)
+        expect(socket(0).readyState).toBe(1)
+    })
+
+    it('a later check after an answered one starts counting misses from zero', async () => {
+        open()
+        socket(0).open()
+        client.checkConnection()
+        await jest.advanceTimersByTimeAsync(8_000)
+        socket(0).reply({ type: 'pong' })
+        await jest.advanceTimersByTimeAsync(6_000)
+        socket(0).reply({ type: 'pong' })
+        await jest.advanceTimersByTimeAsync(6_000)
+        client.checkConnection()
+        await jest.advanceTimersByTimeAsync(8_000)
+        expect(socket(0).readyState).toBe(1)
+        expect(TestSocket.instances).toHaveLength(1)
+    })
+
+    it('sends no probe when the socket delivered a message in the last 5 s', async () => {
+        open()
+        socket(0).open()
+        await jest.advanceTimersByTimeAsync(1_000)
+        socket(0).reply({ type: 'agent-updated' })
+        await jest.advanceTimersByTimeAsync(4_999)
+        client.checkConnection()
+        expect(pings(0)).toBe(0)
+        await jest.advanceTimersByTimeAsync(1)
+        client.checkConnection()
+        expect(pings(0)).toBe(1)
     })
 })
 
@@ -717,6 +779,38 @@ describe('ApiClient on a network change', () => {
     })
 
     const online = () => window.dispatchEvent(new Event('online'))
+    /** Set what the platform reports: `navigator.connection.type` and `navigator.onLine`. */
+    const setNet = ({ type, onLine }: { type?: string; onLine?: boolean }) => {
+        if (type !== undefined) (connection as unknown as { type: string }).type = type
+        if (onLine !== undefined) (globalThis as unknown as { navigator: { onLine: boolean } }).navigator.onLine = onLine
+    }
+
+    // Chromium fires `change` whenever its downlink or rtt estimate moves,
+    // as a busy call makes it do: that is no network change.
+    it('starts no probe on a change of navigator.connection with the same type and onLine', () => {
+        setNet({ type: 'wifi', onLine: true })
+        const changed = jest.fn()
+        client.onNetworkChange(changed)
+        open()
+        socket(0).open()
+        const sentBefore = socket(0).sent.length
+
+        connection.dispatchEvent(new Event('change'))
+        expect(socket(0).sent.length).toBe(sentBefore)
+        jest.advanceTimersByTime(9_000)
+        expect(TestSocket.instances).toHaveLength(1)
+        expect(changed).not.toHaveBeenCalled()
+    })
+
+    it('probes on a change of navigator.connection when onLine changed', () => {
+        setNet({ type: 'wifi', onLine: true })
+        open()
+        socket(0).open()
+
+        setNet({ onLine: false })
+        connection.dispatchEvent(new Event('change'))
+        expect(socket(0).sent.at(-1)?.type).toBe('ping')
+    })
 
     it('redials at once on "online": a sent write fails, a sent read is resent, and onNetworkChange fires once the new socket opens', async () => {
         const changed = jest.fn()
@@ -743,12 +837,14 @@ describe('ApiClient on a network change', () => {
         await expect(read).resolves.toEqual(['p'])
     })
 
-    it('checks the socket on a change of navigator.connection: one that answers stays, as on a bandwidth estimate update', () => {
+    it('checks the socket when navigator.connection changes type: one that answers stays', () => {
+        setNet({ type: 'wifi' })
         const changed = jest.fn()
         client.onNetworkChange(changed)
         open()
         socket(0).open()
 
+        setNet({ type: 'cellular' })
         connection.dispatchEvent(new Event('change'))
         expect(socket(0).sent.at(-1)?.type).toBe('ping')
         socket(0).reply({ type: 'pong' })
@@ -759,15 +855,17 @@ describe('ApiClient on a network change', () => {
     })
 
     it('redials on a change of navigator.connection when the socket stays silent', () => {
+        setNet({ type: 'wifi' })
         const changed = jest.fn()
         client.onNetworkChange(changed)
         open()
         socket(0).open()
 
+        setNet({ type: 'cellular' })
         connection.dispatchEvent(new Event('change'))
         connection.dispatchEvent(new Event('change'))
         expect(TestSocket.instances).toHaveLength(1)
-        jest.advanceTimersByTime(2_000)
+        jest.advanceTimersByTime(16_000)
         expect(TestSocket.instances).toHaveLength(2)
         socket(1).open()
         expect(changed).toHaveBeenCalledTimes(1)

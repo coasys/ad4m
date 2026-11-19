@@ -91,9 +91,17 @@ const PONG_RETURN_MS = 5_000
 /** How long `checkConnection` waits for the open socket to say anything
  *  after its ping. If a large write sent before it may still be on the way,
  *  the wait lasts until that write could have crossed, as for the periodic
- *  ping, and half of this more for the pong. On a working path the pong is
- *  one round trip away. */
-const CHECK_CONNECTION_DEADLINE_MS = 2_000
+ *  ping, and half of this more for the pong. A busy socket's pong can wait
+ *  seconds behind live-query results on the executor's side, so this is
+ *  generous: a probe that drops a healthy socket costs every live query
+ *  and can cost the call. */
+const CHECK_CONNECTION_DEADLINE_MS = 8_000
+
+/** Probes in a row that must go unanswered before `checkConnection` drops the socket. */
+const CHECK_CONNECTION_MISSES = 2
+
+/** A socket that delivered a message this recently is alive: `checkConnection` sends no probe. */
+const CHECK_CONNECTION_HEARD_MS = 5_000
 
 /** The bytes `text` takes as UTF-8, as a WebSocket text frame sends it. */
 function utf8Length(text: string): number {
@@ -190,6 +198,10 @@ export class ApiClient {
     private _wsSentBy = 0
     /** A `checkConnection` probe waiting for the open socket to say anything; null when none. */
     private _wsProbeTimer: ReturnType<typeof setTimeout> | null = null
+    /** Probes of the current check that went unanswered. */
+    private _wsProbeMisses = 0
+    /** When the open socket last delivered a message. */
+    private _wsHeardAt = -Infinity
     // The executor sends a socket only the events it asked for (`events.watch`).
     // What the executor has for the open socket, as sent; a new socket has `{}`.
     private _watching: string | null = '{}'
@@ -248,6 +260,7 @@ export class ApiClient {
         ws.onmessage = (event) => {
             if (this._ws === ws) {
                 this._wsPingedAt = null
+                this._wsHeardAt = performance.now()
                 this._endProbe()
             }
             let parsed: Record<string, unknown>
@@ -337,11 +350,20 @@ export class ApiClient {
             target.addEventListener('online', handler)
             removers.push(() => target.removeEventListener?.('online', handler))
         }
-        const connection = (globalThis as { navigator?: { connection?: Partial<EventTarget> } }).navigator?.connection
+        const navigator = (globalThis as { navigator?: { connection?: Partial<EventTarget> & { type?: string }; onLine?: boolean } }).navigator
+        const connection = navigator?.connection
         if (typeof connection?.addEventListener === 'function') {
             // `change` also fires when Chromium's downlink or rtt estimate
-            // moves, as a busy call makes it do: probe rather than drop.
-            const probe = () => this.checkConnection()
+            // moves, as a busy call makes it do. Only a new connection type or
+            // a new online state says the path may have changed: probe then.
+            const path = () => `${connection.type}|${navigator?.onLine}`
+            let lastPath = path()
+            const probe = () => {
+                const now = path()
+                if (now === lastPath) return
+                lastPath = now
+                this.checkConnection()
+            }
             connection.addEventListener('change', probe)
             removers.push(() => connection.removeEventListener?.('change', probe))
         }
@@ -412,6 +434,7 @@ export class ApiClient {
     private _startPing(ws: WebSocket): void {
         this._stopPing()
         this._wsPingedAt = null
+        this._wsHeardAt = -Infinity
         this._wsSentBy = 0
         this._wsPingTimer = setInterval(() => {
             if (this._ws !== ws) return
@@ -456,6 +479,7 @@ export class ApiClient {
     }
 
     private _endProbe(): void {
+        this._wsProbeMisses = 0
         if (this._wsProbeTimer) {
             clearTimeout(this._wsProbeTimer)
             this._wsProbeTimer = null
@@ -742,16 +766,24 @@ export class ApiClient {
 
     /**
      * Check the open socket now rather than at the next ping: send a ping,
-     * and if nothing at all arrives on that socket within `deadlineMs`,
+     * and if nothing at all arrives on that socket within `deadlineMs`, ping
+     * again; after CHECK_CONNECTION_MISSES probes in a row with no answer,
      * treat it as a network change (drop it, dial the next one at once,
      * `onNetworkChange` callbacks fire when it opens). Any message keeps it.
      * For a caller that has seen its network path break, e.g. ICE going
      * disconnected, where the platform fired no `online` event. Without an
-     * open socket, or while a check runs, this does nothing.
+     * open socket, while a check runs, or when the socket delivered a message
+     * in the last CHECK_CONNECTION_HEARD_MS, this does nothing.
      */
     checkConnection(deadlineMs = CHECK_CONNECTION_DEADLINE_MS): void {
         const ws = this._ws
         if (!ws || ws.readyState !== 1 /* OPEN */ || this._wsProbeTimer) return
+        if (performance.now() - this._wsHeardAt < CHECK_CONNECTION_HEARD_MS) return
+        this._wsProbeMisses = 0
+        this._probe(ws, deadlineMs)
+    }
+
+    private _probe(ws: WebSocket, deadlineMs: number): void {
         const first = this._wsPingedAt === null
         if (first) this._wsPingedAt = performance.now()
         this._send(ws, JSON.stringify({ type: 'ping' }))
@@ -763,7 +795,13 @@ export class ApiClient {
         this._wsProbeTimer = setTimeout(() => {
             this._wsProbeTimer = null
             if (this._ws !== ws) return
-            console.warn(`WebSocket silent for ${wait} ms after a check; reconnecting`)
+            if (++this._wsProbeMisses < CHECK_CONNECTION_MISSES) {
+                console.warn(`WebSocket silent for ${wait} ms after a check; checking again`)
+                this._probe(ws, deadlineMs)
+                return
+            }
+            this._wsProbeMisses = 0
+            console.warn(`WebSocket silent for ${CHECK_CONNECTION_MISSES} checks in a row; reconnecting`)
             this._onNetworkChange()
         }, wait)
     }
