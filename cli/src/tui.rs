@@ -243,8 +243,9 @@ pub(crate) fn links_title(uuid: Option<&str>, shown: usize) -> String {
     }
 }
 
+/// The admin screens load only while the Coasys app is closed.
 fn should_start_refresh(model: &Model, inflight: bool) -> bool {
-    model.stale() && !inflight
+    model.space.is_none() && model.stale() && !inflight
 }
 
 fn invalidate(model: &mut Model) {
@@ -678,7 +679,19 @@ async fn drive(
     model: &mut Model,
 ) -> Result<()> {
     let mut inflight: Option<BoxedRefresh<'_>> = None;
+    let conn = tui_space::connection(client);
     loop {
+        if model.open_request.is_some() {
+            open_coasys(model, &conn);
+        }
+        if model.space.is_some() {
+            // The admin refresh is suspended: an in-flight one is dropped.
+            inflight = None;
+            if drive_space(session, model).await? {
+                return Ok(());
+            }
+            continue;
+        }
         if should_start_refresh(model, inflight.is_some()) {
             let request = model.refresh_request();
             inflight = Some(Box::pin(fetch(client, request)));
@@ -695,6 +708,33 @@ async fn drive(
             DriveEvent::Tick => {}
         }
     }
+}
+
+/// One frame of the open Coasys app, then one input slice. `true`: leave
+/// the TUI. The app never waits on the executor here: its reads land
+/// between frames, so F10 and Ctrl-C always get through.
+async fn drive_space(session: &mut TerminalSession, model: &mut Model) -> Result<bool> {
+    let terminal = session
+        .terminal
+        .as_mut()
+        .context("tui terminal is not open")?;
+    if let Some(space) = model.space.as_mut() {
+        space.tick();
+        terminal.draw(|frame| {
+            let area = frame.area();
+            space.draw(frame.buffer_mut(), area);
+        })?;
+    }
+    tokio::time::sleep(INPUT_SLICE).await;
+    let Some(key) = poll_key()? else {
+        return Ok(false);
+    };
+    let exit = space_key(model, key);
+    if model.space.is_none() {
+        // Back on the admin screens: start from a clean screen.
+        terminal.clear()?;
+    }
+    Ok(exit)
 }
 
 fn select_screen(model: &mut Model, screen: Screen) {
@@ -722,6 +762,7 @@ fn handle_key(model: &mut Model, key: &KeyEvent) {
         KeyCode::Up | KeyCode::Char('k') => move_selection(model, -1),
         KeyCode::Down | KeyCode::Char('j') => move_selection(model, 1),
         KeyCode::Enter if model.screen == Screen::Perspectives => open_selected(model),
+        KeyCode::Char('o') if model.screen == Screen::Perspectives => request_coasys(model),
         KeyCode::Esc if model.screen == Screen::Links => model.screen = Screen::Perspectives,
         _ => {}
     }
@@ -772,14 +813,46 @@ fn open_coasys(model: &mut Model, conn: &Connection) {
 }
 
 fn open_coasys_with(
-    _model: &mut Model,
-    _open: impl FnOnce(SpaceRow) -> Result<CoasysScreen, String>,
+    model: &mut Model,
+    open: impl FnOnce(SpaceRow) -> Result<CoasysScreen, String>,
 ) {
+    let Some(row) = model.open_request.take() else {
+        return;
+    };
+    match open(row) {
+        Ok(space) => {
+            model.space = Some(space);
+            model.error = None;
+            invalidate(model);
+        }
+        Err(error) => model.error = Some(format!("Cannot open Coasys: {error}")),
+    }
 }
 
 /// A key while the Coasys app is open. `true`: leave the TUI.
-fn space_key(_model: &mut Model, _key: KeyEvent) -> bool {
-    false
+fn space_key(model: &mut Model, key: KeyEvent) -> bool {
+    let Some(space) = model.space.as_mut() else {
+        return false;
+    };
+    match space.handle_key(key) {
+        SpaceKey::Stay => false,
+        SpaceKey::Exit => true,
+        SpaceKey::Back => {
+            // Dropping the screen stops its reads; the socket stays open.
+            model.space = None;
+            model.screen = Screen::Perspectives;
+            invalidate(model);
+            false
+        }
+    }
+}
+
+/// `o`: ask to open the selected visible row in the Coasys app. No row, no request.
+fn request_coasys(model: &mut Model) {
+    let visible = model.visible();
+    if let Some(index) = visible.get(model.selected).copied() {
+        model.open_request = Some(tui_space::space_row(&model.perspectives[index]));
+    }
 }
 
 fn draw(frame: &mut Frame, model: &Model) {
@@ -820,7 +893,7 @@ fn draw(frame: &mut Frame, model: &Model) {
     frame.render_widget(error_line, chunks[2]);
 
     let help = Paragraph::new(
-        "1 status  2 perspectives  3 links  tab next  j/k move  enter open  n neighbourhoods  r refresh  q quit",
+        "1 status  2 perspectives  3 links  tab next  j/k move  enter links  o Coasys (read-only)  n neighbourhoods  r refresh  q quit",
     )
     .block(Block::default().borders(Borders::ALL).title("Keys"));
     frame.render_widget(help, chunks[3]);
@@ -1176,7 +1249,12 @@ mod tests {
     }
 
     async fn fake_client() -> (tui_space::fake_ws::FakeWs, Ad4mClient) {
-        let fake = tui_space::fake_ws::FakeWs::start().await;
+        client_of(tui_space::fake_ws::FakeWs::start().await).await
+    }
+
+    async fn client_of(
+        fake: tui_space::fake_ws::FakeWs,
+    ) -> (tui_space::fake_ws::FakeWs, Ad4mClient) {
         let client = Ad4mClient::connect(fake.url.clone(), String::new())
             .await
             .unwrap();
@@ -1248,7 +1326,9 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn coasys_back_preserves_admin_state() {
-        let (_fake, client) = fake_client().await;
+        // Every read is refused, so none waits on the peer: a clone of the
+        // socket that outlives the app is the app's, not a pending call's.
+        let (_fake, client) = client_of(tui_space::fake_ws::FakeWs::refusing().await).await;
         let conn = tui_space::connection(&client);
         let base = std::sync::Arc::strong_count(client.ws()) - 1; // minus `conn`
 

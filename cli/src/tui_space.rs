@@ -242,14 +242,15 @@ impl CoasysScreen {
     }
 }
 
-/// A loopback WebSocket peer for unit tests: it takes sockets and requests
-/// and never answers, so every read the app starts stays pending.
+/// A loopback WebSocket peer for unit tests. It takes sockets and requests.
+/// [`FakeWs::start`] never answers, so every read the app starts stays
+/// pending; [`FakeWs::refusing`] answers every request with an RPC error.
 #[cfg(test)]
 pub(crate) mod fake_ws {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
-    use futures::StreamExt;
+    use futures::{SinkExt, StreamExt};
     use tokio::net::TcpListener;
     use tokio_tungstenite::tungstenite::Message;
 
@@ -261,6 +262,14 @@ pub(crate) mod fake_ws {
 
     impl FakeWs {
         pub(crate) async fn start() -> Self {
+            Self::serve(false).await
+        }
+
+        pub(crate) async fn refusing() -> Self {
+            Self::serve(true).await
+        }
+
+        async fn serve(refuse: bool) -> Self {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
             let accepted = Arc::new(AtomicUsize::new(0));
@@ -280,6 +289,13 @@ pub(crate) mod fake_ws {
                                     serde_json::from_str(&text).unwrap_or_default();
                                 let method = frame["type"].as_str().unwrap_or("?").to_string();
                                 seen.lock().unwrap().push(method);
+                                if refuse {
+                                    let reply = serde_json::json!({
+                                        "id": frame["id"],
+                                        "error": {"code": -32000, "message": "fake peer refuses"},
+                                    });
+                                    let _ = ws.send(Message::Text(reply.to_string())).await;
+                                }
                             }
                         }
                     });
