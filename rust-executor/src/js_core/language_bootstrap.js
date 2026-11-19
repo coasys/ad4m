@@ -75,6 +75,34 @@ if (typeof globalThis.LANGUAGE_CONTROLLER === "object" && globalThis.LANGUAGE_CO
     globalThis.LANGUAGE_CONTROLLER.writeStorageFile = function(path, content) {
         Deno.writeTextFileSync(path, content);
     };
+    // temp file in the same directory -> fsync -> rename over `path` ->
+    // fsync the directory. Any failure throws; the temp file is removed.
+    globalThis.LANGUAGE_CONTROLLER.writeStorageFileAtomic = function(path, content) {
+        var cut = path.lastIndexOf("/");
+        var dir = cut > 0 ? path.slice(0, cut) : ".";
+        var tmp = path + ".tmp-" + crypto.randomUUID();
+        var bytes = new TextEncoder().encode(String(content));
+        var file = Deno.openSync(tmp, { write: true, create: true, truncate: true });
+        try {
+            try {
+                var off = 0;
+                while (off < bytes.length) off += file.writeSync(bytes.subarray(off));
+                file.syncSync();
+            } finally {
+                file.close();
+            }
+            Deno.renameSync(tmp, path);
+        } catch (e) {
+            try { Deno.removeSync(tmp); } catch (_) { /* already gone */ }
+            throw e;
+        }
+        var d = Deno.openSync(dir, { read: true });
+        try {
+            d.syncSync();
+        } finally {
+            d.close();
+        }
+    };
 }
 
 // Map of serialised cell_id key -> signalCallback for Holochain signal routing.

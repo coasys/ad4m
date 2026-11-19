@@ -374,6 +374,25 @@ export function writeStorageFile(path, content) {
     fileIoExtension().writeStorageFile(path, content);
 }
 
+// Atomic, durable replacement of one file (optional; part of the File I/O
+// extension where the runtime installs it). Returns only once `content` is
+// on disk under `path`: written to a temporary file in the same directory,
+// fsynced, renamed over `path`, and the directory fsynced. A reader sees
+// the old content or the new one, never a torn file, and a crash at any
+// point keeps the old content. Throws on any failure (never degrades
+// silently, unlike the KV). A language that needs a durable record before
+// an irreversible action (e.g. a write to a remote service) must use this
+// and refuse the action when it is missing.
+export function writeStorageFileAtomic(path, content) {
+    var lc = langCtrl();
+    if (!lc || typeof lc.writeStorageFileAtomic !== "function") {
+        throw new Error(
+            "[ad4m:host] writeStorageFileAtomic is not installed on this runtime"
+        );
+    }
+    lc.writeStorageFileAtomic(path, content);
+}
+
 // ============================================================================
 // Storage KV -- CORE (Spec section 7.4)
 // ============================================================================
