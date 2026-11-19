@@ -325,6 +325,13 @@ impl SfuPeer {
         }
     }
 
+    /// Test wrapper at `Instant::now`. The event loop calls
+    /// `accept_server_answer_at` through `settle_answer`.
+    #[cfg(test)]
+    fn accept_server_answer(&mut self, sdp_answer_json: &str) -> Result<(), ServerAnswerError> {
+        self.accept_server_answer_at(sdp_answer_json, Instant::now())
+    }
+
     /// Apply the client's answer to the SFU's pending offer. An answer to
     /// an ICE restart's offer ends the restart and adds the candidates
     /// trickled meanwhile, then starts the next restart if one was asked for.
@@ -335,10 +342,6 @@ impl SfuPeer {
     /// pending negotiation unchanged. str0m consuming the token and refusing
     /// the answer does not: the caller disconnects the peer. An answer that
     /// crossed another offer has consumed the token; the caller keeps the peer.
-    fn accept_server_answer(&mut self, sdp_answer_json: &str) -> Result<(), ServerAnswerError> {
-        self.accept_server_answer_at(sdp_answer_json, Instant::now())
-    }
-
     fn accept_server_answer_at(
         &mut self,
         sdp_answer_json: &str,
