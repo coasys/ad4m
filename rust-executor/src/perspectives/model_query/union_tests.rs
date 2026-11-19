@@ -640,7 +640,11 @@ async fn union_hydrates_only_the_page() {
             .unwrap();
         let want: Vec<String> = expected.iter().map(|&i| item(i)).collect();
         assert_eq!(ids(&result), want, "{q}");
-        assert_eq!(result.total_count, Some(n), "{q}: totalCount is the whole union");
+        assert_eq!(
+            result.total_count,
+            Some(n),
+            "{q}: totalCount is the whole union"
+        );
         for (row, &i) in result.instances.iter().zip(&expected) {
             assert_eq!(row["__subjectClass"], class_of(i), "{q}: {row}");
             assert_eq!(row["__subjectClasses"], serde_json::json!([class_of(i)]));
