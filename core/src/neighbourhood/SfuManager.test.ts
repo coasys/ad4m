@@ -60,6 +60,11 @@ class FakePeerConnection {
     onicecandidate: ((e: { candidate: null }) => void) | null = null
     ontrack: ((e: unknown) => void) | null = null
     closed = false
+    /** Unset until a test drives it, as the stall watchdog then has nothing to read. */
+    connectionState: RTCPeerConnectionState | undefined = undefined
+    /** What flows while time passes: each `getStats` sees the flowing counters grow. */
+    flow = { inbound: false, outbound: false, feedback: false }
+    private counters = { inbound: 0, outbound: 0, reports: 0 }
 
     constructor(readonly configuration?: RTCConfiguration) {
         FakePeerConnection.instances.push(this)
@@ -81,6 +86,19 @@ class FakePeerConnection {
     async setLocalDescription(d: RTCSessionDescriptionInit) { this.localDescription = d }
     async setRemoteDescription(d: RTCSessionDescriptionInit) { this.remoteDescriptions.push(d) }
     close() { this.closed = true }
+    /** The transport's RTP both ways, and the RTCP reports the SFU sends on this client's own media. */
+    async getStats() {
+        if (this.flow.inbound) this.counters.inbound += 50
+        if (this.flow.outbound) this.counters.outbound += 50
+        if (this.flow.feedback) this.counters.reports++
+        const { inbound, outbound, reports } = this.counters
+        return new Map<string, Record<string, unknown>>([
+            ["in-a", { type: "inbound-rtp", kind: "audio", mid: "1", packetsReceived: inbound / 2 }],
+            ["in-v", { type: "inbound-rtp", kind: "video", mid: "2", packetsReceived: inbound / 2 }],
+            ["out-a", { type: "outbound-rtp", kind: "audio", packetsSent: outbound }],
+            ["remote-in-a", { type: "remote-inbound-rtp", kind: "audio", timestamp: 1_000 * reports, packetsLost: 0 }],
+        ])
+    }
 
     /** A remote track arriving on the media section `mid`. */
     receive(track: FakeTrack, mid: string | null) {
@@ -1774,4 +1792,195 @@ test("a manager that left sends no restart for its old connection", async () => 
     await flush()
 
     expect(api.sfuCallRestartIce).not.toHaveBeenCalled()
+})
+
+// ── Receiving nothing while sending ─────────────────────────────────────────
+//
+// After a NAT rebinding the SFU (str0m) still takes this client's media from
+// its new address but can have no path back to it, and sends it nothing; the
+// browser's own ICE checks are answered, so the connection stays `connected`
+// (sfu-soak5, Firefox, 2026-11-19). The watchdog restarts ICE when the
+// connection sends and receives nothing at all from a room where someone
+// sends. "Nothing at all": no RTP, and no RTCP report on this client's own
+// media either. A room whose others all turned their tracks off sends no RTP,
+// but the SFU still reports on what it receives from this client.
+
+/** A joined call, connected, where ALICE sends audio on mid 1 and video on mid 2, all of it flowing. */
+async function flowingCall(api = fakeApi()) {
+    const manager = new SfuManager(api, ROOM, ME, URL)
+    await manager.join(fakeStream(new FakeTrack("audio")))
+    const pc = currentPc()
+    api.emitOffer(offer("alice", [mapped("1", ALICE, "audio"), mapped("2", ALICE, "video")]))
+    api.emitRoster(roster([ALICE]))
+    await flush()
+    pc.receive(new FakeTrack("audio"), "1")
+    pc.receive(new FakeTrack("video"), "2")
+    await iceState("connected")
+    pc.connectionState = "connected"
+    pc.flow = { inbound: true, outbound: true, feedback: true }
+    await jest.advanceTimersByTimeAsync(3_000)
+    return { api, manager, pc }
+}
+
+/** The SFU sends this client nothing any more: no media, no reports; this client still sends. */
+function cutOff(pc: FakePeerConnection) {
+    pc.flow = { inbound: false, outbound: true, feedback: false }
+}
+
+describe("the receive-stall watchdog", () => {
+    beforeEach(fakeTimers)
+    afterEach(() => jest.useRealTimers())
+
+    test("restarts ICE on the same connection once it has received nothing for 5 s while it sends", async () => {
+        const { api, pc } = await flowingCall()
+        api.log.length = 0
+        cutOff(pc)
+
+        await jest.advanceTimersByTimeAsync(4_500)
+        expect(api.sfuCallRestartIce).not.toHaveBeenCalled()
+        await jest.advanceTimersByTimeAsync(2_500)
+        expect(api.sfuCallRestartIce.mock.calls).toEqual([[URL, ROOM, MINE]])
+
+        // The existing restart path: the offer is answered on this connection, no rebuild.
+        api.emitOffer(offer("restart-offer"))
+        await flush()
+        pc.flow = { inbound: true, outbound: true, feedback: true }
+        await jest.advanceTimersByTimeAsync(60_000)
+        expect(pc.remoteSdps()).toContain("restart-offer")
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(1)
+        expect(api.sfuCallLeave).not.toHaveBeenCalled()
+        expect(api.sfuCallJoin).toHaveBeenCalledTimes(1)
+        expect(FakePeerConnection.instances).toHaveLength(1)
+        expect(pc.closed).toBe(false)
+    })
+
+    test("restarts again, one restart at a time, while the stall lasts", async () => {
+        const { api, pc } = await flowingCall()
+        cutOff(pc)
+        await jest.advanceTimersByTimeAsync(7_000)
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(1)
+        // The restart's own window (15 s) runs first; ICE still says connected, so no rebuild.
+        await jest.advanceTimersByTimeAsync(14_000)
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(1)
+        await jest.advanceTimersByTimeAsync(8_000)
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(2)
+        expect(api.sfuCallLeave).not.toHaveBeenCalled()
+    })
+
+    test("does nothing while the user is alone in the room", async () => {
+        const api = fakeApi()
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream(new FakeTrack("audio")))
+        const pc = currentPc()
+        api.emitRoster(roster([]))
+        await flush()
+        await iceState("connected")
+        pc.connectionState = "connected"
+        cutOff(pc)
+
+        await jest.advanceTimersByTimeAsync(60_000)
+        expect(api.sfuCallRestartIce).not.toHaveBeenCalled()
+    })
+
+    test("does nothing when the others in the room never sent a track", async () => {
+        const api = fakeApi()
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream(new FakeTrack("audio")))
+        const pc = currentPc()
+        api.emitRoster(roster([ALICE, BOB]))
+        await flush()
+        await iceState("connected")
+        pc.connectionState = "connected"
+        cutOff(pc)
+
+        await jest.advanceTimersByTimeAsync(60_000)
+        expect(api.sfuCallRestartIce).not.toHaveBeenCalled()
+    })
+
+    test("does nothing when everyone else turned their tracks off: the SFU still reports on this client's media", async () => {
+        const { api, pc } = await flowingCall()
+        pc.flow = { inbound: false, outbound: true, feedback: true }
+
+        await jest.advanceTimersByTimeAsync(60_000)
+        expect(api.sfuCallRestartIce).not.toHaveBeenCalled()
+    })
+
+    test("does nothing when the SFU's reports come only every 5 s, as for audio", async () => {
+        const { api, pc } = await flowingCall()
+        pc.flow = { inbound: false, outbound: true, feedback: false }
+        for (let i = 0; i < 12; i++) {
+            await jest.advanceTimersByTimeAsync(4_000)
+            pc.flow.feedback = true
+            await jest.advanceTimersByTimeAsync(1_000)
+            pc.flow.feedback = false
+        }
+        expect(api.sfuCallRestartIce).not.toHaveBeenCalled()
+    })
+
+    test("does nothing while media arrives: muted tracks still send", async () => {
+        const { api, pc } = await flowingCall()
+        pc.flow = { inbound: true, outbound: true, feedback: false }
+
+        await jest.advanceTimersByTimeAsync(60_000)
+        expect(api.sfuCallRestartIce).not.toHaveBeenCalled()
+    })
+
+    test("does nothing when this client sends nothing either", async () => {
+        const { api, pc } = await flowingCall()
+        pc.flow = { inbound: false, outbound: false, feedback: false }
+
+        await jest.advanceTimersByTimeAsync(60_000)
+        expect(api.sfuCallRestartIce).not.toHaveBeenCalled()
+    })
+
+    test("does nothing while the connection is not connected", async () => {
+        const { api, pc } = await flowingCall()
+        pc.connectionState = "connecting"
+        cutOff(pc)
+
+        await jest.advanceTimersByTimeAsync(60_000)
+        expect(api.sfuCallRestartIce).not.toHaveBeenCalled()
+    })
+
+    test("does nothing while the call is joining", async () => {
+        const api = fakeApi()
+        const joining = deferred<CallSessionInfo>()
+        api.sfuCallJoin.mockImplementationOnce(() => joining.promise)
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        const joined = manager.join(fakeStream(new FakeTrack("audio")))
+        await flush()
+        const pc = currentPc()
+        pc.connectionState = "connected"
+        cutOff(pc)
+
+        await jest.advanceTimersByTimeAsync(30_000)
+        expect(api.sfuCallRestartIce).not.toHaveBeenCalled()
+        joining.resolve(session())
+        await joined
+    })
+
+    test("does nothing while the call is being rebuilt", async () => {
+        const { api, pc } = await flowingCall()
+        const rejoining = deferred<CallSessionInfo>()
+        api.sfuCallJoin.mockImplementationOnce(() => rejoining.promise)
+        cutOff(pc)
+        await iceState("failed")
+        const next = currentPc()
+        expect(next).not.toBe(pc)
+        next.connectionState = "connected"
+        cutOff(next)
+
+        await jest.advanceTimersByTimeAsync(30_000)
+        expect(api.sfuCallRestartIce).not.toHaveBeenCalled()
+    })
+
+    test("stops with the call", async () => {
+        const { api, manager, pc } = await flowingCall()
+        await manager.leave()
+        pc.closed = false
+        cutOff(pc)
+
+        await jest.advanceTimersByTimeAsync(60_000)
+        expect(api.sfuCallRestartIce).not.toHaveBeenCalled()
+    })
 })

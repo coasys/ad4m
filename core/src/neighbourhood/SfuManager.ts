@@ -254,6 +254,32 @@ export async function resolveTopology(
 
 // ── SFU Manager ───────────────────────────────────────────────────
 
+/** What one read of a connection's stats says about its traffic: see `SfuManager.watchReceiving`. */
+interface ReceiveSample {
+    /** RTP packets received, over all media sections. */
+    inbound: number
+    /** RTP packets sent. */
+    outbound: number
+    /** The RTCP reports on this client's media (`remote-inbound-rtp`): changes when a new one arrives. */
+    reports: string
+}
+
+async function receiveSample(pc: RTCPeerConnection): Promise<ReceiveSample> {
+    let inbound = 0
+    let outbound = 0
+    const reports: string[] = []
+    ;(await pc.getStats()).forEach((stat: any) => {
+        if (stat.type === "inbound-rtp") inbound += stat.packetsReceived ?? 0
+        else if (stat.type === "outbound-rtp") outbound += stat.packetsSent ?? 0
+        else if (stat.type === "remote-inbound-rtp") {
+            reports.push(
+                [stat.id, stat.timestamp, stat.packetsLost, stat.jitter, stat.roundTripTimeMeasurements].join(":"),
+            )
+        }
+    })
+    return { inbound, outbound, reports: reports.sort().join("|") }
+}
+
 export class SfuManager {
     private neighbourhood: SfuNeighbourhoodApi
     private neighbourhoodUrl: string
@@ -321,6 +347,14 @@ export class SfuManager {
     private unlistedTimer: ReturnType<typeof setTimeout> | null = null
     /** How long the roster may leave this session out before the call is rebuilt. */
     private static readonly UNLISTED_GRACE_MS = 3_000
+    /** Running while a connection is the call's: see `watchReceiving`. */
+    private receiveWatch: ReturnType<typeof setInterval> | null = null
+    private static readonly RECEIVE_CHECK_MS = 1_000
+    /** How long a connection may send and receive no RTP before ICE is restarted. */
+    private static readonly RECEIVE_STALL_MS = 5_000
+    /** How long the SFU's reports on this client's media must be missing too.
+     *  str0m reports on audio every 5 s (on video every 1 s): longer than that. */
+    private static readonly FEEDBACK_SILENCE_MS = 6_000
 
     constructor(
         neighbourhood: SfuNeighbourhoodApi,
@@ -686,6 +720,7 @@ export class SfuManager {
             throw err
         }
         markJoined()
+        this.watchReceiving(pc)
 
         // Who was in the room when this join landed (`participantId:did`).
         // The roster event keeps it current from here.
@@ -721,6 +756,7 @@ export class SfuManager {
         this.rosterUnsubscribe?.()
         this.rosterUnsubscribe = null
         this.clearUnlistedTimer()
+        this.stopReceiveWatch()
     }
 
     private clearUnlistedTimer(): void {
@@ -757,6 +793,92 @@ export class SfuManager {
             console.info("SFU: the room no longer lists this session, rebuilding the call")
             void this.reconnect()
         }, SfuManager.UNLISTED_GRACE_MS)
+    }
+
+    /**
+     * Restart ICE when `pc` sends but receives nothing. After a NAT rebinding
+     * the SFU (str0m, the controlled ICE agent) takes this client's media
+     * from its new address at once, but sends only on a pair the client
+     * nominates. Firefox does not nominate the new one, so the SFU sends this
+     * client nothing while everyone else still gets its media; its own ICE
+     * checks are answered, so the connection stays `connected` (sfu-soak5,
+     * 2026-11-19). A restart makes the browser check and nominate again.
+     *
+     * The stats are read every second. ICE is restarted (`restartIce`: this
+     * connection, its tracks and its room slot stay) when all of these hold:
+     *  - `pc` is the call's and `connected`, its join is done, and no
+     *    rebuild or restart is running;
+     *  - someone else sends: the room lists another participant this
+     *    client holds a received track of;
+     *  - inbound RTP over all media sections has not grown for 5 s, while
+     *    outbound RTP has;
+     *  - and no RTCP report on this client's own media arrived for 6 s.
+     *
+     * The last is how "nobody sends" is told apart from "nothing reaches
+     * me". A muted track (`enabled = false`) still sends silence or black
+     * frames, so RTP keeps coming. Tracks turned off (`replaceTrack(null)`)
+     * send no RTP, but the SFU still reports on the media it receives from
+     * this client, so the path back is there and a restart could not help.
+     * A path that is gone carries neither.
+     */
+    private watchReceiving(pc: RTCPeerConnection): void {
+        this.stopReceiveWatch()
+        // Since when inbound RTP and the reports have not changed, and what was sent by then.
+        let rtp: { at: number; inbound: number; outbound: number } | null = null
+        let reports: { at: number; key: string } | null = null
+        let sampling = false
+        const watch = setInterval(async () => {
+            if (sampling) return
+            if (!this.mayRestartForStall(pc)) {
+                rtp = reports = null
+                return
+            }
+            sampling = true
+            let sample: ReceiveSample
+            try {
+                sample = await receiveSample(pc)
+            } catch {
+                return
+            } finally {
+                sampling = false
+            }
+            if (this.receiveWatch !== watch || !this.mayRestartForStall(pc)) {
+                rtp = reports = null
+                return
+            }
+            const now = Date.now()
+            if (!rtp || sample.inbound !== rtp.inbound) rtp = { at: now, inbound: sample.inbound, outbound: sample.outbound }
+            if (!reports || sample.reports !== reports.key) reports = { at: now, key: sample.reports }
+            if (
+                now - rtp.at >= SfuManager.RECEIVE_STALL_MS &&
+                now - reports.at >= SfuManager.FEEDBACK_SILENCE_MS &&
+                sample.outbound > rtp.outbound
+            ) {
+                console.info("SFU: receiving nothing while sending, restarting ICE")
+                rtp = reports = null
+                this.restartIce(pc)
+            }
+        }, SfuManager.RECEIVE_CHECK_MS)
+        this.receiveWatch = watch
+    }
+
+    /** Whether the receive-stall watchdog may act on `pc` now: see `watchReceiving`. */
+    private mayRestartForStall(pc: RTCPeerConnection): boolean {
+        return (
+            this.state.peerConnection === pc &&
+            pc.connectionState === "connected" &&
+            !!this.state.participantId &&
+            !this.reconnecting &&
+            !this.restartTimer &&
+            [...this.state.participants.values()].some((p) => p.hasAudio || p.hasVideo)
+        )
+    }
+
+    private stopReceiveWatch(): void {
+        if (this.receiveWatch) {
+            clearInterval(this.receiveWatch)
+            this.receiveWatch = null
+        }
     }
 
     /**
