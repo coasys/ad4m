@@ -1,6 +1,6 @@
 [package]
 name = "ad4m-executor"
-version = "0.13.1-staging.11"
+version = "0.13.1-staging.15"
 edition = "2021"
 authors = ["Nicolas Luck <nicolas.luck@coasys.org>"]
 description = "Runtime implementation of AD4M as library - https://ad4m.dev"
@@ -201,7 +201,7 @@ sodoken = "=0.1.0"
 scryer-prolog = { version = "0.10", git = "https://github.com/coasys/scryer-prolog", branch = "ad4m" }
 # scryer-prolog = { path = "../../scryer-prolog", features = ["multi_thread"] }
 
-ad4m-client = { path = "../rust-client", version="0.13.1-staging.11" }
+ad4m-client = { path = "../rust-client", version="0.13.1-staging.15" }
 reqwest = { version = "0.11.20", features = ["json", "native-tls", "blocking", "stream", "multipart"] }
 # reqwest 0.11's DNS `Name` (the identity resolver's public-address-only `dns_resolver`).
 hyper_014 = { package = "hyper", version = "0.14.21", default-features = false, features = ["tcp", "client"] }
@@ -256,6 +256,9 @@ oxigraph = { git = "https://github.com/coasys/oxigraph.git", tag = "v0.5.13-coas
 # Already in the lockfile as a transitive dependency: 128-bit scope and member
 # hashes of the scope index.
 blake3 = "1.8"
+# The SPARQL algebra oxigraph parses with, for rewriting a query: from the
+# same fork tag, so its terms are oxigraph's own `oxrdf` types.
+spargebra = { git = "https://github.com/coasys/oxigraph.git", tag = "v0.5.13-coasys.1", features = ["sparql-12"] }
 ts-rs = { version = "12.0.1", features = ["serde-compat", "no-serde-warnings", "serde-json-impl", "chrono-impl", "url-impl"] }
 tower-service = "0.3"
 

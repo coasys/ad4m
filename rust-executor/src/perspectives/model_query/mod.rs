@@ -96,6 +96,8 @@ mod eval_transform;
 mod filtering;
 mod getters;
 mod hydration;
+#[cfg(test)]
+mod include_limit_tests;
 pub(crate) mod index_path;
 #[cfg(test)]
 mod index_path_tests;
@@ -111,6 +113,8 @@ mod link_status_tests;
 mod links;
 #[cfg(test)]
 mod page_before_resolve_tests;
+#[cfg(test)]
+mod polymorphic_default_tests;
 mod projection;
 #[cfg(test)]
 mod proof_valid_tests;
@@ -126,6 +130,8 @@ pub(crate) mod shape;
 mod sparql_builder;
 #[cfg(test)]
 mod test_helpers;
+#[cfg(test)]
+mod timestamp_probe_tests;
 pub(crate) mod types;
 mod union;
 pub(crate) mod utils;

@@ -1,5 +1,5 @@
 import { Ad4mClient } from './Ad4mClient';
-import { ApiClient } from './apiClient';
+import { ApiClient, RpcError } from './apiClient';
 import { Perspective } from './perspectives/Perspective';
 import { LinkQuery } from './perspectives/LinkQuery';
 import type { EventMap, EventName } from './generated/api/Events';
@@ -34,6 +34,9 @@ const originalWebSocket = (global as any).WebSocket;
 
 type RpcHandler = unknown | ((params: Record<string, unknown>) => unknown);
 
+/** A handler result under this key is sent as the reply's `error` member instead of `result`. */
+const RPC_ERROR = '__rpcError';
+
 const MOCK_RESPONSES: Record<string, RpcHandler> = {
     // ── Agent ──
     'agent.get': { did: 'did:test:123', perspective: new Perspective(), directMessageLanguage: 'lang://dm', identity: 'did:scid:coasys:1:QmTest' },
@@ -54,7 +57,7 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'agent.lock': { did: 'did:test:123', isInitialized: true, isUnlocked: false },
     'agent.unlock': { did: 'did:test:123', isInitialized: true, isUnlocked: true },
     'agent.import': { did: 'did:test:imported', isInitialized: true, isUnlocked: true },
-    'agent.byDid': (p: Record<string, unknown>) => ({ did: p.did, perspective: new Perspective() }),
+    'agent.byDIDs': (p: Record<string, unknown>) => (p.dids as string[]).map(did => ({ did, perspective: new Perspective() })),
     'agent.updateProfile': { did: 'did:test:123', perspective: new Perspective(), directMessageLanguage: 'lang://dm' },
     'agent.sign': 'signed-message-data',
     'agent.isLocked': false,
@@ -118,6 +121,27 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'perspective.addSdna': true,
     'perspective.executeCommands': true,
     'perspective.createSubject': true,
+    // A `colour` property is refused as the executor refuses an unknown property: 422 with the
+    // InstanceError as data.
+    'perspective.instanceCreate': (p: Record<string, unknown>) =>
+        (p.properties as Record<string, unknown> | undefined)?.colour !== undefined
+            ? { [RPC_ERROR]: {
+                code: 422,
+                message: "Validation failed for class 'Task': colour (unknownProperty)",
+                data: { kind: 'validation', className: 'Task', errors: [{
+                    property: 'colour', problem: { kind: 'unknownProperty', class: 'Task', available: ['title'] },
+                    expectedType: null, cardinality: null, allowedValues: null, received: 'red', item: null,
+                }] },
+            } }
+            : { className: p.className, baseUri: 'ad4m://obj/new', propertiesSet: Object.keys(p.properties as object), collectionsSet: [], parent: null },
+    'perspective.instanceUpdate': (p: Record<string, unknown>) =>
+        ({ className: p.className, baseUri: p.baseUri, updatedProperties: Object.keys(p.properties as object) }),
+    'perspective.instanceRemove': (p: Record<string, unknown>) =>
+        ({ className: p.className, baseUri: p.baseUri, linksRemoved: 3 }),
+    'perspective.instanceAddToCollection': (p: Record<string, unknown>) =>
+        ({ className: p.className, baseUri: p.baseUri, collection: p.collection, itemUri: p.itemUri, linksAdded: 1, alreadyMember: false }),
+    'perspective.instanceRemoveFromCollection': (p: Record<string, unknown>) =>
+        ({ className: p.className, baseUri: p.baseUri, collection: p.collection, itemUri: p.itemUri, linksRemoved: 1 }),
     'perspective.getSubjectData': '{"name":"test"}',
     'perspective.createBatch': 'batch-id-1',
     'perspective.commitBatch': { additions: [], removals: [] },
@@ -175,10 +199,10 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
         };
     },
     'expression.getMany': (p: Record<string, unknown>) => {
-        // Return one result per URL (aligned by index), matching real API behavior
+        // One entry per URL, in order: what `expression.get` answers for it.
         const urls = (p.urls || []) as string[];
-        return urls.map((url: string) => ({
-            author: 'did:test:1', timestamp: '2023-01-01', data: { type: 'test' },
+        return urls.map(() => ({
+            author: 'did:test:123', timestamp: '2024-01-01', data: '{"content":"hello"}',
             language: { address: 'lang://test' }, proof: { valid: true },
         }));
     },
@@ -342,7 +366,8 @@ class MockWebSocket {
                 : handler;
 
             const reply = (value: unknown) => setTimeout(() => {
-                this.onmessage?.({ data: JSON.stringify({ id, result: value }) });
+                const error = (value as Record<string, unknown> | null)?.[RPC_ERROR];
+                this.onmessage?.({ data: JSON.stringify(error ? { id, error } : { id, result: value }) });
             }, 0);
             if (result instanceof Promise) result.then(reply);
             else reply(result);
@@ -488,6 +513,7 @@ describe('AgentClient', () => {
 
     test('byDID() fetches agent by DID', async () => {
         const agent = await ad4m.agent.byDID('did:test:other');
+        expect(lastRpcCall!.params.dids).toEqual(['did:test:other']);
         expect(agent.did).toBe('did:test:other');
     });
 
@@ -647,6 +673,52 @@ describe('PerspectiveClient', () => {
         expect(lastRpcCall!.type).toBe('perspective.removeLinks');
         expect(lastRpcCall!.params.links).toHaveLength(1);
         expect(lastRpcCall!.params.batchId).toBe('batch-id-1');
+    });
+
+    test('instanceCreate() sends the body next to uuid and returns the created instance', async () => {
+        const created = await ad4m.perspective.instanceCreate('uuid-1', {
+            className: 'Task', properties: { title: 'Write' }, batchId: 'batch-1',
+        });
+        expect(lastRpcCall!.type).toBe('perspective.instanceCreate');
+        expect(lastRpcCall!.params).toEqual({
+            uuid: 'uuid-1', className: 'Task', properties: { title: 'Write' }, batchId: 'batch-1',
+        });
+        expect(created.baseUri).toBe('ad4m://obj/new');
+        expect(created.propertiesSet).toEqual(['title']);
+    });
+
+    test('a refused instance write rejects with the validation errors as RpcError.data', async () => {
+        const error = await ad4m.perspective
+            .instanceCreate('uuid-1', { className: 'Task', properties: { title: 't', colour: 'red' } })
+            .then(() => null, (e: unknown) => e);
+        expect(error).toBeInstanceOf(RpcError);
+        const rpcError = error as RpcError;
+        expect(rpcError.status).toBe(422);
+        const data = rpcError.data as { kind: string; errors: { property: string; problem: { kind: string } }[] };
+        expect(data.kind).toBe('validation');
+        expect(data.errors[0].property).toBe('colour');
+        expect(data.errors[0].problem.kind).toBe('unknownProperty');
+    });
+
+    test('the other instance writes call their methods with the body', async () => {
+        const base = { className: 'Task', baseUri: 'ad4m://obj/t' };
+        const item = { ...base, collection: 'labels', itemUri: 'ad4m://label/x' };
+
+        const updated = await ad4m.perspective.instanceUpdate('uuid-1', { ...base, properties: { status: 'doing' } });
+        expect(lastRpcCall).toEqual({ type: 'perspective.instanceUpdate', params: { uuid: 'uuid-1', ...base, properties: { status: 'doing' } } });
+        expect(updated.updatedProperties).toEqual(['status']);
+
+        const removed = await ad4m.perspective.instanceRemove('uuid-1', { ...base, batchId: 'b' });
+        expect(lastRpcCall).toEqual({ type: 'perspective.instanceRemove', params: { uuid: 'uuid-1', ...base, batchId: 'b' } });
+        expect(removed.linksRemoved).toBe(3);
+
+        const added = await ad4m.perspective.instanceAddToCollection('uuid-1', item);
+        expect(lastRpcCall).toEqual({ type: 'perspective.instanceAddToCollection', params: { uuid: 'uuid-1', ...item } });
+        expect(added.linksAdded).toBe(1);
+
+        const taken = await ad4m.perspective.instanceRemoveFromCollection('uuid-1', item);
+        expect(lastRpcCall).toEqual({ type: 'perspective.instanceRemoveFromCollection', params: { uuid: 'uuid-1', ...item } });
+        expect(taken.linksRemoved).toBe(1);
     });
 
     test('updateLink() updates a link', async () => {
@@ -1088,8 +1160,18 @@ describe('ExpressionClient', () => {
     test('getMany() returns multiple expressions', async () => {
         const exprs = await ad4m.expression.getMany(['url1', 'url2']);
         expect(exprs).toHaveLength(2);
-        expect(exprs[0].author).toBe('did:test:1');
-        expect(exprs[1].author).toBe('did:test:1');
+        expect(exprs[0].author).toBe('did:test:123');
+        expect(exprs[1].author).toBe('did:test:123');
+    });
+
+    test('getMany() sends at most 200 URLs per expression.getMany call', async () => {
+        const freshClient = newClient();
+        const urls = Array.from({ length: 201 }, (_, i) => `lang://test/Qm${i}`);
+        const exprs = await freshClient.expression.getMany(urls);
+        expect(exprs).toHaveLength(201);
+        const calls = lastOf(MockWebSocket.instances).rpc.filter(c => c.type === 'expression.getMany');
+        expect(calls.map(c => (c.params.urls as string[]).length)).toEqual([200, 1]);
+        expect(calls.flatMap(c => c.params.urls as string[])).toEqual(urls);
     });
 
     test('getRaw() returns raw expression', async () => {

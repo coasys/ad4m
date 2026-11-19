@@ -596,6 +596,26 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
         "perspective.removeSubject",
         || json!({ "subjectClass": "C", "expressionAddress": "e" }),
     ),
+    (
+        "perspective.instanceCreate",
+        || json!({ "className": "C", "properties": {} }),
+    ),
+    (
+        "perspective.instanceUpdate",
+        || json!({ "className": "C", "baseUri": "ad4m://e", "properties": { "p": 1 } }),
+    ),
+    (
+        "perspective.instanceRemove",
+        || json!({ "className": "C", "baseUri": "ad4m://e" }),
+    ),
+    (
+        "perspective.instanceAddToCollection",
+        || json!({ "className": "C", "baseUri": "ad4m://e", "collection": "c", "itemUri": "ad4m://i" }),
+    ),
+    (
+        "perspective.instanceRemoveFromCollection",
+        || json!({ "className": "C", "baseUri": "ad4m://e", "collection": "c", "itemUri": "ad4m://i" }),
+    ),
     ("perspective.commitBatch", || json!({ "batchId": "b" })),
     ("perspective.discardBatch", || json!({ "batchId": "b" })),
     (
@@ -645,7 +665,7 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
         "perspective.mintFlowReceipt",
         || json!({ "instanceUri": "i" }),
     ),
-    ("perspective.flowFired", || json!({ "instance": "i" })),
+    ("perspective.flowFired", || json!({ "instances": ["i"] })),
     // #712's SFU. `sfu.servesAllMembers` names its perspective in `uuid`; the reads without
     // params take `{}`.
     ("sfu.startRoom", sfu_room),

@@ -1,0 +1,361 @@
+{
+  "schemaVersion": 1,
+  "runId": "707d9cbd",
+  "startedAt": "2026-11-15T23:12:07.455Z",
+  "finishedAt": "2026-11-15T23:14:45.877Z",
+  "hardwareClass": "amd-strix-halo-128",
+  "fingerprint": {
+    "os": "linux",
+    "osVersion": "Ubuntu 26.04 LTS",
+    "kernel": "7.0.0-38-generic",
+    "arch": "x64",
+    "cpu": {
+      "model": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S",
+      "cores": 16,
+      "threads": 32
+    },
+    "memoryBytes": 131891142656,
+    "gpus": [
+      {
+        "vendor": "amd",
+        "name": "Advanced Micro Devices, Inc. [AMD/ATI] Strix Halo [Radeon Graphics / Radeon 8050S Graphics / Radeon 8060S Graphics]",
+        "vramBytes": 536870912,
+        "gttBytes": 65945571328,
+        "unified": true,
+        "pciId": "0000:c2:00.0"
+      }
+    ],
+    "backends": [
+      "cpu",
+      "rocm",
+      "vulkan"
+    ],
+    "gpuBudgetBytes": 66482442240,
+    "drivers": {
+      "rocm": "10.0.0",
+      "amdgpu": "in-kernel 7.0.0-38-generic"
+    },
+    "id": "d9d043fd"
+  },
+  "executor": {
+    "commit": "0b8330871c5c5d6360b0f9a6f6347aec1e873a31",
+    "binary": "ad4m-executor",
+    "version": "ad4m 0.13.1-staging.11",
+    "harnessCommit": "0b8330871c5c5d6360b0f9a6f6347aec1e873a31"
+  },
+  "options": {
+    "repeat": 3,
+    "concurrency": [
+      1,
+      4
+    ],
+    "providers": [
+      "llama-server"
+    ],
+    "services": [
+      "llm"
+    ],
+    "direct": true
+  },
+  "providers": {
+    "llama-server": {
+      "status": "available",
+      "builds": [
+        "linux-x64-vulkan"
+      ],
+      "mode": "spawned",
+      "version": "b11669"
+    }
+  },
+  "cells": [
+    {
+      "provider": "llama-server",
+      "service": "llm",
+      "status": "pass",
+      "model": {
+        "modelId": "qwen3.5-4b-q4_k_m",
+        "remoteModel": "qwen3.5-4b-q4_k_m",
+        "sizeBytes": 2740937888,
+        "memoryBytes": 4000000000,
+        "license": "Apache-2.0",
+        "params": "4B",
+        "source": "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/e87f176479d0855a907a41277aca2f8ee7a09523/Qwen3.5-4B-Q4_K_M.gguf",
+        "sha256": "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4"
+      },
+      "runtimeBuild": "linux-x64-vulkan",
+      "backend": "vulkan",
+      "endpointKind": "LLAMA_SERVER",
+      "serverFlags": [
+        "-c",
+        "8192",
+        "-ngl",
+        "999",
+        "--reasoning",
+        "off"
+      ],
+      "checks": [
+        {
+          "name": "factual answer (/v1/chat/completions)",
+          "pass": true,
+          "detail": "\"Paris\"",
+          "value": "Paris"
+        },
+        {
+          "name": "task prompt (SDK ai.prompt)",
+          "pass": true,
+          "detail": "\"Paris\""
+        },
+        {
+          "name": "tool call (/v1/chat/completions, tools)",
+          "pass": true,
+          "detail": "get_weather({\"city\":\"Paris\"})"
+        },
+        {
+          "name": "streaming (/v1/chat/completions, stream)",
+          "pass": true,
+          "detail": "19 chunks, \"one, two, three, four, five, six, seven, eight, nine, ten\"",
+          "value": 19,
+          "threshold": "> 1 chunk, one to ten in order"
+        },
+        {
+          "name": "model runs on the GPU (vulkan)",
+          "pass": true,
+          "detail": "3.91 GB of GPU memory held for a 2.74 GB model",
+          "value": 3910008832,
+          "threshold": ">= half the model size"
+        }
+      ],
+      "metrics": {
+        "firstRequestMs": 148,
+        "ttftMs": {
+          "n": 3,
+          "median": 126,
+          "p95": 129.9,
+          "min": 120.3,
+          "max": 130.3,
+          "mean": 125.6
+        },
+        "decodeTps": {
+          "n": 3,
+          "median": 64.57,
+          "p95": 64.773,
+          "min": 63.888,
+          "max": 64.795,
+          "mean": 64.418
+        },
+        "prefillTps": {
+          "n": 3,
+          "median": 1780,
+          "p95": 1800.1,
+          "min": 1764.2,
+          "max": 1802.3,
+          "mean": 1782.2
+        },
+        "latencyMs": {
+          "n": 3,
+          "median": 156.8,
+          "p95": 159.1,
+          "min": 143,
+          "max": 159.3,
+          "mean": 153
+        },
+        "tokenCountSource": "usage",
+        "directLatencyMs": {
+          "n": 3,
+          "median": 144.4,
+          "p95": 161.3,
+          "min": 139.4,
+          "max": 163.2,
+          "mean": 149
+        },
+        "executorOverheadMs": 12.4,
+        "throughputTpsC1": {
+          "n": 2,
+          "median": 58.373,
+          "p95": 58.399,
+          "min": 58.345,
+          "max": 58.402,
+          "mean": 58.373
+        },
+        "throughputTpsC4": {
+          "n": 2,
+          "median": 131.1,
+          "p95": 142.3,
+          "min": 118.6,
+          "max": 143.6,
+          "mean": 131.1
+        },
+        "peakRssBytes": 3017363456,
+        "peakGpuBytes": 3910008832,
+        "serverReadyMs": 2030,
+        "endpointHealth": "REACHABLE"
+      },
+      "fit": {
+        "fits": true,
+        "modelBytes": 4000000000,
+        "budgetBytes": 65408700416,
+        "gpuBudgetBytes": 66482442240,
+        "ramBytes": 131891142656
+      },
+      "durationMs": 22547
+    },
+    {
+      "provider": "llama-server",
+      "service": "llm",
+      "status": "pass",
+      "model": {
+        "modelId": "qwen3.8-27b-ud-q4_k_m",
+        "remoteModel": "qwen3.8-27b-ud-q4_k_m",
+        "sizeBytes": 16564259744,
+        "memoryBytes": 21900000000,
+        "license": "Apache-2.0",
+        "params": "27B",
+        "source": "https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/4af51b3542f775b0a8e4b310bfb3f17e01c306c9/Qwen3.8-27B-UD-Q4_K_M.gguf",
+        "sha256": "1bce504dfecd84153666928a41d8a66706f0158d3a317bc5196b72819d7dc529",
+        "context": 65536,
+        "serverFlags": [
+          "-c",
+          "65536",
+          "-np",
+          "1",
+          "-ngl",
+          "999",
+          "--jinja",
+          "--spec-type",
+          "draft-mtp",
+          "--spec-draft-n-max",
+          "4",
+          "--reasoning-budget",
+          "2048",
+          "--reasoning-budget-message",
+          "Thinking budget reached. Now give the final answer."
+        ]
+      },
+      "runtimeBuild": "linux-x64-vulkan",
+      "backend": "vulkan",
+      "endpointKind": "LLAMA_SERVER",
+      "serverFlags": [
+        "-c",
+        "65536",
+        "-np",
+        "1",
+        "-ngl",
+        "999",
+        "--jinja",
+        "--spec-type",
+        "draft-mtp",
+        "--spec-draft-n-max",
+        "4",
+        "--reasoning-budget",
+        "2048",
+        "--reasoning-budget-message",
+        "Thinking budget reached. Now give the final answer."
+      ],
+      "checks": [
+        {
+          "name": "factual answer (/v1/chat/completions)",
+          "pass": true,
+          "detail": "\"Paris\"",
+          "value": "Paris"
+        },
+        {
+          "name": "task prompt (SDK ai.prompt)",
+          "pass": true,
+          "detail": "\"Paris\""
+        },
+        {
+          "name": "tool call (/v1/chat/completions, tools)",
+          "pass": true,
+          "detail": "get_weather({\"city\":\"Paris\"})"
+        },
+        {
+          "name": "streaming (/v1/chat/completions, stream)",
+          "pass": true,
+          "detail": "19 chunks, \"one, two, three, four, five, six, seven, eight, nine, ten\"",
+          "value": 19,
+          "threshold": "> 1 chunk, one to ten in order"
+        },
+        {
+          "name": "model runs on the GPU (vulkan)",
+          "pass": true,
+          "detail": "22.65 GB of GPU memory held for a 16.56 GB model",
+          "value": 22652760064,
+          "threshold": ">= half the model size"
+        }
+      ],
+      "metrics": {
+        "firstRequestMs": 1362,
+        "ttftMs": {
+          "n": 3,
+          "median": 524,
+          "p95": 799.8,
+          "min": 501.3,
+          "max": 830.5,
+          "mean": 618.6
+        },
+        "decodeTps": {
+          "n": 3,
+          "median": 18.825,
+          "p95": 19.114,
+          "min": 16.625,
+          "max": 19.146,
+          "mean": 18.199
+        },
+        "prefillTps": {
+          "n": 3,
+          "median": 304.1,
+          "p95": 328.4,
+          "min": 271.9,
+          "max": 331.1,
+          "mean": 302.3
+        },
+        "latencyMs": {
+          "n": 3,
+          "median": 731.5,
+          "p95": 920.2,
+          "min": 657,
+          "max": 941.1,
+          "mean": 776.5
+        },
+        "tokenCountSource": "usage",
+        "directLatencyMs": {
+          "n": 3,
+          "median": 717.5,
+          "p95": 1028.1,
+          "min": 659.1,
+          "max": 1062.6,
+          "mean": 813.1
+        },
+        "executorOverheadMs": 14,
+        "throughputTpsC1": {
+          "n": 2,
+          "median": 15.506,
+          "p95": 16.279,
+          "min": 14.647,
+          "max": 16.365,
+          "mean": 15.506
+        },
+        "throughputTpsC4": {
+          "n": 2,
+          "median": 18.225,
+          "p95": 18.961,
+          "min": 17.406,
+          "max": 19.043,
+          "mean": 18.225
+        },
+        "peakRssBytes": 9274957824,
+        "peakGpuBytes": 22652760064,
+        "serverReadyMs": 9588,
+        "endpointHealth": "REACHABLE"
+      },
+      "fit": {
+        "fits": true,
+        "modelBytes": 21900000000,
+        "budgetBytes": 65408700416,
+        "gpuBudgetBytes": 66482442240,
+        "ramBytes": 131891142656
+      },
+      "durationMs": 126796
+    }
+  ]
+}

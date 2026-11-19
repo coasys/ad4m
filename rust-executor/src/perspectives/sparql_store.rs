@@ -1,3 +1,4 @@
+use super::write_log::{AddedLink, WriteDelta, WriteLog};
 use crate::languages::literal::RFC3986_COMPONENT_ENCODE;
 use crate::types::LinkStatus;
 use crate::types::{DecoratedExpressionProof, DecoratedLinkExpression, Link, LinkExpression};
@@ -777,6 +778,38 @@ fn diff_of<'l>(links: impl IntoIterator<Item = &'l LinkExpression>) -> VerifiedD
     diff
 }
 
+/// The [`WriteDelta`] of writing `links` in `tx`, read before the write:
+/// [`WriteDelta::Added`] when none of their reifiers is stored yet (or
+/// written twice in `links`). A link written again over its own reifier
+/// replaces its annotations, which may remove a value a reader matched.
+fn added_delta(tx: &Transaction<'_>, links: &[LinkExpression]) -> Result<WriteDelta, Error> {
+    let mut added = Vec::with_capacity(links.len());
+    let mut reifiers = std::collections::HashSet::new();
+    for link in links {
+        let reifier = make_reifier_iri(link);
+        let stored = tx
+            .quads_for_pattern(
+                Some(reifier.as_ref().into()),
+                None,
+                None,
+                Some(GraphNameRef::DefaultGraph),
+            )
+            .next()
+            .is_some();
+        if stored || !reifiers.insert(reifier.clone()) {
+            return Ok(WriteDelta::Other);
+        }
+        let (source, predicate, target) = make_direct_triple(link);
+        added.push(AddedLink {
+            source,
+            predicate,
+            target,
+            reifier,
+        });
+    }
+    Ok(WriteDelta::Added(added))
+}
+
 /// Which proof annotations an insert may write on `reifier` (#1146), as `tx`
 /// reads the store.
 ///
@@ -1181,10 +1214,27 @@ pub struct SparqlStore {
     /// The scope index in the store's auxiliary space: ordered member lists
     /// of model classes, updated in the transaction of every link write.
     scope_index: Arc<ScopeIndex>,
+    /// The write generation: bumped after every committed write, shared
+    /// across clones. A reader that keeps a query result can reuse it while
+    /// the generation it read before the query is unchanged, and can wait for
+    /// the next write ([`Self::watch_writes`]) instead of polling.
+    writes: Arc<tokio::sync::watch::Sender<u64>>,
+    /// What each recent write did, by the generation it ended, so a reader
+    /// that kept a result can read only what was added since
+    /// ([`Self::additions_since`]).
+    write_log: Arc<Mutex<WriteLog>>,
     /// Test-only: every read query's text, in order, shared across clones, so a test can
     /// assert which store queries a pipeline ran (see [`SparqlStore::queries_run`]).
     #[cfg(test)]
     query_log: Arc<Mutex<Vec<String>>>,
+    /// Test-only: each SELECT's text with the number of rows it returned.
+    #[cfg(test)]
+    query_rows: Arc<Mutex<Vec<(String, usize)>>>,
+    /// Test-only: how many index scans `query_links` and
+    /// `query_links_top_n_by_timestamp` ran, shared across clones. They do not
+    /// go through the query log.
+    #[cfg(test)]
+    link_scans: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// The SELECT behind [`SparqlStore::get_all_links`] and other link reads that
@@ -1249,8 +1299,14 @@ impl SparqlStore {
             store: Arc::new(store),
             writer: Arc::new(Mutex::new(())),
             scope_index,
+            writes: Arc::new(tokio::sync::watch::Sender::new(0)),
+            write_log: Arc::new(Mutex::new(WriteLog::default())),
             #[cfg(test)]
             query_log: Arc::new(Mutex::new(Vec::new())),
+            #[cfg(test)]
+            query_rows: Arc::new(Mutex::new(Vec::new())),
+            #[cfg(test)]
+            link_scans: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
         // Builds a restart interrupted go on from their marks.
         for rule in this.scope_index.unfinished(&this.store)? {
@@ -1502,6 +1558,40 @@ impl SparqlStore {
         self.scope_index.compactor.clone()
     }
 
+    /// The current write generation. Read it *before* a query whose result
+    /// is kept: a write that lands during the query then shows as a newer
+    /// generation, and the result is read again.
+    pub(crate) fn write_generation(&self) -> u64 {
+        *self.writes.borrow()
+    }
+
+    /// A receiver that sees each new write generation.
+    pub(crate) fn watch_writes(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.writes.subscribe()
+    }
+
+    /// Call after a write committed (or may have), with what it did: only
+    /// [`WriteDelta::Added`] when it removed nothing and every link's reifier
+    /// is new. The log entry and the new generation appear together, so a
+    /// reader that sees a generation finds every write up to it in the log.
+    fn note_write(&self, delta: WriteDelta) {
+        let mut log = self.write_log.lock().unwrap_or_else(|e| e.into_inner());
+        let generation = self.write_generation().wrapping_add(1);
+        log.record(generation, delta);
+        self.writes.send_modify(|g| *g = generation);
+    }
+
+    /// The links added after generation `from` up to `to` (read with
+    /// [`Self::write_generation`]), or `None` when a write in between did
+    /// more than add links or the log no longer reaches back to `from`: the
+    /// reader must then read everything again. See [`WriteLog`].
+    pub(crate) fn additions_since(&self, from: u64, to: u64) -> Option<Vec<AddedLink>> {
+        self.write_log
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .additions_since(from, to)
+    }
+
     /// Returns the number of quads in the store (for diagnostics).
     pub fn quad_count(&self) -> usize {
         self.store.len().unwrap_or(0)
@@ -1557,8 +1647,10 @@ impl SparqlStore {
         if skip_local && is_stored_local(&tx, link)? {
             return Ok(false);
         }
+        let delta = added_delta(&tx, std::slice::from_ref(link))?;
         write_link_quads(&mut tx, link, status)?;
         self.commit_indexed(tx, &diff_of([link]))?;
+        self.note_write(delta);
         Ok(true)
     }
 
@@ -1624,6 +1716,7 @@ impl SparqlStore {
         }
         // A verdict removed can end a membership.
         self.commit_indexed(tx, &diff_of([link]))?;
+        self.note_write(WriteDelta::Other);
         Ok(())
     }
 
@@ -1651,6 +1744,7 @@ impl SparqlStore {
         }
         remove_link_quads(&mut tx, link)?;
         self.commit_indexed(tx, &diff_of([link]))?;
+        self.note_write(WriteDelta::Other);
         Ok(true)
     }
 
@@ -1675,6 +1769,16 @@ impl SparqlStore {
             .lock()
             .map_err(|_| anyhow!("SPARQL store writer lock poisoned"))?;
         let mut tx = self.store.start_transaction()?;
+        let delta = if removals.is_empty() {
+            let stored: Vec<LinkExpression> = additions
+                .iter()
+                .filter(|l| l.status.is_some())
+                .cloned()
+                .collect();
+            added_delta(&tx, &stored)?
+        } else {
+            WriteDelta::Other
+        };
         for link in removals {
             remove_link_quads(&mut tx, link)?;
         }
@@ -1690,7 +1794,9 @@ impl SparqlStore {
             };
             write_link_quads(&mut tx, link, status)?;
         }
-        self.commit_indexed(tx, &diff_of(removals.iter().chain(additions)))
+        let deltas = self.commit_indexed(tx, &diff_of(removals.iter().chain(additions)))?;
+        self.note_write(delta);
+        Ok(deltas)
     }
 
     /// Return all links in the store using a SPARQL 1.2 reifier query.
@@ -1755,6 +1861,8 @@ impl SparqlStore {
         limit: Option<usize>,
     ) -> Result<Vec<DecoratedLinkExpression>, Error> {
         use std::ops::ControlFlow;
+        #[cfg(test)]
+        self.count_link_scan();
         // Bail out early on the zero-page case: the closure below pushes first,
         // then checks `links.len() >= lim`, so without this guard `Some(0)`
         // would return one element instead of zero.
@@ -1799,6 +1907,8 @@ impl SparqlStore {
         use std::cmp::Reverse;
         use std::collections::BinaryHeap;
         use std::ops::ControlFlow;
+        #[cfg(test)]
+        self.count_link_scan();
 
         if limit == 0 {
             return Ok(Vec::new());
@@ -2404,6 +2514,11 @@ impl SparqlStore {
                     }
                     rows.push(Value::Object(row));
                 }
+                #[cfg(test)]
+                self.query_rows
+                    .lock()
+                    .map_err(|_| anyhow!("SPARQL store query log lock poisoned"))?
+                    .push((query_string.to_string(), rows.len()));
                 Ok(serde_json::to_string(&rows)?)
             }
             QueryResults::Boolean(b) => Ok(serde_json::to_string(&b)?),
@@ -2482,7 +2597,9 @@ impl SparqlStore {
         // `Store::clear` leaves the auxiliary space as it is: the index is
         // emptied after it, with every class unready in between.
         self.scope_index.begin_clear(&self.store)?;
-        self.store.clear()?;
+        let cleared = self.store.clear();
+        self.note_write(WriteDelta::Other);
+        cleared?;
         self.scope_index.clear(&self.store)?;
         Ok(())
     }
@@ -2617,6 +2734,7 @@ impl SparqlStore {
             }
         }
         self.commit_indexed(tx, &diff)?;
+        self.note_write(WriteDelta::Other);
         Ok(metadata_links.len())
     }
 
@@ -2627,6 +2745,37 @@ impl SparqlStore {
             .lock()
             .map(|log| log.clone())
             .unwrap_or_default()
+    }
+
+    /// Test-only: how many writes the write log holds.
+    #[cfg(test)]
+    pub(crate) fn write_log_entries(&self) -> usize {
+        self.write_log
+            .lock()
+            .map(|log| log.entry_count())
+            .unwrap_or_default()
+    }
+
+    /// Test-only: each SELECT this store (and its clones) ran so far, with the
+    /// number of rows it returned, in order.
+    #[cfg(test)]
+    pub(crate) fn query_rows_run(&self) -> Vec<(String, usize)> {
+        self.query_rows
+            .lock()
+            .map(|log| log.clone())
+            .unwrap_or_default()
+    }
+
+    /// Test-only: how many link index scans this store (and its clones) ran so far.
+    #[cfg(test)]
+    pub(crate) fn link_scans_run(&self) -> usize {
+        self.link_scans.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    fn count_link_scan(&self) {
+        self.link_scans
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Store `link` without refusing a link in the metadata vocabulary: the
@@ -2640,6 +2789,7 @@ impl SparqlStore {
         let mut tx = self.store.start_transaction()?;
         write_link_quads(&mut tx, link, link.status.as_ref().unwrap())?;
         self.commit_indexed(tx, &diff_of([link]))?;
+        self.note_write(WriteDelta::Other);
         Ok(())
     }
 }

@@ -446,7 +446,7 @@ async fn only_a_ready_index_of_this_flag_is_read() {
         .await
         .unwrap();
     assert_eq!(pages_served(), before, "the stricter shape goes to SPARQL");
-    assert_eq!(strict.total_count, 0, "no message has a body");
+    assert!(strict.instances.is_empty(), "no message has a body");
 }
 
 fn median(mut samples: Vec<std::time::Duration>) -> std::time::Duration {
@@ -543,7 +543,9 @@ async fn bench_newest_20_of_100k_under_one_parent() {
             0,
         ),
     };
-    let q = query(q);
+    let mut q = query(q);
+    // The total is asserted below, and comes only when asked for.
+    q.count = Some(true);
     let store = &world.indexed;
 
     let before = store.queries_run().len();
@@ -573,7 +575,7 @@ async fn bench_newest_20_of_100k_under_one_parent() {
     assert_eq!(pages_served() - before, 9, "every run took the index path");
     assert_eq!(fast_result.instances, slow_result.instances);
     assert_eq!(fast_result.total_count, slow_result.total_count);
-    assert_eq!(fast_result.total_count, MEMBERS as usize);
+    assert_eq!(fast_result.total_count, Some(MEMBERS as usize));
     let pagination = SparqlPagination {
         sort_key: SortKey::Timestamp,
         direction: OrderDirection::DESC,

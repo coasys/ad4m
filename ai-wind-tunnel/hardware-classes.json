@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "description": "Ordered rules: the first whose `match` holds names the machine's class. Memory is in GiB (2^30 bytes), compared with >=. `minMemoryGb` reads system RAM, `minVramGb` the dedicated memory of the GPU that matched `gpuVendor`. `unifiedMemory` is that GPU's flag (an integrated GPU sharing system RAM). `backendAny` needs at least one of the listed backends to be usable. Within a family, `tierGb` orders the classes: a class without a recommendation falls back to the nearest smaller tier of its family, then to the cpu family at the same or a smaller tier.",
+  "description": "Ordered rules: the first whose `match` holds names the machine's class. Memory is in GiB (2^30 bytes), compared with >=. `minMemoryGb` reads system RAM, `minVramGb` the dedicated memory of the GPU that matched `gpuVendor`. `unifiedMemory` is that GPU's flag (an integrated GPU sharing system RAM). `backendAny` needs at least one of the listed backends to be usable. `cpuBrandAny` needs the CPU brand to contain one of the listed strings, ignoring case: it tells a chip from others of the same vendor and memory (Strix Halo, with its 256-bit memory bus, is the \"Ryzen AI Max\" parts). Within a family, `tierGb` orders the classes: a class without a recommendation falls back to the nearest smaller tier of its family, then to the cpu family at the same or a smaller tier. A class with `fallback` narrows another class (it must come before it): its chain is itself, then that class's chain, and no other class's chain reaches it.",
   "rules": [
     { "class": "apple-silicon-128", "family": "apple-silicon", "tierGb": 128, "match": { "os": "macos", "arch": "arm64", "minMemoryGb": 112 } },
     { "class": "apple-silicon-64", "family": "apple-silicon", "tierGb": 64, "match": { "os": "macos", "arch": "arm64", "minMemoryGb": 56 } },
@@ -12,6 +12,8 @@
     { "class": "nvidia-16gb", "family": "nvidia", "tierGb": 16, "match": { "gpuVendor": "nvidia", "backendAny": ["cuda", "vulkan"], "minVramGb": 14 } },
     { "class": "nvidia-12gb", "family": "nvidia", "tierGb": 12, "match": { "gpuVendor": "nvidia", "backendAny": ["cuda", "vulkan"], "minVramGb": 11 } },
     { "class": "nvidia-8gb", "family": "nvidia", "tierGb": 8, "match": { "gpuVendor": "nvidia", "backendAny": ["cuda", "vulkan"], "minVramGb": 7 } },
+
+    { "class": "amd-strix-halo-128", "family": "amd-strix-halo", "tierGb": 128, "fallback": "amd-igpu-uma-128", "match": { "cpuBrandAny": ["Ryzen AI Max"], "gpuVendor": "amd", "unifiedMemory": true, "backendAny": ["rocm", "vulkan"], "minMemoryGb": 112 } },
 
     { "class": "amd-igpu-uma-128", "family": "amd-igpu-uma", "tierGb": 128, "match": { "gpuVendor": "amd", "unifiedMemory": true, "backendAny": ["rocm", "vulkan"], "minMemoryGb": 112 } },
     { "class": "amd-igpu-uma-64", "family": "amd-igpu-uma", "tierGb": 64, "match": { "gpuVendor": "amd", "unifiedMemory": true, "backendAny": ["rocm", "vulkan"], "minMemoryGb": 56 } },
