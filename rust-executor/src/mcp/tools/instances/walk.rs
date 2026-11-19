@@ -196,7 +196,8 @@ pub(crate) async fn rows_pointing_to(
         let title = identity_name(shape);
         for (relation, _) in forward_relations(shape) {
             let mut properties: Vec<String> = title.map(str::to_string).into_iter().collect();
-            properties.push("createdAt".into());
+            // The row metadata (`timestamp`, `author`) is read only when asked for.
+            properties.extend(["createdAt", "timestamp", "author"].map(String::from));
             let query = json!({
                 "where": { relation: node },
                 "properties": properties,

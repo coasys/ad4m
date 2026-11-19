@@ -111,7 +111,10 @@ async fn activity_pages_in_the_store_and_counts_all_rows() {
     let result = execute_model_query_from_json(
         &store,
         "Topic",
-        &ordered("activity", Some(2)),
+        &ModelQueryInput {
+            count: Some(true),
+            ..ordered("activity", Some(2))
+        },
         TOPIC_SHAPE_JSON,
     )
     .await

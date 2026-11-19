@@ -642,6 +642,8 @@ mod tests {
             batch_min: 1,
             batch_max: 8,
             claim_ttl_ms: 60_000,
+            // The single-shot path splits; the harness default does not (#1804).
+            max_tool_calls: Some(0),
             ..Default::default()
         };
         write_processor(&mut perspective, &cfg, Some(false), &ctx)
@@ -839,6 +841,8 @@ mod tests {
             mint_scope: Some(mint.clone()),
             existing_scope: same_scope.then_some(mint),
             emit_debug_events: emit_debug,
+            // The single-shot path splits; the harness default does not (#1804).
+            max_tool_calls: Some(0),
             ..Default::default()
         };
         write_processor(&mut perspective, &cfg, Some(emit_debug), &ctx)

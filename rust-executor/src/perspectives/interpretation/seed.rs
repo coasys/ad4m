@@ -490,7 +490,10 @@ pub(crate) async fn read_seed_graph(
     let mut rows_total = 0usize;
     for shape in shapes {
         let class = class_label(&shape.target_class, shapes);
-        match perspective.model_query(&class, r#"{"limit":0}"#).await {
+        match perspective
+            .model_query(&class, r#"{"limit":0,"count":true}"#)
+            .await
+        {
             Ok(raw) => {
                 rows_total += serde_json::from_str::<Value>(&raw)
                     .ok()
