@@ -1817,6 +1817,7 @@ test.each([
     await flush()
     expect(api.sfuCallAnswerServerOffer).toHaveBeenCalledTimes(2)
     expect(FakePeerConnection.instances).toHaveLength(1)
+    await manager.leave()
 })
 
 test("an offer the executor resends while its answer is unsent gets that answer, applied once", async () => {
@@ -1881,6 +1882,7 @@ test("after the socket reconnects the manager asks the executor to resume its se
     expect(api.sfuCallResume.mock.calls).toEqual([[URL, ROOM, MINE]])
     expect(api.log).toEqual(["sfuCallResume"])
     expect(api.sfuCallLeave).not.toHaveBeenCalled()
+    await manager.leave()
 })
 
 test("an answer the socket fault kept goes out before the resume", async () => {
@@ -1896,6 +1898,7 @@ test("an answer the socket fault kept goes out before the resume", async () => {
     await flush()
 
     expect(api.log).toEqual(["sfuCallAnswerServerOffer", "sfuCallResume"])
+    await manager.leave()
 })
 
 test("an executor without sfu.callResume: the manager waits for its resend, keeps the call, and asks again next time", async () => {
@@ -1918,6 +1921,7 @@ test("an executor without sfu.callResume: the manager waits for its resend, keep
     expect(api.sfuCallResume).toHaveBeenCalledTimes(2)
     expect(api.sfuCallLeave).not.toHaveBeenCalled()
     expect(errors).toEqual([])
+    await manager.leave()
 })
 
 test("an api without onReconnect or sfuCallResume still joins and keeps its call", async () => {
