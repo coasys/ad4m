@@ -575,6 +575,44 @@ impl std::fmt::Display for CreditRefused {
 
 impl std::error::Error for CreditRefused {}
 
+/// Whether `error` is a credit gate's refusal, not an upstream failure.
+pub(crate) fn is_credit_refusal(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<CreditRefused>().is_some()
+}
+
+/// How a [`run_with_tools_outcome`] loop ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HarnessEnd {
+    /// The model answered without a tool call (or stayed silent).
+    Finished,
+    /// The tool-call cap was reached; the wind-down answer followed.
+    CapReached,
+    /// The model server failed a round twice; the best-effort answer
+    /// without tools followed (#1738).
+    Degraded,
+    /// The credit gate stopped the loop.
+    CreditHalted,
+}
+
+/// The end of a [`run_with_tools_outcome`] loop: the final text, how the loop
+/// ended, and how many tool calls it dispatched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HarnessOutcome {
+    pub text: String,
+    pub end: HarnessEnd,
+    pub tool_calls: usize,
+}
+
+impl HarnessOutcome {
+    fn new(text: String, end: HarnessEnd, tool_calls: usize) -> Self {
+        Self {
+            text,
+            end,
+            tool_calls,
+        }
+    }
+}
+
 /// The interpretation-pass tool-calling loop.
 ///
 /// `initial_messages` is the caller-built prompt — for interpretation, this
@@ -598,6 +636,31 @@ pub async fn run_with_tools(
     observer: Option<&dyn ToolObserver>,
     credit_gate: Option<Arc<dyn CreditGate>>,
 ) -> Result<String> {
+    run_with_tools_outcome(
+        model_id,
+        initial_messages,
+        provider,
+        completions,
+        config,
+        observer,
+        credit_gate,
+    )
+    .await
+    .map(|outcome| outcome.text)
+}
+
+/// [`run_with_tools`], with how the loop ended and how many tool calls it
+/// dispatched ([`HarnessOutcome`]). Interpretation reads the end state to
+/// decide whether the pass falls back to single-shot.
+pub async fn run_with_tools_outcome(
+    model_id: &str,
+    initial_messages: Vec<Value>,
+    provider: Arc<dyn ToolProvider>,
+    completions: Arc<dyn CompletionSource>,
+    config: HarnessConfig,
+    observer: Option<&dyn ToolObserver>,
+    credit_gate: Option<Arc<dyn CreditGate>>,
+) -> Result<HarnessOutcome> {
     let mut messages = initial_messages;
     // Budget is enforced per *dispatched tool call*, not per round: a single
     // completion may return multiple tool_calls, and we don't want one round
@@ -629,7 +692,11 @@ pub async fn run_with_tools(
                      Halting the loop; caller receives what the buffer holds.",
                     cap = config.max_tool_calls,
                 );
-                return Ok(String::new());
+                return Ok(HarnessOutcome::new(
+                    String::new(),
+                    HarnessEnd::CreditHalted,
+                    calls_used,
+                ));
             }
         }
         let tools = provider.tools().await;
@@ -659,7 +726,11 @@ pub async fn run_with_tools(
                     "harness: credit gate refused the retry of round {round}: {e}. \
                      Halting; caller receives what the buffer holds."
                 );
-                return Ok(String::new());
+                return Ok(HarnessOutcome::new(
+                    String::new(),
+                    HarnessEnd::CreditHalted,
+                    calls_used,
+                ));
             }
             // A 4xx answer or a timeout is not retried and not worked around: the same
             // request gets the same answer, and a hung server would hold the run for
@@ -675,7 +746,19 @@ pub async fn run_with_tools(
                     &mut empty_nudges,
                     config.empty_completion_nudges,
                 )
-                .await;
+                .await
+                .map(|text| HarnessOutcome::new(text, HarnessEnd::Degraded, calls_used))
+                .or_else(|e| {
+                    if is_credit_refusal(&e) {
+                        Ok(HarnessOutcome::new(
+                            String::new(),
+                            HarnessEnd::CreditHalted,
+                            calls_used,
+                        ))
+                    } else {
+                        Err(e)
+                    }
+                });
             }
         };
 
@@ -721,7 +804,11 @@ pub async fn run_with_tools(
                 "harness: the model stayed silent ({empty_nudges} nudges \
                  spent); returning its empty reply"
             );
-            return Ok(completion.content);
+            return Ok(HarnessOutcome::new(
+                completion.content,
+                HarnessEnd::Finished,
+                calls_used,
+            ));
         }
 
         // When tool_calls[] is empty, try to recover a tool call from the
@@ -754,7 +841,11 @@ pub async fn run_with_tools(
                          (rule 1 — prose surrounds the fenced block) at round={round}. \
                          A possible tool call was not honoured.",
                     );
-                    return Ok(completion.content);
+                    return Ok(HarnessOutcome::new(
+                        completion.content,
+                        HarnessEnd::Finished,
+                        calls_used,
+                    ));
                 }
                 ContentToolCallDecision::DeclinedPlural => {
                     // COVERAGE: tool_calls[] was empty; content contained
@@ -765,7 +856,11 @@ pub async fn run_with_tools(
                          (rule 2 — multiple fenced blocks) at round={round}. \
                          A possible tool call was not honoured.",
                     );
-                    return Ok(completion.content);
+                    return Ok(HarnessOutcome::new(
+                        completion.content,
+                        HarnessEnd::Finished,
+                        calls_used,
+                    ));
                 }
                 ContentToolCallDecision::DeclinedUnknownTool => {
                     // SECURITY: a fenced block named a tool outside the offered
@@ -780,7 +875,11 @@ pub async fn run_with_tools(
                          (rule 3 — name not in the offered tool set) at round={round}. \
                          tools_offered={tool_count}. A possible tool call was not honoured.",
                     );
-                    return Ok(completion.content);
+                    return Ok(HarnessOutcome::new(
+                        completion.content,
+                        HarnessEnd::Finished,
+                        calls_used,
+                    ));
                 }
                 ContentToolCallDecision::DeclinedSchemaValidation(reason) => {
                     // COVERAGE: a recognised tool, but the argument keys did
@@ -797,14 +896,22 @@ pub async fn run_with_tools(
                          (rule 4 — argument keys failed schema check) at round={round}: \
                          {reason}. A possible tool call was not honoured.",
                     );
-                    return Ok(completion.content);
+                    return Ok(HarnessOutcome::new(
+                        completion.content,
+                        HarnessEnd::Finished,
+                        calls_used,
+                    ));
                 }
                 // Quiet on purpose: no fenced block, or one that was not a
                 // tool call at all. This is the ordinary final-answer path and
                 // the overwhelming majority of rounds; the `content_preview`
                 // warn above already covers it.
                 ContentToolCallDecision::NoCandidate => {
-                    return Ok(completion.content);
+                    return Ok(HarnessOutcome::new(
+                        completion.content,
+                        HarnessEnd::Finished,
+                        calls_used,
+                    ));
                 }
             }
         } else {
@@ -871,7 +978,11 @@ pub async fn run_with_tools(
                 "harness: credit gate refused final wind-down completion: {e}. \
                  Returning empty content; buffer holds whatever the loop produced.",
             );
-            return Ok(String::new());
+            return Ok(HarnessOutcome::new(
+                String::new(),
+                HarnessEnd::CreditHalted,
+                calls_used,
+            ));
         }
     }
     messages.push(json!({
@@ -897,7 +1008,11 @@ pub async fn run_with_tools(
                 "harness: credit gate refused the wind-down retry: {e}. \
                  Returning empty content."
             );
-            return Ok(String::new());
+            return Ok(HarnessOutcome::new(
+                String::new(),
+                HarnessEnd::CreditHalted,
+                calls_used,
+            ));
         }
         Err(e) => {
             // The wind-down call is already tool-free. One retry was enough;
@@ -917,6 +1032,7 @@ pub async fn run_with_tools(
         credit_gate.as_deref(),
     )
     .await
+    .map(|text| HarnessOutcome::new(text, HarnessEnd::CapReached, calls_used))
 }
 
 /// A tool-free completion's text, asked for again while it comes back empty:
@@ -1060,9 +1176,11 @@ async fn best_effort_after_upstream_failure(
         if let Err(e) = gate.check().await {
             log::warn!(
                 "harness: credit gate refused the no-tools final request \
-                 after an upstream failure: {e}. Returning empty content."
+                 after an upstream failure: {e}. Halting."
             );
-            return Ok(String::new());
+            // A credit halt, not an upstream failure: the caller must not
+            // read it as a degraded run and spend further completions.
+            return Err(CreditRefused(e).into());
         }
     }
     messages.push(json!({
@@ -1122,7 +1240,7 @@ fn retry_warn_line(round: usize, error: &anyhow::Error) -> String {
 /// `HTTP 500` when the error carries an upstream status, else the error's
 /// own text. Named so a caller whose run still fails can see the status the
 /// model server answered with.
-fn upstream_status_label(error: &anyhow::Error) -> String {
+pub(crate) fn upstream_status_label(error: &anyhow::Error) -> String {
     error
         .chain()
         .find_map(|cause| {

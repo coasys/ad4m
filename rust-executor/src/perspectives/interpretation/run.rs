@@ -1,5 +1,7 @@
 use super::dedup::semantic_embedding_model;
 use super::existing_budget::{existing_for_prompt, Compact};
+use super::seed::{build_seed, log_seed, read_seed_graph, seed_budget, with_seed, HARNESS_GUIDE};
+use super::walk_tools::WalkToolsProvider;
 use super::{
     apply_with_overlay, build_interpretation_input_showing, build_speaker_name_map, class_label,
     ensure_interpretation_task_for_model, existing_instance_context, existing_relation_links,
@@ -13,10 +15,8 @@ use crate::ai_service::harness::flow_propose::{FlowProposalBuffer, FlowTransitio
 use crate::ai_service::harness::propose::{
     class_propose_shape_from_shacl, ProposalBuffer, ProposeWritesProvider,
 };
-use crate::ai_service::harness::provider::{
-    is_read_only, BoundArgsProvider, FilteredProvider, ToolProvider, ToolSchema,
-};
-use crate::ai_service::harness::{run_with_tools, HarnessConfig};
+use crate::ai_service::harness::provider::{BoundArgsProvider, ToolProvider};
+use crate::ai_service::harness::{run_with_tools_outcome, HarnessConfig};
 use crate::perspectives::model_query::types::{ModelShape, Scope};
 use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClassOption};
 use crate::types::LinkStatus;
@@ -629,12 +629,112 @@ pub struct InterpretationOutcome {
     /// URIs of the `FlowTransitionProposal`s the deterministic flow pass
     /// minted after this pass's writes were committed.
     pub flow_proposals: Vec<String>,
+    /// How the pass ran ([`RUN_MODE_SINGLE_SHOT`], [`RUN_MODE_HARNESS`] or
+    /// [`RUN_MODE_FALLBACK`]), as its run record says.
+    pub mode: &'static str,
 }
+
+/// A pass never rewrites the content of a row outside its scope (#1804): an
+/// update of such a row keeps its relation values and drops its property
+/// values. Rows of other sources (an earlier call) keep their title and
+/// text; a new row can still attach to them.
+///
+/// The scope is the rows under `base_prefix` and, when the pass has an
+/// existing scope, the rows in it (`existing`). Without an existing scope
+/// and with an empty `base_prefix`, each row is in scope.
+///
+/// A processor with a prefix per source (one per call) and no existing
+/// scope therefore cannot update a row of an earlier source, also at
+/// `maxToolCalls: 0`: a rolling summary over many calls stops growing. Give
+/// such a processor an `existingScope` that holds those rows, or a prefix
+/// that stays the same across sources, to allow those updates.
+///
+/// The match is a literal string prefix: `we://interpreted/call1` also
+/// matches `we://interpreted/call12/...`. End the prefix with a delimiter
+/// (`we://interpreted/call1/`).
+pub(crate) fn keep_content_outside_scope(
+    ops: Vec<InterpretationOp>,
+    shapes: &[ModelShape],
+    base_prefix: &str,
+    scope: Option<&Scope>,
+    existing: &ExistingInstances,
+) -> Vec<InterpretationOp> {
+    if base_prefix.is_empty() && scope.is_none() {
+        return ops;
+    }
+    let in_scope = |id: &str| {
+        (!base_prefix.is_empty() && id.starts_with(base_prefix))
+            || (scope.is_some() && existing.contains_key(id))
+    };
+    ops.into_iter()
+        .filter_map(|op| match op {
+            InterpretationOp::Update {
+                base,
+                class,
+                values,
+            } if !in_scope(&base) => {
+                let relations: std::collections::HashSet<&str> = shapes
+                    .iter()
+                    .filter(|s| class_label(&s.target_class, shapes) == class)
+                    .flat_map(|s| s.include_relations.iter())
+                    .filter(|r| r.direction == "forward")
+                    .map(|r| r.name.as_str())
+                    .collect();
+                let dropped: Vec<String> = values
+                    .keys()
+                    .filter(|k| !relations.contains(k.as_str()))
+                    .cloned()
+                    .collect();
+                let values: serde_json::Map<String, serde_json::Value> = values
+                    .into_iter()
+                    .filter(|(k, _)| relations.contains(k.as_str()))
+                    .collect();
+                if !dropped.is_empty() {
+                    log::info!(
+                        "interpretation: {base} is outside the pass scope; its content stays \
+                         (dropped: {})",
+                        dropped.join(", ")
+                    );
+                }
+                (!values.is_empty()).then_some(InterpretationOp::Update {
+                    base,
+                    class,
+                    values,
+                })
+            }
+            op => Some(op),
+        })
+        .collect()
+}
+
+/// The tool-call cap of a harness pass whose config or request leaves
+/// `maxToolCalls` out (#1804). Each proposal counts against the cap, and a
+/// new row with a parent costs two calls, so it is above the harness default.
+pub const DEFAULT_INTERPRETATION_TOOL_CALLS: u32 = 40;
+
+/// The path a pass takes from its `maxToolCalls` (#1804): absent → the
+/// harness with [`DEFAULT_INTERPRETATION_TOOL_CALLS`]; `0` → single-shot
+/// (`None`); `n` → the harness with the cap `n`.
+pub fn interpretation_tool_cap(max_tool_calls: Option<u32>) -> Option<u32> {
+    match max_tool_calls {
+        None => Some(DEFAULT_INTERPRETATION_TOOL_CALLS),
+        Some(0) => None,
+        Some(n) => Some(n),
+    }
+}
+
+/// The run record's `mode` for a single-shot pass.
+pub const RUN_MODE_SINGLE_SHOT: &str = "single-shot";
+/// The run record's `mode` for a harness pass.
+pub const RUN_MODE_HARNESS: &str = "harness";
+/// The run record's `mode` for a harness pass that fell back to single-shot.
+pub const RUN_MODE_FALLBACK: &str = "fallback";
 
 /// [`run_interpretation_with_strategy`] with a per-call model override.
 ///
 /// A batch whose prompt does not fit the model window is split in half and
 /// each half is run on its own. See [`super::overflow`].
+#[allow(clippy::too_many_arguments)]
 pub async fn run_interpretation_with_strategy_and_model(
     perspective: &mut PerspectiveInstance,
     shapes: &[ModelShape],
@@ -719,6 +819,43 @@ pub(super) async fn run_interpretation_once(
     emit_ctx: Option<&crate::perspectives::auto_processor::events::InterpretationEmitContext>,
     flow_filter: Option<&[String]>,
 ) -> anyhow::Result<InterpretationOutcome> {
+    run_single_shot(
+        perspective,
+        shapes,
+        transcript,
+        base_prefix,
+        context,
+        dedup_strategy,
+        model_override,
+        scope,
+        cursor,
+        emit_debug_events,
+        emit_ctx,
+        flow_filter,
+        RUN_MODE_SINGLE_SHOT,
+        None,
+    )
+    .await
+}
+
+/// The single-shot pass, with the `mode` its run record gets.
+#[allow(clippy::too_many_arguments)]
+async fn run_single_shot(
+    perspective: &mut PerspectiveInstance,
+    shapes: &[ModelShape],
+    transcript: &[TranscriptTurn],
+    base_prefix: &str,
+    context: &AgentContext,
+    dedup_strategy: &DedupStrategy,
+    model_override: Option<&str>,
+    scope: Option<&Scope>,
+    cursor: Option<&InterpretationRunCursor>,
+    emit_debug_events: bool,
+    emit_ctx: Option<&crate::perspectives::auto_processor::events::InterpretationEmitContext>,
+    flow_filter: Option<&[String]>,
+    mode: &'static str,
+    completions: Option<Arc<dyn crate::ai_service::harness::CompletionSource>>,
+) -> anyhow::Result<InterpretationOutcome> {
     // The task row `prompt` reads (see `ensure_interpretation_task_for_model`).
     let task = ensure_interpretation_task_for_model(model_override)?;
     let interpretation_started = std::time::Instant::now();
@@ -801,9 +938,17 @@ pub(super) async fn run_interpretation_once(
             Some(shown.counts(true)),
         );
 
-        let service = crate::ai_service::AIService::global_instance()
-            .await
-            .map_err(|e| anyhow::anyhow!("run_interpretation: AIService not ready: {e:#}"))?;
+        // The model: the AI service, or the source a test passes.
+        let service = match &completions {
+            Some(_) => None,
+            None => Some(
+                crate::ai_service::AIService::global_instance()
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!("run_interpretation: AIService not ready: {e:#}")
+                    })?,
+            ),
+        };
 
         // Mid-pass observability (Nico 2026-08-20 + CodeRabbit #903 CR #6):
         // `LlmRequestSent` fires right before EACH `service.prompt` call and
@@ -828,6 +973,8 @@ pub(super) async fn run_interpretation_once(
             flow_proposals: llm_proposals,
         } = retry_interpretation_parse(|_attempt| {
             let service = service.clone();
+            let completions = completions.clone();
+            let model_id = task.model_id.clone();
             let task_id = task.task_id.clone();
             let prompt = prompt.clone();
             let capture = debug_response_capture.clone();
@@ -853,13 +1000,30 @@ pub(super) async fn run_interpretation_once(
                     .await;
                 }
 
-                let result = service
-                    // Internal caller (interpretation runner) — no user auth context; billing skipped.
-                    // Reasoning first, capped so thinking cannot overflow the window.
-                    // A size failure retries once with thinking off.
-                    .prompt_interpretation_pass(task_id, prompt, Some(stick_no_thinking.as_ref()))
-                    .await
-                    .context("AIService::prompt failed")?;
+                let text = match (completions, service) {
+                    (Some(source), _) => {
+                        let messages = [serde_json::json!({ "role": "user", "content": prompt })];
+                        source
+                            .complete(&model_id, &messages, Vec::new())
+                            .await?
+                            .content
+                    }
+                    (None, Some(service)) => {
+                        service
+                            // Internal caller (interpretation runner) — no user auth context; billing skipped.
+                            // Reasoning first, capped so thinking cannot overflow the window.
+                            // A size failure retries once with thinking off.
+                            .prompt_interpretation_pass(
+                                task_id,
+                                prompt,
+                                Some(stick_no_thinking.as_ref()),
+                            )
+                            .await
+                            .context("AIService::prompt failed")?
+                            .text
+                    }
+                    (None, None) => unreachable!("the service is read when no source is given"),
+                };
 
                 if let Some(ctx) = emit_ctx_cloned.as_ref() {
                     emit(
@@ -871,17 +1035,17 @@ pub(super) async fn run_interpretation_once(
                         .with_agent_did(&ctx.agent_did)
                         .with_items(&ctx.item_ids)
                         .with_batch_key(&ctx.batch_key)
-                        .with_llm_output(result.text.clone()),
+                        .with_llm_output(text.clone()),
                     )
                     .await;
                 }
 
                 if emit_debug_events {
                     if let Ok(mut slot) = capture.lock() {
-                        *slot = Some(result.text.clone());
+                        *slot = Some(text.clone());
                     }
                 }
-                Ok(result.text)
+                Ok(text)
             }
         })
         .await?;
@@ -913,6 +1077,7 @@ pub(super) async fn run_interpretation_once(
         // Filter no-op Updates: the LLM occasionally re-emits an unchanged existing
         // entry, and applying that would clear-and-rewrite scalar links for nothing.
         let ops = strip_noop_updates(perspective, shapes, planned).await?;
+        let ops = keep_content_outside_scope(ops, shapes, base_prefix, scope, &existing_ctx);
 
         // Apply the writes AND the provenance overlay (#883): every create/update
         // also instantiates/updates an `InterpretationOverlay` over the same base
@@ -947,6 +1112,7 @@ pub(super) async fn run_interpretation_once(
             context,
             cursor,
             debug.as_ref(),
+            Some(mode),
             &llm_proposals,
             &flow_subjects,
             flow_filter,
@@ -957,6 +1123,7 @@ pub(super) async fn run_interpretation_once(
             bases,
             debug,
             flow_proposals,
+            mode,
         })
     }
     .await;
@@ -1051,6 +1218,7 @@ pub(crate) async fn apply_ops_and_run_flow_passes(
     context: &AgentContext,
     cursor: Option<&InterpretationRunCursor>,
     debug: Option<&crate::perspectives::interpretation::InterpretationDebug>,
+    mode: Option<&str>,
     llm_proposals: &[crate::perspectives::interpretation::LlmFlowProposal],
     flow_subjects: &[String],
     flow_filter: Option<&[String]>,
@@ -1069,6 +1237,7 @@ pub(crate) async fn apply_ops_and_run_flow_passes(
         context,
         cursor,
         debug,
+        mode,
     )
     .await?;
 
@@ -1178,9 +1347,9 @@ async fn run_flow_post_pass(
 
 /// Harness-dispatched interpretation pass — the tool-calling alternative to
 /// [`run_interpretation_with_strategy_and_model`]. Same inputs/outputs, but
-/// the LLM sees a live tool surface (`{Class}_query`, `{Class}_get`,
-/// `{Class}_propose_create`, `{Class}_propose_link_child`, …) and drives the
-/// extraction by tool calls rather than by emitting one big JSON blob.
+/// the model walks the graph with the walk tools ([`super::walk_tools`]),
+/// starts from a seed ([`super::seed`]) in place of the full `existing` list,
+/// and writes with `{class}_create` / `{class}_propose_link_child`.
 ///
 /// Design v3 §6: writes only cross the overlay gate at pass boundary — the
 /// LLM's `_propose_*` calls buffer [`InterpretationOp`]s; when the harness
@@ -1197,10 +1366,20 @@ async fn run_flow_post_pass(
 /// dropped, and `AddLinks` whose triples already exist are filtered out.
 /// This bounds duplicate accretion on the indefinitely-running processor.
 ///
-/// The final answer text from the harness is discarded — the LLM already
-/// wrote via tools, and any narrative it emits is not consumed by the
-/// interpretation pipeline. (If we later want a try-parse-as-fallback, it
-/// hooks in here.)
+/// **Fallback (#1804).** The pass runs single-shot one time on the same
+/// batch, with `dedup_strategy` and `emit_debug_events`, when the harness
+/// loop:
+///
+/// - degraded: the model server failed a round two times (#1738);
+/// - made no tool call: the model answered with text only, or with nothing;
+/// - returned an error, for example a 4xx answer.
+///
+/// The proposals buffered before then are dropped: the harness writes
+/// nothing before its drain, so each row is written one time. The run record
+/// says `mode: fallback`. A loop that reached its cap, and a loop whose
+/// proposals were all refused, fall back too: their result may be partial,
+/// and a used result consumes every source of the batch.
+/// If the fallback fails too, its error is the pass's error.
 ///
 /// `max_tool_calls` = 0 is treated as "no harness path"; callers should
 /// route to [`run_interpretation_with_strategy_and_model`] instead of
@@ -1221,6 +1400,90 @@ pub async fn run_interpretation_with_harness_and_model(
     dedup_on_drain: bool,
     credit_gate: Option<Arc<dyn crate::ai_service::harness::CreditGate>>,
     flow_filter: Option<&[String]>,
+    dedup_strategy: &DedupStrategy,
+    emit_debug_events: bool,
+) -> anyhow::Result<InterpretationOutcome> {
+    run_harness_pass(
+        perspective,
+        shapes,
+        transcript,
+        base_prefix,
+        context,
+        model_override,
+        scope,
+        cursor,
+        max_tool_calls,
+        caller,
+        emit_ctx,
+        dedup_on_drain,
+        credit_gate,
+        flow_filter,
+        dedup_strategy,
+        emit_debug_events,
+        None,
+    )
+    .await
+}
+
+/// Why a harness loop's result is not used, so the pass falls back to
+/// single-shot; `None` when it is used.
+///
+/// A pass whose result is used is committed with the full cursor: each source
+/// counts as processed. So a pass that may have left work undone falls back:
+/// one that reached its cap (rows or links after the cap are missing), and
+/// one whose proposals were all refused (`accepted` is 0, `rejected` above 0).
+pub(crate) fn fallback_reason(
+    result: &anyhow::Result<crate::ai_service::harness::HarnessOutcome>,
+    accepted: usize,
+    rejected: usize,
+) -> Option<String> {
+    use crate::ai_service::harness::HarnessEnd;
+    match result {
+        // The status only: an upstream error's Display carries the response
+        // body, which can echo the prompt, and this goes to a WARN line.
+        Err(e) => Some(format!(
+            "the harness failed ({})",
+            crate::ai_service::harness::upstream_status_label(e)
+        )),
+        Ok(o) if o.end == HarnessEnd::Degraded => {
+            Some("the model server failed two times (degraded)".to_string())
+        }
+        Ok(o) if o.end == HarnessEnd::CapReached => Some(format!(
+            "the pass reached its cap of tool calls ({}); its writes may be partial",
+            o.tool_calls
+        )),
+        Ok(o) if o.end == HarnessEnd::Finished && o.tool_calls == 0 => {
+            Some("the model made no tool call".to_string())
+        }
+        Ok(_) if accepted == 0 && rejected > 0 => Some(format!(
+            "each of the {rejected} proposals of the pass was refused"
+        )),
+        Ok(_) => None,
+    }
+}
+
+/// [`run_interpretation_with_harness_and_model`] with the completion source
+/// the loop talks to: `None` is the AI service (the model the task names);
+/// tests pass a scripted source.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_harness_pass(
+    perspective: &mut PerspectiveInstance,
+    shapes: &[ModelShape],
+    transcript: &[TranscriptTurn],
+    base_prefix: &str,
+    context: &AgentContext,
+    model_override: Option<&str>,
+    scope: Option<&Scope>,
+    cursor: Option<&InterpretationRunCursor>,
+    max_tool_calls: u32,
+    caller: Option<Arc<crate::agent::session::Session>>,
+    emit_ctx: Option<&crate::perspectives::auto_processor::events::InterpretationEmitContext>,
+    dedup_on_drain: bool,
+    credit_gate: Option<Arc<dyn crate::ai_service::harness::CreditGate>>,
+    flow_filter: Option<&[String]>,
+    dedup_strategy: &DedupStrategy,
+    emit_debug_events: bool,
+    completions: Option<Arc<dyn crate::ai_service::harness::CompletionSource>>,
 ) -> anyhow::Result<InterpretationOutcome> {
     // Same task-row selection as the single-shot path so the model + system
     // prompt + few-shots + billing meta come from the same row the operator
@@ -1249,30 +1512,32 @@ pub async fn run_interpretation_with_harness_and_model(
     )
     .await;
     let speaker_names = build_speaker_name_map(transcript);
-    // Budgeted like the single-shot path (#1804), but with full ids and
-    // values: the tools take ids, and the model can `_get` the rest. No
-    // dedup strategy here, so the rows that do not all fit go by recency.
-    let shown = existing_for_prompt(
-        &task,
+    // The seed (#1804): the scope rows as outline lines, the newest of them in
+    // full, and the nodes above them, under the budget of the `existing`
+    // block. It replaces the full `existing` list; the model finds other rows
+    // with the walk tools. Full ids: the tools take ids.
+    let without_seed = build_interpretation_input_showing(
         shapes,
         transcript,
-        &existing_ctx,
+        &ExistingInstances::new(),
         &active_flows,
         &speaker_names,
-        base_prefix,
         None,
-        Compact::No,
-        dedup_on_drain,
+    );
+    let mut seed_graph = read_seed_graph(
+        perspective,
+        shapes,
+        &existing_ctx,
+        &existing_links,
+        base_prefix,
+        scope,
     )
     .await;
-    let prompt = build_interpretation_input_showing(
-        shapes,
-        transcript,
-        &shown.shown,
-        &active_flows,
-        &speaker_names,
-        Some(shown.counts(dedup_on_drain)),
-    );
+    seed_graph.unshown_checked = dedup_on_drain;
+    let (seed_budget_tokens, window) = seed_budget(&task, &without_seed).await;
+    let seed = build_seed(&existing_ctx, &seed_graph, seed_budget_tokens);
+    log_seed(&seed, seed_budget_tokens, window);
+    let prompt = with_seed(&without_seed, &seed);
 
     // Build per-class propose shapes from the perspective's SHACL classes,
     // filtered to the class-name set the caller passed as `shapes`. Any
@@ -1315,37 +1580,34 @@ pub async fn run_interpretation_with_harness_and_model(
         )]),
     ));
 
-    // Narrow the Ad4m tool surface to (a) class-scoped tools for the offered
-    // classes only, and (b) read verbs only. Rationale: a smaller local LLM
-    // like `gemma3:12b` faced with 60+ generic tools (`add_perspective`,
-    // neighbourhood/agent/runtime helpers, dynamic write verbs on every
-    // registered class) tends to hallucinate simpler tool names and skips
-    // the propose-write path — observed in CI job 22252 on `5c34ed868`,
-    // where the LLM called dynamic `extintention_create` (bypassing the
-    // overlay) and never touched `extintention_propose_create`. Filtering
-    // down to the ~2 classes × ~3 read verbs the pass actually needs
-    // forces the LLM through the propose-write wrappers below.
-    let offered_classes: Vec<_> = all_shacl_classes
+    // Narrow the AD4M tool surface to the walk tools (#1804): the generic
+    // `instance_query`, `get_children` and `instance_get`, with `class_name`
+    // an enum of the offered classes, and no per-class reads. A small local
+    // model faced with 60+ generic tools (`add_perspective`, neighbourhood
+    // helpers, dynamic write verbs) hallucinates simpler tool names and skips
+    // the propose-write path (CI job 22252 on `5c34ed868`), so the list stays
+    // narrow: three reads, plus the proposal writers below.
+    let offered_classes: Vec<String> = all_shacl_classes
         .iter()
         .filter(|c| requested_class_names.contains_key(&c.name))
-        .cloned()
+        .map(|c| c.name.clone())
         .collect();
-    let ad4m_filtered: Arc<dyn ToolProvider> = Arc::new(FilteredProvider::new(
-        ad4m_bound,
-        offered_class_tools(&offered_classes),
-    ));
+    let ad4m_filtered: Arc<dyn ToolProvider> =
+        Arc::new(WalkToolsProvider::new(ad4m_bound, offered_classes));
 
     // Wrap in ProposeWritesProvider so the LLM also sees the two synthetic
     // per-class writers whose side-effect is "queue an InterpretationOp",
     // not "mutate the graph." The buffer is drained after the loop.
     let buffer = ProposalBuffer::new();
     let classes_offered = propose_shapes.len();
-    let write_provider: Arc<dyn ToolProvider> = Arc::new(ProposeWritesProvider::new(
+    let writes = ProposeWritesProvider::new(
         ad4m_filtered,
         propose_shapes,
         buffer.clone(),
         base_prefix.to_string(),
-    ));
+    );
+    let rejected = writes.rejected();
+    let write_provider: Arc<dyn ToolProvider> = Arc::new(writes);
     // One `{Flow}_propose_transition` tool per active flow; calls are
     // validated against the flow's reachable states and buffered.
     let flow_buffer = FlowProposalBuffer::new();
@@ -1358,37 +1620,47 @@ pub async fn run_interpretation_with_harness_and_model(
     // OpenAI-compat bridge: real CompletionSource that talks to AIService
     // via the tool-grammar constrained-decoding path Josh cherry-picked
     // into /v1. Local + remote models both go through this one seam.
-    let service = crate::ai_service::AIService::global_instance()
-        .await
-        .map_err(|e| anyhow::anyhow!("run_interpretation_harness: AIService not ready: {e:#}"))?;
+    // A test's source also answers the single-shot fallback.
+    let completions_for_fallback = completions.clone();
+    let bridge: Arc<dyn crate::ai_service::harness::CompletionSource> = match completions {
+        Some(source) => source,
+        None => {
+            let service = crate::ai_service::AIService::global_instance()
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!("run_interpretation_harness: AIService not ready: {e:#}")
+                })?;
+            // A pass with a caller bills the agent it acts as (by DID); the caller's session
+            // named that agent. An executor-owned pass (no caller) bills no one.
+            let bill_to = context
+                .managed_did()
+                .map(str::to_string)
+                .filter(|_| has_caller);
+            Arc::new(
+                crate::api::openai_compat::harness_bridge::OpenAiCompatBridge::new(
+                    Arc::new(service),
+                    bill_to,
+                ),
+            )
+        }
+    };
     // Sized from the window the model's requests actually run at — the same
     // resolved `num_ctx` the bridge trims its outgoing list to.
-    let tool_result_max_bytes = service.tool_result_max_bytes(&task.model_id).await;
-    // A pass with a caller bills the agent it acts as (by DID); the caller's session named that
-    // agent. An executor-owned pass (no caller) bills no one.
-    let bill_to = context
-        .managed_did()
-        .map(str::to_string)
-        .filter(|_| has_caller);
-    let bridge = Arc::new(
-        crate::api::openai_compat::harness_bridge::OpenAiCompatBridge::new(
-            Arc::new(service),
-            bill_to,
-        ),
-    );
+    let tool_result_max_bytes = bridge.tool_result_max_bytes(&task.model_id).await;
 
-    // Single user message carrying the entire interpretation prompt —
+    // The guide, then one user message carrying the interpretation prompt.
     // OpenAiCompatBridge prepends the tools-system-prompt automatically
-    // when tools are advertised, so we don't split system-vs-user here.
-    let initial_messages = vec![serde_json::json!({
-        "role": "user",
-        "content": prompt,
-    })];
+    // when tools are advertised.
+    let initial_messages = vec![
+        serde_json::json!({ "role": "system", "content": HARNESS_GUIDE }),
+        serde_json::json!({ "role": "user", "content": prompt }),
+    ];
 
     // Drive the loop. The returned text is discarded — the LLM wrote via
-    // propose_* tools, which populated `buffer`. If the LLM emitted a final
-    // narrative it's not consumed here (see doc comment above).
-    let _final_text = run_with_tools(
+    // propose_* tools, which populated `buffer`. How the loop ended decides
+    // whether the pass falls back to single-shot (see the doc above).
+    let pass_started = std::time::Instant::now();
+    let harness = run_with_tools_outcome(
         &task.model_id,
         initial_messages,
         provider,
@@ -1404,7 +1676,60 @@ pub async fn run_interpretation_with_harness_and_model(
         emit_ctx.map(|ctx| ctx as &dyn crate::ai_service::harness::ToolObserver),
         credit_gate,
     )
-    .await?;
+    .await;
+    // A credit halt ends the pass: the fallback's completions would not pass
+    // the caller's credit gate. Nothing is written and no source is consumed.
+    let credit_halted = match &harness {
+        Ok(o) => o.end == crate::ai_service::harness::HarnessEnd::CreditHalted,
+        Err(e) => crate::ai_service::harness::is_credit_refusal(e),
+    };
+    if credit_halted {
+        let _ = buffer.drain();
+        let _ = flow_buffer.drain();
+        anyhow::bail!(
+            "run_interpretation_harness: the credit gate stopped the pass; nothing was \
+             written, and it does not fall back to single-shot"
+        );
+    }
+    let accepted = buffer.len() + flow_buffer.len();
+    let rejected = rejected.load(std::sync::atomic::Ordering::SeqCst);
+    if let Some(reason) = fallback_reason(&harness, accepted, rejected) {
+        // Nothing was written: the buffers are dropped, and the single-shot
+        // pass writes each row one time.
+        let dropped = buffer.drain().len();
+        let _ = flow_buffer.drain();
+        log::warn!(
+            "harness: falling back to single-shot: {reason}; dropped_proposals={dropped} \
+             model={} harness_ms={}",
+            task.model_id,
+            pass_started.elapsed().as_millis(),
+        );
+        return run_single_shot(
+            perspective,
+            shapes,
+            transcript,
+            base_prefix,
+            context,
+            dedup_strategy,
+            model_override,
+            scope,
+            cursor,
+            emit_debug_events,
+            emit_ctx,
+            flow_filter,
+            RUN_MODE_FALLBACK,
+            completions_for_fallback,
+        )
+        .await;
+    }
+    let harness = harness.expect("an error falls back above");
+    log::info!(
+        "harness: pass ended end={:?} tool_calls={}/{} harness_ms={}",
+        harness.end,
+        harness.tool_calls,
+        max_tool_calls,
+        pass_started.elapsed().as_millis(),
+    );
 
     // Drain the buffered ops. When `dedup_on_drain` is active (auto-processor
     // path), collapse duplicate Creates and filter stale AddLinks before
@@ -1415,6 +1740,7 @@ pub async fn run_interpretation_with_harness_and_model(
     } else {
         ops
     };
+    let ops = keep_content_outside_scope(ops, shapes, base_prefix, scope, &existing_ctx);
     // CI-visible diagnostic: pairs with the per-round log in `run_with_tools`.
     // When the harness silently returns zero bases it's almost always because
     // the LLM chose to answer instead of tool-calling, so the buffer is empty
@@ -1445,6 +1771,7 @@ pub async fn run_interpretation_with_harness_and_model(
         context,
         cursor,
         None,
+        Some(RUN_MODE_HARNESS),
         &flow_buffer.drain(),
         &flow_subjects,
         flow_filter,
@@ -1465,17 +1792,8 @@ pub async fn run_interpretation_with_harness_and_model(
         // loop; per-tool-call events carry the debug surface instead.
         debug: None,
         flow_proposals,
+        mode: RUN_MODE_HARNESS,
     })
-}
-
-/// Which AD4M tools a pass sees: the read tools generated for `offered` classes, by exact
-/// name. Not a name prefix: offered classes come from graph state neighbourhood peers write,
-/// and a class named `List` would otherwise admit the static `list_perspectives`.
-fn offered_class_tools(
-    offered: &[crate::mcp::shacl::ShaclClass],
-) -> impl Fn(&ToolSchema) -> bool + Send + Sync + 'static {
-    let names = crate::mcp::tools::Ad4mMcpHandler::class_tool_names(offered);
-    move |t: &ToolSchema| is_read_only(t) && names.contains(&t.name)
 }
 
 /// The MCP context of an interpretation pass on `perspective`. The pass runs in-process but
@@ -1506,9 +1824,9 @@ pub(crate) async fn pass_mcp_context(
         // fallback inside a pass is anonymous, never the operator.
         crate::agent::capabilities::ListenerReach::Network,
         // The harness bridge's `list_tool_schemas` includes the dynamic
-        // per-class tools only under this flag, and a pass takes the full
-        // generated surface before `offered_class_tools` narrows it.
-        // Set explicitly so the intent is visible at the construction site.
+        // per-class tools only under this flag. A pass narrows the surface to
+        // the walk tools (`WalkToolsProvider`); the flag stays on so the MCP
+        // context of a pass is the one its tests pin.
         true,
     )
     .scoped_to(&perspective.uuid)
@@ -1526,7 +1844,7 @@ pub(crate) async fn pass_mcp_context(
 ///   perspectives only, so the pass reaches no user's perspective.
 ///
 /// Either way the session may only query this perspective, so even a tool outside the pass's
-/// offered ones ([`offered_class_tools`]) would reach nothing else of the agent's. The pass
+/// offered ones ([`WalkToolsProvider`]) would reach nothing else of the agent's. The pass
 /// writes through its proposal buffer.
 ///
 /// [`Session::in_process`]: crate::agent::session::Session::in_process
@@ -1832,58 +2150,6 @@ mod pass_session_tests {
             assert!(!answer.contains(B_SECRET), "{tool} read B: {answer}");
             assert!(!answer.contains(&b.uuid), "{tool} named B: {answer}");
         }
-    }
-
-    /// A class with no properties, named `name`.
-    fn bare_class(name: &str) -> crate::mcp::shacl::ShaclClass {
-        crate::mcp::shacl::ShaclClass {
-            name: name.to_string(),
-            name_lower: name.to_lowercase(),
-            properties: vec![],
-            shape_uri: None,
-            all_predicates: vec![],
-        }
-    }
-
-    /// A read tool named `name`, as the filter sees it.
-    fn read_tool(name: &str) -> crate::ai_service::harness::provider::ToolSchema {
-        crate::ai_service::harness::provider::ToolSchema {
-            name: name.to_string(),
-            description: String::new(),
-            parameters: json!({}),
-            side_effect: crate::ai_service::harness::provider::SideEffect::Read,
-        }
-    }
-
-    // Offered classes come from SHACL in the perspective, shared graph state that
-    // neighbourhood peers write: a class named after a static tool's first word (`List`,
-    // `Query`, `Get`, `Instance`, ...) must not admit that static tool.
-    #[test]
-    fn an_offered_class_admits_its_own_tools_and_no_static_tool() {
-        let statics = Ad4mMcpHandler::static_tool_names();
-        assert!(statics.iter().any(|n| n == "list_perspectives"));
-        let mut words: Vec<&str> = statics.iter().filter_map(|n| n.split('_').next()).collect();
-        words.extend(["List", "Query", "Get"]);
-        for word in words {
-            let mut chars = word.chars();
-            let class_name: String = chars
-                .next()
-                .map(|c| c.to_uppercase().chain(chars).collect())
-                .unwrap_or_default();
-            let admits = offered_class_tools(&[bare_class(&class_name)]);
-            for name in &statics {
-                assert!(
-                    !admits(&read_tool(name)),
-                    "a class named `{class_name}` admits the static tool `{name}`"
-                );
-            }
-        }
-
-        let admits = offered_class_tools(&[bare_class("List")]);
-        for own in ["list_query", "list_list", "list_get"] {
-            assert!(admits(&read_tool(own)), "`{own}` is the class's own tool");
-        }
-        assert!(!admits(&read_tool("note_query")), "another class's tool");
     }
 
     // The pass reaches its own perspective, not the rest of its user's, even through a static
@@ -2601,6 +2867,7 @@ mod tests {
             uuid::Uuid::new_v4().to_string(),
             "1700000000000".to_string(),
             ctx,
+            None,
             None,
             None,
             &[],

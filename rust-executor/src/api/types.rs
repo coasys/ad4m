@@ -615,6 +615,13 @@ pub struct RunInterpretationRequest {
     #[serde(default)]
     #[ts(optional)]
     pub emit_debug_events: Option<bool>,
+    /// Tool-call cap of the pass (#1804). Absent: the tool-calling harness
+    /// with the executor's default cap. `0`: the single-shot path. `N`: the
+    /// harness with the cap `N`. A harness pass that ends without a usable
+    /// answer falls back to single-shot.
+    #[serde(default)]
+    #[ts(optional)]
+    pub max_tool_calls: Option<u32>,
 }
 
 /// Run harness-dispatched LLM interpretation over a transcript. Mirrors

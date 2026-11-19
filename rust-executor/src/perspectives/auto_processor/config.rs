@@ -214,12 +214,14 @@ pub struct AutoProcessorConfig {
     /// May differ from [`Self::existing_scope`] — a watcher can read from a
     /// broader subtree than it writes into, or vice-versa.
     pub mint_scope: Option<Scope>,
-    /// Interpretation-pass tool-call budget. `None` or `Some(0)` = the
-    /// original single-shot LLM path (no tools). `Some(N)` with `N > 0` =
-    /// engage the tool-calling harness (see [`crate::ai_service::harness`])
-    /// and let the LLM make up to `N` tool calls per pass before being
-    /// forced to answer. The cap prevents a stuck or adversarial model
-    /// from DoS'ing the extraction pass.
+    /// Interpretation-pass tool-call budget (#1804). `None` (absent) = the
+    /// tool-calling harness (see [`crate::ai_service::harness`]) with the cap
+    /// [`crate::perspectives::interpretation::DEFAULT_INTERPRETATION_TOOL_CALLS`].
+    /// `Some(0)` = the single-shot LLM path (no tools). `Some(N)` = the
+    /// harness with the cap `N`: the model makes up to `N` tool calls per
+    /// pass before it must answer. The cap prevents a stuck or adversarial
+    /// model from DoS'ing the extraction pass. A harness pass that ends
+    /// without a usable answer falls back to single-shot.
     pub max_tool_calls: Option<u32>,
     /// When `true`, enables full debug observability for this processor:
     /// 1. Persists the raw LLM prompt + response on the pass's
@@ -684,7 +686,8 @@ fn config_from_instance(instance: &serde_json::Value) -> Option<AutoProcessorCon
         None => None,
     };
 
-    // `maxToolCalls`: absent → `None` (single-shot, no harness). Present but
+    // `maxToolCalls`: absent → `None` (the harness with the default cap;
+    // `Some(0)` is single-shot, see `interpretation_tool_cap`). Present but
     // unparseable → bail like the other required-shape fields; silently
     // defaulting to "no tool calls" on a typo would mask the config bug.
     let max_tool_calls = match scalar("maxToolCalls") {

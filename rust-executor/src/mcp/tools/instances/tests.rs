@@ -733,6 +733,8 @@ async fn relation_targets_are_iri_gated_on_every_write_path() {
                     parent: None,
                     limit: None,
                     offset: None,
+                    order: None,
+                    fields: None,
                 }))
                 .await,
         )["count"]
@@ -1111,6 +1113,8 @@ async fn instance_tools_round_trip_typed_data() {
                 parent: None,
                 limit: None,
                 offset: None,
+                order: None,
+                fields: None,
             }))
             .await,
     );
@@ -1133,6 +1137,8 @@ async fn instance_tools_round_trip_typed_data() {
                 parent: Some(channel.clone()),
                 limit: None,
                 offset: None,
+                order: None,
+                fields: None,
             }))
             .await,
     );
@@ -1147,6 +1153,8 @@ async fn instance_tools_round_trip_typed_data() {
                 parent: None,
                 limit: None,
                 offset: None,
+                order: None,
+                fields: None,
             }))
             .await,
     );
@@ -1162,6 +1170,8 @@ async fn instance_tools_round_trip_typed_data() {
                 parent: None,
                 limit: Some(1),
                 offset: None,
+                order: None,
+                fields: None,
             }))
             .await,
     );
@@ -1177,6 +1187,8 @@ async fn instance_tools_round_trip_typed_data() {
                 parent: None,
                 limit: None,
                 offset: None,
+                order: None,
+                fields: None,
             }))
             .await,
     );
@@ -1262,6 +1274,8 @@ async fn instance_tools_round_trip_typed_data() {
                 parent: None,
                 limit: None,
                 offset: None,
+                order: None,
+                fields: None,
             }))
             .await,
     );
@@ -1278,6 +1292,8 @@ async fn instance_tools_round_trip_typed_data() {
                 parent: None,
                 limit: None,
                 offset: None,
+                order: None,
+                fields: None,
             }))
             .await,
     );
@@ -1664,6 +1680,7 @@ async fn add_child_and_get_children_are_class_agnostic() {
                 perspective_id: uuid.clone(),
                 parent: "my-room".into(),
                 limit: None,
+                via: None,
             }))
             .await,
     );
@@ -1688,6 +1705,7 @@ async fn add_child_and_get_children_are_class_agnostic() {
                 perspective_id: uuid.clone(),
                 parent: "my-room".into(),
                 limit: Some(1),
+                via: None,
             }))
             .await,
     );
@@ -1702,6 +1720,7 @@ async fn add_child_and_get_children_are_class_agnostic() {
                 perspective_id: uuid.clone(),
                 parent: wrapped_parent.clone(),
                 limit: None,
+                via: None,
             }))
             .await,
     );
@@ -1714,6 +1733,7 @@ async fn add_child_and_get_children_are_class_agnostic() {
                 perspective_id: uuid.clone(),
                 parent: "nobody-home".into(),
                 limit: None,
+                via: None,
             }))
             .await,
     );
@@ -1740,6 +1760,7 @@ async fn add_child_and_get_children_are_class_agnostic() {
                 perspective_id: uuid.clone(),
                 parent: "ad4m://self".into(),
                 limit: None,
+                via: None,
             }))
             .await,
     );
@@ -1924,6 +1945,8 @@ async fn legacy_literal_ids_round_trip_through_the_instance_tools() {
                 parent: Some("literal://string:my-channel".into()),
                 limit: None,
                 offset: None,
+                order: None,
+                fields: None,
             }))
             .await,
     );
@@ -2088,6 +2111,8 @@ async fn instance_query_clamps_an_oversized_limit_without_hiding_the_total() {
                         parent: None,
                         limit,
                         offset: None,
+                        order: None,
+                        fields: None,
                     }))
                     .await,
             )
@@ -2180,6 +2205,8 @@ async fn create_failing_after_the_subject_is_staged_leaves_no_instance() {
                 parent: None,
                 limit: None,
                 offset: None,
+                order: None,
+                fields: None,
             }))
             .await,
     );
@@ -3551,6 +3578,7 @@ async fn a_we_calls_blocks_are_its_children() {
                 perspective_id: uuid.clone(),
                 parent: call.clone(),
                 limit: None,
+                via: None,
             }))
             .await,
     );
@@ -3584,6 +3612,8 @@ async fn a_we_calls_blocks_are_its_children() {
                 parent: Some(call.clone()),
                 limit: None,
                 offset: None,
+                order: None,
+                fields: None,
             }))
             .await,
     );
@@ -3652,6 +3682,7 @@ async fn a_we_calls_blocks_are_its_children() {
                 perspective_id: uuid.clone(),
                 parent: plain.into(),
                 limit: None,
+                via: None,
             }))
             .await,
     );
@@ -4628,6 +4659,8 @@ async fn in_list_gates_instance_create() {
                 parent: None,
                 limit: None,
                 offset: None,
+                order: None,
+                fields: None,
             }))
             .await,
     )["count"]
@@ -5108,4 +5141,265 @@ async fn a_legacy_spelled_instance_is_updated_and_removed_where_it_is_stored() {
         .await
         .unwrap();
     assert!(left.is_empty(), "remove left the stored links: {left:?}");
+}
+
+// ---- Walk tools (#1804): `order`, `fields`, `via` ----
+
+/// A topic, and items that name their topic through a forward `hasOne`
+/// (`about`). No containment: the shape of the staging call graph.
+const WALK_TOPIC_SDNA: &str = r#"{
+  "target_class": "walk://Topic",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"rdf://type","target":"walk://Topic"}
+  ],
+  "properties": [
+    {"path":"walk://title","name":"title","datatype":"xsd:string","identity":true,"min_count":1,"max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"walk://title","target":"value"}]}
+  ]
+}"#;
+
+const WALK_ITEM_SDNA: &str = r#"{
+  "target_class": "walk://Item",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"rdf://type","target":"walk://Item"}
+  ],
+  "properties": [
+    {"path":"walk://item_title","name":"title","datatype":"xsd:string","identity":true,"min_count":1,"max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"walk://item_title","target":"value"}]},
+    {"path":"walk://about","name":"about","node_kind":"IRI","relation_kind":"hasOne","max_count":1,
+     "target_class_name":"Topic","writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"walk://about","target":"value"}]}
+  ]
+}"#;
+
+async fn create(
+    handler: &Ad4mMcpHandler,
+    uuid: &str,
+    class: &str,
+    values: &[(&str, Value)],
+) -> String {
+    let created = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: uuid.to_string(),
+                class_name: class.into(),
+                properties: Some(props(values)),
+                base_uri: None,
+                parent: None,
+            }))
+            .await,
+    );
+    assert_eq!(created["created"], true, "{created}");
+    // Distinct link timestamps, so the activity order is defined.
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    created["base_uri"].as_str().unwrap().to_string()
+}
+
+async fn query(
+    handler: &Ad4mMcpHandler,
+    uuid: &str,
+    class: &str,
+    order: Option<&str>,
+    fields: Option<&str>,
+    filter: Option<Map<String, Value>>,
+) -> Value {
+    parse(
+        &handler
+            .instance_query(Parameters(InstanceQueryParams {
+                perspective_id: uuid.to_string(),
+                class_name: class.into(),
+                filter,
+                parent: None,
+                limit: None,
+                offset: None,
+                order: order.map(str::to_string),
+                fields: fields.map(str::to_string),
+            }))
+            .await,
+    )
+}
+
+fn walk_ids(rows: &Value, key: &str) -> Vec<String> {
+    rows[key]
+        .as_array()
+        .unwrap_or_else(|| panic!("no {key} in {rows}"))
+        .iter()
+        .map(|r| r["id"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn get_children_via_relations_walks_declared_parent_links() {
+    let (handler, uuid, _guard) = setup_with(
+        &[("Topic", WALK_TOPIC_SDNA), ("Item", WALK_ITEM_SDNA)],
+        false,
+    )
+    .await;
+    let topic = create(&handler, &uuid, "Topic", &[("title", json!("Budget"))]).await;
+    let other = create(&handler, &uuid, "Topic", &[("title", json!("Hiring"))]).await;
+    let a = create(
+        &handler,
+        &uuid,
+        "Item",
+        &[
+            ("title", json!("Cut costs")),
+            ("about", json!(topic.clone())),
+        ],
+    )
+    .await;
+    let b = create(
+        &handler,
+        &uuid,
+        "Item",
+        &[
+            ("title", json!("Raise prices")),
+            ("about", json!(topic.clone())),
+        ],
+    )
+    .await;
+    let _c = create(
+        &handler,
+        &uuid,
+        "Item",
+        &[
+            ("title", json!("Post the job")),
+            ("about", json!(other.clone())),
+        ],
+    )
+    .await;
+
+    let children = |via: Option<&str>| {
+        let handler = &handler;
+        let uuid = uuid.clone();
+        let topic = topic.clone();
+        let via = via.map(str::to_string);
+        async move {
+            parse(
+                &handler
+                    .get_children(Parameters(GetChildrenParams {
+                        perspective_id: uuid,
+                        parent: topic,
+                        limit: None,
+                        via,
+                    }))
+                    .await,
+            )
+        }
+    };
+
+    // Containment: this graph has none, as on staging.
+    let held = children(None).await;
+    assert_eq!(held["total_count"], 0, "{held}");
+
+    // Relations: the two items that name the topic, oldest first, each with
+    // class, title and the relation.
+    let pointing = children(Some("relations")).await;
+    assert_eq!(
+        walk_ids(&pointing, "children"),
+        vec![a.clone(), b.clone()],
+        "{pointing}"
+    );
+    assert_eq!(pointing["children"][0]["class"], "Item");
+    assert_eq!(pointing["children"][0]["title"], "Cut costs");
+    assert_eq!(pointing["children"][0]["via"], "about");
+
+    // All: a containment child joins them, with its class and title.
+    let held_topic = create(&handler, &uuid, "Topic", &[("title", json!("Sub topic"))]).await;
+    let added = parse(
+        &handler
+            .add_child(Parameters(AddChildParams {
+                perspective_id: uuid.clone(),
+                parent: topic.clone(),
+                child: held_topic.clone(),
+            }))
+            .await,
+    );
+    assert_eq!(added["success"], true, "{added}");
+    let all = children(Some("all")).await;
+    assert_eq!(all["total_count"], 3, "{all}");
+    let sub = all["children"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == held_topic.as_str())
+        .unwrap_or_else(|| panic!("containment child missing: {all}"));
+    assert_eq!(sub["via"], "containment");
+    assert_eq!(sub["class"], "Topic");
+    assert_eq!(sub["title"], "Sub topic");
+
+    // A wrong `via` names the valid ones.
+    let bad = children(Some("sideways")).await;
+    assert!(
+        bad["error"]
+            .as_str()
+            .unwrap()
+            .contains("'containment', 'relations' or 'all'"),
+        "{bad}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn instance_query_orders_by_activity_and_returns_outline_rows() {
+    let (handler, uuid, _guard) = setup_with(
+        &[("Topic", WALK_TOPIC_SDNA), ("Item", WALK_ITEM_SDNA)],
+        false,
+    )
+    .await;
+    let first = create(&handler, &uuid, "Topic", &[("title", json!("First"))]).await;
+    let second = create(&handler, &uuid, "Topic", &[("title", json!("Second"))]).await;
+    let third = create(&handler, &uuid, "Topic", &[("title", json!("Third"))]).await;
+
+    let by_creation = query(&handler, &uuid, "Topic", Some("createdAt"), None, None).await;
+    assert_eq!(
+        walk_ids(&by_creation, "instances"),
+        vec![third.clone(), second.clone(), first.clone()]
+    );
+
+    // An item attaches to the first topic: it is now the most active.
+    let item = create(
+        &handler,
+        &uuid,
+        "Item",
+        &[
+            ("title", json!("Follow up")),
+            ("about", json!(first.clone())),
+        ],
+    )
+    .await;
+    let by_activity = query(&handler, &uuid, "Topic", Some("activity"), None, None).await;
+    assert_eq!(
+        walk_ids(&by_activity, "instances"),
+        vec![first.clone(), third.clone(), second.clone()],
+        "{by_activity}"
+    );
+
+    // Outline: id, title and the parent link, nothing else.
+    let outline = query(&handler, &uuid, "Item", None, Some("outline"), None).await;
+    let row = &outline["instances"][0];
+    assert_eq!(row["id"], item.as_str());
+    assert_eq!(row["title"], "Follow up");
+    assert_eq!(row["about"], first.as_str(), "{outline}");
+    assert_eq!(
+        row.as_object().unwrap().len(),
+        3,
+        "outline keys only: {row}"
+    );
+
+    // A filter on the relation walks to the rows that point to a node.
+    let pointing = query(
+        &handler,
+        &uuid,
+        "Item",
+        Some("activity"),
+        Some("outline"),
+        Some(props(&[("about", json!(first.clone()))])),
+    )
+    .await;
+    assert_eq!(walk_ids(&pointing, "instances"), vec![item.clone()]);
+
+    // Unknown keys are errors that name the valid ones.
+    let bad = query(&handler, &uuid, "Topic", Some("color"), None, None).await;
+    assert!(bad["error"].as_str().unwrap().contains("activity"), "{bad}");
+    let bad = query(&handler, &uuid, "Topic", None, Some("short"), None).await;
+    assert!(bad["error"].as_str().unwrap().contains("outline"), "{bad}");
 }

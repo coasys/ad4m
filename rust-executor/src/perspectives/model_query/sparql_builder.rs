@@ -165,6 +165,22 @@ pub(super) fn build_timestamp_probe(shape: &ModelShape, guard: LinkGuard) -> Str
     )
 }
 
+/// The pattern that binds `?_act_v` to the timestamp of each link that
+/// `?source` is the source of or the target of, for the `activity` order key
+/// ([`SortKey::Activity`]). The newest of them is the instance's last
+/// activity: its creation, its last change (`updatedAt`), or the last link
+/// that points to it (a row that attached to it). Only links the guard admits
+/// count.
+pub(super) fn build_activity_probe(guard: LinkGuard) -> String {
+    let rdf_reifies = "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies";
+    let ont_ts = "ad4m://ontology/timestamp";
+    let out_verified = guard.on_reifier("?_act_ro");
+    let in_verified = guard.on_reifier("?_act_ri");
+    format!(
+        "{{ ?source ?_act_op ?_act_ot . ?_act_ro <{rdf_reifies}> <<( ?source ?_act_op ?_act_ot )>> . ?_act_ro <{ont_ts}> ?_act_v .{out_verified} }}\n            UNION\n            {{ ?_act_is ?_act_ip ?source . ?_act_ri <{rdf_reifies}> <<( ?_act_is ?_act_ip ?source )>> . ?_act_ri <{ont_ts}> ?_act_v .{in_verified} }}"
+    )
+}
+
 /// The predicates of the links hydration reads for an instance, deduplicated
 /// and sorted. Empty means every predicate.
 ///
@@ -216,6 +232,10 @@ pub(super) fn build_instance_sparql(
             SortKey::Timestamp | SortKey::CreatedAt => match pg.direction {
                 OrderDirection::DESC => suffix.push_str("\n    ORDER BY DESC(?_first_ts)"),
                 OrderDirection::ASC => suffix.push_str("\n    ORDER BY ASC(?_first_ts)"),
+            },
+            SortKey::Activity => match pg.direction {
+                OrderDirection::DESC => suffix.push_str("\n    ORDER BY DESC(?_activity)"),
+                OrderDirection::ASC => suffix.push_str("\n    ORDER BY ASC(?_activity)"),
             },
             SortKey::Property(_) => {
                 let dir = match pg.direction {
@@ -290,6 +310,16 @@ pub(super) fn build_instance_sparql(
             {ts_probe}
 {conformance}
 {where_extra}
+        }} GROUP BY ?source{anchor_group}{pagination_suffix}"#
+                )
+            }
+            SortKey::Activity => {
+                let probe = build_activity_probe(guard);
+                format!(
+                    r#"SELECT DISTINCT ?source{anchor_select} (MAX(?_act_v) AS ?_activity) WHERE {{
+{conformance}
+{where_extra}
+            {probe}
         }} GROUP BY ?source{anchor_group}{pagination_suffix}"#
                 )
             }

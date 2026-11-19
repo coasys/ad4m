@@ -57,10 +57,18 @@ const EMBED_TURN_MAX_CHARS: usize = 1_000;
 
 /// Whether the prompt shows short handles or full ids. The single-shot path
 /// reads the model's answer back through [`Handles`], so it is compact. The
-/// harness path is not: its tools take full ids.
+/// harness path shows the seed ([`super::seed`]) in place of this block, so
+/// only tests build the full-id view, to compare the two.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Compact {
     Yes,
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "the harness shows the seed since #1804; tests compare"
+        )
+    )]
     No,
 }
 

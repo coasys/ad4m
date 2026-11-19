@@ -403,6 +403,7 @@ impl Ad4mMcpHandler {
     }
 
     /// The names of the static tools: every tool the router registers.
+    #[cfg(test)]
     pub(crate) fn static_tool_names() -> Vec<String> {
         Self::tool_router()
             .list_all()

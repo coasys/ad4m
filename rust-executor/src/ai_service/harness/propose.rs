@@ -176,9 +176,26 @@ pub struct ProposeWritesProvider<P: ToolProvider + ?Sized> {
     /// The pass owner (engine) passes its `base_prefix` here — matches the
     /// `plan_interpretation_ops_resolved` argument name.
     base_prefix: String,
+    /// Proposals refused at the call (validation failed). A pass whose
+    /// proposals were all refused did not write what it tried to.
+    rejected: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl<P: ToolProvider + ?Sized> ProposeWritesProvider<P> {
+    /// How many `_create` / `_propose_link_child` calls were refused.
+    pub fn rejected(&self) -> Arc<std::sync::atomic::AtomicUsize> {
+        self.rejected.clone()
+    }
+
+    /// Count a refused proposal.
+    fn counted(&self, result: Result<String>) -> Result<String> {
+        if result.is_err() {
+            self.rejected
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        result
+    }
+
     pub fn new(
         inner: Arc<P>,
         classes: Vec<ClassProposeShape>,
@@ -190,6 +207,7 @@ impl<P: ToolProvider + ?Sized> ProposeWritesProvider<P> {
             classes,
             buffer,
             base_prefix,
+            rejected: Arc::default(),
         }
     }
 }
@@ -227,7 +245,7 @@ where
         // could otherwise consume something like `<class>_link_child_
         // create` if we ever added it).
         if let Some(class_name) = strip_class_suffix(name, "_propose_link_child") {
-            return self.handle_propose_link_child(&class_name, args);
+            return self.counted(self.handle_propose_link_child(&class_name, args));
         }
         if let Some(class_name) = strip_class_suffix(name, "_create") {
             // `<class>_create` was previously named `<class>_propose_create`.
@@ -245,7 +263,7 @@ where
             // handler runs. `find_class` returns None for a prefix that
             // isn't a registered class, so we fall through cleanly.
             if self.find_class(&class_name).is_some() {
-                return self.handle_propose_create(&class_name, args);
+                return self.counted(self.handle_propose_create(&class_name, args));
             }
         }
         // `<class>_add_<relation>` alias family: gemma3:12b in CI job
@@ -299,7 +317,7 @@ where
                  instance, call `{lower}_propose_link_child` with `{lower}_uri` = the \
                  {class} URI, `predicate` = the relation IRI (e.g. `soa://{relation_tail}` \
                  if that matches the class definition), and `linked_uri` = the target URI. \
-                 Discover real URIs with the target class's `_query` tool first — \
+                 Find real URIs with `instance_query` or `get_children` first — \
                  never invent placeholder URIs.",
                 class = c.class_name
             ));
@@ -508,17 +526,17 @@ impl<P: ToolProvider + ?Sized> ProposeWritesProvider<P> {
         if let Some(bad) = placeholder_uri(&parent) {
             return Err(anyhow!(
                 "propose_link_child: `{source_field}` looks like a placeholder ({bad}). \
-                 Do NOT invent URIs. First call the class-specific `_query` tool \
-                 (e.g. `{lower_class}_query`) to discover real URIs, then pass the \
-                 URI returned by the query verbatim as `{source_field}`."
+                 Do NOT invent URIs. First call `instance_query` (or `get_children`) \
+                 to find real URIs, then pass the URI the tool returned verbatim \
+                 as `{source_field}`."
             ));
         }
         if let Some(bad) = placeholder_uri(&child) {
             return Err(anyhow!(
                 "propose_link_child: `linked_uri` looks like a placeholder ({bad}). \
-                 Do NOT invent URIs. First call the class-specific `_query` tool \
-                 for the target class to discover real URIs, then pass the URI \
-                 returned by the query verbatim as `linked_uri`."
+                 Do NOT invent URIs. First call `instance_query` (or `get_children`) \
+                 for the target class to find real URIs, then pass the URI \
+                 the tool returned verbatim as `linked_uri`."
             ));
         }
 
@@ -807,8 +825,8 @@ fn propose_link_child_schema(c: &ClassProposeShape) -> ToolSchema {
                 "type": "string",
                 "description": format!(
                     "URI of the `{class}` instance that OWNS the relation (SOURCE side of the link). \
-                     MUST be a real URI you already have on hand: either the URI returned by a \
-                     `{class_lower}_query` in this same pass (extract from its JSON `id`/`uri` field), \
+                     MUST be a real URI you already have on hand: either the URI returned by \
+                     `instance_query` or `get_children` in this same pass (its JSON `id` field), the seed, \
                      or the URI part of a `created: <URI>` response from `{class_lower}_create`. \
                      Do NOT copy schema-example placeholders like `<uri>` or `ad4m://obj/unknown` — \
                      those are rejected. Do NOT paste tool names or query text as URIs.",
@@ -819,7 +837,7 @@ fn propose_link_child_schema(c: &ClassProposeShape) -> ToolSchema {
             "predicate": predicate_schema,
             "linked_uri": {
                 "type": "string",
-                "description": "URI of the instance being linked TO via `predicate` (TARGET side of the link). Same URI-sourcing rules as the source-side field: use a URI returned by the target class's `_query` (JSON `id`/`uri`) or a URI from a prior `_create` in this same pass. NEVER invent or copy schema placeholders.",
+                "description": "URI of the instance being linked TO via `predicate` (TARGET side of the link). Same URI-sourcing rules as the source-side field: use a URI returned by `instance_query` or `get_children` (JSON `id`), or shown in the seed, or a URI from a prior `_create` in this same pass. NEVER invent or copy schema placeholders.",
             },
         },
         "required": [source_field.clone(), "predicate", "linked_uri"],
@@ -868,7 +886,7 @@ fn propose_link_child_schema(c: &ClassProposeShape) -> ToolSchema {
              **DIRECTION — READ CAREFULLY:** `{source_field}` MUST be the `{class}` (source of the link, the side that OWNS the relation). `linked_uri` MUST be the related instance (target of the link). Do NOT invert. Example: if `{class}` has relation `basedOn → Belief`, then `{source_field}` = the {class}'s URI, `linked_uri` = the Belief's URI.\n\
              \n\
              **Workflow — always in this order:**\n\
-             1. Call `_query` for each side to discover real URIs (or reuse a URI from a prior `_create` in this same pass).\n\
+             1. Find real URIs for each side with `instance_query` or `get_children` (or reuse a URI from a prior `_create` in this same pass).\n\
              2. Call this tool with those real URIs. Placeholders like `ad4m://obj/unknown` are rejected — the pass makes no progress if you invent URIs.{rel_hint}",
             class = c.class_name,
             source_field = source_field,

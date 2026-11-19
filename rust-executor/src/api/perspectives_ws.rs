@@ -1327,9 +1327,11 @@ async fn run_interpretation_handler(
     // `model_query_handler` / `evaluate_getters_handler`, but with a longer
     // budget appropriate for the interpretation pass (see
     // `RUN_INTERPRETATION_TIMEOUT_SECS`).
-    // Same per-slice link as the watcher. A later half that fails has
-    // already committed earlier halves, and this handler only links after
-    // `Ok`. The trailing link below stays, and skips an edge already written.
+    // Same per-slice link as the watcher, on the single-shot path (#1808).
+    // A later half that fails has already committed earlier halves, and this
+    // handler only links after `Ok`. The trailing link below stays, and skips
+    // an edge already written. The harness path has no split; it gets the
+    // trailing link only.
     let slice_link = body.mint_scope.as_ref().map(|mint_scope| {
         crate::perspectives::interpretation::SliceScopeLink {
             mint_scope,
@@ -1337,26 +1339,65 @@ async fn run_interpretation_handler(
             processor_id: "runInterpretation",
         }
     });
-    let bases = match tokio::time::timeout(
-        Duration::from_secs(RUN_INTERPRETATION_TIMEOUT_SECS),
-        crate::perspectives::interpretation::run_interpretation_observed_linked(
-            &mut perspective,
-            &shapes,
-            &transcript,
-            &body.base_prefix,
-            &agent_context,
-            // Existing-instance scope: when the caller supplies one,
-            // dedup lookup is restricted to instances under that subtree
-            // (same semantics as `AutoProcessorConfig.existingScope`).
-            // `None` keeps the whole-perspective dedup set — the
-            // pre-scope default that #883 originally added the plumbing for.
-            body.existing_scope.as_ref(),
-            emit_ctx.as_ref(),
-            slice_link.as_ref(),
-        ),
-    )
-    .await
-    {
+    // The harness by default, single-shot for `maxToolCalls: 0` (#1804), as
+    // the auto-processor decides.
+    let tool_cap =
+        crate::perspectives::interpretation::interpretation_tool_cap(body.max_tool_calls);
+    let timeout_secs = match tool_cap {
+        Some(_) => RUN_INTERPRETATION_HARNESS_TIMEOUT_SECS,
+        None => RUN_INTERPRETATION_TIMEOUT_SECS,
+    };
+    let pass = async {
+        match tool_cap {
+            Some(cap) => {
+                crate::perspectives::interpretation::run_interpretation_with_harness_and_model(
+                    &mut perspective,
+                    &shapes,
+                    &transcript,
+                    &body.base_prefix,
+                    &agent_context,
+                    None,
+                    body.existing_scope.as_ref(),
+                    None,
+                    cap,
+                    // The pass's tools act as the caller, as in
+                    // `runInterpretationWithHarness`.
+                    Some(ctx.session.clone()),
+                    emit_ctx.as_ref(),
+                    // Dedup on drain: the single-shot answer of this method
+                    // was always checked against all rows; the harness keeps that.
+                    true,
+                    Some(std::sync::Arc::new(WsHarnessCreditGate::new(
+                        ctx.user_did().map(str::to_string),
+                    ))),
+                    None,
+                    &crate::perspectives::interpretation::DedupStrategy::default(),
+                    false,
+                )
+                .await
+                .map(|outcome| outcome.bases)
+            }
+            None => {
+                crate::perspectives::interpretation::run_interpretation_observed_linked(
+                    &mut perspective,
+                    &shapes,
+                    &transcript,
+                    &body.base_prefix,
+                    &agent_context,
+                    // Existing-instance scope: when the caller supplies one,
+                    // dedup lookup is restricted to instances under that subtree
+                    // (same semantics as `AutoProcessorConfig.existingScope`).
+                    // `None` keeps the whole-perspective dedup set — the
+                    // pre-scope default that #883 originally added the plumbing for.
+                    body.existing_scope.as_ref(),
+                    emit_ctx.as_ref(),
+                    slice_link.as_ref(),
+                )
+                .await
+            }
+        }
+    };
+    let bases = match tokio::time::timeout(Duration::from_secs(timeout_secs), pass).await {
         Ok(Ok(bases)) => bases,
         Ok(Err(e)) => {
             // Both failure arms close the row before returning. A consumer that opened one on
@@ -1369,26 +1410,20 @@ async fn run_interpretation_handler(
             return Err(WsRpcError::internal(e.to_string()));
         }
         Err(_) => {
-            log::warn!(
-                "run_interpretation timed out after {}s",
-                RUN_INTERPRETATION_TIMEOUT_SECS
-            );
+            log::warn!("run_interpretation timed out after {timeout_secs}s");
             if let Some((id, did)) = observe {
                 emit_one_shot_abandoned(
                     &uuid,
                     id,
                     did,
-                    &format!("timed out after {RUN_INTERPRETATION_TIMEOUT_SECS}s"),
+                    &format!("timed out after {timeout_secs}s"),
                 )
                 .await;
             }
             return Err(WsRpcError {
                 data: None,
                 code: 408,
-                message: format!(
-                    "runInterpretation timed out after {}s",
-                    RUN_INTERPRETATION_TIMEOUT_SECS
-                ),
+                message: format!("runInterpretation timed out after {timeout_secs}s"),
             });
         }
     };
@@ -1581,16 +1616,19 @@ async fn run_interpretation_with_harness_handler(
             body.max_tool_calls,
             caller,
             emit_ctx.as_ref(),
-            // WS-RPC is the one-shot path — dedup-on-drain stays off; the
-            // caller reaches for the harness specifically to trust the LLM
-            // to `_query` before proposing. The auto-processor watcher is
-            // the caller that passes `true`.
-            false,
+            // Dedup on drain, as `runInterpretation` and the watcher: a
+            // same-title duplicate must not depend on whether the harness
+            // succeeded or fell back (Lal on #1812).
+            true,
             credit_gate,
             // Direct WS runs default to all flows on the perspective; a
             // `flows` request field can narrow this later (per-run flow
             // targeting, Nico 2026-09-04 — processor configs already have it).
             None,
+            // The single-shot fallback (#1804) uses the default dedup, as
+            // `runInterpretation` does, and no debug capture.
+            &crate::perspectives::interpretation::DedupStrategy::default(),
+            false,
         ),
     )
     .await
