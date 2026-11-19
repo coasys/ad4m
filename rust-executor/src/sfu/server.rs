@@ -15,6 +15,7 @@ use str0m::media::{
     KeyframeRequest, KeyframeRequestKind, MediaData, MediaKind, MediaTime, Mid, Rid,
 };
 use str0m::net::Protocol;
+use str0m::stats::PeerStats;
 use str0m::{net::Receive, Candidate, Event, IceConnectionState, Input, Output, Rtc, RtcError};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
@@ -93,6 +94,17 @@ pub struct SfuPeer {
     /// When media (RTP) from this peer last arrived, or `None`.
     /// See [`MEDIA_LIVE_WINDOW`].
     pub last_media_at: Option<Instant>,
+    /// The media byte counters of the last stats line, for its bitrates.
+    /// See [`PEER_STATS_INTERVAL`].
+    stats_last: Option<StatsSample>,
+}
+
+/// Media bytes in and out at one [`PeerStats`] event.
+#[derive(Debug, Clone, Copy)]
+struct StatsSample {
+    at: Instant,
+    bytes_rx: u64,
+    bytes_tx: u64,
 }
 
 /// One server offer waiting for its answer: the str0m token, and the exact
@@ -172,6 +184,11 @@ const OFFER_BACKOFF_RESENDS: u32 = 2;
 /// Wait between resends after the back-off, and after a `sfu.callResume`.
 const OFFER_RESEND_STEADY: Duration = Duration::from_secs(30);
 
+/// How often each client peer logs one stats line (str0m's `PeerStats`):
+/// bitrate and bytes in and out, loss each way, RTT, the simulcast layers it
+/// receives, and how long ago its media last arrived.
+pub const PEER_STATS_INTERVAL: Duration = Duration::from_secs(30);
+
 /// Media from a peer within this window counts as flowing.
 pub const MEDIA_LIVE_WINDOW: Duration = Duration::from_secs(10);
 
@@ -215,6 +232,7 @@ impl SfuPeer {
             drops_logged: HashSet::new(),
             write_errors_logged: HashSet::new(),
             last_media_at: None,
+            stats_last: None,
         }
     }
 
@@ -474,6 +492,78 @@ impl SfuPeer {
         pending.resends += 1;
         pending.next_deadline = now + OFFER_RESEND_STEADY;
         Some((pending.sdp.clone(), pending.track_mapping.clone()))
+    }
+
+    /// One info line from str0m's `PeerStats`: media bitrate in and out
+    /// since the last line (bytes in and out in total), loss each way, RTT,
+    /// the simulcast layer of each video track it receives (`-`: none
+    /// forwarded yet), its quality preference, and how long ago its media
+    /// last arrived.
+    fn stats_line(
+        &mut self,
+        stats: &PeerStats,
+        layers_in: &[Option<Rid>],
+        preference: Option<&str>,
+        now: Instant,
+    ) -> String {
+        let sample = StatsSample {
+            at: stats.timestamp,
+            bytes_rx: stats.bytes_rx,
+            bytes_tx: stats.bytes_tx,
+        };
+        let kbps = |bytes: u64, since: Duration| {
+            let secs = since.as_secs_f64();
+            if secs > 0.0 {
+                format!("{:.0}", bytes as f64 * 8.0 / 1000.0 / secs)
+            } else {
+                "-".to_string()
+            }
+        };
+        let (kbps_in, kbps_out) = match self.stats_last {
+            Some(last) => {
+                let since = sample.at.saturating_duration_since(last.at);
+                (
+                    kbps(sample.bytes_rx.saturating_sub(last.bytes_rx), since),
+                    kbps(sample.bytes_tx.saturating_sub(last.bytes_tx), since),
+                )
+            }
+            None => ("-".to_string(), "-".to_string()),
+        };
+        self.stats_last = Some(sample);
+        let percent = |loss: Option<f32>| match loss {
+            Some(fraction) => format!("{:.1}%", fraction * 100.0),
+            None => "-".to_string(),
+        };
+        let rtt = stats.rtt.or_else(|| {
+            stats
+                .selected_candidate_pair
+                .as_ref()
+                .and_then(|pair| pair.current_round_trip_time)
+        });
+        let mut layers: Vec<String> = layers_in
+            .iter()
+            .map(|rid| rid.map_or_else(|| "-".to_string(), |rid| rid.to_string()))
+            .collect();
+        layers.sort();
+        format!(
+            "SFU stats: peer {} ({}) room {} in {} kbit/s out {} kbit/s (total {} kB in, {} kB out) loss in {} out {} rtt {} layers [{}] pref {} media {}",
+            self.id,
+            self.agent_did,
+            self.room_id,
+            kbps_in,
+            kbps_out,
+            stats.bytes_rx / 1000,
+            stats.bytes_tx / 1000,
+            percent(stats.ingress_loss_fraction),
+            percent(stats.egress_loss_fraction),
+            rtt.map_or_else(|| "-".to_string(), |rtt| format!("{} ms", rtt.as_millis())),
+            layers.join(","),
+            preference.unwrap_or("auto"),
+            match self.last_media_at {
+                Some(at) => format!("{:.1} s ago", now.saturating_duration_since(at).as_secs_f64()),
+                None => "never".to_string(),
+            },
+        )
     }
 
     /// `now` reached the pending offer's deadline. One call publishes at
@@ -898,7 +988,9 @@ impl SfuServer {
         local_addr: SocketAddr,
         advertised: Option<SocketAddr>,
     ) -> Result<(Rtc, String), String> {
-        let mut rtc = Rtc::builder().build(Instant::now());
+        let mut rtc = Rtc::builder()
+            .set_stats_interval(Some(PEER_STATS_INTERVAL))
+            .build(Instant::now());
 
         let candidate = Candidate::host(local_addr, "udp")
             .map_err(|e| format!("Failed to create host candidate: {}", e))?;
@@ -1318,6 +1410,28 @@ impl SfuServer {
                                     );
                                     data_received.push((pid.clone(), payload));
                                 }
+                            }
+                            Event::PeerStats(stats) => {
+                                // The layer of each video track this peer receives.
+                                let layers_in: Vec<Option<Rid>> = peer
+                                    .tracks_out
+                                    .iter()
+                                    .filter(|(out_mid, _)| {
+                                        peer.rtc
+                                            .media(**out_mid)
+                                            .is_some_and(|media| media.kind().is_video())
+                                    })
+                                    .map(|(_, track)| layers.layer_of(pid, track))
+                                    .collect();
+                                info!(
+                                    "{}",
+                                    peer.stats_line(
+                                        &stats,
+                                        &layers_in,
+                                        quality_preferences.get(pid).map(String::as_str),
+                                        Instant::now(),
+                                    )
+                                );
                             }
                             Event::ChannelClose(cid) => {
                                 if let Some(label) = peer.channels.remove(&cid) {
@@ -2374,6 +2488,8 @@ mod tests {
         data: Vec<Duration>,
         channel: Option<ChannelId>,
         media: Vec<MediaData>,
+        /// `PeerStats` events, one per [`PEER_STATS_INTERVAL`] when enabled.
+        peer_stats: usize,
     }
 
     /// Feed `rtc` the clock, then drain it: events go to `seen`, packets
@@ -2396,6 +2512,7 @@ mod tests {
                 Output::Event(Event::ChannelOpen(id, _)) => seen.channel = Some(id),
                 Output::Event(Event::ChannelData(_)) => seen.data.push(now - start),
                 Output::Event(Event::MediaData(d)) => seen.media.push(d),
+                Output::Event(Event::PeerStats(_)) => seen.peer_stats += 1,
                 Output::Event(_) => {}
             }
         }
@@ -3553,6 +3670,81 @@ mod tests {
         assert_audio_writer(peer, mid);
         assert!(peer.resume_offer(resumed_at).is_none());
         assert!(peer.rtc.is_alive());
+    }
+
+    /// A client peer's `Rtc` reports `PeerStats` every 30 s, for the stats
+    /// line. Before, the SFU logged no bitrate, loss or layer per peer.
+    #[test]
+    fn a_client_peer_reports_its_stats_every_thirty_seconds() {
+        let (bind, caller_addr) = pair_addrs();
+        let (mut caller, mut peer) = connected_pair();
+        let start = Instant::now();
+        let (mut caller_seen, mut peer_seen) = (Seen::default(), Seen::default());
+        let mut sent = Vec::new();
+        let mut now = start;
+        while now - start < PEER_STATS_INTERVAL * 2 + Duration::from_secs(1) {
+            let caller_next = drive(&mut caller, now, start, &mut caller_seen, &mut sent);
+            for (source, destination, data) in sent.drain(..) {
+                if destination == bind {
+                    receive(&mut peer.rtc, now, source, destination, &data);
+                }
+            }
+            let peer_next = drive(&mut peer.rtc, now, start, &mut peer_seen, &mut sent);
+            for (source, destination, data) in sent.drain(..) {
+                if destination == caller_addr {
+                    receive(&mut caller, now, source, destination, &data);
+                }
+            }
+            now = caller_next.min(peer_next).clamp(
+                now + Duration::from_millis(1),
+                now + Duration::from_millis(50),
+            );
+        }
+        assert!(peer.rtc.is_alive());
+        assert_eq!(peer_seen.peer_stats, 2);
+    }
+
+    /// The stats line: bitrates since the previous line, totals, loss each
+    /// way, RTT, the layer of each video track received, the preference and
+    /// the media age.
+    #[test]
+    fn the_stats_line_names_bitrate_loss_rtt_layers_and_media_age() {
+        let (_caller, mut peer) = connected_pair();
+        let now = Instant::now();
+        peer.note_media(now);
+        let stats = |at: Instant, bytes_rx: u64, bytes_tx: u64| PeerStats {
+            peer_bytes_rx: bytes_rx,
+            peer_bytes_tx: bytes_tx,
+            bytes_rx,
+            bytes_tx,
+            timestamp: at,
+            bwe_tx: None,
+            egress_loss_fraction: Some(0.012),
+            ingress_loss_fraction: None,
+            rtt: Some(Duration::from_millis(34)),
+            selected_candidate_pair: None,
+        };
+        let first = peer.stats_line(&stats(now, 1_000_000, 3_000_000), &[], None, now);
+        assert!(
+            first.contains(&format!("peer {} (did:key:caller)", peer.id)),
+            "{first}"
+        );
+        assert!(first.contains("in - kbit/s out - kbit/s"), "{first}");
+        assert!(first.contains("total 1000 kB in, 3000 kB out"), "{first}");
+
+        let later = now + PEER_STATS_INTERVAL;
+        let line = peer.stats_line(
+            &stats(later, 1_000_000 + 3_000_000, 3_000_000 + 7_500_000),
+            &[Some(Rid::from("h")), None, Some(Rid::from("l"))],
+            Some("medium"),
+            later + Duration::from_millis(1500),
+        );
+        assert!(line.contains("in 800 kbit/s out 2000 kbit/s"), "{line}");
+        assert!(line.contains("loss in - out 1.2%"), "{line}");
+        assert!(line.contains("rtt 34 ms"), "{line}");
+        assert!(line.contains("layers [-,h,l]"), "{line}");
+        assert!(line.contains("pref medium"), "{line}");
+        assert!(line.contains("media 31.5 s ago"), "{line}");
     }
 
     /// No media, an unanswered offer, and ICE down: the ICE rules still end
