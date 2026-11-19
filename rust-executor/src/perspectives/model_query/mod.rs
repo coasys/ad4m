@@ -98,6 +98,8 @@ mod filtering;
 mod getters;
 mod hydration;
 #[cfg(test)]
+mod include_limit_tests;
+#[cfg(test)]
 mod integration_tests;
 mod link_author;
 #[cfg(test)]
