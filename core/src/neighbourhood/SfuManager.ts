@@ -428,8 +428,8 @@ export class SfuManager {
      *
      * Two budgets. At most `MAX_REBUILDS` rebuilds start within
      * `REBUILD_WINDOW_MS`; one more stops rebuilding and emits `error`, until
-     * the user joins again. Within one rebuild, a join that fails because the executor cannot be
-     * reached — a restart, an outage — is retried with backoff for up to
+     * the user joins again. Within one rebuild, a join that fails because
+     * the executor cannot be reached — a restart, an outage — is retried with backoff for up to
      * `REJOIN_WINDOW_MS`, so the call comes back on its own once it can.
      */
     private async reconnect(): Promise<void> {
@@ -821,10 +821,11 @@ export class SfuManager {
      * `UNLISTED_GRACE_MS`, read the room from the executor (`confirmUnlisted`)
      * and rebuild only if it does not list the session either; a roster that
      * lists it again in that time cancels, since one published just before
-     * this join landed can arrive after it. A manager with no session (between leave and join, or
-     * stopped because a later tab replaced it) starts no rebuild: `stop`
-     * clears the timer and drops `pc`, so a replaced session never rejoins
-     * and never takes the call back from the newer tab.
+     * this join landed can arrive after it. A manager with no session
+     * (between leave and join, or stopped because a later tab replaced it)
+     * starts no rebuild: `stop` clears the timer and drops `pc`, so a
+     * replaced session never rejoins and never takes the call back from the
+     * newer tab.
      */
     private noticeRoster(pc: RTCPeerConnection, sessions: SfuRosterParticipant[]): void {
         const participantId = this.state.participantId
