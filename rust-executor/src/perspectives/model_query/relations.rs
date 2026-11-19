@@ -170,12 +170,20 @@ pub(super) async fn resolve_includes_recursive(
             sub_query.include_unverified = include_unverified;
         }
 
-        // Checked here, where the include is recognised, rather than down in
-        // hydration: both resolvers return early when the relation holds no
-        // targets, so validating later would accept the query on an empty
-        // collection and reject the same query on a full one. Whether a request
-        // is answerable must not depend on the data it is asking about.
+        // A relation's declared `polymorphic` (carried in its shape as
+        // `ad4m://polymorphic`) is the default for its include, at every depth,
+        // as the SDK applies it at the top. An explicit value, `false` too, wins.
+        if sub_query.polymorphic.is_none() && rel.polymorphic {
+            sub_query.polymorphic = Some(true);
+        }
+
+        // Both checks are made here, where the include is recognised, rather
+        // than down in hydration: both resolvers return early when the relation
+        // holds no targets, so validating later would accept the query on an
+        // empty collection and reject the same query on a full one. Whether a
+        // request is answerable must not depend on the data it is asking about.
         reject_pagination_on_polymorphic(rel_name, &sub_query)?;
+        reject_untyped_without_polymorphic(rel, &sub_query)?;
 
         if rel.direction == "reverse" {
             resolve_reverse_include(stop, store, instances, rel, &sub_query, resolver, depth)
@@ -221,6 +229,27 @@ fn reject_pagination_on_polymorphic(
              polymorphic include, because the read runs one query per class present and a \
              limit would apply to each of them separately. Drop them and the relation's own \
              link order decides what survives, or read one class at a time."
+        ));
+    }
+    Ok(())
+}
+
+/// Refuse an include of an untyped relation that is not read polymorphically.
+///
+/// An untyped relation names no class, so there is no shape to hydrate its
+/// targets against. Unchecked, that surfaced as a shape lookup for the empty
+/// string, which failed the whole query with a message naming neither the
+/// relation nor the fix.
+fn reject_untyped_without_polymorphic(
+    rel: &ShapeRelation,
+    sub_query: &ModelQueryInput,
+) -> Result<(), Error> {
+    if rel.target_class_name.is_empty() && !sub_query.polymorphic.unwrap_or(false) {
+        return Err(anyhow!(
+            "include on relation '{}': the relation declares no target class, so its \
+             targets cannot be hydrated. Either give it a target, or read it with \
+             `polymorphic: true` to hydrate each target as the class it actually is.",
+            rel.name
         ));
     }
     Ok(())
@@ -666,18 +695,9 @@ async fn resolve_forward_include(
         )
         .await?;
     } else {
-        if rel.target_class_name.is_empty() {
-            // An untyped relation names no class, so there is no shape to
-            // hydrate its targets against. This used to surface as a shape
-            // lookup for the empty string, which failed the whole query with a
-            // message naming neither the relation nor the fix.
-            return Err(anyhow!(
-                "include on relation '{}': the relation declares no target class, so its \
-                 targets cannot be hydrated. Either give it a target, or read it with \
-                 `polymorphic: true` to hydrate each target as the class it actually is.",
-                rel.name
-            ));
-        }
+        // `resolve_includes_recursive` has refused an untyped relation that is
+        // not polymorphic (`reject_untyped_without_polymorphic`), so the target
+        // class named here is never empty.
         let target_shape = resolver.get_shape(&rel.target_class_name)?;
         if let Some(page) = &page {
             let parent_ids: Vec<String> = instances
@@ -879,17 +899,8 @@ async fn resolve_reverse_include(
             )
             .await?;
         } else {
-            if rel.target_class_name.is_empty() {
-                // Same shape of failure as the forward path, and the same fix:
-                // an untyped relation names no class, so there is nothing to
-                // hydrate its sources against.
-                return Err(anyhow!(
-                    "include on relation '{}': the relation declares no target class, so its \
-                     targets cannot be hydrated. Either give it a target, or read it with \
-                     `polymorphic: true` to hydrate each target as the class it actually is.",
-                    rel.name
-                ));
-            }
+            // As on the forward path: an untyped relation was refused by
+            // `reject_untyped_without_polymorphic`, so the class is never empty.
             let target_shape = resolver.get_shape(&rel.target_class_name)?;
             if let Some(page) = &page {
                 // The sources were read above over the same predicate and
