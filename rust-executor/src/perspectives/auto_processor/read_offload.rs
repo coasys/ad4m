@@ -5,7 +5,9 @@
 //! with [`Handle::block_on`] and holds one permit of [`READ_SLOTS`] until it
 //! returns. Claim waits, events, the model check and writes stay on the
 //! calling task. Dropping the tick cancels the parent token; each stage's
-//! gate watches that token, so the store read ends too.
+//! gate watches that token, so the store read ends too. A stage's deadline
+//! starts when that stage opens, after a read slot is held. Queue time and
+//! earlier stages do not spend it.
 //!
 //! The cap is two prepares at once, and never more than
 //! [`std::thread::available_parallelism`]. Two is a conservative starting
@@ -60,9 +62,9 @@ pub(crate) fn available_permits() -> usize {
 }
 
 /// The deadline for one prepare stage. Tests that have not set a global
-/// config still get the executor default of 30s. A test override for one
-/// stage does not shorten this: the parent gate uses it, and a short source
-/// deadline must not inherit time already spent on config or cursor.
+/// config still get the executor default of 30s. A per-stage test override
+/// replaces this for that stage only. The budget starts when the stage
+/// opens, after a read slot is held.
 fn auto_processor_query_deadline() -> Duration {
     let guard = crate::config::GLOBAL_AD4M_CONFIG
         .lock()
@@ -100,7 +102,7 @@ struct StageOpen {
 }
 
 impl StageOpen {
-    fn open(parent: &CancellationToken, parent_stop: &EvalStop, stage: Stage) -> Option<Self> {
+    fn open(parent: &CancellationToken, stage: Stage) -> Option<Self> {
         if reads_on_runtime() {
             let stop = EvalStop::none();
             let bound = BoundStop::bind(&stop);
@@ -110,7 +112,7 @@ impl StageOpen {
                 stop,
             });
         }
-        if parent.is_cancelled() || parent_stop.is_stopped() {
+        if parent.is_cancelled() {
             return None;
         }
         let gate = EvalGate::request(stage_deadline(stage), Some(parent.clone()));
@@ -172,8 +174,7 @@ pub(crate) async fn prepare_reads(
 ) -> PrepareOutcome {
     if reads_on_runtime() {
         let parent = CancellationToken::new();
-        let stop = EvalStop::none();
-        return prepare_inner(perspective, watcher, now_ms, &parent, &stop).await;
+        return prepare_inner(perspective, watcher, now_ms, &parent).await;
     }
 
     let slot = Arc::new(std::sync::Mutex::new(Some(std::mem::take(watcher))));
@@ -186,9 +187,8 @@ pub(crate) async fn prepare_reads(
     };
     let parent = CancellationToken::new();
     let _cancel = CancelOnDrop(parent.clone());
-    let parent_gate = EvalGate::request(auto_processor_query_deadline(), None);
-    let parent_stop = parent_gate.stop();
-
+    // The permit comes before any gate. A tick queued behind a full cap must
+    // not arm a watchdog, and must not spend its deadline while it waits.
     let permit = READ_SLOTS
         .clone()
         .acquire_owned()
@@ -197,7 +197,6 @@ pub(crate) async fn prepare_reads(
     let runtime = tokio::runtime::Handle::current();
     let perspective = perspective.clone();
     let parent_for_job = parent.clone();
-    let parent_stop_for_job = parent_stop.clone();
     let slot_for_job = slot.clone();
 
     let join = tokio::task::spawn_blocking(move || {
@@ -217,7 +216,6 @@ pub(crate) async fn prepare_reads(
                 &mut watcher,
                 now_ms,
                 &parent_for_job,
-                &parent_stop_for_job,
             ))
         }));
         *slot_for_job.lock().unwrap_or_else(|e| e.into_inner()) = Some(watcher);
@@ -253,8 +251,8 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
     }
 }
 
-fn job_cancelled(parent: &CancellationToken, parent_stop: &EvalStop) -> bool {
-    parent.is_cancelled() || parent_stop.is_stopped()
+fn job_cancelled(parent: &CancellationToken) -> bool {
+    parent.is_cancelled()
 }
 
 async fn prepare_inner(
@@ -262,10 +260,9 @@ async fn prepare_inner(
     watcher: &mut WatcherState,
     now_ms: i64,
     parent: &CancellationToken,
-    parent_stop: &EvalStop,
 ) -> PrepareOutcome {
     let uuid = perspective.uuid.clone();
-    if job_cancelled(parent, parent_stop) {
+    if job_cancelled(parent) {
         return PrepareOutcome::Finished(TickOutcome::Pending);
     }
     // Read before any query, so a write during one makes the next tick read again.
@@ -274,14 +271,14 @@ async fn prepare_inner(
     let configs = match watcher.reads.configs(generation) {
         Some(configs) => configs,
         None => {
-            let Some(stage) = StageOpen::open(parent, parent_stop, Stage::Config) else {
+            let Some(stage) = StageOpen::open(parent, Stage::Config) else {
                 return PrepareOutcome::Finished(TickOutcome::Pending);
             };
             match load_processors_stopped(perspective, stage.stop()).await {
                 Ok(configs) => watcher.reads.set_configs(generation, configs),
                 Err(err) => {
                     log::warn!("auto_processor_tick [{uuid}]: load_processors failed: {err:#}");
-                    if job_cancelled(parent, parent_stop) {
+                    if job_cancelled(parent) {
                         return PrepareOutcome::Finished(TickOutcome::Pending);
                     }
                     return PrepareOutcome::Finished(if watcher.has_pending() {
@@ -298,13 +295,13 @@ async fn prepare_inner(
     }
 
     for cfg in configs.iter() {
-        if job_cancelled(parent, parent_stop) {
+        if job_cancelled(parent) {
             return PrepareOutcome::Finished(TickOutcome::Pending);
         }
         let processed_rows = match watcher.reads.processed(&cfg.processor_id, generation) {
             Some(rows) => rows,
             None => {
-                let Some(stage) = StageOpen::open(parent, parent_stop, Stage::Cursor) else {
+                let Some(stage) = StageOpen::open(parent, Stage::Cursor) else {
                     return PrepareOutcome::Finished(TickOutcome::Pending);
                 };
                 match load_processed_sources_stopped(perspective, &cfg.processor_id, stage.stop())
@@ -318,7 +315,7 @@ async fn prepare_inner(
                             "auto_processor `{}` [{uuid}]: load_processed_source_ids failed: {err:#}",
                             cfg.processor_id
                         );
-                        if job_cancelled(parent, parent_stop) {
+                        if job_cancelled(parent) {
                             return PrepareOutcome::Finished(TickOutcome::Pending);
                         }
                         // A cursor failure skips this config before `retain_pending`.
@@ -336,7 +333,7 @@ async fn prepare_inner(
         watcher.retain_pending(&cfg.processor_id, |turn| {
             queueable(&turn.id, &turn.timestamp)
         });
-        if job_cancelled(parent, parent_stop) {
+        if job_cancelled(parent) {
             return PrepareOutcome::Finished(TickOutcome::Pending);
         }
 
@@ -358,7 +355,7 @@ async fn prepare_inner(
 
         // The record loop stays under this gate on a cache hit, so a long
         // record can still be cancelled.
-        let Some(stage) = StageOpen::open(parent, parent_stop, Stage::Source) else {
+        let Some(stage) = StageOpen::open(parent, Stage::Source) else {
             return PrepareOutcome::Finished(TickOutcome::Pending);
         };
         let transcript = match (kept, delta) {
@@ -379,14 +376,14 @@ async fn prepare_inner(
                              tick failed: {err:#}",
                             cfg.processor_id
                         );
-                        if job_cancelled(parent, parent_stop) {
+                        if job_cancelled(parent) {
                             return PrepareOutcome::Finished(TickOutcome::Pending);
                         }
                         continue;
                     }
                 };
-                let Some(gained) = hash_turns(&gained, parent, parent_stop, stage.stop()) else {
-                    if job_cancelled(parent, parent_stop) {
+                let Some(gained) = hash_turns(&gained, parent, stage.stop()) else {
+                    if job_cancelled(parent) {
                         return PrepareOutcome::Finished(TickOutcome::Pending);
                     }
                     log::warn!(
@@ -402,7 +399,7 @@ async fn prepare_inner(
                 {
                     Ok(turns) => turns,
                     Err(()) => {
-                        if job_cancelled(parent, parent_stop) {
+                        if job_cancelled(parent) {
                             return PrepareOutcome::Finished(TickOutcome::Pending);
                         }
                         log::warn!(
@@ -427,14 +424,14 @@ async fn prepare_inner(
                             "auto_processor `{}` [{uuid}]: gather_transcript_sparql failed: {err:#}",
                             cfg.processor_id
                         );
-                        if job_cancelled(parent, parent_stop) {
+                        if job_cancelled(parent) {
                             return PrepareOutcome::Finished(TickOutcome::Pending);
                         }
                         continue;
                     }
                 };
-                let Some(gained) = hash_turns(&gained, parent, parent_stop, stage.stop()) else {
-                    if job_cancelled(parent, parent_stop) {
+                let Some(gained) = hash_turns(&gained, parent, stage.stop()) else {
+                    if job_cancelled(parent) {
                         return PrepareOutcome::Finished(TickOutcome::Pending);
                     }
                     log::warn!(
@@ -449,7 +446,7 @@ async fn prepare_inner(
                 {
                     Ok(turns) => turns,
                     Err(()) => {
-                        if job_cancelled(parent, parent_stop) {
+                        if job_cancelled(parent) {
                             return PrepareOutcome::Finished(TickOutcome::Pending);
                         }
                         log::warn!(
@@ -463,7 +460,7 @@ async fn prepare_inner(
         };
 
         for (i, turn) in transcript.iter().enumerate() {
-            if i % 32 == 0 && (job_cancelled(parent, parent_stop) || stage.stop().is_stopped()) {
+            if i % 32 == 0 && (job_cancelled(parent) || stage.stop().is_stopped()) {
                 // Partial records stay. The next tick records the rest from
                 // the kept transcript. Do not drain this one.
                 return PrepareOutcome::Finished(TickOutcome::Pending);
@@ -484,7 +481,7 @@ async fn prepare_inner(
     if !had_pending {
         return PrepareOutcome::Finished(TickOutcome::Idle);
     }
-    if job_cancelled(parent, parent_stop) {
+    if job_cancelled(parent) {
         return PrepareOutcome::Finished(TickOutcome::Pending);
     }
     PrepareOutcome::Drain(configs)
@@ -493,12 +490,11 @@ async fn prepare_inner(
 fn hash_turns(
     turns: &[crate::perspectives::interpretation::TranscriptTurn],
     parent: &CancellationToken,
-    parent_stop: &EvalStop,
     stop: &EvalStop,
 ) -> Option<Vec<PendingTurn>> {
     let mut out = Vec::with_capacity(turns.len());
     for (i, turn) in turns.iter().enumerate() {
-        if i % 32 == 0 && (job_cancelled(parent, parent_stop) || stop.is_stopped()) {
+        if i % 32 == 0 && (job_cancelled(parent) || stop.is_stopped()) {
             return None;
         }
         out.push(PendingTurn::from_transcript(turn));
@@ -553,9 +549,22 @@ pub(crate) mod probe {
         hold: Hold,
         panic_stage: Option<Stage>,
         deadline: Option<(Stage, Duration)>,
+        /// The first parked query of each stage holds. Later queries of that
+        /// stage return at once, so a per-stage budget can still finish.
+        hold_once: bool,
     }
 
     static SPEC: Mutex<Option<Spec>> = Mutex::new(None);
+    /// Stages that have already taken their one hold. Reset by [`install`].
+    static HELD_ONCE: Mutex<[bool; 3]> = Mutex::new([false; 3]);
+
+    fn stage_slot(stage: Stage) -> usize {
+        match stage {
+            Stage::Config => 0,
+            Stage::Cursor => 1,
+            Stage::Source => 2,
+        }
+    }
 
     pub(crate) struct Guard;
 
@@ -567,12 +576,7 @@ pub(crate) mod probe {
         }
     }
 
-    pub(crate) fn install(
-        park: Park,
-        hold: Hold,
-        panic_stage: Option<Stage>,
-        deadline: Option<(Stage, Duration)>,
-    ) -> Guard {
+    fn install_spec(spec: Spec) -> Guard {
         CURRENT.store(0, Ordering::Release);
         PEAK.store(0, Ordering::Release);
         ENTERED.store(0, Ordering::Release);
@@ -585,14 +589,39 @@ pub(crate) mod probe {
         *HOLD_START.lock().unwrap_or_else(|e| e.into_inner()) = None;
         *HOLD_END.lock().unwrap_or_else(|e| e.into_inner()) = None;
         *QUERY_THREAD.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        *SPEC.lock().unwrap_or_else(|e| e.into_inner()) = Some(Spec {
+        *HELD_ONCE.lock().unwrap_or_else(|e| e.into_inner()) = [false; 3];
+        *SPEC.lock().unwrap_or_else(|e| e.into_inner()) = Some(spec);
+        PROBE_ON.store(true, Ordering::Release);
+        Guard
+    }
+
+    pub(crate) fn install(
+        park: Park,
+        hold: Hold,
+        panic_stage: Option<Stage>,
+        deadline: Option<(Stage, Duration)>,
+    ) -> Guard {
+        install_spec(Spec {
             park,
             hold,
             panic_stage,
             deadline,
-        });
-        PROBE_ON.store(true, Ordering::Release);
-        Guard
+            hold_once: false,
+        })
+    }
+
+    /// Park the first query of each stage. Later queries of that stage return.
+    pub(crate) fn install_holding_each_stage_once(
+        hold: Hold,
+        deadline: Option<(Stage, Duration)>,
+    ) -> Guard {
+        install_spec(Spec {
+            park: Park::All,
+            hold,
+            panic_stage: None,
+            deadline,
+            hold_once: true,
+        })
     }
 
     pub(crate) fn set_pass() {
@@ -712,8 +741,8 @@ pub(crate) mod probe {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .as_ref()
-            .map(|spec| (spec.park, spec.hold, spec.panic_stage));
-        let Some((park, hold, panic_stage)) = spec else {
+            .map(|spec| (spec.park, spec.hold, spec.panic_stage, spec.hold_once));
+        let Some((park, hold, panic_stage, hold_once)) = spec else {
             return Ok(());
         };
         if panic_stage == Some(stage) {
@@ -725,6 +754,14 @@ pub(crate) mod probe {
         };
         if !parked {
             return Ok(());
+        }
+        if hold_once {
+            let mut held = HELD_ONCE.lock().unwrap_or_else(|e| e.into_inner());
+            let slot = stage_slot(stage);
+            if held[slot] {
+                return Ok(());
+            }
+            held[slot] = true;
         }
 
         enter_hold();

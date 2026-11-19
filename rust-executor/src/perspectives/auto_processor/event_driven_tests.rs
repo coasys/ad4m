@@ -1567,6 +1567,113 @@ async fn a_source_read_deadline_does_not_keep_a_partial_transcript() {
     deadline_then_queues(super::read_offload::Stage::Source, "deadline-source").await;
 }
 
+/// Restores the previous global query deadline, including an unset config.
+struct QueryDeadline {
+    prev: Option<crate::config::Ad4mConfig>,
+}
+
+impl QueryDeadline {
+    fn secs(secs: u64) -> Self {
+        let mut slot = crate::config::GLOBAL_AD4M_CONFIG
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let prev = slot.clone();
+        let mut config = prev.clone().unwrap_or_default();
+        config.query_deadline_secs = Some(secs);
+        *slot = Some(config);
+        Self { prev }
+    }
+}
+
+impl Drop for QueryDeadline {
+    fn drop(&mut self) {
+        let mut slot = crate::config::GLOBAL_AD4M_CONFIG
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *slot = self.prev.clone();
+    }
+}
+
+/// A tick waiting for a read slot must still queue its turn once a slot
+/// frees. The deadline starts when the stage opens, after the permit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_queued_prepare_does_not_spend_its_deadline_waiting_for_a_slot() {
+    use super::read_offload::probe::{self, Hold, Park};
+    use super::read_offload::{available_permits, read_slot_count};
+
+    let _deadline = QueryDeadline::secs(1);
+    let cap = read_slot_count();
+    let mut holders = Vec::new();
+    for i in 0..cap {
+        holders.push(one_turn(&format!("queue-hold-{i}")).await);
+    }
+    let (victim_p, victim_ctx, victim_now) = one_turn("queue-victim").await;
+    let _guard = probe::install(
+        Park::All,
+        Hold::UntilRelease {
+            limit: Duration::from_secs(8),
+        },
+        None,
+        None,
+    );
+    let mut tasks = Vec::new();
+    for (p, ctx, now_ms) in holders {
+        tasks.push(tokio::spawn(async move {
+            let mut watcher = WatcherState::new();
+            p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
+        }));
+    }
+    assert!(
+        wait_until(
+            || probe::current() == cap && available_permits() == 0,
+            Duration::from_secs(5)
+        )
+        .await,
+        "the read slots did not fill: current {} permits {}",
+        probe::current(),
+        available_permits()
+    );
+    let victim = tokio::spawn(async move {
+        let mut watcher = WatcherState::new();
+        victim_p
+            .run_auto_processor_tick(&mut watcher, victim_now, &victim_ctx)
+            .await;
+        watcher
+    });
+    // Longer than the 1s deadline, so a gate armed before the permit fires
+    // while this tick is still queued.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    probe::set_pass();
+    let watcher = tokio::time::timeout(Duration::from_secs(5), victim)
+        .await
+        .expect("victim tick ends")
+        .expect("victim task");
+    assert_eq!(pending_texts(&watcher, "queue-victim"), vec!["hello"]);
+    for task in tasks {
+        let _ = tokio::time::timeout(Duration::from_secs(5), task).await;
+    }
+}
+
+/// Time spent on an earlier stage does not come out of a later stage's
+/// deadline. Each stage's budget starts when that stage opens.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn earlier_stage_reads_do_not_spend_a_later_stage_deadline() {
+    use super::read_offload::probe::{self, Hold};
+
+    let _deadline = QueryDeadline::secs(2);
+    let (p, ctx, now_ms) = one_turn("stage-budget").await;
+    let _guard =
+        probe::install_holding_each_stage_once(Hold::Timed(Duration::from_millis(1500)), None);
+    let mut watcher = WatcherState::new();
+    tokio::time::timeout(
+        Duration::from_secs(8),
+        p.run_auto_processor_tick(&mut watcher, now_ms, &ctx),
+    )
+    .await
+    .expect("tick ends");
+    assert_eq!(pending_texts(&watcher, "stage-budget"), vec!["hello"]);
+}
+
 /// A panic in the read is a failed tick. The watcher comes back, and the next
 /// tick still queues the turn.
 #[tokio::test]
