@@ -20,7 +20,7 @@
 
 use deno_core::anyhow::{anyhow, Error};
 use serde_json::Value;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use super::query::{execute_model_query_inner, order_fully_pushable};
 use super::sparql_builder::{all_where_pushable, verified_link_exists};
@@ -393,6 +393,11 @@ async fn hydrate_polymorphic(
     // candidate until a query returns it or none is left, so it is read as the
     // class the admitted links support rather than dropped.
     let preferred = sub_query.prefer_classes.as_deref().unwrap_or(&[]);
+    // The caller adds the `id` restriction; any other key is the include's own.
+    let has_user_where = sub_query
+        .where_clause
+        .as_ref()
+        .is_some_and(|wc| wc.keys().any(|k| k != "id"));
     let mut pending: Vec<(String, Vec<String>)> = Vec::new();
     for id in target_ids {
         match classes.get(id).map(|names| candidates(names, preferred)) {
@@ -473,10 +478,55 @@ async fn hydrate_polymorphic(
             }
         }
 
-        // Not returned under its class: try the next one.
-        pending = pending
+        // Not returned under its class: try the next one, unless the include's
+        // own `where` is what excluded it. The same read with only the `id`
+        // restriction tells the two apart: a target it returns conforms under
+        // this read and failed the `where`, so it stays excluded rather than
+        // being read as a less specific class the `where` may not reach.
+        let mut dropped: Vec<(String, Vec<String>)> = pending
             .into_iter()
             .filter(|(id, _)| !hydrated.contains_key(id))
+            .collect();
+        if !dropped.is_empty() && has_user_where {
+            let mut by_class: BTreeMap<String, Vec<String>> = BTreeMap::new();
+            for (id, cands) in &dropped {
+                by_class
+                    .entry(cands[0].clone())
+                    .or_default()
+                    .push(id.clone());
+            }
+            let mut excluded_by_where: HashSet<String> = HashSet::new();
+            for (class_name, ids) in by_class {
+                let Ok(target_shape) = resolver.get_shape(&class_name) else {
+                    continue;
+                };
+                let mut id_query = sub_query.clone();
+                id_query.where_clause = Some(BTreeMap::from([(
+                    "id".to_string(),
+                    WhereCondition::StringArray(ids),
+                )]));
+                id_query.limit = None;
+                id_query.offset = None;
+                let result = Box::pin(execute_model_query_inner(
+                    stop,
+                    store,
+                    target_shape.as_ref(),
+                    &id_query,
+                    resolver,
+                    depth + 1,
+                ))
+                .await?;
+                excluded_by_where.extend(
+                    result
+                        .instances
+                        .iter()
+                        .filter_map(|inst| inst["id"].as_str().map(str::to_string)),
+                );
+            }
+            dropped.retain(|(id, _)| !excluded_by_where.contains(id));
+        }
+        pending = dropped
+            .into_iter()
             .filter_map(|(id, mut cands)| {
                 cands.remove(0);
                 (!cands.is_empty()).then_some((id, cands))

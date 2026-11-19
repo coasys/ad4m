@@ -442,3 +442,53 @@ async fn polymorphic_target_admitted_by_the_read_keeps_its_specific_class() {
         expected
     );
 }
+
+/// `items` read under `linkStatus: SHARED` with `where` on `kind`, which only
+/// `Special` declares, as `(top level, nested)` results.
+async fn items_where(cond: Value) -> (Vec<(String, String)>, Vec<(String, String)>) {
+    let (resolver, holder, shelf) = status_shapes();
+    let store = status_world();
+    let items = json!({ "where": { "kind": cond } });
+    let top = q(json!({ "linkStatus": "SHARED", "include": { "items": items } }));
+    let top = super::query::execute_model_query(&store, holder.as_ref(), &top, &resolver)
+        .await
+        .unwrap();
+    let nested = q(json!({ "linkStatus": "SHARED",
+        "include": { "holder": { "include": { "items": items } } } }));
+    let nested = super::query::execute_model_query(&store, shelf.as_ref(), &nested, &resolver)
+        .await
+        .unwrap();
+    (
+        item_classes(&top.instances[0]["items"]),
+        item_classes(&nested.instances[0]["holder"]["items"]),
+    )
+}
+
+/// A target the include's own `where` excludes under its class stays excluded:
+/// it is not read again as a less specific class, where `kind` is not a
+/// property and a negated condition would pass. `t/2` is `Special` through
+/// admitted links and fails `not`; `t/1` and `t/3` are `Base` under this read,
+/// so the condition holds for them.
+#[tokio::test]
+async fn polymorphic_target_excluded_by_where_is_not_read_as_another_class() {
+    let expected = pairs(&[("we://t/1", "Base"), ("we://t/3", "Base")]);
+    let (top, nested) = items_where(json!({ "not": "we://special" })).await;
+    assert_eq!(
+        (top, nested),
+        (expected.clone(), expected),
+        "(top level, nested)"
+    );
+}
+
+/// Control: equality on the same property keeps the one target whose admitted
+/// links satisfy it, as its specific class.
+#[tokio::test]
+async fn polymorphic_where_equality_keeps_the_matching_target() {
+    let expected = pairs(&[("we://t/2", "Special")]);
+    let (top, nested) = items_where(json!("we://special")).await;
+    assert_eq!(
+        (top, nested),
+        (expected.clone(), expected),
+        "(top level, nested)"
+    );
+}
