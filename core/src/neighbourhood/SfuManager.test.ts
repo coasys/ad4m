@@ -2553,3 +2553,92 @@ test("a resume the socket fails (503) changes nothing: the next reconnect asks a
     expect(api.sfuCallJoin).toHaveBeenCalledTimes(1)
     await manager.leave()
 })
+
+// ── Round 2: one room read at a time ────────────────────────────────────────
+
+test("room reads before a rebuild do not overlap: triggers while one is out share it, and the call is rebuilt once", async () => {
+    fakeTimers()
+    try {
+        const api = fakeApi()
+        const read = deferred<SfuRoomInfo[]>()
+        api.sfuListRooms.mockImplementation(() => read.promise)
+        api.sfuCallResume.mockRejectedValue(new RpcError(404, "Unknown type: sfu.callResume"))
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream())
+
+        api.emitRoster(roster([ALICE], {}, { withoutMe: true }))
+        await flush()
+        await jest.advanceTimersByTimeAsync(3_000)
+        expect(api.sfuListRooms).toHaveBeenCalledTimes(1)
+        // While that read is out: another roster without this session, and a refused resume.
+        api.emitRoster(roster([ALICE, BOB], {}, { withoutMe: true }))
+        api.emitReconnect()
+        await jest.advanceTimersByTimeAsync(3_000)
+        expect(api.sfuListRooms).toHaveBeenCalledTimes(1)
+
+        read.resolve([room([pid(ALICE), ALICE])])
+        await jest.advanceTimersByTimeAsync(1_000)
+        expect(api.sfuCallLeave).toHaveBeenCalledTimes(1)
+        expect(api.sfuCallJoin).toHaveBeenCalledTimes(2)
+        await manager.leave()
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
+test("a room read that answers after a roster listed this session again rebuilds nothing, and the next unlisted roster reads again", async () => {
+    fakeTimers()
+    try {
+        const api = fakeApi()
+        const first = deferred<SfuRoomInfo[]>()
+        api.sfuListRooms.mockImplementationOnce(() => first.promise).mockResolvedValue([room([MINE, ME])])
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream())
+
+        api.emitRoster(roster([ALICE], {}, { withoutMe: true }))
+        await flush()
+        await jest.advanceTimersByTimeAsync(3_000)
+        api.emitRoster(roster([ALICE, ME]))
+        await flush()
+        first.resolve([])
+        await jest.advanceTimersByTimeAsync(0)
+        expect(api.sfuCallLeave).not.toHaveBeenCalled()
+
+        api.emitRoster(roster([ALICE], {}, { withoutMe: true }))
+        await flush()
+        await jest.advanceTimersByTimeAsync(3_000)
+        expect(api.sfuListRooms).toHaveBeenCalledTimes(2)
+        expect(api.sfuCallLeave).not.toHaveBeenCalled()
+        await manager.leave()
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
+test("a room read from before a rebuild is not used for the rebuilt session", async () => {
+    fakeTimers()
+    try {
+        const api = fakeApi()
+        const old = deferred<SfuRoomInfo[]>()
+        api.sfuListRooms.mockImplementationOnce(() => old.promise).mockResolvedValue([room([MINE, ME])])
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream())
+        api.emitRoster(roster([ALICE], {}, { withoutMe: true }))
+        await flush()
+        await jest.advanceTimersByTimeAsync(3_000)
+
+        await iceState("failed")
+        expect(api.sfuCallJoin).toHaveBeenCalledTimes(2)
+        api.emitRoster(roster([ALICE], {}, { withoutMe: true }))
+        await flush()
+        await jest.advanceTimersByTimeAsync(3_000)
+        old.resolve([])
+        await jest.advanceTimersByTimeAsync(0)
+
+        expect(api.sfuListRooms).toHaveBeenCalledTimes(2)
+        expect(api.sfuCallJoin).toHaveBeenCalledTimes(2)
+        await manager.leave()
+    } finally {
+        jest.useRealTimers()
+    }
+})

@@ -380,8 +380,10 @@ export class SfuManager {
     private networkUnsubscribe: (() => void) | null = null
     /** Running while the room's roster leaves this session out: see `noticeRoster`. */
     private unlistedTimer: ReturnType<typeof setTimeout> | null = null
-    /** The room read that follows that grace, while it is out; a roster listing this session drops it. */
+    /** The latest wish to confirm this session is gone (`confirmUnlisted`); a roster listing it drops it. */
     private unlistedCheck: object | null = null
+    /** The room read in flight: every confirmation while it is out waits for this one. */
+    private roomRead: Promise<SfuRoomInfo[]> | null = null
     /** How long the roster may leave this session out before the call is rebuilt. */
     private static readonly UNLISTED_GRACE_MS = 3_000
     /** How long after the socket is back ICE has to be connected before it is restarted. */
@@ -818,6 +820,8 @@ export class SfuManager {
         this.rosterUnsubscribe?.()
         this.rosterUnsubscribe = null
         this.clearUnlistedTimer()
+        // A read from before this join says nothing about the next one's session.
+        this.roomRead = null
     }
 
     private clearUnlistedTimer(): void {
@@ -870,9 +874,14 @@ export class SfuManager {
         this.unlistedCheck = check
         const stillOurs = () =>
             this.unlistedCheck === check && this.state.peerConnection === pc && this.state.participantId === participantId
-        if (this.neighbourhood.sfuListRooms) {
+        const listRooms = this.neighbourhood.sfuListRooms?.bind(this.neighbourhood)
+        if (listRooms) {
             try {
-                const rooms = await this.neighbourhood.sfuListRooms()
+                // One read at a time: only the newest wish (`check`) acts on its answer.
+                const read = (this.roomRead ??= listRooms().finally(() => {
+                    if (this.roomRead === read) this.roomRead = null
+                }))
+                const rooms = await read
                 if (!stillOurs()) return
                 const room = rooms.find((r) => r.neighbourhoodUrl === this.neighbourhoodUrl && r.roomName === this.roomId)
                 if (room?.participants.some((p) => p.participantId === participantId)) {
