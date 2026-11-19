@@ -219,6 +219,7 @@ import type { SfuParticipantQualityPreference } from "./SfuParticipantQualityPre
 import type { SfuPerspectiveParams } from "./SfuPerspectiveParams";
 import type { SfuQualityPreferenceParams } from "./SfuQualityPreferenceParams";
 import type { SfuRestartIceParams } from "./SfuRestartIceParams";
+import type { SfuResumeParams } from "./SfuResumeParams";
 import type { SfuRoomInfo } from "./SfuRoomInfo";
 import type { SfuRoomParams } from "./SfuRoomParams";
 import type { SfuSendDataParams } from "./SfuSendDataParams";
@@ -460,6 +461,7 @@ export interface RpcMethods {
   "sfu.callJoin": { params: SfuCallJoinParams; result: CallSessionInfo };
   "sfu.callLeave": { params: SfuCallLeaveParams; result: boolean };
   "sfu.callRestartIce": { params: SfuRestartIceParams; result: boolean };
+  "sfu.callResume": { params: SfuResumeParams; result: boolean };
   "sfu.callSetQualityPreference": { params: SfuQualityPreferenceParams; result: boolean };
   "sfu.cascadeStatus": { params: Record<string, never>; result: SfuCascadeStatus };
   "sfu.ensureMembership": { params: SfuEnsureMembershipParams; result: boolean };

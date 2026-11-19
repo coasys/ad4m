@@ -313,7 +313,9 @@ per-node capacity only drives redirects; the server drops a peer after
 (`sfu.callRestartIce`), 15 s after the request. The restart's answer ends
 that grace and the 10 s disconnect clock starts again. An unanswered server
 offer is resent at 10 s and 30 s, then every 30 s, and never drops the peer
-(#1802 dropped it at 70 s, also while its media flowed);
+(#1802 dropped it at 70 s, also while its media flowed); `sfu.callResume`
+(the session's `participantId`) sends the pending offer and the roster again
+at once, for a client whose socket came back;
 on ICE `disconnected` or a network change the SDK restarts ICE in place (the
 SFU stays the only offerer: the restart comes as a server renegotiation
 offer), and rebuilds the call if that has not reconnected within 15 s; a

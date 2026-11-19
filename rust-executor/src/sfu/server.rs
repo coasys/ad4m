@@ -169,7 +169,7 @@ const OFFER_RETRY_BASE: Duration = Duration::from_secs(10);
 /// Resends that back off from [`OFFER_RETRY_BASE`] before the steady wait.
 const OFFER_BACKOFF_RESENDS: u32 = 2;
 
-/// Wait between resends after the back-off.
+/// Wait between resends after the back-off, and after a `sfu.callResume`.
 const OFFER_RESEND_STEADY: Duration = Duration::from_secs(30);
 
 /// Media from a peer within this window counts as flowing.
@@ -461,6 +461,21 @@ impl SfuPeer {
         });
     }
 
+    /// The client asked for its call state again (`sfu.callResume`), e.g.
+    /// after its socket came back: an offer published meanwhile may never
+    /// have reached it. Returns the pending offer's SDP and mapping to
+    /// publish at once, or `None` when no offer waits. The resend counts as
+    /// one, so the next deadline resend comes [`OFFER_RESEND_STEADY`] later.
+    pub fn resume_offer(
+        &mut self,
+        now: Instant,
+    ) -> Option<(String, Vec<crate::sfu::TrackMapEntry>)> {
+        let pending = self.pending.as_mut()?;
+        pending.resends += 1;
+        pending.next_deadline = now + OFFER_RESEND_STEADY;
+        Some((pending.sdp.clone(), pending.track_mapping.clone()))
+    }
+
     /// `now` reached the pending offer's deadline. One call publishes at
     /// most one resend and moves the deadline, so repeated ticks at the
     /// same instant publish once. The token stays pending across resends,
@@ -604,6 +619,9 @@ pub enum SfuCommand {
     /// network change. The SFU offers new ICE credentials through the
     /// server-offer path; the client answers with `ApplyServerAnswer`.
     RestartIce { participant_id: ParticipantId },
+    /// The client's socket came back (`sfu.callResume`): publish the pending
+    /// server offer, if any, again at once.
+    Resume { participant_id: ParticipantId },
     /// Query the quality preferences map.  Returns a snapshot via
     /// oneshot so callers outside the event loop can read it.
     GetQualityPreferences {
@@ -1135,6 +1153,31 @@ impl SfuServer {
                         }
                         info!("SFU: peer {} asked for an ICE restart", participant_id);
                         peer.restart_ice(Instant::now());
+                    }
+                    Ok(SfuCommand::Resume { participant_id }) => {
+                        let Some(peer) = peers.get_mut(&participant_id) else {
+                            debug!("SFU: Resume for unknown participant {}", participant_id);
+                            continue;
+                        };
+                        if peer.is_pipe {
+                            warn!("SFU: Resume for pipe {} ignored", participant_id);
+                            continue;
+                        }
+                        match peer.resume_offer(Instant::now()) {
+                            Some((sdp, track_mapping)) => {
+                                info!(
+                                    "SFU: peer {} resumed; pending offer sent again",
+                                    participant_id
+                                );
+                                publish_renegotiation_offer(
+                                    peer,
+                                    &participant_id,
+                                    sdp,
+                                    track_mapping,
+                                );
+                            }
+                            None => info!("SFU: peer {} resumed; no offer pending", participant_id),
+                        }
                     }
                     Ok(SfuCommand::GetQualityPreferences { reply }) => {
                         let _ = reply.send(quality_preferences.clone());
@@ -3470,6 +3513,46 @@ mod tests {
             assert!(!peers[&pid].stayed_disconnected(at));
         }
         assert_eq!(peers[&pid].pending.as_ref().unwrap().sdp, sdp);
+    }
+
+    /// `sfu.callResume` while an offer waits: the pending offer goes out
+    /// again at once, the same SDP and mapping, and the next deadline resend
+    /// waits 30 s from the resume. Without a pending offer it sends nothing.
+    #[test]
+    fn a_resume_sends_the_pending_offer_at_once() {
+        let (mut caller, mut peer) = connected_pair();
+        let now = Instant::now();
+        assert!(peer.resume_offer(now).is_none(), "no offer waits");
+        let (sdp, mapping, mid) = offer_outbound_audio(&mut peer, now);
+        peer.note_media(now);
+        let pid = peer.id.clone();
+        let mut peers = HashMap::from([(pid.clone(), peer)]);
+        let resent = sweep_offer_deadlines(&mut peers, now + OFFER_RETRY_BASE);
+        assert_eq!(resent.len(), 1);
+
+        let resumed_at = now + Duration::from_secs(95);
+        let peer = peers.get_mut(&pid).unwrap();
+        let (resumed_sdp, resumed_mapping) =
+            peer.resume_offer(resumed_at).expect("the offer waits");
+        assert_eq!(resumed_sdp, sdp);
+        assert_same_mapping(&resumed_mapping, &mapping);
+        assert!(sweep_offer_deadlines(&mut peers, resumed_at).is_empty());
+        assert!(sweep_offer_deadlines(
+            &mut peers,
+            resumed_at + OFFER_RESEND_STEADY - Duration::from_millis(1)
+        )
+        .is_empty());
+        assert_eq!(
+            sweep_offer_deadlines(&mut peers, resumed_at + OFFER_RESEND_STEADY).len(),
+            1
+        );
+
+        let peer = peers.get_mut(&pid).unwrap();
+        peer.accept_server_answer(&answer_json(&mut caller, &resumed_sdp))
+            .unwrap();
+        assert_audio_writer(peer, mid);
+        assert!(peer.resume_offer(resumed_at).is_none());
+        assert!(peer.rtc.is_alive());
     }
 
     /// No media, an unanswered offer, and ICE down: the ICE rules still end
