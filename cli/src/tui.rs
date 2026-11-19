@@ -19,8 +19,6 @@ use ad4m_client::connect::normalize_base_url;
 use ad4m_client::types::{AgentStatus, LinkExpression, PerspectiveHandle, RuntimeInfo};
 use ad4m_client::Ad4mClient;
 use anyhow::{Context, Result};
-use we_ad4m::SpaceRow;
-use we_tui::KeyResult as SpaceKeyResult;
 use crossterm::{
     cursor::{Hide, Show},
     event::{
@@ -38,13 +36,15 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
     Frame, Terminal,
 };
+use we_ad4m::SpaceRow;
+use we_tui::KeyResult as SpaceKeyResult;
 
 const REFRESH: Duration = Duration::from_secs(2);
 /// How often the input loop looks for a key while a refresh is in flight.
 const INPUT_SLICE: Duration = Duration::from_millis(50);
 const LINK_LIMIT: i64 = 200;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Screen {
     Status,
     Perspectives,
@@ -730,7 +730,15 @@ async fn drive(
 /// screen it returns to is fully usable.
 fn open_space(client: &Ad4mClient, model: &mut Model, row: SpaceRow) {
     let conn = tui_space::connection(client);
-    match tui_space::open(&conn, row) {
+    open_space_as(model, row, |row| tui_space::open(&conn, row));
+}
+
+fn open_space_as(
+    model: &mut Model,
+    row: SpaceRow,
+    assemble: impl FnOnce(SpaceRow) -> Result<SpaceApp, String>,
+) {
+    match assemble(row) {
         Ok(space) => {
             model.space = Some(space);
             model.needs_clear = true;
@@ -1009,6 +1017,7 @@ mod tests {
     use ad4m_client::types::{
         ExpressionProof, Link, Neighbourhood, NeighbourhoodExpression, Perspective,
     };
+    use std::sync::Arc;
 
     fn proof() -> ExpressionProof {
         ExpressionProof {
@@ -1020,6 +1029,15 @@ mod tests {
     }
 
     fn perspective(name: Option<&str>, uuid: &str, neighbourhood: bool) -> PerspectiveHandle {
+        perspective_shared(name, uuid, neighbourhood, None)
+    }
+
+    fn perspective_shared(
+        name: Option<&str>,
+        uuid: &str,
+        neighbourhood: bool,
+        shared_url: Option<&str>,
+    ) -> PerspectiveHandle {
         PerspectiveHandle {
             name: name.map(str::to_string),
             neighbourhood: neighbourhood.then(|| NeighbourhoodExpression {
@@ -1031,7 +1049,7 @@ mod tests {
                 proof: proof(),
                 timestamp: "2026-11-18T00:00:00Z".to_string(),
             }),
-            shared_url: None,
+            shared_url: shared_url.map(str::to_string),
             uuid: uuid.to_string(),
             state: None,
         }
@@ -1236,6 +1254,148 @@ mod tests {
             assert!(inflight.is_none(), "quit must drop the in-flight refresh");
             assert!(tx.is_closed());
         }
+    }
+
+    #[test]
+    fn open_coasys_uses_filtered_selection() {
+        let mut model = Model::new("http://127.0.0.1:1".to_string());
+        model.screen = Screen::Perspectives;
+        model.perspectives = vec![
+            perspective(Some("Local"), "local-1", false),
+            perspective_shared(Some("Town"), "nh-1", true, Some("perspective://nh-1")),
+        ];
+        // With the neighbourhood filter on, the visible row is the shared one.
+        model.neighbourhoods_only = true;
+        handle_key(
+            &mut model,
+            &KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE),
+        );
+        let row = model
+            .requested_open
+            .take()
+            .expect("o requests the visible row");
+        assert_eq!(row.uuid, "nh-1");
+        assert_eq!(row.name, "Town");
+        assert_eq!(row.shared_url.as_deref(), Some("perspective://nh-1"));
+
+        // An empty filtered list requests nothing.
+        model.perspectives = vec![perspective(Some("Local"), "local-1", false)];
+        handle_key(
+            &mut model,
+            &KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE),
+        );
+        assert!(model.requested_open.is_none());
+
+        // Enter still opens the links screen for the selected row.
+        model.neighbourhoods_only = false;
+        handle_key(
+            &mut model,
+            &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        assert_eq!(model.screen, Screen::Links);
+        assert_eq!(model.open_uuid.as_deref(), Some("local-1"));
+
+        // 'o' away from the perspectives screen does nothing.
+        handle_key(
+            &mut model,
+            &KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE),
+        );
+        assert!(model.requested_open.is_none());
+    }
+
+    #[tokio::test]
+    async fn coasys_back_preserves_admin_state() {
+        let (url, _server) = crate::tui_space::silent_ws_server().await;
+        let conn = we_ad4m::Connection::open(tokio::runtime::Handle::current(), &url, "")
+            .await
+            .unwrap();
+        let mut model = Model::new(url);
+        model.screen = Screen::Perspectives;
+        model.perspectives = vec![
+            perspective(Some("Local"), "local-1", false),
+            perspective(Some("Town"), "nh-1", true),
+        ];
+        model.selected = 1;
+        model.loaded_at = Some(Instant::now());
+
+        let row = model.selected_space().unwrap();
+        open_space_as(&mut model, row, |row| crate::tui_space::open(&conn, row));
+        let stats = model.space.as_ref().unwrap().source.clone();
+        assert!(model.space.is_some());
+        assert!(!should_start_refresh(&model, false), "refresh is suspended");
+        assert!(model.stale(), "opening drops an in-flight result");
+
+        // F10: back to the same admin screen, selection kept.
+        handle_key(
+            &mut model,
+            &KeyEvent::new(KeyCode::F(10), KeyModifiers::NONE),
+        );
+        assert!(model.space.is_none());
+        assert_eq!(model.selected, 1);
+        assert!(
+            should_start_refresh(&model, false),
+            "back on the admin screen resumes its refresh"
+        );
+        // The view's handle on the source is gone — the subscriptions its
+        // `stops` senders held are released when it drops.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            Arc::strong_count(&stats),
+            1,
+            "the space's subscriptions are released on drop"
+        );
+
+        // Back in: the same space reopens, the same row stays selected.
+        let row = model.selected_space().unwrap();
+        open_space_as(&mut model, row, |row| crate::tui_space::open(&conn, row));
+        assert_eq!(model.space.as_ref().unwrap().space.uuid, "nh-1");
+        close_space(&mut model);
+        assert_eq!(model.selected, 1);
+    }
+
+    #[tokio::test]
+    async fn coasys_pending_load_still_exits() {
+        // The peer answers nothing — live-member reads and $queries stay
+        // pending — yet F10 and Ctrl-C still work.
+        let (url, _server) = crate::tui_space::silent_ws_server().await;
+        let conn = we_ad4m::Connection::open(tokio::runtime::Handle::current(), &url, "")
+            .await
+            .unwrap();
+        let row = SpaceRow {
+            uuid: "pending".to_string(),
+            name: "pending".to_string(),
+            shared_url: None,
+        };
+        let mut model = Model::new(url);
+        model.space = Some(crate::tui_space::open(&conn, row.clone()).unwrap());
+        model.space.as_mut().unwrap().app.session.poll();
+        assert!(key_quits(
+            &KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            model.space.is_some()
+        ));
+        handle_key(
+            &mut model,
+            &KeyEvent::new(KeyCode::F(10), KeyModifiers::NONE),
+        );
+        assert!(model.space.is_none());
+
+        // A failed open leaves the admin UI exactly as usable as before.
+        open_space_as(&mut model, row, |_| Err("assembly broke".to_string()));
+        assert!(model.space.is_none());
+        assert_eq!(
+            model.error.as_deref(),
+            Some("Coasys view failed: assembly broke")
+        );
+        handle_key(
+            &mut model,
+            &KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE),
+        );
+        assert_eq!(model.screen, Screen::Perspectives);
+        handle_key(
+            &mut model,
+            &KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE),
+        );
+        assert_eq!(model.screen, Screen::Status);
     }
 
     #[tokio::test]

@@ -14,7 +14,7 @@
 use std::sync::Arc;
 
 use we_ad4m::live::{LiveMap, LiveMembers};
-use we_ad4m::{Ad4mQuerySource, Connection, SpaceBinding, SpaceRow, SourceStats};
+use we_ad4m::{Ad4mQuerySource, Connection, SourceStats, SpaceBinding, SpaceRow};
 use we_data::{OfflineData, Provenance, StoreMap};
 use we_expr::{Namespace, Value};
 use we_screen::{ScreenSchema, ScreenState};
@@ -177,11 +177,7 @@ pub fn open(conn: &Connection, space: SpaceRow) -> Result<SpaceApp, String> {
     let spec = AppSpec {
         bundle: bundle.name.clone().into(),
         app: bundle.app.clone(),
-        template: bundle
-            .templates
-            .as_deref()
-            .and_then(|t| t.first())
-            .cloned(),
+        template: bundle.templates.as_deref().and_then(|t| t.first()).cloned(),
         pages: bundle.pages.clone().unwrap_or_default(),
         boot: bundle.boot_screen.clone(),
     };
@@ -205,9 +201,7 @@ pub fn open(conn: &Connection, space: SpaceRow) -> Result<SpaceApp, String> {
         provenance: data.provenance.clone(),
         live_members,
         bag: data.bag.clone(),
-        notices: vec![
-            "read-only view — writes and calls are dropped, not sent".to_string(),
-        ],
+        notices: vec!["read-only view — writes and calls are dropped, not sent".to_string()],
         dropped_seen: 0,
         first_frame_open: false,
         _live: live,
@@ -230,7 +224,12 @@ impl SpaceApp {
         let Some(host) = self.app.session.host_as::<StaticHost>() else {
             return Vec::new();
         };
-        let fresh: Vec<String> = host.dropped.iter().skip(self.dropped_seen).cloned().collect();
+        let fresh: Vec<String> = host
+            .dropped
+            .iter()
+            .skip(self.dropped_seen)
+            .cloned()
+            .collect();
         self.dropped_seen = host.dropped.len();
         fresh
     }
@@ -262,18 +261,371 @@ pub fn space_row(perspective: &ad4m_client::types::PerspectiveHandle) -> SpaceRo
             .clone()
             .filter(|n| !n.is_empty())
             .unwrap_or_else(|| perspective.uuid.clone()),
-        shared_url: perspective
-            .shared_url
-            .clone()
-            .filter(|u| !u.is_empty()),
+        shared_url: perspective.shared_url.clone().filter(|u| !u.is_empty()),
     }
 }
 
 /// `Connection` over the CLI's already-authenticated socket — the brief's
 /// one-line adapter. The token stays inside the shared client.
 pub fn connection(client: &ad4m_client::Ad4mClient) -> Connection {
-    Connection::new(
-        tokio::runtime::Handle::current(),
-        client.ws().clone(),
-    )
+    Connection::new(tokio::runtime::Handle::current(), client.ws().clone())
+}
+
+/// Test peer: a WebSocket upgrade that then answers nothing — the client
+/// connects, every RPC stays pending.
+#[cfg(test)]
+pub(crate) async fn silent_ws_server() -> (String, tokio::task::JoinHandle<()>) {
+    use futures::StreamExt;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let task = tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                if let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await {
+                    while let Some(Ok(_)) = ws.next().await {}
+                }
+            });
+        }
+    });
+    (format!("http://127.0.0.1:{port}"), task)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ClapApp, Domain};
+    use std::collections::HashSet;
+    use we_template::{HandlerToken, ResolvedChild, ResolvedNode};
+
+    fn tui_args(url: &str, admin: Option<&str>) -> ClapApp {
+        ClapApp {
+            domain: Domain::Tui,
+            no_capability: admin.is_none(),
+            executor_url: Some(url.to_string()),
+            admin_credential: admin.map(str::to_string),
+            allow_insecure_remote: false,
+        }
+    }
+
+    /// The adapter the `o` screen uses must be the CLI client's socket
+    /// itself — `Arc::ptr_eq` is the check, through the real
+    /// `get_ad4m_client` so the transport guard stays in the path.
+    #[tokio::test]
+    async fn coasys_reuses_guarded_socket() {
+        // This test drives `get_ad4m_client`, so it shares the transport
+        // probe with `client_transport_tests` — serialize against them.
+        let _lock = crate::login::transport_probe::token_dir_lock().await;
+        let (url, _server) = silent_ws_server().await;
+        let args = tui_args(&url, None);
+        let (client, _) = crate::get_ad4m_client(&args, &args.domain)
+            .await
+            .expect("guarded client connects to the loopback peer");
+        let conn = connection(&client);
+        assert!(
+            Arc::ptr_eq(client.ws(), conn.ws()),
+            "the space adapter must share the guarded socket, not dial again"
+        );
+        assert!(conn.is_connected());
+
+        // A refused executor never gets as far as a socket for the adapter
+        // to reuse — the plaintext guard still answers first.
+        let refused = tui_args("http://203.0.113.55:9", Some("not-a-real-secret"));
+        let err = crate::get_ad4m_client(&refused, &refused.domain)
+            .await
+            .err()
+            .expect("remote plaintext stays refused");
+        assert!(err.to_string().contains("plaintext"), "{err}");
+    }
+
+    /// First `$invoke`-carrying handler of each node, pre-order — a caller
+    /// picks a target the bag cannot answer.
+    fn invoke_nodes(root: &ResolvedNode) -> Vec<(we_template::NodeId, String, String)> {
+        let mut out = Vec::new();
+        for (name, handler) in &root.handlers {
+            for token in &handler.tokens {
+                if let HandlerToken::Invoke { target, .. } = token {
+                    out.push((root.id.clone(), name.to_string(), target.clone()));
+                    break;
+                }
+            }
+        }
+        for child in &root.children {
+            if let ResolvedChild::Node(node) = child {
+                out.extend(invoke_nodes(node));
+            }
+        }
+        out
+    }
+
+    /// The connected document carries the bundle's allowlist plus the
+    /// connected-mode facts — and nothing recorded.
+    #[test]
+    fn coasys_reads_connected_document() {
+        let doc: serde_json::Value = serde_json::from_str(CONNECTED).unwrap();
+        assert_eq!(
+            doc["queries"].as_object().unwrap().len(),
+            0,
+            "no recorded queries"
+        );
+        assert_eq!(
+            doc["invokes"].as_object().unwrap().len(),
+            0,
+            "no recorded invokes"
+        );
+        let allowed: HashSet<String> = [
+            "themeStore.builtInThemes",
+            "themeStore.currentThemeId",
+            "templateStore.brand",
+            "recordStore.displays",
+            "sessionStore.bootState",
+            "sessionStore.signInStep",
+            "identityStore.needsFirstRun",
+            "spaceStore.canAdministerCurrentSpace",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+        for (store, members) in doc["stores"].as_object().unwrap() {
+            for member in members.as_object().unwrap().keys() {
+                let path = format!("{store}.{member}");
+                assert!(allowed.contains(&path), "unlisted member recorded: {path}");
+            }
+        }
+        assert_eq!(
+            doc["stores"]["spaceStore"]["canAdministerCurrentSpace"], false,
+            "the view is read-only from the first frame"
+        );
+        assert_eq!(
+            doc["stores"]["sessionStore"]["bootState"],
+            serde_json::json!("ready")
+        );
+    }
+
+    /// `o` navigates the assembled session at `/space/<uuid>` — the same
+    /// route `we-app` gives the space screen.
+    #[tokio::test]
+    async fn coasys_open_uses_uuid_route() {
+        let (url, _server) = silent_ws_server().await;
+        let conn = Connection::open(tokio::runtime::Handle::current(), &url, "")
+            .await
+            .unwrap();
+        let space = open(
+            &conn,
+            SpaceRow {
+                uuid: "11111111-2222-3333-4444-555555555555".to_string(),
+                name: "routed".to_string(),
+                shared_url: Some("perspective://routed".to_string()),
+            },
+        )
+        .expect("space assembles");
+        assert_eq!(
+            space.app.session.screen().nav.href(),
+            "/space/11111111-2222-3333-4444-555555555555"
+        );
+    }
+
+    /// `open` mounts the shipped bundle's app root — `Bundle::parse` and
+    /// the first resolve see the same `Coasys`/`Column` the file says.
+    #[tokio::test]
+    async fn coasys_uses_bundle_template() {
+        let bundle = Bundle::parse(BUNDLE).expect("the shipped bundle parses");
+        assert_eq!(bundle.name, "Coasys");
+
+        let (url, _server) = silent_ws_server().await;
+        let conn = Connection::open(tokio::runtime::Handle::current(), &url, "")
+            .await
+            .unwrap();
+        let mut space = open(
+            &conn,
+            SpaceRow {
+                uuid: "bundled".to_string(),
+                name: "bundled".to_string(),
+                shared_url: None,
+            },
+        )
+        .expect("space assembles");
+        let root = space.app.session.resolve();
+        assert_eq!(
+            root.ty.as_ref(),
+            "Column",
+            "the mounted root is the bundle's app, not a hand-built shell"
+        );
+    }
+
+    /// The connected document holds no recorded rows, and a write-like
+    /// activation is dropped with a notice — never sent to the executor.
+    #[tokio::test]
+    async fn coasys_read_only_has_no_recorded_rows() {
+        // Assemble over a peer that would hear anything the view sent.
+        let (url, _server) = silent_ws_server().await;
+        let conn = Connection::open(tokio::runtime::Handle::current(), &url, "")
+            .await
+            .expect("test connection");
+        let mut space = open(
+            &conn,
+            SpaceRow {
+                uuid: "read-only-space".to_string(),
+                name: "read only".to_string(),
+                shared_url: None,
+            },
+        )
+        .expect("space assembles");
+
+        // There is no write path at all: the host is the offline StaticHost.
+        assert!(space.app.session.host_as::<we_ad4m::WriteHost>().is_none());
+        assert!(space.app.session.host_as::<StaticHost>().is_some());
+
+        // A write-like activation: dispatch an $invoke the document does
+        // not answer. It is recorded as dropped, and the notice names it.
+        let root = space.app.session.resolve();
+        let bag_reply = |target: &str| space.bag.invoke_reply(target).is_some();
+        let candidates: Vec<_> = invoke_nodes(&root)
+            .into_iter()
+            .filter(|(_, _, target)| !bag_reply(target))
+            .take(20)
+            .collect();
+        assert!(!candidates.is_empty(), "the tree has an $invoke to try");
+        let mut dropped = None;
+        for (node, handler, target) in candidates {
+            space.app.session.dispatch(&node, &handler, Value::Null);
+            let host = space.app.session.host_as::<StaticHost>().unwrap();
+            if host.dropped.iter().any(|t| t == &target) {
+                dropped = Some(target);
+                break;
+            }
+        }
+        let target = dropped.expect("an unanswerable $invoke must be dropped");
+        let line = space.notice_line();
+        assert_eq!(line, format!("dropped: {target}"));
+    }
+
+    /// Real executor, real socket: the guarded client the `tui` command
+    /// builds feeds the production adapter, a seeded call renders, a
+    /// second call arrives live, and the frame is dumped for review.
+    ///
+    /// `EXECUTOR_PATH` names the executor binary; with
+    /// `AD4M_REQUIRE_EXECUTOR=1` a missing binary fails rather than skips.
+    #[test]
+    #[ignore = "needs an ad4m-executor binary (EXECUTOR_PATH)"]
+    fn coasys_live_space_capture() {
+        use ratatui::backend::TestBackend;
+        use ratatui::layout::Rect;
+        use ratatui::Terminal;
+        use std::time::{Duration, Instant};
+
+        let Some(executor) = we_ad4m::testkit::start_executor() else {
+            return;
+        };
+        let rt = we_ad4m::Runtime::new().expect("adapter runtime");
+        // `get_ad4m_client` shares the transport probe with
+        // `client_transport_tests` — serialize against them.
+        let _lock = rt.block_on(crate::login::transport_probe::token_dir_lock());
+
+        // Seed over the testkit's own socket: agent, space,
+        // CollectionBlock, one call.
+        let seeder = we_ad4m::testkit::connect(&rt, &executor.url);
+        let uuid = we_ad4m::testkit::seed_space(&rt, &seeder, "slice3-live");
+        we_ad4m::testkit::create_collection(&rt, &seeder, &uuid, "call", "slice3-live-call");
+
+        // The guarded client `ad4m tui` builds — no token, the executor
+        // has no admin credential — then the production adapter on top.
+        let args = tui_args(&executor.url, None);
+        let (client, _) = rt
+            .block_on(crate::get_ad4m_client(&args, &args.domain))
+            .expect("guarded client connects to the test executor");
+        let conn = {
+            // `connection` takes the ambient handle; here that is the
+            // adapter runtime's.
+            let _enter = rt.handle().enter();
+            connection(&client)
+        };
+        assert!(Arc::ptr_eq(client.ws(), conn.ws()));
+        let mut space = open(
+            &conn,
+            SpaceRow {
+                uuid: uuid.clone(),
+                name: "slice3-live".to_string(),
+                shared_url: None,
+            },
+        )
+        .expect("space assembles");
+
+        let (width, height) = (120u16, 40u16);
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let mut draw = |space: &mut SpaceApp| -> String {
+            space.app.session.poll();
+            terminal
+                .draw(|f| {
+                    let area = f.area();
+                    space.render_into(f.buffer_mut(), area);
+                })
+                .unwrap();
+            we_tui::buffer_text(terminal.backend().buffer(), Rect::new(0, 0, width, height))
+        };
+
+        let started = Instant::now();
+        let mut draw_until = |label: &str, space: &mut SpaceApp| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while Instant::now() < deadline {
+                let text = draw(space);
+                if text.contains(label) {
+                    return text;
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            draw(space)
+        };
+        let mut text = draw_until("slice3-live-call", &mut space);
+        assert!(
+            text.contains("slice3-live-call"),
+            "the seeded call never rendered:\n{text}"
+        );
+
+        // A second call arrives on the live subscription — no reopen.
+        we_ad4m::testkit::create_collection(&rt, &seeder, &uuid, "call", "slice3-live-call-2");
+        text = draw_until("slice3-live-call-2", &mut space);
+        assert!(
+            text.contains("slice3-live-call-2"),
+            "the second call never arrived live:\n{text}"
+        );
+
+        // The route carries the uuid; the sidebar shows the Coasys groups.
+        let route = format!("/space/{uuid}");
+        assert!(text.contains(&route), "no uuid route on screen:\n{text}");
+        assert!(
+            text.contains("Calls"),
+            "the Coasys group labels are missing:\n{text}"
+        );
+
+        let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/1779-slice3");
+        std::fs::create_dir_all(&out).expect("capture dir");
+        std::fs::write(out.join("live-space.txt"), &text).expect("frame dump");
+        let info = rt.block_on(client.runtime.info()).expect("executor info");
+        let head = std::process::Command::new("git")
+            .args(["-C", env!("CARGO_MANIFEST_DIR"), "rev-parse", "HEAD"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default();
+        let meta = serde_json::json!({
+            "ad4m": head,
+            "we": "aebab9a2e0532000bac8458585a55fa080c0333f",
+            "executor": {
+                "url": executor.url,
+                "version": info.ad4m_executor_version,
+            },
+            "space": uuid,
+            "backend": { "width": width, "height": height },
+            "elapsed_ms": started.elapsed().as_millis() as u64,
+        });
+        std::fs::write(
+            out.join("live-space.meta.json"),
+            serde_json::to_string_pretty(&meta).unwrap(),
+        )
+        .expect("capture metadata");
+    }
 }
