@@ -21,6 +21,7 @@ import {
   Ad4mClient,
   Ad4mModel,
   BelongsToMany,
+  BelongsToOne,
   Flag,
   HasMany,
   Link,
@@ -171,7 +172,37 @@ class PolyMarker extends Ad4mModel {
   markedBy: any[] = [];
 }
 
+/** Untyped, declared-polymorphic reverse relation, reached below a polymorphic include. */
+@Model({ name: "PolyNote" })
+class PolyNote extends Ad4mModel {
+  @Flag({ through: "test://poly/note_type", value: "test://poly/note" })
+  noteType = "test://poly/note";
+
+  @BelongsToOne({
+    through: "test://poly/extracted",
+    polymorphic: true,
+    instantiateAs: () => [PolyTextBlock],
+  })
+  extractedFrom: any = null;
+}
+
+/** Holds notes through an untyped polymorphic relation of its own. */
+@Model({ name: "PolyDesk" })
+class PolyDesk extends Ad4mModel {
+  @Flag({ through: "test://poly/desk_type", value: "test://poly/desk" })
+  deskType = "test://poly/desk";
+
+  @HasMany({
+    through: "test://poly/desk_items",
+    polymorphic: true,
+    instantiateAs: () => [PolyNote],
+  })
+  items: any[] = [];
+}
+
 const ALL_MODELS = [
+  PolyNote,
+  PolyDesk,
   PolyPost,
   PolyImagePost,
   PolyFeed,
@@ -408,6 +439,33 @@ describe("Ad4mModel — polymorphic relations", function () {
     expect(nested.length).to.equal(1);
     expect(nested[0]).to.be.instanceOf(PolyImageBlock);
     expect(nested[0].src).to.equal("nested.png");
+  });
+
+  it("applies a declared-polymorphic relation's default below a polymorphic include", async () => {
+    // `extractedFrom` is untyped and declared polymorphic on `PolyNote`, which is
+    // only known per concrete class under `items`. The executor reads the
+    // declaration from the note's shape, so `include: { extractedFrom: true }`
+    // needs no `polymorphic` at that depth, and is answerable whether or not
+    // anything was extracted.
+    const desk = await PolyDesk.create(perspective, {});
+    const note = await PolyNote.create(perspective, {});
+    const text = await PolyTextBlock.create(perspective, { text: "source" });
+    await perspective.add(
+      new Link({ source: desk.id, predicate: "test://poly/desk_items", target: note.id }),
+    );
+    await perspective.add(
+      new Link({ source: text.id, predicate: "test://poly/extracted", target: note.id }),
+    );
+
+    const found = await PolyDesk.findOne(perspective, {
+      where: { id: desk.id },
+      include: { items: { include: { extractedFrom: true } } },
+    });
+
+    const items = found!.items as any[];
+    expect(items.length).to.equal(1);
+    expect(items[0]).to.be.instanceOf(PolyNote);
+    expect(items[0].extractedFrom.id).to.equal(text.id);
   });
 
   it("hydrates a reverse include polymorphically too", async () => {
