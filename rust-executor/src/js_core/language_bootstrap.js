@@ -103,6 +103,37 @@ if (typeof globalThis.LANGUAGE_CONTROLLER === "object" && globalThis.LANGUAGE_CO
             d.close();
         }
     };
+    // Exclusive creation (O_EXCL): throws AlreadyExists when `path` exists,
+    // so two writers can use it as a lock. Content written and fsynced, the
+    // directory fsynced; on a failure after creation the file is removed.
+    globalThis.LANGUAGE_CONTROLLER.createStorageFileExclusive = function(path, content) {
+        var cut = path.lastIndexOf("/");
+        var dir = cut > 0 ? path.slice(0, cut) : ".";
+        var bytes = new TextEncoder().encode(String(content));
+        var file = Deno.openSync(path, { write: true, createNew: true });
+        try {
+            try {
+                var off = 0;
+                while (off < bytes.length) off += file.writeSync(bytes.subarray(off));
+                file.syncSync();
+            } finally {
+                file.close();
+            }
+        } catch (e) {
+            try { Deno.removeSync(path); } catch (_) { /* already gone */ }
+            throw e;
+        }
+        var d = Deno.openSync(dir, { read: true });
+        try {
+            d.syncSync();
+        } finally {
+            d.close();
+        }
+    };
+    // Remove one file; throws NotFound when it does not exist.
+    globalThis.LANGUAGE_CONTROLLER.removeStorageFile = function(path) {
+        Deno.removeSync(path);
+    };
 }
 
 // Map of serialised cell_id key -> signalCallback for Holochain signal routing.

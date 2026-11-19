@@ -393,6 +393,27 @@ export function writeStorageFileAtomic(path, content) {
     lc.writeStorageFileAtomic(path, content);
 }
 
+// Exclusive creation of one file (O_EXCL): throws an error named
+// "AlreadyExists" when `path` exists — a lock primitive for languages that
+// coordinate writers of one storage directory. Content is fsynced; a
+// failure after creation removes the file. Optional, like the atomic write.
+export function createStorageFileExclusive(path, content) {
+    var lc = langCtrl();
+    if (!lc || typeof lc.createStorageFileExclusive !== "function") {
+        throw new Error("[ad4m:host] createStorageFileExclusive is not installed on this runtime");
+    }
+    lc.createStorageFileExclusive(path, content);
+}
+
+// Removal of one file; throws an error named "NotFound" when it is absent.
+export function removeStorageFile(path) {
+    var lc = langCtrl();
+    if (!lc || typeof lc.removeStorageFile !== "function") {
+        throw new Error("[ad4m:host] removeStorageFile is not installed on this runtime");
+    }
+    lc.removeStorageFile(path);
+}
+
 // ============================================================================
 // Storage KV -- CORE (Spec section 7.4)
 // ============================================================================
