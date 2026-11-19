@@ -155,6 +155,47 @@ mod tests {
         assert!(sign.contains("function"), "AGENT.sign is {sign}");
     }
 
+    /// A language's console goes to the executor's log at the level of its method, not to
+    /// stdout: per-poll `console.log` chatter filled the operator's info log.
+    #[tokio::test]
+    async fn a_language_console_logs_at_the_level_of_its_method() {
+        use crate::js_core::utils_extension::CONSOLE_LINES;
+        use log::Level;
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = crate::languages::language_runtime::LanguageRuntime::new(
+            "console-check".to_string(),
+            dir.path().to_path_buf(),
+            false,
+        );
+        runtime.init().await.unwrap();
+        runtime
+            .execute(
+                "(() => { console.log('console-check log', { n: 1 }); \
+                 console.debug('console-check debug'); console.info('console-check info'); \
+                 console.warn('console-check warn'); console.error('console-check error'); \
+                 return true; })()",
+            )
+            .await
+            .unwrap();
+        let lines: Vec<(Level, String)> = CONSOLE_LINES
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, line)| line.starts_with("console-check"))
+            .cloned()
+            .collect();
+        assert_eq!(
+            lines,
+            vec![
+                (Level::Debug, "console-check log { n: 1 }".to_string()),
+                (Level::Debug, "console-check debug".to_string()),
+                (Level::Info, "console-check info".to_string()),
+                (Level::Warn, "console-check warn".to_string()),
+                (Level::Error, "console-check error".to_string()),
+            ]
+        );
+    }
+
     /// The legitimate signing path stays: languages sign through signature_service and
     /// act as their agent through agent_service.
     #[test]

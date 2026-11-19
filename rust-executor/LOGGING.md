@@ -35,6 +35,17 @@ level:
   rounds, prompt/response bodies (truncated), auto-processor stage
   transitions.
 
+Anything that fires on a timer or per poll, message or connection stays
+off info, however short: an idle executor's info log should be quiet.
+
+**Languages.** A language's `console.log` and `console.debug` are logged
+at debug, `console.info` at info, `console.warn` and `console.error` at
+warn and error (`js_core/utils_extension.js`, installed as the language
+isolate's `console` by `language_bootstrap.js`), all as `[JSCORE]: ...`
+under the target `rust_executor::js_core::utils_extension`. Set that
+target to `debug` to see a language's chatter. Deno's own console wrote
+to stdout at no level, past `RUST_LOG` and `--log-dir`.
+
 **TRACE** is for hot-path internals:
 
 - Prolog runtime chatter, holochain internals, deno v8 chatter, pubsub
