@@ -249,3 +249,183 @@ fn shape_relation_reads_declared_polymorphic() {
     let (_, placement) = shapes(false, false);
     assert!(!placement.include_relations[0].polymorphic);
 }
+
+/// `Holder.items` is untyped and declared polymorphic; `Shelf.holder` is typed,
+/// so `Shelf → holder → items` reaches the polymorphic include one level down.
+/// `Special` requires everything `Base` does and a `we://kind` flag, so a target
+/// carrying both ranks `Special` first.
+fn status_shapes() -> (StaticShapeResolver, Arc<ModelShape>, Arc<ModelShape>) {
+    let (resolver, holder) = StaticShapeResolver::from_json(
+        "Holder",
+        r#"{"className":"Holder","properties":{
+             "flag":{"predicate":"we://flag","required":true,"flag":true,"initial":"we://holder"}
+           },"relations":{
+             "items":{"predicate":"we://holds","kind":"hasMany","targetClassName":"","polymorphic":true}
+           }}"#,
+    )
+    .unwrap();
+    for (name, json) in [
+        (
+            "Shelf",
+            r#"{"className":"Shelf","properties":{
+                 "flag":{"predicate":"we://flag","required":true,"flag":true,"initial":"we://shelf"}
+               },"relations":{
+                 "holder":{"predicate":"we://on","kind":"hasOne","maxCount":1,"targetClassName":"Holder"}
+               }}"#,
+        ),
+        (
+            "Base",
+            r#"{"className":"Base","properties":{
+                 "flag":{"predicate":"we://flag","required":true,"flag":true,"initial":"we://base"}
+               },"relations":{}}"#,
+        ),
+        (
+            "Special",
+            r#"{"className":"Special","properties":{
+                 "flag":{"predicate":"we://flag","required":true,"flag":true,"initial":"we://base"},
+                 "kind":{"predicate":"we://kind","required":true,"flag":true,"initial":"we://special"}
+               },"relations":{}}"#,
+        ),
+    ] {
+        resolver.register(name, parse_shape_from_json(json, name).unwrap());
+    }
+    let shelf = super::types::ShapeResolver::get_shape(&resolver, "Shelf").unwrap();
+    (resolver, holder, shelf)
+}
+
+/// Shelf `s/1` holds holder `h/1`, which holds three targets, each `Base`
+/// through a signed Shared link. `t/1` is `Special` only through a Local
+/// `we://kind` link, `t/2` through a Shared one, `t/3` through a Shared one
+/// whose signature does not verify.
+fn status_world() -> SparqlStore {
+    use super::link_status_tests::ls_link;
+    let signer = crate::agent::signatures::TestSigner::generate();
+    let store = SparqlStore::new(None).unwrap();
+    let shared = |s: &str, p: &str, t: &str| ls_link(&signer, s, p, t, 1, LinkStatus::Shared);
+    let mut links: Vec<LinkExpression> = ["Holder", "Shelf", "Base", "Special"]
+        .iter()
+        .map(|c| shared(&format!("we://models/{c}"), "rdf://type", "ad4m://SubjectClass"))
+        .collect();
+    links.extend([
+        shared("we://s/1", "we://flag", "we://shelf"),
+        shared("we://s/1", "we://on", "we://h/1"),
+        shared("we://h/1", "we://flag", "we://holder"),
+        shared("we://h/1", "we://holds", "we://t/1"),
+        shared("we://h/1", "we://holds", "we://t/2"),
+        shared("we://h/1", "we://holds", "we://t/3"),
+        shared("we://t/1", "we://flag", "we://base"),
+        shared("we://t/2", "we://flag", "we://base"),
+        shared("we://t/3", "we://flag", "we://base"),
+        ls_link(&signer, "we://t/1", "we://kind", "we://special", 2, LinkStatus::Local),
+        shared("we://t/2", "we://kind", "we://special"),
+    ]);
+    let mut forged = shared("we://t/3", "we://kind", "we://signed-something-else");
+    forged.data.target = "we://special".to_string();
+    assert!(!forged.compute_proof_valid(), "the fixture must not verify");
+    links.push(forged);
+    for l in links {
+        store.add_link(&l).unwrap();
+    }
+    store
+}
+
+/// `(id, __subjectClass)` of each item, by id: the three links share a
+/// timestamp, so their order is not what is under test.
+fn item_classes(items: &Value) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = items
+        .as_array()
+        .unwrap_or_else(|| panic!("items is a list: {items}"))
+        .iter()
+        .map(|i| {
+            (
+                i["id"].as_str().unwrap_or_default().to_string(),
+                i["__subjectClass"].as_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+fn pairs(v: &[(&str, &str)]) -> Vec<(String, String)> {
+    v.iter()
+        .map(|(a, b)| (a.to_string(), b.to_string()))
+        .collect()
+}
+
+/// What the Shared, verified-only read of `status_world` supports: `t/1` and
+/// `t/3` are `Special` only through a link that read does not admit.
+fn shared_reading() -> Vec<(String, String)> {
+    pairs(&[
+        ("we://t/1", "Base"),
+        ("we://t/2", "Special"),
+        ("we://t/3", "Base"),
+    ])
+}
+
+/// A target classified as a more specific class through a link the read does
+/// not admit (Local under `linkStatus: SHARED`, unverified without
+/// `includeUnverified`) is not dropped: its group query does not return it, so
+/// it is read as the next class it conforms to, the one the admitted links
+/// support.
+#[tokio::test]
+async fn polymorphic_target_typed_only_by_an_unadmitted_link_falls_back() {
+    let (resolver, holder, _) = status_shapes();
+    let store = status_world();
+    let query = q(json!({ "linkStatus": "SHARED", "include": { "items": true } }));
+    let result = super::query::execute_model_query(&store, holder.as_ref(), &query, &resolver)
+        .await
+        .unwrap();
+    assert_eq!(
+        item_classes(&result.instances[0]["items"]),
+        shared_reading(),
+        "{:?}",
+        result.instances
+    );
+}
+
+/// The same one include down, where the declared polymorphic applies.
+#[tokio::test]
+async fn nested_polymorphic_target_typed_only_by_an_unadmitted_link_falls_back() {
+    let (resolver, _, shelf) = status_shapes();
+    let store = status_world();
+    let query = q(json!({ "linkStatus": "SHARED",
+        "include": { "holder": { "include": { "items": true } } } }));
+    let result = super::query::execute_model_query(&store, shelf.as_ref(), &query, &resolver)
+        .await
+        .unwrap();
+    assert_eq!(
+        item_classes(&result.instances[0]["holder"]["items"]),
+        shared_reading(),
+        "{:?}",
+        result.instances
+    );
+}
+
+/// The read that admits every link still reads each target as its most
+/// specific class.
+#[tokio::test]
+async fn polymorphic_target_admitted_by_the_read_keeps_its_specific_class() {
+    let (resolver, holder, shelf) = status_shapes();
+    let store = status_world();
+    let expected = pairs(&[
+        ("we://t/1", "Special"),
+        ("we://t/2", "Special"),
+        ("we://t/3", "Special"),
+    ]);
+
+    let top = q(json!({ "include": { "items": true } }));
+    let result = fixture_query(&store, holder.as_ref(), &top, &resolver)
+        .await
+        .unwrap();
+    assert_eq!(item_classes(&result.instances[0]["items"]), expected);
+
+    let nested = q(json!({ "include": { "holder": { "include": { "items": true } } } }));
+    let result = fixture_query(&store, shelf.as_ref(), &nested, &resolver)
+        .await
+        .unwrap();
+    assert_eq!(
+        item_classes(&result.instances[0]["holder"]["items"]),
+        expected
+    );
+}
