@@ -462,6 +462,11 @@ fn context_was_exceeded(error: &anyhow::Error) -> bool {
     if text.contains("context budget:") {
         return false;
     }
+    // Go servers (Ollama among them) report a timeout as "context deadline
+    // exceeded". That is a transient failure, not a window overflow.
+    if text.contains("deadline") {
+        return false;
+    }
     let about_context = text.contains("context") || text.contains("n_ctx");
     let over = text.contains("exceed") || text.contains("too long") || text.contains("too large");
     about_context && over
@@ -2589,6 +2594,20 @@ mod tests {
         assert!(
             !prompt_does_not_fit(&throttled.context("AIService::prompt failed")),
             "a rate limit must not retire a source, whatever its URL says"
+        );
+        let deadline = anyhow::anyhow!(crate::ai_service::providers::http::UpstreamStatus {
+            url: "http://127.0.0.1:11434/api/chat".into(),
+            status: reqwest::StatusCode::GATEWAY_TIMEOUT,
+            body: "context deadline exceeded".into(),
+            retry_after: None,
+        });
+        assert!(
+            !prompt_does_not_fit(&deadline.context("AIService::prompt failed")),
+            "a timeout must leave its source retryable"
+        );
+        assert!(
+            !prompt_does_not_fit(&anyhow::anyhow!("context deadline exceeded")),
+            "a Go timeout message without a server status is not an overflow either"
         );
         let url_only = anyhow::anyhow!(crate::ai_service::providers::http::UpstreamStatus {
             url: "https://context.example/api/chat".into(),
