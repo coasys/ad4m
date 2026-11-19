@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The nightly feed-scale check: WE's `test:feed-scale` (apps/we-web/tests/live/feed-scale/) against
+# The nightly feed-scale check: WE's `test:feed-scale` (apps/we-web/e2e/feed-scale/) against
 # the executor and the SDK of one ad4m commit. A space holding FEED_SCALE_MESSAGES messages (a
 # million) of WE's real message class, generated signed into a file and loaded by the executor's
 # perspective import, opened in Chromium: how long the Feed's newest page and the page before it

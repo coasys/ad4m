@@ -133,6 +133,10 @@ pub struct PropertyShape {
     /// and scalar-vs-collection rendering.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub relation_kind: Option<String>,
+    /// The relation is read `polymorphic: true` unless a query says otherwise
+    /// (`ad4m://polymorphic`); the executor applies it at every include depth.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub polymorphic: Option<bool>,
     /// Bare target class name for a relation property — used by the executor
     /// to look up the target shape through its in-memory cache.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2024,6 +2028,14 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
                 source: prop_shape_uri.clone(),
                 predicate: Some("ad4m://relationKind".to_string()),
                 target: format!("literal:string:{}", kind),
+            });
+        }
+
+        if let Some(polymorphic) = prop.polymorphic {
+            links.push(Link {
+                source: prop_shape_uri.clone(),
+                predicate: Some("ad4m://polymorphic".to_string()),
+                target: format!("literal:{}", polymorphic),
             });
         }
 

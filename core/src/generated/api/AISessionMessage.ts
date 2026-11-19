@@ -13,9 +13,10 @@ seq: number, role: AISessionMessageRole,
 /**
  * The transcript entry: `{"text": ..}` for user and assistant turns;
  * `{"name", "arguments", "target"?, "writes", "result"? | "error"?}` for a
- * tool step. `writes` is the executor's own read of the call's side effect
- * (`agent_session::tool_writes`), so a client marking the steps that
- * changed something does not have to guess from the name.
+ * tool step. `writes` is the tool's declared intent
+ * (`agent_session::tool_writes`), recorded before the call runs. It does
+ * not say the call changed anything: a refused or failed write still has
+ * `writes: true`.
  */
 content: unknown, 
 /**

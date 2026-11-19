@@ -39,6 +39,34 @@ function findLinkTarget(
 }
 
 describe("Decorators → SHACL writer round-trip", () => {
+  it("emits ad4m:polymorphic only for a relation that declares it", () => {
+    @Model({ name: "PolyHolder" })
+    class PolyHolder extends Ad4mModel {
+      @HasOne({ through: "ns://node", polymorphic: true })
+      node: string = "";
+
+      @BelongsToOne({ through: "ns://extracted", polymorphic: true })
+      extractedFrom: string = "";
+
+      @HasMany({ through: "ns://plain" })
+      plain: string[] = [];
+    }
+
+    const { shape } = PolyHolder.generateSHACL();
+    const links = flatten(shape);
+    const propUri = (name: string) => `ns://PolyHolder.${name}`;
+
+    expect(findLinkTarget(links, propUri("node"), "ad4m://polymorphic")).toBe(
+      "literal:true",
+    );
+    expect(
+      findLinkTarget(links, propUri("extractedFrom"), "ad4m://polymorphic"),
+    ).toBe("literal:true");
+    expect(
+      findLinkTarget(links, propUri("plain"), "ad4m://polymorphic"),
+    ).toBeUndefined();
+  });
+
   it("emits ad4m:relationKind for every relation kind", () => {
     @Model({ name: "Target" })
     class Target extends Ad4mModel {}

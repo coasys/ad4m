@@ -1,5 +1,6 @@
 use super::{
-    class_label, instances_by_class, relation_predicates, ExistingInstances, TranscriptTurn,
+    class_label, instances_by_class, relation_predicates, ExistingInstances, InstanceContext,
+    TranscriptTurn,
 };
 use crate::perspectives::flow_context::{render_consensus_rule, ContentionStatus, FlowContext};
 use crate::perspectives::model_query::types::ModelShape;
@@ -69,6 +70,61 @@ pub fn build_interpretation_input(
     existing: &ExistingInstances,
     active_flows: &[FlowContext],
     speaker_names: &HashMap<String, String>,
+) -> String {
+    build_interpretation_input_showing(
+        shapes,
+        transcript,
+        existing,
+        active_flows,
+        speaker_names,
+        None,
+    )
+}
+
+/// How many existing instances a budgeted prompt shows, and whether the pass
+/// checks its output against the instances the prompt leaves out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ExistingShown {
+    /// Distinct instances the prompt shows. An instance in two classes is in
+    /// two `existing` arrays and counts once.
+    pub shown: usize,
+    /// Distinct instances in the full existing set.
+    pub total: usize,
+    /// Whether the pass dedups its output against the full set. The
+    /// single-shot path always does; the harness path only with
+    /// `dedup_on_drain` (the auto-processor), not on the WS-RPC call.
+    pub unshown_checked: bool,
+}
+
+/// The `existing_shown` line: how many of the existing instances the prompt
+/// shows, and whether the ones it does not show are checked for duplicates.
+pub(crate) fn existing_shown_line(counts: &ExistingShown) -> String {
+    let ExistingShown { shown, total, .. } = counts;
+    if counts.unshown_checked {
+        format!(
+            "`existing` shows {shown} of {total} instances. Instances that are not shown are \
+             still checked for duplicates."
+        )
+    } else {
+        format!(
+            "`existing` shows {shown} of {total} instances. Instances that are not shown are \
+             not checked for duplicates: query the class before you create an instance that \
+             may already exist."
+        )
+    }
+}
+
+/// [`build_interpretation_input`] for an `existing` set that is a budgeted
+/// part of the full one (`existing_budget`). When `counts` says some
+/// instances are left out, the prompt gets an `existing_shown` line
+/// ([`existing_shown_line`]) that says so.
+pub(crate) fn build_interpretation_input_showing(
+    shapes: &[ModelShape],
+    transcript: &[TranscriptTurn],
+    existing: &ExistingInstances,
+    active_flows: &[FlowContext],
+    speaker_names: &HashMap<String, String>,
+    counts: Option<ExistingShown>,
 ) -> String {
     // Group the id-keyed source by class once for the per-class `existing`
     // blocks below (deterministically ordered — see `instances_by_class`).
@@ -158,30 +214,7 @@ pub fn build_interpretation_input(
             let name = name.as_str();
             let existing_json: Vec<serde_json::Value> = existing_by_class
                 .get(name)
-                .map(|rows| {
-                    rows.iter()
-                        .map(|r| {
-                            // `properties` is the current secondary-scalar
-                            // state (e.g. rolling `summary` on a
-                            // ConversationSubgroup). Rendered only when
-                            // present so the prompt stays compact for
-                            // identity-only classes.
-                            let mut entry = serde_json::Map::new();
-                            entry.insert("id".into(), serde_json::json!(r.id));
-                            entry.insert("title".into(), serde_json::json!(r.title));
-                            entry.insert("class".into(), serde_json::json!(r.class));
-                            if !r.properties.is_empty() {
-                                let props: serde_json::Map<String, serde_json::Value> = r
-                                    .properties
-                                    .iter()
-                                    .map(|(k, v)| (k.clone(), serde_json::json!(v)))
-                                    .collect();
-                                entry.insert("properties".into(), serde_json::Value::Object(props));
-                            }
-                            serde_json::Value::Object(entry)
-                        })
-                        .collect()
-                })
+                .map(|rows| rows.iter().map(|r| existing_entry_json(r)).collect())
                 .unwrap_or_default();
             // `"hint"` is the prompt-facing key (short, cheap in tokens and what
             // the system prompt + few-shot examples reference); its value is the
@@ -233,6 +266,9 @@ pub fn build_interpretation_input(
         })
         .collect();
     let mut out = serde_json::json!({ "classes": classes, "transcript": turns });
+    if let Some(counts) = counts.filter(|c| c.shown < c.total) {
+        out["existing_shown"] = serde_json::json!(existing_shown_line(&counts));
+    }
     if !active_flows.is_empty() {
         out["active_flows"] = serde_json::Value::Array(
             active_flows
@@ -242,6 +278,28 @@ pub fn build_interpretation_input(
         );
     }
     out.to_string()
+}
+
+/// One `existing` entry as the prompt shows it: `{id, title, class}`, plus
+/// `properties` when the instance has secondary scalars. Also what the
+/// `existing` budget counts a row's tokens from (`existing_budget`).
+pub(crate) fn existing_entry_json(r: &InstanceContext) -> serde_json::Value {
+    // `properties` is the current secondary-scalar state (e.g. rolling
+    // `summary` on a ConversationSubgroup). Rendered only when present so
+    // the prompt stays compact for identity-only classes.
+    let mut entry = serde_json::Map::new();
+    entry.insert("id".into(), serde_json::json!(r.id));
+    entry.insert("title".into(), serde_json::json!(r.title));
+    entry.insert("class".into(), serde_json::json!(r.class));
+    if !r.properties.is_empty() {
+        let props: serde_json::Map<String, serde_json::Value> = r
+            .properties
+            .iter()
+            .map(|(k, v)| (k.clone(), serde_json::json!(v)))
+            .collect();
+        entry.insert("properties".into(), serde_json::Value::Object(props));
+    }
+    serde_json::Value::Object(entry)
 }
 
 /// Render one live [`FlowContext`] as the JSON object the LLM sees under
@@ -372,13 +430,20 @@ You receive a JSON object with these fields:
     `hint` describing when to instantiate it, a list of `fields` (each with a
     `name`, optional `hint`, and `required` flag), a `relations` list of
     forward instance-reference slots (each with a `name`, `targetClass`,
-    `cardinality`, and optional `hint`), and an `existing` array of instances already present in
-    the graph for that class. Each existing entry is `{id, title, class}`, and
+    `cardinality`, and optional `hint`), and an `existing` array with instances already in
+    the graph for that class. `existing` can be a partial view: when the graph holds
+    more instances than the prompt has room for, it shows only some of them, and
+    `existing_shown` says how many. Each existing entry is `{id, title, class}`, and
     may also carry a `properties` object holding the instance's current
     secondary-scalar values (e.g. a rolling summary). `id` is the stable
     handle you emit to update that entry; `title` is its identity label; the
     optional `properties` object shows its *current state* so you can judge
     whether new turns continue that instance or belong to a fresh one.
+  - `existing_shown` (OPTIONAL — present only when `existing` leaves
+    instances out): how many distinct instances the `existing` arrays show
+    (an instance in two classes counts once), and whether the engine checks
+    your output against the instances that are not shown. An instance that
+    is not shown still exists.
   - `transcript`: an array of turns `{speaker, text}` and, when known,
     `timestamp` (the source link's RFC3339 time). Use `speaker` for identity
     reasoning. When two different participants share the same display name,
@@ -844,6 +909,7 @@ mod tests {
             title: "Draft the design doc".to_string(),
             class: "Task".to_string(),
             properties: BTreeMap::new(),
+            updated_at: String::new(),
         }]);
         let input = build_interpretation_input(
             &shapes,
@@ -908,6 +974,7 @@ mod tests {
             title: "Payments infrastructure".to_string(),
             class: "ConversationSubgroup".to_string(),
             properties,
+            updated_at: String::new(),
         }]);
         let input = build_interpretation_input(
             &shapes,

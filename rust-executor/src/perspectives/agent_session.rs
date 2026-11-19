@@ -106,10 +106,10 @@ pub fn writable_tool_names() -> Vec<&'static str> {
     SESSION_WRITES.to_vec()
 }
 
-/// Whether the tool called `name` writes — the executor's one answer to "did
-/// this call change something". Both the session's write-tools gate and the
-/// `writes` flag every tool step's transcript row carries read it, so a
-/// client never has to guess from the name.
+/// Whether the tool called `name` is declared to write. Both the session's
+/// write-tools gate and the `writes` flag on every tool step read this
+/// function. The flag is that declared intent. The step records it before
+/// the call runs. A refused or failed write still has `writes: true`.
 ///
 /// The sources, in order:
 ///
@@ -123,8 +123,8 @@ pub fn writable_tool_names() -> Vec<&'static str> {
 ///   the surface an AI session offers: `list_perspectives` reads,
 ///   `add_perspective` writes, and so on);
 /// - a generated per-class tool (only ever offered under
-///   `dynamicClassTools`) is classified by its verb: `create` / `set` /
-///   `add` / `remove` / `delete` write, `query` / `get` / `list` read;
+///   `dynamicClassTools`) is classified by its verb: `create` / `update` /
+///   `set` / `add` / `remove` / `delete` write, `query` / `get` / `list` read;
 /// - a name none of those knows **writes** — the safe side, both for a gate
 ///   and for a flag a UI trusts.
 pub fn tool_writes(name: &str) -> bool {
@@ -521,6 +521,7 @@ mod tests {
             "note_set_title",
             "note_add_items",
             "note_remove_items",
+            "note_update",
         ] {
             assert!(tool_writes(name), "{name} is a write marked read");
         }
