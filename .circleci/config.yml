@@ -957,9 +957,12 @@ jobs:
           no_output_timeout: 30m
 
   # Runs everything gated by #[ignore = "llm-e2e"] (Rust) or LLM_E2E=1 (JS).
-  # These hit Marvin's local Ollama; too slow + occasionally flaky for
-  # per-push CI, so they run once nightly against `dev` via a scheduled
-  # pipeline (`run-nightly-llm: true`).
+  # The suites prompt staging's llama-server (llama-qwen27b.service on
+  # :12460). This job does not start a server and does not load a model:
+  # the GPU already holds that one. Embeddings stay on Ollama's
+  # nomic-embed-text. Too slow + occasionally flaky for per-push CI, so
+  # they run once nightly against `dev` via a scheduled pipeline
+  # (`run-nightly-llm: true`).
   #
   # The exception is `anthropic_e2e`, which calls api.anthropic.com and
   # costs real money on every run. It reads `ANTHROPIC_API_KEY`
@@ -968,6 +971,17 @@ jobs:
   llm-e2e:
     machine: true
     resource_class: coasys/marvin
+    environment:
+      INTERPRETATION_E2E_BASE_URL: http://127.0.0.1:12460/v1
+      INTERPRETATION_E2E_MODEL: qwen3.8-27b-ud-q4_k_m
+      INTERPRETATION_E2E_ENDPOINT_KIND: LLAMA_SERVER
+      # Under the server's one 65536-token slot. The chat template and the
+      # server's reasoning budget sit on top of what a request sends.
+      INTERPRETATION_E2E_MAX_NUM_CTX: "57344"
+      # One completion may wait behind staging on that slot, then generate.
+      INTERPRETATION_E2E_REQUEST_TIMEOUT_SECS: "900"
+      INTERPRETATION_EMBED_BASE_URL: http://127.0.0.1:11434/v1
+      INTERPRETATION_EMBED_MODEL: nomic-embed-text
     steps:
       # Skip-if-unchanged: only run the expensive suite when dev has moved
       # since the last successful nightly. `circleci-agent step halt` ends
@@ -997,6 +1011,48 @@ jobs:
             else
               echo "dev @ $CIRCLE_SHA1, last tested $LAST_SHA — proceeding"
             fi
+      # Staging's llama-qwen27b.service is already running. This job does
+      # not start it, stop it, or load another model.
+      - run:
+          name: Preflight staging llama-server
+          command: |
+            set -euo pipefail
+            BASE="${INTERPRETATION_E2E_BASE_URL:?INTERPRETATION_E2E_BASE_URL is unset}"
+            MODEL="${INTERPRETATION_E2E_MODEL:?INTERPRETATION_E2E_MODEL is unset}"
+            ROOT="${BASE%/v1}"
+            ROOT="${ROOT%/}"
+            echo "Checking llama-server at ${ROOT} for model ${MODEL}"
+            if ! HEALTH=$(curl -sfL --max-time 10 "${ROOT}/health"); then
+              echo "llama-server is not healthy at ${ROOT}/health."
+              echo "The llm-e2e job uses staging's already-running llama-qwen27b.service and does not start a server."
+              echo "Repair that unit before rerunning. This job will not load another model."
+              exit 1
+            fi
+            echo "health: ${HEALTH}"
+            if ! MODELS=$(curl -sfL --max-time 15 "${ROOT}/v1/models"); then
+              echo "GET ${ROOT}/v1/models failed."
+              echo "llama-qwen27b.service should be serving ${MODEL}. This job does not start a server."
+              exit 1
+            fi
+            if ! echo "$MODELS" | jq -e --arg m "$MODEL" '[(.data // [])[]?.id, (.models // [])[]?.id] | index($m) != null' >/dev/null; then
+              echo "llama-server at ${ROOT} does not list model alias ${MODEL}."
+              echo "Expected the alias served by llama-qwen27b.service. This job does not start a server or load a model."
+              echo "Models response:"
+              echo "$MODELS"
+              exit 1
+            fi
+            echo "llama-server lists ${MODEL}"
+            if ! TAGS=$(curl -sfL --max-time 10 "http://127.0.0.1:11434/api/tags"); then
+              echo "Ollama at :11434 did not answer /api/tags."
+              echo "Embeddings (nomic-embed-text) stay on Ollama. The LLM does not. This job does not pull models."
+              exit 1
+            fi
+            if ! echo "$TAGS" | jq -e '[.models[]?.name] | any(. == "nomic-embed-text" or . == "nomic-embed-text:latest" or startswith("nomic-embed-text:"))' >/dev/null; then
+              echo "Ollama at :11434 does not list nomic-embed-text."
+              echo "The semantic-dedup e2e needs that embedding model. This job does not pull models."
+              exit 1
+            fi
+            echo "Ollama lists nomic-embed-text"
       # Build here: this pipeline has no `build` job, and the stash of an
       # older `build` for this SHA may already be deleted.
       - setup_integration_test_environment:
@@ -1015,6 +1071,15 @@ jobs:
           name: JS LLM-E2E (auto-processor + interpretation suites)
           command: |
             cd ./tests/js && LLM_E2E=1 pnpm run test-model
+          no_output_timeout: 60m
+      - run:
+          name: JS LLM-E2E (auto-processor multi-user)
+          # Not under tests/model/, so `test-model` does not pick it up.
+          # prepare-test publishes perspective-diff-sync. Bob joins that
+          # neighbourhood so he can write Alice's perspective; a private
+          # one is owner-scoped. The integration step prepares again.
+          command: |
+            cd ./tests/js && pnpm run prepare-test && LLM_E2E=1 pnpm exec ts-mocha -p tsconfig.json --timeout 1200000 --exit tests/auto-processor-multi-user.test.ts
           no_output_timeout: 60m
       - run:
           name: JS LLM-E2E (integration — includes auto-processor-neighbourhood)
@@ -1070,7 +1135,9 @@ jobs:
   # - core and connect built and packed, and WE's ad4m pin (root pnpm.overrides) pointed at
   #   the two tarballs; WE installs with its own pnpm (its packageManager, pnpm 10);
   # - we-web built with WE_SEED=seeds/coasys.seed.json, then `test:spaces` in the real tier:
-  #   Whisper in the executor, extraction on the host's Ollama.
+  #   Whisper in the executor, extraction on staging's llama-server (127.0.0.1:12460,
+  #   model qwen3.8-27b-ud-q4_k_m). This job does not start that server and does not
+  #   load a model. A completion may wait on its one slot, behind staging.
   # It halts green when this ad4m commit and the WE commit `we-ref` names already passed
   # here: the pipeline fires several times a night, and WE moves on its own, so either repo
   # moving runs it again. The record is a file on the runner host (no API token).
@@ -1083,9 +1150,23 @@ jobs:
       PLAYWRIGHT_BROWSERS_PATH: /home/marvin/.cache/ms-playwright-debian13
       WE_REF: << pipeline.parameters.we-ref >>
       COASYS_SPACES_TIER: real
-      COASYS_SPACES_LLM_BASE_URL: http://localhost:11434/v1
-      # The model staging and llm-e2e use, which Marvin keeps loaded: one load on the GPU.
-      COASYS_SPACES_LLM_MODEL: qwen3.8-27b-48k
+      # Staging's llama-server (systemd user unit llama-qwen27b). Already running;
+      # this job does not start it, stop it, or load another model.
+      COASYS_SPACES_LLM_BASE_URL: http://127.0.0.1:12460/v1
+      COASYS_SPACES_LLM_MODEL: qwen3.8-27b-ud-q4_k_m
+      # Empty: do not make an Ollama /api/create variant. llama-server's slot is
+      # already 98304 tokens, and /api/create is not that server.
+      COASYS_SPACES_LLM_NUM_CTX: ""
+      # WE#468's real tier (apps/we-web/e2e/coasys-spaces/models.mjs realLlm)
+      # reads these and sends them on ai.addEndpoint / ai.addModel. Unset, the
+      # harness registers OPEN_AI_COMPATIBLE with the executor's defaults.
+      # LLAMA_SERVER is what turns thinking off. native tools stay on so the
+      # Qwen parser is not handed a prompt-injected tool list. 900s covers a
+      # few minutes queued on the one slot. 90112 is the 98304 window minus 8192.
+      COASYS_SPACES_LLM_ENDPOINT_KIND: LLAMA_SERVER
+      COASYS_SPACES_LLM_NATIVE_TOOLS: "true"
+      COASYS_SPACES_LLM_REQUEST_TIMEOUT_SECS: "900"
+      COASYS_SPACES_LLM_MAX_NUM_CTX: "90112"
       # Its own directory, which preflight empties; one coasys-spaces runs at a time (serial
       # group nightly-llm).
       COASYS_SPACES_ARTIFACTS: /tmp/coasys-spaces-artifacts
@@ -1104,8 +1185,9 @@ jobs:
             fi
             exit "$rc"
       - run:
-          # Before any build: a missing model fails in seconds, with what to do.
-          name: Check that Ollama answers and has the model
+          # Before any build: a missing server fails in seconds. GET /v1/models
+          # is llama-server's listing; the hint is the user unit, not an ollama pull.
+          name: Check that llama-server answers and lists the model
           command: bash scripts/coasys-spaces.sh llm-check
       - run:
           name: Get the executor for this commit (published, else build)
@@ -1130,6 +1212,11 @@ jobs:
           command: bash scripts/coasys-spaces.sh build-web
           no_output_timeout: 20m
       - run:
+          # Model calls share staging's one llama-server slot and may wait a few
+          # minutes in the queue, then generate. The suite prints a wait line
+          # each minute, so this bound is silence, not the length of a call.
+          # The per-call limit is COASYS_SPACES_LLM_REQUEST_TIMEOUT_SECS (900),
+          # which the harness sets on the endpoint. The executor default is 600s.
           name: Run the coasys-spaces suite (WE test:spaces)
           command: bash scripts/coasys-spaces.sh test
           no_output_timeout: 60m
@@ -1284,14 +1371,16 @@ workflows:
 
   # Nightly against `dev`. An API trigger (or a Project Trigger) sets
   # `run-nightly-llm`. In-config cron does not reach this project.
-  # Same resource class (Marvin) so Ollama is local. llm-e2e, the SFU
+  # Same resource class (Marvin). llm-e2e and coasys-spaces both prompt
+  # staging's llama-server, which already holds the GPU, and neither loads
+  # a model. llm-e2e's embeddings stay on Ollama (:11434). llm-e2e, the SFU
   # wind tunnel and coasys-spaces start together and do not build on each
   # other's result: an llm-e2e failure must not skip the tunnel, and a tunnel
   # failure must not skip llm-e2e. Three API triggers fire this pipeline every night on
   # one host. Each job has its own serial group, so a second trigger waits
   # instead of sharing ports, DIDs and the GPU with the first. llm-e2e and
-  # coasys-spaces share one group: both run models on the host's Ollama and
-  # GPU, and together they make extraction timeouts likelier.
+  # coasys-spaces share one group (`nightly-llm`) so they do not run at once
+  # on that one slot.
   nightly-llm-e2e:
     when: << pipeline.parameters.run-nightly-llm >>
     jobs:
