@@ -731,8 +731,11 @@ async fn drive_space(session: &mut TerminalSession, model: &mut Model) -> Result
     };
     let exit = space_key(model, key);
     if model.space.is_none() {
-        // Back on the admin screens: start from a clean screen.
-        terminal.clear()?;
+        // Back on the admin screens: clear and redraw all of it. Not
+        // `clear()`, which asks the terminal for the cursor position and
+        // fails when the terminal does not answer.
+        let size = terminal.size()?;
+        terminal.resize(ratatui::layout::Rect::new(0, 0, size.width, size.height))?;
     }
     Ok(exit)
 }
