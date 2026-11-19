@@ -43,6 +43,8 @@
 mod dedup;
 mod existing_budget;
 mod graph;
+#[cfg(test)]
+mod harness_pass_tests;
 mod overflow;
 pub(crate) use overflow::SliceScopeLink;
 pub(crate) use run::{

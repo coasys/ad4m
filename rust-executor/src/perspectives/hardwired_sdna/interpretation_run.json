@@ -12,6 +12,7 @@
     {"path": "ad4m://interp/processor",    "name": "processor",                       "min_count": 0, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://interp/processor", "target": "value"}]},
     {"path": "ad4m://interp/sources",      "name": "sources",       "collection": true,"datatype": "xsd://string", "min_count": 0, "setter": [{"action": "addLink", "source": "this", "predicate": "ad4m://interp/sources", "target": "value"}]},
     {"path": "ad4m://interp/debug_prompt", "name": "debugPrompt",                     "min_count": 0, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://interp/debug_prompt", "target": "value", "local": true}]},
-    {"path": "ad4m://interp/debug_response","name": "debugResponse",                  "min_count": 0, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://interp/debug_response", "target": "value", "local": true}]}
+    {"path": "ad4m://interp/debug_response","name": "debugResponse",                  "min_count": 0, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://interp/debug_response", "target": "value", "local": true}]},
+    {"path": "ad4m://interp/mode",         "name": "mode",                            "min_count": 0, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://interp/mode", "target": "value"}]}
   ]
 }

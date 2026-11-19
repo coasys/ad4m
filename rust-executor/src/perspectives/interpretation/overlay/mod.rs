@@ -138,6 +138,7 @@ pub(crate) async fn mint_and_commit_interpretation_run(
 /// overlays. The run node is minted when there is at least one overlay to
 /// anchor, **or** when an AutoProcessor cursor must be recorded (even if the
 /// LLM wrote nothing — those turns are still consumed).
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn apply_with_overlay(
     perspective: &mut PerspectiveInstance,
     shapes: &[ModelShape],
@@ -148,6 +149,7 @@ pub(crate) async fn apply_with_overlay(
     context: &AgentContext,
     cursor: Option<&InterpretationRunCursor>,
     debug: Option<&crate::perspectives::interpretation::InterpretationDebug>,
+    mode: Option<&str>,
 ) -> anyhow::Result<Vec<String>> {
     if ops.is_empty() {
         if cursor.is_some() {
@@ -156,6 +158,7 @@ pub(crate) async fn apply_with_overlay(
                 meta.debug_prompt = Some(d.prompt.clone());
                 meta.debug_response = Some(d.response.clone());
             }
+            meta.mode = mode.map(str::to_string);
             // Empty-ops fast-path: no overlays to write, but the cursor mint
             // itself is a fan-out of `create_subject` + N × `update_subject`
             // (one per additional source id). Without a batch, each of those
@@ -266,6 +269,7 @@ pub(crate) async fn apply_with_overlay(
             meta.debug_prompt = Some(d.prompt.clone());
             meta.debug_response = Some(d.response.clone());
         }
+        meta.mode = mode.map(str::to_string);
         let batch_id = perspective.create_batch().await;
         let mut phase3_err: Option<anyhow::Error> = None;
 
@@ -359,6 +363,7 @@ pub(crate) async fn seed_overlay(
         ran_at: "0".to_string(),
         debug_prompt: None,
         debug_response: None,
+        mode: None,
     };
     let run_uri = mint_interpretation_run(perspective, &meta, None, None, context).await?;
     let ow = OverlayWrite {
@@ -413,6 +418,7 @@ mod tests {
             run_id.to_string(),
             "1700000000000".to_string(),
             ctx,
+            None,
             None,
             None,
         )

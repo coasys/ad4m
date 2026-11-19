@@ -191,6 +191,10 @@ fn merge_outcomes(outcomes: Vec<InterpretationOutcome>) -> InterpretationOutcome
     let mut bases = Vec::new();
     let mut flow_proposals = Vec::new();
     let mut debug = None;
+    // Every slice runs single-shot (`run_interpretation_once`).
+    let mode = outcomes
+        .first()
+        .map_or(super::run::RUN_MODE_SINGLE_SHOT, |o| o.mode);
     for outcome in outcomes {
         bases.extend(outcome.bases);
         flow_proposals.extend(outcome.flow_proposals);
@@ -200,6 +204,7 @@ fn merge_outcomes(outcomes: Vec<InterpretationOutcome>) -> InterpretationOutcome
         bases,
         debug,
         flow_proposals,
+        mode,
     }
 }
 

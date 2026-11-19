@@ -166,6 +166,7 @@ mod tests {
             ran_at: "1000".into(),
             debug_prompt: None,
             debug_response: None,
+            mode: None,
         };
         mint_interpretation_run(
             &mut p,
@@ -187,6 +188,7 @@ mod tests {
             ran_at: "1000".into(),
             debug_prompt: None,
             debug_response: None,
+            mode: None,
         };
         mint_interpretation_run(
             &mut p,
@@ -208,6 +210,7 @@ mod tests {
             ran_at: "1".into(),
             debug_prompt: None,
             debug_response: None,
+            mode: None,
         };
         mint_interpretation_run(
             &mut p,
@@ -319,6 +322,7 @@ mod tests {
             ran_at: "1000".into(),
             debug_prompt: None,
             debug_response: None,
+            mode: None,
         };
         mint_interpretation_run(&mut p, &meta, None, None, &ctx)
             .await
@@ -383,6 +387,7 @@ mod tests {
                 ran_at: now_ms.to_string(),
                 debug_prompt: None,
                 debug_response: None,
+                mode: None,
             },
             Some(&InterpretationRunCursor {
                 processor: processor_node("cursor-skip"),
@@ -626,6 +631,7 @@ mod tests {
                 ran_at: now_ms.to_string(),
                 debug_prompt: None,
                 debug_response: None,
+                mode: None,
             },
             Some(&InterpretationRunCursor {
                 processor: processor_node("incremental"),

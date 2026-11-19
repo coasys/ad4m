@@ -72,6 +72,10 @@ pub(crate) struct InterpretationRunMeta {
     pub debug_prompt: Option<String>,
     /// Optional live-debug response string, same rules as `debug_prompt`.
     pub debug_response: Option<String>,
+    /// How the pass ran: `single-shot`, `harness`, or `fallback` (a harness
+    /// pass that ended without a usable answer and ran single-shot on the same
+    /// batch, #1804). `None` writes no value.
+    pub mode: Option<String>,
 }
 
 impl InterpretationRunMeta {
@@ -96,6 +100,7 @@ impl InterpretationRunMeta {
             ran_at,
             debug_prompt: None,
             debug_response: None,
+            mode: None,
         }
     }
 }
@@ -119,16 +124,16 @@ pub(crate) async fn ensure_interpretation_overlay_classes(
         context,
     )
     .await?;
-    // `debug_response` is the newest property on the run class, so a
-    // perspective that registered the pre-debug SDNA is refreshed rather
-    // than left with a shape whose `debug_prompt`/`debug_response` setters
-    // do not exist — `write_processor` would silently drop those values.
+    // `mode` is the newest property on the run class, so a perspective that
+    // registered an older SDNA is refreshed rather than left with a shape
+    // whose newer setters do not exist — `create_subject` would silently
+    // drop those values.
     ensure_subject_class(
         perspective,
         INTERP_RUN_CLASS,
         INTERP_RUN_TARGET_CLASS,
         INTERP_RUN_SDNA,
-        Some("ad4m://interp/debug_response"),
+        Some("ad4m://interp/mode"),
         context,
     )
     .await
@@ -175,6 +180,9 @@ pub(crate) async fn mint_interpretation_run(
     }
     if let Some(response) = &meta.debug_response {
         values["debugResponse"] = response.clone().into();
+    }
+    if let Some(mode) = &meta.mode {
+        values["mode"] = mode.clone().into();
     }
     perspective
         .create_subject(

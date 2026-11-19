@@ -176,9 +176,26 @@ pub struct ProposeWritesProvider<P: ToolProvider + ?Sized> {
     /// The pass owner (engine) passes its `base_prefix` here — matches the
     /// `plan_interpretation_ops_resolved` argument name.
     base_prefix: String,
+    /// Proposals refused at the call (validation failed). A pass whose
+    /// proposals were all refused did not write what it tried to.
+    rejected: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl<P: ToolProvider + ?Sized> ProposeWritesProvider<P> {
+    /// How many `_create` / `_propose_link_child` calls were refused.
+    pub fn rejected(&self) -> Arc<std::sync::atomic::AtomicUsize> {
+        self.rejected.clone()
+    }
+
+    /// Count a refused proposal.
+    fn counted(&self, result: Result<String>) -> Result<String> {
+        if result.is_err() {
+            self.rejected
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        result
+    }
+
     pub fn new(
         inner: Arc<P>,
         classes: Vec<ClassProposeShape>,
@@ -190,6 +207,7 @@ impl<P: ToolProvider + ?Sized> ProposeWritesProvider<P> {
             classes,
             buffer,
             base_prefix,
+            rejected: Arc::default(),
         }
     }
 }
@@ -227,7 +245,7 @@ where
         // could otherwise consume something like `<class>_link_child_
         // create` if we ever added it).
         if let Some(class_name) = strip_class_suffix(name, "_propose_link_child") {
-            return self.handle_propose_link_child(&class_name, args);
+            return self.counted(self.handle_propose_link_child(&class_name, args));
         }
         if let Some(class_name) = strip_class_suffix(name, "_create") {
             // `<class>_create` was previously named `<class>_propose_create`.
@@ -245,7 +263,7 @@ where
             // handler runs. `find_class` returns None for a prefix that
             // isn't a registered class, so we fall through cleanly.
             if self.find_class(&class_name).is_some() {
-                return self.handle_propose_create(&class_name, args);
+                return self.counted(self.handle_propose_create(&class_name, args));
             }
         }
         // `<class>_add_<relation>` alias family: gemma3:12b in CI job
