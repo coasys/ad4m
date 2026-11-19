@@ -283,6 +283,8 @@ GET  /api/logs                  -> text/event-stream; the last 1000 lines, then 
                                      (404 when logging is off, 429 past 8 open streams)
 ```
 
+Every endpoint above answers CORS for any origin (`Access-Control-Allow-Origin: *`, `Retry-After` exposed), so a language that runs in a browser can call it. Auth is the bearer token, never a cookie. The operator listener does not answer CORS.
+
 JSON answers over 1 kB are compressed (br or gzip) when the request sends `Accept-Encoding`, and sent plain when it does not. `/render` and `/sync` always answer one page: `limit` is 1 to 5000 (anything else is a 400), and a request without it gets a page of 500. See the next section.
 
 ### Paged snapshot, then tail

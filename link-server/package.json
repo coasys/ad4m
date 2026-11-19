@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@fastify/compress": "^9.3.0",
+    "@fastify/cors": "^11.4.3",
     "@fastify/websocket": "^11.0.0",
     "@noble/ciphers": "^1.0.0",
     "@noble/curves": "^1.6.0",
