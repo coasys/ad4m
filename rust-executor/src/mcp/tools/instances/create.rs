@@ -1,12 +1,7 @@
 //! `instance_create` — create an instance of any subject class.
 
-use super::{
-    check_setters, error_json, fetch_instance, generate_instance_uri, link_target, pretty,
-    resolve_class, subject_class, validate_properties, validation_failure, Ad4mMcpHandler,
-    WriteMode,
-};
-use crate::mcp::shacl;
-use crate::types::{Link, LinkStatus};
+use super::{common_error, error_json, pretty, Ad4mMcpHandler};
+use crate::perspectives::instances::{self as shared, InstanceError, WriteStep};
 use rmcp::{handler::server::wrapper::Parameters, tool};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -45,206 +40,87 @@ impl Ad4mMcpHandler {
                 Ok(v) => v,
                 Err(e) => return e,
             };
-        let (class_name, shape) = match resolve_class(&perspective, &p.class_name).await {
-            Ok(v) => v,
-            Err(e) => return e,
+        let created = match shared::create(
+            &mut perspective,
+            &agent_context,
+            shared::InstanceCreate {
+                class_name: p.class_name.clone(),
+                properties: p.properties.clone(),
+                base_uri: p.base_uri.clone(),
+                parent: p.parent.clone(),
+                batch_id: None,
+            },
+        )
+        .await
+        {
+            Ok(created) => created,
+            Err(e) => return create_error(&e),
         };
-
-        let empty = Map::new();
-        let props = p.properties.as_ref().unwrap_or(&empty);
-        let validated = match validate_properties(&shape, props, WriteMode::Create) {
-            Ok(v) => v,
-            Err(errors) => return validation_failure(&class_name, &errors),
-        };
-        let setter_errors = check_setters(&perspective, &shape, &validated.scalars).await;
-        if !setter_errors.is_empty() {
-            return validation_failure(&class_name, &setter_errors);
-        }
-
-        // Normalize once: a bare caller-supplied id ("my-channel") becomes a
-        // literal URI here, and this single value is used for the subject,
-        // the collection links AND the parent link — otherwise they would
-        // target different nodes.
-        let base_uri = match p.base_uri.as_deref() {
-            Some(uri) if !uri.trim().is_empty() => link_target(uri.trim()),
-            _ => generate_instance_uri(),
-        };
-        // A `call` constructor makes the record in its language and names
-        // it — the generated base_uri is not its id, and it cannot run
-        // inside the batch below, so create_subject gets none.
-        let call_ctor = perspective
-            .constructor_is_call(&class_name)
-            .await
-            .unwrap_or(false);
-        if !call_ctor {
-            // Three arms, not `if let Ok(Some(_))`: a store/query failure must not
-            // read as "no instance found" and let the create land on top of an
-            // existing instance, merging its property links.
-            match fetch_instance(&perspective, &class_name, &base_uri).await {
-                Ok(Some(_)) => {
-                    return error_json(format!(
-                        "A {class_name} instance already exists at '{base_uri}'. Use instance_update \
-                         to change it, or omit base_uri to create a new instance with a generated id."
-                    ))
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    return error_json(format!(
-                        "Could not check whether a {class_name} instance already exists at \
-                         '{base_uri}': {e} — nothing was created."
-                    ))
-                }
-            }
-        }
-
-        // Resolve every collection predicate BEFORE creating the subject, so
-        // a bad collection name fails the whole call cleanly instead of
-        // leaving a live instance with partial collection membership.
-        let mut collection_predicates: std::collections::HashMap<String, String> =
-            std::collections::HashMap::new();
-        // Collection links are written directly here, not through the
-        // collection's `adder` action, so the status has to be resolved from
-        // the property shape (`ad4m://local`) for each one.
-        let mut collection_statuses: std::collections::HashMap<String, LinkStatus> =
-            std::collections::HashMap::new();
-        for (collection, _) in &validated.collections {
-            collection_statuses.insert(
-                collection.clone(),
-                shacl::resolve_property_link_status(&perspective, &class_name, collection).await,
-            );
-            match shacl::resolve_property_predicate(&perspective, &class_name, collection).await {
-                Ok(pred) => {
-                    collection_predicates.insert(collection.clone(), pred);
-                }
-                Err(e) => {
-                    return error_json(format!(
-                        "Could not resolve collection '{collection}' on {class_name}: {e} — \
-                         nothing was created"
-                    ))
-                }
-            }
-        }
-
-        let initial_values = if validated.scalars.is_empty() {
-            None
-        } else {
-            Some(Value::Object(validated.scalars.clone()))
-        };
-
-        // One batch for the whole create — subject, collection links, and the
-        // parent link land atomically or not at all (same reasoning as
-        // instance_update: no partially-constructed instance is ever
-        // observable, by peers or by a failed call's aftermath). Every
-        // pre-commit error path discards the batch so it does not sit in
-        // the store until the timeout sweep.
-        let batch_id = perspective.create_batch().await;
-        // The call constructor's URL — when it returns one — replaces the
-        // generated base_uri as the instance id for the collection and
-        // parent links too.
-        let created = perspective
-            .create_subject(
-                subject_class(&class_name),
-                base_uri.clone(),
-                initial_values,
-                if call_ctor {
-                    None
-                } else {
-                    Some(batch_id.clone())
-                },
-                &agent_context,
-            )
-            .await;
-        let base_uri = match created {
-            Err(e) => {
-                perspective.discard_batch(&batch_id).await;
-                return error_json(format!(
-                    "Error creating {class_name} instance (nothing was created): {e:#}"
-                ));
-            }
-            Ok(Some(url)) => url,
-            Ok(None) => base_uri,
-        };
-
-        // Collections: one link per item, same path as instance_add_to_collection.
-        let mut collections_set: Map<String, Value> = Map::new();
-        for (collection, items) in &validated.collections {
-            let predicate = collection_predicates[collection].clone();
-            let status = collection_statuses
-                .get(collection)
-                .cloned()
-                .unwrap_or(LinkStatus::Shared);
-            let mut added = Vec::with_capacity(items.len());
-            for item in items {
-                let item_str = match item {
-                    Value::String(s) => s.clone(),
-                    other => other.to_string(),
-                };
-                let target = Self::create_property_expression(
-                    &perspective,
-                    &class_name,
-                    collection,
-                    &item_str,
-                    &agent_context,
-                )
-                .await;
-                let link = Link {
-                    source: base_uri.clone(),
-                    predicate: Some(predicate.clone()),
-                    target,
-                };
-                if let Err(e) = perspective
-                    .add_link(link, status.clone(), Some(batch_id.clone()), &agent_context)
-                    .await
-                {
-                    perspective.discard_batch(&batch_id).await;
-                    return error_json(format!(
-                        "Failed to add '{item_str}' to collection '{collection}' — nothing was \
-                         created (batch abandoned): {e:#}"
-                    ));
-                }
-                added.push(Value::String(item_str));
-            }
-            collections_set.insert(collection.clone(), Value::Array(added));
-        }
-
-        let parent = p.parent.as_deref().filter(|s| !s.trim().is_empty());
-        if let Some(parent) = parent {
-            if let Err(e) = perspective
-                .add_to_container(
-                    &link_target(parent.trim()),
-                    &base_uri,
-                    Some(batch_id.clone()),
-                    &agent_context,
-                )
-                .await
-            {
-                perspective.discard_batch(&batch_id).await;
-                return error_json(format!(
-                    "Failed to link to parent '{parent}' — nothing was created (batch \
-                     abandoned): {e:#}"
-                ));
-            }
-        }
-
-        if let Err(e) = perspective.commit_batch(batch_id, &agent_context).await {
-            return error_json(format!("Error committing create: {e:#}"));
-        }
 
         let mut result = json!({
             "created": true,
             "perspective_id": p.perspective_id,
-            "class_name": class_name,
-            "base_uri": base_uri,
-            "properties_set": validated.scalars.keys().cloned().collect::<Vec<_>>(),
+            "class_name": created.class_name,
+            "base_uri": created.base_uri,
+            "properties_set": created.properties_set,
         });
-        if !collections_set.is_empty() {
+        if !created.collections_set.is_empty() {
+            let collections_set: Map<String, Value> = created
+                .collections_set
+                .into_iter()
+                .map(|c| (c.collection, json!(c.items)))
+                .collect();
             result["collections_set"] = Value::Object(collections_set);
         }
-        if let Some(parent) = parent {
+        if let Some(parent) = created.parent {
             result["parent"] = json!(parent);
             result["added_to_parent"] = json!(true);
         }
 
         pretty(&result)
+    }
+}
+
+/// `instance_create`'s text for a refused or failed create.
+fn create_error(error: &InstanceError) -> String {
+    if let Some(text) = common_error(error) {
+        return text;
+    }
+    match error {
+        InstanceError::AlreadyExists {
+            class_name,
+            base_uri,
+        } => error_json(format!(
+            "A {class_name} instance already exists at '{base_uri}'. Use instance_update \
+             to change it, or omit base_uri to create a new instance with a generated id."
+        )),
+        InstanceError::Failed {
+            class_name,
+            step,
+            error,
+        } => error_json(match step {
+            WriteStep::CheckExisting { base_uri } => format!(
+                "Could not check whether a {class_name} instance already exists at \
+                 '{base_uri}': {error} — nothing was created."
+            ),
+            WriteStep::ResolveCollection { collection } => format!(
+                "Could not resolve collection '{collection}' on {class_name}: {error} — \
+                 nothing was created"
+            ),
+            WriteStep::CreateSubject => {
+                format!("Error creating {class_name} instance (nothing was created): {error:#}")
+            }
+            WriteStep::AddCollectionItem { collection, item } => format!(
+                "Failed to add '{item}' to collection '{collection}' — nothing was \
+                 created (batch abandoned): {error:#}"
+            ),
+            WriteStep::AddToParent { parent } => format!(
+                "Failed to link to parent '{parent}' — nothing was created (batch \
+                 abandoned): {error:#}"
+            ),
+            WriteStep::Commit => format!("Error committing create: {error:#}"),
+            other => format!("Error creating {class_name} instance ({other:?}): {error:#}"),
+        }),
+        other => error_json(format!("{other:?}")),
     }
 }

@@ -15,8 +15,11 @@ REST/WS shim. Split plan: spec item 6.
 
 `*_ws.rs`, one per RPC namespace: `agent`, `ai`, `expressions`, `hosting`,
 `languages`, `neighbourhoods`, `perspectives` (largest; also SHACL + interpretation
-handlers), `runtime`, `config` (`runtime.config`, `runtime.setConfig`), `users`, `identity`, and
-`agent_session` (`perspective.runAgent`). Each exposes `register_ws_handlers(&mut HandlerMap)`
+handlers), `runtime`, `config` (`runtime.config`, `runtime.setConfig`), `users`, `identity`,
+`agent_session` (`perspective.runAgent`), and `perspective_instances` (`perspective.instance*`:
+validated instance writes over `perspectives/instances/`, the same functions as the MCP
+`instance_*` tools; a refused write is a `WsRpcError` with the `InstanceError` as `data`: 422
+for a shape violation, see the module doc). Each exposes `register_ws_handlers(&mut HandlerMap)`
 called from `ws_handler::build_handler_map`.
 
 Handler shape (`perspectives_ws.rs::add_link` is representative):
@@ -161,7 +164,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-239 methods: Cap 82, CapAnyPointer 1, Executor 43, Open 5, Operator 28, Owns 78, UserOrOperator 2. Local only (the operator on this machine): 5.
+241 methods: Cap 82, CapAnyPointer 1, Executor 43, Open 5, Operator 28, Owns 80, UserOrOperator 2. Local only (the operator on this machine): 5.
 
 | Method | Guard |
 |---|---|
@@ -275,7 +278,6 @@ the guard checked:
 | `perspective.addLink` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.addLinkExpression` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.addLinks` | `Owns(Perspective uuid, perspective:UPDATE)` |
-| `perspective.addSdna` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.all` | `CapAnyPointer(perspective:READ)` |
 | `perspective.commitBatch` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.create` | `Cap(perspective:CREATE)` |
@@ -290,11 +292,12 @@ the guard checked:
 | `perspective.flowStates` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.flowValidOutputs` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.get` | `Owns(Perspective uuid, perspective:READ)`, 404 → `null` |
-| `perspective.getAllShacl` | `Owns(Perspective uuid, perspective:READ)` |
-| `perspective.getShacl` | `Owns(Perspective uuid, perspective:READ)` |
-| `perspective.getShaclNames` | `Owns(Perspective uuid, perspective:READ)` |
-| `perspective.getShaclTargetClass` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.getSubjectData` | `Owns(Perspective uuid, perspective:READ)` |
+| `perspective.instanceAddToCollection` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.instanceCreate` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.instanceRemove` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.instanceRemoveFromCollection` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.instanceUpdate` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.interpretationOverlays` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.linkMutations` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.mintFlowReceipt` | `Owns(Perspective uuid, perspective:UPDATE)` |
@@ -307,6 +310,7 @@ the guard checked:
 | `perspective.queryLinks` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.queryProlog` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.querySparql` | `Owns(Perspective uuid, perspective:READ)` |
+| `perspective.registerShapes` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.rejectFlowProposal` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.rejectInterpretation` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.remove` | `Owns(Perspective uuid, perspective:DELETE)` |
@@ -318,6 +322,7 @@ the guard checked:
 | `perspective.runAgent` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.runInterpretation` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.runInterpretationWithHarness` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.shapes` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.snapshot` | `Owns(Perspective uuid, perspective:READ)`, 404 → `null` |
 | `perspective.subjectClassesOf` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.subscribeQuery` | `Owns(Perspective uuid, perspective:READ)` |
@@ -478,7 +483,9 @@ them against those two guards.
   once to each of `event_recipients`, each copy naming that DID as `recipient`
   (`perspectives::publish_telepresence_signal`, used by both link-language paths and by
   `send_signal` / `send_broadcast` for the executor's own agents: a neighbourhood's owners are
-  only this executor's agents). `notification-triggered` goes to the notification's `ownerDid`,
+  only this executor's agents). A broadcast reaches every owner, the sender's own agent too, main
+  or managed, so its other clients hear it (two devices of one agent in a mesh call); `loopback`
+  adds a second copy to every owner. `notification-triggered` goes to the notification's `ownerDid`,
   never to co-owners, and needs the query capability on its perspective (its `triggerMatch` is
   query results), not `runtime.notifications`' AGENT_UPDATE. `auto-processor-event` goes to the pass owner when it is one of
   `event_recipients`, else nobody (`auto_processor::events::pass_audience`);
@@ -602,9 +609,11 @@ them against those two guards.
   `core/src/generated/api/`, but not its `index.ts`: add the export line there by hand.
 - `crate::types::core` (domain) vs `crate::types::domain` (wire/input). Some duplicates,
   see spec item 5. Prefer `crate::types::X` re-exports.
-- `WsRpcError { code, message }` (`ws_handler.rs`): constructors `bad_request`,
+- `WsRpcError { code, message, data }` (`ws_handler.rs`): constructors `bad_request`,
   `unauthorized`, `forbidden`, `not_found`, `conflict`, `too_many_requests`,
-  `internal`, `not_implemented`. No `From` impls for domain errors yet.
+  `internal`, `not_implemented`; `.with_data(value)` adds structured detail, sent as
+  `error.data` (`to_wire`) and read by the SDK as `RpcError.data`. No `From` impls for domain
+  errors yet.
 
 ## openai_compat/
 

@@ -522,6 +522,101 @@ async fn describe_perspective_marks_unregistered_relation_targets() {
     );
 }
 
+/// A `Task` shape in namespace `ns`.
+fn task_sdna(ns: &str) -> String {
+    format!(
+        r#"{{
+  "target_class": "{ns}://Task",
+  "constructor_actions": [
+    {{"action":"addLink","source":"this","predicate":"rdf://type","target":"{ns}://Task"}}
+  ],
+  "properties": [
+    {{"path":"{ns}://title","name":"title","datatype":"xsd:string","min_count":1,"max_count":1,"writable":true,
+     "setter":[{{"action":"setSingleTarget","source":"this","predicate":"{ns}://title","target":"value"}}]}}
+  ]
+}}"#
+    )
+}
+
+/// Two classes of one name (`a://Task`, `b://Task`) are both described,
+/// each named by its target class IRI, and the instance tools take that IRI
+/// (and the IRI of a class whose name is its own) as `class_name`.
+#[tokio::test(flavor = "multi_thread")]
+async fn describe_perspective_lists_two_classes_of_one_name() {
+    let (a, b) = (task_sdna("a"), task_sdna("b"));
+    let (handler, uuid, _guard) = setup_with(
+        &[("Task", &a), ("Task", &b), ("Channel", CHANNEL_SDNA)],
+        false,
+    )
+    .await;
+    let desc = parse(
+        &handler
+            .describe_perspective(Parameters(DescribePerspectiveParams {
+                perspective_id: uuid.clone(),
+            }))
+            .await,
+    );
+    let classes = desc["classes"].as_array().expect("classes array");
+    let listed: Vec<(&str, &str)> = classes
+        .iter()
+        .map(|c| {
+            (
+                c["name"].as_str().unwrap(),
+                c["class_uri"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        listed,
+        vec![
+            ("Channel", "flux://Channel"),
+            ("a://Task", "a://Task"),
+            ("b://Task", "b://Task"),
+        ],
+        "{desc}"
+    );
+
+    for class_name in ["b://Task", "a://Task"] {
+        let created = parse(
+            &handler
+                .instance_create(Parameters(InstanceCreateParams {
+                    perspective_id: uuid.clone(),
+                    class_name: class_name.into(),
+                    properties: Some(props(&[("title", json!(class_name))])),
+                    base_uri: None,
+                    parent: None,
+                }))
+                .await,
+        );
+        assert_eq!(created["created"], true, "{created}");
+        let base_uri = created["base_uri"].as_str().unwrap().to_string();
+        let (ns, _) = class_name.split_once("://").unwrap();
+        let p = crate::perspectives::get_perspective(&uuid).unwrap();
+        let titles = p
+            .get_links(&crate::types::LinkQuery {
+                source: Some(base_uri.clone()),
+                predicate: Some(format!("{ns}://title")),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(titles.len(), 1, "{class_name} writes its own predicate");
+    }
+
+    let channel = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: uuid.clone(),
+                class_name: "flux://Channel".into(),
+                properties: Some(props(&[("name", json!("general"))])),
+                base_uri: None,
+                parent: None,
+            }))
+            .await,
+    );
+    assert_eq!(channel["created"], true, "{channel}");
+}
+
 /// Relation-typed properties through the generic tools: schema exposure,
 /// URI-gated writes on a forward hasOne, rejection of non-URI values, and
 /// read-only enforcement on a belongsTo (reverse) relation.
@@ -4820,4 +4915,437 @@ async fn describe_perspective_lists_allowed_values() {
     assert_eq!(find(properties, "locked")["allowed_values"], json!([]));
     // No `in` declared: the key is absent, not null.
     assert!(find(properties, "title").get("allowed_values").is_none());
+}
+
+// ============================================================================
+// #1762 CodeRabbit review: collection values keep their type, an instance
+// stored under the legacy `literal://` spelling is written where it lives,
+// integers that do not fit are refused
+// ============================================================================
+
+/// One string collection and one boolean collection, both stored as plain
+/// literals (no `resolveLanguage`).
+const TAGGED_SDNA: &str = r#"{
+  "target_class": "ns://Tagged",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"rdf://type","target":"ns://Tagged"}
+  ],
+  "properties": [
+    {"path":"ns://tagged_title","name":"title","datatype":"xsd:string","min_count":1,"max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://tagged_title","target":"value"}]},
+    {"path":"ns://tag","name":"tags","datatype":"xsd:string","collection":true,"writable":true,
+     "adder":[{"action":"addLink","source":"this","predicate":"ns://tag","target":"value"}],
+     "remover":[{"action":"removeLink","source":"this","predicate":"ns://tag","target":"value"}]},
+    {"path":"ns://flag","name":"flags","datatype":"xsd:boolean","collection":true,"writable":true,
+     "adder":[{"action":"addLink","source":"this","predicate":"ns://flag","target":"value"}],
+     "remover":[{"action":"removeLink","source":"this","predicate":"ns://flag","target":"value"}]}
+  ]
+}"#;
+
+/// The link targets stored under `source --predicate-->`, sorted.
+async fn stored_targets(
+    handler: &Ad4mMcpHandler,
+    uuid: &str,
+    source: &str,
+    predicate: &str,
+) -> Vec<String> {
+    let (perspective, _) = handler
+        .get_writable_perspective(uuid)
+        .await
+        .expect("fixture perspective");
+    let mut targets: Vec<String> = perspective
+        .get_links(&crate::types::LinkQuery {
+            source: Some(source.to_string()),
+            predicate: Some(predicate.to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("get_links")
+        .into_iter()
+        .map(|l| l.data.target)
+        .collect();
+    targets.sort();
+    targets
+}
+
+/// A string collection given `"false"` and `"42"` stores them as strings —
+/// on create and on add — not as the boolean and number their text parses
+/// to. Validation already settled the type; writing must not re-guess it.
+#[tokio::test(flavor = "multi_thread")]
+async fn string_collection_items_stay_strings_when_written() {
+    let (handler, uuid, _guard) = setup_with(&[("Tagged", TAGGED_SDNA)], false).await;
+
+    let created = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Tagged".into(),
+                properties: Some(props(&[
+                    ("title", json!("t")),
+                    ("tags", json!(["false", "42"])),
+                ])),
+                base_uri: None,
+                parent: None,
+            }))
+            .await,
+    );
+    assert_eq!(created["created"], true, "{created}");
+    let base = created["base_uri"].as_str().unwrap().to_string();
+    assert_eq!(
+        stored_targets(&handler, &uuid, &base, "ns://tag").await,
+        vec!["literal:string:42", "literal:string:false"]
+    );
+
+    let added = parse(
+        &handler
+            .instance_add_to_collection(Parameters(InstanceAddToCollectionParams {
+                perspective_id: uuid.clone(),
+                class_name: "Tagged".into(),
+                base_uri: base.clone(),
+                collection: "tags".into(),
+                item_uri: "true".into(),
+            }))
+            .await,
+    );
+    assert_eq!(added["links_added"], 1, "{added}");
+    assert_eq!(
+        stored_targets(&handler, &uuid, &base, "ns://tag").await,
+        vec![
+            "literal:string:42",
+            "literal:string:false",
+            "literal:string:true"
+        ]
+    );
+}
+
+/// A boolean collection member is stored as `literal:boolean:true`; the
+/// value `"true"` must find it, so adding it again is a no-op and removing
+/// it removes it.
+#[tokio::test(flavor = "multi_thread")]
+async fn boolean_collection_members_are_matched_by_value() {
+    let (handler, uuid, _guard) = setup_with(&[("Tagged", TAGGED_SDNA)], false).await;
+
+    let created = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Tagged".into(),
+                properties: Some(props(&[("title", json!("t")), ("flags", json!([true]))])),
+                base_uri: None,
+                parent: None,
+            }))
+            .await,
+    );
+    assert_eq!(created["created"], true, "{created}");
+    let base = created["base_uri"].as_str().unwrap().to_string();
+    assert_eq!(
+        stored_targets(&handler, &uuid, &base, "ns://flag").await,
+        vec!["literal:boolean:true"]
+    );
+
+    let again = parse(
+        &handler
+            .instance_add_to_collection(Parameters(InstanceAddToCollectionParams {
+                perspective_id: uuid.clone(),
+                class_name: "Tagged".into(),
+                base_uri: base.clone(),
+                collection: "flags".into(),
+                item_uri: "true".into(),
+            }))
+            .await,
+    );
+    assert_eq!(again["links_added"], 0, "{again}");
+    assert_eq!(again["already_member"], true, "{again}");
+
+    let removed = parse(
+        &handler
+            .instance_remove_from_collection(Parameters(InstanceRemoveFromCollectionParams {
+                perspective_id: uuid.clone(),
+                class_name: "Tagged".into(),
+                base_uri: base.clone(),
+                collection: "flags".into(),
+                item_uri: "true".into(),
+            }))
+            .await,
+    );
+    assert_eq!(removed["links_removed"], 1, "{removed}");
+    assert!(stored_targets(&handler, &uuid, &base, "ns://flag")
+        .await
+        .is_empty());
+}
+
+/// A whole float too large for an integer property is refused, not
+/// saturated to `i64::MAX`; a whole float that fits is still accepted.
+#[tokio::test(flavor = "multi_thread")]
+async fn integer_property_refuses_a_whole_float_that_does_not_fit() {
+    let (handler, uuid, _guard) = setup(false).await;
+
+    let bad = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Channel".into(),
+                properties: Some(props(&[("name", json!("big")), ("rank", json!(1e20))])),
+                base_uri: None,
+                parent: None,
+            }))
+            .await,
+    );
+    let err = bad["error"]
+        .as_str()
+        .unwrap_or_else(|| panic!("1e20 must be refused, got: {bad}"));
+    assert!(err.contains("rank") && err.contains("integer"), "{err}");
+
+    let ok = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Channel".into(),
+                properties: Some(props(&[("name", json!("three")), ("rank", json!(3.0))])),
+                base_uri: None,
+                parent: None,
+            }))
+            .await,
+    );
+    assert_eq!(ok["created"], true, "{ok}");
+    let got = parse(
+        &handler
+            .instance_get(Parameters(InstanceGetParams {
+                perspective_id: uuid.clone(),
+                class_name: "Channel".into(),
+                base_uri: ok["base_uri"].as_str().unwrap().into(),
+            }))
+            .await,
+    );
+    assert_eq!(got["rank"], 3, "{got}");
+}
+
+/// An instance written before ids were normalised lives under the legacy
+/// `literal://string:…` source. `fetch_instance` finds it through the other
+/// spelling; update and remove must then write at that stored source, not at
+/// the normalised one the store does not alias to it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_legacy_spelled_instance_is_updated_and_removed_where_it_is_stored() {
+    let (handler, uuid, _guard) = setup(false).await;
+    let legacy = "literal://string:legacy-room";
+    let normalised = "literal:string:legacy-room";
+
+    {
+        let (mut perspective, agent) = handler
+            .get_writable_perspective(&uuid)
+            .await
+            .expect("fixture perspective");
+        for (predicate, target) in [
+            ("flux://entry_type", "flux://has_channel"),
+            ("rdf://type", "flux://Channel"),
+            ("flux://channel_name", "literal:string:Old"),
+        ] {
+            perspective
+                .add_link(
+                    crate::types::Link {
+                        source: legacy.into(),
+                        predicate: Some(predicate.into()),
+                        target: target.into(),
+                    },
+                    crate::types::LinkStatus::Shared,
+                    None,
+                    &agent,
+                )
+                .await
+                .expect("seed legacy link");
+        }
+    }
+    // The premise: the store keeps the legacy source as written.
+    assert_eq!(
+        stored_targets(&handler, &uuid, legacy, "flux://channel_name").await,
+        vec!["literal:string:Old"]
+    );
+
+    let updated = parse(
+        &handler
+            .instance_update(Parameters(InstanceUpdateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Channel".into(),
+                base_uri: legacy.into(),
+                properties: props(&[("name", json!("New"))]),
+            }))
+            .await,
+    );
+    assert!(updated.get("error").is_none(), "{updated}");
+    assert_eq!(
+        stored_targets(&handler, &uuid, legacy, "flux://channel_name").await,
+        vec!["literal:string:New"],
+        "the update must land on the stored instance"
+    );
+    assert!(
+        stored_targets(&handler, &uuid, normalised, "flux://channel_name")
+            .await
+            .is_empty(),
+        "the update must not start a second node under the normalised id"
+    );
+
+    let removed = parse(
+        &handler
+            .instance_remove(Parameters(InstanceRemoveParams {
+                perspective_id: uuid.clone(),
+                class_name: "Channel".into(),
+                base_uri: legacy.into(),
+            }))
+            .await,
+    );
+    assert!(removed.get("error").is_none(), "{removed}");
+    let (perspective, _) = handler.get_writable_perspective(&uuid).await.unwrap();
+    let left = perspective
+        .get_links(&crate::types::LinkQuery {
+            source: Some(legacy.into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(left.is_empty(), "remove left the stored links: {left:?}");
+}
+
+/// `common_error` words an ambiguous class name with the IRIs a caller may
+/// pass instead.
+#[test]
+fn an_ambiguous_class_error_names_the_candidate_iris() {
+    let text = common_error(&InstanceError::AmbiguousClass {
+        class_name: "Task".into(),
+        candidates: vec!["a://Task".into(), "b://Task".into()],
+    })
+    .expect("worded by common_error");
+    assert!(text.contains("Task"), "{text}");
+    assert!(text.contains("a://Task"), "{text}");
+    assert!(text.contains("b://Task"), "{text}");
+}
+
+/// `a://Task` and `b://Task` share the name `Task`.
+const TASK_A_SDNA: &str = r#"{
+  "target_class": "a://Task",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"rdf://type","target":"a://Task"}
+  ],
+  "properties": [
+    {"path":"a://task_title","name":"title","datatype":"xsd:string","min_count":1,"max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"a://task_title","target":"value"}]}
+  ]
+}"#;
+
+const TASK_B_SDNA: &str = r#"{
+  "target_class": "b://Task",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"rdf://type","target":"b://Task"}
+  ],
+  "properties": [
+    {"path":"b://task_title","name":"title","datatype":"xsd:string","min_count":1,"max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"b://task_title","target":"value"}]}
+  ]
+}"#;
+
+fn tool_text(result: &rmcp::model::CallToolResult) -> String {
+    result
+        .content
+        .iter()
+        .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The generated per-class tools dispatch through the same class lookup as
+/// the `instance_*` tools: on a name two classes share they write into
+/// neither, the refusal names both IRIs, and no `task_*` tool is generated
+/// (`class_keys` names those classes by IRI).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_generated_write_on_a_shared_name_is_refused_naming_both_iris() {
+    let (handler, uuid, _guard) = setup_with(
+        &[
+            ("TaskA", TASK_A_SDNA),
+            ("TaskB", TASK_B_SDNA),
+            ("Channel", CHANNEL_SDNA),
+        ],
+        true,
+    )
+    .await;
+
+    let names: Vec<String> = handler
+        .generate_dynamic_tools()
+        .await
+        .iter()
+        .map(|t| t.name.to_string())
+        .collect();
+    assert!(
+        !names.iter().any(|n| n.starts_with("task_")),
+        "a shared name generates no tools: {names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n == "channel_create"),
+        "a unique name still generates its tools: {names:?}"
+    );
+
+    for (tool, args) in [
+        (
+            "task_create",
+            props(&[("perspective_id", json!(uuid)), ("title", json!("t"))]),
+        ),
+        (
+            "task_set_title",
+            props(&[
+                ("perspective_id", json!(uuid)),
+                ("expression_address", json!("ad4m://obj/x")),
+                ("value", json!("v")),
+            ]),
+        ),
+    ] {
+        let result = handler
+            .handle_dynamic_tool(tool, Some(args))
+            .await
+            .expect("the tool answers");
+        assert_eq!(result.is_error, Some(true), "{tool}: {result:?}");
+        let text = tool_text(&result);
+        assert!(
+            text.contains("a://Task") && text.contains("b://Task"),
+            "{tool} names both IRIs: {text}"
+        );
+    }
+
+    // Nothing was written: no instance typed against either class, no title.
+    let perspective = crate::perspectives::get_perspective(&uuid).expect("perspective");
+    for (predicate, target) in [
+        ("rdf://type", Some("a://Task")),
+        ("rdf://type", Some("b://Task")),
+        ("a://task_title", None),
+    ] {
+        let links = perspective
+            .get_links(&crate::types::LinkQuery {
+                predicate: Some(predicate.into()),
+                target: target.map(Into::into),
+                ..Default::default()
+            })
+            .await
+            .expect("get_links");
+        assert!(
+            links.is_empty(),
+            "{predicate} → {target:?} written by a refused tool: {links:?}"
+        );
+    }
+}
+
+/// With one class of the name the generated write resolves it and creates.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_generated_write_on_a_unique_name_still_creates() {
+    let (handler, uuid, _guard) = setup_with(&[("Task", TASK_A_SDNA)], true).await;
+    let created = handler
+        .handle_dynamic_tool(
+            "task_create",
+            Some(props(&[
+                ("perspective_id", json!(uuid)),
+                ("title", json!("t")),
+            ])),
+        )
+        .await
+        .expect("the tool answers");
+    assert_ne!(created.is_error, Some(true), "{}", tool_text(&created));
+    let out = parse(&tool_text(&created));
+    assert_eq!(out["created"], true, "{out}");
+    assert_eq!(out["class_name"], "Task", "{out}");
 }

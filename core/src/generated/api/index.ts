@@ -9,7 +9,6 @@
 export type { AddLinkExpressionRequest } from "./AddLinkExpressionRequest";
 export type { AddLinkRequest } from "./AddLinkRequest";
 export type { AddLinksBulkRequest } from "./AddLinksBulkRequest";
-export type { AddSdnaRequest } from "./AddSdnaRequest";
 export type { AgentMessage } from "./AgentMessage";
 export type { AgentReply } from "./AgentReply";
 export type { AgentsByDidsRequest } from "./AgentsByDidsRequest";
@@ -148,6 +147,33 @@ export type { SignedRequest } from "./SignedRequest";
 export type { SkippedSource } from "./SkippedSource";
 export type { StoreBehind } from "./StoreBehind";
 export type { StoreInfo } from "./StoreInfo";
+// Class registration (perspective.registerShapes, perspective.shapes).
+export type { PropertyShapeJson } from "./PropertyShapeJson";
+export type { RegisterResult } from "./RegisterResult";
+export type { ShapeAction } from "./ShapeAction";
+export type { ShapeConformanceCondition } from "./ShapeConformanceCondition";
+export type { ShapeJson } from "./ShapeJson";
+export type { ShapeSummary } from "./ShapeSummary";
+// The validated instance writes (perspective.instance*): bodies, results, and the
+// error data of a refused write (RpcError.data).
+export type { InstanceCreate } from "./InstanceCreate";
+export type { InstanceUpdate } from "./InstanceUpdate";
+export type { InstanceRemove } from "./InstanceRemove";
+export type { InstanceAddToCollection } from "./InstanceAddToCollection";
+export type { InstanceRemoveFromCollection } from "./InstanceRemoveFromCollection";
+export type { InstanceCreated } from "./InstanceCreated";
+export type { InstanceUpdated } from "./InstanceUpdated";
+export type { InstanceRemoved } from "./InstanceRemoved";
+export type { CollectionItemAdded } from "./CollectionItemAdded";
+export type { CollectionItemRemoved } from "./CollectionItemRemoved";
+export type { CollectionItems } from "./CollectionItems";
+export type { InstanceError } from "./InstanceError";
+export type { ValidationError } from "./ValidationError";
+export type { ValidationProblem } from "./ValidationProblem";
+export type { ReadOnlyReason } from "./ReadOnlyReason";
+export type { Cardinality } from "./Cardinality";
+export type { WriteStep } from "./WriteStep";
+export type { CascadeStep } from "./CascadeStep";
 export { READ_METHODS, LONG_METHODS, OPENS_METHODS } from "./RpcMethods";
 export type { RpcMethods, RpcMethod } from "./RpcMethods";
 export { SCOPED_EVENTS } from "./Events";

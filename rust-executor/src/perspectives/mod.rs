@@ -17,6 +17,7 @@ pub(crate) mod flow_spawn;
 pub(crate) mod hardwired_class;
 pub(crate) mod hosted_status;
 pub(crate) mod ingest;
+pub mod instances;
 pub mod interpretation;
 #[cfg(test)]
 mod interpretation_e2e;
@@ -44,6 +45,7 @@ pub mod shacl_to_prolog;
 pub mod sparql_store;
 pub mod subject_classes_of;
 pub mod utils;
+pub(crate) mod write_log;
 use crate::languages::mount_types::MountDelta;
 use crate::types::{
     LinkQuery, LinkStatus, NeighbourhoodSignalFilter, PerspectiveEvent, PerspectiveExpression,

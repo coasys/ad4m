@@ -641,7 +641,6 @@ describe("Ad4mModel query methods (modelQuery integration)", () => {
     modelQuery: jest.fn(),
     infer: jest.fn(),
     uuid: 'test-perspective-uuid',
-    stringOrTemplateObjectToSubjectClassName: jest.fn().mockResolvedValue('Recipe')
   } as any;
 
   beforeEach(() => {
@@ -797,7 +796,6 @@ describe("Ad4mModel.count() with advanced where conditions", () => {
     modelQuery: jest.fn(),
     infer: jest.fn(),
     uuid: 'test-perspective-uuid',
-    stringOrTemplateObjectToSubjectClassName: jest.fn().mockResolvedValue('Recipe')
   } as any;
 
   beforeEach(() => {
@@ -1340,6 +1338,69 @@ describe("ModelQueryBuilder subscribe callback timing", () => {
   });
 });
 
+describe("totalCount is asked for only by the readers of it (P3)", () => {
+  const { Ad4mModel, Model, Flag, Property } = require("./index");
+
+  @Model({ name: "CountedThing" })
+  class CountedThing extends Ad4mModel {
+    @Flag({ through: "test://type", value: "test://counted" })
+    type: string = "test://counted";
+    @Property({ through: "test://name" })
+    name: string = "";
+  }
+
+  function perspective() {
+    const client = {
+      modelSubscribe: jest.fn().mockResolvedValue({
+        subscriptionId: "count-sub",
+        revision: 0,
+        result: { instances: [], totalCount: 4 },
+      }),
+      onQueryUpdate: jest.fn(() => () => {}),
+      onReconnect: jest.fn(() => () => {}),
+      disposeQuerySubscription: jest.fn().mockResolvedValue(true),
+    };
+    return {
+      uuid: "count-uuid",
+      client,
+      modelQuery: jest.fn().mockResolvedValue({ instances: [], totalCount: 4 }),
+      modelSubscribe: jest.fn((className: string, queryJson: string) =>
+        client.modelSubscribe("count-uuid", className, queryJson),
+      ),
+    } as any;
+  }
+  const sentQuery = (fn: jest.Mock) => JSON.parse(fn.mock.calls[0][1]);
+
+  it("findAll() and get() send no count", async () => {
+    const p = perspective();
+    await CountedThing.findAll(p, { limit: 5 });
+    expect(sentQuery(p.modelQuery)).not.toHaveProperty("count");
+    const q = perspective();
+    await CountedThing.query(q).limit(5).get();
+    expect(sentQuery(q.modelQuery)).not.toHaveProperty("count");
+  });
+
+  it("findAllAndCount(), count() and the builder's count() send count: true", async () => {
+    for (const run of [
+      (p: any) => CountedThing.findAllAndCount(p, { limit: 5 }),
+      (p: any) => CountedThing.count(p),
+      (p: any) => CountedThing.query(p).count(),
+    ]) {
+      const p = perspective();
+      await run(p);
+      expect(sentQuery(p.modelQuery).count).toBe(true);
+    }
+  });
+
+  it("countSubscribe() opens its subscription with count: true", async () => {
+    const p = perspective();
+    const builder = CountedThing.query(p);
+    expect(await builder.countSubscribe(() => {})).toBe(4);
+    expect(sentQuery(p.modelSubscribe)).toMatchObject({ limit: 0, count: true });
+    builder.dispose();
+  });
+});
+
 describe("ModelQueryBuilder paginateSubscribe", () => {
   // The subscription is the paged query itself (PERF-11). Since #1237 the
   // executor re-runs a paged subscription when a record outside the page
@@ -1521,6 +1582,51 @@ describe("ModelQueryBuilder paginateSubscribe", () => {
       errorSpy.mockRestore();
     }
   });
+
+  it("paginateSubscribe() rejects a first answer without totalCount and ends its subscription", async () => {
+    const { mockClient, mockPerspective } = buildMocks({ instances: [] });
+    const builder = testModel("PaginateNoCount").query(mockPerspective);
+
+    await expect(builder.paginateSubscribe(10, 1, () => {})).rejects.toThrow(/totalCount/);
+
+    expect(mockClient.disposeQuerySubscription).toHaveBeenCalledWith("test-uuid", "paginate-sub");
+    // The failed call left nothing for the builder to end.
+    builder.dispose();
+    expect(mockClient.disposeQuerySubscription).toHaveBeenCalledTimes(1);
+  });
+
+  it("countSubscribe() rejects a first answer without totalCount and ends its subscription", async () => {
+    const { mockClient, mockPerspective } = buildMocks({ instances: [] });
+    const builder = testModel("CountNoCount").query(mockPerspective);
+
+    await expect(builder.countSubscribe(() => {})).rejects.toThrow(/totalCount/);
+
+    expect(mockClient.disposeQuerySubscription).toHaveBeenCalledWith("test-uuid", "paginate-sub");
+    builder.dispose();
+    expect(mockClient.disposeQuerySubscription).toHaveBeenCalledTimes(1);
+  });
+
+  it("countSubscribe() skips a pushed update without totalCount and keeps delivering", async () => {
+    const errorSpy = jest.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { mockPerspective, push } = buildMocks({ instances: [], totalCount: 1 });
+      const counts: number[] = [];
+      const builder = testModel("CountPushNoCount").query(mockPerspective);
+      expect(await builder.countSubscribe(c => counts.push(c))).toBe(1);
+
+      // The push runs the client's update dispatch: it must not throw.
+      expect(() => push({ result: { instances: [] } })).not.toThrow();
+      expect(counts).toEqual([]);
+      push({ result: { instances: [], totalCount: 2 } });
+      await settle();
+
+      expect(counts).toEqual([2]);
+      expect(errorSpy.mock.calls.some(args => args[0] === "Count subscription error:")).toBe(true);
+      builder.dispose();
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
 });
 
 // ============================================================================
@@ -1622,50 +1728,7 @@ describe("ModelQueryBuilder reconnect", () => {
 // Performance Optimisation Tests
 // ============================================================================
 
-import { getCachedResult, setCachedResult, clearQueryCache, queryCacheSize } from "./query-cache";
 import { getPropertiesMetadata, getRelationsMetadata, getMemoizedSHACL } from "./decorators";
-
-describe("QueryCache", () => {
-  beforeEach(() => clearQueryCache());
-
-  it("should return undefined for cache miss", () => {
-    expect(getCachedResult("uuid1", "SELECT ?s WHERE {}")).toBeUndefined();
-  });
-
-  it("should return cached result within TTL", () => {
-    const result = [{ s: "test" }];
-    setCachedResult("uuid1", "SELECT ?s WHERE {}", result);
-    expect(getCachedResult("uuid1", "SELECT ?s WHERE {}")).toBe(result);
-  });
-
-  it("should expire after TTL", async () => {
-    setCachedResult("uuid1", "SELECT ?s WHERE {}", [{ s: "test" }], 50);
-    await new Promise(r => setTimeout(r, 60));
-    expect(getCachedResult("uuid1", "SELECT ?s WHERE {}")).toBeUndefined();
-  });
-
-  it("should cache independently per perspective", () => {
-    setCachedResult("uuid1", "SELECT ?s WHERE {}", "result1");
-    setCachedResult("uuid2", "SELECT ?s WHERE {}", "result2");
-    expect(getCachedResult("uuid1", "SELECT ?s WHERE {}")).toBe("result1");
-    expect(getCachedResult("uuid2", "SELECT ?s WHERE {}")).toBe("result2");
-  });
-
-  it("should cache independently per query", () => {
-    setCachedResult("uuid1", "query1", "r1");
-    setCachedResult("uuid1", "query2", "r2");
-    expect(getCachedResult("uuid1", "query1")).toBe("r1");
-    expect(getCachedResult("uuid1", "query2")).toBe("r2");
-  });
-
-  it("should clear all entries", () => {
-    setCachedResult("uuid1", "q1", "r1");
-    setCachedResult("uuid2", "q2", "r2");
-    expect(queryCacheSize()).toBe(2);
-    clearQueryCache();
-    expect(queryCacheSize()).toBe(0);
-  });
-});
 
 describe("SHACL Memoisation", () => {
   it("should memoise generateSHACL() per class", () => {
@@ -1907,7 +1970,6 @@ describe("deepQuery — getter evaluation", () => {
     }),
     get: jest.fn().mockResolvedValue([]),
     getExpression: jest.fn().mockResolvedValue(null),
-    stringOrTemplateObjectToSubjectClassName: jest.fn().mockResolvedValue("DeepQueryTestMessage"),
   };
 
   beforeEach(() => {
@@ -1954,7 +2016,7 @@ describe("deepQuery — getter evaluation", () => {
       // Should make exactly 1 RPC call via perspective.evaluateGetters
       expect(mockPerspective.evaluateGetters).toHaveBeenCalledTimes(1);
       const [className, instanceIds, propertyNames] = mockPerspective.evaluateGetters.mock.calls[0];
-      expect(className).toBe("DeepQueryTestMessage");
+      expect(className).toBe("flux://DeepQueryTestMessage");
       expect(instanceIds).toEqual(["flux://msg-0", "flux://msg-1"]);
       expect(propertyNames).toEqual(["replyingTo"]);
       // No querySparql calls — all done in-process
@@ -1968,7 +2030,7 @@ describe("deepQuery — getter evaluation", () => {
 
       expect(mockPerspective.evaluateGetters).toHaveBeenCalledTimes(1);
       const [className, instanceIds, propertyNames] = mockPerspective.evaluateGetters.mock.calls[0];
-      expect(className).toBe("DeepQueryTestMessage");
+      expect(className).toBe("flux://DeepQueryTestMessage");
       expect(instanceIds).toEqual(["flux://msg-0", "flux://msg-1"]);
       expect(propertyNames).toBeUndefined();
     });
@@ -2168,6 +2230,19 @@ describe("Ad4mModel.fromSHACL()", () => {
     expect(typeof (Cls as any).generateSHACL).toBe("function");
   });
 
+  it("keeps the shape's target class: the namespace is everything before the local name", () => {
+    for (const [targetClass, name] of [
+      ["urn:isbn:Book", "Book"],
+      ["a://Note", "Note"],
+      ["http://x.org/ns#Thing", "Thing"],
+      ["a://b/c/Thing", "Thing"],
+    ]) {
+      const Cls = Ad4mModel.fromSHACL(makeShape(targetClass, []), name);
+      expect(Cls.getTargetClass()).toBe(targetClass);
+      expect(Cls.getClassName()).toBe(name);
+    }
+  });
+
   it("handles shapes with no properties", () => {
     const shape = makeShape("flux://Empty", []);
     const Cls = Ad4mModel.fromSHACL(shape, "Empty");
@@ -2209,7 +2284,6 @@ describe("IncludeProjection type guard and key splitting", () => {
     modelQuery: jest.fn(),
     infer: jest.fn(),
     uuid: "test-perspective-uuid",
-    stringOrTemplateObjectToSubjectClassName: jest.fn().mockResolvedValue("Post"),
   } as any;
 
   beforeEach(() => {
@@ -2328,7 +2402,7 @@ describe("IncludeProjection type guard and key splitting", () => {
     const qi = JSON.parse(queryJson);
 
     // targetClassName drives the executor's cache lookup for the target shape.
-    expect(qi.projections?.$signalCount?.targetClassName).toBe("Signal");
+    expect(qi.projections?.$signalCount?.targetClassName).toBe("signal://Signal");
   });
 
   it("leaves targetClassName absent when relation has no target decorator", async () => {
@@ -2384,7 +2458,7 @@ describe("IncludeProjection type guard and key splitting", () => {
     expect(posts.projections?.$signalCount).toMatchObject({ from: "signals", count: true });
     expect(posts.include).toBeUndefined();
     // Read against the relation's target, so it is tagged as a top-level one would be.
-    expect(posts.projections.$signalCount.targetClassName).toBe("Signal");
+    expect(posts.projections.$signalCount.targetClassName).toBe("signal://Signal");
   });
 
   it("keeps the nested relations beside the projections it moves", async () => {
@@ -2414,7 +2488,7 @@ describe("IncludeProjection type guard and key splitting", () => {
     expect(posts.projections?.$signalCount).toMatchObject({ from: "signals", count: true });
     expect(posts.include).toBeUndefined();
     // Tagged against Post, the class two relations down.
-    expect(posts.projections.$signalCount.targetClassName).toBe("Signal");
+    expect(posts.projections.$signalCount.targetClassName).toBe("signal://Signal");
   });
 
   it("leaves a projection untagged under a polymorphic relation that declares a target", async () => {
@@ -2639,9 +2713,6 @@ describe("Relation writes: to-one batching and scalar coercion", () => {
       createSubject: jest.fn().mockResolvedValue(undefined),
       createBatch: jest.fn().mockResolvedValue("batch-generated"),
       commitBatch: jest.fn().mockResolvedValue(undefined),
-      stringOrTemplateObjectToSubjectClassName: jest
-        .fn()
-        .mockResolvedValue("TestRelationship"),
       uuid: "test-perspective-uuid",
     }) as any;
 
@@ -2873,8 +2944,8 @@ describe("Polymorphic relations", () => {
         {
           id: "we://c/1",
           children: [
-            { id: "we://t/1", __subjectClass: "PolyTextBlock", text: "hello" },
-            { id: "we://i/1", __subjectClass: "PolyImageBlock", src: "cat.png" },
+            { id: "we://t/1", __subjectClass: "we://PolyTextBlock", text: "hello" },
+            { id: "we://i/1", __subjectClass: "we://PolyImageBlock", src: "cat.png" },
           ],
         },
       ],
@@ -2892,16 +2963,17 @@ describe("Polymorphic relations", () => {
     expect(collection.children[1].src).toBe("cat.png");
   });
 
-  it("maps a child to its class by the name the class itself declares", () => {
-    // The mapping is derived from `@Model({ name })`, not restated beside the
-    // class list — the two cannot drift apart because there is only one of them.
-    expect((PolyTextBlock as any).className).toBe("PolyTextBlock");
+  it("maps a child to its class by the target class IRI the class itself declares", () => {
+    // The mapping is derived from the class's own target class, not restated
+    // beside the class list — the two cannot drift apart because there is only
+    // one of them. By IRI, so two classes of one name stay apart.
+    expect((PolyTextBlock as any).getTargetClass()).toBe("we://PolyTextBlock");
 
     const raw = {
       instances: [
         {
           id: "we://c/1",
-          children: [{ id: "we://t/1", __subjectClass: "PolyTextBlock", text: "hello" }],
+          children: [{ id: "we://t/1", __subjectClass: "we://PolyTextBlock", text: "hello" }],
         },
       ],
     };
@@ -2925,8 +2997,8 @@ describe("Polymorphic relations", () => {
           children: [
             {
               id: "we://b/1",
-              __subjectClass: "PolyTextBlock",
-              __subjectClasses: ["PolyTextBlock", "PolyBookmark"],
+              __subjectClass: "we://PolyTextBlock",
+              __subjectClasses: ["we://PolyTextBlock", "we://PolyBookmark"],
               text: "hello",
             },
           ],
@@ -2940,7 +3012,7 @@ describe("Polymorphic relations", () => {
 
     const child = collection.children[0];
     expect(child).toBeInstanceOf(PolyTextBlock);
-    expect(child.__subjectClasses).toEqual(["PolyTextBlock", "PolyBookmark"]);
+    expect(child.__subjectClasses).toEqual(["we://PolyTextBlock", "we://PolyBookmark"]);
   });
 
   it("leaves children as data when no instantiateAs is given", () => {
@@ -2954,7 +3026,7 @@ describe("Polymorphic relations", () => {
       instances: [
         {
           id: "we://c/1",
-          children: [{ id: "we://t/1", __subjectClass: "PolyTextBlock", text: "hello" }],
+          children: [{ id: "we://t/1", __subjectClass: "we://PolyTextBlock", text: "hello" }],
         },
       ],
     };
@@ -2966,7 +3038,7 @@ describe("Polymorphic relations", () => {
     // Still correct data, just untyped — the concrete class name is present for
     // a caller that wants to do its own dispatch.
     expect(collection.children[0].text).toBe("hello");
-    expect(collection.children[0].__subjectClass).toBe("PolyTextBlock");
+    expect(collection.children[0].__subjectClass).toBe("we://PolyTextBlock");
   });
 
   it("keeps a child whose class is not listed, rather than dropping it", () => {
@@ -2980,8 +3052,8 @@ describe("Polymorphic relations", () => {
         {
           id: "we://c/1",
           children: [
-            { id: "we://t/1", __subjectClass: "PolyTextBlock", text: "hello" },
-            { id: "we://k/1", __subjectClass: "PolyTaskBlock", done: true },
+            { id: "we://t/1", __subjectClass: "we://PolyTextBlock", text: "hello" },
+            { id: "we://k/1", __subjectClass: "we://PolyTaskBlock", done: true },
           ],
         },
       ],
@@ -2994,7 +3066,7 @@ describe("Polymorphic relations", () => {
     expect(collection.children).toHaveLength(2);
     expect(collection.children[0]).toBeInstanceOf(PolyTextBlock);
     expect(collection.children[1].done).toBe(true);
-    expect(collection.children[1].__subjectClass).toBe("PolyTaskBlock");
+    expect(collection.children[1].__subjectClass).toBe("we://PolyTaskBlock");
   });
 
   it("does not construct an unlisted child as the relation's declared target", () => {
@@ -3024,8 +3096,8 @@ describe("Polymorphic relations", () => {
         {
           id: "we://c/1",
           children: [
-            { id: "we://k/1", __subjectClass: "PolyTaskBlock", done: true },
-            { id: "we://b/1", __subjectClass: "PolyBaseBlock", base: "declared" },
+            { id: "we://k/1", __subjectClass: "we://PolyTaskBlock", done: true },
+            { id: "we://b/1", __subjectClass: "we://PolyBaseBlock", base: "declared" },
           ],
         },
       ],
@@ -3039,7 +3111,7 @@ describe("Polymorphic relations", () => {
     expect(unlisted).toBeDefined();
     expect(unlisted).not.toBeInstanceOf(PolyBaseBlock);
     expect(unlisted.done).toBe(true);
-    expect(unlisted.__subjectClass).toBe("PolyTaskBlock");
+    expect(unlisted.__subjectClass).toBe("we://PolyTaskBlock");
     // The declared target is still right when it is the class the executor named.
     expect(declared).toBeInstanceOf(PolyBaseBlock);
     expect(declared.base).toBe("declared");
@@ -3066,8 +3138,8 @@ describe("Polymorphic relations", () => {
         {
           id: "we://c/1",
           children: [
-            { id: "we://k/1", __subjectClass: "PolyTaskBlock", done: true },
-            { id: "we://b/1", __subjectClass: "PolyBaseOnlyBlock", base: "declared" },
+            { id: "we://k/1", __subjectClass: "we://PolyTaskBlock", done: true },
+            { id: "we://b/1", __subjectClass: "we://PolyBaseOnlyBlock", base: "declared" },
           ],
         },
       ],
@@ -3080,7 +3152,7 @@ describe("Polymorphic relations", () => {
     const [unlisted, declared] = collection.children;
     expect(unlisted).not.toBeInstanceOf(PolyBaseOnlyBlock);
     expect(unlisted.done).toBe(true);
-    expect(unlisted.__subjectClass).toBe("PolyTaskBlock");
+    expect(unlisted.__subjectClass).toBe("we://PolyTaskBlock");
     expect(declared).toBeInstanceOf(PolyBaseOnlyBlock);
     expect(declared.base).toBe("declared");
   });
@@ -3107,7 +3179,7 @@ describe("Polymorphic relations", () => {
       instances: [
         {
           id: "we://c/1",
-          children: [{ id: "we://t/1", __subjectClass: "PolyTextBlock", text: "hello" }],
+          children: [{ id: "we://t/1", __subjectClass: "we://PolyTextBlock", text: "hello" }],
         },
       ],
     };
@@ -3129,7 +3201,7 @@ describe("Polymorphic relations", () => {
 
     expect(JSON.parse(queryJson).include.children).toEqual({
       polymorphic: true,
-      preferClasses: ["PolyTextBlock", "PolyImageBlock"],
+      preferClasses: ["we://PolyTextBlock", "we://PolyImageBlock"],
     });
   });
 
@@ -3144,17 +3216,17 @@ describe("Polymorphic relations", () => {
     // Declaration order is the preference order — a target conforming to two of
     // them is read as whichever was named first.
     expect(JSON.parse(queryJson).include.children.preferClasses).toEqual([
-      "PolyTextBlock",
-      "PolyImageBlock",
+      "we://PolyTextBlock",
+      "we://PolyImageBlock",
     ]);
   });
 
   it("lets an explicit preference at the call site win over the declaration", () => {
     const { queryJson } = (PolyCollection as any).prepareModelQueryParams({
-      include: { children: { preferClasses: ["PolyBookmark"] } },
+      include: { children: { preferClasses: ["we://PolyBookmark"] } },
     });
 
-    expect(JSON.parse(queryJson).include.children.preferClasses).toEqual(["PolyBookmark"]);
+    expect(JSON.parse(queryJson).include.children.preferClasses).toEqual(["we://PolyBookmark"]);
   });
 
   it("sends no preference for a polymorphic relation that names no classes", () => {
@@ -3199,7 +3271,7 @@ describe("Polymorphic relations", () => {
     const include = JSON.parse(queryJson).include;
     expect(include.sections.include.children).toEqual({
       polymorphic: true,
-      preferClasses: ["PolyTextBlock", "PolyImageBlock"],
+      preferClasses: ["we://PolyTextBlock", "we://PolyImageBlock"],
     });
   });
 
@@ -3563,14 +3635,14 @@ describe("Ad4mModel.findAllOf / queryOf (one query over several classes, #1238)"
 
   const rows = {
     instances: [
-      { id: "u://t1", status: "open", __subjectClass: "UnionTaskU", __subjectClasses: ["UnionTaskU"] },
-      { id: "u://n1", body: "hi", __subjectClass: "UnionNoteU", __subjectClasses: ["UnionNoteU"] },
-      { id: "u://x", __subjectClass: "Other", __subjectClasses: ["Other"] },
+      { id: "u://t1", status: "open", __subjectClass: "u://UnionTaskU", __subjectClasses: ["u://UnionTaskU"] },
+      { id: "u://n1", body: "hi", __subjectClass: "u://UnionNoteU", __subjectClasses: ["u://UnionNoteU"] },
+      { id: "u://x", __subjectClass: "o://Other", __subjectClasses: ["o://Other"] },
     ],
     totalCount: 7,
   };
 
-  it("sends every class name and builds each row as its own class", async () => {
+  it("sends every class's target class IRI and builds each row as its own class", async () => {
     const perspective = { modelQuery: jest.fn().mockResolvedValue(rows), uuid: "p" } as any;
     const results = await Ad4mModel.findAllOf(perspective, [UnionTaskU, UnionNoteU], {
       where: { status: "open" },
@@ -3580,7 +3652,7 @@ describe("Ad4mModel.findAllOf / queryOf (one query over several classes, #1238)"
     });
 
     const [classNames, queryJson] = perspective.modelQuery.mock.calls[0];
-    expect(classNames).toEqual(["UnionTaskU", "UnionNoteU"]);
+    expect(classNames).toEqual(["u://UnionTaskU", "u://UnionNoteU"]);
     const sent = JSON.parse(queryJson);
     expect(sent.where).toEqual({ status: "open" });
     expect(sent.order).toEqual([["status", "DESC"]]);
@@ -3650,5 +3722,134 @@ describe("Ad4mModel.findAllOf / queryOf (one query over several classes, #1238)"
         parent: { id: "u://board", model: UnionBoardU },
       }),
     ).toThrow(/different predicates/);
+  });
+});
+
+import { valueToLiteralIri } from "./query-sparql";
+
+describe("Model writes: one executeAction call per write (P4)", () => {
+  @Model({ name: "P4Card" })
+  class P4Card extends Ad4mModel {
+    @Optional({ through: "p4://title" })
+    title?: string;
+
+    @Optional({ through: "p4://note", local: true })
+    note?: string;
+
+    @Optional({ through: "p4://rank" })
+    rank?: number;
+
+    @HasMany({ through: "p4://tag" })
+    tags: string[] = [];
+
+    @HasMany({ through: "p4://link" })
+    links: string[] = [];
+  }
+
+  const makePerspective = () =>
+    ({
+      executeAction: jest.fn().mockResolvedValue(undefined),
+      uuid: "test-perspective-uuid",
+    }) as any;
+
+  /**
+   * The links each `executeAction` call writes, resolved as the executor's
+   * `execute_commands` resolves them: one left-to-right pass, longest
+   * parameter name first; `this` is the instance; `collectionSetter` takes
+   * every parameter of its call as a member.
+   */
+  const resolved = (perspective: any) =>
+    perspective.executeAction.mock.calls.flatMap(([commands, expression, parameters]: any[]) => {
+      const names = [...(parameters ?? [])].sort((a: any, b: any) => b.name.length - a.name.length);
+      const sub = (input?: string) => {
+        if (input == null) return input;
+        let out = "";
+        for (let i = 0; i < input.length;) {
+          const p = names.find((p: any) => p.name && input.startsWith(p.name, i));
+          if (p) { out += p.value; i += p.name.length; } else { out += input[i]; i += 1; }
+        }
+        return out;
+      };
+      const self = (s?: string) => (s === "this" ? expression : s);
+      return commands.map((c: any) => ({
+        action: c.action,
+        source: self(sub(c.source)),
+        predicate: self(sub(c.predicate)),
+        target: c.action === "collectionSetter" ? (parameters ?? []).map((p: any) => p.value) : sub(c.target),
+        local: !!c.local,
+      }));
+    });
+
+  const edited = (perspective: any) => {
+    const card = new P4Card(perspective, "p4://card/1") as any;
+    card.takeSnapshot();
+    card.title = "Hello";
+    card.note = "private";
+    card.rank = 3;
+    return card;
+  };
+
+  it("an update of three scalar fields makes one call with each field's link and status", async () => {
+    const perspective = makePerspective();
+    await edited(perspective).save("batch-1");
+
+    expect(perspective.executeAction).toHaveBeenCalledTimes(1);
+    expect(perspective.executeAction.mock.calls[0][3]).toBe("batch-1");
+    expect(resolved(perspective)).toEqual([
+      { action: "setSingleTarget", source: "p4://card/1", predicate: "p4://title", target: "literal:string:Hello", local: false },
+      { action: "setSingleTarget", source: "p4://card/1", predicate: "p4://note", target: "literal:string:private", local: true },
+      { action: "setSingleTarget", source: "p4://card/1", predicate: "p4://rank", target: valueToLiteralIri(3), local: false },
+    ]);
+  });
+
+  it("adder and remover values join the scalar writes; each collection set is a call of its own", async () => {
+    const perspective = makePerspective();
+    // No snapshot: every field is written, in field order (tags, links, then the scalars).
+    const card = new P4Card(perspective, "p4://card/1") as any;
+    card.tags = { action: "adder", value: ["t1", "t2"] };
+    card.links = ["l1", "l2"];
+    card.title = "Hello";
+    card.note = "private";
+    card.rank = 3;
+    await card.innerUpdate(true, "batch-1");
+
+    // tags (two adds) in one call; links (collectionSetter) alone; the three scalars in one.
+    expect(perspective.executeAction).toHaveBeenCalledTimes(3);
+    expect(resolved(perspective)).toEqual([
+      { action: "addLink", source: "p4://card/1", predicate: "p4://tag", target: "t1", local: false },
+      { action: "addLink", source: "p4://card/1", predicate: "p4://tag", target: "t2", local: false },
+      { action: "collectionSetter", source: "p4://card/1", predicate: "p4://link", target: ["l1", "l2"], local: false },
+      { action: "setSingleTarget", source: "p4://card/1", predicate: "p4://title", target: "literal:string:Hello", local: false },
+      { action: "setSingleTarget", source: "p4://card/1", predicate: "p4://note", target: "literal:string:private", local: true },
+      { action: "setSingleTarget", source: "p4://card/1", predicate: "p4://rank", target: valueToLiteralIri(3), local: false },
+    ]);
+  });
+
+  it("a long run of writes is split into calls of at most 200 writes, in order", async () => {
+    const perspective = makePerspective();
+    const card = new P4Card(perspective, "p4://card/1") as any;
+    const tags = Array.from({ length: 450 }, (_, i) => `t${i}`);
+    card.tags = { action: "adder", value: tags };
+    await card.innerUpdate(true, "batch-1");
+
+    const tagCalls = perspective.executeAction.mock.calls.filter(([commands]: any[]) => commands[0].action === "addLink");
+    expect(tagCalls.map((call: any[]) => call[2].length)).toEqual([200, 200, 50]);
+    const added = resolved(perspective).filter((c: any) => c.action === "addLink");
+    expect(added.map((c: any) => c.target)).toEqual(tags);
+  });
+
+  it("a single write is sent as before, with its `value` parameter", async () => {
+    const perspective = makePerspective();
+    const card = new P4Card(perspective, "p4://card/1") as any;
+    card.takeSnapshot();
+    card.title = "Only";
+    await card.save("batch-1");
+
+    expect(perspective.executeAction.mock.calls).toEqual([[
+      [{ action: "setSingleTarget", source: "this", predicate: "p4://title", target: "value" }],
+      "p4://card/1",
+      [{ name: "value", value: "literal:string:Only" }],
+      "batch-1",
+    ]]);
   });
 });

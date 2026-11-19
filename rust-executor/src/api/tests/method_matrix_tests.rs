@@ -551,8 +551,6 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
     ),
     ("perspective.verifyFlowReceipt", || json!({ "receipt": {} })),
     ("perspective.flowValidOutputs", || json!({ "flow": "f" })),
-    ("perspective.getShaclTargetClass", || json!({ "name": "S" })),
-    ("perspective.getShacl", || json!({ "name": "S" })),
     ("perspective.update", || json!({ "name": "n" })),
     ("perspective.addLink", || json!({ "link": link() })),
     ("perspective.addLinkExpression", || {
@@ -580,10 +578,7 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
         "perspective.linkMutations",
         || json!({ "mutations": { "additions": [link()], "removals": [] } }),
     ),
-    (
-        "perspective.addSdna",
-        || json!({ "name": "C", "sdnaType": "subject_class" }),
-    ),
+    ("perspective.registerShapes", || json!({ "shapes": [] })),
     (
         "perspective.executeCommands",
         || json!({ "commands": "[]", "expression": "e" }),
@@ -599,6 +594,26 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
     (
         "perspective.removeSubject",
         || json!({ "subjectClass": "C", "expressionAddress": "e" }),
+    ),
+    (
+        "perspective.instanceCreate",
+        || json!({ "className": "C", "properties": {} }),
+    ),
+    (
+        "perspective.instanceUpdate",
+        || json!({ "className": "C", "baseUri": "ad4m://e", "properties": { "p": 1 } }),
+    ),
+    (
+        "perspective.instanceRemove",
+        || json!({ "className": "C", "baseUri": "ad4m://e" }),
+    ),
+    (
+        "perspective.instanceAddToCollection",
+        || json!({ "className": "C", "baseUri": "ad4m://e", "collection": "c", "itemUri": "ad4m://i" }),
+    ),
+    (
+        "perspective.instanceRemoveFromCollection",
+        || json!({ "className": "C", "baseUri": "ad4m://e", "collection": "c", "itemUri": "ad4m://i" }),
     ),
     ("perspective.commitBatch", || json!({ "batchId": "b" })),
     ("perspective.discardBatch", || json!({ "batchId": "b" })),
@@ -649,7 +664,7 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
         "perspective.mintFlowReceipt",
         || json!({ "instanceUri": "i" }),
     ),
-    ("perspective.flowFired", || json!({ "instance": "i" })),
+    ("perspective.flowFired", || json!({ "instances": ["i"] })),
     (
         "perspective.mount",
         || json!({ "languageAddress": "QmLang" }),
