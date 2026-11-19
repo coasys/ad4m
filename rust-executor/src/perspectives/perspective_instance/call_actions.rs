@@ -405,4 +405,68 @@ impl PerspectiveInstance {
             LanguageController::parse_expr_url(&calls[0].source).map_err(|e| anyhow!("{e}"))?;
         Ok(Some(format!("{scheme}://{address}")))
     }
+
+    /// Whether `class_name`'s constructor makes a language call — MCP's
+    /// `instance_create` checks this to keep its batch out of
+    /// `create_subject`'s way, since calls cannot run inside one.
+    pub(crate) async fn constructor_is_call(&self, class_name: &str) -> Result<bool, AnyError> {
+        Ok(self
+            .get_constructor_actions(class_name)
+            .await?
+            .iter()
+            .any(|c| c.action == Action::Call))
+    }
+
+    /// `class_name`'s `ad4m://setter` for `prop` classified as calls or
+    /// link actions, `None` when the shape declares none. A write that
+    /// involves a `Call` setter cannot run inside a batch
+    /// (`run_call_actions`), so `instances` asks here before it opens its
+    /// own.
+    pub(crate) async fn property_setter_kind(
+        &self,
+        class_name: &str,
+        prop: &str,
+    ) -> Result<Option<SetterKind>, AnyError> {
+        Ok(self
+            .get_property_setter_actions(class_name, prop)
+            .await?
+            .map(|commands| {
+                if commands.iter().any(|c| c.action == Action::Call) {
+                    SetterKind::Call
+                } else {
+                    SetterKind::Links
+                }
+            }))
+    }
+
+    /// `class_name`'s `ad4m://destructor` classified as calls or link
+    /// actions, `None` when the shape declares none. As with the setters,
+    /// a `call` destructor cannot run inside a batch.
+    pub(crate) async fn destructor_kind(
+        &self,
+        class_name: &str,
+    ) -> Result<Option<SetterKind>, AnyError> {
+        Ok(self
+            .get_shape_actions_from_shacl(class_name, "ad4m://destructor")
+            .await?
+            .map(|commands| {
+                if commands.iter().any(|c| c.action == Action::Call) {
+                    SetterKind::Call
+                } else {
+                    SetterKind::Links
+                }
+            }))
+    }
+}
+
+/// How a property's `ad4m://setter` writes: language calls or links.
+/// `call_actions` refuses a mixed list (`partition_actions`), so one
+/// `Call` member classifies the whole setter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SetterKind {
+    /// `call` actions — the write calls into a language and cannot run
+    /// inside a batch.
+    Call,
+    /// Link actions (`collectionSetter`, `addLink`, `setSingleTarget`, …).
+    Links,
 }
