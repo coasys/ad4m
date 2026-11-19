@@ -2254,24 +2254,29 @@ async fn realtime_refuses_a_commit_past_the_pending_bound() {
 #[tokio::test]
 async fn realtime_maps_a_full_utterance_queue_to_rate_limit_and_keeps_the_audio() {
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Barrier};
+    use std::sync::{mpsc, Arc, Mutex};
+    use std::time::Duration;
 
     let calls = Arc::new(AtomicUsize::new(0));
-    let entered = Arc::new(Barrier::new(2));
-    let release = Arc::new(Barrier::new(2));
+    // Channels, not barriers: every wait is bounded, and a failed assertion drops
+    // `release_tx`, which ends the held upstream call at once instead of hanging the test.
+    let (entered_tx, entered_rx) = mpsc::channel::<()>();
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    let release_rx = Mutex::new(release_rx);
     let mut server = mockito::Server::new_async().await;
     {
         let calls = calls.clone();
-        let entered = entered.clone();
-        let release = release.clone();
         server
             .mock("POST", "/v1/audio/transcriptions")
             .with_header("content-type", "application/json")
             .with_chunked_body(move |w| {
                 let n = calls.fetch_add(1, Ordering::SeqCst);
                 if n == 0 {
-                    entered.wait();
-                    release.wait();
+                    let _ = entered_tx.send(());
+                    let _ = release_rx
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(60));
                 }
                 write!(w, "{}", json!({ "text": format!("c{n}") }))
             })
@@ -2296,14 +2301,10 @@ async fn realtime_maps_a_full_utterance_queue_to_rate_limit_and_keeps_the_audio(
         .queue_utterance(&sid, chunk.clone(), &operator)
         .await
         .expect("the first utterance");
-    let entered = entered.clone();
-    tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        tokio::task::spawn_blocking(move || entered.wait()),
-    )
-    .await
-    .expect("the held utterance never reached the upstream")
-    .unwrap();
+    tokio::task::spawn_blocking(move || entered_rx.recv_timeout(Duration::from_secs(30)))
+        .await
+        .unwrap()
+        .expect("the held utterance never reached the upstream");
 
     let mut waiting = Vec::new();
     for _ in 0..8 {
@@ -2328,10 +2329,7 @@ async fn realtime_maps_a_full_utterance_queue_to_rate_limit_and_keeps_the_audio(
     );
     assert_eq!(calls.load(Ordering::SeqCst), 1, "refused audio was sent");
 
-    let release = release.clone();
-    tokio::task::spawn_blocking(move || release.wait())
-        .await
-        .unwrap();
+    release_tx.send(()).unwrap();
     first.await.expect("the utterance in progress");
     for answer in waiting {
         answer.await.expect("a waiting utterance");
