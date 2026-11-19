@@ -1674,6 +1674,63 @@ async fn earlier_stage_reads_do_not_spend_a_later_stage_deadline() {
     assert_eq!(pending_texts(&watcher, "stage-budget"), vec!["hello"]);
 }
 
+/// Cancelling the prepare after the job has taken the watcher must not drop
+/// that watcher. The lease is held outside the cancelled future, and the job
+/// writes the watcher back into it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cancel_after_the_job_starts_keeps_a_watcher_held_outside() {
+    use super::read_offload::probe::{self, Hold, Park};
+    use super::read_offload::PrepareLease;
+    use super::read_offload::Stage;
+    use super::watcher::PendingTurn;
+
+    let (p, _ctx, now_ms) = one_turn("outside").await;
+    let mut watcher = WatcherState::new();
+    watcher.record_item(
+        "outside",
+        PendingTurn {
+            id: "kept-outside".into(),
+            speaker: "s".into(),
+            text: "outside-watcher".into(),
+            timestamp: now_ms.to_string(),
+        },
+        now_ms,
+    );
+    let lease = PrepareLease::from_watcher(watcher);
+    let held = lease.clone();
+    let _guard = probe::install(
+        Park::Only(Stage::Source),
+        Hold::UntilRelease {
+            limit: Duration::from_secs(8),
+        },
+        None,
+        None,
+    );
+    let tick =
+        tokio::spawn(async move { super::read_offload::prepare_leased(&p, &lease, now_ms).await });
+    assert!(
+        wait_until(|| probe::hold_start().is_some(), Duration::from_secs(3)).await,
+        "the transcript read did not start"
+    );
+    tick.abort();
+    probe::set_pass();
+    let saw = wait_until(
+        || {
+            held.clone_watcher().is_some_and(|watcher| {
+                pending_texts(&watcher, "outside")
+                    .iter()
+                    .any(|text| text == "outside-watcher")
+            })
+        },
+        Duration::from_secs(3),
+    )
+    .await;
+    assert!(
+        saw,
+        "the job did not write the watcher back into the lease held outside the cancelled future"
+    );
+}
+
 /// A panic in the read is a failed tick. The watcher comes back, and the next
 /// tick still queues the turn.
 #[tokio::test]

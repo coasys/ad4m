@@ -153,20 +153,47 @@ impl Drop for CancelOnDrop {
     }
 }
 
-struct Restore<'a> {
+/// The watcher for one prepare. The job writes it back into this lease, even
+/// after the awaiting future has been dropped. [`prepare_reads`] copies it
+/// into the caller's `&mut` when that future completes or is dropped before
+/// the job has taken it.
+#[derive(Clone)]
+pub(crate) struct PrepareLease {
     slot: Arc<std::sync::Mutex<Option<WatcherState>>>,
+}
+
+impl PrepareLease {
+    pub(crate) fn from_watcher(watcher: WatcherState) -> Self {
+        Self {
+            slot: Arc::new(std::sync::Mutex::new(Some(watcher))),
+        }
+    }
+
+    pub(crate) fn clone_watcher(&self) -> Option<WatcherState> {
+        self.slot.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    fn take(&self) -> Option<WatcherState> {
+        self.slot.lock().unwrap_or_else(|e| e.into_inner()).take()
+    }
+}
+
+struct Restore<'a> {
+    lease: PrepareLease,
     watcher: &'a mut WatcherState,
 }
 
 impl Drop for Restore<'_> {
     fn drop(&mut self) {
-        if let Some(watcher) = self.slot.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        if let Some(watcher) = self.lease.take() {
             *self.watcher = watcher;
         }
     }
 }
 
-/// Run the read half of one tick. See the module docs.
+/// Run the read half of one tick. The `&mut` is restored when this future
+/// completes, and when it is dropped before the job takes the watcher. A
+/// caller that drops the future and keeps the watcher uses [`PrepareLease`].
 pub(crate) async fn prepare_reads(
     perspective: &PerspectiveInstance,
     watcher: &mut WatcherState,
@@ -177,14 +204,31 @@ pub(crate) async fn prepare_reads(
         return prepare_inner(perspective, watcher, now_ms, &parent).await;
     }
 
-    let slot = Arc::new(std::sync::Mutex::new(Some(std::mem::take(watcher))));
-    // Puts the watcher back on every return, including a cancel while this
-    // task waits for a permit. No job has started then, so the slot still
-    // holds it.
+    let lease = PrepareLease::from_watcher(std::mem::take(watcher));
     let _restore = Restore {
-        slot: slot.clone(),
+        lease: lease.clone(),
         watcher,
     };
+    prepare_leased(perspective, &lease, now_ms).await
+}
+
+/// [`prepare_reads`] for a caller that owns the lease past this future.
+pub(crate) async fn prepare_leased(
+    perspective: &PerspectiveInstance,
+    lease: &PrepareLease,
+    now_ms: i64,
+) -> PrepareOutcome {
+    if reads_on_runtime() {
+        let parent = CancellationToken::new();
+        let mut watcher = match lease.take() {
+            Some(watcher) => watcher,
+            None => return PrepareOutcome::Finished(TickOutcome::Pending),
+        };
+        let outcome = prepare_inner(perspective, &mut watcher, now_ms, &parent).await;
+        *lease.slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(watcher);
+        return outcome;
+    }
+
     let parent = CancellationToken::new();
     let _cancel = CancelOnDrop(parent.clone());
     // The permit comes before any gate. A tick queued behind a full cap must
@@ -197,7 +241,7 @@ pub(crate) async fn prepare_reads(
     let runtime = tokio::runtime::Handle::current();
     let perspective = perspective.clone();
     let parent_for_job = parent.clone();
-    let slot_for_job = slot.clone();
+    let slot_for_job = lease.slot.clone();
 
     let join = tokio::task::spawn_blocking(move || {
         let _permit = permit;
@@ -218,6 +262,7 @@ pub(crate) async fn prepare_reads(
                 &parent_for_job,
             ))
         }));
+        // The lease the caller still holds, not a slot private to this job.
         *slot_for_job.lock().unwrap_or_else(|e| e.into_inner()) = Some(watcher);
         match result {
             Ok(outcome) => outcome,
