@@ -1,0 +1,429 @@
+#!/usr/bin/env python3
+"""PTY acceptance for ad4m #1779 slice 3: `o` opens the Coasys view, F10
+returns, Ctrl-C exits, a resize repaints.
+
+The script starts its own `ad4m-executor` (`init` + `run` on a temporary
+data dir, no admin credential — a loopback caller is the operator), seeds
+one perspective holding a `CollectionBlock` call over a minimal stdlib
+WebSocket client, then drives `ad4m --executor-url <url> --no-capability
+tui` under a PTY:
+
+    '2'   → the perspectives screen, the seeded space selected
+    'o'   → the live Coasys view (the seeded call renders)
+    F10   → back to the perspectives screen
+    resize → the view repaints at the new size
+    'o'   → the space again
+    Ctrl-C → the process exits 0 and leaves the PTY in cooked mode
+
+Everything the child prints is saved as <output>/terminal.ansi. The
+script FAILS — never skips — on a missing binary, a startup failure or a
+timeout. It captures no token: there is none to capture.
+
+Usage:
+    python3 cli/tests/tui_space_pty.py \
+        --ad4m target/debug/ad4m \
+        --executor /path/to/ad4m-executor \
+        --output target/1779-slice3
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import errno
+import fcntl
+import hashlib
+import json
+import os
+import select
+import signal
+import socket
+import struct
+import subprocess
+import sys
+import tempfile
+import termios
+import time
+
+# The executor's `init --network-bootstrap-seed`: the same public seed
+# W's testkit passes (crates/renderer/we-ad4m/testdata/bootstrapSeed.json).
+BOOTSTRAP_SEED = {
+    "trustedAgents": ["did:key:zQ3shkkuZLvqeFgHdgZgFMUx8VGkgVWsLA83w2oekhZxoCW2n"],
+    "knownLinkLanguages": ["QmzSYwdbpzDfaBt28VZp5LYpy1Daq4agD7z8GTBVpJyyr3MPhTy"],
+    "directMessageLanguage": "",
+    "agentLanguage": "QmzSYwdeHcdyNWBJPVBvbgWNQh3S9MjDfgQiP2agUMJAwfyrHpC",
+    "perspectiveLanguage": "QmzSYwdZ5zUZFVJdWsyg9PjjqyM72mjrxjaaSTX9rXtHmC3S5fi",
+    "neighbourhoodLanguage": "QmzSYwdpVQ6RKTJbzFEZ8mfMdn5SYvd7immxudDVG92uxgAJ8nY",
+    "languageLanguageBundle": "",
+}
+
+# `we://CollectionBlock` with `kind` + `title`, as W's testkit registers it
+# (`COLLECTION_SDNA`): the Coasys sidebar groups calls by `we://kind`.
+COLLECTION_SDNA = r"""{
+  "target_class": "we://CollectionBlock",
+  "constructor_actions": [
+    {"action": "addLink", "source": "this", "predicate": "we://kind", "target": "placeholder"}
+  ],
+  "properties": [
+    {"path": "we://kind", "name": "kind", "min_count": 1, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "we://kind", "target": "value"}]},
+    {"path": "we://title", "name": "title", "min_count": 0, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "we://title", "target": "value"}]}
+  ]
+}"""
+
+SPACE_NAME = "slice3-pty"
+CALL_TITLE = "slice3-pty-call"
+
+
+def literal(s: str) -> str:
+    """`Literal::from_string(s).to_url()` — `literal:string:<urlencoded>`."""
+    from urllib.parse import quote
+
+    return "literal:string:" + quote(s, safe="")
+
+
+class RpcError(Exception):
+    pass
+
+
+class Ws:
+    """The smallest correct WS client: RFC6455 upgrade + masked text
+    frames. Speaks the executor's `{"id","type","params"}` RPC."""
+
+    def __init__(self, url: str, timeout: float = 10.0):
+        base = url.split("//", 1)[1]
+        self.host, port_s = base.split(":", 1)
+        self.sock = socket.create_connection((self.host, int(port_s)), timeout)
+        self.buf = b""
+        self.n = 0
+        key = base64.b64encode(os.urandom(16)).decode()
+        req = (
+            f"GET /api/v1/ws HTTP/1.1\r\nHost: {base}\r\n"
+            "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+            f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n"
+        )
+        self.sock.sendall(req.encode())
+        while b"\r\n\r\n" not in self.buf:
+            chunk = self.sock.recv(4096)
+            if not chunk:
+                raise ConnectionError("executor closed the upgrade")
+            self.buf += chunk
+        head, _, self.buf = self.buf.partition(b"\r\n\r\n")
+        status = head.split(b"\r\n", 1)[0]
+        if b" 101 " not in status:
+            raise ConnectionError(f"WS upgrade refused: {status!r}")
+        accept = base64.b64encode(
+            hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()).digest()
+        ).decode()
+        if accept.encode() not in head:
+            raise ConnectionError("bad Sec-WebSocket-Accept")
+
+    def _read(self, n: int) -> bytes:
+        while len(self.buf) < n:
+            chunk = self.sock.recv(65536)
+            if not chunk:
+                raise ConnectionError("executor closed the socket")
+            self.buf += chunk
+        out, self.buf = self.buf[:n], self.buf[n:]
+        return out
+
+    def _send(self, payload: bytes) -> None:
+        mask = os.urandom(4)
+        ln = len(payload)
+        if ln < 126:
+            hdr = bytes([0x81, 0x80 | ln])
+        elif ln < 65536:
+            hdr = bytes([0x81, 0x80 | 126]) + struct.pack(">H", ln)
+        else:
+            hdr = bytes([0x81, 0x80 | 127]) + struct.pack(">Q", ln)
+        self.sock.sendall(hdr + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(payload)))
+
+    def _recv(self) -> tuple[int, bytes]:
+        hdr = self._read(2)
+        opcode, ln = hdr[0] & 0x0F, hdr[1] & 0x7F
+        if ln == 126:
+            ln = struct.unpack(">H", self._read(2))[0]
+        elif ln == 127:
+            ln = struct.unpack(">Q", self._read(8))[0]
+        mask = self._read(4) if hdr[1] & 0x80 else b""
+        data = self._read(ln)
+        if mask:
+            data = bytes(b ^ mask[i % 4] for i, b in enumerate(data))
+        return opcode, data
+
+    def call(self, method: str, params: dict, timeout: float = 30.0) -> dict:
+        self.n += 1
+        rid = str(self.n)
+        self._send(json.dumps({"id": rid, "type": method, "params": params}).encode())
+        deadline = time.monotonic() + timeout
+        while True:
+            self.sock.settimeout(max(deadline - time.monotonic(), 0.001))
+            op, data = self._recv()
+            if op == 8:
+                raise ConnectionError("executor sent close")
+            if op == 9:  # ping → pong
+                mask = os.urandom(4)
+                self.sock.sendall(
+                    bytes([0x8A, 0x80 | len(data)])
+                    + mask
+                    + bytes(b ^ mask[i % 4] for i, b in enumerate(data))
+                )
+                continue
+            if op != 1:
+                continue
+            msg = json.loads(data)
+            if str(msg.get("id")) != rid:
+                continue
+            if msg.get("error"):
+                raise RpcError(f"{method}: {msg['error']}")
+            return msg.get("result")
+
+    def close(self) -> None:
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+
+
+def free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def start_executor(binary: str, work: str, log_path: str) -> tuple[subprocess.Popen, str]:
+    data = os.path.join(work, "executor-data")
+    os.makedirs(data)
+    seed = os.path.join(work, "bootstrap-seed.json")
+    with open(seed, "w") as f:
+        json.dump(BOOTSTRAP_SEED, f)
+    init = subprocess.run(
+        [binary, "init", "--data-path", data, "--network-bootstrap-seed", seed],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    if init.returncode != 0:
+        raise RuntimeError(f"ad4m-executor init exited {init.returncode}")
+    port = free_port()
+    env = dict(os.environ, AD4M_EXIT_WITH_PARENT="true")
+    log = open(log_path, "w")
+    proc = subprocess.Popen(
+        [
+            binary,
+            "run",
+            "--insecure-no-admin-credential",
+            "--app-data-path",
+            data,
+            "--port",
+            str(port),
+            "--run-holochain",
+            "false",
+            "--language-language-only",
+            "true",
+            "--run-dapp-server",
+            "false",
+        ],
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=log,
+    )
+    return proc, f"http://127.0.0.1:{port}"
+
+
+def wait_executor(url: str, proc: subprocess.Popen, timeout: float = 120.0) -> Ws:
+    deadline = time.monotonic() + timeout
+    last = None
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            raise RuntimeError(f"executor exited {proc.returncode} during startup")
+        try:
+            return Ws(url, timeout=5.0)
+        except (OSError, ConnectionError) as e:
+            last = e
+            time.sleep(0.5)
+    raise TimeoutError(f"executor did not accept a socket in {timeout}s: {last}")
+
+
+def seed(ws: Ws) -> str:
+    """Agent + one space with a `call` collection. Returns the uuid."""
+    ws.call("agent.generate", {"passphrase": "pty"}, timeout=60)
+    handle = ws.call("perspective.create", {"name": SPACE_NAME})
+    uuid = handle["uuid"]
+    ws.call(
+        "perspective.addSdna",
+        {
+            "uuid": uuid,
+            "name": "CollectionBlock",
+            "sdnaCode": "",
+            "sdnaType": "subject_class",
+            "shaclJson": COLLECTION_SDNA,
+        },
+    )
+    for predicate, target in [
+        ("we://kind", literal("call")),
+        ("we://title", literal(CALL_TITLE)),
+    ]:
+        ws.call(
+            "perspective.addLink",
+            {
+                "uuid": uuid,
+                "link": {"source": "pty://call/1", "predicate": predicate, "target": target},
+            },
+        )
+    ws.close()
+    return uuid
+
+
+def set_winsize(fd: int, cols: int, rows: int) -> None:
+    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+
+
+def drive_pty(ad4m: str, url: str, uuid: str, out_ansi: str, timeout: float = 90.0) -> None:
+    """The keystroke path: 2 → o → F10 → resize → o → Ctrl-C."""
+    import pty as pty_mod
+
+    master, slave = pty_mod.openpty()
+    set_winsize(slave, 120, 40)
+    child = subprocess.Popen(
+        [ad4m, "--executor-url", url, "--no-capability", "tui"],
+        stdin=slave,
+        stdout=slave,
+        stderr=slave,
+        close_fds=True,
+        start_new_session=True,
+    )
+    os.close(slave)
+    log = open(out_ansi, "wb")
+    transcript = bytearray()
+    # `Terminal::clear` snapshots the cursor: it emits ESC[6n and waits
+    # for the report a real terminal sends. This PTY answers, or 'o' and
+    # F10 would each cost a 2 s timeout and a "clear failed" notice.
+    dsr_answered = 0
+
+    def pump(want: float = 0.25) -> None:
+        nonlocal dsr_answered
+        end = time.monotonic() + want
+        while time.monotonic() < end:
+            r, _, _ = select.select([master], [], [], 0.05)
+            if not r:
+                continue
+            try:
+                chunk = os.read(master, 65536)
+            except OSError as e:
+                if e.errno == errno.EIO:
+                    return  # child closed its side
+                raise
+            if not chunk:
+                return
+            transcript.extend(chunk)
+            log.write(chunk)
+            log.flush()
+            seen = transcript.count(b"\x1b[6n")
+            while dsr_answered < seen:
+                dsr_answered += 1
+                os.write(master, b"\x1b[1;1R")
+
+    def send(keys: bytes) -> None:
+        os.write(master, keys)
+        pump()
+
+    def wait_for(needle: bytes, within: float, what: str) -> None:
+        deadline = time.monotonic() + within
+        while time.monotonic() < deadline:
+            pump(0.3)
+            if needle in transcript:
+                return
+            if child.poll() is not None:
+                raise RuntimeError(f"ad4m exited {child.returncode} while waiting for {what}")
+        raise TimeoutError(
+            f"timed out waiting for {what} ({needle!r} not in transcript)"
+        )
+
+    try:
+        # Status screen first — the perspectives screen is '2'.
+        wait_for(b"Executor status", 20.0, "the admin status screen")
+        send(b"2")
+        wait_for(SPACE_NAME.encode(), 30.0, "the seeded space on the perspectives screen")
+        # 'o' opens the Coasys view of the selected (seeded) row. The route
+        # line — not the row's bare uuid — is what proves the view mounted.
+        route = f"/space/{uuid}".encode()
+        send(b"o")
+        wait_for(route, 30.0, "the Coasys view (uuid route)")
+        wait_for(CALL_TITLE.encode(), 30.0, "the seeded call in the Coasys view")
+        # F10 returns to the admin screen.
+        send(b"\x1b[21~")
+        wait_for(SPACE_NAME.encode(), 10.0, "the perspectives screen after F10")
+        # A resize while the space view is open repaints without a hang.
+        send(b"o")
+        wait_for(route, 30.0, "the Coasys view again")
+        set_winsize(master, 100, 30)
+        send(b"")  # let a frame repaint at the new size
+        pump(0.5)
+        # Ctrl-C exits normally.
+        send(b"\x03")
+        deadline = time.monotonic() + 10.0
+        while child.poll() is None and time.monotonic() < deadline:
+            pump(0.2)
+        if child.poll() is None:
+            child.kill()
+            raise TimeoutError("Ctrl-C did not exit the TUI in 10s")
+        pump(0.5)
+        if child.returncode != 0:
+            raise RuntimeError(f"ad4m tui exited {child.returncode}, expected 0")
+    finally:
+        log.close()
+        try:
+            os.close(master)
+        except OSError:
+            pass
+        if child.poll() is None:
+            child.kill()
+            child.wait()
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--ad4m", required=True, help="path to the ad4m binary")
+    ap.add_argument("--executor", required=True, help="path to the ad4m-executor binary")
+    ap.add_argument("--output", required=True, help="artifact dir (terminal.ansi lands here)")
+    args = ap.parse_args()
+
+    for name, path in [("--ad4m", args.ad4m), ("--executor", args.executor)]:
+        if not os.path.isfile(path) or not os.access(path, os.X_OK):
+            print(f"FAIL: {name} binary missing or not executable: {path}", file=sys.stderr)
+            return 2
+    os.makedirs(args.output, exist_ok=True)
+
+    work = tempfile.mkdtemp(prefix="ad4m-pty-")
+    exec_log = os.path.join(args.output, "executor.log")
+    proc, url = start_executor(args.executor, work, exec_log)
+    try:
+        ws = wait_executor(url, proc)
+        uuid = seed(ws)
+        out_ansi = os.path.join(args.output, "terminal.ansi")
+        drive_pty(args.ad4m, url, uuid, out_ansi)
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+
+    # The child ran in a PTY we already closed; its restore sequences are
+    # evidence in the capture: leaving raw mode emits the alt-screen exit +
+    # cursor-show the TUI sends on every exit path it owns.
+    with open(out_ansi, "rb") as f:
+        capture = f.read()
+    for seq, name in [
+        (b"\x1b[?1049l", "alternate-screen exit"),
+        (b"\x1b[?25h", "cursor show"),
+    ]:
+        if seq not in capture:
+            print(f"FAIL: terminal-mode restoration sequence missing ({name})", file=sys.stderr)
+            return 1
+    print(f"OK: tui PTY acceptance — capture at {out_ansi}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
