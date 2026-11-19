@@ -38,7 +38,7 @@ host.js  (runtime-agnostic; web-platform builtins only: fetch, URL, ...)
 +------------+  +----------------------+  +----------+  +----------------------+
     |                    |                      |                |
     v                    v                      v                v
-Host-specific backend (Deno ops, HTTP API, Web Crypto, IndexedDB, ...)
+Host-specific backend (Deno ops, HTTP API, Wasm SHA-256, OPFS sync handles, ...)
 ```
 
 ## The `ad4m:host` surface
@@ -103,11 +103,11 @@ All `AGENT` methods are SYNC in the reference implementation
 |--------|------|-----------|-------------|
 | `did()` | SYNC | `() => string` | Returns the agent's DID (e.g. `did:key:z6Mk...`). |
 | `signingKeyId()` | SYNC | `() => string` | Returns the signing key identifier. |
-| `sign(payload)` | SYNC | `(Uint8Array) => Uint8Array` | Signs raw bytes, returns the signature bytes. |
+| `sign(payload)` | SYNC | `(Uint8Array) => Uint8Array` | Signs raw bytes, returns the signature bytes. The reference actually returns a plain number array, not `Uint8Array` — see Notes. |
 | `signStringHex(payload)` | SYNC | `(string) => string` | Signs a string payload and returns the hex-encoded signature. |
 | `openSealed(sealed)` | SYNC | `(SealedBox) => string` | Opens a box sealed to the acting agent (the node, or the managed user the call runs for) and returns the plaintext as hex. Throws for a box sealed to any other DID, or an altered one. See "Sealed boxes" below. |
 | `createSignedExpression(data)` | SYNC | `(any) => object` | Wraps `data` in an Expression envelope with `author`, `timestamp`, `data`, and `proof` fields. Returns the signed expression object. |
-| `getAllLocalUserDIDs()` | SYNC | `() => string[]` | Returns DIDs of all local managed users. |
+| `getAllLocalUserDIDs()` | SYNC | `() => string[]` | Returns the main agent's DID plus the DIDs of all local managed users. |
 | `createSignedExpressionForUser(email, data)` | SYNC | `(string, any) => object` | Like `createSignedExpression` but signs with a managed user's key. Only the user that the current call runs for: any other email, and any call that runs for the main agent, throws. |
 | `didForUser(email)` | SYNC | `(string) => string` | Returns the DID for a managed user identified by email. |
 
@@ -131,8 +131,16 @@ server link language seals in `bootstrap-languages/server-link-language/src/encr
 
 - In the Deno executor, these delegate to `deno_core` ops backed by the
   Rust `AgentService`.
-- A browser implementation could back these with Web Crypto API for
-  signing and an HTTP/WebSocket API for DID resolution.
+- `sign`'s declared return type is `Uint8Array`, but the Deno op
+  serializes `Vec<u8>` (`agent_extension.rs:140-144`) and the JS
+  forwards it unconverted (`agent_extension.js:47-49`, `host.js:82`),
+  so the reference hands back a `number[]`. A host should match the
+  declared shape; language code should tolerate either.
+- A browser implementation must keep every method synchronous: carry
+  the DID as a preloaded string (resolved during startup, before
+  languages load — remote DID resolution cannot answer a SYNC call),
+  and sign with a synchronous JS/Wasm implementation or a deliberately
+  designed synchronous bridge — Web Crypto's `sign` returns a Promise.
 - The `createSignedExpression` return value must have the shape:
   ```json
   {
@@ -215,9 +223,11 @@ but are not part of the public contract; new Languages should use
 - Exposed to Languages via `ad4m:host`'s `hash()` export (spec §7.7).
   Languages should import that rather than reaching for `UTILS.hash`
   directly — the global is an implementation detail.
-- Browser runtimes implement this with Web Crypto + a CIDv1 encoder;
-  Node.js runtimes use `crypto` + `multiformats`. The output format
-  (base58btc CIDv1 Qm-prefixed) is the contract, not the library.
+- `hash()` is SYNC, so a browser runtime needs a synchronous SHA-256 —
+  a JS/Wasm implementation plus a CIDv1 encoder; Web Crypto's `digest`
+  returns a Promise and cannot back it. Node.js runtimes use `crypto` +
+  `multiformats`. The output format (base58btc CIDv1 Qm-prefixed) is
+  the contract, not the library.
 
 # Core functions implemented inside `ad4m:host`
 
@@ -237,11 +247,19 @@ interface spec does not number it yet). `host.js` runs it over
 - The reply body is read as a stream and refused as soon as it passes
   32 MiB — or the caller's lower `maxBytes` — with an error whose
   `code` is `"too-large"`.
-- Returns `{ status, body }` for every HTTP status; rejects only on
-  network failure, timeout or the size cap. Error messages redact
-  credentials and query strings.
-- `headersJson` is a JSON object string, `body` a string sent only for
-  non-GET/HEAD methods.
+- Returns `{ status, body }` for every completed HTTP response,
+  whatever the status. Rejects on network failure, timeout, the size
+  cap — and on request/argument errors: `method`, `headers` and `url`
+  are passed to `fetch` unvalidated (`host.js:211-216`), so a malformed
+  URL, an invalid method or header, or a forbidden combination fails
+  before any network access. A lowercase `get` with a nonempty body
+  slips past the case-sensitive body guard (`:212`) and is rejected by
+  `fetch` after method normalization. Timeout and other failures are
+  plain `Error`s; only the size cap carries `code: "too-large"`. Error
+  messages redact credentials and query strings.
+- `headersJson` is a JSON object string; malformed JSON is silently
+  treated as empty headers (`:202-208`), not rejected. `body` is a
+  string sent only for non-GET/HEAD methods.
 
 **What the host must provide:** a standard `fetch` (Deno, browsers and
 Web Workers all have one) plus `AbortSignal.timeout`, `TextDecoder`,
@@ -260,20 +278,29 @@ keeps it in an in-isolate `Map` (`host.js:409-530`):
 - Persistence is best-effort: the first storage call loads
   `<languageStorageDirectory>/ad4m-language-kv.json` through the File
   I/O extension, and a put/delete schedules one full-file rewrite at
-  the end of the turn. If the extension is absent or a write fails,
-  the KV logs a warning and keeps working in-memory-only.
+  the end of the turn. If the extension is absent the KV silently runs
+  in-memory-only — that is normal, not an error (`host.js:435-439`). A
+  missing file is likewise normal. It logs a warning only when a load
+  fails for another reason (`:450-459`) or when a flush fails
+  (`:476-484`).
 - `storageGet` returns `null` (not `undefined`) for a missing key.
 
-A browser host can back the File I/O extension with IndexedDB or the
-Origin Private File System and get a persistent KV for free; with no
-extension at all the KV still works for the isolate's lifetime.
+A browser host that wants a persistent KV has to work within the SYNC
+contract: IndexedDB is asynchronous and cannot back the SYNC File I/O
+methods directly. The options are a preloaded in-memory file cache
+filled during startup, with an explicit durability policy for when
+cached writes are flushed back, or — inside a Worker — prepared OPFS
+synchronous access handles for the served paths. With no extension at
+all the KV still works for the isolate's lifetime.
 
 # Optional extensions
 
 Extensions are capabilities a runtime *may* provide beyond the core
 contract. A language that uses an extension must be written knowing
-the runtime might not implement it: the `ad4m:host` wrappers throw a
-clear error at call time if the extension is missing. Runtimes that
+the runtime might not implement it: the `ad4m:host` wrappers fail
+clearly at call time if the extension is missing — thrown
+synchronously by the plain-function wrappers, surfaced as a Promise
+rejection by the `async` ones. Runtimes that
 don't implement an extension simply omit installing its global (for
 Holochain) or its methods (for File I/O on `LANGUAGE_CONTROLLER`).
 
@@ -285,8 +312,11 @@ bootstrap process, just before calling the language's `init()`.
 
 Languages that don't use Holochain never call these methods, so a
 runtime without Holochain support can simply not install this global.
-The `ad4m:host` module throws a descriptive error if a language tries
-to call a Holochain import without the delegate present.
+Without the delegate, `holochainRegisterDnas` and `holochainCall`
+throw a descriptive error synchronously — the missing-delegate check
+runs before any Promise exists (`host.js:64-72,98-102`) — while the
+`async` `holochainCallAsync` surfaces the same failure as a Promise
+rejection (`:104`).
 
 **Reference implementation:** `rust-executor/src/js_core/language_bootstrap.js`
 (the `createHolochainDelegate()` function)
@@ -341,7 +371,7 @@ languages that explicitly opt into filesystem-like semantics.
 | Method | Mode | Signature | Description |
 |--------|------|-----------|-------------|
 | `readStorageFile(path)` | SYNC | `(string) => string` | Reads a file/blob at `path` as a UTF-8 string. Throws if not found (error message should contain "NotFound" or "No such file" for the KV layer to handle gracefully). |
-| `writeStorageFile(path, content)` | SYNC | `(string, string) => void` | Writes a file/blob at `path` with the given UTF-8 content. Should create parent directories as needed. |
+| `writeStorageFile(path, content)` | SYNC | `(string, string) => void` | Writes a file/blob at `path` with the given UTF-8 content. Creating parent directories as needed is a host recommendation; the Deno reference calls `Deno.writeTextFileSync` directly (`language_bootstrap.js:75-77`) and does not create them. |
 
 ### `ad4m:host` exports (call-side)
 
@@ -355,9 +385,13 @@ on runtimes that don't install the methods.
 
 - Deno executor: `Deno.readTextFileSync` / `Deno.writeTextFileSync`
   (sandboxed by Deno's filesystem permission allow-list).
-- Browser runtime: could wrap IndexedDB with a synthetic path scheme
-  (e.g. `idb:/lang-x/bundle-y.js`), use the Origin Private File
-  System, or route to an HTTP API. "Path" is opaque to the contract.
+- These methods are SYNC, so browser storage APIs that return Promises
+  cannot back them directly. IndexedDB is asynchronous; an HTTP wrapper
+  would hand `JSON.parse` a Promise on load, and its unawaited writes
+  could never report a persistence failure. A browser host needs a
+  preloaded in-memory file cache with an explicit durability policy,
+  or — inside a Worker — prepared OPFS synchronous access handles.
+  "Path" is opaque to the contract.
 - The paths passed in must be reachable by the runtime's permission
   model. Languages that pick a path outside the language's allowed
   scope will get a permission error, not a contract violation.
@@ -371,23 +405,25 @@ on runtimes that don't install the methods.
 
 A compliant host needs only the globals above. The Deno executor
 installs more — legacy surfaces kept for old bundles and bootstrap
-plumbing. None of them are reachable through `ad4m:host`; new languages
-should not use them, and a new host does not have to install them
-(except where noted).
+plumbing — and the table also lists the platform builtins `host.js`
+itself calls. None of these are additional direct `ad4m:host` exports.
+The platform builtins are required on every runtime; the rest are
+optional legacy globals that new languages should not use and a new
+host does not have to install (except where noted).
 
 | Global | Where installed | What it is |
 |--------|-----------------|------------|
 | `SIGNATURE` | `rust-executor/src/js_core/signature_extension.js:7` | `verifyStringSignedByDID`, `verify` — sync signature-check ops. Legacy; no `ad4m:host` export. |
 | `PUBSUB` | `rust-executor/src/js_core/pubsub_extension.js:6` | `publish(topic, data)` — an async op that always fails: language code may not publish executor events (`pubsub_extension.rs`, #1371). Kept so the op table stays unchanged. |
 | `RUNTIME_SERVICE` | `rust-executor/src/runtime_service/runtime_service_extension.js:6` | `friends`, `addMessageOutbox`, `getTrustedAgents` — sync `#[op2]` ops behind `async` JS wrappers. Legacy runtime surface. |
-| `HOLOCHAIN_SERVICE` | `rust-executor/src/holochain_service/holochain_service_extension.js:53` | 15 raw conductor ops, all async: conductor lifecycle, `installApp`, `callZomeFunction`, agent infos, dna/happ pack tools. The contract's `__holochainDelegate__` is built on it by `createHolochainDelegate` (`language_bootstrap.js:179-281`); language code should never call it directly. |
+| `HOLOCHAIN_SERVICE` | `rust-executor/src/holochain_service/holochain_service_extension.js:53` | 14 raw conductor ops, all async: conductor lifecycle, `installApp`, `callZomeFunction`, agent infos, dna/happ pack tools. The contract's `__holochainDelegate__` is built on it by `createHolochainDelegate` (`language_bootstrap.js:179-281`); language code should never call it directly. |
 | Extra `AGENT` methods | `rust-executor/src/js_core/agent_extension.js` | Sync ops beyond the contract's nine: `didDocument` (:13), `agent` (:56), `isInitialized` (:59), `isUnlocked` (:62), `agentForUser` (:90), `listUserEmails` (:102). Executor-internal surface, not exported by `ad4m:host`. |
 | `__ad4mSignal__` | `rust-executor/src/js_core/language_bootstrap.js:287-291, 326` | Per-language signal emitter installed at `init()`; how WASM-era languages reach `ad4mSignalEmitted` without `ad4m:host`. |
 | `__agentProxy__` | `rust-executor/src/js_core/language_bootstrap.js:310-320, 327` | LanguageContext-shaped agent object (`did`/`signingKeyId` getters plus the contract signing methods) for languages that expect the old context global. |
 | `__handleHolochainSignal__`, `__holochainSignalCallbacks__` | `rust-executor/src/js_core/language_bootstrap.js:82, 157-173, 407-419` | Inbound Holochain signal dispatch: the executor calls `__handleHolochainSignal__` in the isolate; the map holds per-cell JS callbacks. Installed by the bootstrap inside the isolate, not by the host. |
 | `languageModule`, `initLanguage`, `__ad4m_language_instance__`, `language` | `rust-executor/src/js_core/language_bootstrap.js:298, 322, 432-439` | The bootstrap's own plumbing: `languageModule` holds the imported bundle, `initLanguage` builds the instance and stores it for the runtime to call. |
 | `Buffer` | `rust-executor/src/js_core/language_bootstrap.js:7-8` | `node:buffer` polyfill for bundles that call `Buffer.from`. A non-Deno host must supply it too if its languages need it. |
-| DOM stubs (`HTMLElement`, `document`, `customElements`, `window`) | `rust-executor/src/js_core/language_bootstrap.js:14-59` | No-op shims so Svelte-compiled icon modules don't crash at import. A browser tab has real ones (harmless); a bare worker needs the same stubs. |
+| DOM stubs (`HTMLElement`, `document`, `customElements`, `window`) | `rust-executor/src/js_core/language_bootstrap.js:14-59` | No-op shims so Svelte-compiled icon modules don't crash at import. A browser tab has real ones (harmless); a bare worker loading those bundles needs comparable stubs. |
 | Platform builtins | used by `rust-executor/src/js_core/host.js` | Not installed by the executor — `fetch` (:216), `AbortSignal.timeout` (:210), `TextDecoder` (:180), `URL` (:187), `queueMicrotask` (:493), `setTimeout` (`language_bootstrap.js:274`). Deno, browsers and workers all provide them. |
 
 ## Module registration
@@ -398,11 +434,15 @@ The host must register the `ad4m:host` module so that
 - **Deno executor:** uses `StringModuleLoader` to register the module
   contents under the `"ad4m:host"` specifier
   (`rust-executor/src/js_core/options.rs`).
-- **Browser runtime:** could use an import map
-  (`{ "imports": { "ad4m:host": "./host.js" } }`) or a Service Worker
-  that intercepts the import.
-- **Node.js:** could use a custom loader hook or an import map via
-  `--experimental-import-meta-resolve`.
+- **Browser runtime:** an import map
+  (`{ "imports": { "ad4m:host": "./host.js" } }`) works in a tab, but
+  import maps do not apply to imports inside Workers, and a Service
+  Worker fetch interception cannot resolve a bare specifier —
+  resolution happens before the request reaches it. The concrete
+  approach is a bundler alias, a custom module loader, or rewriting
+  the imports to a real path.
+- **Node.js:** a custom loader hook. `--experimental-import-meta-resolve`
+  does not supply import maps.
 
 ## Initialization order
 
@@ -421,21 +461,28 @@ The host must register the `ad4m:host` module so that
 ## Minimal browser implementation sketch
 
 ```javascript
-// 1. Install AGENT (backed by HTTP API to a remote executor)
+// 1. Install AGENT — every method is SYNC, so none may return a
+//    Promise. Resolve the DID during startup and keep it as a string;
+//    sign with a synchronous JS/Wasm implementation (Web Crypto's
+//    sign is async and cannot back a SYNC method).
 globalThis.AGENT = {
-    did: () => fetch("/api/agent/did").then(r => r.text()),
-    // ... or use cached DID + Web Crypto for local signing
+    did: () => cachedDid,               // preloaded DID string
+    sign: (payload) => syncSign(payload), // JS/Wasm signer, not Web Crypto
+    // ...
 };
 
 // 2. Install LANGUAGE_CONTROLLER (core methods)
 globalThis.LANGUAGE_CONTROLLER = {
-    languageStorageDirectory: () => "indexeddb://lang-storage/" + langAddr,
+    languageStorageDirectory: () => "/lang-storage/" + langAddr,
     languageAddress: () => langAddr,
     languageSettings: () => settingsJson,
 
-    // OPTIONAL: File I/O extension. Omit these entirely if this runtime
-    // doesn't support raw file I/O — the KV will work in-memory-only and
-    // languages importing readStorageFile will throw a clear error on call.
+    // OPTIONAL: File I/O extension. This sketch is tab-only —
+    // localStorage does not exist inside Workers (a Worker needs a
+    // preloaded cache or OPFS sync handles instead). Omit these
+    // entirely if this runtime doesn't support raw file I/O — the KV
+    // will work in-memory-only and languages importing
+    // readStorageFile will throw a clear error on call.
     readStorageFile: (path) => {
         const data = localStorage.getItem("ad4m-storage:" + path);
         if (data === null) throw new Error("NotFound: " + path);
@@ -455,13 +502,15 @@ globalThis.LANGUAGE_CONTROLLER = {
 
 // 3. Install UTILS (canonical content-address hash)
 //    Output must be the AD4M-canonical format: SHA-256 -> CIDv1 -> base58btc,
-//    prefixed with "Qm". Browser runtimes can use Web Crypto + a CID library.
+//    prefixed with "Qm". hash() is SYNC, so this needs a synchronous
+//    SHA-256 (JS or Wasm) — Web Crypto's digest is async.
 globalThis.UTILS = {
     hash: (data) => canonicalAd4mHash(data),  // SHA-256 -> CIDv1 -> "Qm..."
 };
 
-// 4. Register the ad4m:host module (via import map or bundler alias)
-// 4. Load language bundle
-// 5. Optionally install __holochainDelegate__ via WebSocket to conductor
-// 6. Call language.init()
+// 4. Register the ad4m:host module (bundler alias, custom module
+//    loader or rewritten imports — import maps don't apply in Workers)
+// 5. Load language bundle
+// 6. Optionally install __holochainDelegate__ via WebSocket to conductor
+// 7. Call language.init()
 ```
