@@ -87,22 +87,6 @@ impl Ad4mMcpHandler {
         tools
     }
 
-    /// The names of the dynamic tools of `classes` that are theirs alone: a generated name
-    /// that a static tool also has (a class named `Instance` generates `instance_query`)
-    /// dispatches to the static tool, so it is left out.
-    pub(crate) fn class_tool_names(
-        classes: &[shacl::ShaclClass],
-    ) -> std::collections::HashSet<String> {
-        let statics: std::collections::HashSet<String> =
-            Self::static_tool_names().into_iter().collect();
-        classes
-            .iter()
-            .flat_map(|class| Self::class_tools(class, true))
-            .map(|t| t.name.to_string())
-            .filter(|name| !statics.contains(name))
-            .collect()
-    }
-
     /// Extract property information from a SHACL shape
     fn make_tool_schema(
         properties: Vec<(&str, &str)>,
