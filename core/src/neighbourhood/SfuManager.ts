@@ -347,8 +347,11 @@ export class SfuManager {
      *  connection is fine, so it goes out again once the socket is back, or
      *  when the executor sends its offer again. */
     private unsentAnswer: UnsentAnswer | null = null
-    /** The last server offer applied: only its answer is worth keeping for a resend. */
-    private lastOffer: string | null = null
+    /** The newest server offer for this session: arrived, or being applied.
+     *  Only an answer to it is ever sent. The executor matches an answer to
+     *  its pending offer by mids alone, so an answer to an older offer would
+     *  use up a newer one with the same mids (an ICE restart). */
+    private currentOffer: string | null = null
     private reconnectUnsubscribe: (() => void) | null = null
     private renegotiationUnsubscribe: (() => void) | null = null
     private rosterUnsubscribe: (() => void) | null = null
@@ -940,6 +943,7 @@ export class SfuManager {
             (event) => {
                 if (!ours(event)) return
                 waiting.push(event)
+                if (event.participantId === this.state.participantId) this.noteOffer(event.sdpOffer)
                 this.offerQueue = this.offerQueue
                     .then(() => joined)
                     .then(() => {
@@ -995,7 +999,7 @@ export class SfuManager {
             this.midToParticipant.set(entry.mid, { participantId: entry.participantId, did: entry.agentDid })
         }
         let sdpAnswer: string
-        this.lastOffer = event.sdpOffer
+        this.noteOffer(event.sdpOffer)
         try {
             await pc.setRemoteDescription(new RTCSessionDescription(JSON.parse(event.sdpOffer)))
             await pc.setLocalDescription(await pc.createAnswer())
@@ -1018,6 +1022,10 @@ export class SfuManager {
      * ICE and the roster, which see whether the session is really gone.
      */
     private async sendAnswer(answer: UnsentAnswer): Promise<void> {
+        if (!this.answersCurrentOffer(answer)) {
+            if (this.unsentAnswer === answer) this.unsentAnswer = null
+            return
+        }
         try {
             await this.neighbourhood.sfuCallAnswerServerOffer(
                 this.neighbourhoodUrl,
@@ -1030,14 +1038,26 @@ export class SfuManager {
         } catch (err) {
             if (this.state.peerConnection !== answer.pc) return
             if (isSocketFault(err)) {
-                // A step given up on (`timeBoxed`) can fail after a newer offer was applied: its answer is stale.
-                if (answer.sdpOffer !== this.lastOffer) return
+                // A newer offer came while this answer was out: its answer is stale.
+                if (!this.answersCurrentOffer(answer)) return
                 console.warn("SFU: the answer did not reach the executor; sending it again once the socket is back:", err)
                 this.unsentAnswer = answer
                 return
             }
             console.warn("SFU: the executor refused the answer; keeping the connection:", err)
         }
+    }
+
+    /** A server offer for this session arrived or is being applied: it is the current one now,
+     *  and an answer a socket fault kept for another offer is stale. */
+    private noteOffer(sdpOffer: string): void {
+        this.currentOffer = sdpOffer
+        if (this.unsentAnswer && this.unsentAnswer.sdpOffer !== sdpOffer) this.unsentAnswer = null
+    }
+
+    /** `answer` is for this call's connection and its newest offer. */
+    private answersCurrentOffer(answer: UnsentAnswer): boolean {
+        return this.state.peerConnection === answer.pc && answer.sdpOffer === this.currentOffer
     }
 
     /**
@@ -1052,7 +1072,7 @@ export class SfuManager {
         this.offerQueue = this.offerQueue.then(() =>
             this.timeBoxed(async () => {
                 const unsent = this.unsentAnswer
-                if (unsent?.pc === pc && this.state.peerConnection === pc) await this.sendAnswer(unsent)
+                if (unsent && this.answersCurrentOffer(unsent)) await this.sendAnswer(unsent)
                 await this.resume(pc)
             }),
         )

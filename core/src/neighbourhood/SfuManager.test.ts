@@ -2305,3 +2305,78 @@ test("a rebuild keeps the participants: nobody leaves, their media is cleared un
     await flush()
     expect(left).toEqual([BOB])
 })
+
+// ── Round 2: an answer is sent only for the offer it answers ────────────────
+
+/** Answers that name the offer they answer, so a test can tell them apart. */
+function distinctAnswers(pc: FakePeerConnection) {
+    jest.spyOn(pc, "createAnswer").mockImplementation(async () => ({
+        type: "answer",
+        sdp: `answer-to-${pc.remoteSdps().at(-1)}`,
+    }))
+}
+const answerTo = (sdp: string) => JSON.stringify({ type: "answer", sdp: `answer-to-${sdp}` })
+const answersSent = (api: ReturnType<typeof fakeApi>) => (api.sfuCallAnswerServerOffer.mock.calls as unknown as string[][]).map((c) => c[3])
+
+test("an answer the socket kept is dropped when a newer offer arrives; after the socket is back only the newer one goes out", async () => {
+    fakeTimers()
+    try {
+        const api = fakeApi()
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream())
+        distinctAnswers(currentPc())
+        // A's answer is lost with the socket; B's answer is still out when the socket is back.
+        let failB!: (e: unknown) => void
+        api.sfuCallAnswerServerOffer
+            .mockRejectedValueOnce(new RpcError(503, "WebSocket connection closed"))
+            .mockImplementationOnce(() => new Promise((_, reject) => { failB = reject }))
+
+        api.emitOffer(offer("A"))
+        await flush()
+        api.emitOffer(offer("B"))
+        await jest.advanceTimersByTimeAsync(10_000)
+        api.emitReconnect()
+        await jest.advanceTimersByTimeAsync(0)
+        expect(answersSent(api)).toEqual([answerTo("A"), answerTo("B")])
+
+        // B's answer was lost too: the next socket gets B's, never A's.
+        failB(new RpcError(503, "WebSocket connection closed"))
+        await flush()
+        api.emitReconnect()
+        await jest.advanceTimersByTimeAsync(0)
+        expect(answersSent(api)).toEqual([answerTo("A"), answerTo("B"), answerTo("B")])
+        await manager.leave()
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
+test("a same-mid ICE restart offer is never answered with the answer of the offer before it", async () => {
+    // The server matches an answer to its pending offer by mids only: A's
+    // answer would use up the restart's token.
+    fakeTimers()
+    try {
+        const api = fakeApi()
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream())
+        await iceState("connected")
+        distinctAnswers(currentPc())
+        api.sfuCallAnswerServerOffer
+            .mockRejectedValueOnce(new RpcError(408, "RPC call 'sfu.callAnswerServerOffer' timed out after 30000ms"))
+            .mockImplementationOnce(() => new Promise(() => {}))
+
+        api.emitOffer(offer("renegotiate"))
+        await flush()
+        await iceState("disconnected")
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(1)
+        api.emitOffer(offer("restart"))
+        await jest.advanceTimersByTimeAsync(10_000)
+        api.emitReconnect()
+        await jest.advanceTimersByTimeAsync(0)
+
+        expect(answersSent(api)).toEqual([answerTo("renegotiate"), answerTo("restart")])
+        await manager.leave()
+    } finally {
+        jest.useRealTimers()
+    }
+})
