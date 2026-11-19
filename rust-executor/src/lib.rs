@@ -32,6 +32,7 @@ pub mod agent;
 pub mod ai_service;
 pub mod ai_sessions;
 pub mod billing;
+pub mod call_diag;
 mod dapp_server;
 pub mod db;
 pub mod db_backend;
