@@ -679,6 +679,44 @@ jobs:
           command: cd rust-executor && cargo test --release -- --test-threads=1
           no_output_timeout: 30m
 
+  # Trial, not a required check: the same suite under cargo-nextest, one process per
+  # test, in parallel (.config/nextest.toml, profile `ci`). On one box it took about 30 s
+  # against about 6 min for rust-tests. It runs beside rust-tests for a few days so the
+  # two can be compared on these runners; rust-tests stays the gate. The profile leaves
+  # out 18 tests that need a global another test set up (they run in rust-tests) and
+  # nextest runs no doc-tests (rust-executor has 9, all ignored). The JUnit report gives
+  # per-test times in the job's Tests tab. nextest is a pinned release, checked against
+  # its SHA-256, kept in the runner's workdir (not the shared ~/.cargo/bin).
+  rust-tests-nextest:
+    machine: true
+    resource_class: coasys/marvin
+    steps:
+      - fix_workdir
+      - checkout
+      - heavy_gate
+      - setup_env
+      - restore_rust_compile_inputs
+      - run:
+          name: Install cargo-nextest 0.9.152
+          command: |
+            set -euo pipefail
+            bin="$PWD/target/nextest-bin"
+            if ! "$bin/cargo-nextest" nextest --version 2>/dev/null | grep -q '^cargo-nextest 0.9.152 '; then
+              dir=$(mktemp -d)
+              curl -fsSL -o "$dir/nextest.tar.gz" https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.152/cargo-nextest-0.9.152-x86_64-unknown-linux-gnu.tar.gz
+              echo "d039b43c3e0958441b6ad0a39c8884d018b3d2e8fb9928f209074b1100b5e17a  $dir/nextest.tar.gz" | sha256sum -c -
+              mkdir -p "$bin"
+              tar -xzf "$dir/nextest.tar.gz" -C "$bin"
+              rm -rf "$dir"
+            fi
+            echo "export PATH=\"$bin:\$PATH\"" >> "$BASH_ENV"
+      - run:
+          name: rust-executor tests (nextest, profile ci)
+          command: cd rust-executor && cargo nextest run --release --profile ci
+          no_output_timeout: 30m
+      - store_test_results:
+          path: target/nextest/ci/junit.xml
+
   # The Rust client: unit tests plus its real-executor integration test.
   # ad4m-executor comes from the build job's stash; AD4M_REQUIRE_EXECUTOR
   # turns a missing binary into a failure instead of a silent skip (F11).
@@ -1370,6 +1408,10 @@ workflows:
           requires:
             - build
       - rust-tests:
+          requires:
+            - build
+      # Trial beside rust-tests; not a required check (see the job).
+      - rust-tests-nextest:
           requires:
             - build
       - rust-client-tests:
