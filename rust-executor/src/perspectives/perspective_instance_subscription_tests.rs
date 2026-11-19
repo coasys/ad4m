@@ -322,7 +322,7 @@ async fn union_model_subscription_reruns_on_an_edit_to_either_class() {
         .model_subscribe_and_query(
             &crate::perspectives::sparql_store::EvalStop::none(),
             classes,
-            r#"{"includeUnverified":true}"#.into(),
+            r#"{"includeUnverified":true,"count":true}"#.into(),
             uuid::Uuid::new_v4().to_string(),
             "c".into(),
             None,
