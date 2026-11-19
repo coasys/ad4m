@@ -1,4 +1,4 @@
-use self::error::AIServiceError;
+pub(crate) use self::error::AIServiceError;
 use crate::types::RequestContext;
 use crate::types::{AITask, AITaskInput, Endpoint, Model, ModelInput, ModelType};
 use anyhow::{anyhow, Context};
@@ -21,6 +21,8 @@ pub mod providers;
 pub(crate) mod transcription;
 #[cfg(test)]
 mod transcription_e2e;
+#[cfg(test)]
+mod utterance_queue_tests;
 use log::error;
 use providers::{ChatReply, ChatRequest, ChatTurn, RemoteChat, ToolSpec};
 
@@ -143,8 +145,9 @@ lazy_static! {
 /// its worker ([`transcription::RemoteStream`]) ends once it has answered the utterances
 /// fed before.
 struct TranscriptionSession {
-    /// The worker's queue: it answers each utterance after the ones fed before it.
-    utterances: mpsc::UnboundedSender<transcription::Utterance>,
+    /// At most [`transcription::MAX_WAITING_UTTERANCES`] utterances wait here. One more
+    /// can be in the worker. A further one is refused. That is not eight in flight in total.
+    utterances: mpsc::Sender<transcription::Utterance>,
     /// The model the stream transcribes with: a reload of it closes the stream, whose
     /// worker holds the endpoint's URL and key as they were.
     model_id: String,
@@ -158,6 +161,15 @@ struct TranscriptionSession {
     /// The managed agent that opened the stream, by DID: it pays, and only it reaches the
     /// stream. `None`: the main agent.
     agent_did: Option<String>,
+    /// The worker. Dropping the session detaches it. Tests abort it.
+    #[cfg(test)]
+    worker: Option<tokio::task::JoinHandle<()>>,
+}
+
+/// An utterance the service did not queue. The caller still owns `samples`.
+pub(crate) struct RejectedUtterance {
+    pub samples: Vec<f32>,
+    pub error: anyhow::Error,
 }
 
 type TranscriptionStreams = Arc<Mutex<HashMap<String, TranscriptionSession>>>;
@@ -199,8 +211,8 @@ pub type FeedAnswer = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
 #[cfg(test)]
 impl TranscriptionSession {
     /// A session of `owner`, and the queue its worker would read.
-    fn for_test(owner: Option<&str>) -> (Self, mpsc::UnboundedReceiver<transcription::Utterance>) {
-        let (utterances, queue) = mpsc::unbounded_channel();
+    fn for_test(owner: Option<&str>) -> (Self, mpsc::Receiver<transcription::Utterance>) {
+        let (utterances, queue) = mpsc::channel(transcription::MAX_WAITING_UTTERANCES);
         let (text_broadcast_tx, _) = tokio::sync::broadcast::channel(1);
         let session = TranscriptionSession {
             utterances,
@@ -209,6 +221,7 @@ impl TranscriptionSession {
             in_flight: Default::default(),
             text_broadcast_tx,
             agent_did: owner.map(str::to_string),
+            worker: None,
         };
         (session, queue)
     }
@@ -765,6 +778,12 @@ impl AIService {
             .await
             .clone()
             .ok_or(anyhow!(AIServiceError::ServiceNotInitialized))
+    }
+
+    /// Install `service` as the global one. `None` clears it. Tests only.
+    #[cfg(test)]
+    pub(crate) async fn install_global_for_test(service: Option<AIService>) {
+        *AI_SERVICE.lock().await = service;
     }
 
     // -------------------------------------
@@ -1634,8 +1653,57 @@ impl AIService {
         agent_did: Option<String>,
         user_did: String,
     ) -> String {
+        self.open_remote_stream_in(
+            model_id,
+            remote_model,
+            endpoint_id,
+            client,
+            agent_did,
+            user_did,
+            None,
+        )
+        .await
+    }
+
+    /// As [`Self::open_remote_stream`], and the worker sends each completion record here.
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    async fn open_remote_stream_observed(
+        &self,
+        model_id: String,
+        remote_model: String,
+        endpoint_id: String,
+        client: Arc<dyn providers::audio::RemoteTranscribe>,
+        agent_did: Option<String>,
+        user_did: String,
+        completions: mpsc::UnboundedSender<transcription::UtteranceCompletion>,
+    ) -> String {
+        self.open_remote_stream_in(
+            model_id,
+            remote_model,
+            endpoint_id,
+            client,
+            agent_did,
+            user_did,
+            Some(completions),
+        )
+        .await
+    }
+
+    /// Eight utterances may wait. One more is in the worker. `try_send` refuses the next.
+    #[allow(clippy::too_many_arguments)]
+    async fn open_remote_stream_in(
+        &self,
+        model_id: String,
+        remote_model: String,
+        endpoint_id: String,
+        client: Arc<dyn providers::audio::RemoteTranscribe>,
+        agent_did: Option<String>,
+        user_did: String,
+        completions: Option<mpsc::UnboundedSender<transcription::UtteranceCompletion>>,
+    ) -> String {
         let stream_id = uuid::Uuid::new_v4().to_string();
-        let (utterances, queue) = mpsc::unbounded_channel();
+        let (utterances, queue) = mpsc::channel(transcription::MAX_WAITING_UTTERANCES);
         let (text_broadcast_tx, _) = tokio::sync::broadcast::channel::<String>(64);
         log::info!("Opening transcription stream {stream_id} on model {model_id} ({remote_model})");
         let worker = transcription::RemoteStream {
@@ -1648,8 +1716,11 @@ impl AIService {
             user_did,
             listeners: text_broadcast_tx.clone(),
             gate: Some(transcription::SpeechGate::new()),
+            completions,
         };
-        tokio::spawn(worker.run(queue));
+        let task = tokio::spawn(worker.run(queue));
+        #[cfg(not(test))]
+        drop(task);
 
         self.transcription_streams.lock().await.insert(
             stream_id.clone(),
@@ -1660,6 +1731,8 @@ impl AIService {
                 in_flight: Default::default(),
                 text_broadcast_tx,
                 agent_did,
+                #[cfg(test)]
+                worker: Some(task),
             },
         );
         stream_id
@@ -1690,23 +1763,70 @@ impl AIService {
         audio_samples: Vec<f32>,
         caller: &RequestContext,
     ) -> Result<FeedAnswer> {
+        self.admit_utterance(stream_id, audio_samples, caller)
+            .await
+            .map_err(|rejected| rejected.error)
+    }
+
+    /// Queue one utterance, or give the samples back with the reason they were not queued.
+    ///
+    /// Ownership is checked before the queue is touched, so a caller who does not own the
+    /// stream learns nothing about how full it is. The map lock is not held across a wait
+    /// for capacity. Only an accepted utterance updates activity and the in-flight count.
+    /// Dropping the returned future releases that count and does not free a queue slot:
+    /// the slot is the channel, and it stays taken until the worker takes the audio.
+    pub(crate) async fn admit_utterance(
+        &self,
+        stream_id: &String,
+        audio_samples: Vec<f32>,
+        caller: &RequestContext,
+    ) -> std::result::Result<FeedAnswer, RejectedUtterance> {
         let map_lock = self.transcription_streams.lock().await;
-        let stream = map_lock
-            .get(stream_id)
-            .ok_or(AIServiceError::StreamNotFound)?;
-        Self::verify_stream_ownership(stream, caller)?;
-        *stream.last_activity.lock().await = tokio::time::Instant::now();
-        // Queued while the map is locked: two feeds keep the order they arrived in.
-        let (done, outcome) = oneshot::channel();
-        stream
-            .utterances
-            .send(transcription::Utterance {
+        let Some(stream) = map_lock.get(stream_id) else {
+            return Err(RejectedUtterance {
                 samples: audio_samples,
-                done,
-            })
-            .map_err(|e| {
-                AIServiceError::CrazyError(format!("Failed to feed stream {stream_id}: {e}"))
-            })?;
+                error: anyhow!(AIServiceError::StreamNotFound),
+            });
+        };
+        if let Err(error) = Self::verify_stream_ownership(stream, caller) {
+            return Err(RejectedUtterance {
+                samples: audio_samples,
+                error,
+            });
+        }
+        let sample_count = audio_samples.len();
+        if sample_count > transcription::MAX_UTTERANCE_SAMPLES {
+            return Err(RejectedUtterance {
+                samples: audio_samples,
+                error: anyhow!(AIServiceError::UtteranceTooLarge {
+                    samples: sample_count,
+                    limit: transcription::MAX_UTTERANCE_SAMPLES,
+                }),
+            });
+        }
+        let (done, outcome) = oneshot::channel();
+        let utterance = transcription::Utterance {
+            samples: audio_samples,
+            done,
+            enqueued_at: tokio::time::Instant::now(),
+        };
+        // Refused here, while the map is still locked, and nothing is queued.
+        match stream.utterances.try_send(utterance) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(utterance)) => {
+                return Err(RejectedUtterance {
+                    samples: utterance.samples,
+                    error: anyhow!(AIServiceError::UtteranceQueueFull),
+                });
+            }
+            Err(mpsc::error::TrySendError::Closed(utterance)) => {
+                return Err(RejectedUtterance {
+                    samples: utterance.samples,
+                    error: anyhow!(AIServiceError::TranscriptionStreamClosed),
+                });
+            }
+        }
+        *stream.last_activity.lock().await = tokio::time::Instant::now();
         // Counted while the map is still locked, so the reaper never sees the utterance
         // queued and not counted. The answer holds it: answered or dropped, it ends.
         let in_flight = InFlight::count(stream);
@@ -1717,6 +1837,17 @@ impl AIService {
                 .await
                 .map_err(|_| anyhow!("Transcription stream {stream_id} ended before it answered"))?
         }))
+    }
+
+    /// Stop the worker. Utterances already accepted then fail, as they do when it panics.
+    #[cfg(test)]
+    async fn abort_transcription_worker(&self, stream_id: &str) {
+        let map = self.transcription_streams.lock().await;
+        if let Some(session) = map.get(stream_id) {
+            if let Some(worker) = &session.worker {
+                worker.abort();
+            }
+        }
     }
 
     /// The text of a stream, as it is published (`/v1/realtime`).

@@ -109,6 +109,8 @@ mod link_status_tests;
 mod links;
 #[cfg(test)]
 mod page_before_resolve_tests;
+#[cfg(test)]
+mod polymorphic_default_tests;
 mod projection;
 #[cfg(test)]
 mod proof_valid_tests;
