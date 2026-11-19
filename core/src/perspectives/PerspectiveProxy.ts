@@ -1,5 +1,6 @@
 import { PerspectiveClient } from "./PerspectiveClient";
 import type { EventMap, ScopedEventName } from "../generated/api/Events";
+import type { FlowFiredEntry } from "../generated/api/FlowFiredEntry";
 import type {
     FlowFireOutcome, FlowMintedReceipt, FlowOutputRef, FlowProposeResult,
     FlowReceiptVerdict, FlowStateEntry, FlowValidOutput,
@@ -16,7 +17,6 @@ import { NeighbourhoodExpression } from "../neighbourhood/Neighbourhood";
 import { AIClient } from "../ai/AIClient";
 
 import { getPropertiesMetadata, getRelationsMetadata } from "../model/decorators";
-import { getCachedResult, setCachedResult, invalidatePerspectiveCache } from "../model/query-cache";
 import { AllInstancesResult } from "../model/types";
 import { LiveQuery, LiveQueryStatus, Subscribed } from "./LiveQuery";
 import type { TranscriptTurn } from "../generated/api";
@@ -338,9 +338,7 @@ export class PerspectiveProxy {
      * @param batchId - Optional batch ID to group this operation with others
      */
     async executeAction(actions, expression, parameters: Parameter[], batchId?: string) {
-        const result = await this.#client.executeCommands(this.#handle.uuid, JSON.stringify(actions), expression, JSON.stringify(parameters), batchId)
-        invalidatePerspectiveCache(this.#handle.uuid);
-        return result
+        return this.#client.executeCommands(this.#handle.uuid, JSON.stringify(actions), expression, JSON.stringify(parameters), batchId)
     }
 
     /**
@@ -623,12 +621,15 @@ export class PerspectiveProxy {
     }
 
     /**
-     * The proposals of `instance` whose votes settled an edge, as this
-     * agent's executor recorded them — the flow's history, sorted by URI.
+     * For each of `instances`, in order, the proposals whose votes settled an
+     * edge, as this agent's executor recorded them — the flow's history,
+     * sorted by URI (`fired: []` when none). One call covers up to 200
+     * instances (the executor refuses more with a 400); split a longer list
+     * into batches of 200.
      * Replaces the `resolvedAs` property proposals used to carry.
      */
-    async flowFired(instance: string): Promise<string[]> {
-        return await this.#client.flowFired(this.#handle.uuid, instance)
+    async flowFired(instances: string[]): Promise<FlowFiredEntry[]> {
+        return await this.#client.flowFired(this.#handle.uuid, instances)
     }
 
     /**
@@ -696,19 +697,18 @@ export class PerspectiveProxy {
      * keep its blocking thread busy until it completes; what's saved is the
      * serialise + network + client-deserialise tax on the result.  Aborted
      * calls reject with `DOMException('Aborted', 'AbortError')` — match
-     * `fetch()` for handling. Cached results bypass the round-trip entirely
-     * and are returned synchronously, ignoring the signal.
+     * `fetch()` for handling. A call with `options` makes its own RPC.
+     *
+     * **Sharing:** concurrent identical calls without `options` share one RPC;
+     * each caller gets its own result object. Nothing is cached once the
+     * call settles: use a live query for repeated reads of the same data.
      *
      * @param query - SPARQL query string (read-only operations only)
      * @param options - Optional call options (e.g. AbortSignal for cancellation)
      * @returns Query results as parsed JSON
      */
     async querySparql<T = any>(query: string, options?: CallOptions): Promise<T> {
-        const cached = getCachedResult(this.#handle.uuid, query);
-        if (cached !== undefined) return cached as T;
-        const result = await this.#client.querySparql(this.#handle.uuid, query, options);
-        setCachedResult(this.#handle.uuid, query, result);
-        return result as T;
+        return this.#client.querySparql<T>(this.#handle.uuid, query, options);
     }
 
     /**
@@ -722,9 +722,9 @@ export class PerspectiveProxy {
      *   query over their union, whose rows carry `__subjectClass` and
      *   `__subjectClasses` (#1238)
      * @param queryJson - Structured query as JSON string
-     * @returns Object with `instances` array and `totalCount`
+     * @returns Object with `instances` array, and `totalCount` when the query sets `count: true`
      */
-    async modelQuery(className: string | string[], queryJson: string, options?: CallOptions): Promise<{ instances: any[], totalCount: number }> {
+    async modelQuery(className: string | string[], queryJson: string, options?: CallOptions): Promise<{ instances: any[], totalCount?: number }> {
         return await this.#client.modelQuery(this.#handle.uuid, className, queryJson, options);
     }
 
@@ -825,9 +825,7 @@ export class PerspectiveProxy {
      * ```
      */
     async add(link: Link, status: LinkStatus = 'shared', batchId?: string): Promise<LinkExpression> {
-        const result = await this.#client.addLink(this.#handle.uuid, link, status, batchId)
-        invalidatePerspectiveCache(this.#handle.uuid);
-        return result;
+        return this.#client.addLink(this.#handle.uuid, link, status, batchId)
     }
 
     /**
@@ -840,9 +838,7 @@ export class PerspectiveProxy {
      * @returns Array of created LinkExpressions
      */
     async addLinks(links: Link[], status: LinkStatus = 'shared', batchId?: string): Promise<LinkExpression[]> {
-        const result = await this.#client.addLinks(this.#handle.uuid, links, status, batchId)
-        invalidatePerspectiveCache(this.#handle.uuid);
-        return result;
+        return this.#client.addLinks(this.#handle.uuid, links, status, batchId)
     }
 
     /**
@@ -853,9 +849,7 @@ export class PerspectiveProxy {
      * @returns Array of removed LinkExpressions
      */
     async removeLinks(links: LinkExpressionInput[], batchId?: string): Promise<LinkExpression[]> {
-        const result = await this.#client.removeLinks(this.#handle.uuid, links, batchId)
-        invalidatePerspectiveCache(this.#handle.uuid);
-        return result;
+        return this.#client.removeLinks(this.#handle.uuid, links, batchId)
     }
 
     /**
@@ -867,9 +861,7 @@ export class PerspectiveProxy {
      * @returns Object containing results of the mutations
      */
     async linkMutations(mutations: LinkMutations, status: LinkStatus = 'shared'): Promise<LinkExpressionMutations> {
-        const result = await this.#client.linkMutations(this.#handle.uuid, mutations, status)
-        invalidatePerspectiveCache(this.#handle.uuid);
-        return result;
+        return this.#client.linkMutations(this.#handle.uuid, mutations, status)
     }
 
         /**
@@ -898,9 +890,7 @@ export class PerspectiveProxy {
      * @param batchId - Optional batch ID to group this operation with others
      */
     async update(oldLink: LinkExpressionInput, newLink: Link, batchId?: string): Promise<LinkExpression> {
-        const result = await this.#client.updateLink(this.#handle.uuid, oldLink, newLink, batchId)
-        invalidatePerspectiveCache(this.#handle.uuid);
-        return result;
+        return this.#client.updateLink(this.#handle.uuid, oldLink, newLink, batchId)
     }
 
     /**
@@ -948,9 +938,7 @@ export class PerspectiveProxy {
         } else {
             resolvedLink = link as LinkExpressionInput;
         }
-        const result = await this.#client.removeLink(this.#handle.uuid, resolvedLink, batchId)
-        invalidatePerspectiveCache(this.#handle.uuid);
-        return result;
+        return this.#client.removeLink(this.#handle.uuid, resolvedLink, batchId)
     }
 
     /** Creates a new batch for grouping operations */
@@ -960,9 +948,7 @@ export class PerspectiveProxy {
 
     /** Commits a batch of operations */
     async commitBatch(batchId: string): Promise<LinkExpressionMutations> {
-        const result = await this.#client.commitBatch(this.#handle.uuid, batchId)
-        invalidatePerspectiveCache(this.#handle.uuid);
-        return result;
+        return this.#client.commitBatch(this.#handle.uuid, batchId)
     }
 
     /**
@@ -1356,13 +1342,13 @@ export class PerspectiveProxy {
     }
 
     /**
-     * Get all SHACL shapes stored in this Perspective (one RPC call).
-     * The executor resolves all shapes in-process and returns them in bulk.
+     * Get the SHACL shapes stored in this Perspective in one RPC call: all of
+     * them, or only those named in `names` (unknown names are left out).
      * A shape that fails to decode is skipped with a `console.warn`, so it
      * does not hide the others.
      */
-    async getAllShacl(): Promise<Array<{name: string, shape: SHACLShape}>> {
-        const entries = await this.#client.getAllShacl(this.#handle.uuid);
+    async getAllShacl(options?: { names?: string[] }): Promise<Array<{name: string, shape: SHACLShape}>> {
+        const entries = await this.#client.getAllShacl(this.#handle.uuid, options?.names);
         const shapes: Array<{name: string, shape: SHACLShape}> = [];
         for (const { name, shapeUri, links } of entries) {
             try {
@@ -1640,7 +1626,6 @@ export class PerspectiveProxy {
      *  record that the abstract class reads, under its own name. */
     async updateSubject(className: string, exprAddr: string, values: Record<string, any>, batchId?: string) {
         await this.#client.updateSubject(this.#handle.uuid, className, exprAddr, JSON.stringify(values), batchId);
-        invalidatePerspectiveCache(this.#handle.uuid);
     }
 
     /**
@@ -1660,44 +1645,27 @@ export class PerspectiveProxy {
      * const { baseUri } = await perspective.instanceCreate({ className: "Task", properties: { title: "Write" } });
      */
     async instanceCreate(body: InstanceCreate): Promise<InstanceCreated> {
-        const created = await this.#client.instanceCreate(this.#handle.uuid, body);
-        invalidatePerspectiveCache(this.#handle.uuid);
-        return created;
+        return this.#client.instanceCreate(this.#handle.uuid, body);
     }
 
     /** Sets single-valued properties of an instance, validated; the others stay. See {@link instanceCreate}. */
     async instanceUpdate(body: InstanceUpdate): Promise<InstanceUpdated> {
-        const updated = await this.#client.instanceUpdate(this.#handle.uuid, body);
-        invalidatePerspectiveCache(this.#handle.uuid);
-        return updated;
+        return this.#client.instanceUpdate(this.#handle.uuid, body);
     }
 
     /** Removes an instance and every link to and from it. See {@link instanceCreate}. */
     async instanceRemove(body: InstanceRemove): Promise<InstanceRemoved> {
-        // Outside a batch the links go one by one, so a rejection (`partiallyRemoved`) can
-        // come after some are gone: invalidate either way.
-        try {
-            return await this.#client.instanceRemove(this.#handle.uuid, body);
-        } finally {
-            invalidatePerspectiveCache(this.#handle.uuid);
-        }
+        return this.#client.instanceRemove(this.#handle.uuid, body);
     }
 
     /** Adds an item to a collection of an instance, validated. See {@link instanceCreate}. */
     async instanceAddToCollection(body: InstanceAddToCollection): Promise<CollectionItemAdded> {
-        const added = await this.#client.instanceAddToCollection(this.#handle.uuid, body);
-        invalidatePerspectiveCache(this.#handle.uuid);
-        return added;
+        return this.#client.instanceAddToCollection(this.#handle.uuid, body);
     }
 
     /** Removes an item from a collection of an instance. See {@link instanceCreate}. */
     async instanceRemoveFromCollection(body: InstanceRemoveFromCollection): Promise<CollectionItemRemoved> {
-        // Like instanceRemove, a rejection can come after some links are gone.
-        try {
-            return await this.#client.instanceRemoveFromCollection(this.#handle.uuid, body);
-        } finally {
-            invalidatePerspectiveCache(this.#handle.uuid);
-        }
+        return this.#client.instanceRemoveFromCollection(this.#handle.uuid, body);
     }
 
     async getSubjectData<T>(subjectClass: T, exprAddr: string): Promise<T> {
@@ -1762,7 +1730,6 @@ export class PerspectiveProxy {
         const ctor = (subjectClass as any)?.constructor;
         if (typeof subjectClass === "object" && ctor && Object.prototype.hasOwnProperty.call(ctor, 'builtinUri')) {
             await this.#client.removeSubject(this.#handle.uuid, ctor.builtinUri, exprAddr, batchId);
-            invalidatePerspectiveCache(this.#handle.uuid);
             return;
         }
         let className = await this.stringOrTemplateObjectToSubjectClassName(subjectClass)
@@ -1773,7 +1740,6 @@ export class PerspectiveProxy {
         const markers = await this.get(new LinkQuery({ predicate: "ad4m://abstract" }));
         if (markers.some((link) => shapePattern.test(link.data.source))) {
             await this.#client.removeSubject(this.#handle.uuid, className, exprAddr, batchId);
-            invalidatePerspectiveCache(this.#handle.uuid);
             return;
         }
 
