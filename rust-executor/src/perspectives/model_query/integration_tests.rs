@@ -808,9 +808,9 @@ async fn test_build_projection_order_clause_by_id() {
 }
 
 // -----------------------------------------------------------------------
-// Integration tests: resolve_projections()
+// Integration tests: resolve_projections(&crate::perspectives::sparql_store::EvalStop::none(),)
 //
-// These tests verify that resolve_projections() correctly issues grouped
+// These tests verify that resolve_projections(&crate::perspectives::sparql_store::EvalStop::none(),) correctly issues grouped
 // SPARQL queries against a real SparqlStore and attaches the results to
 // the parent instance objects.
 // -----------------------------------------------------------------------
@@ -837,6 +837,7 @@ fn make_shape_with_relation(class: &str, rel_name: &str, predicate: &str) -> Mod
             transform: None,
             interpretation_hint: None,
             identity: false,
+            in_values: None,
             local: false,
             ordering: None,
         }],
@@ -888,6 +889,7 @@ async fn test_resolve_projections_count() {
     {
         let _resolver = super::test_helpers::StaticShapeResolver::new();
         resolve_projections(
+            &crate::perspectives::sparql_store::EvalStop::none(),
             &store,
             &mut instances,
             &projections,
@@ -944,6 +946,7 @@ async fn test_resolve_projections_list() {
     {
         let _resolver = super::test_helpers::StaticShapeResolver::new();
         resolve_projections(
+            &crate::perspectives::sparql_store::EvalStop::none(),
             &store,
             &mut instances,
             &projections,
@@ -999,6 +1002,7 @@ async fn test_resolve_projections_scalar() {
     {
         let _resolver = super::test_helpers::StaticShapeResolver::new();
         resolve_projections(
+            &crate::perspectives::sparql_store::EvalStop::none(),
             &store,
             &mut instances,
             &projections,
@@ -1046,6 +1050,7 @@ async fn test_resolve_projections_count_zero_when_no_links() {
     {
         let _resolver = super::test_helpers::StaticShapeResolver::new();
         resolve_projections(
+            &crate::perspectives::sparql_store::EvalStop::none(),
             &store,
             &mut instances,
             &projections,
@@ -1123,6 +1128,7 @@ async fn test_resolve_projections_where_filter_by_plain_iri() {
     {
         let _resolver = super::test_helpers::StaticShapeResolver::new();
         resolve_projections(
+            &crate::perspectives::sparql_store::EvalStop::none(),
             &store,
             &mut instances,
             &projections,
@@ -1197,6 +1203,7 @@ async fn test_resolve_projections_where_filter_by_author() {
     {
         let _resolver = super::test_helpers::StaticShapeResolver::new();
         resolve_projections(
+            &crate::perspectives::sparql_store::EvalStop::none(),
             &store,
             &mut instances,
             &projections,
@@ -1477,6 +1484,7 @@ async fn test_evaluate_getters_where_compiled_literal_filter() {
             transform: None,
             interpretation_hint: None,
             identity: false,
+            in_values: None,
             local: false,
             ordering: None,
         }],
@@ -1485,8 +1493,16 @@ async fn test_evaluate_getters_where_compiled_literal_filter() {
     };
 
     let mut instances = vec![serde_json::json!({"id": board})];
-    let eval_result =
-        evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true));
+    let eval_result = evaluate_getters(
+        &crate::perspectives::sparql_store::EvalStop::none(),
+        &store,
+        &mut instances,
+        &shape,
+        None,
+        true,
+        None,
+        Some(true),
+    );
     assert!(
         eval_result.is_ok(),
         "evaluate_getters should succeed: {:?}",
@@ -1906,6 +1922,7 @@ async fn test_getters_run_after_pagination() {
     }"#;
 
     let query_input = ModelQueryInput {
+        count: Some(true),
         limit: Some(2),
         deep_query: Some(true),
         order: Some(vec![("timestamp".to_string(), OrderDirection::ASC)]),
@@ -1916,7 +1933,7 @@ async fn test_getters_run_after_pagination() {
         .await
         .unwrap();
     assert_eq!(result.instances.len(), 2, "should return 2 instances");
-    assert_eq!(result.total_count, 5, "total count should be 5");
+    assert_eq!(result.total_count.unwrap(), 5, "total count should be 5");
 
     // Both returned instances should have replyingTo populated
     for inst in &result.instances {
@@ -2049,6 +2066,7 @@ async fn test_where_filter_signed_expression_string() {
             transform: None,
             interpretation_hint: None,
             identity: false,
+            in_values: None,
             local: false,
             ordering: None,
         }],
@@ -2057,7 +2075,17 @@ async fn test_where_filter_signed_expression_string() {
     };
 
     let mut instances = vec![json!({"id": board})];
-    evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true)).unwrap();
+    evaluate_getters(
+        &crate::perspectives::sparql_store::EvalStop::none(),
+        &store,
+        &mut instances,
+        &shape,
+        None,
+        true,
+        None,
+        Some(true),
+    )
+    .unwrap();
 
     let active = instances[0]["activeTasks"].as_array().unwrap();
     assert_eq!(
@@ -2128,6 +2156,7 @@ async fn test_where_filter_signed_expression_no_matches() {
             transform: None,
             interpretation_hint: None,
             identity: false,
+            in_values: None,
             local: false,
             ordering: None,
         }],
@@ -2136,7 +2165,17 @@ async fn test_where_filter_signed_expression_no_matches() {
     };
 
     let mut instances = vec![json!({"id": parent})];
-    evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true)).unwrap();
+    evaluate_getters(
+        &crate::perspectives::sparql_store::EvalStop::none(),
+        &store,
+        &mut instances,
+        &shape,
+        None,
+        true,
+        None,
+        Some(true),
+    )
+    .unwrap();
 
     let result = instances[0]["activeChildren"].as_array().unwrap();
     assert_eq!(result.len(), 0, "Should be empty when no matches");
@@ -2255,6 +2294,7 @@ async fn test_where_filter_multiple_conditions() {
             transform: None,
             interpretation_hint: None,
             identity: false,
+            in_values: None,
             local: false,
             ordering: None,
         }],
@@ -2263,7 +2303,17 @@ async fn test_where_filter_multiple_conditions() {
     };
 
     let mut instances = vec![json!({"id": board})];
-    evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true)).unwrap();
+    evaluate_getters(
+        &crate::perspectives::sparql_store::EvalStop::none(),
+        &store,
+        &mut instances,
+        &shape,
+        None,
+        true,
+        None,
+        Some(true),
+    )
+    .unwrap();
 
     let result = instances[0]["highPriActive"].as_array().unwrap();
     assert_eq!(result.len(), 1, "Only task_hi should match: {:?}", result);
@@ -2327,6 +2377,7 @@ async fn test_where_filter_missing_property_on_target() {
             transform: None,
             interpretation_hint: None,
             identity: false,
+            in_values: None,
             local: false,
             ordering: None,
         }],
@@ -2335,7 +2386,17 @@ async fn test_where_filter_missing_property_on_target() {
     };
 
     let mut instances = vec![json!({"id": parent})];
-    evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true)).unwrap();
+    evaluate_getters(
+        &crate::perspectives::sparql_store::EvalStop::none(),
+        &store,
+        &mut instances,
+        &shape,
+        None,
+        true,
+        None,
+        Some(true),
+    )
+    .unwrap();
 
     let result = instances[0]["active"].as_array().unwrap();
     assert_eq!(result.len(), 1, "Only child_with should match");
@@ -2397,6 +2458,7 @@ async fn test_where_filter_plain_literal_string() {
             transform: None,
             interpretation_hint: None,
             identity: false,
+            in_values: None,
             local: false,
             ordering: None,
         }],
@@ -2405,7 +2467,17 @@ async fn test_where_filter_plain_literal_string() {
     };
 
     let mut instances = vec![json!({"id": parent})];
-    evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true)).unwrap();
+    evaluate_getters(
+        &crate::perspectives::sparql_store::EvalStop::none(),
+        &store,
+        &mut instances,
+        &shape,
+        None,
+        true,
+        None,
+        Some(true),
+    )
+    .unwrap();
 
     let result = instances[0]["redChildren"].as_array().unwrap();
     assert_eq!(result.len(), 1);
@@ -2490,6 +2562,7 @@ async fn test_where_filter_on_multiple_instances() {
             transform: None,
             interpretation_hint: None,
             identity: false,
+            in_values: None,
             local: false,
             ordering: None,
         }],
@@ -2498,7 +2571,17 @@ async fn test_where_filter_on_multiple_instances() {
     };
 
     let mut instances = vec![json!({"id": board1}), json!({"id": board2})];
-    evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true)).unwrap();
+    evaluate_getters(
+        &crate::perspectives::sparql_store::EvalStop::none(),
+        &store,
+        &mut instances,
+        &shape,
+        None,
+        true,
+        None,
+        Some(true),
+    )
+    .unwrap();
 
     let active1 = instances[0]["activeTasks"].as_array().unwrap();
     assert_eq!(active1.len(), 1, "board1 should have 1 active task");
@@ -2884,6 +2967,7 @@ fn scalar_prop(name: &str, predicate: &str, required: bool, flag: bool) -> Shape
         transform: None,
         interpretation_hint: None,
         identity: false,
+        in_values: None,
         local: false,
         ordering: None,
     }
@@ -2908,6 +2992,7 @@ fn collection_prop(name: &str, predicate: &str, getter: Option<&str>) -> ShapePr
         transform: None,
         interpretation_hint: None,
         identity: false,
+        in_values: None,
         local: false,
         ordering: None,
     }
@@ -3507,6 +3592,7 @@ async fn test_full_model_query_ops_with_pagination_pushed() {
         &store,
         "Scored",
         &ModelQueryInput {
+            count: Some(true),
             where_clause: Some(wc),
             limit: Some(3),
             offset: Some(2),
@@ -3518,7 +3604,11 @@ async fn test_full_model_query_ops_with_pagination_pushed() {
     .await
     .unwrap();
     assert_eq!(result.instances.len(), 3, "Should get 3 items in page");
-    assert_eq!(result.total_count, 7, "Total matching items: score >= 30");
+    assert_eq!(
+        result.total_count.unwrap(),
+        7,
+        "Total matching items: score >= 30"
+    );
 }
 
 #[tokio::test]
@@ -3623,6 +3713,7 @@ async fn test_full_model_query_ops_contains_with_pagination() {
         &store,
         "Person",
         &ModelQueryInput {
+            count: Some(true),
             where_clause: Some(wc),
             limit: Some(1),
             offset: Some(1),
@@ -3634,7 +3725,7 @@ async fn test_full_model_query_ops_contains_with_pagination() {
     .await
     .unwrap();
     assert_eq!(result.instances.len(), 1, "Should get 1 item in page");
-    assert_eq!(result.total_count, 3, "Total matching: 3 Alices");
+    assert_eq!(result.total_count.unwrap(), 3, "Total matching: 3 Alices");
     assert_eq!(
         result.instances[0]["name"].as_str().unwrap(),
         "Alice Brown",
@@ -3719,24 +3810,24 @@ async fn test_plain_literal_where_paginate_count() {
         "status".to_string(),
         WhereCondition::String("active".to_string()),
     );
-    let result = fixture_query_from_json(
-        &store,
-        "Task",
-        &ModelQueryInput {
-            where_clause: Some(wc.clone()),
-            limit: Some(2),
-            offset: Some(0),
-            order: Some(vec![("timestamp".to_string(), OrderDirection::ASC)]),
-            count: Some(true),
-            ..Default::default()
-        },
-        shape_json,
-    )
-    .await
-    .unwrap();
+    let first_page = ModelQueryInput {
+        where_clause: Some(wc.clone()),
+        limit: Some(2),
+        offset: Some(0),
+        order: Some(vec![("timestamp".to_string(), OrderDirection::ASC)]),
+        count: Some(true),
+        ..Default::default()
+    };
+    let result = fixture_query_from_json(&store, "Task", &first_page, shape_json)
+        .await
+        .unwrap();
 
     assert_eq!(result.instances.len(), 2, "Page should have 2 items");
-    assert_eq!(result.total_count, 3, "Total active items should be 3");
+    assert_eq!(
+        result.total_count.unwrap(),
+        3,
+        "Total active items should be 3"
+    );
     assert_eq!(result.instances[0]["name"].as_str().unwrap(), "Alpha");
     assert_eq!(result.instances[1]["name"].as_str().unwrap(), "Beta");
     assert_eq!(result.instances[0]["status"].as_str().unwrap(), "active");
@@ -3758,8 +3849,42 @@ async fn test_plain_literal_where_paginate_count() {
     .unwrap();
 
     assert_eq!(result2.instances.len(), 1);
-    assert_eq!(result2.total_count, 3);
+    assert_eq!(result2.total_count.unwrap(), 3);
     assert_eq!(result2.instances[0]["name"].as_str().unwrap(), "Delta");
+
+    // Without `count`: the same rows, no total, and none on the wire.
+    for count in [None, Some(false)] {
+        let uncounted = fixture_query_from_json(
+            &store,
+            "Task",
+            &ModelQueryInput {
+                count,
+                ..first_page.clone()
+            },
+            shape_json,
+        )
+        .await
+        .unwrap();
+        assert_eq!(uncounted.instances, result.instances, "count: {count:?}");
+        assert_eq!(uncounted.total_count, None, "count: {count:?}");
+        let wire = serde_json::to_value(&uncounted).unwrap();
+        assert!(wire.get("totalCount").is_none(), "{wire}");
+
+        let count_only = fixture_query_from_json(
+            &store,
+            "Task",
+            &ModelQueryInput {
+                count,
+                limit: Some(0),
+                ..first_page.clone()
+            },
+            shape_json,
+        )
+        .await
+        .unwrap();
+        assert!(count_only.instances.is_empty());
+        assert_eq!(count_only.total_count, None, "limit 0, count: {count:?}");
+    }
 }
 
 /// Guards that the `contains` filter — which doesn't reduce to a direct
@@ -3900,6 +4025,7 @@ async fn test_perf_large_dataset_paginated_query() {
         &store,
         "Message",
         &ModelQueryInput {
+            count: Some(true),
             where_clause: Some(wc),
             limit: Some(50),
             offset: Some(0),
@@ -3914,7 +4040,8 @@ async fn test_perf_large_dataset_paginated_query() {
 
     assert_eq!(result.instances.len(), 50, "Should get 50 messages");
     assert_eq!(
-        result.total_count, msgs_per_channel,
+        result.total_count.unwrap(),
+        msgs_per_channel,
         "Total count should be messages in one channel"
     );
     eprintln!(
@@ -4025,7 +4152,8 @@ async fn test_perf_flux_message_parent_scope_paginated() {
 
     assert_eq!(result.instances.len(), 30, "Should get 30 messages");
     assert_eq!(
-        result.total_count, msgs_per_channel,
+        result.total_count.unwrap(),
+        msgs_per_channel,
         "Total count should be {} messages in channel-2",
         msgs_per_channel
     );
@@ -4062,7 +4190,12 @@ async fn test_perf_flux_message_parent_scope_paginated() {
         <test://channel-2> <ad4m://has_child> ?source .
         ?source <flux://entry_type> <flux://has_message> .
     } LIMIT 30"#;
-    let _r = store.query(q_no_order).unwrap();
+    let _r = store
+        .query(
+            &crate::perspectives::sparql_store::EvalStop::none(),
+            q_no_order,
+        )
+        .unwrap();
     eprintln!("[RAW] no ORDER BY: {:?}", t_no_order.elapsed());
 
     // Test 2: Flag-reifier probe (what we currently generate)
@@ -4073,7 +4206,9 @@ async fn test_perf_flux_message_parent_scope_paginated() {
         ?_r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source <flux://entry_type> <flux://has_message> )>> .
         ?_r <ad4m://ontology/timestamp> ?_first_ts .
     } ORDER BY DESC(?_first_ts) LIMIT 30"#;
-    let _r = store.query(q_flag).unwrap();
+    let _r = store
+        .query(&crate::perspectives::sparql_store::EvalStop::none(), q_flag)
+        .unwrap();
     eprintln!("[RAW] flag-reifier ORDER BY: {:?}", t_flag.elapsed());
 
     // Test 3: Parent-reifier probe (uses the fully-bound parent IRI)
@@ -4084,7 +4219,12 @@ async fn test_perf_flux_message_parent_scope_paginated() {
         ?_r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( <test://channel-2> <ad4m://has_child> ?source )>> .
         ?_r <ad4m://ontology/timestamp> ?_first_ts .
     } ORDER BY DESC(?_first_ts) LIMIT 30"#;
-    let _r = store.query(q_parent).unwrap();
+    let _r = store
+        .query(
+            &crate::perspectives::sparql_store::EvalStop::none(),
+            q_parent,
+        )
+        .unwrap();
     eprintln!("[RAW] parent-reifier ORDER BY: {:?}", t_parent.elapsed());
 
     // Test 4: Wildcard reifier (the old expensive pattern)
@@ -4096,7 +4236,9 @@ async fn test_perf_flux_message_parent_scope_paginated() {
         ?_r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?_anyP ?_anyT )>> .
         ?_r <ad4m://ontology/timestamp> ?_first_ts .
     } ORDER BY DESC(?_first_ts) LIMIT 30"#;
-    let _r = store.query(q_wild).unwrap();
+    let _r = store
+        .query(&crate::perspectives::sparql_store::EvalStop::none(), q_wild)
+        .unwrap();
     eprintln!("[RAW] wildcard-reifier ORDER BY: {:?}", t_wild.elapsed());
 
     // Test 5: Full outer query (the actual generated pattern)
@@ -4117,7 +4259,12 @@ async fn test_perf_flux_message_parent_scope_paginated() {
         ?_reifier <ad4m://ontology/author> ?author .
         ?_reifier <ad4m://ontology/timestamp> ?timestamp .
     }"#;
-    let r_full: Vec<Value> = serde_json::from_str(&store.query(q_full).unwrap()).unwrap();
+    let r_full: Vec<Value> = serde_json::from_str(
+        &store
+            .query(&crate::perspectives::sparql_store::EvalStop::none(), q_full)
+            .unwrap(),
+    )
+    .unwrap();
     eprintln!(
         "[RAW] full outer query: {:?} ({} rows)",
         t_full.elapsed(),
@@ -4132,7 +4279,12 @@ async fn test_perf_flux_message_parent_scope_paginated() {
         ?_r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source <flux://entry_type> <flux://has_message> )>> .
         ?_r <ad4m://ontology/timestamp> ?_first_ts .
     } ORDER BY DESC(?_first_ts) LIMIT 30"#;
-    let ids_json: Vec<Value> = serde_json::from_str(&store.query(q_ids).unwrap()).unwrap();
+    let ids_json: Vec<Value> = serde_json::from_str(
+        &store
+            .query(&crate::perspectives::sparql_store::EvalStop::none(), q_ids)
+            .unwrap(),
+    )
+    .unwrap();
     let source_values: String = ids_json
         .iter()
         .filter_map(|r| r["source"].as_str())
@@ -4151,7 +4303,15 @@ async fn test_perf_flux_message_parent_scope_paginated() {
         ?_reifier <ad4m://ontology/timestamp> ?timestamp .
     }}"#
     );
-    let r_outer: Vec<Value> = serde_json::from_str(&store.query(&q_outer).unwrap()).unwrap();
+    let r_outer: Vec<Value> = serde_json::from_str(
+        &store
+            .query(
+                &crate::perspectives::sparql_store::EvalStop::none(),
+                &q_outer,
+            )
+            .unwrap(),
+    )
+    .unwrap();
     eprintln!(
         "[RAW] pre-materialized VALUES outer: {:?} ({} rows)",
         t_outer.elapsed(),
@@ -4194,6 +4354,7 @@ async fn test_full_model_query_order_by_property_string() {
         &store,
         "Person",
         &ModelQueryInput {
+            count: Some(true),
             limit: Some(2),
             order: Some(vec![("name".to_string(), OrderDirection::ASC)]),
             ..Default::default()
@@ -4203,7 +4364,7 @@ async fn test_full_model_query_order_by_property_string() {
     .await
     .unwrap();
     assert_eq!(result.instances.len(), 2);
-    assert_eq!(result.total_count, 3);
+    assert_eq!(result.total_count.unwrap(), 3);
     // First 2 alphabetically: Alice, Bob
     assert_eq!(result.instances[0]["name"].as_str().unwrap(), "Alice");
     assert_eq!(result.instances[1]["name"].as_str().unwrap(), "Bob");
@@ -4213,6 +4374,7 @@ async fn test_full_model_query_order_by_property_string() {
         &store,
         "Person",
         &ModelQueryInput {
+            count: Some(true),
             limit: Some(2),
             order: Some(vec![("name".to_string(), OrderDirection::DESC)]),
             ..Default::default()
@@ -4271,6 +4433,7 @@ async fn test_full_model_query_order_by_property_string_signed_envelope() {
         &store,
         "Person2",
         &ModelQueryInput {
+            count: Some(true),
             limit: Some(2),
             order: Some(vec![("name".to_string(), OrderDirection::ASC)]),
             ..Default::default()
@@ -4280,7 +4443,7 @@ async fn test_full_model_query_order_by_property_string_signed_envelope() {
     .await
     .unwrap();
     assert_eq!(result.instances.len(), 2);
-    assert_eq!(result.total_count, 3);
+    assert_eq!(result.total_count.unwrap(), 3);
     assert_eq!(result.instances[0]["name"].as_str().unwrap(), "Alice");
     assert_eq!(result.instances[1]["name"].as_str().unwrap(), "Bob");
 }
@@ -4321,6 +4484,7 @@ async fn test_full_model_query_order_by_property_number() {
         &store,
         "Scored",
         &ModelQueryInput {
+            count: Some(true),
             limit: Some(3),
             order: Some(vec![("score".to_string(), OrderDirection::ASC)]),
             ..Default::default()
@@ -4330,7 +4494,7 @@ async fn test_full_model_query_order_by_property_number() {
     .await
     .unwrap();
     assert_eq!(result.instances.len(), 3);
-    assert_eq!(result.total_count, 5);
+    assert_eq!(result.total_count.unwrap(), 5);
     let got_scores: Vec<f64> = result
         .instances
         .iter()
@@ -4343,6 +4507,7 @@ async fn test_full_model_query_order_by_property_number() {
         &store,
         "Scored",
         &ModelQueryInput {
+            count: Some(true),
             limit: Some(2),
             order: Some(vec![("score".to_string(), OrderDirection::DESC)]),
             ..Default::default()
@@ -4441,6 +4606,7 @@ async fn test_resolve_projections_where_filter_via_target_shape_property() {
             transform: None,
             interpretation_hint: None,
             identity: false,
+            in_values: None,
             local: false,
             ordering: None,
         }],
@@ -4473,6 +4639,7 @@ async fn test_resolve_projections_where_filter_via_target_shape_property() {
     );
 
     resolve_projections(
+        &crate::perspectives::sparql_store::EvalStop::none(),
         &store,
         &mut instances,
         &projections,
@@ -4508,6 +4675,7 @@ async fn test_resolve_projections_where_filter_via_target_shape_property() {
     );
 
     resolve_projections(
+        &crate::perspectives::sparql_store::EvalStop::none(),
         &store,
         &mut instances2,
         &projections2,
@@ -4757,7 +4925,7 @@ async fn test_sort_by_projection_count_with_pagination() {
     .unwrap();
 
     assert_eq!(result.instances.len(), 2, "page size should be 2");
-    assert_eq!(result.total_count, 5, "total should be 5");
+    assert_eq!(result.total_count.unwrap(), 5, "total should be 5");
     let page1: Vec<u64> = result
         .instances
         .iter()
@@ -5226,8 +5394,18 @@ fn bench_indexed_literal_vs_str_filter() {
     );
 
     // Warm-up — touch every triple under both query plans before timing.
-    let _ = store.query(&indexed).unwrap();
-    let _ = store.query(&filtered).unwrap();
+    let _ = store
+        .query(
+            &crate::perspectives::sparql_store::EvalStop::none(),
+            &indexed,
+        )
+        .unwrap();
+    let _ = store
+        .query(
+            &crate::perspectives::sparql_store::EvalStop::none(),
+            &filtered,
+        )
+        .unwrap();
 
     let runs = 5;
     let mut indexed_total = std::time::Duration::ZERO;
@@ -5236,7 +5414,12 @@ fn bench_indexed_literal_vs_str_filter() {
 
     for _ in 0..runs {
         let start = Instant::now();
-        let r = store.query(&indexed).unwrap();
+        let r = store
+            .query(
+                &crate::perspectives::sparql_store::EvalStop::none(),
+                &indexed,
+            )
+            .unwrap();
         indexed_total += start.elapsed();
         let rows: Vec<Value> = serde_json::from_str(&r).unwrap();
         assert_eq!(rows.len(), 1, "indexed query must return exactly 1 row");
@@ -5247,7 +5430,12 @@ fn bench_indexed_literal_vs_str_filter() {
         );
 
         let start = Instant::now();
-        let r = store.query(&filtered).unwrap();
+        let r = store
+            .query(
+                &crate::perspectives::sparql_store::EvalStop::none(),
+                &filtered,
+            )
+            .unwrap();
         filtered_total += start.elapsed();
         let rows: Vec<Value> = serde_json::from_str(&r).unwrap();
         assert_eq!(rows.len(), 1, "filtered query must return exactly 1 row");
@@ -5390,6 +5578,7 @@ async fn test_persistent_store_typed_literal_comparison() {
     // Diagnostic: raw SPARQL to verify typed literal comparison
     let raw_gt = store
         .query(
+            &crate::perspectives::sparql_store::EvalStop::none(),
             r#"SELECT ?s WHERE {
                 ?s <ns://score> ?v .
                 FILTER(?v > "50"^^<http://www.w3.org/2001/XMLSchema#integer>)
@@ -5406,6 +5595,7 @@ async fn test_persistent_store_typed_literal_comparison() {
 
     let raw_neq = store
         .query(
+            &crate::perspectives::sparql_store::EvalStop::none(),
             r#"SELECT ?s WHERE {
                 ?s <ns://name> ?v .
                 FILTER(?v != "Alpha"^^<http://www.w3.org/2001/XMLSchema#string>)
@@ -5739,7 +5929,13 @@ async fn test_subject_classes_of_batch() {
         "ns://c".to_string(),
         "ns://nothing".to_string(),
     ];
-    let result = subject_classes_of(&store, &resolver, &uris).unwrap();
+    let result = subject_classes_of(
+        &crate::perspectives::sparql_store::EvalStop::none(),
+        &store,
+        &resolver,
+        &uris,
+    )
+    .unwrap();
 
     assert_eq!(result.get("ns://a"), Some(&vec!["TextBlock".to_string()]));
     assert_eq!(result.get("ns://b"), Some(&vec!["ImageBlock".to_string()]));
@@ -5799,7 +5995,13 @@ async fn test_subject_classes_of_mixed_absolute_and_unusable_uris() {
         ":leading-colon".to_string(),
         "ns://b".to_string(),
     ];
-    let result = subject_classes_of(&store, &resolver, &uris).expect("the batch still resolves");
+    let result = subject_classes_of(
+        &crate::perspectives::sparql_store::EvalStop::none(),
+        &store,
+        &resolver,
+        &uris,
+    )
+    .expect("the batch still resolves");
 
     assert_eq!(result.get("ns://a"), Some(&vec!["TextBlock".to_string()]));
     assert_eq!(
@@ -5859,8 +6061,13 @@ async fn test_subject_classes_of_skips_class_with_unusable_predicate() {
         .add_link(&make_link("ns://a", "title", "literal:string:hi", "2"))
         .unwrap();
 
-    let result =
-        subject_classes_of(&store, &resolver, &["ns://a".to_string()]).expect("the batch resolves");
+    let result = subject_classes_of(
+        &crate::perspectives::sparql_store::EvalStop::none(),
+        &store,
+        &resolver,
+        &["ns://a".to_string()],
+    )
+    .expect("the batch resolves");
 
     assert_eq!(
         result.get("ns://a"),
@@ -5904,7 +6111,13 @@ async fn test_subject_classes_of_requires_every_triple_not_just_a_flag() {
         .add_link(&make_link("ns://a", "ns://flag", "ns://text_block", "2"))
         .unwrap();
 
-    let result = subject_classes_of(&store, &resolver, &["ns://a".to_string()]).unwrap();
+    let result = subject_classes_of(
+        &crate::perspectives::sparql_store::EvalStop::none(),
+        &store,
+        &resolver,
+        &["ns://a".to_string()],
+    )
+    .unwrap();
 
     assert!(
         !result.contains_key("ns://a"),
@@ -5961,7 +6174,13 @@ async fn test_subject_classes_of_returns_every_class_most_specific_first() {
         .add_link(&make_link("ns://a", "ns://text", "literal:string:hi", "2"))
         .unwrap();
 
-    let result = subject_classes_of(&store, &resolver, &["ns://a".to_string()]).unwrap();
+    let result = subject_classes_of(
+        &crate::perspectives::sparql_store::EvalStop::none(),
+        &store,
+        &resolver,
+        &["ns://a".to_string()],
+    )
+    .unwrap();
 
     let classes = result.get("ns://a").expect("ns://a is classified");
     assert_eq!(
@@ -8729,6 +8948,7 @@ async fn a_traverse_scope_with_an_unwritable_predicate_matches_nothing() {
         .unwrap();
 
     let query = ModelQueryInput {
+        count: Some(true),
         parent: Some(Scope::Traverse {
             ids: vec!["we://root".to_string()],
             // A space cannot appear in an IRI term.
@@ -8753,7 +8973,7 @@ async fn a_traverse_scope_with_an_unwritable_predicate_matches_nothing() {
             .filter_map(|i| i["id"].as_str())
             .collect::<Vec<_>>()
     );
-    assert_eq!(result.total_count, 0, "and a total that agrees");
+    assert_eq!(result.total_count.unwrap(), 0, "and a total that agrees");
 }
 
 /// The same rule for the older spellings, which had the same hole: a `Raw`
@@ -8868,6 +9088,7 @@ async fn a_per_anchor_limit_refuses_an_order_the_store_cannot_express() {
 async fn a_walk_totals_the_walk_rather_than_one_step_of_it() {
     let store = comment_tree_store();
     let query = ModelQueryInput {
+        count: Some(true),
         parent: Some(Scope::Traverse {
             ids: vec!["we://root".to_string()],
             predicate: Some("we://comment".to_string()),
@@ -8890,7 +9111,8 @@ async fn a_walk_totals_the_walk_rather_than_one_step_of_it() {
         .collect();
     assert_eq!(ids, vec!["we://c1", "we://r1"], "one per level, two levels");
     assert_eq!(
-        result.total_count, 2,
+        result.total_count.unwrap(),
+        2,
         "the total is the walk's own union, not root's three direct replies"
     );
 }
@@ -8905,6 +9127,7 @@ async fn a_walk_totals_the_walk_rather_than_one_step_of_it() {
 async fn a_count_only_walk_totals_the_walk_too() {
     let store = comment_tree_store();
     let query = ModelQueryInput {
+        count: Some(true),
         parent: Some(Scope::Traverse {
             ids: vec!["we://root".to_string()],
             predicate: Some("we://comment".to_string()),
@@ -8926,7 +9149,8 @@ async fn a_count_only_walk_totals_the_walk_too() {
         "a count-only query returns no rows"
     );
     assert_eq!(
-        result.total_count, 2,
+        result.total_count.unwrap(),
+        2,
         "the count is the walk's own union, exactly as the full query reports it"
     );
 }
@@ -9059,6 +9283,7 @@ async fn a_transitive_read_excludes_every_named_anchor() {
 async fn a_transitive_read_totals_what_it_returns() {
     let store = comment_tree_store();
     let query = ModelQueryInput {
+        count: Some(true),
         parent: Some(traverse_scope(
             &["we://root", "we://c1"],
             true,
@@ -9076,7 +9301,8 @@ async fn a_transitive_read_totals_what_it_returns() {
         "c2, c3, r1, r2, rr1 — both anchors excluded"
     );
     assert_eq!(
-        result.total_count, 5,
+        result.total_count.unwrap(),
+        5,
         "the total counts what the scope returns, not the anchors it starts from"
     );
 }
@@ -9915,6 +10141,7 @@ async fn paged(offset: Option<usize>, limit: usize) -> (Vec<String>, usize, bool
         &ModelQueryInput {
             offset,
             limit: Some(limit),
+            count: Some(true),
             ..Default::default()
         },
         shape_json,
@@ -9929,7 +10156,7 @@ async fn paged(offset: Option<usize>, limit: usize) -> (Vec<String>, usize, bool
         .iter()
         .map(|i| i["id"].as_str().unwrap().to_string())
         .collect();
-    (ids, result.total_count, counted)
+    (ids, result.total_count.expect("count: true"), counted)
 }
 
 fn paged_ids(range: std::ops::Range<usize>) -> Vec<String> {
@@ -10005,6 +10232,7 @@ async fn a_short_page_sliced_per_anchor_keeps_the_stores_count() {
             )),
             order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
             limit: Some(10),
+            count: Some(true),
             ..Default::default()
         },
         COMMENT_SHAPE_JSON,
@@ -10018,7 +10246,53 @@ async fn a_short_page_sliced_per_anchor_keeps_the_stores_count() {
         .collect();
     assert_eq!(ids, vec!["we://c1"], "one per anchor, oldest first");
     assert_eq!(
-        result.total_count, 3,
+        result.total_count,
+        Some(3),
         "the page is short because of the slice, not because the scope ran out"
     );
+}
+
+/// A getter cut off by the call's stop fails the call. Logging and skipping it,
+/// as for a getter that errors on its own, would answer with properties missing,
+/// and a model subscription's re-check would keep that as its baseline.
+#[tokio::test]
+async fn a_stopped_getter_fails_the_call_instead_of_dropping_the_property() {
+    let store = SparqlStore::new(None).unwrap();
+    store
+        .add_link(&make_link(
+            "test://inst-1",
+            "test://is_active",
+            "literal:boolean:true",
+            "2024-01-01T00:00:00Z",
+        ))
+        .unwrap();
+    let shape = parse_shape_from_json(
+        r#"{
+        "className": "TestModel",
+        "properties": {
+            "isActive": {
+                "predicate": "test://is_active",
+                "getter": "ASK WHERE { <Base> <test://is_active> ?x }"
+            },
+            "status": {
+                "predicate": "test://is_active",
+                "getter": "SELECT ?value WHERE { <Base> <test://is_active> ?value }"
+            }
+        },
+        "relations": {}
+    }"#,
+        "TestModel",
+    )
+    .unwrap();
+
+    let result = super::getters::evaluate_getters_batch(
+        &crate::perspectives::sparql_store::EvalStop::cancelled(),
+        &store,
+        &shape,
+        &["test://inst-1".to_string()],
+        None,
+    );
+
+    let err = result.expect_err("a stopped getter must fail the call, not drop the property");
+    assert!(err.to_string().contains("cancelled"), "{err}");
 }

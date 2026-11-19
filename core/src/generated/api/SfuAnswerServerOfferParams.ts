@@ -2,6 +2,10 @@
 
 export type SfuAnswerServerOfferParams = { neighbourhoodUrl: string, roomName: string, 
 /**
+ * The caller's session, as its join returned it.
+ */
+participantId: string, 
+/**
  * JSON-encoded `RTCSessionDescriptionInit`.
  */
 sdpAnswer: string, };

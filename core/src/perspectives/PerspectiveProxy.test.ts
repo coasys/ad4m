@@ -3,7 +3,6 @@ import { Link, LinkExpression } from '../links/Links';
 import { LinkQuery } from './LinkQuery';
 import { Literal } from '../Literal';
 import { SHACLFlow } from '../shacl/SHACLFlow';
-import { clearQueryCache } from '../model/query-cache';
 
 function createProxy(client: any): PerspectiveProxy {
   return new PerspectiveProxy(
@@ -472,10 +471,10 @@ describe('PerspectiveProxy.addFlow replace', () => {
   });
 });
 
-// A read right after an awaited write must not be served from the query
-// cache: `updateSubject` and `removeSubject` through an abstract class (#1435)
-// write in the executor, so they invalidate it like the other writes.
-describe('PerspectiveProxy write RPCs invalidate the query cache', () => {
+// A read right after an awaited write sees the write: `updateSubject` and
+// `removeSubject` through an abstract class (#1435) write in the executor,
+// and querySparql keeps no result once its call settles.
+describe('PerspectiveProxy reads after write RPCs are fresh', () => {
   const query = 'SELECT ?v WHERE { <ad4m://m/1> <test://text> ?v }';
 
   function client() {
@@ -490,8 +489,6 @@ describe('PerspectiveProxy write RPCs invalidate the query cache', () => {
       queryLinks: jest.fn().mockResolvedValue([marker]),
     } as any;
   }
-
-  beforeEach(() => clearQueryCache());
 
   it('after updateSubject', async () => {
     const proxy = createProxy(client());
@@ -510,8 +507,6 @@ describe('PerspectiveProxy write RPCs invalidate the query cache', () => {
   });
 
   it('after delete of a built-in TextContent row', async () => {
-    const now = Date.now();
-    jest.spyOn(Date, 'now').mockReturnValue(now);
     const c = client();
     const proxy = createProxy(c);
     expect(await proxy.querySparql(query)).toEqual([{ v: 'old' }]);
@@ -519,6 +514,37 @@ describe('PerspectiveProxy write RPCs invalidate the query cache', () => {
     await proxy.removeSubject(row, 'ad4m://m/1');
     expect(c.removeSubject).toHaveBeenCalledWith('test-uuid', 'ad4m://TextContent', 'ad4m://m/1', undefined);
     expect(await proxy.querySparql(query)).toEqual([{ v: 'new' }]);
-    jest.spyOn(Date, 'now').mockRestore();
+  });
+});
+
+// Outside a batch, instanceRemove and instanceRemoveFromCollection remove
+// links one by one: a failure part-way rejects the call after some links are
+// already gone. A read right after must reach the executor.
+describe('PerspectiveProxy reads after a rejected instance write are fresh', () => {
+  const query = 'SELECT ?v WHERE { <ad4m://m/1> <test://text> ?v }';
+  const partial = Object.assign(new Error('partiallyRemoved'), { data: { kind: 'partiallyRemoved', removed: 2 } });
+
+  function client() {
+    return {
+      querySparql: jest.fn()
+        .mockResolvedValueOnce([{ v: 'old' }])
+        .mockResolvedValueOnce([]),
+      instanceRemove: jest.fn().mockRejectedValue(partial),
+      instanceRemoveFromCollection: jest.fn().mockRejectedValue(partial),
+    } as any;
+  }
+
+  it('after instanceRemove rejects', async () => {
+    const proxy = createProxy(client());
+    expect(await proxy.querySparql(query)).toEqual([{ v: 'old' }]);
+    await expect(proxy.instanceRemove({ className: 'Note', baseUri: 'ad4m://m/1' } as any)).rejects.toBe(partial);
+    expect(await proxy.querySparql(query)).toEqual([]);
+  });
+
+  it('after instanceRemoveFromCollection rejects', async () => {
+    const proxy = createProxy(client());
+    expect(await proxy.querySparql(query)).toEqual([{ v: 'old' }]);
+    await expect(proxy.instanceRemoveFromCollection({ className: 'Note', baseUri: 'ad4m://m/1', collection: 'tags', itemUri: 'x' } as any)).rejects.toBe(partial);
+    expect(await proxy.querySparql(query)).toEqual([]);
   });
 });

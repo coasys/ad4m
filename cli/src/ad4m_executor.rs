@@ -44,6 +44,7 @@ extern crate rustyline;
 extern crate tokio;
 
 mod formatting;
+mod identity;
 mod startup;
 mod util;
 
@@ -120,13 +121,105 @@ enum Domain {
         data_path: Option<String>,
         #[arg(short, long, action)]
         network_bootstrap_seed: Option<String>,
+        /// The did:scid of the identity that operates this executor. Recorded only while the
+        /// data folder has no operator; another identity never replaces it (only the recorded
+        /// operator can). On a data folder already initialized, only the operator is recorded
+        /// (the seed stays, unless --network-bootstrap-seed is given too). The operator is
+        /// recorded in this data folder: give `init` the same --data-path that `run` uses.
+        #[arg(long)]
+        operator: Option<String>,
+    },
+    /// Join an identity: claim an offer link (or offer string) its app opened, show the match
+    /// code, and wait until the app confirms. Needs the operator's admin credential
+    /// (`--admin-credential` or AD4M_ADMIN_CREDENTIAL) and an operator recorded with
+    /// `init --operator`.
+    Claim {
+        /// The offer link (`https://id.coasys.org/o#coasys:offer:1:…`) or the offer string.
+        offer: String,
+        /// A name for this executor the app shows on its confirm card.
+        #[arg(long)]
+        hint: Option<String>,
+        /// Claim and print the match code, without waiting for the confirmation.
+        #[arg(long, action)]
+        no_wait: bool,
     },
     Run(RunArgs),
+    /// Give this executor a new main wallet key (a revoked server links again with it). Runs
+    /// only on the executor's own machine: it reaches the executor on a loopback address with
+    /// the admin credential from AD4M_ADMIN_CREDENTIAL_FILE (or --admin-credential,
+    /// AD4M_ADMIN_CREDENTIAL). The old key stays for history.
+    Rekey,
     /// Inspect the settings `run` would start with
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
     },
+    /// Local AI without a running executor
+    LocalAi {
+        #[command(subcommand)]
+        command: LocalAiCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum LocalAiCommand {
+    /// Download the runtimes and models `ai.localInstall` would, into a store, and keep the
+    /// selection in a state directory, starting nothing (the Docker image's INCLUDE_MODELS).
+    /// An executor with that store (`local_ai_dir`) and that state (`<app data>/local-ai`)
+    /// starts them with no download.
+    Install {
+        /// The store of runtimes and models.
+        #[arg(long)]
+        store: std::path::PathBuf,
+        /// Where the selection goes.
+        #[arg(long)]
+        state: std::path::PathBuf,
+        /// cpu, cuda, metal, vulkan or rocm. Default: the best one detected here.
+        #[arg(long, value_parser = parse_device)]
+        device: Option<rust_executor::ai_service::local::hardware::Backend>,
+        /// The services, comma-separated: llm, embeddings, stt. Default: every one the plan
+        /// offers.
+        #[arg(long, value_delimiter = ',', value_parser = parse_service)]
+        services: Option<Vec<rust_executor::ai_service::local::data::Service>>,
+    },
+}
+
+fn parse_device(
+    value: &str,
+) -> Result<rust_executor::ai_service::local::hardware::Backend, String> {
+    serde_json::from_value(serde_json::Value::String(value.to_string()))
+        .map_err(|_| format!("`{value}` is not a device: cpu, cuda, metal, vulkan or rocm"))
+}
+
+fn parse_service(value: &str) -> Result<rust_executor::ai_service::local::data::Service, String> {
+    serde_json::from_value(serde_json::Value::String(value.to_string()))
+        .map_err(|_| format!("`{value}` is not a service: llm, embeddings or stt"))
+}
+
+/// `local-ai install`: the download, its progress on stdout (one line per item per 10 %).
+async fn local_ai_install(
+    store: std::path::PathBuf,
+    state: std::path::PathBuf,
+    device: Option<rust_executor::ai_service::local::hardware::Backend>,
+    services: Option<Vec<rust_executor::ai_service::local::data::Service>>,
+) -> Result<()> {
+    let last = std::sync::Mutex::new(None::<(String, u64)>);
+    rust_executor::ai_service::local::install_into(store, state, device, services, move |step| {
+        let item = step.item.unwrap_or_default();
+        let percent = (step.item_done_bytes * 100)
+            .checked_div(step.item_total_bytes)
+            .unwrap_or(0);
+        let mut last = last.lock().unwrap_or_else(|p| p.into_inner());
+        if last
+            .as_ref()
+            .is_some_and(|(i, p)| *i == item && percent / 10 == p / 10)
+        {
+            return;
+        }
+        println!("local AI: {} {item} {percent}%", step.phase);
+        *last = Some((item, percent));
+    })
+    .await
 }
 
 #[derive(Debug, Subcommand)]
@@ -136,9 +229,23 @@ enum ConfigCommand {
     Print(RunArgs),
 }
 
+/// The exit code for a command line clap does not run: 0 for `--help` and `--version`, else 78
+/// (`ExitReason::ConfigRefused`), as for a refused config file: an invalid flag or `AD4M_*`
+/// variable fails the same way at every start, so a supervisor does not retry it.
+fn command_line_exit_code(error: &clap::Error) -> i32 {
+    match error.kind() {
+        clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion => 0,
+        _ => rust_executor::exit::ExitReason::ConfigRefused.code(),
+    }
+}
+
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
-    let args = ClapApp::parse();
+    let args = ClapApp::try_parse().unwrap_or_else(|e| {
+        let code = command_line_exit_code(&e);
+        let _ = e.print();
+        std::process::exit(code);
+    });
 
     if let Domain::Dev { command } = args.domain {
         dev::run(command).await?;
@@ -148,17 +255,67 @@ async fn main() -> Result<()> {
     if let Domain::Init {
         data_path,
         network_bootstrap_seed,
+        operator,
     } = args.domain
     {
-        match rust_executor::init::init(data_path, network_bootstrap_seed) {
-            Ok(()) => println!("Successfully initialized AD4M executor!"),
-            Err(e) => {
-                println!("Failed to initialize AD4M executor: {}", e);
-                std::process::exit(1);
-            }
-        };
+        let done = identity::init_with_operator(
+            data_path,
+            network_bootstrap_seed,
+            operator.as_deref(),
+            |data_path, seed| {
+                rust_executor::init::init(data_path, seed)
+                    .map_err(|e| anyhow::anyhow!("Failed to initialize AD4M executor: {e}"))?;
+                println!("Successfully initialized AD4M executor!");
+                Ok(())
+            },
+        );
+        if let Err(e) = done {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
         return Ok(());
     };
+
+    if let Domain::Claim {
+        offer,
+        hint,
+        no_wait,
+    } = args.domain
+    {
+        let executor_url = match args.executor_url {
+            Some(url) => url,
+            None => startup::get_executor_url()?,
+        };
+        // No credential: an executor started with --insecure-no-admin-credential, where the
+        // empty token on loopback is the operator.
+        let token = args
+            .admin_credential
+            .or_else(|| std::env::var("AD4M_ADMIN_CREDENTIAL").ok())
+            .unwrap_or_default();
+        if let Err(e) = identity::claim(&executor_url, &token, &offer, hint, no_wait).await {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
+    if let Domain::Rekey = args.domain {
+        let executor_url = match args.executor_url {
+            Some(url) => url,
+            None => startup::get_executor_url()?,
+        };
+        let rekeyed = match identity::admin_credential(args.admin_credential, |name| {
+            std::env::var(name).ok()
+        }) {
+            Ok(token) => identity::rekey(&executor_url, &token).await,
+            Err(e) => Err(e),
+        };
+        if let Err(e) = rekeyed {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
 
     if let Domain::Config {
         command: ConfigCommand::Print(run_args),
@@ -172,11 +329,42 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    if let Domain::LocalAi {
+        command:
+            LocalAiCommand::Install {
+                store,
+                state,
+                device,
+                services,
+            },
+    } = args.domain
+    {
+        if let Err(e) = local_ai_install(store, state, device, services).await {
+            eprintln!("Local AI install failed: {e:#}");
+            std::process::exit(1);
+        }
+        println!("Local AI installed.");
+        return Ok(());
+    }
+
     if let Domain::Run(run_args) = args.domain {
+        // A config the executor refuses exits 78 (`ExitReason::ConfigRefused`): a supervisor
+        // does not retry it.
+        let refused = |message: String| -> ! {
+            eprintln!("{message}");
+            exit(rust_executor::exit::ExitReason::ConfigRefused.code());
+        };
         let ResolvedRun {
             config,
             unlock_passphrase,
-        } = run_args.resolve(process_env)?;
+        } = run_args
+            .resolve(process_env)
+            .unwrap_or_else(|e| refused(format!("{e:#}")));
+        let mut checked = config.clone();
+        checked.prepare();
+        if let Err(message) = checked.check_admin_credential() {
+            refused(message);
+        }
         let startup = tokio::spawn(async move { rust_executor::run(config).await }).await;
         // Exit 1 when the REST API fails (e.g. the port is taken), instead of
         // running on with no API.
@@ -191,12 +379,11 @@ async fn main() -> Result<()> {
             tokio::spawn(rust_executor::unlock_agent_at_startup(passphrase));
         }
 
-        let _ = ctrlc::set_handler(move || {
-            println!("Received CTRL-C! Exiting...");
-            exit(0);
-        });
-
-        use ctrlc;
+        // SIGINT and SIGTERM are handled by `rust_executor::run`, which shuts down within a
+        // deadline. Do not install another handler here: one replaces the other, and the
+        // `ctrlc` handler that used to sit here printed to stdout first, which panics once the
+        // launcher holding the other end of the pipe is gone, so the executor then ignored
+        // every signal but SIGKILL.
         use std::process::exit;
         use std::time::Duration;
         use tokio::time::sleep;
@@ -335,6 +522,25 @@ mod tests {
         assert!(help.contains("AD4M_ADMIN_CREDENTIAL"), "{help}");
         assert!(!help.contains("s3cret-value"), "{help}");
     }
+
+    /// A command line clap refuses exits 78 like a refused config; help is not a refusal.
+    #[test]
+    fn a_refused_command_line_exits_78_and_help_exits_0() {
+        let _env = lock_env();
+        let code = |argv: &[&str]| {
+            command_line_exit_code(
+                &ClapApp::try_parse_from(argv).expect_err("clap does not run it"),
+            )
+        };
+        assert_eq!(code(&["ad4m-executor", "run", "--port", "not-a-port"]), 78);
+        assert_eq!(code(&["ad4m-executor", "run", "--no-such-flag"]), 78);
+        std::env::set_var("AD4M_APP_DATA_PATH", "");
+        let empty = code(&["ad4m-executor", "run", "--insecure-no-admin-credential"]);
+        std::env::remove_var("AD4M_APP_DATA_PATH");
+        assert_eq!(empty, 78);
+        assert_eq!(code(&["ad4m-executor", "run", "--help"]), 0);
+    }
+
     fn parse_run(argv: &[&str]) -> RunArgs {
         match ClapApp::try_parse_from(argv).expect("argv parses").domain {
             Domain::Run(run) => run,

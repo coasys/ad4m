@@ -340,11 +340,15 @@ could swap: a member's X25519 key follows from its DID.
   above).
 - **A member can spoil a grant.** The server cannot check the key inside a
   box. A member that grants a box holding a wrong key for a version stores the
-  first box for that member and version; the recipient's language leaves the
-  version out of its key ring and cannot open the links of that version. No
-  route removes a stored box, so this lasts. The next rotation gives the
-  recipient a new version sealed by the admin. Only a member of the room can
-  do this, and only for versions it holds.
+  first box for that member and version. The recipient's language finds that
+  the key does not match the version's `commitment`, leaves the version out of
+  its key ring and drops its own box (`DELETE /rooms/:roomId/keys/:version`).
+  The version then shows as missing again, and a member holding it grants it
+  again. Until then the recipient cannot open the links of that version. Only
+  a member of the room can do this, and only for versions it holds. A member
+  that grants a wrong box again after each drop can win that race every time;
+  removing it from the ACL stops it in allowlist mode. With `AUTO_ADMIT` the
+  server admits it again at its next sign-in.
 
 ### E2E encryption — other future requirements
 

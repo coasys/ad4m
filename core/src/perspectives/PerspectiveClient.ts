@@ -19,6 +19,12 @@ import type { AgentMessage } from "../generated/api/AgentMessage";
 import type { AgentReply } from "../generated/api/AgentReply";
 import type { PerspectiveQueryLinksParams } from "../generated/api/PerspectiveQueryLinksParams";
 import type { JsonValue } from "../generated/api/serde_json/JsonValue";
+import type { FlowFiredEntry } from "../generated/api/FlowFiredEntry";
+import type {
+    CollectionItemAdded, CollectionItemRemoved, InstanceAddToCollection, InstanceCreate,
+    InstanceCreated, InstanceRemove, InstanceRemoveFromCollection, InstanceRemoved,
+    InstanceUpdate, InstanceUpdated,
+} from "../generated/api";
 import type { AddAutoProcessorConfig, InterpretationOverlayInfo, RawScope, RunInterpretationObserveOptions } from "./AutoProcessor";
 // FlowInstance.ts owns the flow-proposal result types so they sit next to the
 // `proposeTransition()` API they describe. `import type` keeps this out of the
@@ -35,11 +41,25 @@ function classParams(className: string | string[]): { class_name: string } | { c
     return Array.isArray(className) ? { class_names: className } : { class_name: className }
 }
 
+/** A new live query's id (a UUID v4). The client mints it, so it can end the
+ *  subscription without the subscribe call's reply. `getRandomValues`, not
+ *  `randomUUID`: a page served over plain HTTP has only the former. */
+function mintSubscriptionId(): string {
+    const b = globalThis.crypto.getRandomValues(new Uint8Array(16))
+    b[6] = (b[6] & 0x0f) | 0x40
+    b[8] = (b[8] & 0x3f) | 0x80
+    const hex = Array.from(b, x => x.toString(16).padStart(2, '0')).join('')
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
+}
+
 export class PerspectiveClient {
     #apiClient: ApiClient
     #expressionClient?: ExpressionClient
     #neighbourhoodClient?: NeighbourhoodClient
     #aiClient?: AIClient
+    #sparqlInFlight = new Map<string, Promise<string>>()
+    /** Per perspective, how many writes through this client have settled; part of the in-flight key. */
+    #writeGeneration = new Map<string, number>()
 
     constructor(baseUrl: string, token?: string, sharedApiClient?: ApiClient) {
         this.#apiClient = sharedApiClient || new ApiClient(baseUrl, token)
@@ -103,15 +123,62 @@ export class PerspectiveClient {
         return JSON.parse(result)
     }
 
+    /**
+     * Concurrent identical calls (same perspective and query, no `options`)
+     * share one RPC. Each caller parses its own copy of the reply, and a call
+     * made after the shared one settled makes a new RPC. So does a call made
+     * after a write through this client settled: the shared RPC may have been
+     * answered before the write (see `#wrote`).
+     */
     async querySparql<T = any>(uuid: string, query: string, options?: CallOptions): Promise<T> {
-        const result = await this.#apiClient.call('perspective.querySparql', { uuid, engine: 'sparql', query }, options)
-        return JSON.parse(result) as T
+        if (options) return JSON.parse(await this.#apiClient.call('perspective.querySparql', { uuid, engine: 'sparql', query }, options)) as T
+        const key = `${uuid}\n${this.#writeGeneration.get(uuid) ?? 0}\n${query}`
+        let reply = this.#sparqlInFlight.get(key)
+        if (!reply) {
+            reply = this.#apiClient.call('perspective.querySparql', { uuid, engine: 'sparql', query })
+                .finally(() => this.#sparqlInFlight.delete(key))
+            this.#sparqlInFlight.set(key, reply)
+        }
+        return JSON.parse(await reply) as T
+    }
+
+    /**
+     * Await a write to `uuid`, then start a new write generation for it
+     * (also when the write failed: it may still have changed the perspective).
+     * Calls of {@link querySparql} already waiting keep sharing their RPC; an
+     * identical call started from now on makes its own.
+     */
+    async #wrote<T>(uuid: string, write: Promise<T>): Promise<T> {
+        try {
+            return await write
+        } finally {
+            this.#writeGeneration.set(uuid, (this.#writeGeneration.get(uuid) ?? 0) + 1)
+        }
     }
 
     /** Open a live SPARQL query. Updates arrive through {@link onQueryUpdate}. */
     /** `options.signal` cancels the call, and the executor stops computing the first result. */
     async subscribeQuery(uuid: string, query: string, options?: CallOptions): Promise<Subscribed> {
-        return this.#apiClient.call('perspective.subscribeQuery', { uuid, query }, options)
+        const subscriptionId = mintSubscriptionId()
+        return this.#released(uuid, subscriptionId, this.#apiClient.call(
+            'perspective.subscribeQuery', { uuid, query, subscriptionId }, options,
+        ))
+    }
+
+    /** A subscribe call that failed (timed out, aborted, refused) leaves no live
+     *  query on the executor that nobody holds. The client minted its id, so it
+     *  disposes it without the reply. A timeout or an abort sends `request.cancel`
+     *  first, and the executor handles a cancel before the calls after it: the
+     *  cancel either stops the call before it registers, or the dispose finds the
+     *  subscription. The dispose goes out before the call's error is thrown, and
+     *  is not awaited; one that fails changes nothing. */
+    async #released(uuid: string, subscriptionId: string, call: Promise<Subscribed>): Promise<Subscribed> {
+        try {
+            return await call
+        } catch (e) {
+            this.disposeQuerySubscription(uuid, subscriptionId).catch(() => {})
+            throw e
+        }
     }
 
     /** Every `query-subscription-update` event on this client's socket. */
@@ -166,9 +233,11 @@ export class PerspectiveClient {
     /** Open a live model query over one class or several. Updates arrive through {@link onQueryUpdate}. */
     /** `options.signal` cancels the call, and the executor stops computing the first result. */
     async modelSubscribe(uuid: string, className: string | string[], queryJson: string, options?: CallOptions): Promise<Subscribed> {
-        return this.#apiClient.call(
-            'perspective.modelSubscribe', { uuid, ...classParams(className), query_json: queryJson }, options
-        )
+        const subscriptionId = mintSubscriptionId()
+        return this.#released(uuid, subscriptionId, this.#apiClient.call(
+            'perspective.modelSubscribe', { uuid, ...classParams(className), query_json: queryJson, subscriptionId },
+            options,
+        ))
     }
 
     async add(name: string): Promise<PerspectiveProxy> {
@@ -187,30 +256,30 @@ export class PerspectiveClient {
     }
 
     async addLink(uuid: string, link: Link, status: LinkStatus = 'shared', batchId?: string): Promise<LinkExpression> {
-        const added = await this.#apiClient.call(
+        const added = await this.#wrote(uuid, this.#apiClient.call(
             'perspective.addLink', { uuid, link, status, batchId }
-        )
+        ))
         return LinkExpression.fromWire(added)
     }
 
     async addLinks(uuid: string, links: Link[], status: LinkStatus = 'shared', batchId?: string): Promise<LinkExpression[]> {
-        const added = await this.#apiClient.call(
+        const added = await this.#wrote(uuid, this.#apiClient.call(
             'perspective.addLinks', { uuid, links, status, batchId }
-        )
+        ))
         return added.map(LinkExpression.fromWire)
     }
 
     async removeLinks(uuid: string, links: LinkExpressionInput[], batchId?: string): Promise<LinkExpression[]> {
-        const removed = await this.#apiClient.call(
+        const removed = await this.#wrote(uuid, this.#apiClient.call(
             'perspective.removeLinks', { uuid, links: links.map(linkExpressionInputToWire), batchId }
-        )
+        ))
         return removed.map(LinkExpression.fromWire)
     }
 
     async linkMutations(uuid: string, mutations: LinkMutations, status?: LinkStatus): Promise<LinkExpressionMutations> {
-        const diff = await this.#apiClient.call(
+        const diff = await this.#wrote(uuid, this.#apiClient.call(
             'perspective.linkMutations', { uuid, mutations: linkMutationsToWire(mutations), status }
-        )
+        ))
         return LinkExpressionMutations.fromWire(diff)
     }
 
@@ -240,7 +309,7 @@ export class PerspectiveClient {
         observe?: RunInterpretationObserveOptions,
         options?: CallOptions,
     ): Promise<string[]> {
-        return this.#apiClient.call(
+        return this.#wrote(uuid, this.#apiClient.call(
             'perspective.runInterpretation',
             {
                 uuid, transcript, basePrefix, classes, existingScope, mintScope,
@@ -248,7 +317,7 @@ export class PerspectiveClient {
                 emitDebugEvents: observe?.emitDebugEvents,
             },
             options,
-        )
+        ))
     }
 
     /**
@@ -282,7 +351,7 @@ export class PerspectiveClient {
         emitDebugEvents?: boolean,
         options?: CallOptions,
     ): Promise<string[]> {
-        return this.#apiClient.call(
+        return this.#wrote(uuid, this.#apiClient.call(
             'perspective.runInterpretationWithHarness',
             {
                 uuid,
@@ -296,7 +365,7 @@ export class PerspectiveClient {
                 emitDebugEvents,
             },
             options,
-        )
+        ))
     }
 
     /**
@@ -324,7 +393,9 @@ export class PerspectiveClient {
         },
         options?: CallOptions,
     ): Promise<AgentReply> {
-        return this.#apiClient.call('perspective.runAgent', { uuid, messages, ...settings }, options)
+        const reply = this.#apiClient.call('perspective.runAgent', { uuid, messages, ...settings }, options)
+        // Without write tools the session only reads.
+        return settings?.writeTools?.length ? this.#wrote(uuid, reply) : reply
     }
 
     /**
@@ -336,16 +407,16 @@ export class PerspectiveClient {
      * Returns the processor id.
      */
     async addAutoProcessor(uuid: string, config: AddAutoProcessorConfig): Promise<string> {
-        return this.#apiClient.call(
+        return this.#wrote(uuid, this.#apiClient.call(
             'perspective.addAutoProcessor', { ...config, uuid },
-        )
+        ))
     }
 
     /** Delete an auto-processor's config. `false` when there was none to delete. */
     async removeAutoProcessor(uuid: string, processorId: string): Promise<boolean> {
-        return this.#apiClient.call(
+        return this.#wrote(uuid, this.#apiClient.call(
             'perspective.removeAutoProcessor', { uuid, processorId },
-        )
+        ))
     }
 
     /** Pending interpretation overlays (LLM suggestions awaiting human accept/reject). */
@@ -361,17 +432,17 @@ export class PerspectiveClient {
     /** Accept an overlay's suggestion(s): the LLM value becomes the real value and
      *  the overlay is deleted. Omit `property` to accept the whole base. */
     async acceptInterpretation(uuid: string, base: string, property?: string): Promise<boolean> {
-        return this.#apiClient.call(
+        return this.#wrote(uuid, this.#apiClient.call(
             'perspective.acceptInterpretation', { uuid, base, property },
-        )
+        ))
     }
 
     /** Reject an overlay's suggestion(s). Omit `property` to reject the whole base
      *  (a rejected `create` deletes the suggested instance). */
     async rejectInterpretation(uuid: string, base: string, property?: string): Promise<boolean> {
-        return this.#apiClient.call(
+        return this.#wrote(uuid, this.#apiClient.call(
             'perspective.rejectInterpretation', { uuid, base, property },
-        )
+        ))
     }
 
     async proposeFlowTransition(
@@ -381,15 +452,15 @@ export class PerspectiveClient {
         rationale?: string,
         outputs?: FlowOutputRef[],
     ): Promise<FlowProposeResult> {
-        return this.#apiClient.call(
+        return this.#wrote(uuid, this.#apiClient.call(
             'perspective.proposeFlowTransition', { uuid, instanceUri, toState, rationale, outputs },
-        )
+        ))
     }
 
     async acceptFlowProposal(uuid: string, proposalUri: string): Promise<FlowFireOutcome[]> {
-        return this.#apiClient.call(
+        return this.#wrote(uuid, this.#apiClient.call(
             'perspective.acceptFlowProposal', { uuid, proposalUri },
-        )
+        ))
     }
 
     /**
@@ -398,9 +469,9 @@ export class PerspectiveClient {
      * proposal this agent opened.
      */
     async rejectFlowProposal(uuid: string, proposalUri: string): Promise<number> {
-        const result = await this.#apiClient.call(
+        const result = await this.#wrote(uuid, this.#apiClient.call(
             'perspective.rejectFlowProposal', { uuid, proposalUri },
-        )
+        ))
         return result.retractedLinks
     }
 
@@ -427,11 +498,13 @@ export class PerspectiveClient {
         )
     }
 
-    /** The proposals of `instance` the calling agent's replica recorded as
-     *  fired, sorted. */
-    async flowFired(uuid: string, instance: string): Promise<string[]> {
+    /** For each of `instances`, in order, the proposals the calling agent's
+     *  replica recorded as fired, sorted. One call covers up to 200
+     *  instances (more is refused with a 400); split a longer list into
+     *  batches of 200. */
+    async flowFired(uuid: string, instances: string[]): Promise<FlowFiredEntry[]> {
         return this.#apiClient.call(
-            'perspective.flowFired', { uuid, instance },
+            'perspective.flowFired', { uuid, instances },
         )
     }
 
@@ -439,69 +512,110 @@ export class PerspectiveClient {
      *  run has not settled into a terminal state, and when an output's
      *  content no longer matches what the quorum committed to. */
     async mintFlowReceipt(uuid: string, instanceUri: string): Promise<FlowMintedReceipt> {
-        return this.#apiClient.call(
+        return this.#wrote(uuid, this.#apiClient.call(
             'perspective.mintFlowReceipt', { uuid, instanceUri },
-        )
+        ))
     }
 
     async addLinkExpression(uuid: string, link: LinkExpression, status: LinkStatus = 'shared', batchId?: string): Promise<LinkExpression> {
-        const added = await this.#apiClient.call(
+        const added = await this.#wrote(uuid, this.#apiClient.call(
             'perspective.addLinkExpression', { uuid, link: linkExpressionToWire(link), status, batchId }
-        )
+        ))
         return LinkExpression.fromWire(added)
     }
 
     async updateLink(uuid: string, oldLink: LinkExpressionInput, newLink: Link, batchId?: string): Promise<LinkExpression> {
-        const updated = await this.#apiClient.call(
+        const updated = await this.#wrote(uuid, this.#apiClient.call(
             'perspective.updateLink', { uuid, oldLink: linkExpressionInputToWire(oldLink), newLink, batchId }
-        )
+        ))
         return LinkExpression.fromWire(updated)
     }
 
     async removeLink(uuid: string, link: LinkExpressionInput, batchId?: string): Promise<boolean> {
         const { status, ...wire } = linkExpressionInputToWire(link)
-        return this.#apiClient.call(
+        return this.#wrote(uuid, this.#apiClient.call(
             'perspective.removeLink', { uuid, link: wire, batchId }
-        )
+        ))
     }
 
     async addSdna(uuid: string, name: string, sdnaCode: string | undefined, sdnaType: "subject_class" | "flow" | "custom", shaclJson?: string): Promise<boolean> {
-        const result = await this.#apiClient.call(
+        const result = await this.#wrote(uuid, this.#apiClient.call(
             'perspective.addSdna', { uuid, name, sdnaCode: sdnaCode || "", sdnaType, shaclJson }
-        )
+        ))
         return typeof result === 'boolean' ? result : result.every(Boolean)
     }
 
     async addSdnaBatch(uuid: string, entries: { name: string; sdnaCode?: string; sdnaType: "subject_class" | "flow" | "custom"; shaclJson?: string }[]): Promise<boolean[]> {
-        const result = await this.#apiClient.call(
+        const result = await this.#wrote(uuid, this.#apiClient.call(
             'perspective.addSdna', { uuid, entries: entries.map(e => ({ ...e, sdnaCode: e.sdnaCode || "" })) }
-        )
+        ))
         return typeof result === 'boolean' ? [result] : result
     }
 
     async executeCommands(uuid: string, commands: string, expression: string, parameters: string, batchId?: string): Promise<boolean> {
-        return this.#apiClient.call(
+        return this.#wrote(uuid, this.#apiClient.call(
             'perspective.executeCommands', { uuid, commands, expression, parameters, batchId }
-        )
+        ))
     }
 
     async createSubject(uuid: string, subjectClass: string, expressionAddress: string, initialValues?: string, batchId?: string): Promise<boolean> {
-        return this.#apiClient.call(
+        return this.#wrote(uuid, this.#apiClient.call(
             'perspective.createSubject', { uuid, subjectClass, expressionAddress, initialValues, batchId }
-        )
+        ))
     }
 
     /** Through an abstract class (#1435), the executor writes to the record's own classes. */
     async updateSubject(uuid: string, subjectClass: string, expressionAddress: string, values: string, batchId?: string): Promise<boolean> {
-        return this.#apiClient.call(
+        return this.#wrote(uuid, this.#apiClient.call(
             'perspective.updateSubject', { uuid, subjectClass, expressionAddress, values, batchId }
-        )
+        ))
     }
 
     async removeSubject(uuid: string, subjectClass: string, expressionAddress: string, batchId?: string): Promise<boolean> {
-        return this.#apiClient.call(
+        return this.#wrote(uuid, this.#apiClient.call(
             'perspective.removeSubject', { uuid, subjectClass, expressionAddress, batchId }
-        )
+        ))
+    }
+
+    /**
+     * Validated writes (`perspective.instance*`): the executor checks each against the class's
+     * SHACL shape — each property's type, which are required, which take a single value, `sh:in`
+     * — before writing anything. A refused write rejects with an `RpcError` whose `data` is an
+     * `InstanceError` and stages nothing for that call; a shape violation is status 422 with
+     * `data.kind === 'validation'` and `data.errors` naming each property.
+     *
+     * With `batchId` the write is staged into that open batch and lands on its commit; the
+     * link reads a write does (collection membership, the remove cascade) see the batch's own
+     * staged work, but an instance created in the same batch is not found — instance existence
+     * reads committed state only, so a create followed by an update, remove or
+     * `instanceAddToCollection` of the new instance in one batch fails `notFound`; put a new
+     * instance's initial collection items on the create itself. A failure that is not a
+     * refusal — a store error mid-write, `failed` / `partiallyRemoved` — can leave part of the
+     * write staged in the batch: discard it ({@link discardBatch}) instead of committing
+     * it to keep the calls that succeeded.
+     */
+    async instanceCreate(uuid: string, body: InstanceCreate): Promise<InstanceCreated> {
+        return this.#wrote(uuid, this.#apiClient.call('perspective.instanceCreate', { uuid, ...body }))
+    }
+
+    /** Sets the given single-valued properties; the others stay. See {@link instanceCreate}. */
+    async instanceUpdate(uuid: string, body: InstanceUpdate): Promise<InstanceUpdated> {
+        return this.#wrote(uuid, this.#apiClient.call('perspective.instanceUpdate', { uuid, ...body }))
+    }
+
+    /** Removes the instance and every link to and from it. See {@link instanceCreate}. */
+    async instanceRemove(uuid: string, body: InstanceRemove): Promise<InstanceRemoved> {
+        return this.#wrote(uuid, this.#apiClient.call('perspective.instanceRemove', { uuid, ...body }))
+    }
+
+    /** Adds an item to a collection (a no-op when it is a member). See {@link instanceCreate}. */
+    async instanceAddToCollection(uuid: string, body: InstanceAddToCollection): Promise<CollectionItemAdded> {
+        return this.#wrote(uuid, this.#apiClient.call('perspective.instanceAddToCollection', { uuid, ...body }))
+    }
+
+    /** Removes an item's membership link from a collection. See {@link instanceCreate}. */
+    async instanceRemoveFromCollection(uuid: string, body: InstanceRemoveFromCollection): Promise<CollectionItemRemoved> {
+        return this.#wrote(uuid, this.#apiClient.call('perspective.instanceRemoveFromCollection', { uuid, ...body }))
     }
 
     async getSubjectData(uuid: string, subjectClass: string, expressionAddress: string): Promise<string> {
@@ -550,13 +664,12 @@ export class PerspectiveClient {
     }
 
     /**
-     * Retrieve all SHACL shapes in one call.  Returns an array of
-     * `{name, shapeUri, links}` — one entry per shape (one RPC call).
+     * Retrieve SHACL shapes in one call: every shape, or only those in
+     * `names` (unknown names are left out). Returns `{name, shapeUri, links}`
+     * per shape.
      */
-    async getAllShacl(uuid: string): Promise<Array<{ name: string; shapeUri: string; links: Array<{source: string; predicate: string; target: string}> }>> {
-        return this.#apiClient.call(
-            'perspective.getAllShacl', { uuid }
-        )
+    async getAllShacl(uuid: string, names?: string[]): Promise<Array<{ name: string; shapeUri: string; links: Array<{source: string; predicate: string; target: string}> }>> {
+        return this.#apiClient.call('perspective.getAllShacl', { uuid, names })
     }
 
     // ExpressionClient functions, needed for Subjects:
@@ -582,10 +695,20 @@ export class PerspectiveClient {
     }
 
     async commitBatch(uuid: string, batchId: string): Promise<LinkExpressionMutations> {
-        const diff = await this.#apiClient.call(
+        const diff = await this.#wrote(uuid, this.#apiClient.call(
             'perspective.commitBatch', { uuid, batchId }
-        )
+        ))
         return LinkExpressionMutations.fromWire(diff)
+    }
+
+    /**
+     * Drops an open batch without committing it — the recovery for a failed batched call:
+     * a failed call does not roll back the calls before it and may have staged part of its
+     * own work, so discard rather than commit to keep the successful calls. Resolves `true`
+     * when the batch was open and is now dropped.
+     */
+    async discardBatch(uuid: string, batchId: string): Promise<boolean> {
+        return this.#apiClient.call('perspective.discardBatch', { uuid, batchId })
     }
 
     /** Register a callback that fires after a successful WebSocket reconnect.

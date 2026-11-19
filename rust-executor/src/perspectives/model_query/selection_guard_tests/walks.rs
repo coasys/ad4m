@@ -1,6 +1,7 @@
 //! #1120 on transitive paths: a property path has no link per hop to check, so
 //! a guarded walk is done one step at a time (`query::guarded_reach`).
 
+use super::super::sparql_builder::verified_link_exists;
 use super::super::types::ModelQueryResult;
 use super::{add, forged, ids, opted_in, run, signed};
 use crate::agent::signatures::TestSigner;
@@ -98,14 +99,18 @@ async fn selection_a_forged_link_does_not_extend_a_transitive_scope() {
             query["limit"] = limit;
             let got = run(&store, query.clone()).await;
             assert_eq!(sorted(&got), expected, "{query}");
-            assert_eq!(got.total_count, expected.len(), "{query}: totalCount");
+            assert_eq!(
+                got.total_count.unwrap(),
+                expected.len(),
+                "{query}: totalCount"
+            );
             let got = run(&store, opted_in(query.clone())).await;
             assert_eq!(sorted(&got), expected_opted_in, "{query} with the opt-in");
         }
         let mut count = walk(anchor, direction);
         count["limit"] = json!(0);
         assert_eq!(
-            run(&store, count.clone()).await.total_count,
+            run(&store, count.clone()).await.total_count.unwrap(),
             expected.len(),
             "{count}"
         );
@@ -247,7 +252,7 @@ async fn test_perf_guarded_selection_paginated_query() {
         let got = run(&store, q.clone()).await;
         let elapsed = start.elapsed();
         assert_eq!(got.instances.len(), 50, "{q}");
-        assert_eq!(got.total_count, 1000, "{q}");
+        assert_eq!(got.total_count.unwrap(), 1000, "{q}");
         timings.push(elapsed);
     }
     eprintln!(
@@ -257,4 +262,70 @@ async fn test_perf_guarded_selection_paginated_query() {
     );
     assert!(timings[0].as_secs() < 5, "{:?}", timings[0]);
     assert!(timings[2].as_secs() < 5, "{:?}", timings[2]);
+}
+
+/// The guard hydration reads use (`LinkGuard::exists`) binds the reifier before
+/// it checks it. Its checks used to sit beside the `rdf:reifies` pattern in one
+/// `FILTER EXISTS`, which Oxigraph evaluated as a Cartesian product with every
+/// valid reifier: 1.8 s here for 3000 rows over 9000 signed links, and a full
+/// scan per hydrated relation on staging's 76k-link neighbourhood. Nested, it
+/// is a lookup per row. Same rows as the join form either way.
+#[tokio::test]
+async fn test_perf_exists_guard_binds_the_reifier() {
+    let store = SparqlStore::new(None).unwrap();
+    let admin = TestSigner::generate();
+    for i in 0..3000u32 {
+        let msg = format!("sg://m-{i}");
+        let second = (i % 50) + 1;
+        add(
+            &store,
+            [
+                signed(&admin, &msg, "ad4m://type", "sg://Grant", second),
+                signed(&admin, &msg, "sg://member", "sg://channel", second),
+                signed(
+                    &admin,
+                    &msg,
+                    "sg://name",
+                    &format!("literal:string:m{i}"),
+                    second,
+                ),
+            ],
+        );
+    }
+    // One forged link: the guard must still drop it.
+    add(
+        &store,
+        [forged(
+            &admin,
+            "sg://forged",
+            "sg://member",
+            "sg://channel",
+            1,
+        )],
+    );
+    let guard = verified_link_exists("?s", "sg://member", "?o", None, None);
+    let guarded = format!("SELECT ?s WHERE {{ ?s <sg://member> ?o .{guard} }}");
+    let joined = "SELECT DISTINCT ?s WHERE { ?s <sg://member> ?o . \
+         ?_r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?s <sg://member> ?o )>> . \
+         ?_r <ad4m://ontology/proofValid> \"true\" . }";
+    let rows = |q: &str| {
+        let mut rows: Vec<String> = serde_json::from_str::<Vec<Value>>(
+            &store
+                .query_arbitrary(&crate::perspectives::sparql_store::EvalStop::none(), q)
+                .unwrap(),
+        )
+        .unwrap()
+        .iter()
+        .map(|r| r.to_string())
+        .collect();
+        rows.sort();
+        rows
+    };
+    let start = std::time::Instant::now();
+    let got = rows(&guarded);
+    let elapsed = start.elapsed();
+    eprintln!("exists guard over 3000 rows, 9001 signed links: {elapsed:?}");
+    assert_eq!(got.len(), 3000, "the forged link is dropped");
+    assert_eq!(got, rows(joined));
+    assert!(elapsed.as_millis() < 1000, "{elapsed:?}");
 }

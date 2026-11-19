@@ -8,14 +8,6 @@ use super::language_runtime_handle::LanguageRuntimeHandle;
 use crate::agent::{sealed_box::seal_to_did, AgentContext};
 use serde_json::{json, Value};
 
-fn init_v8_platform() {
-    static V8_INIT: std::sync::Once = std::sync::Once::new();
-    V8_INIT.call_once(|| {
-        deno_core::v8::V8::set_flags_from_string("--max-opt=0");
-        deno_core::JsRuntime::init_platform(None);
-    });
-}
-
 /// Runs `script` (a JS expression that returns a JSON string) as `context`.
 async fn run_as(handle: &LanguageRuntimeHandle, context: &AgentContext, script: &str) -> Value {
     let raw = handle
@@ -27,7 +19,7 @@ async fn run_as(handle: &LanguageRuntimeHandle, context: &AgentContext, script: 
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_language_signs_only_as_the_user_it_runs_for() {
-    init_v8_platform();
+    crate::test_utils::init_v8_platform();
     crate::test_utils::setup_wallet();
     crate::test_utils::setup_agent();
     let alice = format!("alice.{}@example.org", uuid::Uuid::new_v4());
@@ -101,7 +93,7 @@ async fn a_language_signs_only_as_the_user_it_runs_for() {
 /// node or a managed user.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_language_opens_only_boxes_sealed_to_the_agent_it_runs_for() {
-    init_v8_platform();
+    crate::test_utils::init_v8_platform();
     crate::test_utils::setup_wallet();
     crate::test_utils::setup_agent();
     let alice =
