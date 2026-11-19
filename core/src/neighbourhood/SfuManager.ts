@@ -33,6 +33,7 @@ import type {
     SfuConfig,
     SfuDataMessage,
     SfuQualityPreference,
+    SfuRoomInfo,
     SfuRoomRoster,
     SfuRosterParticipant,
     SfuSessionReplaced,
@@ -119,6 +120,10 @@ export interface SfuNeighbourhoodApi {
     subscribeSfuRoomRoster(
         callback: (roster: SfuRoomRoster) => void,
     ): () => void
+    /** The rooms of the neighbourhoods this agent is in, with their sessions
+     *  (`sfu.listRooms`). Read before a rebuild for a roster that left this
+     *  session out. Optional: without it, that roster alone rebuilds. */
+    sfuListRooms?(): Promise<SfuRoomInfo[]>
     subscribeSfuSessionReplaced(
         callback: (event: SfuSessionReplaced) => void,
     ): () => void
@@ -356,6 +361,8 @@ export class SfuManager {
     private networkUnsubscribe: (() => void) | null = null
     /** Running while the room's roster leaves this session out: see `noticeRoster`. */
     private unlistedTimer: ReturnType<typeof setTimeout> | null = null
+    /** The room read that follows that grace, while it is out; a roster listing this session drops it. */
+    private unlistedCheck: object | null = null
     /** How long the roster may leave this session out before the call is rebuilt. */
     private static readonly UNLISTED_GRACE_MS = 3_000
     /** How long after the socket is back ICE has to be connected before it is restarted. */
@@ -791,6 +798,7 @@ export class SfuManager {
     }
 
     private clearUnlistedTimer(): void {
+        this.unlistedCheck = null
         if (this.unlistedTimer) {
             clearTimeout(this.unlistedTimer)
             this.unlistedTimer = null
@@ -803,10 +811,11 @@ export class SfuManager {
      * may not say so. In E6 (CI job 53158) one of six sessions never started
      * a rebuild after a 20 s outage the server had dropped it for. The check
      * is per session, not per agent: another device of this agent keeps the
-     * DID listed. Rebuild once the roster has left this session out for
-     * `UNLISTED_GRACE_MS`; a roster that lists it again in that time
-     * cancels, since one published just before this join landed can arrive
-     * after it. A manager with no session (between leave and join, or
+     * DID listed. Once the roster has left this session out for
+     * `UNLISTED_GRACE_MS`, read the room from the executor (`confirmUnlisted`)
+     * and rebuild only if it does not list the session either; a roster that
+     * lists it again in that time cancels, since one published just before
+     * this join landed can arrive after it. A manager with no session (between leave and join, or
      * stopped because a later tab replaced it) starts no rebuild: `stop`
      * clears the timer and drops `pc`, so a replaced session never rejoins
      * and never takes the call back from the newer tab.
@@ -821,9 +830,45 @@ export class SfuManager {
         this.unlistedTimer = setTimeout(() => {
             this.unlistedTimer = null
             if (this.state.peerConnection !== pc || this.state.participantId !== participantId) return
-            console.info("SFU: the room no longer lists this session, rebuilding the call")
-            void this.reconnect()
+            void this.confirmUnlisted(pc, participantId)
         }, SfuManager.UNLISTED_GRACE_MS)
+    }
+
+    /**
+     * A roster left this session out for the grace: ask the executor for the
+     * room before tearing a call down for one event. Rebuild if it does not
+     * list the session. A read the socket fault failed (503, 408) keeps the
+     * call: ICE, and the next roster, still say if the session is gone. Any
+     * other refusal, or an API without the read, rebuilds as the roster said.
+     */
+    private async confirmUnlisted(pc: RTCPeerConnection, participantId: string): Promise<void> {
+        const check = {}
+        this.unlistedCheck = check
+        const stillOurs = () =>
+            this.unlistedCheck === check && this.state.peerConnection === pc && this.state.participantId === participantId
+        if (this.neighbourhood.sfuListRooms) {
+            try {
+                const rooms = await this.neighbourhood.sfuListRooms()
+                if (!stillOurs()) return
+                const room = rooms.find((r) => r.neighbourhoodUrl === this.neighbourhoodUrl && r.roomName === this.roomId)
+                if (room?.participants.some((p) => p.participantId === participantId)) {
+                    console.info("SFU: a roster left this session out, but the executor still lists it; keeping the call")
+                    this.unlistedCheck = null
+                    return
+                }
+            } catch (err) {
+                if (!stillOurs()) return
+                if (isSocketFault(err)) {
+                    console.warn("SFU: a roster left this session out, and the room could not be read; keeping the call:", err)
+                    this.unlistedCheck = null
+                    return
+                }
+                console.warn("SFU: the room could not be read; going by the roster:", err)
+            }
+        }
+        this.unlistedCheck = null
+        console.info("SFU: the room no longer lists this session, rebuilding the call")
+        void this.reconnect()
     }
 
     /**

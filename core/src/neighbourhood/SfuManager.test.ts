@@ -2078,3 +2078,106 @@ test("a new join by the user after the budget ran out starts with a fresh one", 
     await iceState("failed")
     expect(api.sfuCallJoin).toHaveBeenCalledTimes(6)
 })
+
+// ── Ask the executor before an unlisted rebuild (C5) ────────────────────────
+
+test("a roster that leaves this session out does not rebuild while the executor still lists it", async () => {
+    // One roster event can be stale or out of order; the room read is current.
+    fakeTimers()
+    try {
+        const api = fakeApi()
+        api.sfuListRooms.mockResolvedValue([room([MINE, ME], [pid(ALICE), ALICE])])
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream())
+
+        api.emitRoster(roster([ALICE], {}, { withoutMe: true }))
+        await flush()
+        await jest.advanceTimersByTimeAsync(10_000)
+
+        expect(api.sfuListRooms).toHaveBeenCalledTimes(1)
+        expect(api.sfuCallLeave).not.toHaveBeenCalled()
+        expect(currentPc().closed).toBe(false)
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
+test("an unlisted session is rebuilt once the executor's room read confirms it is gone", async () => {
+    fakeTimers()
+    try {
+        const api = fakeApi()
+        api.sfuListRooms.mockResolvedValue([room([pid(ALICE), ALICE])])
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream())
+
+        api.emitRoster(roster([ALICE], {}, { withoutMe: true }))
+        await flush()
+        await jest.advanceTimersByTimeAsync(3_000)
+
+        expect(api.sfuListRooms).toHaveBeenCalledTimes(1)
+        expect(api.sfuCallLeave).toHaveBeenCalledTimes(1)
+        expect(api.sfuListRooms.mock.invocationCallOrder[0]).toBeLessThan(api.sfuCallLeave.mock.invocationCallOrder[0])
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
+test("a room read that fails does not rebuild the call", async () => {
+    // The socket is down: the server's state cannot be read, so nothing is torn down for it.
+    fakeTimers()
+    try {
+        const api = fakeApi()
+        api.sfuListRooms.mockRejectedValue(new RpcError(503, "WebSocket connection closed"))
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream())
+
+        api.emitRoster(roster([ALICE], {}, { withoutMe: true }))
+        await flush()
+        await jest.advanceTimersByTimeAsync(10_000)
+
+        expect(api.sfuCallLeave).not.toHaveBeenCalled()
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
+test("a roster that lists this session while the room read is out cancels the rebuild", async () => {
+    fakeTimers()
+    try {
+        const api = fakeApi()
+        const read = deferred<SfuRoomInfo[]>()
+        api.sfuListRooms.mockImplementation(() => read.promise)
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream())
+
+        api.emitRoster(roster([ALICE], {}, { withoutMe: true }))
+        await flush()
+        await jest.advanceTimersByTimeAsync(3_000)
+        api.emitRoster(roster([ALICE, ME]))
+        await flush()
+        read.resolve([])
+        await jest.advanceTimersByTimeAsync(1_000)
+
+        expect(api.sfuCallLeave).not.toHaveBeenCalled()
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
+test("a room read the executor refuses (not a socket fault) goes by the roster and rebuilds", async () => {
+    fakeTimers()
+    try {
+        const api = fakeApi()
+        api.sfuListRooms.mockRejectedValue(new RpcError(403, "Capability check failed"))
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream())
+
+        api.emitRoster(roster([ALICE], {}, { withoutMe: true }))
+        await flush()
+        await jest.advanceTimersByTimeAsync(3_000)
+
+        expect(api.sfuCallLeave).toHaveBeenCalledTimes(1)
+    } finally {
+        jest.useRealTimers()
+    }
+})
