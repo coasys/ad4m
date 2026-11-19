@@ -18,7 +18,7 @@ import {
   readyLocalDefaults,
   registerModel,
   serves,
-} from "./aiSetup";
+} from "./aiSetupHelpers";
 import { LocalAiPanel, useLocalAi } from "./LocalAiPanel";
 
 type Mode = "Local" | "Server" | "Skip";
