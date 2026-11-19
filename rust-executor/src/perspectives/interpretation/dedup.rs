@@ -504,8 +504,23 @@ pub async fn filter_already_present_with_strategy(
         DedupStrategy::Semantic {
             model, threshold, ..
         } => {
-            filter_already_present_semantic(instances, existing, identity_props, model, *threshold)
-                .await
+            match filter_already_present_semantic(
+                instances.clone(),
+                existing,
+                identity_props,
+                model,
+                *threshold,
+            )
+            .await
+            {
+                Ok(kept) => Ok(kept),
+                Err(e) => {
+                    log::warn!(
+                        "semantic dedup with '{model}' failed, comparing normalized titles: {e:#}"
+                    );
+                    Ok(filter_already_present(instances, existing, identity_props))
+                }
+            }
         }
     }
 }
@@ -529,8 +544,26 @@ pub async fn resolve_already_present_with_strategy(
         DedupStrategy::Semantic {
             model, threshold, ..
         } => {
-            resolve_already_present_semantic(instances, existing, identity_props, model, *threshold)
-                .await
+            // An embedding model that is registered but fails (endpoint down, timeout) must
+            // not throw away a finished extraction: the pass compares normalized titles, as
+            // the harness path's duplicate check does.
+            match resolve_already_present_semantic(
+                instances.clone(),
+                existing,
+                identity_props,
+                model,
+                *threshold,
+            )
+            .await
+            {
+                Ok(resolved) => Ok(resolved),
+                Err(e) => {
+                    log::warn!(
+                        "semantic dedup with '{model}' failed, comparing normalized titles: {e:#}"
+                    );
+                    Ok(resolve_already_present(instances, existing, identity_props))
+                }
+            }
         }
     }
 }
@@ -966,6 +999,63 @@ mod tests {
             .await
             .unwrap();
         (id, mock)
+    }
+
+    // A registered embedding model whose endpoint fails (down, 5xx) does not fail the pass:
+    // with the semantic default, an error here would drop the finished extraction and retry
+    // the LLM call every tick. The pass compares normalized titles instead.
+    #[tokio::test]
+    async fn a_registered_embedding_model_that_fails_falls_back_to_normalized_titles() {
+        crate::db::Ad4mDb::init_global_instance(":memory:").unwrap();
+        crate::ai_service::AIService::init_global_instance()
+            .await
+            .unwrap();
+        let mut server = mockito::Server::new_async().await;
+        let (id, ok_mock) = same_vector_embedder(&mut server, "down-embed", 0).await;
+        ok_mock.remove_async().await;
+        let failing = server
+            .mock("POST", "/v1/embeddings")
+            .with_status(500)
+            .with_body("model crashed")
+            .expect_at_least(1)
+            .create_async()
+            .await;
+        let proposed = parse_interpretation_response(
+            r#"[
+              {"class":"Task","title":"  ship   the   mvp  "},
+              {"class":"Task","title":"Write the docs"}
+            ]"#,
+        )
+        .unwrap();
+        let existing = existing_by_identity(&[("Task", "ship the MVP")]);
+        let identity_props = HashMap::from([("Task".to_string(), "title".to_string())]);
+        let semantic = DedupStrategy::Semantic {
+            model: id,
+            threshold: 0.9,
+            unclear_from: DEFAULT_UNCLEAR_FROM,
+        };
+
+        let resolved = resolve_already_present_with_strategy(
+            proposed.clone(),
+            &existing,
+            &identity_props,
+            &semantic,
+        )
+        .await
+        .expect("a failing embedding endpoint must not fail the pass");
+        let tags: Vec<bool> = resolved
+            .iter()
+            .map(|(_, r)| matches!(r, Resolution::DupOfExisting(_)))
+            .collect();
+        assert_eq!(tags, vec![true, false], "normalized titles: {resolved:?}");
+
+        let kept =
+            filter_already_present_with_strategy(proposed, &existing, &identity_props, &semantic)
+                .await
+                .expect("a failing embedding endpoint must not fail the pass");
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].props["title"], serde_json::json!("Write the docs"));
+        failing.assert_async().await;
     }
 
     // A threshold is set for the model a pass names: another model's similarities do not
