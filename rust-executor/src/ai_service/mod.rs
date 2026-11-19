@@ -475,6 +475,18 @@ pub(crate) fn prompt_does_not_fit(error: &anyhow::Error) -> bool {
     if is_local_context_budget(error) {
         return true;
     }
+    // A server answer is judged by its status and body only: the URL and the
+    // wrapping messages can hold "context" or "exceeded" by chance. A rate
+    // limit clears with time, so it never retires a source.
+    if let Some(answered) = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<providers::http::UpstreamStatus>())
+    {
+        if answered.status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            return false;
+        }
+        return context_was_exceeded(&anyhow::anyhow!("{}", answered.body));
+    }
     let text = format!("{error:#}").to_ascii_lowercase();
     context_was_exceeded(&anyhow::anyhow!("{text}"))
 }
@@ -2566,6 +2578,37 @@ mod tests {
         assert!(
             !prompt_does_not_fit(&lookalike),
             "a matching sentence is not the budget error and must not retire a source"
+        );
+
+        let throttled = anyhow::anyhow!(crate::ai_service::providers::http::UpstreamStatus {
+            url: "https://context.example/api/chat".into(),
+            status: reqwest::StatusCode::TOO_MANY_REQUESTS,
+            body: "rate limit exceeded".into(),
+            retry_after: None,
+        });
+        assert!(
+            !prompt_does_not_fit(&throttled.context("AIService::prompt failed")),
+            "a rate limit must not retire a source, whatever its URL says"
+        );
+        let url_only = anyhow::anyhow!(crate::ai_service::providers::http::UpstreamStatus {
+            url: "https://context.example/api/chat".into(),
+            status: reqwest::StatusCode::BAD_REQUEST,
+            body: "quota exceeded".into(),
+            retry_after: None,
+        });
+        assert!(
+            !prompt_does_not_fit(&url_only),
+            "only the body names an overflow, not the URL"
+        );
+        let refused = anyhow::anyhow!(crate::ai_service::providers::http::UpstreamStatus {
+            url: "http://127.0.0.1:8080/v1/chat/completions".into(),
+            status: reqwest::StatusCode::BAD_REQUEST,
+            body: "the request exceeds the available context size".into(),
+            retry_after: None,
+        });
+        assert!(
+            prompt_does_not_fit(&refused.context("AIService::prompt failed")),
+            "a server that refuses the prompt as too long must still split"
         );
 
         let server = anyhow::anyhow!("context length exceeded");

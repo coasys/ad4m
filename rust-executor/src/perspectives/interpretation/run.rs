@@ -972,7 +972,15 @@ pub(super) async fn run_interpretation_once(
             Ok(outcome)
         }
         Err(e) => {
-            log::error!(
+            // A prompt that does not fit is split by the caller; that is
+            // recovery, not a failure an operator must see.
+            let level = if crate::ai_service::prompt_does_not_fit(&e) {
+                log::Level::Debug
+            } else {
+                log::Level::Error
+            };
+            log::log!(
+                level,
                 "❌ 🧠 interpretation failed model={} latency={}ms err={e:#}",
                 model_override.unwrap_or("<default>"),
                 interpretation_started.elapsed().as_millis(),
