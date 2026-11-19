@@ -7311,6 +7311,15 @@ impl PerspectiveInstance {
         // write generation since the last drain came with an entry. `Lagged`,
         // an unclassifiable batch or a write no entry accounts for (a store
         // write outside the commit path) stales them all.
+        //
+        // A gap also holds this tick's drains. The write no entry explains
+        // may be part of a diff still being applied link by link (a peer's
+        // schema diff writes, then broadcasts): a read now can see half of
+        // it, and a pass that starts cannot be undone by a later re-read.
+        // The diff's entry arrives once its last link is written, so the
+        // next tick drains under the whole diff; a write that never gets an
+        // entry is past `seen` by then, and holds nothing.
+        let feed_gap;
         {
             // The receiver leaves `watcher` for the drain so the matcher can
             // borrow it mutably to write the stale marks. `covered` starts
@@ -7355,7 +7364,8 @@ impl PerspectiveInstance {
             while covered.contains(&(proven + 1)) {
                 proven += 1;
             }
-            if !unclassifiable && covered_through(generation) {
+            feed_gap = unclassifiable || !covered_through(generation);
+            if !feed_gap {
                 // Every store write the tick sees arrived classified: mark
                 // only the transcripts a matching entry can change.
                 for write in &drained {
@@ -7364,10 +7374,10 @@ impl PerspectiveInstance {
                 seen = proven;
             } else {
                 // A gap: stale every kept transcript — the write no entry
-                // classified could have touched any scope — and trust the
-                // reads this tick makes past it. `seen` takes the larger of
-                // the generation this tick reads at and what the feed still
-                // proves above it.
+                // classified could have touched any scope — and re-read, but
+                // drain nothing until a tick the feed explains (see above).
+                // `seen` takes the larger of the generation this tick reads
+                // at and what the feed still proves above it.
                 self.auto_processor_mark_stale(watcher, None);
                 seen = generation.max(proven);
             }
@@ -7545,7 +7555,9 @@ impl PerspectiveInstance {
         });
         let mut passed = false;
         for cfg in order {
-            if passed && self.sparql_store.write_generation() != generation {
+            // A feed gap holds every drain of this tick (see the drain of
+            // the commit feed above).
+            if feed_gap || (passed && self.sparql_store.write_generation() != generation) {
                 break;
             }
             if read_failed.contains(&cfg.processor_id) {

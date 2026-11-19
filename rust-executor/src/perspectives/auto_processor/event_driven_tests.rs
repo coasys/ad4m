@@ -991,6 +991,65 @@ async fn a_schema_write_seen_before_its_feed_entry_is_read_under_the_new_shape()
     );
 }
 
+/// A peer's diff is written link by link and broadcast after its last link:
+/// a tick between the two can read half a schema (a new property's path
+/// without its `sh://minCount`). Such a tick sees a write no entry explains,
+/// re-reads, and drains nothing; the next tick, which the feed explains,
+/// drains.
+#[tokio::test]
+async fn a_tick_inside_a_diff_still_being_written_drains_nothing() {
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
+    seed_message(
+        &mut p,
+        &ctx,
+        "msg://1",
+        "did:key:alice",
+        "hello",
+        "ns://body",
+    )
+    .await;
+    write_processor(&mut p, &config("half-diff", 1_000, None), Some(false), &ctx)
+        .await
+        .expect("write_processor");
+    let mut watcher = WatcherState::new();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
+    assert_eq!(
+        pending_texts(&watcher, "half-diff"),
+        vec!["hello"],
+        "queued, inside its debounce"
+    );
+
+    // The first link of a diff still being applied: in the store, with no
+    // feed entry yet.
+    let mut first = crate::types::LinkExpression::from(
+        crate::agent::signatures::TestSigner::generate().sign(crate::types::Link {
+            source: "ns://ns://Message".into(),
+            predicate: Some("sh://property".into()),
+            target: "ns://ns://Message.label".into(),
+        }),
+    );
+    first.status = Some(crate::types::LinkStatus::Shared);
+    p.sparql_store.add_link(&first).expect("a peer's link");
+    let reads = transcript_queries(&p);
+
+    p.run_auto_processor_tick(&mut watcher, now_ms + 2_000, &ctx)
+        .await;
+    assert_eq!(transcript_queries(&p), reads + 1, "the gap re-reads");
+    assert_eq!(
+        pending_texts(&watcher, "half-diff"),
+        vec!["hello"],
+        "a tick the feed cannot explain drains nothing"
+    );
+
+    p.run_auto_processor_tick(&mut watcher, now_ms + 2_500, &ctx)
+        .await;
+    assert!(
+        pending_texts(&watcher, "half-diff").is_empty(),
+        "the next tick, with the store explained, drains"
+    );
+}
+
 /// The links of `sdna_json`'s shape, signed as a peer would send them.
 fn peer_shape_diff(sdna_json: &str) -> crate::types::PerspectiveDiff {
     let signer = crate::agent::signatures::TestSigner::generate();
