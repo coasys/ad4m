@@ -1017,6 +1017,9 @@ pub struct ShapeRelation {
     /// The target class IRI: the registered class holding the `sh:class`
     /// shape. Empty when no registered class holds it.
     pub(crate) target_class: String,
+    /// The relation's declared `polymorphic` (`ad4m://polymorphic` in SHACL):
+    /// the default for an include of it when the query does not say.
+    pub(crate) polymorphic: bool,
 }
 
 impl ShapeRelation {

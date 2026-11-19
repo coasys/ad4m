@@ -102,7 +102,8 @@ function namespaceOf(targetClass: string | undefined): string | undefined {
  * The walk stops descending *through* a polymorphic relation, because there is
  * nothing to descend into: its targets are of several classes by definition, so
  * no single class's metadata could say what a deeper include means. The
- * executor resolves those nested includes against each concrete class instead.
+ * executor applies each concrete class's declared default from its shape
+ * (`ad4m://polymorphic`) to those nested includes instead.
  */
 function applyPolymorphicIncludeDefaults(includes: IncludeMap, ctor: Function): void {
   const relMeta = getRelationsMetadata(ctor);

@@ -436,6 +436,7 @@ mod tests {
             target_class_name: target.into(),
             target_class_uri: String::new(),
             target_class: String::new(),
+            polymorphic: false,
         };
         let mut top = shape("Top", vec![relation("mids", "we://mids")]);
         top.include_relations = vec![rel("mids", "we://mids", "Mid")];

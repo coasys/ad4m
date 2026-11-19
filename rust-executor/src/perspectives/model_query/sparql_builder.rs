@@ -2761,6 +2761,7 @@ mod relation_quantifier_tests {
             target_class_name: "Comment".to_string(),
             target_class_uri: String::new(),
             target_class: String::new(),
+            polymorphic: false,
         });
         s
     }
@@ -3121,6 +3122,7 @@ mod relation_quantifier_tests {
             target_class_name: "Agent".to_string(),
             target_class_uri: String::new(),
             target_class: String::new(),
+            polymorphic: false,
         });
 
         let clause = wc(vec![("author", ops_with(None, Some(vec![])))]);

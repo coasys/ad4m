@@ -267,6 +267,11 @@ export interface SHACLPropertyShape {
    *  and default max-count. */
   relationKind?: 'hasMany' | 'hasOne' | 'belongsToOne' | 'belongsToMany';
 
+  /** AD4M-specific: the relation is read `polymorphic: true` unless the query
+   *  says otherwise (`ad4m://polymorphic`). Carried in the shape so the executor
+   *  applies it at every include depth, below a polymorphic include too. */
+  polymorphic?: boolean;
+
   /** AD4M-specific: target class name (local-name) for a relation property.
    *  Complements `class` (the SHACL node-shape URI) by providing the bare
    *  model class name used by the executor to look up the target shape
@@ -707,6 +712,14 @@ export class SHACLShape {
         });
       }
 
+      if (prop.polymorphic) {
+        links.push({
+          source: propShapeId,
+          predicate: "ad4m://polymorphic",
+          target: `literal:${prop.polymorphic}`
+        });
+      }
+
       if (prop.targetClassName) {
         links.push({
           source: propShapeId,
@@ -855,6 +868,7 @@ export class SHACLShape {
         in: json(id, "sh://in"),
         relationKind: ['hasMany', 'hasOne', 'belongsToOne', 'belongsToMany'].includes(relationKind!)
           ? relationKind as SHACLPropertyShape['relationKind'] : undefined,
+        polymorphic: bool(id, "ad4m://polymorphic"),
         targetClassName: str(id, "ad4m://targetClassName"),
         whereFilter: json(id, "ad4m://whereFilter"),
         wherePredicates: json(id, "ad4m://wherePredicates"),
@@ -905,6 +919,7 @@ export class SHACLShape {
         class: p.class,
         in: p.in,
         relation_kind: p.relationKind,
+        polymorphic: p.polymorphic,
         collection: p.collection ?? (isCollection(p) || undefined),
         target_class_name: p.targetClassName,
         where_filter: p.whereFilter,
@@ -963,6 +978,7 @@ export class SHACLShape {
         class: p.class,
         in: p.in as SHACLPropertyShape['in'],
         relationKind: p.relation_kind as SHACLPropertyShape['relationKind'],
+        polymorphic: p.polymorphic,
         collection: p.collection,
         targetClassName: p.target_class_name,
         whereFilter: p.where_filter,

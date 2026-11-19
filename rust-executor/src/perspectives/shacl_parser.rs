@@ -157,6 +157,10 @@ pub struct PropertyShape {
     /// and scalar-vs-collection rendering.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub relation_kind: Option<String>,
+    /// The relation is read `polymorphic: true` unless a query says otherwise
+    /// (`ad4m://polymorphic`); the executor applies it at every include depth.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub polymorphic: Option<bool>,
     /// Bare target class name for a relation property — used by the executor
     /// to look up the target shape through its in-memory cache.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2033,6 +2037,14 @@ pub fn shape_links(mut shape: SHACLShape, class_name: &str) -> Result<Vec<Link>,
             });
         }
 
+        if let Some(polymorphic) = prop.polymorphic {
+            links.push(Link {
+                source: prop_shape_uri.clone(),
+                predicate: Some("ad4m://polymorphic".to_string()),
+                target: format!("literal:{}", polymorphic),
+            });
+        }
+
         // Bare target class name for cache-based include resolution.
         if let Some(target_name) = &prop.target_class_name {
             links.push(Link {
@@ -2269,7 +2281,7 @@ const SHAPE_NODE_PREDICATES: [&str; 7] = [
     "ad4m://destructor",
 ];
 
-const PROPERTY_NODE_PREDICATES: [&str; 29] = [
+const PROPERTY_NODE_PREDICATES: [&str; 30] = [
     "sh://path",
     "ad4m://interpretation_hint",
     ALIAS_PREDICATE,
@@ -2289,6 +2301,7 @@ const PROPERTY_NODE_PREDICATES: [&str; 29] = [
     "ad4m://getter",
     "ad4m://conformanceConditions",
     "ad4m://relationKind",
+    "ad4m://polymorphic",
     "ad4m://targetClassName",
     "ad4m://whereFilter",
     "ad4m://wherePredicates",
@@ -2448,6 +2461,7 @@ pub fn shape_from_links(target_class: &str, links: &[Link]) -> Option<SHACLShape
                     .unwrap_or_default(),
                 class: first(&node, "sh://class"),
                 relation_kind: text(&node, "ad4m://relationKind"),
+                polymorphic: flag(&node, "ad4m://polymorphic"),
                 target_class_name: text(&node, "ad4m://targetClassName"),
                 where_filter: json(text(&node, "ad4m://whereFilter")),
                 where_predicates: json(text(&node, "ad4m://wherePredicates")),
