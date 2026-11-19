@@ -1013,6 +1013,9 @@ pub struct ShapeRelation {
     /// node-shape URI to clients) can return the full IRI rather than the
     /// bare class name.  Empty when no `sh:class` was set on the property.
     pub(crate) target_class_uri: String,
+    /// The relation's declared `polymorphic` (`ad4m://polymorphic` in SHACL):
+    /// the default for an include of it when the query does not say.
+    pub(crate) polymorphic: bool,
 }
 
 /// Complete shape of a model class — the set of all properties, relations,
