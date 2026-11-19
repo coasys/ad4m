@@ -4,6 +4,7 @@
 //! This enables AI agents to work with any data model defined in a perspective,
 //! not just hardcoded tool sets.
 
+use super::side_effects::generated_verb_writes;
 use super::Ad4mMcpHandler;
 use crate::mcp::shacl::{self, ShaclProperty};
 use crate::perspectives::perspective_instance::SubjectClassOption;
@@ -325,22 +326,22 @@ impl Ad4mMcpHandler {
             }
         };
 
-        // rest could be "create", "query", "get", "delete", "set_propname", "add_propname", "remove_propname", "get_propname"
+        // rest could be "create", "query", "list", "get", "update", "delete",
+        // "set_propname", "add_propname", "remove_propname", "get_propname".
         let (operation, property_name) = if let Some((op, prop)) = rest.split_once('_') {
             (op, Some(prop.to_string()))
         } else {
             (rest, None)
         };
 
-        if !matches!(
-            operation,
-            "create" | "query" | "list" | "get" | "update" | "delete" | "set" | "add" | "remove"
-        ) {
+        // The same lists the classifier uses, so a write verb cannot be a
+        // read on one side and a write on the other.
+        let Some(writes) = generated_verb_writes(operation) else {
             return Ok(CallToolResult::error(vec![Content::text(format!(
                 "Unknown tool: {}",
                 tool_name
             ))]));
-        }
+        };
 
         let perspective_id = match args.get("perspective_id").and_then(|v| v.as_str()) {
             Some(id) => id.to_string(),
@@ -354,7 +355,6 @@ impl Ad4mMcpHandler {
         // Find actual class name (preserving original case). A write checks the write guard
         // here already, so a caller who may not write is refused as the write would refuse it.
         let class_name = {
-            let writes = !matches!(operation, "query" | "list" | "get");
             let perspective = if writes {
                 self.get_writable_perspective(&perspective_id)
                     .await
@@ -377,10 +377,6 @@ impl Ad4mMcpHandler {
             };
             // The generated tools of an abstract class (#1435) only read: the
             // write tools write links at one class's predicates.
-            let writes = matches!(
-                operation,
-                "create" | "update" | "set" | "add" | "remove" | "delete"
-            );
             let refusal = match writes.then(|| perspective.is_abstract_class(&name)) {
                 Some(Ok(true)) => Some(format!(
                     "'{name}' is an abstract class: its generated tools only read, and it \

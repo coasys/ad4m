@@ -122,7 +122,7 @@ async fn activity_pages_in_the_store_and_counts_all_rows() {
         .map(|i| i["id"].as_str().unwrap())
         .collect();
     assert_eq!(page, vec!["pt://topic/2", "pt://topic/1"]);
-    assert_eq!(result.total_count, 3);
+    assert_eq!(result.total_count, Some(3));
 
     // Ascending: the least active first.
     let asc = ModelQueryInput {

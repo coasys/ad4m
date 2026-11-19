@@ -18,14 +18,14 @@
 
 use crate::agent::{did_for_context, AgentContext};
 use crate::perspectives::interpretation::{
-    run_interpretation_with_harness_and_model, run_interpretation_with_strategy_and_model,
-    DedupStrategy, InterpretationRunCursor, TranscriptTurn,
+    run_interpretation_with_harness_and_model, run_interpretation_with_strategy_and_model_linked,
+    DedupStrategy, InterpretationRunCursor, SliceScopeLink, TranscriptTurn,
 };
 use crate::perspectives::model_query::load_shape_from_store;
 use crate::perspectives::model_query::types::Scope;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::presence::is_online;
-use crate::types::{Link, LinkStatus};
+use crate::types::{Link, LinkQuery, LinkStatus};
 
 use super::claim::{batch_key, confirm_claim, renew_claim, settle_claim, try_claim, ClaimOutcome};
 use super::config::AutoProcessorConfig;
@@ -1466,6 +1466,14 @@ pub async fn run_one_pass(
             item_ids: item_ids.clone(),
             batch_key: batch_key_hex.clone(),
         });
+    // Link each committed slice before the next slice loads existing
+    // records. The snapshot stays the one taken above, so a slice's new
+    // bases are still absent from it and still receive the parent edge.
+    let slice_link = cfg.mint_scope.as_ref().map(|mint_scope| SliceScopeLink {
+        mint_scope,
+        pre_existing: &pre_existing_uris,
+        processor_id: &cfg.processor_id,
+    });
 
     // Fork (#1804): the harness pass by default — `maxToolCalls` absent means
     // the cap `DEFAULT_INTERPRETATION_TOOL_CALLS`, `n > 0` the cap `n` — and
@@ -1541,7 +1549,7 @@ pub async fn run_one_pass(
         }
         (None, _) => {
             let outcome = abandon_on_err!(
-                run_interpretation_with_strategy_and_model(
+                run_interpretation_with_strategy_and_model_linked(
                     perspective,
                     &shapes,
                     &transcript,
@@ -1560,6 +1568,7 @@ pub async fn run_one_pass(
                     emit_ctx.as_ref(),
                     // Same flow targeting as the harness branch above.
                     Some(&cfg.flows),
+                    slice_link.as_ref(),
                 )
                 .await
             );
@@ -1620,11 +1629,12 @@ pub async fn run_one_pass(
     // node" from a URI-prefix convention into an actual graph edge. We filter
     // to freshly-created bases (not present in `pre_existing_uris`) so that
     // upserts of pre-existing instances don't get re-parented into our scope
-    // (CodeRabbit #902 review). Written outside the interpretation batch: if
-    // the executor crashes between the mint and the link write, the base is
-    // orphaned but the next pass will upsert by identity + re-attempt the
-    // link write (idempotent). The `Processed` signal fires only after the
-    // mint-scope write succeeds, so observers never see a false "done" state.
+    // (CodeRabbit #902 review). Written outside the interpretation batch. A
+    // failed link write after the slice commits leaves that base unlinked:
+    // the source is already consumed, and the next pass's snapshot treats
+    // the base as pre-existing, so nothing retries the link. The `Processed`
+    // signal fires only after the mint-scope write succeeds, so observers
+    // never see a false "done" state.
     //
     // The bases and the cursor are already committed, so the links are
     // written before the claim re-read below, which can fail or back off.
@@ -1717,7 +1727,10 @@ pub async fn run_one_pass(
 /// The interpretation has already committed them and the processed-turn
 /// cursor. Leaving without these links keeps them out of the subtree, and
 /// the cursor then suppresses the turns, so a later pass does not repair it.
-async fn link_fresh_bases(
+///
+/// The overflow split calls this after each committed slice, with the same
+/// pre-pass snapshot, before the next slice reads existing records.
+pub(crate) async fn link_fresh_bases(
     perspective: &mut PerspectiveInstance,
     mint_scope: Option<&crate::perspectives::model_query::types::Scope>,
     bases: &[String],
@@ -1784,7 +1797,36 @@ pub(crate) async fn write_mint_scope_links(
             );
         }
     };
+    // add_link stamps a new timestamp, so a second call is a second link.
+    // A split writes this edge after each committed slice, and the pass
+    // writes it again when interpretation returns. Count only a matching
+    // edge that is Shared and whose stored verdict is `Some(true)`.
+    // `get_links` also returns Local edges and edges whose verdict is not
+    // true; those are not the scope edge. A verified Shared edge signed
+    // by another agent still counts. LinkGuard builds the scoped-read
+    // SPARQL and does not filter this `Vec`, so the check is on the
+    // decorated link itself.
     for base in bases {
+        let already = perspective
+            .get_links(&LinkQuery {
+                source: Some(parent_id.clone()),
+                predicate: Some(predicate.clone()),
+                target: Some(base.clone()),
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "auto_processor `{processor_id}`: mint_scope lookup({parent_id} -> {base}) \
+                     failed: {e:#}"
+                )
+            })?;
+        if already
+            .iter()
+            .any(|link| link.status == Some(LinkStatus::Shared) && link.proof.valid == Some(true))
+        {
+            continue;
+        }
         perspective
             .add_link(
                 Link {
@@ -2937,6 +2979,113 @@ mod tests {
         for l in &links {
             assert_eq!(l.status, Some(LinkStatus::Shared), "child link must sync");
         }
+    }
+
+    /// A Local parent→base edge is not what a peer or a scoped read sees.
+    /// The same triple still needs a Shared link.
+    #[tokio::test]
+    async fn scope_edge_local_match_still_writes_shared() {
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        let parent = "soa://project/42";
+        let predicate = "soa://contains";
+        let base = "soa://project/42/task/local-only";
+        p.add_link(
+            Link {
+                source: parent.into(),
+                predicate: Some(predicate.into()),
+                target: base.into(),
+            },
+            LinkStatus::Local,
+            None,
+            &ctx,
+        )
+        .await
+        .expect("seed local edge");
+        let scope = Scope::Raw {
+            id: parent.into(),
+            predicate: predicate.into(),
+        };
+        write_mint_scope_links(&mut p, &scope, &[base.into()], &ctx, "test-proc")
+            .await
+            .expect("write_mint_scope_links");
+        let links = p
+            .get_links(&crate::types::LinkQuery {
+                source: Some(parent.into()),
+                predicate: Some(predicate.into()),
+                target: Some(base.into()),
+                ..Default::default()
+            })
+            .await
+            .expect("get_links");
+        let shared = links
+            .iter()
+            .filter(|link| {
+                link.status == Some(LinkStatus::Shared) && link.proof.valid == Some(true)
+            })
+            .count();
+        assert_eq!(
+            shared, 1,
+            "a Local edge must not suppress the Shared scope edge: {links:?}"
+        );
+    }
+
+    /// A valid Shared edge is already the scope edge. Calling again must
+    /// not write a second link.
+    #[tokio::test]
+    async fn scope_edge_valid_shared_is_not_duplicated() {
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        let parent = "soa://project/42";
+        let predicate = "soa://contains";
+        let base = "soa://project/42/task/shared";
+        p.add_link(
+            Link {
+                source: parent.into(),
+                predicate: Some(predicate.into()),
+                target: base.into(),
+            },
+            LinkStatus::Shared,
+            None,
+            &ctx,
+        )
+        .await
+        .expect("seed shared edge");
+        let seeded = p
+            .get_links(&crate::types::LinkQuery {
+                source: Some(parent.into()),
+                predicate: Some(predicate.into()),
+                target: Some(base.into()),
+                ..Default::default()
+            })
+            .await
+            .expect("seeded links");
+        assert_eq!(seeded.len(), 1, "the seed is one edge: {seeded:?}");
+        assert_eq!(seeded[0].status, Some(LinkStatus::Shared));
+        assert_eq!(
+            seeded[0].proof.valid,
+            Some(true),
+            "the seed must be a verified Shared edge: {seeded:?}"
+        );
+        let scope = Scope::Raw {
+            id: parent.into(),
+            predicate: predicate.into(),
+        };
+        write_mint_scope_links(&mut p, &scope, &[base.into()], &ctx, "test-proc")
+            .await
+            .expect("write_mint_scope_links");
+        let links = p
+            .get_links(&crate::types::LinkQuery {
+                source: Some(parent.into()),
+                predicate: Some(predicate.into()),
+                target: Some(base.into()),
+                ..Default::default()
+            })
+            .await
+            .expect("get_links");
+        assert_eq!(
+            links.len(),
+            1,
+            "a valid Shared edge means no second link: {links:?}"
+        );
     }
 
     /// A late back-off still links the bases the interpretation already

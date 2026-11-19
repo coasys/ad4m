@@ -1327,6 +1327,18 @@ async fn run_interpretation_handler(
     // `model_query_handler` / `evaluate_getters_handler`, but with a longer
     // budget appropriate for the interpretation pass (see
     // `RUN_INTERPRETATION_TIMEOUT_SECS`).
+    // Same per-slice link as the watcher, on the single-shot path (#1808).
+    // A later half that fails has already committed earlier halves, and this
+    // handler only links after `Ok`. The trailing link below stays, and skips
+    // an edge already written. The harness path has no split; it gets the
+    // trailing link only.
+    let slice_link = body.mint_scope.as_ref().map(|mint_scope| {
+        crate::perspectives::interpretation::SliceScopeLink {
+            mint_scope,
+            pre_existing: &pre_existing_uris,
+            processor_id: "runInterpretation",
+        }
+    });
     // The harness by default, single-shot for `maxToolCalls: 0` (#1804), as
     // the auto-processor decides.
     let tool_cap =
@@ -1366,7 +1378,7 @@ async fn run_interpretation_handler(
                 .map(|outcome| outcome.bases)
             }
             None => {
-                crate::perspectives::interpretation::run_interpretation_observed(
+                crate::perspectives::interpretation::run_interpretation_observed_linked(
                     &mut perspective,
                     &shapes,
                     &transcript,
@@ -1379,6 +1391,7 @@ async fn run_interpretation_handler(
                     // pre-scope default that #883 originally added the plumbing for.
                     body.existing_scope.as_ref(),
                     emit_ctx.as_ref(),
+                    slice_link.as_ref(),
                 )
                 .await
             }
@@ -1418,9 +1431,10 @@ async fn run_interpretation_handler(
     // Mint-scope child links: same rule as AutoProcessor — only freshly
     // created bases get an extra `mintScope.id --predicate--> new_base` edge
     // so upserts of pre-existing instances don't get re-parented into the
-    // caller's scope. Written outside the interpretation batch (the watcher
-    // takes the same approach): if this write fails the base is orphaned,
-    // but a subsequent call will upsert by identity and re-attempt.
+    // caller's scope. Written after the slice commits (the watcher takes
+    // the same approach). A failed link write leaves that base unlinked:
+    // the source is consumed and the next pass's snapshot treats the base
+    // as pre-existing, so nothing retries the link.
     if let Some(mint_scope) = body.mint_scope.as_ref() {
         let created = crate::perspectives::auto_processor::watcher::partition_created(
             &bases,
@@ -2084,15 +2098,29 @@ async fn flow_states_handler(params: Value, ctx: Arc<RequestContext>) -> Result<
     Ok(serde_json::to_value(entries)?)
 }
 
+/// Most instances one `perspective.flowFired` call may name: their marks are
+/// read under one database lock.
+pub(crate) const MAX_FLOW_FIRED_INSTANCES: usize = 200;
+
+/// `perspective.flowFired { instances }`: more than
+/// [`MAX_FLOW_FIRED_INSTANCES`] instances → 400.
 async fn flow_fired_handler(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let instance = params.require_str("instance")?;
     let perspective = guarded_perspective(&params).await?;
+    let body: PerspectiveFlowFiredParams = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {e}")))?;
+    if body.instances.len() > MAX_FLOW_FIRED_INSTANCES {
+        return Err(WsRpcError::bad_request(format!(
+            "`instances` holds {} entries; the limit is {}",
+            body.instances.len(),
+            MAX_FLOW_FIRED_INSTANCES
+        )));
+    }
     let agent_did = flow_bookkeeping_agent(&ctx)?;
     let fired =
-        crate::perspectives::flow_instance::replica_state::FlowReplicaState::fired_for_instance(
+        crate::perspectives::flow_instance::replica_state::FlowReplicaState::fired_for_instances(
             &perspective.uuid,
             &agent_did,
-            &instance,
+            &body.instances,
         )
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
     Ok(serde_json::to_value(fired)?)
@@ -2459,8 +2487,10 @@ async fn get_all_shacl(params: Value, _ctx: Arc<RequestContext>) -> Result<Value
 
 pub fn register_ws_handlers(map: &mut HandlerMap) {
     use crate::perspectives::flow_instance::{
-        pass::FireOutcome, produced::ValidOutput, propose::ProposeOutcome,
-        replica_state::FlowStateEntry,
+        pass::FireOutcome,
+        produced::ValidOutput,
+        propose::ProposeOutcome,
+        replica_state::{FlowFiredEntry, FlowStateEntry},
     };
     use crate::perspectives::interpretation::overlay::OverlayView;
     let query = || Guard::perspective(perspective_query_capability);
@@ -2699,7 +2729,7 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     )
     .read()
     .guard(query());
-    map.method::<PerspectiveFlowFiredParams, Vec<String>>(
+    map.method::<PerspectiveFlowFiredParams, Vec<FlowFiredEntry>>(
         "perspective.flowFired",
         flow_fired_handler,
     )
@@ -3200,13 +3230,13 @@ pub struct PerspectiveFlowStatesParams {
     pub instances: Option<Vec<String>>,
 }
 
-/// `perspective.flowFired`: the proposals of `instance` the calling agent's
-/// pass has recorded as fired, sorted.
+/// `perspective.flowFired`: for each of `instances`, in order, the proposals
+/// the calling agent's pass has recorded as fired, sorted.
 #[derive(Deserialize, TS)]
 #[ts(export)]
 pub struct PerspectiveFlowFiredParams {
     pub uuid: String,
-    pub instance: String,
+    pub instances: Vec<String>,
 }
 
 #[derive(Deserialize, TS)]

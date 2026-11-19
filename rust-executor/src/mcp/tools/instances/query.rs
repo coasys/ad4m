@@ -76,7 +76,8 @@ impl Ad4mMcpHandler {
             Err(e) => return error_json(e),
         };
         let mut query = json!({
-            "limit": p.limit.unwrap_or(DEFAULT_QUERY_LIMIT).min(MAX_QUERY_LIMIT)
+            "limit": p.limit.unwrap_or(DEFAULT_QUERY_LIMIT).min(MAX_QUERY_LIMIT),
+            "count": true
         });
         if let Some(key) = p.order.as_deref().filter(|k| !k.trim().is_empty()) {
             match order_json(&shape, key) {
