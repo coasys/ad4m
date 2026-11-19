@@ -324,6 +324,18 @@ pub(crate) mod fake_ws {
 mod tests {
     use super::*;
 
+    /// Labels of the Coasys app's own navigation, present on a live space.
+    const LIVE_GROUPS: &[&str] = &[
+        "SPACE",
+        "Feed",
+        "Calls",
+        "Workflows",
+        "People",
+        "Social DNA",
+        "Templates",
+        "Themes",
+    ];
+
     fn row(uuid: &str) -> SpaceRow {
         SpaceRow {
             uuid: uuid.to_string(),
@@ -431,6 +443,152 @@ mod tests {
             assert!(text.contains("action(s) not run"), "{text}");
         }
         assert_no_writes(&fake.methods());
+    }
+
+    /// Draw the space into a 120x40 test terminal until `want` shows, or
+    /// panic after `limit` with the last frame.
+    fn wait_for_text(
+        terminal: &mut ratatui::Terminal<ratatui::backend::TestBackend>,
+        screen: &mut CoasysScreen,
+        want: &str,
+        limit: std::time::Duration,
+    ) -> String {
+        let started = std::time::Instant::now();
+        loop {
+            screen.tick();
+            terminal
+                .draw(|frame| {
+                    let area = frame.area();
+                    screen.draw(frame.buffer_mut(), area);
+                })
+                .unwrap();
+            let area = terminal.backend().buffer().area;
+            let text = we_tui::buffer_text(terminal.backend().buffer(), area);
+            if text.contains(want) {
+                return text;
+            }
+            assert!(
+                started.elapsed() < limit,
+                "{want:?} not on screen after {limit:?}:\n{text}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    /// The app on a real executor's space, through the production adapter
+    /// and the CLI's guarded client: a seeded call shows, and a call created
+    /// afterwards arrives live. Writes `target/1779-slice3/live-space.txt`.
+    ///
+    /// `AD4M_REQUIRE_EXECUTOR=1 EXECUTOR_PATH=/path/ad4m-executor
+    ///  cargo test -p ad4m --bin ad4m coasys_live_space_capture -- --ignored`
+    #[test]
+    #[ignore = "starts a real executor: set EXECUTOR_PATH"]
+    fn coasys_live_space_capture() {
+        use std::time::{Duration, Instant};
+        use we_ad4m::testkit as kit;
+
+        let Some(executor) = kit::start_executor() else {
+            return;
+        };
+        let rt = we_ad4m::Runtime::new().unwrap();
+        let writer = kit::connect(&rt, &executor.url);
+        let uuid = kit::seed_space(&rt, &writer, "slice3-live");
+        kit::create_collection(&rt, &writer, &uuid, "call", "slice3-live-call");
+
+        // The CLI's own path: the shared transport check, no stored token.
+        let _lock = rt.block_on(crate::login::transport_probe::token_dir_lock());
+        let tokens = tempfile::tempdir().unwrap();
+        std::env::set_var("AD4M_TOKEN_DIR", tokens.path());
+        let args = crate::ClapApp {
+            domain: crate::Domain::Tui,
+            no_capability: false,
+            executor_url: Some(executor.url.clone()),
+            admin_credential: None,
+            allow_insecure_remote: false,
+        };
+        let (client, url) = rt
+            .block_on(crate::get_ad4m_client(&args, &args.domain))
+            .unwrap();
+        let _enter = rt.handle().enter();
+        let conn = connection(&client);
+        assert!(Arc::ptr_eq(conn.ws(), client.ws()));
+        let base = Arc::strong_count(client.ws());
+        let version = rt
+            .block_on(client.runtime.info())
+            .map(|info| info.ad4m_executor_version)
+            .unwrap_or_else(|e| format!("<unknown: {e}>"));
+        let handles = rt.block_on(client.perspectives.all()).unwrap();
+        let handle = handles.iter().find(|h| h.uuid == uuid).unwrap();
+
+        let started = Instant::now();
+        let mut screen = open(&conn, space_row(handle)).unwrap();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
+        let first = wait_for_text(
+            &mut terminal,
+            &mut screen,
+            "slice3-live-call",
+            Duration::from_secs(10),
+        );
+        let seeded_after = started.elapsed();
+        kit::create_collection(&rt, &writer, &uuid, "call", "slice3-live-call-2");
+        let created = Instant::now();
+        let text = wait_for_text(
+            &mut terminal,
+            &mut screen,
+            "slice3-live-call-2",
+            Duration::from_secs(10),
+        );
+        let live_after = created.elapsed();
+
+        assert_eq!(screen.route(), format!("/space/{uuid}"));
+        assert!(text.contains(&format!("/space/{uuid}")), "{text}");
+        assert!(
+            text.contains(&format!("Coasys (read-only)  slice3-live  {uuid}")),
+            "{text}"
+        );
+        for group in LIVE_GROUPS {
+            assert!(text.contains(group), "Coasys group {group:?} missing:\n{text}");
+        }
+        assert!(screen.stats.deliveries.load(std::sync::atomic::Ordering::Relaxed) > 0);
+        assert!(screen.dropped().is_empty(), "{:?}", screen.dropped());
+
+        let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/1779-slice3");
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(out.join("live-space.txt"), &text).unwrap();
+        std::fs::write(out.join("live-space-first.txt"), &first).unwrap();
+        let meta = serde_json::json!({
+            "test": "coasys_live_space_capture",
+            "ad4m": env!("CARGO_PKG_VERSION"),
+            "we_rev": WE_REV,
+            "executor_version": version,
+            "executor_url": url,
+            "space": "slice3-live",
+            "route": screen.route(),
+            "size": "120x40",
+            "seeded_call_ms": seeded_after.as_millis() as u64,
+            "live_call_ms": live_after.as_millis() as u64,
+        });
+        std::fs::write(
+            out.join("live-space.json"),
+            serde_json::to_string_pretty(&meta).unwrap(),
+        )
+        .unwrap();
+        eprintln!("{meta:#}\n{text}");
+
+        // Closing the app lets go of every clone of the socket it took.
+        drop(screen);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Arc::strong_count(client.ws()) > base {
+            assert!(
+                Instant::now() < deadline,
+                "the closed app still holds {} clones of the socket",
+                Arc::strong_count(client.ws()) - base
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(client.ws().is_connected());
+        std::env::remove_var("AD4M_TOKEN_DIR");
     }
 
     #[test]
