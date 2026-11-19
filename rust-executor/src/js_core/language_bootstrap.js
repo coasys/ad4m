@@ -112,14 +112,18 @@ if (typeof globalThis.LANGUAGE_CONTROLLER === "object" && globalThis.LANGUAGE_CO
         }
         syncStorageDir(dir);
     };
-    // Exclusive creation (O_EXCL): throws AlreadyExists when `path` exists,
-    // so two writers can use it as a lock. Content written and fsynced, the
-    // directory fsynced; on a failure after creation the file is removed.
+    // Exclusive creation, published atomically: the content is written in
+    // full to a unique temp file (createNew) and fsynced, then hard-linked to
+    // `path` — link() is atomic and fails with AlreadyExists when `path`
+    // exists — and the temp name removed. So `path` never exists with
+    // partial content (a lock is never seen half-written). The directory is
+    // fsynced (not on Windows). On any failure the temp file is removed.
     globalThis.LANGUAGE_CONTROLLER.createStorageFileExclusive = function(path, content) {
         var cut = path.lastIndexOf("/");
         var dir = cut > 0 ? path.slice(0, cut) : ".";
+        var tmp = path + ".tmp-" + crypto.randomUUID();
         var bytes = new TextEncoder().encode(String(content));
-        var file = Deno.openSync(path, { write: true, createNew: true });
+        var file = Deno.openSync(tmp, { write: true, createNew: true });
         try {
             try {
                 var off = 0;
@@ -128,9 +132,9 @@ if (typeof globalThis.LANGUAGE_CONTROLLER === "object" && globalThis.LANGUAGE_CO
             } finally {
                 file.close();
             }
-        } catch (e) {
-            try { Deno.removeSync(path); } catch (_) { /* already gone */ }
-            throw e;
+            Deno.linkSync(tmp, path);
+        } finally {
+            try { Deno.removeSync(tmp); } catch (_) { /* already gone */ }
         }
         syncStorageDir(dir);
     };
