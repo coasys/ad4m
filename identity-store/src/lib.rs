@@ -54,7 +54,8 @@ pub struct Settings {
     pub pow_bits: u8,
     /// `FEED_TOKEN`: the mirror token of `GET /v1/feed`. None: the feed answers `401` to all.
     pub feed_token: Option<String>,
-    /// `CORS_ORIGINS`: the origins allowed to call from a browser (the auth domain, the web app).
+    /// `CORS_ORIGINS`: the origins allowed to call from a browser (the auth domain, the web app);
+    /// `*` allows any.
     pub cors_origins: Vec<String>,
     /// `HELD_LOG_BYTES`: the most heap the logs held folded in memory take together, by
     /// `held::held_bytes_of` (default 256 MiB; `held.rs`). A log whose fold is larger is folded
