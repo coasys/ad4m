@@ -274,8 +274,16 @@ export class SfuManager {
     private static readonly MAX_RECONNECTS = 3
     /** How long one rebuild keeps retrying a join the executor cannot take yet. */
     private static readonly REJOIN_WINDOW_MS = 120_000
-    /** How long an ICE restart has to bring the connection back before a rebuild. */
-    private static readonly RESTART_TIMEOUT_MS = 5_000
+    /** The executor's wait before the first resend of an unanswered offer.
+     *  `OFFER_RETRY_BASE` in `rust-executor/src/sfu/server.rs`. */
+    private static readonly OFFER_RESEND_BASE_MS = 10_000
+    /** How long ICE has to come back after that resend arrives. */
+    private static readonly RESTART_AFTER_RESEND_MS = 5_000
+    /** How long an ICE restart has to bring the connection back before a rebuild.
+     *  The window stays open through the first resend, then the previous 5 s
+     *  for ICE. A restart that connects clears the timer at once. */
+    private static readonly RESTART_TIMEOUT_MS =
+        SfuManager.OFFER_RESEND_BASE_MS + SfuManager.RESTART_AFTER_RESEND_MS
     /** A rebuild is running: a second failure signal joins it rather than starting another. */
     private reconnecting = false
     /** Bumped by `leave()`, so a reconnect in flight stops before rejoining. */
