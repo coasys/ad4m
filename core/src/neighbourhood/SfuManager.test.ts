@@ -959,22 +959,6 @@ test("joins that succeed while ICE keeps failing stop after three reconnects", a
     expect(errors).toEqual([new Error("SFU reconnect attempts exhausted")])
 })
 
-test("a connection that comes up resets the reconnect count", async () => {
-    const api = fakeApi()
-    const manager = new SfuManager(api, ROOM, ME, URL)
-    const errors: unknown[] = []
-    manager.on("error", (e) => errors.push(e))
-    await manager.join(fakeStream())
-
-    for (let i = 0; i < 6; i++) {
-        await iceState("failed")
-        await iceState("connected")
-    }
-
-    expect(api.sfuCallLeave).toHaveBeenCalledTimes(6)
-    expect(errors).toEqual([])
-})
-
 test("a rebuilt connection sends the tracks replaceTrack set and restores the quality preference", async () => {
     const api = fakeApi()
     const manager = new SfuManager(api, ROOM, ME, URL)
@@ -2032,4 +2016,65 @@ test("leave drops a pending check of ICE after the socket", async () => {
     } finally {
         jest.useRealTimers()
     }
+})
+
+// ── Rebuild budget per time window (C4) ─────────────────────────────────────
+
+test("at most three rebuilds in two minutes, even when ICE connects in between; then it stops and says so once", async () => {
+    // A flapping socket used to rebuild for ever: the count reset on every connect.
+    fakeTimers()
+    try {
+        const api = fakeApi()
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        const errors: unknown[] = []
+        manager.on("error", (e) => errors.push(e))
+        await manager.join(fakeStream())
+
+        for (let i = 0; i < 5; i++) {
+            await iceState("failed")
+            await iceState("connected")
+            await jest.advanceTimersByTimeAsync(10_000)
+        }
+
+        expect(api.sfuCallLeave).toHaveBeenCalledTimes(3)
+        expect(api.sfuCallJoin).toHaveBeenCalledTimes(4)
+        expect(errors).toEqual([new Error("SFU reconnect attempts exhausted")])
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
+test("rebuilds further apart than the window are not limited", async () => {
+    fakeTimers()
+    try {
+        const api = fakeApi()
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        const errors: unknown[] = []
+        manager.on("error", (e) => errors.push(e))
+        await manager.join(fakeStream())
+
+        for (let i = 0; i < 6; i++) {
+            await iceState("failed")
+            await iceState("connected")
+            await jest.advanceTimersByTimeAsync(45_000)
+        }
+
+        expect(api.sfuCallLeave).toHaveBeenCalledTimes(6)
+        expect(errors).toEqual([])
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
+test("a new join by the user after the budget ran out starts with a fresh one", async () => {
+    const api = fakeApi()
+    const manager = new SfuManager(api, ROOM, ME, URL)
+    await manager.join(fakeStream())
+    for (let i = 0; i < 4; i++) await iceState("failed")
+    expect(api.sfuCallLeave).toHaveBeenCalledTimes(3)
+
+    await manager.leave()
+    await manager.join(fakeStream())
+    await iceState("failed")
+    expect(api.sfuCallJoin).toHaveBeenCalledTimes(6)
 })

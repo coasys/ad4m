@@ -296,10 +296,14 @@ export class SfuManager {
     private state: SfuCallState
     private callbacks: Map<SfuEvent, SfuEventCallback[]> = new Map()
     private iceServers: RTCIceServer[]
-    /** Reconnects since ICE last reached connected — not since a join: a
-     *  join can succeed while the media path never comes up. */
-    private reconnectAttempts: number = 0
-    private static readonly MAX_RECONNECTS = 3
+    /** When each rebuild of this call started, those within the last
+     *  REBUILD_WINDOW_MS. ICE connecting does not clear it: a socket that
+     *  flaps can rebuild a call whose ICE connects every time. */
+    private rebuilds: number[] = []
+    private static readonly MAX_REBUILDS = 3
+    private static readonly REBUILD_WINDOW_MS = 120_000
+    /** The rebuild budget ran out: no rebuild until the user joins again. */
+    private gaveUp = false
     /** How long one rebuild keeps retrying a join the executor cannot take yet. */
     private static readonly REJOIN_WINDOW_MS = 120_000
     /** The executor's wait before the first resend of an unanswered offer.
@@ -411,22 +415,29 @@ export class SfuManager {
      * the rejoin: the executor refuses the replaced session key (409), and
      * the manager stops as the notice would have stopped it, without retrying.
      *
-     * Two budgets. A rebuild whose join works but whose connection fails
-     * again counts once against `MAX_RECONNECTS`, reset when ICE connects.
-     * Within one rebuild, a join that fails because the executor cannot be
+     * Two budgets. At most `MAX_REBUILDS` rebuilds start within
+     * `REBUILD_WINDOW_MS`; one more stops rebuilding and emits `error`, until
+     * the user joins again. Within one rebuild, a join that fails because the executor cannot be
      * reached — a restart, an outage — is retried with backoff for up to
      * `REJOIN_WINDOW_MS`, so the call comes back on its own once it can.
      */
     private async reconnect(): Promise<void> {
         const stream = this.state.localStream
-        if (!stream || this.reconnecting) return
+        if (!stream || this.reconnecting || this.gaveUp) return
         const generation = this.generation
-        if (++this.reconnectAttempts > SfuManager.MAX_RECONNECTS) {
+        const now = Date.now()
+        this.rebuilds = this.rebuilds.filter((at) => now - at < SfuManager.REBUILD_WINDOW_MS)
+        if (this.rebuilds.length >= SfuManager.MAX_REBUILDS) {
+            this.gaveUp = true
+            console.error(
+                `SFU: ${this.rebuilds.length} rebuilds in ${SfuManager.REBUILD_WINDOW_MS / 1000} s; not rebuilding again`,
+            )
             this.emit("error", new Error("SFU reconnect attempts exhausted"))
             return
         }
+        this.rebuilds.push(now)
         console.info(
-            `SFU: connection failed, reconnecting (${this.reconnectAttempts}/${SfuManager.MAX_RECONNECTS})`,
+            `SFU: connection failed, reconnecting (${this.rebuilds.length}/${SfuManager.MAX_REBUILDS} in ${SfuManager.REBUILD_WINDOW_MS / 1000} s)`,
         )
         this.reconnecting = true
         this.endRestart()
@@ -570,7 +581,11 @@ export class SfuManager {
     /** Join the SFU call with simulcast support. */
     async join(localStream: MediaStream): Promise<void> {
         const generation = this.generation
-        if (!this.reconnecting) this.sessionKey = randomId()
+        if (!this.reconnecting) {
+            this.sessionKey = randomId()
+            this.rebuilds = []
+            this.gaveUp = false
+        }
         this.state.localStream = localStream
 
         const pc = new RTCPeerConnection({ iceServers: this.iceServers })
@@ -593,8 +608,7 @@ export class SfuManager {
                 pc.iceConnectionState === "connected" ||
                 pc.iceConnectionState === "completed"
             ) {
-                // A working path ends a restart and a run of reconnects.
-                this.reconnectAttempts = 0
+                // A working path ends a restart.
                 this.endRestart()
             }
         }
