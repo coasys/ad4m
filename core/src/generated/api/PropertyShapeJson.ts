@@ -68,6 +68,11 @@ class?: string,
  */
 relation_kind?: string, 
 /**
+ * The relation is read `polymorphic: true` unless a query says otherwise
+ * (`ad4m://polymorphic`); the executor applies it at every include depth.
+ */
+polymorphic?: boolean, 
+/**
  * Bare target class name for a relation property — used by the executor
  * to look up the target shape through its in-memory cache.
  */
