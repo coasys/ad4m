@@ -102,7 +102,7 @@ describe("Ad4mModel — one query over several classes", function () {
     const { t1, n2 } = await interleaved();
     const result = await perspective.modelQuery(
       ["UnionTask", "UnionNote"],
-      JSON.stringify({ order: [["position", "ASC"]], limit: 2 }),
+      JSON.stringify({ order: [["position", "ASC"]], limit: 2, count: true }),
     );
     expect(result.instances.map((i: any) => i.id)).to.deep.equal([t1.id, n2.id]);
     expect(result.instances.map((i: any) => i.__subjectClass)).to.deep.equal([

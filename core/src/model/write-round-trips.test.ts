@@ -1,7 +1,6 @@
 import { Ad4mModel } from "./Ad4mModel";
 import { HasMany, Model, Property } from "./decorators";
 import { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
-import { clearQueryCache } from "./query-cache";
 
 // Every RPC that save() and delete() send, counted on a client double that
 // keeps the registered classes' SHACL links like the executor does.
@@ -113,8 +112,6 @@ async function createNote(proxy: PerspectiveProxy) {
 }
 
 describe("RPCs per write", () => {
-  beforeEach(() => clearQueryCache());
-
   it("create of a decorated model sends no class-list lookup", async () => {
     const { proxy, calls } = countingProxy([RoundTripNote]);
     await createNote(proxy);
@@ -187,6 +184,36 @@ describe("RPCs per write", () => {
     expect(commands[1]).toContain("collectionSetter");
   });
 
+  it("create still clears an empty relation whose predicate an adder envelope in the same save wrote to", async () => {
+    // `tags` writes through `{action: 'adder'}` before `labels` (same predicate)
+    // is reached, so `labels: []` has links to clear.
+    const { proxy, sent } = countingProxy([RoundTripShared]);
+    const shared = new RoundTripShared(proxy);
+    shared.title = "standup";
+    shared.tags = { action: "adder", value: ["rt://tag/a"] } as any;
+    shared.labels = [];
+    await shared.save();
+    expect(commandsSent(sent).some((c) => c.includes("collectionSetter") && c.includes("rt://tag"))).toBe(true);
+  });
+
+  it("create still clears an empty relation whose predicate a scalar relation write in the same save wrote to", async () => {
+    // A scalar on `tags` is written as a one-member relation before `labels`
+    // (same predicate) is reached, so `labels: []` has a link to clear. The
+    // scalar's own write is a collectionSetter on rt://tag too, so look for
+    // the clear: the one with no values.
+    const { proxy, sent } = countingProxy([RoundTripShared]);
+    const shared = new RoundTripShared(proxy);
+    shared.title = "standup";
+    shared.tags = "rt://tag/a" as any;
+    shared.labels = [];
+    await shared.save();
+    const clears = sent.filter(
+      ([method, , commands, , params]) =>
+        method === "executeCommands" && commands.includes("collectionSetter") && commands.includes("rt://tag") && params === "[]",
+    );
+    expect(clears).toHaveLength(1);
+  });
+
   it("update of an existing record with [] still clears the relation", async () => {
     const { proxy, calls, sent } = countingProxy([RoundTripCall]);
     const call = new RoundTripCall(proxy, "rt://call/1");
@@ -210,8 +237,6 @@ describe("RPCs per write", () => {
 });
 
 describe("class name a write resolves", () => {
-  beforeEach(() => clearQueryCache());
-
   @Model({ name: "RoundTripDerivedNote" })
   class RoundTripDerivedNote extends RoundTripNote {
     @Property({ through: "rt://body" })
@@ -301,7 +326,6 @@ const rtt = Number(process.env.SDK_RTT_MS || 0);
     const ms: number[] = [];
     let rpcs = 0;
     for (let i = 0; i < runs; i++) {
-      clearQueryCache();
       const { proxy, calls } = countingProxy([RoundTripNote, RoundTripReadable, RoundTripCall], rtt);
       const start = performance.now();
       await write(proxy);
