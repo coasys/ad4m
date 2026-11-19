@@ -173,7 +173,7 @@ mod tests {
                 "(() => { console.log('console-check log', { n: 1 }); \
                  console.debug('console-check debug'); console.info('console-check info'); \
                  console.warn('console-check warn'); console.error('console-check error'); \
-                 return true; })()",
+                 console.trace('console-check trace'); return true; })()",
             )
             .await
             .unwrap();
@@ -184,6 +184,15 @@ mod tests {
             .filter(|(_, line)| line.starts_with("console-check"))
             .cloned()
             .collect();
+        // A trace (Deno console level 4) is a stack for debugging, not an error.
+        let trace: Vec<Level> = CONSOLE_LINES
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, line)| line.starts_with("Trace: console-check trace"))
+            .map(|(level, _)| *level)
+            .collect();
+        assert_eq!(trace, vec![Level::Debug]);
         assert_eq!(
             lines,
             vec![
