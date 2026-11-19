@@ -335,9 +335,11 @@ export class SfuManager {
     private replacedTracks: Map<"audio" | "video", MediaStreamTrack | null> = new Map()
     /** The last quality preference set, for a rebuilt connection to restore. */
     private qualityPreference: SfuQualityPreference | null = null
-    /** Server-offer work, one step at a time, each at most OFFER_STEP_TIMEOUT_MS. */
+    /** Server-offer work, one step at a time. The SDP steps of an offer run
+     *  to their end before the next offer's start; an RPC holds the queue at
+     *  most OFFER_STEP_TIMEOUT_MS. */
     private offerQueue: Promise<void> = Promise.resolve()
-    /** How long one step of `offerQueue` may hold the steps behind it. */
+    /** How long one RPC of `offerQueue` may hold the steps behind it. */
     private static readonly OFFER_STEP_TIMEOUT_MS = 10_000
     /** The last server offer answered. The executor sends an unanswered
      *  restart offer again when asked twice; one that was answered meanwhile
@@ -938,6 +940,8 @@ export class SfuManager {
         // sessions; only those naming this session's participant id are ours,
         // and that id is known once the join returns.
         const waiting: SfuCallRenegotiationOffer[] = []
+        // A queue per connection: a step stuck on a dropped connection holds nothing of this one.
+        this.offerQueue = Promise.resolve()
         this.renegotiationUnsubscribe = this.neighbourhood.subscribeSfuCallRenegotiationOffer(
             this.agentDid,
             (event) => {
@@ -948,8 +952,9 @@ export class SfuManager {
                     .then(() => joined)
                     .then(() => {
                         const offers = waiting.splice(0).filter((e) => e.participantId === this.state.participantId)
-                        if (offers.length > 0) return this.timeBoxed(() => this.applyServerOffers(pc, offers))
+                        if (offers.length > 0) return this.applyServerOffers(pc, offers)
                     })
+                    .catch((err) => console.warn("SFU: applying a server offer failed:", err))
             },
         )
         this.rosterUnsubscribe = this.neighbourhood.subscribeSfuRoomRoster((roster) => {
@@ -973,7 +978,8 @@ export class SfuManager {
         for (const unsubscribe of previous) unsubscribe?.()
     }
 
-    /** Run one step of `offerQueue`; after OFFER_STEP_TIMEOUT_MS the steps behind it go on without it. */
+    /** Run one RPC step of `offerQueue`; after OFFER_STEP_TIMEOUT_MS the steps behind it go on
+     *  without it. Never an SDP step: one given up on would go on changing the connection. */
     private timeBoxed(step: () => Promise<void>): Promise<void> {
         let timer: ReturnType<typeof setTimeout> | undefined
         const timeout = new Promise<void>((resolve) => {
@@ -993,16 +999,21 @@ export class SfuManager {
         // The executor sent again an offer whose answer a socket fault kept:
         // that answer is still the one, and the offer is applied already.
         const unsent = this.unsentAnswer
-        if (unsent?.pc === pc && unsent.sdpOffer === event.sdpOffer) return this.sendAnswer(unsent)
+        if (unsent?.pc === pc && unsent.sdpOffer === event.sdpOffer) return this.timeBoxed(() => this.sendAnswer(unsent))
         // The mapping first: the tracks this offer adds arrive while it is applied.
         for (const entry of offers.flatMap((offer) => offer.trackMapping ?? [])) {
             this.midToParticipant.set(entry.mid, { participantId: entry.participantId, did: entry.agentDid })
         }
         let sdpAnswer: string
         this.noteOffer(event.sdpOffer)
+        // A newer offer that arrived while this one applies is answered by its own step, next.
+        const superseded = () => this.state.peerConnection !== pc || this.currentOffer !== event.sdpOffer
         try {
             await pc.setRemoteDescription(new RTCSessionDescription(JSON.parse(event.sdpOffer)))
-            await pc.setLocalDescription(await pc.createAnswer())
+            if (superseded()) return
+            const answer = await pc.createAnswer()
+            if (superseded()) return
+            await pc.setLocalDescription(answer)
             sdpAnswer = JSON.stringify(pc.localDescription)
         } catch (err) {
             if (this.state.peerConnection !== pc) return
@@ -1012,7 +1023,8 @@ export class SfuManager {
             void this.reconnect()
             return
         }
-        await this.sendAnswer({ pc, sdpOffer: event.sdpOffer, roomName: event.roomName, participantId: event.participantId, sdpAnswer })
+        const answer = { pc, sdpOffer: event.sdpOffer, roomName: event.roomName, participantId: event.participantId, sdpAnswer }
+        await this.timeBoxed(() => this.sendAnswer(answer))
     }
 
     /**

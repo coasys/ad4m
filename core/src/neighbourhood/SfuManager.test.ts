@@ -2380,3 +2380,78 @@ test("a same-mid ICE restart offer is never answered with the answer of the offe
         jest.useRealTimers()
     }
 })
+
+test("a stalled SDP step for one offer holds the next: a newer offer is applied after it, and the stale one never answers", async () => {
+    // Before: the 10 s time box let B's step run while A's was still inside
+    // setRemoteDescription; A then created and set its answer over B's.
+    fakeTimers()
+    try {
+        const api = fakeApi()
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream())
+        const pc = currentPc()
+        distinctAnswers(pc)
+        const setLocal = jest.spyOn(pc, "setLocalDescription")
+        let releaseA!: () => void
+        const realSetRemote = pc.setRemoteDescription.bind(pc)
+        jest.spyOn(pc, "setRemoteDescription").mockImplementationOnce(
+            (d: RTCSessionDescriptionInit) => new Promise<void>((resolve) => {
+                releaseA = () => { void realSetRemote(d).then(resolve) }
+            }),
+        )
+
+        api.emitOffer(offer("A"))
+        await flush()
+        await jest.advanceTimersByTimeAsync(1_000)
+        api.emitOffer(offer("B"))
+        await jest.advanceTimersByTimeAsync(20_000)
+        releaseA()
+        await jest.advanceTimersByTimeAsync(0)
+        await flush()
+
+        expect(answersSent(api)).toEqual([answerTo("B")])
+        expect(setLocal.mock.calls.map(([d]) => d.sdp)).toEqual(["answer-to-B"])
+        expect(pc.localDescription?.sdp).toBe("answer-to-B")
+        await manager.leave()
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
+test("the answer RPC is still time-boxed: one that hangs lets the next offer go on after 10 s", async () => {
+    fakeTimers()
+    try {
+        const api = fakeApi()
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream())
+        const pc = currentPc()
+        api.sfuCallAnswerServerOffer.mockImplementationOnce(() => new Promise(() => {}))
+        api.emitOffer(offer("first"))
+        await flush()
+        api.emitOffer(offer("second"))
+        await jest.advanceTimersByTimeAsync(9_999)
+        expect(pc.remoteSdps()).toEqual(["server-answer", "first"])
+        await jest.advanceTimersByTimeAsync(1)
+        expect(pc.remoteSdps()).toEqual(["server-answer", "first", "second"])
+        await manager.leave()
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
+test("an SDP step that never settles on a dropped connection does not hold the rebuilt connection's offers", async () => {
+    const api = fakeApi()
+    const manager = new SfuManager(api, ROOM, ME, URL)
+    await manager.join(fakeStream())
+    jest.spyOn(currentPc(), "setRemoteDescription").mockImplementationOnce(() => new Promise<void>(() => {}))
+    api.emitOffer(offer("stuck"))
+    await flush()
+
+    await iceState("failed")
+    const rebuilt = currentPc()
+    api.emitOffer(offer("after-rebuild"))
+    await flush()
+
+    expect(rebuilt.remoteSdps()).toEqual(["server-answer", "after-rebuild"])
+    await manager.leave()
+})
