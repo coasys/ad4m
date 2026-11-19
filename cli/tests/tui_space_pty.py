@@ -73,6 +73,12 @@ COLLECTION_SDNA = r"""{
 SPACE_NAME = "slice3-pty"
 CALL_TITLE = "slice3-pty-call"
 
+# Transition bounds — far under the ~2 s a cursor-querying clear stalls for
+# on a terminal that does not answer ESC[6n (this PTY does not). 'o' also
+# assembles the space; F10 only repaints the admin screen.
+OPEN_BOUND = 1.5
+BACK_BOUND = 1.0
+
 
 def literal(s: str) -> str:
     """`Literal::from_string(s).to_url()` — `literal:string:<urlencoded>`."""
@@ -294,13 +300,12 @@ def drive_pty(ad4m: str, url: str, uuid: str, out_ansi: str, timeout: float = 90
     os.close(slave)
     log = open(out_ansi, "wb")
     transcript = bytearray()
-    # `Terminal::clear` snapshots the cursor: it emits ESC[6n and waits
-    # for the report a real terminal sends. This PTY answers, or 'o' and
-    # F10 would each cost a 2 s timeout and a "clear failed" notice.
-    dsr_answered = 0
+    # This PTY never answers a device-status report. A transition clear
+    # that queries the cursor (ESC[6n) blocks ~2 s here, so the 'o' and
+    # F10 transitions below are time-bounded — a regression shows up as a
+    # stall — and the run asserts the child never emitted the query.
 
     def pump(want: float = 0.25) -> None:
-        nonlocal dsr_answered
         end = time.monotonic() + want
         while time.monotonic() < end:
             r, _, _ = select.select([master], [], [], 0.05)
@@ -317,21 +322,18 @@ def drive_pty(ad4m: str, url: str, uuid: str, out_ansi: str, timeout: float = 90
             transcript.extend(chunk)
             log.write(chunk)
             log.flush()
-            seen = transcript.count(b"\x1b[6n")
-            while dsr_answered < seen:
-                dsr_answered += 1
-                os.write(master, b"\x1b[1;1R")
 
     def send(keys: bytes) -> None:
         os.write(master, keys)
         pump()
 
-    def wait_for(needle: bytes, within: float, what: str) -> None:
-        deadline = time.monotonic() + within
+    def wait_for(needle: bytes, within: float, what: str) -> float:
+        start = time.monotonic()
+        deadline = start + within
         while time.monotonic() < deadline:
             pump(0.3)
             if needle in transcript:
-                return
+                return time.monotonic() - start
             if child.poll() is not None:
                 raise RuntimeError(f"ad4m exited {child.returncode} while waiting for {what}")
         raise TimeoutError(
@@ -345,13 +347,16 @@ def drive_pty(ad4m: str, url: str, uuid: str, out_ansi: str, timeout: float = 90
         wait_for(SPACE_NAME.encode(), 30.0, "the seeded space on the perspectives screen")
         # 'o' opens the Coasys view of the selected (seeded) row. The route
         # line — not the row's bare uuid — is what proves the view mounted.
+        # The transition is time-bounded: a clear that queries the cursor
+        # would stall ~2 s on this PTY, which never answers ESC[6n.
         route = f"/space/{uuid}".encode()
         send(b"o")
-        wait_for(route, 30.0, "the Coasys view (uuid route)")
+        opened_in = wait_for(route, OPEN_BOUND, "the Coasys view (uuid route)")
         wait_for(CALL_TITLE.encode(), 30.0, "the seeded call in the Coasys view")
-        # F10 returns to the admin screen.
+        # F10 returns to the admin screen — bounded the same way.
         send(b"\x1b[21~")
-        wait_for(SPACE_NAME.encode(), 10.0, "the perspectives screen after F10")
+        back_in = wait_for(SPACE_NAME.encode(), BACK_BOUND, "the perspectives screen after F10")
+        print(f"  transitions: 'o' opened in {opened_in:.2f}s, F10 back in {back_in:.2f}s")
         # A resize while the space view is open repaints without a hang.
         send(b"o")
         wait_for(route, 30.0, "the Coasys view again")
@@ -369,6 +374,10 @@ def drive_pty(ad4m: str, url: str, uuid: str, out_ansi: str, timeout: float = 90
         pump(0.5)
         if child.returncode != 0:
             raise RuntimeError(f"ad4m tui exited {child.returncode}, expected 0")
+        if b"\x1b[6n" in transcript:
+            raise RuntimeError(
+                "ad4m queried the cursor (ESC[6n) — a transition clear must not"
+            )
     finally:
         log.close()
         try:

@@ -33,7 +33,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
     Frame, Terminal,
 };
 use we_ad4m::SpaceRow;
@@ -708,12 +708,16 @@ async fn drive(
             .context("tui terminal is not open")?;
         if model.needs_clear {
             model.needs_clear = false;
-            // A clear is cosmetic — the buffer diff already repaints every
-            // changed cell. `Terminal::clear` snapshots the cursor first,
-            // which a terminal that cannot answer the position query fails
-            // on; losing the session to that is wrong, so a failed clear is
-            // a notice, not an exit.
-            if let Err(error) = terminal.clear() {
+            // A transition clear is cosmetic — the buffer diff repaints
+            // every changed cell anyway. `Terminal::clear` snapshots the
+            // cursor first (`ESC[6n`, up to a two-second wait on a terminal
+            // that does not answer), so the frame is blanked through the
+            // buffer instead: a `Clear`-widget frame resets every cell and
+            // the same diff machinery paints the blanks. A failed draw is
+            // still a notice, not an exit.
+            if let Err(error) = terminal.draw(|frame| {
+                frame.render_widget(Clear, frame.area());
+            }) {
                 model.error = Some(format!("terminal clear failed: {error}"));
             }
         }
