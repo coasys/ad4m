@@ -80,13 +80,13 @@ pub(crate) fn decode_transcript_body(uri: &str) -> Option<String> {
     }
 }
 
-/// The transcript read: the turns, beside the raw model-query JSON the
+/// The transcript read: the turns, beside the model-query instances the
 /// watch loop feeds to its wake trigger.
 pub struct GatheredTranscript {
-    /// The model-query result as returned — the trigger's `near`/`via` rules
-    /// are defined over the nodes of the last read, so an edit to an
+    /// The model-query instances as returned — the trigger's `near`/`via`
+    /// rules are defined over the nodes of the last read, so an edit to an
     /// in-scope instance's links wakes it.
-    pub result_json: String,
+    pub instances: Vec<serde_json::Value>,
     /// Turns whose required text resolved.
     pub turns: Vec<TranscriptTurn>,
     /// At least one in-scope instance's `text_property` failed its
@@ -147,16 +147,14 @@ pub(crate) async fn gather_transcript_model_within(
     // unresolved text — not built on an undecided condition (#1795).
     let where_names = where_property_names(query_json);
     let query_json = with_text_provenance(query_json, text_property)?;
-    let result_json = perspective
-        .model_query_within(class, &query_json, shape_wait)
+    let result = perspective
+        .model_query_one_result_within(class, &query_json, shape_wait)
         .await
         .map_err(|e| anyhow::anyhow!("gather_transcript_model: model_query failed: {e:#}"))?;
-    let result: serde_json::Value = serde_json::from_str(&result_json)
-        .map_err(|e| anyhow::anyhow!("gather_transcript_model: bad model_query result: {e:#}"))?;
 
     let mut out = Vec::new();
     let mut has_unresolved = false;
-    for instance in result["instances"].as_array().into_iter().flatten() {
+    for instance in &result.instances {
         // The resolver marks a `resolveLanguage` value it could not fetch:
         // the raw expression URL sits where the text should be, so there is
         // no turn to take — and none to retire, since the same target may
@@ -208,7 +206,7 @@ pub(crate) async fn gather_transcript_model_within(
         });
     }
     Ok(GatheredTranscript {
-        result_json,
+        instances: result.instances,
         turns: out,
         has_unresolved,
     })

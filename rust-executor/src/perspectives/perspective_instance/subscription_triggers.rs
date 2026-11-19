@@ -1072,6 +1072,18 @@ impl ModelTrigger {
         }
     }
 
+    /// [`Self::with_result`] for a result's instances already parsed.
+    pub(crate) fn with_instances(&self, instances: &[Value]) -> Self {
+        let mut nodes = HashSet::new();
+        for instance in instances {
+            nodes.extend(value_nodes(instance));
+        }
+        ModelTrigger {
+            rules: self.rules.clone(),
+            nodes: Arc::new(nodes),
+        }
+    }
+
     /// Whether `writes` may change this subscription's result.
     pub(super) fn matches(&self, writes: &Writes, store: &mut StoreLookups) -> bool {
         let rules = &self.rules;
@@ -1194,6 +1206,13 @@ impl ModelTrigger {
 /// Every `id` in a model result, at any depth. Included records carry their
 /// `id` like top-level ones do.
 fn result_nodes(result: &str) -> HashSet<String> {
+    serde_json::from_str::<Value>(result)
+        .map(|v| value_nodes(&v))
+        .unwrap_or_default()
+}
+
+/// [`result_nodes`] over a result that is already parsed.
+fn value_nodes(result: &Value) -> HashSet<String> {
     fn walk(v: &Value, out: &mut HashSet<String>) {
         match v {
             Value::Object(map) => {
@@ -1212,9 +1231,7 @@ fn result_nodes(result: &str) -> HashSet<String> {
         }
     }
     let mut out = HashSet::new();
-    if let Ok(v) = serde_json::from_str::<Value>(result) {
-        walk(&v, &mut out);
-    }
+    walk(result, &mut out);
     out
 }
 

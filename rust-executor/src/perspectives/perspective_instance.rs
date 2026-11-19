@@ -4434,6 +4434,37 @@ impl PerspectiveInstance {
         query_json: &str,
         shape_wait: Duration,
     ) -> Result<String, deno_core::anyhow::Error> {
+        let result = self
+            .model_query_result_within(stop, classes, query_json, shape_wait)
+            .await?;
+        serde_json::to_string(&result).map_err(|e| {
+            deno_core::anyhow::anyhow!("Failed to serialize model query result: {}", e)
+        })
+    }
+
+    /// [`Self::model_query_within`] for a caller that reads the result
+    /// itself: the instances as the pipeline built them, never serialised to
+    /// a string and parsed back.
+    pub(super) async fn model_query_one_result_within(
+        &self,
+        class_name: &str,
+        query_json: &str,
+        shape_wait: Duration,
+    ) -> Result<super::model_query::ModelQueryResult, deno_core::anyhow::Error> {
+        let classes = super::model_query::QueryClasses::One(class_name.to_string());
+        self.model_query_result_within(&EvalStop::none(), &classes, query_json, shape_wait)
+            .await
+    }
+
+    /// The query behind every `model_query*` entry point, before the result
+    /// is serialised.
+    async fn model_query_result_within(
+        &self,
+        stop: &EvalStop,
+        classes: &super::model_query::QueryClasses,
+        query_json: &str,
+        shape_wait: Duration,
+    ) -> Result<super::model_query::ModelQueryResult, deno_core::anyhow::Error> {
         let mut query_input: super::model_query::ModelQueryInput = serde_json::from_str(query_json)
             .map_err(|e| deno_core::anyhow::anyhow!("Failed to parse model query: {}", e))?;
 
@@ -4472,12 +4503,9 @@ impl PerspectiveInstance {
         let named = classes;
         let classes = &targets.classes;
         if classes.names().is_empty() {
-            return serde_json::to_string(&super::model_query::ModelQueryResult {
+            return Ok(super::model_query::ModelQueryResult {
                 instances: vec![],
                 total_count: 0,
-            })
-            .map_err(|e| {
-                deno_core::anyhow::anyhow!("Failed to serialize model query result: {}", e)
             });
         }
         // A built-in's own rows (`Container`) are read through its view.
@@ -4518,12 +4546,9 @@ impl PerspectiveInstance {
             {
                 // No valid output survives; answer directly rather than
                 // handing the store an empty VALUES block.
-                return serde_json::to_string(&super::model_query::ModelQueryResult {
+                return Ok(super::model_query::ModelQueryResult {
                     instances: vec![],
                     total_count: 0,
-                })
-                .map_err(|e| {
-                    deno_core::anyhow::anyhow!("Failed to serialize model query result: {}", e)
                 });
             }
         }
@@ -4584,10 +4609,7 @@ impl PerspectiveInstance {
         let mut result = result;
         self.finish_container_rows(stop, named, &query_input, &mut result)
             .await?;
-
-        serde_json::to_string(&result).map_err(|e| {
-            deno_core::anyhow::anyhow!("Failed to serialize model query result: {}", e)
-        })
+        Ok(result)
     }
 
     /// Evaluate property getters for a batch of instances in-process.
@@ -7460,7 +7482,7 @@ impl PerspectiveInstance {
                         // Feed the read's nodes to the wake trigger, so a
                         // write that edits an in-scope instance's links
                         // (`near`/`via` rules) wakes the loop.
-                        watcher.set_trigger_result(&cfg.processor_id, &read.result_json);
+                        watcher.set_trigger_result(&cfg.processor_id, &read.instances);
                         watcher.reads.set_transcript(
                             cfg,
                             generation,

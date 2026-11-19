@@ -200,8 +200,9 @@ pub(super) fn build_instance_sparql(
     query: &ModelQueryInput,
     sparql_pagination: Option<&SparqlPagination>,
     resolver: Option<&dyn ShapeResolver>,
-    link_columns: bool,
+    link_predicates: &[String],
 ) -> InstanceQueryPlan {
+    let link_columns = !link_predicates.is_empty();
     let (conformance, where_extra) = build_query_patterns(shape, query, resolver);
     let guard = LinkGuard::of(query);
 
@@ -364,16 +365,51 @@ pub(super) fn build_instance_sparql(
         } else {
             ("", "")
         };
-        InstanceQueryPlan::Single(format!(
-            r#"SELECT DISTINCT ?source ?predicate ?target ?author ?timestamp{link_select} WHERE {{
-{conformance}
-{where_extra}
-{predicate_filter}    ?source ?predicate ?target .
+        // The link rows: the reifier join, with `values` fixing the
+        // predicates and `optionals` the columns bound beyond the base five.
+        let link_rows = |values: &str, optionals: &str| {
+            format!(
+                r#"{values}    ?source ?predicate ?target .
     ?_reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?predicate ?target )>> .
     FILTER(isIRI(?source) && isIRI(?predicate))
     ?_reifier <ad4m://ontology/author> ?author .
     ?_reifier <ad4m://ontology/timestamp> ?timestamp .
-{link_status}{proof_valid}{link_optionals}{local_status}}}"#
+{link_status}{proof_valid}{optionals}{local_status}"#
+            )
+        };
+        let values_of = |predicates: Vec<&str>| {
+            let values: String = predicates
+                .iter()
+                .map(|p| format!("<{p}>"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            format!("    VALUES ?predicate {{ {values} }}\n")
+        };
+        // The provenance columns join every hydrated row (the reifier's
+        // five optional annotations), so they are bound only for the
+        // predicates a `links` key serves: the rows split in two groups, and
+        // the rest (a class flag's `rdf:type` row on every instance, say)
+        // skips the joins. A wildcard fetch has no predicate list to split.
+        let others: Vec<&str> = needed
+            .iter()
+            .copied()
+            .filter(|p| !link_predicates.iter().any(|l| l == p))
+            .collect();
+        let rows = if link_columns && !needed.is_empty() && !others.is_empty() {
+            let served: Vec<&str> = link_predicates.iter().map(String::as_str).collect();
+            format!(
+                "    {{\n{}    }} UNION {{\n{}    }}\n",
+                link_rows(&values_of(served), link_optionals),
+                link_rows(&values_of(others), "")
+            )
+        } else {
+            link_rows(&predicate_filter, link_optionals)
+        };
+        InstanceQueryPlan::Single(format!(
+            r#"SELECT DISTINCT ?source ?predicate ?target ?author ?timestamp{link_select} WHERE {{
+{conformance}
+{where_extra}
+{rows}}}"#
         ))
     }
 }
@@ -2131,7 +2167,7 @@ mod tests {
     }
 
     fn pagination_subquery(shape: &ModelShape, pg: &SparqlPagination) -> String {
-        match build_instance_sparql(shape, &ModelQueryInput::default(), Some(pg), None, false) {
+        match build_instance_sparql(shape, &ModelQueryInput::default(), Some(pg), None, &[]) {
             InstanceQueryPlan::TwoPhase {
                 pagination_subquery,
                 ..
@@ -2280,7 +2316,7 @@ mod tests {
     #[test]
     fn flag_initial_that_is_not_an_iri_takes_the_str_fallback() {
         let s = shape("Todo", vec![flag("done", "todo://done", "true")]);
-        let plan = build_instance_sparql(&s, &ModelQueryInput::default(), None, None, false);
+        let plan = build_instance_sparql(&s, &ModelQueryInput::default(), None, None, &[]);
         let sparql = match plan {
             InstanceQueryPlan::Single(q) => q,
             InstanceQueryPlan::TwoPhase { .. } => panic!("expected Single plan"),
@@ -2295,7 +2331,7 @@ mod tests {
         );
         // And an initial that IS a real IRI keeps the seekable form.
         let s = shape("Todo", vec![flag("done", "todo://done", "todo://yes")]);
-        let plan = build_instance_sparql(&s, &ModelQueryInput::default(), None, None, false);
+        let plan = build_instance_sparql(&s, &ModelQueryInput::default(), None, None, &[]);
         let sparql = match plan {
             InstanceQueryPlan::Single(q) => q,
             InstanceQueryPlan::TwoPhase { .. } => panic!("expected Single plan"),
@@ -3608,7 +3644,7 @@ mod traverse_scope_tests {
             Some(3),
         ));
         let pg = make_pg(SortKey::Timestamp, OrderDirection::ASC);
-        let sparql = match build_instance_sparql(&traverse_shape(), &q, Some(&pg), None, false) {
+        let sparql = match build_instance_sparql(&traverse_shape(), &q, Some(&pg), None, &[]) {
             InstanceQueryPlan::TwoPhase {
                 pagination_subquery,
                 ..
@@ -3694,7 +3730,7 @@ mod traverse_scope_tests {
             SortKey::Projection("test://has-like".to_string()),
             OrderDirection::DESC,
         );
-        let sparql = match build_instance_sparql(&traverse_shape(), &q, Some(&pg), None, false) {
+        let sparql = match build_instance_sparql(&traverse_shape(), &q, Some(&pg), None, &[]) {
             InstanceQueryPlan::TwoPhase {
                 pagination_subquery,
                 ..
@@ -3721,7 +3757,7 @@ mod traverse_scope_tests {
             SortKey::Projection("test://has-like".to_string()),
             OrderDirection::DESC,
         );
-        let sparql = match build_instance_sparql(&traverse_shape(), &q, Some(&pg), None, false) {
+        let sparql = match build_instance_sparql(&traverse_shape(), &q, Some(&pg), None, &[]) {
             InstanceQueryPlan::TwoPhase {
                 pagination_subquery,
                 ..

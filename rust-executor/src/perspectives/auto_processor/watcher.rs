@@ -308,12 +308,16 @@ pub struct WatcherState {
 }
 
 impl WatcherState {
-    /// Feed `result_json` (a `model_query` result) to `processor_id`'s
+    /// Feed the `instances` of a `model_query` result to `processor_id`'s
     /// trigger, so its `near`/`via` rules match writes on the instances the
     /// last transcript read returned — e.g. an edit to a message's text.
-    pub(crate) fn set_trigger_result(&mut self, processor_id: &str, result_json: &str) {
+    pub(crate) fn set_trigger_result(
+        &mut self,
+        processor_id: &str,
+        instances: &[serde_json::Value],
+    ) {
         if let Some(trigger) = self.triggers.get_mut(processor_id) {
-            *trigger = trigger.with_result(result_json);
+            *trigger = trigger.with_instances(instances);
         }
     }
 }

@@ -3237,7 +3237,7 @@ async fn test_build_instance_sparql_scalar_only_model_uses_values_clause() {
         scalar_prop("description", "flux://description", false, false),
     ]);
     let query = ModelQueryInput::default();
-    let sparql = build_instance_sparql(&shape, &query, None, None, false).into_single();
+    let sparql = build_instance_sparql(&shape, &query, None, None, &[]).into_single();
 
     assert!(
         sparql.contains("VALUES ?predicate"),
@@ -3271,7 +3271,7 @@ async fn test_build_instance_sparql_excludes_getter_backed_collections() {
         ),
     ]);
     let query = ModelQueryInput::default();
-    let sparql = build_instance_sparql(&shape, &query, None, None, false).into_single();
+    let sparql = build_instance_sparql(&shape, &query, None, None, &[]).into_single();
 
     assert!(
         sparql.contains("VALUES ?predicate"),
@@ -3305,7 +3305,7 @@ async fn test_build_instance_sparql_retains_raw_predicate_collections() {
         ),
     ]);
     let query = ModelQueryInput::default();
-    let sparql = build_instance_sparql(&shape, &query, None, None, false).into_single();
+    let sparql = build_instance_sparql(&shape, &query, None, None, &[]).into_single();
 
     assert!(sparql.contains("VALUES ?predicate"));
     assert!(sparql.contains("<flux://entry_type>"));
@@ -3336,7 +3336,7 @@ async fn test_build_instance_sparql_shared_predicate_mixed_getter() {
         ),
     ]);
     let query = ModelQueryInput::default();
-    let sparql = build_instance_sparql(&shape, &query, None, None, false).into_single();
+    let sparql = build_instance_sparql(&shape, &query, None, None, &[]).into_single();
 
     assert!(sparql.contains("VALUES ?predicate"));
     // ad4m://has_child should appear because raw_children needs it
@@ -3352,7 +3352,7 @@ async fn test_build_instance_sparql_empty_shape_falls_back_to_wildcard() {
     // unrestricted wildcard (no VALUES clause).
     let shape = make_shape(vec![]);
     let query = ModelQueryInput::default();
-    let sparql = build_instance_sparql(&shape, &query, None, None, false).into_single();
+    let sparql = build_instance_sparql(&shape, &query, None, None, &[]).into_single();
 
     assert!(
         !sparql.contains("VALUES ?predicate"),
@@ -3372,7 +3372,7 @@ async fn test_build_instance_sparql_values_clause_is_deduplicated() {
         scalar_prop("name", "ns://name", false, false),
     ]);
     let query = ModelQueryInput::default();
-    let sparql = build_instance_sparql(&shape, &query, None, None, false).into_single();
+    let sparql = build_instance_sparql(&shape, &query, None, None, &[]).into_single();
 
     assert!(sparql.contains("VALUES ?predicate"));
     // Count occurrences of the shared predicate in the VALUES clause
@@ -10176,6 +10176,96 @@ async fn a_member_is_dated_and_attributed_by_its_own_link() {
         rows[0]["data"]["predicate"],
         json!("role://member"),
         "a name resolves to the predicate the shape declares"
+    );
+}
+
+/// The instance query binds the provenance columns only for the predicates
+/// a `links` key serves: the class's other rows (the flag, `name`) join no
+/// reifier annotation. The rows a key reads are the same full signed links
+/// either way, and an instance's own fields do not move.
+#[tokio::test]
+async fn links_provenance_is_bound_for_the_requested_predicates_only() {
+    let store = SparqlStore::new(None).unwrap();
+    let role = "role://instance/1";
+    let alice = "did:key:zAlice";
+    let bob = "did:key:zBob";
+    seed_role(&store, role, alice, false);
+    store
+        .add_link(&link_by(
+            "did:key:zMallory",
+            role,
+            "role://member",
+            bob,
+            ROLE_T2,
+        ))
+        .unwrap();
+
+    let plain = fixture_query_from_json(
+        &store,
+        "Reviewer",
+        &ModelQueryInput::default(),
+        ROLE_SHAPE_JSON,
+    )
+    .await
+    .unwrap();
+
+    let before = store.queries_run().len();
+    let result = fixture_query_from_json(
+        &store,
+        "Reviewer",
+        &links_query(&["members"]),
+        ROLE_SHAPE_JSON,
+    )
+    .await
+    .unwrap();
+    let issued = store.queries_run().split_off(before);
+    let hydration: Vec<&String> = issued.iter().filter(|q| q.contains("?proofKey")).collect();
+    assert_eq!(
+        hydration.len(),
+        1,
+        "one query carries provenance: {issued:?}"
+    );
+    let sparql = hydration[0];
+    let (served, rest) = sparql.split_once("UNION").expect("the rows split in two");
+    assert!(served.contains("<role://member>") && served.contains("OPTIONAL"));
+    assert!(
+        !rest.contains("<role://member>")
+            && rest.contains("<role://name>")
+            && !rest.contains("OPTIONAL"),
+        "the other predicates bind no provenance column: {rest}"
+    );
+
+    let inst = &result.instances[0];
+    let rows = inst["__links"]["members"].as_array().expect("member rows");
+    let parsed: Vec<LinkExpression> = rows
+        .iter()
+        .map(|r| serde_json::from_value(r.clone()).expect("LinkExpression"))
+        .collect();
+    assert_eq!(
+        parsed,
+        vec![
+            link_by(ROLE_ADMIN, role, "role://member", alice, ROLE_T1),
+            link_by("did:key:zMallory", role, "role://member", bob, ROLE_T2),
+        ]
+    );
+    let mut stripped = inst.clone();
+    stripped.as_object_mut().unwrap().remove("__links");
+    assert_eq!(stripped, plain.instances[0], "the instance is unchanged");
+
+    // Every fetched predicate asked for: nothing to split off.
+    let before = store.queries_run().len();
+    fixture_query_from_json(
+        &store,
+        "Reviewer",
+        &links_query(&["members", "name", "type"]),
+        ROLE_SHAPE_JSON,
+    )
+    .await
+    .unwrap();
+    let issued = store.queries_run().split_off(before);
+    assert!(
+        issued.iter().all(|q| !q.contains("UNION")),
+        "no predicate is left over: {issued:?}"
     );
 }
 

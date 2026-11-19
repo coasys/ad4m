@@ -177,11 +177,20 @@ fn served_predicates<'a>(shape: &ModelShape, keys: &'a [(String, String)]) -> Ha
         .collect()
 }
 
-/// Whether the instance query must carry the `__links` provenance columns:
-/// any `links` key that is served from the hydration rows needs them (see
-/// [`attach_links`]). `keys` is the already-resolved `links` request.
-pub(super) fn hydration_carries_links(shape: &ModelShape, keys: &[(String, String)]) -> bool {
-    !served_predicates(shape, keys).is_empty()
+/// The predicates whose `__links` rows the instance query serves: the ones
+/// whose provenance columns (see [`attach_links`]) it must bind, and no
+/// others. `keys` is the already-resolved `links` request; empty when no
+/// key is served this way, which is when the query carries no columns.
+pub(super) fn hydration_link_predicates(
+    shape: &ModelShape,
+    keys: &[(String, String)],
+) -> Vec<String> {
+    let mut served: Vec<String> = served_predicates(shape, keys)
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    served.sort();
+    served
 }
 
 /// Attach [`LINKS_KEY`] to every instance in `instances`.
@@ -198,7 +207,7 @@ pub(super) fn hydration_carries_links(shape: &ModelShape, keys: &[(String, Strin
 /// ([`InstanceLinkRow::rank`](super::types::InstanceLinkRow::rank) is the
 /// order both pick by) — and no second query runs for them. `hydrated` is
 /// `Some` only when the instance query selected the provenance columns,
-/// which `hydration_carries_links` decides. Keys on any other predicate are
+/// which `hydration_link_predicates` decides. Keys on any other predicate are
 /// read with one query over just those predicates, restricted to the page.
 ///
 /// `local: true` properties get the same `LinkStatus::Local` restriction the
@@ -382,15 +391,26 @@ pub(super) async fn attach_links(
         }
     }
 
+    // An instance's rows move out of `found` unless another reader needs
+    // them: two keys naming one predicate, or two instances sharing an id
+    // (a source once per anchor), which each get a copy.
+    let one_key_each = ids.len() == instances.len()
+        && keys
+            .iter()
+            .map(|(_, p)| p.as_str())
+            .collect::<HashSet<_>>()
+            .len()
+            == keys.len();
     for inst in instances.iter_mut() {
         let id = inst["id"].as_str().unwrap_or("").to_string();
         let mut out = Map::new();
         for (key, predicate) in keys {
-            let rows = found
-                .get(&id)
-                .and_then(|p| p.get(predicate))
-                .cloned()
-                .unwrap_or_default();
+            let rows = if one_key_each {
+                found.get_mut(&id).and_then(|p| p.remove(predicate))
+            } else {
+                found.get(&id).and_then(|p| p.get(predicate)).cloned()
+            }
+            .unwrap_or_default();
             out.insert(key.clone(), Value::Array(rows));
         }
         if let Value::Object(obj) = inst {

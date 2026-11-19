@@ -14,7 +14,7 @@ use super::hydration::{
     filter_properties, group_results_by_source, hydrate_instances, ALWAYS_KEPT,
 };
 use super::link_author::refuse_unanswerable_link_author;
-use super::links::{attach_links, hydration_carries_links, resolve_link_keys};
+use super::links::{attach_links, hydration_link_predicates, resolve_link_keys};
 use super::projection::resolve_projections;
 use super::relations::{resolve_includes_recursive, resolve_reverse_relations};
 use super::sparql_builder::{
@@ -317,7 +317,7 @@ async fn walk_levels(
         level_input.offset = None;
 
         let plan =
-            build_instance_sparql(shape, &level_input, Some(pagination), Some(resolver), false);
+            build_instance_sparql(shape, &level_input, Some(pagination), Some(resolver), &[]);
         let InstanceQueryPlan::TwoPhase {
             pagination_subquery,
             ..
@@ -624,8 +624,10 @@ pub(super) async fn execute_model_query_inner(
     };
     // A `links` key on a predicate the instance query fetches is served from
     // the hydration rows — `attach_links` then needs their provenance columns
-    // in every plan's row SELECT, which this one flag carries through.
-    let link_columns = hydration_carries_links(shape, &link_keys);
+    // in every plan's row SELECT, which this flag carries through; the
+    // single plan binds them for those predicates only.
+    let link_predicates = hydration_link_predicates(shape, &link_keys);
+    let link_columns = !link_predicates.is_empty();
 
     // Fast path: COUNT-only
     //
@@ -884,7 +886,7 @@ pub(super) async fn execute_model_query_inner(
         query_input,
         sparql_pagination.as_ref(),
         Some(resolver),
-        link_columns,
+        &link_predicates,
     );
 
     // Captures the source IRI order returned by the phase-1 pagination subquery
