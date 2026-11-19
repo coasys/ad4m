@@ -15,7 +15,7 @@
 //! Gated behind `#[ignore = "llm-e2e"]` so a `cargo test` on a dev box with no
 //! model reachable does not fail on the suite; regular CI skips it too. The
 //! nightly `llm-e2e` workflow runs them against that llama-server. Embeddings
-//! (`nomic-embed-text`) stay on Ollama at `:11434`.
+//! (`nomic-embed-text`) are a second llama-server at `:12461`.
 //!
 //! Run this suite locally:
 //!   `cargo test --release --lib perspectives::interpretation_e2e -- --ignored
@@ -1343,12 +1343,13 @@ async fn e2e_flux_grouping_scoped_incremental_lifecycle() {
 /// wording, then feeds a transcript that reintroduces the SAME task under
 /// different words + adds a genuinely new one. The default (`NormalizedString`)
 /// strategy would let the reworded duplicate through; the semantic strategy
-/// (via `nomic-embed-text` on Ollama, not on the llama-server the LLM uses) must
-/// catch it, so no fresh instance carries a title semantically equal to the seed.
+/// (via `nomic-embed-text` on llama-server at `:12461`, not on the chat
+/// llama-server the LLM uses) must catch it, so no fresh instance carries a
+/// title semantically equal to the seed.
 ///
-/// Requires `nomic-embed-text` on the embeddings endpoint (Ollama at `:11434`).
-/// Base URL/model overridable via `INTERPRETATION_EMBED_BASE_URL` /
-/// `INTERPRETATION_EMBED_MODEL` (defaults `http://127.0.0.1:11434/v1` +
+/// Requires `nomic-embed-text` on the embeddings endpoint (llama-server at
+/// `:12461`). Base URL/model overridable via `INTERPRETATION_EMBED_BASE_URL` /
+/// `INTERPRETATION_EMBED_MODEL` (defaults `http://127.0.0.1:12461/v1` +
 /// `nomic-embed-text`).
 #[tokio::test]
 #[ignore = "llm-e2e"]

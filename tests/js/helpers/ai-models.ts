@@ -1,13 +1,13 @@
 import type { Ad4mClient, EndpointKind } from "@coasys/ad4m";
 
 /**
- * Staging's llama-server, one slot at `-c 65536`. The nightly `llm-e2e` job
+ * Staging's llama-server, one slot at `-c 98304`. The nightly `llm-e2e` job
  * points here and does not start a server of its own.
  */
-export const E2E_SERVER_SLOT_TOKENS = 65_536;
+export const E2E_SERVER_SLOT_TOKENS = 98_304;
 
 /**
- * Context budget handed to the executor. The slot is 65536; the chat template
+ * Context budget handed to the executor. The slot is 98304; the chat template
  * and the server's reasoning budget (2048) sit on top of what we send, so the
  * default stays 8192 under the slot. A request that fills the slot is refused.
  */
@@ -80,7 +80,7 @@ export const E2E_PASS_TIMEOUT_MS = 600_000;
  * included, does not send tools unless the model says so, and the
  * prompt-injected path is the one that 500s against a Qwen tool parser.
  * `maxNumCtx` is the budget the executor sizes prompts to. It is not a
- * per-request context the server applies — the slot is already 65536 — and
+ * per-request context the server applies — the slot is already 98304 — and
  * it stays under that slot.
  *
  * The endpoint is saved once per executor and reused after.

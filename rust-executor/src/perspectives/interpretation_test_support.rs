@@ -13,9 +13,9 @@
 //! is started with `--jinja`, so tool definitions come back as `tool_calls`.
 //! The model flag `native_tools` is set: an OpenAI-shaped endpoint leaves it
 //! off otherwise, and the prompt-injected path is what Ollama's Qwen parser
-//! answers with a 500. Embeddings stay on Ollama's `nomic-embed-text`
-//! (`INTERPRETATION_EMBED_*`, default `http://127.0.0.1:11434/v1`): the chat
-//! server does not serve them.
+//! answers with a 500. Embeddings are a second llama-server
+//! (`INTERPRETATION_EMBED_*`, default `http://127.0.0.1:12461/v1`, alias
+//! `nomic-embed-text`): the chat server does not serve them.
 
 #![cfg(test)]
 
@@ -267,14 +267,23 @@ pub(crate) async fn setup_perspective_no_llm(
 
 // ---- real-LLM harness (llama-server /v1) ------------------------------------
 
-/// The chat server's one slot (`-c 65536`). A request that fills it is refused.
-const E2E_SERVER_SLOT_TOKENS: u32 = 65_536;
+/// The chat server's one slot (`-c 98304`). A request that fills it is refused.
+const E2E_SERVER_SLOT_TOKENS: u32 = 98_304;
 /// Default context budget: the slot minus room for the chat template and the
 /// server's reasoning budget (2048). Requests stay under the slot.
 const E2E_MAX_NUM_CTX_DEFAULT: u32 = E2E_SERVER_SLOT_TOKENS - 8_192;
 /// One completion may wait behind another request on the single slot, then
 /// generate. Long enough for a few minutes of queueing, not unbounded.
 const E2E_REQUEST_TIMEOUT_DEFAULT: u32 = 900;
+
+/// Live `llama-qwen27b.service` is `-c 98304`. The budget stays 8192 under
+/// that slot (chat template plus the server's reasoning budget of 2048).
+#[test]
+fn e2e_context_budget_stays_under_the_live_slot() {
+    assert_eq!(E2E_SERVER_SLOT_TOKENS, 98_304);
+    assert!(E2E_MAX_NUM_CTX_DEFAULT < E2E_SERVER_SLOT_TOKENS);
+    assert_eq!(E2E_SERVER_SLOT_TOKENS - E2E_MAX_NUM_CTX_DEFAULT, 8_192);
+}
 
 fn e2e_max_num_ctx() -> u32 {
     let requested = std::env::var("INTERPRETATION_E2E_MAX_NUM_CTX")
@@ -370,7 +379,7 @@ pub(crate) async fn setup_interpretation_e2e(
     // the harness writes `<tool_call>` into the prompt. llama-server `--jinja`
     // honours the definitions and returns `tool_calls`. `max_num_ctx` is the
     // budget the executor sizes the prompt to; it is not sent to the server
-    // (the slot is fixed at 65536) and stays under that slot.
+    // (the slot is fixed at 98304) and stays under that slot.
     let endpoint = e2e_endpoint(
         "e2e-llm",
         kind,
@@ -402,16 +411,17 @@ pub(crate) async fn setup_interpretation_e2e(
 /// embeds identity strings with.
 ///
 /// `INTERPRETATION_EMBED_MODEL` is both the name `semantic_from_env` looks up and the
-/// remote model id. Set, it is the Ollama tag (`nomic-embed-text` in CI). Unset, the
-/// registered name is `interpretation-embed` and the remote id is `nomic-embed-text`.
-/// Callers that name the model themselves must use `semantic_from_env`, or a set
-/// variable registers a model they do not look up and dedup compares strings.
+/// remote model id. Set, it is the llama-server alias (`nomic-embed-text` in CI).
+/// Unset, the registered name is `interpretation-embed` and the remote id is
+/// `nomic-embed-text`. Callers that name the model themselves must use
+/// `semantic_from_env`, or a set variable registers a model they do not look up
+/// and dedup compares strings.
 ///
-/// The endpoint is OpenAI-shaped at `INTERPRETATION_EMBED_BASE_URL` (default Ollama at
-/// `http://127.0.0.1:11434/v1`). It does not follow the LLM URL: llama-server is a
-/// chat slot and does not embed. `INTERPRETATION_EMBED_API_KEY` when the endpoint
-/// wants one. Only the semantic-dedup e2e needs it, so it isn't part of the
-/// default setup.
+/// The endpoint is OpenAI-shaped at `INTERPRETATION_EMBED_BASE_URL` (default
+/// `http://127.0.0.1:12461/v1`, `llama-nomic-embed.service`). It does not follow
+/// the chat URL: that llama-server is one slot and does not embed.
+/// `INTERPRETATION_EMBED_API_KEY` when the endpoint wants one. Only the
+/// semantic-dedup e2e needs it, so it isn't part of the default setup.
 pub(crate) async fn register_interpretation_embedding_model() {
     use crate::types::{ModelInput, ModelType};
     let service = crate::ai_service::AIService::global_instance()
@@ -419,7 +429,7 @@ pub(crate) async fn register_interpretation_embedding_model() {
         .expect("AIService global instance");
     let model = std::env::var("INTERPRETATION_EMBED_MODEL").ok();
     let base_url = std::env::var("INTERPRETATION_EMBED_BASE_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:11434/v1".into());
+        .unwrap_or_else(|_| "http://127.0.0.1:12461/v1".into());
     let remote_model = model.clone().unwrap_or_else(|| "nomic-embed-text".into());
     eprintln!("[e2e] semantic dedup embeds with '{remote_model}' at {base_url}");
     let endpoint = e2e_endpoint(
@@ -444,8 +454,8 @@ pub(crate) async fn register_interpretation_embedding_model() {
 
 /// The `kind` endpoint at `base_url` with `api_key`, `max_num_ctx` and
 /// `request_timeout_secs`: the one saved already, else a new one named `name`,
-/// saved without a probe. The LLM is llama-server; embeddings are a separate
-/// OpenAI-shaped endpoint on Ollama.
+/// saved without a probe. The LLM is the chat llama-server; embeddings are a
+/// separate OpenAI-shaped llama-server.
 fn e2e_endpoint(
     name: &str,
     kind: crate::types::EndpointKind,

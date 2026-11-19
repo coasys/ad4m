@@ -26,7 +26,7 @@
  *   INTERPRETATION_E2E_BASE_URL (default http://127.0.0.1:12460/v1)
  *   INTERPRETATION_E2E_MODEL    (default qwen3.8-27b-ud-q4_k_m)
  *   INTERPRETATION_E2E_ENDPOINT_KIND (default LLAMA_SERVER)
- *   INTERPRETATION_E2E_MAX_NUM_CTX (default 57344, under the server's 65536 slot)
+ *   INTERPRETATION_E2E_MAX_NUM_CTX (default 90112, under the server's 98304 slot)
  *   INTERPRETATION_E2E_API_KEY  (unset: no key; llama-server takes none)
  * Tools go out as definitions (`nativeTools`). The context budget stays under
  * the server slot, so a request is not refused for filling it.

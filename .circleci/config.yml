@@ -958,9 +958,10 @@ jobs:
 
   # Runs everything gated by #[ignore = "llm-e2e"] (Rust) or LLM_E2E=1 (JS).
   # The suites prompt staging's llama-server (llama-qwen27b.service on
-  # :12460). This job does not start a server and does not load a model:
-  # the GPU already holds that one. Embeddings stay on Ollama's
-  # nomic-embed-text. Too slow + occasionally flaky for per-push CI, so
+  # :12460, -c 98304). This job does not start a server and does not load a
+  # model: the GPU already holds that one. Embeddings are a second
+  # llama-server (llama-nomic-embed.service on :12461, alias
+  # nomic-embed-text). Too slow + occasionally flaky for per-push CI, so
   # they run once nightly against `dev` via a scheduled pipeline
   # (`run-nightly-llm: true`).
   #
@@ -975,12 +976,13 @@ jobs:
       INTERPRETATION_E2E_BASE_URL: http://127.0.0.1:12460/v1
       INTERPRETATION_E2E_MODEL: qwen3.8-27b-ud-q4_k_m
       INTERPRETATION_E2E_ENDPOINT_KIND: LLAMA_SERVER
-      # Under the server's one 65536-token slot. The chat template and the
-      # server's reasoning budget sit on top of what a request sends.
-      INTERPRETATION_E2E_MAX_NUM_CTX: "57344"
+      # Under the server's one 98304-token slot. The chat template and the
+      # server's reasoning budget (2048) sit on top of what a request sends,
+      # so the budget stays 8192 under the slot.
+      INTERPRETATION_E2E_MAX_NUM_CTX: "90112"
       # One completion may wait behind staging on that slot, then generate.
       INTERPRETATION_E2E_REQUEST_TIMEOUT_SECS: "900"
-      INTERPRETATION_EMBED_BASE_URL: http://127.0.0.1:11434/v1
+      INTERPRETATION_EMBED_BASE_URL: http://127.0.0.1:12461/v1
       INTERPRETATION_EMBED_MODEL: nomic-embed-text
     steps:
       # Skip-if-unchanged: only run the expensive suite when dev has moved
@@ -1042,17 +1044,31 @@ jobs:
               exit 1
             fi
             echo "llama-server lists ${MODEL}"
-            if ! TAGS=$(curl -sfL --max-time 10 "http://127.0.0.1:11434/api/tags"); then
-              echo "Ollama at :11434 did not answer /api/tags."
-              echo "Embeddings (nomic-embed-text) stay on Ollama. The LLM does not. This job does not pull models."
+            EMBED_BASE="${INTERPRETATION_EMBED_BASE_URL:?INTERPRETATION_EMBED_BASE_URL is unset}"
+            EMBED_MODEL="${INTERPRETATION_EMBED_MODEL:?INTERPRETATION_EMBED_MODEL is unset}"
+            EMBED_ROOT="${EMBED_BASE%/v1}"
+            EMBED_ROOT="${EMBED_ROOT%/}"
+            echo "Checking llama-server at ${EMBED_ROOT} for model ${EMBED_MODEL}"
+            if ! EMBED_HEALTH=$(curl -sfL --max-time 10 "${EMBED_ROOT}/health"); then
+              echo "llama-server is not healthy at ${EMBED_ROOT}/health."
+              echo "The llm-e2e job uses staging's already-running llama-nomic-embed.service and does not start a server."
+              echo "Repair that unit before rerunning. This job will not load another model."
               exit 1
             fi
-            if ! echo "$TAGS" | jq -e '[.models[]?.name] | any(. == "nomic-embed-text" or . == "nomic-embed-text:latest" or startswith("nomic-embed-text:"))' >/dev/null; then
-              echo "Ollama at :11434 does not list nomic-embed-text."
-              echo "The semantic-dedup e2e needs that embedding model. This job does not pull models."
+            echo "health: ${EMBED_HEALTH}"
+            if ! EMBED_MODELS=$(curl -sfL --max-time 15 "${EMBED_ROOT}/v1/models"); then
+              echo "GET ${EMBED_ROOT}/v1/models failed."
+              echo "llama-nomic-embed.service should be serving ${EMBED_MODEL}. This job does not start a server."
               exit 1
             fi
-            echo "Ollama lists nomic-embed-text"
+            if ! echo "$EMBED_MODELS" | jq -e --arg m "$EMBED_MODEL" '[(.data // [])[]?.id, (.models // [])[]?.id] | index($m) != null' >/dev/null; then
+              echo "llama-server at ${EMBED_ROOT} does not list model alias ${EMBED_MODEL}."
+              echo "Expected the alias served by llama-nomic-embed.service. This job does not start a server or load a model."
+              echo "Models response:"
+              echo "$EMBED_MODELS"
+              exit 1
+            fi
+            echo "llama-server lists ${EMBED_MODEL}"
       # Build here: this pipeline has no `build` job, and the stash of an
       # older `build` for this SHA may already be deleted.
       - setup_integration_test_environment:

@@ -192,7 +192,7 @@ async fn harness_tight_budget_exits_cleanly_no_crash() {
 
 /// Local reproduction of the TS integration test
 /// `tests/js/tests/model/run-interpretation-harness.test.ts`, but purely
-/// Rust-side so it can be iterated against Marvin's Ollama without waiting on
+/// Rust-side so it can be iterated against staging's llama-server without waiting on
 /// the full JS suite.
 ///
 /// Seeds three `Belief` instances at known URIs, offers both `Belief` and

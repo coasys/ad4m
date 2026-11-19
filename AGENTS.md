@@ -120,10 +120,11 @@ Each job has its own serial group. The jobs: `llm-e2e`,
 `llm-e2e` runs the ignored Rust interpretation suites and the JS suites gated
 by `LLM_E2E=1`. It does not start a model server. It prompts staging's
 llama-server at `http://127.0.0.1:12460/v1` (alias `qwen3.8-27b-ud-q4_k_m`,
-kind `LLAMA_SERVER`, context budget 57344 under the server's 65536-token
-slot) and embeds with Ollama's `nomic-embed-text` on `:11434`. A preflight
-checks `/health` and that `/v1/models` lists the alias, and fails the job
-when the unit is down. Requests share that one slot with staging's own AI
+kind `LLAMA_SERVER`, context budget 90112 under the server's 98304-token
+slot) and embeds with `nomic-embed-text` on a second llama-server at
+`http://127.0.0.1:12461/v1` (`llama-nomic-embed.service`). A preflight
+checks `/health` and that `/v1/models` lists each alias, and fails the job
+when a unit is down. Requests share that one chat slot with staging's own AI
 processing.
 
 `coasys-spaces` runs WE's product suite (`pnpm --filter @we/app-web test:spaces`,

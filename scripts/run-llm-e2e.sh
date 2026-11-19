@@ -17,11 +17,12 @@
 #   INTERPRETATION_E2E_BASE_URL      (default http://127.0.0.1:12460/v1)
 #   INTERPRETATION_E2E_MODEL         (default qwen3.8-27b-ud-q4_k_m)
 #   INTERPRETATION_E2E_ENDPOINT_KIND (default LLAMA_SERVER)
-#   INTERPRETATION_E2E_MAX_NUM_CTX   (default 57344, under the 65536 slot)
+#   INTERPRETATION_E2E_MAX_NUM_CTX   (default 90112, under the 98304 slot)
 #   INTERPRETATION_E2E_REQUEST_TIMEOUT_SECS (default 900)
 #   INTERPRETATION_E2E_API_KEY       (unset: llama-server takes no key)
-# Embeddings stay on Ollama's nomic-embed-text:
-#   INTERPRETATION_EMBED_BASE_URL    (default http://127.0.0.1:11434/v1)
+# Embeddings are a second llama-server (llama-nomic-embed.service), alias
+# nomic-embed-text. This script does not start it:
+#   INTERPRETATION_EMBED_BASE_URL    (default http://127.0.0.1:12461/v1)
 #   INTERPRETATION_EMBED_MODEL       (default nomic-embed-text)
 #
 # The Rust leg below is `cargo test --release`, matching the nightly job.
