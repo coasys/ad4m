@@ -206,6 +206,10 @@ fn perspective_calls(p: &str, class: &str, name: &str) -> Vec<(String, Value)> {
             "instance_get",
             json!({"class_name": class, "base_uri": base}),
         ),
+        (
+            "instance_search",
+            json!({"text": name, "class_name": class}),
+        ),
         ("instance_transcript", json!({"parent": base})),
         ("get_children", json!({"parent": base})),
         (
