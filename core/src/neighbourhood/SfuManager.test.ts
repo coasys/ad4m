@@ -959,7 +959,7 @@ test("joins that succeed while ICE keeps failing stop after three reconnects", a
 
     for (let i = 0; i < 4; i++) await iceState("failed")
 
-    expect(api.sfuCallLeave).toHaveBeenCalledTimes(3)
+    expect(api.sfuCallLeave).toHaveBeenCalledTimes(4) // 3 rebuilds, then the end leaves the last session
     expect(errors).toEqual([new Error("SFU reconnect attempts exhausted")])
 })
 
@@ -2044,7 +2044,7 @@ test("at most three rebuilds in two minutes, even when ICE connects in between; 
             await jest.advanceTimersByTimeAsync(10_000)
         }
 
-        expect(api.sfuCallLeave).toHaveBeenCalledTimes(3)
+        expect(api.sfuCallLeave).toHaveBeenCalledTimes(4) // 3 rebuilds, then the end leaves the last session
         expect(api.sfuCallJoin).toHaveBeenCalledTimes(4)
         expect(errors).toEqual([new Error("SFU reconnect attempts exhausted")])
     } finally {
@@ -2079,7 +2079,7 @@ test("a new join by the user after the budget ran out starts with a fresh one", 
     const manager = new SfuManager(api, ROOM, ME, URL)
     await manager.join(fakeStream())
     for (let i = 0; i < 4; i++) await iceState("failed")
-    expect(api.sfuCallLeave).toHaveBeenCalledTimes(3)
+    expect(api.sfuCallLeave).toHaveBeenCalledTimes(4) // 3 rebuilds, then the end leaves the last session
 
     await manager.leave()
     await manager.join(fakeStream())
@@ -2454,4 +2454,30 @@ test("an SDP step that never settles on a dropped connection does not hold the r
 
     expect(rebuilt.remoteSdps()).toEqual(["server-answer", "after-rebuild"])
     await manager.leave()
+})
+
+test("a call that gave up rebuilding ends: `call-ended` with reason gave-up, its connection closed and its session left", async () => {
+    // Before, the manager kept a dead connection and only said `error`: the UI spun for ever.
+    const api = fakeApi()
+    const { manager, left } = recordedManager(api)
+    const ended: unknown[] = []
+    manager.on("call-ended", (event: unknown) => ended.push(event))
+    await manager.join(fakeStream())
+    api.emitRoster(roster([ALICE]))
+    await flush()
+
+    for (let i = 0; i < 4; i++) await iceState("failed")
+
+    expect(ended).toEqual([{ reason: "gave-up", error: new Error("SFU reconnect attempts exhausted") }])
+    expect(FakePeerConnection.instances.every((pc) => pc.closed)).toBe(true)
+    expect(manager.getState().peerConnection).toBeNull()
+    expect(manager.getState().participantId).toBeNull()
+    // Three rebuilds left their sessions, and the end left the last one.
+    expect(api.sfuCallLeave).toHaveBeenCalledTimes(4)
+    expect(left).toEqual([ALICE])
+    // Ended for good: no later signal rebuilds it.
+    api.emitNetworkChange()
+    api.emitReconnect()
+    await flush()
+    expect(api.sfuCallJoin).toHaveBeenCalledTimes(4)
 })

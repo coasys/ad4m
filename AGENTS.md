@@ -319,8 +319,10 @@ SFU stays the only offerer: the restart comes as a server renegotiation
 offer), and rebuilds the call if that has not reconnected within 15 s; after
 a socket reconnect or a network change it restarts ICE only if ICE is not
 connected 2 s later; a failed connection is rebuilt at once, a rebuild
-retries the join for 120 s, and after 3 rebuilds in 2 min the SDK stops
-rebuilding and emits `error` until the user joins again. A rebuild keeps
+retries the join for 120 s, and after 3 rebuilds in 2 min the SDK ends the
+call: it closes the connection, leaves the session, emits `error` and then
+`call-ended` (`{ reason: "gave-up" }`, also on the `Session`, which goes
+idle) for the UI to show; a new `join` starts over. A rebuild keeps
 the participants and clears only their media. Only an SDP the connection
 cannot apply rebuilds from a renegotiation: an answer the socket lost (503,
 408) is sent again once the socket is back, then the SDK calls

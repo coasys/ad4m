@@ -160,7 +160,17 @@ export type SfuEvent =
     | "stream-removed"
     /** `(SfuSessionReplaced)` — a later join from this device took the call over; this manager stopped. */
     | "replaced"
+    /** `(SfuCallEnded)` — the call ended on its own and will not come back without a new `join`:
+     *  the rebuild budget ran out (`reason: "gave-up"`). The manager has stopped. */
+    | "call-ended"
     | "error"
+
+/** Why a call ended without the user leaving it. */
+export interface SfuCallEnded {
+    /** `gave-up`: MAX_REBUILDS rebuilds within REBUILD_WINDOW_MS did not keep the call up. */
+    reason: "gave-up"
+    error: Error
+}
 
 export type SfuEventCallback = (...args: any[]) => void
 
@@ -432,8 +442,8 @@ export class SfuManager {
      * the manager stops as the notice would have stopped it, without retrying.
      *
      * Two budgets. At most `MAX_REBUILDS` rebuilds start within
-     * `REBUILD_WINDOW_MS`; one more stops rebuilding and emits `error`, until
-     * the user joins again. Within one rebuild, a join that fails because
+     * `REBUILD_WINDOW_MS`; one more ends the call (`endCall`): `error`, then
+     * `call-ended` with reason `gave-up`, until the user joins again. Within one rebuild, a join that fails because
      * the executor cannot be reached — a restart, an outage — is retried with backoff for up to
      * `REJOIN_WINDOW_MS`, so the call comes back on its own once it can.
      */
@@ -448,7 +458,9 @@ export class SfuManager {
             console.error(
                 `SFU: ${this.rebuilds.length} rebuilds in ${SfuManager.REBUILD_WINDOW_MS / 1000} s; not rebuilding again`,
             )
-            this.emit("error", new Error("SFU reconnect attempts exhausted"))
+            const error = new Error("SFU reconnect attempts exhausted")
+            this.emit("error", error)
+            this.endCall({ reason: "gave-up", error })
             return
         }
         this.rebuilds.push(now)
@@ -1161,6 +1173,19 @@ export class SfuManager {
         void this.leaveSession()
         this.resetParticipants()
         this.emit("replaced", event)
+    }
+
+    /**
+     * The call ended without the user leaving: stop as `leave` does, so no
+     * dead connection is left behind, and say why with `call-ended`. A new
+     * `join` starts the call again with a fresh rebuild budget.
+     */
+    private endCall(event: SfuCallEnded): void {
+        console.error(`SFU: the call ended (${event.reason})`)
+        this.stop()
+        void this.leaveSession()
+        this.resetParticipants()
+        this.emit("call-ended", event)
     }
 
     /** End this manager's call locally: no reconnect in flight continues, nothing is sent. */
