@@ -2442,6 +2442,156 @@ mod tests {
         assert_eq!(ids(&batch_b), vec!["b-1".to_string()]);
     }
 
+    /// The processor's `dedupStrategy` reaches the harness path (#1804; before, the harness
+    /// compared normalized titles only). A real harness pass through `run_one_pass`, no
+    /// `test_hooks::interpret` stand-in: a scripted model creates a Task whose title only
+    /// paraphrases an existing one. Under the processor's bands (threshold 0.5) the two are
+    /// the same row and the create becomes an update. With the default strategy (0.85, or
+    /// normalized titles) the paraphrase would stay a second Task.
+    #[tokio::test]
+    async fn run_one_pass_gives_the_harness_the_processors_dedup_strategy() {
+        use crate::perspectives::interpretation::embedding_cache::tests::{
+            word_embedder, word_vector,
+        };
+        use crate::perspectives::interpretation::search::cosine;
+        use crate::perspectives::interpretation_test_support::{
+            graph_titles_lower, seed_instance, TASK_SDNA,
+        };
+        use crate::types::{AiCapability, EndpointKind, ModelInput, ModelType};
+        use std::sync::atomic::AtomicUsize;
+
+        let (old, new) = (
+            "Finish the WebRTC calling module",
+            "WebRTC calling module work",
+        );
+        let score = cosine(&word_vector(old), &word_vector(new));
+        assert!(
+            (0.5..0.85).contains(&score),
+            "fixture: {score} must merge at 0.5 and not at the default 0.85"
+        );
+
+        let (mut p, shapes, ctx) = setup_perspective_no_llm(&[("Task", TASK_SDNA)]).await;
+        seed_instance(&mut p, &ctx, &shapes[0], "test://old/webrtc", old).await;
+        crate::ai_service::AIService::init_global_instance()
+            .await
+            .unwrap();
+        let service = crate::ai_service::AIService::global_instance()
+            .await
+            .unwrap();
+        let mut embed_server = mockito::Server::new_async().await;
+        let (embed_id, _) = word_embedder(
+            &mut embed_server,
+            &format!("fwd-embed-{}", uuid::Uuid::new_v4()),
+        )
+        .await;
+
+        // The model: one `task_create` with the paraphrase, then a text answer.
+        let asked = Arc::new(AtomicUsize::new(0));
+        let asked_in_mock = asked.clone();
+        let mut llm_server = mockito::Server::new_async().await;
+        let _llm = llm_server
+            .mock("POST", "/v1/chat/completions")
+            .with_body_from_request(move |request| {
+                let body: serde_json::Value =
+                    serde_json::from_slice(request.body().unwrap()).unwrap();
+                let first = asked_in_mock.fetch_add(1, Ordering::SeqCst) == 0;
+                let call = serde_json::json!([{
+                    "index": 0, "id": "call_1", "type": "function",
+                    "function": {
+                        "name": "task_create",
+                        "arguments": serde_json::json!({ "title": new, "type": "ns://task" })
+                            .to_string(),
+                    },
+                }]);
+                let (message, delta, finish) = if first {
+                    (
+                        serde_json::json!({ "role": "assistant", "content": null, "tool_calls": call }),
+                        serde_json::json!({ "role": "assistant", "tool_calls": call }),
+                        "tool_calls",
+                    )
+                } else {
+                    (
+                        serde_json::json!({ "role": "assistant", "content": "done" }),
+                        serde_json::json!({ "role": "assistant", "content": "done" }),
+                        "stop",
+                    )
+                };
+                if body.get("stream").and_then(|v| v.as_bool()) == Some(true) {
+                    let chunk = serde_json::json!({
+                        "id": "c", "object": "chat.completion.chunk", "created": 0, "model": "stub",
+                        "choices": [{ "index": 0, "delta": delta, "finish_reason": finish }],
+                    });
+                    format!("data: {chunk}\n\ndata: [DONE]\n\n").into_bytes()
+                } else {
+                    serde_json::json!({
+                        "id": "c", "object": "chat.completion", "created": 0, "model": "stub",
+                        "choices": [{ "index": 0, "finish_reason": finish, "message": message }],
+                        "usage": { "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2 },
+                    })
+                    .to_string()
+                    .into_bytes()
+                }
+            })
+            .expect_at_least(1)
+            .create_async()
+            .await;
+        let endpoint = crate::types::Endpoint {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: format!("fwd-llm-{}", uuid::Uuid::new_v4()),
+            kind: EndpointKind::Vllm,
+            base_url: url::Url::parse(&llm_server.url()).unwrap(),
+            api_key: crate::secret::Secret::new(uuid::Uuid::new_v4().to_string()),
+            capabilities: vec![AiCapability::Chat],
+            max_num_ctx: Some(32_768),
+            request_timeout_secs: None,
+            max_concurrent: None,
+            managed: false,
+            health: Default::default(),
+        };
+        crate::db::Ad4mDb::with_global_instance(|db| db.insert_endpoint(&endpoint)).unwrap();
+        let llm_id = crate::db::Ad4mDb::with_global_instance(|db| {
+            db.add_model(&ModelInput {
+                name: format!("fwd-llm-{}", uuid::Uuid::new_v4()),
+                model_type: ModelType::Llm,
+                endpoint_id: endpoint.id.clone(),
+                remote_model: "stub".into(),
+                native_tools: Some(true),
+            })
+        })
+        .unwrap();
+        service.reload_model(llm_id.clone()).await.unwrap();
+        service
+            .set_default_model(ModelType::Llm, llm_id)
+            .await
+            .unwrap();
+
+        let mut cfg = cfg("fwd", 100, 32);
+        cfg.interpretation_classes = vec![shapes[0].target_class.clone()];
+        cfg.max_tool_calls = Some(4);
+        cfg.dedup_strategy_json = Some(
+            serde_json::json!({
+                "kind": "semantic", "model": embed_id, "threshold": 0.5, "unclearFrom": 0.4,
+            })
+            .to_string(),
+        );
+        let items = vec![pt("We still have to do the WebRTC calling module work.")];
+        let now = chrono::Utc::now().timestamp_millis();
+        run_one_pass(&mut p, &cfg, &items, now, &ctx, false, 0)
+            .await
+            .expect("pass");
+
+        assert!(
+            asked.load(Ordering::SeqCst) >= 1,
+            "the harness asked the model"
+        );
+        let titles = graph_titles_lower(&p, &shapes).await;
+        assert_eq!(
+            titles,
+            vec![old.to_lowercase()],
+            "the paraphrase merged into the old Task under the processor's bands: {titles:?}"
+        );
+    }
+
     // ---- parse_dedup_strategy_json -----------------------------------------
 
     #[test]
