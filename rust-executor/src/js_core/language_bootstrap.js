@@ -75,6 +75,19 @@ if (typeof globalThis.LANGUAGE_CONTROLLER === "object" && globalThis.LANGUAGE_CO
     globalThis.LANGUAGE_CONTROLLER.writeStorageFile = function(path, content) {
         Deno.writeTextFileSync(path, content);
     };
+    // fsync a directory so a rename or creation in it is durable. Windows
+    // cannot open a directory as a file; there the step is skipped (NTFS
+    // journals the metadata change) rather than reporting a write that
+    // already landed as failed.
+    var syncStorageDir = function(dir) {
+        if (Deno.build.os === "windows") return;
+        var d = Deno.openSync(dir, { read: true });
+        try {
+            d.syncSync();
+        } finally {
+            d.close();
+        }
+    };
     // temp file in the same directory -> fsync -> rename over `path` ->
     // fsync the directory. Any failure throws; the temp file is removed.
     globalThis.LANGUAGE_CONTROLLER.writeStorageFileAtomic = function(path, content) {
@@ -82,7 +95,8 @@ if (typeof globalThis.LANGUAGE_CONTROLLER === "object" && globalThis.LANGUAGE_CO
         var dir = cut > 0 ? path.slice(0, cut) : ".";
         var tmp = path + ".tmp-" + crypto.randomUUID();
         var bytes = new TextEncoder().encode(String(content));
-        var file = Deno.openSync(tmp, { write: true, create: true, truncate: true });
+        // createNew: never write through a file or link already at the temp path
+        var file = Deno.openSync(tmp, { write: true, createNew: true });
         try {
             try {
                 var off = 0;
@@ -96,12 +110,7 @@ if (typeof globalThis.LANGUAGE_CONTROLLER === "object" && globalThis.LANGUAGE_CO
             try { Deno.removeSync(tmp); } catch (_) { /* already gone */ }
             throw e;
         }
-        var d = Deno.openSync(dir, { read: true });
-        try {
-            d.syncSync();
-        } finally {
-            d.close();
-        }
+        syncStorageDir(dir);
     };
     // Exclusive creation (O_EXCL): throws AlreadyExists when `path` exists,
     // so two writers can use it as a lock. Content written and fsynced, the
@@ -123,12 +132,7 @@ if (typeof globalThis.LANGUAGE_CONTROLLER === "object" && globalThis.LANGUAGE_CO
             try { Deno.removeSync(path); } catch (_) { /* already gone */ }
             throw e;
         }
-        var d = Deno.openSync(dir, { read: true });
-        try {
-            d.syncSync();
-        } finally {
-            d.close();
-        }
+        syncStorageDir(dir);
     };
     // Remove one file; throws NotFound when it does not exist.
     globalThis.LANGUAGE_CONTROLLER.removeStorageFile = function(path) {
