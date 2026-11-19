@@ -304,7 +304,13 @@ fn status_world() -> SparqlStore {
     let shared = |s: &str, p: &str, t: &str| ls_link(&signer, s, p, t, 1, LinkStatus::Shared);
     let mut links: Vec<LinkExpression> = ["Holder", "Shelf", "Base", "Special"]
         .iter()
-        .map(|c| shared(&format!("we://models/{c}"), "rdf://type", "ad4m://SubjectClass"))
+        .map(|c| {
+            shared(
+                &format!("we://models/{c}"),
+                "rdf://type",
+                "ad4m://SubjectClass",
+            )
+        })
         .collect();
     links.extend([
         shared("we://s/1", "we://flag", "we://shelf"),
@@ -316,7 +322,14 @@ fn status_world() -> SparqlStore {
         shared("we://t/1", "we://flag", "we://base"),
         shared("we://t/2", "we://flag", "we://base"),
         shared("we://t/3", "we://flag", "we://base"),
-        ls_link(&signer, "we://t/1", "we://kind", "we://special", 2, LinkStatus::Local),
+        ls_link(
+            &signer,
+            "we://t/1",
+            "we://kind",
+            "we://special",
+            2,
+            LinkStatus::Local,
+        ),
         shared("we://t/2", "we://kind", "we://special"),
     ]);
     let mut forged = shared("we://t/3", "we://kind", "we://signed-something-else");
