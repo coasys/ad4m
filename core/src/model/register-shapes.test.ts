@@ -119,6 +119,7 @@ describe("registerShapes payload", () => {
       conformance_conditions: [{ type: "flag", predicate: "ns://kind", value: "ns://x" }],
       class: "ns://OtherShape",
       relation_kind: "hasMany",
+      polymorphic: true,
       target_class_name: "Other",
       where_filter: { status: "open" },
       where_predicates: { status: "ns://status" },
