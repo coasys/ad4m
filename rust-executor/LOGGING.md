@@ -99,6 +99,25 @@ most-specific tag on the left.
   particular: one info at "start", one info at "done"; every internal
   round trip, tool call, or retry lives at debug or trace.
 
+## Call diagnostics (`[call-diag]`)
+
+Lines that say where a call's time went (sockets, slow RPCs, broadcasts, language
+queues) go through `call_diag!` (`src/call_diag.rs`): one line, the tag
+`[call-diag]` first, then `event=<name>` and `key=value` fields (a value with a
+space is quoted). `grep '\[call-diag\]'` lists them; `grep 'event=rpc.slow'`
+one kind. The events and their levels are in the module doc. Keep them at the
+level they have: they are the only record of a call that went wrong.
+
+## Changing the filter while running
+
+`runtime.setLogFilter { filter, ttlSeconds? }` (operator only; SDK
+`runtime.setLogFilter`) puts directives like `ws_rpc=debug,sfu=debug` over the
+startup filter for `ttlSeconds` (default 1800, at most 14400); then the
+startup filter is back by itself. `runtime.logFilter` reads both and the revert
+time. A directive name matches whole module path segments anywhere in a target
+(`ws_rpc` = `rust_executor::api::ws_rpc`); targets it does not name keep their
+startup level (`src/log_filter.rs`).
+
 ## Subscription branch naming
 
 Live queries in `perspectives/perspective_instance.rs` have two branches:
