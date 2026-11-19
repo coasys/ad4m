@@ -442,3 +442,85 @@ async fn polymorphic_target_admitted_by_the_read_keeps_its_specific_class() {
         expected
     );
 }
+
+/// A target the include's own `where` excludes under its selected class stays
+/// excluded: it must not come back as a less specific class whose read has no
+/// such property. `Special` declares `blocked`, `Base` does not.
+#[tokio::test]
+async fn polymorphic_target_excluded_by_where_under_its_class_stays_excluded() {
+    let (resolver, holder) = StaticShapeResolver::from_json(
+        "Holder",
+        r#"{"className":"Holder","properties":{
+             "flag":{"predicate":"we://flag","required":true,"flag":true,"initial":"we://holder"}
+           },"relations":{
+             "items":{"predicate":"we://holds","kind":"hasMany","targetClassName":"","polymorphic":true}
+           }}"#,
+    )
+    .unwrap();
+    for (name, json) in [
+        (
+            "Base",
+            r#"{"className":"Base","properties":{
+                 "flag":{"predicate":"we://flag","required":true,"flag":true,"initial":"we://base"}
+               },"relations":{}}"#,
+        ),
+        (
+            "Special",
+            r#"{"className":"Special","properties":{
+                 "flag":{"predicate":"we://flag","required":true,"flag":true,"initial":"we://base"},
+                 "kind":{"predicate":"we://kind","required":true,"flag":true,"initial":"we://special"},
+                 "blocked":{"predicate":"we://blocked","required":false,"resolveLanguage":"literal"}
+               },"relations":{}}"#,
+        ),
+    ] {
+        resolver.register(name, parse_shape_from_json(json, name).unwrap());
+    }
+    let store = SparqlStore::new(None).unwrap();
+    let mut links: Vec<LinkExpression> = ["Holder", "Base", "Special"]
+        .iter()
+        .map(|c| {
+            make_link(
+                &format!("we://models/{c}"),
+                "rdf://type",
+                "ad4m://SubjectClass",
+                "1",
+            )
+        })
+        .collect();
+    links.extend([
+        make_link("we://h/1", "we://flag", "we://holder", "1"),
+        make_link("we://h/1", "we://holds", "we://t/1", "1"),
+        make_link("we://h/1", "we://holds", "we://t/2", "1"),
+    ]);
+    for t in ["we://t/1", "we://t/2"] {
+        links.push(make_link(t, "we://flag", "we://base", "1"));
+        links.push(make_link(t, "we://kind", "we://special", "1"));
+    }
+    links.push(make_link(
+        "we://t/1",
+        "we://blocked",
+        "literal:string:blocked",
+        "1",
+    ));
+    links.push(make_link(
+        "we://t/2",
+        "we://blocked",
+        "literal:string:fine",
+        "1",
+    ));
+    for l in links {
+        store.add_link(&l).unwrap();
+    }
+
+    let query =
+        q(json!({ "include": { "items": { "where": { "blocked": { "not": "blocked" } } } } }));
+    let result = fixture_query(&store, holder.as_ref(), &query, &resolver)
+        .await
+        .unwrap();
+    assert_eq!(
+        item_classes(&result.instances[0]["items"]),
+        pairs(&[("we://t/2", "Special")]),
+        "{:?}",
+        result.instances
+    );
+}

@@ -43,10 +43,12 @@ use deno_core::anyhow::Error;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
+use super::model_query::sparql_builder::LinkGuard;
 use super::model_query::types::{ModelShape, ShapeResolver};
 use super::model_query::utils::looks_like_absolute_iri;
 use super::shacl_parser::ABSTRACT_PREDICATE;
 use super::sparql_store::{EvalStop, SparqlStore};
+use crate::types::LinkStatus;
 
 /// Every subject class registered in this perspective.
 ///
@@ -216,6 +218,42 @@ pub fn subject_classes_of_with_pending(
     uris: &[String],
     pending: &[(String, String, String)],
 ) -> Result<HashMap<String, Vec<String>>, Error> {
+    // Every link counts: the guard is open.
+    let open = LinkGuard {
+        status: None,
+        include_unverified: Some(true),
+    };
+    classify(stop, store, resolver, uris, pending, open)
+}
+
+/// [`subject_classes_of`], reading only the links a model query's
+/// `linkStatus` / `includeUnverified` admit: the same [`LinkGuard`] the
+/// query's own reads use, so a URI is classified as a class only through links
+/// a query for that class could also read. `None, None` is the query default
+/// (any status, verified links only), not "every link".
+pub fn subject_classes_of_guarded(
+    stop: &EvalStop,
+    store: &SparqlStore,
+    resolver: &dyn ShapeResolver,
+    uris: &[String],
+    link_status: Option<&LinkStatus>,
+    include_unverified: Option<bool>,
+) -> Result<HashMap<String, Vec<String>>, Error> {
+    let guard = LinkGuard {
+        status: link_status,
+        include_unverified,
+    };
+    classify(stop, store, resolver, uris, &[], guard)
+}
+
+fn classify(
+    stop: &EvalStop,
+    store: &SparqlStore,
+    resolver: &dyn ShapeResolver,
+    uris: &[String],
+    pending: &[(String, String, String)],
+    guard: LinkGuard,
+) -> Result<HashMap<String, Vec<String>>, Error> {
     let mut out: HashMap<String, Vec<String>> = HashMap::new();
     if uris.is_empty() {
         return Ok(out);
@@ -289,7 +327,7 @@ pub fn subject_classes_of_with_pending(
     }
 
     if !flag_preds.is_empty() {
-        let rows = fetch(stop, store, &values_clause, &flag_preds, true)?;
+        let rows = fetch(stop, store, &values_clause, &flag_preds, true, guard)?;
         for row in &rows {
             let (s, p, o) = match (row["s"].as_str(), row["p"].as_str(), row["o"].as_str()) {
                 (Some(s), Some(p), Some(o)) => (s, p, o),
@@ -309,7 +347,7 @@ pub fn subject_classes_of_with_pending(
     }
 
     if !presence_preds.is_empty() {
-        let rows = fetch(stop, store, &values_clause, &presence_preds, false)?;
+        let rows = fetch(stop, store, &values_clause, &presence_preds, false, guard)?;
         for row in &rows {
             let (s, p) = match (row["s"].as_str(), row["p"].as_str()) {
                 (Some(s), Some(p)) => (s, p),
@@ -362,6 +400,7 @@ fn fetch(
     values_clause: &str,
     preds: &HashSet<&str>,
     with_object: bool,
+    guard: LinkGuard,
 ) -> Result<Vec<Value>, Error> {
     let pred_values = preds
         .iter()
@@ -371,11 +410,13 @@ fn fetch(
 
     let query = if with_object {
         format!(
-            "SELECT DISTINCT ?s ?p ?o WHERE {{ VALUES ?s {{ {values_clause} }} VALUES ?p {{ {pred_values} }} ?s ?p ?o . }}"
+            "SELECT DISTINCT ?s ?p ?o WHERE {{ VALUES ?s {{ {values_clause} }} VALUES ?p {{ {pred_values} }} ?s ?p ?o .{} }}",
+            guard.exists("?s", "?p", "?o")
         )
     } else {
         format!(
-            "SELECT DISTINCT ?s ?p WHERE {{ VALUES ?s {{ {values_clause} }} VALUES ?p {{ {pred_values} }} ?s ?p ?_o . }}"
+            "SELECT DISTINCT ?s ?p WHERE {{ VALUES ?s {{ {values_clause} }} VALUES ?p {{ {pred_values} }} ?s ?p ?_o .{} }}",
+            guard.exists("?s", "?p", "?_o")
         )
     };
 
@@ -410,6 +451,74 @@ mod tests {
             order_by_specificity(&mut a),
             vec!["Alpha".to_string(), "Beta".to_string()]
         );
+    }
+
+    struct OneShape(std::sync::Arc<ModelShape>);
+
+    impl ShapeResolver for OneShape {
+        fn get_shape(&self, _: &str) -> Result<std::sync::Arc<ModelShape>, Error> {
+            Ok(self.0.clone())
+        }
+    }
+
+    /// A URI whose flag is a Local link is classified as the class only when
+    /// the guard admits Local links; the unguarded variant reads every link.
+    #[test]
+    fn test_guarded_classification_reads_only_admitted_links() {
+        use crate::agent::signatures::TestSigner;
+        use crate::types::{Link, LinkExpression};
+        use chrono::TimeZone;
+
+        let signer = TestSigner::generate();
+        let at = chrono::Utc.with_ymd_and_hms(2026, 9, 24, 12, 0, 1).unwrap();
+        let link = |s: &str, p: &str, t: &str, status: LinkStatus| {
+            let mut l = LinkExpression::from(signer.sign_at(
+                Link {
+                    source: s.to_string(),
+                    predicate: Some(p.to_string()),
+                    target: t.to_string(),
+                },
+                at,
+            ));
+            l.status = Some(status);
+            l
+        };
+        let store = SparqlStore::new(None).unwrap();
+        for l in [
+            link(
+                "ns://Special",
+                "rdf://type",
+                "ad4m://SubjectClass",
+                LinkStatus::Shared,
+            ),
+            link("ns://u", "ns://flag", "ns://special", LinkStatus::Local),
+        ] {
+            store.add_link(&l).unwrap();
+        }
+        let shape = super::super::model_query::shape::parse_shape_from_json(
+            r#"{"className":"Special","properties":{
+                 "flag":{"predicate":"ns://flag","required":true,"flag":true,"initial":"ns://special"}
+               },"relations":{}}"#,
+            "Special",
+        )
+        .unwrap();
+        let resolver = OneShape(std::sync::Arc::new(shape));
+        let stop = EvalStop::none();
+        let uris = vec!["ns://u".to_string()];
+        let special = Some(vec!["Special".to_string()]);
+
+        let guarded = |status: Option<&LinkStatus>| {
+            subject_classes_of_guarded(&stop, &store, &resolver, &uris, status, Some(true))
+                .unwrap()
+                .get("ns://u")
+                .cloned()
+        };
+        assert_eq!(guarded(Some(&LinkStatus::Shared)), None);
+        assert_eq!(guarded(Some(&LinkStatus::Local)), special);
+        assert_eq!(guarded(None), special);
+        // The unguarded variant reads every link.
+        let open = subject_classes_of(&stop, &store, &resolver, &uris).unwrap();
+        assert_eq!(open.get("ns://u").cloned(), special);
     }
 
     #[test]

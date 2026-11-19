@@ -348,19 +348,6 @@ pub(super) fn choose<'a>(matched: &'a [String], preferred: &[String]) -> Option<
         .or_else(|| matched.first())
 }
 
-/// Every class in `matched`, in the order [`choose`] picks from: the caller's
-/// preferred classes the target conforms to, then the rest by specificity.
-/// The head is what `choose` returns.
-fn candidates(matched: &[String], preferred: &[String]) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for class in preferred.iter().chain(matched) {
-        if matched.contains(class) && !out.contains(class) {
-            out.push(class.clone());
-        }
-    }
-    out
-}
-
 async fn hydrate_polymorphic(
     stop: &EvalStop,
     store: &SparqlStore,
@@ -374,114 +361,98 @@ async fn hydrate_polymorphic(
 ) -> Result<(), Error> {
     // `limit`/`offset` were refused before either resolver ran — see
     // `reject_pagination_on_polymorphic`. Nothing to check here.
-    let classes = crate::perspectives::subject_classes_of::subject_classes_of(
-        stop, store, resolver, target_ids,
+    //
+    // Targets are classified under the include's own link guard
+    // (`linkStatus` / `includeUnverified`), the one each group query reads
+    // under, so the class chosen is one the group query can return.
+    let classes = crate::perspectives::subject_classes_of::subject_classes_of_guarded(
+        stop,
+        store,
+        resolver,
+        target_ids,
+        sub_query.link_status.as_ref(),
+        sub_query.include_unverified,
     )?;
 
     // Group by class, keeping the ids of each group in the order they arrived so
     // a group's own results stay stable.
     //
-    // `subject_classes_of` returns every class a URI conforms to, most specific
-    // first. Hydration needs exactly one shape per target, so one is chosen —
-    // whichever the caller asked for, falling back to the most specific.
+    // `subject_classes_of_guarded` returns every class a URI conforms to, most
+    // specific first. Hydration needs exactly one shape per target, so one is
+    // chosen — whichever the caller asked for, falling back to the most specific.
     // The rest are not lost: they ride back on the instance below.
-    //
-    // `subject_classes_of` reads every link, where the group query reads only
-    // the links `linkStatus` / `includeUnverified` admit. A target classified
-    // through a link the read does not admit (a Local type link under a Shared
-    // read) is not returned by its class's query; it is retried as its next
-    // candidate until a query returns it or none is left, so it is read as the
-    // class the admitted links support rather than dropped.
     let preferred = sub_query.prefer_classes.as_deref().unwrap_or(&[]);
-    let mut pending: Vec<(String, Vec<String>)> = Vec::new();
+    let mut by_class: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for id in target_ids {
-        match classes.get(id).map(|names| candidates(names, preferred)) {
-            Some(cands) if !cands.is_empty() => pending.push((id.clone(), cands)),
-            _ => {
-                // A target matching no registered class is skipped rather than
-                // hydrated as something it is not. It stays absent from the
-                // relation, which is the same outcome a non-conforming target has
-                // always had — but from the outside it looks like a child that
-                // simply is not there, and in a live neighbourhood it may only look
-                // that way until the type link arrives. Leave a trail.
-                log::debug!(
-                    "polymorphic include on '{relation_name}': '{id}' matches no registered class, skipping"
-                );
-            }
+        if let Some(class_name) = classes.get(id).and_then(|names| choose(names, preferred)) {
+            by_class
+                .entry(class_name.clone())
+                .or_default()
+                .push(id.clone());
+        } else {
+            // A target matching no registered class is skipped rather than
+            // hydrated as something it is not. It stays absent from the
+            // relation, which is the same outcome a non-conforming target has
+            // always had — but from the outside it looks like a child that
+            // simply is not there, and in a live neighbourhood it may only look
+            // that way until the type link arrives. Leave a trail.
+            log::debug!(
+                "polymorphic include on '{relation_name}': '{id}' matches no registered class, skipping"
+            );
         }
     }
 
-    while !pending.is_empty() {
-        let mut by_class: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        for (id, cands) in &pending {
-            by_class
-                .entry(cands[0].clone())
-                .or_default()
-                .push(id.clone());
-        }
+    for (class_name, ids) in by_class {
+        let target_shape = match resolver.get_shape(&class_name) {
+            Ok(s) => s,
+            Err(e) => {
+                log::warn!("polymorphic include: no shape for '{class_name}': {e}");
+                continue;
+            }
+        };
 
-        for (class_name, ids) in by_class {
-            let target_shape = match resolver.get_shape(&class_name) {
-                Ok(s) => s,
-                Err(e) => {
-                    log::warn!("polymorphic include: no shape for '{class_name}': {e}");
-                    continue;
+        let mut group_query = sub_query.clone();
+        let mut wc = group_query.where_clause.take().unwrap_or_default();
+        wc.insert("id".to_string(), WhereCondition::StringArray(ids));
+        group_query.where_clause = Some(wc);
+        // Already rejected above, so there is nothing here to drop — cleared
+        // only so a group query cannot inherit one by some later edit.
+        group_query.limit = None;
+        group_query.offset = None;
+
+        let result = Box::pin(execute_model_query_inner(
+            stop,
+            store,
+            target_shape.as_ref(),
+            &group_query,
+            resolver,
+            depth + 1,
+        ))
+        .await?;
+
+        for mut inst in result.instances {
+            if let Some(id) = inst["id"].as_str().map(|s| s.to_string()) {
+                if let Some(obj) = inst.as_object_mut() {
+                    obj.insert(
+                        SUBJECT_CLASS_KEY.to_string(),
+                        Value::String(class_name.clone()),
+                    );
+                    // The readings this one was chosen over. Costs nothing to
+                    // return — the classification that picked the head had to
+                    // produce the whole set to rank it.
+                    let all = classes
+                        .get(&id)
+                        .cloned()
+                        .unwrap_or_else(|| vec![class_name.clone()]);
+                    obj.insert(
+                        SUBJECT_CLASSES_KEY.to_string(),
+                        Value::Array(all.into_iter().map(Value::String).collect()),
+                    );
                 }
-            };
-
-            let mut group_query = sub_query.clone();
-            let mut wc = group_query.where_clause.take().unwrap_or_default();
-            wc.insert("id".to_string(), WhereCondition::StringArray(ids));
-            group_query.where_clause = Some(wc);
-            // Already rejected above, so there is nothing here to drop — cleared
-            // only so a group query cannot inherit one by some later edit.
-            group_query.limit = None;
-            group_query.offset = None;
-
-            let result = Box::pin(execute_model_query_inner(
-                stop,
-                store,
-                target_shape.as_ref(),
-                &group_query,
-                resolver,
-                depth + 1,
-            ))
-            .await?;
-
-            for mut inst in result.instances {
-                if let Some(id) = inst["id"].as_str().map(|s| s.to_string()) {
-                    if let Some(obj) = inst.as_object_mut() {
-                        obj.insert(
-                            SUBJECT_CLASS_KEY.to_string(),
-                            Value::String(class_name.clone()),
-                        );
-                        // The readings this one was chosen over. Costs nothing to
-                        // return — the classification that picked the head had to
-                        // produce the whole set to rank it.
-                        let all = classes
-                            .get(&id)
-                            .cloned()
-                            .unwrap_or_else(|| vec![class_name.clone()]);
-                        obj.insert(
-                            SUBJECT_CLASSES_KEY.to_string(),
-                            Value::Array(all.into_iter().map(Value::String).collect()),
-                        );
-                    }
-                    ordered_ids.push(id.clone());
-                    hydrated.insert(id, inst);
-                }
+                ordered_ids.push(id.clone());
+                hydrated.insert(id, inst);
             }
         }
-
-        // Not returned under its class: try the next one.
-        pending = pending
-            .into_iter()
-            .filter(|(id, _)| !hydrated.contains_key(id))
-            .filter_map(|(id, mut cands)| {
-                cands.remove(0);
-                (!cands.is_empty()).then_some((id, cands))
-            })
-            .collect();
     }
 
     Ok(())

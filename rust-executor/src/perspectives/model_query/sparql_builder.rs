@@ -496,9 +496,9 @@ pub(super) fn proof_valid_filter(include_unverified: Option<bool>) -> &'static s
 /// links only. A missing annotation fails closed: both checks are required
 /// triples, so a link with no status or no verdict does not pass.
 #[derive(Debug, Clone, Copy, Default)]
-pub(super) struct LinkGuard<'a> {
-    pub(super) status: Option<&'a LinkStatus>,
-    pub(super) include_unverified: Option<bool>,
+pub(in crate::perspectives) struct LinkGuard<'a> {
+    pub(in crate::perspectives) status: Option<&'a LinkStatus>,
+    pub(in crate::perspectives) include_unverified: Option<bool>,
 }
 
 impl<'a> LinkGuard<'a> {
@@ -582,7 +582,12 @@ impl<'a> LinkGuard<'a> {
     /// an expression): a Cartesian product that scanned every reifier passing
     /// the checks, for every row. On 76k links that was a full scan per
     /// hydrated relation (`test_perf_exists_guard_binds_the_reifier`).
-    pub(super) fn exists(&self, subject: &str, predicate: &str, object: &str) -> String {
+    pub(in crate::perspectives) fn exists(
+        &self,
+        subject: &str,
+        predicate: &str,
+        object: &str,
+    ) -> String {
         if self.is_open() {
             return String::new();
         }
