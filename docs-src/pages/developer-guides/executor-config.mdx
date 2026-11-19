@@ -156,7 +156,9 @@ of `OLLAMA`, `LLAMA_SERVER`, `VLLM`, `OPEN_AI`, `ANTHROPIC`,
 `request_timeout_secs` bounds one request to the endpoint, queueing
 included (default 300 for chat, 60 for embeddings, 120 for speech); a
 stream `/v1` forwards may be silent that long between two chunks, not
-longer. `max_concurrent` lets at most that many requests through at once,
+longer. An OpenAI-protocol chat client uses this setting for a stream
+too. A value above 600 seconds is kept. When the setting is unset, that
+client waits 600 seconds. `max_concurrent` lets at most that many requests through at once,
 the rest wait (default: no limit). A `model_type` is `LLM`, `EMBEDDING`,
 `TRANSCRIPTION` or `SPEECH`.
 
