@@ -1,5 +1,6 @@
 use super::dedup::semantic_embedding_model;
 use super::existing_budget::{existing_for_prompt, Compact};
+use super::seed::{build_seed, log_seed, read_seed_graph, seed_budget, with_seed, HARNESS_GUIDE};
 use super::walk_tools::WalkToolsProvider;
 use super::{
     apply_with_overlay, build_interpretation_input_showing, build_speaker_name_map, class_label,
@@ -1272,9 +1273,9 @@ async fn run_flow_post_pass(
 
 /// Harness-dispatched interpretation pass — the tool-calling alternative to
 /// [`run_interpretation_with_strategy_and_model`]. Same inputs/outputs, but
-/// the LLM sees a live tool surface (`{Class}_query`, `{Class}_get`,
-/// `{Class}_propose_create`, `{Class}_propose_link_child`, …) and drives the
-/// extraction by tool calls rather than by emitting one big JSON blob.
+/// the model walks the graph with the walk tools ([`super::walk_tools`]),
+/// starts from a seed ([`super::seed`]) in place of the full `existing` list,
+/// and writes with `{class}_create` / `{class}_propose_link_child`.
 ///
 /// Design v3 §6: writes only cross the overlay gate at pass boundary — the
 /// LLM's `_propose_*` calls buffer [`InterpretationOp`]s; when the harness
@@ -1437,30 +1438,32 @@ pub(crate) async fn run_harness_pass(
     )
     .await;
     let speaker_names = build_speaker_name_map(transcript);
-    // Budgeted like the single-shot path (#1804), but with full ids and
-    // values: the tools take ids, and the model can `_get` the rest. No
-    // dedup strategy here, so the rows that do not all fit go by recency.
-    let shown = existing_for_prompt(
-        &task,
+    // The seed (#1804): the scope rows as outline lines, the newest of them in
+    // full, and the nodes above them, under the budget of the `existing`
+    // block. It replaces the full `existing` list; the model finds other rows
+    // with the walk tools. Full ids: the tools take ids.
+    let without_seed = build_interpretation_input_showing(
         shapes,
         transcript,
-        &existing_ctx,
+        &ExistingInstances::new(),
         &active_flows,
         &speaker_names,
-        base_prefix,
         None,
-        Compact::No,
-        dedup_on_drain,
+    );
+    let mut seed_graph = read_seed_graph(
+        perspective,
+        shapes,
+        &existing_ctx,
+        &existing_links,
+        base_prefix,
+        scope,
     )
     .await;
-    let prompt = build_interpretation_input_showing(
-        shapes,
-        transcript,
-        &shown.shown,
-        &active_flows,
-        &speaker_names,
-        Some(shown.counts(dedup_on_drain)),
-    );
+    seed_graph.unshown_checked = dedup_on_drain;
+    let (seed_budget_tokens, window) = seed_budget(&task, &without_seed).await;
+    let seed = build_seed(&existing_ctx, &seed_graph, seed_budget_tokens);
+    log_seed(&seed, seed_budget_tokens, window);
+    let prompt = with_seed(&without_seed, &seed);
 
     // Build per-class propose shapes from the perspective's SHACL classes,
     // filtered to the class-name set the caller passed as `shapes`. Any
@@ -1571,13 +1574,13 @@ pub(crate) async fn run_harness_pass(
     // resolved `num_ctx` the bridge trims its outgoing list to.
     let tool_result_max_bytes = bridge.tool_result_max_bytes(&task.model_id).await;
 
-    // Single user message carrying the entire interpretation prompt —
+    // The guide, then one user message carrying the interpretation prompt.
     // OpenAiCompatBridge prepends the tools-system-prompt automatically
-    // when tools are advertised, so we don't split system-vs-user here.
-    let initial_messages = vec![serde_json::json!({
-        "role": "user",
-        "content": prompt,
-    })];
+    // when tools are advertised.
+    let initial_messages = vec![
+        serde_json::json!({ "role": "system", "content": HARNESS_GUIDE }),
+        serde_json::json!({ "role": "user", "content": prompt }),
+    ];
 
     // Drive the loop. The returned text is discarded — the LLM wrote via
     // propose_* tools, which populated `buffer`. How the loop ended decides
