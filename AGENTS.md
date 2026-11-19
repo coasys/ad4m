@@ -128,13 +128,22 @@ processing.
 
 `coasys-spaces` runs WE's product suite (`pnpm --filter @we/app-web test:spaces`,
 WE `apps/we-web/tests/live/coasys-spaces/`): a Coasys space, a call, its
-transcript (executor Whisper), extraction on Ollama `qwen3.8-27b-48k`, and flows.
-Ollama's OpenAI endpoint runs a model with the server's default context window
-and cuts a longer prompt silently. So when the model's own `num_ctx` is below
-`COASYS_SPACES_LLM_NUM_CTX` (16384), `llm-check` makes a variant such as
-`coasys-spaces-gemma3-12b:ctx16384` (`/api/create`) and the suite runs on it.
-A model with a large enough `num_ctx` (the 48k tag) runs as it is, so the GPU
-holds one load. It uses this commit's executor and SDK:
+transcript (executor Whisper), extraction on staging's llama-server
+(`http://127.0.0.1:12460/v1`, model `qwen3.8-27b-ud-q4_k_m`), and flows.
+That server is already running (`llama-qwen27b.service`, one 98304-token slot)
+and already holds the GPU. The job does not start it and does not load a model.
+`COASYS_SPACES_LLM_NUM_CTX` is empty, so `llm-check` does not make a context
+variant. `/api/create` runs only when the server is Ollama (`/api/version`
+returns a version) and `COASYS_SPACES_LLM_NUM_CTX` is set: a hand run against
+Ollama can still make a variant such as `coasys-spaces-gemma3-12b:ctx16384`
+when the model's own `num_ctx` is smaller. A model whose own `num_ctx` is
+already that large is used as it is. The job also sets
+`COASYS_SPACES_LLM_ENDPOINT_KIND=LLAMA_SERVER`,
+`COASYS_SPACES_LLM_NATIVE_TOOLS=true`,
+`COASYS_SPACES_LLM_REQUEST_TIMEOUT_SECS=900` and
+`COASYS_SPACES_LLM_MAX_NUM_CTX=90112`. The script passes those through;
+WE's real tier (we#468) registers them on the endpoint. The 900s limit
+includes time queued on the one slot. It uses this commit's executor and SDK:
 
 - The executor is the one the `build` job published for the commit
   (`$EXECUTOR_PUBLISH_DIR/<sha>/manifest.json`, sha256 checked). If there is none,
@@ -147,14 +156,17 @@ holds one load. It uses this commit's executor and SDK:
 The job halts green when the same ad4m commit, WE commit, tier and model already
 passed on the host (`~/.local/state/ad4m-ci/coasys-spaces/last-success`). Set
 `COASYS_SPACES_FORCE=1` to run anyway. A checkout with changes (a run by hand
-with local edits) runs, but neither skips nor records a pass. It shares the
-serial group `nightly-llm` with `llm-e2e`, so the two jobs do not use the
-host GPU at the same time. Screenshots, traces and logs are under the job's
-artifacts, `coasys-spaces/`.
+with local edits) runs, but neither skips nor records a pass. It shares the serial group
+`nightly-llm` with `llm-e2e`, so the two do not run at once: both prompt
+staging's llama-server on :12460, and `llm-e2e`'s embeddings stay on Ollama.
+A completion in this job may wait a few minutes on llama-server's one
+slot, behind staging. Screenshots, traces and logs are under the
+job's artifacts, `coasys-spaces/`.
 
 Each step is a subcommand of `scripts/coasys-spaces.sh`. `bash
-scripts/coasys-spaces.sh all` runs the whole job on a machine with Ollama and the
-model (`COASYS_SPACES_TIER=stub` needs no model). `bash
+scripts/coasys-spaces.sh all` runs the whole job. The real tier needs the model
+server named by `COASYS_SPACES_LLM_*` (the nightly job uses staging's
+llama-server). `COASYS_SPACES_TIER=stub` needs no model. `bash
 scripts/coasys-spaces.test.sh` tests the script.
 
 To run the workflow by hand on a branch, with another WE ref (the definition id
