@@ -8,11 +8,18 @@ use crate::js_core::error::AnyhowWrapperError;
 
 /// The canonical AD4M content-address hash (spec section 7.7): SHA-256
 /// multihash in a CIDv1, base58btc-encoded, prefixed with `"Qm"`.
+///
+/// This format is frozen: existing expression and language addresses are
+/// these strings, so every runtime must produce them byte for byte. It is not
+/// an IPFS CIDv0 (`Qm` + base58 multihash); it is `"Qm"` followed by a
+/// base58btc multibase CIDv1 (which starts with `z`). The vectors in
+/// `ad4m-ldk/js/test/hash-vectors.json` pin it.
 fn content_hash(data: &str) -> String {
     // Compute the SHA-256 multihash
     let multihash = Code::Sha2_256.digest(data.as_bytes());
 
-    // Create a CID with default settings (version 1, DAG-Protobuf)
+    // CIDv1 with codec 0x00. (DAG-Protobuf would be 0x70; do not change the
+    // codec, it is part of the frozen format.)
     let cid = Cid::new_v1(0, multihash);
 
     // Encode the CID in base58btc (IPFS default)
