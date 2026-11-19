@@ -1413,7 +1413,10 @@ mod tests {
         handle_key(&mut model, &press(KeyCode::Char('o')));
         open_coasys(&mut model, &conn);
         draw_app(&mut model).unwrap();
-        assert!(space_key(&mut model, ctrl_c()), "Ctrl-C did not leave the TUI");
+        assert!(
+            space_key(&mut model, ctrl_c()),
+            "Ctrl-C did not leave the TUI"
+        );
 
         // A failed open leaves the admin screens usable.
         let mut failed = perspectives_model();

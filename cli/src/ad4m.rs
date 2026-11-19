@@ -473,7 +473,10 @@ mod client_transport_tests {
         }
         assert_eq!(fake.accepted(), 1, "the app dialed a second socket");
         drop(screen);
-        assert!(client.ws().is_connected(), "closing the app closed the socket");
+        assert!(
+            client.ws().is_connected(),
+            "closing the app closed the socket"
+        );
 
         // `tui` keeps the shared transport rules, before any socket.
         transport_probe::reset();

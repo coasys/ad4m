@@ -102,8 +102,7 @@ pub(crate) fn open_bundle(
     let doc: serde_json::Value =
         serde_json::from_str(CONNECTED).map_err(|e| format!("connected document: {e}"))?;
     let live_map = LiveMap::bundled();
-    let mut map =
-        StoreMap::parse(we_tui::load::SEED_MAP).map_err(|e| format!("store map: {e}"))?;
+    let mut map = StoreMap::parse(we_tui::load::SEED_MAP).map_err(|e| format!("store map: {e}"))?;
     map.members.extend(live_map.derived.members.clone());
     let data = OfflineData::from_snapshot(&doc, Some(&map))?;
 
@@ -142,11 +141,7 @@ pub(crate) fn open_bundle(
     let runtime = Runtime::app(spec, data.bag.clone(), LocalState::new())
         .with_sources(Some(source), Arc::new(NoParts))
         .with_dollar_types(known_dollar);
-    let session = Session::from_parts(
-        runtime,
-        Box::new(StaticHost::new(data.bag.clone())),
-        screen,
-    );
+    let session = Session::from_parts(runtime, Box::new(StaticHost::new(data.bag.clone())), screen);
     let theme = we_tui::palette::load_theme_set().theme("dark").0.clone();
     let app = TuiApp::new(session, theme, we_tui::palette::truecolor_env());
     Ok(CoasysScreen {
@@ -369,7 +364,9 @@ mod tests {
     fn assert_no_writes(methods: &[String]) {
         for method in methods {
             let lower = method.to_lowercase();
-            for word in ["add", "create", "update", "remove", "set", "execute", "publish"] {
+            for word in [
+                "add", "create", "update", "remove", "set", "execute", "publish",
+            ] {
                 assert!(
                     !lower.contains(word),
                     "a read-only screen sent the write-like call {method}"
@@ -548,9 +545,18 @@ mod tests {
             "{text}"
         );
         for group in LIVE_GROUPS {
-            assert!(text.contains(group), "Coasys group {group:?} missing:\n{text}");
+            assert!(
+                text.contains(group),
+                "Coasys group {group:?} missing:\n{text}"
+            );
         }
-        assert!(screen.stats.deliveries.load(std::sync::atomic::Ordering::Relaxed) > 0);
+        assert!(
+            screen
+                .stats
+                .deliveries
+                .load(std::sync::atomic::Ordering::Relaxed)
+                > 0
+        );
         assert!(screen.dropped().is_empty(), "{:?}", screen.dropped());
 
         let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/1779-slice3");
