@@ -203,7 +203,7 @@ Expression addresses.
 
 | Method | Mode | Signature | Description |
 |--------|------|-----------|-------------|
-| `hash(data)` | SYNC | `(string) => string` | Canonical AD4M content-address hash. Computes **SHA-256 → CIDv1 (DAG-Protobuf) → base58btc encoding**, then prefixes the result with `"Qm"`. Runtimes MUST implement this identically — two runtimes must produce the same address for the same content, or Expression URLs become non-portable. |
+| `hash(data)` | SYNC | `(string) => string` | Canonical AD4M content-address hash. Computes **SHA-256 multihash → CIDv1 with codec `0x00` → base58btc multibase** (which starts with `z`), then prefixes the result with `"Qm"`, so addresses start with `Qmz`. The comment in `utils_extension.rs` says DAG-Protobuf, but DAG-Protobuf is codec `0x70`; the code uses `0x00`. Runtimes MUST implement this identically — two runtimes must produce the same address for the same content, or Expression URLs become non-portable. |
 
 Legacy log helpers (`consoleLog`, `consoleDebug`, `consoleError`,
 `consoleWarn`) also live on `UTILS` in the reference implementation
