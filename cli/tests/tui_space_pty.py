@@ -562,6 +562,7 @@ def drive_pty(ad4m: str, url: str, uuid: str, out_ansi: str, timeout: float = 90
         times["open"] = wait_screen(route, OPEN_BOUND, "the Coasys view (uuid route)")
         wait_screen("Coasys", 5.0, "the Coasys header")
         wait_screen(CALL_TITLE, 30.0, "the seeded call in the Coasys view")
+        wait_screen("read-only view", 5.0, "the read-only notice")
         # F10 returns to the admin screen — bounded the same way, and the
         # screen must really change: the perspectives header is back, the
         # seeded row is listed, and the space route is gone.

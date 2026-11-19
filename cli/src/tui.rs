@@ -1452,6 +1452,61 @@ mod tests {
         assert_eq!(model.screen, Screen::Status);
     }
 
+    /// The notice row is painted on every space frame — and the read-only
+    /// fact stays on it when a dropped call or an unavailable read joins.
+    #[tokio::test]
+    async fn coasys_notice_row_is_on_every_space_frame() {
+        use ratatui::backend::TestBackend;
+        let (url, _server) = crate::tui_space::silent_ws_server().await;
+        let conn = we_ad4m::Connection::open(tokio::runtime::Handle::current(), &url, "")
+            .await
+            .unwrap();
+        let mut model = Model::new(url);
+        model.space = Some(
+            crate::tui_space::open(
+                &conn,
+                SpaceRow {
+                    uuid: "notice".to_string(),
+                    name: "notice".to_string(),
+                    shared_url: None,
+                },
+            )
+            .unwrap(),
+        );
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        let mut frame_text = |model: &mut Model| {
+            terminal.draw(|frame| draw(frame, model)).unwrap();
+            we_tui::buffer_text(
+                terminal.backend().buffer(),
+                ratatui::layout::Rect::new(0, 0, 120, 40),
+            )
+        };
+        let first = frame_text(&mut model);
+        assert!(first.contains("read-only view"), "{first}");
+
+        // A dropped call and a read nothing answered extend the row —
+        // the read-only fact must still be on it.
+        {
+            let space = model.space.as_mut().unwrap();
+            space
+                .app
+                .session
+                .host_mut_as::<we_template::StaticHost>()
+                .unwrap()
+                .dropped
+                .push("aStore.aCall".to_string());
+            space.provenance.note_unavailable("aStore.aMember");
+        }
+        let second = frame_text(&mut model);
+        for needle in [
+            "read-only view",
+            "dropped: aStore.aCall",
+            "unavailable reads: 1",
+        ] {
+            assert!(second.contains(needle), "{needle} missing:\n{second}");
+        }
+    }
+
     #[tokio::test]
     async fn a_move_key_leaves_the_refresh_in_flight() {
         for key in [

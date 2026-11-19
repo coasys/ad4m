@@ -77,7 +77,7 @@ pub struct SpaceApp {
     pub live_members: Vec<String>,
     /// The bag — the notice-row code writes `spaceStore.firstScreenOpen`.
     bag: Arc<StoreBag>,
-    /// Read-only and dropped-call lines, newest last.
+    /// Dropped-call lines, newest last.
     notices: Vec<String>,
     /// How many dropped calls `notice` has already folded in.
     dropped_seen: usize,
@@ -85,6 +85,10 @@ pub struct SpaceApp {
     first_frame_open: bool,
     _live: LiveMembers,
 }
+
+/// First words of the notice row — the view's read-only contract, on
+/// every space frame, before any status that joins it.
+const READ_ONLY_NOTICE: &str = "read-only view — writes and calls are dropped, not sent";
 
 /// The `$`-types the catalog draws — the gate every frontend wires.
 fn known_dollar(ty: &str) -> bool {
@@ -201,7 +205,7 @@ pub fn open(conn: &Connection, space: SpaceRow) -> Result<SpaceApp, String> {
         provenance: data.provenance.clone(),
         live_members,
         bag: data.bag.clone(),
-        notices: vec!["read-only view — writes and calls are dropped, not sent".to_string()],
+        notices: Vec::new(),
         dropped_seen: 0,
         first_frame_open: false,
         _live: live,
@@ -234,13 +238,21 @@ impl SpaceApp {
         fresh
     }
 
-    /// The notice row under the app — the read-only fact and the newest
-    /// dropped call, honestly named.
+    /// The notice row under the app — the read-only fact, always, then
+    /// the count of reads nothing answered and the newest dropped call.
     pub fn notice_line(&mut self) -> String {
         for call in self.drain_dropped() {
             self.notices.push(format!("dropped: {call}"));
         }
-        self.notices.last().cloned().unwrap_or_default()
+        let mut line = READ_ONLY_NOTICE.to_string();
+        let unavailable = self.provenance.report().unavailable.len();
+        if unavailable > 0 {
+            line.push_str(&format!("  ·  unavailable reads: {unavailable}"));
+        }
+        if let Some(last) = self.notices.last() {
+            line.push_str(&format!("  ·  {last}"));
+        }
+        line
     }
 
     /// One frame: resolve + paint into `buf` at `area`, then open the held
@@ -499,7 +511,50 @@ mod tests {
         }
         let target = dropped.expect("an unanswerable $invoke must be dropped");
         let line = space.notice_line();
-        assert_eq!(line, format!("dropped: {target}"));
+        assert!(line.starts_with(READ_ONLY_NOTICE), "{line}");
+        assert!(line.contains(&format!("dropped: {target}")), "{line}");
+    }
+
+    /// The read-only fact leads the notice row on every frame — a dropped
+    /// call and a read nothing answered extend it, never replace it.
+    #[tokio::test]
+    async fn coasys_notice_stays_read_only() {
+        let (url, _server) = silent_ws_server().await;
+        let conn = Connection::open(tokio::runtime::Handle::current(), &url, "")
+            .await
+            .unwrap();
+        let mut space = open(
+            &conn,
+            SpaceRow {
+                uuid: "notice".to_string(),
+                name: "notice".to_string(),
+                shared_url: None,
+            },
+        )
+        .expect("space assembles");
+
+        assert_eq!(space.notice_line(), READ_ONLY_NOTICE);
+
+        // A member read nothing can answer is counted, beside read-only.
+        if let Some(Value::Namespace(ns)) = space.bag.root("spaceStore") {
+            ns.get("aMemberNobodyRecorded");
+        }
+        let line = space.notice_line();
+        assert!(line.starts_with(READ_ONLY_NOTICE), "{line}");
+        assert!(line.contains("unavailable reads: 1"), "{line}");
+
+        // A dropped call joins both — read-only still first.
+        space
+            .app
+            .session
+            .host_mut_as::<StaticHost>()
+            .unwrap()
+            .dropped
+            .push("aStore.aCall".to_string());
+        let line = space.notice_line();
+        assert!(line.starts_with(READ_ONLY_NOTICE), "{line}");
+        assert!(line.contains("unavailable reads: 1"), "{line}");
+        assert!(line.contains("dropped: aStore.aCall"), "{line}");
     }
 
     /// Real executor, real socket: the guarded client the `tui` command
