@@ -480,7 +480,7 @@ pub async fn execute_union_query_with_views(
         keys_by_class.insert(class.clone(), keyed);
     }
     // The union after `where`: each record once, however many classes return it.
-    let total_count = all_ids.len();
+    let total_count = query.count.unwrap_or(false).then_some(all_ids.len());
     if query.limit == Some(0) {
         return Ok(ModelQueryResult {
             instances: vec![],

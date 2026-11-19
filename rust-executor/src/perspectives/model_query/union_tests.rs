@@ -93,6 +93,7 @@ fn note(store: &SparqlStore, id: &str, rank: Option<i64>, ts: &str) {
 fn query(json: serde_json::Value) -> ModelQueryInput {
     let mut q: ModelQueryInput = serde_json::from_value(json).unwrap();
     q.include_unverified = Some(true);
+    q.count.get_or_insert(true);
     q
 }
 
@@ -127,7 +128,22 @@ async fn union_pages_once_over_interleaved_sort_keys() {
         .unwrap();
 
     assert_eq!(ids(&result), vec!["app://n2", "app://t3", "app://n4"]);
-    assert_eq!(result.total_count, 6, "totalCount is the whole union");
+    assert_eq!(
+        result.total_count.unwrap(),
+        6,
+        "totalCount is the whole union"
+    );
+    let uncounted = query(serde_json::json!({
+        "order": {"rank": "ASC"}, "limit": 3, "offset": 1, "count": false
+    }));
+    let without = execute_union_query(&store, &classes(&["Task", "Note"]), &uncounted, &resolver)
+        .await
+        .unwrap();
+    assert_eq!(
+        without.instances, result.instances,
+        "same page without count"
+    );
+    assert_eq!(without.total_count, None, "no totalCount unless asked");
     let class_of: Vec<&str> = result
         .instances
         .iter()
@@ -159,7 +175,7 @@ async fn union_where_on_a_property_one_class_declares_excludes_the_other() {
         .await
         .unwrap();
     assert_eq!(ids(&result), vec!["app://t1"]);
-    assert_eq!(result.total_count, 1);
+    assert_eq!(result.total_count.unwrap(), 1);
 }
 
 /// Rows without the order key — a class that does not declare it, or a record
@@ -217,7 +233,7 @@ async fn union_returns_a_record_of_two_classes_once_with_both_classes() {
         .await
         .unwrap();
     assert_eq!(ids(&result), vec!["app://both", "app://n2"]);
-    assert_eq!(result.total_count, 2);
+    assert_eq!(result.total_count.unwrap(), 2);
     let both = &result.instances[0];
     assert_eq!(both["__subjectClass"], "Note");
     let mut all: Vec<&str> = both["__subjectClasses"]
@@ -256,7 +272,7 @@ async fn union_pages_by_timestamp_when_no_order_is_given() {
         .await
         .unwrap();
     assert!(result.instances.is_empty());
-    assert_eq!(result.total_count, 3);
+    assert_eq!(result.total_count.unwrap(), 3);
 }
 
 /// With no order the union pages on the creation time its rows carry as
@@ -368,7 +384,7 @@ async fn union_creation_time_order_does_not_depend_on_a_second_key() {
         .await
         .unwrap();
         assert_eq!(ids(&result), want.to_vec(), "{q}");
-        assert_eq!(result.total_count, 2, "{q}");
+        assert_eq!(result.total_count, Some(2), "{q}");
     }
 }
 
@@ -510,7 +526,7 @@ async fn union_reads_a_class_named_twice_once() {
         .await
         .unwrap();
     assert_eq!(ids(&result), vec!["app://t1", "app://n2"]);
-    assert_eq!(result.total_count, 2);
+    assert_eq!(result.total_count.unwrap(), 2);
 }
 
 /// Record `i` of [`posts_and_clips`].
@@ -624,7 +640,7 @@ async fn union_hydrates_only_the_page() {
             .unwrap();
         let want: Vec<String> = expected.iter().map(|&i| item(i)).collect();
         assert_eq!(ids(&result), want, "{q}");
-        assert_eq!(result.total_count, n, "{q}: totalCount is the whole union");
+        assert_eq!(result.total_count, Some(n), "{q}: totalCount is the whole union");
         for (row, &i) in result.instances.iter().zip(&expected) {
             assert_eq!(row["__subjectClass"], class_of(i), "{q}: {row}");
             assert_eq!(row["__subjectClasses"], serde_json::json!([class_of(i)]));
@@ -652,7 +668,7 @@ async fn union_hydrates_only_the_page() {
     .await
     .unwrap();
     assert!(count.instances.is_empty());
-    assert_eq!(count.total_count, n);
+    assert_eq!(count.total_count, Some(n));
     assert_eq!(files.gets() - before, 0, "a count hydrated rows");
     files.stop().await;
 }
@@ -687,7 +703,8 @@ async fn union_page_classifies_a_two_class_record_and_filters_after_hydration() 
             .unwrap();
         assert_eq!(ids(&result), vec![item(3), item(4), item(5)], "{q}");
         assert_eq!(
-            result.total_count, n,
+            result.total_count,
+            Some(n),
             "{q}: the two-class record counts once"
         );
         assert_eq!(result.instances[1]["__subjectClass"], class, "{q}");
@@ -714,7 +731,7 @@ async fn union_page_classifies_a_two_class_record_and_filters_after_hydration() 
     expected.sort_by_key(|&i| (rank_of(i), i));
     let want: Vec<String> = expected[..3].iter().map(|&i| item(i)).collect();
     assert_eq!(ids(&result), want);
-    assert_eq!(result.total_count, (11..n).count());
+    assert_eq!(result.total_count, Some((11..n).count()));
     files.stop().await;
 }
 
@@ -747,5 +764,5 @@ async fn union_orders_by_updated_at_from_the_hydrated_rows() {
         vec!["app://t1", "app://t2"],
         "t1's edit at 50 makes it the most recently updated"
     );
-    assert_eq!(result.total_count, 3);
+    assert_eq!(result.total_count, Some(3));
 }
