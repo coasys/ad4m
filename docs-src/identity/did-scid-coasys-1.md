@@ -615,8 +615,8 @@ Coasys identity store adds these checks:
 
 A 16-byte `nonce` such that `sha256("coasys:pow" ‖ scid ‖ challenge ‖ nonce)` has at least
 `bits` leading zero bits, with `scid` and `challenge` as their UTF-8 text. On the wire:
-`{ "nonce": base58btc(16 bytes), "bits", "challenge" }`; the store checks against its own
-`bits` (or `previousBits` for 10 minutes after a change), never the proof's. The proof binds
+`{ "nonce": base58btc(16 bytes), "bits", "challenge" }`; the store checks against the
+`bits` its challenge carries (below), never the proof's. The proof binds
 to the SCID, which covers master #0, the commitment and every listed key, so one proof admits
 one log.
 
@@ -624,7 +624,10 @@ one log.
 (`{nonce, expires}`, a few minutes): the solver hashes over `challenge.nonce` and puts it in
 the proof, and the host refuses a missing, expired, forged or already-spent one. So a proof
 cannot be made ahead of time and stockpiled: it is only good on the host that issued the
-challenge, before it expires, once.
+challenge, before it expires, once. The host's tag on the challenge also covers the `bits`
+it asked for when it minted it (`GET /v1/pow` answers `{bits, challenge}`), and the host checks
+the proof at those bits: a change of the host's cost needs no grace, since each challenge in
+flight keeps the bits it was issued at and expires within minutes.
 
 # Part C — Wallet profile (informative)
 
@@ -925,7 +928,7 @@ a new string ends the read of the last one.
   binds and records `FirstRun` in one write. A key the main agent's own incept lists, and
   the refresh of an identity it already speaks for, bind as before.
 - The executor never builds #0 and never solves a proof of work (section 14). The party that
-  builds #0 reads `identity.powParams` → `{bits, previousBits, changedAt, challenge}` (the
+  builds #0 reads `identity.powParams` → `{bits, challenge}` (the
   store's `GET /v1/pow`, which mints a fresh `challenge` per call), solves the proof for the
   SCID over `challenge.nonce`, and calls `identity.publish {events, pow}`; the executor sends
   `pow` to the store unchanged (`null` on every later event). A resumed create reads

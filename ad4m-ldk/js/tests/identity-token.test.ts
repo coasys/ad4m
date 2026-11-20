@@ -122,7 +122,7 @@ function testLanguage() {
             this.calls.push(["keyOwner", [multikey, waitSec]]);
             return null;
         },
-        async powParams() { this.calls.push(["powParams", []]); return { bits: 22, previousBits: 20, changedAt: 3, challenge: { nonce: "5Challenge", expires: 4 } }; },
+        async powParams() { this.calls.push(["powParams", []]); return { bits: 22, challenge: { nonce: "5Challenge", expires: 4 } }; },
         async attachNote(did, token, req) {
             this.calls.push(["attachNote", [did, token, req]]);
             return { did, method: "email", time: 4, voucher: "did:key:zVouch", sig: "zNoteSig" };
@@ -228,7 +228,7 @@ test("identity: events and requests pass through unchanged, as free functions", 
     assert.deepEqual(await identityHead!("did:scid:zScid"), head);
     assert.equal(await identityKeyOwner!("z6MkKey"), null);
     assert.deepEqual(calls.at(-1), ["keyOwner", ["z6MkKey", undefined]]);
-    assert.deepEqual(await identityPowParams!(), { bits: 22, previousBits: 20, changedAt: 3, challenge: { nonce: "5Challenge", expires: 4 } });
+    assert.deepEqual(await identityPowParams!(), { bits: 22, challenge: { nonce: "5Challenge", expires: 4 } });
     assert.equal((await identityAttachNote!("did:scid:zScid", "tok", request)).method, "email");
     assert.equal(calls.at(-1)![1][2], request);
 

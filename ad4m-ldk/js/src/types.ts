@@ -173,9 +173,8 @@ export interface PowChallenge {
 
 /** `GET /v1/pow`. */
 export interface PowParams {
+    /** The leading zero bits a proof must have: the cost the challenge was issued at. */
     bits: number;
-    previousBits: number;
-    changedAt: number;
     /** A fresh challenge for the next proof; the caller solves over `challenge.nonce` and must fetch again for another log (the store spends each challenge once and at most to `expires`). */
     challenge: PowChallenge;
 }

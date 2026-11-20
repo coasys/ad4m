@@ -6,18 +6,10 @@ import type { PowChallenge } from "./PowChallenge";
  */
 export type PowParams = { 
 /**
- * The leading zero bits a proof must have.
+ * The leading zero bits a proof must have: the cost the challenge below was issued at,
+ * which the store checks the proof against whatever its cost is by then.
  */
 bits: number, 
-/**
- * The bits before the last change; a proof at these bits passes for 10 minutes after
- * `changedAt`.
- */
-previousBits: number, 
-/**
- * When `bits` last changed (unix seconds).
- */
-changedAt: number, 
 /**
  * A fresh challenge for the next proof; the caller solves over `challenge.nonce` and must
  * fetch again for another log (the store spends each challenge once and at most to

@@ -1,5 +1,5 @@
 //! The brake on new logs without a vouching note (slice 3.C, C1): the global and per-address
-//! buckets, the proof of work and its `previousBits` window, the failure bucket, the order of
+//! buckets, the proof of work at its challenge's bits, the failure bucket, the order of
 //! the checks before any signature replays, trusted proxies, `/v1/metrics` and the
 //! configuration keys.
 
@@ -268,22 +268,23 @@ async fn a_bad_proof_is_403_pow_and_the_failure_bucket_fills_after_30() {
 }
 
 #[tokio::test]
-async fn raised_bits_accept_a_proof_at_the_previous_bits_for_ten_minutes_then_refuse_it() {
+async fn a_challenge_keeps_the_bits_it_was_issued_at_when_the_cost_changes() {
     let t = TestStore::with_settings(TestStore::brake_settings());
     let pow = t.get("/v1/pow").await.body;
-    assert_eq!(
-        json!({ "bits": pow["bits"], "previousBits": pow["previousBits"],
-                "changedAt": pow["changedAt"] }),
-        json!({ "bits": TEST_POW_BITS, "previousBits": TEST_POW_BITS, "changedAt": T0 })
-    );
-    // The answer mints a fresh one-use challenge for the next proof, good for 300 seconds.
+    assert_eq!(pow["bits"], TEST_POW_BITS);
+    // The answer is the bits and a fresh one-use challenge, good for 300 seconds; nothing else.
+    assert_eq!(pow.as_object().unwrap().len(), 2, "{pow}");
     let challenge = pow["challenge"].clone();
     assert!(challenge["nonce"].is_string());
     assert_eq!(challenge["expires"], T0 + 300);
-    // A restart with the same bits keeps the record.
-    t.set_now(T0 + 50);
-    let t = t.restarted();
-    assert_eq!(t.get("/v1/pow").await.body["changedAt"], T0);
+
+    let alice = Person::new("alice");
+    let bob = Person::new("bob");
+    let carol = Person::new("carol");
+    let peer = from("198.51.100.1:1000");
+    // A challenge issued at the old bits, and a proof over it, before the cost is raised.
+    let old_nonce = t.store.pow_challenge().nonce;
+    let old_alice = proof_between(&alice.scid(), &old_nonce, TEST_POW_BITS, 12);
 
     // Raised to 12 bits at T0 + 100.
     t.set_now(T0 + 100);
@@ -291,51 +292,24 @@ async fn raised_bits_accept_a_proof_at_the_previous_bits_for_ten_minutes_then_re
         pow_bits: 12,
         ..TestStore::brake_settings()
     };
-    let t = t.restarted_with(raised.clone());
-    let pow = t.get("/v1/pow").await.body;
-    assert_eq!(
-        json!({ "bits": pow["bits"], "previousBits": pow["previousBits"],
-                "changedAt": pow["changedAt"] }),
-        json!({ "bits": 12, "previousBits": TEST_POW_BITS, "changedAt": T0 + 100 })
-    );
-    let alice = Person::new("alice");
-    let bob = Person::new("bob");
-    let peer = from("198.51.100.1:1000");
-    // Within ten minutes of the change: a proof at the previous bits passes.
-    t.set_now(T0 + 100 + 599);
-    let old_alice = proof_between(
-        &alice.scid(),
-        &t.store.pow_challenge().nonce,
-        TEST_POW_BITS,
-        12,
-    );
-    let reply = post_new(
-        &t,
-        peer,
-        &[],
-        &alice,
-        Some(serde_json::to_value(&old_alice).unwrap()),
-    );
-    assert_ok(&reply.await);
-    // Ten minutes after: refused, a proof at the new bits passes.
-    t.set_now(T0 + 100 + 600);
-    let old_bob = proof_between(
-        &bob.scid(),
-        &t.store.pow_challenge().nonce,
-        TEST_POW_BITS,
-        12,
-    );
+    let t = t.restarted_with(raised);
+    assert_eq!(t.get("/v1/pow").await.body["bits"], 12);
+
+    // A new challenge carries the new bits: a proof at the old bits over it is refused, one
+    // at the new bits passes.
+    let new_nonce = t.store.pow_challenge().nonce;
+    let short_bob = proof_between(&bob.scid(), &new_nonce, TEST_POW_BITS, 12);
     let reply = post_new(
         &t,
         peer,
         &[],
         &bob,
-        Some(serde_json::to_value(&old_bob).unwrap()),
+        Some(serde_json::to_value(&short_bob).unwrap()),
     )
     .await;
     assert_eq!(reply.status, StatusCode::FORBIDDEN, "{}", reply.body);
     assert_eq!(reply.body["error"], "pow");
-    let new_bob = pow::solve(&bob.scid(), &t.store.pow_challenge().nonce, 12);
+    let new_bob = pow::solve(&bob.scid(), &new_nonce, 12);
     assert_ok(
         &post_new(
             &t,
@@ -346,9 +320,51 @@ async fn raised_bits_accept_a_proof_at_the_previous_bits_for_ten_minutes_then_re
         )
         .await,
     );
-    // A restart with the raised bits keeps the change's time.
-    let t = t.restarted_with(raised);
-    assert_eq!(t.get("/v1/pow").await.body["changedAt"], T0 + 100);
+
+    // The proof over the challenge issued at the old bits still passes, for as long as that
+    // challenge lives (no grace window).
+    t.set_now(T0 + 299);
+    assert_ok(
+        &post_new(
+            &t,
+            peer,
+            &[],
+            &alice,
+            Some(serde_json::to_value(&old_alice).unwrap()),
+        )
+        .await,
+    );
+
+    // The bits are under the challenge's tag: a challenge issued at 12 bits with its bits byte
+    // lowered fails the tag, even with a proof that meets the lowered bits.
+    let minted = t.store.pow_challenge().nonce;
+    let mut bytes = bs58::decode(&minted).into_vec().unwrap();
+    assert_eq!(bytes[8], 12);
+    bytes[8] = 0;
+    let forged = bs58::encode(&bytes).into_string();
+    let forged_proof = pow::solve(&carol.scid(), &forged, 0);
+    let reply = post_new(
+        &t,
+        peer,
+        &[],
+        &carol,
+        Some(serde_json::to_value(&forged_proof).unwrap()),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::FORBIDDEN, "{}", reply.body);
+    assert_eq!(reply.body["error"], "pow");
+    // The untouched challenge, solved at its bits, admits carol.
+    let carol_proof = pow::solve(&carol.scid(), &minted, 12);
+    assert_ok(
+        &post_new(
+            &t,
+            peer,
+            &[],
+            &carol,
+            Some(serde_json::to_value(&carol_proof).unwrap()),
+        )
+        .await,
+    );
 }
 
 #[tokio::test]
@@ -631,5 +647,4 @@ async fn a_store_from_an_empty_configuration_publishes_22_bits() {
     let t = TestStore::with_settings(Settings::from_config(|_| None).unwrap());
     let pow = t.get("/v1/pow").await.body;
     assert_eq!(pow["bits"], 22);
-    assert_eq!(pow["previousBits"], 22);
 }

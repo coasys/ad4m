@@ -18,10 +18,10 @@ workspace's `Cargo.lock`); rusqlite 0.40 on the system `libsqlite3`.
 |---|---|
 | `src/main.rs` | `identity-store [serve]`, `identity-store keygen`; configuration from the environment (`Settings::from_config`); `serve` records each socket's peer address (`ConnectInfo`) |
 | `src/lib.rs` | `Store` (database, head key, clock, settings, the published proof-of-work parameters, the HTTP client for the vouching service, the change signal for waits), `Settings` (`from_config` parses every key), `Clock`, `Fault` |
-| `src/db.rs` | the schema (the module's `chain_*` tables, type `coasys:kel`, and `logs`, `heads`, `keys`, `agents`, `nonces`, `feed`, `offers`, `claims`, `fork_signers`, `inbox`, `records`, `requests`, `buckets`, `brake`, `pow`, `pow_seen`, `notes`), log replay, the key index (key rows with each master marked, the next-key commitment in `logs.next`) and its lookups |
+| `src/db.rs` | the schema (the module's `chain_*` tables, type `coasys:kel`, and `logs`, `heads`, `keys`, `agents`, `nonces`, `feed`, `offers`, `claims`, `fork_signers`, `inbox`, `records`, `requests`, `buckets`, `brake`, `pow_seen`, `notes`), log replay, the key index (key rows with each master marked, the next-key commitment in `logs.next`) and its lookups |
 | `src/held.rs` | `HeldLogs`: the folds of recently used logs at their stored heads, bounded, least recently used out; `Store::held_chain`; `fold_bytes_of` (a fold's whole heap and its live part, for the bound and the per-log budget); `state_before` (a log's state before a seq, rebuilt from a later state) |
 | `src/log.rs` | `POST …/events` with the admission checks (below; `append` picks the brake or the vouch path, `append_admitted` runs the checks under an `Admission`), log pages (with the note and `vouched`), heads, the key index |
-| `src/brake.rs` | the brake on no-note logs: the sender's address (`Sender`, `client_ip`, `TRUSTED_PROXIES`, IPv6 by /64), the token buckets in `brake` (failure, global, address), the proof-of-work check with the previous bits' grace over a one-use challenge (`challenge`, `open_challenge`, `check_pow`; table `pow_seen` spends a challenge until its `expires`), `pow_params` (table `pow`), pruning of refilled rows, the `/v1/metrics` text |
+| `src/brake.rs` | the brake on no-note logs: the sender's address (`Sender`, `client_ip`, `TRUSTED_PROXIES`, IPv6 by /64), the token buckets in `brake` (failure, global, address), the proof-of-work check at the bits its one-use challenge carries (`challenge` tags `expires` and `bits`, `open_challenge`, `check_pow`; table `pow_seen` spends a challenge until its `expires`), pruning of refilled rows, the `/v1/metrics` text |
 | `src/vouch.rs` | vouching notes: the redeem client of the platform's vouching service, the `notes` table (one note per log), `POST /v1/notes/{scid}`, `note_vouches` (the note under `VOUCH_KEYS`) |
 | `src/offers.rs` | the offer routes, the claim route, the device's state poll, the store's side of the claim check (`check_spend`, `spend`, `supersede`) |
 | `src/request.rs` | signed requests (`X-Coasys-Request`): checks, nonce replay guard (`take_nonce`, shared with pre-join reads), `percent_decode` |
@@ -42,7 +42,7 @@ workspace's `Cargo.lock`); rusqlite 0.40 on the system `libsqlite3`.
 | `tests/held_memory.rs` | the heap a held fold takes per event (a counting allocator; the bound stated under "Held folds") |
 | `tests/miss.rs` | a miss in the held folds checks no stored signature (every stored proof replaced, the miss still folds; a new event is still checked); the per-log budget (`log-too-large`) on the live part and the whole fold, a `rotate` taken past either, the owner's recovery from a log a thief padded (rotate, revoke the thief's bot keys, add a device), and pad-revoke-pad stopped at the whole-fold bound |
 | `tests/miss_cost.rs` | ignored: the wall time of one signed request on a miss, on a full rotation log and on logs padded with repeated scope actions; of a late-failing batch on a log held at its budget; of a rival that does not replay on a held full rotation log (`-- --ignored --nocapture`, release) |
-| `tests/brake.rs` | the brake: the address bucket (a fourth no-note log from one address in a day, IPv6 by /64), the global ceiling, a full bucket before any signature check, the failure bucket, the previous bits for 10 minutes, trusted proxies, `/v1/metrics` (no addresses), pruning, the defaults |
+| `tests/brake.rs` | the brake: the address bucket (a fourth no-note log from one address in a day, IPv6 by /64), the global ceiling, a full bucket before any signature check, the failure bucket, a challenge keeping its bits across a cost change (and a tampered bits byte failing the tag), trusted proxies, `/v1/metrics` (no addresses), pruning, the defaults |
 | `tests/notes.rs` | vouching notes against `tests/common/vouch.rs` (a vouching service on 127.0.0.1 with the redeem contract): a note with #0, a note beside a log, who may ask for one, the service's answers, `vouched` under `VOUCH_KEYS`, no note on a settled page |
 | `tests/serve.rs` | the `serve` process stops cleanly on SIGTERM and SIGINT |
 | `examples/test_agent.rs` | the test person over JSON lines, for the agent language suites |
@@ -57,7 +57,7 @@ workspace's `Cargo.lock`); rusqlite 0.40 on the system `libsqlite3`.
 | `GET /logs/{scid}?from=` (public host profile) | `200 LogPage` (≤ 256 events; `note` and `vouched` on the page that holds the head, none on a settled page; no pauses) · `404` |
 | `GET /heads/{scid}` (public host profile) | `200 SignedHead` · `404` |
 | `GET /keys/{multikey}?wait=0..8` | `200 KeyIndexEntry` · `404` (at once, or at the timeout) · `400` wait > 8 |
-| `GET /pow` | `200 {bits, previousBits, changedAt, challenge: {nonce, expires}}` (`POW_BITS`; the bits before the last change and when it was, kept in table `pow` across restarts; a fresh one-use challenge per call, good for 300 s) |
+| `GET /pow` | `200 {bits, challenge: {nonce, expires}}` (`POW_BITS`; a fresh one-use challenge per call, good for 300 s, whose tag covers `bits`, so a proof is checked at the bits its challenge was issued at and a cost change needs no grace) |
 | `GET /metrics` | `200 text/plain`: the global bucket's level; for the address and the failure buckets, how many are in use (not full), how many are empty and the lowest level. Unauthenticated, so it names no address |
 | `POST /notes/{scid}` `{token}` + signed request (a device key without the bot mark or the current master) | `201 VouchNote` · `400 malformed` · `403 signer`/`store` · `403 vouch` · `409 already-vouched` (checked before the redeem: no token is spent) · `503 vouch-unavailable` |
 | `GET /agents/{did}` | `200 AgentRecord` · `404` |
@@ -208,8 +208,9 @@ tests name them by these names.
   empty episode, `the global brake is empty`, reset on the next admitted log), the
   address bucket (`BRAKE_ADDR_BURST` at once, `BRAKE_ADDR_PER_DAY` per 24 h; `429 address`),
   and the proof of work at `POW_BITS` over the one-use `challenge` of `GET /v1/pow`
-  (`403 pow`; missing, expired, forged and spent challenges all refuse; the previous bits
-  pass for `POW_GRACE_S`, 10 minutes, after a change). A full bucket answers `429` before any
+  (`403 pow`; missing, expired, forged and spent challenges all refuse; the challenge's tag
+  covers the bits it was issued at, and the proof must meet those, so a change of `POW_BITS`
+  leaves challenges in flight at their old bits until they expire). A full bucket answers `429` before any
   check of the events, so a broken event gets `429`, not `400`. Only an admitted log takes
   from the global and the address bucket, in the append's transaction (`admitted_by =
   'brake'`). Any other `4xx` to a log the store does not hold, on a request without a token,
@@ -466,7 +467,7 @@ tests name them by these names.
 | `IDENTITY_STORE_DB` | `identity-store.sqlite` | the SQLite file |
 | `IDENTITY_STORE_KEY` | `store-key` | the head key file (32-byte secret, base58btc); `serve` makes one when missing |
 | `IDENTITY_STORE_LISTEN` | `0.0.0.0:8080` | port 0 picks a free port |
-| `POW_BITS` | `22` | what `GET /v1/pow` publishes and a no-note #0 must meet, over the one-use challenge each answer mints (300 s); the previous bits pass for 10 minutes after a change |
+| `POW_BITS` | `22` | what `GET /v1/pow` publishes and a no-note #0 must meet, over the one-use challenge each answer mints (300 s), which carries the bits it was issued at |
 | `BRAKE_GLOBAL_PER_HOUR` | `120` | no-note logs store-wide per hour |
 | `BRAKE_ADDR_BURST` | `3` | no-note logs per address at once (IPv6 by /64) |
 | `BRAKE_ADDR_PER_DAY` | `3` | what the address bucket refills per 24 h |

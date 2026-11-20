@@ -4,7 +4,7 @@
 //! One SQLite file holds the hash-chain module's tables (`chain_heads`, `chain_entries`,
 //! `chain_forks`, type `coasys:kel`) and the store's own (`logs`, `heads`, `keys`, `agents`,
 //! `nonces`, `pow_seen`, `feed`, `offers`, `claims`, `fork_signers`, `inbox`, `records`,
-//! `requests`, `buckets`, `brake`, `pow`, `notes`). The store replays every event with the identity core before it appends, and
+//! `requests`, `buckets`, `brake`, `notes`). The store replays every event with the identity core before it appends, and
 //! commits each append with its head, key-index rows, feed items, the claim it spends and the
 //! inbox messages and requests it ends in one transaction (the one-transaction rule of
 //! `identity-store/AGENTS.md`). It can withhold an event, never forge one: every client checks
@@ -58,8 +58,8 @@ pub fn system_clock() -> Clock {
 #[derive(Clone, Debug)]
 pub struct Settings {
     /// `POW_BITS`: the proof-of-work cost published at `GET /v1/pow` (default 22) that a new log
-    /// with no vouching note must meet (`brake.rs`). After a change the previous bits pass for
-    /// 10 minutes too.
+    /// with no vouching note must meet (`brake.rs`). Each challenge carries the bits it was issued at, so after a
+    /// change a challenge in flight keeps its old bits until it expires (300 s).
     pub pow_bits: u8,
     /// `BRAKE_GLOBAL_PER_HOUR`: no-note logs store-wide per hour, the global bucket's size and
     /// hourly refill (default 120).
@@ -261,8 +261,6 @@ pub struct Store {
     pub settings: Settings,
     /// The folded logs held in memory (`held.rs`).
     pub held: held::HeldLogs,
-    /// The proof-of-work cost it runs with (`GET /v1/pow`'s bits), fixed at the start.
-    pow: brake::PowCost,
     /// The client of the vouching service.
     http: reqwest::Client,
     clock: Clock,
@@ -279,26 +277,9 @@ pub struct Store {
 impl Store {
     pub fn new(db: db::Db, key: StoreKey, clock: Clock, settings: Settings) -> Arc<Store> {
         let started_at = clock();
-        // The bits the database last ran with decide `previousBits` and `changedAt`. When that
-        // record cannot be read or written, the store runs without a grace window.
-        let pow = db
-            .lock()
-            .and_then(|conn| brake::pow_params(&conn, settings.pow_bits, started_at))
-            .unwrap_or_else(|e| {
-                eprintln!(
-                    "identity-store: the proof-of-work record failed: {:?}",
-                    e.body
-                );
-                brake::PowCost {
-                    bits: settings.pow_bits,
-                    previous_bits: settings.pow_bits,
-                    changed_at: started_at,
-                }
-            });
         Arc::new(Store {
             db,
             key,
-            pow,
             http: vouch::client(),
             held: held::HeldLogs::new(settings.held_log_bytes),
             settings,
@@ -334,15 +315,14 @@ impl Store {
         self.started_at
     }
 
-    /// The proof-of-work cost of `GET /v1/pow` (`bits`, `previousBits`, `changedAt`).
-    pub fn pow_params(&self) -> brake::PowCost {
-        self.pow
-    }
-
-    /// A fresh challenge for `GET /v1/pow`'s next proof (`brake::challenge`): one use, good
-    /// until `expires`.
+    /// A fresh challenge for `GET /v1/pow`'s next proof (`brake::challenge`), tagged with the
+    /// configured `POW_BITS`: one use, good until `expires`.
     pub fn pow_challenge(&self) -> ad4m_ldk::identity::PowChallenge {
-        brake::challenge(&self.key.pow_challenge_key(), self.now())
+        brake::challenge(
+            &self.key.pow_challenge_key(),
+            self.settings.pow_bits,
+            self.now(),
+        )
     }
 
     /// Logs [`brake::GLOBAL_EMPTY_WARNING`] when the global bucket is empty: once per empty

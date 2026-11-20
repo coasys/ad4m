@@ -532,7 +532,6 @@ impl Store {
                             &tx,
                             scid,
                             req.pow.as_ref(),
-                            &self.pow_params(),
                             &self.key.pow_challenge_key(),
                             now,
                         )?;

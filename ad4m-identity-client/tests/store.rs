@@ -1846,7 +1846,7 @@ async fn a_phone_creates_through_the_brake_then_attaches_a_vouching_note() {
     let (router, _dir, server) = vouching_store().await;
     let e = phone(&router, 1, None);
     let params = e.pow_params().await.unwrap();
-    assert_eq!((params.bits, params.previous_bits), (8, 8));
+    assert_eq!(params.bits, 8);
 
     let did = create(&e, &MemoryVault::new(), 91).await;
     assert_eq!(status(&e).await["vouched"], false);

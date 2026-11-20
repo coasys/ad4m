@@ -44,7 +44,7 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     // ── Identity ──
     'identity.status': { did: 'did:scid:coasys:1:QmTest', deviceKey: 'z6MkTest', deviceEnc: 'z6LSTest', keyId: 'd1', revoked: null, head: null, fork: null, storeBehind: null, store: { url: 'https://store.ad4m.dev', trusted: true }, vouched: false },
     'identity.publish': { seq: 0, hash: 'QmHead', time: 1, sig: 'z' },
-    'identity.powParams': { bits: 22, previousBits: 20, changedAt: 5, challenge: { nonce: 'Challenge1', expires: 300 } },
+    'identity.powParams': { bits: 22, challenge: { nonce: 'Challenge1', expires: 300 } },
     'identity.attachNote': (p: Record<string, unknown>) => ({ did: 'did:scid:coasys:1:QmTest', method: 'email', time: 1, voucher: 'did:key:z6MkVoucher', sig: String(p.token) }),
     'identity.claimOffer': (p: Record<string, unknown>) => ({ did: 'did:scid:coasys:1:QmTest', offerId: 'offer', matchCode: 'R7K Q2M', kind: 'node', expires: 1, needsAccept: false, echo: p }),
     'identity.acceptJoin': { accepted: true },
@@ -1454,7 +1454,7 @@ describe('IdentityClient', () => {
         const params = await ad4m.identity.powParams();
         expect(lastRpcCall!.type).toBe('identity.powParams');
         expect(lastRpcCall!.params).toEqual({});
-        expect(params).toEqual({ bits: 22, previousBits: 20, changedAt: 5, challenge: { nonce: 'Challenge1', expires: 300 } });
+        expect(params).toEqual({ bits: 22, challenge: { nonce: 'Challenge1', expires: 300 } });
     });
 
     test('attachNote() sends the token and returns the note', async () => {
