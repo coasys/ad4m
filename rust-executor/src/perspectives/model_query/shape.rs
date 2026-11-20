@@ -20,7 +20,7 @@ use crate::perspectives::shacl_parser::{
     class_name_of, current_shape_uri, SHAPE_PREDICATE, SUBJECT_CLASS,
 };
 use crate::perspectives::sparql_store::{EvalStop, SparqlStore};
-use deno_core::anyhow::Error;
+use anyhow::Error;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 
@@ -658,8 +658,8 @@ pub(crate) fn parse_where_filter(val: &Value) -> Option<BTreeMap<String, WhereCo
 #[cfg(test)]
 pub(crate) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<ModelShape, Error> {
     use super::types::TransformExpression;
-    let meta: Value = serde_json::from_str(json)
-        .map_err(|e| deno_core::anyhow::anyhow!("Failed to parse shape JSON: {}", e))?;
+    let meta: Value =
+        serde_json::from_str(json).map_err(|e| anyhow::anyhow!("Failed to parse shape JSON: {}", e))?;
 
     let target_class = meta["className"].as_str().unwrap_or(class_name).to_string();
 
@@ -684,11 +684,7 @@ pub(crate) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<Mode
                 .get("transform")
                 .map(|v| {
                     serde_json::from_value::<TransformExpression>(v.clone()).map_err(|e| {
-                        deno_core::anyhow::anyhow!(
-                            "Failed to parse transform for property '{}': {}",
-                            name,
-                            e
-                        )
+                        anyhow::anyhow!("Failed to parse transform for property '{}': {}", name, e)
                     })
                 })
                 .transpose()?;

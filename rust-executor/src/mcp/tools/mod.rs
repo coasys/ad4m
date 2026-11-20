@@ -748,16 +748,6 @@ impl Ad4mMcpHandler {
             .find_map(|summary| summary.shape.node_shape_uri)
     }
 
-    /// Escape string for safe use in Prolog queries
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn escape_prolog_string(s: &str) -> String {
-        s.replace('\\', "\\\\")
-            .replace('\n', "\\n")
-            .replace('\r', "\\r")
-            .replace('"', "\\\"")
-            .replace('\'', "\\'")
-    }
-
     /// Resolve a property name to its predicate URI using SHACL shape links.
     /// Delegates to the shared shacl::resolve_property_predicate helper.
     pub(crate) async fn resolve_property_predicate(

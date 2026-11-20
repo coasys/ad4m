@@ -65,7 +65,7 @@ pub(super) async fn resolve_projections(
     depth: u8,
     link_status: Option<&LinkStatus>,
     include_unverified: Option<bool>,
-) -> Result<(), deno_core::anyhow::Error> {
+) -> Result<(), anyhow::Error> {
     if instances.is_empty() || projections.is_empty() {
         return Ok(());
     }
@@ -127,7 +127,7 @@ pub(super) async fn resolve_projections(
             wc.values()
                 .any(|c| matches!(c, WhereCondition::Ops(o) if o.author.is_some()))
         }) {
-            return Err(deno_core::anyhow::anyhow!(
+            return Err(anyhow::anyhow!(
                 "IncludeProjection '{key}': a nested `author` is not supported in a projection's \
                  `where`; use its top-level `author` for the projected link's author"
             ));
@@ -730,7 +730,7 @@ fn walk_guarded(
     where_patterns: &str,
     proj: &ProjectionInput,
     guard: LinkGuard,
-) -> Result<Vec<(String, String)>, deno_core::anyhow::Error> {
+) -> Result<Vec<(String, String)>, anyhow::Error> {
     let edge = super::containment::ContainmentEdge {
         predicate: safe_pred.to_string(),
         holder: None,

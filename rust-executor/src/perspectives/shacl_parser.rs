@@ -1,5 +1,5 @@
 use crate::types::Link;
-use deno_core::error::AnyError;
+use anyhow::Error;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use ts_rs::TS;
@@ -566,7 +566,7 @@ fn transition_uri(namespace: &str, flow_name: &str, transition: &FlowTransition)
 }
 
 /// Parse Flow JSON to RDF links
-pub fn parse_flow_to_links(flow_json: &str, flow_name: &str) -> Result<Vec<Link>, AnyError> {
+pub fn parse_flow_to_links(flow_json: &str, flow_name: &str) -> Result<Vec<Link>, Error> {
     let flow: SHACLFlow = serde_json::from_str(flow_json)
         .map_err(|e| anyhow::anyhow!("Failed to parse Flow JSON: {}", e))?;
 
@@ -975,7 +975,7 @@ pub const CONSENSUS_RULE_PREDICATE: &str = "ad4m://consensusRule";
 /// when it is read.
 pub fn check_consensus_rule_links<'a>(
     links: impl IntoIterator<Item = &'a Link>,
-) -> Result<(), AnyError> {
+) -> Result<(), Error> {
     for link in links {
         if link.predicate.as_deref() != Some(CONSENSUS_RULE_PREDICATE) {
             continue;
@@ -1278,7 +1278,7 @@ fn decode_string_array(target: &str, predicate: &str) -> Option<Vec<String>> {
 /// Same policy as the TS reader and as [`load_flow_instances`] — a
 /// stale / hand-mangled flow definition on-graph shouldn't poison every
 /// Model C extraction pass on the perspective until it's manually cleaned.
-pub fn parse_flow_from_links(links: &[Link], flow_uri: &str) -> Result<SHACLFlow, AnyError> {
+pub fn parse_flow_from_links(links: &[Link], flow_uri: &str) -> Result<SHACLFlow, Error> {
     // Expected format: `{namespace}{Name}Flow` — same rule as the TS side.
     let without_suffix = flow_uri
         .strip_suffix("Flow")
@@ -1632,7 +1632,7 @@ fn property_name(prop: &PropertyShape) -> String {
 ///   class, both would answer to it.
 /// - Two properties of one class cannot take the same alias for the same
 ///   abstract class.
-fn refuse_abstract_misuse(shape: &SHACLShape, class_name: &str) -> Result<(), AnyError> {
+fn refuse_abstract_misuse(shape: &SHACLShape, class_name: &str) -> Result<(), Error> {
     if shape.is_abstract && shape.properties.is_empty() {
         return Err(anyhow::anyhow!(
             "Abstract class '{class_name}' declares no property and no relation: it would \
@@ -1679,7 +1679,7 @@ fn refuse_abstract_misuse(shape: &SHACLShape, class_name: &str) -> Result<(), An
 }
 
 /// Parse SHACL JSON to RDF links (Option 3: Named Property Shapes)
-pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Link>, AnyError> {
+pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Link>, Error> {
     let shape: SHACLShape = serde_json::from_str(shacl_json)
         .map_err(|e| anyhow::anyhow!("Failed to parse SHACL JSON: {}", e))?;
     shape_links(shape, class_name)
@@ -1689,7 +1689,7 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
 /// on the target class (`rdf://type ad4m://SubjectClass`, `ad4m://shape`),
 /// the shape node and one node per property. Every JSON value is written as
 /// [`canonical_json`], so one shape always gives the same links.
-pub fn shape_links(mut shape: SHACLShape, class_name: &str) -> Result<Vec<Link>, AnyError> {
+pub fn shape_links(mut shape: SHACLShape, class_name: &str) -> Result<Vec<Link>, Error> {
     // Before a single link is generated: a property-shape `local: true` is a
     // declaration about the property, not about whichever actions happen to
     // have been authored with the flag copied in. Push it into the actions so
@@ -2141,7 +2141,7 @@ pub fn shape_links(mut shape: SHACLShape, class_name: &str) -> Result<Vec<Link>,
 }
 /// Extract namespace from URI (e.g., "recipe://Recipe" -> "recipe://")
 /// Matches TypeScript SHACLShape.ts extractNamespace() behavior
-pub fn extract_namespace(uri: &str) -> Result<String, AnyError> {
+pub fn extract_namespace(uri: &str) -> Result<String, Error> {
     // Handle protocol-style URIs (://ending) - for AD4M-style URIs like "recipe://Recipe"
     // We want just the scheme + "://" part
     if let Some(scheme_pos) = uri.find("://") {

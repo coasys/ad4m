@@ -1010,7 +1010,7 @@ impl PerspectiveInstance {
                     return false;
                 }
                 if !online_set.contains(did) {
-                    log::info!(
+                    log::debug!(
                         "auto_processor supervisor `{uuid}`: agent `{did}` aged out of \
                          freshness window; aborting loop"
                     );
@@ -1032,7 +1032,7 @@ impl PerspectiveInstance {
                 let uuid_clone = uuid.clone();
                 let did_clone = did.clone();
                 let handle = tokio::spawn(async move {
-                    log::info!(
+                    log::debug!(
                         "auto_processor supervisor `{uuid_clone}`: starting loop for agent \
                          `{did_clone}`"
                     );
