@@ -796,6 +796,39 @@ mod instance_writes {
         assert_eq!(things(&p).await[0]["title"], "bye");
     }
 
+    /// Round 6 (We's Acorn "Untag"): the frame We sends, by the mount's alias
+    /// class IRI (`literal:string:shacl://<Name>`), `tags: []` on a record
+    /// that has a tag, reaches the language's setter as `{tags: []}` and the
+    /// record reads back with no tags. Pins the executor half; the live
+    /// failure was the SDK sending no frame at all (`cdd52af8c`).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn untag_by_the_alias_iri_clears_the_collection_in_the_language() {
+        let lang = load_mount_test_language().await;
+        create_in_language(&lang, json!({"title": "a", "tags": ["x"]})).await;
+        let (mut p, ctx) = mounted(&lang).await;
+        let before = calls(&lang).await.len();
+
+        instance_update(
+            &mut p,
+            &ctx,
+            InstanceUpdate {
+                class_name: "literal:string:shacl://MountThing".into(),
+                base_uri: format!("{lang}://t1"),
+                properties: Map::from_iter([("tags".to_string(), json!([]))]),
+                batch_id: None,
+            },
+        )
+        .await
+        .expect("untag");
+
+        assert_eq!(
+            calls(&lang).await[before..].to_vec(),
+            vec![json!({"address": "t1", "name": "update", "params": {"tags": []}})]
+        );
+        let tags = things(&p).await[0]["tags"].clone();
+        assert!(tags.as_array().is_none_or(|t| t.is_empty()), "{tags}");
+    }
+
     /// Lal r2 P1: a mounted collection whose shape declares a `call` adder
     /// and remover and no setter. `instanceAddToCollection` /
     /// `instanceRemoveFromCollection` run the language's adder / remover
