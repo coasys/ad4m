@@ -1361,6 +1361,7 @@ describe("totalCount is asked for only by the readers of it (P3)", () => {
       }),
       onQueryUpdate: jest.fn(() => () => {}),
       onReconnect: jest.fn(() => () => {}),
+      onSubscriptionEnded: jest.fn(() => () => {}),
       disposeQuerySubscription: jest.fn().mockResolvedValue(true),
     };
     return {
