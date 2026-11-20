@@ -18,7 +18,7 @@ import {
   parseMaxNumCtx,
   serves,
   withMaxNumCtx,
-} from "./aiSetup";
+} from "./aiSetupHelpers";
 
 const MODEL_TYPES: ModelType[] = ["LLM", "EMBEDDING", "TRANSCRIPTION", "SPEECH"];
 

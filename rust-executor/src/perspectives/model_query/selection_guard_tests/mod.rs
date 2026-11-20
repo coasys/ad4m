@@ -119,8 +119,10 @@ pub(super) fn add(store: &SparqlStore, links: impl IntoIterator<Item = LinkExpre
 }
 
 pub(super) async fn run(store: &SparqlStore, query: Value) -> ModelQueryResult {
-    let query: ModelQueryInput = serde_json::from_value(query.clone())
+    let mut query: ModelQueryInput = serde_json::from_value(query.clone())
         .unwrap_or_else(|e| panic!("query {query} does not parse: {e}"));
+    // The guards apply to `totalCount` too, so every run asks for it.
+    query.count.get_or_insert(true);
     execute_model_query_from_json(store, "Grant", &query, SG_SHAPE_JSON)
         .await
         .unwrap()

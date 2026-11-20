@@ -5,7 +5,7 @@ import "../index.css";
 import { LocalAiPanel, useLocalAi } from "./LocalAiPanel";
 import ModelCard from "./ModelCard";
 import ModelModal from "./ModelModal";
-import { endpointLabel } from "./aiSetup";
+import { endpointLabel } from "./aiSetupHelpers";
 
 const MODEL_TYPES: ModelType[] = ["LLM", "EMBEDDING", "TRANSCRIPTION", "SPEECH"];
 

@@ -8,11 +8,14 @@
  * Reproduction:
  *   1. Start one executor with `enable_multi_user`.
  *   2. Create + log in two managed users (Alice, Bob).
- *   3. Register an AutoProcessorConfig on a perspective owned by Alice's
- *      session.
- *   4. Alice + Bob each post a message via their own JWT'd Ad4mClient — the
+ *   3. Alice publishes that perspective as a neighbourhood and Bob joins it.
+ *      A private perspective is owner-scoped, so Bob's `byUUID` is null
+ *      until the join adds him to the owners list. `pnpm run prepare-test`
+ *      must have published perspective-diff-sync first.
+ *   4. Register an AutoProcessorConfig on that shared perspective.
+ *   5. Alice + Bob each post a message via their own JWT'd Ad4mClient — the
  *      link's author is the managed user's DID.
- *   5. Wait for a ConversationSubgroup to appear.
+ *   6. Wait for a ConversationSubgroup to appear.
  *
  * Pre-fix: no per-user loop runs, the main-agent loop stands down on every
  * tick, no subgroup appears, `waitUntil` times out. Post-fix: the supervisor
@@ -24,10 +27,11 @@
  * processor passes reach it the same way as single-user passes.
  */
 import path from "path";
-import { Ad4mClient, Link, PerspectiveProxy } from "@coasys/ad4m";
+import { Ad4mClient, Link, Perspective, PerspectiveProxy } from "@coasys/ad4m";
 import type { AutoProcessorEvent } from "@coasys/ad4m";
 import fs from "fs-extra";
 import { fileURLToPath } from "url";
+import { v4 as uuidv4 } from "uuid";
 import { expect } from "chai";
 import {
   baseUrl,
@@ -36,18 +40,13 @@ import {
   gracefulShutdown,
 } from "../utils/utils";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
-import { addOllamaLlm, waitUntil } from "../helpers/index";
+import { addE2eLlm, E2E_PASS_TIMEOUT_MS, waitUntil } from "../helpers/index";
 import { ChildProcess } from "node:child_process";
 import { ConversationSubgroup } from "./model/auto-processor-models";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const BASE_URL = process.env.INTERPRETATION_E2E_BASE_URL || "http://localhost:11434/v1";
-// Ask for the window the Modelfile already loaded (qwen3.8-27b-48k: 49152). The provider reads
-// it from /api/show too; the pin also holds a model without a Modelfile num_ctx to staging's residency.
-const MAX_NUM_CTX = Number(process.env.INTERPRETATION_E2E_MAX_NUM_CTX) || 49152;
-const MODEL = process.env.INTERPRETATION_E2E_MODEL || "qwen3.8-27b-48k";
 const ADMIN_CREDENTIAL = "auto-processor-multi-user-admin";
 
 // Same shape as the two-executor test uses: speaker + timestamp come off the
@@ -63,14 +62,14 @@ ORDER BY ?timestamp`;
 
 // LLM E2E gate — this suite drives the executor's real LLM path. Skipped by
 // default (unset `LLM_E2E`); the nightly `llm-e2e` workflow on `dev` runs it
-// against Marvin's Ollama. Run locally with `LLM_E2E=1`, or the umbrella
+// against the host's llama-server. Run locally with `LLM_E2E=1`, or the umbrella
 // `./scripts/run-llm-e2e.sh` at the repo root.
 const describeIfLLM: Mocha.SuiteFunction = (process.env.LLM_E2E === "1"
   ? describe
   : (describe.skip as unknown as Mocha.SuiteFunction));
 
 describeIfLLM("AutoProcessor runs for managed users on a hosted node", function () {
-  this.timeout(600_000);
+  this.timeout(1_200_000);
 
   const TEST_DIR = path.join(`${__dirname}/../tst-tmp`);
   const appDataPath = path.join(TEST_DIR, "agents", "auto-processor-multi-user");
@@ -118,7 +117,7 @@ describeIfLLM("AutoProcessor runs for managed users on a hosted node", function 
     // LLM lives on the admin side — its default binding is global, so
     // interpretation passes running under a managed user's context still
     // resolve to it.
-    const modelId = await addOllamaLlm(admin, "interpretation-llm", BASE_URL, MODEL, MAX_NUM_CTX);
+    const modelId = await addE2eLlm(admin, "interpretation-llm");
     await admin.ai.setDefaultModel("LLM", modelId);
 
     // Two managed users, free-access so billing doesn't gate the LLM call.
@@ -156,9 +155,27 @@ describeIfLLM("AutoProcessor runs for managed users on a hosted node", function 
   });
 
   it("processes utterances authored by managed users without a main-agent loop", async () => {
-    // Alice creates the perspective, registers the extraction class, and
-    // configures one auto-processor over the body-message scope.
+    // Alice creates the perspective. Bob joins it, then she registers the
+    // extraction class and one auto-processor over the body-message scope.
     const handle = await alice!.perspective.add("auto-processor-managed-users");
+    // Owner-scoped: Bob cannot resolve Alice's private perspective. Joining
+    // the neighbourhood she publishes adds him as an owner of this same
+    // perspective (one executor, one graph). The hash file is written by
+    // `pnpm run prepare-test`.
+    const linkLangHash = fs
+      .readFileSync(path.join(__dirname, "../scripts/perspective-diff-sync-hash"), "utf8")
+      .trim();
+    const socialContext = await alice!.languages.applyTemplateAndPublish(
+      linkLangHash,
+      JSON.stringify({ uid: uuidv4(), name: "auto-processor managed users" }),
+    );
+    const neighbourhoodUrl = await alice!.neighbourhood.publishFromPerspective(
+      handle.uuid,
+      socialContext.address,
+      new Perspective(),
+    );
+    await bob!.neighbourhood.joinFromUrl(neighbourhoodUrl);
+
     const aliceP = (await alice!.perspective.byUUID(handle.uuid)) as PerspectiveProxy;
     await ConversationSubgroup.register(aliceP);
 
@@ -175,20 +192,17 @@ describeIfLLM("AutoProcessor runs for managed users on a hosted node", function 
       claimTtlMs: 60_000,
     } as any);
 
-    // `perspective.add` assigns the caller as the owner, so a strict
-    // ownership regime would make Bob's `byUUID` return `null`
-    // (CodeRabbit #881 review). On the current hosted-node/multi-user
-    // path Bob is a managed user on Alice's executor, so he does see the
-    // perspective, but assert it here so a future ownership tightening
-    // surfaces a clear diagnostic instead of a silent NPE on `bobP.add`.
     const bobPRaw = await bob!.perspective.byUUID(handle.uuid);
     expect(
       bobPRaw,
-      "Bob (managed user on the same executor) must resolve Alice's perspective — " +
-        "if this fails, publish the perspective as a neighbourhood or add Bob " +
-        "as an owner before this line.",
+      "Bob must resolve the neighbourhood he just joined — the join adds him " +
+        "to the owners of Alice's perspective on this executor.",
     ).to.exist;
     const bobP = bobPRaw as PerspectiveProxy;
+    // The pass runs as whichever managed user wins the claim. That user's
+    // session is the one that receives `processed`; Alice's socket stays
+    // quiet when Bob wins.
+    bobP.on("auto-processor-event", (e) => events.push(e));
 
     // One turn from each managed user's own JWT'd client — so each link is
     // signed by that user's DID and the body link's reifier carries the
@@ -217,11 +231,13 @@ describeIfLLM("AutoProcessor runs for managed users on a hosted node", function 
     let subgroups: ConversationSubgroup[] = [];
     await waitUntil(
       async () => {
-        subgroups = await ConversationSubgroup.findAll(aliceP);
+        const aliceGroups = await ConversationSubgroup.findAll(aliceP);
+        const bobGroups = await ConversationSubgroup.findAll(bobP);
+        subgroups = aliceGroups.length >= bobGroups.length ? aliceGroups : bobGroups;
         const processedCount = events.filter((e) => e.step === "processed").length;
         return processedCount >= 1 && subgroups.length >= 1;
       },
-      240_000,
+      E2E_PASS_TIMEOUT_MS,
       "a processed event and at least one subgroup from managed-user utterances",
     );
 
