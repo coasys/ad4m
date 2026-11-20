@@ -270,7 +270,7 @@ pub fn granted_token(auth: crate::agent::capabilities::AuthInfo) -> String {
         None => crate::agent::AgentContext::main_agent(),
     };
     let request_id = format!("test-{}", uuid::Uuid::new_v4());
-    crate::agent::grants::mint(agent, auth, Some(request_id), 3600)
+    crate::agent::grants::mint(agent, auth, Some(request_id), 3600, None)
         .expect("the test wallet signs and the test database stores the grant")
         .0
 }

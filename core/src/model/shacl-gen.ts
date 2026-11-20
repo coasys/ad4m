@@ -329,6 +329,7 @@ export function buildSHACL(
         // Encode relation kind so the executor can derive direction and
         // scalar-vs-collection rendering without consulting the JS class.
         relShape.relationKind = relMeta.kind;
+        if (relMeta.polymorphic) relShape.polymorphic = true;
 
         // Scalar relations cap at 1.
         if (relMeta.kind === 'hasOne' || relMeta.kind === 'belongsToOne') {

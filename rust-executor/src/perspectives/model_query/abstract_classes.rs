@@ -30,7 +30,7 @@ use crate::perspectives::shacl_parser::{ABSTRACT_PREDICATE, ALIAS_PREDICATE};
 use crate::perspectives::sparql_store::EvalStop;
 use crate::perspectives::sparql_store::SparqlStore;
 use crate::perspectives::subject_classes_of::{concrete_subject_class_names, local_name};
-use deno_core::anyhow::Error;
+use anyhow::Error;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;

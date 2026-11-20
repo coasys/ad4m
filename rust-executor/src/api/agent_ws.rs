@@ -716,8 +716,14 @@ async fn permit_capability_handler(
             ));
         }
     }
-    let random_number_challenge =
-        crate::agent::capabilities::permit_capability_within(auth, &held).map_err(|_| missing())?;
+    // A key-bound session's approval binds the grant the same way (delegated): the app's
+    // token ends with the device and the identity, as the approving session's would.
+    let random_number_challenge = crate::agent::capabilities::permit_capability_within(
+        auth,
+        &held,
+        ctx.session.grant().and_then(|g| g.key.as_ref()),
+    )
+    .map_err(|_| missing())?;
     Ok(Value::String(random_number_challenge))
 }
 

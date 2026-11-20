@@ -35,7 +35,7 @@ use super::types::{IncludeValue, ModelQueryInput, ModelShape, Scope, WhereCondit
 use super::utils::{validate_iri, values_or_str_filter};
 use crate::perspectives::sparql_store::{EvalStop, SparqlStore};
 use crate::types::LinkStatus;
-use deno_core::anyhow::{anyhow, Error};
+use anyhow::{anyhow, Error};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::sync::Arc;
