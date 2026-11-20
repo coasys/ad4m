@@ -22,6 +22,7 @@ export interface JSONSchemaProperty {
   items?: JSONSchemaProperty;
   properties?: { [key: string]: JSONSchemaProperty };
   required?: string[];
+  enum?: unknown[];
   "x-ad4m"?: {
     through?: string;
     resolveLanguage?: string;
@@ -363,10 +364,19 @@ export function buildModelFromJSONSchema(
           }
         }
 
+        // A string `enum` becomes `sh:in`, unless propertyOptions sets `options` itself.
+        // Other enums are left unconstrained: `sh:in` entries are strings.
+        let allowed = getPropertyOption(propertyName, propertySchema, options, 'options');
+        const stringEnum = Array.isArray(propertySchema.enum) && propertySchema.enum.every((v) => typeof v === "string");
+        if (allowed === undefined && stringEnum) {
+          allowed = (propertySchema.enum as string[]).map((value) => ({ value }));
+        }
+
         properties[propertyName] = {
           through: predicate,
           required: isRequired,
           writable: writable,
+          ...(allowed !== undefined && { options: allowed }),
           ...(resolveLanguage !== undefined && { resolveLanguage }),
           ...(local !== undefined && { local }),
           ...(initial && { initial })

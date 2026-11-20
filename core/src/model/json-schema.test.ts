@@ -55,3 +55,48 @@ describe("fromJSONSchema: reserved property names", () => {
     );
   });
 });
+
+describe("fromJSONSchema: enum", () => {
+  const schema = {
+    title: "FedRequest",
+    type: "object",
+    properties: {
+      status: { type: "string", enum: ["pending", "accepted", "declined"] },
+      hops: { type: "number", enum: [1, 2] },
+      note: { type: "string" },
+    },
+    required: ["status"],
+  };
+
+  it("maps a string enum to sh:in", () => {
+    const Cls: any = Ad4mModel.fromJSONSchema(schema, {
+      name: "FedRequest",
+      namespace: "fed://",
+    });
+    const props = Object.fromEntries(
+      Cls.generateSHACL().shape.properties.map((p: any) => [p.name, p]),
+    );
+    expect(props.status.in).toEqual([
+      { value: "pending" },
+      { value: "accepted" },
+      { value: "declined" },
+    ]);
+    expect(props.hops.in).toBeUndefined(); // not a string enum: left unconstrained
+    expect(props.note.in).toBeUndefined();
+    expect(Cls.getModelMetadata().properties.status.required).toBe(true);
+  });
+
+  it("lets propertyOptions override the enum", () => {
+    const Cls: any = Ad4mModel.fromJSONSchema(schema, {
+      name: "FedRequest2",
+      namespace: "fed://",
+      propertyOptions: {
+        status: { options: [{ value: "fed://pending", label: "Pending" }] },
+      },
+    });
+    const status = Cls.generateSHACL().shape.properties.find(
+      (p: any) => p.name === "status",
+    );
+    expect(status.in).toEqual([{ value: "fed://pending", label: "Pending" }]);
+  });
+});
