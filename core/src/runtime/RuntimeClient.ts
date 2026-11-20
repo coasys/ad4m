@@ -1,7 +1,7 @@
 import {ApiClient, CallOptions } from '../apiClient'
 import { Perspective, PerspectiveExpression } from "../perspectives/Perspective"
 import { RuntimeInfo, SentMessage, NotificationInput, NotificationUpdate, Notification, ImportResult, UserStatistics } from "./RuntimeTypes"
-import type { HostRate, LogTail, RuntimeConfig, SetConfigResult, UnytVersionInfo } from "../generated/api"
+import type { HostRate, LogTail, RuntimeConfig, SetConfigResult, StorageStatus, StorageUnlockResult, UnytVersionInfo } from "../generated/api"
 import { LanguageMeta } from "../language/LanguageMeta"
 
 export class RuntimeClient {
@@ -13,6 +13,18 @@ export class RuntimeClient {
 
     async info(): Promise<RuntimeInfo> {
         return this.#apiClient.call('runtime.info', {})
+    }
+
+    /** The storage gate's state. Answers while the executor is sealed (every other call
+     *  gets `storage-sealed` until the keyring is unlocked). */
+    async storageStatus(): Promise<StorageStatus> {
+        return this.#apiClient.call('runtime.storageStatus', {})
+    }
+
+    /** Unlocks the storage keyring with the operator secret (64 hex characters). Only the
+     *  operator on the executor's machine can call it. */
+    async unlockStorage(secret: string): Promise<StorageUnlockResult> {
+        return this.#apiClient.call('storage.unlock', { secret })
     }
 
     async tlsDomain(): Promise<string | null> {

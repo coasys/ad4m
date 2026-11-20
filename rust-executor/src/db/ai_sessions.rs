@@ -1022,8 +1022,8 @@ mod tests {
 
         // s1: title, default_perspective, capabilities; s2: title, capabilities; m1: content;
         // m2: content, error; m3: content.
-        assert_eq!(db.seal_plain_values().unwrap(), 9);
-        assert_eq!(db.seal_plain_values().unwrap(), 0, "sealed once");
+        assert_eq!(db.seal_plain_values().unwrap().sealed, 9);
+        assert_eq!(db.seal_plain_values().unwrap().sealed, 0, "sealed once");
 
         let title = stored(&db, "SELECT title FROM ai_sessions WHERE id = ?1", "s1");
         assert!(title.starts_with(SEALED_PREFIX));

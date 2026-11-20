@@ -3,19 +3,15 @@ use aes_gcm::{
     Aes256Gcm, Key, Nonce,
 };
 use base64::{engine::general_purpose, Engine as _};
-#[cfg(not(test))]
 use keyring::Entry;
-#[cfg(not(test))]
 use std::sync::Mutex;
 
 // Service name for keyring entry
-#[cfg(not(test))]
 const KEYRING_SERVICE: &str = "ad4m-launcher";
 #[cfg(not(test))]
 const KEYRING_USER: &str = "smtp-encryption-key";
 
 // Lazy static mutex to ensure thread-safe access to keyring
-#[cfg(not(test))]
 lazy_static::lazy_static! {
     static ref KEYRING_MUTEX: Mutex<()> = Mutex::new(());
 }
@@ -63,34 +59,105 @@ fn get_encryption_key() -> Result<Key<Aes256Gcm>, Box<dyn std::error::Error>> {
 }
 
 /// The launcher's operator secret, which opens the embedded executor's data at rest.
-#[cfg(not(test))]
 const STORAGE_SECRET_USER: &str = "storage-secret";
 
+/// What the launcher does about the executor's storage secret at start, from whether the
+/// OS keyring holds it and whether the data folder holds a keyring (sealed data).
+#[derive(Debug, PartialEq, Eq)]
+pub enum StorageSecretDecision {
+    /// The OS keyring's secret: hand it to the executor.
+    Stored,
+    /// No sealed data yet: make a new secret and keep it in the OS keyring.
+    Make,
+    /// Sealed data but no OS keyring entry: a new secret could not open the keyring, so
+    /// none is made. The launcher asks the user for it instead of locking them out.
+    Missing,
+}
+
+/// The storage-secret decision, split from the keyring so tests need no OS keyring.
+pub(crate) fn storage_secret_decision(stored: bool, sealed_data: bool) -> StorageSecretDecision {
+    match (stored, sealed_data) {
+        (true, _) => StorageSecretDecision::Stored,
+        (false, true) => StorageSecretDecision::Missing,
+        (false, false) => StorageSecretDecision::Make,
+    }
+}
+
+fn storage_secret_entry() -> Result<Entry, keyring::Error> {
+    Entry::new(KEYRING_SERVICE, STORAGE_SECRET_USER)
+}
+
 /// The operator secret the launcher hands its executor in-process: kept in the OS keyring (not
-/// on the data folder's disk), made from the OS random source on the first start.
+/// on the data folder's disk), made from the OS random source on the first start. `Ok(None)`
+/// is [`StorageSecretDecision::Missing`]: the data folder at `data_dir` holds sealed data but
+/// the OS keyring lost the secret, so no new one is made — a new one could not open it.
 #[cfg(not(test))]
-pub fn storage_secret() -> Result<rust_executor::at_rest::StorageSecret, Box<dyn std::error::Error>>
-{
-    use rust_executor::at_rest::{secret_source, SecretSourceKind, StorageSecret};
+pub fn storage_secret(
+    data_dir: &std::path::Path,
+) -> Result<Option<rust_executor::at_rest::StorageSecret>, Box<dyn std::error::Error>> {
+    use rust_executor::at_rest::{keyring_file, secret_source, SecretSourceKind, StorageSecret};
     let _lock = KEYRING_MUTEX.lock().unwrap();
-    let entry = Entry::new(KEYRING_SERVICE, STORAGE_SECRET_USER)?;
-    let secret = match entry.get_password() {
-        Ok(hex) => StorageSecret::from_hex(&hex, SecretSourceKind::InProcess, None)?,
-        Err(keyring::Error::NoEntry) => {
-            let hex = secret_source::new_secret_hex();
-            entry.set_password(&hex)?;
-            StorageSecret::from_hex(&hex, SecretSourceKind::InProcess, None)?
-        }
+    let entry = storage_secret_entry()?;
+    let stored = match entry.get_password() {
+        Ok(hex) => Some(hex),
+        Err(keyring::Error::NoEntry) => None,
         Err(e) => return Err(Box::new(e)),
     };
-    Ok(secret)
+    let sealed_data = keyring_file::path_in(data_dir).exists();
+    match storage_secret_decision(stored.is_some(), sealed_data) {
+        StorageSecretDecision::Stored => Ok(Some(StorageSecret::from_hex(
+            stored.as_deref().unwrap(),
+            SecretSourceKind::InProcess,
+            None,
+        )?)),
+        StorageSecretDecision::Make => {
+            let hex = secret_source::new_secret_hex();
+            entry.set_password(&hex)?;
+            Ok(Some(StorageSecret::from_hex(
+                &hex,
+                SecretSourceKind::InProcess,
+                None,
+            )?))
+        }
+        StorageSecretDecision::Missing => Ok(None),
+    }
 }
 
 /// Tests never touch the OS keyring: a fixed secret stands in.
 #[cfg(test)]
-pub fn storage_secret() -> Result<rust_executor::at_rest::StorageSecret, Box<dyn std::error::Error>>
-{
-    Ok(rust_executor::at_rest::StorageSecret::in_process([7u8; 32]))
+pub fn storage_secret(
+    _data_dir: &std::path::Path,
+) -> Result<Option<rust_executor::at_rest::StorageSecret>, Box<dyn std::error::Error>> {
+    Ok(Some(rust_executor::at_rest::StorageSecret::in_process(
+        [7u8; 32],
+    )))
+}
+
+/// Keeps `hex` (64 hex characters) as the executor's storage secret in the OS keyring: a
+/// secret the user entered or restored, so the next start finds it.
+pub fn set_storage_secret(hex: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let _lock = KEYRING_MUTEX.lock().unwrap();
+    rust_executor::at_rest::secret_source::parse_hex(hex)?;
+    storage_secret_entry()?.set_password(hex)?;
+    Ok(())
+}
+
+/// The storage secret the OS keyring holds, for the user to back up. `Err` when there is
+/// none or the keyring does not answer.
+pub fn get_storage_secret() -> Result<String, Box<dyn std::error::Error>> {
+    let _lock = KEYRING_MUTEX.lock().unwrap();
+    Ok(storage_secret_entry()?.get_password()?)
+}
+
+/// Reads a storage secret file (the 64-hex form `ad4m-executor storage new-secret` writes)
+/// and keeps it in the OS keyring. Answers the secret so the caller can unlock with it.
+pub fn restore_storage_secret_file(
+    path: &std::path::Path,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let content = std::fs::read_to_string(path)?;
+    let hex = content.lines().next().unwrap_or("").trim().to_string();
+    set_storage_secret(&hex)?;
+    Ok(hex)
 }
 
 /// Encrypt a password using AES-256-GCM
@@ -139,6 +206,37 @@ pub fn decrypt_password(encrypted: &str) -> Result<String, Box<dyn std::error::E
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// No OS keyring entry and no keyring in the data folder (a first start, or a fresh
+    /// agent): a new secret is made and stored.
+    #[test]
+    fn no_entry_and_no_keyring_makes_a_new_secret() {
+        assert_eq!(
+            storage_secret_decision(false, false),
+            StorageSecretDecision::Make
+        );
+    }
+
+    /// No OS keyring entry but a keyring in the data folder (sealed data): the missing state
+    /// is reported and no new secret is made — one could not open the keyring anyway.
+    #[test]
+    fn no_entry_with_a_keyring_reports_missing_and_makes_none() {
+        assert_eq!(
+            storage_secret_decision(false, true),
+            StorageSecretDecision::Missing
+        );
+    }
+
+    /// A stored entry is used, sealed data or not.
+    #[test]
+    fn a_stored_entry_is_used() {
+        for sealed_data in [false, true] {
+            assert_eq!(
+                storage_secret_decision(true, sealed_data),
+                StorageSecretDecision::Stored
+            );
+        }
+    }
 
     #[test]
     fn test_encrypt_decrypt() {

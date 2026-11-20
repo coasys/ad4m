@@ -546,3 +546,46 @@ fn a_failed_run_seals_the_gate_until_the_next_unlock() {
     run_with(&gate, &fixture.paths, &mut quiet(&gate), &Hooks::default()).unwrap();
     fixture.assert_fully_sealed(gate.keys());
 }
+
+/// A `perspective_diff` row whose `perspective` is no uuid has no store to seal for: it is
+/// skipped (logged with its table and reason, kept in the clear in the keyed file), the move
+/// completes, and the next unlock finds nothing to do — the row does not fail every start.
+#[test]
+fn a_row_that_cannot_be_sealed_is_skipped_and_the_second_unlock_is_a_no_op() {
+    let fixture = Fixture::new();
+    rusqlite::Connection::open(&fixture.paths.database)
+        .unwrap()
+        .execute(
+            "INSERT INTO perspective_diff (perspective, additions, removals, is_pending) VALUES ('not-a-uuid', '[]', '[]', 1)",
+            [],
+        )
+        .unwrap();
+    let gate = unlocked_gate(fixture.data.path());
+    let outcome = run(&gate, &fixture.paths).unwrap();
+    assert_eq!(
+        outcome,
+        Outcome::Migrated {
+            steps: MigrationStep::ALL.to_vec()
+        }
+    );
+    fixture.assert_fully_sealed(gate.keys());
+    // The row stays as it was, in the clear inside the keyed file.
+    let key = sqlite::database_key(gate.keys()).unwrap();
+    let conn = sqlite::open_keyed(&fixture.paths.database, &key).unwrap();
+    let additions: String = conn
+        .query_row(
+            "SELECT additions FROM perspective_diff WHERE perspective = 'not-a-uuid'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(additions, "[]");
+    drop(conn);
+    drop(gate);
+
+    // The next unlock, in a new process, has nothing to do: the skipped row does not come up
+    // as a failing seal again.
+    let gate = unlocked_gate(fixture.data.path());
+    assert_eq!(run(&gate, &fixture.paths).unwrap(), Outcome::NothingToDo);
+    assert_eq!(gate.state(), StorageState::Unlocking);
+}

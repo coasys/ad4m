@@ -427,6 +427,14 @@ only wrapped; without the secret it opens nothing.
   secret file on the same disk as the data folder stops the unlock
   (`secret-on-data-disk`) unless `allow_secret_on_data_disk` is `true`
   (`AD4M_ALLOW_SECRET_ON_DATA_DISK`, `--allow-secret-on-data-disk`).
+- **The Docker image keeps it on the volume.** Its entrypoint points
+  `AD4M_STORAGE_SECRET_FILE` at `/data/storage-secret` and sets
+  `AD4M_ALLOW_SECRET_ON_DATA_DISK`: a first start writes the file (mode
+  `0600`), later starts reuse it. Sealed data (`/data/ad4m/keyring.json`)
+  without the file refuses the start — a new secret could not open it — so
+  the volume keeps data and secret together. An operator who wants the
+  secret off the volume sets `AD4M_STORAGE_SECRET_FILE` to a mounted file
+  and the entrypoint leaves it alone.
 - **Keep it.** A lost secret is lost data: nothing in the data folder
   recovers it.
 
