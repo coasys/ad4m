@@ -283,6 +283,7 @@ struct UnregisterOnDrop {
     id: Option<String>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Drop for UnregisterOnDrop {
     fn drop(&mut self) {
         let Some(id) = self.id.take() else { return };
@@ -297,6 +298,23 @@ impl Drop for UnregisterOnDrop {
                 queries.lock().await.remove(&id);
             });
         }
+    }
+}
+
+/// The web executor's (wasm32) drop: the same, with the task on `crate::rt` (there is no
+/// tokio runtime to ask for).
+#[cfg(target_arch = "wasm32")]
+impl Drop for UnregisterOnDrop {
+    fn drop(&mut self) {
+        let Some(id) = self.id.take() else { return };
+        if let Ok(mut queries) = self.queries.try_lock() {
+            queries.remove(&id);
+            return;
+        }
+        let queries = self.queries.clone();
+        crate::rt::spawn(async move {
+            queries.lock().await.remove(&id);
+        });
     }
 }
 
@@ -369,6 +387,7 @@ pub(super) static RECHECK_SLOTS: LazyLock<Arc<Semaphore>> =
 /// A re-check is spawned only once it holds a permit, so all passes of all
 /// perspectives together run at most `slots`' permits of re-checks; one
 /// that panics is logged and yields nothing.
+#[cfg(not(target_arch = "wasm32"))]
 pub(super) async fn run_rechecks<T: Send + 'static>(
     checks: Vec<BoxFuture<'static, T>>,
     slots: &Arc<Semaphore>,
@@ -393,6 +412,23 @@ pub(super) async fn run_rechecks<T: Send + 'static>(
             Ok(output) => outputs.push(output),
             Err(e) => log::error!("❌ 🔗 subscription re-check failed: {}", e),
         }
+    }
+    outputs
+}
+
+/// The web executor's (wasm32) `run_rechecks`: one thread and no blocking pool, so the
+/// re-checks run here, one after another, each holding a permit of `slots` while it runs
+/// (the slots are shared with every other perspective's passes, as on native).
+#[cfg(target_arch = "wasm32")]
+pub(super) async fn run_rechecks<T: Send + 'static>(
+    checks: Vec<BoxFuture<'static, T>>,
+    slots: &Arc<Semaphore>,
+) -> Vec<T> {
+    let mut outputs = Vec::with_capacity(checks.len());
+    for check in checks {
+        // `acquire` fails only on a closed semaphore, and this one is never closed.
+        let _permit = slots.acquire().await;
+        outputs.push(check.await);
     }
     outputs
 }
