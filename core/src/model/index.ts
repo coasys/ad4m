@@ -17,4 +17,3 @@ export * from "./hydration";
 export * from "./ModelQueryBuilder";
 export * from "./sdna";
 export * from "./shacl-gen";
-export * from "./query-cache";

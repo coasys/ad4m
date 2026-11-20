@@ -202,6 +202,40 @@ test_sdk_needs_the_checkout_at_ad4m_sha() {
     grep -qF "not AD4M_SHA $SHA" <<<"$out" || fail "the mismatch is not reported: $out"
 }
 
+# Chromium is installed with whichever package declares playwright-core. The e2e harness
+# (WE#468) puts it on @we/e2e; the tree before that puts it on @we/app-web.
+test_chromium_package() {
+    mkdir -p "$COASYS_SPACES_WORK/we/apps/we-web"
+    echo '{"name":"@we/app-web"}' >"$COASYS_SPACES_WORK/we/apps/we-web/package.json"
+    [ "$(bash "$SCRIPT" chromium-package)" = "@we/app-web" ] ||
+        fail "without @we/e2e, Chromium is not installed from @we/app-web: $(bash "$SCRIPT" chromium-package)"
+
+    mkdir -p "$COASYS_SPACES_WORK/we/packages/e2e"
+    echo '{"name":"@we/e2e","dependencies":{"playwright-core":"1.64.1"}}' >"$COASYS_SPACES_WORK/we/packages/e2e/package.json"
+    [ "$(bash "$SCRIPT" chromium-package)" = "@we/e2e" ] ||
+        fail "an @we/e2e that depends on playwright-core is not used: $(bash "$SCRIPT" chromium-package)"
+}
+
+# The test step records the registration the suite will send, before it looks for pnpm.
+# On the script before this, that line is absent, so the assertion fails there.
+test_test_records_llm_registration() {
+    mkdir -p "$COASYS_SPACES_WORK/we/apps/we-web"
+    echo '{"name":"we"}' >"$COASYS_SPACES_WORK/we/package.json"
+    echo '{"name":"@we/app-web","scripts":{"test:spaces":"true"}}' >"$COASYS_SPACES_WORK/we/apps/we-web/package.json"
+    : >"$COASYS_SPACES_WORK/ad4m-executor" && chmod 755 "$COASYS_SPACES_WORK/ad4m-executor"
+    out="$(
+        COASYS_SPACES_LLM_ENDPOINT_KIND=LLAMA_SERVER \
+            COASYS_SPACES_LLM_NATIVE_TOOLS=true \
+            COASYS_SPACES_LLM_REQUEST_TIMEOUT_SECS=900 \
+            COASYS_SPACES_LLM_MAX_NUM_CTX=90112 \
+            bash "$SCRIPT" test 2>&1
+    )" && fail "test ran without WE's pnpm"
+    grep -qF "names no packageManager" <<<"$out" || fail "did not stop at pnpm: $out"
+    local line="llm kind LLAMA_SERVER nativeTools true requestTimeoutSecs 900 maxNumCtx 90112"
+    grep -qF "$line" "$COASYS_SPACES_ARTIFACTS/run.txt" ||
+        fail "registration not recorded: $(cat "$COASYS_SPACES_ARTIFACTS/run.txt" 2>/dev/null)"
+}
+
 # A WE without the suite fails the test step; pnpm --filter would run nothing and pass.
 test_test_needs_the_suite() {
     mkdir -p "$COASYS_SPACES_WORK/we/apps/we-web"
@@ -253,7 +287,8 @@ test_llm_check() {
     serve_models "llama3:8b" "gemma3:12b"
     COASYS_SPACES_LLM_MODEL=gemma3:12b bash "$SCRIPT" llm-check >/dev/null 2>&1 || fail "llm-check failed with the model served"
     out="$(COASYS_SPACES_LLM_MODEL=gemma3:27b bash "$SCRIPT" llm-check 2>&1)" && fail "llm-check passed without the model"
-    grep -qF "ollama pull gemma3:27b" <<<"$out" || fail "a missing model does not say what to pull: $out"
+    grep -qF "systemctl --user status llama-qwen27b" <<<"$out" || fail "a missing model does not name llama-qwen27b: $out"
+    grep -qF "ollama pull" <<<"$out" && fail "a missing model still says to ollama pull: $out"
     kill "$SERVER"
     wait "$SERVER" 2>/dev/null
     # Ollama's /v1/models lists an untagged model as `<name>:latest`; the bare name is that model.
@@ -266,6 +301,7 @@ test_llm_check() {
     wait "$SERVER" 2>/dev/null
     out="$(bash "$SCRIPT" llm-check 2>&1)" && fail "llm-check passed with no server"
     grep -qF "does not answer" <<<"$out" || fail "no server is not reported as such: $out"
+    grep -qF "systemctl --user status llama-qwen27b" <<<"$out" || fail "no server does not name llama-qwen27b: $out"
     COASYS_SPACES_TIER=stub bash "$SCRIPT" llm-check >/dev/null 2>&1 || fail "the stub tier needs no model server"
     unset COASYS_SPACES_LLM_BASE_URL
 }
@@ -302,7 +338,8 @@ test_llm_context_window() {
 for t in test_executor_from_zst test_executor_from_gz test_executor_missing \
     test_executor_checksum_mismatch test_executor_other_commit test_executor_size_mismatch \
     test_executor_unknown_file test_preflight test_dirty_checkout_is_not_recorded test_record_needs_we_sha test_we_ref_must_be_a_name \
-    test_sdk_needs_the_checkout_at_ad4m_sha test_test_needs_the_suite test_llm_check \
+    test_sdk_needs_the_checkout_at_ad4m_sha test_chromium_package test_test_records_llm_registration \
+    test_test_needs_the_suite test_llm_check \
     test_llm_context_window; do
     echo "$t"
     setup

@@ -847,3 +847,131 @@ async fn a_session_lists_the_per_class_tools_only_with_dynamic_class_tools() {
     }
     clean_up(vec![a]).await;
 }
+
+/// Each generated per-class mutator, aimed at a perspective the session may
+/// read and may not write. Dispatch refuses the call. The step still records
+/// `writes: true`: that flag is the tool's declared intent, written before
+/// the call runs.
+#[tokio::test(flavor = "multi_thread")]
+async fn each_per_class_mutator_is_refused_on_a_read_only_perspective() {
+    setup();
+    let _runtime = test_support::RuntimeService::start();
+    let flag = DynamicToolsFlag::held();
+    flag.set(Some(true));
+
+    let did = "did:key:alice-d8";
+    let perspective = test_support::perspective(Some(vec![did.to_string()])).await;
+    test_support::seed(&perspective, "Note", "kept", "words-kept").await;
+    let before = links_of(&perspective).await;
+
+    let caller = user(did, everything());
+    let session = service::create(
+        &caller,
+        AiSessionCreate {
+            model: Some("scripted".into()),
+            capabilities: Some(vec![perspective_query_capability(
+                vec![perspective.clone()],
+            )]),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let base = "item://kept";
+    let model = Scripted::answering(vec![
+        calls("note_query", json!({ "perspective_id": perspective })),
+        calls(
+            "note_create",
+            json!({
+                "perspective_id": perspective,
+                "expression_address": "item://planted",
+                "body": "planted-words",
+            }),
+        ),
+        calls(
+            "note_set_body",
+            json!({
+                "perspective_id": perspective,
+                "expression_address": base,
+                "value": "rewritten",
+            }),
+        ),
+        calls(
+            "note_add_items",
+            json!({
+                "perspective_id": perspective,
+                "expression_address": base,
+                "value": "item://extra",
+            }),
+        ),
+        calls(
+            "note_remove_items",
+            json!({
+                "perspective_id": perspective,
+                "expression_address": base,
+                "value": "item://extra",
+            }),
+        ),
+        calls(
+            "note_delete",
+            json!({
+                "perspective_id": perspective,
+                "expression_address": base,
+            }),
+        ),
+    ]);
+    let steps = steps_of(&session, &caller, model.clone(), None).await;
+    assert_eq!(steps.len(), 6, "{steps:?}");
+
+    let offered: Vec<String> = model.offered().into_iter().map(|tool| tool.name).collect();
+    for name in [
+        "note_query",
+        "note_create",
+        "note_set_body",
+        "note_add_items",
+        "note_remove_items",
+        "note_delete",
+    ] {
+        assert!(
+            offered.iter().any(|n| n == name),
+            "{name} is not on offer: {offered:?}"
+        );
+    }
+
+    assert_eq!(steps[0].content["name"], "note_query");
+    assert_eq!(steps[0].status, Some(Done), "the read answers: {steps:?}");
+    assert_eq!(
+        steps[0].content["writes"],
+        json!(false),
+        "a read declares writes false: {steps:?}"
+    );
+    assert!(
+        steps[0].content["result"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("kept"),
+        "the query names the seeded instance: {steps:?}"
+    );
+
+    for (step, name) in steps[1..].iter().zip([
+        "note_create",
+        "note_set_body",
+        "note_add_items",
+        "note_remove_items",
+        "note_delete",
+    ]) {
+        assert_eq!(step.content["name"], name, "{step:?}");
+        expect_failed(step, name, NOT_HELD);
+        assert_eq!(
+            step.content["writes"],
+            json!(true),
+            "a refused write still declares writes: {step:?}"
+        );
+    }
+    assert_eq!(
+        links_of(&perspective).await,
+        before,
+        "a refused mutator changed the perspective"
+    );
+    clean_up(vec![perspective]).await;
+}
