@@ -834,3 +834,47 @@ async fn teardown_during_a_hung_send_ends_the_drain_task() {
 
     stub.stop().await;
 }
+
+/// S8, past the cache's 60 s: a blocked membership check still answers the
+/// last policy within its own time-box, not after the language's stall.
+/// And once the language serves again, the expired entry is checked anew.
+#[tokio::test(start_paused = true)]
+async fn an_expired_policy_with_a_blocked_check_serves_the_last_policy() {
+    test_setup();
+    let stub = stub_language(
+        Vec::new(),
+        &[Capability::PeersRemote, Capability::TelepresenceGetAgents],
+    )
+    .await;
+    let instance = neighbourhood(&stub, vec![crate::agent::did()]).await;
+    let url = instance.persisted.lock().await.shared_url.clone().unwrap();
+    assert_eq!(
+        read_policy(&url).await.as_result().unwrap().mode,
+        "designated",
+        "setup: expected the honest policy"
+    );
+
+    sleep(Duration::from_secs(61)).await;
+    stub.set(StubMode::Block);
+    let policy = timeout(Duration::from_secs(3), read_policy(&url))
+        .await
+        .expect("a policy read past the cache's lifetime waited on the blocked language")
+        .as_result()
+        .expect("a policy read past the cache's lifetime failed");
+    assert_eq!(policy.mode, "designated");
+
+    // The language serves again and a remote member is there: the expired
+    // entry does not hide it.
+    stub.set(StubMode::Serve);
+    stub.set_peers(vec!["did:key:remote".to_string()]);
+    sleep(Duration::from_secs(61)).await;
+    let policy = timeout(Duration::from_secs(3), read_policy(&url))
+        .await
+        .expect("the policy read waited")
+        .as_result()
+        .expect("the policy read failed");
+    assert_eq!(policy.mode, "mesh", "the expired entry hid a remote member");
+
+    stub.stop().await;
+    crate::perspectives::unregister_perspective(&instance.uuid);
+}

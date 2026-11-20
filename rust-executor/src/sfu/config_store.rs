@@ -19,7 +19,8 @@ use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::time::Instant;
+// tokio's clock, so a paused test clock ages the cache.
+use tokio::time::Instant;
 
 use crate::agent::{did_for_context, AgentContext};
 use crate::perspectives::all_perspectives;
@@ -151,6 +152,12 @@ pub async fn stored_policy(neighbourhood_url: &str) -> Option<CallPolicy> {
 /// left can take this long to be noticed.
 const POLICY_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// How long `read_policy` waits on the membership check once the cached
+/// policy has expired. Past it the check counts as failed, and the last
+/// policy answers: an expired entry must not put `getConfig` back behind a
+/// stalled language.
+const MEMBERSHIP_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// The last policy `read_policy` resolved for a neighbourhood, and — when
 /// it came from a membership check rather than a stored config link —
 /// whether the check found every member hosted here. `send_broadcast`
@@ -270,7 +277,14 @@ pub async fn read_policy(neighbourhood_url: &str) -> Result<CallPolicy, AnyError
     if let Some(policy) = cached_policy(neighbourhood_url) {
         return Ok(policy);
     }
-    match hosts_every_member(&perspective).await {
+    let checked = tokio::time::timeout(MEMBERSHIP_CHECK_TIMEOUT, hosts_every_member(&perspective))
+        .await
+        .unwrap_or_else(|_| {
+            Err(deno_core::anyhow::anyhow!(
+                "the membership check did not answer within {MEMBERSHIP_CHECK_TIMEOUT:?}"
+            ))
+        });
+    match checked {
         Ok(hosted) => {
             let policy = CallPolicy {
                 mode: if hosted { "designated" } else { "mesh" }.to_string(),
