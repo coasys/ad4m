@@ -491,6 +491,8 @@ export class SfuManager {
                 // The people in the call have not changed: keep them, drop only
                 // the old connection's media. The rejoin's roster says who left.
                 this.clearMedia()
+                // A stream-removed handler may have left the call.
+                if (generation !== this.generation) return
                 try {
                     await this.join(stream)
                     if (this.qualityPreference) await this.setQualityPreference(this.qualityPreference)

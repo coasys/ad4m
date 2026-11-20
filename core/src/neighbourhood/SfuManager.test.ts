@@ -2407,6 +2407,30 @@ test("a rebuild keeps the participants: nobody leaves, their media is cleared un
     expect(left).toEqual([BOB])
 })
 
+test("a call left from a stream-removed handler during a rebuild is not joined again", async () => {
+    // `clearMedia` emits stream-removed synchronously, after the rebuild's
+    // generation check; an app may hang up there.
+    const api = fakeApi()
+    const { manager, removed } = recordedManager(api)
+    await manager.join(fakeStream())
+    api.emitRoster(roster([ALICE]))
+    await flush()
+    api.emitOffer(offer("tracks", [mapped("1", ALICE, "audio")]))
+    await flush()
+    currentPc().receive(new FakeTrack("audio"), "1")
+    let left: Promise<void> | undefined
+    manager.on("stream-removed", () => { left ??= manager.leave() })
+
+    await iceState("failed")
+    await left
+    await flush()
+
+    expect(removed).toHaveLength(1)
+    expect(api.sfuCallJoin).toHaveBeenCalledTimes(1)
+    expect(manager.getState().participantId).toBeNull()
+    expect(manager.getState().peerConnection).toBeNull()
+})
+
 // ── Round 2: an answer is sent only for the offer it answers ────────────────
 
 /** Answers that name the offer they answer, so a test can tell them apart. */
