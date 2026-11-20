@@ -1325,7 +1325,9 @@ async fn prepare_read_does_not_block_the_runtime_timer() {
     let (p, ctx, now_ms) = one_turn("timer").await;
     let _guard = probe::install(
         Park::Only(Stage::Source),
-        Hold::Timed(Duration::from_millis(200)),
+        Hold::UntilRelease {
+            limit: Duration::from_secs(5),
+        },
         None,
         None,
     );
@@ -1339,19 +1341,17 @@ async fn prepare_read_does_not_block_the_runtime_timer() {
         "the transcript read did not start"
     );
     tokio::time::sleep(Duration::from_millis(30)).await;
-    let fired = std::time::Instant::now();
-    let start = probe::hold_start().expect("hold start");
     assert!(
-        probe::hold_end().is_none_or(|end| fired <= end),
-        "the runtime timer fired after the transcript read released the worker"
+        probe::hold_end().is_none(),
+        "the hold ended before the runtime timer was checked"
     );
-    assert!(fired >= start);
     assert_ne!(
         probe::query_thread(),
         Some(runtime_thread),
         "the transcript read ran on the runtime thread"
     );
-    tokio::time::timeout(Duration::from_secs(3), tick)
+    probe::set_pass();
+    tokio::time::timeout(Duration::from_secs(5), tick)
         .await
         .expect("the tick ends")
         .expect("tick task");
