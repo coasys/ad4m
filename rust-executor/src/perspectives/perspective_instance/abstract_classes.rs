@@ -284,18 +284,55 @@ impl PerspectiveInstance {
     /// Whether `update_subject` through the abstract `abstract_class` with
     /// `values` on `base` calls into a language: the instance writes ask
     /// before they choose a batch, since a call cannot run inside one.
+    ///
+    /// Read from the declared actions only, as `update_through_abstract`
+    /// picks them, never by planning the write: planning resolves values,
+    /// and a value stored through a language is an `expression_create`.
+    /// Names the write would refuse are skipped; the write refuses them.
     pub(crate) async fn abstract_update_calls(
         &self,
         abstract_class: &str,
         base: &str,
         values: &Value,
-        context: &AgentContext,
     ) -> Result<bool, AnyError> {
-        Ok(!self
-            .update_through_abstract(abstract_class, base, values, context)
-            .await?
-            .calls
-            .is_empty())
+        if abstract_class == CONTAINER_URI {
+            if let Some(write) = self.has_child_write(base, values).await? {
+                if !write.beside_own {
+                    return Ok(false);
+                }
+            }
+        }
+        let Value::Object(values) = values else {
+            return Ok(false);
+        };
+        let (alias_key, shape) = self.abstract_shape(abstract_class)?;
+        let memberships = membership_names(&shape);
+        let index = self.abstract_index()?;
+        let targets = self.write_targets(abstract_class, base)?;
+        for (name, value) in values {
+            let membership = memberships.contains(name.as_str());
+            let (op, value) = match membership {
+                true => Op::of(value),
+                false => (Op::Set, value),
+            };
+            // An adder or remover with no members makes no call.
+            if op != Op::Set && matches!(value, Value::Array(items) if items.is_empty()) {
+                continue;
+            }
+            for class in &targets {
+                let own_shape = self.get_shape(class)?;
+                let Some(own) = index.own_name(class, &own_shape, name, &alias_key) else {
+                    continue;
+                };
+                let Some(actions) = self.actions_for(class, own, op, membership).await? else {
+                    continue;
+                };
+                if actions.iter().any(|c| c.action == Action::Call) {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
     }
 
     /// Whether `remove_subject` through the abstract `abstract_class` on
@@ -395,13 +432,7 @@ impl PerspectiveInstance {
                 names.join(", ")
             ));
         }
-        let memberships: HashSet<&str> = shape
-            .properties
-            .iter()
-            .filter(|p| p.is_collection)
-            .map(|p| p.name.as_str())
-            .chain(shape.include_relations.iter().map(|r| r.name.as_str()))
-            .collect();
+        let memberships = membership_names(&shape);
         let index = self.abstract_index()?;
         let targets = self.write_targets(abstract_class, base)?;
         let mut commands = Vec::new();
@@ -937,6 +968,18 @@ struct HasChildWrite {
     /// One of the parent's classes runs its own remover too: these commands
     /// join its run instead of being the whole write.
     beside_own: bool,
+}
+
+/// The names of `shape` that hold members — its collections and included
+/// relations — and so take an `{action, value}` op.
+fn membership_names(shape: &ModelShape) -> HashSet<&str> {
+    shape
+        .properties
+        .iter()
+        .filter(|p| p.is_collection)
+        .map(|p| p.name.as_str())
+        .chain(shape.include_relations.iter().map(|r| r.name.as_str()))
+        .collect()
 }
 
 /// What an update through an abstract class does to one name.
