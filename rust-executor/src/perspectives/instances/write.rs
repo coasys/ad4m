@@ -172,9 +172,13 @@ pub struct CollectionItemAdded {
     /// The collection's canonical name.
     pub collection: String,
     pub item_uri: String,
-    /// 0 when the item was in the collection already (as the batch's effective graph has it).
+    /// 0 when the item was in the collection already (as the batch's effective graph has it),
+    /// or when a language call made the write (`languageCall`).
     pub links_added: usize,
     pub already_member: bool,
+    /// The collection's declared adder is a `call`: the language added the member, and its
+    /// answer, not a link written here, makes the membership.
+    pub language_call: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
@@ -187,8 +191,10 @@ pub struct CollectionItemRemoved {
     pub item_uri: String,
     /// 0 when the item was not in the collection (as the batch's effective graph has it).
     /// Inside a batch, a member that only the batch had added counts too — it leaves by
-    /// cancelling the staged addition.
+    /// cancelling the staged addition. 0 too when a language call made the write.
     pub links_removed: usize,
+    /// The collection's declared remover is a `call`: the language removed the member.
+    pub language_call: bool,
 }
 
 /// The batch a create or update writes into.
@@ -952,6 +958,7 @@ pub async fn add_to_collection(
             item_uri: params.item_uri,
             links_added: 0,
             already_member: false,
+            language_call: true,
         });
     }
     check_batch(perspective, params.batch_id.as_deref()).await?;
@@ -1005,6 +1012,7 @@ pub async fn add_to_collection(
             item_uri: params.item_uri,
             links_added: 0,
             already_member: true,
+            language_call: false,
         });
     }
 
@@ -1056,6 +1064,7 @@ pub async fn add_to_collection(
         item_uri: params.item_uri,
         links_added: 1,
         already_member: false,
+        language_call: false,
     })
 }
 
@@ -1112,6 +1121,7 @@ pub async fn remove_from_collection(
             collection,
             item_uri: params.item_uri,
             links_removed: 0,
+            language_call: true,
         });
     }
     check_batch(perspective, params.batch_id.as_deref()).await?;
@@ -1215,5 +1225,6 @@ pub async fn remove_from_collection(
         collection,
         item_uri: params.item_uri,
         links_removed: removed,
+        language_call: false,
     })
 }

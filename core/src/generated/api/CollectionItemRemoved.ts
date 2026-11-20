@@ -4,6 +4,10 @@ export type CollectionItemRemoved = { className: string, baseUri: string, collec
 /**
  * 0 when the item was not in the collection (as the batch's effective graph has it).
  * Inside a batch, a member that only the batch had added counts too — it leaves by
- * cancelling the staged addition.
+ * cancelling the staged addition. 0 too when a language call made the write.
  */
-linksRemoved: number, };
+linksRemoved: number, 
+/**
+ * The collection's declared remover is a `call`: the language removed the member.
+ */
+languageCall: boolean, };

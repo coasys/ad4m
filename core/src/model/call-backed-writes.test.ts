@@ -46,8 +46,8 @@ function proxyWith(record: Record<string, any> = { id: MINTED, title: "a", tags:
     }),
     instanceUpdate: (_uuid: string, body: any) => ({ className: body.className, baseUri: body.baseUri, updatedProperties: [] }),
     instanceRemove: (_uuid: string, body: any) => ({ className: body.className, baseUri: body.baseUri, linksRemoved: 0 }),
-    instanceAddToCollection: (_uuid: string, body: any) => ({ ...body, linksAdded: 0, alreadyMember: false }),
-    instanceRemoveFromCollection: (_uuid: string, body: any) => ({ ...body, linksRemoved: 0 }),
+    instanceAddToCollection: (_uuid: string, body: any) => ({ ...body, linksAdded: 0, alreadyMember: false, languageCall: true }),
+    instanceRemoveFromCollection: (_uuid: string, body: any) => ({ ...body, linksRemoved: 0, languageCall: true }),
   };
   const client = new Proxy({} as any, {
     get: (_target, method: string) => {

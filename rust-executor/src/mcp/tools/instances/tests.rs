@@ -5424,3 +5424,85 @@ async fn a_users_instance_calls_count_on_its_did() {
     );
     assert_eq!(user.queries.load(Ordering::Relaxed), u_queries_before + 1);
 }
+
+/// `instance_add_to_collection` / `instance_remove_from_collection`
+/// on a mounted collection whose shape declares a `call` adder and remover
+/// (and no setter) run the language's adder / remover, and say so
+/// (`language_call`): the membership is the language's to write, so
+/// `links_added: 0` does not mean the item was already there.
+#[tokio::test(flavor = "multi_thread")]
+async fn collection_tools_run_a_call_adder_and_remover() {
+    use crate::languages::mount_tests::{interact, load_mount_test_language};
+    let lang = load_mount_test_language().await;
+    let project = format!("{lang}://project");
+    interact(
+        &project,
+        "setShapes",
+        json!({"shapes": [{"name": "MountThing", "target": "mounttest://Thing", "tags": {
+            "setter": null,
+            "adder": [{"action": "call", "source": "this", "predicate": "addTags", "target": "{}"}],
+            "remover": [{"action": "call", "source": "this", "predicate": "removeTags", "target": "{}"}],
+        }}]}),
+    )
+    .await
+    .unwrap();
+    interact(
+        &format!("{lang}://class/MountThing"),
+        "create",
+        json!({"title": "a"}),
+    )
+    .await
+    .unwrap();
+    let (mut perspective, _shapes, _ctx) = setup_perspective_no_llm(&[]).await;
+    perspective.mount(&lang).await.unwrap();
+    let uuid = perspective.persisted.lock().await.uuid.clone();
+    register_perspective(uuid.clone(), perspective);
+    let _guard = PerspectiveGuard(uuid.clone());
+    let handler = Ad4mMcpHandler::new(admin_context(false));
+    let base_uri = format!("{lang}://t1");
+    let calls = || async {
+        interact(&project, "calls", json!({}))
+            .await
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .clone()
+    };
+    let before = calls().await.len();
+
+    let added = parse(
+        &handler
+            .instance_add_to_collection(Parameters(InstanceAddToCollectionParams {
+                perspective_id: uuid.clone(),
+                class_name: "MountThing".into(),
+                base_uri: base_uri.clone(),
+                collection: "tags".into(),
+                item_uri: "x".into(),
+            }))
+            .await,
+    );
+    assert_eq!(added["success"], true, "{added}");
+    assert_eq!(added["language_call"], true, "{added}");
+
+    let removed = parse(
+        &handler
+            .instance_remove_from_collection(Parameters(InstanceRemoveFromCollectionParams {
+                perspective_id: uuid.clone(),
+                class_name: "MountThing".into(),
+                base_uri,
+                collection: "tags".into(),
+                item_uri: "x".into(),
+            }))
+            .await,
+    );
+    assert_eq!(removed["success"], true, "{removed}");
+    assert_eq!(removed["language_call"], true, "{removed}");
+
+    assert_eq!(
+        calls().await[before..].to_vec(),
+        vec![
+            json!({"address": "t1", "name": "addTags", "params": {"tags": ["x"]}}),
+            json!({"address": "t1", "name": "removeTags", "params": {"tags": ["x"]}}),
+        ]
+    );
+}
