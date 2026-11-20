@@ -562,6 +562,9 @@ export class Ad4mModel {
   private _baseExpression: string;
   private _perspective: PerspectiveProxy;
   private _snapshot: Record<string, any> | null = null;
+  /** Fields a static {@link Ad4mModel.update} was given on a call-backed
+   *  class: dirty whatever the snapshot says ({@link changedFields}). */
+  private _given: Set<string> | null = null;
   /** True when the constructor minted the id: no record can hold links yet. */
   private _idMinted: boolean = false;
   /** Predicates this instance has already written relation links under (`add*`/`set*`), so they may hold links. */
@@ -1012,6 +1015,10 @@ export class Ad4mModel {
     ];
 
     for (const field of allFields) {
+      if (this._given?.has(field)) {
+        changed.push(field);
+        continue;
+      }
       // Skip fields that were not recorded in the snapshot (e.g. relation
       // fields omitted because the originating query had no `include`).
       // Without this guard, a relation populated by hydrateFromLinks with
@@ -2649,7 +2656,17 @@ export class Ad4mModel {
     const instance = new this(perspective, id) as T;
     await instance.get();
     Object.assign(instance, data);
-    await instance.save();
+    // A call-backed record lives in its language and the perspective only
+    // mirrors it, from each call's delta: just after a write the read above
+    // can still show the old value. The fields given are the write, so they
+    // go out even when that read already shows them (an Untag `tags: []`
+    // racing the Tag before it). An ordinary class reads the store it writes.
+    if (this.hasCallActions()) (instance as any)._given = new Set(Object.keys(data));
+    try {
+      await instance.save();
+    } finally {
+      (instance as any)._given = null;
+    }
     return instance;
   }
 

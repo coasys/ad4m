@@ -159,6 +159,30 @@ describe("a call-backed class's writes", () => {
     });
   });
 
+  describe("static update() writes the fields it is given (round 6: Acorn Untag)", () => {
+    // A mounted record lives in its language; the perspective mirrors it from
+    // the call's delta. Just after a write (Tag) the mirror can still show the
+    // old value, so a read-assign-diff update whose value equals that stale
+    // read (Untag: tags = []) sent nothing, and the language kept the tag.
+    const Thing = Ad4mModel.fromSHACL(callShape("mounttest://Thing"), "MountThing");
+
+    it("sends tags = [] even when the read already shows []", async () => {
+      const { proxy, sent } = proxyWith({ id: MINTED, title: "a", tags: [] });
+      await (Thing as any).update(proxy, MINTED, { tags: [] });
+      expect(bodies(sent, "instanceUpdate")).toEqual([
+        { className: "mounttest://Thing", baseUri: MINTED, properties: { tags: [] } },
+      ]);
+    });
+
+    it("sends only the given fields", async () => {
+      const { proxy, sent } = proxyWith({ id: MINTED, title: "a", tags: ["x"] });
+      await (Thing as any).update(proxy, MINTED, { title: "a" });
+      expect(bodies(sent, "instanceUpdate")).toEqual([
+        { className: "mounttest://Thing", baseUri: MINTED, properties: { title: "a" } },
+      ]);
+    });
+  });
+
   describe("a declared call adder or remover runs, not a full-list replace", () => {
     // `tags` declares a `call` adder and remover and no setter: a full-list
     // instanceUpdate would reach no declared action (the executor refuses
@@ -297,6 +321,12 @@ describe("an ordinary link-backed class keeps its established writes", () => {
     await row.delete();
     expect(methods(sent).filter((m) => m.startsWith("instance"))).toEqual([]);
     expect(methods(sent)).toContain("removeSubject");
+  });
+
+  it("a static update() of an unchanged value writes nothing", async () => {
+    const { proxy, sent } = proxyWith({ id: "ad4m://n1", title: "a" });
+    await (Note as any).update(proxy, "ad4m://n1", { title: "a" });
+    expect(methods(sent).filter((m) => m.startsWith("instance") || m === "executeCommands")).toEqual([]);
   });
 
   it("an unbatched create sends no instanceCreate", async () => {
