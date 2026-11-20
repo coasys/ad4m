@@ -927,4 +927,25 @@ mod tests {
         let alice = RequestContext::user_for_test("did:alice", all());
         assert_eq!(caller_did(&alice).unwrap(), "did:alice");
     }
+
+    /// A browser ends trickle with an empty candidate and null line index.
+    /// The RPC keeps `candidate` a string. The classifier drops that string.
+    #[test]
+    fn an_empty_end_of_candidates_trickle_is_accepted() {
+        let params: SfuAddIceCandidateParams = serde_json::from_value(json!({
+            "neighbourhoodUrl": "n",
+            "roomName": "r",
+            "participantId": "P1",
+            "candidate": "",
+            "sdpMid": null,
+            "sdpMLineIndex": null
+        }))
+        .unwrap();
+        assert_eq!(params.candidate, "");
+        assert!(
+            crate::sfu::server::parse_trickle_candidate(&params.candidate)
+                .unwrap()
+                .is_none()
+        );
+    }
 }

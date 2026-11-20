@@ -128,21 +128,38 @@ so the same file runs on both link languages.
 
 ### Nightly (`nightly-llm-e2e` workflow)
 
-A pipeline with `run-nightly-llm: true` runs only this workflow, on `coasys/marvin`
-(local Ollama). Each job has its own serial group. The jobs: `llm-e2e`,
+A pipeline with `run-nightly-llm: true` runs only this workflow, on `coasys/marvin`.
+Each job has its own serial group. The jobs: `llm-e2e`,
 `integration-tests-sfu`, `integration-tests-sfu-browsers` (see below) and
 `coasys-spaces`.
 
+`llm-e2e` runs the ignored Rust interpretation suites and the JS suites gated
+by `LLM_E2E=1`. It does not start a model server. It prompts staging's
+llama-server at `http://127.0.0.1:12460/v1` (alias `qwen3.8-27b-ud-q4_k_m`,
+kind `LLAMA_SERVER`, context budget 57344 under the server's 65536-token
+slot) and embeds with Ollama's `nomic-embed-text` on `:11434`. A preflight
+checks `/health` and that `/v1/models` lists the alias, and fails the job
+when the unit is down. Requests share that one slot with staging's own AI
+processing.
+
 `coasys-spaces` runs WE's product suite (`pnpm --filter @we/app-web test:spaces`,
 WE `apps/we-web/tests/live/coasys-spaces/`): a Coasys space, a call, its
-transcript (executor Whisper), extraction on Ollama `qwen3.8-27b-48k` (the
-model staging and `llm-e2e` use, which Marvin keeps loaded), and flows.
-Ollama's OpenAI endpoint runs a model with the server's default context window
-and cuts a longer prompt silently. So when the model's own `num_ctx` is below
-`COASYS_SPACES_LLM_NUM_CTX` (16384), `llm-check` makes a variant such as
-`coasys-spaces-gemma3-12b:ctx16384` (`/api/create`) and the suite runs on it.
-A model with a large enough `num_ctx` (the 48k tag) runs as it is, so the GPU
-holds one load. It uses this commit's executor and SDK:
+transcript (executor Whisper), extraction on staging's llama-server
+(`http://127.0.0.1:12460/v1`, model `qwen3.8-27b-ud-q4_k_m`), and flows.
+That server is already running (`llama-qwen27b.service`, one 98304-token slot)
+and already holds the GPU. The job does not start it and does not load a model.
+`COASYS_SPACES_LLM_NUM_CTX` is empty, so `llm-check` does not make a context
+variant. `/api/create` runs only when the server is Ollama (`/api/version`
+returns a version) and `COASYS_SPACES_LLM_NUM_CTX` is set: a hand run against
+Ollama can still make a variant such as `coasys-spaces-gemma3-12b:ctx16384`
+when the model's own `num_ctx` is smaller. A model whose own `num_ctx` is
+already that large is used as it is. The job also sets
+`COASYS_SPACES_LLM_ENDPOINT_KIND=LLAMA_SERVER`,
+`COASYS_SPACES_LLM_NATIVE_TOOLS=true`,
+`COASYS_SPACES_LLM_REQUEST_TIMEOUT_SECS=900` and
+`COASYS_SPACES_LLM_MAX_NUM_CTX=90112`. The script passes those through;
+WE's real tier (we#468) registers them on the endpoint. The 900s limit
+includes time queued on the one slot. It uses this commit's executor and SDK:
 
 - The executor is the one the `build` job published for the commit
   (`$EXECUTOR_PUBLISH_DIR/<sha>/manifest.json`, sha256 checked). If there is none,
@@ -156,13 +173,16 @@ The job halts green when the same ad4m commit, WE commit, tier and model already
 passed on the host (`~/.local/state/ad4m-ci/coasys-spaces/last-success`). Set
 `COASYS_SPACES_FORCE=1` to run anyway. A checkout with changes (a run by hand
 with local edits) runs, but neither skips nor records a pass. It shares the serial group
-`nightly-llm` with `llm-e2e`: both use the host's Ollama and GPU, so they run
-one after the other. Screenshots, traces and logs are under the
+`nightly-llm` with `llm-e2e`, so the two do not run at once: both prompt
+staging's llama-server on :12460, and `llm-e2e`'s embeddings stay on Ollama.
+A completion in this job may wait a few minutes on llama-server's one
+slot, behind staging. Screenshots, traces and logs are under the
 job's artifacts, `coasys-spaces/`.
 
 Each step is a subcommand of `scripts/coasys-spaces.sh`. `bash
-scripts/coasys-spaces.sh all` runs the whole job on a machine with Ollama and the
-model (`COASYS_SPACES_TIER=stub` needs no model). `bash
+scripts/coasys-spaces.sh all` runs the whole job. The real tier needs the model
+server named by `COASYS_SPACES_LLM_*` (the nightly job uses staging's
+llama-server). `COASYS_SPACES_TIER=stub` needs no model. `bash
 scripts/coasys-spaces.test.sh` tests the script.
 
 To run the workflow by hand on a branch, with another WE ref (the definition id
@@ -304,12 +324,15 @@ the participant id); a session never receives its own media or its own
 `sfu-data` (`senderParticipantId`), but does receive its agent's other
 device; room capacity comes from the
 space's policy (`maxMeshParticipants × 4`, 128 without one), and cascade
-per-node capacity only drives redirects; the server drops a peer only after
+per-node capacity only drives redirects; the server drops a peer after
 10 s of ICE `Disconnected`, or, once the client asked for an ICE restart
-(`sfu.callRestartIce`), 10 s after the request or after the restart's answer;
+(`sfu.callRestartIce`), 15 s after the request. The restart's answer ends
+that grace and the 10 s disconnect clock starts again. The deadline sweep
+also drops a peer when a server offer stays unanswered after both resends
+(resend at 10 s and at 30 s, drop at 70 s), even when ICE stays connected;
 on ICE `disconnected` or a network change the SDK restarts ICE in place (the
 SFU stays the only offerer: the restart comes as a server renegotiation
-offer), and rebuilds the call if that has not reconnected within 5 s; a
+offer), and rebuilds the call if that has not reconnected within 15 s; a
 failed connection is rebuilt at once, and a rebuild retries the join for
 120 s. The restart names the session's `participantId` (only that session
 restarts, never another device of the agent), and a manager with no session
