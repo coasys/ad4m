@@ -172,8 +172,10 @@ impl Language {
         let controller = LanguageController::global_instance();
         let script = r#"JSON.stringify((await language.perspectiveSyncCurrentRevision()) ?? null)"#;
 
+        // A read: its answer may lag a commit queued just behind it, which callers
+        // tolerate (it is a "may differ" hint, not a fence).
         let result = controller
-            .execute_on_language(&self.address, script)
+            .execute_concurrent_on_language(&self.address, script)
             .await
             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
         parse_revision(result)
@@ -191,7 +193,7 @@ impl Language {
         let script = r#"JSON.stringify((await language.perspectiveSyncRender()) ?? null)"#;
 
         let result = controller
-            .execute_on_language(&self.address, script)
+            .execute_concurrent_on_language(&self.address, script)
             .await
             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
         let maybe_value = serde_json::from_str(&result)?;
@@ -231,7 +233,7 @@ impl Language {
         let script = r#"JSON.stringify((await language.peersRemote()) ?? [])"#;
 
         let result = controller
-            .execute_on_language(&self.address, script)
+            .execute_concurrent_on_language(&self.address, script)
             .await
             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
         let others_vec = serde_json::from_str(&result)?;
@@ -284,7 +286,7 @@ impl Language {
         let script = r#"JSON.stringify((await language.telepresenceGetOnlineAgents()) ?? [])"#;
 
         let result = controller
-            .execute_on_language(&self.address, script)
+            .execute_concurrent_on_language(&self.address, script)
             .await
             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
         let online_agents = serde_json::from_str(&result)?;
@@ -309,8 +311,12 @@ impl Language {
             did_literal, payload_json
         );
 
+        // Emits one message and writes no state a later call depends on; signal order
+        // is not guaranteed to the remote end anyway (MeshManager numbers offers and
+        // drops overtaken ones), so it runs beside the other calls — the call queue
+        // was the latency this removes (#1856).
         controller
-            .execute_on_language(&self.address, &script)
+            .execute_concurrent_on_language(&self.address, &script)
             .await
             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
         Ok(())
@@ -327,8 +333,9 @@ impl Language {
             payload_json
         );
 
+        // Same as send_signal: one emit, no language state, no order to keep.
         controller
-            .execute_on_language(&self.address, &script)
+            .execute_concurrent_on_language(&self.address, &script)
             .await
             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
         Ok(())
