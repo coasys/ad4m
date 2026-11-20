@@ -18,7 +18,7 @@
 //!    `Traverse` from the parents, cut per anchor in the store where the store
 //!    can cut it exactly ([`per_parent_query`]).
 
-use deno_core::anyhow::{anyhow, Error};
+use anyhow::{anyhow, Error};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 
