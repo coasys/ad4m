@@ -42,6 +42,18 @@ language publish. Loading, callback registration and teardown run with no call
 beside them. Everything runs on the runtime's one task (`process_requests`):
 the V8 event loop keeps one waker.
 
+A bundle that is wasm-bindgen output (a Rust/ALDK language) runs every call
+ordered, `CallKind::Concurrent` included: `load_module` marks the runtime
+(`LanguageRuntime::is_wasm_bundle` — the `__wbindgen`/`__wbg_` names a bundler
+cannot rename) and the request loop then admits its concurrent calls only to
+the ordered slot. wasm-bindgen-futures polls all of a module's futures from
+one microtask queue that does not restore each task's V8 async context, so a
+call resumed beside another would sign as the other call's agent; and the
+ALDK's async exports hold the instance's one lock across their awaits while
+its sync exports (`interactions`, `expressionInteract`) answer busy when it
+is held — a second call could never run beside an in-flight one correctly
+anyway (`a_wasm_language_runs_concurrent_calls_in_order_as_their_agents`).
+
 The agent a call acts as travels with the call, not with the thread: the
 runtime registers it under the request id and runs the script as
 `__ad4mRunCall(id, async () => (script))` (`js_core/agent_extension.js`), which
@@ -55,7 +67,10 @@ module is loaded unevaluated and the capture script's `import()` evaluates it
 under the token), `init`, callback registration and teardown. Timers,
 sockets and promises they start inherit that token, so server-link's
 WebSocket handlers and reconnects act as the main agent; Holochain signals
-and syncs arrive as calls as the main agent. Never bring back a runtime-wide
+and syncs arrive as calls as the main agent. And a callback a language fires
+from inside a call — an `emit*` import, a closure it was handed, a promise
+it started — runs in that call's async context, so it acts as the invoking
+call's agent. Never bring back a runtime-wide
 "current agent": a call that resumes beside another would sign as the other
 call's agent (`overlapping_calls_each_act_as_their_own_agent`), and never let
 a missing token mean the main agent: code in a managed user's call would

@@ -11,6 +11,7 @@
 use super::language_runtime::MAX_CONCURRENT_CALLS;
 use super::language_runtime_handle::LanguageRuntimeHandle;
 use crate::agent::AgentContext;
+use crate::languages::language_context::LanguageContext;
 use std::time::{Duration, Instant};
 
 /// The process-wide V8 start: a second `Once` here set the flags after another test had
@@ -825,6 +826,195 @@ async fn a_read_whose_caller_left_before_it_started_is_not_run() {
         ran.trim(),
         r#"["blocker","holder"]"#,
         "a read ran after its caller had gone"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Isolate-level errors and WASM languages
+// ---------------------------------------------------------------------------
+
+/// An unhandled rejection is an isolate-level error, not a call's. A concurrent call that
+/// leaves one behind must not end the ordered call running beside it: the ordered call keeps
+/// its slot until its own promise settles, so a call queued behind it starts only after it,
+/// and the offending call still answers its own caller. (Before `EventLoopErrors`, whichever
+/// call's future polled the loop next took the error as its own result — ending a call whose
+/// promise still ran and freeing its slot early.)
+#[tokio::test(flavor = "multi_thread")]
+async fn an_event_loop_error_in_a_concurrent_call_does_not_free_the_ordered_call() {
+    let (handle, _dir) = spawn_runtime("QmEventLoopErr");
+    handle
+        .execute("(globalThis.__log = [], 0)".into())
+        .await
+        .unwrap();
+
+    let ordered = {
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            handle
+                .execute(format!(
+                    "({}, globalThis.__log.push(\"ordered\"), \"ordered\")",
+                    sleep_js(1200)
+                ))
+                .await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Its own promise resolves; the rejected promise beside it is nobody's handler.
+    let bad = within(Duration::from_secs(10), "the call that rejects", async {
+        handle
+            .execute_concurrent(
+                "(Promise.reject(new Error(\"unhandled in test\")), \"bad done\")".into(),
+            )
+            .await
+    })
+    .await;
+    assert_eq!(bad.expect("the call answers").trim(), "bad done");
+
+    let behind = within(Duration::from_secs(10), "the call behind", async {
+        handle
+            .execute("(globalThis.__log.push(\"behind\"), \"behind\")".into())
+            .await
+    })
+    .await;
+    assert_eq!(behind.expect("the call behind answers").trim(), "behind");
+
+    let ordered = within(Duration::from_secs(10), "the ordered call", ordered)
+        .await
+        .unwrap();
+    assert_eq!(ordered.expect("the ordered call answers").trim(), "ordered");
+
+    let log = handle
+        .execute("JSON.stringify(globalThis.__log)".into())
+        .await
+        .unwrap();
+    assert_eq!(
+        log.trim(),
+        r#"["ordered","behind"]"#,
+        "the call behind ran before the ordered call ended: the event-loop error freed its slot"
+    );
+}
+
+/// The generated bundle of `tests/rust-languages/test-wasm-language`, when
+/// `bash tests/rust-languages/build.sh` has run — the JS suite
+/// (`flat-language.test.ts`) gates on the same file.
+fn wasm_language_bundle() -> Option<String> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../tests/rust-languages/test-wasm-language/build/bundle.js");
+    std::fs::read_to_string(path).ok()
+}
+
+/// A Rust/ALDK (wasm-bindgen) language runs every call ordered, a `CallKind::Concurrent`
+/// one included: wasm-bindgen-futures polls all of a module's futures from one queue that
+/// does not restore each task's async context, and ALDK's async exports hold the instance's
+/// lock across their awaits — a call beside another's reads would sign as the wrong agent,
+/// and a sync export like `interactions()` would see the busy instance. Below, the read sent
+/// concurrent still runs 600 ms when the create and the interactions() call behind it are
+/// sent; both must wait for it, and the create must still sign as the managed user, not the
+/// main agent.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_wasm_language_runs_concurrent_calls_in_order_as_their_agents() {
+    let Some(bundle) = wasm_language_bundle() else {
+        eprintln!(
+            "test-wasm-language bundle missing; run `bash tests/rust-languages/build.sh` — skipping"
+        );
+        return;
+    };
+
+    crate::test_utils::setup_wallet();
+    crate::test_utils::setup_agent();
+    let alice =
+        crate::test_utils::create_test_user(&format!("alice.{}@example.org", uuid::Uuid::new_v4()));
+
+    let address = "QmTestWasmOrdered".to_string();
+    let (handle, dir) = spawn_runtime(&address);
+    let context = LanguageContext::new(
+        crate::agent::did(),
+        crate::agent::signing_key_id(),
+        None,
+        dir.path().to_path_buf(),
+        address.clone(),
+    );
+    handle
+        .load_module(bundle, context.clone())
+        .await
+        .expect("the WASM bundle loads");
+    handle
+        .load_language(context.to_json())
+        .await
+        .expect("the language's init() runs");
+
+    // Sent concurrent: would run beside the calls below on a JS language.
+    let read = {
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            handle
+                .execute_concurrent(
+                    "JSON.stringify(await globalThis.__ad4m_language_instance__.expressionGet(\"slow:600:x\"))"
+                        .into(),
+                )
+                .await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // A sync export. Overlapping the read it would see the instance's lock
+    // held (`try_with` → null); ordered, it runs after it and answers for real.
+    let interactions = within(Duration::from_secs(10), "interactions", async {
+        handle
+            .execute_concurrent(
+                "JSON.stringify(globalThis.__ad4m_language_instance__.interactions(\"expr://x\"))"
+                    .into(),
+            )
+            .await
+    })
+    .await;
+    let interactions = interactions.expect("the interactions call answers");
+    assert!(
+        interactions.contains("echo"),
+        "interactions() overlapped the read's lock and answered busy: {interactions}"
+    );
+
+    // Alice's create, sent while the read still runs, runs after it — and
+    // signs as Alice, never as the agent whose call preceded it.
+    let created = within(Duration::from_secs(10), "the create", async {
+        handle
+            .execute_concurrent_with_context(
+                "globalThis.__ad4m_language_instance__.expressionCreate({note: \"from alice\"})"
+                    .into(),
+                AgentContext::managed(alice.clone()),
+            )
+            .await
+    })
+    .await
+    .expect("the create answers");
+    let addr = created.trim().trim_matches('"').to_string();
+    assert!(
+        addr.starts_with("test:"),
+        "unexpected expression address: {addr}"
+    );
+
+    let read = within(Duration::from_secs(10), "the slow read", read)
+        .await
+        .unwrap();
+    read.expect("the read answers");
+
+    let expression = handle
+        .execute(format!(
+            "JSON.stringify(await globalThis.__ad4m_language_instance__.expressionGet({}))",
+            serde_json::to_string(&addr).unwrap()
+        ))
+        .await
+        .expect("the get answers");
+    let author = serde_json::from_str::<serde_json::Value>(&expression)
+        .unwrap()
+        .pointer("/author")
+        .and_then(|a| a.as_str())
+        .expect("the stored expression has an author")
+        .to_string();
+    assert_eq!(
+        author, alice,
+        "the create signed as {author}, not the managed user"
     );
 }
 

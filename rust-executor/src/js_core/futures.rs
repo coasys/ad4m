@@ -2,18 +2,29 @@ use deno_core::error::{CoreError, JsError};
 use deno_core::{v8, PollEventLoopOptions};
 use deno_runtime::worker::MainWorker;
 use futures::Future;
+use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::pin::Pin;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use tokio::sync::Mutex as TokioMutex;
 
+/// Errors the isolate's event loop reported while a call's future was driving
+/// it. An event-loop error is isolate-level (an unhandled rejection, a failed
+/// dynamic import): it belongs to no call, so a call's future hands it to the
+/// loop's owner (the `process_requests` event-loop branch, the only future
+/// that reports them) instead of ending its own call on it.
+pub(crate) type EventLoopErrors = Rc<RefCell<VecDeque<CoreError>>>;
+
 pub struct EventLoopFuture {
     worker: Arc<TokioMutex<MainWorker>>,
+    errors: EventLoopErrors,
 }
 
 impl EventLoopFuture {
-    pub fn new(worker: Arc<TokioMutex<MainWorker>>) -> Self {
-        EventLoopFuture { worker }
+    pub fn new(worker: Arc<TokioMutex<MainWorker>>, errors: EventLoopErrors) -> Self {
+        EventLoopFuture { worker, errors }
     }
 }
 
@@ -21,6 +32,11 @@ impl Future for EventLoopFuture {
     type Output = Result<(), CoreError>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        // Report an error a call's future collected while driving the loop:
+        // reported once, here, no matter whose poll surfaced it.
+        if let Some(err) = self.errors.borrow_mut().pop_front() {
+            return Poll::Ready(Err(err));
+        }
         let worker = self.worker.try_lock();
         if let Ok(mut worker) = worker {
             // deno v2.9's poll_event_loop uses PollEventLoopOptions::default().
@@ -58,6 +74,7 @@ where
     F: Future<Output = Result<v8::Global<v8::Value>, Box<JsError>>> + Unpin,
 {
     worker: Arc<TokioMutex<MainWorker>>,
+    errors: EventLoopErrors,
     value: F,
 }
 
@@ -65,8 +82,12 @@ impl<F> SmartGlobalVariableFuture<F>
 where
     F: Future<Output = Result<v8::Global<v8::Value>, Box<JsError>>> + Unpin,
 {
-    pub fn new(worker: Arc<TokioMutex<MainWorker>>, value: F) -> Self {
-        SmartGlobalVariableFuture { worker, value }
+    pub fn new(worker: Arc<TokioMutex<MainWorker>>, errors: EventLoopErrors, value: F) -> Self {
+        SmartGlobalVariableFuture {
+            worker,
+            errors,
+            value,
+        }
     }
 }
 
@@ -86,6 +107,8 @@ where
             Err(_) => return Poll::Pending,
         };
 
+        // Clone the sink before `value_pin` borrows `self` mutably.
+        let errors = self.errors.clone();
         let mut value_pin = Pin::new(&mut self.value);
 
         if let Poll::Ready(result) = value_pin.as_mut().poll(cx) {
@@ -112,12 +135,13 @@ where
             .poll_event_loop(cx, deno_core::PollEventLoopOptions::default());
         if let Poll::Ready(event_loop_result) = event_loop_poll {
             if let Err(err) = event_loop_result {
-                // Propagate the actual event-loop error so callers see
-                // the real failure (permission denial, uncaught rejection,
-                // module-eval error, etc.). event_loop returns CoreError
-                // directly, no conversion needed.
-                log::error!("Error in event loop: {:?}", err);
-                return Poll::Ready(Err(err));
+                // An event-loop error is isolate-level, not this call's: an
+                // unhandled rejection in any promise on the isolate lands
+                // here, whichever call drove this poll. Hand it to the
+                // loop's owner and keep polling — this call ends only when
+                // its own promise settles, or it would free its slot (the
+                // ordered one included) while its script still runs.
+                errors.borrow_mut().push_back(err);
             }
 
             if let Poll::Ready(result) = value_pin.poll(cx) {

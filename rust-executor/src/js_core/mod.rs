@@ -43,6 +43,10 @@ use self::futures::{EventLoopFuture, SmartGlobalVariableFuture};
 pub struct JsCore {
     worker: Arc<TokioMutex<MainWorker>>,
     loaded_modules: Arc<TokioMutex<HashSet<String>>>,
+    /// Event-loop errors a call's future found while driving the loop, for
+    /// the loop's owner to report: an event-loop error belongs to the
+    /// isolate, not to the call whose poll surfaced it (`futures.rs`).
+    event_loop_errors: futures::EventLoopErrors,
 }
 
 /// Per-language-instance runtime state.
@@ -206,6 +210,7 @@ impl JsCore {
             #[allow(clippy::arc_with_non_send_sync)]
             worker: Arc::new(TokioMutex::new(worker)),
             loaded_modules: Arc::new(TokioMutex::new(HashSet::new())),
+            event_loop_errors: Default::default(),
         }
     }
 
@@ -325,7 +330,7 @@ impl JsCore {
     }
 
     pub(crate) fn event_loop(&self) -> EventLoopFuture {
-        EventLoopFuture::new(self.worker.clone())
+        EventLoopFuture::new(self.worker.clone(), self.event_loop_errors.clone())
     }
 
     async fn execute_async_smart(
@@ -369,6 +374,7 @@ impl JsCore {
 
         Ok(SmartGlobalVariableFuture::new(
             self.worker.clone(),
+            self.event_loop_errors.clone(),
             resolve_fut,
         ))
     }

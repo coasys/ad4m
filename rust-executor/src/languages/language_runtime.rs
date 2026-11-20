@@ -7,6 +7,7 @@ use futures::future::LocalBoxFuture;
 use futures::stream::{FuturesUnordered, StreamExt};
 use log::{debug, error, info, warn};
 use serde_json::Value as JsonValue;
+use std::cell::Cell;
 use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -124,6 +125,9 @@ impl LanguageOperation {
 pub struct LanguageRuntime {
     language_address: String,
     js_core: JsCore,
+    /// Set by `load_module`: the bundle is wasm-bindgen output (a Rust/ALDK
+    /// language), so every call into it runs ordered, `Concurrent` included.
+    wasm: Cell<bool>,
 }
 
 impl LanguageRuntime {
@@ -139,7 +143,15 @@ impl LanguageRuntime {
         Self {
             language_address,
             js_core: JsCore::new_for_language(storage_directory, is_system_language),
+            wasm: Cell::new(false),
         }
+    }
+
+    /// Whether the bundle is wasm-bindgen output (a Rust/ALDK language).
+    /// wasm-bindgen's `__wbindgen`/`__wbg_` names are the wasm module's own
+    /// import/export names, so bundling cannot rename them.
+    fn is_wasm_bundle(source: &str) -> bool {
+        source.contains("__wbindgen") || source.contains("__wbg_")
     }
 
     /// Initialize the language runtime by executing the bootstrap module.
@@ -162,6 +174,12 @@ impl LanguageRuntime {
         source: &str,
         language_context: &LanguageContext,
     ) -> Result<(), String> {
+        // A WASM language runs every call ordered: its futures are polled from
+        // wasm-bindgen-futures' single module-wide microtask queue, which does
+        // not restore each task's V8 async context, so a call resumed beside
+        // another would act as the other call's agent (`is_wasm_bundle`).
+        self.wasm.set(Self::is_wasm_bundle(source));
+
         // Use a synthetic URL unique to this language so Deno's module map
         // doesn't collide if multiple languages are loaded in the same runtime.
         let specifier = format!("https://ad4m.language/{}/bundle.js", self.language_address);
@@ -583,7 +601,10 @@ impl LanguageRuntime {
                     // lifecycle request ahead of it — and never delays the calls behind it.
                     let mut i = 0;
                     while i < queue.len() {
-                        let is_concurrent = queue[i].operation.is_concurrent();
+                        // A call sent concurrent counts as ordered on a WASM
+                        // language (`load_module`, `is_wasm_bundle`): nothing
+                        // beside it ever runs on the isolate.
+                        let is_concurrent = queue[i].operation.is_concurrent() && !this.wasm.get();
                         let is_lifecycle = queue[i].operation.is_lifecycle();
                         let lifecycle_ahead =
                             queue.iter().take(i).any(|r| r.operation.is_lifecycle());
@@ -623,7 +644,10 @@ impl LanguageRuntime {
                                 Some(request) => {
                                     // A concurrent call starts at once unless a lifecycle
                                     // request runs or waits before it, or the bound holds.
+                                    // On a WASM language it waits for the ordered slot like
+                                    // an ordered call (`is_wasm_bundle`).
                                     let start_now = request.operation.is_concurrent()
+                                        && !this.wasm.get()
                                         && !ordered_is_lifecycle
                                         && concurrent.len() < MAX_CONCURRENT_CALLS
                                         && !queue.iter().any(|r| r.operation.is_lifecycle());
@@ -650,7 +674,10 @@ impl LanguageRuntime {
                             this.finish(done, &running, true);
                         }
 
-                        // Continuously poll V8 event loop for pending JS tasks/ops
+                        // Continuously poll V8 event loop for pending JS tasks/ops.
+                        // The single place isolate-level errors are reported: an
+                        // error a call's future found while driving the loop
+                        // arrives through the shared sink (`js_core/futures.rs`).
                         event_loop_result = js_core.event_loop() => {
                             if let Err(err) = event_loop_result {
                                 warn!("[lang:{}] Event loop error: {}", addr, err);
