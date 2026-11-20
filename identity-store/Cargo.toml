@@ -30,6 +30,10 @@ ed25519-dalek = "2.2.0"
 bs58 = "0.5.1"
 base64 = "0.22.1"
 rand = "0.8.5"
+# The challenge tokens of `GET /v1/pow`: an HMAC-SHA256 tag stamps them, sha2 also derives
+# the challenge key from the head key's secret.
+sha2 = "0.10.8"
+hmac = "0.12.1"
 thiserror = "2.0.12"
 # The redeem call to the vouching service (`VOUCH_URL`), over HTTPS with the webpki roots.
 reqwest = { version = "0.12.28", default-features = false, features = ["json", "rustls-tls"] }

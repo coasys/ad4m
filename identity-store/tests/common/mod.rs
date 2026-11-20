@@ -288,10 +288,12 @@ impl TestStore {
         json!({ "events": events })
     }
 
-    /// A proof of work for `scid` at the store's current bits.
+    /// A proof of work for `scid` at the store's current bits over a fresh challenge of
+    /// `GET /v1/pow`, as a client's (`store.pow_challenge`, then `pow::solve`).
     pub fn pow_for(&self, scid: &str) -> Value {
         let bits = self.store.pow_params().bits;
-        serde_json::to_value(ad4m_identity_core::pow::solve(scid, bits)).unwrap()
+        let challenge = self.store.pow_challenge();
+        serde_json::to_value(ad4m_identity_core::pow::solve(scid, &challenge.nonce, bits)).unwrap()
     }
 
     /// Appends the person's #0 and checks the `200`.

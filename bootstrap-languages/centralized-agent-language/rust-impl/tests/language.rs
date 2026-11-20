@@ -550,16 +550,22 @@ fn append_req(events: Vec<Value>) -> AppendRequest {
     }
 }
 
-/// The append of person `p`'s event #0, with the proof of work the store asks for (`POW_BITS`
-/// 8 here): the party that builds #0 solves it.
-fn incept_req(p: &Value) -> AppendRequest {
-    let solved = ad4m_identity_core::pow::solve(p["scid"].as_str().unwrap(), 8);
+/// The append of person `p`'s event #0, with the proof of work the store asks for: the party
+/// that builds #0 reads `GET /v1/pow`'s challenge and bits and solves over them.
+fn incept_req(store: &Store<Host>, p: &Value) -> AppendRequest {
+    let params = block_on(store.pow_params()).unwrap();
+    let solved = ad4m_identity_core::pow::solve(
+        p["scid"].as_str().unwrap(),
+        &params.challenge.nonce,
+        params.bits,
+    );
     AppendRequest {
         events: vec![p["incept"].clone()],
         vouch: None,
         pow: Some(ad4m_ldk::identity::Pow {
             nonce: solved.nonce,
             bits: solved.bits,
+            challenge: solved.challenge,
         }),
     }
 }
@@ -567,7 +573,7 @@ fn incept_req(p: &Value) -> AppendRequest {
 /// Publishes a fresh person through the language.
 fn person(apps: &mut Apps, store: &Store<Host>, name: &str) -> Value {
     let p = apps.run("person", json!({ "name": name }));
-    block_on(store.append(p["did"].as_str().unwrap(), &incept_req(&p))).unwrap();
+    block_on(store.append(p["did"].as_str().unwrap(), &incept_req(store, &p))).unwrap();
     p
 }
 
@@ -635,7 +641,7 @@ fn the_log_calls_answer_and_refuse_as_the_store_does() {
         )),
         IdentityErrorCode::Forbidden { .. }
     ));
-    let head = block_on(store.append(did, &incept_req(&alice))).unwrap();
+    let head = block_on(store.append(did, &incept_req(&store, &alice))).unwrap();
     assert_eq!(head.seq, 0);
     assert_eq!(head.store, format!("did:key:{}", server.key));
     assert_eq!(block_on(store.head(did)).unwrap(), Some(head.clone()));
@@ -645,7 +651,7 @@ fn the_log_calls_answer_and_refuse_as_the_store_does() {
 
     // A repeat of #0 as it was (with its proof) gets the head.
     assert_eq!(
-        refusal(block_on(store.append(did, &incept_req(&alice)))),
+        refusal(block_on(store.append(did, &incept_req(&store, &alice)))),
         IdentityErrorCode::Conflict { head }
     );
     assert_eq!(
@@ -668,6 +674,7 @@ fn the_log_calls_answer_and_refuse_as_the_store_does() {
     wrong_pow.pow = Some(ad4m_ldk::identity::Pow {
         nonce: "11111111111111111111111".into(),
         bits: 8,
+        challenge: String::new(),
     });
     assert!(matches!(
         refusal(block_on(store.append(bob_did, &wrong_pow))),
@@ -1456,7 +1463,7 @@ fn bodies_are_the_inputs_canonical_json_and_the_signed_request_travels_unchanged
     let name = "kim bytes";
     let p = apps.run("person", json!({ "name": name }));
     let did = p["did"].as_str().unwrap();
-    let request = incept_req(&p);
+    let request = incept_req(&store, &p);
     block_on(store.append(did, &request)).unwrap();
     let sent = host.last();
     assert_eq!(
@@ -1519,7 +1526,7 @@ fn changing_the_store_setting_moves_every_call_and_a_silent_store_is_unavailable
     assert!(block_on(store.head(did)).unwrap().is_some());
     *host.url.borrow_mut() = format!("{}/", second.url);
     assert!(block_on(store.head(did)).unwrap().is_none());
-    block_on(store.append(did, &incept_req(&p))).unwrap();
+    block_on(store.append(did, &incept_req(&store, &p))).unwrap();
     assert!(block_on(store.head(did)).unwrap().is_some());
     for call in host.calls.borrow().iter().rev().take(3) {
         assert!(

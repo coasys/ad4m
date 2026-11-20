@@ -152,6 +152,8 @@ export interface Pow {
     /** base58btc, 16 bytes. */
     nonce: string;
     bits: number;
+    /** The `nonce` of the `PowChallenge` the proof commits to; left out reads as empty, which the store refuses. */
+    challenge: string;
 }
 
 /** `POST /v1/logs/{scid}/events`. A request carries a vouching token or a proof, never both. */
@@ -161,11 +163,21 @@ export interface AppendRequest {
     pow?: Pow | null;
 }
 
+/** The one-use challenge `GET /v1/pow` mints for the next proof. */
+export interface PowChallenge {
+    /** The token the proof's `challenge` carries and hashes over. */
+    nonce: string;
+    /** Unix seconds the token is good until; a proof that arrives past it is refused. */
+    expires: number;
+}
+
 /** `GET /v1/pow`. */
 export interface PowParams {
     bits: number;
     previousBits: number;
     changedAt: number;
+    /** A fresh challenge for the next proof; the caller solves over `challenge.nonce` and must fetch again for another log (the store spends each challenge once and at most to `expires`). */
+    challenge: PowChallenge;
 }
 
 /** `GET /v1/keys/{multikey}`: the identity a key belongs to. */

@@ -5,7 +5,7 @@
 mod common;
 
 use ad4m_identity_core::link::OfferKind;
-use ad4m_identity_core::{pow, verify_note, BotScope, Event, VouchNote};
+use ad4m_identity_core::{verify_note, BotScope, Event, VouchNote};
 use ad4m_ldk::identity::LogPage;
 use axum::http::StatusCode;
 use identity_store::Settings;
@@ -85,7 +85,7 @@ async fn a_new_log_with_a_token_and_a_proof_is_400_and_redeems_nothing() {
     let (t, server) = world().await;
     server.give("t-alice", "alice@example.org");
     let alice = Person::new("alice");
-    let proof = pow::solve(&alice.scid(), 8);
+    let proof = t.pow_for(&alice.scid());
     let reply = post_new(&t, &alice, json!({ "vouch": "t-alice", "pow": proof })).await;
     assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.body);
     assert_eq!(reply.body["error"], "vouch-and-pow");

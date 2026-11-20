@@ -2,34 +2,37 @@
   "cases": [
     {
       "bits": 8,
-      "hash": "0034187231a3cbbf300377da014ad4f47c85ce10cb17b88a510f06e9b20bbc63",
+      "hash": "003784db3b5afe70ea02f1dcb8e1d18a6e473333ff775d578b0454b8078762da",
       "pow": {
         "bits": 8,
-        "nonce": "1111111111111114d"
+        "challenge": "5VeCtOrSpOwChALLeNgEfRoMtEhOsT",
+        "nonce": "11111111111111132"
       },
       "scid": "QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c",
       "zeroBits": 10
     },
     {
       "bits": 12,
-      "hash": "000f3a67772535c1a35a062cf23951313afa73311fbb1e2ff5f44da68bf5f99a",
+      "hash": "000e5e547de3bac1054348f504b68f94476d146b03158a57cb43a20431fce775",
       "pow": {
         "bits": 12,
-        "nonce": "11111111111111oe"
+        "challenge": "5VeCtOrSpOwChALLeNgEfRoMtEhOsT",
+        "nonce": "11111111111111Ud"
       },
       "scid": "QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c",
       "zeroBits": 12
     },
     {
       "bits": 16,
-      "hash": "0000ba25b9ba89fe4b5bd10a94a0a03ecf86b31ac160eca4de9b6accd9cc83cf",
+      "hash": "000012efdf6183c16db15e68b2ecc2d5cbc818d928c0e964436313c8ed89794a",
       "pow": {
         "bits": 16,
-        "nonce": "111111111111114pb"
+        "challenge": "5VeCtOrSpOwChALLeNgEfRoMtEhOsT",
+        "nonce": "11111111111111GGr"
       },
       "scid": "QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c",
-      "zeroBits": 16
+      "zeroBits": 19
     }
   ],
-  "description": "sha256(\"coasys:pow\" ‖ scid ‖ nonce) with at least `bits` leading zero bits; the solver counts nonces from 0 as 16 big-endian bytes."
+  "description": "sha256(\"coasys:pow\" ‖ scid ‖ challenge ‖ nonce) with at least `bits` leading zero bits; the solver counts nonces from 0 as 16 big-endian bytes. `challenge` is the host's challenge the proof commits to (any text; a host pins its value)."
 }
