@@ -220,14 +220,15 @@ async fn the_operator_sets_a_log_filter_for_a_while_and_nobody_else_may() {
         .dispatch("runtime.setLogFilter", set, operator.clone())
         .await
         .unwrap();
-    assert_eq!(reply["overrideFilter"], "ws_rpc=debug");
+    // The in-force filter, with the rule that keeps MCP session ids out of the log.
+    assert_eq!(reply["overrideFilter"], "ws_rpc=debug,rmcp=warn");
     assert!(reply["revertsAt"].is_string(), "{reply}");
     assert!(debug_ws_rpc());
     let status = map
         .dispatch("runtime.logFilter", json!({}), operator.clone())
         .await
         .unwrap();
-    assert_eq!(status["overrideFilter"], "ws_rpc=debug");
+    assert_eq!(status["overrideFilter"], "ws_rpc=debug,rmcp=warn");
 
     tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
     assert!(!debug_ws_rpc(), "the filter did not revert after its ttl");

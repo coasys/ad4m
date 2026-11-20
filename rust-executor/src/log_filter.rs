@@ -12,6 +12,10 @@
 //! matches `rust_executor::api::ws_rpc`, `api::ws_rpc` too, `rust_executor` every module of
 //! the crate. The most specific match decides: the one that reaches deepest into the target's
 //! path (`ws_rpc` over `rust_executor` for `rust_executor::api::ws_rpc`), then the longer name.
+//!
+//! An override is sanitised as the startup filter is: rmcp stays at `warn` unless the
+//! override names `rmcp` (`logging::without_mcp_session_ids`; rmcp logs each MCP session's
+//! id, a bearer, at info), and a name matched in the middle of a path never reaches into rmcp.
 
 use log::{LevelFilter, Log, Metadata, Record};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -70,7 +74,9 @@ fn match_depth(target: &str, name: &str) -> Option<usize> {
     let name: Vec<&str> = name.split("::").collect();
     (0..target.len())
         .rev()
-        .find(|&i| target[i..].starts_with(&name))
+        // Into rmcp only by a name that starts with `rmcp`: `session=debug` must not reach
+        // `rmcp::...::session::local`, which logs MCP session ids (bearers) at info.
+        .find(|&i| target[i..].starts_with(&name) && (i == 0 || target[0] != "rmcp"))
         .map(|i| i + name.len())
 }
 
@@ -244,9 +250,12 @@ impl FilterState {
                 MAX_TTL.as_secs()
             ));
         }
-        let directives = parse(spec)?;
+        // The startup filter's rule: rmcp stays at warn unless the filter names rmcp, so a
+        // global `debug` does not log MCP session ids (`logging::without_mcp_session_ids`).
+        let spec = crate::logging::without_mcp_session_ids(spec.trim());
+        let directives = parse(&spec)?;
         let over = Override {
-            spec: spec.trim().to_string(),
+            spec,
             directives,
             until: Instant::now() + ttl,
             until_wall: chrono::Utc::now() + chrono::Duration::from_std(ttl).unwrap_or_default(),
@@ -420,7 +429,7 @@ mod tests {
         let status = state
             .set_override("ws_rpc=debug", Duration::from_secs(1))
             .unwrap();
-        assert_eq!(status.current.as_deref(), Some("ws_rpc=debug"));
+        assert_eq!(status.current.as_deref(), Some("ws_rpc=debug,rmcp=warn"));
         assert!(status.reverts_at.is_some());
         assert!(state.enabled(&meta(WS_RPC, log::Level::Debug)));
         assert!(!state.enabled(&meta("rust_executor::db", log::Level::Debug)));
@@ -452,5 +461,58 @@ mod tests {
             .set_override("sfu=debug", MAX_TTL + Duration::from_secs(1))
             .is_err());
         assert_eq!(state.status().current, None);
+    }
+
+    const RMCP_SESSIONS: &str = "rmcp::transport::streamable_http_server::session::local";
+
+    fn log_info(logger: &ReloadableLogger, target: &str, text: &str) {
+        logger.log(
+            &Record::builder()
+                .target(target)
+                .level(log::Level::Info)
+                .args(format_args!("{text}"))
+                .build(),
+        );
+    }
+
+    /// rmcp logs each new MCP session's id at info, and that id is a bearer for the session's
+    /// remembered token (an admin credential's never expires). The startup filter holds rmcp at
+    /// warn (`logging::without_mcp_session_ids`); no override may lift it unless it names rmcp.
+    #[test]
+    fn an_override_never_logs_mcp_session_ids() {
+        let state = state();
+        state.set_startup(&crate::logging::without_mcp_session_ids("info"));
+        let sink = Sink::default();
+        let logger = ReloadableLogger::new(Box::new(sink.clone()));
+        for spec in [
+            "debug",
+            "trace",
+            "info",
+            "session=debug",
+            "local=trace",
+            "streamable_http_server=debug,ws_rpc=debug",
+        ] {
+            state.set_override(spec, Duration::from_secs(60)).unwrap();
+            assert!(
+                !state.enabled(&meta(RMCP_SESSIONS, log::Level::Info)),
+                "{spec:?} lets rmcp's session ids through"
+            );
+            log_info(
+                &logger,
+                RMCP_SESSIONS,
+                "create new session secret-session-id",
+            );
+        }
+        assert!(
+            sink.0.lock().unwrap().is_empty(),
+            "{:?}",
+            sink.0.lock().unwrap()
+        );
+        // An operator who names rmcp gets what they asked for, as at startup.
+        state
+            .set_override("rmcp=debug", Duration::from_secs(60))
+            .unwrap();
+        assert!(state.enabled(&meta(RMCP_SESSIONS, log::Level::Info)));
+        state.set_override("", DEFAULT_TTL).unwrap();
     }
 }
