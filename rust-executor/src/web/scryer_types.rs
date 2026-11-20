@@ -34,7 +34,9 @@ pub enum LeafAnswer {
     False,
     Exception(Term),
     #[non_exhaustive]
-    LeafAnswer { bindings: BTreeMap<String, Term> },
+    LeafAnswer {
+        bindings: BTreeMap<String, Term>,
+    },
 }
 
 #[cfg(test)]

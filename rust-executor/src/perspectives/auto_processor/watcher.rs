@@ -76,7 +76,8 @@ impl LeaseGuard {
         // pattern used in distributed systems.
         let interval_ms = (ttl_ms / 3).max(1_000) as u64;
         let handle = crate::rt::spawn(async move {
-            let mut ticker = crate::rt::time::interval(tokio::time::Duration::from_millis(interval_ms));
+            let mut ticker =
+                crate::rt::time::interval(tokio::time::Duration::from_millis(interval_ms));
             ticker.tick().await; // skip the immediate first tick; pass just started
             loop {
                 ticker.tick().await;
