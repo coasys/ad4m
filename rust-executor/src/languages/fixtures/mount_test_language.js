@@ -20,7 +20,21 @@ let snapshotFailure = null;
 // entries mountSnapshot() lists after the records (setSnapshotFault)
 let extraEntries = [];
 
+// expressions expressionCreate made: "e<n>" -> content
+const expressions = new Map();
+
 export async function init() {}
+
+// A write that stores a property through this language (resolve_language)
+// makes one expression per value; each is logged in `calls` as
+// { address: "expression", name: "expressionCreate", params: content }, so
+// tests can count them.
+export async function expressionCreate(content) {
+  calls.push({ address: "expression", name: "expressionCreate", params: content });
+  const id = "e" + (expressions.size + 1);
+  expressions.set(id, content);
+  return id;
+}
 export function isPublic() { return false; }
 
 function delta(address) {
@@ -54,7 +68,7 @@ export function interactions(address) {
       { label: "Calls", name: "calls", parameters: [],
         execute: async () => calls.slice() },
       { label: "Reset", name: "reset", parameters: [],
-        execute: async () => { records.clear(); calls.length = 0; counter = 0; return true; } },
+        execute: async () => { records.clear(); expressions.clear(); calls.length = 0; counter = 0; return true; } },
       { label: "Address", name: "address", parameters: [],
         execute: async () => languageAddress() },
       // Change the version mountShapes() reports (tests re-install on version change).

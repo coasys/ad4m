@@ -741,12 +741,7 @@ pub async fn update(
     // ask them whether any of those calls a language.
     if is_abstract {
         has_calls = perspective
-            .abstract_update_calls(
-                &class_name,
-                &stored,
-                &Value::Object(subject_values.clone()),
-                agent,
-            )
+            .abstract_update_calls(&class_name, &stored, &Value::Object(subject_values.clone()))
             .await
             .map_err(|e| failed(&class_name, WriteStep::UpdateSubject, e))?;
     }

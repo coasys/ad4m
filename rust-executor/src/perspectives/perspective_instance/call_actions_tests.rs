@@ -794,6 +794,146 @@ mod instance_writes {
         assert_eq!(things(&p).await[0]["title"], "bye");
     }
 
+    /// `app://Note`: a link class read through `app://TextContent` whose
+    /// `text` is stored through `lang` — every value written to it is an
+    /// `expressionCreate` on the language. A node is a Note when it has the
+    /// `app://is_note` flag link (`make_note`).
+    async fn register_note(p: &mut PerspectiveInstance, ctx: &AgentContext, lang: &str) {
+        p.add_sdna(
+            "Note".to_string(),
+            String::new(),
+            SdnaType::SubjectClass,
+            Some(
+                json!({
+                    "target_class": "app://Note",
+                    "properties": [
+                        {"path": "app://is_note", "name": "isNote", "has_value": "app://Note",
+                         "min_count": 1, "max_count": 1},
+                        {"path": "app://note_text", "name": "text", "datatype": "xsd:string",
+                         "max_count": 1, "writable": true, "resolve_language": lang,
+                         "setter": [{"action": "setSingleTarget", "source": "this",
+                                     "predicate": "app://note_text", "target": "value"}]},
+                    ],
+                })
+                .to_string(),
+            ),
+            ctx,
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn make_note(p: &mut PerspectiveInstance, ctx: &AgentContext, base: &str) {
+        p.add_link(
+            Link {
+                source: base.to_string(),
+                predicate: Some("app://is_note".to_string()),
+                target: "app://Note".to_string(),
+            },
+            LinkStatus::Local,
+            None,
+            ctx,
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn expression_creates(lang: &str) -> usize {
+        calls(lang)
+            .await
+            .iter()
+            .filter(|c| c["name"] == "expressionCreate")
+            .count()
+    }
+
+    /// Lal r2 P1: an abstract `instanceUpdate` that reaches only a link
+    /// setter stored through a language makes one expression. Choosing the
+    /// batch must not resolve the values: a dry run of the write made one
+    /// expression, and the write itself a second.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn abstract_update_creates_each_expression_once() {
+        let lang = load_mount_test_language().await;
+        let (mut p, ctx) = mounted(&lang).await;
+        register_text_content(&mut p, &ctx).await;
+        register_note(&mut p, &ctx, &lang).await;
+        make_note(&mut p, &ctx, "app://n1").await;
+
+        instance_update(
+            &mut p,
+            &ctx,
+            InstanceUpdate {
+                class_name: "app://TextContent".into(),
+                base_uri: "app://n1".into(),
+                properties: Map::from_iter([("text".to_string(), json!("hi"))]),
+                batch_id: None,
+            },
+        )
+        .await
+        .expect("abstract instance update");
+
+        assert_eq!(
+            expression_creates(&lang).await,
+            1,
+            "{:?}",
+            calls(&lang).await
+        );
+    }
+
+    /// Lal r2 P1: a record that is both a mounted Thing (`call` setter) and a
+    /// Note (a link setter stored through the language). Through the
+    /// abstract class, with no batch, the call runs once and one expression
+    /// is made; in a caller's batch the update is refused before either.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_mixed_abstract_update_creates_no_expression_when_refused() {
+        let lang = load_mount_test_language().await;
+        create_in_language(&lang, json!({"title": "hello"})).await;
+        let (mut p, ctx) = mounted(&lang).await;
+        register_text_content(&mut p, &ctx).await;
+        register_note(&mut p, &ctx, &lang).await;
+        let base = format!("{lang}://t1");
+        make_note(&mut p, &ctx, &base).await;
+        let batch = p.create_batch().await;
+        let before = calls(&lang).await;
+
+        let refused = instance_update(
+            &mut p,
+            &ctx,
+            InstanceUpdate {
+                class_name: "app://TextContent".into(),
+                base_uri: base.clone(),
+                properties: Map::from_iter([("text".to_string(), json!("bye"))]),
+                batch_id: Some(batch),
+            },
+        )
+        .await;
+        assert!(
+            matches!(refused, Err(InstanceError::CallsInBatch { .. })),
+            "{refused:?}"
+        );
+        assert_eq!(
+            calls(&lang).await,
+            before,
+            "nothing reached the language before the refusal"
+        );
+
+        instance_update(
+            &mut p,
+            &ctx,
+            InstanceUpdate {
+                class_name: "app://TextContent".into(),
+                base_uri: base,
+                properties: Map::from_iter([("text".to_string(), json!("bye"))]),
+                batch_id: None,
+            },
+        )
+        .await
+        .expect("abstract instance update");
+        let after: Vec<Value> = calls(&lang).await[before.len()..].to_vec();
+        let named = |name: &str| after.iter().filter(|c| c["name"] == name).count();
+        assert_eq!(named("expressionCreate"), 1, "{after:?}");
+        assert_eq!(named("update"), 1, "{after:?}");
+    }
+
     /// Lal P2: a link constructor with a `call` setter on one property must
     /// still write a setter-less collection's item links on create. Whether
     /// the constructor calls — not whether any action calls — decides if
