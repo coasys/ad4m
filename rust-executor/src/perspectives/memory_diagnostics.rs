@@ -11,8 +11,8 @@
 
 use super::perspective_instance::PerspectiveMemoryStats;
 use super::{get_app_data_path, PERSPECTIVES};
-use std::time::Duration;
 use crate::rt::time::sleep;
+use std::time::Duration;
 
 /// Log at info or debug level depending on the `verbose` flag.
 macro_rules! mem_log {
