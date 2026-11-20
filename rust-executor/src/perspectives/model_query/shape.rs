@@ -16,7 +16,6 @@
 
 use super::types::{ModelShape, ShapeProperty, ShapeRelation, WhereCondition};
 use super::utils::escape_sparql_string;
-use crate::perspectives::sparql_store::EvalStop;
 use crate::perspectives::sparql_store::SparqlStore;
 use deno_core::anyhow::{anyhow, Error};
 use serde_json::Value;
@@ -79,7 +78,7 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
         "#
     );
 
-    let result_json = store.query(&EvalStop::none(), &query)?;
+    let result_json = crate::perspectives::sparql_store::query_bound(store, &query)?;
     let results: Vec<Value> = serde_json::from_str(&result_json)?;
 
     if results.is_empty() {
@@ -140,7 +139,7 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
         "#
     );
 
-    let props_json = store.query(&EvalStop::none(), &props_query)?;
+    let props_json = crate::perspectives::sparql_store::query_bound(store, &props_query)?;
     let prop_results: Vec<Value> = serde_json::from_str(&props_json)?;
 
     // Property shapes can fan into multiple rows because their `rdf://type`
@@ -161,7 +160,13 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
     let mut properties: Vec<ShapeProperty> = Vec::new();
     let mut include_relations: Vec<ShapeRelation> = Vec::new();
 
-    for prop_uri in &prop_order {
+    for (prop_i, prop_uri) in prop_order.iter().enumerate() {
+        if prop_i % 32 == 0 && crate::perspectives::sparql_store::read_stopped() {
+            let stop = crate::perspectives::sparql_store::bound_or_none();
+            return Err(stop
+                .stopped_err("shape load")
+                .unwrap_or_else(|| anyhow!("shape load stopped")));
+        }
         let rows = match grouped.get(prop_uri) {
             Some(r) => r,
             None => continue,
@@ -280,7 +285,7 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
         let initial_value = if is_flag {
             has_value.clone()
         } else {
-            initial_value_from_constructor(store, &target_class, &path)
+            initial_value_from_constructor(store, &target_class, &path)?
         };
 
         // Suppress writable-derived metadata: when explicitly false the
@@ -377,14 +382,19 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
         LIMIT 1
         "#
     );
-    let class_hint = store
-        .query(&EvalStop::none(), &class_hint_query)
-        .ok()
-        .and_then(|json| serde_json::from_str::<Vec<Value>>(&json).ok())
-        .and_then(|rows| {
-            rows.first()
-                .and_then(|r| r["hint"].as_str().map(decode_literal_string_target))
-        });
+    let class_hint = match query_bound_optional(store, &class_hint_query)? {
+        Some(json) => serde_json::from_str::<Vec<Value>>(&json)
+            .ok()
+            .and_then(|rows| {
+                rows.first()
+                    .and_then(|r| r["hint"].as_str().map(decode_literal_string_target))
+            }),
+        None => None,
+    };
+    if let Some(err) = crate::perspectives::sparql_store::bound_or_none().stopped_err("shape load")
+    {
+        return Err(err);
+    }
 
     Ok(ModelShape {
         target_class,
@@ -395,15 +405,27 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
     })
 }
 
+/// A query whose failure means "not stored", unless the bound read was
+/// cancelled. A cancel is an error, so the caller does not cache a shape
+/// that simply missed the value.
+fn query_bound_optional(store: &SparqlStore, query: &str) -> Result<Option<String>, Error> {
+    match crate::perspectives::sparql_store::query_bound(store, query) {
+        Ok(json) => Ok(Some(json)),
+        Err(err) if crate::perspectives::sparql_store::read_stopped() => Err(err),
+        Err(_) => Ok(None),
+    }
+}
+
 /// Recover an initial value for a non-flag property by inspecting the
 /// constructor actions encoded as `ad4m://constructor` literal JSON on
 /// the shape.  Returns the `target` of any `addLink` action whose
-/// `predicate` matches `predicate`.
+/// `predicate` matches `predicate`. `Ok(None)` when the constructor is
+/// absent. `Err` when the read was cancelled.
 fn initial_value_from_constructor(
     store: &SparqlStore,
     target_class: &str,
     predicate: &str,
-) -> Option<String> {
+) -> Result<Option<String>, Error> {
     // The constructor link is anchored to the shape URI, not the target
     // class.  Resolve the shape URI from the target class so we can
     // query for its constructor.
@@ -416,9 +438,19 @@ fn initial_value_from_constructor(
         LIMIT 1
         "#
     );
-    let shape_result_json = store.query(&EvalStop::none(), &shape_query).ok()?;
-    let shape_rows: Vec<Value> = serde_json::from_str(&shape_result_json).ok()?;
-    let shape_uri = shape_rows.first()?["shapeUri"].as_str()?.to_string();
+    let Some(shape_result_json) = query_bound_optional(store, &shape_query)? else {
+        return Ok(None);
+    };
+    let Ok(shape_rows) = serde_json::from_str::<Vec<Value>>(&shape_result_json) else {
+        return Ok(None);
+    };
+    let Some(shape_uri) = shape_rows
+        .first()
+        .and_then(|row| row["shapeUri"].as_str())
+        .map(str::to_string)
+    else {
+        return Ok(None);
+    };
 
     let safe_shape = escape_sparql_string(&shape_uri);
     let ctor_query = format!(
@@ -429,23 +461,37 @@ fn initial_value_from_constructor(
         LIMIT 1
         "#
     );
-    let ctor_result_json = store.query(&EvalStop::none(), &ctor_query).ok()?;
-    let ctor_rows: Vec<Value> = serde_json::from_str(&ctor_result_json).ok()?;
-    let ctor_literal = ctor_rows.first()?["ctor"].as_str()?.to_string();
+    let Some(ctor_result_json) = query_bound_optional(store, &ctor_query)? else {
+        return Ok(None);
+    };
+    let Ok(ctor_rows) = serde_json::from_str::<Vec<Value>>(&ctor_result_json) else {
+        return Ok(None);
+    };
+    let Some(ctor_literal) = ctor_rows
+        .first()
+        .and_then(|row| row["ctor"].as_str())
+        .map(str::to_string)
+    else {
+        return Ok(None);
+    };
 
     let ctor_json = decode_literal_string_target(&ctor_literal);
-    let actions: Value = serde_json::from_str(&ctor_json).ok()?;
-    let arr = actions.as_array()?;
+    let Ok(actions) = serde_json::from_str::<Value>(&ctor_json) else {
+        return Ok(None);
+    };
+    let Some(arr) = actions.as_array() else {
+        return Ok(None);
+    };
     for action in arr {
         let action_name = action["action"].as_str().unwrap_or("");
         let pred = action["predicate"].as_str().unwrap_or("");
         if action_name == "addLink" && pred == predicate {
             if let Some(target) = action["target"].as_str() {
-                return Some(target.to_string());
+                return Ok(Some(target.to_string()));
             }
         }
     }
-    None
+    Ok(None)
 }
 
 /// Decode `literal:5^^xsd:integer` or `literal:number:5` into a `u32`.

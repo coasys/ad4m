@@ -128,14 +128,40 @@ pub async fn gather_transcript_sparql(
     perspective: &PerspectiveInstance,
     sparql: &str,
 ) -> anyhow::Result<Vec<TranscriptTurn>> {
+    gather_transcript_sparql_stopped(
+        perspective,
+        sparql,
+        &crate::perspectives::sparql_store::EvalStop::none(),
+    )
+    .await
+}
+
+/// [`gather_transcript_sparql`] under `stop`. The query, the JSON decode and
+/// the row walk end when the call's gate fires.
+pub(crate) async fn gather_transcript_sparql_stopped(
+    perspective: &PerspectiveInstance,
+    sparql: &str,
+    stop: &crate::perspectives::sparql_store::EvalStop,
+) -> anyhow::Result<Vec<TranscriptTurn>> {
+    if let Some(err) = stop.stopped_err("query") {
+        anyhow::bail!("{err:#}");
+    }
     let rows_json = perspective
-        .sparql_query(sparql.to_string())
+        .sparql_query_stopped(stop, sparql)
         .map_err(|e| anyhow::anyhow!("gather_transcript_sparql: SPARQL query failed: {e:#}"))?;
+    if let Some(err) = stop.stopped_err("query") {
+        anyhow::bail!("{err:#}");
+    }
     let rows: Vec<serde_json::Value> = serde_json::from_str(&rows_json)
         .map_err(|e| anyhow::anyhow!("gather_transcript_sparql: bad SPARQL result JSON: {e:#}"))?;
 
     let mut out = Vec::with_capacity(rows.len());
-    for row in rows {
+    for (row_i, row) in rows.into_iter().enumerate() {
+        if row_i % 32 == 0 {
+            if let Some(err) = stop.stopped_err("query") {
+                anyhow::bail!("{err:#}");
+            }
+        }
         let Some(speaker) = row.get("speaker").and_then(|v| v.as_str()) else {
             continue;
         };

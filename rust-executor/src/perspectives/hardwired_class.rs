@@ -20,12 +20,33 @@ pub(crate) async fn subject_class_registered(
     perspective: &PerspectiveInstance,
     target_class: &str,
 ) -> anyhow::Result<bool> {
+    subject_class_registered_stopped(
+        perspective,
+        target_class,
+        &crate::perspectives::sparql_store::EvalStop::none(),
+    )
+    .await
+}
+
+/// [`subject_class_registered`] under `stop`. The class scan ends when the
+/// call's gate fires.
+pub(crate) async fn subject_class_registered_stopped(
+    perspective: &PerspectiveInstance,
+    target_class: &str,
+    stop: &crate::perspectives::sparql_store::EvalStop,
+) -> anyhow::Result<bool> {
+    if let Some(err) = stop.stopped_err("link scan") {
+        return Err(anyhow::anyhow!(err));
+    }
     let links = perspective
-        .get_links(&LinkQuery {
-            predicate: Some("rdf://type".to_string()),
-            target: Some("ad4m://SubjectClass".to_string()),
-            ..Default::default()
-        })
+        .get_links_stopped(
+            stop,
+            &LinkQuery {
+                predicate: Some("rdf://type".to_string()),
+                target: Some("ad4m://SubjectClass".to_string()),
+                ..Default::default()
+            },
+        )
         .await?;
     Ok(links.iter().any(|l| l.data.source == target_class))
 }

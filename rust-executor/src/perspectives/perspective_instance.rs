@@ -589,6 +589,18 @@ fn extract_predicates_from_sparql(query: &str) -> HashSet<String> {
     predicates
 }
 
+/// `Some` when `stop` has fired. The wait returns this instead of sleeping
+/// out the rest of the sync budget.
+fn shape_wait_stopped(stop: &EvalStop) -> Option<AnyError> {
+    if !stop.is_stopped() {
+        return None;
+    }
+    Some(
+        stop.stopped_err("shape wait")
+            .unwrap_or_else(|| anyhow!("shape wait stopped")),
+    )
+}
+
 /// One wake per background loop that waits on an event; see `PerspectiveInstance::wakes`.
 #[derive(Default)]
 struct LoopWakes {
@@ -718,8 +730,9 @@ pub struct PerspectiveInstance {
     /// Test-only: makes [`Self::get_shape_or_wait`] treat this perspective as
     /// joined to a neighbourhood, so a test can exercise the cross-peer wait
     /// without a running link language. Compiled out in non-test builds.
+    /// `pub(crate)` so an auto-processor tick test can force the wait.
     #[cfg(test)]
-    force_shape_sync_wait: Arc<AtomicBool>,
+    pub(crate) force_shape_sync_wait: Arc<AtomicBool>,
 }
 
 /// The local Shared links the remote render lacks, without the links of the diffs the
@@ -880,6 +893,22 @@ impl PerspectiveInstance {
         class_name: &str,
         budget: Duration,
     ) -> Result<Arc<ModelShape>, AnyError> {
+        self.get_shape_or_wait_stopped(&EvalStop::none(), class_name, budget)
+            .await
+    }
+
+    /// [`get_shape_or_wait`] that ends when `stop` fires, including while the
+    /// poll is asleep. A dropped tick must not keep its read slot for the
+    /// rest of the sync budget.
+    pub async fn get_shape_or_wait_stopped(
+        &self,
+        stop: &EvalStop,
+        class_name: &str,
+        budget: Duration,
+    ) -> Result<Arc<ModelShape>, AnyError> {
+        if let Some(err) = shape_wait_stopped(stop) {
+            return Err(err);
+        }
         match self.get_shape(class_name) {
             Ok(shape) => return Ok(shape),
             Err(e) => {
@@ -888,9 +917,17 @@ impl PerspectiveInstance {
                 }
             }
         }
+        if let Some(err) = shape_wait_stopped(stop) {
+            return Err(err);
+        }
         let deadline = Instant::now() + budget;
         let poll = Duration::from_millis(100);
+        // Short enough that a fired stop is seen during a poll sleep.
+        let slice = Duration::from_millis(25);
         loop {
+            if let Some(err) = shape_wait_stopped(stop) {
+                return Err(err);
+            }
             let now = Instant::now();
             if now >= deadline {
                 // Keeps the original message as a prefix (callers match on
@@ -905,7 +942,15 @@ impl PerspectiveInstance {
                 });
             }
             // Never sleep past the deadline: the caller's budget is shared.
-            sleep(poll.min(deadline - now)).await;
+            let mut left = poll.min(deadline - now);
+            while !left.is_zero() {
+                if let Some(err) = shape_wait_stopped(stop) {
+                    return Err(err);
+                }
+                let step = slice.min(left);
+                sleep(step).await;
+                left = left.saturating_sub(step);
+            }
             if let Ok(shape) = self.get_shape(class_name) {
                 return Ok(shape);
             }
@@ -4281,7 +4326,8 @@ impl PerspectiveInstance {
                 continue;
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
-            self.get_shape_or_wait(class_name, remaining).await?;
+            self.get_shape_or_wait_stopped(stop, class_name, remaining)
+                .await?;
         }
         // An abstract class (#1435) reads the concrete classes that have its
         // names, each through its view; none of them is an empty result.
@@ -4400,7 +4446,7 @@ impl PerspectiveInstance {
                 return Err(err);
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
-            self.get_shape_or_wait(&missing.class_name, remaining)
+            self.get_shape_or_wait_stopped(stop, &missing.class_name, remaining)
                 .await?;
         };
         let mut result = result;
@@ -6842,6 +6888,9 @@ impl PerspectiveInstance {
     /// after writes that only added links the kept transcript is brought up
     /// to date with a read of what they add (`TickReads::merge_transcript`).
     /// The windows and deferrals are applied at `now_ms` either way.
+    /// Those reads and the filter after them run on a blocking worker, under
+    /// the executor read cap. Claim waits, events, the model check and writes
+    /// stay on this task. Dropping the tick cancels the read.
     ///
     /// `context` is the agent this executor runs the pass as — the production
     /// loop passes the main agent; a multi-user test passes each managed user's
@@ -6868,159 +6917,19 @@ impl PerspectiveInstance {
         context: &AgentContext,
     ) -> crate::perspectives::auto_processor::watcher::TickOutcome {
         use crate::perspectives::auto_processor::{
-            config::load_processors,
-            cursor::{load_processed_sources, processed_ids_in_window, turn_in_source_window},
-            delta_read::{delta_query, DeltaRead},
             events::{emit, AutoProcessorEvent, AutoProcessorStep},
-            watcher::{
-                model_available, run_one_pass, CachedTurn, PassOutcome, PendingTurn, TickOutcome,
-            },
+            read_offload::{prepare_reads, PrepareOutcome},
+            watcher::{model_available, run_one_pass, PassOutcome, TickOutcome},
         };
 
         let uuid = self.uuid.clone();
-        // Read before any query, so a write during one makes the next tick read again.
-        let generation = self.sparql_store.write_generation();
-        let configs = match watcher.reads.configs(generation) {
-            Some(cs) => cs,
-            None => match load_processors(self).await {
-                Ok(cs) => watcher.reads.set_configs(generation, cs),
-                Err(e) => {
-                    log::warn!(
-                        "auto_processor_tick [{}]: load_processors failed: {e:#}",
-                        uuid
-                    );
-                    return if watcher.has_pending() {
-                        TickOutcome::Pending
-                    } else {
-                        TickOutcome::Idle
-                    };
-                }
-            },
+        let configs = match prepare_reads(self, watcher, now_ms).await {
+            PrepareOutcome::Finished(outcome) => return outcome,
+            PrepareOutcome::Drain(configs) => configs,
         };
-        if configs.is_empty() {
-            return TickOutcome::Idle;
-        }
-
-        // 1. Record new-since-last-processed turns per config (payload kept).
-        for cfg in configs.iter() {
-            let processed_rows = match watcher.reads.processed(&cfg.processor_id, generation) {
-                Some(rows) => rows,
-                None => match load_processed_sources(self, &cfg.processor_id).await {
-                    Ok(rows) => watcher
-                        .reads
-                        .set_processed(&cfg.processor_id, generation, rows),
-                    Err(e) => {
-                        log::warn!(
-                            "auto_processor `{}` [{}]: load_processed_source_ids failed: {e:#}",
-                            cfg.processor_id,
-                            uuid
-                        );
-                        continue;
-                    }
-                },
-            };
-            let processed = processed_ids_in_window(&processed_rows, now_ms, cfg.source_window_ms);
-            // Inside the window and not consumed: may be queued (unless deferred).
-            let queueable = |id: &str, timestamp: &str| {
-                cfg.source_window_ms
-                    .is_none_or(|w| turn_in_source_window(timestamp, now_ms, w))
-                    && !processed.contains(id)
-            };
-            // Turns queued at an earlier tick (kept while no model was set,
-            // or past a batch cap) are checked again: a run may have consumed
-            // them since, or they may have left the window.
-            watcher.retain_pending(&cfg.processor_id, |t| queueable(&t.id, &t.timestamp));
-            // A kept read is reused unless a turn it keeps without text has
-            // become queueable (its run aged out of the window).
-            let kept = watcher.reads.transcript(cfg).filter(|(_, turns)| {
-                !turns.iter().any(|t| {
-                    matches!(t, CachedTurn::Consumed { .. }) && queueable(t.id(), t.timestamp())
-                })
-            });
-            // After writes that only added links, read what they can add to
-            // the kept read (late turns with old timestamps included, see
-            // `delta_read`). Anything else (no kept read, a removal or reload
-            // since, a log that no longer reaches back, a scope query a delta
-            // cannot follow) reads the whole transcript.
-            let delta = match &kept {
-                Some((kept_at, _)) if *kept_at == generation => None,
-                Some((kept_at, _)) => self
-                    .sparql_store
-                    .additions_since(*kept_at, generation)
-                    .map(|added| delta_query(&cfg.source_scope_query, &added))
-                    .filter(|d| *d != DeltaRead::Full),
-                None => None,
-            };
-            let transcript = match (kept, delta) {
-                (Some((kept_at, turns)), _) if kept_at == generation => turns,
-                (kept, Some(delta)) => {
-                    // Release the kept copy, so the merge can take it over.
-                    drop(kept);
-                    let gained = match delta {
-                        DeltaRead::Query(query) => {
-                            crate::perspectives::interpretation::gather_transcript_sparql(
-                                self, &query,
-                            )
-                            .await
-                        }
-                        _ => Ok(Vec::new()),
-                    };
-                    match gained {
-                        Ok(t) => watcher.reads.merge_transcript(
-                            cfg,
-                            generation,
-                            t.iter().map(PendingTurn::from_transcript).collect(),
-                            queueable,
-                        ),
-                        Err(e) => {
-                            log::warn!(
-                                "auto_processor `{}` [{}]: reading the turns added since the last \
-                                 tick failed: {e:#}",
-                                cfg.processor_id,
-                                uuid
-                            );
-                            continue;
-                        }
-                    }
-                }
-                _ => match crate::perspectives::interpretation::gather_transcript_sparql(
-                    self,
-                    &cfg.source_scope_query,
-                )
-                .await
-                {
-                    Ok(t) => watcher.reads.set_transcript(
-                        cfg,
-                        generation,
-                        t.iter().map(PendingTurn::from_transcript).collect(),
-                        queueable,
-                    ),
-                    Err(e) => {
-                        log::warn!(
-                            "auto_processor `{}` [{}]: gather_transcript_sparql failed: {e:#}",
-                            cfg.processor_id,
-                            uuid
-                        );
-                        continue;
-                    }
-                },
-            };
-            for turn in transcript.iter() {
-                // A turn kept without text was not queueable at this tick's `now_ms` (checked above).
-                let CachedTurn::Full(pending) = turn else {
-                    continue;
-                };
-                if !queueable(&pending.id, &pending.timestamp)
-                    || watcher.is_deferred(&cfg.processor_id, &pending.id, now_ms)
-                {
-                    continue;
-                }
-                watcher.record_item(&cfg.processor_id, pending.clone(), now_ms);
-            }
-        }
-
-        let had_pending = watcher.has_pending_for(configs.iter().map(|c| c.processor_id.as_str()));
-        if !had_pending {
+        // Teardown can land while the reads run. Do not drain a perspective
+        // that is going away.
+        if self.is_teardown.load(Ordering::Acquire) {
             return TickOutcome::Idle;
         }
         // Every pass prompts the default LLM. Without one, a drained batch
@@ -7041,6 +6950,12 @@ impl PerspectiveInstance {
         if watcher.waiting_for_model {
             log::info!("auto_processor [{uuid}]: an LLM is configured; processing resumes");
             watcher.waiting_for_model = false;
+        }
+        // The model check itself can observe teardown (a test, or remove
+        // landing while the readiness read runs). Drain would start a pass
+        // on a perspective that is going away.
+        if self.is_teardown.load(Ordering::Acquire) {
+            return TickOutcome::Idle;
         }
 
         // 2. Drain + run a pass per config.
@@ -9817,6 +9732,107 @@ mod tests {
             .get_shape("Recipe")
             .expect("re-parse after invalidation");
         assert!(!Arc::ptr_eq(&first, &second));
+    }
+
+    fn task_shape_shacl() -> String {
+        r#"{
+            "target_class": "ns://Task",
+            "interpretation_hint": "keep this hint",
+            "constructor_actions": [
+                {"action": "addLink", "source": "this", "predicate": "ns://title", "target": "from-constructor"}
+            ],
+            "properties": [
+                {"path": "ns://title", "name": "title", "datatype": "xsd://string", "min_count": 1, "max_count": 1}
+            ]
+        }"#
+        .to_string()
+    }
+
+    /// Load `Task` once under a stop that fires on `needle`, then again with
+    /// the stop clear. A cancelled optional read must not be cached as absent.
+    async fn shape_after_cancelled_read(
+        needle: &str,
+    ) -> Arc<crate::perspectives::model_query::types::ModelShape> {
+        use crate::perspectives::auto_processor::read_offload::probe;
+        use crate::perspectives::sparql_store::{BoundStop, EvalGate};
+        use std::time::Duration;
+
+        let mut perspective = setup().await;
+        perspective
+            .add_sdna(
+                "Task".to_string(),
+                String::new(),
+                SdnaType::SubjectClass,
+                Some(task_shape_shacl()),
+                &AgentContext::main_agent(),
+            )
+            .await
+            .expect("add_sdna");
+        let gate = EvalGate::request(Duration::from_secs(30), None);
+        let stop = gate.stop();
+        let bound = BoundStop::bind(&stop);
+        let needle_guard = probe::cancel_on_query(needle);
+        let stopped = perspective.get_shape("Task");
+        drop(needle_guard);
+        drop(bound);
+        drop(gate);
+        assert!(
+            stopped.is_err(),
+            "a cancelled shape load returned Ok and can be cached: {stopped:?}"
+        );
+        perspective.get_shape("Task").expect("unstopped load")
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_constructor_read_is_not_cached_as_no_initial_value() {
+        let shape = shape_after_cancelled_read("ad4m://constructor").await;
+        let title = shape
+            .properties
+            .iter()
+            .find(|prop| prop.name == "title")
+            .expect("title property");
+        assert_eq!(title.initial_value.as_deref(), Some("from-constructor"));
+        assert_eq!(shape.interpretation_hint.as_deref(), Some("keep this hint"));
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_class_hint_read_is_not_cached_as_no_hint() {
+        let shape = shape_after_cancelled_read("SELECT ?hint").await;
+        assert_eq!(shape.interpretation_hint.as_deref(), Some("keep this hint"));
+        let title = shape
+            .properties
+            .iter()
+            .find(|prop| prop.name == "title")
+            .expect("title property");
+        assert_eq!(title.initial_value.as_deref(), Some("from-constructor"));
+    }
+
+    /// A shape wait ends when its stop fires. It does not sit out the budget.
+    #[tokio::test]
+    async fn a_shape_wait_returns_when_its_stop_fires() {
+        use crate::perspectives::sparql_store::EvalGate;
+        use std::time::Instant;
+
+        let perspective = setup().await;
+        perspective
+            .force_shape_sync_wait
+            .store(true, Ordering::SeqCst);
+        let gate = EvalGate::request(Duration::from_millis(100), None);
+        let started = Instant::now();
+        let result = perspective
+            .get_shape_or_wait_stopped(&gate.stop(), "Missing", Duration::from_secs(2))
+            .await;
+        let elapsed = started.elapsed();
+        let err = result.expect_err("a missing shape is still an error");
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "the wait ignored its stop and ran for {elapsed:?}: {err:#}"
+        );
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("deadline") || msg.contains("stopped") || msg.contains("cancelled"),
+            "the error does not say the wait stopped: {msg}"
+        );
     }
 
     /// Two apps that each define `Message` in their own namespace must not

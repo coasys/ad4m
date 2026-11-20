@@ -189,16 +189,17 @@ impl PendingTurn {
     }
 }
 
+/// Test-only count of queued-id comparisons. An atomic, not a thread local:
+/// recording runs on a blocking worker, and the test reads the count on the
+/// runtime thread.
 #[cfg(test)]
-thread_local! {
-    static ID_COMPARISONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-}
+static ID_COMPARISONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Test-only: how many queued ids this thread compared so far, in the
-/// pending queues' duplicate checks.
+/// Test-only: how many queued ids have been compared so far, in the pending
+/// queues' duplicate checks.
 #[cfg(test)]
 pub(crate) fn id_comparisons() -> u64 {
-    ID_COMPARISONS.with(|c| c.get())
+    ID_COMPARISONS.load(std::sync::atomic::Ordering::Acquire)
 }
 
 /// A turn id in a pending queue's id set. Equal as its string; in tests each
@@ -216,7 +217,7 @@ impl std::hash::Hash for QueuedId {
 impl PartialEq for QueuedId {
     fn eq(&self, other: &Self) -> bool {
         #[cfg(test)]
-        ID_COMPARISONS.with(|c| c.set(c.get() + 1));
+        ID_COMPARISONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.0 == other.0
     }
 }
@@ -335,6 +336,10 @@ impl CachedTurn {
     }
 }
 
+fn read_stopped_now() -> bool {
+    crate::perspectives::sparql_store::read_stopped()
+}
+
 impl TickReads {
     pub(crate) fn configs(&self, generation: u64) -> Option<Arc<Vec<AutoProcessorConfig>>> {
         self.configs
@@ -384,16 +389,29 @@ impl TickReads {
         generation: u64,
         gained: Vec<PendingTurn>,
         queueable: impl Fn(&str, &str) -> bool,
-    ) -> Arc<Vec<CachedTurn>> {
-        let Some((_, query, kept)) = self
+    ) -> Result<Arc<Vec<CachedTurn>>, ()> {
+        let Some((kept_at, query, kept)) = self
             .transcripts
             .remove(&cfg.processor_id)
             .filter(|(_, query, _)| *query == cfg.source_scope_query)
         else {
             return self.set_transcript(cfg, generation, gained, queueable);
         };
-        let mut turns = Arc::try_unwrap(kept).unwrap_or_else(|shared| (*shared).clone());
-        for turn in turns.iter_mut() {
+        // The entry is already out of the map. A stop puts the pre-merge
+        // turns back at `kept_at`. The merge edits a copy, so a stop cannot
+        // store a partial vector under the old generation.
+        let original = kept;
+        if read_stopped_now() {
+            self.restore_transcript(cfg, kept_at, query, original);
+            return Err(());
+        }
+        let mut turns = (*original).clone();
+        let mut stopped = false;
+        for (i, turn) in turns.iter_mut().enumerate() {
+            if i % 64 == 0 && read_stopped_now() {
+                stopped = true;
+                break;
+            }
             if let CachedTurn::Full(t) = turn {
                 if !queueable(&t.id, &t.timestamp) {
                     *turn = CachedTurn::Consumed {
@@ -403,10 +421,22 @@ impl TickReads {
                 }
             }
         }
+        if stopped {
+            self.restore_transcript(cfg, kept_at, query, original);
+            return Err(());
+        }
         if !gained.is_empty() {
+            if read_stopped_now() {
+                self.restore_transcript(cfg, kept_at, query, original);
+                return Err(());
+            }
             let order = transcript_order(&cfg.source_scope_query);
             let mut known: HashSet<String> = turns.iter().map(|t| t.id().to_string()).collect();
-            for t in gained {
+            for (i, t) in gained.into_iter().enumerate() {
+                if i % 64 == 0 && read_stopped_now() {
+                    self.restore_transcript(cfg, kept_at, query, original);
+                    return Err(());
+                }
                 if known.insert(t.id.clone()) {
                     let turn = cached(t, &queueable);
                     // Where a fresh read, sorted the same way, puts it.
@@ -422,38 +452,66 @@ impl TickReads {
                 }
             }
         }
+        if read_stopped_now() {
+            self.restore_transcript(cfg, kept_at, query, original);
+            return Err(());
+        }
         let turns = Arc::new(turns);
         self.transcripts
             .insert(cfg.processor_id.clone(), (generation, query, turns.clone()));
-        turns
+        Ok(turns)
+    }
+
+    /// Put a merge that stopped back at the generation it already had,
+    /// with the turns from before the merge.
+    fn restore_transcript(
+        &mut self,
+        cfg: &AutoProcessorConfig,
+        kept_at: u64,
+        query: String,
+        turns: Arc<Vec<CachedTurn>>,
+    ) {
+        self.transcripts
+            .insert(cfg.processor_id.clone(), (kept_at, query, turns));
     }
 
     /// Keep `turns`, with the text only of those `queueable` accepts, one per
     /// turn id, sorted as [`TranscriptOrder`] says for the scope query.
+    /// `Err` when the bound read stop fires: nothing is written.
     pub(crate) fn set_transcript(
         &mut self,
         cfg: &AutoProcessorConfig,
         generation: u64,
         turns: Vec<PendingTurn>,
         queueable: impl Fn(&str, &str) -> bool,
-    ) -> Arc<Vec<CachedTurn>> {
+    ) -> Result<Arc<Vec<CachedTurn>>, ()> {
         let mut seen = HashSet::new();
-        let mut turns: Vec<CachedTurn> = turns
-            .into_iter()
-            .filter(|t| seen.insert(t.id.clone()))
-            .map(|t| cached(t, &queueable))
-            .collect();
+        let mut kept = Vec::new();
+        for (i, turn) in turns.into_iter().enumerate() {
+            if i % 64 == 0 && read_stopped_now() {
+                return Err(());
+            }
+            if seen.insert(turn.id.clone()) {
+                kept.push(cached(turn, &queueable));
+            }
+        }
+        if read_stopped_now() {
+            return Err(());
+        }
         if let Some(TranscriptOrder::Timestamp { descending }) =
             transcript_order(&cfg.source_scope_query)
         {
-            turns.sort_by(|a, b| transcript_cmp(a, b, descending));
+            kept.sort_by(|a, b| transcript_cmp(a, b, descending));
         }
-        let turns = Arc::new(turns);
+        if read_stopped_now() {
+            return Err(());
+        }
+        let turns = Arc::new(kept);
         self.transcripts.insert(
             cfg.processor_id.clone(),
             (generation, cfg.source_scope_query.clone(), turns.clone()),
         );
-        turns
+        Ok(turns)
     }
 
     pub(crate) fn processed(
@@ -1875,6 +1933,9 @@ pub(crate) mod test_hooks {
         pub model_readiness: Option<Arc<tokio::sync::watch::Sender<u64>>>,
         /// How many times a tick asked [`model_available`].
         pub model_checks: Arc<std::sync::atomic::AtomicUsize>,
+        /// Runs when a tick asks [`model_available`]. A test sets teardown here,
+        /// after the reads have returned and before the drain.
+        pub on_model_check: Option<Arc<dyn Fn() + Send + Sync>>,
     }
 
     tokio::task_local! {
@@ -1941,6 +2002,9 @@ pub(crate) mod test_hooks {
         HOOKS
             .try_with(|h| {
                 h.model_checks.fetch_add(1, Ordering::Relaxed);
+                if let Some(hook) = &h.on_model_check {
+                    hook();
+                }
                 !h.no_model.load(Ordering::Relaxed)
             })
             .unwrap_or(true)
@@ -3239,11 +3303,15 @@ mod tests {
     fn a_merged_transcript_drops_the_text_of_turns_no_longer_queueable() {
         let c = cfg("merge", 0, 32);
         let mut reads = TickReads::default();
-        reads.set_transcript(&c, 1, vec![pt("a"), pt("b")], |_, _| true);
+        reads
+            .set_transcript(&c, 1, vec![pt("a"), pt("b")], |_, _| true)
+            .expect("kept transcript");
 
         // Since then "a" was consumed, and "c" was added.
         let queueable = |id: &str, _: &str| id != "a";
-        let merged = reads.merge_transcript(&c, 2, vec![pt("c")], queueable);
+        let merged = reads
+            .merge_transcript(&c, 2, vec![pt("c")], queueable)
+            .expect("merged transcript");
         assert_eq!(
             merged[0],
             CachedTurn::Consumed {
@@ -3254,8 +3322,39 @@ mod tests {
         );
 
         let mut fresh = TickReads::default();
-        let read = fresh.set_transcript(&c, 2, vec![pt("a"), pt("b"), pt("c")], queueable);
+        let read = fresh
+            .set_transcript(&c, 2, vec![pt("a"), pt("b"), pt("c")], queueable)
+            .expect("fresh transcript");
         assert_eq!(*merged, *read, "the merge holds what a fresh read holds");
         assert_eq!(reads.transcript(&c), Some((2, merged)));
+    }
+
+    /// A stop after a merge has rewritten a kept turn must put back the turns
+    /// from before the merge, still at the old generation. The watcher is not
+    /// inside the cancelled future: the stop is bound on this thread.
+    #[test]
+    fn a_stopped_merge_restores_the_turns_from_before_the_merge() {
+        use crate::perspectives::sparql_store::{BoundStop, EvalGate, EvalStop};
+
+        let c = cfg("merge-stop", 0, 32);
+        let mut reads = TickReads::default();
+        reads
+            .set_transcript(&c, 1, vec![pt("a")], |_, _| true)
+            .expect("kept transcript");
+        let gate = EvalGate::request(std::time::Duration::from_secs(30), None);
+        let _bound = BoundStop::bind(&gate.stop());
+        // Poll 1 is the check before the loop. Poll 2 is the kept turn, before
+        // its text is dropped. Poll 3 is the check before the gained turn is
+        // inserted, after that kept turn was rewritten.
+        let _arm = EvalStop::stop_after_polls(3);
+        let queueable = |id: &str, _: &str| id != "a";
+        let merged = reads.merge_transcript(&c, 2, vec![pt("c")], queueable);
+        assert!(merged.is_err(), "the merge ran past its stop");
+        let (generation, turns) = reads.transcript(&c).expect("the old transcript stays");
+        assert_eq!(generation, 1, "a stopped merge is not marked current");
+        match turns.first() {
+            Some(CachedTurn::Full(t)) if t.id == "a" && t.text == "a" => {}
+            other => panic!("a stopped merge stored a partial transcript: {other:?}"),
+        }
     }
 }

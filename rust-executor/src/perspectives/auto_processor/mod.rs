@@ -22,6 +22,7 @@ pub mod config;
 pub mod cursor;
 pub(crate) mod delta_read;
 pub mod events;
+pub(crate) mod read_offload;
 pub mod watcher;
 
 #[cfg(test)]

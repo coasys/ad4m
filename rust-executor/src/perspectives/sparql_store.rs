@@ -80,15 +80,54 @@ impl EvalStop {
     #[cfg(test)]
     pub(crate) fn cancelled() -> EvalStop {
         let stop = EvalStop::none();
-        stop.stop.mark(STOP_CANCELLED);
-        stop.token.cancel();
+        stop.cancel_for_test();
         stop
+    }
+
+    /// Mark this stop cancelled. Tests use it when a chosen query must fail
+    /// as a cancel rather than as a missing value.
+    #[cfg(test)]
+    pub(crate) fn cancel_for_test(&self) {
+        self.stop.mark(STOP_CANCELLED);
+        self.token.cancel();
     }
 
     /// Whether the eval carrying this stop must end. The evaluator checks the
     /// token itself; manual scans (`for_each_matched_link`) check this.
     pub(crate) fn is_stopped(&self) -> bool {
+        #[cfg(test)]
+        self.fire_stop_after_polls();
         self.stop.kind.load(Ordering::Acquire) != RUNNING || self.token.is_cancelled()
+    }
+
+    /// Test arm: the nth call of [`Self::is_stopped`] on this thread cancels
+    /// the stop. `0` is off. Does not count [`Self::stopped_err`].
+    #[cfg(test)]
+    pub(crate) fn stop_after_polls(n: u32) -> StopAfterPolls {
+        let prev_after = STOP_AFTER_POLLS.with(|c| c.replace(n));
+        let prev_seen = STOP_POLLS_SEEN.with(|c| c.replace(0));
+        StopAfterPolls {
+            prev_after,
+            prev_seen,
+        }
+    }
+
+    #[cfg(test)]
+    fn fire_stop_after_polls(&self) {
+        let fire = STOP_AFTER_POLLS.with(|after| {
+            let n = after.get();
+            if n == 0 {
+                return false;
+            }
+            STOP_POLLS_SEEN.with(|seen| {
+                let next = seen.get().saturating_add(1);
+                seen.set(next);
+                next >= n
+            })
+        });
+        if fire {
+            self.cancel_for_test();
+        }
     }
 
     /// The error a stopped eval reports, saying why; `None` while it may
@@ -228,6 +267,99 @@ pub(crate) fn query_deadline() -> Duration {
             .filter(|secs| *secs > 0)
             .unwrap_or(30),
     )
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static STOP_AFTER_POLLS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    static STOP_POLLS_SEEN: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Restores the previous [`EvalStop::stop_after_polls`] arm.
+#[cfg(test)]
+pub(crate) struct StopAfterPolls {
+    prev_after: u32,
+    prev_seen: u32,
+}
+
+#[cfg(test)]
+impl Drop for StopAfterPolls {
+    fn drop(&mut self) {
+        STOP_AFTER_POLLS.with(|c| c.set(self.prev_after));
+        STOP_POLLS_SEEN.with(|c| c.set(self.prev_seen));
+    }
+}
+
+std::thread_local! {
+    /// Stop bound for store reads that have no `EvalStop` parameter (shape
+    /// load, the abstract-class index). Unset means [`EvalStop::none`].
+    static BOUND_STOP: std::cell::RefCell<Option<EvalStop>> = const { std::cell::RefCell::new(None) };
+    /// Set while an auto-processor prepare drives queries with
+    /// `Handle::block_on` on a blocking worker. A nested `spawn_blocking`
+    /// from there would take a second pool thread.
+    static INLINE_QUERY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Bind `stop` for the current thread until the guard drops.
+pub(crate) struct BoundStop {
+    prev: Option<EvalStop>,
+}
+
+impl BoundStop {
+    pub(crate) fn bind(stop: &EvalStop) -> Self {
+        let prev = BOUND_STOP.with(|slot| slot.replace(Some(stop.clone())));
+        Self { prev }
+    }
+}
+
+impl Drop for BoundStop {
+    fn drop(&mut self) {
+        BOUND_STOP.with(|slot| *slot.borrow_mut() = self.prev.take());
+    }
+}
+
+/// The bound stop, or [`EvalStop::none`] when the thread has not bound one.
+pub(crate) fn bound_or_none() -> EvalStop {
+    BOUND_STOP.with(|slot| slot.borrow().clone().unwrap_or_else(EvalStop::none))
+}
+
+/// Whether the bound stop has fired. False when nothing is bound.
+pub(crate) fn read_stopped() -> bool {
+    BOUND_STOP.with(|slot| slot.borrow().as_ref().is_some_and(EvalStop::is_stopped))
+}
+
+/// Run `query` under the stop bound on this thread, or [`EvalStop::none`]
+/// when the thread has not bound one. Shape load and the abstract-class
+/// index have no `EvalStop` parameter; the auto-processor prepare binds one
+/// so those reads end with the stage that asked for them.
+pub(crate) fn query_bound(store: &SparqlStore, query: &str) -> Result<String, Error> {
+    let stop = bound_or_none();
+    if let Some(err) = stop.stopped_err("query") {
+        return Err(err);
+    }
+    store.query(&stop, query)
+}
+
+/// Run SPARQL on this thread instead of `spawn_blocking`.
+pub(crate) struct InlineQuery {
+    prev: bool,
+}
+
+impl InlineQuery {
+    pub(crate) fn enter() -> Self {
+        let prev = INLINE_QUERY.with(|flag| flag.replace(true));
+        Self { prev }
+    }
+}
+
+impl Drop for InlineQuery {
+    fn drop(&mut self) {
+        INLINE_QUERY.with(|flag| flag.set(self.prev));
+    }
+}
+
+fn queries_inline() -> bool {
+    INLINE_QUERY.with(|flag| flag.get())
 }
 
 /// The gate one WS query call runs under: the configured deadline, the
@@ -2179,6 +2311,8 @@ impl SparqlStore {
             .push(query_string.to_string());
         #[cfg(test)]
         let _eval_count = eval_count::one();
+        #[cfg(test)]
+        crate::perspectives::auto_processor::read_offload::probe_query(stop, query_string)?;
 
         let results = self
             .sparql_evaluator(stop)
@@ -2275,6 +2409,11 @@ impl SparqlStore {
     /// `stop` decides when the eval ends: the gate that owns it fires it and
     /// the eval stops itself, reporting why.
     pub async fn query_async(&self, stop: &EvalStop, query_string: &str) -> Result<String, Error> {
+        // Already on the auto-processor prepare worker: the query runs here,
+        // under `stop`, instead of taking another blocking-pool thread.
+        if queries_inline() {
+            return self.query(stop, query_string);
+        }
         let store = self.clone();
         let stop = stop.clone();
         let query = query_string.to_string();
@@ -2298,6 +2437,9 @@ impl SparqlStore {
         stop: &EvalStop,
         query_string: &str,
     ) -> Result<String, Error> {
+        if queries_inline() {
+            return self.query_arbitrary(stop, query_string);
+        }
         let store = self.clone();
         let stop = stop.clone();
         let query = query_string.to_string();
