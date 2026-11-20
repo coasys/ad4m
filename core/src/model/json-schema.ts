@@ -250,6 +250,16 @@ export function getDefaultValueForType(type?: string): any {
 // ─── buildModelFromJSONSchema ────────────────────────────────────────────────
 
 /**
+ * Property names every instance already carries. The executor refuses a class
+ * that declares one (`RESERVED_PROPERTY_NAMES` in
+ * rust-executor/src/perspectives/shacl_parser.rs), and on the generated
+ * prototype `id` and `timestamp` would hide Ad4mModel's own getters.
+ */
+export const RESERVED_SCHEMA_PROPERTY_NAMES = [
+  "id", "baseExpression", "createdAt", "updatedAt", "author", "timestamp", "__links",
+];
+
+/**
  * Core implementation of `Ad4mModel.fromJSONSchema()`.
  *
  * Creates a dynamic Ad4mModel subclass from a JSON Schema definition,
@@ -265,9 +275,10 @@ export function buildModelFromJSONSchema(
   schema: JSONSchema,
   options: JSONSchemaToModelOptions
 ): typeof Ad4mModel {
-  // Disallow top-level "author" property since Ad4mModel provides it implicitly via link authorship
-  if (schema?.properties && Object.prototype.hasOwnProperty.call(schema.properties, "author")) {
-    throw new Error('JSON Schema must not define a top-level "author" property because Ad4mModel already exposes it. Please rename the property (e.g., "writer").');
+  // Disallow top-level properties that collide with the fields Ad4mModel exposes itself
+  const reserved = Object.keys(schema?.properties ?? {}).filter((name) => RESERVED_SCHEMA_PROPERTY_NAMES.includes(name));
+  if (reserved.length > 0) {
+    throw new Error(`JSON Schema must not define the top-level ${reserved.map((n) => `"${n}"`).join(", ")} propert${reserved.length > 1 ? "ies" : "y"}: Ad4mModel already exposes ${reserved.length > 1 ? "them" : "it"} (reserved: ${RESERVED_SCHEMA_PROPERTY_NAMES.join(", ")}). Please rename the property (e.g., "author" to "writer").`);
   }
   // Determine namespace with cascading precedence
   const namespace = determineNamespace(schema, options);
