@@ -6,6 +6,12 @@ export type CollectionItemAdded = { className: string, baseUri: string,
  */
 collection: string, itemUri: string, 
 /**
- * 0 when the item was in the collection already (as the batch's effective graph has it).
+ * 0 when the item was in the collection already (as the batch's effective graph has it),
+ * or when a language call made the write (`languageCall`).
  */
-linksAdded: number, alreadyMember: boolean, };
+linksAdded: number, alreadyMember: boolean, 
+/**
+ * The collection's declared adder is a `call`: the language added the member, and its
+ * answer, not a link written here, makes the membership.
+ */
+languageCall: boolean, };

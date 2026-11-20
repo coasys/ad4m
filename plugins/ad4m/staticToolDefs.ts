@@ -503,7 +503,7 @@ export const STATIC_TOOL_DEFS: McpTool[] =
   },
   {
     "name": "instance_add_to_collection",
-    "description": "Add an item to a collection property of an instance (e.g. add a Message to a Channel's messages). class_name is the owning instance's class, base_uri its id, collection one of the names listed under collections by describe_perspective, item_uri the URI of the item (usually another instance's id). Adding an item that is already in the collection is a no-op (links_added: 0). Undo with instance_remove_from_collection.",
+    "description": "Add an item to a collection property of an instance (e.g. add a Message to a Channel's messages). class_name is the owning instance's class, base_uri its id, collection one of the names listed under collections by describe_perspective, item_uri the URI of the item (usually another instance's id). Adding an item that is already in the collection is a no-op (links_added: 0, already_member: true). A collection whose class declares a language call as its adder (a mounted class) is added to by that language: the reply says language_call: true, with links_added: 0. Undo with instance_remove_from_collection.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "title": "InstanceAddToCollectionParams",
@@ -542,7 +542,7 @@ export const STATIC_TOOL_DEFS: McpTool[] =
   },
   {
     "name": "instance_remove_from_collection",
-    "description": "Remove an item from a collection property of an instance (e.g. take a Message out of a Channel's messages). class_name is the owning instance's class, base_uri its id, collection one of the names listed under collections by describe_perspective, item_uri the item to remove as listed by instance_get. Only the membership link is removed \u2014 the item itself is untouched (use instance_remove to delete it). Removing an item that is not in the collection is a no-op (links_removed: 0).",
+    "description": "Remove an item from a collection property of an instance (e.g. take a Message out of a Channel's messages). class_name is the owning instance's class, base_uri its id, collection one of the names listed under collections by describe_perspective, item_uri the item to remove as listed by instance_get. Only the membership link is removed \u2014 the item itself is untouched (use instance_remove to delete it). Removing an item that is not in the collection is a no-op (links_removed: 0). A collection whose class declares a language call as its remover (a mounted class) is removed from by that language: the reply says language_call: true.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "title": "InstanceRemoveFromCollectionParams",
