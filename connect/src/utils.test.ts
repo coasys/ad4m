@@ -169,6 +169,26 @@ describe('adoptStoredSession', () => {
     expect(getLocal('ad4m-last-host')).toBeNull();
   });
 
+  it('carries a guest\'s credentials over with the session, so the session stays a guest\'s', () => {
+    const host = 'https://host.example';
+    localStorage.setItem('0.10.0/ad4m-token', 'older');
+    localStorage.setItem(`0.10.0/ad4m-guest-email-${host}`, 'guest-old@flux.demo');
+    localStorage.setItem('0.10.1/ad4m-token', 'guest-token');
+    localStorage.setItem('0.10.1/ad4m-url', host);
+    localStorage.setItem(`0.10.1/ad4m-guest-email-${host}`, 'guest-abc@flux.demo');
+    localStorage.setItem(`0.10.1/ad4m-guest-pass-${host}`, 'secret');
+    // A key of another version line that only shares the prefix's start is not this version's.
+    localStorage.setItem(`0.10.1-staging.2/ad4m-guest-email-${host}`, 'guest-pre@flux.demo');
+    expect(adoptStoredSession()).toBe(true);
+    expect(getLocal(`ad4m-guest-email-${host}`)).toBe('guest-abc@flux.demo');
+    expect(getLocal(`ad4m-guest-pass-${host}`)).toBe('secret');
+    // The copies under the versions it carried over from go with their sessions.
+    expect(localStorage.getItem(`0.10.1/ad4m-guest-email-${host}`)).toBeNull();
+    expect(localStorage.getItem(`0.10.1/ad4m-guest-pass-${host}`)).toBeNull();
+    expect(localStorage.getItem(`0.10.0/ad4m-guest-email-${host}`)).toBeNull();
+    expect(localStorage.getItem(`0.10.1-staging.2/ad4m-guest-email-${host}`)).toBe('guest-pre@flux.demo');
+  });
+
   it('carries over no session stored for another URL than the app names', () => {
     localStorage.setItem('0.10.1/ad4m-token', 'other-executor');
     localStorage.setItem('0.10.1/ad4m-url', 'http://old:1');
