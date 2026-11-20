@@ -571,6 +571,31 @@ pub struct ModelQueryInput {
     /// Only meaningful alongside `polymorphic`.
     #[serde(default)]
     pub prefer_classes: Option<Vec<String>>,
+    /// Read this include through a link its class does not declare: the
+    /// predicate, as a relation decorator's `through` names it.
+    ///
+    /// A class says which links it reads, and an include of anything else is
+    /// skipped, which is right for a typo and wrong for a link that is there all
+    /// the same. Another app's class cannot know what a later app links to its
+    /// instances: a conversation that produced an action item links to it, and
+    /// the action item's class, written by whoever wrote it, declares nothing
+    /// about conversations. `through` lets the reader say which link it means.
+    ///
+    /// Needs `kind`. Where the class does declare the name, the declaration
+    /// wins, and naming a different predicate here is an error rather than a
+    /// second reading of the same name.
+    ///
+    /// Only meaningful on an `include` sub-query.
+    #[serde(default)]
+    pub through: Option<String>,
+    /// With `through`, which way the link runs and how many it reads, in the
+    /// relation decorators' words: `belongsToOne` or `belongsToMany`, the
+    /// instances linking *to* this one.
+    ///
+    /// Only the reverse kinds. An outgoing link the class does not declare is
+    /// already reachable through `links`.
+    #[serde(default)]
+    pub kind: Option<String>,
     /// Read the instance as it exists in links of this status only (#1116).
     ///
     /// `Some(Shared)` hydrates from Shared links only, which is what a

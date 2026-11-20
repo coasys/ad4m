@@ -1113,9 +1113,10 @@ pub(super) async fn execute_model_query_inner(
         )?;
     }
 
-    // Eager-load included relations
+    // Eager-load included relations. Asked of a class declaring none as well: an include naming its
+    // link with `through` needs no declaration, and is most often asked of exactly such a class.
     if let Some(ref include) = query_input.include {
-        if !paginated.is_empty() && !shape.include_relations.is_empty() {
+        if !paginated.is_empty() {
             resolve_includes_recursive(
                 stop,
                 store,
