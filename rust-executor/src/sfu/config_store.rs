@@ -15,7 +15,11 @@
 //! older build wrote with those fields is read for its policy only.
 
 use deno_core::error::AnyError;
+use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::Instant;
 
 use crate::agent::{did_for_context, AgentContext};
 use crate::perspectives::all_perspectives;
@@ -141,22 +145,130 @@ pub async fn stored_policy(neighbourhood_url: &str) -> Option<CallPolicy> {
     }
 }
 
+/// How long a resolved policy is trusted before the membership check runs
+/// again. The check waits on the link language — the same serial queue the
+/// 2026-11-19 call's `getConfig`s died behind — so a member that joined or
+/// left can take this long to be noticed.
+const POLICY_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The last policy `read_policy` resolved for a neighbourhood, and — when
+/// it came from a membership check rather than a stored config link —
+/// whether the check found every member hosted here. `send_broadcast`
+/// reads [`every_member_local`] as its cheap "no remote members" signal.
+struct PolicyCacheEntry {
+    policy: CallPolicy,
+    at: Instant,
+    every_member_local: Option<bool>,
+}
+
+lazy_static! {
+    static ref POLICY_CACHE: Mutex<HashMap<String, PolicyCacheEntry>> =
+        Mutex::new(HashMap::new());
+}
+
+/// The resolved policy when it is less than [`POLICY_CACHE_TTL`] old.
+fn cached_policy(neighbourhood_url: &str) -> Option<CallPolicy> {
+    POLICY_CACHE
+        .lock()
+        .expect("policy cache lock")
+        .get(neighbourhood_url)
+        .filter(|entry| entry.at.elapsed() < POLICY_CACHE_TTL)
+        .map(|entry| entry.policy.clone())
+}
+
+/// The resolved policy however old it is: what a failed membership check
+/// falls back to, which must never become "mesh" by default.
+fn last_policy(neighbourhood_url: &str) -> Option<CallPolicy> {
+    POLICY_CACHE
+        .lock()
+        .expect("policy cache lock")
+        .get(neighbourhood_url)
+        .map(|entry| entry.policy.clone())
+}
+
+fn cache_policy(neighbourhood_url: &str, policy: &CallPolicy, every_member_local: Option<bool>) {
+    POLICY_CACHE.lock().expect("policy cache lock").insert(
+        neighbourhood_url.to_string(),
+        PolicyCacheEntry {
+            policy: policy.clone(),
+            at: Instant::now(),
+            every_member_local,
+        },
+    );
+}
+
+/// `true` when the last membership check a `read_policy` ran found every
+/// member hosted on this executor, while that verdict is still fresh:
+/// remote delivery could then reach nobody the local delivery did not, so
+/// `send_broadcast` skips the link-language hop.
+pub(crate) fn every_member_local(neighbourhood_url: &str) -> bool {
+    POLICY_CACHE
+        .lock()
+        .expect("policy cache lock")
+        .get(neighbourhood_url)
+        .is_some_and(|entry| {
+            entry.every_member_local == Some(true) && entry.at.elapsed() < POLICY_CACHE_TTL
+        })
+}
+
 /// [`stored_policy`], or the policy of a neighbourhood with none: this
 /// executor's SFU (`designated`) when it hosts every member, so all of them
 /// reach the same room, and mesh otherwise. SFUs on different executors meet
 /// only through a cascade an operator sets up, so members on two executors
 /// would each sit alone in their own executor's room.
-pub async fn read_policy(neighbourhood_url: &str) -> CallPolicy {
+///
+/// The membership check waits on the link language's serial runtime, so the
+/// resolved policy is cached for [`POLICY_CACHE_TTL`]. A check that fails
+/// answers the last resolved policy, however old, and an error when there
+/// is none — never a silent "mesh" a different neighbour would compute
+/// differently (2026-11-19: a blocked language turned a designated-policy
+/// call to mesh mid-call).
+pub async fn read_policy(neighbourhood_url: &str) -> Result<CallPolicy, AnyError> {
     if let Some(policy) = stored_policy(neighbourhood_url).await {
-        return policy;
+        cache_policy(neighbourhood_url, &policy, None);
+        return Ok(policy);
     }
-    let hosted = match neighbourhood_perspective(neighbourhood_url).await {
-        Some(perspective) => hosts_every_member(&perspective).await.unwrap_or(false),
-        None => false,
+    let perspective = match neighbourhood_perspective(neighbourhood_url).await {
+        Some(perspective) => perspective,
+        // Not joined here: this executor cannot host the neighbourhood's
+        // members, so this is an honest "mesh", not a failed check.
+        None => {
+            return Ok(CallPolicy {
+                mode: "mesh".to_string(),
+                ..Default::default()
+            })
+        }
     };
-    CallPolicy {
-        mode: if hosted { "designated" } else { "mesh" }.to_string(),
-        ..Default::default()
+    if let Some(policy) = cached_policy(neighbourhood_url) {
+        return Ok(policy);
+    }
+    match hosts_every_member(&perspective).await {
+        Ok(hosted) => {
+            let policy = CallPolicy {
+                mode: if hosted { "designated" } else { "mesh" }.to_string(),
+                ..Default::default()
+            };
+            cache_policy(neighbourhood_url, &policy, Some(hosted));
+            Ok(policy)
+        }
+        Err(e) => {
+            if let Some(policy) = last_policy(neighbourhood_url) {
+                log::warn!(
+                    "SFU config: the membership check for {neighbourhood_url} failed ({e}); answering the last policy {policy:?}"
+                );
+                Ok(policy)
+            } else if !perspective.has_link_language().await {
+                // No link language is no remote members to check: the same
+                // "mesh" a perspective without one has always got, not a
+                // check turned into one.
+                Ok(CallPolicy {
+                    mode: "mesh".to_string(),
+                    ..Default::default()
+                })
+            } else {
+                Err(e)
+            }
+        }
     }
 }
 
@@ -376,9 +488,9 @@ mod tests {
 
         assert_eq!(neighbourhood_creator(&url).await, Some(creator));
         assert!(stored_policy(&url).await.is_none());
-        // No policy and no known members (no link language here): mesh, as a
-        // space with a member on another executor.
-        assert_eq!(read_policy(&url).await, policy("mesh", 4));
+        // No policy and no remote members to check (no link language here):
+        // mesh, as a space with a member on another executor.
+        assert_eq!(read_policy(&url).await.unwrap(), policy("mesh", 4));
 
         write_policy(&url, &policy("cascaded", 6), &context)
             .await

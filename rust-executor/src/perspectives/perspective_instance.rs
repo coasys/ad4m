@@ -1432,7 +1432,9 @@ impl PerspectiveInstance {
             .unwrap_or(false)
     }
 
-    async fn has_link_language(&self) -> bool {
+    /// Whether the link language is attached to this perspective. A
+    /// neighbourhood without one has no remote members to check.
+    pub(crate) async fn has_link_language(&self) -> bool {
         let link_language_guard = self.link_language.read().await;
         link_language_guard.is_some()
     }
