@@ -29,12 +29,13 @@ use base64::Engine;
 use rand::RngCore;
 
 use super::cache::scid_from;
+use super::connect;
 use super::resolver::{multikey_of, SessionKey, SessionKeyError};
 use super::service::IdentityService;
 use super::types::{
-    EndedSessions, KeyPurpose, KeySessionResult, KeyStatement, LoginWithKeyParams, RenewedSession,
-    SessionChallenge, SessionClient, SessionInfo, SessionRole, SignedKeyStatement,
-    UnsignedKeyStatement,
+    EndedSessions, KeyPurpose, KeySessionResult, KeyStatement, LoginWithKeyParams,
+    LoginWithKeyResult, RedeemCodeParams, RenewedSession, SessionChallenge, SessionClient,
+    SessionInfo, SessionRole, SignedKeyStatement, UnsignedKeyStatement, WebLoginCode,
 };
 use super::verdict::{KeyVerdict, VerdictChange};
 use crate::agent::capabilities::{
@@ -116,6 +117,14 @@ pub enum KeyLoginError {
     StoreUnavailable,
     /// A renewal names another grant or another key than the session's.
     Grant,
+    /// A web statement's origin is not one of the origins the registry lists for its app (or
+    /// the registry does not know the app).
+    Origin,
+    /// The registry of apps did not answer, so a web login cannot be checked.
+    RegistryUnavailable,
+    /// `user.redeemCode`: the code is unknown, used, expired, or the verifier is not the one
+    /// of the login's `codeChallenge`. The code is spent either way.
+    Code,
     /// Too many challenges are open.
     TooManyChallenges,
     /// The session may not do this: the message says what it lacks.
@@ -139,6 +148,9 @@ impl KeyLoginError {
             KeyLoginError::NotKnown => "not-known",
             KeyLoginError::StoreUnavailable => "store-unavailable",
             KeyLoginError::Grant => "grant",
+            KeyLoginError::Origin => "origin",
+            KeyLoginError::RegistryUnavailable => "registry-unavailable",
+            KeyLoginError::Code => "code",
             KeyLoginError::TooManyChallenges => "too-many-challenges",
             KeyLoginError::Forbidden(_) => "forbidden",
             KeyLoginError::BadRequest(_) => "bad-request",
@@ -156,6 +168,8 @@ impl From<KeyLoginError> for WsRpcError {
             | KeyLoginError::Signature
             | KeyLoginError::Key
             | KeyLoginError::NotKnown
+            | KeyLoginError::Origin
+            | KeyLoginError::Code
             | KeyLoginError::Grant => WsRpcError::forbidden(code),
             KeyLoginError::NoPublicOrigin => WsRpcError::forbidden(format!(
                 "{code}: the statement's audience is no origin this executor takes key \
@@ -166,7 +180,7 @@ impl From<KeyLoginError> for WsRpcError {
                 "{code}: key login on a network listener needs public_origins \
                  (--public-origin): the origins clients reach this executor at"
             )),
-            KeyLoginError::StoreUnavailable => WsRpcError {
+            KeyLoginError::StoreUnavailable | KeyLoginError::RegistryUnavailable => WsRpcError {
                 code: 503,
                 message: code.into(),
                 data: None,
@@ -369,8 +383,10 @@ pub fn challenge(
     })
 }
 
-/// The shape every statement this executor takes has: version 1, a native client without PKCE,
-/// a `did:scid:coasys:1` identity and an Ed25519 device key; a `grant` exactly on a renewal.
+/// The shape every statement this executor takes has: version 1, a `did:scid:coasys:1`
+/// identity and an Ed25519 device key; a `grant` exactly on a renewal; no PKCE for a native
+/// client; for a web client (`allow_web`) the PKCE `codeChallenge` of a login and none on a
+/// renewal.
 fn check_shape(
     v: u8,
     purpose: KeyPurpose,
@@ -378,6 +394,7 @@ fn check_shape(
     code_challenge: Option<&String>,
     grant: Option<&String>,
     expected: KeyPurpose,
+    allow_web: bool,
 ) -> Result<(), KeyLoginError> {
     let bad = |m: &str| Err(KeyLoginError::BadRequest(m.to_string()));
     if v != 1 {
@@ -389,13 +406,27 @@ fn check_shape(
             KeyPurpose::Renew => bad("user.renewSession takes a statement with purpose renew"),
         };
     }
-    match client {
-        SessionClient::Native if code_challenge.is_some() => {
+    match (client, expected, code_challenge) {
+        (SessionClient::Native, _, Some(_)) => {
             return bad("a native statement carries no codeChallenge")
         }
-        SessionClient::Native => {}
-        SessionClient::Web { .. } => {
-            return bad("a web login answers a one-time code, which this executor does not issue")
+        (SessionClient::Native, _, None) => {}
+        (SessionClient::Web { .. }, _, _) if !allow_web => {
+            return bad("this call takes a native statement")
+        }
+        (SessionClient::Web { origin }, _, _)
+            if normalise_origin(origin).as_deref() != Ok(origin.as_str()) =>
+        {
+            return bad("a web statement's origin is scheme://host[:port], normalised")
+        }
+        (SessionClient::Web { .. }, KeyPurpose::Login, Some(challenge))
+            if connect::is_s256_challenge(challenge) => {}
+        (SessionClient::Web { .. }, KeyPurpose::Login, _) => {
+            return bad("a web login carries the S256 codeChallenge of its verifier")
+        }
+        (SessionClient::Web { .. }, KeyPurpose::Renew, None) => {}
+        (SessionClient::Web { .. }, KeyPurpose::Renew, Some(_)) => {
+            return bad("a renewal carries no codeChallenge")
         }
     }
     match (expected, grant) {
@@ -612,8 +643,9 @@ async fn role_for(
     service: &IdentityService,
     did: &str,
     key: &SessionKey,
+    operator_allowed: bool,
 ) -> Result<Role, KeyLoginError> {
-    if db(|db| db.operator_record())?.is_some_and(|record| record.scid == did) {
+    if operator_allowed && db(|db| db.operator_record())?.is_some_and(|record| record.scid == did) {
         return Ok(Role::Operator);
     }
     let mut agents = db(|db| db.agents_of_identity(&key.scid))?;
@@ -684,8 +716,8 @@ pub async fn login(
     service: &IdentityService,
     params: LoginWithKeyParams,
     now: u64,
-) -> Result<KeySessionResult, KeyLoginError> {
-    let LoginWithKeyParams { proof, app } = params;
+) -> Result<LoginWithKeyResult, KeyLoginError> {
+    let LoginWithKeyParams { proof, app, app_id } = params;
     let statement = &proof.statement;
     if !service.challenges.consume(&statement.challenge, now) {
         return Err(KeyLoginError::Challenge);
@@ -697,15 +729,35 @@ pub async fn login(
         statement.code_challenge.as_ref(),
         statement.grant.as_ref(),
         KeyPurpose::Login,
+        true,
     )?;
     check_identity(statement)?;
-    let auth = AuthInfo::try_from(app).map_err(KeyLoginError::BadRequest)?;
+    let mut auth = AuthInfo::try_from(app).map_err(KeyLoginError::BadRequest)?;
     check_audience(statement, &executor_did()?, &service.audiences, now)?;
     if !signature_holds(&proof) {
         return Err(KeyLoginError::Signature);
     }
+    // A web login: the registry says whether this origin is the app's and whether the app is
+    // first-party. Only a first-party app holds the operator role; any other web app gets
+    // the grant of the agent that speaks for the identity, within what it asked for.
+    let web = match &statement.client {
+        SessionClient::Native => None,
+        SessionClient::Web { origin } => {
+            let app_id = app_id
+                .as_deref()
+                .ok_or_else(|| KeyLoginError::BadRequest("a web login names its appId".into()))?;
+            let registered = service.connect.registry.app(app_id).await?;
+            if !registered.has_origin(origin) {
+                return Err(KeyLoginError::Origin);
+            }
+            // The grant names the page it was made for; a renewal holds it to that origin.
+            auth.app_url = Some(origin.clone());
+            Some((origin.clone(), registered.first_party))
+        }
+    };
     let key = admitted_key(service, statement).await?;
-    let role = role_for(service, &statement.scid, &key).await?;
+    let operator_allowed = web.as_ref().map_or(true, |(_, first_party)| *first_party);
+    let role = role_for(service, &statement.scid, &key, operator_allowed).await?;
 
     let (what, session_role) = match role {
         Role::Operator => (KeyGrant::Operator, SessionRole::Operator),
@@ -789,16 +841,41 @@ pub async fn login(
             return Err(KeyLoginError::NotKnown);
         }
     }
-    let grant = grant.keep();
     let did = did_for_context(&grant.agent).map_err(|e| KeyLoginError::Internal(e.to_string()))?;
-    Ok(KeySessionResult {
+    let session = KeySessionResult {
         token,
         expires_at: grant.expires_at(),
         grant_id: grant.id.0.clone(),
         role: session_role,
         did,
         scid: statement.scid.clone(),
-    })
+    };
+    let Some((origin, _)) = web else {
+        grant.keep();
+        return Ok(LoginWithKeyResult::Session(session));
+    };
+    // A web login answers a code; the token waits for the app's verifier. The code's store
+    // holds the grant now, and ends it unless the code is redeemed.
+    let code_challenge = statement.code_challenge.clone().unwrap_or_default();
+    let (code, expires_at) =
+        service
+            .connect
+            .codes
+            .issue(session, grant, code_challenge, origin, now)?;
+    Ok(LoginWithKeyResult::Code(WebLoginCode { code, expires_at }))
+}
+
+/// `user.redeemCode`: the session that `code` opened, for the app that holds the verifier of
+/// the login's `codeChallenge`.
+pub fn redeem_code(
+    service: &IdentityService,
+    params: RedeemCodeParams,
+    now: u64,
+) -> Result<KeySessionResult, KeyLoginError> {
+    service
+        .connect
+        .codes
+        .redeem(&params.code, &params.code_verifier, now)
 }
 
 /// `user.renewSession`: one more [`KEY_SESSION_TTL`] for the caller's key-bound grant, on a
@@ -824,7 +901,14 @@ pub async fn renew(
         statement.code_challenge.as_ref(),
         statement.grant.as_ref(),
         KeyPurpose::Renew,
+        true,
     )?;
+    // A web statement renews only a grant made for its origin.
+    if let SessionClient::Web { origin } = &statement.client {
+        if grant.auth.app_url.as_deref() != Some(origin.as_str()) {
+            return Err(KeyLoginError::Grant);
+        }
+    }
     if statement.grant.as_deref() != Some(grant.id.0.as_str())
         || statement.key != binding.key
         || statement.scid != binding.scid
@@ -948,10 +1032,10 @@ fn key_grant(session: &Session) -> Result<Arc<LiveGrant>, KeyLoginError> {
 /// Ends `grant` on drop unless [`EndUnlessAnswered::keep`] takes it out: a login
 /// abandoned after the mint — the caller cancelled, or its socket went away —
 /// leaves no live grant without an answer.
-struct EndUnlessAnswered(Option<Arc<LiveGrant>>);
+pub(super) struct EndUnlessAnswered(Option<Arc<LiveGrant>>);
 
 impl EndUnlessAnswered {
-    fn keep(mut self) -> Arc<LiveGrant> {
+    pub(super) fn keep(mut self) -> Arc<LiveGrant> {
         self.0.take().expect("kept once")
     }
 }
@@ -1075,6 +1159,7 @@ pub fn sign_statement(unsigned: UnsignedKeyStatement) -> Result<SignedKeyStateme
         unsigned.code_challenge.as_ref(),
         unsigned.grant.as_ref(),
         unsigned.purpose,
+        false,
     )?;
     normalise_origin(&unsigned.audience).map_err(KeyLoginError::BadRequest)?;
     let main = AgentContext::main_agent();
@@ -1725,6 +1810,7 @@ mod tests {
             challenges: Default::default(),
             inbox: Default::default(),
             audiences: Audiences::loopback(LOCAL_PORT),
+            connect: Default::default(),
             store_keys_source: crate::identity::StoreSource::Config,
         }
     }
@@ -1747,6 +1833,7 @@ mod tests {
                 challenges: Default::default(),
                 inbox: Default::default(),
                 audiences: Audiences::loopback(LOCAL_PORT),
+                connect: Default::default(),
                 store_keys_source: crate::identity::StoreSource::Config,
             };
             self.store = store;
@@ -1824,6 +1911,7 @@ mod tests {
             store_url: None,
             challenges: Default::default(),
             audiences: Audiences::loopback(LOCAL_PORT),
+            connect: Default::default(),
             store_keys_source: crate::identity::StoreSource::Config,
             inbox: Default::default(),
         };
@@ -1873,7 +1961,23 @@ mod tests {
     }
 
     fn params(proof: SignedKeyStatement) -> LoginWithKeyParams {
-        LoginWithKeyParams { proof, app: app() }
+        LoginWithKeyParams {
+            proof,
+            app: app(),
+            app_id: None,
+        }
+    }
+
+    /// A native login: the session it opened.
+    async fn login(
+        service: &IdentityService,
+        params: LoginWithKeyParams,
+        now: u64,
+    ) -> Result<KeySessionResult, KeyLoginError> {
+        match super::login(service, params, now).await? {
+            LoginWithKeyResult::Session(session) => Ok(session),
+            LoginWithKeyResult::Code(_) => panic!("a native login answered a code"),
+        }
     }
 
     fn open(token: &str) -> Result<Session, AuthError> {
@@ -1961,6 +2065,384 @@ mod tests {
             .into_iter()
             .filter(|row| row.key.as_ref().is_some_and(|k| k.signing_key == key))
             .count()
+    }
+
+    /// The grants bound to `key` that still work (`grants_of` also counts ended rows).
+    fn live_grants_of(key: &SigningKey) -> usize {
+        let key = key.key();
+        Grants::global()
+            .key_bound()
+            .iter()
+            .filter(|g| g.key.as_ref().is_some_and(|b| b.key == key))
+            .count()
+    }
+
+    // ---- web login: a code, then a token for the holder of the PKCE verifier ----
+
+    const WEB_ORIGIN: &str = "https://coasys.app";
+    /// RFC 7636 appendix B: its S256 is the statement's `codeChallenge`.
+    const VERIFIER: &str = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+
+    /// A registry on a loopback port answering `{appId, name, origins, firstParty}` for each of
+    /// `apps` (id, origins, first party), 404 for any other id. Returns its base URL.
+    async fn registry(apps: Vec<(&'static str, Vec<&'static str>, bool)>) -> String {
+        use axum::extract::Path;
+        use axum::http::StatusCode;
+        use axum::response::IntoResponse;
+        let router = axum::Router::new().route(
+            "/v1/connect/apps/{id}",
+            axum::routing::get(move |Path(id): Path<String>| {
+                let found = apps.iter().find(|(known, _, _)| *known == id).cloned();
+                async move {
+                    match found {
+                        Some((id, origins, first_party)) => axum::Json(serde_json::json!({
+                            "appId": id,
+                            "name": id,
+                            "origins": origins,
+                            "firstParty": first_party,
+                        }))
+                        .into_response(),
+                        None => StatusCode::NOT_FOUND.into_response(),
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        url
+    }
+
+    impl World {
+        /// The world reading its app registry at `url`.
+        fn with_registry(mut self, url: &str) -> World {
+            self.service.connect = connect::Connect::new(Some(url));
+            self
+        }
+
+        /// A web login statement of `key` for `origin`, bound to `VERIFIER`.
+        fn web_statement(&self, key: &SigningKey, origin: &str) -> KeyStatement {
+            let mut statement = self.statement(key);
+            statement.client = SessionClient::Web {
+                origin: origin.into(),
+            };
+            statement.code_challenge = Some(connect::s256(VERIFIER));
+            statement
+        }
+
+        /// A web login as `app_id`, for the origin `WEB_ORIGIN`.
+        async fn web_login(
+            &self,
+            app_id: Option<&str>,
+        ) -> Result<LoginWithKeyResult, KeyLoginError> {
+            let proof = signed(self.web_statement(&self.phone, WEB_ORIGIN), &self.phone);
+            let mut params = params(proof);
+            params.app_id = app_id.map(str::to_string);
+            super::login(&self.service, params, now()).await
+        }
+
+        /// A web login that must answer a code.
+        async fn web_code(&self) -> WebLoginCode {
+            match self.web_login(Some("coasys-app")).await.unwrap() {
+                LoginWithKeyResult::Code(code) => code,
+                LoginWithKeyResult::Session(_) => panic!("a web login answered a token"),
+            }
+        }
+    }
+
+    fn redeem(
+        world: &World,
+        code: &str,
+        verifier: &str,
+        at: u64,
+    ) -> Result<KeySessionResult, KeyLoginError> {
+        redeem_code(
+            &world.service,
+            RedeemCodeParams {
+                code: code.into(),
+                code_verifier: verifier.into(),
+            },
+            at,
+        )
+    }
+
+    /// A world whose identity the main agent speaks for (no operator record).
+    async fn main_agent_world(seed: u8, first_party: bool) -> (World, MainBound) {
+        let mut world = world(seed).await;
+        no_operator();
+        let main = did_for_context(&AgentContext::main_agent()).unwrap();
+        let key = device_multikey(&main).unwrap();
+        add_key(
+            &mut world.log,
+            key.clone(),
+            enc_key_of(&key).unwrap(),
+            KeyLife::Standing,
+        );
+        let world = world.with_store();
+        accept_signed(&world.service.cache, &world.log.events).await;
+        let bound = MainBound::to(&world.log.scid());
+        let url = registry(vec![("coasys-app", vec![WEB_ORIGIN], first_party)]).await;
+        (world.with_registry(&url), bound)
+    }
+
+    #[tokio::test]
+    async fn a_web_login_answers_a_code_and_the_verifier_redeems_it_once() {
+        let world = world(150).await;
+        world.operate();
+        let url = registry(vec![("coasys-app", vec![WEB_ORIGIN], true)]).await;
+        let world = world.with_registry(&url);
+
+        let code = world.web_code().await;
+        assert!(code.expires_at.abs_diff(now() + connect::CODE_TTL) <= 2);
+        assert_eq!(
+            world.service.connect.codes.origin_of(&code.code).as_deref(),
+            Some(WEB_ORIGIN)
+        );
+
+        let session = redeem(&world, &code.code, VERIFIER, now()).unwrap();
+        assert_eq!(session.role, SessionRole::Operator);
+        assert_eq!(session.scid, world.did);
+        let opened = open(&session.token).unwrap();
+        assert_eq!(opened.grant_id().unwrap().0, session.grant_id);
+        assert!(session.expires_at.abs_diff(now() + KEY_SESSION_TTL) <= 2);
+
+        assert_eq!(
+            redeem(&world, &code.code, VERIFIER, now()).unwrap_err(),
+            KeyLoginError::Code,
+            "a code opens one session"
+        );
+        assert!(open(&session.token).is_ok(), "a second try ends nothing");
+        no_operator();
+    }
+
+    #[tokio::test]
+    async fn a_wrong_verifier_spends_the_code_and_ends_the_grant() {
+        let world = world(152).await;
+        world.operate();
+        let url = registry(vec![("coasys-app", vec![WEB_ORIGIN], true)]).await;
+        let world = world.with_registry(&url);
+
+        let code = world.web_code().await;
+        assert_eq!(
+            live_grants_of(&world.phone),
+            1,
+            "the grant exists while the code is open"
+        );
+        let wrong = "a".repeat(43);
+        for verifier in [wrong.as_str(), "short", ""] {
+            // Each refusal needs its own code: the first one spends it.
+            let code = world.web_code().await;
+            assert_eq!(
+                redeem(&world, &code.code, verifier, now()).unwrap_err(),
+                KeyLoginError::Code,
+                "{verifier:?}"
+            );
+            assert_eq!(
+                redeem(&world, &code.code, VERIFIER, now()).unwrap_err(),
+                KeyLoginError::Code,
+                "the right verifier comes too late"
+            );
+        }
+        // The code that nobody tried keeps its grant, the three spent ones ended theirs.
+        assert_eq!(live_grants_of(&world.phone), 1);
+        assert!(redeem(&world, &code.code, VERIFIER, now()).is_ok());
+        no_operator();
+    }
+
+    #[tokio::test]
+    async fn a_code_expires_after_sixty_seconds_and_a_made_up_code_is_refused() {
+        let world = world(154).await;
+        world.operate();
+        let url = registry(vec![("coasys-app", vec![WEB_ORIGIN], true)]).await;
+        let world = world.with_registry(&url);
+
+        let code = world.web_code().await;
+        assert_eq!(
+            redeem(&world, &code.code, VERIFIER, code.expires_at + 1).unwrap_err(),
+            KeyLoginError::Code
+        );
+        assert_eq!(
+            live_grants_of(&world.phone),
+            0,
+            "the expired code's grant ended"
+        );
+        let fresh = world.web_code().await;
+        assert_eq!(
+            redeem(&world, &fresh.code, VERIFIER, fresh.expires_at).map(|s| s.role),
+            Ok(SessionRole::Operator),
+            "the last second still counts"
+        );
+        assert_eq!(
+            redeem(&world, "not-a-code", VERIFIER, now()).unwrap_err(),
+            KeyLoginError::Code
+        );
+        no_operator();
+    }
+
+    #[tokio::test]
+    async fn a_web_login_for_an_origin_the_registry_does_not_list_is_refused() {
+        let world = world(156).await;
+        world.operate();
+        let url = registry(vec![("coasys-app", vec![WEB_ORIGIN], true)]).await;
+        let world = world.with_registry(&url);
+
+        let attempt = |origin: &'static str, app_id: Option<&'static str>| {
+            let world = &world;
+            async move {
+                let proof = signed(world.web_statement(&world.phone, origin), &world.phone);
+                let mut params = params(proof);
+                params.app_id = app_id.map(str::to_string);
+                super::login(&world.service, params, now())
+                    .await
+                    .map(|_| ())
+            }
+        };
+        assert_eq!(
+            attempt("https://evil.example", Some("coasys-app"))
+                .await
+                .unwrap_err(),
+            KeyLoginError::Origin
+        );
+        assert_eq!(
+            attempt(WEB_ORIGIN, Some("unknown-app")).await.unwrap_err(),
+            KeyLoginError::Origin,
+            "an app the registry does not know"
+        );
+        assert!(matches!(
+            attempt(WEB_ORIGIN, None).await.unwrap_err(),
+            KeyLoginError::BadRequest(_)
+        ));
+        assert!(matches!(
+            attempt(WEB_ORIGIN, Some("../x")).await.unwrap_err(),
+            KeyLoginError::BadRequest(_)
+        ));
+        assert_eq!(live_grants_of(&world.phone), 0, "no refusal leaves a grant");
+
+        let down = world.with_registry("http://127.0.0.1:1");
+        assert_eq!(
+            down.web_login(Some("coasys-app")).await.err(),
+            Some(KeyLoginError::RegistryUnavailable)
+        );
+        no_operator();
+    }
+
+    #[tokio::test]
+    async fn a_web_statement_needs_a_challenge_and_a_native_one_takes_none() {
+        let world = world(158).await;
+        world.operate();
+        let url = registry(vec![("coasys-app", vec![WEB_ORIGIN], true)]).await;
+        let world = world.with_registry(&url);
+        let refused = |statement: KeyStatement| {
+            let world = &world;
+            async move {
+                let mut params = params(signed(statement, &world.phone));
+                params.app_id = Some("coasys-app".into());
+                super::login(&world.service, params, now()).await.err()
+            }
+        };
+        let bad = |e: Option<KeyLoginError>| matches!(e, Some(KeyLoginError::BadRequest(_)));
+
+        let mut none = world.web_statement(&world.phone, WEB_ORIGIN);
+        none.code_challenge = None;
+        assert!(bad(refused(none).await), "a web login without a challenge");
+        let mut not_s256 = world.web_statement(&world.phone, WEB_ORIGIN);
+        not_s256.code_challenge = Some("not-a-sha256".into());
+        assert!(bad(refused(not_s256).await), "a challenge that is no S256");
+        let mut native = world.statement(&world.phone);
+        native.code_challenge = Some(connect::s256(VERIFIER));
+        assert!(bad(refused(native).await), "a native login with one");
+        let loose = world.web_statement(&world.phone, "https://Coasys.app/");
+        assert!(
+            bad(refused(loose).await),
+            "an origin that is not normalised"
+        );
+        assert_eq!(live_grants_of(&world.phone), 0);
+        no_operator();
+    }
+
+    #[tokio::test]
+    async fn only_a_first_party_app_on_an_operators_identity_gets_the_operator_role() {
+        {
+            // First party and the operator record: the operator role.
+            let (world, _bound) = main_agent_world(160, true).await;
+            world.operate();
+            let code = world.web_code().await;
+            assert_eq!(
+                redeem(&world, &code.code, VERIFIER, now()).unwrap().role,
+                SessionRole::Operator
+            );
+            // First party without the record: an app grant on the agent that speaks for the
+            // person.
+            no_operator();
+            let code = world.web_code().await;
+            let session = redeem(&world, &code.code, VERIFIER, now()).unwrap();
+            assert_eq!(session.role, SessionRole::App);
+            assert!(!open(&session.token).unwrap().is_operator());
+        }
+
+        // The record but no first-party flag: an app grant too, never the operator.
+        let (world, _bound) = main_agent_world(162, false).await;
+        world.operate();
+        let code = world.web_code().await;
+        let session = redeem(&world, &code.code, VERIFIER, now()).unwrap();
+        assert_eq!(session.role, SessionRole::App);
+        assert!(!open(&session.token).unwrap().is_operator());
+        no_operator();
+    }
+
+    #[tokio::test]
+    async fn a_web_grant_renews_for_its_own_origin_only() {
+        let world = world(164).await;
+        world.operate();
+        let url = registry(vec![("coasys-app", vec![WEB_ORIGIN], true)]).await;
+        let world = world.with_registry(&url);
+        let code = world.web_code().await;
+        let session = redeem(&world, &code.code, VERIFIER, now()).unwrap();
+        let opened = open(&session.token).unwrap();
+        let renewal = |origin: &str| {
+            let mut statement = world.statement(&world.phone);
+            statement.purpose = KeyPurpose::Renew;
+            statement.grant = Some(session.grant_id.clone());
+            statement.client = SessionClient::Web {
+                origin: origin.into(),
+            };
+            statement
+        };
+
+        assert_eq!(
+            renew(
+                &world.service,
+                &opened,
+                signed(renewal("https://evil.example"), &world.phone),
+                now(),
+            )
+            .await
+            .unwrap_err(),
+            KeyLoginError::Grant
+        );
+        let mut with_challenge = renewal(WEB_ORIGIN);
+        with_challenge.code_challenge = Some(connect::s256(VERIFIER));
+        assert!(matches!(
+            renew(
+                &world.service,
+                &opened,
+                signed(with_challenge, &world.phone),
+                now(),
+            )
+            .await
+            .unwrap_err(),
+            KeyLoginError::BadRequest(_)
+        ));
+        let renewed = renew(
+            &world.service,
+            &opened,
+            signed(renewal(WEB_ORIGIN), &world.phone),
+            now() + 10,
+        )
+        .await
+        .unwrap();
+        assert!(open(&renewed.token).is_ok());
+        no_operator();
     }
 
     #[test]
@@ -2708,6 +3190,7 @@ mod tests {
             store_url: None,
             challenges: Default::default(),
             audiences: Audiences::loopback(LOCAL_PORT),
+            connect: Default::default(),
             store_keys_source: crate::identity::StoreSource::Config,
             inbox: Default::default(),
         };

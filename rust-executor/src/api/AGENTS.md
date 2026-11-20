@@ -205,7 +205,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-289 methods: Cap 90, CapAnyPointer 1, Executor 48, Open 13, Operator 53, Owns 79, UserOrOperator 5. Local only (the operator on this machine): 17.
+290 methods: Cap 91, CapAnyPointer 1, Executor 48, Open 13, Operator 53, Owns 79, UserOrOperator 5. Local only (the operator on this machine): 17.
 
 | Method | Guard |
 |---|---|
@@ -491,6 +491,7 @@ the guard checked:
 | `user.loginWithKey` | `Cap(agent:AUTHENTICATE)` |
 | `user.logout` | `Open` |
 | `user.multiUserEnabled` | `Cap(runtime.user_management[enabled]:READ)` |
+| `user.redeemCode` | `Cap(agent:AUTHENTICATE)` |
 | `user.renewSession` | `Open` |
 | `user.requestVerification` | `Cap(runtime.user_management:VERIFY)` |
 | `user.revokeAllSessions` | `Cap(agent:UPDATE)` |

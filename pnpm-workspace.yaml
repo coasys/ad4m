@@ -3,7 +3,7 @@ packages:
   - 'core'
   - 'docs-src'
   - 'ui'
-  - 'connect'
+  - 'connect-lib'
   - 'bootstrap-languages/*'
   - 'ad4m-ldk/js'
   - 'link-server'

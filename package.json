@@ -4,7 +4,7 @@
     "core",
     "docs-src",
     "ui",
-    "connect",
+    "connect-lib",
     "test-runner",
     "bootstrap-languages/*",
     "tests/js",

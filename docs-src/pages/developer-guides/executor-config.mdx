@@ -165,8 +165,8 @@ the rest wait (default: no limit). A `model_type` is `LLM`, `EMBEDDING`,
   "ai_defaults": { "llm": "qwen" } }
 ```
 
-**`identity`** (`storeUrl`, `storeKeys`, `allowPrivateSrc`; flags
-`--identity-store-url`, `--identity-store-keys`) names the `did:scid`
+**`identity`** (`storeUrl`, `storeKeys`, `registryUrl`, `allowPrivateSrc`; flags
+`--identity-store-url`, `--identity-store-keys`, `--identity-registry-url`) names the `did:scid`
 identity store and the keys its signed heads must carry. Leave both out to
 use the store of the executor's network: the `identityStore` of the seed
 `ad4m-executor init` writes into the data folder (the seed this build
@@ -185,6 +185,14 @@ the seed's `identityStore`.
 { "identity": { "storeUrl": "https://store.example.org",
   "storeKeys": ["z6Mk…"] } }
 ```
+
+`registryUrl` (env `AD4M_IDENTITY_REGISTRY_URL`) is the platform whose app
+registry a web login (`@coasys/connect`) is checked against. The executor reads
+`GET <registryUrl>/v1/connect/apps/{appId}` for the app's origins and its
+`firstParty` flag, and keeps the answer 5 minutes. It defaults to
+`https://api.coasys.app`. A page whose origin the app does not list gets no
+code (`origin`); an unreachable registry answers `registry-unavailable`.
+Only a first-party app can hold the operator role.
 
 **`public_origins`** lists the origins (`scheme://host[:port]`) clients reach
 this executor at, such as `["https://ad4m.example.org"]`. A key login

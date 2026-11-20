@@ -1,0 +1,54 @@
+{
+  "name": "@coasys/connect",
+  "description": "Sign a web app in with the person's own browser key: opens the Coasys Connect frame, redeems its one-time code and keeps the session fresh",
+  "license": "CAL-1.0",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./core": {
+      "types": "./dist/core.d.ts",
+      "import": "./dist/core.js",
+      "require": "./dist/core.js"
+    },
+    "./utils": {
+      "types": "./dist/utils.d.ts",
+      "import": "./dist/utils.js",
+      "require": "./dist/utils.js"
+    }
+  },
+  "scripts": {
+    "release": "np --no-2fa --no-tests --tag=latest",
+    "release:beta": "np --no-2fa --no-tests --tag=beta --any-branch",
+    "build": "tsc --project tsconfig.json && node scripts/build.js",
+    "typecheck": "tsc --noEmit --emitDeclarationOnly false --declaration false --project tsconfig.json",
+    "test": "vitest run"
+  },
+  "author": {
+    "name": "Nicolas Luck",
+    "email": "nicolas@coasys.org"
+  },
+  "devDependencies": {
+    "@coasys/ad4m": "workspace:0.13.1-staging.11",
+    "@types/node": "^16.11.11",
+    "esbuild": "^0.15.5",
+    "happy-dom": "^14.0.0",
+    "np": "^7.6.2",
+    "typescript": "^4.6.2",
+    "vitest": "^1.6.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/coasys/ad4m.git",
+    "directory": "connect-lib"
+  },
+  "version": "0.13.1-staging.11"
+}

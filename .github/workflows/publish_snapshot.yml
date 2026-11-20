@@ -1,6 +1,6 @@
 name: Publish snapshot packages
 
-# Every push to `dev` and every pull request publishes `@coasys/ad4m` and `@coasys/ad4m-connect`
+# Every push to `dev` and every pull request publishes `@coasys/ad4m` and `@coasys/connect`
 # to pkg.pr.new, as a snapshot installable by URL:
 #
 #   pnpm add https://pkg.pr.new/@coasys/ad4m@<commit>
@@ -69,4 +69,4 @@ jobs:
       # `--commentWithSha` makes the PR comment link the commit's snapshot, which never changes,
       # rather than the PR's, which moves with every push.
       - name: Publish to pkg.pr.new
-        run: pnpm dlx pkg-pr-new@0.0.88 publish --pnpm --commentWithSha ./core ./connect
+        run: pnpm dlx pkg-pr-new@0.0.88 publish --pnpm --commentWithSha ./core ./connect-lib

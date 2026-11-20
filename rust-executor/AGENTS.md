@@ -179,6 +179,10 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   age, so a revocation the change missed ends its sessions within 5 minutes (it also ends
   grants whose key could not be read for an hour). `user.logout` ends any grant; `user.endAllSessions` every grant of the
   caller's identity (and of a managed agent).
+- **Web key login** (`identity/connect.rs`): a statement with `client: web` answers a one-time
+  code (60 s, single use, bound to a PKCE S256 `codeChallenge`), and `user.redeemCode` gives the
+  session for the verifier. The app registry (`identity.registryUrl`, `--identity-registry-url`,
+  `AD4M_IDENTITY_REGISTRY_URL`) decides the origin and the operator role: `src/identity/AGENTS.md`.
 - **Managed agents' wallet keys** are named by the DID (`KEY_NAME_MAIN` for the main agent):
   `AgentService::create_managed_agent_key` creates one under its DID,
   `AgentService::wallet_key_for_did` finds it (cached). A shared wallet cannot name keys, so there

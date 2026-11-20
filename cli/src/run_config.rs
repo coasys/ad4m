@@ -388,6 +388,14 @@ pub struct RunArgs {
         value_parser = non_empty(BoolValueParser::new())
     )]
     pub identity_allow_private_src: Option<bool>,
+    /// The platform's base URL, where a web login reads its app registry
+    /// (`identity.registryUrl`). Default: `https://api.coasys.app`.
+    #[arg(
+        long,
+        env = "AD4M_IDENTITY_REGISTRY_URL",
+        value_parser = non_empty(StringValueParser::new())
+    )]
+    pub identity_registry_url: Option<String>,
     /// Accept a storage secret file (`AD4M_STORAGE_SECRET_FILE`) on the same disk as the data
     /// folder (`allow_secret_on_data_disk`). Off by default: a secret beside the data it
     /// opens protects nothing. For tests and development.
@@ -483,6 +491,7 @@ impl RunArgs {
         if self.identity_store_url.is_some()
             || self.identity_store_keys.is_some()
             || self.identity_allow_private_src.is_some()
+            || self.identity_registry_url.is_some()
         {
             let identity = file.identity.get_or_insert_with(Default::default);
             overlay(&mut identity.store_url, &self.identity_store_url);
@@ -491,6 +500,7 @@ impl RunArgs {
                 &mut identity.allow_private_src,
                 &self.identity_allow_private_src,
             );
+            overlay(&mut identity.registry_url, &self.identity_registry_url);
         }
         overlay(&mut file.local_ai_dir, &self.local_ai_dir);
         overlay(&mut file.local_ai_autostart, &self.local_ai_autostart);
@@ -546,7 +556,8 @@ impl RunArgs {
             self.tls_cert_file.is_some() || self.tls_key_file.is_some() || self.tls_port.is_some();
         let identity = self.identity_store_url.is_some()
             || self.identity_store_keys.is_some()
-            || self.identity_allow_private_src.is_some();
+            || self.identity_allow_private_src.is_some()
+            || self.identity_registry_url.is_some();
         [
             ("app_data_path", self.app_data_path.is_some()),
             ("port", self.port.is_some()),
@@ -1011,6 +1022,13 @@ pub(crate) mod tests {
             "http://127.0.0.1:8082",
         ),
         (
+            "/identity/registryUrl",
+            "AD4M_IDENTITY_REGISTRY_URL",
+            "--identity-registry-url",
+            "http://127.0.0.1:8091",
+            "http://127.0.0.1:8092",
+        ),
+        (
             "/identity/allowPrivateSrc",
             "AD4M_IDENTITY_ALLOW_PRIVATE_SRC",
             "--identity-allow-private-src",
@@ -1092,6 +1110,7 @@ pub(crate) mod tests {
                 store_url: Some("http://127.0.0.1:8080".into()),
                 store_keys: Some(vec!["z6MkA".into()]),
                 allow_private_src: Some(false),
+                registry_url: Some("http://127.0.0.1:8090".into()),
             }),
             log_dir: Some("/a/logs".into()),
             public_origins: Some(vec!["https://a.example".into()]),

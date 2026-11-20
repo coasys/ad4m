@@ -41,7 +41,8 @@ audience: string,
  */
 challenge: string, client: SessionClient, 
 /**
- * PKCE for a web login; a native statement carries none.
+ * PKCE for a web login (S256 of the verifier the app's page holds, base64url, 43
+ * characters); a native statement and a renewal carry none.
  */
 codeChallenge?: string, 
 /**

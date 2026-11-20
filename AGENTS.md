@@ -17,7 +17,7 @@ file. Edit this file; do not put unique rules in `CLAUDE.md`.
 | `ad4m-keyring/` | Symmetric keys for data at rest and room keys: `SecretKey` (zeroed before it is freed), `VersionedKey` (versions only grow, old ones readable until retired), `wrap`/`unwrap` under another key with a `WrapContext` as associated data (XChaCha20-Poly1305, random nonce), `hkdf_subkey`, and the room-key X25519 seal, byte for byte the server link language's `sealToDid` (shared vectors in `vectors/room-key-seal.json`). No executor dependency; builds for wasm32. See `ad4m-keyring/AGENTS.md` | Rust |
 | `identity-store/` | The shared store of key logs: `identity-store` binary (axum, SQLite on `ad4m-hash-chain`'s `SqliteChainStore`), signed heads, the key index, signed requests, agent records, offers and claims (an `add` spends a claim: the claim check), the device inbox, the private details record and the request box (ciphertext only). Its log and head reads are the public did:scid host profile (any origin, cached). Reached by executors only through the agent language. See `identity-store/AGENTS.md` | Rust |
 | `core/` | TypeScript SDK (`@coasys/ad4m`): `Ad4mClient`, types, model/SHACL decorators, generated RPC contracts (`src/generated/api/RpcMethods.ts`) | TS |
-| `connect/` | Browser/Node connection helper (`@coasys/ad4m-connect`) | TS |
+| `connect-lib/` | `@coasys/connect`: the app's side of Coasys Connect on the web. `getAd4mConnect` opens the Connect frame on the auth domain, checks its answer (origin, `state`), redeems the one-time code with a PKCE verifier (`user.redeemCode`), keeps the token in memory, renews through the frame. Replaces `@coasys/ad4m-connect`. See `connect-lib/AGENTS.md` | TS |
 | `bootstrap-languages/` | The system Languages (agent, perspective-diff-sync, etc.) bundled into the executor | TS/Rust |
 | `ad4m-ldk/` | ALDK = AD4M Language Development Kit (Rust + JS crates for writing Languages) | Rust/TS |
 | `ad4m-hooks/`, `hooks/` | React/Vue hooks for the SDK | TS |
@@ -66,7 +66,7 @@ it in older docs.
   gets no event until it sends `events.watch` naming it, so a raw-WebSocket test
   client must send the watch and wait for its reply before it triggers the
   event (see `tests/js/helpers/sfu/events.ts`).
-- `connect/` tests (vitest + happy-dom) fail under Node 26 (`localStorage.clear`
+- `connect-lib/` tests (vitest + happy-dom) fail under Node 26 (`localStorage.clear`
   undefined); run them under Node 24.
 
 ## Holochain DHT and GetStrategy
@@ -132,7 +132,7 @@ holds one load. It uses this commit's executor and SDK:
 - The executor is the one the `build` job published for the commit
   (`$EXECUTOR_PUBLISH_DIR/<sha>/manifest.json`, sha256 checked). If there is none,
   the job builds it.
-- `core` and `connect` are built and packed. WE's ad4m pin (root `pnpm.overrides`)
+- `core` and `connect-lib` are built and packed. WE's ad4m pin (root `pnpm.overrides`)
   points at the two tarballs.
 - WE comes from the pipeline parameter `we-ref` (branch, tag or full commit;
   default `dev`). WE installs with its own pnpm (10).
