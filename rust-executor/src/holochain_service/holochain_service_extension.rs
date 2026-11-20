@@ -126,7 +126,8 @@ fn json_to_msgpack_value(val: &serde_json::Value) -> rmpv::Value {
 /// reach us as f64. Encode a finite whole-number f64 that fits in i64 as a
 /// msgpack integer, so zome fields typed `u64`/`i64` decode it. Zome fields
 /// typed `f64` still accept a msgpack integer. Fractions, NaN, infinities and
-/// values outside i64 range stay F64.
+/// values outside i64 range stay F64. Minus zero becomes Integer 0, so its sign
+/// is lost; a whole number has no use for it.
 fn integral_f64_to_msgpack(f: f64) -> rmpv::Value {
     // 2^63 is exact in f64; i64 covers [-2^63, 2^63).
     const I64_BOUND: f64 = 9_223_372_036_854_775_808.0;
