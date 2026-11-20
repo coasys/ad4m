@@ -8,7 +8,7 @@ Language in its own Deno isolate on its own OS thread. Split plan: spec item 9.
 
 | File | Role |
 |---|---|
-| `mod.rs` (2.9k, no tests) | `LanguageController` global (`LanguageController::global_instance()`; lazily self-initialises). Load/unload runtimes, `execute_on_language[_with_context]`, install from address / bundle, system languages, settings, `language_by_ref` (306 lines), expression get/create/interact, **and** neighbourhood create/get + Holochain DNA templating (both moving out) |
+| `mod.rs` (2.9k, no tests) | `LanguageController` global (`LanguageController::global_instance()`; lazily self-initialises). Load/unload runtimes, `call_language` (the one script-call entry, `execute_on_language[_with_context]` for the ordered default), install from address / bundle, system languages, settings, `language_by_ref` (306 lines), expression get/create/interact, **and** neighbourhood create/get + Holochain DNA templating (both moving out) |
 | `language_runtime.rs` | One runtime = thread + `JsCore::new_for_language` + request channel; the request loop (ordered calls and reads, all on one task); each call's `AgentContext` registered for its script's agent token |
 | `language_runtime_handle.rs` | Cloneable handle: send JS source string, await result |
 | `call_deadline_tests.rs` | Calls into one runtime through a real handle: the call deadline, send order, the agent a call signs as; `#[ignore]` benchmarks |
@@ -16,10 +16,10 @@ Language in its own Deno isolate on its own OS thread. Split plan: spec item 9.
 | `conductor_languages.rs` | `load_link_and_installed_languages`: the system-language steps whose constructors wait for the Holochain conductor (known link languages, installed languages). Run in the background after generate/unlock by `agent::conductor_startup` |
 | `language_context.rs`, `capability.rs`, `literal.rs`, `byte_array.rs`, `error.rs`, `wasm_delegate.rs` | context passed at load, per-language capability grants, `Literal` codec, `LanguageError` |
 
-A script call is **ordered** (`CallKind::Ordered`, the default:
-`execute_on_language[_with_context]`) or **concurrent** (`CallKind::Concurrent`:
-`execute_concurrent_on_language`). Ordered calls run one at a time, in send
-order: commits must reach the link language in the order they were made, and a
+A script call goes through `call_language` with a `CallKind`: **ordered**
+(`CallKind::Ordered`, the default — `execute_on_language[_with_context]` wraps
+it) or **concurrent** (`CallKind::Concurrent`). Ordered calls run one at a time,
+in send order: commits must reach the link language in the order they were made, and a
 language's own state (p-diff-sync's `myRevision` and `peers`, server-link's
 cursor and `_session`, local link's `links`/`revision`) changes across their
 awaits. A concurrent call starts as soon as it arrives and runs beside the
@@ -43,11 +43,12 @@ beside them. Everything runs on the runtime's one task (`process_requests`):
 the V8 event loop keeps one waker.
 
 A bundle that is wasm-bindgen output (a Rust/ALDK language) runs every call
-ordered, `CallKind::Concurrent` included: `load_module` marks the runtime
-(`LanguageRuntime::is_wasm_bundle` — the `__wbindgen`/`__wbg_` names a bundler
-cannot rename) and the request loop then admits its concurrent calls only to
-the ordered slot. wasm-bindgen-futures polls all of a module's futures from
-one microtask queue that does not restore each task's V8 async context, so a
+ordered, `CallKind::Concurrent` included: `load_module` marks the handle
+(`LanguageRuntimeHandle::is_wasm_bundle` — the `__wbindgen`/`__wbg_` names a
+bundler cannot rename), whose `send` then writes `Ordered` into every call it
+sends; the runtime only ever sees the resolved kind. wasm-bindgen-futures polls
+all of a module's futures from one microtask queue that does not restore each
+task's V8 async context, so a
 call resumed beside another would sign as the other call's agent; and the
 ALDK's async exports hold the instance's one lock across their awaits while
 its sync exports (`interactions`, `expressionInteract`) answer busy when it

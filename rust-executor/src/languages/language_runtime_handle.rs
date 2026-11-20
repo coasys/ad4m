@@ -52,9 +52,9 @@ pub struct LanguageRuntimeHandle {
     call_deadline: Duration,
     /// The request the runtime is running.
     running: RunningRequest,
-    /// Set by the runtime's `load_module` (`LanguageRuntime::is_wasm_bundle`):
-    /// the language is wasm-bindgen output, so every call into it runs in the
-    /// ordered slot, a concurrent-marked one included.
+    /// Set by `load_module` (`is_wasm_bundle`): the language is wasm-bindgen
+    /// output, so every call into it runs ordered, a concurrent-marked one
+    /// included — `send` rewrites such a call's kind before it is sent.
     wasm: Arc<AtomicBool>,
 }
 
@@ -77,8 +77,6 @@ impl LanguageRuntimeHandle {
         let prefix_len = 8.min(addr.len());
         let running = RunningRequest::default();
         let runtime_running = running.clone();
-        let wasm = Arc::new(AtomicBool::new(false));
-        let runtime_wasm = wasm.clone();
 
         std::thread::Builder::new()
             .name(format!("lang-{}", &addr[..prefix_len]))
@@ -89,12 +87,8 @@ impl LanguageRuntimeHandle {
                     .expect("Failed to create Tokio runtime for language");
 
                 rt.block_on(async {
-                    let runtime = LanguageRuntime::new(
-                        addr.clone(),
-                        storage_directory,
-                        is_system_language,
-                        runtime_wasm,
-                    );
+                    let runtime =
+                        LanguageRuntime::new(addr.clone(), storage_directory, is_system_language);
 
                     // Execute bootstrap module to make Deno ops available
                     if let Err(e) = runtime.init().await {
@@ -114,7 +108,7 @@ impl LanguageRuntimeHandle {
             tx,
             call_deadline: LANGUAGE_CALL_DEADLINE,
             running,
-            wasm,
+            wasm: Default::default(),
         })
     }
 
@@ -148,20 +142,17 @@ impl LanguageRuntimeHandle {
         self.running.clone()
     }
 
-    /// Test-only: mark the language WASM, as `load_module` does on a real runtime.
+    /// Test-only: mark the language WASM, as `load_module` does on a real bundle.
     #[cfg(test)]
     pub(crate) fn set_wasm(&self) {
         self.wasm.store(true, Ordering::SeqCst);
     }
 
-    /// The kind a call effectively runs as: a concurrent-marked call counts as
-    /// ordered on a WASM language, whose flag `load_module` may only set after
-    /// the call was sent — so it is read on each check, not once at send.
-    fn effective_kind(&self, kind: CallKind) -> CallKind {
-        match kind {
-            CallKind::Concurrent if self.wasm.load(Ordering::SeqCst) => CallKind::Ordered,
-            kind => kind,
-        }
+    /// Whether the bundle is wasm-bindgen output (a Rust/ALDK language).
+    /// wasm-bindgen's `__wbindgen`/`__wbg_` names are the wasm module's own
+    /// import/export names, so bundling cannot rename them.
+    fn is_wasm_bundle(source: &str) -> bool {
+        source.contains("__wbindgen") || source.contains("__wbg_")
     }
 
     /// The error for a call that will not run because the language's running call has run for
@@ -195,7 +186,7 @@ impl LanguageRuntimeHandle {
                 {
                     break;
                 }
-                let (error, limit) = match (self.effective_kind(kind), running.ordered) {
+                let (error, limit) = match (kind, running.ordered) {
                     (CallKind::Ordered, Some((_, since))) => {
                         (self.busy_error(since), since + self.call_deadline)
                     }
@@ -233,7 +224,7 @@ impl LanguageRuntimeHandle {
     }
 
     /// Send an operation and wait for the result.
-    async fn send(&self, operation: LanguageOperation) -> Result<String, String> {
+    async fn send(&self, mut operation: LanguageOperation) -> Result<String, String> {
         let op_name = format!("{:?}", operation);
         let (response_tx, response_rx) = oneshot::channel();
 
@@ -244,14 +235,21 @@ impl LanguageRuntimeHandle {
         );
 
         // Only script calls give up: loading a language and its teardown wait for it.
-        let kind = match &operation {
-            LanguageOperation::Execute(_, _, kind) => Some(*kind),
+        // A call sent concurrent runs ordered on a WASM language (`is_wasm_bundle`):
+        // rewritten here, once — the flag is set by `load_module`, which returns before
+        // the first call is sent — so the runtime schedules the kind the operation says.
+        let kind = match &mut operation {
+            LanguageOperation::Execute(_, _, kind) => {
+                if *kind == CallKind::Concurrent && self.wasm.load(Ordering::SeqCst) {
+                    *kind = CallKind::Ordered;
+                }
+                Some(*kind)
+            }
             _ => None,
         };
-        if kind.map(|kind| self.effective_kind(kind)) == Some(CallKind::Ordered) {
+        if kind == Some(CallKind::Ordered) {
             // Not queued behind a call that has run past the deadline: retries during a hang
-            // would pile up in the channel. A concurrent call does not wait for that call —
-            // unless the language is WASM and runs it ordered too (`effective_kind`).
+            // would pile up in the channel. A concurrent call does not wait for that call.
             if let Some((_, since)) = self.running.lock().unwrap().ordered {
                 if since.elapsed() >= self.call_deadline {
                     return Err(self.busy_error(since));
@@ -297,37 +295,35 @@ impl LanguageRuntimeHandle {
         script: String,
         agent_context: AgentContext,
     ) -> Result<String, String> {
-        self.send(LanguageOperation::Execute(
-            script,
-            agent_context,
-            CallKind::Ordered,
-        ))
-        .await
+        self.call(script, agent_context, CallKind::Ordered).await
     }
 
-    pub async fn execute_concurrent(&self, script: String) -> Result<String, String> {
-        self.execute_concurrent_with_context(script, AgentContext::main_agent())
-            .await
-    }
-
-    /// A concurrent call as `agent_context`: it starts at once and runs beside the
-    /// language's other calls (`CallKind::Concurrent`). Only for a call that changes no
-    /// state a later call depends on and needs no position in the send order.
-    pub async fn execute_concurrent_with_context(
+    /// A script call as `agent_context`, scheduled as `kind`: `CallKind::Ordered` runs it
+    /// one at a time with the language's other ordered calls, in send order;
+    /// `CallKind::Concurrent` starts it at once beside the other calls — only for a call
+    /// that changes no state a later call depends on and needs no position in the send
+    /// order. On a WASM language every call runs ordered (`is_wasm_bundle`).
+    pub(crate) async fn call(
         &self,
         script: String,
         agent_context: AgentContext,
+        kind: CallKind,
     ) -> Result<String, String> {
-        self.send(LanguageOperation::Execute(
-            script,
-            agent_context,
-            CallKind::Concurrent,
-        ))
-        .await
+        self.send(LanguageOperation::Execute(script, agent_context, kind))
+            .await
     }
 
-    pub async fn load_module(&self, path: String, context: LanguageContext) -> Result<(), String> {
-        self.send(LanguageOperation::LoadModule(path, context))
+    /// Load a language bundle into the runtime. `source` is the bundle's JS text. Marks the
+    /// language WASM when the bundle is wasm-bindgen output, so `send` runs every later call
+    /// ordered (`is_wasm_bundle`).
+    pub async fn load_module(
+        &self,
+        source: String,
+        context: LanguageContext,
+    ) -> Result<(), String> {
+        self.wasm
+            .store(Self::is_wasm_bundle(&source), Ordering::SeqCst);
+        self.send(LanguageOperation::LoadModule(source, context))
             .await
             .map(|_| ())
     }

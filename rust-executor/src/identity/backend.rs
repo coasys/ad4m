@@ -19,6 +19,7 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::agent::AgentContext;
 use crate::languages::capability::Capability;
 use crate::languages::language_runtime::CallKind;
 use crate::languages::LanguageController;
@@ -251,20 +252,12 @@ impl AgentLanguageBackend {
             )));
         }
         let script = call_script(export, args);
-        let run = async {
-            match kind {
-                CallKind::Ordered => {
-                    controller
-                        .execute_on_language(language.address(), &script)
-                        .await
-                }
-                CallKind::Concurrent => {
-                    controller
-                        .execute_concurrent_on_language(language.address(), &script)
-                        .await
-                }
-            }
-        };
+        let run = controller.call_language(
+            language.address(),
+            &script,
+            AgentContext::main_agent(),
+            kind,
+        );
         let text = tokio::time::timeout(CALL_TIMEOUT, run)
             .await
             .map_err(|_| IdentityError::Unavailable(format!("{export} timed out")))?

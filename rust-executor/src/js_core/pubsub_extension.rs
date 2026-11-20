@@ -53,7 +53,6 @@ mod tests {
             "pubsub-check".to_string(),
             dir.path().to_path_buf(),
             false,
-            Default::default(),
         );
         runtime.init().await.unwrap();
 

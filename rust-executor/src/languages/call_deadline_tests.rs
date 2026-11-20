@@ -8,7 +8,7 @@
 //! `cargo test --release -p ad4m-executor --lib call_deadline_bench -- --ignored --nocapture --test-threads=1`,
 //! but `call_deadline_bench_e2` on its own: its looping threads spin until the process exits.
 
-use super::language_runtime::MAX_CONCURRENT_CALLS;
+use super::language_runtime::{CallKind, MAX_CONCURRENT_CALLS};
 use super::language_runtime_handle::LanguageRuntimeHandle;
 use crate::agent::AgentContext;
 use crate::languages::language_context::LanguageContext;
@@ -32,6 +32,14 @@ fn spawn_runtime(name: &str) -> (LanguageRuntimeHandle, tempfile::TempDir) {
 /// a zome call or an HTTP round trip as the language sees it.
 fn sleep_js(ms: u64) -> String {
     format!("await new Promise((resolve) => setTimeout(resolve, {ms}))")
+}
+
+/// A concurrent call as the main agent (`CallKind::Concurrent`): the read sent
+/// beside other calls in the tests below.
+async fn concurrent(handle: &LanguageRuntimeHandle, script: String) -> Result<String, String> {
+    handle
+        .call(script, AgentContext::main_agent(), CallKind::Concurrent)
+        .await
 }
 
 /// `n` calls, sent in order; each logs its index when it starts and when it ends, after
@@ -387,7 +395,7 @@ async fn a_read_does_not_wait_for_a_slow_call() {
     let read = within(
         Duration::from_secs(10),
         "the read",
-        handle.execute_concurrent("1 + 1".into()),
+        concurrent(&handle, "1 + 1".into()),
     )
     .await;
     let read_after = t.elapsed();
@@ -408,7 +416,7 @@ async fn a_read_does_not_wait_for_a_slow_call() {
 async fn reads_to_one_language_overlap() {
     let (handle, _dir) = spawn_runtime("QmConcurrentReads");
     let t = Instant::now();
-    let reads = (0..8).map(|i| handle.execute_concurrent(format!("({}, {i})", sleep_js(500))));
+    let reads = (0..8).map(|i| concurrent(&handle, format!("({}, {i})", sleep_js(500))));
     let results = within(
         Duration::from_secs(10),
         "the reads",
@@ -461,14 +469,15 @@ async fn overlapping_calls_each_act_as_their_own_agent() {
     );
     let main_call = async {
         tokio::time::sleep(Duration::from_millis(100)).await;
-        handle.execute_concurrent(agent_probe_js("main", 400)).await
+        concurrent(&handle, agent_probe_js("main", 400)).await
     };
     let bob_call = async {
         tokio::time::sleep(Duration::from_millis(200)).await;
         handle
-            .execute_concurrent_with_context(
+            .call(
                 agent_probe_js("bob", 200),
                 AgentContext::managed(bob.clone()),
+                CallKind::Concurrent,
             )
             .await
     };
@@ -507,7 +516,7 @@ async fn writes_stay_in_send_order_while_reads_run_beside_them() {
     let (handle, _dir) = spawn_runtime("QmConcurrentOrder");
     let reads = (0..20).map(|i| {
         let latency = (i * 29) % 40;
-        handle.execute_concurrent(format!("({}, {i})", sleep_js(latency)))
+        concurrent(&handle, format!("({}, {i})", sleep_js(latency)))
     });
     let ((started, ended), reads) = within(
         Duration::from_secs(20),
@@ -534,11 +543,9 @@ async fn a_call_sent_after_a_slow_concurrent_call_does_not_wait_for_it() {
     let (handle, _dir) = spawn_runtime("QmConcurrentBeforeOrdered");
     let slow = {
         let handle = handle.clone();
-        tokio::spawn(async move {
-            handle
-                .execute_concurrent(format!("({}, \"slow\")", sleep_js(2000)))
-                .await
-        })
+        tokio::spawn(
+            async move { concurrent(&handle, format!("({}, \"slow\")", sleep_js(2000))).await },
+        )
     };
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -590,7 +597,7 @@ async fn a_call_finished_as_its_deadline_passes_returns_its_result() {
     // is queued while the thread holds `running`.
     let call = tokio::spawn({
         let handle = handle.clone();
-        async move { handle.execute_concurrent("1 + 1".into()).await }
+        async move { concurrent(&handle, "1 + 1".into()).await }
     });
     let request = within(Duration::from_secs(5), "the request", rx.recv())
         .await
@@ -618,15 +625,17 @@ async fn the_concurrent_call_past_the_bound_waits_for_a_slot() {
     let gated = |i: usize| {
         let handle = handle.clone();
         tokio::spawn(async move {
-            handle
-                .execute_concurrent(format!(
+            concurrent(
+                &handle,
+                format!(
                     r#"(async () => {{
                         globalThis.__started.push({i});
                         await new Promise((resolve) => globalThis.__release.push(resolve));
                         return {i};
                     }})()"#
-                ))
-                .await
+                ),
+            )
+            .await
         })
     };
     let mut calls: Vec<_> = (0..MAX_CONCURRENT_CALLS).map(gated).collect();
@@ -717,9 +726,7 @@ async fn a_read_that_cannot_start_by_the_deadline_gets_an_error_and_is_not_run()
     tokio::time::sleep(Duration::from_millis(50)).await;
     let t = Instant::now();
     let read = within(Duration::from_secs(10), "the read", async {
-        handle
-            .execute_concurrent("(globalThis.__readRan = true)".into())
-            .await
+        concurrent(&handle, "(globalThis.__readRan = true)".into()).await
     })
     .await;
     let read_after = t.elapsed();
@@ -781,7 +788,7 @@ async fn a_read_admitted_beside_a_read_that_holds_the_thread_gets_an_error_at_th
         let handle = handle.clone();
         tokio::spawn(async move {
             let t = Instant::now();
-            let result = handle.execute_concurrent(busy_js(label, 1500)).await;
+            let result = concurrent(&handle, busy_js(label, 1500)).await;
             (label, t.elapsed(), result)
         })
     };
@@ -843,13 +850,13 @@ async fn a_read_whose_caller_left_before_it_started_is_not_run() {
     // about 1300 ms.
     let holder = {
         let handle = handle.clone();
-        tokio::spawn(async move { handle.execute_concurrent(busy_js("holder", 1000)).await })
+        tokio::spawn(async move { concurrent(&handle, busy_js("holder", 1000)).await })
     };
     tokio::time::sleep(Duration::from_millis(20)).await;
     // Its caller gives up at about 470 ms: after the admission, before the read can start.
     let left = tokio::time::timeout(
         Duration::from_millis(400),
-        handle.execute_concurrent("(globalThis.__ran.push(\"left\"), 0)".into()),
+        concurrent(&handle, "(globalThis.__ran.push(\"left\"), 0)".into()),
     )
     .await;
     assert!(left.is_err(), "the read answered before its caller gave up");
@@ -945,11 +952,11 @@ async fn an_event_loop_error_in_a_concurrent_call_does_not_free_the_ordered_call
 
     // Its own promise resolves; the rejected promise beside it is nobody's handler.
     let bad = within(Duration::from_secs(10), "the call that rejects", async {
-        handle
-            .execute_concurrent(
-                "(Promise.reject(new Error(\"unhandled in test\")), \"bad done\")".into(),
-            )
-            .await
+        concurrent(
+            &handle,
+            "(Promise.reject(new Error(\"unhandled in test\")), \"bad done\")".into(),
+        )
+        .await
     })
     .await;
     assert_eq!(bad.expect("the call answers").trim(), "bad done");
@@ -1031,12 +1038,12 @@ async fn a_wasm_language_runs_concurrent_calls_in_order_as_their_agents() {
     let read = {
         let handle = handle.clone();
         tokio::spawn(async move {
-            handle
-                .execute_concurrent(
-                    "JSON.stringify(await globalThis.__ad4m_language_instance__.expressionGet(\"slow:600:x\"))"
-                        .into(),
-                )
-                .await
+            concurrent(
+                &handle,
+                "JSON.stringify(await globalThis.__ad4m_language_instance__.expressionGet(\"slow:600:x\"))"
+                    .into(),
+            )
+            .await
         })
     };
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1044,12 +1051,12 @@ async fn a_wasm_language_runs_concurrent_calls_in_order_as_their_agents() {
     // A sync export. Overlapping the read it would see the instance's lock
     // held (`try_with` → null); ordered, it runs after it and answers for real.
     let interactions = within(Duration::from_secs(10), "interactions", async {
-        handle
-            .execute_concurrent(
-                "JSON.stringify(globalThis.__ad4m_language_instance__.interactions(\"expr://x\"))"
-                    .into(),
-            )
-            .await
+        concurrent(
+            &handle,
+            "JSON.stringify(globalThis.__ad4m_language_instance__.interactions(\"expr://x\"))"
+                .into(),
+        )
+        .await
     })
     .await;
     let interactions = interactions.expect("the interactions call answers");
@@ -1062,10 +1069,11 @@ async fn a_wasm_language_runs_concurrent_calls_in_order_as_their_agents() {
     // signs as Alice, never as the agent whose call preceded it.
     let created = within(Duration::from_secs(10), "the create", async {
         handle
-            .execute_concurrent_with_context(
+            .call(
                 "globalThis.__ad4m_language_instance__.expressionCreate({note: \"from alice\"})"
                     .into(),
                 AgentContext::managed(alice.clone()),
+                CallKind::Concurrent,
             )
             .await
     })
@@ -1119,7 +1127,7 @@ async fn a_concurrent_call_on_wasm_gets_the_ordered_deadline() {
     // Already past the deadline: refused at once, never queued.
     running.lock().unwrap().ordered = Some((u64::MAX, Instant::now() - Duration::from_secs(1)));
     let refused = within(Duration::from_secs(1), "the refused call", async {
-        handle.execute_concurrent("1 + 1".into()).await
+        concurrent(&handle, "1 + 1".into()).await
     })
     .await;
     assert!(refused
@@ -1131,7 +1139,7 @@ async fn a_concurrent_call_on_wasm_gets_the_ordered_deadline() {
     // busy error, not at the concurrent deadline with "did not start".
     running.lock().unwrap().ordered = Some((u64::MAX, Instant::now() - Duration::from_millis(450)));
     let queued = within(Duration::from_secs(1), "the queued call", async {
-        handle.execute_concurrent("1 + 1".into()).await
+        concurrent(&handle, "1 + 1".into()).await
     })
     .await;
     assert!(queued
@@ -1475,7 +1483,7 @@ async fn call_deadline_bench_h_fast_read_beside_a_slow_call() {
             tokio::time::sleep(Duration::from_millis(100)).await;
             let t = Instant::now();
             let fast = if read {
-                handle.execute_concurrent("1 + 1".into()).await
+                concurrent(&handle, "1 + 1".into()).await
             } else {
                 handle.execute("1 + 1".into()).await
             };
