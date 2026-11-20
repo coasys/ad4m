@@ -582,5 +582,52 @@ describe("Ad4mModel.fromJSONSchema", () => {
         "skill://ad4m",
       ]);
     });
+
+    it("should store an array of objects as one JSON property", async () => {
+      const expenseSchema = {
+        title: "SplitExpense",
+        type: "object",
+        properties: {
+          title: { type: "string" },
+          split: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                did: { type: "string" },
+                share: { type: "number" },
+              },
+            },
+          },
+        },
+        required: ["title"],
+      };
+
+      const SplitExpenseClass = Ad4mModel.fromJSONSchema(expenseSchema, {
+        name: "SplitExpense",
+        namespace: "splitexpense://",
+      }) as any;
+
+      // A property, not a relation: an object has no IRI to link to.
+      const metadata = SplitExpenseClass.getModelMetadata();
+      expect(metadata.properties.split).to.exist;
+      expect(metadata.relations.split).to.be.undefined;
+
+      await perspective!.ensureSDNASubjectClass(SplitExpenseClass);
+
+      const split = [
+        { did: "did:key:alice", share: 2 },
+        { did: "did:key:bob", share: 1 },
+      ];
+      const expense = new SplitExpenseClass(perspective!);
+      expense.title = "Lunch";
+      expense.split = split;
+      await expense.save();
+
+      const retrieved = await SplitExpenseClass.findAll(perspective!);
+      expect(retrieved).to.have.lengthOf(1);
+      // Same elements, same order: no "[object Object]".
+      expect(retrieved[0].split).to.deep.equal(split);
+    });
   });
 });
