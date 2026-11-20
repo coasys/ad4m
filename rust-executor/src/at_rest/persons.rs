@@ -26,7 +26,10 @@
 //! executor keeps no backup of the keyring. A platform snapshot (`perspective_snapshot`)
 //! holds each perspective's part sealed under that perspective store's own Archive subkey,
 //! so the destroyed key makes the person's part unreadable in every snapshot taken before.
-//! So `shredded_everywhere_at` equals `key_destroyed_at`.
+//! So `shredded_everywhere_at` equals `key_destroyed_at`. The promise covers contents: the
+//! outer manifest of a snapshot, opened with the executor's key, still lists the deleted
+//! perspective's uuid and its part's size (the part itself no longer opens), until the next
+//! snapshot replaces it.
 
 use std::path::Path;
 use std::sync::Arc;
