@@ -170,7 +170,7 @@ pub(super) fn build_timestamp_probe(shape: &ModelShape, guard: LinkGuard) -> Str
 ///
 /// The instance's `author` and `timestamp` come from the earliest of these
 /// links, so [`super::link_author::instance_author_filter`] reads the same set.
-pub(super) fn instance_link_predicates(shape: &ModelShape) -> Vec<&str> {
+pub(crate) fn instance_link_predicates(shape: &ModelShape) -> Vec<&str> {
     let unique: std::collections::BTreeSet<&str> = shape
         .properties
         .iter()
