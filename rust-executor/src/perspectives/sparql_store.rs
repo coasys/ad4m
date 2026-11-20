@@ -169,10 +169,12 @@ impl Drop for EvalGate {
 
 /// Fires an eval's stop on its deadline or on the bridged request cancel.
 /// One short thread per gate; it ends the moment the gate drops (`done`).
+#[cfg(not(target_arch = "wasm32"))]
 struct Watchdog {
     done: std::sync::mpsc::SyncSender<()>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Watchdog {
     fn arm(
         stop: EvalStop,
@@ -216,11 +218,19 @@ impl Watchdog {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Drop for Watchdog {
     fn drop(&mut self) {
         let _ = self.done.send(());
     }
 }
+
+// The web executor has no threads: its watchdog is a task on the JS event loop.
+#[cfg(target_arch = "wasm32")]
+#[path = "../web/eval_watchdog.rs"]
+mod eval_watchdog;
+#[cfg(target_arch = "wasm32")]
+use eval_watchdog::Watchdog;
 
 /// The deadline one request-driven evaluation runs under, from the executor
 /// config (`query_deadline_secs`, default 30s). 0 would fail every query, so
