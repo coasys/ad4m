@@ -1722,6 +1722,71 @@ async fn a_dropped_tick_releases_its_read_slot_while_the_shape_wait_sleeps() {
     );
 }
 
+/// Teardown that lands after the reads, and before a drain, ends the tick
+/// idle. The recorded turn stays queued.
+#[tokio::test]
+async fn a_teardown_after_the_reads_does_not_drain() {
+    use super::watcher::TickOutcome;
+    use std::sync::atomic::Ordering;
+
+    let (p, ctx, now_ms) = one_turn("teardown-before").await;
+    p.is_teardown.store(true, Ordering::Release);
+    let mut watcher = WatcherState::new();
+    let outcome = p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
+    assert_eq!(outcome, TickOutcome::Idle);
+    assert_eq!(pending_texts(&watcher, "teardown-before"), vec!["hello"]);
+}
+
+/// Teardown during the model check, after the reads returned, ends the tick
+/// idle. The batch is ready and stays queued.
+#[tokio::test]
+async fn a_teardown_during_the_model_check_does_not_drain() {
+    use super::watcher::test_hooks::{PassHooks, HOOKS};
+    use super::watcher::TickOutcome;
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+    seed_message(
+        &mut p,
+        &ctx,
+        "msg://1",
+        "did:key:alice",
+        "hello",
+        "ns://body",
+    )
+    .await;
+    write_processor(
+        &mut p,
+        &config("teardown-model", 50, None),
+        Some(false),
+        &ctx,
+    )
+    .await
+    .expect("write_processor");
+    let mut watcher = WatcherState::new();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let first = p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
+    assert_eq!(first, TickOutcome::Pending);
+    assert_eq!(pending_texts(&watcher, "teardown-model"), vec!["hello"]);
+
+    let flag = p.is_teardown.clone();
+    let hooks = PassHooks {
+        on_model_check: Some(Arc::new(move || {
+            flag.store(true, Ordering::Release);
+        })),
+        ..Default::default()
+    };
+    let outcome = HOOKS
+        .scope(
+            hooks,
+            p.run_auto_processor_tick(&mut watcher, now_ms + 3_000, &ctx),
+        )
+        .await;
+    assert_eq!(outcome, TickOutcome::Idle);
+    assert_eq!(pending_texts(&watcher, "teardown-model"), vec!["hello"]);
+}
+
 /// Cancelling the prepare after the job has taken the watcher must not drop
 /// that watcher. The lease is held outside the cancelled future, and the job
 /// writes the watcher back into it.

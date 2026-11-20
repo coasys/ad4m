@@ -6927,6 +6927,11 @@ impl PerspectiveInstance {
             PrepareOutcome::Finished(outcome) => return outcome,
             PrepareOutcome::Drain(configs) => configs,
         };
+        // Teardown can land while the reads run. Do not drain a perspective
+        // that is going away.
+        if self.is_teardown.load(Ordering::Acquire) {
+            return TickOutcome::Idle;
+        }
         // Every pass prompts the default LLM. Without one, a drained batch
         // would be claimed and fail, and the loop would retry it twice a
         // second for as long as the executor has no model. Leave the turns
@@ -6945,6 +6950,12 @@ impl PerspectiveInstance {
         if watcher.waiting_for_model {
             log::info!("auto_processor [{uuid}]: an LLM is configured; processing resumes");
             watcher.waiting_for_model = false;
+        }
+        // The model check itself can observe teardown (a test, or remove
+        // landing while the readiness read runs). Drain would start a pass
+        // on a perspective that is going away.
+        if self.is_teardown.load(Ordering::Acquire) {
+            return TickOutcome::Idle;
         }
 
         // 2. Drain + run a pass per config.

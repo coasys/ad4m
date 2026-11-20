@@ -1889,6 +1889,9 @@ pub(crate) mod test_hooks {
         pub model_readiness: Option<Arc<tokio::sync::watch::Sender<u64>>>,
         /// How many times a tick asked [`model_available`].
         pub model_checks: Arc<std::sync::atomic::AtomicUsize>,
+        /// Runs when a tick asks [`model_available`]. A test sets teardown here,
+        /// after the reads have returned and before the drain.
+        pub on_model_check: Option<Arc<dyn Fn() + Send + Sync>>,
     }
 
     tokio::task_local! {
@@ -1955,6 +1958,9 @@ pub(crate) mod test_hooks {
         HOOKS
             .try_with(|h| {
                 h.model_checks.fetch_add(1, Ordering::Relaxed);
+                if let Some(hook) = &h.on_model_check {
+                    hook();
+                }
                 !h.no_model.load(Ordering::Relaxed)
             })
             .unwrap_or(true)
