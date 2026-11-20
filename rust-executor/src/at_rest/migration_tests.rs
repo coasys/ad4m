@@ -61,7 +61,7 @@ impl Fixture {
         let notification = db
             .add_notification(
                 NotificationInput {
-                    description: "a private description".into(),
+                    description: "s1: a private description".into(),
                     app_name: "app".into(),
                     app_url: "https://app.test".into(),
                     app_icon_path: String::new(),
@@ -77,7 +77,7 @@ impl Fixture {
         let perspective = uuid::Uuid::new_v4().to_string();
         db.add_perspective(&PerspectiveHandle {
             uuid: perspective.clone(),
-            name: Some("a private name".into()),
+            name: Some("s1: a private name".into()),
             neighbourhood: Some(DecoratedNeighbourhoodExpression {
                 data: Neighbourhood {
                     link_language: link_language.clone(),
@@ -91,10 +91,20 @@ impl Fixture {
         })
         .unwrap();
         db.add_user(USER, "did:key:alice", "a password").unwrap();
+        // Legacy plaintext that happens to start with the sealed prefix is still plaintext.
+        db.add_task(
+            "s1: a private task".into(),
+            "model".into(),
+            "s1: a private prompt".into(),
+            vec![],
+            None,
+            Some("did:key:alice"),
+        )
+        .unwrap();
         db.create_ai_session(&crate::ai_sessions::types::AiSession {
             id: "ai-session".into(),
             owner_did: Some("did:key:alice".into()),
-            title: "a private conversation".into(),
+            title: "s1: a private conversation".into(),
             model: None,
             default_perspective: Some(perspective.clone()),
             library_perspective: None,
@@ -170,14 +180,14 @@ impl Fixture {
             .get_notification(self.notification.clone())
             .unwrap()
             .expect("the notification");
-        assert_eq!(notification.description, "a private description");
+        assert_eq!(notification.description, "s1: a private description");
         let handle = db
             .get_all_perspectives()
             .unwrap()
             .into_iter()
             .find(|h| h.uuid == self.perspective)
             .expect("the perspective");
-        assert_eq!(handle.name.as_deref(), Some("a private name"));
+        assert_eq!(handle.name.as_deref(), Some("s1: a private name"));
         assert!(db.list_users().unwrap().iter().any(|u| u.username == USER));
         // The conversation is sealed under alice's store and reads back.
         let alice = Some("did:key:alice");
@@ -185,7 +195,14 @@ impl Fixture {
             .get_ai_session(alice, "ai-session")
             .unwrap()
             .expect("the AI session");
-        assert_eq!(session.title, "a private conversation");
+        assert_eq!(session.title, "s1: a private conversation");
+        let task = db
+            .get_tasks()
+            .unwrap()
+            .into_iter()
+            .find(|t| t.name == "s1: a private task")
+            .expect("the task");
+        assert_eq!(task.system_prompt, "s1: a private prompt");
         let message = db
             .get_ai_message(alice, "ai-message")
             .unwrap()

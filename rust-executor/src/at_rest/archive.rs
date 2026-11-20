@@ -14,8 +14,10 @@
 //! integers big endian. The segments are the archive cut into 64 KiB pieces, each sealed
 //! with XChaCha20-Poly1305 in the STREAM construction (big-endian 32-bit counter, last-segment
 //! flag), so each sealed segment is 16 bytes longer than its piece and an archive cut short
-//! or reordered does not open. The key is the executor store key's subkey for archives
-//! ([`SubkeyPurpose::Archive`]) of the version in the header. Every segment's associated data
+//! or reordered does not open. The key is a store key's subkey for archives
+//! ([`SubkeyPurpose::Archive`]) of the version in the header: the executor store's for a
+//! whole archive, a perspective store's for the part of the snapshot that holds that
+//! perspective (the caller names the store; see `perspective_snapshot`). Every segment's associated data
 //! is a label and the whole header, so a header changed in any byte does not open either.
 //!
 //! An archive opens only under the keyring that sealed it.
@@ -83,7 +85,18 @@ fn associated_data(header: &[u8]) -> Vec<u8> {
 
 /// Seals `plain` under the current version of the executor store key's archive subkey.
 pub fn seal_archive(keys: &DataKeys, plain: &[u8]) -> Result<Vec<u8>, ArchiveError> {
-    let (version, key) = keys.subkey(&StoreId::Executor, None, SubkeyPurpose::Archive)?;
+    seal_archive_under(keys, &StoreId::Executor, plain)
+}
+
+/// Seals `plain` under the current version of `store`'s archive subkey. A part sealed under a
+/// perspective's store opens only while that store's key exists: destroying the key shreds
+/// the part wherever it was copied.
+pub fn seal_archive_under(
+    keys: &DataKeys,
+    store: &StoreId,
+    plain: &[u8],
+) -> Result<Vec<u8>, ArchiveError> {
+    let (version, key) = keys.subkey(store, None, SubkeyPurpose::Archive)?;
     let mut nonce_prefix = [0u8; NONCE_PREFIX_LEN];
     rand::thread_rng().fill_bytes(&mut nonce_prefix);
 
@@ -117,6 +130,16 @@ pub fn seal_archive(keys: &DataKeys, plain: &[u8]) -> Result<Vec<u8>, ArchiveErr
 
 /// Opens an archive [`seal_archive`] sealed under this keyring.
 pub fn open_archive(keys: &DataKeys, sealed: &[u8]) -> Result<Vec<u8>, ArchiveError> {
+    open_archive_under(keys, &StoreId::Executor, sealed)
+}
+
+/// Opens an archive [`seal_archive_under`] sealed under `store` of this keyring. A store whose
+/// key is destroyed is [`ArchiveError::Keyring`]: the part is gone.
+pub fn open_archive_under(
+    keys: &DataKeys,
+    store: &StoreId,
+    sealed: &[u8],
+) -> Result<Vec<u8>, ArchiveError> {
     let rest = sealed
         .strip_prefix(&MAGIC[..])
         .ok_or(ArchiveError::NotAnArchive)?;
@@ -138,7 +161,7 @@ pub fn open_archive(keys: &DataKeys, sealed: &[u8]) -> Result<Vec<u8>, ArchiveEr
     let rest = &rest[KEYRING_ID_LEN..];
     let version = KeyVersion(u32::from_be_bytes(rest[..4].try_into().expect("4 bytes")));
     let nonce_prefix = &rest[4..4 + NONCE_PREFIX_LEN];
-    let (_, key) = keys.subkey(&StoreId::Executor, Some(version), SubkeyPurpose::Archive)?;
+    let (_, key) = keys.subkey(store, Some(version), SubkeyPurpose::Archive)?;
     let ad = associated_data(&sealed[..HEADER_LEN]);
 
     let cipher = XChaCha20Poly1305::new_from_slice(key.expose_secret()).expect("32-byte key");

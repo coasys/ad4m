@@ -631,6 +631,17 @@ pub fn register_link_language_perspective(language_address: String, handle: Pers
         .insert(language_address, handle);
 }
 
+/// Routes `link_language` to `handle` in the cache, as a neighbourhood's start does; `None`
+/// removes the route.
+#[cfg(test)]
+pub(crate) fn route_link_language_for_test(link_language: &str, handle: Option<PerspectiveHandle>) {
+    let mut cache = LINK_LANG_TO_PERSPECTIVE_HANDLE.write().unwrap();
+    match handle {
+        Some(handle) => cache.insert(link_language.to_string(), handle),
+        None => cache.remove(link_language),
+    };
+}
+
 /// Look up PerspectiveHandle by link language address from cache
 pub(crate) fn cached_perspective_handle(language_address: &str) -> Option<PerspectiveHandle> {
     LINK_LANG_TO_PERSPECTIVE_HANDLE

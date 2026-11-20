@@ -1,9 +1,12 @@
 //! Directory-level snapshots of the OxiGraph/RocksDB perspective store.
 //!
-//! Periodically checkpoints every perspective's SPARQL store, archives the
-//! checkpoints as a tar.gz, seals the archive under this executor's keyring
-//! (`at_rest::archive`: the checkpoints are plain, so the archive never leaves
-//! unsealed) and uploads it to the platform backend via HMAC-presigned URLs.
+//! Periodically checkpoints every perspective's SPARQL store and archives each checkpoint as
+//! its own tar.gz, sealed under that perspective's store key
+//! (`at_rest::archive::seal_archive_under`); a tar of those parts is sealed again under the
+//! executor store's key (`at_rest::archive`: the checkpoints are plain, so the archive never
+//! leaves unsealed, and no part's name is readable) and uploaded to the platform backend via
+//! HMAC-presigned URLs. Destroying a perspective's store key (a person's deletion) shreds its
+//! part of every snapshot already taken: a restore skips a part whose key is gone.
 //! On startup in shared mode, downloads, opens and extracts the latest
 //! snapshot so OxiGraph opens with the restored data. A snapshot uploaded
 //! before snapshots were sealed (a plain tar.gz) is restored once and replaced
@@ -79,6 +82,11 @@ fn internal_token(config: &Ad4mConfig) -> Result<String, AnyError> {
 /// Returns the compressed bytes. Each perspective UUID subdirectory
 /// (containing `sparql_store/` RocksDB files) gets included recursively.
 pub fn create_snapshot(perspectives_path: &Path) -> Result<Vec<u8>, AnyError> {
+    tar_gz("perspectives", perspectives_path)
+}
+
+/// A tar.gz of the directory `dir`, its entries named under `prefix`.
+fn tar_gz(prefix: &str, perspectives_path: &Path) -> Result<Vec<u8>, AnyError> {
     if !perspectives_path.exists() {
         return Err(anyhow!(
             "Perspectives directory does not exist: {:?}",
@@ -94,7 +102,7 @@ pub fn create_snapshot(perspectives_path: &Path) -> Result<Vec<u8>, AnyError> {
         // Append the entire perspectives directory, preserving the tree structure.
         // Use "perspectives" as the archive prefix so restore extracts cleanly.
         archive
-            .append_dir_all("perspectives", perspectives_path)
+            .append_dir_all(prefix, perspectives_path)
             .map_err(|e| anyhow!("Failed to build snapshot archive: {}", e))?;
 
         let encoder = archive
@@ -337,7 +345,7 @@ fn upload_sealed_snapshot(
         .parent()
         .unwrap_or(persp_dir)
         .join(format!(".snapshot-{}", uuid::Uuid::new_v4()));
-    let data = checkpoint_stores(stores, &staging).and_then(|dir| create_snapshot(&dir));
+    let data = checkpoint_stores(stores, &staging).and_then(|dir| seal_parts(keys, &dir));
     if let Err(e) = std::fs::remove_dir_all(&staging) {
         log::warn!("Failed to remove snapshot staging {:?}: {}", staging, e);
     }
@@ -351,6 +359,67 @@ fn upload_sealed_snapshot(
         log::warn!("Failed to record that snapshots are sealed: {}", e);
     }
     Ok(())
+}
+
+/// The snapshot's plain archive: a tar of one entry per perspective, named by its uuid, that
+/// holds the perspective's checkpoint as a tar.gz sealed under the perspective's own store
+/// key. A perspective with no store key in the keyring (or a name that is no uuid) is an
+/// error: its part would not be shreddable, so no snapshot is made.
+fn seal_parts(keys: &DataKeys, persp_dir: &Path) -> Result<Vec<u8>, AnyError> {
+    let mut archive = Builder::new(Vec::new());
+    let mut names: Vec<String> = std::fs::read_dir(persp_dir)
+        .map_err(|e| anyhow!("Failed to read {:?}: {}", persp_dir, e))?
+        .map(|e| e.map(|e| e.file_name().to_string_lossy().into_owned()))
+        .collect::<Result<_, _>>()?;
+    names.sort();
+    for name in names {
+        let store = part_store(&name)?;
+        let part = tar_gz(&format!("perspectives/{name}"), &persp_dir.join(&name))?;
+        let sealed = archive::seal_archive_under(keys, &store, &part)
+            .map_err(|e| anyhow!("Failed to seal the snapshot part of {name}: {e}"))?;
+        let mut header = tar::Header::new_gnu();
+        header.set_size(sealed.len() as u64);
+        header.set_mode(0o600);
+        archive
+            .append_data(&mut header, &name, &sealed[..])
+            .map_err(|e| anyhow!("Failed to build snapshot archive: {}", e))?;
+    }
+    archive
+        .into_inner()
+        .map_err(|e| anyhow!("Failed to finalise archive: {}", e))
+}
+
+/// The store a snapshot part named `name` is sealed under.
+fn part_store(name: &str) -> Result<crate::at_rest::keyring_file::StoreId, AnyError> {
+    uuid::Uuid::parse_str(name)
+        .map(crate::at_rest::keyring_file::StoreId::Perspective)
+        .map_err(|_| anyhow!("{name:?} is not a perspective uuid"))
+}
+
+/// Opens every part of a snapshot [`seal_parts`] made. A part whose perspective's key is
+/// destroyed is left out: that is the shred. Nothing is extracted unless every other part
+/// opens.
+fn open_parts(keys: &DataKeys, plain: &[u8]) -> Result<Vec<Vec<u8>>, AnyError> {
+    let mut parts = Vec::new();
+    let mut archive = Archive::new(plain);
+    for entry in archive
+        .entries()
+        .map_err(|e| anyhow!("The snapshot is not a snapshot archive: {}", e))?
+    {
+        let mut entry = entry.map_err(|e| anyhow!("The snapshot is damaged: {}", e))?;
+        let name = entry.path()?.to_string_lossy().into_owned();
+        let store = part_store(&name)?;
+        let mut sealed = Vec::new();
+        std::io::Read::read_to_end(&mut entry, &mut sealed)?;
+        match archive::open_archive_under(keys, &store, &sealed) {
+            Ok(part) => parts.push(part),
+            Err(archive::ArchiveError::Keyring(
+                crate::at_rest::data_keys::KeyringError::UnknownStore,
+            )) => log::info!("The snapshot's part {name} is left out: its key was destroyed"),
+            Err(e) => return Err(anyhow!("The snapshot does not open: {}", e)),
+        }
+    }
+    Ok(parts)
 }
 
 /// Downloads the snapshot of `did` and extracts it into `data_path`: a sealed one opened
@@ -378,7 +447,10 @@ fn download_and_restore(
     let (plain, restored) = if archive::is_sealed_archive(&data) {
         let plain = archive::open_archive(keys, &data)
             .map_err(|e| anyhow!("The snapshot does not open: {}", e))?;
-        (plain, Restored::Sealed)
+        for part in open_parts(keys, &plain)? {
+            restore_snapshot(data_path, &part)?;
+        }
+        return Ok(Restored::Sealed);
     } else if data.starts_with(&GZIP_MAGIC) {
         if archive::is_sealed_only(keys) {
             return Err(anyhow!(
@@ -677,12 +749,21 @@ mod tests {
     }
 
     const DID: &str = "did:key:z6MkSnapshotTest";
+    const UUID_A: &str = "6f1c2f0e-6b0e-4a6b-9a53-0d1a1f0f0a0a";
+    const UUID_B: &str = "7a2d3a1f-7c1f-4b7c-8b64-1e2b2a1a1b1b";
     const MARKERS: [&str; 2] = ["marker-link-source-4b1d", "marker-link-target-9e7c"];
 
     fn open_keys(data: &Path) -> std::sync::Arc<DataKeys> {
         let keys = DataKeys::load(crate::at_rest::keyring_file::path_in(data)).unwrap();
         keys.unlock(zeroize::Zeroizing::new([9u8; 32])).unwrap();
+        for uuid in [UUID_A, UUID_B] {
+            keys.create_store(perspective_store(uuid), &[]).unwrap();
+        }
         std::sync::Arc::new(keys)
+    }
+
+    fn perspective_store(uuid: &str) -> crate::at_rest::keyring_file::StoreId {
+        part_store(uuid).unwrap()
     }
 
     /// Two perspectives under `data/perspectives`, their links carrying [`MARKERS`].
@@ -692,7 +773,7 @@ mod tests {
 
         let signer = TestSigner::generate();
         let mut stores = Vec::new();
-        for (uuid, count) in [("uuid-a", 3), ("uuid-b", 4)] {
+        for (uuid, count) in [(UUID_A, 3), (UUID_B, 4)] {
             let dir = data.join("perspectives").join(uuid);
             let store = std::sync::Arc::new(SparqlStore::new(Some(dir.to_str().unwrap())).unwrap());
             for i in 0..count {
@@ -747,7 +828,12 @@ mod tests {
 
         assert!(object.starts_with(b"AD4MARCH"));
         assert!(!object.starts_with(&GZIP_MAGIC));
-        for readable in [&b"ustar"[..], b"perspectives", b"sparql_store", b"uuid-a"] {
+        for readable in [
+            &b"ustar"[..],
+            b"perspectives",
+            b"sparql_store",
+            UUID_A.as_bytes(),
+        ] {
             assert!(!contains(&object, readable), "{:?}", readable);
         }
         for marker in MARKERS {
@@ -765,11 +851,72 @@ mod tests {
             .collect();
         assert!(left.is_empty(), "{left:?}");
 
-        // Opened, it is the archive of the checkpoints: the seal is what kept them unread.
+        // Opened, it is one part per perspective, each sealed under that perspective's own key
+        // and holding its checkpoint: the seal is what kept them unread.
         let plain = archive::open_archive(&keys, &object).unwrap();
-        assert!(tar_names(&plain)
+        let parts = open_parts(&keys, &plain).unwrap();
+        assert_eq!(parts.len(), 2);
+        assert!(tar_names(&parts[0])
             .iter()
-            .any(|n| n.starts_with("perspectives/uuid-a/sparql_store")));
+            .any(|n| n.starts_with(&format!("perspectives/{UUID_A}/sparql_store"))));
+    }
+
+    /// Deleting a person destroys its perspectives' keys, and a snapshot taken before that no
+    /// longer yields their data: the part of a perspective whose key is gone is left out of a
+    /// restore, while the other perspectives restore with every link.
+    #[test]
+    fn a_snapshot_taken_before_a_perspective_key_was_destroyed_no_longer_holds_it() {
+        use crate::at_rest::data_keys::DestroyReason;
+        let stub = PresignStub::start();
+        let live = TempDir::new().unwrap();
+        let keys = open_keys(live.path());
+        let stores = stores_with_markers(live.path());
+        let config = stub.config();
+        upload_sealed_snapshot(
+            &config,
+            DID,
+            &keys,
+            &stores,
+            &live.path().join("perspectives"),
+        )
+        .unwrap();
+        let object = stub.uploaded();
+
+        // The snapshot restores both while the keys are there.
+        let before = TempDir::new().unwrap();
+        download_and_restore(&config, DID, &keys, before.path()).unwrap();
+        assert!(before
+            .path()
+            .join(format!("perspectives/{UUID_A}/sparql_store"))
+            .exists());
+
+        keys.destroy_store(
+            &perspective_store(UUID_A),
+            DestroyReason::PerspectiveRemoved,
+        )
+        .unwrap();
+        let after = TempDir::new().unwrap();
+        assert_eq!(
+            download_and_restore(&config, DID, &keys, after.path()).unwrap(),
+            Restored::Sealed
+        );
+        assert!(
+            !after.path().join(format!("perspectives/{UUID_A}")).exists(),
+            "the destroyed perspective's part is not extracted"
+        );
+        let dir = after.path().join(format!("perspectives/{UUID_B}"));
+        let store = SparqlStore::new(Some(dir.to_str().unwrap())).unwrap();
+        assert_eq!(
+            store
+                .get_all_links(&crate::perspectives::sparql_store::EvalStop::none())
+                .unwrap()
+                .len(),
+            4,
+            "another perspective restores"
+        );
+        // The uploaded object is the same: this keyring opens only the other perspective's part.
+        let plain = archive::open_archive(&keys, &object).unwrap();
+        assert_eq!(open_parts(&keys, &plain).unwrap().len(), 1);
     }
 
     /// A sealed snapshot restores under the keyring that sealed it, with every link.
@@ -794,7 +941,7 @@ mod tests {
             download_and_restore(&config, DID, &keys, restored.path()).unwrap(),
             Restored::Sealed
         );
-        for (uuid, count) in [("uuid-a", 3), ("uuid-b", 4)] {
+        for (uuid, count) in [(UUID_A, 3), (UUID_B, 4)] {
             let dir = restored.path().join("perspectives").join(uuid);
             let store = SparqlStore::new(Some(dir.to_str().unwrap())).unwrap();
             assert_eq!(
@@ -850,7 +997,7 @@ mod tests {
             download_and_restore(&config, DID, &keys, data.path()).unwrap(),
             Restored::Plain
         );
-        let dir = data.path().join("perspectives/uuid-b");
+        let dir = data.path().join(format!("perspectives/{UUID_B}"));
         let store = std::sync::Arc::new(SparqlStore::new(Some(dir.to_str().unwrap())).unwrap());
         assert_eq!(
             store
@@ -865,7 +1012,7 @@ mod tests {
             &config,
             DID,
             &keys,
-            &[("uuid-b".to_string(), store)],
+            &[(UUID_B.to_string(), store)],
             &data.path().join("perspectives"),
         )
         .unwrap();

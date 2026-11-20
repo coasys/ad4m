@@ -101,6 +101,38 @@ fn io_error(path: &Path, error: io::Error) -> LangStorageError {
     }
 }
 
+/// The one lock of the languages' files. Whoever replaces a language file holds it from the
+/// moment it takes the key it seals under until the file is renamed into place: a language's
+/// write, the seal-again of a file read under another store or still in the clear, the
+/// re-encryption's seal-again of a file under an older key version, and the move from
+/// plaintext. So a replace never overwrites a file that changed since the bytes it was made
+/// from were read (they are read again under the lock), and [`exclusive`], which the
+/// re-encryption holds to count and retire key versions, finds no writer that took an old
+/// version and has not published yet.
+static FILES: Mutex<()> = Mutex::new(());
+
+/// Runs `f` while holding the languages' files lock.
+pub fn exclusive<T>(f: impl FnOnce() -> T) -> T {
+    let _held = FILES.lock().unwrap_or_else(|p| p.into_inner());
+    f()
+}
+
+/// A test's pause between a writer's key and its publication.
+#[cfg(test)]
+pub(crate) static PAUSE_AFTER_SEAL: Mutex<Option<Arc<dyn Fn() + Send + Sync>>> = Mutex::new(None);
+
+#[cfg(test)]
+fn pause_after_seal() {
+    // The hook runs without the static's lock, so a test can clear it while it waits.
+    let pause = PAUSE_AFTER_SEAL.lock().unwrap().clone();
+    if let Some(pause) = pause {
+        pause();
+    }
+}
+
+#[cfg(not(test))]
+fn pause_after_seal() {}
+
 static INSTALLED: OnceLock<Arc<DataKeys>> = OnceLock::new();
 
 /// Installs the keys the languages' storage calls seal under. `run` calls it once the keyring
@@ -342,23 +374,40 @@ pub fn read_file(
     if is_sealed(&bytes) {
         let (store, plain) = open(keys, caller.address, &file, &bytes, path)?;
         if store != scope {
-            reseal(keys, &scope, caller.address, &file, &full, &plain);
+            reseal(keys, &scope, caller.address, &file, &full, &bytes, &plain);
         }
         return text(plain);
     }
     if keys.language_storage_state()? == StoreState::Encrypted {
         return Err(LangStorageError::NotSealed(path.to_string()));
     }
-    reseal(keys, &scope, caller.address, &file, &full, &bytes);
+    reseal(keys, &scope, caller.address, &file, &full, &bytes, &bytes);
     text(bytes)
 }
 
-/// Seals `plain` again under `scope` in place. A failure only logs: the reader has the
-/// content, and the file still opens as it is.
-fn reseal(keys: &DataKeys, scope: &StoreId, address: &str, file: &str, full: &Path, plain: &[u8]) {
-    let written = seal(keys, scope, address, file, plain)
-        .map_err(|e| e.to_string())
-        .and_then(|sealed| files::write_atomic(full, &sealed).map_err(|e| e.to_string()));
+/// Seals `plain`, the content of the file as the reader found it (`seen`), again under
+/// `scope` in place, only if the file still holds `seen` under the files lock: a write that
+/// landed meanwhile stays. A failure only logs: the reader has the content, and the file still
+/// opens as it is.
+fn reseal(
+    keys: &DataKeys,
+    scope: &StoreId,
+    address: &str,
+    file: &str,
+    full: &Path,
+    seen: &[u8],
+    plain: &[u8],
+) {
+    let written = exclusive(|| {
+        match std::fs::read(full) {
+            Ok(now) if now == seen => {}
+            Ok(_) => return Ok(()),
+            Err(e) => return Err(e.to_string()),
+        }
+        let sealed = seal(keys, scope, address, file, plain).map_err(|e| e.to_string())?;
+        pause_after_seal();
+        files::write_atomic(full, &sealed).map_err(|e| e.to_string())
+    });
     if let Err(e) = written {
         log::warn!("Could not seal {} under {scope}: {e}", full.display());
     }
@@ -382,14 +431,21 @@ pub fn write_file(
     if let Some(parent) = full.parent() {
         files::create_private_dir_all(parent).map_err(|e| io_error(parent, e))?;
     }
-    let bytes = match keys {
-        Some(keys) => {
-            let scope = scope_for(keys, caller.address);
-            seal(keys, &scope, caller.address, &file, content.as_bytes())?
-        }
-        None => content.as_bytes().to_vec(),
-    };
-    files::write_atomic(&full, &bytes).map_err(|e| io_error(&full, e))
+    // The key is taken, the content sealed and the file renamed in place under one hold of the
+    // files lock, so a re-encryption never retires the key version this write sealed under
+    // before the file is there.
+    exclusive(|| {
+        let bytes = match keys {
+            Some(keys) => {
+                let scope = scope_for(keys, caller.address);
+                let sealed = seal(keys, &scope, caller.address, &file, content.as_bytes())?;
+                pause_after_seal();
+                sealed
+            }
+            None => content.as_bytes().to_vec(),
+        };
+        files::write_atomic(&full, &bytes).map_err(|e| io_error(&full, e))
+    })
 }
 
 /// Deletes every file the language at `address` keeps in its storage folder under
@@ -535,15 +591,24 @@ pub fn reseal_store(
             }
             Err(e) => return Err(e),
         };
-        let sealed = seal(keys, store, &address, &file, &plain)?;
-        match std::fs::read(&path) {
-            Ok(again) if again == bytes => {}
-            Ok(_) => continue,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(io_error(&path, e)),
+        // The key, the check that the file is still what was read, and the rename are one
+        // hold of the files lock: a write that lands meanwhile waits, or came first and is
+        // seen by the check.
+        let replaced = exclusive(|| -> Result<bool, LangStorageError> {
+            let sealed = seal(keys, store, &address, &file, &plain)?;
+            match std::fs::read(&path) {
+                Ok(again) if again == bytes => {}
+                Ok(_) => return Ok(false),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+                Err(e) => return Err(io_error(&path, e)),
+            }
+            pause_after_seal();
+            files::write_atomic(&path, &sealed).map_err(|e| io_error(&path, e))?;
+            Ok(true)
+        })?;
+        if replaced {
+            report.resealed += 1;
         }
-        files::write_atomic(&path, &sealed).map_err(|e| io_error(&path, e))?;
-        report.resealed += 1;
     }
     Ok(report)
 }
@@ -722,11 +787,17 @@ pub(crate) fn migrate_with(
     for (address, file, full) in &pending {
         sealing(address);
         let one = || -> Result<(), String> {
-            let plain = std::fs::read(full).map_err(|e| format!("{}: {e}", full.display()))?;
             let scope = scope_for(keys, address);
-            let bytes = seal(keys, &scope, address, file, &plain).map_err(|e| format!("{e}"))?;
-            files::write_atomic_with(full, &bytes, |from, to| rename(from, to))
-                .map_err(|e| format!("{}: {e}", full.display()))?;
+            // Read, seal and rename under one hold of the files lock: what a language wrote
+            // meanwhile is not overwritten with the older plaintext.
+            let plain = exclusive(|| -> Result<Vec<u8>, String> {
+                let plain = std::fs::read(full).map_err(|e| format!("{}: {e}", full.display()))?;
+                let bytes =
+                    seal(keys, &scope, address, file, &plain).map_err(|e| format!("{e}"))?;
+                files::write_atomic_with(full, &bytes, |from, to| rename(from, to))
+                    .map_err(|e| format!("{}: {e}", full.display()))?;
+                Ok(plain)
+            })?;
             let back = std::fs::read(full).map_err(|e| format!("{}: {e}", full.display()))?;
             let shown = full.display().to_string();
             let (_, opened) =
@@ -834,6 +905,57 @@ mod tests {
         assert_eq!(
             read_file(Some(&keys), me, absolute.to_str().unwrap()).unwrap(),
             r#"{"secret":"v"}"#
+        );
+    }
+
+    /// A write that lands while the re-encryption seals a file again is kept: the replace
+    /// waits for the write or sees it, it never overwrites it with the older content.
+    #[test]
+    fn a_write_during_a_reseal_survives() {
+        use std::sync::mpsc;
+        let data = tempfile::tempdir().unwrap();
+        let keys = open_keys(data.path());
+        let store = StoreId::Perspective(uuid::Uuid::new_v4());
+        keys.create_store(store.clone(), &[]).unwrap();
+        let languages = data.path().join("languages");
+        let folder = languages.join("QmLanguageA");
+        std::fs::create_dir_all(&folder).unwrap();
+        let old = seal(&keys, &store, "QmLanguageA", "kv.json", b"old").unwrap();
+        std::fs::write(folder.join("kv.json"), old).unwrap();
+        keys.begin_store_rotation(&store).unwrap();
+
+        let (at_rename_tx, at_rename_rx) = mpsc::channel::<()>();
+        let (go_tx, go_rx) = mpsc::channel::<()>();
+        let at_rename_tx = Mutex::new(at_rename_tx);
+        let go_rx = Mutex::new(go_rx);
+        *PAUSE_AFTER_SEAL.lock().unwrap() = Some(Arc::new(move || {
+            at_rename_tx.lock().unwrap().send(()).unwrap();
+            go_rx.lock().unwrap().recv().unwrap();
+        }));
+        let job_keys = keys.clone();
+        let job_languages = languages.clone();
+        let job_store = store.clone();
+        let job = std::thread::spawn(move || reseal_store(&job_keys, &job_languages, &job_store));
+        // The job has read, sealed and checked the file, and is about to rename.
+        at_rename_rx.recv().unwrap();
+        *PAUSE_AFTER_SEAL.lock().unwrap() = None;
+        let writer_keys = keys.clone();
+        let writer_folder = folder.clone();
+        let writer = std::thread::spawn(move || {
+            write_file(
+                Some(&writer_keys),
+                caller(&writer_folder, "QmLanguageA"),
+                "kv.json",
+                "new",
+            )
+        });
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        go_tx.send(()).unwrap();
+        job.join().unwrap().unwrap();
+        writer.join().unwrap().unwrap();
+        assert_eq!(
+            read_file(Some(&keys), caller(&folder, "QmLanguageA"), "kv.json").unwrap(),
+            "new"
         );
     }
 
