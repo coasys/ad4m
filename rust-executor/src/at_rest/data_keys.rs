@@ -217,6 +217,9 @@ enum Inner {
     Sealed {
         keyring_id: KeyringId,
         file: Option<Box<KeyringFile>>,
+        /// A keyring file is on the disk: `file` read it, or it did not read (and no unlock
+        /// replaces it). False only for a data folder with no keyring yet.
+        exists: bool,
     },
     Open(Box<OpenKeys>),
 }
@@ -240,6 +243,7 @@ impl DataKeys {
             path,
             inner: Mutex::new(Inner::Sealed {
                 keyring_id,
+                exists: file.is_some(),
                 file: file.map(Box::new),
             }),
         })
@@ -254,6 +258,7 @@ impl DataKeys {
             inner: Mutex::new(Inner::Sealed {
                 keyring_id: KeyringId::random(),
                 file: None,
+                exists: true,
             }),
         }
     }
@@ -264,6 +269,16 @@ impl DataKeys {
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
         self.inner.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Whether the data folder has a keyring file: true once it is open, true for a sealed
+    /// keyring that is on the disk (readable or not), false only on a first start. The
+    /// keyring id alone does not tell: a sealed keyring with no file shows a random one.
+    pub fn keyring_exists(&self) -> bool {
+        match &*self.lock() {
+            Inner::Sealed { exists, .. } => *exists,
+            Inner::Open(_) => true,
+        }
     }
 
     pub fn keyring_id(&self) -> KeyringId {
@@ -303,6 +318,7 @@ impl DataKeys {
             Inner::Sealed {
                 keyring_id,
                 file: None,
+                ..
             } => {
                 let root = derive_root(&secret, keyring_id);
                 let (file, executor_key, main_key) = KeyringFile::create(*keyring_id, &root);
@@ -324,6 +340,7 @@ impl DataKeys {
             Inner::Sealed {
                 keyring_id,
                 file: Some(file),
+                ..
             } => {
                 let root = derive_root(&secret, keyring_id);
                 if !file.root_matches(&root) {
@@ -1340,6 +1357,28 @@ mod tests {
         assert_eq!(summary.persons[0].owner, "main");
         assert_eq!(summary.stores[0].id, "executor");
         assert_eq!(summary.stores[0].state, StoreStateName::Plain);
+    }
+
+    /// `keyring_exists` tells a first start from a restart, which `keyring_id` cannot: a
+    /// sealed keyring with no file shows a random id, like one with a file.
+    #[test]
+    fn the_keyring_exists_only_after_the_first_unlock() {
+        let (folder, keys) = sealed();
+        assert!(!keys.keyring_exists(), "a first start: no file");
+        keys.unlock(secret(3)).unwrap();
+        assert!(keys.keyring_exists(), "open");
+        drop(keys);
+
+        let path = super::super::keyring_file::path_in(folder.path());
+        let again = DataKeys::load(path.clone()).unwrap();
+        assert!(
+            !again.is_open() && again.keyring_exists(),
+            "a restart: sealed, file there"
+        );
+        assert!(
+            DataKeys::unreadable(path).keyring_exists(),
+            "unreadable: there"
+        );
     }
 
     #[test]

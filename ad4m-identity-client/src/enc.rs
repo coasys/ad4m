@@ -213,6 +213,7 @@ pub struct WithEncKey<R: ExecutorRpc> {
 
 fn answered<T: serde::de::DeserializeOwned>(method: &str, value: Value) -> Result<T, RpcError> {
     serde_json::from_value(value).map_err(|e| RpcError {
+        data: None,
         code: 502,
         message: format!("{method} answered {e}"),
     })
@@ -220,6 +221,7 @@ fn answered<T: serde::de::DeserializeOwned>(method: &str, value: Value) -> Resul
 
 fn unavailable(message: String) -> RpcError {
     RpcError {
+        data: None,
         code: 503,
         message: format!("unavailable: {message}"),
     }
@@ -259,6 +261,7 @@ impl<R: ExecutorRpc> WithEncKey<R> {
                 .await?,
         )?;
         let chain = ad4m_identity_core::fold_json(&log.events).map_err(|e| RpcError {
+            data: None,
             code: 502,
             message: format!(
                 "{METHOD} served a log that does not fold: {}",
@@ -268,6 +271,7 @@ impl<R: ExecutorRpc> WithEncKey<R> {
         // A valid log of another identity would check that identity's messages.
         if chain.state().did != did {
             return Err(RpcError {
+                data: None,
                 code: 502,
                 message: format!("{METHOD} served the log of {} for {did}", chain.state().did),
             });
@@ -301,6 +305,7 @@ impl<R: ExecutorRpc> WithEncKey<R> {
                 "the enc key is locked, so the inbox does not open: {m}"
             )),
             EncOpenError::Sealed(e) => RpcError {
+                data: None,
                 code: 400,
                 message: format!("open: {e}"),
             },
@@ -358,14 +363,17 @@ impl<R: ExecutorRpc> WithEncKey<R> {
     /// `canKeepMaster`), so the log lists that one and the executor's wallet opens the entry.
     async fn unwrap_record_key(&self, params: Value) -> Result<Value, RpcError> {
         let wrapped = params["wrapped"].as_str().ok_or(RpcError {
+            data: None,
             code: 400,
             message: "identity.unwrapRecordKey takes {wrapped}".into(),
         })?;
         let did = self.status().await?.did.ok_or(RpcError {
+            data: None,
             code: 404,
             message: "the executor's device key is in no log".into(),
         })?;
         let scid = ad4m_identity_core::scid_of(&did).ok_or(RpcError {
+            data: None,
             code: 502,
             message: format!("identity.status answered {did}, not a did:scid:coasys:1"),
         })?;
