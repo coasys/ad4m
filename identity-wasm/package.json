@@ -23,7 +23,7 @@
   },
   "scripts": {
     "build": "node scripts/build.mjs",
-    "test": "node scripts/smoke.mjs"
+    "smoke": "node scripts/smoke.mjs"
   },
   "repository": {
     "type": "git",

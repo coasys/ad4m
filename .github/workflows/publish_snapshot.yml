@@ -74,6 +74,11 @@ jobs:
       - name: Build identity-wasm
         run: pnpm --filter @coasys/identity-wasm run build
 
+      # Loads the built package with `init()` under Node. Not a `test` script: the turbo test task
+      # runs without the wasm32 build.
+      - name: Smoke-test identity-wasm
+        run: pnpm --filter @coasys/identity-wasm run smoke
+
       # All three packages in one call, so the PR comment lists them together. Connect's snapshot matches
       # core's because connect's build bundles core from this checkout; core is only a
       # devDependency of connect, which an app installing connect does not get. An app installs
