@@ -215,6 +215,40 @@ describe("a call-backed class's writes", () => {
     });
   });
 
+  describe("a subclass reads the shape it addresses", () => {
+    const Imported = Ad4mModel.fromSHACL(callShape("mounttest://Thing"), "MountThing");
+
+    @Model({ name: "LocalThing", namespace: "local://" })
+    class LocalThing extends (Imported as typeof Ad4mModel) {
+      @Property({ through: "local://title", required: true })
+      title: string = "";
+    }
+
+    class SameThing extends (Imported as typeof Ad4mModel) {}
+
+    it("a decorated subclass is its own link-backed class", async () => {
+      expect((LocalThing as any).hasCallActions()).toBe(false);
+      expect(LocalThing.getTargetClass()).toBe("local://LocalThing");
+      const { proxy, sent } = proxyWith({ id: "ad4m://l1", title: "a" });
+      const created = new LocalThing(proxy);
+      created.title = "a";
+      await created.save();
+      const row = new LocalThing(proxy, "ad4m://l1");
+      await row.get();
+      row.title = "b";
+      await row.save();
+      await row.delete();
+      expect(methods(sent).filter((m) => m.startsWith("instance"))).toEqual([]);
+      expect(methods(sent)).toContain("createSubject");
+      expect(methods(sent)).toContain("removeSubject");
+    });
+
+    it("an undecorated subclass is the imported class", () => {
+      expect((SameThing as any).hasCallActions()).toBe(true);
+      expect(SameThing.getTargetClass()).toBe("mounttest://Thing");
+    });
+  });
+
   describe("fromSHACL keeps the shape's call actions", () => {
     it("delete() of an imported call-backed shape with no flag runs the destructor (instanceRemove)", async () => {
       // No `has_value` flag and every property optional: the property

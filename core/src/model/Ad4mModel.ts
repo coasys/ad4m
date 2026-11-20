@@ -616,8 +616,7 @@ export class Ad4mModel {
     // A class from `fromSHACL` keeps the shape's own target class: its name
     // need not be the IRI's local name (a mount's `MountThing` for
     // `mounttest://Thing`), so the generated `namespace + name` is not it.
-    const source = Object.prototype.hasOwnProperty.call(this, 'sourceShape') ? (this as any).sourceShape : undefined;
-    const targetClass = source?.targetClass ?? this.generateSHACL().shape?.targetClass;
+    const targetClass = this.importedShape()?.targetClass ?? this.generateSHACL().shape?.targetClass;
     if (!targetClass) throw new Error(`Class ${this.name} has no target class: declare it with @Model.`);
     return targetClass;
   }
@@ -1168,10 +1167,24 @@ export class Ad4mModel {
   }
 
   /** The shape this class's writes follow, actions included: the shape
-   *  {@link fromSHACL} made it from, else its generated one.
+   *  {@link fromSHACL} made it from ({@link importedShape}), else its
+   *  generated one. {@link getTargetClass} reads the same.
    *  @internal */
   static ownShape(): any {
-    return (this as any).sourceShape ?? this.generateSHACL().shape;
+    return this.importedShape() ?? this.generateSHACL().shape;
+  }
+
+  /** The shape {@link fromSHACL} made this class from: its own, or the
+   *  nearest ancestor's when no class in between was decorated with
+   *  `@Model`. A decorated subclass has a generated shape of its own, and
+   *  is addressed and written by that shape, not its parent's.
+   *  @internal */
+  static importedShape(): any {
+    for (let c: any = this; c && c !== Ad4mModel; c = Object.getPrototypeOf(c)) {
+      if (Object.prototype.hasOwnProperty.call(c, 'sourceShape')) return c.sourceShape;
+      if (Object.prototype.hasOwnProperty.call(c, 'generateSHACL')) return undefined;
+    }
+    return undefined;
   }
 
   /**
