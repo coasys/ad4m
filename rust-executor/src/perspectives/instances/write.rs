@@ -662,32 +662,49 @@ pub async fn update(
         return Err(InstanceError::EmptyProperties);
     }
 
+    // Through an abstract class (#1435) the record's own classes' setters write;
+    // `update_subject` checks those. Which collections they can set depends on
+    // the record, so it is found first.
+    let is_abstract = perspective
+        .is_abstract_class(&class_name)
+        .map_err(|e| failed(&class_name, WriteStep::ReadShape, e))?;
+    let abstract_record = if is_abstract {
+        let base_uri = instance_uri("base_uri", &params.base_uri)?;
+        Some(require_instance(perspective, &class_name, &base_uri).await?)
+    } else {
+        None
+    };
+
     // A collection takes a member list only through a declared
     // `ad4m://setter` (a mounted class's `call`, or a `collectionSetter`);
-    // `validate_update` refuses any other one.
+    // through an abstract class, through what the record's own classes
+    // declare. `validate_update` refuses any other one.
     let infos = class_properties(&shape);
     let mut settable = Vec::new();
     for given in params.properties.keys() {
         let Some(info) = find_property(&infos, given) else {
             continue;
         };
-        if info.collection()
-            && perspective
+        if !info.collection() {
+            continue;
+        }
+        let can_set = match &abstract_record {
+            Some(stored) => perspective
+                .abstract_collection_settable(&class_name, stored, info.name())
+                .await
+                .map_err(|e| failed(&class_name, WriteStep::ReadShape, e))?,
+            None => perspective
                 .property_setter_kind(&class_name, info.name())
                 .await
                 .map_err(|e| failed(&class_name, WriteStep::ReadShape, e))?
-                .is_some()
-        {
+                .is_some(),
+        };
+        if can_set {
             settable.push(info.name().to_string());
         }
     }
     let validated = validate_update(&shape, &params.properties, &settable)
         .map_err(|errors| invalid(&class_name, errors))?;
-    // Through an abstract class (#1435) the record's own classes' setters write;
-    // `update_subject` checks those.
-    let is_abstract = perspective
-        .is_abstract_class(&class_name)
-        .map_err(|e| failed(&class_name, WriteStep::ReadShape, e))?;
     if !is_abstract {
         let setter_errors = check_setters(perspective, &shape, &validated.scalars).await;
         if !setter_errors.is_empty() {
@@ -697,7 +714,10 @@ pub async fn update(
 
     let base_uri = instance_uri("base_uri", &params.base_uri)?;
     // Where it is stored: a legacy-spelled id's node is not the normalised one.
-    let stored = require_instance(perspective, &class_name, &base_uri).await?;
+    let stored = match abstract_record {
+        Some(stored) => stored,
+        None => require_instance(perspective, &class_name, &base_uri).await?,
+    };
 
     // A collection (validation let through only those with a declared
     // `ad4m://setter`) joins the subject values verbatim — `update_subject`
