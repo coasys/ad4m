@@ -3,6 +3,7 @@ import { customElement, property } from "lit/decorators.js";
 import { sharedStyles } from "../../styles/shared-styles";
 import { MapPinIcon } from "../icons";
 import { renderHostAvatar } from "../shared/avatar";
+import { formatPrice } from "../../utils";
 import type { PricingItem, RemoteHost } from "../../types";
 
 @customElement("host-detail")
@@ -153,15 +154,6 @@ export class HostDetail extends LitElement {
     return description;
   }
 
-  private formatPrice(price: number): string {
-    if (price === 0) return "0.00";
-    // Show enough decimal places to be meaningful
-    if (price >= 0.01) return price.toFixed(2);
-    if (price >= 0.0001) return price.toFixed(4);
-    if (price >= 0.000001) return price.toFixed(6);
-    return price.toExponential(2);
-  }
-
   render() {
     if (!this.host) return null;
 
@@ -188,7 +180,7 @@ export class HostDetail extends LitElement {
                 ${this.host.rates.filter(r => this.isOperationRate(r)).map(rate => html`
                   <tr>
                     <td>${this.rateLabel(rate.description)}</td>
-                    <td>${this.formatPrice(rate.priceInHOT)} wHOT</td>
+                    <td>${formatPrice(rate.priceInHOT)} wHOT</td>
                   </tr>
                 `)}
                 ${this.host.rates.filter(r => !this.isOperationRate(r)).length > 0 ? html`
@@ -196,7 +188,7 @@ export class HostDetail extends LitElement {
                   ${this.host.rates.filter(r => !this.isOperationRate(r)).map(rate => html`
                     <tr>
                       <td>${rate.description}</td>
-                      <td>${this.formatPrice(rate.priceInHOT)} wHOT</td>
+                      <td>${formatPrice(rate.priceInHOT)} wHOT</td>
                     </tr>
                   `)}
                 ` : ''}

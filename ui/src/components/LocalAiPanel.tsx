@@ -7,7 +7,7 @@ import type {
   LocalAiStatus,
 } from "@coasys/ad4m";
 import { useCallback, useEffect, useState, type Dispatch, type SetStateAction } from "react";
-import { basisNote, kindLabel, localAction, serverInstead, toDownload } from "./aiSetup";
+import { basisNote, kindLabel, localAction, serverInstead, toDownload } from "./aiSetupHelpers";
 
 /** How often the panel reads local AI's status and plan again while it shows them. */
 const REFRESH_MS = 5000;

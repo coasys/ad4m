@@ -237,6 +237,19 @@ impl UtteranceOutcome {
             Self::GateFailed => "gate_failed",
         }
     }
+
+    /// The level of an utterance's completion line. Silence and empty audio never reach the
+    /// speech server and come several times a minute per open stream: debug. The rest
+    /// reached it, or failed: info.
+    fn log_level(self) -> log::Level {
+        match self {
+            Self::Silence | Self::Empty => log::Level::Debug,
+            Self::Transcribed
+            | Self::UpstreamFailed
+            | Self::InsufficientCredits
+            | Self::GateFailed => log::Level::Info,
+        }
+    }
 }
 
 /// Timing from server admission. The log's `latency_ms` is [`Self::upstream_ms`] when a
@@ -343,7 +356,8 @@ impl RemoteStream {
                 completion.waiting_depth,
             );
         } else {
-            log::info!(
+            log::log!(
+                completion.outcome.log_level(),
                 "transcription stream={} model={} audio_ms={} queue_wait_ms={} total_ms={} outcome={outcome} waiting_depth={}",
                 self.stream_id,
                 self.remote_model,
@@ -506,6 +520,18 @@ pub(crate) fn speech_fixture() -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Utterances that never reached the speech server log at debug; the rest at info.
+    #[test]
+    fn only_utterances_that_reached_the_server_or_failed_log_at_info() {
+        use log::Level;
+        use UtteranceOutcome::*;
+        assert_eq!(Silence.log_level(), Level::Debug);
+        assert_eq!(Empty.log_level(), Level::Debug);
+        for outcome in [Transcribed, UpstreamFailed, InsufficientCredits, GateFailed] {
+            assert_eq!(outcome.log_level(), Level::Info, "{outcome:?}");
+        }
+    }
 
     /// The samples of a 16 kHz mono PCM16 WAV, whatever chunks precede `data`.
     fn wav_samples(path: &str) -> Vec<f32> {

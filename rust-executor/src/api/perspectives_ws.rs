@@ -130,8 +130,9 @@ pub(crate) async fn get_perspective_with_access(
     Ok(perspective)
 }
 
-/// Refuses a write whose managed agent's account has no credits left. `agent_did` is the
-/// managed agent the request acts as; the main agent pays nothing.
+/// Refuses a request (a perspective write, an AI call) whose managed agent's account has no
+/// credits left. `agent_did` is the managed agent the request acts as; a caller without a
+/// managed agent (the main agent, the operator, an app) pays nothing.
 pub(super) fn check_credits(agent_did: Option<&str>) -> Result<(), WsRpcError> {
     if agent_did.is_none() {
         return Ok(());
