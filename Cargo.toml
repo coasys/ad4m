@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "ad4m-hash-chain",
+    "ad4m-literal",
     "ad4m-identity-core",
     "ad4m-identity-client",
     "identity-store",

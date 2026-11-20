@@ -35,6 +35,7 @@ dependencies = [
 name = "ad4m-client"
 version = "0.13.1-staging.16"
 dependencies = [
+ "ad4m-literal",
  "anyhow",
  "chrono",
  "clap",
@@ -321,6 +322,15 @@ dependencies = [
  "serde_json",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+]
+
+[[package]]
+name = "ad4m-literal"
+version = "0.13.1-staging.16"
+dependencies = [
+ "anyhow",
+ "serde_json",
+ "urlencoding",
 ]
 
 [[package]]
