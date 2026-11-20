@@ -270,6 +270,10 @@ getrandom01 = { package = "getrandom", version = "0.1", features = ["wasm-bindge
 getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
 getrandom03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
 wasm-bindgen-futures = "0.4"
+# Timers on setTimeout with tokio's API (src/web/time.rs).
+wasmtimer = "0.4"
+# Utc::now / Local::now from the JS Date.
+chrono = { version = "0.4.6", features = ["serde", "wasmbind"] }
 
 [target.'cfg(all(not(target_env = "msvc"), not(target_arch = "wasm32")))'.dependencies]
 tikv-jemalloc-ctl = { version = "0.6", features = ["stats"] }

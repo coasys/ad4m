@@ -180,6 +180,7 @@ dependencies = [
  "voice_activity_detector",
  "wasm-bindgen-futures",
  "wasm-bindgen-test",
+ "wasmtimer",
  "web-time",
  "webbrowser",
  "x509-parser 0.16.0",
@@ -20819,6 +20820,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "03a4a3f055a804a2f3d86e816a9df78a8fa57762212a8506164959224a40cd48"
 dependencies = [
  "libm",
+]
+
+[[package]]
+name = "wasmtimer"
+version = "0.4.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c62b7f338e4397a45d054c15a2b36a93d57cccdda7be11a7d7b045d47b5e70ce"
+dependencies = [
+ "futures",
+ "js-sys",
+ "parking_lot",
+ "pin-project-lite",
+ "slab",
+ "wasm-bindgen",
 ]
 
 [[package]]
