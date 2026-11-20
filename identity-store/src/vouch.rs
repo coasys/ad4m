@@ -155,7 +155,9 @@ impl Store {
         incoming: &Incoming<'_>,
     ) -> Result<VouchNote, ApiError> {
         let did = did_of(scid);
-        self.verify_request(incoming, Some(&did), Signer::AnyKey)?;
+        let signer = self
+            .verify_request(incoming, Some(&did), Signer::AnyKey)?
+            .key_id;
         let token = note_token(incoming.body)?;
         let vouched = {
             let conn = self.db.lock()?;
@@ -169,10 +171,39 @@ impl Store {
         {
             let mut conn = self.db.lock()?;
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            // The redeem took up to its timeout: a revocation or a rotation may have retired
+            // the requesting key since it was verified. It is checked again here, in the
+            // transaction that takes the identity's one note slot.
+            if !self.speaks_for(&tx, scid, &signer, now)? {
+                return Err(ApiError::forbidden(
+                    "vouch",
+                    "the requesting key no longer speaks for the identity",
+                ));
+            }
             put_note(&tx, scid, &note, now)?;
             tx.commit()?;
         }
         Ok(note)
+    }
+}
+
+impl Store {
+    /// True when the key `key_id` is valid at the stored head of `scid` and the identity is not
+    /// frozen: what [`Store::verify_request`] checked of the key, read again on `conn`.
+    fn speaks_for(
+        &self,
+        conn: &Connection,
+        scid: &str,
+        key_id: &str,
+        now: u64,
+    ) -> Result<bool, ApiError> {
+        let Some(chain) = self.held_chain(conn, scid)? else {
+            return Ok(false);
+        };
+        Ok(crate::db::freezing_fork(conn, scid, &chain)?.is_none()
+            && chain
+                .state()
+                .key_valid_at_time(key_id, chain.head().seq, now))
     }
 }
 

@@ -12,7 +12,8 @@
 //! | `BRAKE_GLOBAL_PER_HOUR` | `120` | new logs without a note store-wide per hour |
 //! | `BRAKE_ADDR_BURST` | `3` | new logs without a note per address at once (IPv6 by /64) |
 //! | `BRAKE_ADDR_PER_DAY` | `3` | what the address bucket refills per 24 h |
-//! | `TRUSTED_PROXIES` | none | comma-separated proxy addresses or ranges whose `CF-Connecting-IP` / `X-Forwarded-For` the brake reads; required when the store runs behind a proxy — unset there, every client counts as the proxy's one address |
+//! | `CLIENT_IP_HEADER` | `x-forwarded-for` | the one header a trusted proxy sets to the client's address: `x-forwarded-for` or `cf-connecting-ip` (Cloudflare ingress); the other is never read |
+//! | `TRUSTED_PROXIES` | none | comma-separated proxy addresses or ranges whose `CLIENT_IP_HEADER` the brake reads; required when the store runs behind a proxy — unset there, every client counts as the proxy's one address |
 //! | `VOUCH_URL` | none | the vouching service's base URL; unset: tokens get `503 vouch-unavailable` |
 //! | `VOUCH_CREDENTIAL` | none | the store's bearer credential at the vouching service |
 //! | `VOUCH_KEYS` | none | comma-separated multikeys of the trusted vouching keys |

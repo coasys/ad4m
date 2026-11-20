@@ -216,8 +216,11 @@ tests name them by these names.
   takes one token from the failure bucket in a transaction of its own. Buckets refill
   continuously; table `brake` keeps each level at its `updated_at` (no row: full). An address
   is the IPv4 address or the IPv6 /64 (an IPv4-mapped address counts as IPv4): the socket
-  peer, or, when the peer is in `TRUSTED_PROXIES`, `CF-Connecting-IP`, else the nearest
-  `X-Forwarded-For` entry that is no trusted proxy. A request that carries a proxy header
+  peer, or, when the peer is in `TRUSTED_PROXIES`, the one header `CLIENT_IP_HEADER` names:
+  the nearest `X-Forwarded-For` entry that is no trusted proxy (the default,
+  `x-forwarded-for`) or `CF-Connecting-IP` (`cf-connecting-ip`, for Cloudflare ingress). The
+  other header is never read: a proxy that passes it through unchanged would let a caller
+  choose its own address. Set it to the header your ingress writes itself. A request that carries a proxy header
   while `TRUSTED_PROXIES` is empty logs one stderr warning at the first such request: behind a
   proxy every client then counts as the proxy's one address. Each admission or refusal deletes
   the rows of its kind's buckets that are full again, so `brake` holds only the addresses seen
@@ -229,11 +232,18 @@ tests name them by these names.
   `verify_note` passes under `VOUCH_KEYS` is taken; `409`/`410` are `403 vouch`; no
   `VOUCH_URL`, an unreachable service, any other status, or a note that does not verify are
   `503 vouch-unavailable`. On `POST …/events` a token (with no `pow`: `400 vouch-and-pow`)
-  takes nothing from the brake: #0 replays and every check runs without committing, then the
-  token is redeemed outside the database lock, then the append runs again and commits with
-  the note (`admitted_by = 'vouch'`); a log that appeared meanwhile is `409 {head}`. On
+  skips the global and address buckets and the proof, but not the failure bucket: it is
+  checked first (`429 failure` before any signature replays), then #0 replays and every
+  check runs without committing, then the token is redeemed outside the database lock, then
+  the append runs again and commits with the note (`admitted_by = 'vouch'`); a log that
+  appeared meanwhile is `409 {head}`. Any refusal of a token request while the store holds
+  no log (a failed check, a refused token `403 vouch`, the service's `503`) takes a token
+  from the failure bucket, as on the brake's path, so a token that never redeems cannot make
+  the store replay the same inception without limit. On
   `POST /v1/notes/{scid}` the store refuses a second note (`409 already-vouched`) before it
-  redeems. `LogPage.vouched` is the stored note read under the current `VOUCH_KEYS`, so a
+  redeems, and checks the requesting key's standing again in the transaction that stores the
+  note (`403 vouch` when a revocation or a rotation retired it while the service answered:
+  the identity's one note slot stays free). `LogPage.vouched` is the stored note read under the current `VOUCH_KEYS`, so a
   store that drops a voucher shows the note with `vouched: false`. No pairing routes yet.
 - The store reads the clock only through `Store::now` (tests inject it). A `wait` read
   watches one `Topic`: the identity's offers (`GET /offers/{scid}`, master-signed), the
@@ -460,7 +470,8 @@ tests name them by these names.
 | `BRAKE_GLOBAL_PER_HOUR` | `120` | no-note logs store-wide per hour |
 | `BRAKE_ADDR_BURST` | `3` | no-note logs per address at once (IPv6 by /64) |
 | `BRAKE_ADDR_PER_DAY` | `3` | what the address bucket refills per 24 h |
-| `TRUSTED_PROXIES` | none | comma-separated proxy addresses or ranges (`10.0.0.0/8`) whose `CF-Connecting-IP` / `X-Forwarded-For` the brake reads. **Required when the store runs behind a proxy** — unset there, every client counts as the proxy's one address and 30 failures an hour lock all sign-ups; the first request carrying a proxy header logs a warning |
+| `CLIENT_IP_HEADER` | `x-forwarded-for` | the one header a trusted proxy sets to the client's address: `x-forwarded-for` or `cf-connecting-ip` (Cloudflare ingress). The other header is never read, so a client cannot choose its address through a proxy that passes it on |
+| `TRUSTED_PROXIES` | none | comma-separated proxy addresses or ranges (`10.0.0.0/8`) whose `CLIENT_IP_HEADER` the brake reads. **Required when the store runs behind a proxy** — unset there, every client counts as the proxy's one address and 30 failures an hour lock all sign-ups; the first request carrying a proxy header logs a warning |
 | `VOUCH_URL` | none | the vouching service's base URL; unset: every token is `503 vouch-unavailable` |
 | `VOUCH_CREDENTIAL` | none | the store's bearer credential at the vouching service |
 | `VOUCH_KEYS` | none | comma-separated Ed25519 multikeys of the trusted vouching keys (`GET {VOUCH_URL}/api/vouch/key` answers the current one) |

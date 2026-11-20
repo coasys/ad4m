@@ -71,11 +71,15 @@ pub struct Settings {
     pub brake_addr_per_day: u32,
     /// `TRUSTED_PROXIES`: comma-separated addresses or ranges (`10.0.0.0/8`) of the proxies in
     /// front of the store. Only a request whose socket peer is one of them is read for its
-    /// client's address from `CF-Connecting-IP`, else `X-Forwarded-For`. Default none —
+    /// client's address, from the one header `client_ip_header` names. Default none —
     /// required when the store runs behind a proxy: without it every client counts as the
     /// proxy's one address for the brake, and the store says so on the first request that
     /// carries a proxy header (`Store::note_untrusted_proxy_headers`).
     pub trusted_proxies: Vec<brake::Cidr>,
+    /// `CLIENT_IP_HEADER`: the one header a trusted proxy fills with the client's address:
+    /// `x-forwarded-for` (default) or `cf-connecting-ip` (Cloudflare ingress). The other is
+    /// never read: a proxy that passes it through would let a caller choose its own address.
+    pub client_ip_header: brake::ClientIpHeader,
     /// `VOUCH_URL`: the vouching service's base URL (`POST {VOUCH_URL}/api/vouch/redeem`). None:
     /// every token gets `503 vouch-unavailable`.
     pub vouch_url: Option<String>,
@@ -119,6 +123,7 @@ impl Default for Settings {
             brake_addr_burst: 3,
             brake_addr_per_day: 3,
             trusted_proxies: Vec::new(),
+            client_ip_header: brake::ClientIpHeader::default(),
             vouch_url: None,
             vouch_credential: None,
             vouch_keys: Vec::new(),
@@ -185,6 +190,12 @@ impl Settings {
                     .map_err(|e| format!("TRUSTED_PROXIES: {e}"))
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let client_ip_header = match text("CLIENT_IP_HEADER") {
+            Some(v) => v
+                .parse::<brake::ClientIpHeader>()
+                .map_err(|e| format!("CLIENT_IP_HEADER: {e}"))?,
+            None => defaults.client_ip_header,
+        };
         let vouch_keys = list("VOUCH_KEYS");
         if let Some(bad) = vouch_keys
             .iter()
@@ -202,6 +213,7 @@ impl Settings {
             brake_addr_burst: number(&get, "BRAKE_ADDR_BURST", defaults.brake_addr_burst)?,
             brake_addr_per_day: number(&get, "BRAKE_ADDR_PER_DAY", defaults.brake_addr_per_day)?,
             trusted_proxies,
+            client_ip_header,
             vouch_url: text("VOUCH_URL"),
             vouch_credential: text("VOUCH_CREDENTIAL").map(vouch::Credential),
             vouch_keys,

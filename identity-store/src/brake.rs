@@ -22,8 +22,9 @@
 //!
 //! An address is the IPv4 address itself, or the /64 prefix of an IPv6 address (an IPv4 address
 //! mapped into IPv6 counts as the IPv4 address). It is the socket's peer, unless that peer is a
-//! trusted proxy (`TRUSTED_PROXIES`): then `CF-Connecting-IP`, else the nearest
-//! `X-Forwarded-For` entry that is no trusted proxy.
+//! trusted proxy (`TRUSTED_PROXIES`): then the one header `CLIENT_IP_HEADER` names, the nearest
+//! `X-Forwarded-For` entry that is no trusted proxy (the default) or `CF-Connecting-IP`; the
+//! other header is never read.
 
 use std::fmt::Write as _;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
@@ -140,31 +141,65 @@ pub fn address_of(ip: IpAddr) -> String {
     }
 }
 
-/// The client's IP: the socket's `peer`, unless the peer is one of `trusted`; then
-/// `CF-Connecting-IP`, else the nearest `X-Forwarded-For` entry that is no trusted proxy (each
-/// proxy appends the address it saw, so entries left of it are the client's to write), else the
-/// peer itself.
-pub fn client_ip(peer: IpAddr, headers: &HeaderMap, trusted: &[Cidr]) -> IpAddr {
+/// The one header a trusted proxy fills with the client's address (`CLIENT_IP_HEADER`). Only
+/// that header is ever read: a proxy that passes the other one through unchanged would let a
+/// caller write its own address.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ClientIpHeader {
+    /// `X-Forwarded-For`, the default: each proxy appends the address it saw.
+    #[default]
+    XForwardedFor,
+    /// `CF-Connecting-IP`, for Cloudflare ingress: Cloudflare sets it to the client's address.
+    CfConnectingIp,
+}
+
+impl FromStr for ClientIpHeader {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<ClientIpHeader, String> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "x-forwarded-for" => Ok(ClientIpHeader::XForwardedFor),
+            "cf-connecting-ip" => Ok(ClientIpHeader::CfConnectingIp),
+            other => Err(format!(
+                "{other} is neither x-forwarded-for nor cf-connecting-ip"
+            )),
+        }
+    }
+}
+
+/// The client's IP: the socket's `peer`, unless the peer is one of `trusted`; then what `header`
+/// names: the nearest `X-Forwarded-For` entry that is no trusted proxy (each proxy appends the
+/// address it saw, so entries left of it are the client's to write), or the one address of
+/// `CF-Connecting-IP`. The other header is ignored. The peer itself when that header is
+/// missing or garbled.
+pub fn client_ip(
+    peer: IpAddr,
+    headers: &HeaderMap,
+    trusted: &[Cidr],
+    header: ClientIpHeader,
+) -> IpAddr {
     let is_trusted = |ip: IpAddr| trusted.iter().any(|c| c.contains(ip));
     if !is_trusted(peer) {
         return peer;
     }
-    let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
-    if let Some(ip) = header("cf-connecting-ip").and_then(|v| IpAddr::from_str(v.trim()).ok()) {
-        return ip;
+    match header {
+        ClientIpHeader::CfConnectingIp => headers
+            .get("cf-connecting-ip")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| IpAddr::from_str(v.trim()).ok())
+            .unwrap_or(peer),
+        ClientIpHeader::XForwardedFor => headers
+            .get_all("x-forwarded-for")
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .flat_map(|v| v.split(','))
+            .filter_map(|v| IpAddr::from_str(v.trim()).ok())
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .find(|ip| !is_trusted(*ip))
+            .unwrap_or(peer),
     }
-    let forwarded: Vec<IpAddr> = headers
-        .get_all("x-forwarded-for")
-        .iter()
-        .filter_map(|v| v.to_str().ok())
-        .flat_map(|v| v.split(','))
-        .filter_map(|v| IpAddr::from_str(v.trim()).ok())
-        .collect();
-    forwarded
-        .into_iter()
-        .rev()
-        .find(|ip| !is_trusted(*ip))
-        .unwrap_or(peer)
 }
 
 /// The sender's address (see [`address_of`], [`client_ip`]), read from the socket peer the
@@ -204,6 +239,7 @@ impl FromRequestParts<Arc<Store>> for Sender {
                 peer.ip(),
                 &parts.headers,
                 &store.settings.trusted_proxies,
+                store.settings.client_ip_header,
             )),
             None => UNKNOWN_ADDRESS.to_string(),
         }))
@@ -312,6 +348,19 @@ fn require(
     Ok(())
 }
 
+/// `429 {scope:"failure"}` when the failure bucket of `address` is empty: step 1 of the brake,
+/// which every new log from an address passes before any signature replays, with a vouching
+/// token or without. Takes nothing.
+pub(crate) fn check_failure(conn: &Connection, address: &str, now: u64) -> Result<(), ApiError> {
+    require(
+        conn,
+        "failure",
+        &failure_name(address),
+        &failure_bucket(),
+        now,
+    )
+}
+
 /// Steps 1 to 3 of the brake for a no-note log from `address`: the failure, global and address
 /// buckets, each `429` when empty. Takes nothing.
 pub(crate) fn check_buckets(
@@ -320,13 +369,7 @@ pub(crate) fn check_buckets(
     address: &str,
     now: u64,
 ) -> Result<(), ApiError> {
-    require(
-        conn,
-        "failure",
-        &failure_name(address),
-        &failure_bucket(),
-        now,
-    )?;
+    check_failure(conn, address, now)?;
     require(conn, "global", GLOBAL, &global_bucket(settings), now)?;
     require(
         conn,
@@ -648,36 +691,71 @@ mod tests {
     }
 
     #[test]
-    fn the_client_address_comes_from_headers_only_behind_a_trusted_proxy() {
+    fn the_client_address_comes_from_the_named_header_only_behind_a_trusted_proxy() {
+        use ClientIpHeader::{CfConnectingIp, XForwardedFor};
         let trusted: Vec<Cidr> = vec!["10.0.0.0/8".parse().unwrap()];
         let h = headers(&[
             ("cf-connecting-ip", "198.51.100.9"),
             ("x-forwarded-for", "192.0.2.5"),
         ]);
         // Not from a trusted proxy: the headers are ignored.
+        for header in [XForwardedFor, CfConnectingIp] {
+            assert_eq!(
+                client_ip(ip("203.0.113.1"), &h, &trusted, header),
+                ip("203.0.113.1")
+            );
+        }
+        // From one: only the named header counts, whatever the other says.
         assert_eq!(
-            client_ip(ip("203.0.113.1"), &h, &trusted),
-            ip("203.0.113.1")
+            client_ip(ip("10.1.1.1"), &h, &trusted, XForwardedFor),
+            ip("192.0.2.5")
         );
-        // From one: CF-Connecting-IP first.
-        assert_eq!(client_ip(ip("10.1.1.1"), &h, &trusted), ip("198.51.100.9"));
-        // Without it, the nearest X-Forwarded-For entry that is no trusted proxy.
+        assert_eq!(
+            client_ip(ip("10.1.1.1"), &h, &trusted, CfConnectingIp),
+            ip("198.51.100.9")
+        );
+        // A client-written CF header does not move an X-Forwarded-For setting, and the reverse.
+        let h = headers(&[("cf-connecting-ip", "198.51.100.9")]);
+        assert_eq!(
+            client_ip(ip("10.1.1.1"), &h, &trusted, XForwardedFor),
+            ip("10.1.1.1")
+        );
+        let h = headers(&[("x-forwarded-for", "192.0.2.5")]);
+        assert_eq!(
+            client_ip(ip("10.1.1.1"), &h, &trusted, CfConnectingIp),
+            ip("10.1.1.1")
+        );
+        // The nearest X-Forwarded-For entry that is no trusted proxy.
         let h = headers(&[("x-forwarded-for", "1.2.3.4, 192.0.2.5, 10.9.9.9")]);
-        assert_eq!(client_ip(ip("10.1.1.1"), &h, &trusted), ip("192.0.2.5"));
+        assert_eq!(
+            client_ip(ip("10.1.1.1"), &h, &trusted, XForwardedFor),
+            ip("192.0.2.5")
+        );
         let h = headers(&[
             ("x-forwarded-for", "1.2.3.4"),
             ("x-forwarded-for", "192.0.2.6"),
         ]);
-        assert_eq!(client_ip(ip("10.1.1.1"), &h, &trusted), ip("192.0.2.6"));
+        assert_eq!(
+            client_ip(ip("10.1.1.1"), &h, &trusted, XForwardedFor),
+            ip("192.0.2.6")
+        );
         // A garbled header: the peer.
         let h = headers(&[
             ("cf-connecting-ip", "nonsense"),
             ("x-forwarded-for", "junk"),
         ]);
-        assert_eq!(client_ip(ip("10.1.1.1"), &h, &trusted), ip("10.1.1.1"));
+        for header in [XForwardedFor, CfConnectingIp] {
+            assert_eq!(
+                client_ip(ip("10.1.1.1"), &h, &trusted, header),
+                ip("10.1.1.1")
+            );
+        }
         // No proxies trusted: always the peer.
         let h = headers(&[("cf-connecting-ip", "198.51.100.9")]);
-        assert_eq!(client_ip(ip("10.1.1.1"), &h, &[]), ip("10.1.1.1"));
+        assert_eq!(
+            client_ip(ip("10.1.1.1"), &h, &[], CfConnectingIp),
+            ip("10.1.1.1")
+        );
     }
 
     #[test]

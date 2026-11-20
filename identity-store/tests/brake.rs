@@ -9,7 +9,7 @@ use std::net::SocketAddr;
 
 use ad4m_identity_core::pow;
 use axum::http::StatusCode;
-use identity_store::brake::Cidr;
+use identity_store::brake::{Cidr, ClientIpHeader};
 use identity_store::Settings;
 use serde_json::{json, Value};
 
@@ -353,10 +353,16 @@ async fn raised_bits_accept_a_proof_at_the_previous_bits_for_ten_minutes_then_re
 
 #[tokio::test]
 async fn behind_a_trusted_proxy_the_forwarded_address_counts_and_elsewhere_the_socket_does() {
+    // The default `CLIENT_IP_HEADER`: X-Forwarded-For. A CF-Connecting-IP the client wrote and
+    // the proxy passed through changes nothing.
     let t = TestStore::with_settings(Settings {
         trusted_proxies: vec!["10.9.0.0/16".parse::<Cidr>().unwrap()],
         ..TestStore::brake_settings()
     });
+    assert_eq!(
+        t.store.settings.client_ip_header,
+        ClientIpHeader::XForwardedFor
+    );
     let proxy = from("10.9.0.5:1000");
     let new = |name: &str| Person::new(name);
     let with_pow = |p: &Person| Some(t.pow_for(&p.scid()));
@@ -366,7 +372,7 @@ async fn behind_a_trusted_proxy_the_forwarded_address_counts_and_elsewhere_the_s
         let reply = post_new(
             &t,
             proxy,
-            &[("cf-connecting-ip", "198.51.100.1")],
+            &[("x-forwarded-for", "198.51.100.1")],
             &p,
             with_pow(&p),
         );
@@ -376,7 +382,19 @@ async fn behind_a_trusted_proxy_the_forwarded_address_counts_and_elsewhere_the_s
     let reply = post_new(
         &t,
         proxy,
-        &[("cf-connecting-ip", "198.51.100.1")],
+        &[("x-forwarded-for", "198.51.100.1")],
+        &p,
+        with_pow(&p),
+    );
+    assert_limited(&reply.await, "address");
+    // A rotating CF-Connecting-IP does not dodge the bucket: the X-Forwarded-For address counts.
+    let reply = post_new(
+        &t,
+        proxy,
+        &[
+            ("x-forwarded-for", "198.51.100.1"),
+            ("cf-connecting-ip", "198.51.100.77"),
+        ],
         &p,
         with_pow(&p),
     );
@@ -384,12 +402,12 @@ async fn behind_a_trusted_proxy_the_forwarded_address_counts_and_elsewhere_the_s
     let reply = post_new(
         &t,
         proxy,
-        &[("cf-connecting-ip", "198.51.100.2")],
+        &[("x-forwarded-for", "198.51.100.2")],
         &p,
         with_pow(&p),
     );
     assert_ok(&reply.await);
-    // Without CF-Connecting-IP: the nearest X-Forwarded-For entry that is no trusted proxy.
+    // The nearest X-Forwarded-For entry that is no trusted proxy.
     let p = new("x 0");
     let reply = post_new(
         &t,
@@ -405,14 +423,14 @@ async fn behind_a_trusted_proxy_the_forwarded_address_counts_and_elsewhere_the_s
     for i in 0..3 {
         let p = new(&format!("o {i}"));
         let client = format!("198.51.100.{}", 100 + i);
-        let headers = [("cf-connecting-ip", client.as_str())];
+        let headers = [("x-forwarded-for", client.as_str())];
         assert_ok(&post_new(&t, outside, &headers, &p, with_pow(&p)).await);
     }
     let p = new("o 3");
     let reply = post_new(
         &t,
         outside,
-        &[("cf-connecting-ip", "198.51.100.200")],
+        &[("x-forwarded-for", "198.51.100.200")],
         &p,
         with_pow(&p),
     );
@@ -421,15 +439,49 @@ async fn behind_a_trusted_proxy_the_forwarded_address_counts_and_elsewhere_the_s
     // The X-Forwarded-For client took one token: two more pass, then 429.
     for i in 1..3 {
         let p = new(&format!("x {i}"));
-        let headers = [("cf-connecting-ip", "198.51.100.3")];
+        let headers = [("x-forwarded-for", "198.51.100.3")];
         assert_ok(&post_new(&t, proxy, &headers, &p, with_pow(&p)).await);
     }
     let p = new("x 3");
-    let headers = [("cf-connecting-ip", "198.51.100.3")];
+    let headers = [("x-forwarded-for", "198.51.100.3")];
     assert_limited(
         &post_new(&t, proxy, &headers, &p, with_pow(&p)).await,
         "address",
     );
+}
+
+/// `CLIENT_IP_HEADER=cf-connecting-ip` (Cloudflare ingress): the CF header names the client, and
+/// an X-Forwarded-For the client wrote is ignored.
+#[tokio::test]
+async fn with_the_cloudflare_setting_only_cf_connecting_ip_names_the_client() {
+    let t = TestStore::with_settings(Settings {
+        trusted_proxies: vec!["10.9.0.0/16".parse::<Cidr>().unwrap()],
+        client_ip_header: ClientIpHeader::CfConnectingIp,
+        ..TestStore::brake_settings()
+    });
+    let proxy = from("10.9.0.5:1000");
+    for i in 0..3 {
+        let p = Person::new(&format!("cf {i}"));
+        // A different X-Forwarded-For each time does not make a new client.
+        let forwarded = format!("203.0.113.{i}");
+        let headers = [
+            ("cf-connecting-ip", "198.51.100.1"),
+            ("x-forwarded-for", forwarded.as_str()),
+        ];
+        assert_ok(&post_new(&t, proxy, &headers, &p, Some(t.pow_for(&p.scid()))).await);
+    }
+    let p = Person::new("cf 3");
+    let headers = [
+        ("cf-connecting-ip", "198.51.100.1"),
+        ("x-forwarded-for", "203.0.113.99"),
+    ];
+    assert_limited(
+        &post_new(&t, proxy, &headers, &p, Some(t.pow_for(&p.scid()))).await,
+        "address",
+    );
+    // Another CF address has its own bucket.
+    let headers = [("cf-connecting-ip", "198.51.100.2")];
+    assert_ok(&post_new(&t, proxy, &headers, &p, Some(t.pow_for(&p.scid()))).await);
 }
 
 /// `TRUSTED_PROXIES` empty but a request carries a proxy header (the store sits behind a proxy
@@ -517,6 +569,7 @@ fn the_defaults_from_an_empty_configuration_are_3_120_and_22_and_each_key_change
     assert_eq!(empty.brake_global_per_hour, 120);
     assert_eq!(empty.pow_bits, 22);
     assert!(empty.trusted_proxies.is_empty());
+    assert_eq!(empty.client_ip_header, ClientIpHeader::XForwardedFor);
     assert_eq!(empty.vouch_url, None);
     assert_eq!(empty.vouch_credential, None);
     assert!(empty.vouch_keys.is_empty());
@@ -544,6 +597,10 @@ fn the_defaults_from_an_empty_configuration_are_3_120_and_22_and_each_key_change
     )])
     .unwrap();
     assert_eq!(s.trusted_proxies.len(), 3);
+    let s = config(&[("CLIENT_IP_HEADER", " CF-Connecting-IP ")]).unwrap();
+    assert_eq!(s.client_ip_header, ClientIpHeader::CfConnectingIp);
+    let s = config(&[("CLIENT_IP_HEADER", "x-forwarded-for")]).unwrap();
+    assert_eq!(s.client_ip_header, ClientIpHeader::XForwardedFor);
     let key = common::vouch::vouching_multikey();
     let s = Settings::from_config(|name| match name {
         "VOUCH_URL" => Some("https://platform.example".into()),
@@ -565,6 +622,7 @@ fn the_defaults_from_an_empty_configuration_are_3_120_and_22_and_each_key_change
     assert!(config(&[("POW_BITS", "300")]).is_err());
     assert!(config(&[("TRUSTED_PROXIES", "10.0.0.0/40")]).is_err());
     assert!(config(&[("TRUSTED_PROXIES", "proxy.example")]).is_err());
+    assert!(config(&[("CLIENT_IP_HEADER", "x-real-ip")]).is_err());
     assert!(config(&[("VOUCH_KEYS", "z6MkNotAKey")]).is_err());
 }
 
