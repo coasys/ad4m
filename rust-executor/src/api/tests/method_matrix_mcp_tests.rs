@@ -875,6 +875,7 @@ fn perspective_tools() -> Vec<PerspectiveTool> {
                     perspective_id: uuid,
                     parent: "matrix://s".into(),
                     limit: None,
+                    via: None,
                 }))
                 .await
             })
@@ -896,6 +897,8 @@ fn perspective_tools() -> Vec<PerspectiveTool> {
                     parent: None,
                     limit: None,
                     offset: None,
+                    order: None,
+                    fields: None,
                 }))
                 .await
             })

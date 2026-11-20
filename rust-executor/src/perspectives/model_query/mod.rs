@@ -87,6 +87,8 @@
 //! | [`containment`] | Containment through `Container`: the edge set, and the patterns and rows that read it |
 
 pub(crate) mod abstract_classes;
+#[cfg(test)]
+mod activity_order_tests;
 pub(crate) mod builtin_classes;
 #[cfg(test)]
 mod collection_provenance_tests;
@@ -137,7 +139,7 @@ pub(crate) use filtering::matches_condition;
 pub(crate) use getters::conformance_predicates;
 pub use getters::evaluate_getters_batch;
 pub(crate) use links::{links_rows, links_trigger_predicates};
-pub use query::{execute_model_query, execute_model_query_stopped};
+pub use query::{execute_model_query, execute_model_query_stopped, ACTIVITY_ORDER_KEY};
 pub use relations::resolve_reverse_relations;
 pub(crate) use shape::{load_shape_from_store, MissingShape};
 pub use types::{
