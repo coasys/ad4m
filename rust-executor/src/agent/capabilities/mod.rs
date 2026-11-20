@@ -11,7 +11,7 @@ pub use token::*;
 #[allow(ambiguous_glob_reexports)]
 pub use types::*;
 
-use crate::agent::grants::{now, KeyBinding};
+use crate::agent::grants::now;
 use crate::agent::AgentContext;
 use crate::events::Event;
 use crate::presence::{last_seen_write_due, LAST_SEEN_CLOCK_SKEW_S};
@@ -505,13 +505,15 @@ pub fn permit_capability(auth_info_extended: AuthInfoExtended) -> Result<String,
 /// (`agent.permitCapability`'s guard, `api::guards::Owner::Request`, which MCP's auto-permit
 /// calls through as its caller). An approver grants no more than it holds itself (`approver`, its
 /// session's capabilities): an app with AGENT_PERMIT approves only within its own grant, so
-/// it cannot mint a wider one. `key` is the approving session's key binding: the minted
-/// grant carries it delegated, so the app's token ends with the device and the identity
-/// (`grants::mint`). `None` when no key-bound session approves.
+/// it cannot mint a wider one. `session` is the approving session's grant: when it is
+/// key-bound, the approval carries its binding and the minted grant inherits it delegated,
+/// so the app's token ends with the device and the identity (`grants::mint`), and a
+/// request still waiting for its code ends with them too ([`pending::Approval`]). `None`
+/// when no key-bound session approves.
 pub fn permit_capability_within(
     auth_info_extended: AuthInfoExtended,
     approver: &[Capability],
-    key: Option<&KeyBinding>,
+    session: Option<&crate::agent::grants::LiveGrant>,
 ) -> Result<String, String> {
     let mut auth = auth_info_extended.auth;
     if let Some(approved) = &auth.capabilities {
@@ -529,7 +531,12 @@ pub fn permit_capability_within(
         auth,
         Secret::new(code.clone()),
         now(),
-        key.map(KeyBinding::delegate),
+        session.and_then(|g| {
+            g.key.as_ref().map(|key| pending::Approval {
+                key: key.delegate(),
+                grant: g.id.clone(),
+            })
+        }),
     )?;
     Ok(code)
 }
@@ -602,7 +609,20 @@ fn capability_overlap(a: &Capability, b: &Capability) -> Option<Capability> {
 /// token goes only to the caller; the grant keeps its id.
 pub async fn generate_capability_token(request_id: String, code: String) -> Result<Secret, String> {
     let (token, grant) = PendingRequests::global()
-        .redeem(&request_id, &code, now(), |target, auth, key| {
+        .redeem(&request_id, &code, now(), |target, auth, approval| {
+            // The approving key session must still hold: a revocation that ended it ends
+            // what it approved, and a request approved just before (or by a session ended
+            // between the drop and the approval) mints nothing.
+            if let Some(approval) = approval {
+                if crate::agent::grants::Grants::global()
+                    .get(&approval.grant)
+                    .is_none()
+                {
+                    return Err("The session that approved this request has ended; the \
+                                request must be approved again"
+                        .to_string());
+                }
+            }
             let capabilities = match &auth.capabilities {
                 Some(approved) => {
                     let caps = grant_caps_for(target, approved);
@@ -625,7 +645,7 @@ pub async fn generate_capability_token(request_id: String, code: String) -> Resu
                 auth,
                 Some(request_id.clone()),
                 DEFAULT_TOKEN_VALID_PERIOD,
-                key.cloned(),
+                approval.map(|a| a.key.clone()),
             )
         })
         .map_err(|e| e.to_string())?;
