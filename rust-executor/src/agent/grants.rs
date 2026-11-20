@@ -41,6 +41,7 @@
 //! device key and the identity as the session's would, while the grant itself is no key
 //! session (no renewal, no `endAllSessions` by it).
 
+use super::capabilities::pending::PendingRequests;
 use super::capabilities::{
     read_stored_claims, AuthInfo, Capability, AGENT_AUTH_CAPABILITY, TOKEN_EXPIRY_LEEWAY_SECONDS,
 };
@@ -587,6 +588,9 @@ impl Grants {
     /// (`did:scid:…`): its key stopped being valid in that identity's log. Returns how many
     /// were active.
     pub fn revoke_key(&self, scid: &str, key: &str) -> Result<usize, GrantError> {
+        // Approvals still waiting for their code end first, under the lock a redemption
+        // mints under: a redemption lands before (its grant is revoked below) or finds none.
+        PendingRequests::global().drop_key(scid, key);
         self.revoke_unexpired_where(|g| {
             g.key
                 .as_ref()
@@ -603,6 +607,7 @@ impl Grants {
         keep: Option<&TokenId>,
         before: Option<u64>,
     ) -> Result<usize, GrantError> {
+        PendingRequests::global().drop_identity(scid, keep, before);
         self.revoke_unexpired_where(|g| {
             g.key.as_ref().is_some_and(|k| k.scid == scid)
                 && Some(&g.id) != keep
@@ -618,6 +623,7 @@ impl Grants {
         keep: Option<&TokenId>,
         before: Option<u64>,
     ) -> Result<usize, GrantError> {
+        PendingRequests::global().drop_agent(agent, keep, before);
         self.revoke_unexpired_where(|g| {
             g.agent == *agent
                 && g.role == GrantRole::Agent
