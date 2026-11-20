@@ -51,6 +51,14 @@ pub(super) fn error(code: u16, message: impl Into<String>) -> WsRpcError {
     }
 }
 
+/// [`error`] with the refusal as `error.data`, for a client that acts on the kind.
+pub(super) fn error_with(code: u16, message: impl Into<String>, data: Value) -> WsRpcError {
+    WsRpcError {
+        data: Some(data),
+        ..error(code, message)
+    }
+}
+
 /// The RPC answer for a refusal of the identity interface: the HTTP status the store gave,
 /// and a message that starts with the refusal's name.
 pub fn backend_error(e: IdentityError) -> WsRpcError {
@@ -63,20 +71,26 @@ pub fn backend_error(e: IdentityError) -> WsRpcError {
             ),
         ),
         IdentityError::KeyTaken(key) => error(409, format!("key-taken: {key} sits in a log")),
-        IdentityError::Forbidden(reason) => error(
+        IdentityError::Forbidden(reason) => error_with(
             403,
             format!(
                 "forbidden: {}",
                 serde_json::to_string(&reason).unwrap_or_default()
             ),
+            serde_json::json!({"error": "forbidden", "reason": reason}),
         ),
         IdentityError::Invalid(reason) => error(400, format!("invalid: {reason}")),
         IdentityError::RateLimited {
             scope,
             retry_after_s,
-        } => error(
+        } => error_with(
             429,
             format!("rate-limited: {scope:?}, retry after {retry_after_s} s"),
+            serde_json::json!({
+                "error": "rate-limited",
+                "scope": scope,
+                "retryAfter": retry_after_s,
+            }),
         ),
         IdentityError::Unavailable(why) => error(503, format!("unavailable: {why}")),
         IdentityError::NotServed(call) => error(
@@ -669,12 +683,13 @@ impl IdentityService {
             .attach_note(&position.did, &params.token, &request)
             .await
             .map_err(|e| match e {
-                IdentityError::Invalid(reason) if reason == "already-vouched" => error(
+                IdentityError::Invalid(reason) if reason == "already-vouched" => error_with(
                     409,
                     format!(
                         "already-vouched: the store keeps a note for {} already",
                         position.did
                     ),
+                    serde_json::json!({"error": "already-vouched"}),
                 ),
                 e => backend_error(e),
             })?;
@@ -2992,6 +3007,10 @@ mod tests {
             "{}",
             again.message
         );
+        assert_eq!(
+            again.data,
+            Some(serde_json::json!({"error": "already-vouched"}))
+        );
         assert!(service.status(&agent).await.unwrap().vouched);
     }
 
@@ -3012,6 +3031,10 @@ mod tests {
             .expect_err("a spent token");
         assert_eq!(spent.code, 403, "{spent:?}");
         assert!(spent.message.contains("vouch"), "{}", spent.message);
+        assert_eq!(
+            spent.data,
+            Some(serde_json::json!({"error": "forbidden", "reason": "vouch"}))
+        );
         assert!(!service.status(&agent).await.unwrap().vouched);
 
         let user = crate::test_utils::create_test_user(&format!(
@@ -3035,6 +3058,37 @@ mod tests {
             "{}",
             refused.message
         );
+        assert_eq!(
+            refused.data,
+            Some(serde_json::json!({"error": "no-identity"}))
+        );
         assert_eq!(backend.inner.requests.lock().unwrap().len(), before);
+    }
+
+    /// A refusal the client acts on carries its kind as `error.data`, so no client reads the
+    /// message's English: the brake's 429 and the proof-of-work 403.
+    #[test]
+    fn the_brake_and_the_proof_of_work_refusals_carry_data() {
+        let limited = backend_error(IdentityError::RateLimited {
+            scope: ad4m_ldk::identity::RateLimitScope::Identity,
+            retry_after_s: 42,
+        });
+        assert_eq!(limited.code, 429);
+        assert_eq!(
+            limited.data,
+            Some(serde_json::json!({
+                "error": "rate-limited",
+                "scope": "identity",
+                "retryAfter": 42
+            }))
+        );
+        let pow = backend_error(IdentityError::Forbidden(
+            ad4m_ldk::identity::ForbiddenReason::Pow,
+        ));
+        assert_eq!(pow.code, 403);
+        assert_eq!(
+            pow.data,
+            Some(serde_json::json!({"error": "forbidden", "reason": "pow"}))
+        );
     }
 }
