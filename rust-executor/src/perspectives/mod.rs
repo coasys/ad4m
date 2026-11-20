@@ -1,6 +1,9 @@
 // AI: not in the web executor (wasm32).
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod agent_session;
+#[cfg(target_arch = "wasm32")]
+#[path = "../web/stubs/agent_session.rs"]
+pub(crate) mod agent_session;
 #[cfg(test)]
 #[cfg(not(target_arch = "wasm32"))]
 mod agent_session_tests;
@@ -22,6 +25,9 @@ pub(crate) mod hosted_status;
 pub(crate) mod ingest;
 pub mod instances;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod interpretation;
+#[cfg(target_arch = "wasm32")]
+#[path = "../web/stubs/interpretation.rs"]
 pub mod interpretation;
 #[cfg(test)]
 #[cfg(not(target_arch = "wasm32"))]

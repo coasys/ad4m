@@ -3,5 +3,5 @@
 pub mod rt;
 pub mod scryer_types;
 pub mod time;
-// `prolog_service/` is declared by the flip (S8), as `crate::prolog_service`: it names
-// `crate::types`, which `lib_wasm.rs` does not have yet.
+// `prolog_service/` is `crate::prolog_service`, declared by path in `lib_wasm.rs`.
+pub mod stubs;
