@@ -49,6 +49,9 @@ enum Step {
     Fail(u16),
     /// The model server refuses the prompt: it does not fit the window.
     Overflow,
+    /// An HTTP error whose body is the given text (a server that echoes the
+    /// prompt).
+    FailWith(u16, &'static str),
 }
 
 /// A model that answers from a script, and records what it was sent.
@@ -121,6 +124,14 @@ impl CompletionSource for Scripted {
                     url: "http://127.0.0.1:8080/v1/chat/completions".into(),
                     status: reqwest::StatusCode::from_u16(code).unwrap(),
                     body: "scripted failure".into(),
+                    retry_after: None,
+                }
+            )),
+            Some(Step::FailWith(code, body)) => Err(anyhow::anyhow!(
+                crate::ai_service::providers::http::UpstreamStatus {
+                    url: "http://127.0.0.1:8080/v1/chat/completions".into(),
+                    status: reqwest::StatusCode::from_u16(code).unwrap(),
+                    body: body.into(),
                     retry_after: None,
                 }
             )),
@@ -525,4 +536,52 @@ async fn a_fallback_whose_batch_overflows_is_split_and_the_item_that_does_not_fi
             "{source} is recorded (run, or does not fit): {processed:?}"
         );
     }
+}
+
+/// A tool surface with one tool that answers nothing.
+struct OneTool;
+
+#[async_trait::async_trait]
+impl crate::ai_service::harness::provider::ToolProvider for OneTool {
+    async fn tools(&self) -> Vec<ToolSchema> {
+        vec![ToolSchema::zero_arg("lookup", "")]
+    }
+    async fn call(&self, _name: &str, _args: Value) -> Result<String> {
+        Ok(String::new())
+    }
+}
+
+// F11 on #1821: after the third upstream failure (a round, its retry, and the
+// final request without tools) the fallback reason names the status and not
+// the response body, which can echo the prompt.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_fallback_reason_of_an_upstream_failure_carries_no_response_body() {
+    const ECHO: &str = "ECHOED-PROMPT-MARKER: Nico said the budget needs a second quote";
+    let model = Scripted::new(vec![
+        Step::FailWith(500, ECHO),
+        Step::FailWith(500, ECHO),
+        Step::FailWith(500, ECHO),
+    ]);
+    let result = crate::ai_service::harness::run_with_tools_outcome(
+        "m",
+        vec![json!({"role": "user", "content": "find it"})],
+        Arc::new(OneTool),
+        model.clone(),
+        crate::ai_service::harness::HarnessConfig::default(),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(
+        model.left(),
+        0,
+        "the round, its retry and the final request ran"
+    );
+    assert!(result.is_err(), "the final request failed too");
+    let reason = super::fallback_reason(&result, 0, 0).expect("an error falls back");
+    assert!(reason.contains("HTTP 500"), "{reason}");
+    assert!(
+        !reason.contains("ECHOED-PROMPT-MARKER"),
+        "the reason carries the upstream body: {reason}"
+    );
 }
