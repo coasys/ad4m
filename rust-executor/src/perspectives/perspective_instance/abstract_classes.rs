@@ -16,7 +16,7 @@ use deno_core::error::AnyError;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
-use super::call_actions::{CallGroup, CallRun};
+use super::call_actions::{CallGroup, CallRun, SetterKind};
 use super::{Action, Command, Parameter, PerspectiveInstance};
 use crate::agent::AgentContext;
 use crate::perspectives::model_query::abstract_classes::{
@@ -279,6 +279,39 @@ impl PerspectiveInstance {
         )?
         .remove(base)
         .unwrap_or_default())
+    }
+
+    /// Whether `update_subject` through the abstract `abstract_class` with
+    /// `values` on `base` calls into a language: the instance writes ask
+    /// before they choose a batch, since a call cannot run inside one.
+    pub(crate) async fn abstract_update_calls(
+        &self,
+        abstract_class: &str,
+        base: &str,
+        values: &Value,
+        context: &AgentContext,
+    ) -> Result<bool, AnyError> {
+        Ok(!self
+            .update_through_abstract(abstract_class, base, values, context)
+            .await?
+            .calls
+            .is_empty())
+    }
+
+    /// Whether `remove_subject` through the abstract `abstract_class` on
+    /// `base` calls into a language: some destructor of the record's classes
+    /// it reaches is a `call`.
+    pub(crate) async fn abstract_remove_calls(
+        &self,
+        abstract_class: &str,
+        base: &str,
+    ) -> Result<bool, AnyError> {
+        for class in self.write_targets(abstract_class, base)? {
+            if self.destructor_kind(&class).await? == Some(SetterKind::Call) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// The classes of `base` a write through `abstract_class` reaches: those
