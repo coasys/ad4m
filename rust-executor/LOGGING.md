@@ -25,15 +25,25 @@ level:
 - Language load / holochain app install / uninstall / conductor
   start-stop / agent create-unlock-logout: one line per lifecycle event,
   not per internal stage.
-- Subscription lifecycle (created / dropped). The 60 s heartbeat that
-  logs how many subscriptions are still active is **debug**, not info.
 
 **DEBUG** is for stage-level detail:
 
-- Subscription evaluation runs, individual link diff commits, per-language
+- Subscription lifecycle (created / dropped: one per client query and
+  per closed socket), subscription evaluation runs, individual link diff commits, per-language
   install detail, holochain zome call boundaries, per-tool-call AI
   rounds, prompt/response bodies (truncated), auto-processor stage
   transitions.
+
+Anything that fires on a timer or per poll, message or connection stays
+off info, however short: an idle executor's info log should be quiet.
+
+**Languages.** A language's `console.log` and `console.debug` are logged
+at debug, `console.info` at info, `console.warn` and `console.error` at
+warn and error (`js_core/utils_extension.js`, installed as the language
+isolate's `console` by `language_bootstrap.js`), all as `[JSCORE]: ...`
+under the target `rust_executor::js_core::utils_extension`. Set that
+target to `debug` to see a language's chatter. Deno's own console wrote
+to stdout at no level, past `RUST_LOG` and `--log-dir`.
 
 **TRACE** is for hot-path internals:
 

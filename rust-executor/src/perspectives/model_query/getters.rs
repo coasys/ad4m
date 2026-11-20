@@ -19,7 +19,7 @@
 //! ([`apply_where_filter_to_relation`]) can further narrow down relation
 //! results based on target instance properties.
 
-use deno_core::anyhow::Error;
+use anyhow::Error;
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, HashMap};
 

@@ -28,7 +28,7 @@ use super::types::{
 };
 use super::utils::{validate_iri, values_or_str_filter, MAX_INCLUDE_DEPTH};
 use crate::perspectives::sparql_store::{EvalStop, SparqlStore};
-use deno_core::anyhow::Error;
+use anyhow::Error;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
 

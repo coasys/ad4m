@@ -550,7 +550,7 @@ where
                 let deadline = liveness.lock().unwrap().deadline();
                 if Instant::now() >= deadline {
                     let heard_at = liveness.lock().unwrap().heard_at;
-                    log::info!(
+                    log::debug!(
                         "WS RPC: client silent for {:?}; ending the connection",
                         deadline - heard_at
                     );
