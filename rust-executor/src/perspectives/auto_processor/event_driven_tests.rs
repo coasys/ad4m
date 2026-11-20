@@ -1497,6 +1497,14 @@ async fn aborting_a_prepare_cancels_the_read_and_holds_the_slot() {
             .expect("tick ends")
             .expect("tick task");
     }
+    assert!(
+        wait_until(
+            || eval_count::running() == baseline,
+            Duration::from_secs(3)
+        )
+        .await,
+        "the aborted read did not leave query_internal"
+    );
     assert_eq!(eval_count::running(), baseline);
     assert!(
         probe::entered() > entered,
