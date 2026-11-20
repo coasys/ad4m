@@ -11,9 +11,11 @@ let counter = 0;
 // version reported by mountShapes(); setVersion changes it so a remount
 // can be told apart from the first install
 let mountVersion = "2";
-// the classes mountShapes() reports: [{ name, target, nodeShapeUri? }];
+// the classes mountShapes() reports: [{ name, target, nodeShapeUri?, tags? }];
 // setShapes changes them so tests can collide with another mount's names,
-// class IRIs and shape nodes
+// class IRIs and shape nodes. `tags` is merged over the `tags` property
+// (a null value drops that key), e.g. to declare a call adder instead of
+// the setter
 let shapeClasses = [{ name: CLASS, target: "mounttest://Thing" }];
 // mountSnapshot() throws this message while it is set (setSnapshotFault)
 let snapshotFailure = null;
@@ -122,6 +124,25 @@ export function interactions(address) {
           records.set(address, { ...records.get(address), ...p });
           return delta(address);
         } },
+      // The call adder / remover a shape may declare for `tags` (setShapes'
+      // `tags` override): params { tags: [members] }.
+      { label: "Add tags", name: "addTags", parameters: [],
+        execute: async (params) => {
+          const p = plain(params);
+          calls.push({ address, name: "addTags", params: p });
+          const record = records.get(address);
+          const tags = (record.tags ?? []).concat((p.tags ?? []).filter((t) => !(record.tags ?? []).includes(t)));
+          records.set(address, { ...record, tags });
+          return delta(address);
+        } },
+      { label: "Remove tags", name: "removeTags", parameters: [],
+        execute: async (params) => {
+          const p = plain(params);
+          calls.push({ address, name: "removeTags", params: p });
+          const record = records.get(address);
+          records.set(address, { ...record, tags: (record.tags ?? []).filter((t) => !(p.tags ?? []).includes(t)) });
+          return delta(address);
+        } },
       { label: "Delete", name: "delete", parameters: [],
         execute: async (params) => {
           calls.push({ address, name: "delete", params: plain(params) });
@@ -133,12 +154,18 @@ export function interactions(address) {
   return [];
 }
 
+function withOverride(property, override) {
+  const merged = { ...property, ...(override ?? {}) };
+  for (const key of Object.keys(merged)) if (merged[key] === null) delete merged[key];
+  return merged;
+}
+
 export function mountShapes() {
   const lang = languageAddress();
   const update = [{ action: "call", source: "this", predicate: "update", target: "{}" }];
   return {
     version: mountVersion,
-    shapes: shapeClasses.map(({ name, target, nodeShapeUri }) => ({
+    shapes: shapeClasses.map(({ name, target, nodeShapeUri, tags }) => ({
       name,
       shape: {
         ...(nodeShapeUri ? { node_shape_uri: nodeShapeUri } : {}),
@@ -149,7 +176,7 @@ export function mountShapes() {
           { path: "rdf://type", name: "type", has_value: target, min_count: 1, max_count: 1 },
           { path: "mounttest://title", name: "title", max_count: 1, writable: true, alias: { TextContent: "text" }, setter: update },
           { path: "mounttest://done", name: "done", max_count: 1, writable: true, setter: update },
-          { path: "mounttest://tag", name: "tags", collection: true, datatype: "xsd://string", writable: true, setter: update, ordering: "linkedList" },
+          withOverride({ path: "mounttest://tag", name: "tags", collection: true, datatype: "xsd://string", writable: true, setter: update, ordering: "linkedList" }, tags),
           { path: "mounttest://child", name: "children", collection: true, node_kind: "IRI", relation_kind: "hasMany", alias: { Container: "children" } },
           { path: "ad4m://collection_order", name: "_collectionOrder" },
         ],

@@ -340,6 +340,57 @@ impl PerspectiveInstance {
             }))
     }
 
+    /// `class_name`'s `ad4m://adder` or `ad4m://remover` (`predicate`) for
+    /// `prop` classified as calls or link actions, `None` when the shape
+    /// declares none.
+    pub(crate) async fn property_member_kind(
+        &self,
+        class_name: &str,
+        prop: &str,
+        predicate: &str,
+    ) -> Result<Option<SetterKind>, AnyError> {
+        Ok(self
+            .get_property_actions_from_shacl(class_name, prop, predicate)
+            .await?
+            .map(|commands| {
+                if commands.iter().any(|c| c.action == Action::Call) {
+                    SetterKind::Call
+                } else {
+                    SetterKind::Links
+                }
+            }))
+    }
+
+    /// Run `class_name`'s `call` adder or remover (`predicate`) for `prop`
+    /// on the instance `base`: one call per interaction, with
+    /// `{prop: members}` as its params — what an adder or remover through
+    /// an abstract class sends. Unbatched, like every call.
+    pub(crate) async fn run_member_calls(
+        &self,
+        class_name: &str,
+        prop: &str,
+        predicate: &str,
+        base: &str,
+        members: Vec<Value>,
+        context: &AgentContext,
+    ) -> Result<(), AnyError> {
+        let where_ = format!("{class_name}.{prop}");
+        let commands = self
+            .get_property_actions_from_shacl(class_name, prop, predicate)
+            .await?
+            .ok_or_else(|| anyhow!("{where_} declares no {predicate}"))?;
+        let (call_commands, _) = Self::partition_actions(commands, &where_)?;
+        let mut groups: BTreeMap<(String, String), CallGroup> = BTreeMap::new();
+        for command in &call_commands {
+            let mut one = Map::new();
+            one.insert(prop.to_string(), Value::Array(members.clone()));
+            Self::group_call(&mut groups, command, Some(base), one, &where_)?;
+        }
+        let calls: Vec<CallRun> = groups.into_values().map(CallGroup::into_run).collect();
+        self.run_call_actions(&calls, None, context).await?;
+        Ok(())
+    }
+
     /// `class_name`'s `ad4m://destructor` classified as calls or link
     /// actions, `None` when the shape declares none. As with the setters,
     /// a `call` destructor cannot run inside a batch.

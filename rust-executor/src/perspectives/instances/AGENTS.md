@@ -29,6 +29,10 @@ Invariants:
   (a mounted class's constructor, setters or destructor; through an abstract class, the
   record's own classes') runs with no batch at all: it refuses any `batch_id`
   (`CallsInBatch`) before calling or writing, since a language call cannot be rolled back.
+  A collection whose adder (remover) is a `call`: `add_to_collection`
+  (`remove_from_collection`) runs that call with `{collection: [member]}` and writes no
+  membership link; the language's delta does. `update` takes a collection only through a
+  declared setter.
 - In a caller's batch, the reads a write does of the links it manages — collection
   membership, the remove cascade — see the batch's effective graph
   (`get_links_effective` in `perspective_instance/batch_view.rs`: committed + staged

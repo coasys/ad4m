@@ -1156,7 +1156,7 @@ export class Ad4mModel {
    */
   static hasCallActions(): boolean {
     if (!callActionsCache.has(this)) {
-      const shape = (this as any).sourceShape ?? this.generateSHACL().shape;
+      const shape = this.ownShape();
       const calls = (actions?: any[]) => (actions ?? []).some((a) => a?.action === 'call');
       callActionsCache.set(this, !!shape && (
         calls(shape.constructor_actions) ||
@@ -1165,6 +1165,13 @@ export class Ad4mModel {
       ));
     }
     return callActionsCache.get(this)!;
+  }
+
+  /** The shape this class's writes follow, actions included: the shape
+   *  {@link fromSHACL} made it from, else its generated one.
+   *  @internal */
+  static ownShape(): any {
+    return (this as any).sourceShape ?? this.generateSHACL().shape;
   }
 
   /**
@@ -1813,6 +1820,38 @@ export class Ad4mModel {
     });
   }
 
+  /** An add or remove on a call-backed row whose shape declares an adder
+   *  (remover) for `key`: `instanceAddToCollection`
+   *  (`instanceRemoveFromCollection`) per member, which runs the declared
+   *  action (a `call` adder reaches the language). Answers false, writing
+   *  nothing, for a setter write or an op the shape does not declare: those
+   *  are a full-list replace through the setter, which the executor
+   *  refuses when there is none. */
+  private async declaredMemberWrite(
+    key: string,
+    kind: 'setter' | 'adder' | 'remover',
+    ids: string[],
+    batchId?: string
+  ): Promise<boolean> {
+    if (kind === 'setter') return false;
+    const ctor = this.constructor as typeof Ad4mModel;
+    const shape = ctor.ownShape();
+    const prop = (shape?.properties ?? []).find((p: any) => p?.name === key);
+    if (!((prop?.[kind] ?? []).length > 0)) return false;
+    for (const itemUri of ids) {
+      const body = {
+        className: ctor.queriedAs(),
+        baseUri: this._baseExpression,
+        collection: key,
+        itemUri,
+        ...(batchId && { batchId }),
+      };
+      if (kind === 'adder') await this._perspective.instanceAddToCollection(body);
+      else await this._perspective.instanceRemoveFromCollection(body);
+    }
+    return true;
+  }
+
   /** The members `key` holds now, as IDs, read fresh from the perspective:
    *  an add or remove on a call-backed class is a full-list replace through
    *  the declared setter, the only collection write its shape declares. */
@@ -1843,6 +1882,7 @@ export class Ad4mModel {
     const ids = (value == null ? [] : Array.isArray(value) ? value : [value]).map((v) => this.resolveRelationId(v));
     const reverse = relMeta?.kind === "belongsToOne" || relMeta?.kind === "belongsToMany";
     if (!reverse && relMeta?.kind !== "hasOne") {
+      if (await this.declaredMemberWrite(key, kind, ids, batchId)) return;
       await this.instanceUpdate({ [key]: await this.membersAfter(key, kind, ids) }, batchId);
       return;
     }
@@ -2121,6 +2161,7 @@ export class Ad4mModel {
         await this.sendWrites(this.planRelation(key, kind, members), batchId);
         continue;
       }
+      if (!scalar && (await this.declaredMemberWrite(key, kind, ids, batchId))) continue;
       patch[key] = scalar ? ids[0] : await this.membersAfter(key, kind, ids);
     }
     if (Object.keys(patch).length > 0) await this.instanceUpdate(patch, batchId);

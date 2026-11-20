@@ -46,6 +46,8 @@ function proxyWith(record: Record<string, any> = { id: MINTED, title: "a", tags:
     }),
     instanceUpdate: (_uuid: string, body: any) => ({ className: body.className, baseUri: body.baseUri, updatedProperties: [] }),
     instanceRemove: (_uuid: string, body: any) => ({ className: body.className, baseUri: body.baseUri, linksRemoved: 0 }),
+    instanceAddToCollection: (_uuid: string, body: any) => ({ ...body, linksAdded: 0, alreadyMember: false }),
+    instanceRemoveFromCollection: (_uuid: string, body: any) => ({ ...body, linksRemoved: 0 }),
   };
   const client = new Proxy({} as any, {
     get: (_target, method: string) => {
@@ -154,6 +156,62 @@ describe("a call-backed class's writes", () => {
         { className: "mounttest://Thing", baseUri: MINTED, properties: { tags: ["x", "y", "z"] } },
       ]);
       expect(methods(sent)).not.toContain("instanceAddToCollection");
+    });
+  });
+
+  describe("a declared call adder or remover runs, not a full-list replace (Lal r2 P1)", () => {
+    // `tags` declares a `call` adder and remover and no setter: a full-list
+    // instanceUpdate would reach no declared action (the executor refuses
+    // it), so add and remove go to instanceAddToCollection /
+    // instanceRemoveFromCollection, which run the adder and remover.
+    const shape = SHACLShape.fromJSON({
+      target_class: "mounttest://Thing",
+      constructor_actions: [{ action: "call", source: "mounttest://class/Thing", predicate: "create", target: "{}" }],
+      properties: [
+        { path: "mounttest://title", name: "title", max_count: 1, writable: true, setter: update },
+        {
+          path: "mounttest://tag", name: "tags", collection: true, datatype: "xsd://string", writable: true,
+          adder: [{ action: "call", source: "this", predicate: "addTags", target: "{}" }],
+          remover: [{ action: "call", source: "this", predicate: "removeTags", target: "{}" }],
+        },
+      ],
+    } as any);
+    const Thing = Ad4mModel.fromSHACL(shape, "MountThing");
+    const item = (itemUri: string) => ({ className: "mounttest://Thing", baseUri: MINTED, collection: "tags", itemUri });
+
+    it("add() runs the adder", async () => {
+      const { proxy, sent } = proxyWith();
+      const row = await fetched(Thing, proxy);
+      await (row as any).addRelationValue("tags", "z");
+      expect(bodies(sent, "instanceAddToCollection")).toEqual([item("z")]);
+      expect(methods(sent)).not.toContain("instanceUpdate");
+    });
+
+    it("remove() runs the remover", async () => {
+      const { proxy, sent } = proxyWith();
+      const row = await fetched(Thing, proxy);
+      await (row as any).removeRelationValue("tags", "x");
+      expect(bodies(sent, "instanceRemoveFromCollection")).toEqual([item("x")]);
+      expect(methods(sent)).not.toContain("instanceUpdate");
+    });
+
+    it("an adder envelope in save() runs the adder per member", async () => {
+      const { proxy, sent } = proxyWith();
+      const row = await fetched(Thing, proxy);
+      row.title = "b";
+      row.tags = { action: "adder", value: ["z", "w"] } as any;
+      await row.save();
+      expect(bodies(sent, "instanceAddToCollection")).toEqual([item("z"), item("w")]);
+      expect(bodies(sent, "instanceUpdate")).toEqual([
+        { className: "mounttest://Thing", baseUri: MINTED, properties: { title: "b" } },
+      ]);
+    });
+
+    it("a caller's batch goes with them, for the executor to refuse", async () => {
+      const { proxy, sent } = proxyWith();
+      const row = await fetched(Thing, proxy);
+      await (row as any).addRelationValue("tags", "z", "batch-1");
+      expect(bodies(sent, "instanceAddToCollection")).toEqual([{ ...item("z"), batchId: "batch-1" }]);
     });
   });
 

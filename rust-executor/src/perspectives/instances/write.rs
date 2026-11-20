@@ -271,6 +271,21 @@ async fn refuse_batch_for_calls(
     }
 }
 
+/// Whether `collection` of `class_name` declares a `call` adder or remover
+/// (`predicate`).
+async fn member_call(
+    perspective: &PerspectiveInstance,
+    class_name: &str,
+    collection: &str,
+    predicate: &str,
+) -> Result<bool, InstanceError> {
+    Ok(perspective
+        .property_member_kind(class_name, collection, predicate)
+        .await
+        .map_err(|e| failed(class_name, WriteStep::ReadShape, e))?
+        == Some(SetterKind::Call))
+}
+
 /// `BatchNotFound` unless `batch_id` is absent or names an open batch.
 async fn check_batch(
     perspective: &PerspectiveInstance,
@@ -905,6 +920,40 @@ pub async fn add_to_collection(
     let base_uri = instance_uri("base_uri", &params.base_uri)?;
     // Where it is stored: a legacy-spelled id's node is not the normalised one.
     let stored = require_instance(perspective, &class_name, &base_uri).await?;
+
+    // A declared `call` adder is the language's to run: it gets the member,
+    // and its delta, not a link of ours, makes the membership. Unbatched.
+    if member_call(perspective, &class_name, &collection, "ad4m://adder").await? {
+        refuse_batch_for_calls(perspective, &class_name, params.batch_id.as_deref()).await?;
+        perspective
+            .run_member_calls(
+                &class_name,
+                &collection,
+                "ad4m://adder",
+                &stored,
+                vec![coerced],
+                agent,
+            )
+            .await
+            .map_err(|e| {
+                failed(
+                    &class_name,
+                    WriteStep::AddCollectionItem {
+                        collection: collection.clone(),
+                        item: params.item_uri.clone(),
+                    },
+                    e,
+                )
+            })?;
+        return Ok(CollectionItemAdded {
+            class_name,
+            base_uri,
+            collection,
+            item_uri: params.item_uri,
+            links_added: 0,
+            already_member: false,
+        });
+    }
     check_batch(perspective, params.batch_id.as_deref()).await?;
 
     let predicate = shacl::resolve_property_predicate(perspective, &class_name, &collection)
@@ -1016,7 +1065,7 @@ pub async fn add_to_collection(
 /// exists only inside the batch leaves by cancelling its staged addition.
 pub async fn remove_from_collection(
     perspective: &mut PerspectiveInstance,
-    _agent: &AgentContext,
+    agent: &AgentContext,
     params: InstanceRemoveFromCollection,
 ) -> Result<CollectionItemRemoved, InstanceError> {
     let (class_name, shape) = resolve_writable_class(perspective, &params.class_name).await?;
@@ -1029,6 +1078,42 @@ pub async fn remove_from_collection(
     let base_uri = instance_uri("base_uri", &params.base_uri)?;
     // Where it is stored: a legacy-spelled id's node is not the normalised one.
     let stored = require_instance(perspective, &class_name, &base_uri).await?;
+
+    // A declared `call` remover, as a `call` adder in `add_to_collection`:
+    // the language removes the member; nothing here reads or writes links.
+    if member_call(perspective, &class_name, &collection, "ad4m://remover").await? {
+        refuse_batch_for_calls(perspective, &class_name, params.batch_id.as_deref()).await?;
+        let member = coerce_scalar(info, &Value::String(params.item_uri.clone()))
+            .unwrap_or_else(|_| Value::String(params.item_uri.clone()));
+        perspective
+            .run_member_calls(
+                &class_name,
+                &collection,
+                "ad4m://remover",
+                &stored,
+                vec![member],
+                agent,
+            )
+            .await
+            .map_err(|e| {
+                failed(
+                    &class_name,
+                    WriteStep::RemoveCollectionItem {
+                        collection: collection.clone(),
+                        item: params.item_uri.clone(),
+                        removed: 0,
+                    },
+                    e,
+                )
+            })?;
+        return Ok(CollectionItemRemoved {
+            class_name,
+            base_uri,
+            collection,
+            item_uri: params.item_uri,
+            links_removed: 0,
+        });
+    }
     check_batch(perspective, params.batch_id.as_deref()).await?;
 
     let predicate = shacl::resolve_property_predicate(perspective, &class_name, &collection)
