@@ -20972,6 +20972,7 @@ dependencies = [
  "ad4m-executor",
  "futures",
  "jsonwebtoken 10.4.0",
+ "serde_json",
  "wasm-bindgen-test",
 ]
 
