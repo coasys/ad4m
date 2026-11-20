@@ -2561,6 +2561,7 @@ mod tests {
                 crate::agent::capabilities::AuthInfo::default(),
                 None,
                 3600,
+                None,
             )
             .unwrap();
 
@@ -2629,6 +2630,7 @@ mod tests {
             crate::agent::capabilities::AuthInfo::default(),
             None,
             3600,
+            None,
         )
         .unwrap();
 
@@ -4582,6 +4584,7 @@ mod tests {
             crate::agent::capabilities::AuthInfo::default(),
             None,
             3600,
+            None,
         )
         .unwrap();
         let revoke_bot =
