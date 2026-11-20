@@ -743,6 +743,7 @@ impl DbBackend for LocalDb {
 /// method runs on the executor's SQLite database through `local`: the Worker holds only the
 /// records that executors share (users and perspective metadata, written and read through
 /// the key-value methods).
+#[cfg(not(target_arch = "wasm32"))]
 pub struct SharedDb {
     base_url: String,
     token: String,
@@ -751,6 +752,7 @@ pub struct SharedDb {
     local: LocalDb,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 const SHARED_DB_CACHE_TTL_SECS: u64 = 30;
 
 /// Cached single-row read from the platform DB.
@@ -768,11 +770,13 @@ const SHARED_DB_CACHE_TTL_SECS: u64 = 30;
 /// or add a shared invalidation channel (Worker-side write notifications).
 /// Do not simply raise the TTL; stale-read bugs of the form "data doesn't
 /// update until the user reconnects" are the failure mode.
+#[cfg(not(target_arch = "wasm32"))]
 struct CachedRow {
     data: Value,
     fetched_at: crate::rt::time::Instant,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl SharedDb {
     pub fn new(base_url: String, token: String) -> Self {
         SharedDb {
@@ -796,6 +800,7 @@ impl SharedDb {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl DbBackend for SharedDb {
     ad4m_db_methods!(run_on_local_db);
 

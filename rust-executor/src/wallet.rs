@@ -717,6 +717,7 @@ impl WalletBackend for LocalWallet {
 // ── SharedWallet ────────────────────────────────────────────────────────────
 
 /// Cached key material fetched from the external wallet service.
+#[cfg(not(target_arch = "wasm32"))]
 struct CachedKey {
     secret: Vec<u8>,
     public: Vec<u8>,
@@ -725,6 +726,7 @@ struct CachedKey {
 
 /// TTL for cached key material (30 seconds).
 /// Kept short to limit JWT-verification asymmetry during key rotation.
+#[cfg(not(target_arch = "wasm32"))]
 const SHARED_WALLET_CACHE_TTL_SECS: u64 = 30;
 
 /// Wallet backend that delegates key operations to an external HTTP service.
@@ -734,6 +736,7 @@ const SHARED_WALLET_CACHE_TTL_SECS: u64 = 30;
 /// Key material fetched over HTTP gets cached in-process with a 30-second TTL.
 /// Signing always happens locally — the secret key bytes come over the wire
 /// but the actual Ed25519 sign operation runs in this process.
+#[cfg(not(target_arch = "wasm32"))]
 pub struct SharedWallet {
     base_url: String,
     token: String,
@@ -741,6 +744,7 @@ pub struct SharedWallet {
     cache: RwLock<std::collections::HashMap<String, CachedKey>>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl SharedWallet {
     pub fn new(base_url: String, token: String) -> Self {
         SharedWallet {
@@ -810,6 +814,7 @@ impl SharedWallet {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl WalletBackend for SharedWallet {
     fn generate_keypair(&self, name: &str) -> Result<(), AnyError> {
         let url = format!("{}/keys/{}", self.base_url, urlencoding::encode(name));

@@ -1,4 +1,5 @@
 use dirs::home_dir;
+#[cfg(not(target_arch = "wasm32"))]
 use portpicker;
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -28,6 +29,7 @@ pub fn language_storage_directory(language_address: &str) -> PathBuf {
     languages_directory().join(language_address)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn find_port(start_port: u16, end_port: u16) -> Result<u16, String> {
     for x in start_port..end_port {
         if portpicker::is_free(x) {
