@@ -213,6 +213,14 @@ pub(super) fn common_error(error: &InstanceError) -> Option<String> {
                 registered.join(", ")
             }
         )),
+        InstanceError::AmbiguousClass {
+            class_name,
+            candidates,
+        } => error_json(format!(
+            "'{class_name}' names more than one registered class — pass its target class IRI \
+             instead: {}. Call describe_perspective to see their schemas.",
+            candidates.join(", ")
+        )),
         InstanceError::AbstractClass { class_name } => error_json(format!(
             "'{class_name}' is an abstract class: collection membership is written through the \
              record's own class, the `__subjectClass` a query on '{class_name}' returns. \

@@ -522,6 +522,101 @@ async fn describe_perspective_marks_unregistered_relation_targets() {
     );
 }
 
+/// A `Task` shape in namespace `ns`.
+fn task_sdna(ns: &str) -> String {
+    format!(
+        r#"{{
+  "target_class": "{ns}://Task",
+  "constructor_actions": [
+    {{"action":"addLink","source":"this","predicate":"rdf://type","target":"{ns}://Task"}}
+  ],
+  "properties": [
+    {{"path":"{ns}://title","name":"title","datatype":"xsd:string","min_count":1,"max_count":1,"writable":true,
+     "setter":[{{"action":"setSingleTarget","source":"this","predicate":"{ns}://title","target":"value"}}]}}
+  ]
+}}"#
+    )
+}
+
+/// Two classes of one name (`a://Task`, `b://Task`) are both described,
+/// each named by its target class IRI, and the instance tools take that IRI
+/// (and the IRI of a class whose name is its own) as `class_name`.
+#[tokio::test(flavor = "multi_thread")]
+async fn describe_perspective_lists_two_classes_of_one_name() {
+    let (a, b) = (task_sdna("a"), task_sdna("b"));
+    let (handler, uuid, _guard) = setup_with(
+        &[("Task", &a), ("Task", &b), ("Channel", CHANNEL_SDNA)],
+        false,
+    )
+    .await;
+    let desc = parse(
+        &handler
+            .describe_perspective(Parameters(DescribePerspectiveParams {
+                perspective_id: uuid.clone(),
+            }))
+            .await,
+    );
+    let classes = desc["classes"].as_array().expect("classes array");
+    let listed: Vec<(&str, &str)> = classes
+        .iter()
+        .map(|c| {
+            (
+                c["name"].as_str().unwrap(),
+                c["class_uri"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        listed,
+        vec![
+            ("Channel", "flux://Channel"),
+            ("a://Task", "a://Task"),
+            ("b://Task", "b://Task"),
+        ],
+        "{desc}"
+    );
+
+    for class_name in ["b://Task", "a://Task"] {
+        let created = parse(
+            &handler
+                .instance_create(Parameters(InstanceCreateParams {
+                    perspective_id: uuid.clone(),
+                    class_name: class_name.into(),
+                    properties: Some(props(&[("title", json!(class_name))])),
+                    base_uri: None,
+                    parent: None,
+                }))
+                .await,
+        );
+        assert_eq!(created["created"], true, "{created}");
+        let base_uri = created["base_uri"].as_str().unwrap().to_string();
+        let (ns, _) = class_name.split_once("://").unwrap();
+        let p = crate::perspectives::get_perspective(&uuid).unwrap();
+        let titles = p
+            .get_links(&crate::types::LinkQuery {
+                source: Some(base_uri.clone()),
+                predicate: Some(format!("{ns}://title")),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(titles.len(), 1, "{class_name} writes its own predicate");
+    }
+
+    let channel = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: uuid.clone(),
+                class_name: "flux://Channel".into(),
+                properties: Some(props(&[("name", json!("general"))])),
+                base_uri: None,
+                parent: None,
+            }))
+            .await,
+    );
+    assert_eq!(channel["created"], true, "{channel}");
+}
+
 /// Relation-typed properties through the generic tools: schema exposure,
 /// URI-gated writes on a forward hasOne, rejection of non-URI values, and
 /// read-only enforcement on a belongsTo (reverse) relation.
@@ -5108,4 +5203,149 @@ async fn a_legacy_spelled_instance_is_updated_and_removed_where_it_is_stored() {
         .await
         .unwrap();
     assert!(left.is_empty(), "remove left the stored links: {left:?}");
+}
+
+/// `common_error` words an ambiguous class name with the IRIs a caller may
+/// pass instead.
+#[test]
+fn an_ambiguous_class_error_names_the_candidate_iris() {
+    let text = common_error(&InstanceError::AmbiguousClass {
+        class_name: "Task".into(),
+        candidates: vec!["a://Task".into(), "b://Task".into()],
+    })
+    .expect("worded by common_error");
+    assert!(text.contains("Task"), "{text}");
+    assert!(text.contains("a://Task"), "{text}");
+    assert!(text.contains("b://Task"), "{text}");
+}
+
+/// `a://Task` and `b://Task` share the name `Task`.
+const TASK_A_SDNA: &str = r#"{
+  "target_class": "a://Task",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"rdf://type","target":"a://Task"}
+  ],
+  "properties": [
+    {"path":"a://task_title","name":"title","datatype":"xsd:string","min_count":1,"max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"a://task_title","target":"value"}]}
+  ]
+}"#;
+
+const TASK_B_SDNA: &str = r#"{
+  "target_class": "b://Task",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"rdf://type","target":"b://Task"}
+  ],
+  "properties": [
+    {"path":"b://task_title","name":"title","datatype":"xsd:string","min_count":1,"max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"b://task_title","target":"value"}]}
+  ]
+}"#;
+
+fn tool_text(result: &rmcp::model::CallToolResult) -> String {
+    result
+        .content
+        .iter()
+        .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The generated per-class tools dispatch through the same class lookup as
+/// the `instance_*` tools: on a name two classes share they write into
+/// neither, the refusal names both IRIs, and no `task_*` tool is generated
+/// (`class_keys` names those classes by IRI).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_generated_write_on_a_shared_name_is_refused_naming_both_iris() {
+    let (handler, uuid, _guard) = setup_with(
+        &[
+            ("TaskA", TASK_A_SDNA),
+            ("TaskB", TASK_B_SDNA),
+            ("Channel", CHANNEL_SDNA),
+        ],
+        true,
+    )
+    .await;
+
+    let names: Vec<String> = handler
+        .generate_dynamic_tools()
+        .await
+        .iter()
+        .map(|t| t.name.to_string())
+        .collect();
+    assert!(
+        !names.iter().any(|n| n.starts_with("task_")),
+        "a shared name generates no tools: {names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n == "channel_create"),
+        "a unique name still generates its tools: {names:?}"
+    );
+
+    for (tool, args) in [
+        (
+            "task_create",
+            props(&[("perspective_id", json!(uuid)), ("title", json!("t"))]),
+        ),
+        (
+            "task_set_title",
+            props(&[
+                ("perspective_id", json!(uuid)),
+                ("expression_address", json!("ad4m://obj/x")),
+                ("value", json!("v")),
+            ]),
+        ),
+    ] {
+        let result = handler
+            .handle_dynamic_tool(tool, Some(args))
+            .await
+            .expect("the tool answers");
+        assert_eq!(result.is_error, Some(true), "{tool}: {result:?}");
+        let text = tool_text(&result);
+        assert!(
+            text.contains("a://Task") && text.contains("b://Task"),
+            "{tool} names both IRIs: {text}"
+        );
+    }
+
+    // Nothing was written: no instance typed against either class, no title.
+    let perspective = crate::perspectives::get_perspective(&uuid).expect("perspective");
+    for (predicate, target) in [
+        ("rdf://type", Some("a://Task")),
+        ("rdf://type", Some("b://Task")),
+        ("a://task_title", None),
+    ] {
+        let links = perspective
+            .get_links(&crate::types::LinkQuery {
+                predicate: Some(predicate.into()),
+                target: target.map(Into::into),
+                ..Default::default()
+            })
+            .await
+            .expect("get_links");
+        assert!(
+            links.is_empty(),
+            "{predicate} → {target:?} written by a refused tool: {links:?}"
+        );
+    }
+}
+
+/// With one class of the name the generated write resolves it and creates.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_generated_write_on_a_unique_name_still_creates() {
+    let (handler, uuid, _guard) = setup_with(&[("Task", TASK_A_SDNA)], true).await;
+    let created = handler
+        .handle_dynamic_tool(
+            "task_create",
+            Some(props(&[
+                ("perspective_id", json!(uuid)),
+                ("title", json!("t")),
+            ])),
+        )
+        .await
+        .expect("the tool answers");
+    assert_ne!(created.is_error, Some(true), "{}", tool_text(&created));
+    let out = parse(&tool_text(&created));
+    assert_eq!(out["created"], true, "{out}");
+    assert_eq!(out["class_name"], "Task", "{out}");
 }
