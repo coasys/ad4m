@@ -20967,6 +20967,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "web-executor-link-test"
+version = "0.0.0"
+dependencies = [
+ "ad4m-executor",
+]
+
+[[package]]
 name = "web-sys"
 version = "0.3.104"
 source = "registry+https://github.com/rust-lang/crates.io-index"
