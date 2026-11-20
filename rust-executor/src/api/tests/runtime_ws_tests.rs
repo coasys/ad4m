@@ -104,6 +104,10 @@ async fn operator_only_methods_refuse_an_app_holding_every_capability_and_users(
             "runtime.importData",
             json!({ "type": "db", "filePath": "/nonexistent/dump.json" }),
         ),
+        (
+            "runtime.importData",
+            json!({ "type": "perspective", "filePath": "/nonexistent/export.json", "perspectiveUuid": "p1" }),
+        ),
         ("runtime.unytAgentKey", json!({})),
         (
             "runtime.unytSendHot",
@@ -162,6 +166,116 @@ async fn set_free_hosting_enabled_refuses_an_app_without_every_capability() {
         .await
         .unwrap_err();
     assert_eq!(err.code, 403, "{}", err.message);
+}
+
+// `runtime.importData {type:"perspective"}` bulk-loads a snapshot file into a named
+// perspective: without `perspectiveUuid` it is a 400 before any lookup. An unknown uuid is
+// `get_perspective_or_404`'s usual 404 (it reads the global config on a miss, which this
+// file's cases leave alone), and a caller the operator guard turns away never reaches
+// either (`operator_only_methods_refuse_an_app_holding_every_capability_and_users`).
+#[tokio::test]
+async fn perspective_import_needs_a_perspective_uuid() {
+    assert_eq!(
+        error_code(
+            "runtime.importData",
+            json!({ "type": "perspective", "filePath": "/nonexistent/export.json" }),
+            true,
+        )
+        .await,
+        400
+    );
+}
+
+// The operator's import lands in the perspective's store: links a query then finds,
+// with the counts the load reports.
+#[tokio::test]
+async fn operator_imports_a_perspective_snapshot_into_the_store() {
+    use crate::agent::signatures::TestSigner;
+    use crate::perspectives::perspective_instance::PerspectiveInstance;
+    use crate::perspectives::register_perspective;
+    use crate::types::domain::Perspective as DomainPerspective;
+    use crate::types::{
+        DecoratedLinkExpression, Link, LinkStatus, PerspectiveHandle, PerspectiveState,
+    };
+
+    let uuid = uuid::Uuid::new_v4().to_string();
+    let perspective = PerspectiveInstance::new(
+        PerspectiveHandle {
+            uuid: uuid.clone(),
+            name: Some("import test".to_string()),
+            neighbourhood: None,
+            shared_url: None,
+            state: PerspectiveState::Private,
+            owners: None,
+        },
+        None,
+    );
+    register_perspective(uuid.clone(), perspective.clone());
+    let _registered = super::support::Registered(uuid.clone());
+
+    // The snapshot file, as `runtime.exportData {type:"perspective"}` writes it.
+    let signer = TestSigner::generate();
+    let links: Vec<DecoratedLinkExpression> = (0..3)
+        .map(|i| {
+            let signed = signer.sign(
+                Link {
+                    source: format!("ad4m://s/{i}"),
+                    predicate: Some("ad4m://p".to_string()),
+                    target: format!("ad4m://t/{i}"),
+                }
+                .normalize(),
+            );
+            DecoratedLinkExpression {
+                author: signed.author,
+                timestamp: signed.timestamp,
+                data: signed.data,
+                proof: crate::types::DecoratedExpressionProof {
+                    key: signed.proof.key,
+                    signature: signed.proof.signature,
+                    valid: None,
+                    invalid: None,
+                },
+                status: Some(LinkStatus::Shared),
+            }
+        })
+        .collect();
+    let file = tempfile::NamedTempFile::new().unwrap();
+    let snapshot = DomainPerspective { links };
+    std::fs::write(
+        file.path(),
+        serde_json::to_string_pretty(&snapshot).unwrap(),
+    )
+    .unwrap();
+
+    let mut map = HandlerMap::new();
+    register_ws_handlers(&mut map);
+    let result = map
+        .dispatch(
+            "runtime.importData",
+            json!({
+                "type": "perspective",
+                "filePath": file.path().to_str().unwrap(),
+                "perspectiveUuid": uuid,
+            }),
+            Arc::new(RequestContext::operator_for_test()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result, json!({ "imported": 3, "covered": 0, "skipped": 0 }));
+
+    let stored = perspective
+        .get_links(&crate::types::LinkQuery {
+            source: None,
+            target: None,
+            predicate: None,
+            from_date: None,
+            until_date: None,
+            limit: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(stored.len(), 3);
+    assert!(stored.iter().all(|l| l.proof.valid == Some(true)));
 }
 
 // Nothing delivers a friend message and the outbox has no owner, so storing one would let

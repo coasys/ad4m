@@ -609,6 +609,7 @@ export const LONG_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "perspective.runAgent",
   "perspective.runInterpretation",
   "perspective.runInterpretationWithHarness",
+  "runtime.importData",
   "runtime.restartHolochain",
 ]);
 

@@ -80,6 +80,8 @@ mod expected_links;
 pub use expected_links::{ExpectedLinks, LinksChanged};
 // A batch's effective view of the graph for the validated write core.
 mod batch_view;
+// Bulk-loading a perspective-export file straight into the SPARQL store.
+mod import;
 
 #[cfg(test)]
 #[path = "perspective_instance_subscription_tests.rs"]
@@ -100,6 +102,10 @@ mod join_tests;
 #[cfg(test)]
 #[path = "perspective_instance_pending_diffs_tests.rs"]
 mod pending_diffs_tests;
+
+#[cfg(test)]
+#[path = "perspective_instance_import_tests.rs"]
+mod import_tests;
 
 static MAX_COMMIT_BYTES: usize = 3_000_000; //3MiB
 static MAX_PENDING_DIFFS_COUNT: usize = 150;
