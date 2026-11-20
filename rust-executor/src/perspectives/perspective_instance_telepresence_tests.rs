@@ -700,8 +700,16 @@ async fn only_a_beat_of_the_same_sender_device_and_call_is_superseded() {
         1,
         "a payload with an ICE candidate beside a beat was dropped as a beat"
     );
-    assert_eq!(sends_with(&stub, "phone"), 1, "another device's beat was dropped");
-    assert_eq!(sends_with(&stub, "room:y"), 1, "another call's beat was dropped");
+    assert_eq!(
+        sends_with(&stub, "phone"),
+        1,
+        "another device's beat was dropped"
+    );
+    assert_eq!(
+        sends_with(&stub, "room:y"),
+        1,
+        "another call's beat was dropped"
+    );
     assert_eq!(
         sends_with(&stub, "co-user"),
         1,
@@ -737,7 +745,11 @@ async fn a_remote_member_who_joins_inside_the_cache_window_gets_the_next_signal(
     );
     instance.send_broadcast(offer(), false).await.unwrap();
     sleep(Duration::from_millis(50)).await;
-    assert_eq!(stub.send_count(), 0, "setup: an all-local send was not skipped");
+    assert_eq!(
+        stub.send_count(),
+        0,
+        "setup: an all-local send was not skipped"
+    );
 
     // A remote member joins 5 s later and beats through the link language.
     sleep(Duration::from_secs(5)).await;
@@ -780,8 +792,10 @@ async fn a_hung_language_send_is_abandoned_after_its_time_box() {
     instance.send_broadcast(offer(), false).await.unwrap();
     instance
         .send_broadcast(
-            signal(serde_json::json!({"v": 1, "call": "room:x", "to": "*", "kind": "ice",
-                "candidate": {"candidate": "behind-the-hung-send"}})),
+            signal(
+                serde_json::json!({"v": 1, "call": "room:x", "to": "*", "kind": "ice",
+                "candidate": {"candidate": "behind-the-hung-send"}}),
+            ),
             false,
         )
         .await
@@ -822,7 +836,10 @@ async fn teardown_during_a_hung_send_ends_the_drain_task() {
     instance.send_broadcast(offer(), false).await.unwrap();
     sleep(Duration::from_millis(50)).await;
     assert_eq!(stub.send_count(), 1, "setup: the send is in flight");
-    assert!(held() > before, "setup: the drain task holds the perspective");
+    assert!(
+        held() > before,
+        "setup: the drain task holds the perspective"
+    );
 
     instance.teardown_background_tasks().await;
     sleep(Duration::from_millis(50)).await;
