@@ -153,6 +153,40 @@ commands:
             fi
             exit 0
 
+  job_memo_check:
+    description: "Halt the job (green) when it has passed before on the same input files"
+    parameters:
+      job:
+        type: string
+    steps:
+      - run:
+          # The key is the commit's file list without the paths the job cannot read
+          # (.circleci/scripts/job-memo.sh, tested in `build`). The push of dev after a
+          # merge, a merge of dev into a PR and a docs-only push then cost this job a few
+          # seconds. Anything but the script's "skip" answer runs the job. The nightly
+          # always runs; so does a head commit with [full-ci] in its message.
+          name: Job memo (halt when << parameters.job >> passed on the same inputs)
+          environment:
+            JOB_MEMO_FORCE: << pipeline.parameters.run-nightly-llm >>
+          command: |
+            rc=0
+            bash .circleci/scripts/job-memo.sh check << parameters.job >> || rc=$?
+            if [ "$rc" = 10 ]; then
+              circleci-agent step halt
+            fi
+            exit 0
+
+  job_memo_record:
+    description: "Record that the job passed on these input files; must be the job's last step"
+    parameters:
+      job:
+        type: string
+    steps:
+      - run:
+          # No `when: always`: this step runs only when every step before it passed.
+          name: Job memo (record the pass)
+          command: bash .circleci/scripts/job-memo.sh record << parameters.job >> || true
+
   setup_env:
     description: "Set up build environment (Node, Rust, Deno, Go, pnpm)"
     parameters:
@@ -421,7 +455,8 @@ jobs:
             CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-/var/lib/ci-artifacts}"
             # deno-snapshot/ prunes its own entries by last use (build-deno-snapshot.sh);
             # its directory's mtime moves only when an entry is added or removed.
-            find "$CI_ARTIFACT_DIR" -maxdepth 1 -mindepth 1 ! -name deno-snapshot -mmin +720 -exec rm -rf {} + 2>/dev/null || true
+            # job-memo/ prunes its own entries too (job-memo.sh).
+            find "$CI_ARTIFACT_DIR" -maxdepth 1 -mindepth 1 ! -name deno-snapshot ! -name job-memo -mmin +720 -exec rm -rf {} + 2>/dev/null || true
       - run:
           # Local git repo + fake cargo, no network; about a second.
           name: Test install-hc-toolchain.sh
@@ -446,6 +481,10 @@ jobs:
           # Fake curl with fixture PRs, no network; about a second. The heavy_gate decision.
           name: Test should-run-heavy.sh
           command: bash .circleci/scripts/should-run-heavy.test.sh
+      - run:
+          # Scratch git repo, no network; about a second. The job_memo_check decision.
+          name: Test job-memo.sh
+          command: bash .circleci/scripts/job-memo.test.sh
       - build_adam
       - build_integration_inputs
       - run:
@@ -604,6 +643,8 @@ jobs:
     steps:
       - fix_workdir
       - checkout
+      - job_memo_check:
+          job: clippy
       - setup_env
       - restore_rust_compile_inputs
       - run:
@@ -650,6 +691,8 @@ jobs:
           when: always
           command: cd ad4m-ldk/rust && cargo test
           no_output_timeout: 30m
+      - job_memo_record:
+          job: clippy
 
   fmt:
     # rustfmt only parses the sources, so it needs no build and no warm target/.
@@ -670,6 +713,8 @@ jobs:
       - fix_workdir
       - checkout
       - heavy_gate
+      - job_memo_check:
+          job: rust-tests
       - setup_env
       - restore_rust_compile_inputs
       - run:
@@ -678,6 +723,8 @@ jobs:
           name: rust-executor tests
           command: cd rust-executor && cargo test --release -- --test-threads=1
           no_output_timeout: 30m
+      - job_memo_record:
+          job: rust-tests
 
   # Trial, not a required check: the same suite under cargo-nextest, one process per
   # test, in parallel (.config/nextest.toml, profile `ci`). On one box it took about 30 s
