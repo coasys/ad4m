@@ -20,6 +20,8 @@ pub(crate) mod ingest;
 pub mod instances;
 pub mod interpretation;
 #[cfg(test)]
+mod interpretation_ab_e2e;
+#[cfg(test)]
 mod interpretation_e2e;
 #[cfg(test)]
 mod interpretation_harness_e2e;
