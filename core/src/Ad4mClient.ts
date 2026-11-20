@@ -7,6 +7,7 @@ import { ExpressionClient } from './expression/ExpressionClient'
 import { AIClient } from './ai/AIClient'
 import { IdentityClient } from './identity/IdentityClient'
 import { BotClient } from './bot/BotClient'
+import { HostClient } from './host/HostClient'
 import { ApiClient, EventFilter } from './apiClient'
 import type { EventMap, EventName } from './generated/api/Events'
 import { Ad4mModel } from './model/Ad4mModel'
@@ -35,6 +36,7 @@ export class Ad4mClient {
     #aiClient: AIClient
     #identityClient: IdentityClient
     #botClient: BotClient
+    #hostClient: HostClient
 
     constructor(
         baseUrl: string,
@@ -56,6 +58,7 @@ export class Ad4mClient {
         this.#runtimeClient = new RuntimeClient(baseUrl, token, this.#apiClient)
         this.#identityClient = new IdentityClient(baseUrl, token, this.#apiClient)
         this.#botClient = new BotClient(baseUrl, token, this.#apiClient)
+        this.#hostClient = new HostClient(baseUrl, token, this.#apiClient)
 
         // Register with AD4M DevTools if the bridge is installed (e.g. browser extension)
         try {
@@ -98,6 +101,11 @@ export class Ad4mClient {
     /** The executor's identity calls (`did:scid:coasys:1`). */
     get identity(): IdentityClient {
         return this.#identityClient
+    }
+
+    /** This executor as a host: tenants, sign-up policy, invites. */
+    get host(): HostClient {
+        return this.#hostClient
     }
 
     /** Bots that act for a person under the person's grant. */

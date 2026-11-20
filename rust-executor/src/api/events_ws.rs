@@ -151,6 +151,10 @@ pub fn event_specs() -> Vec<EventSpec> {
         EventSpec::of::<crate::identity::types::InboxMessageEvent>(InboxMessage, false),
         EventSpec::of::<crate::at_rest::StorageStatus>(StorageStateChanged, false),
         EventSpec::of::<crate::at_rest::StorageMigrationProgress>(StorageMigrationProgress, false),
+        EventSpec::of::<crate::hosting::TenantUsageChangedEvent>(TenantUsageChanged, false),
+        EventSpec::of::<crate::hosting::TenantJoinedEvent>(TenantJoined, false),
+        EventSpec::of::<crate::hosting::TenantLeftEvent>(TenantLeft, false),
+        EventSpec::of::<crate::hosting::policy::HostPolicyView>(HostPolicyChanged, false),
     ]
 }
 
@@ -354,7 +358,11 @@ fn payload_key(topic: Topic) -> Option<&'static str> {
         | Topic::LinkTicket
         | Topic::InboxMessage
         | Topic::StorageStateChanged
-        | Topic::StorageMigrationProgress => None,
+        | Topic::StorageMigrationProgress
+        | Topic::TenantUsageChanged
+        | Topic::TenantJoined
+        | Topic::TenantLeft
+        | Topic::HostPolicyChanged => None,
     }
 }
 
@@ -2584,6 +2592,39 @@ mod event_spec_tests {
                     stores_done: 2,
                     stores_total: 4,
                     store: Some("language:QmLanguage".into()),
+                }),
+            ),
+            (
+                Topic::TenantJoined,
+                serde_json::to_value(crate::hosting::TenantJoinedEvent {
+                    tenant_id: "t".into(),
+                    did_scid: "did:scid:coasys:1:Qm".into(),
+                    route: "anyone".into(),
+                }),
+            ),
+            (
+                Topic::TenantLeft,
+                serde_json::to_value(crate::hosting::TenantLeftEvent {
+                    tenant_id: "t".into(),
+                    did_scid: "did:scid:coasys:1:Qm".into(),
+                    kept: true,
+                    cause: "leave".into(),
+                }),
+            ),
+            (
+                Topic::TenantUsageChanged,
+                serde_json::to_value(crate::hosting::TenantUsageChangedEvent {
+                    tenant_id: "t".into(),
+                }),
+            ),
+            (
+                Topic::HostPolicyChanged,
+                serde_json::to_value(crate::hosting::policy::HostPolicyView {
+                    signup: crate::hosting::policy::SignupPolicy::NoOne,
+                    max_tenants: None,
+                    display: Default::default(),
+                    pinned: vec![],
+                    choice_needed: true,
                 }),
             ),
         ];

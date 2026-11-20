@@ -1,0 +1,36 @@
+# The vhost of cloud.coasys.org (AR-09 4.12.2): TLS here, HTTP and WebSocket to the
+# executor on 127.0.0.1:12500. MCP is not proxied. The firewall opens TCP 443 and the
+# media server's UDP range; the executor's listeners are all on loopback.
+server {
+    listen 80;
+    server_name cloud.coasys.org;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    server_name cloud.coasys.org;
+    # A certificate from Let's Encrypt through the DNS challenge, renewed by a timer.
+    ssl_certificate     /etc/letsencrypt/live/cloud.coasys.org/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/cloud.coasys.org/privkey.pem;
+    add_header X-Robots-Tag "noindex, nofollow" always;
+    client_max_body_size 50m;
+
+    # The executor's platform-internal routes are not for the internet.
+    location /internal/ {
+        return 404;
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:12500;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 3600;
+        proxy_send_timeout 3600;
+    }
+}

@@ -53,6 +53,12 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'identity.log': (p: Record<string, unknown>) => ({ did: p.did, events: [], head: null, fork: null }),
     'identity.devices': [],
     'identity.rekey': { sign: 'did:key:z6MkNew', enc: 'z6LSNew' },
+    // ── Host ──
+    'host.join': { joinHandle: 'h1', tenantId: 't1', deviceDid: 'did:key:z6MkTenant', rejoin: false },
+    'host.joinStatus': { state: 'active', reason: null },
+    'host.leave': (p: Record<string, unknown>) => ({ kept: p.keepData, removedPerspectives: 0, leftSharedPerspectives: 0, keyDestroyedAt: null, shreddedEverywhereAt: null }),
+    'host.createInvite': { inviteId: 'i-1', secret: 'c2VjcmV0', expiresAt: 9 },
+    'host.removeTenant': { removed: true },
     // ── Bots ──
     'bot.createAgent': { did: 'did:key:z6MkBot', key: 'z6MkBot', owner: 'did:scid:coasys:1:QmTest', offerId: 'offer', matchCode: 'R7K Q2M', expires: 1, token: 'bot-token' },
     'bot.grant': { did: 'did:key:z6MkBot', name: 'helper', owner: 'did:scid:coasys:1:QmTest', offerId: 'offer', createdAt: 1, grant: { spaces: ['neighbourhood://Qm1'], can: ['read', 'write'], expires: null, state: 'active', version: 3, updatedAt: 1 }, key: null },
@@ -1376,6 +1382,41 @@ describe('RuntimeClient', () => {
 });
 
 // ===================== IDENTITY TESTS =====================
+// ===================== HOST TESTS =====================
+describe('HostClient', () => {
+    test('join() sends the identity, the offer and the invite secret', async () => {
+        const joined = await ad4m.host.join('did:scid:coasys:1:QmTest', 'coasys:offer:1:x', 'c2VjcmV0');
+        expect(lastRpcCall!.type).toBe('host.join');
+        expect(lastRpcCall!.params).toEqual({ didScid: 'did:scid:coasys:1:QmTest', offer: 'coasys:offer:1:x', inviteSecret: 'c2VjcmV0' });
+        expect(joined.joinHandle).toBe('h1');
+    });
+
+    test('join() without an invite sends null', async () => {
+        await ad4m.host.join('did:scid:coasys:1:QmTest', 'coasys:offer:1:x');
+        expect(lastRpcCall!.params.inviteSecret).toBeNull();
+    });
+
+    test('joinStatus() names the handle', async () => {
+        const status = await ad4m.host.joinStatus('h1');
+        expect(lastRpcCall!.params).toEqual({ joinHandle: 'h1' });
+        expect(status.state).toBe('active');
+    });
+
+    test('leave() sends keepData', async () => {
+        const left = await ad4m.host.leave(false);
+        expect(lastRpcCall!.type).toBe('host.leave');
+        expect(lastRpcCall!.params).toEqual({ keepData: false });
+        expect(left.kept).toBe(false);
+    });
+
+    test('createInvite() and removeTenant() send their params', async () => {
+        await ad4m.host.createInvite(3, 'for ada');
+        expect(lastRpcCall!.params).toEqual({ expiresInDays: 3, note: 'for ada' });
+        await ad4m.host.removeTenant('t1');
+        expect(lastRpcCall!.params).toEqual({ tenantId: 't1' });
+    });
+});
+
 // ===================== BOT TESTS =====================
 describe('BotClient', () => {
     test('createAgent() sends the offer and the name', async () => {

@@ -296,6 +296,9 @@ pub struct Ad4mConfig {
     /// Accept a storage secret file on the data folder's disk; the status then reports the
     /// data as not encrypted at rest. Default false.
     pub allow_secret_on_data_disk: Option<bool>,
+    /// The config file's `host` section, seeded into the host policy at start.
+    #[serde(default)]
+    pub host: Option<crate::hosting::policy::HostConfigSection>,
     /// Seconds one request-driven SPARQL evaluation may run before it is
     /// stopped (default 30). Covers `perspective.querySparql`,
     /// `perspective.modelQuery`, live-query opening and their re-checks.
@@ -869,6 +872,7 @@ impl Ad4mConfig {
             internal_api_token: None,
             storage_secret: None,
             allow_secret_on_data_disk: None,
+            host: None,
         }
     }
 }

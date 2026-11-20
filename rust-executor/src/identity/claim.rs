@@ -26,7 +26,9 @@
 //! its rules and writes the main agent's join row (`add_join`, which keeps a repeated claim's
 //! decision) just before the store call, and `bot.createAgent` runs it for a new bot agent
 //! (`crate::bots`), whose offer the holder opened as a bot offer; a bot's claim writes no join
-//! row and needs no accept. Claims for a hosted tenant's agent are not here yet.
+//! row and needs no accept. `claim_for_tenant` is the claim of a hosted tenant's device key
+//! (`crate::hosting`): the same, for the tenant's managed agent, and the host checks the
+//! stored offer's kind and expiry in the answer.
 
 use ad4m_identity_core::build::Signer;
 use ad4m_identity_core::did_of;
@@ -217,6 +219,19 @@ impl ClaimService<'_> {
             expires: receipt.expires,
             needs_accept,
         })
+    }
+
+    /// Claims `offer` with the device key of the hosted tenant `device_did` (`host.join`, AR-05
+    /// 4.5.3). No join row and no accept: the tenant's activation is the host's own poll of the
+    /// key log. The answer carries the stored offer's `kind` and `expires`, which the host checks.
+    pub async fn claim_for_tenant(
+        &self,
+        device_did: &str,
+        offer: &OfferString,
+    ) -> Result<ClaimOfferResult, WsRpcError> {
+        let agent = AgentContext::managed(device_did.to_string());
+        self.claim_for_agent(&agent, offer, None, None, || Ok(false))
+            .await
     }
 
     /// `identity.joinStatus`: the state of a claim this executor made for its main agent (the

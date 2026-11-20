@@ -754,6 +754,20 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
     ),
     ("identity.deleteRequest", || json!({ "id": "r" })),
     ("identity.unwrapRecordKey", || json!({ "wrapped": "w" })),
+    // The host.
+    (
+        "host.join",
+        || json!({ "didScid": "did:scid:coasys:1:Qm", "offer": "coasys:offer:1:x", "inviteSecret": null }),
+    ),
+    ("host.joinStatus", || json!({ "joinHandle": "h" })),
+    ("host.leave", || json!({ "keepData": true })),
+    ("host.setPolicy", || json!({ "signup": "no_one" })),
+    (
+        "host.createInvite",
+        || json!({ "expiresInDays": 7, "note": null }),
+    ),
+    ("host.revokeInvite", || json!({ "inviteId": "i" })),
+    ("host.removeTenant", || json!({ "tenantId": "t" })),
     // Storage.
     ("storage.unlock", || json!({ "secret": "5a".repeat(32) })),
     (
@@ -1537,6 +1551,13 @@ async fn operator_methods_answer_everyone_else_admin_credential_required() {
             "ai.localRemove",
             "ai.localStart",
             "ai.localStop",
+            "host.createInvite",
+            "host.listInvites",
+            "host.policy",
+            "host.removeTenant",
+            "host.revokeInvite",
+            "host.setPolicy",
+            "host.tenants",
             "identity.acceptJoin",
             "identity.cancelJoin",
             "identity.claimOffer",
@@ -1912,6 +1933,9 @@ fn only_methods_whose_guard_checks_no_capability_are_open() {
         open,
         vec![
             "agent.isLocked",
+            "host.info",
+            "host.join",
+            "host.joinStatus",
             "runtime.freeHostingEnabled",
             "runtime.info",
             "runtime.storageStatus",

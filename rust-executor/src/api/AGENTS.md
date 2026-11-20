@@ -204,7 +204,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-273 methods: Cap 88, CapAnyPointer 1, Executor 48, Open 10, Operator 42, Owns 79, UserOrOperator 5. Local only (the operator on this machine): 17.
+285 methods: Cap 90, CapAnyPointer 1, Executor 48, Open 13, Operator 49, Owns 79, UserOrOperator 5. Local only (the operator on this machine): 17.
 
 | Method | Guard |
 |---|---|
@@ -282,6 +282,18 @@ the guard checked:
 | `expression.getRaw` | `Cap(expression:READ)` |
 | `expression.interact` | `Cap(expression:UPDATE)` |
 | `expression.interactions` | `Cap(expression:READ)` |
+| `host.createInvite` | `Operator` |
+| `host.info` | `Open` |
+| `host.join` | `Open` |
+| `host.joinStatus` | `Open` |
+| `host.leave` | `Cap(runtime.hosting:UPDATE)` |
+| `host.listInvites` | `Operator` |
+| `host.policy` | `Operator` |
+| `host.removeTenant` | `Operator` |
+| `host.revokeInvite` | `Operator` |
+| `host.setPolicy` | `Operator` |
+| `host.tenants` | `Operator` |
+| `host.usage` | `Cap(runtime.hosting:READ)` |
 | `hosting.info` | `Cap(runtime.hosting:READ)` |
 | `hosting.requestPayment` | `Cap(agent:UPDATE)` |
 | `hosting.setHotWallet` | `Cap(agent:UPDATE)` |

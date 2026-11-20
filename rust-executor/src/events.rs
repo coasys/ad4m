@@ -52,11 +52,15 @@ pub enum Topic {
     InboxMessage,
     StorageStateChanged,
     StorageMigrationProgress,
+    TenantUsageChanged,
+    TenantJoined,
+    TenantLeft,
+    HostPolicyChanged,
 }
 
 impl Topic {
     /// Every topic, in the order of `events_ws::event_specs`.
-    pub const ALL: [Topic; 35] = [
+    pub const ALL: [Topic; 39] = [
         Topic::AiSessionChanged,
         Topic::AgentStatusChanged,
         Topic::AgentUpdated,
@@ -92,6 +96,10 @@ impl Topic {
         Topic::InboxMessage,
         Topic::StorageStateChanged,
         Topic::StorageMigrationProgress,
+        Topic::TenantUsageChanged,
+        Topic::TenantJoined,
+        Topic::TenantLeft,
+        Topic::HostPolicyChanged,
     ];
 
     /// The event type on the wire: the `type` field of the socket message and the key
@@ -133,6 +141,10 @@ impl Topic {
             Topic::InboxMessage => "inbox-message",
             Topic::StorageStateChanged => "storage-state-changed",
             Topic::StorageMigrationProgress => "storage-migration-progress",
+            Topic::TenantUsageChanged => "tenant-usage-changed",
+            Topic::TenantJoined => "tenant-joined",
+            Topic::TenantLeft => "tenant-left",
+            Topic::HostPolicyChanged => "host-policy-changed",
         }
     }
 
@@ -163,7 +175,14 @@ impl Topic {
             | Topic::StorageStateChanged
             | Topic::StorageMigrationProgress
             | Topic::LinkTicket
-            | Topic::InboxMessage => caps::AGENT_READ_CAPABILITY.clone(),
+            | Topic::InboxMessage
+            // The host's own events (AR-05 4.13.2): `host.tenants` and `host.policy` are the
+            // operator's, so the operator audience keeps them from every other session.
+            | Topic::TenantJoined
+            | Topic::TenantLeft
+            | Topic::HostPolicyChanged => caps::AGENT_READ_CAPABILITY.clone(),
+            // `host.usage`: a tenant's own, published to its agent.
+            Topic::TenantUsageChanged => caps::RUNTIME_HOSTING_READ_CAPABILITY.clone(),
             // An app approval: the sessions that approve apps for the agent (`agent.permitCapability`).
             Topic::AppsChanged => caps::AGENT_PERMIT_CAPABILITY.clone(),
             // `hosting.info`; the main agent's copy needs RUNTIME_USER_MANAGEMENT_READ instead

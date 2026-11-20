@@ -24,7 +24,7 @@ pub fn executor_is_unlocked() -> bool {
 /// call to `AgentService::user_exists` before that point returns `false`, which would
 /// otherwise surface as "User key not found" — indistinguishable from a deleted account.
 /// Calling this guard first gives callers a clear, actionable message.
-fn check_executor_unlocked() -> Result<(), String> {
+pub(crate) fn check_executor_unlocked() -> Result<(), String> {
     if !executor_is_unlocked() {
         return Err(
             "Executor is locked: its admin has not unlocked the agent yet (keys are held in \

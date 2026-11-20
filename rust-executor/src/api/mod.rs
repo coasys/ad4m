@@ -24,6 +24,7 @@ pub mod ai_ws;
 pub mod bots_ws;
 pub mod config_ws;
 pub mod expressions_ws;
+pub mod host_ws;
 pub mod hosting_ws;
 pub mod identity_ws;
 pub mod key_login_ws;
