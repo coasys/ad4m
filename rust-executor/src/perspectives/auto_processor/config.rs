@@ -33,7 +33,9 @@ use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClas
 use crate::types::{Link, LinkExpression, LinkQuery, LinkStatus};
 
 use super::scalar_string;
-use crate::perspectives::hardwired_class::{ensure_subject_class, subject_class_registered};
+use crate::perspectives::hardwired_class::{
+    ensure_subject_classes, subject_class_registered, HardwiredClass,
+};
 
 /// Instances already reported as unloadable, so each is complained about once.
 ///
@@ -100,11 +102,9 @@ fn log_flow_selection_once(cfg: &AutoProcessorConfig) {
     }
 }
 
-/// Local subject-class name of a processor config.
-pub(crate) const AUTO_PROCESSOR_CLASS: &str = "AutoProcessor";
-/// Target-class URI of [`AUTO_PROCESSOR_CLASS`] — used to detect prior
-/// registration.
-const AUTO_PROCESSOR_TARGET_CLASS: &str = "ad4m://AutoProcessor";
+/// The subject class of a processor config, by its IRI: an app class named
+/// `AutoProcessor` is another class.
+pub(crate) const AUTO_PROCESSOR_CLASS: &str = "ad4m://AutoProcessor";
 
 /// Hard-wired SDNA for the [`AUTO_PROCESSOR_CLASS`] subject class.
 ///
@@ -242,21 +242,20 @@ pub fn processor_node(processor_id: &str) -> String {
 }
 
 /// Idempotently register the hard-wired [`AUTO_PROCESSOR_CLASS`] subject class.
-/// Refreshes the SHACL if an older registration predates the `flows` selection.
 pub async fn ensure_auto_processor_class(
     perspective: &mut PerspectiveInstance,
     context: &AgentContext,
 ) -> anyhow::Result<()> {
-    ensure_subject_class(
-        perspective,
-        AUTO_PROCESSOR_CLASS,
-        AUTO_PROCESSOR_TARGET_CLASS,
-        AUTO_PROCESSOR_SDNA,
-        Some("ad4m://flow"),
-        context,
-    )
-    .await
+    ensure_subject_classes(perspective, &[AUTO_PROCESSOR], context).await
 }
+
+/// The hard-wired `AutoProcessor` class. `flows` is its newest property: a
+/// shape without it is older.
+pub(crate) const AUTO_PROCESSOR: HardwiredClass = HardwiredClass {
+    sdna: AUTO_PROCESSOR_SDNA,
+    newest_path: Some("ad4m://flow"),
+    removed_path: None,
+};
 
 /// Register the class if needed, then mint the processor as a subject instance.
 /// Writing the same `processor_id` twice overwrites its scalars (the setters
@@ -373,7 +372,13 @@ pub async fn write_processor(
            state, and a local-only class list would make one peer's view of what to extract differ
            from everyone else's.
         */
+        // Each class is stored by its target class IRI: a bare name reads the
+        // least IRI of that name, which a class registered later can change.
+        // A class not registered yet is stored as given.
         for class in cfg.interpretation_classes.iter() {
+            let class = perspective
+                .get_shape(class)
+                .map_or_else(|_| class.clone(), |s| s.target_class.clone());
             perspective
                 .add_link(
                     Link {
@@ -520,7 +525,7 @@ pub async fn load_processors(
 ) -> anyhow::Result<Vec<AutoProcessorConfig>> {
     // The watcher polls this on every perspective, most of which never declare
     // a processor: no registered class ⇒ no shape to query ⇒ nothing to load.
-    if !subject_class_registered(perspective, AUTO_PROCESSOR_TARGET_CLASS).await? {
+    if !subject_class_registered(perspective, AUTO_PROCESSOR_CLASS).await? {
         return Ok(Vec::new());
     }
     // Property names MUST match the camelCase names in AUTO_PROCESSOR_SDNA
@@ -957,7 +962,7 @@ mod tests {
             vec![Link {
                 source: processor_node("partial"),
                 predicate: Some("rdf://type".into()),
-                target: AUTO_PROCESSOR_TARGET_CLASS.into(),
+                target: AUTO_PROCESSOR_CLASS.into(),
             }],
             LinkStatus::Shared,
             None,
@@ -1161,6 +1166,38 @@ mod tests {
         assert_eq!(
             loaded[0].interpretation_classes,
             vec!["ns://Question".to_string(), "ns://Task".to_string()]
+        );
+    }
+
+    /// A class is stored by its target class IRI. A bare name reads only the
+    /// least IRI of its name, and which that is changes as classes of the
+    /// name register: the processor keeps the class it was configured with.
+    /// A class not registered yet is stored as given.
+    #[tokio::test]
+    async fn interpretation_classes_are_stored_by_iri() {
+        let task = |ns: &str| {
+            format!(
+                r#"{{"target_class":"{ns}://Task","constructor_actions":[{{"action":"addLink","source":"this","predicate":"rdf://type","target":"{ns}://Task"}}],"properties":[]}}"#
+            )
+        };
+        let (b, c) = (task("b"), task("c"));
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("Task", &b), ("Task", &c)]).await;
+        let mut cfg = sample_config("by-iri");
+        cfg.interpretation_classes = vec!["Task".into(), "c://Task".into(), "ns://Later".into()];
+        write_processor(&mut p, &cfg, Some(false), &ctx)
+            .await
+            .expect("write");
+        p.register_shape_json(&task("a"), &ctx)
+            .await
+            .expect("a://Task");
+        let loaded = load_processors(&p).await.expect("load");
+        assert_eq!(
+            loaded[0].interpretation_classes,
+            vec![
+                "b://Task".to_string(),
+                "c://Task".to_string(),
+                "ns://Later".to_string()
+            ]
         );
     }
 
