@@ -138,7 +138,7 @@ fn node(result: &ModelQueryResult) -> &Value {
 fn assert_collection(task: &Value) {
     let from = &task["extractedFrom"];
     assert_eq!(from["id"], "we://c/1", "extractedFrom hydrated: {task}");
-    assert_eq!(from["__subjectClass"], "CollectionBlock");
+    assert_eq!(from["__subjectClass"], "we://models/CollectionBlock");
 }
 
 #[tokio::test]
@@ -360,9 +360,11 @@ fn item_classes(items: &Value) -> Vec<(String, String)> {
     out
 }
 
+/// `(id, class)` pairs, each class by its target class IRI: `__subjectClass`
+/// on a polymorphic row is the IRI.
 fn pairs(v: &[(&str, &str)]) -> Vec<(String, String)> {
     v.iter()
-        .map(|(a, b)| (a.to_string(), b.to_string()))
+        .map(|(a, b)| (a.to_string(), format!("we://models/{b}")))
         .collect()
 }
 
@@ -493,7 +495,9 @@ async fn polymorphic_where_equality_keeps_the_matching_target() {
     );
 }
 
-/// `(id, __subjectClass, __subjectClasses)` of each row, by id.
+/// `(id, __subjectClass, __subjectClasses)` of each row, by id. The chosen
+/// class by its name: a polymorphic include gives its IRI, a union read the
+/// member name it was asked for.
 fn subject_classes(rows: &Value) -> Vec<(String, String, Vec<String>)> {
     let mut out: Vec<(String, String, Vec<String>)> = rows
         .as_array()
@@ -502,7 +506,9 @@ fn subject_classes(rows: &Value) -> Vec<(String, String, Vec<String>)> {
         .map(|r| {
             (
                 r["id"].as_str().unwrap_or_default().to_string(),
-                r["__subjectClass"].as_str().unwrap_or_default().to_string(),
+                crate::perspectives::shacl_parser::class_name_of(
+                    r["__subjectClass"].as_str().unwrap_or_default(),
+                ),
                 serde_json::from_value(r["__subjectClasses"].clone()).unwrap_or_default(),
             )
         })
@@ -522,9 +528,13 @@ fn shared_classes() -> Vec<(String, String, Vec<String>)> {
         )
     };
     vec![
-        row("we://t/1", "Base", &["Base"]),
-        row("we://t/2", "Special", &["Special", "Base"]),
-        row("we://t/3", "Base", &["Base"]),
+        row("we://t/1", "Base", &["we://models/Base"]),
+        row(
+            "we://t/2",
+            "Special",
+            &["we://models/Special", "we://models/Base"],
+        ),
+        row("we://t/3", "Base", &["we://models/Base"]),
     ]
 }
 

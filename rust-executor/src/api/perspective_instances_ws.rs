@@ -87,8 +87,8 @@ pub struct PerspectiveInstanceRemoveFromCollectionParams {
 /// [`InstanceError`] as `data`.
 ///
 /// - 422: `validation` (the write breaks the class's shape)
-/// - 400: `unknownClass`, `abstractClass`, `invalidUri`, `emptyProperties`,
-///   `storedAsExpressions`
+/// - 400: `unknownClass`, `ambiguousClass`, `abstractClass`, `invalidUri`,
+///   `emptyProperties`, `storedAsExpressions`
 /// - 404: `notFound` (no instance of the class at the URI), `batchNotFound`
 /// - 409: `alreadyExists`
 /// - 500: `failed`, `partiallyRemoved` (the store failed)
@@ -110,6 +110,16 @@ pub(crate) fn instance_error(error: InstanceError) -> WsRpcError {
         InstanceError::UnknownClass { class_name, .. } => {
             (400, format!("Unknown subject class '{class_name}'"))
         }
+        InstanceError::AmbiguousClass {
+            class_name,
+            candidates,
+        } => (
+            400,
+            format!(
+                "'{class_name}' names more than one class: pass its target class IRI ({})",
+                candidates.join(", ")
+            ),
+        ),
         InstanceError::AbstractClass { class_name } => (
             400,
             format!(

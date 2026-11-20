@@ -2710,7 +2710,7 @@ fn compile_relation_quantifier(
         .include_relations
         .iter()
         .find(|r| r.name == prop_name)
-        .map(|r| r.target_class_name.as_str())
+        .map(|r| r.target())
         .filter(|n| !n.is_empty());
     let target_shape = match (target_class, resolver) {
         (Some(class), Some(r)) => match r.get_shape(class) {
@@ -2832,6 +2832,7 @@ mod relation_quantifier_tests {
             max_count: None,
             target_class_name: "Comment".to_string(),
             target_class_uri: String::new(),
+            target_class: String::new(),
             polymorphic: false,
         });
         s
@@ -3192,6 +3193,7 @@ mod relation_quantifier_tests {
             max_count: Some(1),
             target_class_name: "Agent".to_string(),
             target_class_uri: String::new(),
+            target_class: String::new(),
             polymorphic: false,
         });
 

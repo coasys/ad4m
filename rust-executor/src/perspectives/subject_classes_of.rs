@@ -48,7 +48,7 @@ use super::model_query::utils::{emittable_iri, looks_like_absolute_iri};
 use super::model_query::{
     conformance_triples, instance_link_predicates, local_predicates, ConformanceObject, LinkGuard,
 };
-use super::shacl_parser::ABSTRACT_PREDICATE;
+use super::shacl_parser::{class_name_of, ABSTRACT_PREDICATE};
 use super::sparql_store::stored_as_literal;
 use super::sparql_store::{EvalStop, SparqlStore};
 use crate::types::LinkStatus;
@@ -79,8 +79,10 @@ pub fn all_subject_class_names(stop: &EvalStop, store: &SparqlStore) -> Result<V
 
 /// Every registered class that is not abstract (#1435): the classes a record
 /// can be classified as. An abstract class names what a record has, not what
-/// it is, so it is never one of a record's classes.
-pub fn concrete_subject_class_names(
+/// it is, so it is never one of a record's classes. By target class IRI,
+/// sorted. Two classes may share a name (`a://Task`, `b://Task`); each is its
+/// own class here.
+pub fn concrete_subject_classes(
     stop: &EvalStop,
     store: &SparqlStore,
 ) -> Result<Vec<String>, Error> {
@@ -96,15 +98,15 @@ pub fn concrete_subject_class_names(
     "#
     );
     let rows: Vec<Value> = serde_json::from_str(&store.query(stop, &query)?)?;
-    let mut names: Vec<String> = rows
+    let mut classes: Vec<String> = rows
         .iter()
         .filter_map(|r| r["targetClass"].as_str())
-        .map(local_name)
-        .filter(|n| !n.is_empty())
+        .filter(|c| !class_name_of(c).is_empty())
+        .map(str::to_string)
         .collect();
-    names.sort();
-    names.dedup();
-    Ok(names)
+    classes.sort();
+    classes.dedup();
+    Ok(classes)
 }
 
 pub(crate) fn local_name(uri: &str) -> String {
@@ -220,8 +222,8 @@ fn membership(shape: &ModelShape) -> Option<Membership> {
 /// module needing to know anything about the inheritance graph (which SHACL does
 /// not record).
 ///
-/// Ties break alphabetically. Two genuinely different classes with identical
-/// required sets are indistinguishable *by definition of how membership works
+/// Ties break alphabetically by name, then by target class IRI. Two genuinely
+/// different classes with identical required sets are indistinguishable *by definition of how membership works
 /// here*, so any tie-break is arbitrary; the point of sorting is that every peer
 /// makes the same arbitrary choice rather than returning whatever the hash map
 /// iterated first.
@@ -229,8 +231,12 @@ fn membership(shape: &ModelShape) -> Option<Membership> {
 /// This is only an ordering. It ranks the members of a set without removing any
 /// of them — the caller decides whether the tail matters.
 fn order_by_specificity(matches: &mut Vec<(String, usize)>) -> Vec<String> {
-    matches.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-    matches.iter().map(|(name, _)| name.clone()).collect()
+    matches.sort_by(|a, b| {
+        b.1.cmp(&a.1)
+            .then_with(|| class_name_of(&a.0).cmp(&class_name_of(&b.0)))
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    matches.iter().map(|(class, _)| class.clone()).collect()
 }
 
 /// Resolve each URI to every subject class it is an instance of, most specific
@@ -286,6 +292,43 @@ pub(crate) fn subject_classes_of_with_pending(
     pending: &[(String, String, String)],
     guard: LinkGuard<'_>,
 ) -> Result<HashMap<String, Vec<String>>, Error> {
+    Ok(
+        subject_class_iris_of_with_pending(stop, store, resolver, uris, pending, guard)?
+            .into_iter()
+            .map(|(uri, classes)| {
+                let mut names: Vec<String> = Vec::new();
+                for name in classes.iter().map(|c| class_name_of(c)) {
+                    if !names.contains(&name) {
+                        names.push(name);
+                    }
+                }
+                (uri, names)
+            })
+            .collect(),
+    )
+}
+
+/// [`subject_classes_of`] by target class IRI: each URI's classes, most
+/// specific first. Two classes of one name are told apart here, so a reader
+/// hydrates an instance through the class it conforms to.
+pub(crate) fn subject_class_iris_of(
+    stop: &EvalStop,
+    store: &SparqlStore,
+    resolver: &dyn ShapeResolver,
+    uris: &[String],
+    guard: LinkGuard<'_>,
+) -> Result<HashMap<String, Vec<String>>, Error> {
+    subject_class_iris_of_with_pending(stop, store, resolver, uris, &[], guard)
+}
+
+fn subject_class_iris_of_with_pending(
+    stop: &EvalStop,
+    store: &SparqlStore,
+    resolver: &dyn ShapeResolver,
+    uris: &[String],
+    pending: &[(String, String, String)],
+    guard: LinkGuard<'_>,
+) -> Result<HashMap<String, Vec<String>>, Error> {
     let mut out: HashMap<String, Vec<String>> = HashMap::new();
     if uris.is_empty() {
         return Ok(out);
@@ -306,25 +349,25 @@ pub(crate) fn subject_classes_of_with_pending(
         .collect::<Vec<_>>()
         .join(" ");
 
-    // Load every class's shape once. Shapes are cached per perspective, so this
-    // is a map lookup after the first call.
-    let class_names = concrete_subject_class_names(stop, store)?;
+    // Load every class's shape once, by its IRI. Shapes are cached per
+    // perspective, so this is a map lookup after the first call.
+    let classes = concrete_subject_classes(stop, store)?;
     let mut shapes: Vec<(String, Membership)> = Vec::new();
-    for name in class_names {
-        match resolver.get_shape(&name) {
+    for class in classes {
+        match resolver.get_shape(&class) {
             // A class with no required triples at all matches literally every
             // URI, which is not an answer — it is the absence of one.
             Ok(shape) => match membership(shape.as_ref()) {
-                Some(m) if !m.required.is_empty() => shapes.push((name, m)),
+                Some(m) if !m.required.is_empty() => shapes.push((class, m)),
                 Some(_) => {}
                 None => log::warn!(
-                    "subjectClassesOf: skipping class '{name}': a predicate its query emits is \
+                    "subjectClassesOf: skipping class '{class}': a predicate its query emits is \
                      not a parseable IRI"
                 ),
             },
             // A class whose SHACL will not parse cannot classify anything; skip
             // it rather than failing the whole batch for the others.
-            Err(e) => log::warn!("subjectClassesOf: skipping class '{name}': {e}"),
+            Err(e) => log::warn!("subjectClassesOf: skipping class '{class}': {e}"),
         }
     }
     if shapes.is_empty() {
@@ -400,7 +443,7 @@ pub(crate) fn subject_classes_of_with_pending(
     for uri in &valid {
         let uri = uri.as_str();
         let mut matches: Vec<(String, usize)> = Vec::new();
-        for (name, m) in &shapes {
+        for (class, m) in &shapes {
             let carries = |pred: &str, local: bool, value: Option<&FlagValue>| {
                 let c = if local { &carried_local } else { &carried };
                 c.has(uri, pred, value)
@@ -414,7 +457,7 @@ pub(crate) fn subject_classes_of_with_pending(
                     .iter()
                     .any(|(pred, local)| carries(pred, *local, None));
             if conforms && loads_a_link {
-                matches.push((name.clone(), m.required.len()));
+                matches.push((class.clone(), m.required.len()));
             }
         }
 
