@@ -451,10 +451,13 @@ async fn a_broadcast_without_a_link_language_still_fails_after_local_delivery() 
     assert_eq!(delivered, Ok(true), "local delivery did not happen");
 }
 
-/// S7: `onlineAgents` answers the locally known users while the language
-/// is blocked — within its 2 s time-box, not the language's 20 s.
+/// S7: `onlineAgents` does not wait on a blocked language past its 2 s
+/// time-box, and what it answers then is "unknown", not a roster: an `Ok`
+/// with only the co-located users would make every client drop its remote
+/// call participants (`MeshManager.setRoster` tears down whoever is
+/// missing). The error leaves the client's roster as it was.
 #[tokio::test(start_paused = true)]
-async fn online_agents_reports_co_located_users_while_the_language_is_blocked() {
+async fn online_agents_on_a_blocked_language_is_unknown_not_a_local_only_roster() {
     test_setup();
     let now = chrono::Utc::now().timestamp();
     let user = "did:key:telepresence-user";
@@ -479,15 +482,24 @@ async fn online_agents_reports_co_located_users_while_the_language_is_blocked() 
     )
     .await;
     let instance = neighbourhood(&stub, vec![user.to_string()]).await;
-    stub.set(StubMode::Block);
 
-    let answered = timeout(Duration::from_millis(2500), instance.online_agents()).await;
-    let agents = answered
-        .expect("onlineAgents did not answer within 2.5 s while the language was blocked")
-        .expect("onlineAgents failed while the language was blocked");
+    // A healthy language: the co-located user is listed.
+    let agents = instance
+        .online_agents()
+        .await
+        .expect("onlineAgents failed on a healthy language");
     assert!(
         agents.iter().any(|a| a.did == user),
-        "the co-located user is missing: {agents:?}"
+        "setup: the co-located user is missing: {agents:?}"
+    );
+
+    stub.set(StubMode::Block);
+    let answered = timeout(Duration::from_millis(2500), instance.online_agents())
+        .await
+        .expect("onlineAgents did not answer within 2.5 s while the language was blocked");
+    assert!(
+        answered.is_err(),
+        "a timed-out language call answered an authoritative roster without the remote agents: {answered:?}"
     );
 
     stub.stop().await;

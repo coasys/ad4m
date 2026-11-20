@@ -5004,7 +5004,9 @@ impl PerspectiveInstance {
         // present — i.e. a real multi-executor neighbourhood). The language
         // runtime serves one call at a time, so the call is time-boxed: a
         // slow or stuck language call must not stall the roster. On timeout
-        // or error the locally known users still answer.
+        // or error the answer is that error: the remote agents are unknown,
+        // and the co-located users alone would read as a roster without
+        // them (`MeshManager.setRoster` drops every peer it does not list).
         let link_language_clone = self.link_language.read().await.clone();
         let has_link_language = link_language_clone.is_some();
         let remote = match link_language_clone {
@@ -5026,13 +5028,13 @@ impl PerspectiveInstance {
         };
         // A remote multi-user node publishes its agents' statuses as one bundle;
         // `unpack` turns it back into one verified entry per agent.
-        let (mut agents, remote_error): (Vec<OnlineAgent>, Option<AnyError>) = match remote {
-            Ok(remote_agents) => (hosted_status::unpack(remote_agents), None),
+        let mut agents: Vec<OnlineAgent> = match remote {
+            Ok(remote_agents) => hosted_status::unpack(remote_agents),
             Err(e) => {
                 log::warn!(
-                    "online_agents: the link-language call failed or timed out ({e}); answering with co-located users only"
+                    "online_agents: the link-language call failed or timed out ({e}); the roster is unknown"
                 );
-                (Vec::new(), Some(e))
+                return Err(e);
             }
         };
 
@@ -5063,16 +5065,9 @@ impl PerspectiveInstance {
         // watcher) rely on that error to fall through to their claim-based path
         // rather than reading an empty set as "everyone is offline". A link
         // language that answered an empty set is a genuine "nobody online" and
-        // stays `Ok(vec![])`; a link-language call that failed is "unknown",
-        // not "nobody online" — it surfaces its error as before, unless we
-        // actually have co-located managed users to report.
-        if agents.is_empty() {
-            if !has_link_language {
-                return Err(self.no_link_language_error().await);
-            }
-            if let Some(e) = remote_error {
-                return Err(e);
-            }
+        // stays `Ok(vec![])`.
+        if agents.is_empty() && !has_link_language {
+            return Err(self.no_link_language_error().await);
         }
 
         Ok(agents)
