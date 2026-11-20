@@ -685,8 +685,10 @@ pub struct SfuRestartIceParams {
 pub struct SfuResumeParams {
     pub neighbourhood_url: String,
     pub room_name: String,
-    /// The caller's session, as its join returned it. Any other id, even
-    /// another device of the same agent, is refused.
+    /// A session of the caller's agent in this room, as its join returned
+    /// it. Another agent's session, or one no longer in the room, is
+    /// refused. The check is by DID: another device of the same agent may
+    /// resume this session.
     pub participant_id: String,
 }
 

@@ -1530,7 +1530,9 @@ impl SfuService {
     /// was gone did not reach it: the SFU publishes the pending server offer,
     /// if any, again at once, and the room's roster to `agent_did`. The
     /// session itself never depended on the socket. Refused when the session
-    /// is not `agent_did`'s, as every per-session call.
+    /// is not `agent_did`'s or is no longer in the room. The check is by DID
+    /// ([`super::room::SfuRoom::session_of`]): another device of the same agent
+    /// may resume this session, and the roster reaches every device of it.
     pub async fn call_resume(
         &self,
         neighbourhood_url: &str,
