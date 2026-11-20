@@ -713,7 +713,14 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
             Ok(Restored::Nothing) => {
                 info!("No remote snapshot found — starting with fresh perspectives")
             }
-            Err(e) => log::warn!("Perspective restore failed (continuing without): {}", e),
+            // The executor goes on (an unreachable platform must not stop it), but it must not
+            // replace the remote snapshot it could not read: every snapshot upload is refused
+            // until a start restores (`perspective_snapshot::backup_perspectives`).
+            Err(e) => log::error!(
+                "Perspective restore failed: {}. Snapshot uploads are refused until the \
+                 executor restarts with a restore that succeeds; the remote snapshot is kept",
+                e
+            ),
         }
     }
 

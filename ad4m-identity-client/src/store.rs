@@ -124,8 +124,17 @@ const ENC_UNAVAILABLE: &str = "the wallet is locked, so the inbox does not open"
 
 fn error(code: u16, message: impl Into<String>) -> RpcError {
     RpcError {
+        data: None,
         code,
         message: message.into(),
+    }
+}
+
+/// [`error`] with the refusal as data (what the executor sends as `error.data`).
+fn error_with(code: u16, message: impl Into<String>, data: Value) -> RpcError {
+    RpcError {
+        data: Some(data),
+        ..error(code, message)
     }
 }
 
@@ -149,9 +158,10 @@ fn bad_reply(what: impl Into<String>) -> RpcError {
 
 /// `409`: this device's key speaks for no identity (as the executor's `bound_position`).
 fn no_identity() -> RpcError {
-    error(
+    error_with(
         409,
         "no-identity: this device's key speaks for no identity".to_string(),
+        json!({"error": "no-identity"}),
     )
 }
 
@@ -199,7 +209,11 @@ fn refused(status: u16, body: &[u8]) -> RpcError {
         400 => invalid("malformed"),
         403 => {
             if forbidden_reason(reason) {
-                error(403, format!("forbidden: {reason:?}"))
+                error_with(
+                    403,
+                    format!("forbidden: {reason:?}"),
+                    json!({"error": "forbidden", "reason": reason}),
+                )
             } else {
                 invalid("forbidden")
             }
@@ -216,9 +230,10 @@ fn refused(status: u16, body: &[u8]) -> RpcError {
                     ),
                 )
             } else if reason == "already-vouched" {
-                error(
+                error_with(
                     409,
                     "already-vouched: the store keeps a note for this identity already".to_string(),
+                    json!({"error": "already-vouched"}),
                 )
             } else if reason == "key-taken" {
                 error(
@@ -240,13 +255,15 @@ fn refused(status: u16, body: &[u8]) -> RpcError {
             ),
         ),
         413 => invalid("too-large"),
-        429 => error(
+        429 => error_with(
             429,
             format!(
                 "rate-limited: {}, retry after {} s",
                 value["scope"].as_str().unwrap_or("address"),
                 value["retryAfter"].as_u64().unwrap_or(60)
             ),
+            // The store's own body: `{error, scope, retryAfter}`.
+            value.clone(),
         ),
         s if s >= 500 => unavailable(if reason.is_empty() {
             "the store did not answer".to_string()
@@ -1913,5 +1930,33 @@ impl ExecutorRpc for ViaStore {
             })),
             other => Err(not_served(other)),
         }
+    }
+}
+
+#[cfg(test)]
+mod refusal_data_tests {
+    use super::*;
+
+    /// The store's 429 body reaches the caller as it is; a proof-of-work 403 is
+    /// `{error: forbidden, reason}`.
+    #[test]
+    fn the_brake_and_the_proof_of_work_refusals_carry_data() {
+        let body = json!({"error": "rate-limited", "scope": "global", "retryAfter": 12});
+        let limited = refused(429, body.to_string().as_bytes());
+        assert_eq!(limited.code, 429);
+        assert_eq!(limited.message, "rate-limited: global, retry after 12 s");
+        assert_eq!(limited.data, Some(body));
+
+        let pow = refused(
+            403,
+            json!({"error": "pow", "detail": "bad proof"})
+                .to_string()
+                .as_bytes(),
+        );
+        assert_eq!(pow.code, 403);
+        assert_eq!(
+            pow.data,
+            Some(json!({"error": "forbidden", "reason": "pow"}))
+        );
     }
 }

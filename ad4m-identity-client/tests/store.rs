@@ -1864,6 +1864,7 @@ async fn a_phone_creates_through_the_brake_then_attaches_a_vouching_note() {
     let again = e.attach_note("tok-2").await.unwrap_err();
     assert_eq!(again.code, 409, "{again}");
     assert!(again.message.starts_with("already-vouched"), "{again}");
+    assert_eq!(again.data, Some(json!({"error": "already-vouched"})));
 }
 
 // A token the vouching service never gave is `403 forbidden: "vouch"`, and the identity stays
@@ -1876,12 +1877,17 @@ async fn attach_note_refuses_a_bad_token_a_store_with_no_service_and_no_identity
     let none = e.attach_note("tok-0").await.unwrap_err();
     assert_eq!(none.code, 409, "{none}");
     assert!(none.message.contains("no-identity"), "{none}");
+    assert_eq!(none.data, Some(json!({"error": "no-identity"})));
     assert_eq!(server.redeems(), 0);
 
     create(&e, &MemoryVault::new(), 92).await;
     let bad = e.attach_note("never-given").await.unwrap_err();
     assert_eq!(bad.code, 403, "{bad}");
     assert!(bad.message.contains("vouch"), "{bad}");
+    assert_eq!(
+        bad.data,
+        Some(json!({"error": "forbidden", "reason": "vouch"}))
+    );
     assert_eq!(status(&e).await["vouched"], false);
 
     let (plain, _plain_dir) = store();

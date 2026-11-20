@@ -702,7 +702,13 @@ them against those two guards.
   `core/src/generated/api/`, but not its `index.ts`: add the export line there by hand.
 - `crate::types::core` (domain) vs `crate::types::domain` (wire/input). Some duplicates,
   see spec item 5. Prefer `crate::types::X` re-exports.
-- `WsRpcError { code, message }` (`ws_handler.rs`): constructors `bad_request`,
+- `WsRpcError { code, message, data }` (`ws_handler.rs`): `data` is `error.data` on the wire; a
+  refusal a client acts on carries its kind there, never only in `message`. The identity
+  refusals: 429 `{"error":"rate-limited","scope","retryAfter"}`, 403 `{"error":"forbidden","reason"}`
+  (`reason` `pow`, `vouch`, ...), 409 `{"error":"already-vouched"}` / `{"error":"no-identity"}`
+  (`identity::service::error_with`). The Rust clients read it as `RpcCallError.data`
+  (`rust-client`) and `RpcError.data` (`ad4m-identity-client`), the SDK as `RpcError.data`.
+  Constructors `bad_request`,
   `unauthorized`, `forbidden`, `not_found`, `conflict`, `too_many_requests`,
   `internal`, `not_implemented`. No `From` impls for domain errors yet.
 

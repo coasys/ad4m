@@ -131,9 +131,10 @@ impl IdentityService {
     /// [`Self::device_position`], or 409 `no-identity`.
     pub async fn bound_position(&self, agent: &AgentContext) -> Result<DevicePosition, WsRpcError> {
         self.device_position(agent).await?.ok_or_else(|| {
-            super::service::error(
+            super::service::error_with(
                 409,
                 "no-identity: this agent's device key speaks for no identity",
+                serde_json::json!({"error": "no-identity"}),
             )
         })
     }

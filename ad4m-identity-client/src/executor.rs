@@ -27,6 +27,11 @@ use serde_json::{json, Value};
 pub struct RpcError {
     pub code: u16,
     pub message: String,
+    /// The refusal as data: what the executor sent as `error.data` (`{"error": "rate-limited",
+    /// "scope", "retryAfter"}`, `{"error": "forbidden", "reason": "pow"}`, `{"error":
+    /// "already-vouched"}`, `{"error": "no-identity"}`), or what the store's own refusal body
+    /// was when the transport is the store. A caller reads this, never `message`'s English.
+    pub data: Option<Value>,
 }
 
 /// One executor RPC call: `method` with `params`, answering the result JSON.
@@ -150,6 +155,7 @@ impl std::fmt::Debug for TakenMaster {
 /// 32 bytes of base58btc in `value[field]`, taken out of the JSON and wiped there.
 fn take_secret(value: &mut Value, method: &str, field: &str) -> Result<Secret<[u8; 32]>, RpcError> {
     let bad = || RpcError {
+        data: None,
         code: 502,
         message: format!("{method} answered no 32-byte {field}"),
     };
@@ -179,6 +185,7 @@ pub struct ViaExecutor<R: ExecutorRpc> {
 
 fn read<T: DeserializeOwned>(method: &str, value: Value) -> Result<T, RpcError> {
     serde_json::from_value(value).map_err(|e| RpcError {
+        data: None,
         code: 502,
         message: format!("{method} answered {e}"),
     })
@@ -186,6 +193,7 @@ fn read<T: DeserializeOwned>(method: &str, value: Value) -> Result<T, RpcError> 
 
 fn json_of<T: Serialize>(value: &T) -> Result<Value, RpcError> {
     serde_json::to_value(value).map_err(|e| RpcError {
+        data: None,
         code: 400,
         message: e.to_string(),
     })
@@ -225,6 +233,7 @@ impl<R: ExecutorRpc> ViaExecutor<R> {
             .map(Event::from_json)
             .collect::<Result<_, _>>()
             .map_err(|e| RpcError {
+                data: None,
                 code: 502,
                 message: format!("identity.log served an event that does not parse: {e}"),
             })
@@ -239,6 +248,7 @@ impl<R: ExecutorRpc> ViaExecutor<R> {
             )
             .await?;
         Event::from_json(&value).map_err(|e| RpcError {
+            data: None,
             code: 502,
             message: format!("identity.cosignIncept answered an event that does not parse: {e}"),
         })
@@ -326,6 +336,7 @@ impl<R: ExecutorRpc> ViaExecutor<R> {
         let secret = take_secret(&mut value, METHOD, "secret")?;
         let field = |name: &str| {
             value[name].as_str().map(str::to_string).ok_or(RpcError {
+                data: None,
                 code: 502,
                 message: format!("{METHOD} answered no {name}"),
             })
@@ -337,6 +348,7 @@ impl<R: ExecutorRpc> ViaExecutor<R> {
                 .as_u64()
                 .and_then(|i| u32::try_from(i).ok())
                 .ok_or(RpcError {
+                    data: None,
                     code: 502,
                     message: format!("{METHOD} answered no index"),
                 })?,
@@ -363,6 +375,7 @@ impl<R: ExecutorRpc> ViaExecutor<R> {
             .call("identity.recordPut", json!({ "record": json_of(record)? }))
             .await?;
         stored["version"].as_u64().ok_or(RpcError {
+            data: None,
             code: 502,
             message: "identity.recordPut answered no version".into(),
         })
@@ -393,6 +406,7 @@ impl<R: ExecutorRpc> ViaExecutor<R> {
             )
             .await?;
         stored["version"].as_u64().ok_or(RpcError {
+            data: None,
             code: 502,
             message: "identity.recordPut answered no version".into(),
         })
@@ -450,6 +464,7 @@ impl<R: ExecutorRpc> ViaExecutor<R> {
         }
         let posted: Value = self.call("identity.postRequest", params).await?;
         posted["id"].as_str().map(str::to_string).ok_or(RpcError {
+            data: None,
             code: 502,
             message: "identity.postRequest answered no id".into(),
         })
@@ -471,20 +486,21 @@ impl<R: ExecutorRpc> ViaExecutor<R> {
 mod ws {
     use super::*;
 
-    /// "RPC error 403: message" (the WebSocket client's error text) as its code and message;
-    /// any other failure (a closed socket) is 503.
-    pub(crate) fn rpc_error(text: String) -> RpcError {
-        let parsed = text.strip_prefix("RPC error ").and_then(|rest| {
-            let (code, message) = rest.split_once(": ")?;
-            Some(RpcError {
-                code: code.parse().ok()?,
-                message: message.to_string(),
-            })
-        });
-        parsed.unwrap_or(RpcError {
-            code: 503,
-            message: text,
-        })
+    /// The executor's error reply (`RpcCallError`: code, message and `error.data`) as an
+    /// [`RpcError`]; any other failure (a closed socket) is 503.
+    pub(crate) fn rpc_error(e: &(dyn std::error::Error + 'static)) -> RpcError {
+        match e.downcast_ref::<ad4m_client::ws_rpc::RpcCallError>() {
+            Some(reply) => RpcError {
+                code: u16::try_from(reply.code).unwrap_or(503),
+                message: reply.message.clone(),
+                data: reply.data.clone(),
+            },
+            None => RpcError {
+                code: 503,
+                message: e.to_string(),
+                data: None,
+            },
+        }
     }
 
     #[async_trait(?Send)]
@@ -492,7 +508,7 @@ mod ws {
         async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
             ad4m_client::ws_rpc::WsRpcClient::call::<Value>(self, method, params)
                 .await
-                .map_err(|e| rpc_error(e.to_string()))
+                .map_err(|e| rpc_error(e.as_ref()))
         }
     }
 
@@ -501,10 +517,20 @@ mod ws {
         use super::*;
 
         #[test]
-        fn the_ws_clients_error_text_gives_the_code() {
-            let e = rpc_error("RPC error 403: first-link: no".into());
-            assert_eq!((e.code, e.message.as_str()), (403, "first-link: no"));
-            assert_eq!(rpc_error("closed".into()).code, 503);
+        fn the_ws_clients_error_reply_gives_code_message_and_data() {
+            let data = json!({"error": "rate-limited", "scope": "address", "retryAfter": 7});
+            let reply = ad4m_client::ws_rpc::RpcCallError {
+                code: 429,
+                message: "rate-limited: address, retry after 7 s".into(),
+                data: Some(data.clone()),
+            };
+            let e = rpc_error(&reply);
+            assert_eq!(
+                (e.code, e.message.as_str(), e.data),
+                (429, "rate-limited: address, retry after 7 s", Some(data))
+            );
+            let closed = rpc_error(&std::io::Error::other("closed"));
+            assert_eq!((closed.code, closed.data), (503, None));
         }
     }
 }
