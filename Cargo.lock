@@ -100,6 +100,9 @@ dependencies = [
  "futures-channel",
  "futures-core",
  "futures-util",
+ "getrandom 0.1.16",
+ "getrandom 0.2.17",
+ "getrandom 0.3.4",
  "hex",
  "hkdf 0.12.4",
  "holochain",
@@ -175,6 +178,7 @@ dependencies = [
  "urlencoding",
  "uuid 1.24.1",
  "voice_activity_detector",
+ "wasm-bindgen-futures",
  "web-time",
  "webbrowser",
  "x509-parser 0.16.0",
@@ -6985,8 +6989,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8fc3cb4d91f53b50155bdcfd23f6a4c39ae1969c2ae85982b135750cccaf5fce"
 dependencies = [
  "cfg-if",
+ "js-sys",
  "libc",
  "wasi 0.9.0+wasi-snapshot-preview1",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -12980,6 +12986,7 @@ checksum = "9b993c12c391a7733c93171f9d07fbd80e4b99060ce3e4c76e0875cb3e63d0a8"
 dependencies = [
  "dashmap 6.2.1",
  "getrandom 0.3.4",
+ "js-sys",
  "libc",
  "oxiri",
  "oxrdf",
@@ -13080,6 +13087,7 @@ version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "034779b2d182d5069cd28b1f921ba334cad708ab1340db9776312464b6874b78"
 dependencies = [
+ "js-sys",
  "thiserror 2.0.20",
 ]
 
