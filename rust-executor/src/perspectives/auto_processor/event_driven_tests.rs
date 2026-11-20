@@ -1311,6 +1311,11 @@ async fn wait_until(mut ready: impl FnMut() -> bool, limit: Duration) -> bool {
 /// The transcript read must not run on the Tokio worker. A current-thread
 /// runtime sleeps 30ms while that read is held; the sleep ends inside the
 /// hold, and the read's thread is not the runtime's.
+///
+/// To reproduce the pre-fix failure, run prepare on the calling worker.
+/// In `prepare_reads`, call `prepare_inner` directly under `EvalStop::none()`
+/// and do not `spawn_blocking`. The 30 ms timer then fires only after the
+/// hold releases, and `query_thread` is the runtime thread.
 #[tokio::test(flavor = "current_thread")]
 async fn prepare_read_does_not_block_the_runtime_timer() {
     use super::read_offload::probe::{self, Hold, Park};

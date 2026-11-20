@@ -30,14 +30,6 @@ use super::cursor::{
 use super::delta_read::{delta_query, DeltaRead};
 use super::watcher::{CachedTurn, PendingTurn, TickOutcome, WatcherState};
 
-/// The pre-fix path. Committed `false`: prepare runs on a blocking worker.
-/// A red run of the offload tests sets this to `true` and does not commit
-/// that. `true` runs the reads on the calling Tokio worker, under a stop
-/// that never fires.
-fn reads_on_runtime() -> bool {
-    false
-}
-
 /// How many prepares may read at once. See the module docs.
 fn read_concurrency() -> usize {
     std::thread::available_parallelism()
@@ -97,21 +89,13 @@ fn stage_deadline(stage: Stage) -> Duration {
 /// does not look stopped to the next stage.
 struct StageOpen {
     bound: Option<BoundStop>,
-    gate: Option<EvalGate>,
+    /// Dropped after `bound`, which cancels the stage's token.
+    _gate: EvalGate,
     stop: EvalStop,
 }
 
 impl StageOpen {
     fn open(parent: &CancellationToken, stage: Stage) -> Option<Self> {
-        if reads_on_runtime() {
-            let stop = EvalStop::none();
-            let bound = BoundStop::bind(&stop);
-            return Some(Self {
-                bound: Some(bound),
-                gate: None,
-                stop,
-            });
-        }
         if parent.is_cancelled() {
             return None;
         }
@@ -120,7 +104,7 @@ impl StageOpen {
         let bound = BoundStop::bind(&stop);
         Some(Self {
             bound: Some(bound),
-            gate: Some(gate),
+            _gate: gate,
             stop,
         })
     }
@@ -132,9 +116,8 @@ impl StageOpen {
 
 impl Drop for StageOpen {
     fn drop(&mut self) {
-        // Unbind first. The gate's drop then cancels its token.
+        // Unbind first. The gate then drops and cancels its token.
         drop(self.bound.take());
-        drop(self.gate.take());
     }
 }
 
@@ -199,11 +182,6 @@ pub(crate) async fn prepare_reads(
     watcher: &mut WatcherState,
     now_ms: i64,
 ) -> PrepareOutcome {
-    if reads_on_runtime() {
-        let parent = CancellationToken::new();
-        return prepare_inner(perspective, watcher, now_ms, &parent).await;
-    }
-
     let lease = PrepareLease::from_watcher(std::mem::take(watcher));
     let _restore = Restore {
         lease: lease.clone(),
@@ -218,17 +196,6 @@ pub(crate) async fn prepare_leased(
     lease: &PrepareLease,
     now_ms: i64,
 ) -> PrepareOutcome {
-    if reads_on_runtime() {
-        let parent = CancellationToken::new();
-        let mut watcher = match lease.take() {
-            Some(watcher) => watcher,
-            None => return PrepareOutcome::Finished(TickOutcome::Pending),
-        };
-        let outcome = prepare_inner(perspective, &mut watcher, now_ms, &parent).await;
-        *lease.slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(watcher);
-        return outcome;
-    }
-
     let parent = CancellationToken::new();
     let _cancel = CancelOnDrop(parent.clone());
     // The permit comes before any gate. A tick queued behind a full cap must
