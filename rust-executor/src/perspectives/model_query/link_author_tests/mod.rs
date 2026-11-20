@@ -33,7 +33,7 @@ use super::types::{ModelQueryInput, ModelQueryResult, ModelShape};
 use super::utils::literal_percent_encode;
 use crate::perspectives::sparql_store::SparqlStore;
 use crate::types::{ExpressionProof, Link, LinkExpression, LinkStatus};
-use deno_core::anyhow::Error;
+use anyhow::Error;
 use serde_json::{json, Value};
 
 const ADMIN: &str = "did:key:zAdmin";

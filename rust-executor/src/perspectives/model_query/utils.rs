@@ -5,7 +5,7 @@
 //! `literal:` URI scheme ([`parse_literal_value`]), and numeric/timestamp
 //! coercion helpers used by the filtering engine.
 
-use deno_core::anyhow::{anyhow, Error};
+use anyhow::{anyhow, Error};
 #[cfg(test)]
 use percent_encoding::utf8_percent_encode;
 use serde_json::Value;

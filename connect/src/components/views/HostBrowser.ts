@@ -3,7 +3,7 @@ import { customElement, property, state } from "lit/decorators.js";
 import { sharedStyles } from "../../styles/shared-styles";
 import { MapPinIcon } from "../icons";
 import { renderHostAvatar } from "../shared/avatar";
-import { wsUrlToHttpBase } from "../../utils";
+import { wsUrlToHttpBase, formatPrice } from "../../utils";
 import type { RemoteHost } from "../../types";
 
 @customElement("host-browser")
@@ -268,14 +268,6 @@ export class HostBrowser extends LitElement {
     this.dispatchEvent(new CustomEvent("retry", { bubbles: true, composed: true }));
   }
 
-  private formatPrice(price: number): string {
-    if (price === 0) return "0.00";
-    if (price >= 0.01) return price.toFixed(2);
-    if (price >= 0.0001) return price.toFixed(4);
-    if (price >= 0.000001) return price.toFixed(6);
-    return price.toExponential(2);
-  }
-
   private getLinkPrice(rates: RemoteHost["rates"]): number | null {
     const r = rates.find(r => r.description.trim().toLowerCase() === "link write");
     return r ? r.priceInHOT : null;
@@ -344,7 +336,7 @@ export class HostBrowser extends LitElement {
                     const avgTokenPrice = this.getAvgTokenPrice(host.rates);
                     return html`
                     <p class="rates-preview">
-                      ${linkPrice != null ? html`Link: ${this.formatPrice(linkPrice)} wHOT` : ''}${linkPrice != null && avgTokenPrice != null ? ' · ' : ''}${avgTokenPrice != null ? html`Token: ~${this.formatPrice(avgTokenPrice)} wHOT` : ''}
+                      ${linkPrice != null ? html`Link: ${formatPrice(linkPrice)} wHOT` : ''}${linkPrice != null && avgTokenPrice != null ? ' · ' : ''}${avgTokenPrice != null ? html`Token: ~${formatPrice(avgTokenPrice)} wHOT` : ''}
                     </p>
                   `; })() : ''}
                 </div>

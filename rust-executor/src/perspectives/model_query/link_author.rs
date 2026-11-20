@@ -79,7 +79,7 @@ use super::sparql_builder::{
 };
 use super::types::{ModelQueryInput, ModelShape, ShapeResolver, WhereCondition, WhereOps};
 use super::utils::escape_sparql_string;
-use deno_core::anyhow::{anyhow, Error};
+use anyhow::{anyhow, Error};
 use serde_json::Value;
 use std::borrow::Cow;
 use std::collections::BTreeMap;
