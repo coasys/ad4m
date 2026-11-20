@@ -1,0 +1,22 @@
+# The web executor's entry crate: ad4m-executor for wasm32 behind three wasm-bindgen exports
+# (boot, dispatch, on_event). Build it with scripts/web-executor/build.sh. Not published. On
+# native it is an empty lib with no dependencies (every dependency is wasm32-only), so the
+# native dependency set and build do not change.
+[package]
+name = "web-executor"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+ad4m-executor = { path = "../rust-executor" }
+# The lockfile pins the version; scripts/web-executor/build.sh checks the CLI matches it.
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+console_error_panic_hook = "0.1.7"
+log = "0.4.19"

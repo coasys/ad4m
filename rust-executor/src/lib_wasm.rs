@@ -32,7 +32,7 @@ pub mod wallet;
 pub use config::Ad4mConfig;
 pub use secret::Secret;
 
-mod web;
+pub mod web;
 
 // ---- outside ring 2: hand-written stubs (src/web/stubs/), only the items ring 2 names ----
 #[path = "web/stubs/ai_service.rs"]

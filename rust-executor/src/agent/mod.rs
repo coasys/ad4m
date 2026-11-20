@@ -232,6 +232,7 @@ fn did_document_without_secrets(did_document: &str) -> Option<String> {
 /// load-time private-key strip both go through it. It started as #1163's
 /// `try_save` write (0600, original mode kept, `sync_all`, rename) and adds the
 /// unique temp name, the cleanup on error and the directory sync.
+#[cfg(not(target_arch = "wasm32"))]
 fn write_json_atomically<T: Serialize>(path: &path::Path, value: &T) -> Result<(), AnyError> {
     use std::io::Write;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -282,6 +283,14 @@ fn write_json_atomically<T: Serialize>(path: &path::Path, value: &T) -> Result<(
             e
         );
     }
+    Ok(())
+}
+
+/// The web executor's `write_json_atomically`: the file goes to `rt::fs`'s in-memory map in
+/// one step, so no reader sees half of it. No mode, no sync: nothing reaches a disk.
+#[cfg(target_arch = "wasm32")]
+fn write_json_atomically<T: Serialize>(path: &path::Path, value: &T) -> Result<(), AnyError> {
+    crate::rt::fs::write(path, serde_json::to_vec(value)?)?;
     Ok(())
 }
 
@@ -594,7 +603,7 @@ impl AgentService {
     }
 
     pub fn is_initialized(&self) -> bool {
-        let is_initialized = path::Path::new(self.file.as_str()).exists();
+        let is_initialized = crate::rt::fs::exists(self.file.as_str()).unwrap_or(false);
         is_initialized
     }
 
@@ -786,9 +795,9 @@ impl AgentService {
     ) -> Result<(), AnyError> {
         let profile_path = self.user_profile_path(user_email)?;
         if let Some(user_profile_dir) = profile_path.parent() {
-            std::fs::create_dir_all(user_profile_dir)?;
+            crate::rt::fs::create_dir_all(user_profile_dir)?;
         }
-        std::fs::write(profile_path, serde_json::to_string(agent)?)?;
+        crate::rt::fs::write(profile_path, serde_json::to_string(agent)?)?;
         Ok(())
     }
 
@@ -949,11 +958,11 @@ impl AgentService {
     fn load_user_agent_profile(&self, user_email: &str) -> Result<Option<Agent>, AnyError> {
         let profile_path = self.user_profile_path(user_email)?;
 
-        if !profile_path.exists() {
+        if !crate::rt::fs::exists(&profile_path).unwrap_or(false) {
             return Ok(None);
         }
 
-        let profile_json = std::fs::read_to_string(profile_path)?;
+        let profile_json = crate::rt::fs::read_to_string(profile_path)?;
         let agent: Agent = serde_json::from_str(&profile_json)?;
         Ok(Some(agent))
     }
@@ -1231,7 +1240,8 @@ impl AgentService {
             return;
         }
 
-        let file = std::fs::read_to_string(self.file.as_str()).expect("Failed to read agent file");
+        let file =
+            crate::rt::fs::read_to_string(self.file.as_str()).expect("Failed to read agent file");
         let mut dump: AgentStore = serde_json::from_str(&file).unwrap();
         Self::strip_private_keys_from_stored_document(&self.file, &mut dump);
 

@@ -48,11 +48,16 @@ impl LanguageController {
         LanguageController
     }
 
+    /// `Ok(())`: there are no system languages to load in the web executor, so loading all of
+    /// them succeeds at once. The one stub that answers `Ok` instead of an error: `agent.generate`
+    /// and `agent.unlock` load them after the keys are made, and an error here would put a
+    /// standing `agent.error` on every web agent. A language that is asked for later still
+    /// answers "not available" (`language_by_address`, `install_language`, ...).
     pub async fn load_core_system_languages(
         &self,
         _language_language_only: bool,
     ) -> Result<(), LanguageError> {
-        Err(unavailable("system languages"))
+        Ok(())
     }
 
     /// No language is ever loaded.
