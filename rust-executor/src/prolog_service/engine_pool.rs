@@ -2333,7 +2333,7 @@ mod tests {
         println!("🧪 Testing SDNA subject_class definition loading in engine pool");
 
         use crate::types::{DecoratedLinkExpression, Link};
-        use ad4m_client::literal::Literal;
+        use ad4m_literal::Literal;
         let now = chrono::Utc::now().to_rfc3339();
 
         // Step 1: Test basic data without SDNA first

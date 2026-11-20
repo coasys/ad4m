@@ -33,6 +33,8 @@ generate_snapshot = []  # Feature flag for snapshot generation mode
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+# Literal (literal: URLs); its own crate because ad4m-client does not build for wasm32.
+ad4m-literal = { path = "../ad4m-literal", version="0.13.1-staging.16" }
 url = "2.3.1"
 urlencoding = "2.1"
 percent-encoding = "2"

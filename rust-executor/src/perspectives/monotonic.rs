@@ -74,7 +74,7 @@ use crate::types::{
     DecoratedLinkExpression, DecoratedPerspectiveDiff, Link, LinkExpression, LinkStatus,
     PerspectiveDiff,
 };
-use ad4m_client::literal::Literal;
+use ad4m_literal::Literal;
 use anyhow::Error as AnyError;
 
 // ---------------------------------------------------------------------------

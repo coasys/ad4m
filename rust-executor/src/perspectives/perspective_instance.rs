@@ -30,7 +30,7 @@ use crate::types::{
     PerspectiveExpression, PerspectiveHandle, PerspectiveLinkEvent, PerspectiveLinkUpdatedEvent,
     PerspectiveState, PerspectiveStateFilter,
 };
-use ad4m_client::literal::Literal;
+use ad4m_literal::Literal;
 use chrono::DateTime;
 use anyhow::anyhow;
 use anyhow::Error as AnyError;

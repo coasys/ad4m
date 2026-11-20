@@ -8,7 +8,7 @@ use crate::agent::AgentContext;
 use crate::perspectives::interpretation::replace_link;
 use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClassOption};
 use crate::types::LinkQuery;
-use ad4m_client::literal::Literal;
+use ad4m_literal::Literal;
 
 /// Write (or update in place) the overlay for one base: ensure the overlay
 /// subject exists with its `kind` + `run`, then replace each `inferred/<p>`

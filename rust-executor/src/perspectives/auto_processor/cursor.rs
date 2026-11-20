@@ -257,7 +257,7 @@ mod tests {
     #[tokio::test]
     async fn run_without_ran_at_counts_only_when_unbounded() {
         use crate::types::{Link, LinkStatus};
-        use ad4m_client::literal::Literal;
+        use ad4m_literal::Literal;
 
         let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
         let run_uri = "ad4m://interp/run/no-ran-at";
