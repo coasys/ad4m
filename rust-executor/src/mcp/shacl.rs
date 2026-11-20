@@ -658,36 +658,3 @@ pub async fn resolve_property_link_status(
         LinkStatus::Shared
     }
 }
-
-/// Resolve a property's resolve_language (the general expression-language
-/// selector) for a given class. Returns `Ok(Some(language))` if set, `Ok(None)`
-/// if the property exists but has no resolve language, or `Err` if the
-/// class/property is not found. Matching is case-insensitive because dynamic
-/// tool names are lowercased.
-#[allow(dead_code)]
-pub async fn resolve_property_resolve_language(
-    perspective: &PerspectiveInstance,
-    class_name: &str,
-    property_name: &str,
-) -> Result<Option<String>, String> {
-    let properties = load_class_properties(perspective, class_name).await;
-    if properties.is_empty() {
-        return Err(format!("No SHACL shape found for class '{}'", class_name));
-    }
-    let prop_lower = property_name.to_lowercase();
-    for prop in &properties {
-        if prop.name == property_name || prop.name.to_lowercase() == prop_lower {
-            return Ok(prop.resolve_language.clone());
-        }
-    }
-    Err(format!(
-        "Property '{}' not found in class '{}'. Available properties: {}",
-        property_name,
-        class_name,
-        properties
-            .iter()
-            .map(|p| p.name.clone())
-            .collect::<Vec<_>>()
-            .join(", ")
-    ))
-}

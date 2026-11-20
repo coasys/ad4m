@@ -1424,7 +1424,57 @@ test("ICE disconnected also checks the executor socket once, with the restart", 
     }
 })
 
-test("a restart that has not brought the connection back after 5 s falls back to a rebuild", async () => {
+test("a lost restart offer stays open until the executor can resend it", async () => {
+    // ICE drops, the offer is lost, and signaling returns 2 s later. The
+    // executor resends that offer at 10 s. The restart stays open through
+    // that resend, then long enough for ICE to finish.
+    fakeTimers()
+    try {
+        const api = fakeApi()
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream())
+        await iceState("connected")
+        api.log.length = 0
+
+        await iceState("disconnected")
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(1)
+        await jest.advanceTimersByTimeAsync(2_000)
+        api.emitNetworkChange()
+        await flush()
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(2)
+
+        // t = 7 s. A 5 s window started at t = 2 s would rebuild here.
+        await jest.advanceTimersByTimeAsync(5_000)
+        expect(api.sfuCallLeave).not.toHaveBeenCalled()
+        // t = 10 s. The executor's first resend is due. Still no rebuild.
+        await jest.advanceTimersByTimeAsync(3_000)
+        expect(api.sfuCallLeave).not.toHaveBeenCalled()
+
+        // The original peer must apply the resent offer and post its answer
+        // before ICE recovery. `connected` clears the restart timer on its own.
+        const peer = currentPc()
+        api.emitOffer(offer("restart-offer"))
+        await flush()
+        expect(peer.remoteSdps()).toContain("restart-offer")
+        expect(api.sfuCallAnswerServerOffer).toHaveBeenCalledTimes(1)
+        expect(api.sfuCallAnswerServerOffer).toHaveBeenCalledWith(
+            URL,
+            ROOM,
+            MINE,
+            JSON.stringify({ type: "answer", sdp: "local-answer" }),
+        )
+
+        await iceState("connected")
+        await jest.advanceTimersByTimeAsync(30_000)
+        expect(api.sfuCallLeave).not.toHaveBeenCalled()
+        expect(FakePeerConnection.instances).toHaveLength(1)
+        expect(manager.getState().peerConnection).toBe(FakePeerConnection.instances[0])
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
+test("a restart that has not brought the connection back after 15 s falls back to a rebuild", async () => {
     fakeTimers()
     try {
         const api = fakeApi()
@@ -1433,7 +1483,7 @@ test("a restart that has not brought the connection back after 5 s falls back to
         await iceState("connected")
 
         await iceState("disconnected")
-        await jest.advanceTimersByTimeAsync(4_900)
+        await jest.advanceTimersByTimeAsync(14_900)
         expect(api.sfuCallLeave).not.toHaveBeenCalled()
         await jest.advanceTimersByTimeAsync(200)
         expect(api.sfuCallLeave).toHaveBeenCalledTimes(1)
@@ -1458,7 +1508,9 @@ test("a refused restart also waits for the timeout before rebuilding", async () 
         expect(api.sfuCallLeave).not.toHaveBeenCalled()
 
         await iceState("disconnected")
-        await jest.advanceTimersByTimeAsync(5_000)
+        await jest.advanceTimersByTimeAsync(14_900)
+        expect(api.sfuCallLeave).not.toHaveBeenCalled()
+        await jest.advanceTimersByTimeAsync(200)
         expect(api.sfuCallLeave).toHaveBeenCalledTimes(1)
     } finally {
         jest.useRealTimers()
@@ -1477,7 +1529,7 @@ test("a network change restarts ICE even while the connection still looks connec
         await flush()
         expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(1)
         // Still connected when the timeout comes: nothing to rebuild.
-        await jest.advanceTimersByTimeAsync(10_000)
+        await jest.advanceTimersByTimeAsync(15_000)
         expect(api.sfuCallLeave).not.toHaveBeenCalled()
     } finally {
         jest.useRealTimers()
@@ -1560,7 +1612,7 @@ test("a roster that lists this agent during a restart lets the restart finish in
 
 test("a roster that leaves this agent out during a restart rebuilds after its grace, once", async () => {
     // The server dropped the session: the restart cannot heal it, so the
-    // roster's grace (3 s) ends it before the restart's timeout (5 s).
+    // roster's grace (3 s) ends it before the restart's timeout (15 s).
     fakeTimers()
     try {
         const api = fakeApi()

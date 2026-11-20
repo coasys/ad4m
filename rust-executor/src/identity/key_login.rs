@@ -193,10 +193,14 @@ pub enum ChallengeSource {
 
 impl ChallengeSource {
     /// The source of a `user.sessionChallenge` call: the grant of a key session, else the
-    /// address the caller connects from.
+    /// address the caller connects from. A grant that inherited its binding from the
+    /// approving session (`KeyBinding::delegated`) renews nothing, so it draws from the
+    /// caller's pool like every other caller.
     pub fn of(session: &Session, peer: Option<IpAddr>) -> ChallengeSource {
         match session.grant() {
-            Some(grant) if grant.key.is_some() => ChallengeSource::Grant(grant.id.0.clone()),
+            Some(grant) if grant.key.as_ref().is_some_and(|k| !k.delegated()) => {
+                ChallengeSource::Grant(grant.id.0.clone())
+            }
             _ => ChallengeSource::peer(peer),
         }
     }
@@ -655,6 +659,12 @@ async fn agent_speaks(service: &IdentityService, grant: &LiveGrant, scid: &str) 
     if grant.is_operator() {
         return true;
     }
+    // A binding the grant inherited from the approving session names that session's
+    // identity — not one the grant's agent had to speak for at the mint (the operator
+    // approves for any agent). The grant lives and dies with the bound key alone.
+    if grant.key.as_ref().is_some_and(|k| k.delegated()) {
+        return true;
+    }
     let Ok(agent_did) = did_for_context(&grant.agent) else {
         return false;
     };
@@ -940,7 +950,7 @@ pub fn require_key_session(session: &Session) -> Result<(), KeyLoginError> {
 fn key_grant(session: &Session) -> Result<Arc<LiveGrant>, KeyLoginError> {
     session
         .grant()
-        .filter(|g| g.key.is_some())
+        .filter(|g| g.key.as_ref().is_some_and(|k| !k.delegated()))
         .cloned()
         .ok_or_else(not_a_key_session)
 }
@@ -1151,7 +1161,7 @@ pub fn on_verdict_change(change: &VerdictChange) -> usize {
                 && grant
                     .key
                     .as_ref()
-                    .is_some_and(|b| b.scid == did_of(&change.scid))
+                    .is_some_and(|b| !b.delegated() && b.scid == did_of(&change.scid))
                 && did_for_context(&grant.agent)
                     .ok()
                     .is_some_and(|did| multikey_of(&did) == Some(change.key.as_str()))
@@ -3447,6 +3457,7 @@ mod tests {
             auth("login", get_user_default_capabilities()),
             None,
             3600,
+            None,
         )
         .unwrap();
         let (_, app_grant) = grants::mint(
@@ -3457,6 +3468,7 @@ mod tests {
             ),
             None,
             3600,
+            None,
         )
         .unwrap();
         let login_session = session_on(login_grant);
@@ -4471,6 +4483,7 @@ mod tests {
             },
             None,
             3600,
+            None,
         )
         .unwrap();
         let session = Session::for_test(Principal::Agent(user.clone()))
@@ -4693,6 +4706,7 @@ mod tests {
             },
             None,
             3600,
+            None,
         )
         .unwrap();
         let session = Session::for_test(Principal::Agent(user.clone()))
@@ -5088,6 +5102,113 @@ mod tests {
             "the fallback renewal is no check"
         );
         release.notify_one();
+        no_operator();
+    }
+
+    /// The app's token after `session` approves its request: `agent.requestCapability`,
+    /// `agent.permitCapability` through the dispatch (the handler passes the approving
+    /// session's key binding on), and `agent.generateJwt` redeeming the code.
+    async fn app_approved_by(session: &Session) -> String {
+        let auth = AuthInfo::try_from(app()).unwrap();
+        let request_id = crate::agent::capabilities::request_capability(
+            auth.clone(),
+            AgentContext::main_agent(),
+        )
+        .await
+        .unwrap();
+        let extended = crate::agent::capabilities::AuthInfoExtended {
+            request_id: request_id.clone(),
+            auth,
+        };
+        let code = crate::api::ws_handler::build_handler_map()
+            .dispatch(
+                "agent.permitCapability",
+                serde_json::json!({
+                    "auth": serde_json::to_string(&extended).unwrap()
+                }),
+                Arc::new(crate::types::RequestContext::for_session(session.clone())),
+            )
+            .await
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .to_string();
+        crate::agent::capabilities::generate_capability_token(request_id, code)
+            .await
+            .unwrap()
+            .expose()
+            .to_string()
+    }
+
+    // The hole a stack review found: an app a key session approves got a token no revocation
+    // reached. The grant it mints now carries the approving session's binding, delegated:
+    // `revoke_key` ends it with the device.
+    #[tokio::test]
+    async fn an_app_a_key_session_approved_dies_with_the_key() {
+        let world = world(200).await;
+        world.operate();
+        let login = world.login_as(&world.phone).await.unwrap();
+        let session = open(&login.token).unwrap();
+        let app_token = app_approved_by(&session).await;
+        let app = open(&app_token).unwrap();
+
+        // Bound to the approving key, but no key session of its own: `key_binding` (the
+        // session's identity-binding accessor) and `user.renewSession` stay for key logins
+        // only, and its challenges draw from the peer pool, not a grant slot.
+        let binding = app.grant().unwrap().key.clone().unwrap();
+        assert!(binding.delegated());
+        assert_eq!(binding.key, world.phone.key());
+        assert_eq!(binding.scid, world.did);
+        assert!(app.key_binding().is_none());
+        assert!(matches!(key_grant(&app), Err(KeyLoginError::BadRequest(_))));
+        assert_eq!(
+            ChallengeSource::of(&app, Some("10.0.0.9".parse().unwrap())),
+            ChallengeSource::peer(Some("10.0.0.9".parse().unwrap())),
+        );
+
+        Grants::global()
+            .revoke_key(&world.did, &world.phone.key())
+            .unwrap();
+        assert_eq!(open(&app_token).unwrap_err(), AuthError::Revoked);
+        assert_eq!(open(&login.token).unwrap_err(), AuthError::Revoked);
+        no_operator();
+    }
+
+    // The same for "log out everywhere": `user.endAllSessions` revokes the identity's
+    // grants, delegated ones with the direct ones.
+    #[tokio::test]
+    async fn an_app_a_key_session_approved_dies_with_the_identity() {
+        let world = world(201).await;
+        world.operate();
+        let login = world.login_as(&world.phone).await.unwrap();
+        let session = open(&login.token).unwrap();
+        let app_token = app_approved_by(&session).await;
+        assert!(open(&app_token).is_ok());
+
+        let ended = end_all_sessions(&session, false, None).unwrap();
+        assert_eq!(ended.ended, 2, "the login's grant and the app's");
+        assert_eq!(open(&app_token).unwrap_err(), AuthError::Revoked);
+        assert_eq!(open(&login.token).unwrap_err(), AuthError::Revoked);
+        no_operator();
+    }
+
+    // An approval by an unbound session mints an unbound grant, as before: the admin
+    // credential has no key binding to pass on, and `revoke_key`/`revoke_identity` skip it.
+    #[tokio::test]
+    async fn an_app_the_operator_approved_keeps_no_binding() {
+        let world = world(202).await;
+        world.operate();
+        let app_token = app_approved_by(&Session::for_test(Principal::Operator)).await;
+        let app = open(&app_token).unwrap();
+        assert!(app.grant().unwrap().key.is_none());
+
+        Grants::global()
+            .revoke_key(&world.did, &world.phone.key())
+            .unwrap();
+        Grants::global()
+            .revoke_identity(&world.did, None, None)
+            .unwrap();
+        assert!(open(&app_token).is_ok(), "nothing bound it: it survives");
         no_operator();
     }
 }

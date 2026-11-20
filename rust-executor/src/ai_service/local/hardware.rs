@@ -219,6 +219,7 @@ impl LocalHardware {
         ClassInput {
             os: self.os.clone(),
             arch: self.arch.clone(),
+            cpu_brand: self.cpu.brand.clone(),
             memory_bytes: self.ram_bytes,
             backends: self
                 .backends

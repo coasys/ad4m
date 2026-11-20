@@ -389,13 +389,14 @@ async fn link_status_shared_does_not_select_on_a_local_value() {
         "Card",
         &ModelQueryInput {
             limit: Some(0),
+            count: Some(true),
             ..by_local_note()
         },
         LS_SHAPE_JSON,
     )
     .await
     .unwrap();
-    assert_eq!(count.total_count, 0, "counted by a Local value");
+    assert_eq!(count.total_count.unwrap(), 0, "counted by a Local value");
 }
 
 /// Merge guard for #1123 (the default invalid-proof filter), which adds its own
