@@ -492,3 +492,80 @@ async fn polymorphic_where_equality_keeps_the_matching_target() {
         "(top level, nested)"
     );
 }
+
+/// `(id, __subjectClass, __subjectClasses)` of each row, by id.
+fn subject_classes(rows: &Value) -> Vec<(String, String, Vec<String>)> {
+    let mut out: Vec<(String, String, Vec<String>)> = rows
+        .as_array()
+        .unwrap_or_else(|| panic!("a list: {rows}"))
+        .iter()
+        .map(|r| {
+            (
+                r["id"].as_str().unwrap_or_default().to_string(),
+                r["__subjectClass"].as_str().unwrap_or_default().to_string(),
+                serde_json::from_value(r["__subjectClasses"].clone()).unwrap_or_default(),
+            )
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// What the Shared, verified-only read of `status_world` supports, with every
+/// class it supports for each target.
+fn shared_classes() -> Vec<(String, String, Vec<String>)> {
+    let row = |id: &str, class: &str, all: &[&str]| {
+        (
+            id.to_string(),
+            class.to_string(),
+            all.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
+        )
+    };
+    vec![
+        row("we://t/1", "Base", &["Base"]),
+        row("we://t/2", "Special", &["Special", "Base"]),
+        row("we://t/3", "Base", &["Base"]),
+    ]
+}
+
+/// Classification reads the links the read admits: `__subjectClasses` does
+/// not name a class a target is only through a Local or unverified link.
+/// Top level and nested.
+#[tokio::test]
+async fn polymorphic_subject_classes_name_only_what_the_read_admits() {
+    let (resolver, holder, shelf) = status_shapes();
+    let store = status_world();
+    let top = q(json!({ "linkStatus": "SHARED", "include": { "items": true } }));
+    let top = super::query::execute_model_query(&store, holder.as_ref(), &top, &resolver)
+        .await
+        .unwrap();
+    let nested = q(json!({ "linkStatus": "SHARED",
+        "include": { "holder": { "include": { "items": true } } } }));
+    let nested = super::query::execute_model_query(&store, shelf.as_ref(), &nested, &resolver)
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            subject_classes(&top.instances[0]["items"]),
+            subject_classes(&nested.instances[0]["holder"]["items"])
+        ),
+        (shared_classes(), shared_classes()),
+        "(top level, nested)"
+    );
+}
+
+/// The same for a union read, which classifies with the same function.
+#[tokio::test]
+async fn union_subject_classes_name_only_what_the_read_admits() {
+    let (resolver, _, _) = status_shapes();
+    let store = status_world();
+    let query = q(json!({ "linkStatus": "SHARED" }));
+    let classes = vec!["Base".to_string(), "Special".to_string()];
+    let result = super::union::execute_union_query(&store, &classes, &query, &resolver)
+        .await
+        .unwrap();
+    assert_eq!(
+        subject_classes(&Value::Array(result.instances)),
+        shared_classes()
+    );
+}
