@@ -144,9 +144,9 @@ mod tests {
         let state = db.get_flow_replica_state("p", "did:key:new", "i").unwrap();
         assert_eq!(state.unwrap().current_state.as_deref(), Some("open"));
         assert_eq!(
-            db.get_flow_fired_for_instance("p", "did:key:new", "i")
+            db.get_flow_fired_for_instances("p", "did:key:new", &["i".to_string()])
                 .unwrap(),
-            vec!["x".to_string()]
+            vec![vec!["x".to_string()]]
         );
         assert!(db
             .get_flow_replica_state("p", "did:key:old", "i")
@@ -174,9 +174,9 @@ mod tests {
             .unwrap()
             .is_none());
         assert_eq!(
-            db.get_flow_fired_for_instance("p", "did:key:new", "i")
+            db.get_flow_fired_for_instances("p", "did:key:new", &["i".to_string()])
                 .unwrap(),
-            vec!["a".to_string()]
+            vec![vec!["a".to_string()]]
         );
         // The next re-key: every retired DID moves to the newer one, the old one first.
         db.move_flow_rows("did:key:old", "did:key:newer").unwrap();

@@ -8,9 +8,10 @@
 import type { Ad4mModel } from "./Ad4mModel";
 import type { LinkStatus, PerspectiveProxy } from "../perspectives/PerspectiveProxy";
 import { LiveQuery } from "../perspectives/LiveQuery";
+import { requireTotalCount } from "./query-common";
 import type {
   Where, Order, IncludeMap, Query,
-  ResultsWithTotalCount, PaginationResult,
+  Page, PaginationResult,
   TypedQueryWhere, TypedOrder, TypedIncludeMap, PropertyKeysOf,
 } from "./types";
 
@@ -66,7 +67,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
   }
 
   /** Run `params` once and build model instances from the rows. */
-  private execute(params: Query): Promise<ResultsWithTotalCount<T>> {
+  private execute(params: Query): Promise<Page<T>> {
     if (this.unionClasses) {
       return (this.ctor as any).executeUnionQuery(this.perspective, this.unionClasses, params);
     }
@@ -110,10 +111,16 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     try {
       return { live, initial: await live.start() };
     } catch (e) {
-      live.dispose();
-      if (this.currentSubscription === live) this.currentSubscription = undefined;
+      this.endFailed(live);
       throw e;
     }
+  }
+
+  /** End `live` after its call failed. A later call may already own
+   *  `currentSubscription`, so only clear it if it is still `live`. */
+  private endFailed(live: LiveQuery): void {
+    live.dispose();
+    if (this.currentSubscription === live) this.currentSubscription = undefined;
   }
 
   /**
@@ -525,8 +532,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * ```
    */
   async count(): Promise<number> {
-    const { totalCount } = await this.execute({ ...this.queryParams, limit: 0 });
-    return totalCount;
+    return requireTotalCount(await this.execute({ ...this.queryParams, limit: 0, count: true }));
   }
 
   /**
@@ -567,8 +573,21 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    */
   async countSubscribe(callback: (count: number) => void): Promise<number> {
     this.dispose();
-    const { initial } = await this.live({ ...this.queryParams, limit: 0 }, (raw) => callback(raw.totalCount ?? 0));
-    return initial.totalCount ?? 0;
+    // As paginateSubscribe: a push without the asked-for count is logged and
+    // skipped, since a throw here would reach the client's update dispatch.
+    const { live, initial } = await this.live({ ...this.queryParams, limit: 0, count: true }, (raw) => {
+      try {
+        callback(requireTotalCount(raw));
+      } catch (e) {
+        console.error('Count subscription error:', e);
+      }
+    });
+    try {
+      return requireTotalCount(initial);
+    } catch (e) {
+      this.endFailed(live);
+      throw e;
+    }
   }
 
   /**
@@ -596,8 +615,8 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    */
   async paginate(pageSize: number, pageNumber: number): Promise<PaginationResult<T>> {
     const paginationQuery = { ...(this.queryParams || {}), limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
-    const { results, totalCount } = await this.execute(paginationQuery);
-    return { results, totalCount, pageSize, pageNumber };
+    const answer = await this.execute(paginationQuery);
+    return { results: answer.results, totalCount: requireTotalCount(answer), pageSize, pageNumber };
   }
 
   /**
@@ -667,10 +686,11 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
       const results = this.parse(raw);
       const fp = fingerprint([results, raw?.totalCount]);
       this.takeSnapshots(results);
-      return { page: { results, totalCount: raw?.totalCount, pageSize, pageNumber }, fp };
+      // `count: true` is set above, so the executor sends a total.
+      return { page: { results, totalCount: requireTotalCount(raw), pageSize, pageNumber }, fp };
     };
 
-    const { initial } = await this.live(paginatedQuery, (raw) => {
+    const { live, initial } = await this.live(paginatedQuery, (raw) => {
       try {
         const { page, fp } = toPage(raw);
         if (fp === lastFingerprint) return;
@@ -680,9 +700,15 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
         console.error('Paginate subscription error:', e);
       }
     });
-    const { page, fp } = toPage(initial);
-    lastFingerprint = fp;
-    return page;
+    let first: { page: PaginationResult<T>; fp: string };
+    try {
+      first = toPage(initial);
+    } catch (e) {
+      this.endFailed(live);
+      throw e;
+    }
+    lastFingerprint = first.fp;
+    return first.page;
   }
 
   /**
