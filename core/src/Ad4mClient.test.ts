@@ -239,6 +239,8 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'runtime.restartHolochain': true,
     'runtime.restart': true,
     'runtime.logTail': (p: Record<string, unknown>) => ({ lines: [`asked ${p.lines}`] }),
+    'runtime.setLogFilter': (p: Record<string, unknown>) => ({ startupFilter: 'rust_executor=info', overrideFilter: p.filter, revertsAt: '2026-11-20T01:00:00+00:00' }),
+    'runtime.logFilter': { startupFilter: 'rust_executor=info', overrideFilter: null, revertsAt: null },
     'runtime.config': { values: { mcp_port: 3001 }, keys: [{ key: 'mcp_port', class: 'restart' }, { key: 'port', class: 'machine', pinned: 'config' }], restartPending: false, file: '/data/adam/config.json' },
     'runtime.setConfig': (p: Record<string, unknown>) => ({ restartPending: true, refused: p.unset ? [{ key: 'port', reason: 'local-only' }] : [] }),
     'runtime.verifySignature': true,
@@ -1343,6 +1345,25 @@ describe('RuntimeClient', () => {
         const tail = await ad4m.runtime.logTail(20);
         expect(lastRpcCall!.params).toMatchObject({ lines: 20 });
         expect(tail.lines).toEqual(['asked 20']);
+    });
+
+    test('setLogFilter() sends the filter and the ttl', async () => {
+        const status = await ad4m.runtime.setLogFilter('ws_rpc=debug,sfu=debug', 600);
+        expect(lastRpcCall!.type).toBe('runtime.setLogFilter');
+        expect(lastRpcCall!.params).toEqual({ filter: 'ws_rpc=debug,sfu=debug', ttlSeconds: 600 });
+        expect(status.overrideFilter).toBe('ws_rpc=debug,sfu=debug');
+        expect(status.revertsAt).toBe('2026-11-20T01:00:00+00:00');
+    });
+
+    test('setLogFilter() leaves the ttl to the executor when not given', async () => {
+        await ad4m.runtime.setLogFilter('ws_rpc=debug');
+        expect(lastRpcCall!.params).toEqual({ filter: 'ws_rpc=debug' });
+    });
+
+    test('logFilter() reads the filter in force', async () => {
+        const status = await ad4m.runtime.logFilter();
+        expect(lastRpcCall!.type).toBe('runtime.logFilter');
+        expect(status).toEqual({ startupFilter: 'rust_executor=info', overrideFilter: null, revertsAt: null });
     });
 
     test('config() returns the keys with their classes', async () => {

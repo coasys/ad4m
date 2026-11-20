@@ -98,6 +98,10 @@ mod abstract_tests;
 mod join_tests;
 
 #[cfg(test)]
+#[path = "perspective_instance_broadcast_diag_tests.rs"]
+mod broadcast_diag_tests;
+
+#[cfg(test)]
 #[path = "perspective_instance_pending_diffs_tests.rs"]
 mod pending_diffs_tests;
 
@@ -5131,7 +5135,15 @@ impl PerspectiveInstance {
         payload: PerspectiveExpression,
         loopback: bool,
     ) -> Result<(), AnyError> {
+        // Phases for `[call-diag] event=broadcast.slow` (`call_diag::phase`).
+        let mut mark = std::time::Instant::now();
+        let mut phase = |name: &'static str| {
+            let now = std::time::Instant::now();
+            crate::call_diag::phase(name, now - mark);
+            mark = now;
+        };
         let current_perspective_handle = self.persisted.lock().await.clone();
+        phase("handle_lock");
 
         if loopback {
             // send back to all clients through neighbourhood signal subscription
@@ -5159,11 +5171,15 @@ impl PerspectiveInstance {
                 );
             }
         }
+        phase("local_delivery");
 
         // Also send through link language for remote users
         let link_language_clone = self.link_language.read().await.clone();
+        phase("link_language_lock");
         if let Some(mut link_language) = link_language_clone {
-            link_language.send_broadcast(payload).await
+            let sent = link_language.send_broadcast(payload).await;
+            phase("language");
+            sent
         } else {
             Err(self.no_link_language_error().await)
         }

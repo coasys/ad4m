@@ -113,22 +113,74 @@ fn build_signed_perspective(
     }
 }
 
+/// A `neighbourhood.sendBroadcast` slower than this logs where its time went.
+const SLOW_BROADCAST: std::time::Duration = std::time::Duration::from_secs(1);
+
 async fn send_broadcast(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let body: BroadcastRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let agent_context = ctx.acts_as();
-    let perspective_instance = guarded_perspective(&params).await?;
+    let start = std::time::Instant::now();
+    let (sent, phases) = crate::call_diag::timed(async {
+        let agent_context = ctx.acts_as();
+        let mut mark = std::time::Instant::now();
+        let perspective_instance = guarded_perspective(&params).await?;
+        crate::call_diag::phase("perspective_lookup", mark.elapsed());
+        mark = std::time::Instant::now();
+        let signed_perspective =
+            build_signed_perspective(&body.payload, body.signed.unwrap_or(true), &agent_context)?;
+        crate::call_diag::phase("sign", mark.elapsed());
 
-    let signed_perspective =
-        build_signed_perspective(&body.payload, body.signed.unwrap_or(true), &agent_context)?;
-
-    perspective_instance
-        .send_broadcast(signed_perspective, body.loopback.unwrap_or(false))
-        .await
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+        perspective_instance
+            .send_broadcast(signed_perspective, body.loopback.unwrap_or(false))
+            .await
+            .map_err(|e| WsRpcError::internal(e.to_string()))
+    })
+    .await;
+    let total = start.elapsed();
+    if total > SLOW_BROADCAST {
+        log_slow_broadcast(&params, &ctx, &phases, total, &sent);
+    }
+    sent?;
 
     Ok(Value::Bool(true))
+}
+
+/// One `[call-diag] event=broadcast.slow` line: where a slow broadcast spent its time.
+/// `language` is the whole link-language call; inside it `language_queue` is the wait behind
+/// the language's other calls, `language_call` the call itself, and `language_other` the rest
+/// (finding the runtime, encoding the payload).
+fn log_slow_broadcast(
+    params: &Value,
+    ctx: &RequestContext,
+    phases: &[(&'static str, std::time::Duration)],
+    total: std::time::Duration,
+    sent: &Result<(), WsRpcError>,
+) {
+    use crate::call_diag::phase_ms;
+    let language = phase_ms(phases, "language");
+    let queue = phase_ms(phases, "language_queue");
+    let call = phase_ms(phases, "language_call");
+    crate::call_diag!(
+        log::Level::Warn,
+        "broadcast.slow",
+        "perspective" => params.get("uuid").and_then(Value::as_str).unwrap_or_default(),
+        "did" => crate::api::ws_rpc::caller_label(ctx),
+        "payload_bytes" => params.get("payload").map_or(0, |p| p.to_string().len()),
+        "perspective_lookup_ms" => phase_ms(phases, "perspective_lookup"),
+        "sign_ms" => phase_ms(phases, "sign"),
+        "handle_lock_ms" => phase_ms(phases, "handle_lock"),
+        "local_delivery_ms" => phase_ms(phases, "local_delivery"),
+        "link_language_lock_ms" => phase_ms(phases, "link_language_lock"),
+        "language_queue_ms" => queue,
+        "language_call_ms" => call,
+        "language_other_ms" => language.saturating_sub(queue + call),
+        "total_ms" => total.as_millis(),
+        "outcome" => match sent {
+            Ok(()) => "ok".to_string(),
+            Err(e) => format!("error:{}", e.code),
+        },
+    );
 }
 
 async fn send_signal(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {

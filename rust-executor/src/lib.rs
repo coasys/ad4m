@@ -32,6 +32,7 @@ pub mod agent;
 pub mod ai_service;
 pub mod ai_sessions;
 pub mod billing;
+pub mod call_diag;
 mod dapp_server;
 pub mod db;
 pub mod db_backend;
@@ -39,6 +40,7 @@ mod events;
 pub mod init;
 pub mod languages;
 pub mod log_files;
+pub mod log_filter;
 pub mod logging;
 mod neighbourhoods;
 mod pubsub;
@@ -808,6 +810,8 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
     // Start periodic memory diagnostics (logs RSS, jemalloc stats,
     // per-perspective data structure sizes every 30s).
     perspectives::memory_diagnostics::start_memory_diagnostics();
+    // Every 30 s, the languages with calls waiting (`[call-diag] event=language.queue`).
+    crate::languages::queue_report::start_queue_report();
 
     let app_dir = config
         .app_data_path

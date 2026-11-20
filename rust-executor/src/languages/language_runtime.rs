@@ -71,11 +71,18 @@ pub(crate) struct LanguageRuntimeRequest {
     pub queued_at: Instant,
     /// Names the request in `RunningRequest`.
     pub id: u64,
+    /// Set by the runtime when it starts the call: the caller splits its wait into time
+    /// queued and time running (`call_diag::phase`).
+    pub started: Arc<std::sync::OnceLock<Instant>>,
 }
 
 /// The request a runtime is running, if any: its id and when it started. The runtime writes
 /// it; the handle reads it to tell a caller whose call runs from one queued behind another.
 pub(crate) type RunningRequest = Arc<Mutex<Option<(u64, Instant)>>>;
+
+/// The calls sent to a runtime that it has not taken off its queue yet: id → when sent.
+/// For the queue report (`queue_report`).
+pub(crate) type QueuedRequests = Arc<Mutex<std::collections::BTreeMap<u64, Instant>>>;
 
 /// Operations that can be sent to a LanguageRuntime
 #[derive(Debug)]
@@ -375,6 +382,7 @@ impl LanguageRuntime {
         self,
         mut rx: UnboundedReceiver<LanguageRuntimeRequest>,
         running: RunningRequest,
+        queued: QueuedRequests,
     ) {
         let local_set = tokio::task::LocalSet::new();
         let js_core = self.js_core.clone();
@@ -389,8 +397,9 @@ impl LanguageRuntime {
                     maybe_request = rx.recv() => {
                         match maybe_request {
                             Some(request) => {
+                                queued.lock().unwrap().remove(&request.id);
                                 let is_teardown = matches!(request.operation, LanguageOperation::Teardown);
-                                debug!("[lang:{}] Processing operation: {:?}", addr, request.operation);
+                                debug!("[lang:{}] Processing operation: {}", addr, request.operation.name());
                                 // Time in this runtime's queue (#1133 symptom ①): the
                                 // counterpart of the `[hc-actor] … waited` line.
                                 let waited = request.queued_at.elapsed();
@@ -410,7 +419,9 @@ impl LanguageRuntime {
                                     let skip = matches!(request.operation, LanguageOperation::Execute(..))
                                         && request.response_tx.is_closed();
                                     if !skip {
-                                        *running = Some((request.id, Instant::now()));
+                                        let now = Instant::now();
+                                        *running = Some((request.id, now));
+                                        let _ = request.started.set(now);
                                     }
                                     skip
                                 };
