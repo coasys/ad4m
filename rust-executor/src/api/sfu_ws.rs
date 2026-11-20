@@ -325,6 +325,27 @@ async fn call_restart_ice(params: Value, ctx: Arc<RequestContext>) -> Result<Val
     Ok(Value::Bool(ok))
 }
 
+// ── Resume ───────────────────────────────────────────────────────────────────
+//
+// The client's socket dropped and came back while its call went on (the
+// peer does not depend on the socket). Offers and rosters sent meanwhile
+// were lost: the SFU sends the pending offer and the roster again at once.
+
+async fn call_resume(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let p: SfuResumeParams = parse(params)?;
+    let agent_did = member_did(&ctx, &p.neighbourhood_url)?;
+    let ok = service()?
+        .call_resume(
+            &p.neighbourhood_url,
+            &p.room_name,
+            &agent_did,
+            &p.participant_id,
+        )
+        .await
+        .map_err(map_room_err)?;
+    Ok(Value::Bool(ok))
+}
+
 // ── Trickle ICE ───────────────────────────────────────────────────────────────
 //
 // Companion to `callJoin`: when the client gathers ICE candidates
@@ -521,6 +542,8 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     .guard(update());
     map.method::<SfuRestartIceParams, bool>("sfu.callRestartIce", call_restart_ice)
         .guard(update());
+    map.method::<SfuResumeParams, bool>("sfu.callResume", call_resume)
+        .guard(update());
     map.method::<SfuNeighbourhoodParams, SfuConfig>("sfu.getConfig", get_config)
         .read()
         .guard(read());
@@ -652,6 +675,20 @@ pub struct SfuRestartIceParams {
     pub room_name: String,
     /// The caller's session, as its join returned it. Any other id, even
     /// another device of the same agent, is refused.
+    pub participant_id: String,
+}
+
+/// `sfu.callResume`: the session whose pending offer and roster to send again.
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct SfuResumeParams {
+    pub neighbourhood_url: String,
+    pub room_name: String,
+    /// A session of the caller's agent in this room, as its join returned
+    /// it. Another agent's session, or one no longer in the room, is
+    /// refused. The check is by DID: another device of the same agent may
+    /// resume this session.
     pub participant_id: String,
 }
 

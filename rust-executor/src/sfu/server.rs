@@ -15,6 +15,7 @@ use str0m::media::{
     KeyframeRequest, KeyframeRequestKind, MediaData, MediaKind, MediaTime, Mid, Rid,
 };
 use str0m::net::Protocol;
+use str0m::stats::PeerStats;
 use str0m::{net::Receive, Candidate, Event, IceConnectionState, Input, Output, Rtc, RtcError};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
@@ -78,6 +79,11 @@ pub struct SfuPeer {
     /// When ICE last reported `Disconnected` without coming back, or `None`.
     /// See [`ICE_DISCONNECT_GRACE`].
     pub disconnected_since: Option<Instant>,
+    /// Whether ICE has reached `Connected` or `Completed` on this peer. A
+    /// later fall back to `Checking` means its path failed.
+    pub had_path: bool,
+    /// When the peer was made. See [`PEER_ESTABLISH_TIMEOUT`].
+    pub created_at: Instant,
     /// An ICE restart the client asked for (`sfu.callRestartIce`), from the
     /// request until its answer lands or the offer's retry budget ends.
     /// The offer SDP lives in [`PendingNegotiation`].
@@ -90,6 +96,20 @@ pub struct SfuPeer {
     /// (outbound mid, error kind) of failed media writes already logged
     /// — once each, not per packet.
     pub write_errors_logged: HashSet<(Mid, Discriminant<RtcError>)>,
+    /// When media (RTP) from this peer last arrived, or `None`.
+    /// See [`MEDIA_LIVE_WINDOW`].
+    pub last_media_at: Option<Instant>,
+    /// The media byte counters of the last stats line, for its bitrates.
+    /// See [`PEER_STATS_INTERVAL`].
+    stats_last: Option<StatsSample>,
+}
+
+/// Media bytes in and out at one [`PeerStats`] event.
+#[derive(Debug, Clone, Copy)]
+struct StatsSample {
+    at: Instant,
+    bytes_rx: u64,
+    bytes_tx: u64,
 }
 
 /// One server offer waiting for its answer: the str0m token, and the exact
@@ -103,8 +123,7 @@ struct PendingNegotiation {
     track_mapping: Vec<crate::sfu::TrackMapEntry>,
     /// Resends already published. The first publication is not one of them.
     resends: u32,
-    /// When the next resend is due, or when the peer is dropped after the
-    /// last resend.
+    /// When the next resend is due.
     next_deadline: Instant,
     /// This offer carries an ICE restart.
     carries_restart: bool,
@@ -116,8 +135,6 @@ enum OfferDeadline {
     Wait,
     /// Publish the cached SDP again. The token stays pending.
     Resend,
-    /// The retry budget is spent. The caller disconnects the peer.
-    Expired,
 }
 
 /// A client's ICE restart in flight. The SFU stays the only offerer: the
@@ -156,14 +173,38 @@ pub const ICE_DISCONNECT_GRACE: Duration = Duration::from_secs(10);
 /// but its state arrives only on the next poll.
 pub const ICE_RESTART_GRACE: Duration = Duration::from_secs(15);
 
+/// How long a peer may go without ever reaching ICE `Connected` before it
+/// is dropped. A cascade pipe whose answer never arrives has no remote
+/// candidate: str0m keeps it in `Checking` and never reports
+/// `Disconnected`, so the disconnect grace never starts. Dropped, its pipe
+/// entry goes ([`super::service`]'s dead-pipe cleanup) and the next announce
+/// dials a new pipe. A client that never connects ends the same way. A peer
+/// that had a path is never ended by this.
+pub const PEER_ESTABLISH_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Wait before the first resend of an unanswered offer. The wait doubles
-/// after each resend: 10s, then 20s, then 40s. Two resends, then the peer
-/// is dropped (first send at t=0, resend at t=10s and t=30s, drop at t=70s).
+/// once: resends at t=10s and t=30s, then every [`OFFER_RESEND_STEADY`]
+/// (t=60s, 90s, ...) for as long as the offer is unanswered.
+///
+/// An unanswered offer never drops the peer. #1802 dropped it at t=70s,
+/// also while ICE was up and its media flowed: a client whose socket was
+/// down for a minute lost a healthy call. A peer whose client is gone ends
+/// by the ICE rules ([`ICE_DISCONNECT_GRACE`], [`ICE_RESTART_GRACE`]).
 const OFFER_RETRY_BASE: Duration = Duration::from_secs(10);
 
-/// Resends after the first publication. The deadline after the last one
-/// drops the peer.
-const OFFER_MAX_RESENDS: u32 = 2;
+/// Resends that back off from [`OFFER_RETRY_BASE`] before the steady wait.
+const OFFER_BACKOFF_RESENDS: u32 = 2;
+
+/// Wait between resends after the back-off, and after a `sfu.callResume`.
+const OFFER_RESEND_STEADY: Duration = Duration::from_secs(30);
+
+/// How often each client peer logs one stats line (str0m's `PeerStats`):
+/// bitrate and bytes in and out, loss each way, RTT, the simulcast layers it
+/// receives, and how long ago its media last arrived.
+pub const PEER_STATS_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Media from a peer within this window counts as flowing.
+pub const MEDIA_LIVE_WINDOW: Duration = Duration::from_secs(10);
 
 /// The most trickled candidates held while an ICE restart's offer waits for
 /// its answer. A client gathers a handful per network; later ones are dropped.
@@ -172,7 +213,11 @@ const MAX_HELD_CANDIDATES: usize = 64;
 /// How long to wait after `resends_done` publications. `0` is the wait
 /// after the first send.
 fn offer_retry_wait(resends_done: u32) -> Duration {
-    OFFER_RETRY_BASE * (1u32 << resends_done)
+    if resends_done < OFFER_BACKOFF_RESENDS {
+        OFFER_RETRY_BASE * (1u32 << resends_done)
+    } else {
+        OFFER_RESEND_STEADY
+    }
 }
 
 impl SfuPeer {
@@ -197,10 +242,25 @@ impl SfuPeer {
             is_pipe,
             channels: HashMap::new(),
             disconnected_since: None,
+            had_path: false,
+            created_at: Instant::now(),
             ice_restart: None,
             drops_logged: HashSet::new(),
             write_errors_logged: HashSet::new(),
+            last_media_at: None,
+            stats_last: None,
         }
+    }
+
+    /// Media (RTP) from this peer arrived at `now`.
+    pub fn note_media(&mut self, now: Instant) {
+        self.last_media_at = Some(now);
+    }
+
+    /// Whether media from this peer arrived within [`MEDIA_LIVE_WINDOW`].
+    pub fn media_flowing(&self, now: Instant) -> bool {
+        self.last_media_at
+            .is_some_and(|at| now.saturating_duration_since(at) < MEDIA_LIVE_WINDOW)
     }
 
     /// Track an ICE state change: `Disconnected` starts the disconnect
@@ -210,11 +270,27 @@ impl SfuPeer {
             IceConnectionState::Disconnected => self.disconnected_since.or(Some(now)),
             _ => None,
         };
+        if matches!(
+            state,
+            IceConnectionState::Connected | IceConnectionState::Completed
+        ) {
+            self.had_path = true;
+        }
     }
 
-    /// Whether the peer stayed disconnected past its grace and is to be
-    /// dropped. See [`ICE_DISCONNECT_GRACE`] and [`ICE_RESTART_GRACE`].
+    /// Whether ICE never had a path within [`PEER_ESTABLISH_TIMEOUT`] of the
+    /// peer being made.
+    pub fn never_established(&self, now: Instant) -> bool {
+        !self.had_path && now >= self.created_at + PEER_ESTABLISH_TIMEOUT
+    }
+
+    /// Whether the peer stayed disconnected past its grace, or never had a
+    /// path, and is to be dropped. See [`ICE_DISCONNECT_GRACE`],
+    /// [`ICE_RESTART_GRACE`] and [`PEER_ESTABLISH_TIMEOUT`].
     pub fn stayed_disconnected(&self, now: Instant) -> bool {
+        if self.never_established(now) {
+            return true;
+        }
         let Some(since) = self.disconnected_since else {
             return false;
         };
@@ -325,36 +401,20 @@ impl SfuPeer {
         }
     }
 
-    /// Test wrapper at `Instant::now`. The event loop calls
-    /// `accept_server_answer_at` through `settle_answer`.
-    #[cfg(test)]
-    fn accept_server_answer(&mut self, sdp_answer_json: &str) -> Result<(), ServerAnswerError> {
-        self.accept_server_answer_at(sdp_answer_json, Instant::now())
-    }
-
     /// Apply the client's answer to the SFU's pending offer. An answer to
     /// an ICE restart's offer ends the restart and adds the candidates
     /// trickled meanwhile, then starts the next restart if one was asked for.
     ///
-    /// An answer at or after the final resend deadline stays pending, so the
-    /// deadline sweep still drops the peer. An answer whose m-lines are not
-    /// this offer's stays pending too. A JSON parse failure leaves the
-    /// pending negotiation unchanged. str0m consuming the token and refusing
+    /// An answer is taken however late it comes: the offer stays pending
+    /// until it is answered. An answer whose m-lines are not this offer's
+    /// stays pending. A JSON parse failure leaves the pending negotiation
+    /// unchanged. str0m consuming the token and refusing
     /// the answer does not: the caller disconnects the peer. An answer that
     /// crossed another offer has consumed the token; the caller keeps the peer.
-    fn accept_server_answer_at(
-        &mut self,
-        sdp_answer_json: &str,
-        now: Instant,
-    ) -> Result<(), ServerAnswerError> {
+    fn accept_server_answer(&mut self, sdp_answer_json: &str) -> Result<(), ServerAnswerError> {
         let Some(pending) = self.pending.as_ref() else {
             return Err(ServerAnswerError::NoPending);
         };
-        // Only the last deadline. An answer in the same tick as a resend
-        // still belongs to this offer and cancels that resend.
-        if pending.resends >= OFFER_MAX_RESENDS && now >= pending.next_deadline {
-            return Err(ServerAnswerError::PastDeadline);
-        }
         let answer: str0m::change::SdpAnswer = match serde_json::from_str(sdp_answer_json) {
             Ok(answer) => answer,
             Err(e) => return Err(ServerAnswerError::Parse(e.to_string())),
@@ -399,8 +459,8 @@ impl SfuPeer {
     /// belongs to the pending offer and that str0m refused disconnects the
     /// peer. A late answer, an answer for an older offer, and an answer that
     /// crossed another offer leave the peer and its media in place.
-    fn settle_answer(&mut self, sdp_answer_json: &str, now: Instant) {
-        match self.accept_server_answer_at(sdp_answer_json, now) {
+    fn settle_answer(&mut self, sdp_answer_json: &str) {
+        match self.accept_server_answer(sdp_answer_json) {
             Ok(()) => info!(
                 "SFU: server-offer answer accepted for {} ({} outbound tracks live)",
                 self.id,
@@ -451,21 +511,117 @@ impl SfuPeer {
         });
     }
 
+    /// The client asked for its call state again (`sfu.callResume`), e.g.
+    /// after its socket came back: an offer published meanwhile may never
+    /// have reached it. Returns the pending offer's SDP and mapping to
+    /// publish at once, or `None` when no offer waits. The resend counts as
+    /// one, so the next deadline resend comes [`OFFER_RESEND_STEADY`] later.
+    pub fn resume_offer(
+        &mut self,
+        now: Instant,
+    ) -> Option<(String, Vec<crate::sfu::TrackMapEntry>)> {
+        let pending = self.pending.as_mut()?;
+        pending.resends += 1;
+        pending.next_deadline = now + OFFER_RESEND_STEADY;
+        Some((pending.sdp.clone(), pending.track_mapping.clone()))
+    }
+
+    /// One info line from str0m's `PeerStats`: media bitrate in and out
+    /// since the last line (bytes in and out in total), loss each way, RTT,
+    /// the simulcast layer of each video track it receives (`-`: none
+    /// forwarded yet), its quality preference, and how long ago its media
+    /// last arrived.
+    fn stats_line(
+        &mut self,
+        stats: &PeerStats,
+        layers_in: &[Option<Rid>],
+        preference: Option<&str>,
+        now: Instant,
+    ) -> String {
+        let sample = StatsSample {
+            at: stats.timestamp,
+            bytes_rx: stats.bytes_rx,
+            bytes_tx: stats.bytes_tx,
+        };
+        let kbps = |bytes: u64, since: Duration| {
+            let secs = since.as_secs_f64();
+            if secs > 0.0 {
+                format!("{:.0}", bytes as f64 * 8.0 / 1000.0 / secs)
+            } else {
+                "-".to_string()
+            }
+        };
+        let (kbps_in, kbps_out) = match self.stats_last {
+            Some(last) => {
+                let since = sample.at.saturating_duration_since(last.at);
+                (
+                    kbps(sample.bytes_rx.saturating_sub(last.bytes_rx), since),
+                    kbps(sample.bytes_tx.saturating_sub(last.bytes_tx), since),
+                )
+            }
+            None => ("-".to_string(), "-".to_string()),
+        };
+        self.stats_last = Some(sample);
+        let percent = |loss: Option<f32>| match loss {
+            Some(fraction) => format!("{:.1}%", fraction * 100.0),
+            None => "-".to_string(),
+        };
+        let rtt = stats.rtt.or_else(|| {
+            stats
+                .selected_candidate_pair
+                .as_ref()
+                .and_then(|pair| pair.current_round_trip_time)
+        });
+        let mut layers: Vec<String> = layers_in
+            .iter()
+            .map(|rid| rid.map_or_else(|| "-".to_string(), |rid| rid.to_string()))
+            .collect();
+        layers.sort();
+        format!(
+            "SFU stats: peer {} ({}) room {} in {} kbit/s out {} kbit/s (total {} kB in, {} kB out) loss in {} out {} rtt {} layers [{}] pref {} media {}",
+            self.id,
+            self.agent_did,
+            self.room_id,
+            kbps_in,
+            kbps_out,
+            stats.bytes_rx / 1000,
+            stats.bytes_tx / 1000,
+            percent(stats.ingress_loss_fraction),
+            percent(stats.egress_loss_fraction),
+            rtt.map_or_else(|| "-".to_string(), |rtt| format!("{} ms", rtt.as_millis())),
+            layers.join(","),
+            preference.unwrap_or("auto"),
+            match self.last_media_at {
+                Some(at) => format!("{:.1} s ago", now.saturating_duration_since(at).as_secs_f64()),
+                None => "never".to_string(),
+            },
+        )
+    }
+
     /// `now` reached the pending offer's deadline. One call publishes at
     /// most one resend and moves the deadline, so repeated ticks at the
-    /// same instant publish once. The token stays pending across resends.
+    /// same instant publish once. The token stays pending across resends,
+    /// and the peer stays: see [`OFFER_RETRY_BASE`].
     fn on_offer_deadline(&mut self, now: Instant) -> OfferDeadline {
+        let media_flowing = self.media_flowing(now);
         let Some(pending) = self.pending.as_mut() else {
             return OfferDeadline::Wait;
         };
         if now < pending.next_deadline {
             return OfferDeadline::Wait;
         }
-        if pending.resends >= OFFER_MAX_RESENDS {
-            return OfferDeadline::Expired;
-        }
         pending.resends += 1;
         pending.next_deadline = now + offer_retry_wait(pending.resends);
+        if pending.resends > OFFER_BACKOFF_RESENDS {
+            warn!(
+                "SFU: peer {} offer unanswered for {} s ({} resends, media {}); keeping the peer, resending every {} s",
+                self.id,
+                now.saturating_duration_since(pending.sent_at).as_secs(),
+                pending.resends,
+                if media_flowing { "flowing" } else { "silent" },
+                OFFER_RESEND_STEADY.as_secs(),
+            );
+        }
         OfferDeadline::Resend
     }
 }
@@ -477,9 +633,6 @@ enum ServerAnswerError {
     NoPending,
     /// The JSON did not parse. The pending negotiation is unchanged.
     Parse(String),
-    /// The final resend deadline has passed. The pending offer is unchanged
-    /// so the deadline sweep still drops the peer.
-    PastDeadline,
     /// The answer's m-lines are not the pending offer's. The token stays.
     NotThisOffer,
     /// The answer crossed another offer. str0m has already dropped the token.
@@ -493,7 +646,6 @@ impl std::fmt::Display for ServerAnswerError {
         match self {
             Self::NoPending => write!(f, "no pending offer"),
             Self::Parse(error) => write!(f, "answer parse failed: {error}"),
-            Self::PastDeadline => write!(f, "answer arrived after the final resend deadline"),
             Self::NotThisOffer => write!(f, "answer does not belong to the pending offer"),
             Self::OutOfOrder => write!(f, "answer crossed another offer"),
             Self::Rejected(error) => write!(f, "accept_answer failed: {error}"),
@@ -589,6 +741,9 @@ pub enum SfuCommand {
     /// network change. The SFU offers new ICE credentials through the
     /// server-offer path; the client answers with `ApplyServerAnswer`.
     RestartIce { participant_id: ParticipantId },
+    /// The client's socket came back (`sfu.callResume`): publish the pending
+    /// server offer, if any, again at once.
+    Resume { participant_id: ParticipantId },
     /// Query the quality preferences map.  Returns a snapshot via
     /// oneshot so callers outside the event loop can read it.
     GetQualityPreferences {
@@ -865,7 +1020,9 @@ impl SfuServer {
         local_addr: SocketAddr,
         advertised: Option<SocketAddr>,
     ) -> Result<(Rtc, String), String> {
-        let mut rtc = Rtc::builder().build(Instant::now());
+        let mut rtc = Rtc::builder()
+            .set_stats_interval(Some(PEER_STATS_INTERVAL))
+            .build(Instant::now());
 
         let candidate = Candidate::host(local_addr, "udp")
             .map_err(|e| format!("Failed to create host candidate: {}", e))?;
@@ -952,10 +1109,9 @@ impl SfuServer {
                             );
                             continue;
                         };
-                        // Settled before the deadline sweep below. An answer at
-                        // the final deadline stays pending, so that sweep
-                        // still drops the peer.
-                        peer.settle_answer(&sdp_answer_json, Instant::now());
+                        // Settled before the deadline sweep below: an answer
+                        // in the tick of a resend cancels that resend.
+                        peer.settle_answer(&sdp_answer_json);
                         // Deferred tracks drain AFTER poll_output — see
                         // the post-poll sweep below.  Draining here would
                         // call sdp_api().apply() before str0m has
@@ -1122,6 +1278,31 @@ impl SfuServer {
                         info!("SFU: peer {} asked for an ICE restart", participant_id);
                         peer.restart_ice(Instant::now());
                     }
+                    Ok(SfuCommand::Resume { participant_id }) => {
+                        let Some(peer) = peers.get_mut(&participant_id) else {
+                            debug!("SFU: Resume for unknown participant {}", participant_id);
+                            continue;
+                        };
+                        if peer.is_pipe {
+                            warn!("SFU: Resume for pipe {} ignored", participant_id);
+                            continue;
+                        }
+                        match peer.resume_offer(Instant::now()) {
+                            Some((sdp, track_mapping)) => {
+                                info!(
+                                    "SFU: peer {} resumed; pending offer sent again",
+                                    participant_id
+                                );
+                                publish_renegotiation_offer(
+                                    peer,
+                                    &participant_id,
+                                    sdp,
+                                    track_mapping,
+                                );
+                            }
+                            None => info!("SFU: peer {} resumed; no offer pending", participant_id),
+                        }
+                    }
                     Ok(SfuCommand::GetQualityPreferences { reply }) => {
                         let _ = reply.send(quality_preferences.clone());
                     }
@@ -1137,25 +1318,29 @@ impl SfuServer {
                 }
             }
 
-            // An unanswered offer is published again from its cached SDP, or
-            // the peer is dropped when the budget ends. Expiry runs before
-            // the dead-peer cleanup below, so this iteration does not poll
-            // or offer anything further for that peer. A resend is published
-            // after poll: the token stays pending, and the deadline has
-            // already moved, so this tick publishes it once.
+            // An unanswered offer is published again from its cached SDP. It
+            // never drops the peer (see `OFFER_RETRY_BASE`). A resend is
+            // published after poll: the token stays pending, and the
+            // deadline has already moved, so this tick publishes it once.
             let now = Instant::now();
             let due_resends = sweep_offer_deadlines(&mut peers, now);
 
             // Clean out disconnected peers, and tell the service: a client
             // still holds a room slot (capacity, and its DID could not
             // rejoin), a pipe a cascade entry (phantom established pipes
-            // after a remote node crash). Peers the offer budget just
-            // disconnected are removed here too.
+            // after a remote node crash).
             {
                 let mut dead_peers: Vec<DeadPeer> = Vec::new();
                 let now = Instant::now();
                 for (pid, peer) in peers.iter_mut() {
-                    if peer.stayed_disconnected(now) {
+                    if peer.never_established(now) {
+                        info!(
+                            "SFU: peer {} never connected within {} s, dropping it",
+                            pid,
+                            PEER_ESTABLISH_TIMEOUT.as_secs()
+                        );
+                        peer.rtc.disconnect();
+                    } else if peer.stayed_disconnected(now) {
                         info!("SFU: peer {} stayed disconnected, dropping it", pid);
                         peer.rtc.disconnect();
                     }
@@ -1226,6 +1411,7 @@ impl SfuServer {
                                 tracks_opened.push((pid.clone(), e.mid, e.kind));
                             }
                             Event::MediaData(data) => {
+                                peer.note_media(Instant::now());
                                 media_to_relay.push((pid.clone(), data));
                             }
                             Event::KeyframeRequest(req) => {
@@ -1263,6 +1449,28 @@ impl SfuServer {
                                     );
                                     data_received.push((pid.clone(), payload));
                                 }
+                            }
+                            Event::PeerStats(stats) => {
+                                // The layer of each video track this peer receives.
+                                let layers_in: Vec<Option<Rid>> = peer
+                                    .tracks_out
+                                    .iter()
+                                    .filter(|(out_mid, _)| {
+                                        peer.rtc
+                                            .media(**out_mid)
+                                            .is_some_and(|media| media.kind().is_video())
+                                    })
+                                    .map(|(_, track)| layers.layer_of(pid, track))
+                                    .collect();
+                                info!(
+                                    "{}",
+                                    peer.stats_line(
+                                        &stats,
+                                        &layers_in,
+                                        quality_preferences.get(pid).map(String::as_str),
+                                        Instant::now(),
+                                    )
+                                );
                             }
                             Event::ChannelClose(cid) => {
                                 if let Some(label) = peer.channels.remove(&cid) {
@@ -1951,8 +2159,7 @@ struct DueResend {
 }
 
 /// Advance every pending offer's deadline by one step. A resend is returned
-/// for publication after poll. An exhausted budget disconnects the peer; the
-/// caller removes it with the other dead peers.
+/// for publication after poll. No peer is dropped here.
 fn sweep_offer_deadlines(
     peers: &mut HashMap<ParticipantId, SfuPeer>,
     now: Instant,
@@ -1971,12 +2178,6 @@ fn sweep_offer_deadlines(
                     sdp: pending.sdp.clone(),
                     track_mapping: pending.track_mapping.clone(),
                 });
-            }
-            OfferDeadline::Expired => {
-                warn!(
-                    "SFU: peer {pid} pending offer unanswered after {OFFER_MAX_RESENDS} resends, dropping it"
-                );
-                peer.rtc.disconnect();
             }
         }
     }
@@ -2326,6 +2527,8 @@ mod tests {
         data: Vec<Duration>,
         channel: Option<ChannelId>,
         media: Vec<MediaData>,
+        /// `PeerStats` events, one per [`PEER_STATS_INTERVAL`] when enabled.
+        peer_stats: usize,
     }
 
     /// Feed `rtc` the clock, then drain it: events go to `seen`, packets
@@ -2348,6 +2551,7 @@ mod tests {
                 Output::Event(Event::ChannelOpen(id, _)) => seen.channel = Some(id),
                 Output::Event(Event::ChannelData(_)) => seen.data.push(now - start),
                 Output::Event(Event::MediaData(d)) => seen.media.push(d),
+                Output::Event(Event::PeerStats(_)) => seen.peer_stats += 1,
                 Output::Event(_) => {}
             }
         }
@@ -2943,10 +3147,11 @@ mod tests {
         assert!(peer.ice_restart.is_none(), "handed over with the answer");
     }
 
-    /// An ICE restart that is never answered is resent twice, as the same
-    /// offer, and then the peer is dropped. There is no replacement offer.
+    /// An ICE restart that is never answered is resent, always as the same
+    /// offer. There is no replacement offer, and the resends do not drop the
+    /// peer: the restart grace does, if ICE stays down.
     #[test]
-    fn an_unanswered_ice_restart_expires_without_a_new_offer() {
+    fn an_unanswered_ice_restart_is_resent_without_a_new_offer() {
         let (_caller, mut peer) = connected_pair();
         let now = Instant::now();
         peer.restart_ice(now);
@@ -2965,9 +3170,10 @@ mod tests {
         assert_eq!(second_resend[0].sdp, first);
         assert_eq!(peers[&pid].ice_restart.as_ref().unwrap().since, since);
 
-        let expired = sweep_offer_deadlines(&mut peers, now + Duration::from_secs(70));
-        assert!(expired.is_empty(), "expiry publishes no replacement offer");
-        assert!(!peers[&pid].rtc.is_alive());
+        let third_resend = sweep_offer_deadlines(&mut peers, now + Duration::from_secs(60));
+        assert_eq!(third_resend.len(), 1);
+        assert_eq!(third_resend[0].sdp, first);
+        assert!(peers[&pid].rtc.is_alive());
         assert!(apply_deferred_tracks(peers.get_mut(&pid).unwrap(), now).is_none());
     }
 
@@ -3157,7 +3363,8 @@ mod tests {
         assert!(media.kind().is_audio());
     }
 
-    /// Walk the two resends and return the instant the peer is dropped.
+    /// Walk the two back-off resends and return the deadline after them,
+    /// where #1802 dropped the peer.
     fn final_offer_deadline(
         peers: &mut HashMap<ParticipantId, SfuPeer>,
         pid: &ParticipantId,
@@ -3171,16 +3378,16 @@ mod tests {
         assert_eq!(second.len(), 1);
         assert_eq!(second[0].sdp, sdp);
         let deadline = peers[pid].pending.as_ref().unwrap().next_deadline;
-        assert_eq!(deadline, now + Duration::from_secs(70));
+        assert_eq!(deadline, now + Duration::from_secs(60));
         assert_eq!(
             peers[pid].pending.as_ref().unwrap().resends,
-            OFFER_MAX_RESENDS
+            OFFER_BACKOFF_RESENDS
         );
         deadline
     }
 
-    /// An answer one millisecond before the final deadline is applied. The
-    /// sweep then has nothing to drop.
+    /// An answer one millisecond before the deadline after the back-off is
+    /// applied. The sweep then has nothing to resend.
     #[test]
     fn an_answer_just_before_the_final_deadline_is_applied() {
         let (bind, caller_addr) = pair_addrs();
@@ -3192,9 +3399,8 @@ mod tests {
         let mut peers = HashMap::from([(pid.clone(), peer)]);
         let deadline = final_offer_deadline(&mut peers, &pid, now, &sdp);
         let peer = peers.get_mut(&pid).unwrap();
-        peer.accept_server_answer_at(&answer, deadline - Duration::from_millis(1))
-            .unwrap();
-        assert!(peer.pending.is_none(), "the answer cancels the drop");
+        peer.accept_server_answer(&answer).unwrap();
+        assert!(peer.pending.is_none(), "the answer cancels the resend");
         assert!(peer.rtc.is_alive());
         assert!(sweep_offer_deadlines(&mut peers, deadline).is_empty());
         assert!(peers[&pid].rtc.is_alive());
@@ -3218,8 +3424,7 @@ mod tests {
         let now = Instant::now();
         let (sdp, _, mid) = offer_outbound_audio(&mut peer, now);
         let answer = answer_json(&mut caller, &sdp);
-        peer.accept_server_answer_at(&answer, now + OFFER_RETRY_BASE)
-            .unwrap();
+        peer.accept_server_answer(&answer).unwrap();
         assert!(peer.pending.is_none());
         assert!(matches!(
             peer.on_offer_deadline(now + OFFER_RETRY_BASE),
@@ -3229,10 +3434,10 @@ mod tests {
     }
 
     /// The command handler runs before the deadline sweep. An answer at the
-    /// final deadline must not clear the offer, in either order: answer then
-    /// sweep, or sweep then answer.
+    /// deadline where #1802 dropped the peer, or later, is applied: the
+    /// offer was resent, never withdrawn, and the peer stays.
     #[test]
-    fn an_answer_at_the_final_deadline_is_left_for_the_sweep() {
+    fn an_answer_after_the_back_off_is_applied() {
         let (mut caller, mut peer) = connected_pair();
         let now = Instant::now();
         let (sdp, _, mid) = offer_outbound_audio(&mut peer, now);
@@ -3242,34 +3447,25 @@ mod tests {
         let deadline = final_offer_deadline(&mut peers, &pid, now, &sdp);
 
         let peer = peers.get_mut(&pid).unwrap();
-        let err = peer.accept_server_answer_at(&answer, deadline).unwrap_err();
-        assert!(matches!(err, ServerAnswerError::PastDeadline));
-        assert_eq!(peer.pending.as_ref().unwrap().sdp, sdp);
-        assert!(
-            peer.rtc.is_alive(),
-            "the answer path does not drop the peer"
-        );
-        assert!(peer.rtc.writer(mid).is_none());
+        peer.accept_server_answer(&answer).unwrap();
+        assert!(peer.pending.is_none());
+        assert_audio_writer(peer, mid);
         assert!(sweep_offer_deadlines(&mut peers, deadline).is_empty());
-        assert!(!peers[&pid].rtc.is_alive(), "the sweep drops the peer");
-        assert_eq!(peers[&pid].pending.as_ref().unwrap().sdp, sdp);
+        assert!(peers[&pid].rtc.is_alive());
 
         let (mut caller, mut peer) = connected_pair();
-        let (sdp, _, _) = offer_outbound_audio(&mut peer, now);
+        let (sdp, _, mid) = offer_outbound_audio(&mut peer, now);
         let answer = answer_json(&mut caller, &sdp);
         let pid = peer.id.clone();
         let mut peers = HashMap::from([(pid.clone(), peer)]);
         let deadline = final_offer_deadline(&mut peers, &pid, now, &sdp);
-        assert!(sweep_offer_deadlines(&mut peers, deadline).is_empty());
-        assert!(!peers[&pid].rtc.is_alive());
-        let err = peers
-            .get_mut(&pid)
-            .unwrap()
-            .accept_server_answer_at(&answer, deadline + Duration::from_millis(1))
-            .unwrap_err();
-        assert!(matches!(err, ServerAnswerError::PastDeadline));
-        assert!(peers[&pid].pending.is_some());
-        assert!(!peers[&pid].rtc.is_alive());
+        let resent = sweep_offer_deadlines(&mut peers, deadline);
+        assert_eq!(resent.len(), 1, "the sweep resends instead of dropping");
+        assert!(peers[&pid].rtc.is_alive());
+        let peer = peers.get_mut(&pid).unwrap();
+        peer.accept_server_answer(&answer).unwrap();
+        assert!(peer.pending.is_none());
+        assert_audio_writer(peer, mid);
     }
 
     /// Two pipes that already share one track each offer another. Each
@@ -3305,7 +3501,7 @@ mod tests {
         assert!(left.rtc.is_alive());
         assert_audio_writer(&mut left, mid);
 
-        right.settle_answer(&serde_json::to_string(&answer_for_right).unwrap(), now);
+        right.settle_answer(&serde_json::to_string(&answer_for_right).unwrap());
         assert!(right.rtc.is_alive(), "the loop keeps the pipe");
         assert!(right.pending.is_none());
     }
@@ -3325,16 +3521,16 @@ mod tests {
 
         let (sdp_b, _, mid_b) = offer_outbound_audio(&mut peer, now);
         assert_ne!(sdp_mids(&sdp_a), sdp_mids(&sdp_b));
-        let err = peer.accept_server_answer_at(&answer_a, now).unwrap_err();
+        let err = peer.accept_server_answer(&answer_a).unwrap_err();
         assert!(matches!(err, ServerAnswerError::NotThisOffer));
-        peer.settle_answer(&answer_a, now);
+        peer.settle_answer(&answer_a);
         assert!(peer.rtc.is_alive());
         assert_eq!(peer.pending.as_ref().unwrap().sdp, sdp_b);
         assert_audio_writer(&mut peer, mid_a);
         assert!(peer.rtc.writer(mid_b).is_none());
 
         let answer_b = answer_json(&mut caller, &sdp_b);
-        peer.settle_answer(&answer_b, now);
+        peer.settle_answer(&answer_b);
         assert!(peer.pending.is_none());
         assert!(peer.rtc.is_alive());
         exchange_until(
@@ -3387,14 +3583,13 @@ mod tests {
         (left, right, mid)
     }
 
-    /// Two resends, then the peer is removed. The old answer finds no peer.
-    /// A join after that is a new participant with nothing pending.
+    /// Two resends that back off, then one every 30 s. The peer stays and
+    /// keeps the track mapped, and the mapping goes out with every resend.
     #[test]
-    fn an_offer_is_resent_twice_and_then_the_peer_is_dropped() {
-        let (mut caller, mut peer) = connected_pair();
+    fn an_offer_is_resent_twice_and_then_every_thirty_seconds() {
+        let (_caller, mut peer) = connected_pair();
         let now = Instant::now();
-        let (sdp, _, mid) = offer_outbound_audio(&mut peer, now);
-        let answer = answer_json(&mut caller, &sdp);
+        let (sdp, mapping, _) = offer_outbound_audio(&mut peer, now);
         let pid = peer.id.clone();
         let mut peers = HashMap::from([(pid.clone(), peer)]);
 
@@ -3406,25 +3601,280 @@ mod tests {
         let second = sweep_offer_deadlines(&mut peers, now + Duration::from_secs(30));
         assert_eq!(second.len(), 1);
         assert_eq!(second[0].sdp, sdp);
-        assert_eq!(peers[&pid].pending.as_ref().unwrap().resends, 2);
+        assert!(sweep_offer_deadlines(&mut peers, now + Duration::from_secs(59)).is_empty());
+        for at in [60, 90, 120] {
+            let due = sweep_offer_deadlines(&mut peers, now + Duration::from_secs(at));
+            assert_eq!(due.len(), 1, "resend at {at} s");
+            assert_eq!(due[0].sdp, sdp);
+            assert_same_mapping(&due[0].track_mapping, &mapping);
+            assert!(peers[&pid].rtc.is_alive());
+        }
+        assert_eq!(peers[&pid].pending.as_ref().unwrap().resends, 5);
         assert_eq!(peers[&pid].tracks_out.len(), 1);
-        assert!(sweep_offer_deadlines(&mut peers, now + Duration::from_secs(69)).is_empty());
-
-        let expired = sweep_offer_deadlines(&mut peers, now + Duration::from_secs(70));
-        assert!(expired.is_empty(), "expiry publishes no replacement offer");
-        assert!(!peers[&pid].rtc.is_alive());
-        assert_eq!(peers[&pid].pending.as_ref().unwrap().sdp, sdp);
         assert!(apply_deferred_tracks(peers.get_mut(&pid).unwrap(), now).is_none());
-        peers.retain(|_, peer| peer.rtc.is_alive());
-        assert!(peers.get(&pid).is_none(), "the late answer has no peer");
+    }
 
-        let (_caller, mut joined) = connected_pair();
-        assert_ne!(joined.id, pid);
-        assert!(matches!(
-            joined.accept_server_answer(&answer),
-            Err(ServerAnswerError::NoPending)
-        ));
-        assert!(joined.rtc.writer(mid).is_none());
+    /// #1802 dropped a peer whose offer stayed unanswered for 70 s, also
+    /// while its media flowed (a caller dropped mid-call on 2026-11-19). The
+    /// offer is resent at 10 s and 30 s, then every 30 s, and the peer stays.
+    /// Its answer still lands after two minutes.
+    #[test]
+    fn an_offer_unanswered_for_two_minutes_while_media_flows_keeps_the_peer() {
+        let (mut caller, mut peer) = connected_pair();
+        let now = Instant::now();
+        let (sdp, _, mid) = offer_outbound_audio(&mut peer, now);
+        peer.on_ice_state(IceConnectionState::Completed, now);
+        let pid = peer.id.clone();
+        let mut peers = HashMap::from([(pid.clone(), peer)]);
+
+        let mut resent = Vec::new();
+        for second in 0..=120 {
+            let at = now + Duration::from_secs(second);
+            peers.get_mut(&pid).unwrap().note_media(at);
+            assert!(peers[&pid].media_flowing(at));
+            for due in sweep_offer_deadlines(&mut peers, at) {
+                assert_eq!(due.sdp, sdp);
+                resent.push(second);
+            }
+            assert!(peers[&pid].rtc.is_alive(), "dropped at {second} s");
+            assert!(!peers[&pid].stayed_disconnected(at));
+        }
+        assert_eq!(resent, vec![10, 30, 60, 90, 120]);
+
+        let answer = answer_json(&mut caller, &sdp);
+        let peer = peers.get_mut(&pid).unwrap();
+        peer.accept_server_answer(&answer).unwrap();
+        assert!(peer.pending.is_none());
+        assert_audio_writer(peer, mid);
+    }
+
+    /// A peer that sends no media (camera and microphone off, or a guest
+    /// with no devices) while ICE stays up is not dropped for an unanswered
+    /// offer either: only the ICE rules end a silent peer.
+    #[test]
+    fn a_silent_peer_with_ice_up_keeps_its_unanswered_offer() {
+        let (_caller, mut peer) = connected_pair();
+        let now = Instant::now();
+        let (sdp, _, _) = offer_outbound_audio(&mut peer, now);
+        peer.on_ice_state(IceConnectionState::Connected, now);
+        let pid = peer.id.clone();
+        let mut peers = HashMap::from([(pid.clone(), peer)]);
+        for second in 0..=180 {
+            let at = now + Duration::from_secs(second);
+            for due in sweep_offer_deadlines(&mut peers, at) {
+                assert_eq!(due.sdp, sdp);
+            }
+            assert!(!peers[&pid].media_flowing(at));
+            assert!(peers[&pid].rtc.is_alive(), "dropped at {second} s");
+            assert!(!peers[&pid].stayed_disconnected(at));
+        }
+        assert_eq!(peers[&pid].pending.as_ref().unwrap().sdp, sdp);
+    }
+
+    /// `sfu.callResume` while an offer waits: the pending offer goes out
+    /// again at once, the same SDP and mapping, and the next deadline resend
+    /// waits 30 s from the resume. Without a pending offer it sends nothing.
+    #[test]
+    fn a_resume_sends_the_pending_offer_at_once() {
+        let (mut caller, mut peer) = connected_pair();
+        let now = Instant::now();
+        assert!(peer.resume_offer(now).is_none(), "no offer waits");
+        let (sdp, mapping, mid) = offer_outbound_audio(&mut peer, now);
+        peer.note_media(now);
+        let pid = peer.id.clone();
+        let mut peers = HashMap::from([(pid.clone(), peer)]);
+        let resent = sweep_offer_deadlines(&mut peers, now + OFFER_RETRY_BASE);
+        assert_eq!(resent.len(), 1);
+
+        let resumed_at = now + Duration::from_secs(95);
+        let peer = peers.get_mut(&pid).unwrap();
+        let (resumed_sdp, resumed_mapping) =
+            peer.resume_offer(resumed_at).expect("the offer waits");
+        assert_eq!(resumed_sdp, sdp);
+        assert_same_mapping(&resumed_mapping, &mapping);
+        assert!(sweep_offer_deadlines(&mut peers, resumed_at).is_empty());
+        assert!(sweep_offer_deadlines(
+            &mut peers,
+            resumed_at + OFFER_RESEND_STEADY - Duration::from_millis(1)
+        )
+        .is_empty());
+        assert_eq!(
+            sweep_offer_deadlines(&mut peers, resumed_at + OFFER_RESEND_STEADY).len(),
+            1
+        );
+
+        let peer = peers.get_mut(&pid).unwrap();
+        peer.accept_server_answer(&answer_json(&mut caller, &resumed_sdp))
+            .unwrap();
+        assert_audio_writer(peer, mid);
+        assert!(peer.resume_offer(resumed_at).is_none());
+        assert!(peer.rtc.is_alive());
+    }
+
+    /// A client peer's `Rtc` reports `PeerStats` every 30 s, for the stats
+    /// line. Before, the SFU logged no bitrate, loss or layer per peer.
+    #[test]
+    fn a_client_peer_reports_its_stats_every_thirty_seconds() {
+        let (bind, caller_addr) = pair_addrs();
+        let (mut caller, mut peer) = connected_pair();
+        let start = Instant::now();
+        let (mut caller_seen, mut peer_seen) = (Seen::default(), Seen::default());
+        let mut sent = Vec::new();
+        let mut now = start;
+        while now - start < PEER_STATS_INTERVAL * 2 + Duration::from_secs(1) {
+            let caller_next = drive(&mut caller, now, start, &mut caller_seen, &mut sent);
+            for (source, destination, data) in sent.drain(..) {
+                if destination == bind {
+                    receive(&mut peer.rtc, now, source, destination, &data);
+                }
+            }
+            let peer_next = drive(&mut peer.rtc, now, start, &mut peer_seen, &mut sent);
+            for (source, destination, data) in sent.drain(..) {
+                if destination == caller_addr {
+                    receive(&mut caller, now, source, destination, &data);
+                }
+            }
+            now = caller_next.min(peer_next).clamp(
+                now + Duration::from_millis(1),
+                now + Duration::from_millis(50),
+            );
+        }
+        assert!(peer.rtc.is_alive());
+        assert_eq!(peer_seen.peer_stats, 2);
+    }
+
+    /// The stats line: bitrates since the previous line, totals, loss each
+    /// way, RTT, the layer of each video track received, the preference and
+    /// the media age.
+    #[test]
+    fn the_stats_line_names_bitrate_loss_rtt_layers_and_media_age() {
+        let (_caller, mut peer) = connected_pair();
+        let now = Instant::now();
+        peer.note_media(now);
+        let stats = |at: Instant, bytes_rx: u64, bytes_tx: u64| PeerStats {
+            peer_bytes_rx: bytes_rx,
+            peer_bytes_tx: bytes_tx,
+            bytes_rx,
+            bytes_tx,
+            timestamp: at,
+            bwe_tx: None,
+            egress_loss_fraction: Some(0.012),
+            ingress_loss_fraction: None,
+            rtt: Some(Duration::from_millis(34)),
+            selected_candidate_pair: None,
+        };
+        let first = peer.stats_line(&stats(now, 1_000_000, 3_000_000), &[], None, now);
+        assert!(
+            first.contains(&format!("peer {} (did:key:caller)", peer.id)),
+            "{first}"
+        );
+        assert!(first.contains("in - kbit/s out - kbit/s"), "{first}");
+        assert!(first.contains("total 1000 kB in, 3000 kB out"), "{first}");
+
+        let later = now + PEER_STATS_INTERVAL;
+        let line = peer.stats_line(
+            &stats(later, 1_000_000 + 3_000_000, 3_000_000 + 7_500_000),
+            &[Some(Rid::from("h")), None, Some(Rid::from("l"))],
+            Some("medium"),
+            later + Duration::from_millis(1500),
+        );
+        assert!(line.contains("in 800 kbit/s out 2000 kbit/s"), "{line}");
+        assert!(line.contains("loss in - out 1.2%"), "{line}");
+        assert!(line.contains("rtt 34 ms"), "{line}");
+        assert!(line.contains("layers [-,h,l]"), "{line}");
+        assert!(line.contains("pref medium"), "{line}");
+        assert!(line.contains("media 31.5 s ago"), "{line}");
+    }
+
+    /// A cascade pipe whose answer never arrives has no remote candidate, so
+    /// ICE never leaves `Checking` and never reports `Disconnected`. Before
+    /// this PR the 70 s offer expiry ended it; without that, nothing did, and
+    /// `has_pipe` kept the node from dialling again. A peer that never had a
+    /// path is dropped 30 s after it was made; the dead-pipe cleanup removes
+    /// its entry, and the next announce dials a new pipe.
+    #[test]
+    fn a_pipe_that_never_gets_a_path_is_dropped_and_can_be_replaced() {
+        let establish = Duration::from_secs(30);
+        let mut mgr = super::super::cascade::CascadeManager::new(
+            "did:key:nodeB".into(),
+            "127.0.0.1:10040".parse().unwrap(),
+            8,
+        );
+        let room = RoomId::new("neighbourhood://pipe", "r");
+        let (mut pipe, _offer) = mgr.establish_pipe("did:key:nodeA", &room).unwrap();
+        let start = Instant::now();
+        let (mut seen, mut sent) = (Seen::default(), Vec::new());
+        let mut now = start;
+        while now - start < establish + Duration::from_secs(5) {
+            let next = drive(&mut pipe.rtc, now, start, &mut seen, &mut sent);
+            sent.clear();
+            for (_, state) in seen.ice.drain(..) {
+                pipe.on_ice_state(state, now);
+            }
+            now = next.clamp(now + Duration::from_millis(1), now + Duration::from_secs(1));
+        }
+        assert!(pipe.rtc.is_alive(), "str0m itself never gives up on it");
+        assert!(
+            pipe.disconnected_since.is_none(),
+            "ICE never reported a loss"
+        );
+        assert!(!pipe.stayed_disconnected(start + establish - Duration::from_secs(1)));
+        assert!(
+            pipe.stayed_disconnected(start + establish),
+            "a pipe with no path for 30 s is dropped"
+        );
+
+        // What the cascade cleanup does with the dead pipe.
+        assert!(mgr.has_pipe(&room.to_string(), "did:key:nodeA"));
+        mgr.remove_node_from_room(&room.to_string(), "did:key:nodeA");
+        assert!(!mgr.has_pipe(&room.to_string(), "did:key:nodeA"));
+        let (replacement, _) = mgr
+            .establish_pipe("did:key:nodeA", &room)
+            .expect("a new pipe can be dialled");
+        assert_ne!(replacement.id, pipe.id);
+    }
+
+    /// The establishment timeout only ends a peer that never had a path. One
+    /// that connected and then goes quiet (no media, no ICE change) stays.
+    #[test]
+    fn an_established_peer_that_goes_quiet_is_not_hit_by_the_establishment_timeout() {
+        let (_caller, mut peer) = connected_pair();
+        let now = Instant::now();
+        peer.on_ice_state(IceConnectionState::Checking, now);
+        peer.on_ice_state(IceConnectionState::Connected, now + Duration::from_secs(1));
+        for minutes in [1, 5, 30] {
+            assert!(!peer.stayed_disconnected(now + Duration::from_secs(60 * minutes)));
+        }
+        assert!(!peer.media_flowing(now + Duration::from_secs(60)));
+    }
+
+    /// No media, an unanswered offer, and ICE down: the ICE rules still end
+    /// the peer, 10 s after ICE went `Disconnected`, or 15 s after an ICE
+    /// restart request. The offer resends keep neither alive.
+    #[test]
+    fn a_silent_peer_with_ice_down_still_ends_by_the_ice_rules() {
+        let (_caller, mut peer) = connected_pair();
+        let now = Instant::now();
+        offer_outbound_audio(&mut peer, now);
+        peer.note_media(now);
+        let down = now + Duration::from_secs(5);
+        peer.on_ice_state(IceConnectionState::Disconnected, down);
+        let pid = peer.id.clone();
+        let mut peers = HashMap::from([(pid.clone(), peer)]);
+        let resent = sweep_offer_deadlines(&mut peers, now + OFFER_RETRY_BASE);
+        assert_eq!(resent.len(), 1);
+        let peer = &peers[&pid];
+        assert!(!peer.media_flowing(down + ICE_DISCONNECT_GRACE));
+        assert!(!peer.stayed_disconnected(down + ICE_DISCONNECT_GRACE - Duration::from_millis(1)));
+        assert!(peer.stayed_disconnected(down + ICE_DISCONNECT_GRACE));
+
+        let (_caller, mut peer) = connected_pair();
+        offer_outbound_audio(&mut peer, now);
+        peer.on_ice_state(IceConnectionState::Disconnected, now);
+        let asked = now + Duration::from_secs(8);
+        peer.restart_ice(asked);
+        assert!(!peer.stayed_disconnected(asked + ICE_RESTART_GRACE - Duration::from_millis(1)));
+        assert!(peer.stayed_disconnected(asked + ICE_RESTART_GRACE));
     }
 
     /// A track that arrives while an offer waits stays deferred across the

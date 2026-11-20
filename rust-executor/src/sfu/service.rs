@@ -893,13 +893,27 @@ impl SfuService {
     /// departure also reaches the removed DID, including when the room
     /// became empty; the payload still lists only current participants.
     async fn publish_roster(&self, room_id: &RoomId, departed: Option<&str>) {
+        self.publish_roster_to(room_id, departed, None).await
+    }
+
+    /// [`Self::publish_roster`], to `only` when it is set: a client that
+    /// asked for the roster again gets it without everyone else.
+    async fn publish_roster_to(
+        &self,
+        room_id: &RoomId,
+        departed: Option<&str>,
+        only: Option<&str>,
+    ) {
         let _order = self.roster_order.lock().await;
         let mut participants = self.local_sessions(room_id).await;
-        let recipients: Vec<String> = participants
-            .iter()
-            .map(|p| p.agent_did.clone())
-            .chain(departed.map(str::to_string))
-            .collect();
+        let recipients: Vec<String> = match only {
+            Some(did) => vec![did.to_string()],
+            None => participants
+                .iter()
+                .map(|p| p.agent_did.clone())
+                .chain(departed.map(str::to_string))
+                .collect(),
+        };
         participants.extend(
             self.cascade_manager
                 .read()
@@ -1508,6 +1522,40 @@ impl SfuService {
             })
             .await
             .map_err(|e| format!("Failed to send RestartIce command: {}", e))?;
+        Ok(true)
+    }
+
+    /// The client of session `participant_id` lost its socket and has it
+    /// back (`sfu.callResume`). Offers and roster events published while it
+    /// was gone did not reach it: the SFU publishes the pending server offer,
+    /// if any, again at once, and the room's roster to `agent_did`. The
+    /// session itself never depended on the socket. Refused when the session
+    /// is not `agent_did`'s or is no longer in the room. The check is by DID
+    /// ([`super::room::SfuRoom::session_of`]): another device of the same agent
+    /// may resume this session, and the roster reaches every device of it.
+    pub async fn call_resume(
+        &self,
+        neighbourhood_url: &str,
+        room_name: &str,
+        agent_did: &str,
+        participant_id: &str,
+    ) -> Result<bool, String> {
+        let pid = self
+            .own_session(neighbourhood_url, room_name, agent_did, participant_id)
+            .await?;
+        self.server
+            .command_tx
+            .send(SfuCommand::Resume {
+                participant_id: pid,
+            })
+            .await
+            .map_err(|e| format!("Failed to send Resume command: {}", e))?;
+        self.publish_roster_to(
+            &RoomId::new(neighbourhood_url, room_name),
+            None,
+            Some(agent_did),
+        )
+        .await;
         Ok(true)
     }
 
@@ -2426,6 +2474,7 @@ mod tests {
                 .await
                 .is_err());
             assert!(svc.call_restart_ice(url, "r", did, pid).await.is_err());
+            assert!(svc.call_resume(url, "r", did, pid).await.is_err());
             assert!(svc
                 .add_ice_candidate(
                     url,
@@ -2529,6 +2578,108 @@ mod tests {
             offered,
             vec![(serde_json::json!(phone), serde_json::json!("did:a"))]
         );
+    }
+
+    /// `sfu.callResume` from the session's own agent sends its pending
+    /// offer again at once (long before the 10 s resend) and the roster to
+    /// that agent only. Another agent's resume of that session is refused,
+    /// and so is a resume of a session that was replaced.
+    #[tokio::test]
+    async fn a_resume_sends_the_pending_offer_and_the_roster_to_its_session_only() {
+        let svc = test_service().await;
+        let url = "neighbourhood://resume";
+        let mut events = crate::pubsub::get_global_pubsub().await.subscribe_events();
+        let laptop = join(&svc, url, "did:a", "laptop").await;
+        let replaced = join(&svc, url, "did:a", "phone").await;
+        let phone = join(&svc, url, "did:a", "phone").await;
+        let bobs = join(&svc, url, "did:b", "laptop").await;
+
+        let offers_to = |seen: &[Arc<crate::events::Event>]| -> Vec<(String, String)> {
+            published(seen, Topic::SfuCallRenegotiationOffer, url)
+                .into_iter()
+                .map(|o| {
+                    (
+                        o["participantId"].as_str().unwrap().to_string(),
+                        o["sdpOffer"].as_str().unwrap().to_string(),
+                    )
+                })
+                .collect()
+        };
+        async fn settle(
+            svc: &SfuService,
+            events: &mut tokio::sync::broadcast::Receiver<Arc<crate::events::Event>>,
+        ) -> Vec<Arc<crate::events::Event>> {
+            // A round trip: the media loop has handled every command sent so far.
+            svc.get_quality_preferences().await;
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            drain(events)
+        }
+
+        // An ICE restart gives the laptop a pending offer.
+        svc.call_restart_ice(url, "r", "did:a", &laptop)
+            .await
+            .unwrap();
+        let mut pending = Vec::new();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while pending.is_empty() {
+                pending = offers_to(&drain(&mut events));
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("no restart offer in time");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].0, laptop);
+        settle(&svc, &mut events).await;
+
+        // Refused: another agent, a replaced session, a room that does not exist.
+        for (did, pid, room_url) in [
+            ("did:b", laptop.as_str(), url),
+            ("did:a", replaced.as_str(), url),
+            ("did:a", bobs.as_str(), url),
+            ("did:a", laptop.as_str(), "neighbourhood://no-such-room"),
+        ] {
+            let refused = svc.call_resume(room_url, "r", did, pid).await;
+            assert!(refused.is_err(), "{did} {pid} {room_url}");
+        }
+        let seen = settle(&svc, &mut events).await;
+        assert!(
+            offers_to(&seen).is_empty(),
+            "a refused resume sends nothing"
+        );
+        assert!(published(&seen, Topic::SfuRoomRoster, url).is_empty());
+
+        // The laptop's own resume: the same offer at once, and the roster.
+        let asked = std::time::Instant::now();
+        assert!(svc.call_resume(url, "r", "did:a", &laptop).await.unwrap());
+        let seen = settle(&svc, &mut events).await;
+        assert!(asked.elapsed() < std::time::Duration::from_secs(5));
+        assert_eq!(offers_to(&seen), pending);
+        let rosters: Vec<_> = seen
+            .iter()
+            .filter(|e| e.topic == Topic::SfuRoomRoster && e.payload["neighbourhoodUrl"] == url)
+            .collect();
+        assert_eq!(rosters.len(), 1);
+        assert!(matches!(
+            &rosters[0].audience,
+            crate::events::Audience::Dids(dids) if dids == &vec!["did:a".to_string()]
+        ));
+        let mut listed: Vec<String> = rosters[0].payload["participants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["participantId"].as_str().unwrap().to_string())
+            .collect();
+        listed.sort();
+        let mut everyone = vec![laptop.clone(), phone.clone(), bobs.clone()];
+        everyone.sort();
+        assert_eq!(listed, everyone);
+
+        // The phone has no pending offer: its resume sends the roster only.
+        assert!(svc.call_resume(url, "r", "did:a", &phone).await.unwrap());
+        let seen = settle(&svc, &mut events).await;
+        assert!(offers_to(&seen).is_empty());
+        assert_eq!(published(&seen, Topic::SfuRoomRoster, url).len(), 1);
     }
 
     #[tokio::test]

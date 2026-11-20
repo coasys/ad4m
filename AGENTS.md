@@ -311,9 +311,11 @@ space's policy (`maxMeshParticipants × 4`, 128 without one), and cascade
 per-node capacity only drives redirects; the server drops a peer after
 10 s of ICE `Disconnected`, or, once the client asked for an ICE restart
 (`sfu.callRestartIce`), 15 s after the request. The restart's answer ends
-that grace and the 10 s disconnect clock starts again. The deadline sweep
-also drops a peer when a server offer stays unanswered after both resends
-(resend at 10 s and at 30 s, drop at 70 s), even when ICE stays connected;
+that grace and the 10 s disconnect clock starts again. An unanswered server
+offer is resent at 10 s and 30 s, then every 30 s, and never drops the peer
+(#1802 dropped it at 70 s, also while its media flowed); `sfu.callResume`
+(the session's `participantId`) sends the pending offer and the roster again
+at once, for a client whose socket came back;
 on ICE `disconnected` or a network change the SDK restarts ICE in place (the
 SFU stays the only offerer: the restart comes as a server renegotiation
 offer), and rebuilds the call if that has not reconnected within 15 s; a
