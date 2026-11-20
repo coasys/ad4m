@@ -14,3 +14,8 @@ path = "src/lib.rs"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 ad4m-executor = { path = "../rust-executor" }
+
+# Tests of the web executor as a whole crate, under Node: CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=
+# wasm-bindgen-test-runner cargo test -p web-executor-link-test --target wasm32-unknown-unknown
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"
