@@ -589,6 +589,18 @@ fn extract_predicates_from_sparql(query: &str) -> HashSet<String> {
     predicates
 }
 
+/// `Some` when `stop` has fired. The wait returns this instead of sleeping
+/// out the rest of the sync budget.
+fn shape_wait_stopped(stop: &EvalStop) -> Option<AnyError> {
+    if !stop.is_stopped() {
+        return None;
+    }
+    Some(
+        stop.stopped_err("shape wait")
+            .unwrap_or_else(|| anyhow!("shape wait stopped")),
+    )
+}
+
 /// One wake per background loop that waits on an event; see `PerspectiveInstance::wakes`.
 #[derive(Default)]
 struct LoopWakes {
@@ -718,8 +730,9 @@ pub struct PerspectiveInstance {
     /// Test-only: makes [`Self::get_shape_or_wait`] treat this perspective as
     /// joined to a neighbourhood, so a test can exercise the cross-peer wait
     /// without a running link language. Compiled out in non-test builds.
+    /// `pub(crate)` so an auto-processor tick test can force the wait.
     #[cfg(test)]
-    force_shape_sync_wait: Arc<AtomicBool>,
+    pub(crate) force_shape_sync_wait: Arc<AtomicBool>,
 }
 
 /// The local Shared links the remote render lacks, without the links of the diffs the
@@ -880,6 +893,22 @@ impl PerspectiveInstance {
         class_name: &str,
         budget: Duration,
     ) -> Result<Arc<ModelShape>, AnyError> {
+        self.get_shape_or_wait_stopped(&EvalStop::none(), class_name, budget)
+            .await
+    }
+
+    /// [`get_shape_or_wait`] that ends when `stop` fires, including while the
+    /// poll is asleep. A dropped tick must not keep its read slot for the
+    /// rest of the sync budget.
+    pub async fn get_shape_or_wait_stopped(
+        &self,
+        stop: &EvalStop,
+        class_name: &str,
+        budget: Duration,
+    ) -> Result<Arc<ModelShape>, AnyError> {
+        if let Some(err) = shape_wait_stopped(stop) {
+            return Err(err);
+        }
         match self.get_shape(class_name) {
             Ok(shape) => return Ok(shape),
             Err(e) => {
@@ -888,9 +917,17 @@ impl PerspectiveInstance {
                 }
             }
         }
+        if let Some(err) = shape_wait_stopped(stop) {
+            return Err(err);
+        }
         let deadline = Instant::now() + budget;
         let poll = Duration::from_millis(100);
+        // Short enough that a fired stop is seen during a poll sleep.
+        let slice = Duration::from_millis(25);
         loop {
+            if let Some(err) = shape_wait_stopped(stop) {
+                return Err(err);
+            }
             let now = Instant::now();
             if now >= deadline {
                 // Keeps the original message as a prefix (callers match on
@@ -905,7 +942,15 @@ impl PerspectiveInstance {
                 });
             }
             // Never sleep past the deadline: the caller's budget is shared.
-            sleep(poll.min(deadline - now)).await;
+            let mut left = poll.min(deadline - now);
+            while !left.is_zero() {
+                if let Some(err) = shape_wait_stopped(stop) {
+                    return Err(err);
+                }
+                let step = slice.min(left);
+                sleep(step).await;
+                left = left.saturating_sub(step);
+            }
             if let Ok(shape) = self.get_shape(class_name) {
                 return Ok(shape);
             }
@@ -4281,7 +4326,8 @@ impl PerspectiveInstance {
                 continue;
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
-            self.get_shape_or_wait(class_name, remaining).await?;
+            self.get_shape_or_wait_stopped(stop, class_name, remaining)
+                .await?;
         }
         // An abstract class (#1435) reads the concrete classes that have its
         // names, each through its view; none of them is an empty result.
@@ -4400,7 +4446,7 @@ impl PerspectiveInstance {
                 return Err(err);
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
-            self.get_shape_or_wait(&missing.class_name, remaining)
+            self.get_shape_or_wait_stopped(stop, &missing.class_name, remaining)
                 .await?;
         };
         let mut result = result;
@@ -9748,6 +9794,34 @@ mod tests {
             .find(|prop| prop.name == "title")
             .expect("title property");
         assert_eq!(title.initial_value.as_deref(), Some("from-constructor"));
+    }
+
+    /// A shape wait ends when its stop fires. It does not sit out the budget.
+    #[tokio::test]
+    async fn a_shape_wait_returns_when_its_stop_fires() {
+        use crate::perspectives::sparql_store::EvalGate;
+        use std::time::Instant;
+
+        let perspective = setup().await;
+        perspective
+            .force_shape_sync_wait
+            .store(true, Ordering::SeqCst);
+        let gate = EvalGate::request(Duration::from_millis(100), None);
+        let started = Instant::now();
+        let result = perspective
+            .get_shape_or_wait_stopped(&gate.stop(), "Missing", Duration::from_secs(2))
+            .await;
+        let elapsed = started.elapsed();
+        let err = result.expect_err("a missing shape is still an error");
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "the wait ignored its stop and ran for {elapsed:?}: {err:#}"
+        );
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("deadline") || msg.contains("stopped") || msg.contains("cancelled"),
+            "the error does not say the wait stopped: {msg}"
+        );
     }
 
     /// Two apps that each define `Message` in their own namespace must not

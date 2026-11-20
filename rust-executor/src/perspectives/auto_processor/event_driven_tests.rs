@@ -1498,11 +1498,7 @@ async fn aborting_a_prepare_cancels_the_read_and_holds_the_slot() {
             .expect("tick task");
     }
     assert!(
-        wait_until(
-            || eval_count::running() == baseline,
-            Duration::from_secs(3)
-        )
-        .await,
+        wait_until(|| eval_count::running() == baseline, Duration::from_secs(3)).await,
         "the aborted read did not leave query_internal"
     );
     assert_eq!(eval_count::running(), baseline);
@@ -1685,6 +1681,45 @@ async fn earlier_stage_reads_do_not_spend_a_later_stage_deadline() {
     .await
     .expect("tick ends");
     assert_eq!(pending_texts(&watcher, "stage-budget"), vec!["hello"]);
+}
+
+/// A tick dropped while it waits for a shape must give the read slot back.
+/// The class is registered and the shape is not stored, so the wait runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_dropped_tick_releases_its_read_slot_while_the_shape_wait_sleeps() {
+    use super::read_offload::available_permits;
+    use crate::types::{Link, LinkStatus};
+    use std::sync::atomic::Ordering;
+
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+    p.force_shape_sync_wait.store(true, Ordering::SeqCst);
+    p.add_links(
+        vec![Link {
+            source: "ad4m://AutoProcessor".into(),
+            predicate: Some("rdf://type".into()),
+            target: "ad4m://SubjectClass".into(),
+        }],
+        LinkStatus::Shared,
+        None,
+        &ctx,
+    )
+    .await
+    .expect("register the class without a shape");
+    let before = available_permits();
+    let tick = tokio::spawn(async move {
+        let mut watcher = WatcherState::new();
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
+    });
+    assert!(
+        wait_until(|| available_permits() + 1 == before, Duration::from_secs(5)).await,
+        "the tick did not take a read slot"
+    );
+    tick.abort();
+    assert!(
+        wait_until(|| available_permits() == before, Duration::from_secs(1)).await,
+        "the dropped tick kept its read slot while the shape wait slept"
+    );
 }
 
 /// Cancelling the prepare after the job has taken the watcher must not drop
