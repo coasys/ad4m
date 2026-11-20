@@ -6,7 +6,11 @@
 //! columns and the language storage files that name it. Once nothing under an older version
 //! is left, the older versions are dropped from the keyring. Until then data under them still
 //! opens, so a job that stops (a crash, a value that does not open) loses nothing; running it
-//! again resumes it, without making yet another version.
+//! again resumes it, without making yet another version. A language file's write, and this
+//! job's seal-again of a file, hold one lock (`lang_storage::exclusive`) from taking the key to
+//! renaming the file in place, and the job counts and retires under it: a write that took an
+//! older version just before the new one became current is in place before the older version
+//! goes, and is counted.
 //!
 //! The executor's own store is not re-encrypted here: its key also keys the SQLCipher
 //! database file, which the executor opens once at start.
@@ -183,8 +187,21 @@ pub fn finish(
         }
     }
     if report.left == 0 {
-        report.retired = keys.retire_store_versions(store)?;
-    } else {
+        // A language write holds the files lock from taking the key to renaming its file in
+        // place. Counting again and retiring under that lock finds every file a writer that
+        // took an older version published, and no writer takes one after (the current version
+        // is the new one): nothing is stranded under a version that is gone.
+        report.retired = lang_storage::exclusive(|| -> Result<Vec<KeyVersion>, ReencryptError> {
+            let files_left = lang_storage::count_store_files_not_under(languages, store, version)
+                .map_err(|e| ReencryptError::Files(e.to_string()))?;
+            if files_left > 0 {
+                report.left = files_left;
+                return Ok(Vec::new());
+            }
+            Ok(keys.retire_store_versions(store)?)
+        })?;
+    }
+    if report.left != 0 {
         log::warn!(
             "🔑 {store}: {} values or files are still under an older key ({} do not open); \
              the older key versions stay until a re-encryption moves them",
@@ -334,6 +351,97 @@ mod tests {
         assert!(keys
             .subkey(&moved, Some(KeyVersion(1)), SubkeyPurpose::Rows)
             .is_err());
+    }
+
+    /// A language's write that took the old key version before the re-encryption switched to
+    /// the new one, and publishes after the job has counted and resealed, is not stranded: the
+    /// job waits for it before it retires the old version, counts its file and seals it again.
+    #[test]
+    fn a_write_holding_the_old_version_is_not_stranded_by_the_retirement() {
+        use std::sync::mpsc;
+        let folder = tempfile::tempdir().unwrap();
+        let keys = keyring(folder.path());
+        let db = database(folder.path(), &keys);
+        let store = perspective(&db, "moved");
+        let StoreId::Perspective(uuid) = &store else {
+            unreachable!()
+        };
+        let languages = folder.path().join("languages");
+        let language_folder = languages.join("QmWriter");
+        std::fs::create_dir_all(&language_folder).unwrap();
+        crate::perspectives::route_link_language_for_test(
+            "QmWriter",
+            Some(PerspectiveHandle {
+                uuid: uuid.to_string(),
+                name: None,
+                neighbourhood: None,
+                shared_url: None,
+                state: PerspectiveState::Private,
+                owners: None,
+            }),
+        );
+
+        let (taken_tx, taken_rx) = mpsc::channel::<()>();
+        let (go_tx, go_rx) = mpsc::channel::<()>();
+        let go_rx = Mutex::new(go_rx);
+        let taken_tx = Mutex::new(taken_tx);
+        *lang_storage::PAUSE_AFTER_SEAL.lock().unwrap() = Some(Arc::new(move || {
+            taken_tx.lock().unwrap().send(()).unwrap();
+            go_rx.lock().unwrap().recv().unwrap();
+        }));
+        let writer_keys = keys.clone();
+        let writer_folder = language_folder.clone();
+        let writer = std::thread::spawn(move || {
+            lang_storage::write_file(
+                Some(&writer_keys),
+                lang_storage::Caller {
+                    folder: &writer_folder,
+                    address: "QmWriter",
+                    system: false,
+                },
+                "kv.json",
+                "acknowledged",
+            )
+        });
+        // The writer holds version 1 and has not renamed its file.
+        taken_rx.recv().unwrap();
+        // Release it once the job is waiting for the files lock.
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            go_tx.send(()).unwrap();
+        });
+        let report = reencrypt(&keys, &db, &languages, &store);
+        releaser.join().unwrap();
+        *lang_storage::PAUSE_AFTER_SEAL.lock().unwrap() = None;
+        writer.join().unwrap().unwrap();
+        let report = report.unwrap();
+        assert_eq!(
+            report.left, 1,
+            "the job counted the write that landed after it began"
+        );
+        let me = lang_storage::Caller {
+            folder: &language_folder,
+            address: "QmWriter",
+            system: false,
+        };
+        assert_eq!(
+            lang_storage::read_file(Some(&keys), me, "kv.json").unwrap(),
+            "acknowledged",
+            "the write that held version 1 still opens"
+        );
+        // The write is in place and still under version 1, which stays: nothing is stranded,
+        // and the job run again moves the file and then retires version 1.
+        assert!(report.retired.is_empty());
+        let again = reencrypt(&keys, &db, &languages, &store).unwrap();
+        assert!(again.resumed);
+        assert_eq!((again.left, again.resealed_files), (0, 1));
+        assert_eq!(again.retired, vec![KeyVersion(1)]);
+        assert_eq!(
+            lang_storage::read_file(Some(&keys), me, "kv.json").unwrap(),
+            "acknowledged",
+            "and after the retirement"
+        );
+        crate::perspectives::route_link_language_for_test("QmWriter", None);
     }
 
     /// A job that stopped after the new version became current resumes: the next run makes

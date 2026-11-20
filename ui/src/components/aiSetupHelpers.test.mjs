@@ -1,4 +1,4 @@
-// Run with `node --test src/components/aiSetup.test.mjs` (Node 23.6+ strips aiSetup.ts's
+// Run with `node --test src/components/aiSetupHelpers.test.mjs` (Node 23.6+ strips aiSetupHelpers.ts's
 // types). The launcher has no test runner of its own; this covers the onboarding choice.
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -16,7 +16,7 @@ import {
   serverInstead,
   toDownload,
   withMaxNumCtx,
-} from "./aiSetup.ts";
+} from "./aiSetupHelpers.ts";
 
 const ollama = { kind: "OLLAMA", baseUrl: "http://127.0.0.1:11434" };
 const speaches = { kind: "OPEN_AI_AUDIO", baseUrl: "http://127.0.0.1:8000" };
