@@ -31,8 +31,8 @@ mod tests;
 pub use error::{CascadeStep, InstanceError, WriteStep};
 pub(crate) use validate::coerce_scalar;
 pub use validate::{
-    validate_properties, Cardinality, ReadOnlyReason, ValidatedWrite, ValidationError,
-    ValidationProblem, WriteMode,
+    validate_properties, validate_update, Cardinality, ReadOnlyReason, ValidatedWrite,
+    ValidationError, ValidationProblem, WriteMode,
 };
 pub use write::{
     add_to_collection, create, remove, remove_from_collection, update, CollectionItemAdded,

@@ -100,8 +100,8 @@ pub struct Cardinality {
 pub enum WriteMode {
     /// All required properties must be present; collections may be given as arrays.
     Create,
-    /// Partial patch: the given properties and collection member lists
-    /// replace what is there.
+    /// Partial patch of single-valued properties; a collection only through
+    /// [`validate_update`], when it declares a setter.
     Update,
 }
 
@@ -264,15 +264,36 @@ pub(crate) fn coerce_scalar(info: &PropView<'_>, value: &Value) -> Result<Value,
 
 /// Validate a `properties` map against a class shape.
 ///
-/// On success returns the coerced scalar values (keyed by the property's canonical name) and
-/// the collection member lists to write — `Create` writes them as the initial items, `Update`
-/// replaces the collection with them. On failure returns *every* problem found, not
-/// just the first, so the caller can fix its call in one round trip. Nothing is written by this
-/// function.
+/// On success returns the coerced scalar values (keyed by the property's canonical name) and,
+/// for `Create`, the collection items to link. `Update` refuses every collection
+/// (`collectionNotSettable`); [`validate_update`] lets through the ones that declare a setter.
+/// On failure returns *every* problem found, not just the first, so the caller can fix its
+/// call in one round trip. Nothing is written by this function.
 pub fn validate_properties(
     shape: &ModelShape,
     props: &Map<String, Value>,
     mode: WriteMode,
+) -> Result<ValidatedWrite, Vec<ValidationError>> {
+    validate_with(shape, props, mode, &[])
+}
+
+/// `Update` validation where the collections named in `settable` (canonical names: those the
+/// class declares an `ad4m://setter` for) take their full member list, `[]` included, which
+/// the setter writes as a replace. Any other collection is refused, as in
+/// [`validate_properties`].
+pub fn validate_update(
+    shape: &ModelShape,
+    props: &Map<String, Value>,
+    settable: &[String],
+) -> Result<ValidatedWrite, Vec<ValidationError>> {
+    validate_with(shape, props, WriteMode::Update, settable)
+}
+
+fn validate_with(
+    shape: &ModelShape,
+    props: &Map<String, Value>,
+    mode: WriteMode,
+    settable: &[String],
 ) -> Result<ValidatedWrite, Vec<ValidationError>> {
     let infos = class_properties(shape);
     let mut errors: Vec<ValidationError> = Vec::new();
@@ -313,8 +334,15 @@ pub fn validate_properties(
         }
 
         if info.collection() {
-            // Both modes take the full member list: create writes the
-            // initial items, update replaces them (empty clears).
+            let replace = mode == WriteMode::Update;
+            if replace && !settable.iter().any(|name| name == info.name()) {
+                errors.push(ValidationError::on(
+                    info,
+                    ValidationProblem::CollectionNotSettable,
+                    Some(value),
+                ));
+                continue;
+            }
             let items: Vec<Value> = match value {
                 Value::Array(items) => items.clone(),
                 Value::Null => vec![],
@@ -332,9 +360,9 @@ pub fn validate_properties(
                     }
                 }
             }
-            // Create skips an empty list (nothing to write); update keeps
-            // it — an empty array is a replace-with-nothing.
-            if !bad && (!coerced.is_empty() || mode == WriteMode::Update) {
+            // Create skips an empty list (nothing to write); a settable
+            // collection's update keeps it: an empty array clears.
+            if !bad && (!coerced.is_empty() || replace) {
                 out.collections.push((info.name().to_string(), coerced));
             }
             continue;

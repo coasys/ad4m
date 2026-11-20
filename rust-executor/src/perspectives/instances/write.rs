@@ -19,7 +19,7 @@ use super::{
     check_setters, class_properties, coerce_scalar, decoded_literal, fetch_instance, find_property,
     generate_instance_uri, instance_uri, link_target, property_target, property_value_target,
     remove_all_links_of, require_instance, resolve_class, resolve_writable_class, subject_class,
-    validate_properties, InstanceError, WriteMode, WriteStep,
+    validate_properties, validate_update, InstanceError, WriteMode, WriteStep,
 };
 use crate::agent::AgentContext;
 use crate::mcp::shacl;
@@ -56,8 +56,9 @@ pub struct InstanceCreate {
     pub batch_id: Option<String>,
 }
 
-/// Set properties of an instance; the others stay as they are. A collection in
-/// the patch is the full member list it should have — `[]` clears it.
+/// Set properties of an instance; the others stay as they are. A collection with
+/// a declared setter takes the full member list it should have — `[]` clears
+/// it; any other collection is refused (`collectionNotSettable`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
 #[ts(optional_fields)]
 #[serde(rename_all = "camelCase")]
@@ -66,7 +67,7 @@ pub struct InstanceUpdate {
     pub class_name: String,
     pub base_uri: String,
     /// Values by property name, at least one: one JSON value per single-valued
-    /// property, an array of member URIs per collection.
+    /// property, an array of member URIs per collection that declares a setter.
     #[ts(type = "Record<string, unknown>")]
     pub properties: Map<String, Value>,
     /// An open batch to stage the write into; see `InstanceCreate`'s `batchId`.
@@ -628,7 +629,8 @@ pub async fn create(
 
 /// Set properties of an existing instance, in one batch. "Existing" means
 /// committed: an instance created in the same batch is not found yet (`notFound`).
-/// A collection in the patch replaces its members; `[]` clears them.
+/// A collection with a declared setter replaces its members (`[]` clears them);
+/// any other collection is refused.
 pub async fn update(
     perspective: &mut PerspectiveInstance,
     agent: &AgentContext,
@@ -639,7 +641,26 @@ pub async fn update(
         return Err(InstanceError::EmptyProperties);
     }
 
-    let validated = validate_properties(&shape, &params.properties, WriteMode::Update)
+    // A collection takes a member list only through a declared
+    // `ad4m://setter` (a mounted class's `call`, or a `collectionSetter`);
+    // `validate_update` refuses any other one.
+    let infos = class_properties(&shape);
+    let mut settable = Vec::new();
+    for given in params.properties.keys() {
+        let Some(info) = find_property(&infos, given) else {
+            continue;
+        };
+        if info.collection()
+            && perspective
+                .property_setter_kind(&class_name, info.name())
+                .await
+                .map_err(|e| failed(&class_name, WriteStep::ReadShape, e))?
+                .is_some()
+        {
+            settable.push(info.name().to_string());
+        }
+    }
+    let validated = validate_update(&shape, &params.properties, &settable)
         .map_err(|errors| invalid(&class_name, errors))?;
     // Through an abstract class (#1435) the record's own classes' setters write;
     // `update_subject` checks those.
@@ -657,17 +678,16 @@ pub async fn update(
     // Where it is stored: a legacy-spelled id's node is not the normalised one.
     let stored = require_instance(perspective, &class_name, &base_uri).await?;
 
-    // A collection with a declared `ad4m://setter` joins the subject values
-    // verbatim — `update_subject` gives a `call` setter `{coll: [ids]}` and a
-    // `collectionSetter` the member list. One without gets a collectionSetter
-    // synthesized from its `path` and `local` — the replace an
-    // `executeAction` caller would write. A scalar with no declared setter
-    // (a `hasOne` relation, which carries only `adder`/`remover`) is the
-    // same replace with one member.
+    // A collection (validation let through only those with a declared
+    // `ad4m://setter`) joins the subject values verbatim — `update_subject`
+    // gives a `call` setter `{coll: [ids]}` and a `collectionSetter` the
+    // member list. A scalar with no declared setter (a `hasOne` relation,
+    // which carries only `adder`/`remover`) gets a collectionSetter
+    // synthesized from its `path` and `local`, with one member — the replace
+    // an `executeAction` caller would write.
     let mut subject_values = serde_json::Map::new();
     let mut plain_collections: Vec<(String, String, bool, Vec<Value>)> = Vec::new();
     let mut has_calls = false;
-    let infos = class_properties(&shape);
     if is_abstract {
         subject_values.extend(validated.scalars.clone());
     } else {
@@ -702,37 +722,19 @@ pub async fn update(
         }
     }
     for (collection, items) in &validated.collections {
-        if is_abstract {
-            // A bare array is the setter op through an abstract class (`Op::of`);
-            // the record's own classes' collection setters write it.
-            subject_values.insert(collection.clone(), Value::Array(items.clone()));
-            continue;
-        }
-        match perspective
-            .property_setter_kind(&class_name, collection)
-            .await
-            .map_err(|e| failed(&class_name, WriteStep::ReadShape, e))?
+        // Through an abstract class a bare array is the setter op (`Op::of`)
+        // the record's own classes' collection setters write;
+        // `abstract_update_calls` below classifies them.
+        if !is_abstract
+            && perspective
+                .property_setter_kind(&class_name, collection)
+                .await
+                .map_err(|e| failed(&class_name, WriteStep::ReadShape, e))?
+                == Some(SetterKind::Call)
         {
-            Some(kind) => {
-                has_calls |= kind == SetterKind::Call;
-                subject_values.insert(collection.clone(), Value::Array(items.clone()));
-            }
-            None => {
-                let Some(info) = find_property(&infos, collection) else {
-                    return Err(failed(
-                        &class_name,
-                        WriteStep::ReadShape,
-                        anyhow!("collection `{collection}` is not a property of {class_name}"),
-                    ));
-                };
-                plain_collections.push((
-                    collection.clone(),
-                    info.predicate().to_string(),
-                    info.local(),
-                    items.clone(),
-                ));
-            }
+            has_calls = true;
         }
+        subject_values.insert(collection.clone(), Value::Array(items.clone()));
     }
 
     // Through an abstract class the record's own classes' setters write:
