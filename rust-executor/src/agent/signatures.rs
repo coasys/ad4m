@@ -1,8 +1,8 @@
 use crate::types::Expression;
 use chrono::SecondsFormat;
 use chrono::{DateTime, Utc};
-use deno_core::anyhow::anyhow;
-use deno_core::error::AnyError;
+use anyhow::anyhow;
+use anyhow::Error as AnyError;
 use did_key::{CoreSign, PatchedKeyPair};
 use log::error;
 use serde::Serialize;

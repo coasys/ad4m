@@ -22,8 +22,8 @@
 //! - "local" (default): [`LocalDb`]
 //! - "shared": [`SharedDb`]
 
-use deno_core::anyhow::anyhow;
-use deno_core::error::AnyError;
+use anyhow::anyhow;
+use anyhow::Error as AnyError;
 use serde_json::Value;
 use std::any::Any;
 use std::collections::{HashMap, HashSet};

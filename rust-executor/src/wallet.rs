@@ -2,8 +2,8 @@ use argon2::{self, Argon2};
 use base64::Engine;
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
-use deno_core::anyhow::anyhow;
-use deno_core::error::AnyError;
+use anyhow::anyhow;
+use anyhow::Error as AnyError;
 use did_key::{CoreSign, DIDCore, Ed25519KeyPair, KeyMaterial, PatchedKeyPair};
 use lazy_static::lazy_static;
 use once_cell::sync::OnceCell;
@@ -166,8 +166,8 @@ mod legacy {
     use base64::Engine;
     use crypto_box::aead::Aead;
     use crypto_box::{Nonce, PublicKey, SalsaBox, SecretKey};
-    use deno_core::anyhow::anyhow;
-    use deno_core::error::AnyError;
+    use anyhow::anyhow;
+    use anyhow::Error as AnyError;
     use zeroize::Zeroizing;
 
     pub(super) fn slice_to_u8_array(slice: &[u8]) -> [u8; 32] {

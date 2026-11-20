@@ -1,7 +1,7 @@
 use super::types::*;
 use crate::config::get_global_config;
 use crate::wallet::wallet_backend;
-use deno_core::{anyhow::anyhow, error::AnyError};
+use anyhow::{anyhow, Error as AnyError};
 use jsonwebtoken::{encode, Algorithm, DecodingKey, EncodingKey, Header};
 
 /// Resolve the signing key name from global config.

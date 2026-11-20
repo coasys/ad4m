@@ -50,8 +50,8 @@ impl From<String> for ApiError {
     }
 }
 
-impl From<deno_core::error::AnyError> for ApiError {
-    fn from(e: deno_core::error::AnyError) -> Self {
+impl From<anyhow::Error> for ApiError {
+    fn from(e: anyhow::Error) -> Self {
         ApiError::Internal(e.to_string())
     }
 }

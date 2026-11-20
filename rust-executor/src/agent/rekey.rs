@@ -2,8 +2,8 @@
 //! old key stays in the wallet under [`retired_key_name`], for history only: nothing signs with
 //! it again, and what it signed still verifies, since a `did:key` carries its public key.
 
-use deno_core::anyhow::anyhow;
-use deno_core::error::AnyError;
+use anyhow::anyhow;
+use anyhow::Error as AnyError;
 
 use super::{did_document, signing_key_id, AgentService};
 use crate::wallet::{wallet_backend, WalletBackend, KEY_NAME_MAIN};

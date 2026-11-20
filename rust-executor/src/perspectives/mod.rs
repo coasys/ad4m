@@ -88,10 +88,10 @@ static FAIL_METADATA_SWEEP: std::sync::Mutex<Vec<String>> = std::sync::Mutex::ne
 
 /// Remove the links in the store's metadata vocabulary that `p`'s store holds
 /// (see [`sparql_store::SparqlStore::purge_link_metadata_links`]).
-fn sweep_link_metadata(p: &PerspectiveInstance) -> Result<usize, deno_core::anyhow::Error> {
+fn sweep_link_metadata(p: &PerspectiveInstance) -> Result<usize, anyhow::Error> {
     #[cfg(test)]
     if FAIL_METADATA_SWEEP.lock().unwrap().contains(&p.uuid) {
-        return Err(deno_core::anyhow::anyhow!(
+        return Err(anyhow::anyhow!(
             "induced metadata-vocabulary sweep failure"
         ));
     }

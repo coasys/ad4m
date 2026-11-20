@@ -39,7 +39,7 @@
 //!
 //! Both are `VALUES`-bound to the URIs asked about, so neither scans the store.
 
-use deno_core::anyhow::Error;
+use anyhow::Error;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 

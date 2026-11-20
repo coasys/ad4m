@@ -25,7 +25,7 @@ use crate::agent::AgentContext;
 use crate::mcp::shacl;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::types::{Link, LinkExpression, LinkQuery, LinkStatus};
-use deno_core::anyhow::anyhow;
+use anyhow::anyhow;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
@@ -251,7 +251,7 @@ async fn check_batch(
     }
 }
 
-fn failed(class_name: &str, step: WriteStep, error: deno_core::anyhow::Error) -> InstanceError {
+fn failed(class_name: &str, step: WriteStep, error: anyhow::Error) -> InstanceError {
     InstanceError::Failed {
         class_name: class_name.to_string(),
         step,

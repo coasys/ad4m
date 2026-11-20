@@ -13,8 +13,8 @@ use argon2::{
     password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
     Argon2,
 };
-use deno_core::anyhow::anyhow;
-use deno_core::error::AnyError;
+use anyhow::anyhow;
+use anyhow::Error as AnyError;
 use rand::Rng;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};

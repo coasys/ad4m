@@ -35,7 +35,7 @@ use crate::types::{
     DecoratedLinkExpression, Link, LinkExpression, LinkStatus, OnlineAgent, PerspectiveExpression,
 };
 use ad4m_client::literal::{Literal, LiteralValue};
-use deno_core::error::AnyError;
+use anyhow::Error as AnyError;
 use std::collections::HashMap;
 use std::sync::Mutex;
 

@@ -3,7 +3,7 @@ use crate::perspectives::shacl_to_prolog::generate_prolog_facts_from_shacl;
 use crate::types::{DecoratedLinkExpression, ExpressionRef, LanguageRef, Link};
 use ad4m_client::literal::Literal;
 use chrono::DateTime;
-use deno_core::error::AnyError;
+use anyhow::Error as AnyError;
 use log;
 use std::collections::{HashMap, HashSet};
 use std::convert::TryFrom;
