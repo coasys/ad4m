@@ -120,6 +120,9 @@ pub struct StorageStatus {
     pub stores: Option<StoreStates>,
     /// The keyring's id, hex: the same before and after the unlock.
     pub keyring_id: String,
+    /// The data folder has a keyring file. `false` only on a first start, which `keyringId`
+    /// cannot show: a sealed keyring with no file still has a (random) id.
+    pub keyring_exists: bool,
     /// Operator only: where this start's secret came from; `null` while sealed.
     pub secret_source: Option<SecretSourceKind>,
     /// Operator only: the secret file is on the data folder's disk (allowed by
@@ -365,6 +368,7 @@ impl StorageGate {
             encrypted_at_rest,
             stores,
             keyring_id: self.keys.keyring_id().to_hex(),
+            keyring_exists: self.keys.keyring_exists(),
             secret_source: operator.then_some(info.source).flatten(),
             secret_on_data_disk: (operator && self.keys.is_open()).then_some(info.on_data_disk),
             root_generation: operator.then(|| self.keys.root_generation()).flatten(),
@@ -512,6 +516,8 @@ mod tests {
         let sealed = gate.status(true);
         assert_eq!(sealed.state, StorageState::Sealed);
         assert_eq!(sealed.keyring_id.len(), 32);
+        assert!(!sealed.keyring_exists, "a first start: no keyring file");
+        assert!(!gate.status(false).keyring_exists, "not operator only");
         assert_eq!(sealed.stores, None);
         assert_eq!(sealed.secret_source, None);
         assert_eq!(sealed.secret_on_data_disk, None);
@@ -523,6 +529,7 @@ mod tests {
         let open = gate.status(true);
         assert_eq!(open.state, StorageState::Open);
         assert_eq!(open.keyring_id, sealed.keyring_id, "the id does not change");
+        assert!(open.keyring_exists);
         assert_eq!(
             open.stores,
             Some(StoreStates {
