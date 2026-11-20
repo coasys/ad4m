@@ -260,6 +260,8 @@ interface ReceiveSample {
     inbound: number
     /** RTP packets sent. */
     outbound: number
+    /** RTP packets sent on video. */
+    outboundVideo: number
     /** The RTCP reports on this client's media (`remote-inbound-rtp`): changes when a new one arrives. */
     reports: string
 }
@@ -267,17 +269,21 @@ interface ReceiveSample {
 async function receiveSample(pc: RTCPeerConnection): Promise<ReceiveSample> {
     let inbound = 0
     let outbound = 0
+    let outboundVideo = 0
     const reports: string[] = []
     ;(await pc.getStats()).forEach((stat: any) => {
         if (stat.type === "inbound-rtp") inbound += stat.packetsReceived ?? 0
-        else if (stat.type === "outbound-rtp") outbound += stat.packetsSent ?? 0
+        else if (stat.type === "outbound-rtp") {
+            outbound += stat.packetsSent ?? 0
+            if (stat.kind === "video") outboundVideo += stat.packetsSent ?? 0
+        }
         else if (stat.type === "remote-inbound-rtp") {
             reports.push(
                 [stat.id, stat.timestamp, stat.packetsLost, stat.jitter, stat.roundTripTimeMeasurements].join(":"),
             )
         }
     })
-    return { inbound, outbound, reports: reports.sort().join("|") }
+    return { inbound, outbound, outboundVideo, reports: reports.sort().join("|") }
 }
 
 export class SfuManager {
@@ -352,9 +358,19 @@ export class SfuManager {
     private static readonly RECEIVE_CHECK_MS = 1_000
     /** How long a connection may send and receive no RTP before ICE is restarted. */
     private static readonly RECEIVE_STALL_MS = 5_000
-    /** How long the SFU's reports on this client's media must be missing too.
-     *  str0m reports on audio every 5 s (on video every 1 s): longer than that. */
-    private static readonly FEEDBACK_SILENCE_MS = 6_000
+    /** str0m's report intervals on the media it receives (`RtcpReportIntervals`, str0m 0.24). */
+    private static readonly VIDEO_REPORT_MS = 1_000
+    private static readonly AUDIO_REPORT_MS = 5_000
+    /** The reports count as stopped only once more than this many in a row are missing. */
+    private static readonly MISSED_REPORTS = 2
+    /** Stall restarts that may bring nothing back before the call is rebuilt. */
+    private static readonly STALL_RESTARTS = 2
+    /** The receive stall being repaired on `pc`: failed restarts so far, and until
+     *  when the latest one has to bring media or a report back. */
+    private stall: { pc: RTCPeerConnection; failures: number; deadline: number } | null = null
+    /** A rebuild for a receive stall has not shown media yet: ICE connecting does
+     *  not reset `reconnectAttempts` until it does. */
+    private stallRebuild = false
 
     constructor(
         neighbourhood: SfuNeighbourhoodApi,
@@ -571,8 +587,10 @@ export class SfuManager {
                 pc.iceConnectionState === "connected" ||
                 pc.iceConnectionState === "completed"
             ) {
-                // A working path ends a restart and a run of reconnects.
-                this.reconnectAttempts = 0
+                // A working path ends a restart and a run of reconnects, unless
+                // the run was for a receive stall: ICE said connected then too,
+                // so only media coming back ends it (`watchReceiving`).
+                if (!this.stallRebuild) this.reconnectAttempts = 0
                 this.endRestart()
             }
         }
@@ -808,19 +826,34 @@ export class SfuManager {
      * The stats are read every second. ICE is restarted (`restartIce`: this
      * connection, its tracks and its room slot stay) when all of these hold:
      *  - `pc` is the call's and `connected`, its join is done, and no
-     *    rebuild or restart is running;
+     *    rebuild or other restart is running;
      *  - someone else sends: the room lists another participant this
      *    client holds a received track of;
      *  - inbound RTP over all media sections has not grown for 5 s, while
      *    outbound RTP has;
-     *  - and no RTCP report on this client's own media arrived for 6 s.
+     *  - and the RTCP reports on this client's own media have stopped: more
+     *    than two report intervals with none, the interval being the
+     *    shortest for what this client sends (str0m: video 1 s, audio 5 s).
+     *    So over 2 s for a client sending video, over 10 s for audio only:
+     *    one lost report is not a dead path.
      *
-     * The last is how "nobody sends" is told apart from "nothing reaches
+     * The reports are how "nobody sends" is told apart from "nothing reaches
      * me". A muted track (`enabled = false`) still sends silence or black
      * frames, so RTP keeps coming. Tracks turned off (`replaceTrack(null)`)
      * send no RTP, but the SFU still reports on the media it receives from
      * this client, so the path back is there and a restart could not help.
-     * A path that is gone carries neither.
+     * A path that is gone carries neither. A client that sends nothing gets
+     * no reports either, so it cannot tell the two apart and the watchdog
+     * leaves it alone: such a client has only the server's backstop (the SFU
+     * drops a peer stuck re-checking ICE, and the roster check rebuilds).
+     *
+     * A stall restart is judged by what arrives, not by ICE, which said
+     * `connected` all along: media or a report within `RESTART_TIMEOUT_MS`
+     * ends the stall. A restart that brings nothing back (refused, its offer
+     * lost, or ICE back without media) is tried once more; after
+     * `STALL_RESTARTS` such failures the call is rebuilt. That rebuild counts
+     * against `MAX_RECONNECTS` until media flows again, so a stall that no
+     * rebuild cures ends with the reconnects, and the watchdog with them.
      *
      * The interval lives as long as `pc` is the call's: a leave, a
      * replacement, a rebuild, reconnects running out, or `pc` closing
@@ -828,9 +861,11 @@ export class SfuManager {
      */
     private watchReceiving(pc: RTCPeerConnection): void {
         this.stopReceiveWatch()
+        this.stall = null
         // Since when inbound RTP and the reports have not changed, and what was sent by then.
-        let rtp: { at: number; inbound: number; outbound: number } | null = null
+        let rtp: { at: number; inbound: number; outbound: number; outboundVideo: number } | null = null
         let reports: { at: number; key: string } | null = null
+        let last: ReceiveSample | null = null
         let sampling = false
         const watch = setInterval(async () => {
             // A connection that is no longer the call's, or closed, is watched no more.
@@ -840,8 +875,8 @@ export class SfuManager {
                 return
             }
             if (sampling) return
-            if (!this.mayRestartForStall(pc)) {
-                rtp = reports = null
+            if (!this.mayWatchReceiving(pc)) {
+                rtp = reports = last = null
                 return
             }
             sampling = true
@@ -853,34 +888,72 @@ export class SfuManager {
             } finally {
                 sampling = false
             }
-            if (this.receiveWatch !== watch || !this.mayRestartForStall(pc)) {
-                rtp = reports = null
+            if (this.receiveWatch !== watch || !this.mayWatchReceiving(pc)) {
+                rtp = reports = last = null
                 return
             }
             const now = Date.now()
-            if (!rtp || sample.inbound !== rtp.inbound) rtp = { at: now, inbound: sample.inbound, outbound: sample.outbound }
+            // Media or a report since the last read: the path back works.
+            if (last && (sample.inbound !== last.inbound || sample.reports !== last.reports)) {
+                if (this.stall?.pc === pc) console.info("SFU: receiving again after the ICE restart")
+                this.stall = null
+                if (this.stallRebuild) {
+                    this.stallRebuild = false
+                    this.reconnectAttempts = 0
+                }
+            }
+            last = sample
+            if (!rtp || sample.inbound !== rtp.inbound) {
+                rtp = { at: now, inbound: sample.inbound, outbound: sample.outbound, outboundVideo: sample.outboundVideo }
+            }
             if (!reports || sample.reports !== reports.key) reports = { at: now, key: sample.reports }
+
+            const stall = this.stall?.pc === pc ? this.stall : null
+            if (stall) {
+                if (now < stall.deadline) return
+                // The latest restart brought nothing back in its window.
+                rtp = reports = null
+                this.endRestart()
+                if (++stall.failures >= SfuManager.STALL_RESTARTS) {
+                    console.info("SFU: ICE restarts brought no media back, rebuilding the call")
+                    this.stall = null
+                    this.stallRebuild = true
+                    void this.reconnect()
+                    return
+                }
+                console.info("SFU: still receiving nothing after an ICE restart, restarting ICE again")
+                stall.deadline = now + SfuManager.RESTART_TIMEOUT_MS
+                this.restartIce(pc)
+                return
+            }
+            // Another restart (ICE disconnected, a network change) is running: it decides.
+            if (this.restartTimer) {
+                rtp = reports = null
+                return
+            }
+            const reportMs =
+                sample.outboundVideo > rtp.outboundVideo ? SfuManager.VIDEO_REPORT_MS : SfuManager.AUDIO_REPORT_MS
             if (
                 now - rtp.at >= SfuManager.RECEIVE_STALL_MS &&
-                now - reports.at >= SfuManager.FEEDBACK_SILENCE_MS &&
+                now - reports.at > SfuManager.MISSED_REPORTS * reportMs &&
                 sample.outbound > rtp.outbound
             ) {
                 console.info("SFU: receiving nothing while sending, restarting ICE")
                 rtp = reports = null
+                this.stall = { pc, failures: 0, deadline: now + SfuManager.RESTART_TIMEOUT_MS }
                 this.restartIce(pc)
             }
         }, SfuManager.RECEIVE_CHECK_MS)
         this.receiveWatch = watch
     }
 
-    /** Whether the receive-stall watchdog may act on `pc` now: see `watchReceiving`. */
-    private mayRestartForStall(pc: RTCPeerConnection): boolean {
+    /** Whether the receive-stall watchdog reads `pc` now: see `watchReceiving`. */
+    private mayWatchReceiving(pc: RTCPeerConnection): boolean {
         return (
             this.state.peerConnection === pc &&
             pc.connectionState === "connected" &&
             !!this.state.participantId &&
             !this.reconnecting &&
-            !this.restartTimer &&
             [...this.state.participants.values()].some((p) => p.hasAudio || p.hasVideo)
         )
     }
@@ -1072,6 +1145,8 @@ export class SfuManager {
         this.replacedUnsubscribe = null
         this.heldIds.clear()
         this.endRestart()
+        this.stall = null
+        this.stallRebuild = false
         this.networkUnsubscribe?.()
         this.networkUnsubscribe = null
         this.senders.clear()

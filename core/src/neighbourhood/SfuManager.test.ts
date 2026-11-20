@@ -63,8 +63,9 @@ class FakePeerConnection {
     /** Unset until a test drives it, as the stall watchdog then has nothing to read. */
     connectionState: RTCPeerConnectionState | undefined = undefined
     /** What flows while time passes: each `getStats` sees the flowing counters grow. */
-    flow = { inbound: false, outbound: false, feedback: false }
-    private counters = { inbound: 0, outbound: 0, reports: 0 }
+    /** `outbound` is this client's audio, `video` its video. */
+    flow: { inbound: boolean; outbound: boolean; feedback: boolean; video?: boolean } = { inbound: false, outbound: false, feedback: false }
+    private counters = { inbound: 0, outbound: 0, video: 0, reports: 0 }
 
     constructor(readonly configuration?: RTCConfiguration) {
         FakePeerConnection.instances.push(this)
@@ -93,12 +94,14 @@ class FakePeerConnection {
     async getStats() {
         if (this.flow.inbound) this.counters.inbound += 50
         if (this.flow.outbound) this.counters.outbound += 50
+        if (this.flow.video) this.counters.video += 90
         if (this.flow.feedback) this.counters.reports++
-        const { inbound, outbound, reports } = this.counters
+        const { inbound, outbound, video, reports } = this.counters
         return new Map<string, Record<string, unknown>>([
             ["in-a", { type: "inbound-rtp", kind: "audio", mid: "1", packetsReceived: inbound / 2 }],
             ["in-v", { type: "inbound-rtp", kind: "video", mid: "2", packetsReceived: inbound / 2 }],
             ["out-a", { type: "outbound-rtp", kind: "audio", packetsSent: outbound }],
+            ["out-v", { type: "outbound-rtp", kind: "video", packetsSent: video }],
             ["remote-in-a", { type: "remote-inbound-rtp", kind: "audio", timestamp: 1_000 * reports, packetsLost: 0 }],
         ])
     }
@@ -1822,26 +1825,32 @@ test("a manager that left sends no restart for its old connection", async () => 
 // media either. A room whose others all turned their tracks off sends no RTP,
 // but the SFU still reports on what it receives from this client.
 
-/** A joined call, connected, where ALICE sends audio on mid 1 and video on mid 2, all of it flowing. */
-async function flowingCall(api = fakeApi()) {
-    const manager = new SfuManager(api, ROOM, ME, URL)
-    await manager.join(fakeStream(new FakeTrack("audio")))
+/** The current connection, joined: ALICE's audio on mid 1 and video on mid 2 arrive, ICE connected. */
+async function bringUp(api: ReturnType<typeof fakeApi>) {
     const pc = currentPc()
-    api.emitOffer(offer("alice", [mapped("1", ALICE, "audio"), mapped("2", ALICE, "video")]))
+    api.emitOffer(offer(`alice-${FakePeerConnection.instances.length}`, [mapped("1", ALICE, "audio"), mapped("2", ALICE, "video")]))
     api.emitRoster(roster([ALICE]))
     await flush()
     pc.receive(new FakeTrack("audio"), "1")
     pc.receive(new FakeTrack("video"), "2")
     await iceState("connected")
     pc.connectionState = "connected"
-    pc.flow = { inbound: true, outbound: true, feedback: true }
+    return pc
+}
+
+/** A joined call, connected, where ALICE sends audio and video and this client sends both, all of it flowing. */
+async function flowingCall(api = fakeApi()) {
+    const manager = new SfuManager(api, ROOM, ME, URL)
+    await manager.join(fakeStream(new FakeTrack("audio"), new FakeTrack("video")))
+    const pc = await bringUp(api)
+    pc.flow = { inbound: true, outbound: true, video: true, feedback: true }
     await jest.advanceTimersByTimeAsync(3_000)
     return { api, manager, pc }
 }
 
-/** The SFU sends this client nothing any more: no media, no reports; this client still sends. */
+/** The SFU sends this client nothing any more: no media, no reports; this client still sends what it sent. */
 function cutOff(pc: FakePeerConnection) {
-    pc.flow = { inbound: false, outbound: true, feedback: false }
+    pc.flow = { ...pc.flow, inbound: false, feedback: false }
 }
 
 describe("the receive-stall watchdog", () => {
@@ -1871,17 +1880,118 @@ describe("the receive-stall watchdog", () => {
         expect(pc.closed).toBe(false)
     })
 
-    test("restarts again, one restart at a time, while the stall lasts", async () => {
+    // A stall restart succeeds when media or reports come back, whatever ICE
+    // says: ICE said connected all along. Two that fail, and the call is rebuilt.
+
+    test("a stall restart that brings nothing back in 15 s, ICE still connected, is tried once more, then the call is rebuilt", async () => {
         const { api, pc } = await flowingCall()
         cutOff(pc)
         await jest.advanceTimersByTimeAsync(7_000)
         expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(1)
-        // The restart's own window (15 s) runs first; ICE still says connected, so no rebuild.
-        await jest.advanceTimersByTimeAsync(14_000)
-        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(1)
-        await jest.advanceTimersByTimeAsync(8_000)
+        await jest.advanceTimersByTimeAsync(16_000)
         expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(2)
         expect(api.sfuCallLeave).not.toHaveBeenCalled()
+        await jest.advanceTimersByTimeAsync(16_000)
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(2)
+        expect(api.sfuCallLeave).toHaveBeenCalledTimes(1)
+        expect(api.sfuCallJoin).toHaveBeenCalledTimes(2)
+        expect(pc.closed).toBe(true)
+    })
+
+    test("a stall restart the executor refuses counts as failed: once more, then a rebuild", async () => {
+        const api = fakeApi()
+        api.sfuCallRestartIce.mockRejectedValue(new Error("Session P1 is not in this call"))
+        const { pc } = await flowingCall(api)
+        cutOff(pc)
+        await jest.advanceTimersByTimeAsync(7_000)
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(1)
+        await jest.advanceTimersByTimeAsync(16_000)
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(2)
+        expect(api.sfuCallLeave).not.toHaveBeenCalled()
+        await jest.advanceTimersByTimeAsync(16_000)
+        expect(api.sfuCallLeave).toHaveBeenCalledTimes(1)
+        expect(api.sfuCallJoin).toHaveBeenCalledTimes(2)
+    })
+
+    test("a stall restart whose ICE comes back connected but brings no media counts as failed", async () => {
+        const { api, pc } = await flowingCall()
+        cutOff(pc)
+        await jest.advanceTimersByTimeAsync(7_000)
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(1)
+        // The restart is answered and ICE checks and connects again: media stays flat.
+        api.emitOffer(offer("restart-1"))
+        await iceState("checking")
+        await iceState("connected")
+        await jest.advanceTimersByTimeAsync(16_000)
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(2)
+        api.emitOffer(offer("restart-2"))
+        await iceState("checking")
+        await iceState("connected")
+        expect(api.sfuCallLeave).not.toHaveBeenCalled()
+        await jest.advanceTimersByTimeAsync(16_000)
+        expect(api.sfuCallLeave).toHaveBeenCalledTimes(1)
+        expect(api.sfuCallJoin).toHaveBeenCalledTimes(2)
+    })
+
+    test("a stall restart that brings media back ends the stall: the next one gets two restarts of its own", async () => {
+        const { api, pc } = await flowingCall()
+        cutOff(pc)
+        await jest.advanceTimersByTimeAsync(7_000)
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(1)
+        pc.flow = { inbound: true, outbound: true, video: true, feedback: true }
+        await jest.advanceTimersByTimeAsync(30_000)
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(1)
+
+        cutOff(pc)
+        await jest.advanceTimersByTimeAsync(7_000)
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(2)
+        await jest.advanceTimersByTimeAsync(16_000)
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(3)
+        expect(api.sfuCallLeave).not.toHaveBeenCalled()
+    })
+
+    test("stall rebuilds count against the reconnect budget, ICE connecting or not; when it runs out the watchdog stops", async () => {
+        const { api, manager, pc } = await flowingCall()
+        const errors: unknown[] = []
+        manager.on("error", (e) => errors.push(e))
+        cutOff(pc)
+        for (let rebuild = 1; rebuild <= 3; rebuild++) {
+            await jest.advanceTimersByTimeAsync(40_000)
+            expect(api.sfuCallLeave).toHaveBeenCalledTimes(rebuild)
+            // The new connection connects, and still gets nothing.
+            const next = await bringUp(api)
+            next.flow = { inbound: false, outbound: true, video: true, feedback: false }
+        }
+        await jest.advanceTimersByTimeAsync(40_000)
+        expect(errors).toEqual([new Error("SFU reconnect attempts exhausted")])
+        expect(api.sfuCallLeave).toHaveBeenCalledTimes(3)
+        expect(jest.getTimerCount()).toBe(0)
+    })
+
+    // The reports on this client's own media are judged by the shortest
+    // interval str0m reports at for what it sends (video 1 s, audio 5 s):
+    // silent only once more than one report in a row is missing.
+
+    test("one lost audio report in an idle room does not fire it, for a client that sends only audio", async () => {
+        const { api, pc } = await flowingCall()
+        // Everyone else turned their tracks off; this client sends audio only; str0m reports every 5 s.
+        pc.flow = { inbound: false, outbound: true, video: false, feedback: false }
+        for (let report = 1; report <= 12; report++) {
+            await jest.advanceTimersByTimeAsync(4_000)
+            pc.flow.feedback = report !== 3 // the third report is lost
+            await jest.advanceTimersByTimeAsync(1_000)
+            pc.flow.feedback = false
+        }
+        expect(api.sfuCallRestartIce).not.toHaveBeenCalled()
+    })
+
+    test("a client that sends only audio restarts once two audio reports in a row are missing", async () => {
+        const { api, pc } = await flowingCall()
+        pc.flow = { inbound: false, outbound: true, video: false, feedback: false }
+        await jest.advanceTimersByTimeAsync(9_000)
+        expect(api.sfuCallRestartIce).not.toHaveBeenCalled()
+        await jest.advanceTimersByTimeAsync(4_000)
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(1)
     })
 
     test("does nothing while the user is alone in the room", async () => {
