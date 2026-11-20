@@ -1,5 +1,6 @@
 use super::write_log::{AddedLink, WriteDelta, WriteLog};
 use crate::languages::literal::RFC3986_COMPONENT_ENCODE;
+use crate::rt::time::Instant;
 use crate::types::LinkStatus;
 use crate::types::{DecoratedExpressionProof, DecoratedLinkExpression, Link, LinkExpression};
 use anyhow::{anyhow, Error};
@@ -15,7 +16,6 @@ use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use crate::rt::time::Instant;
 
 /// `StopInfo::kind`: how the evaluation carrying the stop ended, for the error
 /// it reports. `0` while it may still run; written once, first writer wins.

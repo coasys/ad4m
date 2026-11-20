@@ -104,9 +104,7 @@ static FAIL_METADATA_SWEEP: std::sync::Mutex<Vec<String>> = std::sync::Mutex::ne
 fn sweep_link_metadata(p: &PerspectiveInstance) -> Result<usize, anyhow::Error> {
     #[cfg(test)]
     if FAIL_METADATA_SWEEP.lock().unwrap().contains(&p.uuid) {
-        return Err(anyhow::anyhow!(
-            "induced metadata-vocabulary sweep failure"
-        ));
+        return Err(anyhow::anyhow!("induced metadata-vocabulary sweep failure"));
     }
     p.sparql_store.purge_link_metadata_links()
 }

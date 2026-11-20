@@ -273,9 +273,7 @@ fn shared_record_did(email: &str, record: Option<&serde_json::Value>) -> Option<
 /// executor with a shared database, and returns the DID of the user's agent. `None` when
 /// there is no shared database or no such user there. A user created on another executor
 /// reaches this one only this way.
-pub fn import_user_from_shared_db(
-    email: &str,
-) -> Result<Option<String>, anyhow::Error> {
+pub fn import_user_from_shared_db(email: &str) -> Result<Option<String>, anyhow::Error> {
     let Some(user_data) = shared_user_record(email).map_err(anyhow::Error::msg)? else {
         return Ok(None);
     };
@@ -294,11 +292,7 @@ pub fn import_user_from_shared_db(
 /// the local row holds. The insert keeps an existing row and skips one whose DID another
 /// local user owns, so the record's DID is the agent only if the row now says so: a shared
 /// record that names a local user's DID under another email must not act as that user.
-fn adopt_shared_user(
-    email: &str,
-    did: &str,
-    stored_hash: &str,
-) -> Result<String, anyhow::Error> {
+fn adopt_shared_user(email: &str, did: &str, stored_hash: &str) -> Result<String, anyhow::Error> {
     if let Err(e) = crate::db_backend::db_backend().add_user_prehashed(email, did, stored_hash) {
         log::warn!("Failed to import user to local DB: {}", e);
     }
