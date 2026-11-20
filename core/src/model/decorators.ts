@@ -586,6 +586,15 @@ export interface ModelConfig {
     name: string;
 
     /**
+     * The namespace of the class: its target class is `{namespace}{name}`
+     * and its shape `{namespace}{name}Shape` (e.g. `"recipe://"`). Without
+     * it the namespace is the scheme of the first property's `through`
+     * (else of the first relation's predicate, else `ad4m://`), so moving
+     * the first field can move the class.
+     */
+    namespace?: string;
+
+    /**
      * An abstract class names properties a record has, not what it is.
      * Querying it reads every installed class that has all of its names (or
      * aliases for them), matched by name, never by `through`; rows keep
@@ -696,8 +705,8 @@ function checkImplements(name: string, target: any, abstractClass: any) {
  *   .where({ name: "Chocolate Cake" })
  *   .run();
  * 
- * // Using with PerspectiveProxy:
- * await perspective.ensureSDNASubjectClass(Recipe);
+ * // Registering the class in a perspective:
+ * await Recipe.register(perspective);
  * ```
  * 
  * @param {ModelConfig} opts - Model configuration
@@ -731,6 +740,7 @@ export function Model(opts: ModelConfig) {
                 seed,
                 opts.interpretationHint,
                 !!opts.abstract,
+                opts.namespace,
             ));
         }
 

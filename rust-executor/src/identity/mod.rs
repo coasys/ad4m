@@ -300,8 +300,7 @@ pub const RECHECK_EVERY: Duration = Duration::from_secs(60);
 
 /// The re-check of stored links: the links of each key whose verdict the cache changed (a
 /// revocation, a key a log lists for the first time), and every [`RECHECK_EVERY`] the links
-/// that could not be checked, those stored `flagged` (a revocation notice arriving after
-/// them may lift one), and those of each bot key whose scope expired since the last tick
+/// that could not be checked, and those of each bot key whose scope expired since the last tick
 /// (since start on the first). When the receiver lags, the changes it missed are made up
 /// for by [`lag_scopes`], which sweeps the marks the cache journaled as well as the key
 /// map, so a lost change of a log the map's bound dropped is found anyway. Each re-check
@@ -337,21 +336,13 @@ async fn run_recheck(
             change = changes.recv() => {
                 let mut signers = BTreeSet::new();
                 let mut lagged = false;
-                let mut revoked = Vec::new();
                 match change {
                     Ok(change) => {
                         signers.insert(format!("did:key:{}", change.key));
-                        if change.verdict == verdict::KeyVerdict::Revoked {
-                            revoked.push((change.scid.clone(), change.key.clone()));
-                        }
                         loop {
                             match changes.try_recv() {
                                 Ok(change) => {
                                     signers.insert(format!("did:key:{}", change.key));
-                                    if change.verdict == verdict::KeyVerdict::Revoked {
-                                        revoked
-                                            .push((change.scid.clone(), change.key.clone()));
-                                    }
                                 }
                                 Err(TryRecvError::Lagged(_)) => lagged = true,
                                 Err(TryRecvError::Empty) | Err(TryRecvError::Closed) => break,
@@ -362,10 +353,10 @@ async fn run_recheck(
                     Err(RecvError::Closed) => return,
                 }
                 let scopes = if lagged {
-                    let (scopes, swept, lagged_revoked) =
+                    let (scopes, swept) =
                         lag_scopes(&service.cache, signers, marks_swept).await;
                     marks_swept = swept;
-                    revoked.extend(lagged_revoked);
+                    retire_spent_marks(&service.cache, marks_swept, expired_until);
                     scopes
                 } else {
                     vec![crate::perspectives::Recheck::Signers(signers)]
@@ -377,15 +368,9 @@ async fn run_recheck(
                                 failed.extend(signers)
                             }
                             crate::perspectives::Recheck::Logged => logged_failed = true,
-                            crate::perspectives::Recheck::CantCheck
-                            | crate::perspectives::Recheck::Flagged => {}
+                            crate::perspectives::Recheck::CantCheck => {}
                         }
                     }
-                }
-                // A revocation also calls for the notices that let a late syncer count the
-                // links this executor already held.
-                for (scid, key) in revoked {
-                    publish_revocation_notices(&service, &scid, &key).await;
                 }
             }
             _ = tick.tick() => {
@@ -402,6 +387,7 @@ async fn run_recheck(
                         );
                     }
                 }
+                retire_spent_marks(&service.cache, marks_swept, expired_until);
                 signers.append(&mut failed);
                 if !signers.is_empty() {
                     let scope = crate::perspectives::Recheck::Signers(signers);
@@ -417,9 +403,17 @@ async fn run_recheck(
                             .await;
                 }
                 crate::perspectives::recheck_links(&crate::perspectives::Recheck::CantCheck).await;
-                crate::perspectives::recheck_links(&crate::perspectives::Recheck::Flagged).await;
             }
         }
+    }
+}
+
+/// Deletes the journal rows both readers are past ([`KelCache::retire_marks`]): the
+/// change marks the lag recovery swept (`marks_swept`) and the scope marks the expiry tick
+/// read (`expired_until`). A failure only logs; the rows go with the next call.
+pub(crate) fn retire_spent_marks(cache: &KelCache, marks_swept: u64, expired_until: u64) {
+    if let Err(e) = cache.retire_marks(marks_swept, expired_until) {
+        log::warn!("identity: could not retire the spent journal marks: {e}");
     }
 }
 
@@ -456,26 +450,24 @@ pub(crate) fn expired_signers(
 /// found whether or not the log is still held. The journaled logs are read back into the
 /// map first, so the links are judged with them. Then every link stored with a person: a
 /// stored person names the log, which the re-check reads back from the cache
-/// ([`read_logs_of`]). The id answered beside the scopes is where the next sweep starts,
-/// and the `(scid, key)` list beside it is the journaled keys the restored logs show
-/// revoked — a lost `Revoked` change still gets its revocation notices
-/// ([`publish_revocation_notices`]).
+/// ([`read_logs_of`]). The id answered beside the scopes is where the next sweep starts.
 pub(crate) async fn lag_scopes(
     cache: &KelCache,
     mut signers: BTreeSet<String>,
     since: u64,
-) -> (
-    Vec<crate::perspectives::Recheck>,
-    u64,
-    Vec<(String, String)>,
-) {
+) -> (Vec<crate::perspectives::Recheck>, u64) {
     signers.extend(
         cache::global_key_map()
             .listed_keys()
             .into_iter()
             .map(|key| format!("did:key:{key}")),
     );
-    let mut revoked = Vec::new();
+    // The head is read before the marks: a mark written while this sweep runs lies above
+    // it, so the next sweep reads it and `retire_marks` never deletes it unread.
+    let swept = cache.last_mark().unwrap_or_else(|e| {
+        log::warn!("identity: could not read the change journal's head: {e}");
+        since
+    });
     match cache.marked_since(since) {
         Ok(marks) => {
             let mut logs = BTreeSet::new();
@@ -490,104 +482,16 @@ pub(crate) async fn lag_scopes(
                     );
                 }
             }
-            for (key, scid) in marks {
-                let Some(log) = cache.key_map().log(&scid) else {
-                    continue;
-                };
-                let revoked_key = log
-                    .state
-                    .device_key_id_of(&key)
-                    .and_then(|id| log.state.keys.get(id))
-                    .and_then(|record| record.revoked)
-                    .is_some_and(|at| at <= log.trusted);
-                if revoked_key {
-                    revoked.push((scid, key));
-                }
-            }
         }
         Err(e) => log::warn!("identity: could not read the journaled key changes: {e}"),
     }
-    let swept = cache.last_mark().unwrap_or_else(|e| {
-        log::warn!("identity: could not read the change journal's head: {e}");
-        since
-    });
     (
         vec![
             crate::perspectives::Recheck::Signers(signers),
             crate::perspectives::Recheck::Logged,
         ],
         swept,
-        revoked,
     )
-}
-
-/// The revocation of `author`'s device key the key map knows, as `(person, revoked)`: the
-/// `did:scid` of the log that lists the signer and the seq its `revoke` sits at (at or below
-/// the trusted seq). `None` when no trusted log lists the key, or lists it unrevoked — the
-/// two cases a revocation notice ([`verdict::NOTICE_PREDICATE`]) has nothing to say to.
-pub(crate) fn revocation_of(author: &str) -> Option<(String, u64)> {
-    let key = resolver::multikey_of(author)?;
-    let cache::KeyLookup::Listed { scid, log } = cache::global_key_map().lookup(key) else {
-        return None;
-    };
-    let id = log.state.device_key_id_of(&key.to_string())?;
-    let revoked = log
-        .state
-        .keys
-        .get(id)?
-        .revoked
-        .filter(|r| *r <= log.trusted)?;
-    Some((ad4m_identity_core::did_of(&scid), revoked))
-}
-
-/// A `VerdictChange` revoked `key` of the identity `scid`: the links this executor's
-/// perspectives already counted as `valid` under it are attested to every reader by a
-/// revocation notice ([`verdict::NOTICE_PREDICATE`]), signed into each perspective that
-/// holds them by a device key of `scid` the revocation left valid — impossible before the
-/// revocation, so a `valid` notice orders the vouched link ahead of it for a reader that
-/// synced late. Nothing is written when no local agent still speaks for `scid`: a notice
-/// only carries weight from a key the revocation left valid.
-async fn publish_revocation_notices(service: &IdentityService, scid: &str, key: &str) {
-    let Some(log) = service.cache.key_map().log(scid) else {
-        return;
-    };
-    let agents = crate::db_backend::db_backend()
-        .agents_of_identity(scid)
-        .unwrap_or_else(|e| {
-            log::warn!(
-                "identity: could not read the agents of {scid} for the revocation notices: {e}"
-            );
-            Vec::new()
-        });
-    let now = service::now();
-    let context = agents.iter().find_map(|did| {
-        let key = resolver::multikey_of(did)?;
-        log.state.device_key_id_of(&key.to_string())?;
-        (verdict::key_verdict(&log.state, log.trusted, key, now) == verdict::KeyVerdict::Valid)
-            .then(|| {
-                if crate::agent::did() == *did {
-                    crate::agent::AgentContext::main_agent()
-                } else {
-                    crate::agent::AgentContext::managed(did.clone())
-                }
-            })
-    });
-    let Some(context) = context else {
-        return;
-    };
-    let author = format!("did:key:{key}");
-    let person = ad4m_identity_core::did_of(scid);
-    for perspective in crate::perspectives::all_perspectives() {
-        if let Err(e) = perspective
-            .publish_revocation_notices(&author, &person, &context)
-            .await
-        {
-            log::warn!(
-                "identity: revocation notices for {author} in perspective {} failed: {e}",
-                perspective.uuid
-            );
-        }
-    }
 }
 
 /// The verdict of a signed expression (a link) and its person, from the executor's key map,
@@ -1033,7 +937,7 @@ mod tests {
         let signer = agent_of(&log);
         // The bound evicts the log before the recovery runs.
         cache.key_map().forget(&log.scid());
-        let (scopes, swept, revoked) = lag_scopes(&cache, BTreeSet::new(), 0).await;
+        let (scopes, swept) = lag_scopes(&cache, BTreeSet::new(), 0).await;
         let signers = scopes
             .iter()
             .find_map(|scope| match scope {
@@ -1045,18 +949,145 @@ mod tests {
             signers.contains(&signer),
             "the journaled mark names the revoked key"
         );
-        // And the lost Revoked change still gets its notices: the restored log names the
-        // key and its log.
-        assert_eq!(
-            revoked,
-            vec![(log.scid(), log.device.key().to_string())],
-            "the lost revocation is still published"
-        );
         // Marks at or before `swept` are not swept again.
         assert!(
             cache.marked_since(swept).unwrap().is_empty(),
             "already swept"
         );
+    }
+
+    /// A key reported changed twice (a second head, or the log evicted and read back while
+    /// the key stays revoked) leaves one journal row, not one per report.
+    #[tokio::test]
+    async fn a_repeated_mark_of_a_key_leaves_one_row() {
+        let mut log = TestLog::new(80);
+        let cache = trusting();
+        accept_signed(&cache, &log.events).await;
+        log.revoke_d1();
+        accept_signed(&cache, &log.events).await;
+        let key = log.device.key().to_string();
+        let rows_of_key = |cache: &KelCache| {
+            cache
+                .mark_rows()
+                .into_iter()
+                .filter(|r| r.1 == key && r.3.is_none())
+                .count()
+        };
+        assert_eq!(rows_of_key(&cache), 1, "one row for the revocation");
+        // Evicted and read back: the load reports the revoked key again.
+        for _ in 0..2 {
+            cache.key_map().forget(&log.scid());
+            cache.trusted(&log.scid()).await.unwrap();
+        }
+        assert_eq!(
+            rows_of_key(&cache),
+            1,
+            "the reload marks it again: no new row"
+        );
+    }
+
+    /// Change marks go once the lag sweep passed them, scope marks once the tick read their
+    /// expiry; `marked_expiring` answers exactly the due rows until then.
+    #[tokio::test]
+    async fn spent_marks_are_retired_and_the_rest_kept() {
+        use ad4m_identity_core::build::{add_unsigned, cosign};
+        use ad4m_identity_core::{BotScope, DeviceKey, KeyLife};
+        let mut log = TestLog::new(81);
+        let bot = ed25519_dalek::SigningKey::from_bytes(&[82; 32]);
+        let chain = log.chain();
+        let device = DeviceKey {
+            id: chain.state().next_device_id(),
+            sign: bot.key(),
+            enc: ad4m_identity_core::encode_x25519_multikey(&[82; 32]),
+            life: KeyLife::Bot(BotScope {
+                can: vec!["read".into()],
+                expires: 1_500,
+            }),
+        };
+        let mut event = add_unsigned(&chain, device, "offer", "co-sig").unwrap();
+        cosign(&mut event, "m0", &log.master).unwrap();
+        log.events.push(event);
+        let cache = trusting();
+        accept_signed(&cache, &log.events).await;
+        log.revoke_d1();
+        accept_signed(&cache, &log.events).await;
+        let bot_key = bot.key().to_string();
+        let scope_rows = |cache: &KelCache| {
+            cache
+                .mark_rows()
+                .into_iter()
+                .filter(|r| r.3.is_some())
+                .count()
+        };
+        assert_eq!(scope_rows(&cache), 1);
+        let changes = cache
+            .mark_rows()
+            .into_iter()
+            .filter(|r| r.3.is_none())
+            .count();
+        assert!(changes > 0, "the revocation is journaled");
+
+        // marked_expiring answers exactly the due rows.
+        assert!(cache.marked_expiring(0, 1_499).unwrap().is_empty());
+        assert_eq!(
+            cache.marked_expiring(1_000, 2_000).unwrap(),
+            vec![(bot_key.clone(), log.scid())]
+        );
+        assert!(cache.marked_expiring(1_500, 2_000).unwrap().is_empty());
+
+        // The tick has not reached the expiry and no sweep ran: nothing goes.
+        assert_eq!(cache.retire_marks(0, 1_000).unwrap(), 0);
+        assert_eq!(cache.mark_rows().len(), changes + 1);
+        // The tick passed the expiry: the scope row goes, the change rows stay.
+        assert_eq!(cache.retire_marks(0, 1_500).unwrap(), 1);
+        assert_eq!(scope_rows(&cache), 0);
+        assert!(cache.marked_expiring(0, 3_000).unwrap().is_empty());
+        assert_eq!(cache.mark_rows().len(), changes);
+        // A sweep passed them: the change rows go; the journal is empty.
+        let (_, swept) = lag_scopes(&cache, BTreeSet::new(), 0).await;
+        retire_spent_marks(&cache, swept, 1_500);
+        assert!(cache.mark_rows().is_empty());
+        // A later change is journaled afresh and found past the sweep's mark.
+        cache.key_map().forget(&log.scid());
+        cache.trusted(&log.scid()).await.unwrap();
+        assert!(!cache.marked_since(swept).unwrap().is_empty());
+    }
+
+    /// A journal an earlier release wrote, with the same NULL-expiry mark many times, is
+    /// collapsed when the cache opens; the newest id of each mark stays, scope rows stay.
+    #[tokio::test]
+    async fn the_migration_collapses_duplicate_marks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ad4m_db.sqlite");
+        {
+            let old = rusqlite::Connection::open(&path).unwrap();
+            old.execute_batch(
+                "CREATE TABLE identity_key_marks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    multikey TEXT NOT NULL,
+                    scid TEXT NOT NULL,
+                    expires INTEGER,
+                    UNIQUE (multikey, scid, expires)
+                );
+                INSERT INTO identity_key_marks (multikey, scid, expires) VALUES
+                    ('k1', 's1', NULL), ('k2', 's1', NULL), ('k1', 's1', NULL),
+                    ('k1', 's1', 900), ('k1', 's1', NULL), ('k1', 's2', NULL);",
+            )
+            .unwrap();
+        }
+        let cache = on_file(&path, vec![store_key().multikey()]);
+        let rows = cache.mark_rows();
+        let key = |r: &(i64, String, String, Option<i64>)| (r.1.clone(), r.2.clone(), r.3);
+        assert_eq!(
+            rows.iter().map(key).collect::<Vec<_>>(),
+            vec![
+                ("k2".into(), "s1".into(), None),
+                ("k1".into(), "s1".into(), Some(900)),
+                ("k1".into(), "s1".into(), None),
+                ("k1".into(), "s2".into(), None),
+            ]
+        );
+        assert_eq!(rows[2].0, 5, "the newest duplicate stays");
     }
 
     /// The anchor of a bound agent is its log's trusted seq, read from the key map with no
