@@ -1203,11 +1203,15 @@ async fn best_effort_after_upstream_failure(
             )
             .await
         }
-        Err(final_error) => Err(anyhow::anyhow!(
-            "upstream model server failed ({}); a final request without tools \
-             also failed: {final_error}",
-            upstream_status_label(&final_error),
-        )),
+        // The upstream error stays in the chain, typed, and its body stays out
+        // of the message: a caller logs `upstream_status_label`, the status.
+        Err(final_error) => {
+            let status = upstream_status_label(&final_error);
+            Err(final_error.context(format!(
+                "upstream model server failed ({status}); a final request without tools \
+                 also failed"
+            )))
+        }
     }
 }
 
@@ -1237,18 +1241,28 @@ fn retry_warn_line(round: usize, error: &anyhow::Error) -> String {
     )
 }
 
-/// `HTTP 500` when the error carries an upstream status, else the error's
-/// own text. Named so a caller whose run still fails can see the status the
-/// model server answered with.
+/// `HTTP 500` when the error carries an upstream status, else a typed reason
+/// (unreachable, timed out, does not fit the window), never the error's text:
+/// the text of an upstream or model error can carry a response body, which
+/// can echo the prompt, and this goes to WARN lines.
 pub(crate) fn upstream_status_label(error: &anyhow::Error) -> String {
-    error
-        .chain()
-        .find_map(|cause| {
-            cause
-                .downcast_ref::<crate::ai_service::providers::http::UpstreamStatus>()
-                .map(|status| format!("HTTP {}", status.status))
-        })
-        .unwrap_or_else(|| error.to_string())
+    use crate::ai_service::providers::http::{UpstreamStatus, UpstreamUnreachable};
+    for cause in error.chain() {
+        if let Some(answered) = cause.downcast_ref::<UpstreamStatus>() {
+            return format!("HTTP {}", answered.status);
+        }
+        if let Some(unreachable) = cause.downcast_ref::<UpstreamUnreachable>() {
+            return if unreachable.timed_out {
+                "the model server timed out".to_string()
+            } else {
+                "the model server could not be reached".to_string()
+            };
+        }
+    }
+    if crate::ai_service::prompt_does_not_fit(error) {
+        return "the prompt does not fit the model window".to_string();
+    }
+    "an error with no upstream status".to_string()
 }
 
 fn assistant_tool_calls_message(c: &HarnessCompletion) -> Value {
