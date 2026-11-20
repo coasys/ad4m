@@ -19,3 +19,4 @@ ad4m-executor = { path = "../rust-executor" }
 # wasm-bindgen-test-runner cargo test -p web-executor-link-test --target wasm32-unknown-unknown
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 wasm-bindgen-test = "0.3"
+jsonwebtoken = { version = "10", default-features = false, features = ["rust_crypto"] }

@@ -20971,6 +20971,7 @@ name = "web-executor-link-test"
 version = "0.0.0"
 dependencies = [
  "ad4m-executor",
+ "jsonwebtoken 10.4.0",
  "wasm-bindgen-test",
 ]
 
