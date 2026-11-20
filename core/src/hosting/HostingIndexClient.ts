@@ -49,6 +49,15 @@ export class HostingIndexClient {
         return this.#apiClient.call("index.withdraw", {});
     }
 
+    /**
+     * `handler` gets the listing each time its state changes: after a publish or a withdraw, and
+     * when the index answers another state (`unreachable`, `delisted`). Returns the unsubscribe
+     * function. Needs `events.watch` on the socket, which `ApiClient.on` sends.
+     */
+    onListingChanged(handler: (listing: OwnListing) => void): () => void {
+        return this.#apiClient.on("index-listing-changed", handler);
+    }
+
     /** What this executor tells anyone about itself as a host (what the index reads). */
     async hostInfo(): Promise<HostInfo> {
         return this.#apiClient.call("host.info", {});

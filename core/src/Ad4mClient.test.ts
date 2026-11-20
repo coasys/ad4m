@@ -1569,6 +1569,19 @@ describe('HostingIndexClient', () => {
         expect(lastRpcCall!.type).toBe('index.withdraw');
     });
 
+    test('onListingChanged() receives the listing of an index-listing-changed event', async () => {
+        const freshClient = newClient();
+        const callback = jest.fn();
+        const unsubscribe = freshClient.hostingIndex.onListingChanged(callback);
+        const listing = { state: 'delisted', reason: 'charging' } as any;
+        lastOf(MockWebSocket.instances).emit(event('index-listing-changed', listing));
+        expect(callback).toHaveBeenCalledTimes(1);
+        expect(callback.mock.calls[0][0]).toMatchObject(listing);
+        unsubscribe();
+        lastOf(MockWebSocket.instances).emit(event('index-listing-changed', listing));
+        expect(callback).toHaveBeenCalledTimes(1);
+    });
+
     test('hostInfo() calls host.info', async () => {
         const info = await ad4m.hostingIndex.hostInfo();
         expect(lastRpcCall!.type).toBe('host.info');

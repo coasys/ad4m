@@ -282,6 +282,10 @@ pub struct ExecutorConfigFile {
     /// The default model per type (`llm`, `embedding`, `transcription`), by name.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ai_defaults: Option<AiDefaultsSetting>,
+    /// The hosting index this executor lists itself in (`url`, `enabled`; AR-07 4.13). Written
+    /// to the executor's settings at each start; off when unset, until `index.configure`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hosting_index: Option<crate::index_client::IndexConfig>,
     /// The per-user store of local AI runtimes and models (`ai.localInstall`).
     /// Unset: the user's data directory, `ad4m/local-ai`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -657,6 +661,7 @@ impl ExecutorConfigFile {
                 models: self.ai_models.clone().unwrap_or_default(),
                 defaults: self.ai_defaults.clone().unwrap_or_default(),
             }),
+            hosting_index: self.hosting_index.clone(),
             local_ai_dir: self.local_ai_dir.clone(),
             local_ai_autostart: self.local_ai_autostart,
             local_ai_device: self.local_ai_device,

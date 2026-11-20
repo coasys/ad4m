@@ -310,3 +310,110 @@ fn only_https_or_loopback_http_urls_are_accepted() {
     assert!(IndexClient::new("not a url").is_err());
     assert!(IndexClient::new("").is_err());
 }
+
+fn local(state: &str, published_at: u64, hash: &str) -> LocalListing {
+    LocalListing {
+        listing_id: "l".into(),
+        draft: ListingText {
+            name: "n".into(),
+            description: String::new(),
+            location: "l".into(),
+            url: "https://h.example".into(),
+        },
+        state: state.into(),
+        reason: None,
+        published_at,
+        rates_hash: hash.into(),
+    }
+}
+
+#[test]
+fn the_rates_hash_ignores_order_and_sees_every_change() {
+    let model = |n: &str| ListedModel {
+        name: n.into(),
+        kind: "llm".into(),
+    };
+    let rate = |d: &str, p: f64| PricingItem {
+        description: d.into(),
+        price_in_hot: p,
+        unit: "credits".into(),
+    };
+    let base = rates_hash(
+        &[model("a"), model("b")],
+        &[rate("link write", 0.25), rate("a", 1.0)],
+    );
+    assert_eq!(base.len(), 64);
+    assert_eq!(
+        base,
+        rates_hash(
+            &[model("b"), model("a")],
+            &[rate("a", 1.0), rate("link write", 0.25)]
+        )
+    );
+    assert_ne!(
+        base,
+        rates_hash(&[model("a")], &[rate("link write", 0.25), rate("a", 1.0)])
+    );
+    assert_ne!(
+        base,
+        rates_hash(
+            &[model("a"), model("b")],
+            &[rate("link write", 0.5), rate("a", 1.0)]
+        )
+    );
+}
+
+#[test]
+fn a_change_is_published_after_sixty_quiet_seconds_and_another_change_restarts_the_wait() {
+    let listing = local("listed", 1_000, "old");
+    let mut pending = None;
+    // Nothing changed: nothing to do, nothing pending.
+    assert!(!republish_due(&listing, "old", &mut pending, 1_010));
+    assert_eq!(pending, None);
+    // Seen at 1_020.
+    assert!(!republish_due(&listing, "new", &mut pending, 1_020));
+    assert!(!republish_due(&listing, "new", &mut pending, 1_079));
+    // Changed again at 1_070: the quiet period starts over from there.
+    assert!(!republish_due(&listing, "newer", &mut pending, 1_070));
+    assert!(!republish_due(&listing, "newer", &mut pending, 1_129));
+    assert!(republish_due(&listing, "newer", &mut pending, 1_130));
+    // Changed back to what was sent before the wait ended: nothing to publish.
+    let mut pending = None;
+    assert!(!republish_due(&listing, "new", &mut pending, 1_020));
+    assert!(!republish_due(&listing, "old", &mut pending, 1_050));
+    assert_eq!(pending, None);
+}
+
+#[test]
+fn a_listing_is_published_daily_while_it_is_on_the_index() {
+    let mut pending = None;
+    let day = REPUBLISH_DAILY_S;
+    assert!(!republish_due(
+        &local("listed", 0, "h"),
+        "h",
+        &mut pending,
+        day - 1
+    ));
+    assert!(republish_due(
+        &local("listed", 0, "h"),
+        "h",
+        &mut pending,
+        day
+    ));
+    assert!(republish_due(
+        &local("unreachable", 0, "h"),
+        "h",
+        &mut pending,
+        day
+    ));
+    // Withdrawn or delisted: the operator publishes again; nothing does it for them.
+    for state in ["withdrawn", "delisted"] {
+        assert!(!republish_due(
+            &local(state, 0, "h"),
+            "x",
+            &mut pending,
+            3 * day
+        ));
+        assert_eq!(pending, None);
+    }
+}

@@ -38,7 +38,7 @@ const SESSION_MARGIN_S: u64 = 60;
 /// in the `settings` table (`hosting_index.config`); the default is off, so no call ever leaves
 /// for an index until the operator sets one.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 #[ts(export)]
 pub struct IndexConfig {
     /// The index's base URL, e.g. `https://api.coasys.org/v1/index`. Empty: none.
@@ -119,6 +119,93 @@ pub struct OwnListing {
     /// `listed`, `unreachable`, `delisted` or `withdrawn`.
     pub state: String,
     pub reason: Option<String>,
+}
+
+/// What this executor remembers of its listing (AR-07 4.3.3 `LocalListing`), kept in the
+/// `settings` table as the JSON row `index_listing` (no secret in it). It is the operator's text
+/// and the last state the index answered, so `index.status` can show the listing while the
+/// index is down, and the republisher knows what was last sent.
+///
+/// Differs from the spec's record in two encodings: `published_at` is unix seconds and
+/// `rates_hash` is lower-case hex, so the row is plain JSON that crosses the SDK as it is.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct LocalListing {
+    pub listing_id: String,
+    pub draft: ListingText,
+    /// `listed`, `unreachable`, `delisted` or `withdrawn`: the last state the index answered.
+    pub state: String,
+    pub reason: Option<String>,
+    /// Unix seconds of the last publish.
+    #[ts(type = "number")]
+    pub published_at: u64,
+    /// SHA-256 (hex) of the models and rates last sent (`rates_hash`).
+    pub rates_hash: String,
+}
+
+/// The SHA-256 of the models and rates a listing carries, in an order that does not depend on
+/// the order the tables answer in.
+pub fn rates_hash(models: &[ListedModel], rates: &[PricingItem]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut models: Vec<_> = models.iter().map(|m| (&m.name, &m.kind)).collect();
+    models.sort();
+    let mut rates: Vec<_> = rates
+        .iter()
+        .map(|r| (&r.description, r.price_in_hot.to_bits(), &r.unit))
+        .collect();
+    rates.sort();
+    let bytes =
+        serde_json::to_vec(&json!({ "models": models, "rates": rates })).unwrap_or_default();
+    hex::encode(Sha256::digest(bytes))
+}
+
+/// How long the models and rates stay as they are before a changed listing is published again.
+pub const REPUBLISH_QUIET_S: u64 = 60;
+
+/// A listing is published again this long after the last publish, which renews the index's
+/// key check.
+pub const REPUBLISH_DAILY_S: u64 = 24 * 60 * 60;
+
+/// A change of models or rates seen, and when it was first seen at this value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingChange {
+    pub hash: String,
+    pub since: u64,
+}
+
+/// Whether the listing is published again at `now` (AR-07 4.6 "Republish on change"): when it
+/// is on the index (`listed` or `unreachable`) and either the models and rates (`current`)
+/// differ from the last sent and have not changed again for [`REPUBLISH_QUIET_S`] (a debounce:
+/// another change restarts the wait), or the last publish is [`REPUBLISH_DAILY_S`] old.
+/// `pending` carries the debounce between calls.
+pub fn republish_due(
+    local: &LocalListing,
+    current: &str,
+    pending: &mut Option<PendingChange>,
+    now: u64,
+) -> bool {
+    if !matches!(local.state.as_str(), "listed" | "unreachable") {
+        *pending = None;
+        return false;
+    }
+    if now.saturating_sub(local.published_at) >= REPUBLISH_DAILY_S {
+        return true;
+    }
+    if current == local.rates_hash {
+        *pending = None;
+        return false;
+    }
+    match pending {
+        Some(p) if p.hash == current => now.saturating_sub(p.since) >= REPUBLISH_QUIET_S,
+        _ => {
+            *pending = Some(PendingChange {
+                hash: current.to_string(),
+                since: now,
+            });
+            false
+        }
+    }
 }
 
 /// `GET /me`: the signed-in operator and its listing.

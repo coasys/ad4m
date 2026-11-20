@@ -499,6 +499,14 @@ impl HandlerMap {
         }
     }
 
+    /// The guard of the dispatched method `name`: `None` for an unknown method (or one with no
+    /// guard, which [`HandlerMap::require_guards`] refuses).
+    pub fn guard_of(&self, name: &str) -> Option<&Guard> {
+        self.handlers
+            .get(name)
+            .and_then(|entry| entry.guard.as_ref())
+    }
+
     /// Every dispatched method's guard (`None`: the method has none, which
     /// [`HandlerMap::require_guards`] refuses), sorted by name.
     pub fn guards(&self) -> Vec<(&str, Option<&Guard>)> {

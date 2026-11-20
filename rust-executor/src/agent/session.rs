@@ -268,6 +268,16 @@ impl Session {
         }
     }
 
+    /// An anonymous caller on a listener with this reach: what an empty token gets when no
+    /// admin credential says otherwise. For a transport that takes no token (`POST /api/v1/rpc`),
+    /// where the loopback operator rule must never apply.
+    pub fn anonymous(reach: ListenerReach) -> Session {
+        Session {
+            reach,
+            ..Session::without_token(Principal::Anonymous, anonymous_capabilities())
+        }
+    }
+
     /// A session for work the executor runs as `agent` without a token from it, limited to
     /// `caps`. The interpretation pass of the auto-processor acts as the owner of its
     /// perspective this way: never as the operator, so the guards treat it as that agent.

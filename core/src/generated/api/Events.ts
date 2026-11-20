@@ -19,6 +19,7 @@ import type { LocalAiProgress } from "./LocalAiProgress";
 import type { ModelStatusEvent } from "./ModelStatusEvent";
 import type { NeighbourhoodSignalFilter } from "./NeighbourhoodSignalFilter";
 import type { NotificationTriggeredEvent } from "./NotificationTriggeredEvent";
+import type { OwnListing } from "./OwnListing";
 import type { PerspectiveEvent } from "./PerspectiveEvent";
 import type { PerspectiveLinkEvent } from "./PerspectiveLinkEvent";
 import type { PerspectiveLinkUpdatedEvent } from "./PerspectiveLinkUpdatedEvent";
@@ -72,6 +73,7 @@ export interface EventMap {
   "inbox-message": InboxMessageEvent;
   "storage-state-changed": StorageStatus;
   "storage-migration-progress": StorageMigrationProgress;
+  "index-listing-changed": OwnListing;
 }
 
 export type EventName = keyof EventMap;

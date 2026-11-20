@@ -14,8 +14,8 @@ use ts_rs::TS;
 use crate::agent::AgentContext;
 use crate::identity::device::WalletSigner;
 use crate::index_client::{
-    IndexClient, IndexConfig, IndexError, IndexSession, ListedModel, ListingDraft, ListingText,
-    OwnListing, PricingItem,
+    rates_hash, republish_due, IndexClient, IndexConfig, IndexError, IndexSession, ListedModel,
+    ListingDraft, ListingText, LocalListing, OwnListing, PendingChange, PricingItem,
 };
 use crate::types::{ModelType, RequestContext};
 
@@ -24,6 +24,21 @@ use super::ws_handler::{HandlerMap, NoParams, WsRpcError};
 
 /// The `settings` row of [`IndexConfig`].
 const CONFIG_KEY: &str = "hosting_index.config";
+
+/// The `settings` row of [`LocalListing`].
+const LISTING_KEY: &str = "index_listing";
+
+/// The republisher looks at the models and rates this often.
+const REPUBLISH_TICK: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// While listed, the republisher reads the index's view of the listing this often, so a change of
+/// state (unreachable, delisted) reaches the operator as `index-listing-changed` without the
+/// operator asking.
+const REFRESH_S: u64 = 60 * 60;
+
+/// After a failed index call the republisher waits this long before the next one (the index
+/// limits a listing to 10 publishes an hour).
+const RETRY_HOLD_S: u64 = 10 * 60;
 
 /// The open index session. In memory only (AR-07 4.3.3): a restart signs in again.
 static SESSION: Mutex<Option<IndexSession>> = Mutex::const_new(None);
@@ -44,6 +59,93 @@ pub fn load_config() -> Result<IndexConfig, WsRpcError> {
         Some(raw) => serde_json::from_str(&raw)
             .map_err(|e| WsRpcError::internal(format!("the stored index config: {e}"))),
     }
+}
+
+/// Stores the config file's `hosting_index` as the executor's index config (AR-07 4.13: the
+/// file's value is the runtime copy at each start). A URL the client would not use is refused.
+pub fn seed_config(config: &IndexConfig) -> Result<(), String> {
+    if config.enabled || !config.url.is_empty() {
+        IndexClient::new(&config.url).map_err(|e| e.to_string())?;
+    }
+    let config = IndexConfig {
+        url: config.url.trim().to_string(),
+        enabled: config.enabled,
+    };
+    crate::db_backend::db_backend()
+        .set_setting(
+            CONFIG_KEY,
+            &serde_json::to_string(&config).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())
+}
+
+/// What this executor remembers of its listing; `None` before the first publish.
+pub fn load_local() -> Result<Option<LocalListing>, WsRpcError> {
+    let raw = crate::db_backend::db_backend()
+        .get_setting(LISTING_KEY)
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    raw.map(|raw| {
+        serde_json::from_str(&raw)
+            .map_err(|e| WsRpcError::internal(format!("the stored listing: {e}")))
+    })
+    .transpose()
+}
+
+fn store_local(local: &LocalListing) -> Result<(), WsRpcError> {
+    crate::db_backend::db_backend()
+        .set_setting(
+            LISTING_KEY,
+            &serde_json::to_string(local).map_err(|e| WsRpcError::internal(e.to_string()))?,
+        )
+        .map_err(|e| WsRpcError::internal(e.to_string()))
+}
+
+/// Tells the operator the listing changed (`index-listing-changed`).
+fn emit_listing(listing: &OwnListing) {
+    crate::pubsub::get_global_pubsub_sync().publish_event(crate::events::Event::new(
+        crate::events::Topic::IndexListingChanged,
+        crate::events::Audience::Operator,
+        listing,
+    ));
+}
+
+/// Keeps the listing the index answered: the stored record follows its state and reason, and
+/// the operator hears of a change (`force`: whatever the stored record says, as after a
+/// publish or a withdraw). Returns whether the listing changed.
+fn observe(listing: &OwnListing, force: bool) -> Result<bool, WsRpcError> {
+    let known = load_local()?;
+    let changed = force
+        || known
+            .as_ref()
+            .is_none_or(|k| k.state != listing.state || k.reason != listing.reason);
+    if !changed {
+        return Ok(false);
+    }
+    let local = match known {
+        Some(known) => LocalListing {
+            state: listing.state.clone(),
+            reason: listing.reason.clone(),
+            ..known
+        },
+        // A listing the index has and this executor has no record of (the settings were lost):
+        // what the index shows is what was last sent.
+        None => LocalListing {
+            listing_id: listing.listing_id.clone(),
+            draft: ListingText {
+                name: listing.name.clone(),
+                description: listing.description.clone(),
+                location: listing.location.clone(),
+                url: listing.url.clone(),
+            },
+            state: listing.state.clone(),
+            reason: listing.reason.clone(),
+            published_at: now(),
+            rates_hash: rates_hash(&listing.ai_models, &listing.rates),
+        },
+    };
+    store_local(&local)?;
+    emit_listing(listing);
+    Ok(true)
 }
 
 /// The client of the configured index; refuses while none is set or it is off.
@@ -180,6 +282,12 @@ pub struct IndexStatus {
     pub allowed: Option<bool>,
     /// The listing as the index shows it; `null` when there is none (or the index is off).
     pub listing: Option<OwnListing>,
+    /// What this executor remembers of its listing: the operator's text and the last state the
+    /// index answered. Shown while the index is down; `null` before the first publish.
+    pub local: Option<LocalListing>,
+    /// Why the index could not be asked (down, a refused sign-in, no operator); `null` when it
+    /// answered or is off. `allowed` and `listing` are `null` then; `local` is what is known.
+    pub index_error: Option<String>,
 }
 
 async fn index_configure(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
@@ -217,6 +325,8 @@ async fn index_status(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value
         executor_did,
         allowed: None,
         listing: None,
+        local: load_local()?,
+        index_error: None,
     };
     if config.enabled {
         let client = configured_client()?;
@@ -228,6 +338,10 @@ async fn index_status(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value
         {
             Ok(me) => {
                 status.allowed = Some(me.allowed);
+                if let Some(listing) = &me.listing {
+                    observe(listing, false)?;
+                    status.local = load_local()?;
+                }
                 status.listing = me.listing;
             }
             // The operator's identity is not on the allow list: a state, not a failure.
@@ -238,17 +352,19 @@ async fn index_status(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value
             {
                 status.allowed = Some(false);
             }
-            Err(e) => return Err(e),
+            // The index cannot be asked: the status still shows what is known.
+            Err(e) => status.index_error = Some(e.message),
         }
     }
     Ok(serde_json::to_value(status)?)
 }
 
-async fn index_publish(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let text: ListingText = serde_json::from_value(params)
-        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {e}")))?;
+/// Publishes (or updates) the listing with `text` and this executor's models and rates, and
+/// keeps what the index answered.
+async fn publish_listing(text: ListingText) -> Result<OwnListing, WsRpcError> {
     let client = configured_client()?;
     let (ai_models, rates) = models_and_rates()?;
+    let sent_hash = rates_hash(&ai_models, &rates);
     let draft = ListingDraft {
         text,
         ai_models,
@@ -259,7 +375,34 @@ async fn index_publish(params: Value, _ctx: Arc<RequestContext>) -> Result<Value
         async move { client.publish(&s, draft).await }
     })
     .await?;
-    Ok(serde_json::to_value(listing)?)
+    store_local(&LocalListing {
+        listing_id: listing.listing_id.clone(),
+        draft: draft.text,
+        state: listing.state.clone(),
+        reason: listing.reason.clone(),
+        published_at: now(),
+        rates_hash: sent_hash,
+    })?;
+    emit_listing(&listing);
+    Ok(listing)
+}
+
+async fn index_publish(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let text: ListingText = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {e}")))?;
+    Ok(serde_json::to_value(publish_listing(text).await?)?)
+}
+
+/// The index's view of the listing, kept: `Some` when there is one.
+async fn refresh_listing(
+    client: &IndexClient,
+    force: bool,
+) -> Result<Option<OwnListing>, WsRpcError> {
+    let me = with_session(client, |s| async move { client.me(&s).await }).await?;
+    if let Some(listing) = &me.listing {
+        observe(listing, force)?;
+    }
+    Ok(me.listing)
 }
 
 async fn index_withdraw(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
@@ -269,7 +412,84 @@ async fn index_withdraw(_params: Value, _ctx: Arc<RequestContext>) -> Result<Val
         async move { client.withdraw(&s).await }
     })
     .await?;
+    // The record says withdrawn whatever the next call answers; the operator hears of it from
+    // the index's own view of the listing when it can be read.
+    if let Some(known) = load_local()? {
+        store_local(&LocalListing {
+            state: "withdrawn".into(),
+            reason: None,
+            ..known
+        })?;
+    }
+    if let Err(e) = refresh_listing(&client, true).await {
+        log::warn!("index.withdraw: the listing could not be read back: {e}");
+    }
     Ok(Value::Bool(true))
+}
+
+// ── Republishing (AR-07 4.6) ───────────────────────────────────────────────
+
+/// What the republisher carries from one look to the next.
+#[derive(Default)]
+struct RepublishState {
+    pending: Option<PendingChange>,
+    /// No index call before this (unix seconds), after a failed one.
+    hold_until: u64,
+    /// When the index's view of the listing was last read.
+    refreshed_at: u64,
+}
+
+/// One look: publishes again when the models or rates changed and stayed so for 60 s, or a day
+/// has passed since the last publish; else reads the index's view once an hour. Does nothing
+/// while the index is off or nothing was ever published.
+async fn republish_tick(state: &mut RepublishState, now: u64) {
+    let Ok(config) = load_config() else { return };
+    if !config.enabled || config.url.is_empty() {
+        state.pending = None;
+        return;
+    }
+    let Ok(Some(local)) = load_local() else {
+        return;
+    };
+    if now < state.hold_until {
+        return;
+    }
+    let Ok((models, rates)) = models_and_rates() else {
+        return;
+    };
+    let current = rates_hash(&models, &rates);
+    let outcome = if republish_due(&local, &current, &mut state.pending, now) {
+        let published = publish_listing(local.draft.clone()).await.map(|_| ());
+        if published.is_ok() {
+            state.pending = None;
+            state.refreshed_at = now;
+        }
+        published
+    } else if local.state != "withdrawn" && now.saturating_sub(state.refreshed_at) >= REFRESH_S {
+        state.refreshed_at = now;
+        match configured_client() {
+            Ok(client) => refresh_listing(&client, false).await.map(|_| ()),
+            Err(e) => Err(e),
+        }
+    } else {
+        Ok(())
+    };
+    if let Err(e) = outcome {
+        log::warn!("hosting index: {e}");
+        state.hold_until = now + RETRY_HOLD_S;
+    }
+}
+
+/// Starts the republisher: it keeps the listing current with this executor's models and rates
+/// for as long as the executor runs.
+pub fn spawn_republisher() {
+    tokio::spawn(async {
+        let mut state = RepublishState::default();
+        loop {
+            tokio::time::sleep(REPUBLISH_TICK).await;
+            republish_tick(&mut state, now()).await;
+        }
+    });
 }
 
 // ── host.info ──────────────────────────────────────────────────────────────

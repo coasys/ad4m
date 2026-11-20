@@ -252,6 +252,9 @@ pub struct Ad4mConfig {
     /// The config file's `ai_endpoints`, `ai_models` and `ai_defaults`, applied at
     /// startup (`ai_service::endpoints::config::apply`).
     pub ai_settings: Option<crate::ai_service::endpoints::config::AiSettings>,
+    /// The config file's `hosting_index`: the index this executor lists itself in, written to
+    /// the `settings` table at startup (`api::index_ws::seed_config`).
+    pub hosting_index: Option<crate::index_client::IndexConfig>,
     /// The per-user store of local AI runtimes and models. Unset: `AD4M_LOCAL_AI_DIR`, else
     /// `<data local dir>/ad4m/local-ai` (`~/.local/share/ad4m/local-ai` on Linux).
     pub local_ai_dir: Option<String>,
@@ -857,6 +860,7 @@ impl Ad4mConfig {
             identity_allow_private_src: None,
             public_origins: None,
             ai_settings: None,
+            hosting_index: None,
             local_ai_dir: None,
             local_ai_autostart: None,
             local_ai_device: None,

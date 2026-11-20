@@ -69,6 +69,22 @@ impl RequestContext {
         })
     }
 
+    /// The context of an anonymous caller that sent no token and opens no connection: one HTTP
+    /// request. `peer` is the address the listener saw.
+    pub fn anonymous(
+        reach: crate::agent::capabilities::ListenerReach,
+        peer: Option<std::net::IpAddr>,
+    ) -> Self {
+        RequestContext {
+            cancel_token: None,
+            session: std::sync::Arc::new(crate::agent::session::Session::anonymous(reach)),
+            connection_id: None,
+            reason: None,
+            peer,
+            query_slots: None,
+        }
+    }
+
     /// `Ok` if the session may do `expected`; otherwise the error a refused call reports
     /// (403 at every surface).
     pub fn require(&self, expected: &Capability) -> Result<(), String> {
