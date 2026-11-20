@@ -701,3 +701,147 @@ async fn polymorphic_target_with_shared_links_on_local_predicates_is_read_as_bas
         "(top level, nested)"
     );
 }
+
+/// [`membership_shapes`] and two more classes. `SpecialC` requires two
+/// collections read through getters, `we://p` and `we://q` (a SHACL
+/// collection with `minCount` ≥ 1 and a getter; the JSON shape format has no
+/// required relation, so the parsed property is marked a collection here),
+/// and has an optional scalar `we://r`: its query loads `we://r` only.
+/// `SpecialI` adds the IRI flag `we://kind = we://special_i` to `Base`.
+fn hydration_shapes() -> (StaticShapeResolver, Arc<ModelShape>, Arc<ModelShape>) {
+    let (resolver, holder, shelf) = membership_shapes();
+    let getter = |p: &str| format!("SELECT ?target WHERE {{ <Base> <{p}> ?target . }}");
+    let mut special_c = parse_shape_from_json(
+        &json!({
+            "className": "SpecialC",
+            "properties": {
+                "p": { "predicate": "we://p", "required": true, "getter": getter("we://p") },
+                "q": { "predicate": "we://q", "required": true, "getter": getter("we://q") },
+                "r": { "predicate": "we://r" }
+            },
+            "relations": {}
+        })
+        .to_string(),
+        "SpecialC",
+    )
+    .unwrap();
+    for p in special_c.properties.iter_mut() {
+        if p.name != "r" {
+            p.is_collection = true;
+        }
+    }
+    resolver.register("SpecialC", special_c);
+    resolver.register(
+        "SpecialI",
+        parse_shape_from_json(
+            r#"{"className":"SpecialI","properties":{
+                 "flag":{"predicate":"we://flag","required":true,"flag":true,"initial":"we://base"},
+                 "kind":{"predicate":"we://kind","required":true,"flag":true,"initial":"we://special_i"}
+               },"relations":{}}"#,
+            "SpecialI",
+        )
+        .unwrap(),
+    );
+    (resolver, holder, shelf)
+}
+
+/// Shelf `s/1` holds holder `h/1`, which holds `u/4`..`u/6`, all `Base`
+/// through signed Shared links. `u/4` also links `we://p` and `we://q` but has
+/// no `we://r`; `u/5` has all three; `u/6`'s `we://kind` is the *literal*
+/// "we://special_i", not the IRI `SpecialI` requires.
+fn hydration_world() -> SparqlStore {
+    use super::link_status_tests::ls_link;
+    let signer = crate::agent::signatures::TestSigner::generate();
+    let store = SparqlStore::new(None).unwrap();
+    let shared = |s: &str, p: &str, t: &str| ls_link(&signer, s, p, t, 1, LinkStatus::Shared);
+    let mut links: Vec<LinkExpression> = [
+        "Holder", "Shelf", "Base", "Special", "SpecialG", "SpecialF", "SpecialL", "SpecialC",
+        "SpecialI",
+    ]
+    .iter()
+    .map(|c| {
+        shared(
+            &format!("we://models/{c}"),
+            "rdf://type",
+            "ad4m://SubjectClass",
+        )
+    })
+    .collect();
+    links.extend([
+        shared("we://s/1", "we://flag", "we://shelf"),
+        shared("we://s/1", "we://on", "we://h/1"),
+        shared("we://h/1", "we://flag", "we://holder"),
+    ]);
+    for u in ["we://u/4", "we://u/5", "we://u/6"] {
+        links.extend([
+            shared("we://h/1", "we://holds", u),
+            shared(u, "we://flag", "we://base"),
+        ]);
+    }
+    for u in ["we://u/4", "we://u/5"] {
+        links.extend([
+            shared(u, "we://p", "we://p/1"),
+            shared(u, "we://q", "we://q/1"),
+        ]);
+    }
+    links.extend([
+        shared("we://u/5", "we://r", "literal:string:r"),
+        shared("we://u/6", "we://kind", "literal:string:we://special_i"),
+    ]);
+    for l in links {
+        store.add_link(&l).unwrap();
+    }
+    store
+}
+
+/// The items of `h/1` in [`hydration_world`] among `ids`, top level and
+/// nested, read with no `linkStatus`.
+async fn hydration_items(ids: &[&str]) -> (Vec<(String, String)>, Vec<(String, String)>) {
+    let (resolver, holder, shelf) = hydration_shapes();
+    let store = hydration_world();
+    let keep = |v: Vec<(String, String)>| -> Vec<(String, String)> {
+        v.into_iter()
+            .filter(|(id, _)| ids.contains(&id.as_str()))
+            .collect()
+    };
+    let top = q(json!({ "include": { "items": true } }));
+    let top = super::query::execute_model_query(&store, holder.as_ref(), &top, &resolver)
+        .await
+        .unwrap();
+    let nested = q(json!({ "include": { "holder": { "include": { "items": true } } } }));
+    let nested = super::query::execute_model_query(&store, shelf.as_ref(), &nested, &resolver)
+        .await
+        .unwrap();
+    (
+        keep(item_classes(&top.instances[0]["items"])),
+        keep(item_classes(&nested.instances[0]["holder"]["items"])),
+    )
+}
+
+/// A class whose requirements hold but whose query loads none of the
+/// target's links (it requires only getter-backed collections, which loading
+/// does not read) returns no row for it, so it is not the target's class:
+/// `u/4` is read as `Base`, not lost. `u/5` carries `we://r`, which
+/// `SpecialC`'s query loads, so it is read as `SpecialC`.
+#[tokio::test]
+async fn polymorphic_target_whose_class_query_loads_none_of_its_links_is_read_as_base() {
+    let expected = pairs(&[("we://u/4", "Base"), ("we://u/5", "SpecialC")]);
+    assert_eq!(
+        hydration_items(&["we://u/4", "we://u/5"]).await,
+        (expected.clone(), expected),
+        "(top level, nested)"
+    );
+}
+
+/// An IRI flag value is not matched by a literal with the same text, as the
+/// class's query (`?source <pred> <iri>`) does not match it: `u/6` is read as
+/// `Base`, not lost.
+#[tokio::test]
+async fn polymorphic_target_with_a_literal_lookalike_of_an_iri_flag_is_read_as_base() {
+    let expected = pairs(&[("we://u/6", "Base")]);
+    assert_eq!(
+        hydration_items(&["we://u/6"]).await,
+        (expected.clone(), expected),
+        "(top level, nested)"
+    );
+}
