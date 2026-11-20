@@ -63,10 +63,10 @@ The registry of upstream model servers (an endpoint owns URL, key, capabilities,
     60 s).
   - The remote chat calls of a model worker (`within_endpoint_limits` in
     `ai_service/mod.rs`): a call that is not a stream gets the slot and the timeout from
-    the slot wait on (default `CHAT_TIMEOUT`, 600 s, the provider clients' own
-    `CHAT_REQUEST_TIMEOUT`). A streaming call gets the slot only: neither its wait for the
-    slot nor the stream has `request_timeout`; the provider client's 600 s bounds the call
-    once it holds the slot.
+    the slot wait on (default `CHAT_TIMEOUT`, 600 s). A streaming call gets the slot only.
+    Its timer is the provider client. An OpenAI-protocol client uses
+    `endpoints::request_timeout` (the endpoint's `request_timeout_secs`, else 600 s) and
+    keeps a value above 600 s. Anthropic and Ollama clients stay at 600 s.
   - Not covered: Ollama `pull_model` (its own idle timeout, `PULL_IDLE_TIMEOUT`) and
     `delete_upstream_model` (30 s), health checks and discovery (`PROBE_TIMEOUT`). None
     takes a slot.
@@ -94,7 +94,7 @@ The executor still runs no model in-process: `local/` installs and supervises mo
 
 | File | Does |
 |---|---|
-| `data.rs` | embeds `local/manifest.json` (runtime builds and model files: URL, size, sha256, memory) and `ai-wind-tunnel/{recommendations,hardware-classes}.json` (schema v1); `classify` (passes `ai-wind-tunnel/hardware-class-fixtures.json`, as the wind tunnel's TS `classify` does) and `chain` (its `fallbackClasses`: the family's smaller tiers, then the cpu family); `Recommendations::get` skips rows the executor cannot run (`completion`, speech on speaches); the manifest keeps only runtimes and models of a `Provider` (llama-server, nemo-speech): whisper-server and sherpa-onnx are the wind tunnel's baselines. The wind tunnel owns these files |
+| `data.rs` | embeds `local/manifest.json` (runtime builds and model files: URL, size, sha256, memory) and `ai-wind-tunnel/{recommendations,hardware-classes}.json` (schema v1); `classify` (passes `ai-wind-tunnel/hardware-class-fixtures.json`, as the wind tunnel's TS `classify` does) and `chain` (its `fallbackClasses`: the family's smaller tiers, then the class's `fallback` chain when it narrows another class, as `amd-strix-halo-128` narrows `amd-igpu-uma-128`, else the cpu family); `Recommendations::get` skips rows the executor cannot run (`completion`, speech on speaches); the manifest keeps only runtimes and models of a `Provider` (llama-server, nemo-speech): whisper-server and sherpa-onnx are the wind tunnel's baselines. The wind tunnel owns these files |
 | `hardware.rs` | `ai.localHardware`: sysinfo (RAM, CPU, disk), std CPU features, NVML and the Vulkan loader opened with `libloading` when present (no `wgpu`), amdgpu sysfs, macOS sysctl. GPU probes run once per process. `memory_budget` = min(GPU − 1 GiB, RAM − 4 GiB); the GPU is `primary_gpu`: the largest discrete GPU of the vendor the preferred GPU backend runs on (CUDA: NVIDIA, ROCm: AMD, Metal: Apple; Vulkan: any), so with two vendors the budget is the GPU's the build uses |
 | `plan.rs` | pure `plan()`: per service the recommendation of the class or the nearest smaller measured one (no evidence = unmeasured), else the manifest's smallest model of the service whose runtime runs here (`basis: default`, also when the measured provider has no build here), memory sum vs budget with step-down, build per provider (recommended, else CUDA > Metal > Vulkan > ROCm > CPU; a recommended ROCm build becomes Vulkan where Vulkan runs: the ROCm build silently runs on the CPU without the system ROCm libraries), each model's `serverFlags` (measured, else `default_flags`: `--reasoning off` for chat), disk check |
 | `install.rs` | the store (`downloads/`, `runtime/<id>/<version>-<build>/`, `models/`), `download` (`.part` + `Range` resume, sha256 and size before rename; a redirect only to https), `unpack` (tar.gz, zip; no path escapes) into `<version>-<build>.partial` (the whole name: `with_extension` would cut at the version's last dot), macOS quarantine strip |
@@ -191,7 +191,14 @@ The executor still runs no model in-process: `local/` installs and supervises mo
 
 - A stream (`endpoint_transcriber` builds its client) runs a `RemoteStream` worker: each fed utterance becomes a 16 kHz mono PCM16 WAV and one
   `providers::audio::RemoteTranscribe` call. The worker takes utterances from a channel
-  filled under the stream-map lock, so text comes out in the order fed. A feed answers
+  filled under the stream-map lock, so text comes out in the order fed. The channel holds
+  eight waiting utterances. One more is in the worker. A ninth waiting utterance is refused
+  at once (`UtteranceQueueFull`) and is not transcribed, published or billed. Admission
+  uses `try_send` and does not wait for capacity under the stream-map lock. Audio past the
+  shared 10 MiB float32 ceiling (`MAX_UTTERANCE_SAMPLES`, the same limit as the HTTP feed
+  and realtime) is refused before it is queued. `latency_ms` is the upstream call only.
+  `queue_wait_ms` is the wait from admission to dequeue. `total_ms` runs from admission
+  through the gate, the WAV, the call, billing and publication. A feed answers
   after its transcript is published; an upstream failure is the feed's error (no URL in
   it). A streaming upstream can fail after it sent pieces: those pieces stay published and
   their words are billed; nothing more is published.

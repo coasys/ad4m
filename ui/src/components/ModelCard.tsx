@@ -1,7 +1,7 @@
 import type { AiEndpoint } from "@coasys/ad4m";
 import { useState } from "react";
 import "../index.css";
-import { endpointLabel } from "./aiSetup";
+import { endpointLabel } from "./aiSetupHelpers";
 
 /** What a model's status says, in words. */
 const STATE_TEXT: Record<string, string> = {

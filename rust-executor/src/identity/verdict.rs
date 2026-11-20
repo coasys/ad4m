@@ -30,9 +30,22 @@ pub enum LinkVerdict {
     /// trusted head is below the anchor). A re-check runs when the log is known.
     CantCheck,
     /// The signer's key was valid at the anchor, but the link entered the space's ordered
-    /// history after the key's `revoke` entered it.
+    /// history after the key's `revoke` entered it — or no witness proves it entered
+    /// before. A stored `Valid` verdict from before the reader learnt of the revocation
+    /// is the witness when the link was already counted; a revocation notice
+    /// ([`NOTICE_PREDICATE`]) is the witness a late syncer can check.
     Flagged,
 }
+
+/// The predicate of a revocation notice: a link `(reifier(L), NOTICE_PREDICATE, person(L))`
+/// signed by a device key of the identity that revoked `L`'s signer, anchored at or past
+/// the seq the `revoke` sits at — impossible to sign before the revocation was learnt, so a
+/// `valid` notice is shared, checkable proof the vouched link entered the space before it.
+/// A link signed by a later-revoked key reads `entered_after_revoke == Some(false)` (and so
+/// `Valid`, not `Flagged`) when a notice vouches for it, whichever order a reader synced in.
+/// The revocation's own writer — an executor hosting a device of the revoking identity that
+/// stayed valid — signs one notice per link it already counted as the revocation lands.
+pub(crate) const NOTICE_PREDICATE: &str = "ad4m://entered-before-revoke";
 
 /// Why a link is `Invalid`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -146,8 +159,13 @@ pub struct LinkFacts<'a> {
     pub anchor: Option<u64>,
     pub log: SignerLog<'a>,
     /// Where the link entered the space's ordered history, compared with the `revoke` of its
-    /// key: `Some(true)` after it, `Some(false)` before it, `None` when the space gives no
-    /// order (a private perspective, or a link language that records no revocations).
+    /// key: `Some(true)` after it, `Some(false)` before it, `None` when nothing orders them.
+    /// Two witnesses read `Some(false)`: this store already counted the link as `Valid`
+    /// before the revocation reached the key map, and a stored revocation notice
+    /// ([`NOTICE_PREDICATE`]) vouches for it — an attestation a still-valid device of the
+    /// revoking identity could only sign after the revocation, for a link the executor that
+    /// signed it already held. A late syncer checks the notice and reaches the same verdict
+    /// as a reader that saw the link early.
     pub entered_after_revoke: Option<bool>,
     /// The executor's clock (unix seconds), for bot scopes only.
     pub now: u64,
@@ -166,9 +184,11 @@ pub struct LinkFacts<'a> {
 ///    anchor does not allow `write`, `Invalid(NotInScope)` (a link is a write).
 /// 5. Revoked after the anchor (at or below the trusted seq): `Valid` only when the link is
 ///    known to have entered the space's history before the revocation did
-///    (`entered_after_revoke == Some(false)`), else `Flagged`. With no order known, whoever
-///    still holds the revoked key could sign today and name an anchor before the revocation
-///    (or no anchor at all), so the link is shown with its verdict and does not count.
+///    (`entered_after_revoke == Some(false)` — the store counted it before the revocation
+///    reached the key map, or a revocation notice vouches for it), else `Flagged`. With no
+///    witness, whoever still holds the revoked key could sign today and name an anchor
+///    before the revocation (or no anchor at all), so the link is shown with its verdict
+///    and does not count.
 pub fn judge(facts: &LinkFacts) -> LinkVerdict {
     use LinkVerdict::*;
     if !facts.signature_holds {
