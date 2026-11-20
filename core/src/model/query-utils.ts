@@ -19,15 +19,7 @@ import { escapeQueryString } from "../utils";
  */
 export function formatQueryValue(value: any): string {
     if (typeof value === 'string') {
-        // Escape backslashes first, then single quotes and other special characters
-        const escaped = value
-            .replace(/\\/g, '\\\\')  // Backslash -> \\
-            .replace(/'/g, "\\'")     // Single quote -> \'
-            .replace(/"/g, '\\"')     // Double quote -> \"
-            .replace(/\n/g, '\\n')    // Newline -> \n
-            .replace(/\r/g, '\\r')    // Carriage return -> \r
-            .replace(/\t/g, '\\t');   // Tab -> \t
-        return `'${escaped}'`;
+        return `'${escapeQueryString(value)}'`;
     } else if (typeof value === 'number' || typeof value === 'boolean') {
         return String(value);
     } else if (Array.isArray(value)) {
