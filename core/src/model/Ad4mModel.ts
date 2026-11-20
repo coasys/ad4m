@@ -8,7 +8,7 @@ import { getPropertiesMetadata, getRelationsMetadata, setPropertyRegistryEntry, 
 import type { PropertyOptions, PropertyMetadataEntry, RelationMetadataEntry } from "./decorators";
 import { formatQueryValue, compileWhereClause } from "./query-utils";
 import { requireSingleParent, requireTotalCount, resolveParentPredicate } from "./query-common";
-import { isArrayType, determinePredicate, determineNamespace, buildModelFromJSONSchema } from "./json-schema";
+import { isArrayType, isObjectArrayType, determinePredicate, determineNamespace, buildModelFromJSONSchema } from "./json-schema";
 import type { SHACLShape } from "../shacl/SHACLShape";
 import type { JSONSchemaProperty, JSONSchema, JSONSchemaToModelOptions } from "./json-schema";
 
@@ -705,7 +705,7 @@ export class Ad4mModel {
       
       if (schema.properties) {
         for (const [propertyName, propertySchema] of Object.entries(schema.properties)) {
-          const isArray = isArrayType(propertySchema as JSONSchemaProperty);
+          const isArray = isArrayType(propertySchema as JSONSchemaProperty) && !isObjectArrayType(propertySchema as JSONSchemaProperty);
           const predicate = determinePredicate(
             schema, 
             propertyName, 

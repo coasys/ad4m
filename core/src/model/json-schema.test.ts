@@ -1,4 +1,5 @@
 import { Ad4mModel } from "./Ad4mModel";
+import { Literal } from "../Literal";
 
 describe("fromJSONSchema: reserved property names", () => {
   for (const name of [
@@ -98,5 +99,72 @@ describe("fromJSONSchema: enum", () => {
       (p: any) => p.name === "status",
     );
     expect(status.in).toEqual([{ value: "fed://pending", label: "Pending" }]);
+  });
+});
+
+describe("fromJSONSchema: array of objects", () => {
+  // `any`: schemas come from JSON, and real ones leave out `items.type`.
+  const schema: any = {
+    title: "Expense",
+    type: "object",
+    properties: {
+      title: { type: "string" },
+      split: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: { did: { type: "string" }, share: { type: "number" } },
+        },
+      },
+      participants: {
+        type: "array",
+        items: {
+          properties: { id: { type: "string" }, username: { type: "string" } },
+        },
+      },
+      owedBy: { type: "array", items: { type: "string" } },
+      tags: { type: "array" },
+    },
+    required: ["split"],
+  };
+  const build = (name: string): any =>
+    Ad4mModel.fromJSONSchema(schema, { name, namespace: "expense://" });
+
+  it("makes it one property, not a relation", () => {
+    const Cls = build("ExpenseA");
+    const meta = Cls.getModelMetadata();
+    for (const name of ["split", "participants"]) {
+      expect(meta.properties[name]).toBeDefined();
+      expect(meta.relations[name]).toBeUndefined();
+    }
+    const shape = Cls.generateSHACL().shape;
+    const split = shape.properties.find((p: any) => p.name === "split");
+    expect(split.path).toBe("expense://split");
+    expect(split.maxCount).toBe(1);
+    expect(meta.properties.split.initial).toBe("literal:json:[]");
+  });
+
+  it("keeps arrays of scalars and arrays without items as relations", () => {
+    const meta = build("ExpenseB").getModelMetadata();
+    expect(meta.relations.owedBy).toBeDefined();
+    expect(meta.relations.tags).toBeDefined();
+    expect(meta.properties.owedBy).toBeUndefined();
+    expect(meta.properties.tags).toBeUndefined();
+  });
+
+  it("writes the whole array as one JSON literal and reads it back", async () => {
+    const Cls = build("ExpenseC");
+    const split = [
+      { did: "did:key:a", share: 2 },
+      { did: "did:key:b", share: 1 },
+    ];
+    const writes = await (
+      new Cls(undefined, "expense://e1") as any
+    ).planProperty("split", split);
+    expect(writes).toHaveLength(1);
+    const value = writes[0].parameters[0].value;
+    expect(value).toMatch(/^literal:json:/);
+    expect(value).not.toContain("object%20Object");
+    expect(Literal.fromUrl(value).get()).toEqual(split);
   });
 });

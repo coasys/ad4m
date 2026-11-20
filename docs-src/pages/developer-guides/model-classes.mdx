@@ -183,6 +183,13 @@ recipe.difficulty = 3;
 await recipe.save();
 ```
 
+How the schema maps:
+
+- A string, number or boolean becomes a property. A string `enum` becomes the property's allowed values (`sh:in`); `propertyOptions.<name>.options` overrides it.
+- An object, and an array whose `items` are objects, becomes one property that holds the whole value as JSON.
+- Any other array becomes a relation (`hasMany`).
+- The names `id`, `baseExpression`, `createdAt`, `updatedAt`, `author`, `timestamp` and `__links` are reserved: every instance already has them. A schema that uses one is refused; rename the property.
+
 Register your model before use:
 
 ```typescript

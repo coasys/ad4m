@@ -91,6 +91,16 @@ export function isObjectType(schema: JSONSchemaProperty): boolean {
   return isSchemaType(schema, "object");
 }
 
+/**
+ * An array whose items are objects. It is stored as one JSON value (like a
+ * free object), not as a relation: a relation holds link targets, and an
+ * object element has no IRI, so it was written as "[object Object]".
+ */
+export function isObjectArrayType(schema: JSONSchemaProperty): boolean {
+  if (!isArrayType(schema) || !schema.items) return false;
+  return isObjectType(schema.items) || (schema.items.type === undefined && schema.items.properties !== undefined);
+}
+
 export function isNumericType(schema: JSONSchemaProperty): boolean {
   const normalized = normalizeSchemaType(schema.type);
   return normalized === "number" || normalized === "integer";
@@ -303,7 +313,8 @@ export function buildModelFromJSONSchema(
       const predicate = determinePredicate(schema, propertyName, propertySchema, namespace, options);
       const isRequired = schema.required?.includes(propertyName) || false;
       const propertyType = normalizeSchemaType(propertySchema.type);
-      const isArray = isArrayType(propertySchema);
+      // An array of objects is one JSON-valued property, not a relation.
+      const isArray = isArrayType(propertySchema) && !isObjectArrayType(propertySchema);
       
       if (isArray) {
         // Handle arrays as relations
@@ -354,11 +365,15 @@ export function buildModelFromJSONSchema(
 
         if (isObjectType(propertySchema)) {
           console.warn(`Property "${propertyName}" is an object type. It will be stored as JSON. Consider flattening complex objects for better semantic querying.`);
+        } else if (isObjectArrayType(propertySchema)) {
+          console.warn(`Property "${propertyName}" is an array of objects. It will be stored as one JSON value. Consider a relation to model instances for better semantic querying.`);
         }
 
         if (isRequired && !initial) {
           if (isObjectType(propertySchema)) {
             initial = 'literal:json:{}';
+          } else if (isObjectArrayType(propertySchema)) {
+            initial = 'literal:json:[]';
           } else {
             initial = "ad4m://undefined";
           }
