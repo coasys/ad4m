@@ -88,7 +88,7 @@ pub struct PerspectiveInstanceRemoveFromCollectionParams {
 ///
 /// - 422: `validation` (the write breaks the class's shape)
 /// - 400: `unknownClass`, `ambiguousClass`, `abstractClass`, `invalidUri`,
-///   `emptyProperties`, `storedAsExpressions`
+///   `emptyProperties`, `storedAsExpressions`, `callsInBatch`
 /// - 404: `notFound` (no instance of the class at the URI), `batchNotFound`
 /// - 409: `alreadyExists`
 /// - 500: `failed`, `partiallyRemoved` (the store failed)
@@ -152,6 +152,16 @@ pub(crate) fn instance_error(error: InstanceError) -> WsRpcError {
             format!("No {class_name} instance found at '{base_uri}'"),
         ),
         InstanceError::BatchNotFound { batch_id } => (404, format!("No open batch '{batch_id}'")),
+        InstanceError::CallsInBatch {
+            class_name,
+            batch_id,
+        } => (
+            400,
+            format!(
+                "Writing a {class_name} instance calls into its language, which batch \
+                 '{batch_id}' cannot roll back: write it without batchId"
+            ),
+        ),
         InstanceError::AlreadyExists {
             class_name,
             base_uri,

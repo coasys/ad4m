@@ -625,7 +625,7 @@ mod instance_writes {
     use super::*;
     use crate::perspectives::instances::{
         create as instance_create, remove as instance_remove, update as instance_update,
-        InstanceCreate, InstanceRemove, InstanceUpdate,
+        InstanceCreate, InstanceError, InstanceRemove, InstanceUpdate,
     };
     use crate::perspectives::perspective_instance::mounts_tests::{
         create as create_in_language, mounted, things,
@@ -750,5 +750,95 @@ mod instance_writes {
         assert_eq!(deletes.len(), 1);
         assert_eq!(deletes[0]["address"], "t1");
         assert!(things(&p).await.is_empty(), "the record is gone");
+    }
+
+    /// A write that calls into a language cannot honour a caller's batch:
+    /// discarding the batch cannot undo the call. `instanceCreate` with an
+    /// open batch on a class with a `call` constructor is refused before
+    /// the call — the language sees nothing and the batch stages nothing.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn create_refuses_a_caller_batch_before_calling() {
+        let lang = load_mount_test_language().await;
+        let (mut p, ctx) = mounted(&lang).await;
+        let batch = p.create_batch().await;
+
+        let result = instance_create(
+            &mut p,
+            &ctx,
+            InstanceCreate {
+                class_name: "MountThing".into(),
+                properties: Some(Map::from_iter([("title".to_string(), json!("a"))])),
+                batch_id: Some(batch.clone()),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(InstanceError::CallsInBatch { .. })),
+            "a create with a call constructor ran in the caller's batch: {result:?}"
+        );
+        assert!(calls(&lang).await.is_empty(), "the language was called");
+        assert!(things(&p).await.is_empty());
+        assert!(p.has_batch(&batch).await, "the caller's batch stays open");
+    }
+
+    /// `instanceUpdate` with an open batch on a `call` setter is refused
+    /// before the call.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn update_refuses_a_caller_batch_before_calling() {
+        let lang = load_mount_test_language().await;
+        create_in_language(&lang, json!({"title": "a"})).await;
+        let (mut p, ctx) = mounted(&lang).await;
+        let batch = p.create_batch().await;
+        let before = calls(&lang).await;
+
+        let result = instance_update(
+            &mut p,
+            &ctx,
+            InstanceUpdate {
+                class_name: "MountThing".into(),
+                base_uri: format!("{lang}://t1"),
+                properties: Map::from_iter([("title".to_string(), json!("b"))]),
+                batch_id: Some(batch),
+            },
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(InstanceError::CallsInBatch { .. })),
+            "an update with a call setter ran in the caller's batch: {result:?}"
+        );
+        assert_eq!(calls(&lang).await, before, "the language was called");
+        assert_eq!(things(&p).await[0]["title"], "a");
+    }
+
+    /// `instanceRemove` with an open batch on a `call` destructor is
+    /// refused before the destructor and before the cascade.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn remove_refuses_a_caller_batch_before_calling() {
+        let lang = load_mount_test_language().await;
+        create_in_language(&lang, json!({"title": "a"})).await;
+        let (mut p, ctx) = mounted(&lang).await;
+        let batch = p.create_batch().await;
+        let before = calls(&lang).await;
+
+        let result = instance_remove(
+            &mut p,
+            &ctx,
+            InstanceRemove {
+                class_name: "MountThing".into(),
+                base_uri: format!("{lang}://t1"),
+                batch_id: Some(batch),
+            },
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(InstanceError::CallsInBatch { .. })),
+            "a remove with a call destructor ran in the caller's batch: {result:?}"
+        );
+        assert_eq!(calls(&lang).await, before, "the language was called");
+        assert_eq!(things(&p).await.len(), 1, "the record is still there");
     }
 }

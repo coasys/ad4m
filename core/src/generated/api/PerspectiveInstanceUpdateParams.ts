@@ -2,10 +2,14 @@
 
 export type PerspectiveInstanceUpdateParams = { uuid: string, className: string, baseUri: string, 
 /**
- * Values by property name, at least one; single-valued properties only.
+ * Values by property name, at least one: one JSON value per single-valued
+ * property, an array of member URIs per collection.
  */
 properties: Record<string, unknown>, 
 /**
  * An open batch to stage the write into; see `InstanceCreate`'s `batchId`.
+ * A write whose lifecycle actions include `call`s cannot batch (the calls
+ * cannot be rolled back): with `batchId` it is refused (`callsInBatch`)
+ * before anything is called or written.
  */
 batchId?: string, };

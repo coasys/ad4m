@@ -243,6 +243,13 @@ pub(super) fn common_error(error: &InstanceError) -> Option<String> {
         InstanceError::BatchNotFound { batch_id } => {
             error_json(format!("No open batch '{batch_id}' — nothing was written."))
         }
+        InstanceError::CallsInBatch {
+            class_name,
+            batch_id,
+        } => error_json(format!(
+            "Writing a {class_name} instance calls into its language, which batch \
+             '{batch_id}' cannot roll back — nothing was written. Write it without batch_id."
+        )),
         _ => return None,
     })
 }

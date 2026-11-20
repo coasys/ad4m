@@ -71,8 +71,8 @@ pub struct InstanceUpdate {
     pub properties: Map<String, Value>,
     /// An open batch to stage the write into; see `InstanceCreate`'s `batchId`.
     /// A write whose lifecycle actions include `call`s cannot batch (the calls
-    /// cannot be rolled back), so those run outside it and its link actions
-    /// commit eagerly rather than staging.
+    /// cannot be rolled back): with `batchId` it is refused (`callsInBatch`)
+    /// before anything is called or written.
     pub batch_id: Option<String>,
 }
 
@@ -252,6 +252,24 @@ async fn abandon_batch(perspective: &PerspectiveInstance, batch: &Option<Batch>)
     }
 }
 
+/// A write whose lifecycle actions call into a language runs outside any batch: discarding a
+/// batch cannot undo a language call. So a caller's batch is refused — `BatchNotFound` when it
+/// is not open, else `CallsInBatch` — before any call or link write.
+async fn refuse_batch_for_calls(
+    perspective: &PerspectiveInstance,
+    class_name: &str,
+    batch_id: Option<&str>,
+) -> Result<(), InstanceError> {
+    check_batch(perspective, batch_id).await?;
+    match batch_id {
+        Some(id) => Err(InstanceError::CallsInBatch {
+            class_name: class_name.to_string(),
+            batch_id: id.to_string(),
+        }),
+        None => Ok(()),
+    }
+}
+
 /// `BatchNotFound` unless `batch_id` is absent or names an open batch.
 async fn check_batch(
     perspective: &PerspectiveInstance,
@@ -395,10 +413,8 @@ pub async fn create(
     // the address it minted in the language. For link constructors a
     // collection with a declared `ad4m://setter` goes through the setter
     // (`create_subject` runs it, `call` or `collectionSetter`); one without is
-    // written as item links below. `run_call_actions` refuses a batch, so a
-    // create that includes calls opens none of its own and runs
-    // `create_subject` unbatched; a caller's batch still stages the link
-    // writes that follow.
+    // written as item links below. A create that includes calls runs
+    // unbatched and refuses a caller's batch (`refuse_batch_for_calls`).
     let ctor_is_call = perspective
         .constructor_is_call(&class_name)
         .await
@@ -467,20 +483,17 @@ pub async fn create(
 
     // One batch for the whole create — subject, collection links, and the parent link land
     // atomically or not at all: no partially-constructed instance is ever observable, by peers
-    // or by a failed call's aftermath. With `call` actions the subject write
-    // cannot batch (`run_call_actions` refuses), so no batch of our own is
-    // opened; the link writes below still stage into a caller's batch.
+    // or by a failed call's aftermath. With `call` actions there is no batch
+    // at all: a caller's is refused before the call, and none of our own is
+    // opened (`run_call_actions` refuses one).
     let batch = if has_calls {
-        check_batch(perspective, params.batch_id.as_deref()).await?;
+        refuse_batch_for_calls(perspective, &class_name, params.batch_id.as_deref()).await?;
         None
     } else {
         Some(Batch::open(perspective, params.batch_id.clone()).await?)
     };
     let subject_batch = batch.as_ref().map(Batch::id);
-    let links_batch = batch
-        .as_ref()
-        .map(Batch::id)
-        .or_else(|| params.batch_id.clone());
+    let links_batch = subject_batch.clone();
     let base_uri = match perspective
         .create_subject(
             subject_class(&class_name),
@@ -725,20 +738,16 @@ pub async fn update(
 
     // One batch for the whole update so remove-old + add-new per property lands atomically
     // (same reasoning as the per-class setters: without it a peer can observe the property as
-    // unset in between). With `call` actions the subject write cannot batch
-    // (`run_call_actions` refuses), so no batch of our own is opened; the
-    // collection replaces below still stage into a caller's batch.
+    // unset in between). With `call` actions there is no batch at all: a
+    // caller's is refused before the call, and none of our own is opened.
     let batch = if has_calls {
-        check_batch(perspective, params.batch_id.as_deref()).await?;
+        refuse_batch_for_calls(perspective, &class_name, params.batch_id.as_deref()).await?;
         None
     } else {
         Some(Batch::open(perspective, params.batch_id.clone()).await?)
     };
     let subject_batch = batch.as_ref().map(Batch::id);
-    let links_batch = batch
-        .as_ref()
-        .map(Batch::id)
-        .or_else(|| params.batch_id.clone());
+    let links_batch = subject_batch.clone();
     if let Err(e) = perspective
         .update_subject(
             subject_class(&class_name),
@@ -818,31 +827,27 @@ pub async fn remove(
     }
 
     // A concrete class's declared destructor runs first — a `call` destructor
-    // cannot sit in a batch (`run_call_actions` refuses), so it runs unbatched;
-    // link destructors stage into the caller's batch as before. The cascade
-    // still follows: it cleans the links the destructor does not own (incoming
+    // runs unbatched and refuses a caller's batch before it calls; link
+    // destructors stage into the caller's batch as before. The cascade still
+    // follows: it cleans the links the destructor does not own (incoming
     // ones, links of other classes on this node).
-    match perspective
+    if let Some(kind) = perspective
         .destructor_kind(&class_name)
         .await
         .map_err(|e| failed(&class_name, WriteStep::ReadShape, e))?
     {
-        Some(kind) => {
-            let subject_batch = match kind {
-                SetterKind::Call => None,
-                SetterKind::Links => params.batch_id.clone(),
-            };
-            perspective
-                .remove_subject(
-                    subject_class(&class_name),
-                    stored.clone(),
-                    subject_batch,
-                    agent,
-                )
-                .await
-                .map_err(|e| failed(&class_name, WriteStep::RemoveSubject, e))?;
+        if kind == SetterKind::Call {
+            refuse_batch_for_calls(perspective, &class_name, params.batch_id.as_deref()).await?;
         }
-        None => {}
+        perspective
+            .remove_subject(
+                subject_class(&class_name),
+                stored.clone(),
+                params.batch_id.clone(),
+                agent,
+            )
+            .await
+            .map_err(|e| failed(&class_name, WriteStep::RemoveSubject, e))?;
     }
 
     // Outside a batch the cascade is not atomic, so on failure the links already removed stay
