@@ -845,3 +845,145 @@ async fn polymorphic_target_with_a_literal_lookalike_of_an_iri_flag_is_read_as_b
         "(top level, nested)"
     );
 }
+
+/// [`status_shapes`] and three classes whose predicates are not all
+/// emittable as `<…>`, or whose names collide once sanitised.
+/// `SpecialBad` has an optional predicate `literal://string:xyz` (stored as
+/// a term, but not a parseable IRI) and `SpecialRel` an optional relative
+/// predicate `title`, each besides a `we://kind` flag on `Base`. `SpecialD`
+/// requires two IRI flags, `we://p-a` and `we://p_a`, with the same value.
+fn emit_shapes() -> (StaticShapeResolver, Arc<ModelShape>, Arc<ModelShape>) {
+    let (resolver, holder, shelf) = status_shapes();
+    for (name, json) in [
+        (
+            "SpecialBad",
+            r#"{"className":"SpecialBad","properties":{
+                 "flag":{"predicate":"we://flag","required":true,"flag":true,"initial":"we://base"},
+                 "kind":{"predicate":"we://kind","required":true,"flag":true,"initial":"we://special_bad"},
+                 "odd":{"predicate":"literal://string:xyz"}
+               },"relations":{}}"#,
+        ),
+        (
+            "SpecialRel",
+            r#"{"className":"SpecialRel","properties":{
+                 "flag":{"predicate":"we://flag","required":true,"flag":true,"initial":"we://base"},
+                 "kind":{"predicate":"we://kind","required":true,"flag":true,"initial":"we://special_rel"},
+                 "title":{"predicate":"title"}
+               },"relations":{}}"#,
+        ),
+        (
+            "SpecialD",
+            r#"{"className":"SpecialD","properties":{
+                 "dash":{"predicate":"we://p-a","required":true,"flag":true,"initial":"we://v"},
+                 "under":{"predicate":"we://p_a","required":true,"flag":true,"initial":"we://v"}
+               },"relations":{}}"#,
+        ),
+    ] {
+        resolver.register(name, parse_shape_from_json(json, name).unwrap());
+    }
+    (resolver, holder, shelf)
+}
+
+/// Shelf `s/1` holds holder `h/1`, which holds `u/7`..`u/9`, all `Base`
+/// through signed Shared links, carrying the `we://kind` of `SpecialBad`,
+/// `Special` and `SpecialRel` respectively. `u/10` carries both of
+/// `SpecialD`'s flags.
+fn emit_world() -> SparqlStore {
+    use super::link_status_tests::ls_link;
+    let signer = crate::agent::signatures::TestSigner::generate();
+    let store = SparqlStore::new(None).unwrap();
+    let shared = |s: &str, p: &str, t: &str| ls_link(&signer, s, p, t, 1, LinkStatus::Shared);
+    let mut links: Vec<LinkExpression> = [
+        "Holder",
+        "Shelf",
+        "Base",
+        "Special",
+        "SpecialBad",
+        "SpecialRel",
+        "SpecialD",
+    ]
+    .iter()
+    .map(|c| {
+        shared(
+            &format!("we://models/{c}"),
+            "rdf://type",
+            "ad4m://SubjectClass",
+        )
+    })
+    .collect();
+    links.extend([
+        shared("we://s/1", "we://flag", "we://shelf"),
+        shared("we://s/1", "we://on", "we://h/1"),
+        shared("we://h/1", "we://flag", "we://holder"),
+    ]);
+    for (u, kind) in [
+        ("we://u/7", "we://special_bad"),
+        ("we://u/8", "we://special"),
+        ("we://u/9", "we://special_rel"),
+    ] {
+        links.extend([
+            shared("we://h/1", "we://holds", u),
+            shared(u, "we://flag", "we://base"),
+            shared(u, "we://kind", kind),
+        ]);
+    }
+    links.extend([
+        shared("we://u/10", "we://p-a", "we://v"),
+        shared("we://u/10", "we://p_a", "we://v"),
+    ]);
+    for l in links {
+        store.add_link(&l).unwrap();
+    }
+    store
+}
+
+/// A class one of whose predicates cannot be emitted as `<…>` cannot run its
+/// own query, so classification skips it rather than fail for every class
+/// in the batch: the read succeeds, `u/8` is `Special`, and `u/7` and `u/9`
+/// fall back to `Base`. Top level and nested.
+#[tokio::test]
+async fn polymorphic_read_skips_a_class_with_an_unemittable_predicate() {
+    let (resolver, holder, shelf) = emit_shapes();
+    let store = emit_world();
+    let top = q(json!({ "include": { "items": true } }));
+    let top = super::query::execute_model_query(&store, holder.as_ref(), &top, &resolver)
+        .await
+        .expect("top level read");
+    let nested = q(json!({ "include": { "holder": { "include": { "items": true } } } }));
+    let nested = super::query::execute_model_query(&store, shelf.as_ref(), &nested, &resolver)
+        .await
+        .expect("nested read");
+    let expected = pairs(&[
+        ("we://u/7", "Base"),
+        ("we://u/8", "Special"),
+        ("we://u/9", "Base"),
+    ]);
+    assert_eq!(
+        (
+            item_classes(&top.instances[0]["items"]),
+            item_classes(&nested.instances[0]["holder"]["items"])
+        ),
+        (expected.clone(), expected),
+        "(top level, nested)"
+    );
+}
+
+/// Two IRI flags whose predicates differ only where sanitising makes them
+/// equal (`we://p-a`, `we://p_a`), with one value, each check their own
+/// link: a node carrying both triples conforms.
+#[tokio::test]
+async fn iri_flags_whose_names_sanitise_alike_each_check_their_own_link() {
+    let (resolver, _, _) = emit_shapes();
+    let store = emit_world();
+    let special_d = super::types::ShapeResolver::get_shape(&resolver, "SpecialD").unwrap();
+    let result =
+        super::query::execute_model_query(&store, special_d.as_ref(), &q(json!({})), &resolver)
+            .await
+            .unwrap();
+    let ids: Vec<&str> = result
+        .instances
+        .iter()
+        .filter_map(|i| i["id"].as_str())
+        .collect();
+    assert_eq!(ids, vec!["we://u/10"]);
+}
