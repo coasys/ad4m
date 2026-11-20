@@ -217,9 +217,12 @@ impl SfuPeer {
     ///
     /// Dropping the peer repairs the call only for clients that rebuild when
     /// the room's roster stops listing their session (the SDK's roster check,
-    /// since #1565). An older client just stays without media. A client with
-    /// the receive watchdog restarts ICE before this grace runs out; a client
-    /// that sends nothing has only this backstop.
+    /// since #1565). An older client just stays without media. The SDK's
+    /// receive watchdog may restart ICE first, but nothing orders the two: a
+    /// client sending video restarted after 6-8 s in sfu-soak5, while one
+    /// sending only audio waits for its reports to stop for over 10 s and a
+    /// background tab reads its stats late, so either may be dropped here
+    /// and rebuilt instead. A client that sends nothing has only this backstop.
     pub fn on_ice_state(&mut self, state: IceConnectionState, now: Instant) {
         self.disconnected_since = match state {
             IceConnectionState::Disconnected => self.disconnected_since.or(Some(now)),
