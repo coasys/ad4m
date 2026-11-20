@@ -66,7 +66,7 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'agent.lock': { did: 'did:test:123', isInitialized: true, isUnlocked: false },
     'agent.unlock': { did: 'did:test:123', isInitialized: true, isUnlocked: true },
     'agent.import': { did: 'did:test:imported', isInitialized: true, isUnlocked: true },
-    'agent.byDid': (p: Record<string, unknown>) => ({ did: p.did, perspective: new Perspective() }),
+    'agent.byDIDs': (p: Record<string, unknown>) => (p.dids as string[]).map(did => ({ did, perspective: new Perspective() })),
     'agent.updateProfile': { did: 'did:test:123', perspective: new Perspective(), directMessageLanguage: 'lang://dm' },
     'agent.sign': 'signed-message-data',
     'agent.isLocked': false,
@@ -208,10 +208,10 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
         };
     },
     'expression.getMany': (p: Record<string, unknown>) => {
-        // Return one result per URL (aligned by index), matching real API behavior
+        // One entry per URL, in order: what `expression.get` answers for it.
         const urls = (p.urls || []) as string[];
-        return urls.map((url: string) => ({
-            author: 'did:test:1', timestamp: '2023-01-01', data: { type: 'test' },
+        return urls.map(() => ({
+            author: 'did:test:123', timestamp: '2024-01-01', data: '{"content":"hello"}',
             language: { address: 'lang://test' }, proof: { valid: true },
         }));
     },
@@ -534,6 +534,7 @@ describe('AgentClient', () => {
 
     test('byDID() fetches agent by DID', async () => {
         const agent = await ad4m.agent.byDID('did:test:other');
+        expect(lastRpcCall!.params.dids).toEqual(['did:test:other']);
         expect(agent.did).toBe('did:test:other');
     });
 
@@ -1180,8 +1181,18 @@ describe('ExpressionClient', () => {
     test('getMany() returns multiple expressions', async () => {
         const exprs = await ad4m.expression.getMany(['url1', 'url2']);
         expect(exprs).toHaveLength(2);
-        expect(exprs[0].author).toBe('did:test:1');
-        expect(exprs[1].author).toBe('did:test:1');
+        expect(exprs[0].author).toBe('did:test:123');
+        expect(exprs[1].author).toBe('did:test:123');
+    });
+
+    test('getMany() sends at most 200 URLs per expression.getMany call', async () => {
+        const freshClient = newClient();
+        const urls = Array.from({ length: 201 }, (_, i) => `lang://test/Qm${i}`);
+        const exprs = await freshClient.expression.getMany(urls);
+        expect(exprs).toHaveLength(201);
+        const calls = lastOf(MockWebSocket.instances).rpc.filter(c => c.type === 'expression.getMany');
+        expect(calls.map(c => (c.params.urls as string[]).length)).toEqual([200, 1]);
+        expect(calls.flatMap(c => c.params.urls as string[])).toEqual(urls);
     });
 
     test('getRaw() returns raw expression', async () => {

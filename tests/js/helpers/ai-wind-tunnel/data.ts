@@ -83,9 +83,13 @@ export interface ClassRule {
   class: string;
   family: string;
   tierGb: number;
+  /** A narrower class of this one: its fallback chain goes on with this class's. */
+  fallback?: string;
   match: {
     os?: string;
     arch?: string;
+    /** The CPU brand contains one of these, ignoring case. */
+    cpuBrandAny?: string[];
     gpuVendor?: string;
     unifiedMemory?: boolean;
     backendAny?: string[];

@@ -52,7 +52,7 @@ pub mod types;
 use std::thread::JoinHandle;
 
 use deno_core::error::AnyError;
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 
 use crate::prolog_service::init_prolog_service;
 use crate::{
@@ -722,7 +722,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
             if let Err(e) = crate::db_backend::db_backend().cleanup_expired_codes() {
                 error!("Failed to cleanup expired verification codes: {}", e);
             } else {
-                info!("Cleaned up expired verification codes");
+                debug!("Cleaned up expired verification codes");
             }
         }
     });

@@ -384,9 +384,15 @@ impl Session {
         self.operator_source
     }
 
-    /// The device key behind the session's grant, when a key login made it.
+    /// The device key behind the session's grant, when a key login made it: not a binding
+    /// the grant inherited from the session that approved it (`KeyBinding::delegated` —
+    /// such a grant is no key session; `revoke_key` and `revoke_identity` still reach it
+    /// through `grant().key`).
     pub fn key_binding(&self) -> Option<&super::grants::KeyBinding> {
-        self.grant.as_ref().and_then(|g| g.key.as_ref())
+        self.grant
+            .as_ref()
+            .and_then(|g| g.key.as_ref())
+            .filter(|k| !k.delegated())
     }
 
     /// The id of the session's grant.

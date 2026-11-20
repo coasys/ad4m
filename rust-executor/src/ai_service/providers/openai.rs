@@ -30,6 +30,9 @@ const REQUEST_TIMEOUT: Duration = super::http::CHAT_REQUEST_TIMEOUT;
 
 pub struct OpenAiChat {
     http: reqwest::Client,
+    /// The bound given to `http`. reqwest does not return it. Tests read this
+    /// so a factory change is visible without waiting out the timer.
+    timeout: Duration,
     api_key: String,
     /// Fully resolved, e.g. `https://api.groq.com/openai/v1/chat/completions`.
     endpoint: String,
@@ -44,12 +47,26 @@ impl OpenAiChat {
     /// provider documents the `/v1` form, and a path prefix (Groq's `/openai/v1`, this
     /// executor's `/api/v1/openai/v1`) survives.
     pub fn new(api_key: &str, base_url: Url, kind: EndpointKind) -> Self {
+        Self::with_timeout(api_key, base_url, kind, REQUEST_TIMEOUT)
+    }
+
+    /// [`Self::new`] with the endpoint's own request bound. A completion queued
+    /// behind another request on a one-slot server can sit longer than the
+    /// default [`REQUEST_TIMEOUT`]; the operator's `request_timeout_secs` is
+    /// that bound, and the HTTP client has to share it or it fires first.
+    pub fn with_timeout(
+        api_key: &str,
+        base_url: Url,
+        kind: EndpointKind,
+        timeout: Duration,
+    ) -> Self {
         Self {
             // `expect`: the default client follows redirects, so a fallback to it would
             // drop the policy that keeps the key on the host it was set for.
-            http: super::http::credentialed_http(REQUEST_TIMEOUT)
+            http: super::http::credentialed_http(timeout)
                 .build()
                 .expect("the HTTP client builds"),
+            timeout,
             api_key: api_key.to_string(),
             endpoint: super::http::versioned_endpoint(base_url, "chat/completions"),
             kind,
@@ -379,6 +396,10 @@ impl StreamState {
 impl RemoteChat for OpenAiChat {
     fn supports_native_tools(&self) -> bool {
         true
+    }
+
+    fn client_timeout(&self) -> Duration {
+        self.timeout
     }
 
     async fn chat(&self, request: ChatRequest) -> Result<ChatReply> {

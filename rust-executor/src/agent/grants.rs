@@ -36,6 +36,10 @@
 //! A key-bound grant lives one hour and is renewed ([`Grants::renew`]): its expiry is atomic,
 //! so sockets opened before a renewal stay open. It ends when its key stops being valid in the
 //! identity's log ([`Grants::revoke_key`]) and on log out everywhere ([`Grants::revoke_identity`]).
+//! A grant the capability flow mints on an approval a key-bound session made inherits that
+//! session's binding, delegated ([`KeyBinding::delegate`]): the app's token ends with the
+//! device key and the identity as the session's would, while the grant itself is no key
+//! session (no renewal, no `endAllSessions` by it).
 
 use super::capabilities::{
     read_stored_claims, AuthInfo, Capability, AGENT_AUTH_CAPABILITY, TOKEN_EXPIRY_LEEWAY_SECONDS,
@@ -95,7 +99,8 @@ pub enum GrantRole {
     Operator,
 }
 
-/// The device key behind a grant that a key login made.
+/// The device key behind a grant that a key login made — or behind one an approval of a key
+/// session minted, which inherited the session's binding as delegated.
 #[derive(Debug)]
 pub struct KeyBinding {
     /// The identity: `did:scid:coasys:1:…`.
@@ -108,6 +113,14 @@ pub struct KeyBinding {
     head_seq: AtomicU64,
     /// When the key was last found valid (Unix seconds).
     checked_at: AtomicU64,
+    /// Whether the grant inherited this binding from the session that approved it: an
+    /// approval mints the grant with a [`KeyBinding::delegate`]d copy. Revocations reach it
+    /// the same — the key's grants and the identity's all end together — but the grant is
+    /// no key session: it never renews, never draws a grant-slot challenge, and ends no
+    /// other sessions (`user.renewSession`, `user.endAllSessions`); and the agent-speaks
+    /// check does not apply, since the binding names the approving session's identity, not
+    /// one the grant's agent had to speak for.
+    delegated: bool,
 }
 
 impl KeyBinding {
@@ -118,6 +131,7 @@ impl KeyBinding {
             key_id,
             head_seq: AtomicU64::new(head_seq),
             checked_at: AtomicU64::new(checked_at),
+            delegated: false,
         }
     }
 
@@ -127,6 +141,31 @@ impl KeyBinding {
 
     pub fn checked_at(&self) -> u64 {
         self.checked_at.load(Ordering::SeqCst)
+    }
+
+    /// Whether the grant inherited this binding from the session that approved it rather
+    /// than a key login opening it.
+    pub fn delegated(&self) -> bool {
+        self.delegated
+    }
+
+    /// This binding as the grant an approval from its session mints carries it: a copy,
+    /// marked delegated.
+    pub fn delegate(&self) -> KeyBinding {
+        let mut binding = self.copy();
+        binding.delegated = true;
+        binding
+    }
+
+    fn copy(&self) -> KeyBinding {
+        KeyBinding {
+            scid: self.scid.clone(),
+            key: self.key.clone(),
+            key_id: self.key_id.clone(),
+            head_seq: AtomicU64::new(self.head_seq()),
+            checked_at: AtomicU64::new(self.checked_at()),
+            delegated: self.delegated,
+        }
     }
 
     /// Records a valid verdict at `head_seq`, read at `at`.
@@ -142,17 +181,26 @@ impl KeyBinding {
             key_id: self.key_id.clone(),
             head_seq: self.head_seq(),
             checked_at: self.checked_at(),
+            delegated: self.delegated,
         }
     }
 
     fn from_row(row: GrantKeyRow) -> Self {
-        KeyBinding::new(
+        let mut binding = KeyBinding::new(
             row.scid,
             row.signing_key,
             row.key_id,
             row.head_seq,
             row.checked_at,
-        )
+        );
+        binding.delegated = row.delegated;
+        binding
+    }
+}
+
+impl Clone for KeyBinding {
+    fn clone(&self) -> Self {
+        self.copy()
     }
 }
 
@@ -334,15 +382,7 @@ impl LiveGrant {
             created_at: self.created_at,
             ended: self.ended.clone(),
             role: self.role,
-            key: self.key.as_ref().map(|k| {
-                KeyBinding::new(
-                    k.scid.clone(),
-                    k.key.clone(),
-                    k.key_id.clone(),
-                    k.head_seq(),
-                    k.checked_at(),
-                )
-            }),
+            key: self.key.as_ref().map(|k| k.copy()),
         }
     }
 }
@@ -830,11 +870,14 @@ pub(crate) fn now() -> u64 {
 /// Signs a token that acts as `agent` for the app `auth`, valid for `valid_for` seconds, and
 /// inserts its grant. `request_id` names the capability request the grant answers; `None`
 /// (a login) uses the token's id. Fails, handing out no token, when the grant is not stored.
+/// `key` binds the grant as a key-bound one ([`KeyBinding::delegate`]: the approving
+/// session's binding, so the device key's revocation and "log out everywhere" reach it).
 pub fn mint(
     agent: AgentContext,
     auth: AuthInfo,
     request_id: Option<String>,
     valid_for: u64,
+    key: Option<KeyBinding>,
 ) -> Result<(String, Arc<LiveGrant>), String> {
     let (token, claims) = super::capabilities::token::sign_token(
         auth.app_name.clone(),
@@ -847,7 +890,7 @@ pub fn mint(
     // `platform`, not the main agent.
     let did = agent.managed_did().unwrap_or_default().to_string();
     let id = claims.nonce().to_string();
-    let grant = LiveGrant::new(
+    let mut grant = LiveGrant::new(
         TokenId(id.clone()),
         request_id.unwrap_or(id),
         agent,
@@ -856,6 +899,9 @@ pub fn mint(
         claims.expires_at(),
         claims.issued_at(),
     );
+    if let Some(key) = key {
+        grant = grant.bound_to(key);
+    }
     let grant = Grants::global().insert(grant)?;
     Ok((token, grant))
 }
@@ -971,7 +1017,14 @@ mod tests {
     #[test]
     fn a_main_agent_grant_names_the_same_did_minted_and_reloaded() {
         let _seam = setup();
-        let (_, grant) = mint(AgentContext::main_agent(), auth("app", vec![]), None, 3600).unwrap();
+        let (_, grant) = mint(
+            AgentContext::main_agent(),
+            auth("app", vec![]),
+            None,
+            3600,
+            None,
+        )
+        .unwrap();
         let reloaded = LiveGrant::from_row(grant.row().unwrap()).unwrap();
         assert_eq!(grant.did, reloaded.did);
         assert_eq!(
@@ -988,6 +1041,7 @@ mod tests {
             auth("grants-mint", vec![AGENT_READ_CAPABILITY.clone()]),
             Some("req-mint".into()),
             3600,
+            None,
         )
         .unwrap();
         let claims = read_stored_claims(&token).unwrap();
@@ -1018,6 +1072,7 @@ mod tests {
             auth("grants-revoke", vec![ALL_CAPABILITY.clone()]),
             None,
             3600,
+            None,
         )
         .unwrap();
         let socket = grant.ended.child_token();
@@ -1040,6 +1095,7 @@ mod tests {
             auth("grants-remove", vec![ALL_CAPABILITY.clone()]),
             Some(format!("req-{}", uuid::Uuid::new_v4())),
             3600,
+            None,
         )
         .unwrap();
         let found = Grants::global().find(&grant.request_id);
@@ -1058,6 +1114,7 @@ mod tests {
             auth("grants-find", vec![]),
             Some(request_id.clone()),
             3600,
+            None,
         )
         .unwrap();
         assert_eq!(Grants::global().find(&request_id)[0].id, grant.id);
@@ -1108,6 +1165,7 @@ mod tests {
             auth("grants-kept", vec![AGENT_READ_CAPABILITY.clone()]),
             None,
             3600,
+            None,
         )
         .unwrap();
         let (_, revoked) = mint(
@@ -1115,6 +1173,7 @@ mod tests {
             auth("grants-revoked", vec![]),
             None,
             3600,
+            None,
         )
         .unwrap();
         Grants::global().revoke_id(&revoked.id).unwrap();
@@ -1242,6 +1301,7 @@ mod tests {
             auth("revocation-retry", vec![]),
             None,
             3600,
+            None,
         )
         .unwrap();
         // What a failed write leaves: ended in memory, active in the table, pending a retry.
@@ -1272,6 +1332,7 @@ mod tests {
             auth("pending-restart", vec![]),
             None,
             3600,
+            None,
         )
         .unwrap();
         // The table's write fails: the grant is ended in memory but the row stays active.

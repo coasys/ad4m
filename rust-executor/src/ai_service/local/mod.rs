@@ -409,7 +409,7 @@ fn count_speech_gate(plan: &mut LocalPlan, gate: impl FnOnce() -> Option<(u64, b
 /// What the tests of the modules here share: the lock that runs them one at a time and
 /// the builders of a selected model and a process status.
 #[cfg(test)]
-mod test_support {
+pub(crate) mod test_support {
     use super::data::{Provider, Service};
     use super::supervisor::{Phase, ProcessStatus};
     use super::SelectedModel;
@@ -417,8 +417,9 @@ mod test_support {
 
     /// One test at a time of those that use the process-wide state (`RUNNING`,
     /// `MANAGED_PORTS`, `GPU_CHECKS`, the install flag, the global service and database):
-    /// a plain `cargo test` runs tests in parallel.
-    pub(super) static TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    /// a plain `cargo test` runs tests in parallel. `pub(crate)` so a test outside
+    /// `local` that swaps that database or the default model holds the same lock.
+    pub(crate) static TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     pub(super) fn selected(service: Service, id: &str, provider: Provider) -> SelectedModel {
         SelectedModel {
