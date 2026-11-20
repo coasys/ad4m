@@ -35,3 +35,16 @@ pub mod time {
         interval, sleep, sleep_until, timeout, Instant, SystemTime, TimerInstant, UNIX_EPOCH,
     };
 }
+
+/// Files the executor keeps by path: the agent file and the agent profiles (`agent/mod.rs`).
+///
+/// Native: `std::fs`'s own functions, re-exported as they are. wasm32 (the web executor):
+/// an in-memory map from path to bytes in `crate::web::fs`, with the same signatures. It
+/// lives as long as the Worker: a reload starts with no files.
+pub mod fs {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub use std::fs::{create_dir_all, exists, read_to_string, write};
+
+    #[cfg(target_arch = "wasm32")]
+    pub use crate::web::fs::{create_dir_all, exists, read_to_string, write};
+}
