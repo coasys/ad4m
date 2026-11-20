@@ -196,7 +196,7 @@ fn order_by_specificity(matches: &mut Vec<(String, usize)>) -> Vec<String> {
 /// (`LinkGuard::of(query)`), so a target is never classified through a link
 /// the read cannot see (a Local type link under a Shared read); one that
 /// serves no read passes [`LinkGuard::ANY`], every link.
-pub fn subject_classes_of(
+pub(crate) fn subject_classes_of(
     stop: &EvalStop,
     store: &SparqlStore,
     resolver: &dyn ShapeResolver,
@@ -218,7 +218,7 @@ pub fn subject_classes_of(
 ///
 /// Membership is set containment, so a staged triple counts exactly as a
 /// committed one does — this widens what is known, never what conforms.
-pub fn subject_classes_of_with_pending(
+pub(crate) fn subject_classes_of_with_pending(
     stop: &EvalStop,
     store: &SparqlStore,
     resolver: &dyn ShapeResolver,
