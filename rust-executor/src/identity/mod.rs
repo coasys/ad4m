@@ -321,6 +321,7 @@ async fn run_recheck(
                     let (scopes, swept, lagged_revoked) =
                         lag_scopes(&service.cache, signers, marks_swept).await;
                     marks_swept = swept;
+                    retire_spent_marks(&service.cache, marks_swept, expired_until);
                     revoked.extend(lagged_revoked);
                     scopes
                 } else {
@@ -358,6 +359,7 @@ async fn run_recheck(
                         );
                     }
                 }
+                retire_spent_marks(&service.cache, marks_swept, expired_until);
                 signers.append(&mut failed);
                 if !signers.is_empty() {
                     let scope = crate::perspectives::Recheck::Signers(signers);
@@ -376,6 +378,15 @@ async fn run_recheck(
                 crate::perspectives::recheck_links(&crate::perspectives::Recheck::Flagged).await;
             }
         }
+    }
+}
+
+/// Deletes the journal rows both readers are past ([`KelCache::retire_marks`]): the
+/// change marks the lag recovery swept (`marks_swept`) and the scope marks the expiry tick
+/// read (`expired_until`). A failure only logs; the rows go with the next call.
+pub(crate) fn retire_spent_marks(cache: &KelCache, marks_swept: u64, expired_until: u64) {
+    if let Err(e) = cache.retire_marks(marks_swept, expired_until) {
+        log::warn!("identity: could not retire the spent journal marks: {e}");
     }
 }
 
@@ -432,6 +443,12 @@ pub(crate) async fn lag_scopes(
             .map(|key| format!("did:key:{key}")),
     );
     let mut revoked = Vec::new();
+    // The head is read before the marks: a mark written while this sweep runs lies above
+    // it, so the next sweep reads it and `retire_marks` never deletes it unread.
+    let swept = cache.last_mark().unwrap_or_else(|e| {
+        log::warn!("identity: could not read the change journal's head: {e}");
+        since
+    });
     match cache.marked_since(since) {
         Ok(marks) => {
             let mut logs = BTreeSet::new();
@@ -463,10 +480,6 @@ pub(crate) async fn lag_scopes(
         }
         Err(e) => log::warn!("identity: could not read the journaled key changes: {e}"),
     }
-    let swept = cache.last_mark().unwrap_or_else(|e| {
-        log::warn!("identity: could not read the change journal's head: {e}");
-        since
-    });
     (
         vec![
             crate::perspectives::Recheck::Signers(signers),
@@ -1013,6 +1026,140 @@ mod tests {
             cache.marked_since(swept).unwrap().is_empty(),
             "already swept"
         );
+    }
+
+    /// A key reported changed twice (a second head, or the log evicted and read back while
+    /// the key stays revoked) leaves one journal row, not one per report.
+    #[tokio::test]
+    async fn a_repeated_mark_of_a_key_leaves_one_row() {
+        let mut log = TestLog::new(80);
+        let cache = trusting();
+        accept_signed(&cache, &log.events).await;
+        log.revoke_d1();
+        accept_signed(&cache, &log.events).await;
+        let key = log.device.key().to_string();
+        let rows_of_key = |cache: &KelCache| {
+            cache
+                .mark_rows()
+                .into_iter()
+                .filter(|r| r.1 == key && r.3.is_none())
+                .count()
+        };
+        assert_eq!(rows_of_key(&cache), 1, "one row for the revocation");
+        // Evicted and read back: the load reports the revoked key again.
+        for _ in 0..2 {
+            cache.key_map().forget(&log.scid());
+            cache.trusted(&log.scid()).await.unwrap();
+        }
+        assert_eq!(
+            rows_of_key(&cache),
+            1,
+            "the reload marks it again: no new row"
+        );
+    }
+
+    /// Change marks go once the lag sweep passed them, scope marks once the tick read their
+    /// expiry; `marked_expiring` answers exactly the due rows until then.
+    #[tokio::test]
+    async fn spent_marks_are_retired_and_the_rest_kept() {
+        use ad4m_identity_core::build::{add_unsigned, cosign};
+        use ad4m_identity_core::{BotScope, DeviceKey, KeyLife};
+        let mut log = TestLog::new(81);
+        let bot = ed25519_dalek::SigningKey::from_bytes(&[82; 32]);
+        let chain = log.chain();
+        let device = DeviceKey {
+            id: chain.state().next_device_id(),
+            sign: bot.key(),
+            enc: ad4m_identity_core::encode_x25519_multikey(&[82; 32]),
+            life: KeyLife::Bot(BotScope {
+                can: vec!["read".into()],
+                expires: 1_500,
+            }),
+        };
+        let mut event = add_unsigned(&chain, device, "offer", "co-sig").unwrap();
+        cosign(&mut event, "m0", &log.master).unwrap();
+        log.events.push(event);
+        let cache = trusting();
+        accept_signed(&cache, &log.events).await;
+        log.revoke_d1();
+        accept_signed(&cache, &log.events).await;
+        let bot_key = bot.key().to_string();
+        let scope_rows = |cache: &KelCache| {
+            cache
+                .mark_rows()
+                .into_iter()
+                .filter(|r| r.3.is_some())
+                .count()
+        };
+        assert_eq!(scope_rows(&cache), 1);
+        let changes = cache
+            .mark_rows()
+            .into_iter()
+            .filter(|r| r.3.is_none())
+            .count();
+        assert!(changes > 0, "the revocation is journaled");
+
+        // marked_expiring answers exactly the due rows.
+        assert!(cache.marked_expiring(0, 1_499).unwrap().is_empty());
+        assert_eq!(
+            cache.marked_expiring(1_000, 2_000).unwrap(),
+            vec![(bot_key.clone(), log.scid())]
+        );
+        assert!(cache.marked_expiring(1_500, 2_000).unwrap().is_empty());
+
+        // The tick has not reached the expiry and no sweep ran: nothing goes.
+        assert_eq!(cache.retire_marks(0, 1_000).unwrap(), 0);
+        assert_eq!(cache.mark_rows().len(), changes + 1);
+        // The tick passed the expiry: the scope row goes, the change rows stay.
+        assert_eq!(cache.retire_marks(0, 1_500).unwrap(), 1);
+        assert_eq!(scope_rows(&cache), 0);
+        assert!(cache.marked_expiring(0, 3_000).unwrap().is_empty());
+        assert_eq!(cache.mark_rows().len(), changes);
+        // A sweep passed them: the change rows go; the journal is empty.
+        let (_, swept, _) = lag_scopes(&cache, BTreeSet::new(), 0).await;
+        retire_spent_marks(&cache, swept, 1_500);
+        assert!(cache.mark_rows().is_empty());
+        // A later change is journaled afresh and found past the sweep's mark.
+        cache.key_map().forget(&log.scid());
+        cache.trusted(&log.scid()).await.unwrap();
+        assert!(!cache.marked_since(swept).unwrap().is_empty());
+    }
+
+    /// A journal an earlier release wrote, with the same NULL-expiry mark many times, is
+    /// collapsed when the cache opens; the newest id of each mark stays, scope rows stay.
+    #[tokio::test]
+    async fn the_migration_collapses_duplicate_marks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ad4m_db.sqlite");
+        {
+            let old = rusqlite::Connection::open(&path).unwrap();
+            old.execute_batch(
+                "CREATE TABLE identity_key_marks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    multikey TEXT NOT NULL,
+                    scid TEXT NOT NULL,
+                    expires INTEGER,
+                    UNIQUE (multikey, scid, expires)
+                );
+                INSERT INTO identity_key_marks (multikey, scid, expires) VALUES
+                    ('k1', 's1', NULL), ('k2', 's1', NULL), ('k1', 's1', NULL),
+                    ('k1', 's1', 900), ('k1', 's1', NULL), ('k1', 's2', NULL);",
+            )
+            .unwrap();
+        }
+        let cache = on_file(&path, vec![store_key().multikey()]);
+        let rows = cache.mark_rows();
+        let key = |r: &(i64, String, String, Option<i64>)| (r.1.clone(), r.2.clone(), r.3);
+        assert_eq!(
+            rows.iter().map(key).collect::<Vec<_>>(),
+            vec![
+                ("k2".into(), "s1".into(), None),
+                ("k1".into(), "s1".into(), Some(900)),
+                ("k1".into(), "s1".into(), None),
+                ("k1".into(), "s2".into(), None),
+            ]
+        );
+        assert_eq!(rows[2].0, 5, "the newest duplicate stays");
     }
 
     /// The anchor of a bound agent is its log's trusted seq, read from the key map with no

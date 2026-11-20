@@ -365,7 +365,15 @@ the offer's state).
   revoked gets its revocation notices too: a `Revoked` change lost in the lag still reaches
   `publish_revocation_notices`. The expiry tick likewise reads a journaled
   log back before re-judging its bot's links (`expired_signers`, `marked_expiring`). `reset`
-  drops a log's rows with the rest of its copy. Reads page by
+  drops a log's rows with the rest of its copy. The journal stays small: a mark is one row
+  per `(key, scid, expires-or-none)` (a unique index over `IFNULL(expires, -1)`, since the
+  table's own `UNIQUE` does not hold for NULL; a repeated mark, such as a revoked key
+  reported again when its evicted log is read back, is `ON CONFLICT DO NOTHING`; the schema
+  migration collapses duplicates an earlier release wrote). `run_recheck` retires rows once
+  their reader is past them (`retire_marks`): a change mark when a lag sweep passed its id
+  (`marks_swept`), a scope mark when the tick read its `expires` (`expired_until`). With no
+  lag, change marks stay until the next sweep, at most one per key and log.
+  `marked_expiring` uses an index that leads on `expires`. Reads page by
   reifier IRI (`RECHECK_BATCH` rows): a key's links are read to the last page; the
   `cantCheck` pass reads one page per tick from `recheck_cursor` and wraps at the end, so
   links that stay unresolvable do not hide the ones after them. Rewritten links go through
