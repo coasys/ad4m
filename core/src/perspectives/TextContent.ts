@@ -24,6 +24,10 @@ import { Model, Property } from "../model/decorators";
  * reads it by its URI, `ad4m://TextContent`, so a perspective never stores it
  * and an app class named `TextContent` does not replace it. `register()` on
  * it writes nothing.
+ *
+ * The waker's mention subscription (`get_mention_waker_config`) reads it for
+ * the agent's names in the text. Mention links it reads through
+ * {@link Mentioning}, with text or without.
  */
 @Model({ name: "TextContent", abstract: true })
 export class TextContent extends Ad4mModel {

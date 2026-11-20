@@ -7,6 +7,12 @@
 import { Buffer } from "node:buffer";
 globalThis.Buffer = Buffer;
 
+// A language's console output goes to the executor's log: console.log and
+// console.debug at debug, console.info at info, console.warn and
+// console.error at warn and error. Deno's own console wrote to stdout at no
+// level, so a language's per-poll chatter filled the operator's log.
+globalThis.console = globalThis.UTILS.languageConsole();
+
 // Minimal DOM stubs – language bundles that include Svelte Icon components
 // reference HTMLElement, document, and customElements at module load time.
 // These stubs prevent "Class extends value undefined" errors without
@@ -380,6 +386,14 @@ async function initLanguage(contextJson) {
         "languageGetSource", "getByAuthor", "getAll", "settingsIcon",
         // Holochain signal routing — also installed on globalThis below
         "handleHolochainSignal",
+        // Identity and token (docs-src/language-interface-spec.md, 5.8 and 5.9): the
+        // executor calls these only on the agent language. Every `Capability::export_name`
+        // must be listed here, or detection never sees it (capability.rs tests check this list).
+        "identityLog", "identityHead", "identityAppend", "identityKeyOwner",
+        "identityPowParams", "identityAttachNote", "identityPutAgent",
+        "identityOpenOffer", "identityListOffers", "identityCancelOffer",
+        "identityClaimOffer", "identityOfferState",
+        "tokenAssets", "tokenBalance", "tokenSend", "tokenReceived",
     ];
     for (const key of flatExportNames) {
         const v = mod[key];

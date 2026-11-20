@@ -41,7 +41,9 @@ fn signed(signer: &TestSigner, source: &str, target: &str) -> LinkExpression {
 /// return the targets store B did not verify. Also checks the control: A's
 /// own verdict, computed on insert from the original bytes, is `true`.
 fn not_verified_after_read_back(a: &SparqlStore) -> Vec<String> {
-    let read_back = a.get_all_links().unwrap();
+    let read_back = a
+        .get_all_links(&crate::perspectives::sparql_store::EvalStop::none())
+        .unwrap();
     assert!(!read_back.is_empty());
     for l in &read_back {
         assert_eq!(
@@ -55,7 +57,7 @@ fn not_verified_after_read_back(a: &SparqlStore) -> Vec<String> {
     for l in read_back {
         b.add_link(&LinkExpression::from(l)).unwrap();
     }
-    b.get_all_links()
+    b.get_all_links(&crate::perspectives::sparql_store::EvalStop::none())
         .unwrap()
         .into_iter()
         .filter(|l| l.proof.valid != Some(true))
@@ -87,9 +89,26 @@ fn assert_round_trip(targets: &[String]) {
         .map(|(i, t)| (format!("rt://s/{i}"), t.clone()))
         .collect();
     expected.sort();
-    assert_eq!(targets_of(a.get_all_links().unwrap()), expected);
     assert_eq!(
-        targets_of(a.query_links(None, None, None, None, None, None).unwrap()),
+        targets_of(
+            a.get_all_links(&crate::perspectives::sparql_store::EvalStop::none(),)
+                .unwrap()
+        ),
+        expected
+    );
+    assert_eq!(
+        targets_of(
+            a.query_links(
+                &crate::perspectives::sparql_store::EvalStop::none(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None
+            )
+            .unwrap()
+        ),
         expected
     );
 
@@ -139,10 +158,11 @@ fn canonical_and_non_literal_targets_verify_after_a_read_back() {
 }
 
 /// Re-inserting a link on the same reifier (same author, source, predicate,
-/// timestamp and stored value) with a canonical target drops the wire target
-/// the first encoding left, so the read-back matches the later signature.
+/// timestamp and stored value) with a second valid encoding keeps the first
+/// one: a verified proof, including the signed target bytes, is replaced only
+/// by an upgrade (#1146). The read-back still matches the stored signature.
 #[test]
-fn a_canonical_re_insert_clears_the_earlier_wire_target() {
+fn a_second_valid_encoding_keeps_the_first_wire_target() {
     let signer = TestSigner::generate();
     let a = SparqlStore::new(None).unwrap();
     let raw = signed(&signer, "rt://s", "literal:string:Write the guide");
@@ -161,12 +181,12 @@ fn a_canonical_re_insert_clears_the_earlier_wire_target() {
     })
     .unwrap();
 
-    let read_back = a.get_all_links().unwrap();
+    let read_back = a
+        .get_all_links(&crate::perspectives::sparql_store::EvalStop::none())
+        .unwrap();
     assert_eq!(read_back.len(), 1, "same reifier, one link");
-    assert_eq!(
-        read_back[0].data.target,
-        "literal:string:Write%20the%20guide"
-    );
+    assert_eq!(read_back[0].data.target, "literal:string:Write the guide");
+    assert_eq!(read_back[0].proof.signature, raw.proof.signature);
     assert_eq!(not_verified_after_read_back(&a), Vec::<String>::new());
 }
 
@@ -181,7 +201,7 @@ async fn shacl_add_sdna_links_verify_after_a_read_back() {
     let store = &perspective.sparql_store;
     assert!(
         store
-            .get_all_links()
+            .get_all_links(&crate::perspectives::sparql_store::EvalStop::none(),)
             .unwrap()
             .iter()
             .any(|l| l.data.predicate.as_deref() == Some("ad4m://setter")),

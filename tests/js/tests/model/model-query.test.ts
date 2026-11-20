@@ -940,6 +940,71 @@ describe("Ad4mModel — Query API", function () {
     expect(found!.posts).to.have.length(1);
   });
 
+  it("include sub-query: { limit } pages each parent's comments, not the page's", async () => {
+    const posts: TestPost[] = [];
+    for (const name of ["left", "right"]) {
+      const post = await TestPost.create(perspective, {
+        title: `per-parent ${name}`,
+        body: "",
+      });
+      for (const n of [1, 2, 3]) {
+        const c = await TestComment.create(perspective, {
+          body: `${name}-${n}`,
+        });
+        await post.addComments(c.id);
+      }
+      posts.push(post);
+    }
+
+    const found = await TestPost.findAll(perspective, {
+      where: { id: posts.map((p) => p.id) },
+      include: { comments: { order: { body: "DESC" }, limit: 2 } },
+    });
+    expect(found).to.have.length(2);
+    const bodies = (post: TestPost) =>
+      (found.find((p) => p.id === post.id)!.comments as TestComment[]).map(
+        (c) => c.body,
+      );
+    expect(bodies(posts[0])).to.deep.equal(["left-3", "left-2"]);
+    expect(bodies(posts[1])).to.deep.equal(["right-3", "right-2"]);
+  });
+
+  it("@BelongsToMany — include: { posts: { limit: 1 } } pages each tag's posts", async () => {
+    const tags: TestTag[] = [];
+    for (const name of ["first", "second"]) {
+      const tag = await TestTag.create(perspective, {
+        label: `per-parent-${name}`,
+      });
+      for (const title of ["B", "A"]) {
+        const post = await TestPost.create(perspective, {
+          title: `${name}-${title}`,
+          body: "",
+        });
+        await post.addTags(tag.id);
+      }
+      tags.push(tag);
+    }
+
+    let found: TestTag[] = [];
+    await waitUntil(
+      async () => {
+        found = await TestTag.findAll(perspective, {
+          where: { id: tags.map((t) => t.id) },
+          include: { posts: { order: { title: "ASC" }, limit: 1 } },
+        });
+        return found.length === 2 && found.every((t) => t.posts.length > 0);
+      },
+      5000,
+      "each tag to have its first post hydrated",
+    );
+    const titles = (tag: TestTag) =>
+      (found.find((t) => t.id === tag.id)!.posts as TestPost[]).map(
+        (p) => p.title,
+      );
+    expect(titles(tags[0])).to.deep.equal(["first-A"]);
+    expect(titles(tags[1])).to.deep.equal(["second-A"]);
+  });
+
   // ── 15. IncludeMap — nested (multi-level) ─────────────────────────────────
 
   it("nested include: post → comments → reactions (2 levels, findOne)", async () => {

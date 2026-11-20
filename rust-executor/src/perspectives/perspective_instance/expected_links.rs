@@ -40,6 +40,12 @@ impl std::fmt::Display for LinksChanged {
 impl std::error::Error for LinksChanged {}
 
 impl PerspectiveInstance {
+    /// Whether a batch with this id is open: created, and neither committed, discarded nor
+    /// swept by the timeout. A write into a caller's batch checks it before writing anything.
+    pub async fn has_batch(&self, batch_uuid: &str) -> bool {
+        self.batch_store.read().await.contains_key(batch_uuid)
+    }
+
     /// What the store holds from `source` along `predicate` now, for [`Self::commit_batch_if`]
     /// to expect.
     pub fn expect_links(&self, source: &str, predicate: &str) -> Result<ExpectedLinks, AnyError> {
@@ -53,7 +59,15 @@ impl PerspectiveInstance {
     fn links_held(&self, source: &str, predicate: &str) -> Result<Vec<HeldLink>, AnyError> {
         let mut links: Vec<HeldLink> = self
             .sparql_store
-            .query_links(Some(source), Some(predicate), None, None, None, None)?
+            .query_links(
+                &crate::perspectives::sparql_store::EvalStop::none(),
+                Some(source),
+                Some(predicate),
+                None,
+                None,
+                None,
+                None,
+            )?
             .into_iter()
             .map(|l| (l.author, l.timestamp, l.data.target))
             .collect();
@@ -88,6 +102,14 @@ impl PerspectiveInstance {
         if self.fail_next_commit.swap(false, Ordering::SeqCst) {
             drop(diff);
             return Err(anyhow!("injected fault (test seam): commit_batch failed"));
+        }
+        // Backstop for a removal queued past the refusing entry points; the
+        // batch is dropped whole, as on any other commit error.
+        for link in &diff.removals {
+            crate::perspectives::monotonic::refuse_monotonic_removal(
+                link,
+                link.status.as_ref().unwrap_or(&LinkStatus::Shared),
+            )?;
         }
 
         //log::info!("🔄 BATCH COMMIT: Retrieved batch diff in {:?} - {} additions, {} removals",
@@ -156,7 +178,7 @@ impl PerspectiveInstance {
         };
 
         // Create combined diff for prolog update, SPARQL store update, and return value
-        let combined_diff = DecoratedPerspectiveDiff {
+        let mut combined_diff = DecoratedPerspectiveDiff {
             additions: [shared_diff.additions.clone(), local_diff.additions.clone()].concat(),
             removals: [shared_diff.removals.clone(), local_diff.removals.clone()].concat(),
         };
@@ -172,14 +194,17 @@ impl PerspectiveInstance {
                     return Err(LinksChanged.into());
                 }
             }
-            // Commit to link language (SPARQL store is updated right after)
+            // Commit to link language (SPARQL store is updated right after).
+            // Tombstone removals stay out of this diff: they are this replica's
+            // store effect only.
             if let Some(diff) = &link_language_diff {
                 self.spawn_commit_and_handle_error(diff);
             }
             // The SPARQL store must be updated first so any subscription re-checks
             // triggered by update_prolog_engines() see the committed batch state.
             if changed {
-                self.write_link_diff(&persist_diff);
+                self.write_link_diff(&persist_diff)?
+                    .fold_into(&mut combined_diff);
             }
         }
 

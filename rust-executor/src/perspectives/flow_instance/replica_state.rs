@@ -12,7 +12,7 @@
 //!   per replica-agent.
 //!
 //! Both live in two executor SQLite tables (`flow_replica_state`,
-//! `flow_fired_mark` in [`Ad4mDb`]). They are not links, so they never sync,
+//! `flow_fired_mark` in [`Ad4mDb`](crate::db::Ad4mDb)). They are not links, so they never sync,
 //! no model query sees them, and no other agent on the same executor can read
 //! them through the graph. Rows are keyed by `(perspective, agent_did, …)`
 //! because the pass runs once per owner agent on a multi-user executor, and are
@@ -26,12 +26,12 @@
 //! Clients read this through `perspective.flowStates` / `perspective.flowFired`
 //! and the `flow-state-changed` event, all scoped to the caller's own agent.
 
-use crate::db::{Ad4mDb, FlowReplicaStateRow};
+use crate::db::FlowReplicaStateRow;
 use crate::events::{Audience, Event, Topic};
 use crate::pubsub::get_global_pubsub;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 
 /// One row of this agent's bookkeeping, as `perspective.flowStates` returns
 /// it. An instance with no entry is one this agent has neither derived nor
@@ -47,6 +47,16 @@ pub struct FlowStateEntry {
     pub current_state: Option<String>,
     /// RFC 3339 time of the pass that last wrote this state; `None` with it.
     pub derived_at: Option<String>,
+}
+
+/// The proposals of one instance this agent has marked fired, as
+/// `perspective.flowFired` returns them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export)]
+pub struct FlowFiredEntry {
+    pub instance: String,
+    /// Sorted; empty when this agent has marked none.
+    pub fired: Vec<String>,
 }
 
 /// An instance's derived state moved, or an edge settled, on one agent's
@@ -150,7 +160,7 @@ pub struct PassRecord {
     pub newly_marked: Vec<String>,
 }
 
-/// Thin service over [`Ad4mDb`]'s two flow tables. Stateless: every call
+/// Thin service over [`Ad4mDb`](crate::db::Ad4mDb)'s two flow tables. Stateless: every call
 /// names the perspective and the agent.
 pub struct FlowReplicaState;
 
@@ -193,11 +203,10 @@ impl FlowReplicaState {
         agent_did: &str,
         instance: &str,
     ) -> anyhow::Result<PriorRow> {
-        Ad4mDb::with_global_instance(|db| {
-            db.get_flow_replica_state(perspective, agent_did, instance)
-        })
-        .map(PriorRow::from)
-        .map_err(|e| anyhow::anyhow!("reading the flow state of {instance}: {e}"))
+        crate::db_backend::db_backend()
+            .get_flow_replica_state(perspective, agent_did, instance)
+            .map(PriorRow::from)
+            .map_err(|e| anyhow::anyhow!("reading the flow state of {instance}: {e}"))
     }
 
     /// This agent's derived state for one instance, if it has one.
@@ -229,13 +238,9 @@ impl FlowReplicaState {
         instance: &str,
         torn_down: &AtomicBool,
     ) -> anyhow::Result<bool> {
-        Ad4mDb::with_global_instance(|db| {
-            if torn_down.load(Ordering::Acquire) {
-                return Ok(false);
-            }
-            db.seed_flow_replica_state(perspective, agent_did, instance)
-        })
-        .map_err(|e| anyhow::anyhow!("seeding flow state of {instance}: {e}"))
+        crate::db_backend::db_backend()
+            .seed_flow_replica_state_unless_torn_down(perspective, agent_did, instance, torn_down)
+            .map_err(|e| anyhow::anyhow!("seeding flow state of {instance}: {e}"))
     }
 
     /// Write `state` for the instance. Returns whether it changed; `false`
@@ -282,20 +287,23 @@ impl FlowReplicaState {
             ));
         }
         let at = chrono::Utc::now().to_rfc3339();
-        Ad4mDb::with_global_instance(|db| {
-            if torn_down.load(Ordering::Acquire) {
-                return Ok(None);
-            }
-            db.record_flow_replica_pass(perspective, agent_did, instance, state, fired, &at)
-                .map(Some)
-        })
-        .map(|recorded| {
-            recorded.map(|(before, newly_marked)| PassRecord {
-                prior: PriorRow::from(before),
-                newly_marked,
+        crate::db_backend::db_backend()
+            .record_flow_replica_pass_unless_torn_down(
+                perspective,
+                agent_did,
+                instance,
+                state,
+                fired,
+                &at,
+                torn_down,
+            )
+            .map(|recorded| {
+                recorded.map(|(before, newly_marked)| PassRecord {
+                    prior: PriorRow::from(before),
+                    newly_marked,
+                })
             })
-        })
-        .map_err(|e| anyhow::anyhow!("recording the flow pass over {instance}: {e}"))
+            .map_err(|e| anyhow::anyhow!("recording the flow pass over {instance}: {e}"))
     }
 
     pub fn is_fired(perspective: &str, agent_did: &str, proposal: &str) -> anyhow::Result<bool> {
@@ -308,10 +316,9 @@ impl FlowReplicaState {
         agent_did: &str,
         proposals: &[String],
     ) -> anyhow::Result<HashSet<String>> {
-        Ad4mDb::with_global_instance(|db| {
-            db.get_flow_fired_among(perspective, agent_did, proposals)
-        })
-        .map_err(|e| anyhow::anyhow!("reading fired marks: {e}"))
+        crate::db_backend::db_backend()
+            .get_flow_fired_among(perspective, agent_did, proposals)
+            .map_err(|e| anyhow::anyhow!("reading fired marks: {e}"))
     }
 
     /// Mark `proposals` (all of `instance`) fired without touching the state.
@@ -328,16 +335,22 @@ impl FlowReplicaState {
         Self::record_pass(perspective, agent_did, instance, None, proposals, &live).map(|_| ())
     }
 
-    /// Every proposal of `instance` this agent has marked fired, sorted.
-    pub fn fired_for_instance(
+    /// The proposals of each of `instances` this agent has marked fired: one
+    /// entry per instance, in the order given, read under one lock.
+    pub fn fired_for_instances(
         perspective: &str,
         agent_did: &str,
-        instance: &str,
-    ) -> anyhow::Result<Vec<String>> {
-        Ad4mDb::with_global_instance(|db| {
-            db.get_flow_fired_for_instance(perspective, agent_did, instance)
-        })
-        .map_err(|e| anyhow::anyhow!("reading fired marks of {instance}: {e}"))
+        instances: &[String],
+    ) -> anyhow::Result<Vec<FlowFiredEntry>> {
+        let lists = crate::db_backend::db_backend()
+            .get_flow_fired_for_instances(perspective, agent_did, instances)
+            .map_err(|e| anyhow::anyhow!("reading fired marks: {e}"))?;
+        Ok(instances
+            .iter()
+            .cloned()
+            .zip(lists)
+            .map(|(instance, fired)| FlowFiredEntry { instance, fired })
+            .collect())
     }
 
     /// Drop every row of the perspective, for every agent. Production removal
@@ -345,7 +358,8 @@ impl FlowReplicaState {
     /// same call that drops the perspective's links.
     #[cfg(test)]
     pub fn remove_perspective(perspective: &str) -> anyhow::Result<()> {
-        Ad4mDb::with_global_instance(|db| db.remove_flow_replica_rows(perspective))
+        crate::db_backend::db_backend()
+            .remove_flow_replica_rows(perspective)
             .map_err(|e| anyhow::anyhow!("removing flow bookkeeping of {perspective}: {e}"))
     }
 
@@ -367,10 +381,9 @@ impl FlowReplicaState {
         agent_did: &str,
         instances: Option<&[String]>,
     ) -> anyhow::Result<Vec<FlowReplicaStateRow>> {
-        Ad4mDb::with_global_instance(|db| {
-            db.get_flow_replica_states(perspective, agent_did, instances)
-        })
-        .map_err(|e| anyhow::anyhow!("reading flow states: {e}"))
+        crate::db_backend::db_backend()
+            .get_flow_replica_states(perspective, agent_did, instances)
+            .map_err(|e| anyhow::anyhow!("reading flow states: {e}"))
     }
 }
 
@@ -388,6 +401,57 @@ mod tests {
     fn fresh() -> String {
         ensure_db_init();
         uuid::Uuid::new_v4().to_string()
+    }
+
+    fn fired_for(p: &str, agent: &str, instance: &str) -> Vec<String> {
+        let mut entries =
+            FlowReplicaState::fired_for_instances(p, agent, &[instance.to_string()]).unwrap();
+        assert_eq!(entries.len(), 1);
+        entries.remove(0).fired
+    }
+
+    /// One read answers several instances, each with its own marks, in the
+    /// order asked; an instance with none answers `[]`; another agent's marks
+    /// never appear.
+    #[test]
+    fn fired_for_instances_answers_each_instance_for_this_agent_only() {
+        let p = fresh();
+        FlowReplicaState::mark_fired(&p, ALICE, "a", &["pa2".into(), "pa1".into()]).unwrap();
+        FlowReplicaState::mark_fired(&p, ALICE, "c", &["pc".into()]).unwrap();
+        FlowReplicaState::mark_fired(&p, BOB, "b", &["bob-pb".into()]).unwrap();
+        FlowReplicaState::mark_fired(&p, BOB, "a", &["bob-pa".into()]).unwrap();
+
+        let asked: Vec<String> = ["c", "b", "a"].map(String::from).to_vec();
+        assert_eq!(
+            FlowReplicaState::fired_for_instances(&p, ALICE, &asked).unwrap(),
+            vec![
+                FlowFiredEntry {
+                    instance: "c".into(),
+                    fired: vec!["pc".into()]
+                },
+                FlowFiredEntry {
+                    instance: "b".into(),
+                    fired: vec![]
+                },
+                FlowFiredEntry {
+                    instance: "a".into(),
+                    fired: vec!["pa1".into(), "pa2".into()]
+                },
+            ]
+        );
+        assert!(FlowReplicaState::fired_for_instances(&p, ALICE, &[])
+            .unwrap()
+            .is_empty());
+        // Bob's own read sees his marks, on the wire as `{ instance, fired }`.
+        assert_eq!(
+            serde_json::to_value(FlowReplicaState::fired_for_instances(&p, BOB, &asked).unwrap())
+                .unwrap(),
+            serde_json::json!([
+                { "instance": "c", "fired": [] },
+                { "instance": "b", "fired": ["bob-pb"] },
+                { "instance": "a", "fired": ["bob-pa"] },
+            ])
+        );
     }
 
     #[test]
@@ -434,9 +498,7 @@ mod tests {
         assert!(!FlowReplicaState::has_derived(&p, BOB, "i").unwrap());
         assert!(!FlowReplicaState::is_fired(&p, BOB, "p1").unwrap());
         assert!(FlowReplicaState::states(&p, BOB, None).unwrap().is_empty());
-        assert!(FlowReplicaState::fired_for_instance(&p, BOB, "i")
-            .unwrap()
-            .is_empty());
+        assert!(fired_for(&p, BOB, "i").is_empty());
     }
 
     #[test]
@@ -548,7 +610,7 @@ mod tests {
         assert_eq!(second.prior, PriorRow::Derived("scoped".into()));
         assert_eq!(second.newly_marked, vec!["p3".to_string()]);
         assert_eq!(
-            FlowReplicaState::fired_for_instance(&p, ALICE, "i").unwrap(),
+            fired_for(&p, ALICE, "i"),
             vec!["p1".to_string(), "p2".into(), "p3".into()]
         );
         assert_eq!(
@@ -580,10 +642,7 @@ mod tests {
                 .as_deref(),
             Some("open")
         );
-        assert_eq!(
-            FlowReplicaState::fired_for_instance(&p, ALICE, "i").unwrap(),
-            vec!["p1".to_string()]
-        );
+        assert_eq!(fired_for(&p, ALICE, "i"), vec!["p1".to_string()]);
     }
 
     #[test]
@@ -626,7 +685,9 @@ mod tests {
         let p = fresh();
         FlowReplicaState::set_current_state(&p, ALICE, "i", "done", &LIVE).unwrap();
         FlowReplicaState::mark_fired(&p, ALICE, "i", &["p1".into()]).unwrap();
-        Ad4mDb::with_global_instance(|db| db.remove_perspective(&p)).unwrap();
+        crate::db_backend::db_backend()
+            .remove_perspective(&p)
+            .unwrap();
         assert!(!FlowReplicaState::has_derived(&p, ALICE, "i").unwrap());
         assert!(!FlowReplicaState::is_fired(&p, ALICE, "p1").unwrap());
     }

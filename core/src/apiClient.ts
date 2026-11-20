@@ -1,5 +1,5 @@
 import { callSafely } from './notifyListeners'
-import { LONG_METHODS, READ_METHODS } from './generated/api/RpcMethods'
+import { LONG_METHODS, OPENS_METHODS, READ_METHODS } from './generated/api/RpcMethods'
 import type { RpcMethod, RpcMethods } from './generated/api/RpcMethods'
 import type { EventMap, EventName } from './generated/api/Events'
 
@@ -11,16 +11,22 @@ export interface WsEvent {
 
 /** Error thrown by ApiClient when an RPC call fails. */
 export class RpcError extends Error {
-    /** Error code (maps to HTTP status semantics: 400, 401, 403, 404, 500). */
+    /** Error code (maps to HTTP status semantics: 400, 401, 403, 404, 422, 500). */
     readonly status: number
     /** Raw error message from server. */
     readonly body: string
+    /**
+     * Structured detail the executor attached (`error.data`), when it did: e.g. the
+     * `InstanceError` of a refused `perspective.instance*` write.
+     */
+    readonly data?: unknown
 
-    constructor(status: number, body: string) {
+    constructor(status: number, body: string, data?: unknown) {
         super(`RPC error ${status}: ${body}`)
         this.name = "RpcError"
         this.status = status
         this.body = body
+        this.data = data
     }
 }
 
@@ -32,7 +38,10 @@ export interface CallOptions {
      */
     signal?: AbortSignal
     /** Timeout in ms, from the call to the reply. Defaults to 30 s, or
-     *  {@link LONG_TIMEOUT_MS} for a method the executor marks long. */
+     *  {@link LONG_TIMEOUT_MS} for a method the executor marks long. A call
+     *  that opens something on the executor (`OPENS_METHODS`, a live query) is
+     *  cancelled there when it times out, as when `signal` aborts it; any other
+     *  call that times out still runs to its end. */
     timeoutMs?: number
 }
 
@@ -58,6 +67,44 @@ const MAX_RECONNECT_DELAY_MS = 30_000
  *  MAX_WATCH_RETRIES times in a row. */
 const WATCH_RETRY_DELAY_MS = 1_000
 const MAX_WATCH_RETRIES = 5
+
+/** An open socket sends a ping this often, and must deliver some message
+ *  (the pong will do) within an interval of the first ping it left
+ *  unanswered. After a network switch a socket can stay OPEN for minutes with
+ *  no close event, since no FIN or RST ever arrives; this notices it within
+ *  two intervals. */
+const PING_INTERVAL_MS = 10_000
+
+/** The slowest link a socket is given time for. The executor reads a ping
+ *  only after the frames sent before it, so a ping left unanswered counts as
+ *  silence only once everything the socket sent before that ping could have
+ *  crossed this link and PONG_RETURN_MS more have passed, if that takes longer
+ *  than PING_INTERVAL_MS. Messages that come in meanwhile do not shorten this:
+ *  they say nothing about how far an upload has got. */
+const SLOWEST_LINK_BYTES_PER_MS = 16 // 16 kB/s
+
+/** How long a pong gets to come back after its ping could have been read
+ *  behind a large write. Shorter than PING_INTERVAL_MS, so the few ms a small
+ *  frame adds before a ping on an idle socket never cost a ping interval. */
+const PONG_RETURN_MS = 5_000
+
+/** How long `checkConnection` waits for the open socket to say anything
+ *  after its ping. If a large write sent before it may still be on the way,
+ *  the wait lasts until that write could have crossed, as for the periodic
+ *  ping, and half of this more for the pong. On a working path the pong is
+ *  one round trip away. */
+const CHECK_CONNECTION_DEADLINE_MS = 2_000
+
+/** The bytes `text` takes as UTF-8, as a WebSocket text frame sends it. */
+function utf8Length(text: string): number {
+    let bytes = text.length
+    for (let i = 0; i < text.length; i++) {
+        const unit = text.charCodeAt(i)
+        // A surrogate is half of a 4-byte pair: 2 units, 2 extra bytes.
+        if (unit >= 0x80) bytes += unit < 0x800 || (unit >= 0xd800 && unit <= 0xdfff) ? 1 : 2
+    }
+    return bytes
+}
 
 let _idCounter = 0
 function nextId(): string {
@@ -133,6 +180,16 @@ export class ApiClient {
     private _wsReconnectTimer: ReturnType<typeof setTimeout> | null = null
     private _wsReconnectDelay = INITIAL_RECONNECT_DELAY_MS
     private _wsPingTimer: ReturnType<typeof setInterval> | null = null
+    /** When the open socket was first pinged since it last delivered a message; null while none is unanswered. */
+    private _wsPingedAt: number | null = null
+    /** When that ping could have reached the executor, which reads it only after what the socket sent before it. */
+    private _wsPingArrivesBy = 0
+    /** When everything the open socket sent so far could have crossed a SLOWEST_LINK_BYTES_PER_MS link.
+     *  A message from the socket does not move it back: hearing from the executor says nothing
+     *  about how much of a large upload has reached it. */
+    private _wsSentBy = 0
+    /** A `checkConnection` probe waiting for the open socket to say anything; null when none. */
+    private _wsProbeTimer: ReturnType<typeof setTimeout> | null = null
     // The executor sends a socket only the events it asked for (`events.watch`).
     // What the executor has for the open socket, as sent; a new socket has `{}`.
     private _watching: string | null = '{}'
@@ -142,6 +199,13 @@ export class ApiClient {
     private _watchSent: Promise<void> = Promise.resolve()
     private _watchRetries = 0
     private _watchRetryTimer: ReturnType<typeof setTimeout> | null = null
+    private _networkCallbacks = new Set<() => void>()
+    /** Removes the network-change listeners; null while not listening. */
+    private _unlistenNetwork: (() => void) | null = null
+    /** A network change waits for its socket to open, then tells `onNetworkChange`. */
+    private _networkChanged = false
+    /** The socket dialled for the last network change. */
+    private _networkDial: WebSocket | null = null
 
     private _getWsUrl(): string {
         const wsBase = this.baseUrl
@@ -154,6 +218,10 @@ export class ApiClient {
     private _ensureWs(): void {
         if (this._ws) return
         if (this._authFailed !== null) throw new RpcError(401, this._authFailed)
+        this._listenForNetworkChanges()
+        // A dial ends any wait for one: a call or subscriber that dials during the backoff
+        // leaves no timer behind to swallow the retry after this socket's own drop.
+        this._cancelReconnect()
         const WsImpl = this._webSocketImpl ?? globalThis.WebSocket
         const ws = new WsImpl(this._getWsUrl())
         this._ws = ws
@@ -178,6 +246,10 @@ export class ApiClient {
         this._wsOpen.catch(() => {})
 
         ws.onmessage = (event) => {
+            if (this._ws === ws) {
+                this._wsPingedAt = null
+                this._endProbe()
+            }
             let parsed: Record<string, unknown>
             try { parsed = JSON.parse(event.data) } catch (e) {
                 console.error('Error parsing WebSocket data:', e)
@@ -187,18 +259,19 @@ export class ApiClient {
             if (parsed.type === undefined) {
                 const pending = this._pendingCalls.get(parsed.id as string)
                 if (!pending) return // late reply to a timed-out or aborted call, or a cancel ack
-                const error = parsed.error as { code?: number; message?: string } | undefined
+                const error = parsed.error as { code?: number; message?: string; data?: unknown } | undefined
                 if (!error) {
                     pending.resolve(parsed.result)
                     return
                 }
-                const rpcError = new RpcError(error.code ?? 500, error.message ?? 'Unknown error')
+                const rpcError = new RpcError(error.code ?? 500, error.message ?? 'Unknown error', error.data)
                 pending.reject(rpcError)
                 // The executor answers 401 only when the token stopped working, then closes the socket.
                 if (rpcError.status === 401) this._failAuth(rpcError.body)
                 return
             }
-            if (parsed.type === 'pong') return
+            // A dropped socket's events are not this client's any more: its successor watches again.
+            if (parsed.type === 'pong' || this._ws !== ws) return
             const perspective = parsed.perspectiveUuid
             const regs = this._handlers.get(parsed.type as string)
             // Like DOM events: a handler added during dispatch waits for the
@@ -211,6 +284,10 @@ export class ApiClient {
         }
 
         ws.onerror = (e) => {
+            // A socket this client already let go (closed, or dropped as silent) is no news:
+            // Node reports an `error` when the server ends the connection without answering
+            // the close frame, as the executor does after the last listener goes.
+            if (this._ws !== ws) return
             console.error('WebSocket error:', e)
         }
     }
@@ -219,14 +296,14 @@ export class ApiClient {
         // A socket closed by _closeWs() must not take the calls queued for its successor.
         if (this._ws !== ws) return
         this._wsReconnectDelay = INITIAL_RECONNECT_DELAY_MS
-        this._startPing()
+        this._startPing(ws)
         // The watch goes out before the queued calls, so the events they cause reach listeners.
         this._watching = '{}'
         this._watchRetries = 0
         this._flushWatch()
         for (const pending of this._pendingCalls.values()) {
             if (!pending.sent) {
-                ws.send(pending.message)
+                this._send(ws, pending.message)
                 pending.sent = true
             }
         }
@@ -238,6 +315,68 @@ export class ApiClient {
             }
         }
         this._hasConnectedOnce = true
+        if (this._networkChanged) {
+            this._networkChanged = false
+            this._notifyNetworkChange()
+        }
+    }
+
+    /**
+     * Hear of network changes where the platform says so: `online` on the
+     * global object (browsers, Deno) redials at once, and `change` on
+     * `navigator.connection` (Chromium) runs `checkConnection`. Elsewhere,
+     * e.g. Node, nothing is heard and the ping deadline notices a dead
+     * socket on its own.
+     */
+    private _listenForNetworkChanges(): void {
+        if (this._unlistenNetwork) return
+        const handler = () => this._onNetworkChange()
+        const removers: (() => void)[] = []
+        const target = globalThis as unknown as Partial<EventTarget>
+        if (typeof target.addEventListener === 'function') {
+            target.addEventListener('online', handler)
+            removers.push(() => target.removeEventListener?.('online', handler))
+        }
+        const connection = (globalThis as { navigator?: { connection?: Partial<EventTarget> } }).navigator?.connection
+        if (typeof connection?.addEventListener === 'function') {
+            // `change` also fires when Chromium's downlink or rtt estimate
+            // moves, as a busy call makes it do: probe rather than drop.
+            const probe = () => this.checkConnection()
+            connection.addEventListener('change', probe)
+            removers.push(() => connection.removeEventListener?.('change', probe))
+        }
+        this._unlistenNetwork = () => { for (const remove of removers) remove() }
+    }
+
+    /**
+     * The network changed: the open socket most likely runs over a path that
+     * is gone, and nothing would say so before the ping deadline. Drop it as
+     * a silent socket is dropped and dial the next one now, without backoff.
+     * `onNetworkChange` callbacks fire once that socket opens.
+     */
+    private _onNetworkChange(): void {
+        if (this._authFailed !== null) return
+        const ws = this._ws
+        // A socket dialled for an earlier change is on the new network already.
+        if (ws && ws === this._networkDial && ws.readyState === 0 /* CONNECTING */) return
+        if (ws) {
+            console.info('Network changed; reconnecting the WebSocket')
+            this._onClose(ws)
+            ws.close()
+        }
+        this._cancelReconnect()
+        this._wsReconnectDelay = INITIAL_RECONNECT_DELAY_MS
+        if (this._handlers.size === 0 && this._pendingCalls.size === 0) {
+            this._notifyNetworkChange()
+            return
+        }
+        this._networkChanged = true
+        this._ensureWs()
+        this._networkDial = this._ws
+    }
+
+    private _notifyNetworkChange(): void {
+        for (const cb of [...this._networkCallbacks]) callSafely(cb, 'Error in network-change callback:')
     }
 
     /** `reason` is set when the executor asked to try again later; calls that fail carry it. */
@@ -270,19 +409,56 @@ export class ApiClient {
         for (const cb of [...this._authFailedCallbacks]) callSafely(cb, 'Error in auth-failed callback:', reason)
     }
 
-    private _startPing(): void {
+    private _startPing(ws: WebSocket): void {
         this._stopPing()
+        this._wsPingedAt = null
+        this._wsSentBy = 0
         this._wsPingTimer = setInterval(() => {
-            if (this._ws?.readyState === 1 /* OPEN */) {
-                this._ws.send(JSON.stringify({ type: 'ping' }))
+            if (this._ws !== ws) return
+            // A probe has its own, shorter deadline and decides for this ping.
+            if (this._wsProbeTimer) return
+            const ping = JSON.stringify({ type: 'ping' })
+            if (this._wsPingedAt === null) {
+                this._wsPingedAt = performance.now()
+                this._send(ws, ping)
+                this._wsPingArrivesBy = this._wsSentBy
+                return
             }
-        }, 30_000)
+            if (performance.now() >= Math.max(this._wsPingedAt + PING_INTERVAL_MS, this._wsPingArrivesBy + PONG_RETURN_MS)) {
+                this._dropSilentSocket(ws)
+                return
+            }
+            this._send(ws, ping)
+        }, PING_INTERVAL_MS)
+    }
+
+    /** Send on `ws`, counting how long what the open socket sent could take to cross the slowest link. */
+    private _send(ws: WebSocket, text: string): void {
+        if (this._ws === ws) this._wsSentBy = Math.max(this._wsSentBy, performance.now()) + utf8Length(text) / SLOWEST_LINK_BYTES_PER_MS
+        ws.send(text)
+    }
+
+    /** The socket answered nothing for a whole ping interval: treat it as
+     *  closed now. Its close event can take minutes on a dead connection,
+     *  since the close frame gets no answer either; `_onClose` ignores it then. */
+    private _dropSilentSocket(ws: WebSocket): void {
+        console.warn(`WebSocket silent for ${performance.now() - (this._wsPingedAt ?? performance.now())} ms after a ping; reconnecting`)
+        this._onClose(ws)
+        ws.close()
     }
 
     private _stopPing(): void {
         if (this._wsPingTimer) {
             clearInterval(this._wsPingTimer)
             this._wsPingTimer = null
+        }
+        this._endProbe()
+    }
+
+    private _endProbe(): void {
+        if (this._wsProbeTimer) {
+            clearTimeout(this._wsProbeTimer)
+            this._wsProbeTimer = null
         }
     }
 
@@ -292,8 +468,60 @@ export class ApiClient {
         this._wsReconnectDelay = Math.min(this._wsReconnectDelay * 2, MAX_RECONNECT_DELAY_MS)
         this._wsReconnectTimer = setTimeout(() => {
             this._wsReconnectTimer = null
+            this._listenForWake(false)
             this._ensureWs()
         }, delay)
+        this._listenForWake(true)
+    }
+
+    /** End the wait for the next dial, if one is pending, without dialling. */
+    private _cancelReconnect(): void {
+        if (this._wsReconnectTimer) {
+            clearTimeout(this._wsReconnectTimer)
+            this._wsReconnectTimer = null
+        }
+        this._listenForWake(false)
+    }
+
+    /**
+     * Dial now if the client is waiting out its reconnect backoff (up to 30 s)
+     * instead of letting the wait run out. For the moments the host knows the
+     * executor may be reachable again: an executor it restarted is up, the
+     * device woke. In a browser the client does this itself on `online` and when
+     * the page becomes visible. Does nothing while a socket is open or
+     * connecting, after `closeAll()` with nothing to reconnect, or once the
+     * executor refused the token.
+     */
+    reconnectNow(): void {
+        if (!this._wsReconnectTimer || this._ws || this._authFailed !== null) return
+        this._cancelReconnect()
+        // The executor is likely back, so a failure now starts the backoff over.
+        this._wsReconnectDelay = INITIAL_RECONNECT_DELAY_MS
+        this._ensureWs()
+    }
+
+    private _wakeListening = false
+    /** `online` always; `visibilitychange` only when the page became visible. */
+    private readonly _onWake = (event: Event): void => {
+        if (event.type === 'visibilitychange' && typeof document !== 'undefined' && document.visibilityState !== 'visible') return
+        this.reconnectNow()
+    }
+
+    /** Listen for `online` and `visibilitychange` exactly while a reconnect
+     *  timer is pending. Outside a browser (no `window`) it registers nothing. */
+    private _listenForWake(on: boolean): void {
+        if (on === this._wakeListening) return
+        const win = typeof window !== 'undefined' ? window : undefined
+        if (typeof win?.addEventListener !== 'function') return
+        const doc = typeof document !== 'undefined' && typeof document.addEventListener === 'function' ? document : undefined
+        this._wakeListening = on
+        if (on) {
+            win.addEventListener('online', this._onWake)
+            doc?.addEventListener('visibilitychange', this._onWake)
+        } else {
+            win.removeEventListener('online', this._onWake)
+            doc?.removeEventListener('visibilitychange', this._onWake)
+        }
     }
 
     // ── RPC call method ─────────────────────────────────────────────────────
@@ -330,7 +558,17 @@ export class ApiClient {
                 signal?.removeEventListener('abort', onAbort)
                 fn()
             }
+            // Tell the executor the call is no longer wanted, so it stops the work. A late
+            // reply finds no pending call and is dropped.
+            const cancel = () => {
+                if (pending.sent && this._ws?.readyState === 1 /* OPEN */) {
+                    this._send(this._ws, JSON.stringify({ id: nextId(), type: 'request.cancel', params: { targetId: id } }))
+                }
+            }
             const timer = setTimeout(() => {
+                // Only a call that opens something is cancelled on timeout: a write that
+                // timed out still runs to its end on the executor, as it always has.
+                if ((OPENS_METHODS as ReadonlySet<string>).has(type)) cancel()
                 settle(() => reject(new RpcError(408, `RPC call '${type}' timed out after ${timeoutMs}ms`)))
                 // A connect that never completes (a black-holed port) would hold every later
                 // call. Drop it once no call waits on it, so the next call dials again.
@@ -340,9 +578,7 @@ export class ApiClient {
                 }
             }, timeoutMs)
             const onAbort = () => {
-                if (pending.sent && this._ws?.readyState === 1 /* OPEN */) {
-                    this._ws.send(JSON.stringify({ id: nextId(), type: 'request.cancel', params: { targetId: id } }))
-                }
+                cancel()
                 settle(() => reject(new DOMException('Aborted', 'AbortError')))
             }
             const pending: PendingCall = {
@@ -364,7 +600,7 @@ export class ApiClient {
                 return
             }
             if (this._ws!.readyState === 1 /* OPEN */) {
-                this._ws!.send(message)
+                this._send(this._ws!, message)
                 pending.sent = true
             }
         })
@@ -479,10 +715,7 @@ export class ApiClient {
             clearTimeout(this._watchRetryTimer)
             this._watchRetryTimer = null
         }
-        if (this._wsReconnectTimer) {
-            clearTimeout(this._wsReconnectTimer)
-            this._wsReconnectTimer = null
-        }
+        this._cancelReconnect()
         const ws = this._ws
         this._ws = null
         this._wsOpen = null
@@ -495,6 +728,44 @@ export class ApiClient {
     onReconnect(callback: () => void): () => void {
         this._reconnectCallbacks.add(callback)
         return () => { this._reconnectCallbacks.delete(callback) }
+    }
+
+    /** Register a callback that fires after the network changed (`online`,
+     *  or a socket that failed `checkConnection`), once the socket dialled for the
+     *  new network is open and its event watch sent. Calls made from it go
+     *  out on that socket. Returns an unsubscribe function. */
+    onNetworkChange(callback: () => void): () => void {
+        this._networkCallbacks.add(callback)
+        this._listenForNetworkChanges()
+        return () => { this._networkCallbacks.delete(callback) }
+    }
+
+    /**
+     * Check the open socket now rather than at the next ping: send a ping,
+     * and if nothing at all arrives on that socket within `deadlineMs`,
+     * treat it as a network change (drop it, dial the next one at once,
+     * `onNetworkChange` callbacks fire when it opens). Any message keeps it.
+     * For a caller that has seen its network path break, e.g. ICE going
+     * disconnected, where the platform fired no `online` event. Without an
+     * open socket, or while a check runs, this does nothing.
+     */
+    checkConnection(deadlineMs = CHECK_CONNECTION_DEADLINE_MS): void {
+        const ws = this._ws
+        if (!ws || ws.readyState !== 1 /* OPEN */ || this._wsProbeTimer) return
+        const first = this._wsPingedAt === null
+        if (first) this._wsPingedAt = performance.now()
+        this._send(ws, JSON.stringify({ type: 'ping' }))
+        if (first) this._wsPingArrivesBy = this._wsSentBy
+        // Any message from the socket ends the probe (`onmessage` → `_endProbe`).
+        // The ping reaches the executor only after what was sent before it,
+        // and its pong gets half the deadline to come back after that.
+        const wait = Math.max(deadlineMs, this._wsSentBy - performance.now() + deadlineMs / 2)
+        this._wsProbeTimer = setTimeout(() => {
+            this._wsProbeTimer = null
+            if (this._ws !== ws) return
+            console.warn(`WebSocket silent for ${wait} ms after a check; reconnecting`)
+            this._onNetworkChange()
+        }, wait)
     }
 
     /** Register a callback that fires once when the executor refuses this
@@ -515,6 +786,11 @@ export class ApiClient {
         this._handlers.clear()
         this._reconnectCallbacks.clear()
         this._authFailedCallbacks.clear()
+        this._networkCallbacks.clear()
+        this._unlistenNetwork?.()
+        this._unlistenNetwork = null
+        this._networkChanged = false
+        this._networkDial = null
         // A reused client must not fire onReconnect on its next first open.
         this._hasConnectedOnce = false
     }

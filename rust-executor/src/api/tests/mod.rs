@@ -17,6 +17,8 @@ pub mod flow_ws_tests;
 #[cfg(test)]
 pub mod handler_table_tests;
 #[cfg(test)]
+pub mod link_status_ws_tests;
+#[cfg(test)]
 pub mod live_query_tests;
 #[cfg(test)]
 pub mod method_matrix_mcp_tests;
@@ -29,7 +31,11 @@ pub mod neighbourhood_access_tests;
 #[cfg(test)]
 pub mod notification_ws_tests;
 #[cfg(test)]
+pub mod perspective_instances_ws_tests;
+#[cfg(test)]
 pub mod protocol_tests;
+#[cfg(test)]
+pub mod query_stop_tests;
 #[cfg(test)]
 pub mod runtime_access_tests;
 #[cfg(test)]

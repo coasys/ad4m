@@ -306,7 +306,8 @@ describe('SHACLShape', () => {
       return [...names, ...links.flatMap(({ source, predicate, target }) => {
         const string = target.startsWith('literal:string:') ? target.slice('literal:string:'.length) : undefined;
         if (predicate === 'sh://in') {
-          const values = JSON.parse(string!).map((v: { value: string }) => v.value);
+          const values = JSON.parse(string!).map((v: any) =>
+            v !== null && typeof v === 'object' && 'value' in v ? v.value : v);
           return [`${source} sh://in ${JSON.stringify(values)}`, `${source} ad4m://in ${string}`];
         }
         const value = string === undefined
@@ -614,7 +615,9 @@ describe('SHACLShape', () => {
       expect(reconstructed.properties[0].in).toEqual(original.properties[0].in);
     });
 
-    it('handles sh:in with empty array (no link created)', () => {
+    it('handles sh:in with empty array (deny-all constraint is stored)', () => {
+      // `in: []` allows nothing — a constraint the executor must see, so the
+      // link is written. Only an absent `in` means unconstrained.
       const original = new SHACLShape('test://Model');
       original.addProperty({
         name: 'field',
@@ -624,7 +627,11 @@ describe('SHACLShape', () => {
 
       const links = original.toLinks();
       const inLink = links.find(l => l.predicate === 'sh://in');
-      expect(inLink).toBeUndefined();
+      expect(inLink).toBeDefined();
+      expect(inLink!.target).toBe('literal:string:[]');
+
+      const reconstructed = SHACLShape.fromLinks(links, 'test://ModelShape');
+      expect(reconstructed.properties[0].in).toEqual([]);
     });
 
     it('preserves sh:in through toJSON() → fromJSON()', () => {
@@ -659,6 +666,27 @@ describe('SHACLShape', () => {
 
       const round = SHACLShape.fromLinks(links, shape.nodeShapeUri);
       expect(round.properties[0].relationKind).toBe('hasMany');
+    });
+
+    it('emits, parses and round-trips polymorphic through links and JSON', () => {
+      const shape = new SHACLShape('ns://Placement');
+      shape.addProperty({ name: 'node', path: 'ns://placed', relationKind: 'hasOne', polymorphic: true });
+      shape.addProperty({ name: 'plain', path: 'ns://plain', relationKind: 'hasOne' });
+      const links = shape.toLinks();
+      const polyLinks = links.filter(l => l.predicate === 'ad4m://polymorphic');
+      expect(polyLinks).toHaveLength(1);
+      expect(polyLinks[0].source).toContain('Placement.node');
+      expect(polyLinks[0].target).toBe('literal:true');
+
+      const round = SHACLShape.fromLinks(links, shape.nodeShapeUri);
+      expect(round.properties.find(p => p.name === 'node')?.polymorphic).toBe(true);
+      expect(round.properties.find(p => p.name === 'plain')?.polymorphic).toBeUndefined();
+
+      const json = shape.toJSON();
+      expect((json as any).properties.find((p: any) => p.name === 'node').polymorphic).toBe(true);
+      const fromJson = SHACLShape.fromJSON(json);
+      expect(fromJson.properties.find(p => p.name === 'node')?.polymorphic).toBe(true);
+      expect(fromJson.properties.find(p => p.name === 'plain')?.polymorphic).toBeUndefined();
     });
 
     it('emits and parses targetClassName', () => {

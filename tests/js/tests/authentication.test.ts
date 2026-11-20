@@ -63,7 +63,8 @@ describe("Authentication integration tests", () => {
 
         function expectRefusal(result: { exited: boolean, code: number | null, output: string }) {
             expect(result.exited, `executor kept running:\n${result.output.slice(-2000)}`).to.be.true;
-            expect(result.code).to.not.equal(0);
+            // 78: a refused start, which a supervisor does not retry.
+            expect(result.code).to.equal(78);
             expect(result.output).to.contain("no admin credential");
             // The message names both ways out.
             expect(result.output).to.contain("--admin-credential");
@@ -81,12 +82,12 @@ describe("Authentication integration tests", () => {
         it("an empty credential is refused, naming the flag or the variable", async () => {
             const flag = await runWithoutCredential(["--admin-credential", ""]);
             expect(flag.exited, `executor kept running:\n${flag.output.slice(-2000)}`).to.be.true;
-            expect(flag.code).to.not.equal(0);
+            expect(flag.code).to.equal(78);
             expect(flag.output).to.contain("--admin-credential needs a value");
 
             const variable = await runWithoutCredential([], { AD4M_ADMIN_CREDENTIAL: "" });
             expect(variable.exited, `executor kept running:\n${variable.output.slice(-2000)}`).to.be.true;
-            expect(variable.code).to.not.equal(0);
+            expect(variable.code).to.equal(78);
             expect(variable.output).to.contain("AD4M_ADMIN_CREDENTIAL is set but empty");
         })
 
@@ -180,6 +181,14 @@ describe("Authentication integration tests", () => {
                     lastErr = null
                     break
                 } catch (e) {
+                    // agent.generate refuses an already-initialised agent: a
+                    // reply lost to the flaky socket below lands exactly here —
+                    // the first call still ran to completion server-side.
+                    const status = await ad4mClient.agent.status().catch(() => null)
+                    if (status?.isInitialized) {
+                        lastErr = null
+                        break
+                    }
                     lastErr = e
                     console.log(`agent.generate attempt ${attempt}/3 failed, retrying:`, e)
                     await sleep(1000)

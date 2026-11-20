@@ -4,6 +4,7 @@
 //! This enables AI agents to work with any data model defined in a perspective,
 //! not just hardcoded tool sets.
 
+use super::side_effects::generated_verb_writes;
 use super::Ad4mMcpHandler;
 use crate::mcp::shacl::{self, ShaclProperty};
 use crate::perspectives::perspective_instance::SubjectClassOption;
@@ -341,22 +342,22 @@ impl Ad4mMcpHandler {
             }
         };
 
-        // rest could be "create", "query", "get", "delete", "set_propname", "add_propname", "remove_propname", "get_propname"
+        // rest could be "create", "query", "list", "get", "update", "delete",
+        // "set_propname", "add_propname", "remove_propname", "get_propname".
         let (operation, property_name) = if let Some((op, prop)) = rest.split_once('_') {
             (op, Some(prop.to_string()))
         } else {
             (rest, None)
         };
 
-        if !matches!(
-            operation,
-            "create" | "query" | "list" | "get" | "update" | "delete" | "set" | "add" | "remove"
-        ) {
+        // The same lists the classifier uses, so a write verb cannot be a
+        // read on one side and a write on the other.
+        let Some(writes) = generated_verb_writes(operation) else {
             return Ok(CallToolResult::error(vec![Content::text(format!(
                 "Unknown tool: {}",
                 tool_name
             ))]));
-        }
+        };
 
         let perspective_id = match args.get("perspective_id").and_then(|v| v.as_str()) {
             Some(id) => id.to_string(),
@@ -370,7 +371,6 @@ impl Ad4mMcpHandler {
         // Find actual class name (preserving original case). A write checks the write guard
         // here already, so a caller who may not write is refused as the write would refuse it.
         let class_name = {
-            let writes = !matches!(operation, "query" | "list" | "get");
             let perspective = if writes {
                 self.get_writable_perspective(&perspective_id)
                     .await
@@ -393,10 +393,6 @@ impl Ad4mMcpHandler {
             };
             // The generated tools of an abstract class (#1435) only read: the
             // write tools write links at one class's predicates.
-            let writes = matches!(
-                operation,
-                "create" | "update" | "set" | "add" | "remove" | "delete"
-            );
             let refusal = match writes.then(|| perspective.is_abstract_class(&name)) {
                 Some(Ok(true)) => Some(format!(
                     "'{name}' is an abstract class: its generated tools only read, and it \
@@ -1450,31 +1446,82 @@ mod tests {
     // The MCP session's caller is tested in `mcp::caller` and `mcp::tools`
     // (`agent_context_tests`), and `auth_status` in `mcp::tools::auth`.
 
-    #[test]
-    fn test_escape_prolog_string() {
-        assert_eq!(
-            Ad4mMcpHandler::escape_prolog_string(r#"test"value"#),
-            r#"test\"value"#
-        );
-        assert_eq!(
-            Ad4mMcpHandler::escape_prolog_string(r"test\path"),
-            r"test\\path"
-        );
-        assert_eq!(
-            Ad4mMcpHandler::escape_prolog_string("test'quote"),
-            r"test\'quote"
-        );
-        // Test newline and carriage return escaping
-        assert_eq!(
-            Ad4mMcpHandler::escape_prolog_string("line1\nline2"),
-            r"line1\nline2"
-        );
-        assert_eq!(
-            Ad4mMcpHandler::escape_prolog_string("text\r\nmore"),
-            r"text\r\nmore"
-        );
-    }
-
     // Integration tests for full login flow would need the database initialized
     // See tests/js/tests/mcp-auth.test.ts for full integration tests
+
+    /// What one class costs in the tools[] JSON: 16 tools, ~8.3 KB. The #1713
+    /// TS repro registers 100 of these (≈ 1,600 tools, ~837 KB — several times
+    /// a 49152-token context); this pins the per-class weight that number is
+    /// computed from, so a slimmer generator updates the test's class count.
+    #[test]
+    fn generated_class_tools_json_size() {
+        // One class with 8 scalar properties + 1 collection, the shape the
+        // #1713 repro test registers in a loop.
+        let scalars: Vec<ShaclProperty> = (0..8)
+            .map(|i| ShaclProperty {
+                name: format!("property{i}"),
+                is_collection: false,
+                predicate: Some(format!("repro://class/property{i}")),
+                datatype: Some("xsd://string".into()),
+                min_count: None,
+                max_count: Some(1),
+                node_kind: None,
+                getter: None,
+                class: None,
+                resolve_language: None,
+                interpretation_hint: None,
+                local: false,
+            })
+            .collect();
+        let collection = ShaclProperty {
+            name: "members".into(),
+            is_collection: true,
+            predicate: Some("repro://class/member".into()),
+            datatype: None,
+            min_count: None,
+            max_count: None,
+            node_kind: Some("sh://IRI".into()),
+            getter: None,
+            class: None,
+            resolve_language: None,
+            interpretation_hint: None,
+            local: false,
+        };
+        let class = shacl::ShaclClass {
+            name: "ReproClass00".into(),
+            name_lower: "reproclass00".into(),
+            properties: [scalars, vec![collection]].concat(),
+            shape_uri: Some("repro://ReproClass00Shape".into()),
+            all_predicates: vec![],
+        };
+        let tools = Ad4mMcpHandler::class_tools(&class, true);
+        assert_eq!(
+            tools.len(),
+            16,
+            "5 class ops + 8 setters + 3 collection ops"
+        );
+        let bytes: usize = tools
+            .iter()
+            .map(|t| {
+                serde_json::to_string(&json!({
+                    "type": "function",
+                    "function": {
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": t.input_schema,
+                    }
+                }))
+                .unwrap()
+                .len()
+            })
+            .sum();
+        // The class count the #1713 repro registers times this per-class cost
+        // must clear the model's context several times over. 8.3 KB × 100
+        // classes ≈ 837 KB ≈ ~210,000 tokens at ~4 chars/token, over 4× a
+        // num_ctx of 49152 — the We failure was ~1,500 tools / ~750 KB.
+        assert!(
+            bytes > 8_000,
+            "a repro class's tools[] JSON shrank to {bytes} bytes — the TS repro needs more classes"
+        );
+    }
 }

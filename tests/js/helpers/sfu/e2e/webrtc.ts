@@ -15,12 +15,34 @@
  * an operation on a closed connection, and closing under a running
  * operation. ICE uses host candidates only: every agent here shares a
  * machine, and test hosts may have no route to a STUN server.
+ *
+ * It fires `iceconnectionstatechange` for each ICE state it reports, as a
+ * browser does. The binding fires the event when libwebrtc's legacy ICE
+ * state changes, but `iceConnectionState` returns the standardized state,
+ * which libwebrtc changes just after. A listener can read the old state,
+ * and then no event comes for the new one (see `ICE_STATE_RECHECK_MS`).
  */
 
 import { wrtc } from "./media.js";
 
 /** The peer connections this process holds open. */
 const open = new Set<RTCPeerConnection>();
+
+/**
+ * After each ICE state event, look at the state again at these times and
+ * fire one more event if it is not the state the last event showed. In E17
+ * the event of a cut read "completed" and the state was "disconnected" 2 ms
+ * later; without a second event the SDK never restarted ICE.
+ */
+const ICE_STATE_RECHECK_MS = [10, 100, 1_000];
+
+/** The next offer a connection of this process creates fails (`failNextOffer`). */
+let offerFails = false;
+
+/** Make the next `createOffer` in this process fail, as one a browser cannot make. */
+export function failNextOffer(): void {
+  offerFails = true;
+}
 
 /**
  * Where this process's media goes: for each open connection, the remote
@@ -49,6 +71,7 @@ export function specPeerConnection(configuration: RTCConfiguration = {}): RTCPee
   const addCandidate = pc.addIceCandidate.bind(pc);
   const closeNative = pc.close.bind(pc);
   const restartIce = pc.restartIce.bind(pc);
+  const createOffer = pc.createOffer.bind(pc);
 
   let operations: Promise<unknown> = Promise.resolve();
   const chain = <T>(operation: () => Promise<T>): Promise<T> => {
@@ -75,6 +98,11 @@ export function specPeerConnection(configuration: RTCConfiguration = {}): RTCPee
       return setRemote(description);
     }));
   pc.addIceCandidate = guarded((candidate: RTCIceCandidateInit) => chain(() => addCandidate(candidate)));
+  pc.createOffer = ((options?: RTCOfferOptions) => {
+    if (!offerFails) return createOffer(options);
+    offerFails = false;
+    return Promise.reject(new Error("OperationError: the offer could not be created"));
+  }) as RTCPeerConnection["createOffer"];
   pc.restartIce = () => {
     if (!closed) restartIce();
   };
@@ -84,6 +112,25 @@ export function specPeerConnection(configuration: RTCConfiguration = {}): RTCPee
     open.delete(pc);
     void operations.then(closeNative);
   };
+  // Always, not only with E2E_DEBUG: a session that does not recover from an
+  // outage is a flake to diagnose from CI's log, and the SDK acts on these
+  // states (E6, CI job 53158). A handful of lines per connection.
+  const who = process.env.E2E_WHO ?? String(process.pid);
+  (pc as any).addEventListener?.("iceconnectionstatechange", () => {
+    console.log(`[e2e ${who}] ${new Date().toISOString().slice(11, 23)} ICE ${pc.iceConnectionState}`);
+  });
+  let shown = pc.iceConnectionState;
+  let events = 0;
+  (pc as any).addEventListener?.("iceconnectionstatechange", () => {
+    shown = pc.iceConnectionState;
+    const event = (events += 1);
+    for (const ms of ICE_STATE_RECHECK_MS) {
+      setTimeout(() => {
+        if (closed || event !== events || pc.iceConnectionState === shown) return;
+        (pc as any).dispatchEvent({ type: "iceconnectionstatechange", target: pc });
+      }, ms).unref();
+    }
+  });
   if (process.env.E2E_DEBUG) trace(pc);
   return pc as RTCPeerConnection;
 }

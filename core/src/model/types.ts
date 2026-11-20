@@ -307,7 +307,8 @@ export function isTraverseScope(scope: Scope): scope is TraverseScope {
  * // One level deep
  * { comments: true }
  *
- * // Sub-query: only the 5 most-recent comments
+ * // Sub-query: only the 5 most-recent comments of each parent
+ * // (`limit` and `offset` page every parent's relation on its own)
  * { comments: { order: { createdAt: 'DESC' }, limit: 5 } }
  *
  * // Nested eager-load
@@ -400,6 +401,7 @@ export type Query = {
   order?: Order;
   offset?: number;
   limit?: number;
+  /** Ask for `totalCount`. Without it the result has none and the executor runs no COUNT query. */
   count?: boolean;
   /**
    * When true, SPARQL property getters (@Property with `getter`) ARE evaluated
@@ -509,6 +511,12 @@ export interface LinkRow {
   timestamp: string;
   data: { source: string; predicate: string; target: string };
   proof: { key: string; signature: string; valid: boolean; invalid: boolean };
+  /**
+   * Where this executor holds the link, spelled as `perspective.get()` spells
+   * it. Absent only when the store recorded none. Not signed: it says nothing
+   * about who wrote the link.
+   */
+  status?: "SHARED" | "LOCAL";
 }
 
 /** `instance.__links`: requested entry (spelled as requested) → its rows, oldest first. */
@@ -766,8 +774,12 @@ export type GetOptions = Pick<Query, 'include' | 'properties'>;
 // ---------------------------------------------------------------------------
 
 export type AllInstancesResult = { AllInstances: Ad4mModel[]; TotalCount?: number };
-export type ResultsWithTotalCount<T> = { results: T[]; totalCount?: number };
-export type PaginationResult<T> = { results: T[]; totalCount?: number; pageSize: number; pageNumber: number };
+/** A model query's rows; `totalCount` is set when the query asked for it (`count: true`). */
+export type Page<T> = { results: T[]; totalCount?: number };
+/** The result of `findAllAndCount()`, which always asks for the count. */
+export type ResultsWithTotalCount<T> = { results: T[]; totalCount: number };
+/** The result of `paginate()` and `paginateSubscribe()`, which always ask for the count. */
+export type PaginationResult<T> = { results: T[]; totalCount: number; pageSize: number; pageNumber: number };
 
 // ---------------------------------------------------------------------------
 // Internal value transport

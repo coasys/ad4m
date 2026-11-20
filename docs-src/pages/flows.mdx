@@ -49,7 +49,7 @@ Flow definitions are [Social DNA](/social-dna): a flow is data in the Perspectiv
 
 To answer *"what state is this task in?"*, the engine:
 
-1. starts at the flow's lowest-valued state,
+1. starts at the flow's lowest-valued state (if two states share the lowest `value`, the one whose name sorts first),
 2. looks at the declared edges that leave it,
 3. takes the edge that collected enough distinct, eligible signatures earliest,
 4. repeats from the state that edge leads to,
@@ -87,8 +87,11 @@ co-owner reads the new state and gets its own event.
   keeps bookkeeping for. `currentState` is `null` for a run you started that
   has not been derived yet; an instance with no entry is one your executor has
   not derived.
-- `perspective.flowFired(instance)` returns the proposals whose votes settled
-  an edge of that instance — its history, as your executor recorded it.
+- `perspective.flowFired(instances)` returns `[{ instance, fired }]`, one entry
+  per instance in the order asked: the proposals whose votes settled an edge
+  of that instance (its history, as your executor recorded it), `[]` when
+  none. One call covers up to 200 runs (more is refused with a 400); split a
+  larger board into batches of 200.
 - `perspective.onFlowStateChanged(({ instance, from, to, firedProposals, caughtUp }) => …)`
   is called when an instance's state moves on your executor or an edge
   settles. Only your own sockets receive it.
@@ -166,7 +169,7 @@ await perspective.addFlow("TaskFlow", flow);
 
 Facts about this shape:
 
-- `value` is an ordering key, not a progress percentage. `0, 1, 2` and `0, 10, 20` behave the same. **Every run begins in the lowest-valued state.**
+- `value` is an ordering key, not a progress percentage. `0, 1, 2` and `0, 10, 20` behave the same. **Every run begins in the lowest-valued state.** Give the entry state a `value` no other state shares. If two states do share the lowest `value`, the run begins in the one whose name sorts first (plain code-point order, the same in TypeScript and Rust), and the parser logs a warning. Both runtimes read the stored `value` with the same grammar: a plain decimal (`-0`, `1.5`, `1e21`) or `inf`/`infinity` with an optional sign. A `value` that fits neither (`NaN`, an empty or garbled literal) sorts last in both runtimes and never becomes the initial state; a state with no `value` at all counts as `0`.
 - The flow's canonical identity is its `flowUri`: `${namespace}${name}Flow`, here `handover://TaskFlowFlow`. Instances store that URI, because bare names collide when two communities share Social DNA.
 - Each state's `interpretationHint` is one English sentence. It is rendered into the prompt an interpreting LLM sees for that state, so an agent reasoning about a transition reads what the group meant, not a guess from the name.
 - A per-state `consensusRule` overrides the flow-level default. Cheap early edges can take one signature while the final one takes two, or a reviewer.
@@ -288,13 +291,13 @@ When two replicas mint proposals for the same transition concurrently — each n
 
 ### Reject is not cancel
 
-`rejectProposal` withdraws what **you** signed. It deletes only links this DID signed — your vote, or your whole proposal if you opened it — and returns how many links went. It never touches another agent's links. If you signed nothing on the proposal it errors instead of doing nothing silently.
+`rejectProposal` withdraws what **you** signed. It retracts only links this DID signed — your vote, or your whole proposal if you opened it — and returns how many links went. It never touches another agent's links. If you signed nothing on the proposal it errors instead of doing nothing silently. The retraction is a signed tombstone per link, not a removal; see [Flow links end only by tombstone](#flow-links-end-only-by-tombstone).
 
 Because state is recomputed from the links present now, withdrawing a vote that had settled an edge moves the flow back:
 
 ```typescript
 // Done had just settled at n:2. Bob withdraws his vote:
-const retracted = await bobInstance.rejectProposal(bobPress.proposalUri); // ≥ 1 link removed
+const retracted = await bobInstance.rejectProposal(bobPress.proposalUri); // ≥ 1 link retracted
 
 // The next derivation stands in InReview again — Alice's single vote
 // is one short of n:2:
@@ -306,6 +309,12 @@ after.outcomes;      // [] — Alice already voted
 *From `flow-task-handover.test.ts`, Part 1.*
 
 There is no "already fired" guard, and there must not be one. The fired mark the engine records (`perspective.flowFired`) is a per-agent display index, never an input to the derivation.
+
+### Flow links end only by tombstone
+
+Flow links are [monotonic links](./monotonic-links): a Shared link whose predicate starts with `ad4m://flow/`, or is `ad4m://acceptedBy`, is **never removed by a diff**. Proposals, votes and receipts are all under these predicates, so no member of a Neighbourhood can make another member's vote disappear by removing it. A peer's removal of such a link is dropped, and your own `removeLink`, `updateLink`, `linkMutations` or batch that would remove it fails with `<predicate> is monotonic; retract with a tombstone (ad4m://retracted) …`. A `Local` flow link (such as a `currentState` cache or `resolved_as` mark written by an executor from before the recorded state moved out of the graph) is removed as before.
+
+A flow link ends only by its author's signed tombstone, `<link.source> --ad4m://retracted--> literal:string:<link.proof.signature>`, which every replica applies the same way. `rejectProposal` writes these for you. Role revocations (`ad4m://flow/role_grant_revoked`) are monotonic too, and cannot be ended at all, so role history is kept. [Monotonic links](./monotonic-links) has the full rules, how a tombstone is applied, and what happens while some members still run an older executor.
 
 ### Contention
 
@@ -347,6 +356,16 @@ bobPress.derivedState;        // "Done"
 *From `flow-task-handover.test.ts`, "Part 2 — Done gated by fromRole: only the reviewer DID counts".*
 
 Each vote is gated **as of its own timestamp**. A voter who held the role when they signed still counts after the role is revoked, and a voter who signed before the grant does not count retroactively. Revocation is a signed tombstone link on the role instance, never a deletion. It stops future votes and does not rewrite settled history.
+
+**When a grant starts.** A grant starts at a link, and only at a link whose signature verifies and whose author the role query accepts:
+
+- On a field whose condition is the voter's DID (`didProperty: "agent"`, or `where: { member: "$did" }`), the grant starts at the earliest such link naming the DID. The author must be one the query's `where.author` accepts, the same rule that decides who may revoke. With no `where.author`, anyone may grant.
+- Under `where: { author: "$did" }`, in a query with no such field, the grant is the instance itself, written by the voter. It starts at the earliest link the voter wrote on the instance.
+- A query with such a field is dated by the field alone, even when it also says `author: "$did"`. "Self-nominate or admin-appoint", `where: { author: { in: ["$did", admin] } }` or the same as `or` arms, with `didProperty: "agent"` therefore starts at the earliest `agent` link from either of them.
+
+One case is stricter than the query reads: when `or` arms mix a field naming the voter with a separate `author: "$did"` arm, a voter who matches only the `author: "$did"` arm is not granted. Give that arm its own field naming the voter, or split it into its own role.
+
+A query that names `$did` in neither way (for example only inside an `in` list, including `author: { in: ["$did", …] }` with no field naming the voter) grants nobody, and so does an instance with no such link. Nothing else dates a grant: not the instance's own timestamp, and not a link from someone the query does not accept, however early it is stamped. The grant author can still back-date their own grant, just as they can back-date a revocation; nobody else can.
 
 One convention follows for Social DNA authors: **role instances are add-only, and membership ends only through tombstones.** The role query runs against the current graph — only the instance's existence is windowed in time — so a query keyed on a mutable property (`where: { active: true }`) reopens the deletion problem: flipping the property would remove the instance from historical verdicts and un-settle edges its votes once settled. State that changes belongs in new instances, not in edited ones.
 
@@ -525,9 +544,9 @@ The gate has **three** outcomes, not two:
 
 1. **Granted.** A verified receipt names this instance.
 2. **Not granted.** No verified receipt names it. The instance contributes nothing, exactly as if the role query had not matched it.
-3. **Cannot decide.** The replica does not hold the granting flow, or the flow's receipt index is over budget. This comes back as an **error**, and the flow whose rule asked cannot derive a state until it is resolved. The error means "unknown", not "no".
+3. **Cannot decide.** The replica does not hold the granting flow. This comes back as an **error**, and the flow whose rule asked cannot derive a state until it is resolved. The error means "unknown", not "no".
 
-Do not write `if (granted) allow else deny` around a call that can throw. If you catch the error and deny, you bring back the silent denial that the engine refuses to give: a flood of junk index links would then deny every holder, with no signal. Show the error, or retry after sync. "Fail-closed" above means that an unproven grant never counts. It does not mean that an undecidable gate reads as "not a member".
+Do not write `if (granted) allow else deny` around a call that can throw. If you catch the error and deny, you bring back the silent denial that the engine refuses to give: a replica that has not synced the granting flow would then deny every holder, with no signal. Show the error, or retry after sync. "Fail-closed" above means that an unproven grant never counts. It does not mean that an undecidable gate reads as "not a member".
 
 Un-granting is the normal role revocation: a signed tombstone on the role instance. It stops future votes. It does not invalidate the receipt, and undoing the granting flow does not un-grant either: retracting a settling vote moves the live flow back, while the minted receipt keeps verifying. Who may write that tombstone follows the role query's `where.author` — absent: anyone; `"$did"`: only the holder; a specific DID: only that DID, and if it is unreachable, the grant is permanent. There is no way to make a `producedByFlow` grant expire.
 
@@ -545,9 +564,10 @@ The refusals a developer will meet, what each one means, and what to do:
 | `proposeTransition` with `outputs` into a non-terminal state | refusal | a run does not end there, so there is nothing the outputs could be outputs *of* | name outputs only on the final transition |
 | `proposeTransition` with `outputs` different from the open proposal's | refusal (neither joined nor twinned) | co-signing would sign outputs you did not name; a twin would split the final edge's commitment | co-sign or reject the open proposal, or agree on the outputs |
 | `rejectProposal` on a proposal you never signed | error | there is nothing of yours to withdraw; a link that merely *names* your DID is not yours | nothing — only signers can retract |
+| `removeLink` / `removeLinks` / `updateLink` / `linkMutations` / a batch removing a Shared flow link | error: `… is monotonic; retract with a tombstone` | flow links end only by their author's tombstone | `rejectProposal` for your own proposal links; otherwise leave the link |
 | `mintFlowReceipt` on a run that has not settled | error: `no settled edge` | the fold found no completed final transition, so there is nothing to freeze | reach quorum on the final transition first |
 | `flowValidOutputs` / the `producedByFlow` filter / a `fromRole` with `producedByFlow` naming a flow this replica does not hold | error, never `[]` | "I cannot check" must not read as "there are none" | sync the flow definition (the Social DNA) first |
-| a query or role gate on a flow whose receipt index holds more than 256 candidates | error: `ReceiptBudgetExceeded` | anyone can write index links, so over the budget the read refuses rather than truncates — a truncated read could hide the one genuine receipt | remove the junk links from the flow's receipt index; the error names the flow and the count |
+| a query or role gate on a flow whose receipt index carries junk: targets that are not `ad4m://flow/receipt/<64 lowercase hex>`, entries with no body, bodies over the 256 KiB receipt cap, bodies that do not hash to their URI, receipts of other flows | the junk is skipped with a warning in the executor log; the genuine receipts still answer, and nothing refuses | anyone can write index links, so an entry counts only when a body under it is within the cap no receipt is minted over, is the receipt its URI names and names this flow; nothing else can hide a receipt, and no count cap refuses honest runs ([#1177](https://github.com/coasys/ad4m/issues/1177)) | nothing; the reader pays a parse per junk body and a verification per body that hashes to its URI, memoised per receipt and held flow definition |
 | a `fromRole` with `producedByFlow` and a `count` satisfied by zero (e.g. `{ max: 0 }`) | error: refusing to gate | a receipt that fails to verify would make the voter eligible, not ineligible | drop the `count`, or gate on a positive count |
 | a `fromRole` with `producedByFlow` but no `state` | the rule does not decode; the edge is refused | a grant without a named state would also be granted by a run that settled into "rejected" | name the state the granting run must settle into |
 | a `consensusRule` with a key the engine does not know (e.g. `grantedByFlow`, `formRole`, `count: { mxa }`), or a key written twice | `addFlow` rejects and stores nothing, naming the state and the key; a definition that arrived by sync is refused when read: the edge fires for nobody and the executor log names the key | a dropped key would widen the gate or remove it | fix the key named in the error |
@@ -573,7 +593,7 @@ Each claim below is enforced by a named code branch in `rust-executor/src/perspe
 - **Eligibility is judged as of each vote's own timestamp** (`roles.rs`; tested by `flow-task-handover.test.ts` Part 2). Revocation stops future votes and never un-settles history.
 - **A co-sign re-checks the evidence and the outputs on the voter's own graph** before signing, and refuses on any mismatch (`accept.rs`, `check_outputs_commitment`; Rust e2e `a_co_signer_refuses_an_output_edited_since_the_proposal`).
 - **A receipt's outputs are what the quorum committed to.** Mint refuses outputs that do not hash to the final edge's signed commitment, and verification re-hashes the carried preimages against it (`receipt.rs`, `final_edge_commitment`; `verify.rs` step 7; tested by the tampered-receipt case in `flow-produced-by.test.ts`, and Rust e2e `a_forged_receipt_in_the_graph_neither_lists_nor_passes_the_filter`).
-- **Every receipt consumer fails closed** (`produced.rs`): only a `Verified` verdict counts, `Undecidable` is excluded, an unknown flow and an over-budget receipt index are errors, never empty answers (Rust e2e `an_unknown_flow_is_an_error_not_an_empty_answer`, `a_receipt_flood_is_an_error_not_an_empty_answer`).
+- **Every receipt consumer fails closed** (`produced.rs`): only a `Verified` verdict counts, `Undecidable` is excluded, an unknown flow is an error, never an empty answer, and junk in a flow's receipt index is skipped entry by entry, never a refusal and never a hidden receipt (Rust e2e `an_unknown_flow_is_an_error_not_an_empty_answer`, `a_flood_of_junk_index_entries_is_skipped_and_the_genuine_receipt_still_counts`, `two_hundred_and_fifty_seven_honest_receipts_all_load`).
 - **A `producedByFlow` role gate has no fallback** to the assignment link, binds by `(className, id)` with the class from the reader's own query, and dates the grant from the quorum's `settled_at` (`grant.rs`, `roles/evidence.rs` `RoleGrantEvidence::resolve`; tested by `flow-task-handover.test.ts` Part 3, both halves, and Rust e2e `a_produced_by_flow_gate_grants_the_holder_through_the_real_store`).
 
 **The engine does NOT guarantee:**

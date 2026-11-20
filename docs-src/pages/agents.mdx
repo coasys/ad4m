@@ -119,6 +119,29 @@ await ad4m.agent.updatePublicPerspective({
 });
 ```
 
+### Saying what kind of agent you are
+
+An agent that is a program acting by itself (a bot, an AI agent, an integration) says so in its
+public perspective with one link, `<its did> ad4m://agent_kind ad4m://bot`, so apps can tell its
+messages from a person's. It is the agent's own claim, the same in every app and neighbourhood,
+and only the agent can write it.
+
+```js
+import { AGENT_KIND_BOT, isBot } from "@coasys/ad4m";
+
+// A bot, once at start (it changes nothing when the profile already says so):
+await ad4m.agent.setKind(AGENT_KIND_BOT);
+
+// An app, about someone whose messages it shows:
+const author = await ad4m.agent.byDID(did);
+if (isBot(author)) { /* draw it as a bot */ }
+```
+
+An agent that says nothing has no declared kind: read it as you would anyone. The OpenClaw
+plugin declares its agent a bot every time it starts: in managed mode the agent it runs, in
+external mode only an account of its own on the executor, never the executor's main agent. Its
+`declareBot: false` setting turns that off.
+
 ## Security and Privacy
 
 The agent-centric model provides several security benefits:

@@ -43,8 +43,10 @@ else
 fi
 echo "$HC_DNA_NAME build.sh: using hc=$HC ($("$HC" --version))"
 
+# The remaps keep build paths out of the wasm, so the packed DNA (and the
+# address of the language that bundles it) is the same wherever it is built.
 CARGO_TARGET_DIR=target \
-    RUSTFLAGS='--cfg getrandom_backend="custom"' \
+    RUSTFLAGS="--cfg getrandom_backend=\"custom\" --remap-path-prefix=$REPO_ROOT=/ad4m --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo" \
     cargo build --release --target wasm32-unknown-unknown "$@"
 
 "$HC" dna pack workdir

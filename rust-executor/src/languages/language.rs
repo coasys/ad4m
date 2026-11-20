@@ -40,11 +40,17 @@ pub struct Language {
     /// Test-only: answers [`Self::commit`] in place of the language runtime.
     #[cfg(test)]
     test_commit: Option<TestCommit>,
+    /// Test-only: answers [`Self::render`] in place of the language runtime.
+    #[cfg(test)]
+    test_render: Option<TestRender>,
 }
 
 #[cfg(test)]
 pub(crate) type TestCommit =
     Arc<dyn Fn(PerspectiveDiff) -> Result<Option<String>, AnyError> + Send + Sync>;
+
+#[cfg(test)]
+pub(crate) type TestRender = Arc<dyn Fn() -> Result<Option<Perspective>, AnyError> + Send + Sync>;
 
 fn parse_revision(js_result: String) -> Result<Option<String>, AnyError> {
     if let Ok(maybe_revision) = serde_json::from_str::<Option<ByteArray>>(&js_result) {
@@ -68,6 +74,8 @@ impl Language {
             capabilities,
             #[cfg(test)]
             test_commit: None,
+            #[cfg(test)]
+            test_render: None,
         }
     }
 
@@ -77,6 +85,15 @@ impl Language {
         Self {
             test_commit: Some(commit),
             ..Self::new(address)
+        }
+    }
+
+    /// Test seam: `render` answers with `render`, whatever the capability set.
+    #[cfg(test)]
+    pub(crate) fn with_test_render(self, render: TestRender) -> Self {
+        Self {
+            test_render: Some(render),
+            ..self
         }
     }
 
@@ -163,6 +180,10 @@ impl Language {
     }
 
     pub async fn render(&mut self) -> Result<Option<Perspective>, AnyError> {
+        #[cfg(test)]
+        if let Some(render) = &self.test_render {
+            return render();
+        }
         if !self.has(Capability::PerspectiveRender) {
             return Ok(None);
         }

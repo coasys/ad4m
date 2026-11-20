@@ -18,7 +18,9 @@
 //!
 //! 1. **`any`**: the predicate alone decides, as before. Used where the
 //!    query's reads cannot be told apart by node: `links`, `producedByFlow`,
-//!    property getters, transitive reads, and classes with no flag.
+//!    property getters, transitive reads, classes with no flag, and, when the
+//!    query has a window, the property a dotted `order` key sorts by (the
+//!    sort reads it on every linked target, flagged or not).
 //! 2. **`joins`**: a flag predicate written (or removed) with one of the
 //!    flag values of a class the subscription scans. This is how a new
 //!    record enters, and how a deleted one leaves the count.
@@ -637,8 +639,17 @@ impl Walk<'_> {
         // Watch the target as an include one level down, without recursing:
         // only its own properties are read. A key naming no declared relation
         // sorts by nothing (the query falls back to the timestamp).
+        //
+        // Under a window (`limit` / `offset`) the last result holds only the
+        // page, so a target linked to a record off the page is near nothing
+        // in it, and `near` / `via` miss the edit that moves that record onto
+        // the page. Re-run on any write of the sorted property then: the sort
+        // reads it on every linked target, whether or not the target carries
+        // its class's flag, so `scan` would miss a target without one.
+        // Without a window every match is in the result already.
+        let windowed = query.limit.is_some() || query.offset.is_some();
         for key in query.order.iter().flatten().map(|(key, _)| key.as_str()) {
-            let Some((rel_name, _)) = key.split_once('.') else {
+            let Some((rel_name, prop_name)) = key.split_once('.') else {
                 continue;
             };
             let Some(rel) = shape.include_relations.iter().find(|r| r.name == rel_name) else {
@@ -649,7 +660,15 @@ impl Walk<'_> {
                 .then(|| self.resolver.get_shape(&rel.target_class_name).ok())
                 .flatten();
             match target {
-                Some(target) => self.watch_class(&target),
+                Some(target) => {
+                    self.watch_class(&target);
+                    if windowed {
+                        match target.properties.iter().find(|p| p.name == prop_name) {
+                            Some(p) => self.rules.any.extend([p.predicate.clone()]),
+                            None => self.rules.any.extend(target.predicates()),
+                        }
+                    }
+                }
                 // The targets' class is not known, so neither is the sorted
                 // property's predicate: any write on a target may move it.
                 None => self.rules.near = Predicates::All,

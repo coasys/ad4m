@@ -235,6 +235,11 @@ export interface SHACLPropertyShape {
    *  and default max-count. */
   relationKind?: 'hasMany' | 'hasOne' | 'belongsToOne' | 'belongsToMany';
 
+  /** AD4M-specific: the relation is read `polymorphic: true` unless the query
+   *  says otherwise (`ad4m://polymorphic`). Carried in the shape so the executor
+   *  applies it at every include depth, below a polymorphic include too. */
+  polymorphic?: boolean;
+
   /** AD4M-specific: target class name (local-name) for a relation property.
    *  Complements `class` (the SHACL node-shape URI) by providing the bare
    *  model class name used by the executor to look up the target shape
@@ -393,7 +398,10 @@ export class SHACLShape {
     const statements = (source: string) => links
       .filter(l => l.source === source && l.predicate !== 'sh://property')
       .flatMap(l => l.predicate === 'sh://in'
-        ? [`sh:in ( ${JSON.parse(l.target.slice(15)).map((v: { value: string }) => str(v.value)).join(' ')} )`, `ad4m:in ${obj(l)}`]
+        ? [`sh:in ( ${JSON.parse(l.target.slice(15)).map((v: any) => {
+          const value = v !== null && typeof v === 'object' && 'value' in v ? v.value : v;
+          return typeof value === 'string' ? str(value) : JSON.stringify(value);
+        }).join(' ')} )`, `ad4m:in ${obj(l)}`]
         : [`${pred(l.predicate!)} ${obj(l)}`]);
 
     const properties = links
@@ -662,7 +670,8 @@ export class SHACLShape {
         });
       }
 
-      if (prop.in && prop.in.length > 0) {
+      // `in: []` is a deny-all constraint, not the absence of one — store it.
+      if (prop.in !== undefined) {
         links.push({
           source: propShapeId,
           predicate: "sh://in",
@@ -675,6 +684,14 @@ export class SHACLShape {
           source: propShapeId,
           predicate: "ad4m://relationKind",
           target: `literal:string:${prop.relationKind}`
+        });
+      }
+
+      if (prop.polymorphic) {
+        links.push({
+          source: propShapeId,
+          predicate: "ad4m://polymorphic",
+          target: `literal:${prop.polymorphic}`
         });
       }
 
@@ -823,6 +840,7 @@ export class SHACLShape {
         in: json(id, "sh://in"),
         relationKind: ['hasMany', 'hasOne', 'belongsToOne', 'belongsToMany'].includes(relationKind!)
           ? relationKind as SHACLPropertyShape['relationKind'] : undefined,
+        polymorphic: bool(id, "ad4m://polymorphic"),
         targetClassName: str(id, "ad4m://targetClassName"),
         whereFilter: json(id, "ad4m://whereFilter"),
         wherePredicates: json(id, "ad4m://wherePredicates"),
@@ -873,6 +891,7 @@ export class SHACLShape {
         class: p.class,
         in: p.in,
         relation_kind: p.relationKind,
+        polymorphic: p.polymorphic,
         collection: p.collection ?? (isCollection(p) || undefined),
         target_class_name: p.targetClassName,
         where_filter: p.whereFilter,
@@ -932,6 +951,7 @@ export class SHACLShape {
         class: p.class,
         in: p.in,
         relationKind: p.relation_kind,
+        polymorphic: p.polymorphic,
         collection: p.collection,
         targetClassName: p.target_class_name,
         whereFilter: p.where_filter,

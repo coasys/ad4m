@@ -8,11 +8,17 @@
 import type { Ad4mModel } from "./Ad4mModel";
 import type { LinkStatus, PerspectiveProxy } from "../perspectives/PerspectiveProxy";
 import { LiveQuery } from "../perspectives/LiveQuery";
+import { requireTotalCount } from "./query-common";
 import type {
   Where, Order, IncludeMap, Query,
-  ResultsWithTotalCount, PaginationResult,
+  Page, PaginationResult,
   TypedQueryWhere, TypedOrder, TypedIncludeMap, PropertyKeysOf,
 } from "./types";
+
+/** What a subscription compares to skip a callback whose results equal the
+ *  last ones emitted (a resync or a reconnect re-open of an unchanged result). */
+const fingerprint = (value: unknown): string =>
+  JSON.stringify(value, (_, v) => (typeof v === 'function' ? undefined : v));
 
 /** Query builder for Ad4mModel queries.
  * Allows building queries with a fluent interface and either running them once
@@ -61,7 +67,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
   }
 
   /** Run `params` once and build model instances from the rows. */
-  private execute(params: Query): Promise<ResultsWithTotalCount<T>> {
+  private execute(params: Query): Promise<Page<T>> {
     if (this.unionClasses) {
       return (this.ctor as any).executeUnionQuery(this.perspective, this.unionClasses, params);
     }
@@ -75,6 +81,11 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
       return (this.ctor as any).parseUnionResult(this.unionClasses, this.perspective, raw, include, properties);
     }
     return (this.ctor as any).parseModelResult(this.perspective, raw, include, properties);
+  }
+
+  /** Snapshot instances for dirty tracking, as `execute` does for its rows. */
+  private takeSnapshots(instances: T[]): void {
+    (this.ctor as any).takeSnapshots(instances, this.queryParams.include);
   }
 
   /** Ends the current subscription, if any, on the client and the executor. */
@@ -100,10 +111,16 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     try {
       return { live, initial: await live.start() };
     } catch (e) {
-      live.dispose();
-      if (this.currentSubscription === live) this.currentSubscription = undefined;
+      this.endFailed(live);
       throw e;
     }
+  }
+
+  /** End `live` after its call failed. A later call may already own
+   *  `currentSubscription`, so only clear it if it is still `live`. */
+  private endFailed(live: LiveQuery): void {
+    live.dispose();
+    if (this.currentSubscription === live) this.currentSubscription = undefined;
   }
 
   /**
@@ -470,8 +487,6 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     const parseResults = (raw: any): T[] => this.parse(raw);
 
     // Suppress callbacks whose parsed results equal the last ones emitted.
-    const fingerprint = (results: any[]) =>
-      JSON.stringify(results, (_, v) => (typeof v === 'function' ? undefined : v));
     let lastFingerprint: string | null = null;
 
     const { initial } = await this.live(this.queryParams, (raw) => {
@@ -517,8 +532,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * ```
    */
   async count(): Promise<number> {
-    const { totalCount } = await this.execute({ ...this.queryParams, limit: 0 });
-    return totalCount;
+    return requireTotalCount(await this.execute({ ...this.queryParams, limit: 0, count: true }));
   }
 
   /**
@@ -559,8 +573,21 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    */
   async countSubscribe(callback: (count: number) => void): Promise<number> {
     this.dispose();
-    const { initial } = await this.live({ ...this.queryParams, limit: 0 }, (raw) => callback(raw.totalCount ?? 0));
-    return initial.totalCount ?? 0;
+    // As paginateSubscribe: a push without the asked-for count is logged and
+    // skipped, since a throw here would reach the client's update dispatch.
+    const { live, initial } = await this.live({ ...this.queryParams, limit: 0, count: true }, (raw) => {
+      try {
+        callback(requireTotalCount(raw));
+      } catch (e) {
+        console.error('Count subscription error:', e);
+      }
+    });
+    try {
+      return requireTotalCount(initial);
+    } catch (e) {
+      this.endFailed(live);
+      throw e;
+    }
   }
 
   /**
@@ -588,8 +615,8 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    */
   async paginate(pageSize: number, pageNumber: number): Promise<PaginationResult<T>> {
     const paginationQuery = { ...(this.queryParams || {}), limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
-    const { results, totalCount } = await this.execute(paginationQuery);
-    return { results, totalCount, pageSize, pageNumber };
+    const answer = await this.execute(paginationQuery);
+    return { results: answer.results, totalCount: requireTotalCount(answer), pageSize, pageNumber };
   }
 
   /**
@@ -635,74 +662,53 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     pageNumber: number,
     callback: (results: PaginationResult<T>) => void
   ): Promise<PaginationResult<T>> {
-    // Clean up any existing subscription
     this.dispose();
 
-    // Subscribe to the full result set (no limit/offset) so the subscription
-    // detects changes anywhere in the dataset; each change re-reads the page.
-    const subscriptionParams = { ...(this.queryParams || {}) };
-    delete subscriptionParams.limit;
-    delete subscriptionParams.offset;
-
-    // Build the paginated query for Rust endpoint (count: true fetches both results and totalCount in one call)
-    const paginatedQuery = {
+    // Subscribe to the page itself. Since #1237 the executor re-runs a paged
+    // subscription when a record outside the page starts or stops matching
+    // (the `joins` and `scan` trigger rules), and a model result carries
+    // `totalCount`, so a write outside the page still changes the result and
+    // is pushed. Each page is built from the pushed rows: no second query, and
+    // the executor hydrates one page per change rather than every match.
+    // Pushes arrive in revision order, so the last callback is the latest
+    // state (#1051). After dispose() the live query delivers nothing.
+    const paginatedQuery: Query = {
       ...(this.queryParams || {}),
       limit: pageSize,
       offset: pageSize * (pageNumber - 1),
       count: true,
     };
-
-    // One read in flight. A dispatch while a read is running sets `pending`
-    // so a fetch always completes after the last dispatch. The generation
-    // counter from #1020 dropped superseded fetches, but ordered them by
-    // start time rather than by how fresh the data they read was — two
-    // back-to-back dispatches could keep the fetch that saw 1 model and
-    // drop the one that saw 2, after which the server has nothing further
-    // to say (issue #1051 / CI: "Paginate callback did not see second model save").
-    // After dispose() no read starts and no result is delivered, including
-    // a read that was already in flight when dispose() ran.
-    let disposed = false;
-    let fetching = false;
-    let pending = false;
-    const processResults = async (): Promise<void> => {
-      if (disposed) return;
-      if (fetching) {
-        pending = true;
-        return;
-      }
-      fetching = true;
-      try {
-        const { results, totalCount } = await this.execute(paginatedQuery);
-        if (!disposed) callback({ results, totalCount, pageSize, pageNumber });
-      } finally {
-        fetching = false;
-        if (pending) {
-          pending = false;
-          // Detached from the caller's promise: needs its own handler, or a
-          // rejection here is unhandled.
-          processResults().catch(e => console.error('Paginate subscription error:', e));
-        }
-      }
+    // As subscribe(): a callback fires only when the rows or totalCount
+    // differ from the last page emitted, not on a resync or a reconnect
+    // re-open of an unchanged page.
+    let lastFingerprint: string | null = null;
+    const toPage = (raw: any): { page: PaginationResult<T>; fp: string } => {
+      const results = this.parse(raw);
+      const fp = fingerprint([results, raw?.totalCount]);
+      this.takeSnapshots(results);
+      // `count: true` is set above, so the executor sends a total.
+      return { page: { results, totalCount: requireTotalCount(raw), pageSize, pageNumber }, fp };
     };
 
-    const { live } = await this.live(subscriptionParams, () => {
-      processResults().catch(e => console.error('Paginate subscription error:', e));
+    const { live, initial } = await this.live(paginatedQuery, (raw) => {
+      try {
+        const { page, fp } = toPage(raw);
+        if (fp === lastFingerprint) return;
+        lastFingerprint = fp;
+        callback(page);
+      } catch (e) {
+        console.error('Paginate subscription error:', e);
+      }
     });
-    if (this.currentSubscription === live) {
-      this.currentSubscription = {
-        dispose: () => {
-          disposed = true;
-          live.dispose();
-        },
-      };
-    } else {
-      // Disposed, or overtaken by a later subscribe, while opening: deliver nothing.
-      disposed = true;
+    let first: { page: PaginationResult<T>; fp: string };
+    try {
+      first = toPage(initial);
+    } catch (e) {
+      this.endFailed(live);
+      throw e;
     }
-
-    // Initial fetch (single call with count: true)
-    const { results, totalCount } = await this.execute(paginatedQuery);
-    return { results, totalCount, pageSize, pageNumber };
+    lastFingerprint = first.fp;
+    return first.page;
   }
 
   /**

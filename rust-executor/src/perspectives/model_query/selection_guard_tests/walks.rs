@@ -1,11 +1,12 @@
 //! #1120 on transitive paths: a property path has no link per hop to check, so
 //! a guarded walk is done one step at a time (`query::guarded_reach`).
 
+use super::super::sparql_builder::verified_link_exists;
 use super::super::types::ModelQueryResult;
 use super::{add, forged, ids, opted_in, run, signed};
 use crate::agent::signatures::TestSigner;
 use crate::perspectives::sparql_store::SparqlStore;
-use serde_json::json;
+use serde_json::{json, Value};
 
 /// A transitive `$` projection walks the relation to any depth. A forged link
 /// on the path must not add what lies behind it to the count or the list.
@@ -98,17 +99,107 @@ async fn selection_a_forged_link_does_not_extend_a_transitive_scope() {
             query["limit"] = limit;
             let got = run(&store, query.clone()).await;
             assert_eq!(sorted(&got), expected, "{query}");
-            assert_eq!(got.total_count, expected.len(), "{query}: totalCount");
+            assert_eq!(
+                got.total_count.unwrap(),
+                expected.len(),
+                "{query}: totalCount"
+            );
             let got = run(&store, opted_in(query.clone())).await;
             assert_eq!(sorted(&got), expected_opted_in, "{query} with the opt-in");
         }
         let mut count = walk(anchor, direction);
         count["limit"] = json!(0);
         assert_eq!(
-            run(&store, count.clone()).await.total_count,
+            run(&store, count.clone()).await.total_count.unwrap(),
             expected.len(),
             "{count}"
         );
+    }
+}
+
+/// A guarded walk over a cycle stops, and reads what the opt-in reads.
+///
+/// `guarded_reach` expands each node once (its `discovered` set). Without that,
+/// `g/a -> g/b -> g/a` puts the same two nodes back on the frontier forever.
+/// The other cycle fixtures read through the opt-in, which emits a property
+/// path and never reaches the walk, so this one signs every link and reads with
+/// the default. `guarded_reach` is synchronous and would never yield to a tokio
+/// timeout, so the queries run on their own thread and the test waits for them
+/// with a deadline.
+///
+/// Killing mutation: queue every reached node (`if true` for
+/// `if discovered.insert(..)`). The walk then never returns and the deadline
+/// fails the test.
+#[test]
+fn selection_a_guarded_walk_over_a_signed_cycle_terminates() {
+    let store = SparqlStore::new(None).unwrap();
+    let admin = TestSigner::generate();
+    add(
+        &store,
+        [
+            signed(&admin, "sg://g/a", "ad4m://type", "sg://Grant", 1),
+            signed(&admin, "sg://g/b", "ad4m://type", "sg://Grant", 2),
+            signed(&admin, "sg://g/a", "sg://reply", "sg://g/b", 3),
+            signed(&admin, "sg://g/b", "sg://reply", "sg://g/a", 4),
+        ],
+    );
+    let queries = vec![
+        json!({ "parent": { "ids": ["sg://g/a"], "predicate": "sg://reply",
+            "transitive": true, "direction": "out" } }),
+        json!({ "parent": { "ids": ["sg://g/a"], "predicate": "sg://reply",
+            "transitive": true, "direction": "in" } }),
+        json!({ "projections": {
+            "$n": { "from": "replies", "count": true, "transitive": true },
+            "$all": { "from": "replies", "transitive": true, "order": { "id": "ASC" } },
+        } }),
+    ];
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let answers: Vec<(Value, Value)> = rt.block_on(async {
+            let mut out = Vec::new();
+            for q in queries {
+                let default = run(&store, q.clone()).await;
+                let opted = run(&store, opted_in(q.clone())).await;
+                out.push((
+                    json!({ "q": q, "instances": default.instances, "total": default.total_count }),
+                    json!({ "q": q, "instances": opted.instances, "total": opted.total_count }),
+                ));
+            }
+            out
+        });
+        let _ = tx.send(answers);
+    });
+    let answers = rx
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .expect("the guarded walk over a signed cycle did not terminate within 60 s");
+
+    for (default, opted) in &answers {
+        assert_eq!(default, opted, "the default reads what the opt-in reads");
+    }
+    let ids = |v: &Value| -> Vec<String> {
+        let mut ids: Vec<String> = v["instances"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["id"].as_str().unwrap().to_string())
+            .collect();
+        ids.sort();
+        ids
+    };
+    // A scope lists the instances under its anchor, never the anchor itself;
+    // a projection counts what each start reaches, and as with `+` a start on
+    // a cycle reaches itself.
+    assert_eq!(ids(&answers[0].0), ["sg://g/b"], "out");
+    assert_eq!(ids(&answers[1].0), ["sg://g/b"], "in");
+    assert_eq!(ids(&answers[2].0), ["sg://g/a", "sg://g/b"], "projection");
+    for inst in answers[2].0["instances"].as_array().unwrap() {
+        assert_eq!(inst["$n"], json!(2), "{inst}");
+        assert_eq!(inst["$all"], json!(["sg://g/a", "sg://g/b"]), "{inst}");
     }
 }
 
@@ -161,7 +252,7 @@ async fn test_perf_guarded_selection_paginated_query() {
         let got = run(&store, q.clone()).await;
         let elapsed = start.elapsed();
         assert_eq!(got.instances.len(), 50, "{q}");
-        assert_eq!(got.total_count, 1000, "{q}");
+        assert_eq!(got.total_count.unwrap(), 1000, "{q}");
         timings.push(elapsed);
     }
     eprintln!(
@@ -171,4 +262,70 @@ async fn test_perf_guarded_selection_paginated_query() {
     );
     assert!(timings[0].as_secs() < 5, "{:?}", timings[0]);
     assert!(timings[2].as_secs() < 5, "{:?}", timings[2]);
+}
+
+/// The guard hydration reads use (`LinkGuard::exists`) binds the reifier before
+/// it checks it. Its checks used to sit beside the `rdf:reifies` pattern in one
+/// `FILTER EXISTS`, which Oxigraph evaluated as a Cartesian product with every
+/// valid reifier: 1.8 s here for 3000 rows over 9000 signed links, and a full
+/// scan per hydrated relation on staging's 76k-link neighbourhood. Nested, it
+/// is a lookup per row. Same rows as the join form either way.
+#[tokio::test]
+async fn test_perf_exists_guard_binds_the_reifier() {
+    let store = SparqlStore::new(None).unwrap();
+    let admin = TestSigner::generate();
+    for i in 0..3000u32 {
+        let msg = format!("sg://m-{i}");
+        let second = (i % 50) + 1;
+        add(
+            &store,
+            [
+                signed(&admin, &msg, "ad4m://type", "sg://Grant", second),
+                signed(&admin, &msg, "sg://member", "sg://channel", second),
+                signed(
+                    &admin,
+                    &msg,
+                    "sg://name",
+                    &format!("literal:string:m{i}"),
+                    second,
+                ),
+            ],
+        );
+    }
+    // One forged link: the guard must still drop it.
+    add(
+        &store,
+        [forged(
+            &admin,
+            "sg://forged",
+            "sg://member",
+            "sg://channel",
+            1,
+        )],
+    );
+    let guard = verified_link_exists("?s", "sg://member", "?o", None, None);
+    let guarded = format!("SELECT ?s WHERE {{ ?s <sg://member> ?o .{guard} }}");
+    let joined = "SELECT DISTINCT ?s WHERE { ?s <sg://member> ?o . \
+         ?_r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?s <sg://member> ?o )>> . \
+         ?_r <ad4m://ontology/proofValid> \"true\" . }";
+    let rows = |q: &str| {
+        let mut rows: Vec<String> = serde_json::from_str::<Vec<Value>>(
+            &store
+                .query_arbitrary(&crate::perspectives::sparql_store::EvalStop::none(), q)
+                .unwrap(),
+        )
+        .unwrap()
+        .iter()
+        .map(|r| r.to_string())
+        .collect();
+        rows.sort();
+        rows
+    };
+    let start = std::time::Instant::now();
+    let got = rows(&guarded);
+    let elapsed = start.elapsed();
+    eprintln!("exists guard over 3000 rows, 9001 signed links: {elapsed:?}");
+    assert_eq!(got.len(), 3000, "the forged link is dropped");
+    assert_eq!(got, rows(joined));
+    assert!(elapsed.as_millis() < 1000, "{elapsed:?}");
 }

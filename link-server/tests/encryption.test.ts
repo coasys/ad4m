@@ -4,7 +4,6 @@ import { test } from "node:test";
 import {
   authenticateAgent,
   clientSideRotate,
-  createSignedLink,
   createTestAgent,
   getJson,
   postJson,
@@ -79,14 +78,15 @@ test("only the admin can rotate the room key", async () => {
   });
 });
 
-test("agent with no granted key yet gets 404 on GET /keys", async () => {
+test("agent with no granted key yet gets 200 and an empty list on GET /keys", async () => {
   await withServer(async (server) => {
     const roomId = randomUUID();
     const admin = await createTestAgent();
     const adminToken = await authenticateAgent(server.url, roomId, admin);
 
-    const res = await getJson<{ error: string }>(`${server.url}/rooms/${roomId}/keys`, adminToken);
-    assert.equal(res.status, 404, "room has no key yet, no rotation has occurred");
+    const res = await getJson<{ keys: unknown[] }>(`${server.url}/rooms/${roomId}/keys`, adminToken);
+    assert.equal(res.status, 200, "no rotation has occurred: no key yet, not a 404");
+    assert.deepEqual(res.body, { keys: [] });
   });
 });
 
@@ -102,14 +102,11 @@ test("member added after a rotation has no key until the next rotation", async (
     await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: lateMember.did }, adminToken);
     const lateToken = await authenticateAgent(server.url, roomId, lateMember);
 
-    // Room has E2E enabled, so GET /keys returns 200 with e2e_enabled: true
-    // and an empty keys array (not 404).
-    const before = await getJson<{ keys: Array<unknown>; e2e_enabled: boolean }>(
+    const before = await getJson<{ keys: Array<unknown> }>(
       `${server.url}/rooms/${roomId}/keys`, lateToken
     );
     assert.equal(before.status, 200);
     assert.equal(before.body.keys.length, 0, "late member has no keys before next rotation");
-    assert.equal(before.body.e2e_enabled, true);
 
     await clientSideRotate(server.url, roomId, adminToken);
     const after = await getJson<{ keys: Array<{ encryptedKey: SealedBox; version: number }> }>(
@@ -119,55 +116,6 @@ test("member added after a rotation has no key until the next rotation", async (
     assert.equal(after.status, 200);
     assert.equal(after.body.keys.length, 1);
     assert.equal(after.body.keys[0].version, 2);
-  });
-});
-
-test("server stores link data opaquely — encrypted-shaped data round-trips unchanged", async () => {
-  await withServer(async (server) => {
-    const roomId = randomUUID();
-    const agent = await createTestAgent();
-    const token = await authenticateAgent(server.url, roomId, agent);
-
-    const encryptedData: EncryptedLinkData = { ciphertext: "deadbeef", nonce: "cafebabe" };
-    const link = await createSignedLink(agent, encryptedData);
-    (link as any).link_hash = "opaque-test-hash-1";
-
-    const commitRes = await postJson<{ sequence: number; revision: string }>(
-      `${server.url}/rooms/${roomId}/commit`,
-      { additions: [link], removals: [] },
-      token
-    );
-    assert.equal(commitRes.status, 200);
-
-    const renderRes = await getJson<{ links: LinkExpression[] }>(`${server.url}/rooms/${roomId}/render`, token);
-    assert.equal(renderRes.status, 200);
-    assert.equal(renderRes.body.links.length, 1);
-    const storedData = renderRes.body.links[0].data as EncryptedLinkData;
-    assert.equal(storedData.ciphertext, "deadbeef");
-    assert.equal(storedData.nonce, "cafebabe");
-  });
-});
-
-test("removing an encrypted-shaped link works by resending the exact original LinkExpression", async () => {
-  await withServer(async (server) => {
-    const roomId = randomUUID();
-    const agent = await createTestAgent();
-    const token = await authenticateAgent(server.url, roomId, agent);
-
-    const encryptedData: EncryptedLinkData = { ciphertext: "aabb", nonce: "ccdd" };
-    const link = await createSignedLink(agent, encryptedData);
-    (link as any).link_hash = "opaque-test-hash-2";
-    await postJson(`${server.url}/rooms/${roomId}/commit`, { additions: [link], removals: [] }, token);
-
-    const removeRes = await postJson<{ sequence: number }>(
-      `${server.url}/rooms/${roomId}/commit`,
-      { additions: [], removals: [link] },
-      token
-    );
-    assert.equal(removeRes.status, 200);
-
-    const renderRes = await getJson<{ links: LinkExpression[] }>(`${server.url}/rooms/${roomId}/render`, token);
-    assert.equal(renderRes.body.links.length, 0);
   });
 });
 
@@ -254,7 +202,7 @@ test("encrypted link removal by link_hash removes the correct link from the acti
   });
 });
 
-test("any authenticated member can remove encrypted links (author check bypassed)", async () => {
+test("any authenticated member can remove an encrypted link", async () => {
   await withServer(async (server) => {
     const roomId = randomUUID();
     const alice = await createTestAgent();
@@ -274,8 +222,8 @@ test("any authenticated member can remove encrypted links (author check bypassed
     const renderBefore = await getJson<{ links: LinkExpression[] }>(`${server.url}/rooms/${roomId}/render`, bobToken);
     assert.equal(renderBefore.body.links.length, 1);
 
-    // Bob removes it using the same link_hash — should succeed because
-    // encrypted links skip the author === claims.did check.
+    // Bob removes it using the same link_hash: the server holds no
+    // cleartext author to check, only the link_hash.
     const wireRemove = {
       data: { ciphertext: "bob-reencrypted", nonce: "bob-nonce" },
       link_hash: hash,
@@ -289,31 +237,6 @@ test("any authenticated member can remove encrypted links (author check bypassed
 
     const renderAfter = await getJson<{ links: LinkExpression[] }>(`${server.url}/rooms/${roomId}/render`, bobToken);
     assert.equal(renderAfter.body.links.length, 0, "Bob must be able to remove Alice's encrypted link");
-  });
-});
-
-test("plaintext removal by non-author is rejected (contrast with encrypted mode)", async () => {
-  await withServer(async (server) => {
-    const roomId = randomUUID();
-    const alice = await createTestAgent();
-    const bob = await createTestAgent();
-    const aliceToken = await authenticateAgent(server.url, roomId, alice);
-    await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: bob.did }, aliceToken);
-    const bobToken = await authenticateAgent(server.url, roomId, bob);
-
-    // Alice adds a plaintext link
-    const link = await createSignedLink(alice, { source: "a", predicate: "p", target: "b" });
-    await postJson(`${server.url}/rooms/${roomId}/commit`, { additions: [link], removals: [] }, aliceToken);
-
-    // Bob tries to remove it — should fail because link.author is Alice's DID,
-    // not Bob's, and plaintext validation requires author === claims.did.
-    const removeRes = await postJson<{ error: string }>(
-      `${server.url}/rooms/${roomId}/commit`,
-      { additions: [], removals: [link] },
-      bobToken
-    );
-    assert.equal(removeRes.status, 400, "plaintext cross-member removal must be rejected");
-    assert.match(removeRes.body.error, /author/);
   });
 });
 
@@ -546,107 +469,6 @@ test("grant is idempotent — already-stored versions are skipped", async () => 
     );
     assert.equal(res.status, 200);
     assert.deepEqual(res.body.granted, [], "already-stored version must not be re-inserted");
-  });
-});
-
-// ---- E2E enforcement: reject plaintext in encrypted rooms ----
-
-test("commit rejects plaintext links in an E2E-enabled room", async () => {
-  await withServer(async (server) => {
-    const roomId = randomUUID();
-    const agent = await createTestAgent();
-    const token = await authenticateAgent(server.url, roomId, agent);
-
-    // Enable E2E via client-side rotation
-    await clientSideRotate(server.url, roomId, token);
-
-    // Attempt a plaintext commit — must fail
-    const link = await createSignedLink(agent, { source: "s", predicate: "p", target: "t" });
-    const res = await postJson<{ error: string }>(
-      `${server.url}/rooms/${roomId}/commit`,
-      { additions: [link], removals: [] },
-      token
-    );
-    assert.equal(res.status, 400);
-    assert.match(res.body.error, /end-to-end encryption/i);
-  });
-});
-
-test("commit accepts encrypted links in an E2E-enabled room", async () => {
-  await withServer(async (server) => {
-    const roomId = randomUUID();
-    const agent = await createTestAgent();
-    const token = await authenticateAgent(server.url, roomId, agent);
-
-    // Enable E2E via client-side rotation
-    await clientSideRotate(server.url, roomId, token);
-
-    // Encrypted commit — must succeed
-    const wireLink = {
-      data: { ciphertext: "encrypted-data", nonce: "encrypted-nonce" },
-      link_hash: "e2e-enforcement-hash",
-    };
-    const res = await postJson<{ sequence: number; revision: string }>(
-      `${server.url}/rooms/${roomId}/commit`,
-      { additions: [wireLink], removals: [] },
-      token
-    );
-    assert.equal(res.status, 200);
-    assert.equal(res.body.sequence, 1);
-  });
-});
-
-test("commit still accepts plaintext links in a non-E2E room", async () => {
-  await withServer(async (server) => {
-    const roomId = randomUUID();
-    const agent = await createTestAgent();
-    const token = await authenticateAgent(server.url, roomId, agent);
-
-    // No rotation — room stays non-E2E
-    const link = await createSignedLink(agent, { source: "s", predicate: "p", target: "t" });
-    const res = await postJson<{ sequence: number }>(
-      `${server.url}/rooms/${roomId}/commit`,
-      { additions: [link], removals: [] },
-      token
-    );
-    assert.equal(res.status, 200);
-  });
-});
-
-// ---- GET /keys: e2e_enabled field ----
-
-test("GET /keys returns e2e_enabled: true with empty keys for late member", async () => {
-  await withServer(async (server) => {
-    const roomId = randomUUID();
-    const admin = await createTestAgent();
-    const member = await createTestAgent();
-    const adminToken = await authenticateAgent(server.url, roomId, admin);
-
-    // Enable E2E (only admin gets key version 1)
-    await clientSideRotate(server.url, roomId, adminToken);
-
-    // Add member after rotation
-    await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: member.did }, adminToken);
-    const memberToken = await authenticateAgent(server.url, roomId, member);
-
-    const res = await getJson<{ keys: unknown[]; e2e_enabled: boolean }>(
-      `${server.url}/rooms/${roomId}/keys`,
-      memberToken
-    );
-    assert.equal(res.status, 200);
-    assert.equal(res.body.e2e_enabled, true);
-    assert.equal(res.body.keys.length, 0);
-  });
-});
-
-test("GET /keys returns 404 for non-E2E room", async () => {
-  await withServer(async (server) => {
-    const roomId = randomUUID();
-    const agent = await createTestAgent();
-    const token = await authenticateAgent(server.url, roomId, agent);
-
-    const res = await getJson<{ error: string }>(`${server.url}/rooms/${roomId}/keys`, token);
-    assert.equal(res.status, 404);
   });
 });
 

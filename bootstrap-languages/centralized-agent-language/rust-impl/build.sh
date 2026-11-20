@@ -16,6 +16,14 @@ if [ ! -f Cargo.lock ]; then
     fi
 fi
 
+# The wasm carries the source paths of its panic locations; remapped, they
+# don't depend on where the repo and the cargo registry are. The bundle still
+# does: cargo hashes the absolute path of the ad4m-ldk path dependency, which
+# is outside this crate's workspace, into the symbol names. At one checkout
+# path the build is byte-stable, and that is the bundle the network seed pins.
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$REPO_ROOT=/ad4m --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo"
+
 echo "==> cargo build --target wasm32-unknown-unknown --release"
 cargo build --target wasm32-unknown-unknown --release
 

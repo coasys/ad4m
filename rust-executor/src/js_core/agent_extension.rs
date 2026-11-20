@@ -95,7 +95,8 @@ fn agent_did_for_user(#[string] user_email: String) -> Result<String, AnyhowWrap
 #[op2]
 #[serde]
 fn agent_list_user_emails() -> Result<Vec<String>, AnyhowWrapperError> {
-    let users = crate::db::Ad4mDb::with_global_instance(|db| db.list_users())
+    let users = crate::db_backend::db_backend()
+        .list_users()
         .map_err(AnyhowWrapperError::from)?;
     Ok(users
         .into_iter()

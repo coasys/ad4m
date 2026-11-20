@@ -15,23 +15,52 @@ export interface WakerSubscription {
   /** SPARQL, or with `className` a model query (JSON) over that class. */
   query: string;
   /**
-   * The class `query` reads, as a model query. A mention subscription has
-   * one, from the executor's `get_mention_waker_config`: the built-in
-   * `ad4m://TextContent`; a children subscription has the built-in
-   * `ad4m://Container`, from `generate_waker_query` (#1446). Without it
-   * `query` is SPARQL.
+   * The class `query` reads, as a model query. A mention subscription has the
+   * built-in `ad4m://TextContent`, from the executor's `get_mention_waker_config`;
+   * a children subscription the built-in `ad4m://Container`, from
+   * `generate_waker_query` (#1446). Without it `query` is SPARQL.
    */
   className?: string;
   /**
    * A mention subscription's terms (profile names and the DID), from
-   * `get_mention_waker_config`. The query matches substrings, so a record
-   * wakes only when its text holds one of these as a whole word
-   * ({@link holdsAWholeWordTerm}); without them a mention subscription is
-   * refused.
+   * `get_mention_waker_config`. The text query matches by substring, so a
+   * record found through its text wakes only when the text holds one of
+   * these as a whole word ({@link holdsAWholeWordTerm}).
    */
   terms?: string[];
+  /**
+   * A mention subscription's agent DID, from `get_mention_waker_config`. A
+   * record whose `mentions` links it, in a verified link another agent wrote,
+   * wakes whatever its text says ({@link mentionOf}).
+   */
+  did?: string;
+  /**
+   * A mention subscription's second query, a model query (JSON) over
+   * `mentionClass`, from `get_mention_waker_config`: every record whose
+   * `mentions` relation links the agent's DID, with text or without (a WE
+   * post's root). It runs beside `query` under the same id, so a record both
+   * find wakes once, through the query that reports it first.
+   */
+  mentionQuery?: string;
+  /** The class `mentionQuery` reads: the built-in `ad4m://Mentioning`. */
+  mentionClass?: string;
+  /**
+   * Set by the manager, not the caller: whether a mention subscription's text
+   * query has taken its opening result, which the manager records as history.
+   * It persists with the subscription. Until it is set, the text query's
+   * opening result is history even after a restart: the persisted seen set
+   * may hold the mention query's records only (the subscription listened
+   * without its text query, #1735), so the text query's old matches would all
+   * wake at once. A subscription saved without it (an older version) starts
+   * that way too.
+   */
+  textHistoryRead?: boolean;
   neighbourhood?: string;
 }
+
+/** The built-in `Container` (`Container.builtinUri`; not imported, so the
+ *  plugin bundle does not pull in the model layer). */
+const CONTAINER = "ad4m://Container";
 
 /** A letter, combining mark, digit or underscore: what a term must not touch. */
 const WORD_CHAR = "[\\p{L}\\p{M}\\p{N}_]";
@@ -68,15 +97,6 @@ const BREAKING_TAG = /^<\/?(?:p|div|br|hr|li|ul|ol|h[1-6]|blockquote|pre|tr|td|t
 const ATTRIBUTES = new RegExp(ATTRIBUTE, "g");
 const MENTION_TARGET = /^\s+(?:href|data-id|data-did)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))$/i;
 
-/**
- * How much of a record's text the word check reads. Dropping markup costs time
- * quadratic in a run of unclosed `<script>`, `<style>` or `<!--` openers, so a
- * very long text could hold the event loop for seconds, and a row that holds
- * no term is checked again on every result while it is in the window. A term
- * past this many characters does not wake.
- */
-export const MENTION_TEXT_LIMIT = 16_384;
-
 const ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " " };
 
 function decodeEntities(s: string): string {
@@ -110,6 +130,15 @@ function readableParts(text: string): { visible: string; targets: string[] } {
 }
 
 /**
+ * How much of a record's text the word check reads. Dropping markup costs time
+ * quadratic in a run of unclosed `<script>`, `<style>` or `<!--` openers, so a
+ * very long text could hold the event loop for seconds, and a row that holds
+ * no term is checked again on every result while it is in the window. A term
+ * past this many characters does not wake.
+ */
+export const MENTION_TEXT_LIMIT = 16_384;
+
+/**
  * Whether `text` holds one of `terms` as a whole word, case-insensitively:
  * "Data" is in "hi Data!", "@data" and "Data's turn", not in "metadata" or
  * "database". A term is matched literally (regex characters, quotes) and must
@@ -123,7 +152,9 @@ function readableParts(text: string): { visible: string; targets: string[] } {
  * is how a mention by DID is found when the DID is not in the visible text.
  *
  * The mention query's `contains` matches substrings (model query has no word
- * match); this is the check that keeps "data" from waking on "metadata".
+ * match); this is the check that keeps "data" from waking on "metadata" when
+ * a record is found through its text alone ({@link mentionOf}).
+ *
  * It reads the first {@link MENTION_TEXT_LIMIT} characters only.
  */
 export function holdsAWholeWordTerm(text: string, terms: string[]): boolean {
@@ -135,10 +166,6 @@ export function holdsAWholeWordTerm(text: string, terms: string[]): boolean {
     return new RegExp(`(?<!${WORD_CHAR})${escaped}(?!${WORD_CHAR})`, "iu").test(visible);
   });
 }
-
-/** The built-in `Container` (`Container.builtinUri`; not imported, so the
- *  plugin bundle does not pull in the model layer). */
-const CONTAINER = "ad4m://Container";
 
 /** Per-message parent resolution result for mention subscriptions. */
 export interface MentionMessage {
@@ -156,6 +183,129 @@ export interface MentionMessage {
    * parents have none, or the walk could not be made.
    */
   ancestors: string[];
+  /**
+   * The DID that signed the link of the path that woke the agent (`via`): the mention link to
+   * its DID, or the text link whose own text names it. Only that link is theirs; the record's
+   * other links may be someone else's.
+   */
+  author?: string;
+  /** That link's timestamp, ISO 8601. */
+  timestamp?: string;
+  /**
+   * Whether that link's signature verified for `author`. A mention is only taken from a link
+   * that verified, so a wake's mention is `true`.
+   */
+  verified: boolean;
+  /**
+   * The query that reported the record first: `"mentions"`, a mention link to the agent's DID
+   * (Mentioning's `mentions`); `"text"`, its name or DID as a whole word in the text (a mention
+   * link may also exist). A text match is the agent's name used as a word, which need not
+   * address it ("the data shows" for an agent named Data).
+   */
+  via?: "mentions" | "text";
+}
+
+/** What {@link mentionOf} finds about a mention: how it was made, and the provenance of its link. */
+type MentionProvenance = Pick<MentionMessage, "author" | "timestamp" | "verified" | "via">;
+
+/** A link as a model row's `__links` carries it (`DecoratedLinkExpression`). */
+interface RowLink {
+  author?: unknown;
+  timestamp?: unknown;
+  data?: { target?: unknown };
+  proof?: { valid?: unknown };
+}
+
+/** The provenance {@link MentionMessage} carries, from one link. */
+function provenanceOf(link: RowLink | undefined, via: "mentions" | "text"): MentionProvenance {
+  const provenance: MentionProvenance = {
+    verified: link?.proof?.valid === true,
+    via,
+  };
+  if (typeof link?.author === "string") provenance.author = link.author;
+  if (typeof link?.timestamp === "string") provenance.timestamp = link.timestamp;
+  return provenance;
+}
+
+/** The links a model row carries for `key` under `__links`, oldest first. */
+function rowLinks(row: any, key: string): RowLink[] {
+  const links: unknown = row?.__links?.[key];
+  return Array.isArray(links) ? links : [];
+}
+
+/** `uri` URI-decoded, or as it is when it is not valid percent-encoding. */
+function decoded(uri: string): string {
+  try {
+    return decodeURIComponent(uri);
+  } catch {
+    return uri;
+  }
+}
+
+/**
+ * The text a link's target holds, read as the executor reads a string property
+ * (`parse_literal_value`): `literal:string:` decoded, `literal:json:` parsed (a signed
+ * expression to its `data`), any other URI as it is. `undefined` when that is not a string.
+ */
+function textOf(target: unknown): string | undefined {
+  if (typeof target !== "string") return undefined;
+  if (!target.startsWith("literal:")) return target;
+  const body = target.slice("literal:".length);
+  if (body.startsWith("string:")) return decoded(body.slice("string:".length));
+  if (body.startsWith("json:")) {
+    const json = decoded(body.slice("json:".length));
+    let value: any;
+    try {
+      value = JSON.parse(json);
+    } catch {
+      return json;
+    }
+    if (value && typeof value === "object" && "data" in value && "author" in value && "proof" in value) {
+      value = value.data;
+    }
+    return typeof value === "string" ? value : undefined;
+  }
+  if (/^(?:number|boolean):/.test(body)) return undefined;
+  return target;
+}
+
+/**
+ * Whether a row of one of the mention subscription's two model queries mentions the
+ * subscription's agent, and the provenance of the link it does so in; `null` when it does not.
+ *
+ * - A row of the query over Mentioning: a verified link to the agent's DID that another agent
+ *   wrote, in the row's `__links.mentions`. It wakes whatever the record's text says, or
+ *   whether it has any: WE's chip label may run into the next word ("@Datai have…"), and a WE
+ *   post's mention sits on its root, which has no text. Its provenance is that link's (the
+ *   newest such).
+ * - A row of the query over TextContent: the query matched a substring, so the text must hold
+ *   a term as a whole word ({@link holdsAWholeWordTerm}), and so must the text of a verified
+ *   link another agent wrote, in `__links.text`. Its provenance is that link's (the newest
+ *   such). The row's `text` is the newest text link's, whoever wrote it, so it does not say
+ *   whose words they are.
+ *
+ * `via` says which it was. A record both queries find wakes once, through the query that
+ * reports it first ({@link WakerSubscriptionManager}).
+ */
+export function mentionOf(
+  row: any,
+  sub: Pick<WakerSubscription, "did" | "terms">,
+): MentionProvenance | null {
+  const did = sub.did;
+  const byOthers = (links: RowLink[]) => links.filter((l) => typeof l.author === "string" && l.author !== did);
+  const linked = byOthers(rowLinks(row, "mentions")).filter(
+    (l) => l.data?.target === did && l.proof?.valid === true,
+  );
+  if (did && linked.length) return provenanceOf(linked[linked.length - 1], "mentions");
+
+  const terms = sub.terms ?? [];
+  const names = (text: unknown) => typeof text === "string" && holdsAWholeWordTerm(text, terms);
+  const text = Array.isArray(row?.text) ? row.text.join(" ") : row?.text;
+  if (!names(text)) return null;
+  const naming = byOthers(rowLinks(row, "text")).filter(
+    (l) => l.proof?.valid === true && names(textOf(l.data?.target)),
+  );
+  return naming.length ? provenanceOf(naming[naming.length - 1], "text") : null;
 }
 
 export interface WakerLogger {
@@ -196,15 +346,21 @@ export interface WakerSubscriptionManagerOptions {
   /** Optional: provide QuerySubscriptionProxy class directly (avoids require("@coasys/ad4m") at runtime). */
   QuerySubscriptionProxy?: any;
   /** How long to wait before re-attempting a subscription the executor rejected
-   *  (default 30000). 0 disables re-attempts. */
+   *  (default 30000). 0 disables re-attempts. Each re-attempt round that still
+   *  leaves something pending doubles the wait, up to `maxRetryPendingMs`. */
   retryPendingMs?: number;
+  /** Longest wait between two re-attempt rounds (default 300000). */
+  maxRetryPendingMs?: number;
   /**
    * How long the executor gets to answer the subscribe handshake before the
    * attempt is abandoned and queued for re-attempt (default 15000). 0 removes
    * the bound. Covers both `proxy.subscribe()` and `proxy.initialized`: when
    * the executor accepts the socket but never answers, neither settles, and
    * without a deadline the subscription ended up neither active nor pending,
-   * so the re-attempt cycle never saw it (#1016).
+   * so the re-attempt cycle never saw it (#1016). Each query of a mention
+   * subscription gets its own: one whose mention query opens listens through
+   * it, and re-attempts a text query that did not open on its own (#1735),
+   * with this budget doubled per failed re-attempt, up to `maxRetryPendingMs`.
    */
   subscribeTimeoutMs?: number;
   /** First delay before offering an undelivered mention wake again (default 5000); doubles per
@@ -268,11 +424,32 @@ export class WakerSubscriptionManager {
   private subscribeTimeoutMs: number;
   private retryWakeMs: number;
 
-  private proxies = new Map<string, any>();
+  /** Per subscription its proxies: one, or a mention subscription's text and mention queries. */
+  private proxies = new Map<string, any[]>();
   private activeSubscriptions = new Map<string, WakerSubscription>();
   /** Subscriptions the executor rejected, waiting to be re-attempted. */
   private pendingSubscriptions = new Map<string, WakerSubscription>();
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  private maxRetryPendingMs: number;
+  /** Re-attempt rounds in a row that left something pending, for the backoff. */
+  private retryRounds = 0;
+  /**
+   * Subscriptions that were active until one of their live queries lost its
+   * executor subscription (a reconnect, a failed resync) and failed to open it
+   * again, with the proxies still re-opening. The query retries on its own,
+   * with backoff, so the manager does not subscribe them again; it reports
+   * them as pending instead of active until every proxy is open again, and
+   * keeps persisting them so a restart restores them (#1595).
+   */
+  private reopening = new Map<string, { sub: WakerSubscription; proxies: Set<any> }>();
+  /**
+   * Mention subscriptions listening through their mention query only, because
+   * their text query failed to open (#1735: a TextContent `contains` scan over a
+   * large neighbourhood can take longer than the handshake budget). The text
+   * query alone is re-attempted: `timer` is the wait before the next attempt,
+   * `proxy` the attempt in flight. `release()` cancels both.
+   */
+  private textRetries = new Map<string, { timer: ReturnType<typeof setTimeout> | null; proxy: any }>();
   /**
    * Cancellation tokens for in-flight `subscribe()` calls.
    *
@@ -314,6 +491,7 @@ export class WakerSubscriptionManager {
     this.QuerySubscriptionProxyCtor = options.QuerySubscriptionProxy ?? null;
     this.previousSeenMessages = options.previousSeenMessages ?? {};
     this.retryPendingMs = options.retryPendingMs ?? 30000;
+    this.maxRetryPendingMs = Math.max(this.retryPendingMs, options.maxRetryPendingMs ?? 300000);
     this.subscribeTimeoutMs = options.subscribeTimeoutMs ?? 15000;
     this.retryWakeMs = options.retryWakeMs ?? 5000;
   }
@@ -335,19 +513,34 @@ export class WakerSubscriptionManager {
    * If a subscription with the same id already exists, it is disposed first.
    */
   async subscribe(sub: WakerSubscription): Promise<void> {
-    // Dispose existing subscription with same id if any
-    this.dispose(sub.id, false);
+    // The manager's own copy: it records `textHistoryRead` on it. A re-derived
+    // subscription under the same id keeps what the manager knows of its text
+    // query.
+    const prior =
+      this.activeSubscriptions.get(sub.id) ??
+      this.pendingSubscriptions.get(sub.id) ??
+      this.reopening.get(sub.id)?.sub;
+    sub = { ...sub };
+    if (prior?.textHistoryRead && sub.textHistoryRead === undefined) sub.textHistoryRead = true;
+    // Dispose existing subscription with same id if any. Not `dispose()`: a
+    // re-attempt must not start the backoff over.
+    this.release(sub.id, false);
     const token = this.beginAttempt(sub.id);
 
     if (!this.QuerySubscriptionProxyCtor) {
       throw new Error("WakerSubscriptionManager: QuerySubscriptionProxy must be provided via constructor options");
     }
     const QuerySubscriptionProxy = this.QuerySubscriptionProxyCtor;
-    if (sub.type === "mention" && sub.className && !sub.terms?.length) {
-      // Without terms the whole-word check cannot run, and every substring
-      // ("metadata" for "data") would wake the agent.
+    if (
+      sub.type === "mention" &&
+      (!sub.className || !sub.terms?.length || !sub.did || !sub.mentionQuery || !sub.mentionClass)
+    ) {
+      // Without terms the whole-word check cannot run, so every substring
+      // ("metadata" for "data") would wake the agent; without the DID no link
+      // can be told to be someone else's; without the mention query a mention
+      // link on a record with no text (a WE post's root) never wakes it.
       throw new Error(
-        `Waker subscription ${sub.id}: a mention subscription needs its terms (get_mention_waker_config returns them)`,
+        `Waker subscription ${sub.id}: a mention subscription needs its TextContent class, terms, DID and Mentioning query (get_mention_waker_config returns them)`,
       );
     }
 
@@ -355,42 +548,77 @@ export class WakerSubscriptionManager {
       `[waker] ${sub.id}: creating subscription (perspective=${sub.perspective}, type=${sub.type})`,
     );
     this.logger.info(`[waker] ${sub.id}: ${sub.className ? `model query over ${sub.className}` : "SPARQL query"}:\n${sub.query}`);
-
-    const proxy = sub.className
-      ? new QuerySubscriptionProxy(sub.perspective, sub.query, this.perspectiveClient, sub.className)
-      : new QuerySubscriptionProxy(sub.perspective, sub.query, this.perspectiveClient);
-    // Suppress unhandled rejection from proxy.initialized — QuerySubscriptionProxy
-    // rejects this promise internally when subscribe() fails, and if nobody catches
-    // it before the next microtask it crashes the process.
-    if (proxy.initialized && typeof proxy.initialized.catch === "function") {
-      proxy.initialized.catch(() => {});
+    if (sub.mentionQuery) {
+      this.logger.info(`[waker] ${sub.id}: model query over ${sub.mentionClass}:\n${sub.mentionQuery}`);
     }
-    // One deadline for the whole handshake: `proxy.subscribe()` and the
+
+    const textProxy = () =>
+      sub.className
+        ? new QuerySubscriptionProxy(sub.perspective, sub.query, this.perspectiveClient, sub.className)
+        : new QuerySubscriptionProxy(sub.perspective, sub.query, this.perspectiveClient);
+    const proxy = textProxy();
+    const mentionProxy = sub.mentionQuery
+      ? new QuerySubscriptionProxy(sub.perspective, sub.mentionQuery, this.perspectiveClient, sub.mentionClass)
+      : undefined;
+    // The live proxies. A text query that failed while the mention query opened
+    // leaves it, and joins it again once a re-attempt opens (#1735).
+    const proxies = mentionProxy ? [proxy, mentionProxy] : [proxy];
+    // `cancelOpening`: a handshake given up on must not keep the executor
+    // computing a first result nobody reads; abandoned ones piled up into
+    // hundreds of busy executor threads on staging (#1595).
+    const disposeProxies = () => {
+      for (const p of proxies) {
+        try { p.dispose({ cancelOpening: true }); } catch {}
+      }
+    };
+    // One deadline per query's handshake: `proxy.subscribe()` and the
     // `initialized` promise it resolves share the budget, so a hang in either
     // surfaces as the same loud-but-recoverable failure a rejection does.
-    const budgetMs = this.subscribeTimeoutMs;
-    const startedAt = Date.now();
-    const bounded = <T>(step: Promise<T>, what: string): Promise<T> =>
-      budgetMs > 0
-        ? withTimeout(
-            step,
-            Math.max(0, budgetMs - (Date.now() - startedAt)),
-            `${what} timed out after ${budgetMs}ms`,
-          )
-        : step;
+    const open = async (p: any, budgetMs: number): Promise<void> => {
+      // Suppress unhandled rejection from proxy.initialized — QuerySubscriptionProxy
+      // rejects this promise internally when subscribe() fails, and if nobody catches
+      // it before the next microtask it crashes the process.
+      if (p.initialized && typeof p.initialized.catch === "function") p.initialized.catch(() => {});
+      const startedAt = Date.now();
+      const bounded = <T>(step: Promise<T>, what: string): Promise<T> =>
+        budgetMs > 0
+          ? withTimeout(
+              step,
+              Math.max(0, budgetMs - (Date.now() - startedAt)),
+              `${what} timed out after ${budgetMs}ms`,
+            )
+          : step;
+      await bounded(p.subscribe(), "subscribe handshake");
+      // Stale: the caller disposes the proxies.
+      if (this.isStale(sub.id, token)) return;
+      await bounded(p.initialized, "subscription initialization");
+    };
+    // A mention subscription's two queries open independently: on a large
+    // neighbourhood the text query (a `contains` scan over every TextContent)
+    // can take longer than the budget while the mention query answers in under
+    // a second (#1735). Waiting on both made the whole subscription fail, and
+    // the agent got no wake at all, not even through a mention link. The
+    // mention query decides; a text query that fails is re-attempted on its own
+    // once the subscription listens.
+    const openings = proxies.map((p) => open(p, this.subscribeTimeoutMs));
+    for (const o of openings) o.catch(() => {});
+    let textFailure: string | undefined;
     try {
-      await bounded(proxy.subscribe(), "subscribe handshake");
-      if (this.isStale(sub.id, token)) {
-        try { proxy.dispose(); } catch {}
-        return;
+      await openings[openings.length - 1];
+      if (mentionProxy) {
+        const [text] = await Promise.allSettled([openings[0]]);
+        if (text.status === "rejected") {
+          textFailure = text.reason?.message ?? String(text.reason);
+          try { proxy.dispose({ cancelOpening: true }); } catch {}
+          proxies.splice(proxies.indexOf(proxy), 1);
+        }
       }
-      await bounded(proxy.initialized, "subscription initialization");
     } catch (err: any) {
       const msg = err?.message ?? String(err);
       this.logger.warn(
         `[waker] ${sub.id}: subscription failed — ${msg}`,
       );
-      try { proxy.dispose(); } catch {}
+      disposeProxies();
       // A dispose that landed mid-attempt wins: don't re-queue something the
       // caller has since asked us to forget.
       if (this.isStale(sub.id, token)) return;
@@ -411,15 +639,16 @@ export class WakerSubscriptionManager {
       throw new Error(
         `Waker subscription ${sub.id} failed: ${msg}${hintFor(msg)}` +
           (this.retryPendingMs > 0
-            ? `. Not listening yet — re-attempting every ${Math.round(this.retryPendingMs / 1000)}s; check ad4m_list_waker_subscriptions.`
+            ? `. Not listening yet — re-attempting within ${Math.round(this.retryCeiling() / 1000)}s, then less often (at most every ${Math.round(this.maxRetryPendingMs / 1000)}s); check ad4m_list_waker_subscriptions.`
             : ""),
       );
     }
     if (this.isStale(sub.id, token)) {
-      try { proxy.dispose(); } catch {}
+      disposeProxies();
       return;
     }
     this.pendingSubscriptions.delete(sub.id);
+    if (this.pendingSubscriptions.size === 0) this.retryRounds = 0;
     this.logger.info(`[waker] ${sub.id}: subscription initialized successfully`);
 
     // Seed from persisted seen messages so we don't re-wake after restart
@@ -431,11 +660,15 @@ export class WakerSubscriptionManager {
       this.logger.info(`[waker] ${sub.id}: seeded ${seen.size} seen message(s) from persisted state`);
     }
 
-    // `opening` is the result the subscription holds when it opens (`proxy.result`): `onResult`
+    // `of`: the query the result is from, for the log (a mention subscription has two).
+    // `opening` marks the result the query holds when it opens (`proxy.result`): `onResult`
     // only reports later changes, so this is the one chance to see what was written meanwhile.
-    const handleResult = async (result: any, opening = false) => {
+    // A mention subscription reads it as `"history"` (recorded as seen, no wake) or `"news"`
+    // (wakes on what is not seen yet: written while the waker was down).
+    const handleResult = async (result: any, of: string, opening?: "history" | "news") => {
+      if (this.isStale(sub.id, token)) return;
       this.logger.info(
-        `[waker] ${sub.id}: ${opening ? "opening result" : "onResult fired"} — type=${typeof result}, isArray=${Array.isArray(result)}, value=${String(JSON.stringify(result)).substring(0, 500)}`,
+        `[waker] ${sub.id}: ${opening ? "opening result" : "onResult fired"}${of} — type=${typeof result}, isArray=${Array.isArray(result)}, value=${String(JSON.stringify(result)).substring(0, 500)}`,
       );
 
       // A model subscription delivers `{ instances }`, SPARQL an array of
@@ -450,26 +683,25 @@ export class WakerSubscriptionManager {
       }
 
       if (sub.type === "mention") {
-        // For mention subscriptions: track seen record ids.
-        // Only wake for records we haven't seen before.
+        // For mention subscriptions: track seen record ids, across both queries, and wake only
+        // for records not seen before, so a record both find wakes once, through the query that
+        // reports it first.
         const currentSeen = this.seenMessages.get(sub.id) ?? new Set<string>();
         const newMessages: string[] = [];
+        const provenance = new Map<string, MentionProvenance>();
 
-        const terms = sub.terms ?? [];
         for (const item of rows as any[]) {
-          // A SPARQL row names the record as `source`, a model row as `id`.
-          const address = sub.className ? item?.id : item?.source;
+          const address = item?.id;
           if (typeof address !== "string" || !address || currentSeen.has(address)) continue;
-          if (terms.length) {
-            // The mention query matched a substring; wake only on a whole word.
-            const text = Array.isArray(item.text) ? item.text.join(" ") : item.text;
-            if (typeof text !== "string" || !holdsAWholeWordTerm(text, terms)) {
-              this.logger.debug(`[waker] ${sub.id}: ${address} holds no term as a whole word, skipping`);
-              continue;
-            }
+          // A mention link as it is; the text, a whole word only.
+          const mention = mentionOf(item, sub);
+          if (!mention) {
+            this.logger.debug(`[waker] ${sub.id}: ${address} has no verified mention link and no term as a whole word, skipping`);
+            continue;
           }
           currentSeen.add(address);
           newMessages.push(address);
+          provenance.set(address, mention);
         }
 
         if (newMessages.length === 0) {
@@ -479,8 +711,8 @@ export class WakerSubscriptionManager {
           return;
         }
 
-        if (opening && !restored) {
-          // A new subscription: what it opens on is history, readable on demand, not news.
+        if (opening === "history") {
+          // What it opens on is history, readable on demand, not news.
           this.seenMessages.set(sub.id, currentSeen);
           const done = this.delivered.get(sub.id) ?? new Set<string>();
           for (const address of newMessages) done.add(address);
@@ -505,8 +737,11 @@ export class WakerSubscriptionManager {
             `[waker] ${sub.id}: message ${msgAddr} has ${parents.length} parent(s): ${parents.join(", ")}` +
               (ancestors.length ? `; ancestors: ${ancestors.join(", ")}` : ""),
           );
-          mentions.push({ address: msgAddr, parents, ancestors });
+          mentions.push({ address: msgAddr, parents, ancestors, ...provenance.get(msgAddr)! });
         }
+        // Released, or replaced under the same id, during the lookups: the state under `sub.id`
+        // is no longer this subscription's, so write nothing and wake for nothing.
+        if (this.isStale(sub.id, token)) return;
 
         this.seenMessages.set(sub.id, currentSeen);
         const pending = this.undelivered.get(sub.id) ?? new Map<string, MentionMessage>();
@@ -535,22 +770,109 @@ export class WakerSubscriptionManager {
         );
       }
     };
-    proxy.onResult((result: any) => handleResult(result));
-
-    if (this.isStale(sub.id, token)) {
-      try { proxy.dispose(); } catch {}
-      return;
-    }
-    this.proxies.set(sub.id, proxy);
-    this.activeSubscriptions.set(sub.id, sub);
-    // After a restart this wakes on mentions written while the waker was down; on a new
-    // subscription it records the existing ones as history.
-    if (proxy.result !== undefined) {
+    // Read `p`'s opening result. The mention query's is news only after a restart. The text
+    // query's is news only after a restart and once a text query of this subscription has read
+    // its history (`textHistoryRead`): it may have listened without it, so the seen set may not
+    // hold what the text query finds (#1735).
+    const readOpening = async (p: any, of: string) => {
+      if (p.result === undefined) return;
+      const isText = p !== mentionProxy;
+      const news = restored && (!isText || sub.type !== "mention" || sub.textHistoryRead === true);
       try {
-        await handleResult(proxy.result, true);
+        await handleResult(p.result, of, news ? "news" : "history");
       } catch (e: any) {
         this.logger.warn(`[waker] ${sub.id}: reading the opening result failed: ${e?.message ?? e}`);
       }
+      const rows: unknown = sub.className ? p.result?.instances : p.result;
+      if (isText && sub.type === "mention" && Array.isArray(rows) && !this.isStale(sub.id, token)) {
+        sub.textHistoryRead = true;
+      }
+    };
+    const listen = (p: any, of: string) => {
+      p.onResult((result: any) => handleResult(result, of));
+      p.onStatus?.((status: any) => this.onReopenStatus(sub, proxies, p, status));
+    };
+    if (proxies.includes(proxy)) listen(proxy, "");
+    if (mentionProxy) listen(mentionProxy, " (mention query)");
+
+    if (this.isStale(sub.id, token)) {
+      disposeProxies();
+      return;
+    }
+    this.proxies.set(sub.id, proxies);
+    this.activeSubscriptions.set(sub.id, sub);
+
+    if (textFailure !== undefined) {
+      // Re-attempt the text query alone, not the subscription: subscribing it
+      // again would re-seed its seen set from the persisted one, and wake again
+      // on mentions delivered since. Each failed attempt doubles the wait, up to
+      // `maxRetryPendingMs`, between half and all of it, as `scheduleRetry` does.
+      // The handshake budget doubles per failed attempt too: a scan that takes
+      // longer than `subscribeTimeoutMs` (#1735 measured over 30 s) would
+      // otherwise time out on every attempt. It is capped at `maxRetryPendingMs`
+      // (or the first budget, if longer): with one attempt in flight at a time,
+      // the executor then spends at most about as long on an attempt as the
+      // waker waits between two.
+      let ceiling = this.retryPendingMs;
+      let budgetMs = this.subscribeTimeoutMs;
+      const retryText = (): number => {
+        const delayMs = ceiling / 2 + Math.random() * (ceiling / 2);
+        ceiling = Math.min(ceiling * 2, this.maxRetryPendingMs);
+        const attemptBudgetMs = budgetMs;
+        budgetMs = Math.min(budgetMs * 2, Math.max(this.subscribeTimeoutMs, this.maxRetryPendingMs));
+        const timer = setTimeout(async () => {
+          if (this.textRetries.get(sub.id)?.timer !== timer || this.isStale(sub.id, token)) return;
+          const p = textProxy();
+          this.textRetries.set(sub.id, { timer: null, proxy: p });
+          // `release()` disposed it already when the entry no longer holds it.
+          const ours = () => this.textRetries.get(sub.id)?.proxy === p;
+          try {
+            await open(p, attemptBudgetMs);
+          } catch (err: any) {
+            if (!ours()) return;
+            try { p.dispose({ cancelOpening: true }); } catch {}
+            if (this.isStale(sub.id, token)) {
+              this.textRetries.delete(sub.id);
+              return;
+            }
+            const nextMs = retryText();
+            this.logger.debug(
+              `[waker] ${sub.id}: text query failed again (${err?.message ?? err}); re-attempting in ${Math.round(nextMs / 1000)}s`,
+            );
+            return;
+          }
+          if (!ours()) return;
+          this.textRetries.delete(sub.id);
+          if (this.isStale(sub.id, token) || this.proxies.get(sub.id) !== proxies) {
+            try { p.dispose({ cancelOpening: true }); } catch {}
+            return;
+          }
+          proxies.push(p);
+          listen(p, "");
+          this.logger.info(`[waker] ${sub.id}: text query opened; listening through both queries`);
+          // The seen set is the mention query's, so a record it already woke on does not wake
+          // again.
+          await readOpening(p, "");
+          if (!this.isStale(sub.id, token)) this.persist();
+        }, delayMs);
+        if (typeof timer.unref === "function") timer.unref();
+        this.textRetries.set(sub.id, { timer, proxy: null });
+        return delayMs;
+      };
+      const firstMs = this.retryPendingMs > 0 ? retryText() : undefined;
+      this.logger.warn(
+        `[waker] ${sub.id}: text query failed (${textFailure}); listening through the mention query only, ` +
+          (firstMs === undefined
+            ? "not re-attempting the text query (retryPendingMs is 0)"
+            : `re-attempting the text query in ${Math.round(firstMs / 1000)}s`),
+      );
+    }
+
+    // After a restart this wakes on mentions written while the waker was down; on a new
+    // subscription it records the existing ones as history. The mention query's first, so a
+    // record both hold wakes through its mention link.
+    for (const [p, of] of [[mentionProxy, " (mention query)"], [proxy, ""]] as const) {
+      if (p && proxies.includes(p)) await readOpening(p, of);
     }
     this.persist();
 
@@ -559,14 +881,60 @@ export class WakerSubscriptionManager {
     );
   }
 
+  /**
+   * A proxy of `sub` failed to re-open its live query, or re-opened it after
+   * failing. `sub` counts as active again once none of its proxies is still
+   * re-opening. `proxies` tells a status of a replaced subscription apart.
+   */
+  private onReopenStatus(sub: WakerSubscription, proxies: any[], proxy: any, status: any): void {
+    if (this.proxies.get(sub.id) !== proxies) return;
+    if (status?.state === "reopening") {
+      const entry = this.reopening.get(sub.id) ?? { sub, proxies: new Set<any>() };
+      entry.proxies.add(proxy);
+      if (!this.reopening.has(sub.id)) {
+        this.reopening.set(sub.id, entry);
+        this.activeSubscriptions.delete(sub.id);
+        this.logger.warn(
+          `[waker] ${sub.id}: live query lost after a reconnect and could not be re-opened (${status.error?.message ?? status.error}); not listening, retrying in ${Math.round((status.retryInMs ?? 0) / 1000)}s`,
+        );
+      }
+      return;
+    }
+    if (status?.state !== "open") return;
+    const entry = this.reopening.get(sub.id);
+    if (!entry) return;
+    entry.proxies.delete(proxy);
+    if (entry.proxies.size > 0) return;
+    this.reopening.delete(sub.id);
+    this.activeSubscriptions.set(sub.id, sub);
+    this.logger.info(`[waker] ${sub.id}: live query re-opened, listening again`);
+    // Wakes held back while it was not active go out now, not with the next mention.
+    if (this.undelivered.get(sub.id)?.size) this.scheduleMentionWake(sub, proxy.result, this.debounceMs);
+  }
+
+  /** The wait before the next re-attempt round: `retryPendingMs` doubled per
+   *  round in a row that left something pending, capped at
+   *  `maxRetryPendingMs`, and between half and all of that, so wakers of a
+   *  restarted executor do not all retry at once. */
+  private nextRetryDelay(): number {
+    const ceiling = this.retryCeiling();
+    return ceiling / 2 + Math.random() * (ceiling / 2);
+  }
+
+  /** The longest the next re-attempt round waits. */
+  private retryCeiling(): number {
+    return Math.min(this.retryPendingMs * 2 ** this.retryRounds, this.maxRetryPendingMs);
+  }
+
   /** Arm the re-attempt timer if pending subscriptions are waiting. */
   private scheduleRetry(): void {
     if (this.retryPendingMs <= 0) return;
     if (this.retryTimer || this.pendingSubscriptions.size === 0) return;
     this.retryTimer = setTimeout(() => {
       this.retryTimer = null;
+      this.retryRounds++;
       void this.retryPending();
-    }, this.retryPendingMs);
+    }, this.nextRetryDelay());
     if (typeof this.retryTimer.unref === "function") this.retryTimer.unref();
   }
 
@@ -601,9 +969,14 @@ export class WakerSubscriptionManager {
     }
   }
 
-  /** Subscriptions that were rejected and are waiting to be re-attempted. */
+  /** Subscriptions that are not listening and are being re-attempted: the
+   *  ones the executor rejected, and active ones whose live query is
+   *  re-opening after a reconnect. */
   getPending(): WakerSubscription[] {
-    return Array.from(this.pendingSubscriptions.values());
+    return [
+      ...this.pendingSubscriptions.values(),
+      ...Array.from(this.reopening.values(), (entry) => entry.sub),
+    ];
   }
 
   /**
@@ -611,17 +984,34 @@ export class WakerSubscriptionManager {
    * @param persist — if false, skip calling onPersist (used during batch cleanup).
    */
   dispose(id: string, persist = true): void {
+    this.release(id, persist);
+    if (this.pendingSubscriptions.size === 0) this.retryRounds = 0;
+  }
+
+  /** Drop everything held for `id`, as `dispose()` does, but leave the
+   *  re-attempt backoff as it is. */
+  private release(id: string, persist: boolean): void {
     // Invalidate any subscribe() for this id that is still awaiting.
     this.generations.set(id, (this.generations.get(id) ?? 0) + 1);
-    const proxy = this.proxies.get(id);
-    if (proxy) {
+    for (const proxy of this.proxies.get(id) ?? []) {
       try {
-        proxy.dispose();
+        proxy.dispose({ cancelOpening: true });
       } catch {
         /* ignore */
       }
-      this.proxies.delete(id);
     }
+    this.proxies.delete(id);
+    const textRetry = this.textRetries.get(id);
+    if (textRetry) {
+      if (textRetry.timer) clearTimeout(textRetry.timer);
+      try {
+        textRetry.proxy?.dispose({ cancelOpening: true });
+      } catch {
+        /* ignore */
+      }
+      this.textRetries.delete(id);
+    }
+    this.reopening.delete(id);
     const timer = this.debounceTimers.get(id);
     if (timer) {
       clearTimeout(timer);
@@ -696,6 +1086,8 @@ export class WakerSubscriptionManager {
       this.dispose(id, false);
     }
     this.pendingSubscriptions.clear();
+    this.reopening.clear();
+    this.retryRounds = 0;
     if (this.retryTimer) {
       clearTimeout(this.retryTimer);
       this.retryTimer = null;
@@ -757,7 +1149,9 @@ export class WakerSubscriptionManager {
       for (const [id, set] of this.delivered) {
         seen[id] = Array.from(set);
       }
-      this.onPersist(this.getActive(), seen);
+      // A subscription that is re-opening was enrolled and is coming back: a
+      // restart in the meantime must restore it.
+      this.onPersist([...this.getActive(), ...Array.from(this.reopening.values(), (entry) => entry.sub)], seen);
     }
   }
 }

@@ -640,6 +640,7 @@ fn session(caller: Caller, caps: &[Capability]) -> Arc<Session> {
     };
     Arc::new(match caller {
         Caller::Operator => Session::for_test(Principal::Operator),
+        Caller::OperatorOnNetwork => Session::for_test(Principal::Operator).on_network(),
         Caller::AppWithout => app(vec![]),
         Caller::AppWith => app(caps.to_vec()),
         Caller::User => user(USER_DID),
@@ -1034,7 +1035,6 @@ fn perspective_tools() -> Vec<PerspectiveTool> {
             Box::pin(async move {
                 h.get_mention_waker_config(Parameters(subscriptions::MentionWakerConfigParams {
                     perspective_id: uuid,
-                    name_override: None,
                 }))
                 .await
             })

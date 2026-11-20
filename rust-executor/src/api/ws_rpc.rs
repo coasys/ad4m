@@ -6,7 +6,7 @@
 //!
 //! **Request:**  `{ "id": "<correlation-id>", "type": "<operation>", "params": {...} }`
 //! **Response:** `{ "id": "<correlation-id>", "result": ... }` or
-//!               `{ "id": "<correlation-id>", "error": { "code": N, "message": "..." } }`
+//!               `{ "id": "<correlation-id>", "error": { "code": N, "message": "...", "data"?: ... } }`
 //! **Events:**   `{ "type": "<event-type>", ...payload }` (no `id`)
 
 use axum::{
@@ -21,7 +21,9 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::capabilities::*;
@@ -31,15 +33,15 @@ use crate::types::RequestContext;
 
 use super::auth::AppState;
 use super::event_interest;
-use super::ws_handler::HandlerMap;
+use super::ws_handler::{HandlerMap, WsRpcError};
 
 /// Per-connection registry of in-flight request ids → cancellation
 /// tokens.  A client cancels an in-flight request by sending
 /// `{"id": "<some-cancel-id>", "type": "request.cancel",
 ///   "params": {"targetId": "<original-request-id>"}}`.
-/// The dispatcher cancels the matching token; the handler races its
-/// work against `token.cancelled()` and returns early.
-type InflightRegistry = Arc<Mutex<HashMap<String, CancellationToken>>>;
+/// The dispatcher cancels the matching tokens: `.0` drops the call's
+/// future, `.1` is its `ctx.cancel_token`, which stops its eval.
+type InflightRegistry = Arc<Mutex<HashMap<String, (CancellationToken, CancellationToken)>>>;
 
 // ── Auth query param ────────────────────────────────────────────────────────
 #[derive(Deserialize, Default)]
@@ -126,7 +128,8 @@ pub(crate) async fn close_refused(mut socket: WebSocket, code: u16, reason: Stri
 }
 
 /// Closes a socket whose token stopped working while it was open.
-pub(crate) async fn close_token_ended(socket: &mut WebSocket) {
+pub(crate) async fn close_token_ended<S: futures::Sink<Message> + Unpin>(socket: &mut S) {
+    use futures::SinkExt;
     let _ = socket.send(Message::Close(Some(token_ended_frame()))).await;
 }
 
@@ -151,8 +154,8 @@ async fn handle_ws(socket: WebSocket, handler_map: Arc<HandlerMap>, ctx: Arc<Req
         track_last_seen(did).await;
     }
 
-    let (mut ws_sink, ws_stream) = socket.split();
-    let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+    let (ws_sink, ws_stream) = socket.split();
+    let (tx, rx) = mpsc::unbounded_channel::<String>();
 
     let conn = Connection::new(handler_map, ctx.clone(), tx);
     // An anonymous socket (no token, for example on an executor that has an admin credential)
@@ -170,45 +173,17 @@ async fn handle_ws(socket: WebSocket, handler_map: Arc<HandlerMap>, ctx: Arc<Req
     };
 
     // ── Writer task ─────────────────────────────────────────────────────
-    let writer_session_over = conn.session_over.clone();
-    let write_handle = tokio::spawn(async move {
-        use futures::SinkExt;
-        loop {
-            tokio::select! {
-                biased;
-                _ = writer_session_over.cancelled() => {
-                    // Deliver what is queued (the 401 reply) and the replies of calls in
-                    // flight, until they finish or the grace ends, then close.
-                    let grace = tokio::time::sleep(REPLY_GRACE);
-                    tokio::pin!(grace);
-                    loop {
-                        let msg = tokio::select! {
-                            msg = rx.recv() => msg,
-                            _ = &mut grace => None,
-                        };
-                        let Some(msg) = msg else { break };
-                        if ws_sink.send(Message::Text(msg.into())).await.is_err() {
-                            return;
-                        }
-                    }
-                    let _ = ws_sink.send(Message::Close(Some(token_ended_frame()))).await;
-                    return;
-                }
-                msg = rx.recv() => match msg {
-                    Some(msg) => {
-                        if ws_sink.send(Message::Text(msg.into())).await.is_err() {
-                            return;
-                        }
-                    }
-                    None => return,
-                },
-            }
-        }
-    });
+    let liveness = Arc::new(std::sync::Mutex::new(Liveness::new(Instant::now())));
+    let mut write_handle = tokio::spawn(write_to(
+        ws_sink,
+        rx,
+        conn.session_over.clone(),
+        liveness.clone(),
+    ));
 
-    // Text frames until the socket closes or errors; pings and binary
-    // frames are skipped.
-    let incoming = ws_stream
+    // Text frames until the socket closes, errors or goes silent; pongs, pings
+    // and binary frames count as heard and are skipped.
+    let incoming = until_silent(ws_stream, liveness)
         .take_while(|msg| {
             futures::future::ready(matches!(msg, Ok(m) if !matches!(m, Message::Close(_))))
         })
@@ -220,10 +195,176 @@ async fn handle_ws(socket: WebSocket, handler_map: Arc<HandlerMap>, ctx: Arc<Req
         });
     serve(conn, incoming, events).await;
 
-    // The writer ends once calls still in flight drop their senders.
-    if let Err(e) = write_handle.await {
-        log::error!("WS RPC writer task failed: {}", e);
+    // The writer ends once calls still in flight drop their senders and what
+    // they queued is sent. A client that went silent takes nothing, and the
+    // send would wait until TCP gives up on it: close the socket instead.
+    match tokio::time::timeout(SILENCE_LIMIT, &mut write_handle).await {
+        Ok(Err(e)) => log::error!("WS RPC writer task failed: {}", e),
+        Ok(Ok(())) => {}
+        Err(_) => write_handle.abort(),
     }
+}
+
+/// How often the executor sends its client a WebSocket ping. Every client answers
+/// one by itself, so a live client is heard from at least this often, once what
+/// the executor wrote before the ping has reached it.
+const PING_INTERVAL: Duration = Duration::from_secs(20);
+
+/// How long a client may send no frame at all before its connection ends. After
+/// a network switch a dead client's socket stays open with no close for as long
+/// as TCP retries, while its live queries run and its events queue up.
+const SILENCE_LIMIT: Duration = Duration::from_secs(60);
+
+/// The slowest link a client is given time for, as in the SDK. A pong waits
+/// behind what the executor wrote before its ping, so silence counts only once
+/// that could have crossed this link, if that takes longer than SILENCE_LIMIT.
+const SLOWEST_LINK_BYTES_PER_SEC: u64 = 16_000;
+
+/// How long a pong gets to come back after its ping could have reached the
+/// client behind a large write.
+const PONG_RETURN: Duration = Duration::from_secs(5);
+
+/// How long `bytes` take to cross a SLOWEST_LINK_BYTES_PER_SEC link.
+fn crossing(bytes: usize) -> Duration {
+    Duration::from_micros(bytes as u64 * 1_000_000 / SLOWEST_LINK_BYTES_PER_SEC)
+}
+
+/// What the executor knows about whether its client is still there. The writer
+/// counts what it sends; the reader notes each frame.
+#[derive(Debug)]
+struct Liveness {
+    /// When the client was last heard from.
+    heard_at: Instant,
+    /// When everything written so far could have crossed the slowest link. A
+    /// frame from the client does not move it back: hearing from the client says
+    /// nothing about how much of a large reply it has read.
+    sent_by: Instant,
+    /// When the first ping written since the client was last heard could have
+    /// reached it; `None` while no ping went out since. Writes after that ping
+    /// do not move it: they queue behind it, so they cannot delay its pong.
+    ping_arrives_by: Option<Instant>,
+}
+
+impl Liveness {
+    fn new(now: Instant) -> Self {
+        Liveness {
+            heard_at: now,
+            sent_by: now,
+            ping_arrives_by: None,
+        }
+    }
+
+    fn wrote(&mut self, bytes: usize, now: Instant) {
+        self.sent_by = self.sent_by.max(now) + crossing(bytes);
+    }
+
+    fn pinged(&mut self, now: Instant) {
+        self.sent_by = self.sent_by.max(now);
+        self.ping_arrives_by.get_or_insert(self.sent_by);
+    }
+
+    fn heard(&mut self, now: Instant) {
+        self.heard_at = now;
+        self.ping_arrives_by = None;
+    }
+
+    /// When the client counts as gone if it has not been heard from: SILENCE_LIMIT
+    /// after it was last heard, or PONG_RETURN after the ping sent since then
+    /// could have reached it, whichever is later. Until that ping goes out, after
+    /// what was written so far could have reached it.
+    fn deadline(&self) -> Instant {
+        let reached_by = self.ping_arrives_by.unwrap_or(self.sent_by);
+        (self.heard_at + SILENCE_LIMIT).max(reached_by + PONG_RETURN)
+    }
+}
+
+/// Send what `rx` carries to `sink`, and a ping every PING_INTERVAL, until `rx`
+/// closes or a send fails. Once the session is over, deliver what is queued (the
+/// 401 reply) and the replies of calls in flight for up to REPLY_GRACE, then close.
+async fn write_to<S>(
+    mut sink: S,
+    mut rx: mpsc::UnboundedReceiver<String>,
+    session_over: CancellationToken,
+    liveness: Arc<std::sync::Mutex<Liveness>>,
+) where
+    S: futures::Sink<Message> + Unpin,
+{
+    use futures::SinkExt;
+    let mut ping = tokio::time::interval_at(Instant::now() + PING_INTERVAL, PING_INTERVAL);
+    // A send that blocks for longer than an interval is followed by one ping, not a burst.
+    ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            biased;
+            _ = session_over.cancelled() => {
+                // Deliver what is queued (the 401 reply) and the replies of calls in
+                // flight, until they finish or the grace ends, then close.
+                let grace = tokio::time::sleep(REPLY_GRACE);
+                tokio::pin!(grace);
+                loop {
+                    let msg = tokio::select! {
+                        msg = rx.recv() => msg,
+                        _ = &mut grace => None,
+                    };
+                    let Some(msg) = msg else { break };
+                    if sink.send(Message::Text(msg.into())).await.is_err() {
+                        return;
+                    }
+                }
+                let _ = sink.send(Message::Close(Some(token_ended_frame()))).await;
+                return;
+            }
+            // Before the queue: with replies or events always waiting, a ping
+            // would otherwise never go out. It fires at most once an interval.
+            _ = ping.tick() => {
+                liveness.lock().unwrap().pinged(Instant::now());
+                if sink.send(Message::Ping(Default::default())).await.is_err() {
+                    return;
+                }
+            }
+            msg = rx.recv() => match msg {
+                Some(msg) => {
+                    liveness.lock().unwrap().wrote(msg.len(), Instant::now());
+                    if sink.send(Message::Text(msg.into())).await.is_err() {
+                        return;
+                    }
+                }
+                None => return,
+            },
+        }
+    }
+}
+
+/// `frames` until the client has been silent for longer than a live one could
+/// be ([`Liveness::deadline`]).
+fn until_silent<S>(
+    frames: S,
+    liveness: Arc<std::sync::Mutex<Liveness>>,
+) -> impl futures::Stream<Item = S::Item>
+where
+    S: futures::Stream + Unpin,
+{
+    futures::stream::unfold(frames, move |mut frames| {
+        let liveness = liveness.clone();
+        async move {
+            loop {
+                let deadline = liveness.lock().unwrap().deadline();
+                if Instant::now() >= deadline {
+                    let heard_at = liveness.lock().unwrap().heard_at;
+                    log::debug!(
+                        "WS RPC: client silent for {:?}; ending the connection",
+                        deadline - heard_at
+                    );
+                    return None;
+                }
+                // Woken at the deadline, check it again: more may have been written.
+                if let Ok(frame) = tokio::time::timeout_at(deadline, frames.next()).await {
+                    liveness.lock().unwrap().heard(Instant::now());
+                    return frame.map(|frame| (frame, frames));
+                }
+            }
+        }
+    })
 }
 
 type EventStream = std::pin::Pin<Box<dyn futures::Stream<Item = String> + Send>>;
@@ -244,7 +385,37 @@ pub(crate) struct Connection {
     interest: event_interest::SharedInterest,
     /// Dispatched calls still running.
     calls: std::sync::Mutex<tokio::task::JoinSet<()>>,
+    /// Fires when the connection closes (and with `session_over`, its parent). Every call's
+    /// `ctx.cancel_token` is a child of it, so closing the socket stops the eval of any
+    /// query still running — its first result has nobody left to receive it, and an
+    /// abandoned one kept a blocking thread busy for minutes (#1595). A call that opens
+    /// a live query drops with it; other calls still finish, so a write the client sent
+    /// completes, and a subscribe that lands after the close is swept as its call ends.
+    closed: CancellationToken,
+    /// Bounds how many calls that open a live query one connection runs at once; the rest
+    /// wait their turn. A client that gives up on its subscribe call and asks again (the waker
+    /// retried every 30 s) piled up one first-result computation per attempt: ~200 busy
+    /// threads on staging (#1595).
+    opening: Arc<tokio::sync::Semaphore>,
+    /// Bounds how many query-running calls one connection evaluates at once (#1736):
+    /// `perspective.querySparql`, `perspective.getLinks`, `perspective.modelQuery`,
+    /// `perspective.evaluateGetters`, `perspective.subscribeQuery` and
+    /// `perspective.modelSubscribe`. A call acquires one slot in
+    /// `sparql_store::query_gate`, which hangs the permit on the eval's stop:
+    /// the slot frees only when the blocking evaluation has actually ended,
+    /// not when the call's future ends.
+    queries: Arc<tokio::sync::Semaphore>,
 }
+
+/// How many calls that open a live query one connection runs at once (see
+/// [`Connection::opening`]).
+pub(crate) const MAX_OPENING_LIVE_QUERIES: usize = 8;
+
+/// How many SPARQL evaluations one connection runs at once (see
+/// [`Connection::queries`]): 8, the same bound the opening cap already set —
+/// each Oxigraph eval is a blocking thread, so 8 keeps one connection from
+/// taking every blocking slot the way 83 mention re-checks did on staging.
+pub(crate) const MAX_RUNNING_QUERIES_PER_CONNECTION: usize = 8;
 
 impl Connection {
     /// A connection whose replies and events go to `tx`.
@@ -256,6 +427,7 @@ impl Connection {
         // A grant revoked before this line has already fired, so its child starts cancelled:
         // no window in which a revoked token's connection stays open.
         let session_over = ctx.session.ended();
+        let closed = session_over.child_token();
         Self {
             handler_map,
             ctx,
@@ -264,6 +436,11 @@ impl Connection {
             inflight: Default::default(),
             interest: Default::default(),
             calls: Default::default(),
+            closed,
+            opening: Arc::new(tokio::sync::Semaphore::new(MAX_OPENING_LIVE_QUERIES)),
+            queries: Arc::new(tokio::sync::Semaphore::new(
+                MAX_RUNNING_QUERIES_PER_CONNECTION,
+            )),
         }
     }
 
@@ -342,8 +519,9 @@ impl Connection {
                 .map(|s| s.to_string())
                 .unwrap_or_default();
             let mut guard = self.inflight.lock().await;
-            let cancelled = if let Some(token) = guard.remove(&target_id) {
-                token.cancel();
+            let cancelled = if let Some((drop_token, ctx_token)) = guard.remove(&target_id) {
+                drop_token.cancel();
+                ctx_token.cancel();
                 true
             } else {
                 false
@@ -359,18 +537,38 @@ impl Connection {
             return;
         }
 
-        // Allocate a CancellationToken for this request and stash it in
-        // the registry under the request id.  The handler races its
-        // work against `cancel_token.cancelled()`; if the client sends
-        // `request.cancel`, the racing future fires immediately and we
-        // reply with an `AbortError` (code 499). A child of `session_over`: a revocation or
-        // expiry cancels the calls in flight too.
-        let cancel_token = self.session_over.child_token();
+        // Allocate the request's CancellationTokens and stash them in
+        // the registry under the request id.  If the client sends
+        // `request.cancel`, the drop token's race fires immediately and we
+        // reply with an `AbortError` (code 499).
+        let opens_live_query = self.handler_map.opens(&msg_type);
+        // Two tokens, two jobs:
+        // - `drop_token` drops the call's future in the select below, on
+        //   `request.cancel` or the session ending — and, for a call that
+        //   opens a live query, on the connection closing too (#1595: its
+        //   first result has nobody left to receive it). Other calls still
+        //   finish once the socket closes: their evals end on `ctx_token`,
+        //   and a subscribe that still completes is swept as the call ends
+        //   (the dispose loop in `serve`).
+        // - `ctx_token` (a `closed` child) rides `req_ctx` into the eval gate:
+        //   a `request.cancel`, the connection closing, a revocation or an
+        //   expiry stops the call's eval — for every query-running method, not
+        //   only live-query openers (#1736). `request.cancel` cancels both.
+        let drop_token = if opens_live_query {
+            self.closed.child_token()
+        } else {
+            self.session_over.child_token()
+        };
+        let ctx_token = self.closed.child_token();
+        let opening = opens_live_query.then(|| self.opening.clone());
+        let queries = self.queries.clone();
         {
             let mut guard = self.inflight.lock().await;
-            guard.insert(id.clone(), cancel_token.clone());
+            guard.insert(id.clone(), (drop_token.clone(), ctx_token.clone()));
         }
 
+        // An event that names a member twice, which `params` (a `Value`) no longer shows.
+        let refused = super::identity_ws::duplicate_member_refusal(&msg_type, text);
         let handler_map = self.handler_map.clone();
         let base_ctx = self.ctx.clone();
         let inflight = self.inflight.clone();
@@ -407,18 +605,21 @@ impl Connection {
             // Build a per-request context that carries the cancel token,
             // so handlers can clone it into long-running operations.
             let mut req_ctx = (*base_ctx).clone();
-            req_ctx.cancel_token = Some(cancel_token.clone());
+            req_ctx.cancel_token = Some(ctx_token.clone());
+            req_ctx.query_slots = Some(queries);
             let req_ctx = Arc::new(req_ctx);
 
-            // Race the handler against cancellation.  On cancel, we
-            // drop the handler future — the work it was doing (e.g.
-            // a `spawn_blocking` SPARQL eval inside Oxigraph) will
-            // continue to run because Rust can't cancel arbitrary
-            // CPU-bound work, but the network reply is skipped and
-            // the next select arm fires first.
+            // Race the handler against a `request.cancel` or the session
+            // ending.  On cancel, we drop the handler future — its eval
+            // gate's drop stops the work it was doing (e.g. a
+            // `spawn_blocking` SPARQL eval inside Oxigraph) — the network
+            // reply is skipped and the first select arm fires first.
+            // A socket that merely closed does not fire `drop_token`:
+            // `ctx_token` still stops the call's eval, and the call ends
+            // with it.
             let response = tokio::select! {
                 biased;
-                _ = cancel_token.cancelled() => {
+                _ = drop_token.cancelled() => {
                     if session_over.is_cancelled() {
                         json!({"id": id, "error": {"code": 401, "message": token_ended_frame().reason.as_str()}})
                     } else {
@@ -427,10 +628,40 @@ impl Connection {
                         json!({"id": id, "error": {"code": 499, "message": "Request cancelled by client"}})
                     }
                 }
-                result = handler_map.dispatch(&msg_type, params, req_ctx) => {
+                result = async {
+                    // Waits for a turn, cancellably: `request.cancel` drops the
+                    // wait with the call's future; the connection closing ends
+                    // it on `ctx_token` — a queued live query has nobody left
+                    // to receive its first result.
+                    let _turn = match opening {
+                        Some(opening) => match tokio::select! {
+                            p = opening.acquire_owned() => p.ok(),
+                            _ = ctx_token.cancelled() => None,
+                        } {
+                            Some(permit) => Some(permit),
+                            None => {
+                                return Err(WsRpcError {
+                                    data: None,
+                                    code: 499,
+                                    message: "Request cancelled by client".to_string(),
+                                });
+                            }
+                        },
+                        None => None,
+                    };
+                    match refused {
+                        // The access answer first: a caller the guard refuses learns nothing
+                        // of its frame.
+                        Some(e) => handler_map
+                            .admit(&msg_type, &params, &req_ctx)
+                            .await
+                            .and(Err(e)),
+                        None => handler_map.dispatch(&msg_type, params, req_ctx).await,
+                    }
+                } => {
                     match result {
                         Ok(val) => json!({"id": id, "result": val}),
-                        Err(e) => json!({"id": id, "error": {"code": e.code, "message": e.message}}),
+                        Err(e) => json!({"id": id, "error": e.to_wire()}),
                     }
                 }
             };
@@ -486,6 +717,8 @@ where
 
     event_task.abort();
     let _ = event_task.await;
+    // Nobody receives the first result of a live query still opening.
+    conn.closed.cancel();
 
     // End the live queries now. A subscribe still in flight adds one after
     // this sweep, so sweep again as each call ends.
@@ -759,6 +992,75 @@ mod socket_tests {
     // revokeToken() used to leave open sockets open until their next request or event. Now
     // each of the token's sockets closes at the revoke, with the frame a failed check sends.
     // The operator revokes through the RPC, by the app's JWT (#1060).
+    /// An `identity.publish` or `identity.cosignIncept` frame whose event names a member twice
+    /// is refused from the frame's text: the `Value` the handler gets keeps only the last.
+    #[tokio::test]
+    async fn an_identity_event_that_names_a_member_twice_is_refused() {
+        let addr = start_server().await;
+        let mut ws = connect(addr, ADMIN).await;
+        let event = r#"{"seq":0,"seq":1}"#;
+        for (id, frame) in [
+            (
+                "p",
+                format!(
+                    r#"{{"id":"p","type":"identity.publish","params":{{"events":[{event}]}}}}"#
+                ),
+            ),
+            (
+                "c",
+                format!(
+                    r#"{{"id":"c","type":"identity.cosignIncept","params":{{"event":{event}}}}}"#
+                ),
+            ),
+        ] {
+            ws.send(WsMessage::Text(frame.into())).await.unwrap();
+            let reply = loop {
+                let frame = tokio::time::timeout(Duration::from_secs(10), ws.next())
+                    .await
+                    .expect("a reply")
+                    .expect("an open socket")
+                    .unwrap();
+                if let WsMessage::Text(text) = frame {
+                    let reply: Value = serde_json::from_str(&text).unwrap();
+                    if reply["id"] == id {
+                        break reply;
+                    }
+                }
+            };
+            assert_eq!(reply["error"]["code"], 400, "{reply}");
+            let message = reply["error"]["message"].as_str().unwrap();
+            assert!(message.starts_with("invalid: DuplicateMember"), "{reply}");
+        }
+    }
+
+    /// The guard runs before the duplicate-member refusal: an app on the main agent, which
+    /// `identity.publish`'s guard refuses, gets the access answer for such a frame.
+    #[tokio::test]
+    async fn a_caller_the_guard_refuses_gets_403_for_a_duplicate_member_frame() {
+        let addr = start_server().await;
+        let mut ws = connect(addr, &app_token("duplicate-member-app")).await;
+        ws.send(WsMessage::Text(
+            r#"{"id":"p","type":"identity.publish","params":{"events":[{"seq":0,"seq":1}]}}"#
+                .into(),
+        ))
+        .await
+        .unwrap();
+        let reply = loop {
+            let frame = tokio::time::timeout(Duration::from_secs(10), ws.next())
+                .await
+                .expect("a reply")
+                .expect("an open socket")
+                .unwrap();
+            if let WsMessage::Text(text) = frame {
+                let reply: Value = serde_json::from_str(&text).unwrap();
+                if reply["id"] == "p" {
+                    break reply;
+                }
+            }
+        };
+        assert_eq!(reply["error"]["code"], 403, "{reply}");
+    }
+
     #[tokio::test]
     async fn every_socket_of_a_token_closes_with_1008_when_it_is_revoked() {
         let addr = start_server().await;
@@ -833,7 +1135,7 @@ mod socket_tests {
         // Events reach a socket over its RPC connection once it watches them; the event
         // stream must end at expiry too, not keep the socket open.
         let watching = &mut sockets[1].1;
-        let watch = json!({ "model-loading-status": null, "perspective-added": null });
+        let watch = json!({ "model-status": null, "perspective-added": null });
         let reply = call_with(watching, "watch", "events.watch", watch).await;
         assert_eq!(reply["result"], true, "{reply}");
 
@@ -1054,7 +1356,7 @@ mod socket_tests {
         let mut admin = connect(addr, ADMIN).await;
         let mut anonymous = connect(addr, "").await;
         // Both sockets watch the event, so only the token gate can keep it from one.
-        let watch = json!({ "model-loading-status": null });
+        let watch = json!({ "model-status": null });
         for ws in [&mut admin, &mut anonymous] {
             let reply = call_with(ws, "watch", "events.watch", watch.clone()).await;
             assert_eq!(reply["result"], true, "{reply}");
@@ -1071,7 +1373,7 @@ mod socket_tests {
             loop {
                 get_global_pubsub().await.publish_event(Event {
                     capability: AGENT_AUTH_CAPABILITY.clone(),
-                    ..Event::new(Topic::AiModelLoadingStatus, Audience::Everyone, &event)
+                    ..Event::new(Topic::AiModelStatus, Audience::Everyone, &event)
                 });
                 if let Ok(Some(Ok(WsMessage::Text(text)))) =
                     tokio::time::timeout(Duration::from_millis(200), admin.next()).await
@@ -1100,5 +1402,184 @@ mod socket_tests {
             !matches!(leaked, Ok(true)),
             "a socket without a token got an event"
         );
+    }
+}
+
+#[cfg(test)]
+mod liveness_tests {
+    //! A client that stops sending frames is let go: its stream of frames ends, and
+    //! `serve` then ends the connection's subscriptions and its event queue. A
+    //! client still reading a large reply on a slow link is not.
+    use super::*;
+    use std::time::Duration;
+    use tokio::time::Instant;
+
+    fn fresh() -> Arc<std::sync::Mutex<Liveness>> {
+        Arc::new(std::sync::Mutex::new(Liveness::new(Instant::now())))
+    }
+
+    fn secs(s: f64) -> Duration {
+        Duration::from_secs_f64(s)
+    }
+
+    /// When the stream ends, measured from `start`. A stream still going after
+    /// 1000 s fails the test instead of running for ever on the paused clock.
+    async fn ended_after<S: futures::Stream + Unpin>(mut frames: S, start: Instant) -> Duration {
+        let drained = async { while frames.next().await.is_some() {} };
+        tokio::time::timeout(Duration::from_secs(1000), drained)
+            .await
+            .expect("the client was never let go");
+        start.elapsed()
+    }
+
+    /// Frames sent at the given times after the start, then silence, the socket held open.
+    fn frames_at(times: Vec<f64>) -> impl futures::Stream<Item = ()> + Unpin {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let start = Instant::now();
+        tokio::spawn(async move {
+            for t in times {
+                tokio::time::sleep_until(start + secs(t)).await;
+                let _ = tx.send(());
+            }
+            std::future::pending::<()>().await;
+        });
+        tokio_stream::wrappers::UnboundedReceiverStream::new(rx)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_silent_client_is_let_go_after_the_limit() {
+        let start = Instant::now();
+        let frames = until_silent(futures::stream::pending::<()>(), fresh());
+        assert_eq!(ended_after(Box::pin(frames), start).await, SILENCE_LIMIT);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn every_frame_restarts_the_limit() {
+        let start = Instant::now();
+        let step = SILENCE_LIMIT.as_secs_f64() - 1.0;
+        let frames = until_silent(frames_at(vec![step, 2.0 * step, 3.0 * step]), fresh());
+        assert_eq!(
+            ended_after(Box::pin(frames), start).await,
+            secs(3.0 * step) + SILENCE_LIMIT
+        );
+    }
+
+    /// A 3.2 MB reply needs 200 s at 16 kB/s. A request the client sends at 1 s
+    /// says nothing about how much of the reply it has read.
+    #[tokio::test(start_paused = true)]
+    async fn an_unrelated_frame_does_not_take_a_large_reply_s_time() {
+        let liveness = fresh();
+        let start = Instant::now();
+        liveness.lock().unwrap().wrote(3_200_000, start);
+        let frames = until_silent(frames_at(vec![1.0]), liveness);
+        assert_eq!(
+            ended_after(Box::pin(frames), start).await,
+            secs(200.0) + PONG_RETURN
+        );
+    }
+
+    /// 1.6 MB written at 50 s cannot have crossed before 150 s.
+    #[tokio::test(start_paused = true)]
+    async fn a_late_write_is_given_its_time_from_when_it_was_written() {
+        let liveness = fresh();
+        let start = Instant::now();
+        let frames = until_silent(futures::stream::pending::<()>(), liveness.clone());
+        tokio::spawn(async move {
+            tokio::time::sleep(secs(50.0)).await;
+            liveness.lock().unwrap().wrote(1_600_000, Instant::now());
+        });
+        assert_eq!(
+            ended_after(Box::pin(frames), start).await,
+            secs(150.0) + PONG_RETURN
+        );
+    }
+
+    /// Once a ping is out, what is written after it queues behind it and cannot
+    /// delay its pong: a client that stopped reading is let go even while events
+    /// keep coming.
+    #[tokio::test(start_paused = true)]
+    async fn writes_after_an_unanswered_ping_do_not_postpone_the_end() {
+        let liveness = fresh();
+        let start = Instant::now();
+        liveness.lock().unwrap().wrote(1_600_000, start);
+        let frames = until_silent(futures::stream::pending::<()>(), liveness.clone());
+        tokio::spawn(async move {
+            for t in 1.. {
+                tokio::time::sleep_until(start + secs(t as f64)).await;
+                let mut liveness = liveness.lock().unwrap();
+                // 16 kB a second, as fast as the link drains.
+                liveness.wrote(16_000, Instant::now());
+                if t == 20 {
+                    liveness.pinged(Instant::now());
+                }
+            }
+        });
+        // At 20 s the link is busy until 120 s (100 s of reply, 20 s of events).
+        assert_eq!(
+            ended_after(Box::pin(frames), start).await,
+            secs(120.0) + PONG_RETURN
+        );
+    }
+
+    /// The writer and the reader together: a 3.2 MB reply, a request at 1 s, and
+    /// the pong to the 20 s ping, which reaches the client behind the reply at
+    /// 200 s and comes back half a second later. The client then goes silent.
+    #[tokio::test(start_paused = true)]
+    async fn a_slow_client_reading_a_large_reply_keeps_its_connection() {
+        let liveness = fresh();
+        let start = Instant::now();
+        let (tx, rx) = mpsc::unbounded_channel::<String>();
+        let sink = futures::sink::drain::<Message>();
+        tokio::spawn(write_to(
+            sink,
+            rx,
+            CancellationToken::new(),
+            liveness.clone(),
+        ));
+        tx.send("x".repeat(3_200_000)).unwrap();
+        let frames = until_silent(frames_at(vec![1.0, 200.5]), liveness);
+        assert_eq!(
+            ended_after(Box::pin(frames), start).await,
+            secs(200.5) + SILENCE_LIMIT
+        );
+        drop(tx);
+    }
+
+    /// With replies queued without a break, the writer still sends a ping each
+    /// interval: it is the client's chance to be heard.
+    #[tokio::test(start_paused = true)]
+    async fn the_writer_pings_while_replies_are_queued() {
+        let start = Instant::now();
+        let sent = Arc::new(std::sync::Mutex::new(Vec::<(Duration, bool)>::new()));
+        let record = sent.clone();
+        // Each send takes a second: a slow link.
+        let sink = Box::pin(futures::sink::unfold((), move |(), msg: Message| {
+            let record = record.clone();
+            async move {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                let ping = matches!(msg, Message::Ping(_));
+                record.lock().unwrap().push((start.elapsed(), ping));
+                Ok::<_, std::convert::Infallible>(())
+            }
+        }));
+        let (tx, rx) = mpsc::unbounded_channel::<String>();
+        for _ in 0..100 {
+            tx.send("reply".to_string()).unwrap();
+        }
+        let writer = tokio::spawn(write_to(sink, rx, CancellationToken::new(), fresh()));
+        tokio::time::sleep(PING_INTERVAL + Duration::from_secs(2)).await;
+        let first_ping = sent
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(_, ping)| *ping)
+            .map(|(at, _)| *at);
+        assert!(
+            first_ping.is_some_and(|at| at <= PING_INTERVAL + Duration::from_secs(2)),
+            "first ping at {:?}",
+            first_ping
+        );
+        drop(tx);
+        writer.abort();
     }
 }

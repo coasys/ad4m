@@ -6,7 +6,7 @@
  */
 
 import { io } from "https://esm.sh/v135/socket.io-client@4.7.2";
-import { Mutex, withTimeout } from "https://esm.sh/v135/async-mutex@0.4.0";
+import { Mutex, withTimeout } from "./vendor/async-mutex@0.4.0.mjs";
 import axiod from "https://deno.land/x/axiod/mod.ts";
 import { defineLanguage, agentDid } from "@coasys/ad4m-ldk";
 

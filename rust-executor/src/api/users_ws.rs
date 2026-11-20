@@ -6,7 +6,6 @@ use std::sync::Arc;
 use ts_rs::TS;
 
 use crate::agent::capabilities::*;
-use crate::db::Ad4mDb;
 use crate::types::{RequestContext, UserCreationResult, UserStatistics, VerificationRequestResult};
 
 use super::guards::Guard;
@@ -17,7 +16,8 @@ async fn get_multi_user_enabled(
     _params: Value,
     _ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    let enabled = Ad4mDb::with_global_instance(|db| db.get_multi_user_enabled())
+    let enabled = crate::db_backend::db_backend()
+        .get_multi_user_enabled()
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
     Ok(Value::Bool(enabled))
 }
@@ -35,8 +35,14 @@ async fn set_multi_user_enabled(
             crate::config::MULTI_USER_WITHOUT_ADMIN_CREDENTIAL_ERROR,
         ));
     }
+    crate::config::refuse_custody_channel_with_multi_user(
+        crate::config::custody_channel_on(),
+        body.enabled,
+    )
+    .map_err(WsRpcError::forbidden)?;
 
-    Ad4mDb::with_global_instance(|db| db.set_multi_user_enabled(body.enabled))
+    crate::db_backend::db_backend()
+        .set_multi_user_enabled(body.enabled)
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
     Ok(Value::Bool(true))
 }
@@ -46,7 +52,8 @@ async fn list_users(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, 
         return Ok(serde_json::json!([]));
     }
 
-    let users = Ad4mDb::with_global_instance(|db| db.list_user_statistics())
+    let users = crate::db_backend::db_backend()
+        .list_user_statistics()
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     Ok(serde_json::to_value(users).unwrap_or_default())
@@ -55,7 +62,8 @@ async fn list_users(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, 
 async fn get_user_wallet(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let email = params.require_str("email")?;
 
-    let wallet = Ad4mDb::with_global_instance(|db| db.get_user_hot_wallet(&email))
+    let wallet = crate::db_backend::db_backend()
+        .get_user_hot_wallet(&email)
         .map_err(|e| WsRpcError::internal(e.to_string()))?
         .ok_or_else(|| WsRpcError::not_found("Wallet not found"))?;
 
@@ -70,16 +78,16 @@ async fn set_user_free_access(
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let email = body.email.trim().to_lowercase();
-    Ad4mDb::with_global_instance(|db| db.set_user_free_access(&email, body.enabled)).map_err(
-        |e| {
+    crate::db_backend::db_backend()
+        .set_user_free_access(&email, body.enabled)
+        .map_err(|e| {
             let message = e.to_string();
             if message.contains("User not found") {
                 WsRpcError::not_found(message)
             } else {
                 WsRpcError::internal(message)
             }
-        },
-    )?;
+        })?;
 
     Ok(Value::Bool(true))
 }
@@ -100,7 +108,7 @@ async fn create_user(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, 
         }));
     }
 
-    let user_exists = Ad4mDb::with_global_instance(|db| db.get_user(&email).is_ok());
+    let user_exists = crate::db_backend::db_backend().get_user(&email).is_ok();
 
     if user_exists {
         match um::verify_credentials(&email, &body.password) {
@@ -122,9 +130,9 @@ async fn create_user(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, 
     let did =
         um::create_user(&email, &body.password).map_err(|e| WsRpcError::internal(e.to_string()))?;
 
-    um::init_user_profile(&did)
-        .await
-        .map_err(WsRpcError::internal)?;
+    // Detached: the reply does not wait for the agent-language publish (see
+    // `init_user_profile`).
+    let _publish = um::init_user_profile(&did).map_err(WsRpcError::internal)?;
 
     let code = um::create_verification_code(&email, "signup")
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
@@ -199,10 +207,9 @@ async fn email_test(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, W
                 .expires_at
                 .ok_or_else(|| WsRpcError::bad_request("'expiresAt' required"))?;
 
-            Ad4mDb::with_global_instance(|db| {
-                db.set_verification_code_expiry(&email, &verification_type, expires_at)
-            })
-            .map_err(|e| WsRpcError::internal(e.to_string()))?;
+            crate::db_backend::db_backend()
+                .set_verification_code_expiry(&email, &verification_type, expires_at)
+                .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
             Ok(Value::Bool(true))
         }
@@ -229,7 +236,7 @@ async fn request_verification(
         }));
     }
 
-    let user_exists = Ad4mDb::with_global_instance(|db| db.get_user(&email).is_ok());
+    let user_exists = crate::db_backend::db_backend().get_user(&email).is_ok();
 
     if !user_exists {
         return Ok(serde_json::json!({
@@ -308,7 +315,9 @@ async fn revoke_all_sessions(params: Value, ctx: Arc<RequestContext>) -> Result<
     // The email names the user's agent: it resolves to the DID here, once. `None` when no
     // user with an agent has it.
     let did_of = |email: &str| {
-        crate::db::Ad4mDb::with_global_instance(|db| db.get_user(email).ok())
+        crate::db_backend::db_backend()
+            .get_user(email)
+            .ok()
             .map(|user| user.did)
             .filter(|did| !did.is_empty())
     };
@@ -590,7 +599,8 @@ mod operator_tests {
             .clone();
         let saved_mode = crate::user_management::is_multi_user_enabled();
         let set_mode = |enabled: bool| {
-            crate::db::Ad4mDb::with_global_instance(|db| db.set_multi_user_enabled(enabled))
+            crate::db_backend::db_backend()
+                .set_multi_user_enabled(enabled)
                 .unwrap()
         };
         set_mode(false);
@@ -617,6 +627,15 @@ mod operator_tests {
             ..Default::default()
         });
         let credentialed = set(true).await;
+        let _ = set(false).await;
+
+        crate::config::set_global_config(Ad4mConfig {
+            admin_credential: Some("users-ws-admin".into()),
+            custody_channel: Some(true),
+            ..Default::default()
+        });
+        let custody_refused = set(true).await.unwrap_err();
+        let custody_mode = crate::user_management::is_multi_user_enabled();
 
         set_mode(saved_mode);
         *GLOBAL_AD4M_CONFIG.lock().unwrap_or_else(|e| e.into_inner()) = saved_config;
@@ -629,6 +648,13 @@ mod operator_tests {
         assert!(!refused_mode, "the refused call left multi-user mode on");
         assert_eq!(turned_off.unwrap(), json!(true));
         assert_eq!(credentialed.unwrap(), json!(true));
+        // An executor with the custody channel never turns multi-user mode on.
+        assert_eq!(custody_refused.code, 403, "{}", custody_refused.message);
+        assert_eq!(
+            custody_refused.message,
+            crate::config::CUSTODY_CHANNEL_WITH_MULTI_USER_ERROR
+        );
+        assert!(!custody_mode, "the refused call left multi-user mode on");
     }
 }
 
@@ -640,7 +666,6 @@ mod session_revocation_tests {
     use crate::agent::session::{AuthError, Session};
     use crate::agent::AgentContext;
     use crate::api::ws_handler::build_handler_map;
-    use crate::db::Ad4mDb;
     use crate::test_utils::{granted_token, managed_user, setup_agent, setup_wallet};
     use crate::types::RequestContext;
     use crate::user_management::generate_user_jwt;
@@ -886,7 +911,7 @@ mod session_revocation_tests {
         .unwrap();
 
         let reloaded = Grants::default();
-        Ad4mDb::with_global_instance(|db| reloaded.load(db)).unwrap();
+        reloaded.load(crate::db_backend::db_backend()).unwrap();
         assert!(reloaded.get(&id).is_none());
         let listed = reloaded.list(&AgentContext::managed(
             crate::agent::AgentService::did_for_email(&email).unwrap(),

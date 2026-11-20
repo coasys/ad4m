@@ -773,6 +773,21 @@ const { results, totalCount } = await Recipe.findAllAndCount(perspective, {
 const page = await Recipe.paginate(perspective, 10, 1, { where: { category: "Dessert" } });
 ```
 
+### What a Query Returns
+
+With no `properties` and no `include`, a query returns every field of each instance:
+
+- `id`, `author`, `createdAt` and `updatedAt`,
+- every property's value, including computed (`getter`) properties,
+- every relation as the ids it points at (raw URI strings), not as instances.
+
+This default is a contract, not an optimisation that may change. Two options change it, and only for the query that sets them:
+
+- `properties: [...]` returns only the named fields, plus `id` (see [Sparse Fieldsets](#sparse-fieldsets-with-properties)).
+- `include: { relation: true }` replaces that relation's ids with instances (see [Eager Loading](#eager-loading-with-include)).
+
+[Flows](/flows) depend on this default. A flow's outputs are hashed from exactly what a query by id returns through the output's class, with no other options, and every voter recomputes that hash on their own executor. If the default shape changed, executors on either side of the change would compute different hashes and refuse to co-sign.
+
 ### Query Builder
 
 The fluent query builder provides a chainable interface:
@@ -913,6 +928,8 @@ const recipes = await Recipe.query(perspective)
 
 The sub-query accepts: `where`, `order`, `limit`, `offset`, `include`, and `properties`.
 
+`limit` and `offset` apply to **each parent** on its own: `include: { comments: { limit: 5 } }` on a page of twenty recipes gives every recipe its own five comments (chosen by the include's `order`, or oldest first without one). A comment linked from two recipes counts toward each. A `polymorphic` include refuses both.
+
 ### Sparse Fieldsets with `properties`
 
 Only hydrate specific properties to avoid unnecessary work (especially useful for properties with non-literal `resolveLanguage` that trigger network calls):
@@ -953,7 +970,7 @@ const posts = await Post.query(perspective).links(["comments"]).get();
 ```
 
 - **Entries** are property or relation names the model declares, or absolute predicate IRIs. An IRI may be one the model does not declare. If an entry matches both, the name wins.
-- **Rows** have the shape of the `LinkExpression` that `perspective.get()` returns (`LinkRow` in the SDK). That includes `proof.valid` / `proof.invalid`, the signature verdict the executor recorded when it stored the link. `valid` is `true` only when the signature verifies against `author`. Links whose signature did not verify are left out unless the query sets `includeUnverified` (see [Unverified Links](#unverified-links)), so by default every row reads `valid: true`. With `includeUnverified`, a link stored without a proof arrives with an empty `key` and `signature` and `valid: false`. `invalid` is always `!valid` (never `null`), as in `perspective.get()`, so `invalid: true` covers both a failed signature and a link nobody signed; to tell them apart, check whether `proof.signature` is empty. Anything that acts on a row, such as counting a vote or honouring a grant, should still require `proof.valid`, so it stays correct when the query sets `includeUnverified`. `data.target` is the target exactly as it was signed (a literal written in another encoding than `Literal.from(v).toUrl()` keeps its original bytes), and the verdict was computed over those bytes, so verifying `proof` yourself gives the same answer. Rows are sorted oldest first, and ties have a fixed order, so every replica returns the same array.
+- **Rows** have the shape of the `LinkExpression` that `perspective.get()` returns (`LinkRow` in the SDK). That includes `proof.valid` / `proof.invalid`, the signature verdict the executor recorded when it stored the link. `valid` is `true` only when the signature verifies against `author`. Links whose signature did not verify are left out unless the query sets `includeUnverified` (see [Unverified Links](#unverified-links)), so by default every row reads `valid: true`. With `includeUnverified`, a link stored without a proof arrives with an empty `key` and `signature` and `valid: false`. `invalid` is always `!valid` (never `null`), as in `perspective.get()`, so `invalid: true` covers both a failed signature and a link nobody signed; to tell them apart, check whether `proof.signature` is empty. Anything that acts on a row, such as counting a vote or honouring a grant, should still require `proof.valid`, so it stays correct when the query sets `includeUnverified`. `data.target` is the target exactly as it was signed (a literal written in another encoding than `Literal.from(v).toUrl()` keeps its original bytes), and the verdict was computed over those bytes, so verifying `proof` yourself gives the same answer. Each row also carries the link's `status` (`"SHARED"` or `"LOCAL"`, as `perspective.get()` spells it). It is not signed: it says where this executor holds the link, not who wrote it. Rows are sorted oldest first, and ties have a fixed order, so every replica returns the same array.
 - **Per-item provenance for collections:** `links: ["members"]` answers "who added each member, when, and does their signature hold". The plain `members` array stays as it is.
 - **Every requested entry is present** on every returned instance, as `[]` when it has no such link. A query that doesn't ask has no `__links` key.
 - **Errors instead of `[]`:** the query fails for an entry that is neither a declared name nor an absolute IRI, such as a typo. It also fails for a reverse relation (`@BelongsToOne` / `@BelongsToMany`). Those links point *at* the instance, and `links` reads outgoing links only, so ask for the relation on the class at the other end.
@@ -1118,6 +1135,8 @@ The rules:
 
 Every link carries its author's signature, and the executor checks it when the link is stored. Queries only hydrate from links whose signature verified. A link that fails the check is withheld, for example a gossiped link whose data was changed after signing. Such a link never becomes a property value, a relation target, the instance's `author` or its `updatedAt`, even when it is newer than the signed value. Last-write-wins would otherwise let it win. It is also left out of the rows under [`__links`](#per-link-rows-with-links) and of the sort keys behind `order` with `limit`/`offset`.
 
+A link that arrives from a Neighbourhood is checked before it is stored. If its signature does not verify against its `author`, the executor drops it, so no query returns it, not even with `includeUnverified`. A copy of a link this agent holds as Local is dropped too, and so is a removal of one. Once a link is stored with a signature that verifies, a later copy of it (same author, source, predicate, target and timestamp) does not replace its signature, key or signed target bytes, whichever way it arrives ([#1146](https://github.com/coasys/ad4m/issues/1146)).
+
 This includes a typed relation such as `@HasMany(() => Comment, { through: "recipe://comment" })`, whose generated conformance getter the executor filters too. A relation `where`, as in `@HasMany(() => Comment, { through: "recipe://comment", where: { status: "approved" } })`, reads each target's values through the same filter, so an unverified `status` link neither admits a comment nor drops one. A `getter` you write yourself is different: the executor runs it as written, so `includeUnverified` does not apply to it and it reads unverified links too. To skip them, join the link's verdict in the getter:
 
 ```typescript
@@ -1151,7 +1170,7 @@ Included relations inherit the setting unless their own sub-query sets `includeU
 
 With `includeUnverified: true`, selection reads unverified links as well, the same as hydration. The one exception is a hand-written `getter` (see above).
 
-> **Links stored before [#1141](https://github.com/coasys/ad4m/pull/1141):** a link whose literal target was not encoded the way the SDK encodes it (a raw space as in `literal:string:Write the guide`, raw `literal:json:{"a":1}`, or `-_.~` escaped by `expression.create(_, "literal")`) and that was stored before #1141 reads back in the canonical encoding. The node that signed it still returns it, but the copy it publishes to a Neighbourhood does not verify, so joiners withhold it unless the query sets `includeUnverified`. Literals written by the SDK (`Literal.from(v).toUrl()`) and links written after #1141 are not affected.
+> **Links stored before [#1141](https://github.com/coasys/ad4m/pull/1141):** a link whose literal target was not encoded the way the SDK encodes it (a raw space as in `literal:string:Write the guide`, raw `literal:json:{"a":1}`, or `-_.~` escaped by `expression.create(_, "literal")`) and that was stored before #1141 reads back in the canonical encoding. The node that signed it still returns it, but the copy it publishes to a Neighbourhood does not verify, so joiners drop it when it arrives and do not return it even with `includeUnverified`. Literals written by the SDK (`Literal.from(v).toUrl()`) and links written after #1141 are not affected.
 
 ### Reading by Link Status
 
@@ -1262,7 +1281,7 @@ not re-run a `Post` subscription, even when both classes use the same flag
 predicate. A query over several classes (`Ad4mModel.queryOf`) is one
 subscription that re-runs on a write any of its classes would re-run on. When
 the result changes, the executor sends only the change (the records added,
-updated and removed, with the new `totalCount`), and the builder applies it to
+updated and removed, with the new `totalCount` when the query set `count: true`), and the builder applies it to
 the result it holds before calling your callback.
 
 #### Subscriptions and `dispose()`
@@ -1275,6 +1294,14 @@ A builder holds one subscription at a time: `subscribe()`, `countSubscribe()`
 and `paginateSubscribe()` end the previous one first. `dispose()` ends it on the
 client at once and tells the executor. The executor also ends every subscription
 of a connection when the connection closes.
+
+A subscribe the client gives up on leaves nothing behind on the executor. When
+the call times out (30 s), or is cancelled (`dispose({ cancelOpening: true })`),
+the client cancels it on the executor and then disposes it. The client picks
+each subscription's id itself and sends it with the subscribe call, so it can
+dispose a subscription whose answer it never got. The
+executor runs identical queries once per change, however many subscriptions
+hold them: each subscription still gets its own id and its own updates.
 
 ## Transactions
 

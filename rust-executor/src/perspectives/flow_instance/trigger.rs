@@ -247,7 +247,8 @@ impl PerspectiveInstance {
                 true
             } else if crate::user_management::is_multi_user_enabled() {
                 let managed = managed.get_or_insert_with(|| {
-                    crate::db::Ad4mDb::with_global_instance(|db| db.list_users())
+                    crate::db_backend::db_backend()
+                        .list_users()
                         .map(|users| users.into_iter().map(|u| u.did).collect())
                         .unwrap_or_else(|e| {
                             log::warn!("seeding minted flow instances: could not list users ({e})");
