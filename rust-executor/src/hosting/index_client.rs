@@ -41,7 +41,7 @@ const SESSION_MARGIN_S: u64 = 60;
 #[serde(rename_all = "camelCase", default)]
 #[ts(export)]
 pub struct IndexConfig {
-    /// The index's base URL, e.g. `https://api.coasys.org/v1/index`. Empty: none.
+    /// The index's base URL, e.g. `https://api.coasys.app/v1/index`. Empty: none.
     pub url: String,
     /// `false`: no call leaves for the index.
     pub enabled: bool,
