@@ -82,7 +82,6 @@ pub use expected_links::{ExpectedLinks, LinksChanged};
 // A batch's effective view of the graph for the validated write core.
 mod batch_view;
 // The judgement the store holds for a link a write path just persisted.
-mod revocation_notices;
 mod stored_judgements;
 
 #[cfg(test)]
@@ -4721,7 +4720,7 @@ impl PerspectiveInstance {
         // keeps a `valid` it cannot re-judge), but answers `Err` at the end so it runs again.
         let mut unreadable: Option<String> = None;
         match scope {
-            super::Recheck::Signers(_) | super::Recheck::Logged | super::Recheck::Flagged => {
+            super::Recheck::Signers(_) | super::Recheck::Logged => {
                 let signers: Vec<String> = match scope {
                     super::Recheck::Signers(signers) => signers.iter().cloned().collect(),
                     _ => Vec::new(),
@@ -4732,11 +4731,6 @@ impl PerspectiveInstance {
                         super::Recheck::Logged => self
                             .sparql_store
                             .links_with_person(after.as_deref(), page)?,
-                        super::Recheck::Flagged => self.sparql_store.links_with_verdict(
-                            &LinkVerdict::Flagged,
-                            after.as_deref(),
-                            page,
-                        )?,
                         _ => {
                             self.sparql_store
                                 .links_by_authors(&signers, after.as_deref(), page)?
@@ -4837,12 +4831,8 @@ impl PerspectiveInstance {
         let mut rewritten = Vec::new();
         for (before, link) in stored.into_iter().zip(&links) {
             // A link this store already counted was here before the revocation reached the
-            // key map; a stored revocation notice says the same for a link a late sync put
-            // in `flagged` (the notice could only be written after the revocation). The
-            // store judges the same way.
-            let entered = (before.verdict == Some(LinkVerdict::Valid)
-                || self.sparql_store.vouched_by_notice(link)?)
-            .then_some(false);
+            // key map: the one order the executor knows. The store judges the same way.
+            let entered = (before.verdict == Some(LinkVerdict::Valid)).then_some(false);
             let now = link.check_entered(entered);
             if before.verdict.as_ref() == Some(&now.verdict) && before.person == now.person {
                 continue;
@@ -9130,6 +9120,21 @@ mod tests {
             assert_eq!(stored.person, None);
             assert_ne!(stored.proof.valid, Some(true));
         }
+        // Nothing on the tick or the lag recovery changes them: they wait for the space's
+        // order (identity slice 3.B).
+        for scope in [
+            crate::perspectives::Recheck::CantCheck,
+            crate::perspectives::Recheck::Logged,
+        ] {
+            assert_eq!(perspective.recheck_links(&scope).await.unwrap(), 0);
+        }
+        for stored in perspective
+            .sparql_store
+            .get_all_links(&EvalStop::none())
+            .unwrap()
+        {
+            assert_eq!(stored.verdict, Some(LinkVerdict::Flagged));
+        }
         map.forget(&log.scid());
     }
 
@@ -10223,7 +10228,7 @@ mod tests {
 
         let bot = evicted_expired_bot(150).await;
         let map = global_key_map();
-        let (scopes, _, _) =
+        let (scopes, _) =
             crate::identity::lag_scopes(&bot.cache, std::collections::BTreeSet::new(), 0).await;
         for scope in scopes {
             crate::identity::with_test_resolver(
@@ -10304,7 +10309,7 @@ mod tests {
         let resolver = Arc::new(Resolver::new(cache.clone(), backend, None, false));
 
         let person = ad4m_identity_core::did_of(&log.scid());
-        let (scopes, _, _) =
+        let (scopes, _) =
             crate::identity::lag_scopes(&cache, std::collections::BTreeSet::new(), 0).await;
         for scope in scopes {
             crate::identity::with_test_resolver(
