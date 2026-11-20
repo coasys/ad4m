@@ -12,11 +12,11 @@ use tokio::sync::Mutex;
 use ts_rs::TS;
 
 use crate::agent::AgentContext;
-use crate::identity::device::WalletSigner;
 use crate::hosting::index_client::{
     rates_hash, republish_due, IndexClient, IndexConfig, IndexError, IndexSession, ListedModel,
     ListingDraft, ListingText, LocalListing, OwnListing, PendingChange, PricingItem,
 };
+use crate::identity::device::WalletSigner;
 use crate::types::{ModelType, RequestContext};
 
 use super::guards::Guard;
