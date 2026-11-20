@@ -1,8 +1,8 @@
-//! Hosting index and `host.info` WS handlers (AR-07 4.6, AR-05 4.13).
+//! Hosting index WS handlers (AR-07 4.6).
 //!
 //! `index.*` are the operator's calls: the executor makes the HTTP calls to the index
-//! (`crate::index_client`) with its main device key; the caller only presses the buttons.
-//! `host.info` is what the index reads at each health check.
+//! (`crate::hosting::index_client`) with its main device key; the caller only presses the
+//! buttons. What the index reads at each health check is `host.info` (`host_ws`).
 
 use std::sync::Arc;
 
@@ -13,7 +13,7 @@ use ts_rs::TS;
 
 use crate::agent::AgentContext;
 use crate::identity::device::WalletSigner;
-use crate::index_client::{
+use crate::hosting::index_client::{
     rates_hash, republish_due, IndexClient, IndexConfig, IndexError, IndexSession, ListedModel,
     ListingDraft, ListingText, LocalListing, OwnListing, PendingChange, PricingItem,
 };
@@ -64,19 +64,28 @@ pub fn load_config() -> Result<IndexConfig, WsRpcError> {
 /// Stores the config file's `hosting_index` as the executor's index config (AR-07 4.13: the
 /// file's value is the runtime copy at each start). A URL the client would not use is refused.
 pub fn seed_config(config: &IndexConfig) -> Result<(), String> {
-    if config.enabled || !config.url.is_empty() {
-        IndexClient::new(&config.url).map_err(|e| e.to_string())?;
-    }
+    store_config(config.clone())
+        .map(|_| ())
+        .map_err(|e| e.message)
+}
+
+/// Validates and stores the index config: a URL the client would not use is refused here, not
+/// at the first publish; the URL is trimmed. Returns what was stored.
+fn store_config(config: IndexConfig) -> Result<IndexConfig, WsRpcError> {
     let config = IndexConfig {
         url: config.url.trim().to_string(),
         enabled: config.enabled,
     };
+    if config.enabled || !config.url.is_empty() {
+        IndexClient::new(&config.url).map_err(index_failure)?;
+    }
     crate::db_backend::db_backend()
         .set_setting(
             CONFIG_KEY,
-            &serde_json::to_string(&config).map_err(|e| e.to_string())?,
+            &serde_json::to_string(&config).map_err(|e| WsRpcError::internal(e.to_string()))?,
         )
-        .map_err(|e| e.to_string())
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    Ok(config)
 }
 
 /// What this executor remembers of its listing; `None` before the first publish.
@@ -293,20 +302,7 @@ pub struct IndexStatus {
 async fn index_configure(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let config: IndexConfig = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {e}")))?;
-    let config = IndexConfig {
-        url: config.url.trim().to_string(),
-        enabled: config.enabled,
-    };
-    if config.enabled || !config.url.is_empty() {
-        // A bad URL stops here, not at the first publish.
-        IndexClient::new(&config.url).map_err(index_failure)?;
-    }
-    crate::db_backend::db_backend()
-        .set_setting(
-            CONFIG_KEY,
-            &serde_json::to_string(&config).map_err(|e| WsRpcError::internal(e.to_string()))?,
-        )
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    let config = store_config(config)?;
     // Another index is another audience: the session is not carried over.
     *SESSION.lock().await = None;
     Ok(serde_json::to_value(config)?)
@@ -494,62 +490,6 @@ pub fn spawn_republisher() {
 
 // ── host.info ──────────────────────────────────────────────────────────────
 
-/// What a host tells anyone (AR-05 4.13.1, the fields the hosting index reads). Tenants add the
-/// rest (name, `runByCoasys`, `emailCheckRequired`) and take `signup` and `full` from their
-/// settings.
-#[derive(Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export)]
-pub struct HostInfo {
-    /// The operator's full `did:scid:coasys:1:...`.
-    pub operator_did: String,
-    /// This executor's main device key as `did:key` (AR-05-R54).
-    pub executor_did: String,
-    /// `anyone`, `by_invite` or `no_one`.
-    pub signup: String,
-    /// `signup == anyone` (AR-07-R50).
-    pub admits_guests: bool,
-    /// No charge for tenants.
-    pub free_access: bool,
-    /// Whether the host takes no more tenants.
-    pub full: bool,
-    pub version: String,
-}
-
-async fn host_info(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let backend = crate::db_backend::db_backend();
-    // A host takes tenants only in multi-user mode (AR-05 4.13.3).
-    if !backend.get_multi_user_enabled().unwrap_or(false) {
-        return Err(WsRpcError {
-            code: 422,
-            message: "not-a-host: multi-user mode is off".into(),
-            data: Some(serde_json::json!({ "code": "not-a-host" })),
-        });
-    }
-    let executor_did = crate::agent::did_for_context(&AgentContext::Main)
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
-    Ok(serde_json::to_value(host_info_of(
-        operator_scid()?,
-        executor_did,
-        backend.get_free_hosting_enabled().unwrap_or(true),
-    ))?)
-}
-
-/// The host's description. Sign-up is open in multi-user mode until the tenant policy (slice
-/// 3.D) can close it; no tenant limit exists yet, so the host is never full.
-fn host_info_of(operator_did: String, executor_did: String, free_access: bool) -> HostInfo {
-    let signup = "anyone".to_string();
-    HostInfo {
-        operator_did,
-        executor_did,
-        admits_guests: signup == "anyone",
-        signup,
-        free_access,
-        full: false,
-        version: crate::globals::AD4M_VERSION.clone(),
-    }
-}
-
 pub fn register_ws_handlers(map: &mut HandlerMap) {
     // The operator sets which index to use and whether to call it.
     map.method::<IndexConfig, IndexConfig>("index.configure", index_configure)
@@ -563,10 +503,6 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         .guard(Guard::Operator);
     map.method::<NoParams, bool>("index.withdraw", index_withdraw)
         .guard(Guard::Operator);
-    // The host's description. Public: the index reads it with no credentials.
-    map.method::<NoParams, HostInfo>("host.info", host_info)
-        .read()
-        .guard(Guard::Open);
 }
 
 #[cfg(test)]

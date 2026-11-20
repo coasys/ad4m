@@ -1,0 +1,359 @@
+#!/usr/bin/env bash
+# Deploys a released ad4m build to Coasys cloud (coasys-cloud.service) and
+# unlocks it. Layout, secrets and the rebuild drill: deploy/coasys-cloud/README.md
+# (AR-09 4.12).
+#
+#   coasys-cloud install <tag>   a fresh machine: user, directories, unit, vhost, release; no data
+#   coasys-cloud deploy <tag>    fetch + check the release, stop, copy the data, switch, start,
+#                                unlock, gate (health, storage open, agent unlocked, 300 s)
+#   coasys-cloud rollback        previous release and the data copied before the last deploy
+#   coasys-cloud unlock          type the storage secret and call storage.unlock on loopback
+#   coasys-cloud status          deployed tag, previous tag, health, storage, rollback copy
+#
+# The executor starts sealed: no start opens the data without a person. The
+# storage secret is read with no echo, held in a shell variable for the length
+# of the command, and handed to `ad4m-executor storage unlock` through a pipe
+# (`printf` is a builtin, so it is in no argument list). It is never written to
+# a file or put into the environment.
+#
+# Run as root (sudo): it makes the user, copies the data and switches links; the
+# executor's own commands run as the coasys-cloud user ($RUN_AS).
+# Every path, URL and command below can be replaced from the environment; the
+# tests do so to run it against a scratch tree with stubs.
+set -euo pipefail
+umask 022
+
+SVC_USER=${COASYS_CLOUD_USER:-coasys-cloud}
+UNIT=${COASYS_CLOUD_UNIT:-coasys-cloud.service}
+OPT=${COASYS_CLOUD_OPT:-/opt/coasys-cloud}
+HOME_DIR=${COASYS_CLOUD_HOME:-/var/lib/coasys-cloud}
+DATA=${COASYS_CLOUD_DATA:-$HOME_DIR/data}
+ROLLBACK=${COASYS_CLOUD_ROLLBACK:-$HOME_DIR/rollback}
+CONFIG_DIR=${COASYS_CLOUD_CONFIG:-/etc/coasys-cloud}
+UNIT_DIR=${COASYS_CLOUD_UNIT_DIR:-/etc/systemd/system}
+NGINX_DIR=${COASYS_CLOUD_NGINX_DIR:-/etc/nginx/sites-available}
+URL=${COASYS_CLOUD_URL:-http://127.0.0.1:12500}
+RELEASE_BASE=${COASYS_CLOUD_RELEASE_BASE:-https://github.com/coasys/ad4m/releases/download}
+ASSET=${COASYS_CLOUD_ASSET:-ad4m-executor-x86_64-unknown-linux-gnu}
+GATE_SECONDS=${COASYS_CLOUD_GATE_SECONDS:-300}
+# Where the secret is typed. Replaced by a file only in tests.
+SECRET_INPUT=${COASYS_CLOUD_SECRET_INPUT:-/dev/tty}
+ADMIN_CREDENTIAL_FILE=${COASYS_CLOUD_ADMIN_CREDENTIAL_FILE:-/run/credentials/$UNIT/admin-credential}
+AGENT_MJS=${COASYS_CLOUD_AGENT_MJS:-$OPT/agent.mjs}
+LOCK=${COASYS_CLOUD_LOCK:-/run/lock/coasys-cloud.lock}
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# Runs a command as the service user.
+read -r -a RUN_AS <<<"${COASYS_CLOUD_RUN_AS:-runuser -u $SVC_USER --}"
+
+RELEASES=$OPT/releases
+CURRENT=$OPT/current
+PREVIOUS=$OPT/previous
+SECRET=""
+
+log() { echo "coasys-cloud: $*"; }
+die() { echo "coasys-cloud: $*" >&2; exit 1; }
+
+# The secret goes out of memory when the command ends, however it ends.
+forget_secret() { SECRET=""; }
+trap forget_secret EXIT
+
+valid_tag() { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ && $1 != *..* ]]; }
+
+tag_of() { # tag_of <link>: the release a link points at, empty for none
+  local target
+  target=$(readlink "$1" 2>/dev/null) || return 0
+  basename "$target"
+}
+
+lock() {
+  mkdir -p "$(dirname "$LOCK")"
+  exec 9>"$LOCK"
+  flock -n 9 || die "another coasys-cloud command is running"
+}
+
+# --- Talking to the executor ------------------------------------------------
+
+as_service() { "${RUN_AS[@]}" env AD4M_ADMIN_CREDENTIAL_FILE="$ADMIN_CREDENTIAL_FILE" "$@"; }
+
+healthy() { curl -fsS --max-time 5 "$URL/health" >/dev/null 2>&1; }
+
+# One word: sealed | unlocking | migrating | open | unknown.
+storage_state() {
+  local text
+  text=$(as_service "$CURRENT/ad4m-executor" storage status --executor-url "$URL" 2>/dev/null) || {
+    echo unknown
+    return 0
+  }
+  case $text in
+    "Storage sealed"*) echo sealed ;;
+    "Storage unlocking"*) echo unlocking ;;
+    "Storage migrating"*) echo migrating ;;
+    "Storage open"*) echo open ;;
+    *) echo unknown ;;
+  esac
+}
+
+# One word: unlocked | locked | no-agent | sealed | unknown.
+agent_state() {
+  local word
+  word=$(as_service env AD4M_URL="$URL" node "$AGENT_MJS" status 2>/dev/null) || word=unknown
+  echo "${word:-unknown}"
+}
+
+# ask_secret: the storage secret, typed with no echo, checked for its shape
+# (64 hex characters) before anything is stopped.
+ask_secret() {
+  local line
+  if [[ $SECRET_INPUT == /dev/tty ]]; then
+    [[ -r /dev/tty ]] || die "no terminal to type the storage secret on"
+    read -r -s -p "Storage secret (not shown): " line <"$SECRET_INPUT" || die "no secret read"
+    echo >&2
+  else
+    read -r -s line <"$SECRET_INPUT" || die "no secret read"
+  fi
+  [[ $line =~ ^[0-9a-fA-F]{64}$ ]] || die "that is not a storage secret (64 hex characters)"
+  SECRET=$line
+  line=""
+}
+
+# send_secret: storage.unlock through the pipe; prints the CLI's answer
+# (state, keyring and the secret's fingerprint only).
+send_secret() {
+  printf '%s\n' "$SECRET" | as_service "$CURRENT/ad4m-executor" storage unlock --executor-url "$URL"
+}
+
+# gate <seconds>: unlock a sealed executor once, then wait for health, storage
+# open and the agent unlocked. Returns 1 on a timeout, a refused secret or an
+# executor that does not come up.
+gate() {
+  local deadline=$((SECONDS + $1)) unlocked=0 storage agent
+  while ((SECONDS < deadline)); do
+    if healthy; then
+      storage=$(storage_state)
+      if [[ $storage == sealed && $unlocked == 0 ]]; then
+        if send_secret >/dev/null; then
+          unlocked=1
+        else
+          log "storage.unlock was refused"
+          return 1
+        fi
+      elif [[ $storage == open ]]; then
+        agent=$(agent_state)
+        if [[ $agent == unlocked ]]; then
+          return 0
+        fi
+        # A new data folder has no agent; the executor makes none on its own.
+        if [[ $agent == no-agent ]]; then
+          log "no agent in this data folder yet: it needs its first-run setup (README)"
+          return 0
+        fi
+      fi
+    fi
+    sleep "${COASYS_CLOUD_POLL_SECONDS:-3}"
+  done
+  log "gate: not healthy, open and unlocked within $1 s"
+  return 1
+}
+
+# --- Releases ---------------------------------------------------------------
+
+fetch_release() { # fetch_release <tag>: releases/<tag>/ad4m-executor, checked against its sha256
+  local tag=$1 dir=$RELEASES/$1 work
+  if [[ -x $dir/ad4m-executor ]]; then
+    log "release $tag is installed"
+    return 0
+  fi
+  work=$(mktemp -d "$OPT/.fetch.XXXXXX")
+  if ! curl -fsSL --retry 3 -o "$work/$ASSET" "$RELEASE_BASE/$tag/$ASSET" ||
+    ! curl -fsSL --retry 3 -o "$work/$ASSET.sha256" "$RELEASE_BASE/$tag/$ASSET.sha256"; then
+    rm -rf "$work"
+    die "cannot fetch release $tag"
+  fi
+  local want have
+  want=$(awk '{print $1; exit}' "$work/$ASSET.sha256")
+  have=$(sha256sum "$work/$ASSET" | awk '{print $1}')
+  if [[ -z $want || $want != "$have" ]]; then
+    rm -rf "$work"
+    die "release $tag does not match its sha256: not installed"
+  fi
+  mkdir -p "$dir"
+  install -m 0755 "$work/$ASSET" "$dir/ad4m-executor"
+  rm -rf "$work"
+  log "installed release $tag"
+}
+
+point() { # point <link> <tag>: atomically make the link name releases/<tag>
+  ln -sfn "$RELEASES/$2" "$1.new"
+  mv -T "$1.new" "$1"
+}
+
+# --- The data and its rollback copy -----------------------------------------
+
+# copy_data: the data directory to the rollback directory (same filesystem),
+# checked file by file before it replaces the old copy.
+copy_data() {
+  [[ -d $DATA ]] || return 0
+  rm -rf "$ROLLBACK.new"
+  cp -a "$DATA" "$ROLLBACK.new" || { rm -rf "$ROLLBACK.new"; return 1; }
+  if ! diff -rq "$DATA" "$ROLLBACK.new" >/dev/null; then
+    rm -rf "$ROLLBACK.new"
+    return 1
+  fi
+  rm -rf "$ROLLBACK"
+  mv -T "$ROLLBACK.new" "$ROLLBACK"
+}
+
+# restore_data: the rollback copy becomes the data directory. What was there is
+# kept as data.set-aside until the next restore, never deleted at once.
+restore_data() {
+  [[ -d $ROLLBACK ]] || return 1
+  rm -rf "$DATA.set-aside"
+  [[ -d $DATA ]] && mv -T "$DATA" "$DATA.set-aside"
+  mv -T "$ROLLBACK" "$DATA"
+}
+
+# --- Commands ---------------------------------------------------------------
+
+# switch_back: stop what runs, restore the data, point current at previous,
+# start it and unlock it with the secret held in memory.
+switch_back() {
+  local back=$1
+  systemctl stop "$UNIT" || true
+  if [[ -d $ROLLBACK ]]; then
+    restore_data || { log "the data could not be restored: nothing is started"; return 1; }
+  else
+    log "no rollback copy: the data stays as it is"
+  fi
+  point "$CURRENT" "$back"
+  systemctl start "$UNIT"
+  if gate "$GATE_SECONDS"; then
+    log "$back runs again"
+    return 0
+  fi
+  log "$back did not come back either: see journalctl -u $UNIT"
+  return 1
+}
+
+cmd_deploy() {
+  local tag=${1:-}
+  [[ -n $tag ]] || die "usage: coasys-cloud deploy <tag>"
+  valid_tag "$tag" || die "not a release tag: $tag"
+  lock
+  if grep -q "REPLACE-WITH" "$CONFIG_DIR/executor-config.json" 2>/dev/null; then
+    die "$CONFIG_DIR/executor-config.json still has a REPLACE-WITH value"
+  fi
+  mkdir -p "$RELEASES"
+  local old
+  old=$(tag_of "$CURRENT")
+  if [[ $old == "$tag" ]]; then
+    die "$tag is already deployed"
+  fi
+  fetch_release "$tag"
+  ask_secret
+
+  systemctl stop "$UNIT" || true
+  if ! copy_data; then
+    systemctl start "$UNIT" 2>/dev/null || true
+    die "the data copy failed: nothing changed"
+  fi
+  [[ -n $old ]] && point "$PREVIOUS" "$old"
+  point "$CURRENT" "$tag"
+  systemctl start "$UNIT"
+  if gate "$GATE_SECONDS"; then
+    log "deployed $tag (previous: ${old:-none})"
+    return 0
+  fi
+  log "$tag failed its gate"
+  if [[ -z $old ]]; then
+    systemctl stop "$UNIT" || true
+    die "no previous release to go back to: $UNIT is stopped"
+  fi
+  systemctl stop "$UNIT" || true
+  # The failed run's data is set aside by the restore; the previous release starts on the copy.
+  if switch_back "$old"; then
+    die "rolled back to $old after $tag failed its gate"
+  fi
+  die "rollback to $old failed too"
+}
+
+cmd_rollback() {
+  lock
+  local back now
+  back=$(tag_of "$PREVIOUS")
+  now=$(tag_of "$CURRENT")
+  [[ -n $back ]] || die "no previous release"
+  [[ -d $ROLLBACK ]] || die "no rollback copy of the data"
+  ask_secret
+  if switch_back "$back"; then
+    point "$PREVIOUS" "$now"
+    log "rolled back from $now to $back"
+    return 0
+  fi
+  die "rollback to $back failed"
+}
+
+cmd_unlock() {
+  lock
+  [[ -x $CURRENT/ad4m-executor ]] || die "no release is deployed"
+  healthy || die "the executor does not answer on $URL: start $UNIT first"
+  case $(storage_state) in
+    open) log "storage is already open"; return 0 ;;
+  esac
+  ask_secret
+  send_secret
+  gate "$GATE_SECONDS" || die "unlocked, but the executor is not healthy and unlocked"
+  log "storage open"
+}
+
+cmd_status() {
+  local health=down storage=unknown rb=no
+  healthy && health=ok
+  [[ -x $CURRENT/ad4m-executor && $health == ok ]] && storage=$(storage_state)
+  [[ -d $ROLLBACK ]] && rb=yes
+  echo "deployed:      $(tag_of "$CURRENT")"
+  echo "previous:      $(tag_of "$PREVIOUS")"
+  echo "health:        $health"
+  echo "storage:       $storage"
+  echo "rollback copy: $rb"
+  if [[ $storage == sealed ]]; then
+    echo "sealed: run \`sudo coasys-cloud unlock\`"
+  fi
+}
+
+cmd_install() {
+  local tag=${1:-}
+  [[ -n $tag ]] || die "usage: coasys-cloud install <tag>"
+  valid_tag "$tag" || die "not a release tag: $tag"
+  lock
+  if ! id "$SVC_USER" >/dev/null 2>&1; then
+    useradd --system --home-dir "$HOME_DIR" --no-create-home --shell /usr/sbin/nologin "$SVC_USER"
+  fi
+  mkdir -p "$RELEASES" "$CONFIG_DIR" "$UNIT_DIR" "$NGINX_DIR"
+  install -d -m 0700 "$HOME_DIR" "$DATA"
+  chown "$SVC_USER:$SVC_USER" "$HOME_DIR" "$DATA"
+  if [[ ! -e $CONFIG_DIR/executor-config.json ]]; then
+    install -m 0644 "$HERE/executor-config.json" "$CONFIG_DIR/executor-config.json"
+    log "wrote $CONFIG_DIR/executor-config.json: set identity.storeKeys before the first deploy"
+  fi
+  install -m 0644 "$HERE/coasys-cloud.service" "$UNIT_DIR/$UNIT"
+  if [[ ! -e $NGINX_DIR/coasys-cloud ]]; then
+    install -m 0644 "$HERE/nginx.conf.example" "$NGINX_DIR/coasys-cloud"
+  fi
+  if [[ -f $HERE/../staging/agent.mjs ]]; then
+    install -m 0644 "$HERE/../staging/agent.mjs" "$AGENT_MJS"
+  fi
+  systemctl daemon-reload
+  systemctl enable "$UNIT"
+  fetch_release "$tag"
+  log "installed $tag; no data and nothing started. Next: make the admin credential"
+  log "(systemd-creds), set identity.storeKeys, then \`coasys-cloud deploy $tag\`"
+}
+
+case ${1:-} in
+  install) shift; cmd_install "$@" ;;
+  deploy) shift; cmd_deploy "$@" ;;
+  rollback) cmd_rollback ;;
+  unlock) cmd_unlock ;;
+  status) cmd_status ;;
+  *) die "usage: coasys-cloud install <tag> | deploy <tag> | rollback | unlock | status" ;;
+esac

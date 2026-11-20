@@ -1235,8 +1235,10 @@ jobs:
             # -x follows `source`d files, so a sourced helper is checked too.
             "$dir/shellcheck-v0.10.0/shellcheck" -x deploy/staging/update.sh deploy/staging/test/update.test.sh \
               scripts/release-checksum.sh scripts/release-checksum.test.sh
-            # The image's AI endpoints from the environment (sourced by docker-entrypoint.sh).
-            "$dir/shellcheck-v0.10.0/shellcheck" -x -s bash docker/ai-env.sh docker/ai-env.test.sh
+            # The image's AI endpoints from the environment (sourced by docker-entrypoint.sh),
+            # and the storage secret it keeps on the data volume.
+            "$dir/shellcheck-v0.10.0/shellcheck" -x -s bash docker/ai-env.sh docker/ai-env.test.sh \
+              docker/storage-secret.sh docker/storage-secret.test.sh
             rm -rf "$dir"
       - run:
           name: update.sh test
@@ -1252,6 +1254,12 @@ jobs:
           # docker/ai-env.sh against a fake executor: the AD4M_AI_* variables register
           # the endpoints, models and defaults they name, once.
           command: bash docker/ai-env.test.sh
+      - run:
+          name: docker storage secret test
+          # docker/storage-secret.sh against a stub ad4m-executor: the entrypoint makes the
+          # secret on the data volume once, reuses it, and refuses a sealed data folder
+          # whose file is gone.
+          command: bash docker/storage-secret.test.sh
 
 workflows:
   version: 2

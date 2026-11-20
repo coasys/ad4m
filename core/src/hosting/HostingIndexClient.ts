@@ -1,5 +1,4 @@
 import { ApiClient } from "../apiClient";
-import type { HostInfo } from "../generated/api/HostInfo";
 import type { IndexConfig } from "../generated/api/IndexConfig";
 import type { IndexStatus } from "../generated/api/IndexStatus";
 import type { ListingText } from "../generated/api/ListingText";
@@ -38,7 +37,7 @@ export class HostingIndexClient {
 
     /**
      * Lists this executor, or updates its listing (one per executor). The index reaches the
-     * executor's `host.info` at `url` before it lists it.
+     * executor's `host.info` (`ad4m.host.info()`) at `url` before it lists it.
      */
     async publish(listing: ListingText): Promise<OwnListing> {
         return this.#apiClient.call("index.publish", listing);
@@ -56,10 +55,5 @@ export class HostingIndexClient {
      */
     onListingChanged(handler: (listing: OwnListing) => void): () => void {
         return this.#apiClient.on("index-listing-changed", handler);
-    }
-
-    /** What this executor tells anyone about itself as a host (what the index reads). */
-    async hostInfo(): Promise<HostInfo> {
-        return this.#apiClient.call("host.info", {});
     }
 }

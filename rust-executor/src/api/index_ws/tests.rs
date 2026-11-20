@@ -94,39 +94,6 @@ async fn configure_refuses_a_url_the_client_would_not_use() {
     assert!(!load_config().unwrap().enabled);
 }
 
-#[tokio::test]
-async fn host_info_answers_not_a_host_with_multi_user_mode_off() {
-    init_db();
-    crate::db_backend::db_backend()
-        .set_multi_user_enabled(false)
-        .unwrap();
-    // Open: an anonymous caller (the index reads it with no credentials) gets the answer.
-    let err = call(
-        "host.info",
-        json!({}),
-        RequestContext::for_test(crate::agent::session::Principal::Anonymous),
-    )
-    .await
-    .unwrap_err();
-    assert_eq!(err.data.unwrap()["code"], "not-a-host");
-}
-
-#[test]
-fn host_info_names_the_operator_and_the_executor() {
-    let operator = "did:scid:coasys:1:QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG";
-    let executor = "did:key:z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z";
-    let info = serde_json::to_value(host_info_of(operator.into(), executor.into(), true)).unwrap();
-    // The fields the hosting index's `fetchHostFacts` reads, with its types.
-    assert_eq!(info["operatorDid"], operator);
-    assert_eq!(info["executorDid"], executor);
-    assert_eq!(info["signup"], "anyone");
-    assert_eq!(info["admitsGuests"], true);
-    assert_eq!(info["freeAccess"], true);
-    assert_eq!(info["full"], false);
-    assert!(info["version"].as_str().is_some_and(|v| !v.is_empty()));
-    assert!(!host_info_of(operator.into(), executor.into(), false).free_access);
-}
-
 fn own_listing(state: &str, reason: Option<&str>) -> OwnListing {
     OwnListing {
         listing_id: "l1".into(),

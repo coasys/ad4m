@@ -47,23 +47,31 @@ async fn call(body: Value) -> (StatusCode, Value) {
 }
 
 #[tokio::test]
-async fn host_info_answers_over_http_with_its_own_error_code() {
+async fn host_info_answers_over_http_with_what_the_health_check_reads() {
     crate::test_utils::setup_wallet();
     crate::test_utils::setup_agent();
     let _ = crate::db::Ad4mDb::init_global_instance(":memory:");
     let backend = crate::db_backend::db_backend();
 
-    // Multi-user mode off: the method's own refusal, `not-a-host`, with its status.
+    // A host with multi-user mode off still answers, and says so: `multiUser` is false.
     backend.set_multi_user_enabled(false).unwrap();
     let (status, body) = call(json!({ "method": "host.info", "params": {} })).await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
-    assert_eq!(body["error"]["code"], "not-a-host", "{body}");
-    assert!(body.get("result").is_none());
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let info = &body["result"];
+    assert_eq!(info["multiUser"], false, "{body}");
+    // The fields the hosting index's health check compares and shows.
+    assert!(info["executorDid"].as_str().is_some_and(|d| d.starts_with("did:key:")), "{body}");
+    assert!(info["operatorDid"].is_null(), "{body}");
+    assert_eq!(info["signup"], "no_one", "{body}");
+    assert_eq!(info["admitsGuests"], false, "{body}");
+    assert_eq!(info["freeAccess"], true, "{body}");
+    assert_eq!(info["full"], false, "{body}");
+    assert!(info["version"].as_str().is_some_and(|v| !v.is_empty()), "{body}");
+    assert!(body.get("error").is_none());
 
     // A missing `params` is `{}`.
     let (status, body) = call(json!({ "method": "host.info" })).await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
-    assert_eq!(body["error"]["code"], "not-a-host", "{body}");
+    assert_eq!(status, StatusCode::OK, "{body}");
 }
 
 #[tokio::test]

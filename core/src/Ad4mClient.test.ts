@@ -44,12 +44,11 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     // ── Identity ──
     'identity.status': { did: 'did:scid:coasys:1:QmTest', deviceKey: 'z6MkTest', deviceEnc: 'z6LSTest', keyId: 'd1', revoked: null, head: null, fork: null, storeBehind: null, store: { url: 'https://store.ad4m.dev', trusted: true }, vouched: false },
     'identity.publish': { seq: 0, hash: 'QmHead', time: 1, sig: 'z' },
-    'identity.powParams': { bits: 22, previousBits: 20, changedAt: 5 },
+    'identity.powParams': { bits: 22, previousBits: 20, changedAt: 5, challenge: { nonce: 'Challenge1', expires: 300 } },
     'index.configure': (p: Record<string, unknown>) => p,
     'index.status': { config: { url: 'https://index.example/v1/index', enabled: true }, scid: 'did:scid:coasys:1:QmTest', executorDid: 'did:key:z6MkTest', allowed: true, listing: null },
     'index.publish': (p: Record<string, unknown>) => ({ listingId: 'l1', ...p, state: 'listed', reason: null }),
     'index.withdraw': true,
-    'host.info': { operatorDid: 'did:scid:coasys:1:QmTest', executorDid: 'did:key:z6MkTest', signup: 'anyone', admitsGuests: true, freeAccess: true, full: false, version: '1' },
     'identity.attachNote': (p: Record<string, unknown>) => ({ did: 'did:scid:coasys:1:QmTest', method: 'email', time: 1, voucher: 'did:key:z6MkVoucher', sig: String(p.token) }),
     'identity.claimOffer': (p: Record<string, unknown>) => ({ did: 'did:scid:coasys:1:QmTest', offerId: 'offer', matchCode: 'R7K Q2M', kind: 'node', expires: 1, needsAccept: false, echo: p }),
     'identity.acceptJoin': { accepted: true },
@@ -58,6 +57,13 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'identity.log': (p: Record<string, unknown>) => ({ did: p.did, events: [], head: null, fork: null }),
     'identity.devices': [],
     'identity.rekey': { sign: 'did:key:z6MkNew', enc: 'z6LSNew' },
+    // ── Host ──
+    'host.info': { multiUser: true, signup: 'anyone', name: 'Home', runByCoasys: false, full: false, operatorDid: 'did:scid:coasys:1:QmTest', executorDid: 'did:key:z6MkTest', admitsGuests: true, freeAccess: true, version: '1' },
+    'host.join': { joinHandle: 'h1', tenantId: 't1', deviceDid: 'did:key:z6MkTenant', rejoin: false },
+    'host.joinStatus': { state: 'active', reason: null },
+    'host.leave': (p: Record<string, unknown>) => ({ kept: p.keepData, removedPerspectives: 0, leftSharedPerspectives: 0, keyDestroyedAt: null, shreddedEverywhereAt: null }),
+    'host.createInvite': { inviteId: 'i-1', secret: 'c2VjcmV0', expiresAt: 9 },
+    'host.removeTenant': { removed: true },
     // ── Bots ──
     'bot.createAgent': { did: 'did:key:z6MkBot', key: 'z6MkBot', owner: 'did:scid:coasys:1:QmTest', offerId: 'offer', matchCode: 'R7K Q2M', expires: 1, token: 'bot-token' },
     'bot.grant': { did: 'did:key:z6MkBot', name: 'helper', owner: 'did:scid:coasys:1:QmTest', offerId: 'offer', createdAt: 1, grant: { spaces: ['neighbourhood://Qm1'], can: ['read', 'write'], expires: null, state: 'active', version: 3, updatedAt: 1 }, key: null },
@@ -1381,6 +1387,49 @@ describe('RuntimeClient', () => {
 });
 
 // ===================== IDENTITY TESTS =====================
+// ===================== HOST TESTS =====================
+describe('HostClient', () => {
+    test('info() reads what the hosting index reads', async () => {
+        const info = await ad4m.host.info();
+        expect(lastRpcCall!.type).toBe('host.info');
+        expect(info.signup).toBe('anyone');
+        expect(info.operatorDid).toBe('did:scid:coasys:1:QmTest');
+        expect(info.executorDid).toBe('did:key:z6MkTest');
+    });
+
+    test('join() sends the identity, the offer and the invite secret', async () => {
+        const joined = await ad4m.host.join('did:scid:coasys:1:QmTest', 'coasys:offer:1:x', 'c2VjcmV0');
+        expect(lastRpcCall!.type).toBe('host.join');
+        expect(lastRpcCall!.params).toEqual({ didScid: 'did:scid:coasys:1:QmTest', offer: 'coasys:offer:1:x', inviteSecret: 'c2VjcmV0' });
+        expect(joined.joinHandle).toBe('h1');
+    });
+
+    test('join() without an invite sends null', async () => {
+        await ad4m.host.join('did:scid:coasys:1:QmTest', 'coasys:offer:1:x');
+        expect(lastRpcCall!.params.inviteSecret).toBeNull();
+    });
+
+    test('joinStatus() names the handle', async () => {
+        const status = await ad4m.host.joinStatus('h1');
+        expect(lastRpcCall!.params).toEqual({ joinHandle: 'h1' });
+        expect(status.state).toBe('active');
+    });
+
+    test('leave() sends keepData', async () => {
+        const left = await ad4m.host.leave(false);
+        expect(lastRpcCall!.type).toBe('host.leave');
+        expect(lastRpcCall!.params).toEqual({ keepData: false });
+        expect(left.kept).toBe(false);
+    });
+
+    test('createInvite() and removeTenant() send their params', async () => {
+        await ad4m.host.createInvite(3, 'for ada');
+        expect(lastRpcCall!.params).toEqual({ expiresInDays: 3, note: 'for ada' });
+        await ad4m.host.removeTenant('t1');
+        expect(lastRpcCall!.params).toEqual({ tenantId: 't1' });
+    });
+});
+
 // ===================== BOT TESTS =====================
 describe('BotClient', () => {
     test('createAgent() sends the offer and the name', async () => {
@@ -1447,7 +1496,7 @@ describe('IdentityClient', () => {
     });
 
     test('publish() sends the events and the proof of work as given', async () => {
-        const pow = { nonce: '11111111111111111111112', bits: 22 };
+        const pow = { nonce: '11111111111111111111112', bits: 22, challenge: 'Challenge1' };
         await ad4m.identity.publish([{ seq: 0 }], pow);
         expect(lastRpcCall!.type).toBe('identity.publish');
         expect(lastRpcCall!.params).toEqual({ events: [{ seq: 0 }], pow });
@@ -1459,7 +1508,7 @@ describe('IdentityClient', () => {
         const params = await ad4m.identity.powParams();
         expect(lastRpcCall!.type).toBe('identity.powParams');
         expect(lastRpcCall!.params).toEqual({});
-        expect(params).toEqual({ bits: 22, previousBits: 20, changedAt: 5 });
+        expect(params).toEqual({ bits: 22, previousBits: 20, changedAt: 5, challenge: { nonce: 'Challenge1', expires: 300 } });
     });
 
     test('attachNote() sends the token and returns the note', async () => {
@@ -1582,12 +1631,6 @@ describe('HostingIndexClient', () => {
         expect(callback).toHaveBeenCalledTimes(1);
     });
 
-    test('hostInfo() calls host.info', async () => {
-        const info = await ad4m.hostingIndex.hostInfo();
-        expect(lastRpcCall!.type).toBe('host.info');
-        expect(info.signup).toBe('anyone');
-        expect(info.executorDid).toBe('did:key:z6MkTest');
-    });
 });
 
 describe('AIClient', () => {

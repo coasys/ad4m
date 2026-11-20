@@ -8,6 +8,7 @@ import { AIClient } from './ai/AIClient'
 import { IdentityClient } from './identity/IdentityClient'
 import { HostingIndexClient } from './hosting/HostingIndexClient'
 import { BotClient } from './bot/BotClient'
+import { HostClient } from './host/HostClient'
 import { ApiClient, EventFilter } from './apiClient'
 import type { EventMap, EventName } from './generated/api/Events'
 import { Ad4mModel } from './model/Ad4mModel'
@@ -37,6 +38,7 @@ export class Ad4mClient {
     #identityClient: IdentityClient
     #hostingIndexClient: HostingIndexClient
     #botClient: BotClient
+    #hostClient: HostClient
 
     constructor(
         baseUrl: string,
@@ -59,6 +61,7 @@ export class Ad4mClient {
         this.#identityClient = new IdentityClient(baseUrl, token, this.#apiClient)
         this.#hostingIndexClient = new HostingIndexClient(baseUrl, token, this.#apiClient)
         this.#botClient = new BotClient(baseUrl, token, this.#apiClient)
+        this.#hostClient = new HostClient(baseUrl, token, this.#apiClient)
 
         // Register with AD4M DevTools if the bridge is installed (e.g. browser extension)
         try {
@@ -101,6 +104,11 @@ export class Ad4mClient {
     /** The executor's identity calls (`did:scid:coasys:1`). */
     get identity(): IdentityClient {
         return this.#identityClient
+    }
+
+    /** This executor as a host: tenants, sign-up policy, invites. */
+    get host(): HostClient {
+        return this.#hostClient
     }
 
     /** This executor's listing in the hosting index (operator only). */

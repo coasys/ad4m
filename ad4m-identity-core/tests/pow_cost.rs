@@ -15,6 +15,8 @@ use wasm_bindgen_test::wasm_bindgen_test as test;
 
 const BITS: u8 = 22;
 const SCIDS: u8 = 24;
+/// A host challenge for the measurement (any text: the proof commits to it).
+const CHALLENGE: &str = "5CoStMeAsUrE";
 
 /// A SCID-shaped text: base58btc of a sha2-256 multihash of `i`.
 fn scid(i: u8) -> String {
@@ -55,7 +57,7 @@ fn pow_solve_cost_at_the_default_bits() {
     for i in 0..SCIDS {
         let scid = scid(i);
         let started = now_ms();
-        let proof = pow::solve(&scid, BITS);
+        let proof = pow::solve(&scid, CHALLENGE, BITS);
         times.push(now_ms() - started);
         assert!(pow::check(&scid, &proof, BITS));
         let nonce: [u8; 16] = bs58::decode(&proof.nonce)

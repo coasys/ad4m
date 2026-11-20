@@ -15,8 +15,8 @@ pub mod fd_limit;
 mod globals;
 pub mod helpers;
 pub mod holochain_service;
+pub mod hosting;
 pub mod identity;
-pub mod index_client;
 pub mod js_core;
 pub mod mcp;
 pub mod perspective_snapshot;
@@ -850,6 +850,14 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
                 .expect("Failed to enable multi-user mode");
         }
     }
+    // The config file's `host` section becomes the stored host policy (AR-05 4.3).
+    if let Some(section) = &config.host {
+        if let Err(e) = crate::hosting::policy::seed_from_config(section) {
+            return failed_start(format!(
+                "Could not apply the config file's host section: {e}"
+            ));
+        }
+    }
     // `check_admin_credential` refused `--enable-multi-user` without a credential; the mode
     // may also be on in the database, from `user.setMultiUserEnabled` on an earlier run.
     let multi_user_on = crate::user_management::is_multi_user_enabled();
@@ -923,6 +931,29 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
                 error!("Failed to cleanup expired verification codes: {}", e);
             } else {
                 info!("Cleaned up expired verification codes");
+            }
+        }
+    });
+
+    // Tenants: a joining device key becomes active once the person's log lists it, a join
+    // that never completes expires, and a key the log revoked ends its tenant (AR-05 4.6, 4.8).
+    tokio::spawn(async {
+        let env = crate::hosting::live::LiveEnv;
+        let mut polls = 0u32;
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+            if !crate::user_management::is_multi_user_enabled() {
+                continue;
+            }
+            // Every 120th poll (10 minutes) also asks the store about each active key.
+            polls = (polls + 1) % 120;
+            let swept = if polls == 0 {
+                crate::hosting::tenants::sweep(&env).await
+            } else {
+                crate::hosting::tenants::sweep_pending(&env).await
+            };
+            if let Err(e) = swept {
+                warn!("tenant sweep failed: {}", e);
             }
         }
     });

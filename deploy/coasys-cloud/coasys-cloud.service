@@ -1,0 +1,44 @@
+# Coasys cloud executor (AR-09 4.12.1). A system unit run by the coasys-cloud user.
+# It starts SEALED on purpose: AD4M_STORAGE_SECRET_FILE is not set, so the data
+# opens only when a person types the storage secret (`coasys-cloud unlock`).
+# Setup, deploy and rollback: deploy/coasys-cloud/README.md.
+[Unit]
+Description=Coasys cloud executor (127.0.0.1:12500)
+After=network-online.target
+Wants=network-online.target
+# Nothing to run before the first deploy; skip instead of failing in a loop.
+ConditionPathExists=/opt/coasys-cloud/current/ad4m-executor
+
+[Service]
+Type=simple
+User=coasys-cloud
+Group=coasys-cloud
+WorkingDirectory=/var/lib/coasys-cloud
+# The admin credential: an encrypted credential only the host key opens.
+LoadCredentialEncrypted=admin-credential:/etc/credstore.encrypted/coasys-cloud-admin-credential
+Environment=AD4M_ADMIN_CREDENTIAL_FILE=%d/admin-credential
+# With an admin credential set, MCP binds 0.0.0.0 unless told otherwise (MCP is off in the settings too).
+Environment=MCP_HOST=127.0.0.1
+ExecStart=/opt/coasys-cloud/current/ad4m-executor run --config /etc/coasys-cloud/executor-config.json
+# Exit 75 (runtime.restart) starts again at once, sealed. 78 (refused config) and
+# 79 (busy data folder) fail the same way on every start, so the unit stops.
+Restart=on-failure
+RestartSec=10
+RestartForceExitStatus=75
+RestartPreventExitStatus=78 79
+TimeoutStopSec=60
+LimitNOFILE=65536
+# No core files: they would hold key bytes.
+LimitCORE=0
+
+# Hardening. Deno's JIT needs writable executable memory.
+ProtectSystem=strict
+# The rollback directory exists only after the first deploy with data (the "-" skips a missing one).
+ReadWritePaths=/var/lib/coasys-cloud/data -/var/lib/coasys-cloud/rollback
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+MemoryDenyWriteExecute=no
+
+[Install]
+WantedBy=multi-user.target

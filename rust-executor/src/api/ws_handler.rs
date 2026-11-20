@@ -716,6 +716,7 @@ pub fn build_handler_map() -> HandlerMap {
     super::users_ws::register_ws_handlers(&mut map);
     super::hosting_ws::register_ws_handlers(&mut map);
     super::index_ws::register_ws_handlers(&mut map);
+    super::host_ws::register_ws_handlers(&mut map);
     super::sfu_ws::register_ws_handlers(&mut map);
     super::identity_ws::register_ws_handlers(&mut map);
     super::key_login_ws::register_ws_handlers(&mut map);

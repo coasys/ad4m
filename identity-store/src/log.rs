@@ -507,10 +507,22 @@ impl Store {
                     return Err(ApiError::not_found(format!("no log {scid}")));
                 }
                 // The brake, before any signature of the request replays: the buckets, then the
-                // proof of work.
+                // proof of work over its one-use challenge.
                 if let Admission::Brake { sender } = admission {
-                    brake::check_buckets(&tx, &self.settings, sender, now)?;
-                    brake::check_pow(scid, req.pow.as_ref(), self.pow_params(), now)?;
+                    if let Err(refusal) = brake::check_buckets(&tx, &self.settings, sender, now) {
+                        if refusal.body["scope"] == "global" {
+                            self.notice_global_empty();
+                        }
+                        return Err(refusal);
+                    }
+                    brake::check_pow(
+                        &tx,
+                        scid,
+                        req.pow.as_ref(),
+                        &self.pow_params(),
+                        &self.key.pow_challenge_key(),
+                        now,
+                    )?;
                 }
                 if first.scid != scid {
                     return Err(ApiError::invalid(
@@ -644,6 +656,7 @@ impl Store {
             let admitted_by = match admission {
                 Admission::Brake { sender } => {
                     brake::admit(&tx, &self.settings, sender, now)?;
+                    self.clear_global_empty_logged();
                     "brake"
                 }
                 Admission::Vouched(note) => {

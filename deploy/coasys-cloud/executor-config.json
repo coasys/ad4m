@@ -1,0 +1,20 @@
+{
+  "app_data_path": "/var/lib/coasys-cloud/data",
+  "port": 12500,
+  "hc_admin_port": 12501,
+  "hc_app_port": 12502,
+  "localhost": true,
+  "run_dapp_server": false,
+  "mcp_enabled": false,
+  "multi_user_config": { "enabled": true, "tls_config": null, "smtp_config": null },
+  "public_origins": ["https://cloud.coasys.org"],
+  "host": {
+    "signup": "by_invite",
+    "display": { "name": "Coasys cloud", "run_by_coasys": true }
+  },
+  "identity": {
+    "storeUrl": "https://store.coasys.org",
+    "storeKeys": ["REPLACE-WITH-THE-STORE-HEAD-KEY"]
+  },
+  "log_config": { "rust_executor": "info", "holochain": "warn" }
+}

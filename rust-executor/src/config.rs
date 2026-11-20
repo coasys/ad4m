@@ -254,7 +254,7 @@ pub struct Ad4mConfig {
     pub ai_settings: Option<crate::ai_service::endpoints::config::AiSettings>,
     /// The config file's `hosting_index`: the index this executor lists itself in, written to
     /// the `settings` table at startup (`api::index_ws::seed_config`).
-    pub hosting_index: Option<crate::index_client::IndexConfig>,
+    pub hosting_index: Option<crate::hosting::index_client::IndexConfig>,
     /// The per-user store of local AI runtimes and models. Unset: `AD4M_LOCAL_AI_DIR`, else
     /// `<data local dir>/ad4m/local-ai` (`~/.local/share/ad4m/local-ai` on Linux).
     pub local_ai_dir: Option<String>,
@@ -299,6 +299,9 @@ pub struct Ad4mConfig {
     /// Accept a storage secret file on the data folder's disk; the status then reports the
     /// data as not encrypted at rest. Default false.
     pub allow_secret_on_data_disk: Option<bool>,
+    /// The config file's `host` section, seeded into the host policy at start.
+    #[serde(default)]
+    pub host: Option<crate::hosting::policy::HostConfigSection>,
     /// Seconds one request-driven SPARQL evaluation may run before it is
     /// stopped (default 30). Covers `perspective.querySparql`,
     /// `perspective.modelQuery`, live-query opening and their re-checks.
@@ -873,6 +876,7 @@ impl Ad4mConfig {
             internal_api_token: None,
             storage_secret: None,
             allow_secret_on_data_disk: None,
+            host: None,
         }
     }
 }

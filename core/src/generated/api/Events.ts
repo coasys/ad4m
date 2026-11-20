@@ -11,6 +11,7 @@ import type { AutoProcessorNeighbourhoodState } from "./AutoProcessorNeighbourho
 import type { ConfigChanged } from "./ConfigChanged";
 import type { ExceptionOccurredEvent } from "./ExceptionOccurredEvent";
 import type { FlowStateChangedEvent } from "./FlowStateChangedEvent";
+import type { HostPolicyView } from "./HostPolicyView";
 import type { HostingUserInfo } from "./HostingUserInfo";
 import type { IdentityForkEvent } from "./IdentityForkEvent";
 import type { InboxMessageEvent } from "./InboxMessageEvent";
@@ -34,6 +35,9 @@ import type { SfuSessionReplaced } from "./SfuSessionReplaced";
 import type { StorageMigrationProgress } from "./StorageMigrationProgress";
 import type { StorageStatus } from "./StorageStatus";
 import type { SubscriptionEndedEvent } from "./SubscriptionEndedEvent";
+import type { TenantJoinedEvent } from "./TenantJoinedEvent";
+import type { TenantLeftEvent } from "./TenantLeftEvent";
+import type { TenantUsageChangedEvent } from "./TenantUsageChangedEvent";
 import type { TranscriptionTextFilter } from "./TranscriptionTextFilter";
 
 /** Every event the executor emits: its payload (the message without `type`). */
@@ -74,6 +78,10 @@ export interface EventMap {
   "storage-state-changed": StorageStatus;
   "storage-migration-progress": StorageMigrationProgress;
   "index-listing-changed": OwnListing;
+  "tenant-usage-changed": TenantUsageChangedEvent;
+  "tenant-joined": TenantJoinedEvent;
+  "tenant-left": TenantLeftEvent;
+  "host-policy-changed": HostPolicyView;
 }
 
 export type EventName = keyof EventMap;

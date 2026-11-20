@@ -108,6 +108,18 @@ impl StoreKey {
         }
     }
 
+    /// The key that stamps the proof-of-work challenges of `GET /v1/pow` (`brake::challenge`):
+    /// `sha2-256("coasys:pow-challenge" ‖ secret)`, a subkey of the head key, so a challenge
+    /// of this store never verifies under another store's key or for another use of this key.
+    /// Deriving it on demand keeps it out of memory between calls.
+    pub fn pow_challenge_key(&self) -> [u8; 32] {
+        use sha2::Digest;
+        let mut h = sha2::Sha256::new();
+        h.update(b"coasys:pow-challenge");
+        h.update(self.key.to_bytes());
+        h.finalize().into()
+    }
+
     /// The receipt for the record write `sealed` of `scid` the store accepted at head `seq`
     /// (domain `coasys:record-receipt`): readers check the record's writer at `seq`.
     pub fn sign_receipt(

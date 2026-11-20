@@ -72,6 +72,21 @@ pub struct Pow {
     /// base58btc, 16 bytes.
     pub nonce: String,
     pub bits: u8,
+    /// The `nonce` of the `PowChallenge` the proof commits to; left out reads as empty, which
+    /// the store refuses.
+    #[serde(default)]
+    pub challenge: String,
+}
+
+/// The one-use challenge `GET /v1/pow` mints for the next proof.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PowChallenge {
+    /// The token the proof's `challenge` carries and hashes over: base58btc of
+    /// `expires` ‖ 16 random ‖ the store's tag.
+    pub nonce: String,
+    /// Unix seconds the token is good until; a proof that arrives past it is refused.
+    pub expires: u64,
 }
 
 /// `GET /v1/pow`.
@@ -81,6 +96,10 @@ pub struct PowParams {
     pub bits: u8,
     pub previous_bits: u8,
     pub changed_at: u64,
+    /// A fresh challenge for the next proof; the caller solves over `challenge.nonce` and must
+    /// fetch again for another log (the store spends each challenge once and at most to
+    /// `expires`).
+    pub challenge: PowChallenge,
 }
 
 /// `GET /v1/keys/{multikey}`: the identity a key belongs to.

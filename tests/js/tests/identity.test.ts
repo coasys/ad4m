@@ -212,10 +212,15 @@ describe("Identity: create, link, refuse a stranger, revoke, fork, restart", fun
     });
 
     it("passes the brake headless: the holder solves the proof of work the store asks for", async () => {
-        // The cost through the executor is the store's own `GET /v1/pow`.
+        // The cost through the executor is the store's own `GET /v1/pow`. Its `challenge`
+        // is minted one-use per call, so two answers differ in it — the cost is what compares.
         const params = await a.client.identity.powParams();
         const published = await (await fetch(`${store.url}/v1/pow`)).json();
-        expect(params).to.deep.equal(published);
+        expect(params.bits).to.equal(published.bits);
+        expect(params.previousBits).to.equal(published.previousBits);
+        expect(params.changedAt).to.equal(published.changedAt);
+        expect(params.challenge.nonce).to.be.a("string").that.is.not.empty;
+        expect(params.challenge.expires).to.be.a("number");
         expect(params.bits).to.equal(8);
         // The holder created the identity above with no vouching token and no window: the
         // store took its #0 because the holder solved the proof, so the log has no note.

@@ -183,14 +183,29 @@ pub struct PublishParams {
     pub pow: Option<Pow>,
 }
 
-/// A proof of work over a SCID (`ad4m_identity_core::pow`): `sha256("coasys:pow" ‖ scid ‖
-/// nonce)` starts with `bits` zero bits.
+/// A proof of work over a SCID and the store's challenge (`ad4m_identity_core::pow`):
+/// `sha256("coasys:pow" ‖ scid ‖ challenge ‖ nonce)` starts with `bits` zero bits.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct Pow {
     /// 16 bytes, base58btc.
     pub nonce: String,
     pub bits: u8,
+    /// The `nonce` of the `PowChallenge` the proof commits to; left out reads as empty, which
+    /// the store refuses.
+    #[serde(default)]
+    pub challenge: String,
+}
+
+/// The one-use challenge `GET /v1/pow` mints for the next proof.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct PowChallenge {
+    /// The token the proof's `challenge` carries and hashes over.
+    pub nonce: String,
+    /// Unix seconds the token is good until; a proof that arrives past it is refused.
+    #[ts(type = "number")]
+    pub expires: u64,
 }
 
 /// `identity.powParams`: the cost of a proof of work the store asks for now (`GET /v1/pow`).
@@ -205,6 +220,10 @@ pub struct PowParams {
     /// When `bits` last changed (unix seconds).
     #[ts(type = "number")]
     pub changed_at: u64,
+    /// A fresh challenge for the next proof; the caller solves over `challenge.nonce` and must
+    /// fetch again for another log (the store spends each challenge once and at most to
+    /// `expires`).
+    pub challenge: PowChallenge,
 }
 
 /// `identity.attachNote` params.

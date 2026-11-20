@@ -6,8 +6,8 @@
 //! - A plaintext file (an executor from before SQLCipher): it moves under the key
 //!   ([`sqlite::migrate_to_sqlcipher`]) and its sealed columns are sealed on the way. The
 //!   executor store is `migrating` meanwhile. If the move fails the plaintext stays as it
-//!   was, the executor runs on it in the clear, the store goes back to `plain`, and the gate
-//!   reports `migration-failed`.
+//!   was, the store goes back to `plain`, and the gate reports `migration-failed`: the
+//!   migration step fails, the executor stays sealed, and the next unlock tries again.
 //!
 //! On success the database keys are installed ([`sqlite::install`]): every connection to the
 //! file opens under them and the sealed columns are sealed.
@@ -27,7 +27,8 @@ use crate::db::Ad4mDb;
 pub enum DatabaseStep {
     /// The file is under its key: new, already keyed, or migrated now (`Some`).
     Keyed(Option<MigrationReport>),
-    /// The plaintext did not move: the executor runs on it in the clear.
+    /// The plaintext did not move: the migration step fails and the executor stays sealed;
+    /// it does not run on the plaintext file.
     KeptPlain(MigrationError),
 }
 
@@ -91,15 +92,26 @@ pub(crate) fn key_file(
                     started_at: Utc::now(),
                 },
             )?;
+            let mut sealing = crate::db::sealed::SealPlainReport::default();
             let migrated = sqlite::migrate_to_sqlcipher(path, &key, |new_file| {
                 // The schema's own migrations run first (the owner columns), then every value
                 // of a sealed column is sealed for its row's store.
                 let db = Ad4mDb::open(new_file, Some((&key, keys.clone())))
                     .map_err(|e| e.to_string())?;
-                let sealed = db.seal_plain_values().map_err(|e| e.to_string())?;
-                log::info!("Sealed {sealed} values of the database");
+                sealing = db.seal_plain_values().map_err(|e| e.to_string())?;
                 Ok(())
             });
+            if sealing.sealed > 0 || sealing.skipped > 0 {
+                log::info!(
+                    "Sealed {} values of the database{}",
+                    sealing.sealed,
+                    if sealing.skipped > 0 {
+                        format!("; {} rows could not be sealed", sealing.skipped)
+                    } else {
+                        String::new()
+                    }
+                );
+            }
             match migrated {
                 Ok(report) => {
                     set_state(keys, gate, StoreState::Encrypted)?;
@@ -264,13 +276,16 @@ mod tests {
         );
     }
 
+    /// A row whose owner resolves to no store cannot be sealed: it is skipped (logged, kept
+    /// in the clear inside the keyed file), and the move still completes — so a start that
+    /// finds it does not fail the same way for good.
     #[test]
-    fn a_failed_migration_runs_on_the_plaintext_and_says_so() {
+    fn a_row_that_cannot_be_sealed_is_skipped_and_the_move_completes() {
         let folder = tempfile::tempdir().unwrap();
         let keys = open_keys(folder.path());
         let path = folder.path().join("ad4m_db.sqlite");
         let (id, _) = plaintext_database(&path);
-        // A perspective id that is not a uuid has no store to seal for: the seal fails.
+        // A perspective id that is not a uuid has no store to seal for.
         Connection::open(&path)
             .unwrap()
             .execute(
@@ -278,28 +293,47 @@ mod tests {
                 [],
             )
             .unwrap();
-        let plaintext = std::fs::read(&path).unwrap();
 
         let step = key_file(&keys, &path, None).unwrap();
-        let DatabaseStep::KeptPlain(e) = step else {
-            panic!("{step:?}")
-        };
-        assert_eq!(e.stage, "seal", "{e}");
-        assert!(
-            e.to_string().contains("the plaintext database is kept"),
-            "{e}"
-        );
-        assert_eq!(
-            std::fs::read(&path).unwrap(),
-            plaintext,
-            "the plaintext is as it was"
-        );
-        assert!(!sqlite::migration_file(&path).exists());
+        assert!(matches!(step, DatabaseStep::Keyed(Some(_))), "{step:?}");
         assert_eq!(
             keys.store_state(&StoreId::Executor).unwrap(),
-            Some(StoreState::Plain)
+            Some(StoreState::Encrypted)
         );
-        let db = Ad4mDb::new(path.to_str().unwrap()).unwrap();
+        assert_eq!(
+            sqlite::database_file(&path).unwrap(),
+            DatabaseFile::Encrypted
+        );
+        assert!(!sqlite::migration_file(&path).exists());
+
+        let key = sqlite::database_key(&keys).unwrap();
+        let conn = open_keyed(&path, &key).unwrap();
+        // The row that could not be sealed is as it was, in the clear inside the keyed file.
+        let additions: String = conn
+            .query_row(
+                "SELECT additions FROM perspective_diff WHERE perspective = 'not-a-uuid'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(additions, "[]");
+        // The others sealed.
+        let description: String = conn
+            .query_row(
+                "SELECT description FROM notifications WHERE id = ?1",
+                [&id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(description.starts_with(SEALED_PREFIX), "{description}");
+        drop(conn);
+
+        // The next start finds the file keyed: nothing to move, the row stays.
+        assert!(matches!(
+            key_file(&keys, &path, None).unwrap(),
+            DatabaseStep::Keyed(None)
+        ));
+        let db = Ad4mDb::open(&path, Some((&key, keys.clone()))).unwrap();
         assert!(db.get_notification(id).unwrap().is_some());
     }
 

@@ -7,6 +7,11 @@
 # key and prints its public multikey on the "listening" line; a production deployment keeps
 # the key as a secret and mounts it instead (IDENTITY_STORE_KEY). `identity-store keygen`
 # makes a key without serving.
+#
+# Behind a reverse proxy or load balancer, TRUSTED_PROXIES is required: set it to the proxy's
+# address or range (`-e TRUSTED_PROXIES=10.0.0.0/8`). Unset, every client counts as the proxy's
+# one address for the signup brake — a few failures an hour lock all sign-ups. The first
+# request carrying a proxy header logs a warning while it is unset.
 
 FROM rust:1.96.1-bookworm AS build
 RUN apt-get update && apt-get install -y --no-install-recommends libsqlite3-dev \

@@ -837,9 +837,8 @@ async fn a_new_log_with_no_note_needs_a_proof_that_meets_the_bits() {
     let events = json!([alice.json(0)]);
 
     // Token and proof together: 400.
-    let proof = pow::solve(&alice.scid(), 8);
-    let both =
-        json!({ "events": events, "vouch": "tok", "pow": { "nonce": proof.nonce, "bits": 8 } });
+    let proof = t.pow_for(&alice.scid());
+    let both = json!({ "events": events, "vouch": "tok", "pow": proof });
     let reply = t.post(&path, &both).await;
     assert_eq!(reply.status, StatusCode::BAD_REQUEST);
     assert_eq!(reply.body["error"], "vouch-and-pow");
@@ -855,22 +854,58 @@ async fn a_new_log_with_no_note_needs_a_proof_that_meets_the_bits() {
     assert_eq!(reply.status, StatusCode::FORBIDDEN, "{}", reply.body);
     assert_eq!(reply.body["error"], "pow");
     assert_eq!(t.count("logs"), 0);
-    // A proof for another SCID: 403 pow.
-    let bob = Person::new("bob");
-    let wrong = pow::solve(&bob.scid(), 8);
+    // A proof made ahead of time, with no challenge from `GET /v1/pow`: 403 pow.
+    let ahead = pow::solve(&alice.scid(), "", 8);
     let reply = t
         .post(
             &path,
-            &json!({ "events": events, "pow": { "nonce": wrong.nonce, "bits": 8 } }),
+            &json!({ "events": events, "pow": { "nonce": ahead.nonce, "bits": 8 } }),
         )
         .await;
     assert_eq!(reply.status, StatusCode::FORBIDDEN);
     assert_eq!(reply.body["error"], "pow");
     assert_eq!(t.count("logs"), 0);
+    // A proof over a challenge that is not the store's (a token made up by the client,
+    // or another store's): 403 pow.
+    let forged = pow::solve(&alice.scid(), &bs58::encode([9u8; 40]).into_string(), 8);
+    let reply = t
+        .post(&path, &json!({ "events": events, "pow": forged }))
+        .await;
+    assert_eq!(reply.status, StatusCode::FORBIDDEN);
+    assert_eq!(reply.body["error"], "pow");
+    let other = t.store.pow_challenge();
+    let other_store = TestStore::with_key([9; 32]);
+    let foreign = pow::solve(&alice.scid(), &other_store.store.pow_challenge().nonce, 8);
+    let reply = t
+        .post(&path, &json!({ "events": events, "pow": foreign }))
+        .await;
+    assert_eq!(reply.status, StatusCode::FORBIDDEN);
+    assert_eq!(reply.body["error"], "pow");
+    // A proof over an expired challenge: 403 pow.
+    let stale = pow::solve(&alice.scid(), &other.nonce, 8);
+    t.set_now(other.expires + 1);
+    let reply = t
+        .post(&path, &json!({ "events": events, "pow": stale }))
+        .await;
+    assert_eq!(reply.status, StatusCode::FORBIDDEN);
+    assert_eq!(reply.body["error"], "pow");
+    t.set_now(T0);
+    assert_eq!(t.count("logs"), 0);
+    // A proof for another SCID over a good challenge: 403 pow.
+    let bob = Person::new("bob");
+    let wrong = t.pow_for(&bob.scid());
+    let reply = t
+        .post(&path, &json!({ "events": events, "pow": wrong }))
+        .await;
+    assert_eq!(reply.status, StatusCode::FORBIDDEN);
+    assert_eq!(reply.body["error"], "pow");
+    assert_eq!(t.count("logs"), 0);
     // A proof below the store's bits that names its own `bits`: the store checks its own, 403.
+    let challenge = t.store.pow_challenge().nonce;
     let mut start = 0u128;
     let weak = loop {
-        let p = pow::solve_range(&alice.scid(), 1, start, 1 << 16).expect("a 1-bit proof");
+        let p =
+            pow::solve_range(&alice.scid(), &challenge, 1, start, 1 << 16).expect("a 1-bit proof");
         if !pow::check(&alice.scid(), &p, 8) {
             break p;
         }
@@ -882,32 +917,35 @@ async fn a_new_log_with_no_note_needs_a_proof_that_meets_the_bits() {
         start = u128::from_be_bytes(bytes) + 1;
     };
     let reply = t
-        .post(
-            &path,
-            &json!({ "events": events, "pow": { "nonce": weak.nonce, "bits": 1 } }),
-        )
+        .post(&path, &json!({ "events": events, "pow": weak }))
         .await;
     assert_eq!(reply.status, StatusCode::FORBIDDEN, "{}", reply.body);
     assert_eq!(reply.body["error"], "pow");
     assert_eq!(t.count("logs"), 0);
-    // A proof that meets the bits: 200.
+    // A proof that meets the bits over a fresh challenge: 200, and it spends the challenge.
     let reply = t
-        .post(
-            &path,
-            &json!({ "events": events, "pow": { "nonce": proof.nonce, "bits": 8 } }),
-        )
+        .post(&path, &json!({ "events": events, "pow": proof }))
         .await;
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
     let page = t.get(&format!("/v1/logs/{}", alice.scid())).await.body;
     assert_eq!(page["vouched"], false);
     assert_eq!(page["note"], Value::Null);
     assert_eq!(t.admitted_by(&alice.scid()), "brake");
-    // A repeat of #0 with its proof (a resumed create): the conflict of any repeat, 409.
+    // Its challenge is spent: a proof over it for a new log is refused too.
+    let carol = Person::new("carol");
+    let spent = pow::solve(&carol.scid(), proof["challenge"].as_str().unwrap(), 8);
     let reply = t
         .post(
-            &path,
-            &json!({ "events": events, "pow": { "nonce": proof.nonce, "bits": 8 } }),
+            &format!("/v1/logs/{}/events", carol.scid()),
+            &json!({ "events": [carol.json(0)], "pow": spent }),
         )
+        .await;
+    assert_eq!(reply.status, StatusCode::FORBIDDEN, "{}", reply.body);
+    assert_eq!(reply.body["error"], "pow");
+    assert_eq!(t.count("logs"), 1);
+    // A repeat of #0 with its proof (a resumed create): the conflict of any repeat, 409.
+    let reply = t
+        .post(&path, &json!({ "events": events, "pow": proof }))
         .await;
     assert_eq!(reply.status, StatusCode::CONFLICT, "{}", reply.body);
     assert_eq!(reply.body["error"], "conflict");
@@ -916,10 +954,7 @@ async fn a_new_log_with_no_note_needs_a_proof_that_meets_the_bits() {
     let mut later = alice.json(0);
     later["seq"] = json!(1);
     let reply = t
-        .post(
-            &path,
-            &json!({ "events": [later], "pow": { "nonce": proof.nonce, "bits": 8 } }),
-        )
+        .post(&path, &json!({ "events": [later], "pow": proof }))
         .await;
     assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.body);
     assert_eq!(reply.body["error"], "malformed");

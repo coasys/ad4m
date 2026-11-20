@@ -83,11 +83,12 @@ fn assert_ok(reply: &Reply) {
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
 }
 
-/// A proof for `scid` that meets `low` bits but not `high`.
-fn proof_between(scid: &str, low: u8, high: u8) -> pow::Pow {
+/// A proof for `scid` over `challenge` that meets `low` bits but not `high`.
+fn proof_between(scid: &str, challenge: &str, low: u8, high: u8) -> pow::Pow {
     let mut start = 0u128;
     loop {
-        let p = pow::solve_range(scid, low, start, 1 << 20).expect("a proof at the low bits");
+        let p = pow::solve_range(scid, challenge, low, start, 1 << 20)
+            .expect("a proof at the low bits");
         if !pow::check(scid, &p, high) {
             return p;
         }
@@ -166,12 +167,17 @@ async fn the_121st_no_note_log_in_an_hour_store_wide_is_429_global() {
     // 120 an hour: one token every 30 seconds.
     assert_eq!(retry, 30);
     assert_eq!(t.count("logs"), 120);
+    // The empty episode logged its one line (`Store::notice_global_empty`), and the log the
+    // brake admits next resets the flag, so the next empty episode logs again.
+    assert!(t.store.global_empty_logged());
     t.set_now(T0 + 30);
     assert_ok(&publish_from(&t, "10.1.0.1:1000", &late).await);
+    assert!(!t.store.global_empty_logged());
     assert_limited(
         &publish_from(&t, "10.1.0.2:1000", &Person::new("g 121")).await,
         "global",
     );
+    assert!(t.store.global_empty_logged());
 }
 
 #[tokio::test]
@@ -212,7 +218,9 @@ async fn a_bad_proof_is_403_pow_and_the_failure_bucket_fills_after_30() {
     let peer = from("198.51.100.9:1000");
     let alice = Person::new("alice");
     let bob = Person::new("bob");
-    let wrong = serde_json::to_value(pow::solve(&bob.scid(), TEST_POW_BITS)).unwrap();
+    // A proof over a fresh challenge for the wrong SCID: its challenge is never spent (the
+    // proof fails before it could be), so the same request repeats.
+    let wrong = t.pow_for(&bob.scid());
     for i in 0..30 {
         // Bad proofs, a missing one and a broken signature with a good proof all count.
         let reply = match i % 3 {
@@ -264,9 +272,14 @@ async fn raised_bits_accept_a_proof_at_the_previous_bits_for_ten_minutes_then_re
     let t = TestStore::with_settings(TestStore::brake_settings());
     let pow = t.get("/v1/pow").await.body;
     assert_eq!(
-        pow,
+        json!({ "bits": pow["bits"], "previousBits": pow["previousBits"],
+                "changedAt": pow["changedAt"] }),
         json!({ "bits": TEST_POW_BITS, "previousBits": TEST_POW_BITS, "changedAt": T0 })
     );
+    // The answer mints a fresh one-use challenge for the next proof, good for 300 seconds.
+    let challenge = pow["challenge"].clone();
+    assert!(challenge["nonce"].is_string());
+    assert_eq!(challenge["expires"], T0 + 300);
     // A restart with the same bits keeps the record.
     t.set_now(T0 + 50);
     let t = t.restarted();
@@ -279,17 +292,23 @@ async fn raised_bits_accept_a_proof_at_the_previous_bits_for_ten_minutes_then_re
         ..TestStore::brake_settings()
     };
     let t = t.restarted_with(raised.clone());
+    let pow = t.get("/v1/pow").await.body;
     assert_eq!(
-        t.get("/v1/pow").await.body,
+        json!({ "bits": pow["bits"], "previousBits": pow["previousBits"],
+                "changedAt": pow["changedAt"] }),
         json!({ "bits": 12, "previousBits": TEST_POW_BITS, "changedAt": T0 + 100 })
     );
     let alice = Person::new("alice");
     let bob = Person::new("bob");
-    let old_alice = proof_between(&alice.scid(), TEST_POW_BITS, 12);
-    let old_bob = proof_between(&bob.scid(), TEST_POW_BITS, 12);
     let peer = from("198.51.100.1:1000");
     // Within ten minutes of the change: a proof at the previous bits passes.
     t.set_now(T0 + 100 + 599);
+    let old_alice = proof_between(
+        &alice.scid(),
+        &t.store.pow_challenge().nonce,
+        TEST_POW_BITS,
+        12,
+    );
     let reply = post_new(
         &t,
         peer,
@@ -300,6 +319,12 @@ async fn raised_bits_accept_a_proof_at_the_previous_bits_for_ten_minutes_then_re
     assert_ok(&reply.await);
     // Ten minutes after: refused, a proof at the new bits passes.
     t.set_now(T0 + 100 + 600);
+    let old_bob = proof_between(
+        &bob.scid(),
+        &t.store.pow_challenge().nonce,
+        TEST_POW_BITS,
+        12,
+    );
     let reply = post_new(
         &t,
         peer,
@@ -310,7 +335,7 @@ async fn raised_bits_accept_a_proof_at_the_previous_bits_for_ten_minutes_then_re
     .await;
     assert_eq!(reply.status, StatusCode::FORBIDDEN, "{}", reply.body);
     assert_eq!(reply.body["error"], "pow");
-    let new_bob = pow::solve(&bob.scid(), 12);
+    let new_bob = pow::solve(&bob.scid(), &t.store.pow_challenge().nonce, 12);
     assert_ok(
         &post_new(
             &t,
@@ -405,6 +430,28 @@ async fn behind_a_trusted_proxy_the_forwarded_address_counts_and_elsewhere_the_s
         &post_new(&t, proxy, &headers, &p, with_pow(&p)).await,
         "address",
     );
+}
+
+/// `TRUSTED_PROXIES` empty but a request carries a proxy header (the store sits behind a proxy
+/// it was never told about): every client would count as the proxy's one address for the
+/// brake, so the first such request logs the warning once (`Store::note_untrusted_proxy_headers`).
+#[tokio::test]
+async fn proxy_headers_with_no_trusted_proxy_log_the_warning_once() {
+    let t = TestStore::new();
+    assert!(!t.store.untrusted_proxy_warned());
+    let p = Person::new("px");
+    let reply = post_new(
+        &t,
+        from("10.9.0.5:1000"),
+        &[("x-forwarded-for", "198.51.100.9")],
+        &p,
+        Some(t.pow_for(&p.scid())),
+    )
+    .await;
+    assert_ok(&reply);
+    assert!(t.store.untrusted_proxy_warned());
+    // The socket address counted, not the forwarded one: the header was never trusted.
+    assert_eq!(t.admitted_by(&p.scid()), "brake");
 }
 
 #[tokio::test]

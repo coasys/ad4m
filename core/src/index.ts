@@ -48,6 +48,7 @@ export * from "./ai/AIClient"
 export * from "./identity/IdentityClient"
 export * from "./hosting/HostingIndexClient"
 export * from "./bot/BotClient"
+export * from "./host/HostClient"
 export * from "./ai/Tasks"
 export * from "./runtime/RuntimeTypes"
 // `Model` is the model decorator: the AI model is `AIModel`.
