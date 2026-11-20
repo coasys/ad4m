@@ -112,8 +112,7 @@ pub fn api_router(state: AppState) -> Router {
             // ── The open methods over HTTP, for callers that cannot open a socket ──
             .route(
                 "/rpc",
-                post(http_rpc::http_rpc)
-                    .layer(DefaultBodyLimit::max(http_rpc::MAX_BODY_BYTES)),
+                post(http_rpc::http_rpc).layer(DefaultBodyLimit::max(http_rpc::MAX_BODY_BYTES)),
             )
             // ── HTTP-only: binary transcription feed (can't go through WS JSON) ──
             .route(
