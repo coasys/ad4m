@@ -23,8 +23,10 @@ const WE_AGENT_TOOLS_FILES: [(&str, &str); 2] = [
 ];
 
 fn main() {
-    // The web executor (wasm32) has no Deno snapshot, no dapp and no Holochain DNA.
+    // The web executor (wasm32) has no Deno snapshot, no dapp and no Holochain DNA; it
+    // reports its commit as native does (`globals::AD4M_COMMIT`).
     if std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("wasm32") {
+        embed_git_commit();
         return;
     }
     println!(
