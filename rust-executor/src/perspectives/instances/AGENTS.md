@@ -25,7 +25,10 @@ Invariants:
 - Without `batch_id`: create/update commit their own batch (discarded on failure); collection
   writes and the remove cascade write directly. With `batch_id`: checked open
   (`BatchNotFound`) before writing, everything goes into it, nothing is committed, and the
-  caller's batch is never discarded here.
+  caller's batch is never discarded here. A write whose lifecycle actions call a language
+  (a mounted class's constructor, setters or destructor; through an abstract class, the
+  record's own classes') runs with no batch at all: it refuses any `batch_id`
+  (`CallsInBatch`) before calling or writing, since a language call cannot be rolled back.
 - In a caller's batch, the reads a write does of the links it manages — collection
   membership, the remove cascade — see the batch's effective graph
   (`get_links_effective` in `perspective_instance/batch_view.rs`: committed + staged
