@@ -693,8 +693,11 @@ jobs:
             fi
             echo "export PATH=\"$bin:\$PATH\"" >> "$BASH_ENV"
       - run:
+          # --lib: every test of the crate is in the lib. Without it cargo also compiles
+          # the crate a second time, without cfg(test), to link the test binary of the
+          # generate_snapshot bin, which holds no test. rust-tests-serial builds all targets.
           name: rust-executor tests (nextest, profile ci)
-          command: cd rust-executor && cargo nextest run --release --profile ci
+          command: cd rust-executor && cargo nextest run --release --lib --profile ci
           no_output_timeout: 30m
       - store_test_results:
           path: target/nextest/ci/junit.xml
