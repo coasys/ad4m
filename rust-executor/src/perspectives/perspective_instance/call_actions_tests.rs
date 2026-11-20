@@ -624,8 +624,10 @@ async fn abstract_update_groups_by_concrete_name() {
 mod instance_writes {
     use super::*;
     use crate::perspectives::instances::{
-        create as instance_create, remove as instance_remove, update as instance_update,
-        InstanceCreate, InstanceError, InstanceRemove, InstanceUpdate,
+        add_to_collection as instance_add_to_collection, create as instance_create,
+        remove as instance_remove, remove_from_collection as instance_remove_from_collection,
+        update as instance_update, InstanceAddToCollection, InstanceCreate, InstanceError,
+        InstanceRemove, InstanceRemoveFromCollection, InstanceUpdate,
     };
     use crate::perspectives::perspective_instance::mounts_tests::{
         create as create_in_language, mounted, things,
@@ -928,6 +930,75 @@ mod instance_writes {
         assert_eq!(updates.len(), 1, "{updates:?}");
         assert_eq!(updates[0]["params"], json!({"title": "bye"}));
         assert_eq!(things(&p).await[0]["title"], "bye");
+    }
+
+    /// a mounted collection whose shape declares a `call` adder
+    /// and remover and no setter. `instanceAddToCollection` /
+    /// `instanceRemoveFromCollection` run the language's adder / remover
+    /// with the member list (writing no membership link of their own),
+    /// and refuse a caller's batch before calling.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn collection_writes_run_a_call_adder_and_remover() {
+        let lang = load_mount_test_language().await;
+        interact(
+            &format!("{lang}://project"),
+            "setShapes",
+            json!({"shapes": [{"name": "MountThing", "target": "mounttest://Thing", "tags": {
+                "setter": null,
+                "adder": [{"action": "call", "source": "this", "predicate": "addTags", "target": "{}"}],
+                "remover": [{"action": "call", "source": "this", "predicate": "removeTags", "target": "{}"}],
+            }}]}),
+        )
+        .await
+        .unwrap();
+        create_in_language(&lang, json!({"title": "a"})).await;
+        let (mut p, ctx) = mounted(&lang).await;
+        let base = format!("{lang}://t1");
+        let add = |batch_id: Option<String>| InstanceAddToCollection {
+            class_name: "MountThing".into(),
+            base_uri: base.clone(),
+            collection: "tags".into(),
+            item_uri: "x".into(),
+            batch_id,
+        };
+        let batch = p.create_batch().await;
+        let before = calls(&lang).await;
+
+        let refused = instance_add_to_collection(&mut p, &ctx, add(Some(batch))).await;
+        assert!(
+            matches!(refused, Err(InstanceError::CallsInBatch { .. })),
+            "{refused:?}"
+        );
+        assert_eq!(calls(&lang).await, before, "nothing was called");
+
+        instance_add_to_collection(&mut p, &ctx, add(None))
+            .await
+            .expect("add through the call adder");
+        assert_eq!(things(&p).await[0]["tags"], json!(["x"]));
+        instance_remove_from_collection(
+            &mut p,
+            &ctx,
+            InstanceRemoveFromCollection {
+                class_name: "MountThing".into(),
+                base_uri: base.clone(),
+                collection: "tags".into(),
+                item_uri: "x".into(),
+                batch_id: None,
+            },
+        )
+        .await
+        .expect("remove through the call remover");
+        // No member links left: the raw model query leaves the key out.
+        let tags = things(&p).await[0]["tags"].clone();
+        assert!(tags.as_array().is_none_or(|t| t.is_empty()), "{tags}");
+
+        assert_eq!(
+            calls(&lang).await[before.len()..].to_vec(),
+            vec![
+                json!({"address": "t1", "name": "addTags", "params": {"tags": ["x"]}}),
+                json!({"address": "t1", "name": "removeTags", "params": {"tags": ["x"]}}),
+            ]
+        );
     }
 
     /// `app://Note`: a link class read through `app://TextContent` whose
