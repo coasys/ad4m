@@ -61,6 +61,27 @@ fn a_token_with_another_algorithm_is_refused() {
 }
 
 #[wasm_bindgen_test]
+fn an_expired_token_is_refused_but_still_read() {
+    let secret = signing_secret();
+    let claims = Claims::new("did:key:issuer".into(), "an app".into(), 3600, None);
+    // Claims keeps `exp` private: move it an hour into the past, beyond the 60 s leeway.
+    let mut value = serde_json::to_value(&claims).expect("claims serialize");
+    let exp = value["exp"].as_u64().expect("exp is a number");
+    value["exp"] = serde_json::json!(exp - 2 * 3600);
+    let jwt = encode(
+        &Header::default(),
+        &value,
+        &EncodingKey::from_secret(&secret),
+    )
+    .expect("encode");
+
+    assert!(decode_jwt(jwt.clone()).is_err());
+    // Revocation reads an expired token too: read_stored_claims skips the exp check.
+    let stored = read_stored_claims(&jwt).expect("read_stored_claims reads an expired token");
+    assert_eq!(stored.nonce(), claims.nonce());
+}
+
+#[wasm_bindgen_test]
 fn garbage_is_neither_decoded_nor_read() {
     let _ = signing_secret();
     assert!(decode_jwt("not-a-jwt".to_string()).is_err());
