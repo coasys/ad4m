@@ -3747,6 +3747,68 @@ mod tests {
         assert!(line.contains("media 31.5 s ago"), "{line}");
     }
 
+    /// A cascade pipe whose answer never arrives has no remote candidate, so
+    /// ICE never leaves `Checking` and never reports `Disconnected`. Before
+    /// this PR the 70 s offer expiry ended it; without that, nothing did, and
+    /// `has_pipe` kept the node from dialling again. A peer that never had a
+    /// path is dropped 30 s after it was made; the dead-pipe cleanup removes
+    /// its entry, and the next announce dials a new pipe.
+    #[test]
+    fn a_pipe_that_never_gets_a_path_is_dropped_and_can_be_replaced() {
+        let establish = Duration::from_secs(30);
+        let mut mgr = super::super::cascade::CascadeManager::new(
+            "did:key:nodeB".into(),
+            "127.0.0.1:10040".parse().unwrap(),
+            8,
+        );
+        let room = RoomId::new("neighbourhood://pipe", "r");
+        let (mut pipe, _offer) = mgr.establish_pipe("did:key:nodeA", &room).unwrap();
+        let start = Instant::now();
+        let (mut seen, mut sent) = (Seen::default(), Vec::new());
+        let mut now = start;
+        while now - start < establish + Duration::from_secs(5) {
+            let next = drive(&mut pipe.rtc, now, start, &mut seen, &mut sent);
+            sent.clear();
+            for (_, state) in seen.ice.drain(..) {
+                pipe.on_ice_state(state, now);
+            }
+            now = next.clamp(now + Duration::from_millis(1), now + Duration::from_secs(1));
+        }
+        assert!(pipe.rtc.is_alive(), "str0m itself never gives up on it");
+        assert!(
+            pipe.disconnected_since.is_none(),
+            "ICE never reported a loss"
+        );
+        assert!(!pipe.stayed_disconnected(start + establish - Duration::from_secs(1)));
+        assert!(
+            pipe.stayed_disconnected(start + establish),
+            "a pipe with no path for 30 s is dropped"
+        );
+
+        // What the cascade cleanup does with the dead pipe.
+        assert!(mgr.has_pipe(&room.to_string(), "did:key:nodeA"));
+        mgr.remove_node_from_room(&room.to_string(), "did:key:nodeA");
+        assert!(!mgr.has_pipe(&room.to_string(), "did:key:nodeA"));
+        let (replacement, _) = mgr
+            .establish_pipe("did:key:nodeA", &room)
+            .expect("a new pipe can be dialled");
+        assert_ne!(replacement.id, pipe.id);
+    }
+
+    /// The establishment timeout only ends a peer that never had a path. One
+    /// that connected and then goes quiet (no media, no ICE change) stays.
+    #[test]
+    fn an_established_peer_that_goes_quiet_is_not_hit_by_the_establishment_timeout() {
+        let (_caller, mut peer) = connected_pair();
+        let now = Instant::now();
+        peer.on_ice_state(IceConnectionState::Checking, now);
+        peer.on_ice_state(IceConnectionState::Connected, now + Duration::from_secs(1));
+        for minutes in [1, 5, 30] {
+            assert!(!peer.stayed_disconnected(now + Duration::from_secs(60 * minutes)));
+        }
+        assert!(!peer.media_flowing(now + Duration::from_secs(60)));
+    }
+
     /// No media, an unanswered offer, and ICE down: the ICE rules still end
     /// the peer, 10 s after ICE went `Disconnected`, or 15 s after an ICE
     /// restart request. The offer resends keep neither alive.
