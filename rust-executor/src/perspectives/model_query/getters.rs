@@ -19,7 +19,7 @@
 //! ([`apply_where_filter_to_relation`]) can further narrow down relation
 //! results based on target instance properties.
 
-use deno_core::anyhow::Error;
+use anyhow::Error;
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, HashMap};
 
@@ -247,6 +247,15 @@ fn own_triple_end(getter: &str, predicate: &str) -> Option<usize> {
     .expect("escaped predicate")
     .find(getter)
     .map(|m| m.end())
+}
+
+/// Whether `getter` is the conformance getter the SDK generates for a typed
+/// relation over `predicate`: the relation's own triple, then only the target
+/// class's conformance triples. Such a getter lists exactly the relation's
+/// links whose targets conform, which is also what a query of the target class
+/// scoped by those links returns.
+pub(super) fn is_generated_relation_getter(getter: &str, predicate: &str) -> bool {
+    own_triple_end(getter, predicate).is_some_and(|end| is_generated_conformance(&getter[end..]))
 }
 
 /// Whether `rest`, a getter after its own triple, is only conformance

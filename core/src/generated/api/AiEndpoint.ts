@@ -9,8 +9,9 @@ import type { EndpointKind } from "./EndpointKind";
 export type AiEndpoint = { id: string, name: string, kind: EndpointKind, baseUrl: string, hasApiKey: boolean, capabilities: Array<AiCapability>, maxNumCtx?: number | null, 
 /**
  * How long a request to this endpoint may take, queueing included. Unset: 300 s for
- * chat `/v1` forwards, 600 s for chat the executor answers (Anthropic, Ollama, tools as
- * text; not bounded here when streamed), 60 s for embeddings, 120 s for speech.
+ * chat `/v1` forwards, 600 s for chat the executor answers, 60 s for embeddings, 120 s
+ * for speech. An OpenAI-protocol chat client uses this value for a stream too. A value
+ * above 600 s is kept. A stream has no second timer in `within_endpoint_limits`.
  */
 requestTimeoutSecs?: number | null, 
 /**

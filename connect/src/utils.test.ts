@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { wsUrlToHttpBase, getInitials, getHue, checkConnection, isEmbedded, setLocal, getLocal, removeLocal, adoptStoredSession, compareVersions } from './utils';
+import { wsUrlToHttpBase, getInitials, getHue, checkConnection, isEmbedded, setLocal, getLocal, removeLocal, adoptStoredSession, compareVersions, formatPrice } from './utils';
 
 // The version every key is stored under, pinned so the tests below can name older and newer ones.
 vi.mock('../../package.json', () => ({ version: '0.10.2-staging.3' }));
@@ -169,6 +169,26 @@ describe('adoptStoredSession', () => {
     expect(getLocal('ad4m-last-host')).toBeNull();
   });
 
+  it('carries a guest\'s credentials over with the session, so the session stays a guest\'s', () => {
+    const host = 'https://host.example';
+    localStorage.setItem('0.10.0/ad4m-token', 'older');
+    localStorage.setItem(`0.10.0/ad4m-guest-email-${host}`, 'guest-old@flux.demo');
+    localStorage.setItem('0.10.1/ad4m-token', 'guest-token');
+    localStorage.setItem('0.10.1/ad4m-url', host);
+    localStorage.setItem(`0.10.1/ad4m-guest-email-${host}`, 'guest-abc@flux.demo');
+    localStorage.setItem(`0.10.1/ad4m-guest-pass-${host}`, 'secret');
+    // A key of another version line that only shares the prefix's start is not this version's.
+    localStorage.setItem(`0.10.1-staging.2/ad4m-guest-email-${host}`, 'guest-pre@flux.demo');
+    expect(adoptStoredSession()).toBe(true);
+    expect(getLocal(`ad4m-guest-email-${host}`)).toBe('guest-abc@flux.demo');
+    expect(getLocal(`ad4m-guest-pass-${host}`)).toBe('secret');
+    // The copies under the versions it carried over from go with their sessions.
+    expect(localStorage.getItem(`0.10.1/ad4m-guest-email-${host}`)).toBeNull();
+    expect(localStorage.getItem(`0.10.1/ad4m-guest-pass-${host}`)).toBeNull();
+    expect(localStorage.getItem(`0.10.0/ad4m-guest-email-${host}`)).toBeNull();
+    expect(localStorage.getItem(`0.10.1-staging.2/ad4m-guest-email-${host}`)).toBe('guest-pre@flux.demo');
+  });
+
   it('carries over no session stored for another URL than the app names', () => {
     localStorage.setItem('0.10.1/ad4m-token', 'other-executor');
     localStorage.setItem('0.10.1/ad4m-url', 'http://old:1');
@@ -329,5 +349,29 @@ describe('checkConnection', () => {
     }));
 
     await expect(checkConnection('http://localhost:12000', 10)).rejects.toThrow('timed out');
+  });
+});
+
+describe('formatPrice', () => {
+  it('formats zero as "0.00"', () => {
+    expect(formatPrice(0)).toBe('0.00');
+  });
+
+  it('formats prices >= 0.01 to 2 decimal places', () => {
+    expect(formatPrice(0.01)).toBe('0.01');
+    expect(formatPrice(1.5)).toBe('1.50');
+  });
+
+  it('formats prices >= 0.0001 and < 0.01 to 4 decimal places', () => {
+    expect(formatPrice(0.0099)).toBe('0.0099');
+    expect(formatPrice(0.0001)).toBe('0.0001');
+  });
+
+  it('formats prices >= 0.000001 and < 0.0001 to 6 decimal places', () => {
+    expect(formatPrice(0.000001)).toBe('0.000001');
+  });
+
+  it('formats prices below 0.000001 in exponential notation', () => {
+    expect(formatPrice(0.0000009)).toBe('9.00e-7');
   });
 });

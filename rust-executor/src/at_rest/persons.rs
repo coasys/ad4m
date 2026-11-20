@@ -23,8 +23,13 @@
 //! 4. The person's data key and its person store, leaving tombstones with no personal data.
 //!
 //! When step 4 has written the keyring file, no copy of the person's keys is left: the
-//! executor keeps no backup of the keyring. So `shredded_everywhere_at` equals
-//! `key_destroyed_at`.
+//! executor keeps no backup of the keyring. A platform snapshot (`perspective_snapshot`)
+//! holds each perspective's part sealed under that perspective store's own Archive subkey,
+//! so the destroyed key makes the person's part unreadable in every snapshot taken before.
+//! So `shredded_everywhere_at` equals `key_destroyed_at`. The promise covers contents: the
+//! outer manifest of a snapshot, opened with the executor's key, still lists the deleted
+//! perspective's uuid and its part's size (the part itself no longer opens), until the next
+//! snapshot replaces it.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -54,7 +59,8 @@ pub struct PersonLeave {
     /// Delete only: when the person's data key was destroyed.
     pub key_destroyed_at: Option<DateTime<Utc>>,
     /// Delete only: when no copy of the person's keys is left anywhere the executor made one.
-    /// The executor keeps no backup of its keyring, so this equals `key_destroyed_at`.
+    /// The executor keeps no backup of its keyring, and a snapshot's perspective parts are
+    /// sealed under their stores' keys, so this equals `key_destroyed_at`.
     pub shredded_everywhere_at: Option<DateTime<Utc>>,
 }
 

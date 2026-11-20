@@ -31,7 +31,6 @@ use axum::{
     response::{sse::Event, IntoResponse, Sse},
     Json,
 };
-use futures::Stream;
 use uuid::Uuid;
 
 use super::errors::{OpenAIError, OpenAIJson};
@@ -747,7 +746,3 @@ pub(super) fn epoch_seconds() -> i64 {
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
 }
-
-// Re-export a Stream alias for documentation purposes.
-#[allow(dead_code)]
-type EventStream = dyn Stream<Item = Result<Event, Infallible>> + Send;

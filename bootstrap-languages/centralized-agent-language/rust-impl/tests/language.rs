@@ -2044,7 +2044,7 @@ fn a_reply_over_the_byte_cap_is_refused_on_every_route() {
 
     answering(200, serde_json::to_value(&head).unwrap());
     assert_eq!(refusal(block_on(store.head(&did))), too_large);
-    answering(200, json!({ "bits": 8, "previousBits": 8, "changedAt": 0 }));
+    answering(200, json!({ "bits": 8 }));
     assert_eq!(refusal(block_on(store.pow_params())), too_large);
     answering(200, json!({ "scid": "x" }));
     assert_eq!(refusal(block_on(store.key_owner("z6Mk", 0))), too_large);

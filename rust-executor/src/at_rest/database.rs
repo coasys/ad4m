@@ -98,7 +98,7 @@ pub(crate) fn key_file(
                 // of a sealed column is sealed for its row's store.
                 let db = Ad4mDb::open(new_file, Some((&key, keys.clone())))
                     .map_err(|e| e.to_string())?;
-                sealing = db.seal_plain_values().map_err(|e| e.to_string())?;
+                sealing = db.seal_plain_values(true).map_err(|e| e.to_string())?;
                 Ok(())
             });
             if sealing.sealed > 0 || sealing.skipped > 0 {

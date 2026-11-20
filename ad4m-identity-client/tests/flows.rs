@@ -1359,7 +1359,7 @@ async fn create_solves_the_proof_of_work_the_store_asks_for() {
     let store = TestStore::new();
     let a = custody(&store, 1);
     let params = a.pow_params().await.unwrap();
-    assert_eq!((params.bits, params.previous_bits), (8, 8));
+    assert_eq!(params.bits, 8);
 
     // An incept published with no proof is refused, and nothing is stored.
     let status = a.status().await.unwrap();

@@ -1,6 +1,7 @@
 import { Link } from "../links/Links";
 import { Literal } from "../Literal";
 import { AD4MAction } from "./SHACLShape";
+import { encodeRFC3986URIComponent } from "../rfc3986";
 
 // Re-export AD4MAction for consumers who import from SHACLFlow
 export { AD4MAction };
@@ -367,6 +368,16 @@ function isConsensusRuleShape(v: unknown): v is ConsensusRule {
   return true;
 }
 
+function decodeOptionalHint(target: string): string | undefined {
+  try {
+    const decoded = Literal.fromUrl(target).get();
+    if (typeof decoded === "string" && decoded.length > 0) return decoded;
+  } catch {
+    // ignore parse errors — leave unset
+  }
+  return undefined;
+}
+
 /**
  * Flow Transition definition
  * Represents a transition between two states
@@ -620,8 +631,7 @@ export class SHACLFlow {
    * executor's flow writer (`parse_flow_to_links`) builds the same URI.
    */
   transitionUri(fromState: string, toState: string, actionName: string): string {
-    const part = (s: string) =>
-      encodeURIComponent(s).replace(/[!'()*]/g, c => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+    const part = encodeRFC3986URIComponent;
     return `${this.namespace}${this.name}.transition/${part(fromState)}/${part(toState)}/${part(actionName)}`;
   }
 
@@ -875,14 +885,8 @@ export class SHACLFlow {
       l.source === flowUri && l.predicate === "ad4m://interpretationHint"
     );
     if (flowHintLink) {
-      try {
-        const decoded = Literal.fromUrl(flowHintLink.target).get();
-        if (typeof decoded === "string" && decoded.length > 0) {
-          flow.interpretationHint = decoded;
-        }
-      } catch {
-        // Ignore parse errors — leave unset.
-      }
+      const hint = decodeOptionalHint(flowHintLink.target);
+      if (hint !== undefined) flow.interpretationHint = hint;
     }
 
     // Find typed I/O (flow-level, design §4.1). Both arrays validated
@@ -931,14 +935,8 @@ export class SHACLFlow {
       l.source === flowUri && l.predicate === "ad4m://creationHint"
     );
     if (creationHintLink) {
-      try {
-        const decoded = Literal.fromUrl(creationHintLink.target).get();
-        if (typeof decoded === "string" && decoded.length > 0) {
-          flow.creationHint = decoded;
-        }
-      } catch {
-        // Ignore parse errors — leave unset.
-      }
+      const hint = decodeOptionalHint(creationHintLink.target);
+      if (hint !== undefined) flow.creationHint = hint;
     }
 
     // Find flow-level `context` — same ModelQuery-shape guard as
@@ -1019,14 +1017,7 @@ export class SHACLFlow {
       );
       let interpretationHint: string | undefined;
       if (hintLink) {
-        try {
-          const decoded = Literal.fromUrl(hintLink.target).get();
-          if (typeof decoded === "string" && decoded.length > 0) {
-            interpretationHint = decoded;
-          }
-        } catch {
-          // Ignore parse errors — leave unset.
-        }
+        interpretationHint = decodeOptionalHint(hintLink.target);
       }
 
       // Get per-state `requires` guard (optional) — one link carrying a
@@ -1057,14 +1048,7 @@ export class SHACLFlow {
       );
       let semanticCheck: string | undefined;
       if (semanticCheckLink) {
-        try {
-          const decoded = Literal.fromUrl(semanticCheckLink.target).get();
-          if (typeof decoded === "string" && decoded.length > 0) {
-            semanticCheck = decoded;
-          }
-        } catch {
-          // Ignore parse errors — leave unset.
-        }
+        semanticCheck = decodeOptionalHint(semanticCheckLink.target);
       }
 
       // Get per-state `consensusRule` override (optional). Same shape

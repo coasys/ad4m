@@ -404,3 +404,142 @@ async fn a_settled_page_carries_no_note_and_the_page_with_the_head_does() {
     assert!(last.vouched);
     assert!(last.note.is_some());
 }
+
+/// The same signed #0 sent again and again with a token that never redeems costs the store a
+/// replay each time only until the sender's failure bucket is empty: a refused token takes a
+/// token from it, and an empty bucket is `429` before any signature is checked.
+#[tokio::test]
+async fn an_arbitrary_token_repeated_empties_the_failure_bucket_and_then_replays_nothing() {
+    let (t, server) = world().await;
+    let alice = Person::new("alice");
+    for i in 0..30 {
+        let reply = post_new(&t, &alice, json!({ "vouch": format!("junk-{i}") })).await;
+        assert_vouch_refused(&reply);
+    }
+    assert_eq!(server.redeems(), 30);
+    // The 31st is 429 failure: a broken signature would be 400 had it been replayed, a valid
+    // token would have been redeemed.
+    let mut broken = alice.json(0);
+    broken["proof"][0]["proofValue"] =
+        Person::new("alice other").json(0)["proof"][0]["proofValue"].clone();
+    let reply = t
+        .post(
+            &format!("/v1/logs/{}/events", alice.scid()),
+            &json!({ "events": [broken], "vouch": "junk-30" }),
+        )
+        .await;
+    assert_eq!(
+        reply.status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "{}",
+        reply.body
+    );
+    assert_eq!(reply.body["scope"], "failure");
+    server.give("t-alice", "alice@example.org");
+    let reply = post_new(&t, &alice, json!({ "vouch": "t-alice" })).await;
+    assert_eq!(
+        reply.status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "{}",
+        reply.body
+    );
+    assert_eq!(server.redeems(), 30);
+    assert_eq!(t.count("logs"), 0);
+    // Another address is not affected.
+    let other = "198.51.100.44:1000".parse().unwrap();
+    let body = {
+        let mut body = TestStore::append_body(&[&alice.events[0]]);
+        body["vouch"] = json!("t-alice");
+        body
+    };
+    let reply = t
+        .send_from(
+            other,
+            "POST",
+            &format!("/v1/logs/{}/events", alice.scid()),
+            Some(serde_json::to_vec(&body).unwrap()),
+            None,
+            &[],
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+}
+
+/// With no `VOUCH_URL` every token is `503`, and each such request is charged too: a store that
+/// cannot redeem is no free replay for a flood.
+#[tokio::test]
+async fn a_token_at_a_store_with_no_vouching_service_is_charged_and_then_429() {
+    let t = TestStore::with_settings(TestStore::brake_settings());
+    let alice = Person::new("alice");
+    for i in 0..30 {
+        let reply = post_new(&t, &alice, json!({ "vouch": format!("junk-{i}") })).await;
+        assert_unavailable(&reply);
+    }
+    let reply = post_new(&t, &alice, json!({ "vouch": "junk-30" })).await;
+    assert_eq!(
+        reply.status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "{}",
+        reply.body
+    );
+    assert_eq!(reply.body["scope"], "failure");
+}
+
+/// Waits until a redeem reached the held vouching service.
+async fn until_redeeming(server: &VouchServer) {
+    while server.redeems() == 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+}
+
+/// A key revoked while the voucher answers does not fill the identity's one note slot: the
+/// standing is checked again in the transaction that stores the note.
+#[tokio::test]
+async fn a_device_revoked_while_the_voucher_waits_gets_403_and_the_slot_stays_free() {
+    let (t, server) = world().await;
+    server.give("t-1", "one@example.org");
+    server.give("t-2", "two@example.org");
+    let mut alice = Person::new("alice");
+    t.publish(&alice).await;
+    let phone = Device::new("alice phone");
+    let phone_id = t.link(&mut alice, &phone, OfferKind::Device, None).await;
+    server.hold();
+    let revoke = alice.revoke(&[&phone_id]);
+    let (reply, revoked) =
+        tokio::join!(ask_note(&t, &alice, &phone_id, &phone.key, "t-1"), async {
+            until_redeeming(&server).await;
+            let reply = t.append(&alice.scid(), &[&revoke]).await;
+            server.release();
+            reply
+        });
+    assert_eq!(revoked.status, StatusCode::OK, "{}", revoked.body);
+    assert_vouch_refused(&reply);
+    assert_eq!(t.count("notes"), 0);
+    assert!(page(&t, &alice).await.note.is_none());
+    // The slot is free: a key that still stands fills it.
+    alice.push(revoke);
+    let reply = ask_note(&t, &alice, "d1", &alice.device_key(1), "t-2").await;
+    assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+}
+
+/// The master a `rotate` retires while the voucher answers is refused the same way.
+#[tokio::test]
+async fn a_master_retired_while_the_voucher_waits_gets_403_and_the_slot_stays_free() {
+    let (t, server) = world().await;
+    server.give("t-1", "one@example.org");
+    let alice = Person::new("alice");
+    t.publish(&alice).await;
+    let old_master = alice.current_master();
+    let old_id = alice.master_id();
+    server.hold();
+    let rotate = alice.rotate(&[]);
+    let (reply, rotated) = tokio::join!(ask_note(&t, &alice, &old_id, &old_master, "t-1"), async {
+        until_redeeming(&server).await;
+        let reply = t.append(&alice.scid(), &[&rotate]).await;
+        server.release();
+        reply
+    });
+    assert_eq!(rotated.status, StatusCode::OK, "{}", rotated.body);
+    assert_vouch_refused(&reply);
+    assert_eq!(t.count("notes"), 0);
+}

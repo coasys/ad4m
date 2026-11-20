@@ -46,8 +46,8 @@ use crate::ai_service::{AIService, FeedAnswer};
 use crate::api::errors::ApiError;
 use crate::types::{ModelType, RequestContext};
 
-/// The most audio one utterance may buffer: 10 MB of `f32`, as the HTTP feed accepts.
-const MAX_BUFFERED_SAMPLES: usize = 10 * 1024 * 1024 / 4;
+/// The most audio one utterance may buffer: the shared 10 MiB float32 ceiling.
+const MAX_BUFFERED_SAMPLES: usize = crate::ai_service::transcription::MAX_UTTERANCE_SAMPLES;
 
 /// The most commits a session may have waiting for their answer: each holds up to
 /// [`MAX_BUFFERED_SAMPLES`] of audio until it is transcribed.
@@ -285,6 +285,7 @@ where
                     let _ = send_error(&mut socket, "insufficient_quota", &refused).await;
                     continue;
                 }
+                crate::hosting::meter::count_ai_run(caller.user_did());
 
                 // Tear down any prior session before opening a new one.
                 if let Some(old_sid) = stream_id.take() {
@@ -404,14 +405,34 @@ where
                 let utterance = std::mem::take(&mut buffered);
                 // Queued here, so commits keep their order; answered in the loop, so the
                 // deltas of a long utterance are read while it is transcribed.
-                let queued = match AIService::global_instance().await {
-                    Ok(service) => service.queue_utterance(sid, utterance, &caller).await,
-                    Err(e) => Err(e),
-                };
-                match queued {
-                    Ok(answer) => answers.push(answer),
+                // A full queue gives the samples back. Any other failure drops them, as before.
+                let service = match AIService::global_instance().await {
+                    Ok(service) => service,
                     Err(e) => {
+                        drop(utterance);
                         let _ = send_error(&mut socket, "server_error", &e.to_string()).await;
+                        continue;
+                    }
+                };
+                match service.admit_utterance(sid, utterance, &caller).await {
+                    Ok(answer) => answers.push(answer),
+                    Err(rejected)
+                        if crate::ai_service::AIServiceError::is_utterance_queue_full(
+                            &rejected.error,
+                        ) =>
+                    {
+                        buffered = rejected.samples;
+                        let _ = send_error(
+                            &mut socket,
+                            "rate_limit_exceeded",
+                            &rejected.error.to_string(),
+                        )
+                        .await;
+                    }
+                    Err(rejected) => {
+                        let _ =
+                            send_error(&mut socket, "server_error", &rejected.error.to_string())
+                                .await;
                     }
                 }
             }

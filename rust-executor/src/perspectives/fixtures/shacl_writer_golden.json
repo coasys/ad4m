@@ -76,6 +76,13 @@
         "datatype": "xsd://string",
         "max_count": 1,
         "in": []
+      },
+      {
+        "path": "zoo://owner",
+        "name": "owner",
+        "relation_kind": "hasOne",
+        "polymorphic": true,
+        "target_class_name": "Animal"
       }
     ]
   },
@@ -149,7 +156,13 @@
     {"source": "zoo://Dog.locked", "predicate": "sh://path", "target": "zoo://locked"},
     {"source": "zoo://Dog.locked", "predicate": "sh://datatype", "target": "xsd://string"},
     {"source": "zoo://Dog.locked", "predicate": "sh://maxCount", "target": "literal:1^^xsd:integer"},
-    {"source": "zoo://Dog.locked", "predicate": "sh://in", "target": "literal:string:[]"}
+    {"source": "zoo://Dog.locked", "predicate": "sh://in", "target": "literal:string:[]"},
+    {"source": "zoo://DogShape", "predicate": "sh://property", "target": "zoo://Dog.owner"},
+    {"source": "zoo://Dog.owner", "predicate": "rdf://type", "target": "sh://PropertyShape"},
+    {"source": "zoo://Dog.owner", "predicate": "sh://path", "target": "zoo://owner"},
+    {"source": "zoo://Dog.owner", "predicate": "ad4m://relationKind", "target": "literal:string:hasOne"},
+    {"source": "zoo://Dog.owner", "predicate": "ad4m://polymorphic", "target": "literal:true"},
+    {"source": "zoo://Dog.owner", "predicate": "ad4m://targetClassName", "target": "literal:string:Animal"}
   ]
 },
 {
