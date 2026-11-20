@@ -193,3 +193,60 @@ describe("fromJSONSchema: array of objects", () => {
     expect(e.changedFields()).toContain("participants");
   });
 });
+
+describe("fromJSONSchema: array items given by $ref", () => {
+  const schema: any = {
+    title: "Quest",
+    type: "object",
+    $defs: {
+      User: {
+        type: "object",
+        properties: { id: { type: "string" }, username: { type: "string" } },
+      },
+      Member: { $ref: "#/$defs/User" },
+      Tag: { type: "string" },
+      Loop: { $ref: "#/$defs/Loop" },
+    },
+    definitions: {
+      Step: { properties: { title: { type: "string" } } },
+    },
+    properties: {
+      participants: { type: "array", items: { $ref: "#/$defs/User" } },
+      members: { type: "array", items: { $ref: "#/$defs/Member" } },
+      steps: { type: "array", items: { $ref: "#/definitions/Step" } },
+      tags: { type: "array", items: { $ref: "#/$defs/Tag" } },
+      external: {
+        type: "array",
+        items: { $ref: "https://example.org/User.json" },
+      },
+      missing: { type: "array", items: { $ref: "#/$defs/Nope" } },
+      looping: { type: "array", items: { $ref: "#/$defs/Loop" } },
+    },
+  };
+
+  it("follows a local ref to an object schema: one JSON property", () => {
+    const meta = (
+      Ad4mModel.fromJSONSchema(schema, {
+        name: "QuestRef",
+        namespace: "quest://",
+      }) as any
+    ).getModelMetadata();
+    for (const name of ["participants", "members", "steps"]) {
+      expect(meta.properties[name]).toBeDefined();
+      expect(meta.relations[name]).toBeUndefined();
+    }
+  });
+
+  it("keeps a ref to a scalar, a ref it cannot follow, and a looping ref as relations", () => {
+    const meta = (
+      Ad4mModel.fromJSONSchema(schema, {
+        name: "QuestRef2",
+        namespace: "quest://",
+      }) as any
+    ).getModelMetadata();
+    for (const name of ["tags", "external", "missing", "looping"]) {
+      expect(meta.relations[name]).toBeDefined();
+      expect(meta.properties[name]).toBeUndefined();
+    }
+  });
+});

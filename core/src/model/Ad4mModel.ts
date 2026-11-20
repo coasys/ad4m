@@ -707,7 +707,7 @@ export class Ad4mModel {
       
       if (schema.properties) {
         for (const [propertyName, propertySchema] of Object.entries(schema.properties)) {
-          const isArray = isArrayType(propertySchema as JSONSchemaProperty) && !isObjectArrayType(propertySchema as JSONSchemaProperty);
+          const isArray = isArrayType(propertySchema as JSONSchemaProperty) && !isObjectArrayType(propertySchema as JSONSchemaProperty, schema as JSONSchema);
           const predicate = determinePredicate(
             schema, 
             propertyName, 
