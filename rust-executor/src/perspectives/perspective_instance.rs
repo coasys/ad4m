@@ -82,6 +82,7 @@ pub use expected_links::{ExpectedLinks, LinksChanged};
 // A batch's effective view of the graph for the validated write core.
 mod batch_view;
 // The judgement the store holds for a link a write path just persisted.
+mod revocation_notices;
 mod stored_judgements;
 
 #[cfg(test)]
@@ -4720,7 +4721,7 @@ impl PerspectiveInstance {
         // keeps a `valid` it cannot re-judge), but answers `Err` at the end so it runs again.
         let mut unreadable: Option<String> = None;
         match scope {
-            super::Recheck::Signers(_) | super::Recheck::Logged => {
+            super::Recheck::Signers(_) | super::Recheck::Logged | super::Recheck::Flagged => {
                 let signers: Vec<String> = match scope {
                     super::Recheck::Signers(signers) => signers.iter().cloned().collect(),
                     _ => Vec::new(),
@@ -4731,6 +4732,11 @@ impl PerspectiveInstance {
                         super::Recheck::Logged => self
                             .sparql_store
                             .links_with_person(after.as_deref(), page)?,
+                        super::Recheck::Flagged => self.sparql_store.links_with_verdict(
+                            &LinkVerdict::Flagged,
+                            after.as_deref(),
+                            page,
+                        )?,
                         _ => {
                             self.sparql_store
                                 .links_by_authors(&signers, after.as_deref(), page)?
@@ -4831,8 +4837,12 @@ impl PerspectiveInstance {
         let mut rewritten = Vec::new();
         for (before, link) in stored.into_iter().zip(&links) {
             // A link this store already counted was here before the revocation reached the
-            // key map: the one order the executor knows. The store judges the same way.
-            let entered = (before.verdict == Some(LinkVerdict::Valid)).then_some(false);
+            // key map; a stored revocation notice says the same for a link a late sync put
+            // in `flagged` (the notice could only be written after the revocation). The
+            // store judges the same way.
+            let entered = (before.verdict == Some(LinkVerdict::Valid)
+                || self.sparql_store.vouched_by_notice(link)?)
+            .then_some(false);
             let now = link.check_entered(entered);
             if before.verdict.as_ref() == Some(&now.verdict) && before.person == now.person {
                 continue;
@@ -9894,7 +9904,8 @@ mod tests {
 
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
         let now = chrono::Utc::now().timestamp() as u64;
-        let expired = crate::identity::expired_signers(&map, start, now);
+        let cache = crate::identity::cache::tests::trusting();
+        let (expired, _) = crate::identity::expired_signers(&cache, start, now);
         assert_eq!(
             expired,
             std::collections::BTreeSet::from([link.author.clone()])
@@ -9945,6 +9956,7 @@ mod tests {
     struct EvictedBot {
         perspective: PerspectiveInstance,
         resolver: std::sync::Arc<crate::identity::resolver::Resolver>,
+        cache: std::sync::Arc<crate::identity::cache::KelCache>,
         scid: String,
         /// The cache's database file.
         db: std::path::PathBuf,
@@ -10026,6 +10038,7 @@ mod tests {
         EvictedBot {
             perspective,
             resolver,
+            cache,
             scid,
             db,
             _dir: dir,
@@ -10045,7 +10058,9 @@ mod tests {
 
         let bot = evicted_expired_bot(150).await;
         let map = global_key_map();
-        for scope in crate::identity::lag_scopes(&map, std::collections::BTreeSet::new()) {
+        let (scopes, _, _) =
+            crate::identity::lag_scopes(&bot.cache, std::collections::BTreeSet::new(), 0).await;
+        for scope in scopes {
             crate::identity::with_test_resolver(
                 bot.resolver.clone(),
                 bot.perspective.recheck_links(&scope),
@@ -10065,6 +10080,82 @@ mod tests {
         );
         assert_eq!(stored[0].person, None);
         map.forget(&bot.scid);
+    }
+
+    /// The case `Logged` cannot reach: a link stored `valid` with no person — no log listed
+    /// its signer when it was judged — whose log arrived while the change was lost to the
+    /// lag, then left the map. The journaled marks still name the key and its log: the
+    /// recovery reads the log back and the re-check gives the link its person.
+    #[tokio::test]
+    async fn the_lag_recovery_judges_again_a_valid_link_with_no_person_whose_log_left_the_map() {
+        use crate::identity::cache::tests::{accept_signed, store_key, FakeStore, TestLog};
+        use crate::identity::cache::{global_key_map, KelCache};
+        use crate::identity::resolver::Resolver;
+        use ad4m_identity_core::build::Signer;
+        use std::sync::atomic::Ordering;
+        use std::sync::Arc;
+
+        let perspective = setup().await;
+        let log = TestLog::new(160);
+        let key = log.device.key();
+        // The link is judged while no log lists the signer: `valid`, no person.
+        let map = global_key_map();
+        map.note_no_log(&key);
+        let data = create_link().normalize();
+        let at = chrono::Utc::now();
+        let timestamp = at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let bytes = crate::agent::signatures::hash_data_and_timestamp(&data, &at);
+        let link = LinkExpression {
+            author: format!("did:key:{key}"),
+            timestamp,
+            data,
+            proof: ExpressionProof {
+                key: format!("did:key:{key}#{key}"),
+                signature: hex::encode(log.device.sign(&bytes)),
+                anchor: None,
+            },
+            status: Some(LinkStatus::Shared),
+        };
+        assert!(perspective.sparql_store.add_remote_link(&link).unwrap());
+        let stored = perspective
+            .sparql_store
+            .get_all_links(&EvalStop::none())
+            .unwrap();
+        assert_eq!(stored[0].verdict, Some(LinkVerdict::Valid));
+        assert_eq!(stored[0].person, None);
+
+        // The log arrives while its change is lost (its mark is journaled), and the bound
+        // drops it before the recovery runs.
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("ad4m_db.sqlite");
+        let cache = Arc::new(KelCache::open(&db, vec![store_key().multikey()]).unwrap());
+        accept_signed(&cache, &log.events).await;
+        map.forget(&log.scid());
+
+        let store = Arc::new(FakeStore::new(log.events.clone()));
+        store.key_index_down.store(true, Ordering::SeqCst);
+        store.store_down.store(true, Ordering::SeqCst);
+        let backend: Arc<dyn crate::identity::backend::IdentityBackend> = store.clone();
+        let resolver = Arc::new(Resolver::new(cache.clone(), backend, None, false));
+
+        let person = ad4m_identity_core::did_of(&log.scid());
+        let (scopes, _, _) =
+            crate::identity::lag_scopes(&cache, std::collections::BTreeSet::new(), 0).await;
+        for scope in scopes {
+            crate::identity::with_test_resolver(
+                resolver.clone(),
+                perspective.recheck_links(&scope),
+            )
+            .await
+            .unwrap();
+        }
+        let stored = perspective
+            .sparql_store
+            .get_all_links(&EvalStop::none())
+            .unwrap();
+        assert_eq!(stored[0].verdict, Some(LinkVerdict::Valid));
+        assert_eq!(stored[0].person.as_deref(), Some(person.as_str()));
+        map.forget(&log.scid());
     }
 
     /// The lag recovery's sweep of the links stored with a person reads each person's log back

@@ -282,9 +282,11 @@ the offer's state).
   or the anchor past the trusted seq, `cantCheck`; a master key, `invalid`; the key added
   after the anchor or revoked at or before it, `invalid`; a bot key whose scope is past its
   `expires` by the clock now, `invalid`. A key revoked after the anchor: `valid` only when the
-  link is known to have entered before the `revoke`, else `flagged`. No link language gives a
-  space order today; the one order the executor knows is its own store's: a link it already
-  counted (stored `valid`) before the revocation was accepted (`check_entered(Some(false))`).
+  link is known to have entered before the `revoke`, else `flagged`. Two witnesses prove
+  that order to a store (`SparqlStore::vouched_by_notice`, `check_entered`): the store's own
+  history — a link it already counted (stored `valid`) before the revocation was accepted —
+  and a revocation notice (below). With neither, the link is `flagged`; with either, every
+  honest reader reaches `valid`, whenever it synced.
 - **Admission needs a confirmed head** (`check_signed_with`, `KeyMap::admits`). A new link
   counts (`valid`) only when the store confirmed the signer's trusted head (`accept`,
   `KeyMap::note_confirmed`) less than `ADMIT_FRESHNESS` ago, whatever its anchor: an older
@@ -320,9 +322,26 @@ the offer's state).
   key: its owner), only for a `valid` link. The link store keeps it beside the verdict
   (`ad4m://ontology/person`, `ad4m://ontology/linkVerdict`) for SPARQL; `proofValid` is `true`
   exactly for `valid`. A found person stays for good; "no log" holds for 15 minutes.
+- **A revocation notice** (`NOTICE_PREDICATE`, `ad4m://entered-before-revoke`) is a link an
+  executor writes when the key map accepts a revocation: for every stored `valid` link of
+  the revoked key, one link `(reifier(L), ad4m://entered-before-revoke, person)` signed by a
+  device key of the same identity the revocation left valid, anchored at or past the
+  `revoke`'s seq (`identity::publish_revocation_notices`,
+  `PerspectiveInstance::publish_revocation_notices` — the revoking executor is the one that
+  knows which links it counted before its store confirmed the revocation). A still-valid
+  signer is required: the revoked key itself cannot forge one, and nobody can write it
+  before the revocation was learnt, so a `valid` notice is shareable, checkable proof the
+  vouched link entered the space first. A reader applies it in `vouched_by_notice`: the
+  notice's direct triple must point at the link's reifier and the identity that revoked its
+  signer (`identity::revocation_of` names both from the key map), and its stored person and
+  `proofAnchor` must match. Notices are ordinary links — shared in a neighbourhood, local
+  otherwise — so they sync like everything else and judge themselves by the same rules.
 - **The re-check** (`run_recheck`, started by `init`): on each `VerdictChange` the links of
-  that key; every 60 s the links of bot keys whose scope `expires` fell since the last tick
-  (`KeyMap::expiring`), then the `cantCheck` links. Each is judged again and rewritten when
+  that key (and, for a revocation, the notices above); every 60 s the links of bot keys
+  whose scope `expires` fell since the last tick (`KeyMap::expiring` plus the journaled
+  marks, below — a log the map dropped still has its row), then the `cantCheck` links and
+  the `flagged` ones (`Recheck::Flagged`: a revocation notice arriving later may vouch for
+  one). Each is judged again and rewritten when
   the verdict or person changed (`PerspectiveInstance::recheck_links`), except that neither
   a re-check nor a write of the same proof ever replaces a stored `valid` with `cantCheck`
   (`verdict::replaces`): the stored `valid` is the order the executor knows, and a log that
@@ -332,10 +351,21 @@ the offer's state).
   log each stored person names when the map does not hold it (`identity::read_logs_of`, no
   store or index call). A log the cache cannot read then leaves the re-check incomplete:
   its links keep their stored verdict for now, and the scope answers failure, so
-  `run_recheck` runs it again on the next tick (`failed` signers, `logged_failed`). When the change receiver lags (a start-up load past the bound
-  overflows `CHANGES_CAPACITY` while it evicts logs), `lag_scopes` re-checks the keys the map
-  lists and then every link stored with a person (`Recheck::Logged`), so a lost change of a
-  log already evicted is still made up for. Reads page by
+  `run_recheck` runs it again on the next tick (`failed` signers, `logged_failed`).
+- **The change journal** (`identity_key_marks` in `ad4m_db.sqlite`, written by
+  `publish_trusted`): one row per key a newly accepted head changed, one per bot scope that
+  expires, each with its log's scid. It survives a receiver lag, a restart and a key-map
+  eviction — the three ways the key map alone forgets a change. When the change receiver
+  lags (a start-up load past the bound overflows `CHANGES_CAPACITY` while it evicts logs),
+  `lag_scopes` re-checks the keys the map lists, the keys journaled since the last sweep
+  (`marked_since`, their logs read back into the map first so the links are judged with
+  them) and then every link stored with a person (`Recheck::Logged`), so a lost change of a
+  log already evicted is still made up for — including a link stored `valid` with no person
+  whose log only arrived inside the lost window. A journaled key the restored log shows
+  revoked gets its revocation notices too: a `Revoked` change lost in the lag still reaches
+  `publish_revocation_notices`. The expiry tick likewise reads a journaled
+  log back before re-judging its bot's links (`expired_signers`, `marked_expiring`). `reset`
+  drops a log's rows with the rest of its copy. Reads page by
   reifier IRI (`RECHECK_BATCH` rows): a key's links are read to the last page; the
   `cantCheck` pass reads one page per tick from `recheck_cursor` and wraps at the end, so
   links that stay unresolvable do not hide the ones after them. Rewritten links go through
