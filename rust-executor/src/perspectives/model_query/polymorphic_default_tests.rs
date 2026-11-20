@@ -569,3 +569,135 @@ async fn union_subject_classes_name_only_what_the_read_admits() {
         shared_classes()
     );
 }
+
+/// `Holder`/`Shelf` as in [`status_shapes`], and three classes that each add a
+/// `we://kind` flag to `Base` and one more requirement the group query's
+/// conformance makes: `SpecialG` a required property read through a getter,
+/// `SpecialF` a required flag with no fixed value, and `SpecialL` both its
+/// flags declared `local`.
+fn membership_shapes() -> (StaticShapeResolver, Arc<ModelShape>, Arc<ModelShape>) {
+    let (resolver, holder, shelf) = status_shapes();
+    for (name, json) in [
+        (
+            "SpecialG",
+            r#"{"className":"SpecialG","properties":{
+                 "flag":{"predicate":"we://flag","required":true,"flag":true,"initial":"we://base"},
+                 "kind":{"predicate":"we://kind","required":true,"flag":true,"initial":"we://special_g"},
+                 "extra":{"predicate":"we://extra","required":true,
+                          "getter":"SELECT ?value WHERE { <Base> <we://extra> ?value . }"}
+               },"relations":{}}"#,
+        ),
+        (
+            "SpecialF",
+            r#"{"className":"SpecialF","properties":{
+                 "flag":{"predicate":"we://flag","required":true,"flag":true,"initial":"we://base"},
+                 "kind":{"predicate":"we://kind","required":true,"flag":true,"initial":"we://special_f"},
+                 "tag":{"predicate":"we://tag","required":true,"flag":true}
+               },"relations":{}}"#,
+        ),
+        (
+            "SpecialL",
+            r#"{"className":"SpecialL","properties":{
+                 "flag":{"predicate":"we://flag","required":true,"flag":true,"initial":"we://base","local":true},
+                 "kind":{"predicate":"we://kind","required":true,"flag":true,"initial":"we://special_l","local":true}
+               },"relations":{}}"#,
+        ),
+    ] {
+        resolver.register(name, parse_shape_from_json(json, name).unwrap());
+    }
+    (resolver, holder, shelf)
+}
+
+/// Shelf `s/1` holds holder `h/1`, which holds `u/1`..`u/3`, all through
+/// signed Shared links. Each is `Base`, and carries the `we://kind` of
+/// `SpecialG`, `SpecialF` and `SpecialL` respectively, but not the rest of
+/// that class: `u/1` has no `we://extra`, `u/2` no `we://tag`, and `u/3`'s
+/// links on `SpecialL`'s local predicates are Shared.
+fn membership_world() -> SparqlStore {
+    use super::link_status_tests::ls_link;
+    let signer = crate::agent::signatures::TestSigner::generate();
+    let store = SparqlStore::new(None).unwrap();
+    let shared = |s: &str, p: &str, t: &str| ls_link(&signer, s, p, t, 1, LinkStatus::Shared);
+    let mut links: Vec<LinkExpression> = [
+        "Holder", "Shelf", "Base", "Special", "SpecialG", "SpecialF", "SpecialL",
+    ]
+    .iter()
+    .map(|c| {
+        shared(
+            &format!("we://models/{c}"),
+            "rdf://type",
+            "ad4m://SubjectClass",
+        )
+    })
+    .collect();
+    links.extend([
+        shared("we://s/1", "we://flag", "we://shelf"),
+        shared("we://s/1", "we://on", "we://h/1"),
+        shared("we://h/1", "we://flag", "we://holder"),
+    ]);
+    for (u, kind) in [
+        ("we://u/1", "we://special_g"),
+        ("we://u/2", "we://special_f"),
+        ("we://u/3", "we://special_l"),
+    ] {
+        links.extend([
+            shared("we://h/1", "we://holds", u),
+            shared(u, "we://flag", "we://base"),
+            shared(u, "we://kind", kind),
+        ]);
+    }
+    for l in links {
+        store.add_link(&l).unwrap();
+    }
+    store
+}
+
+/// The items of `h/1` among `ids`, top level and nested, read with no
+/// `linkStatus`.
+async fn membership_items(ids: &[&str]) -> (Vec<(String, String)>, Vec<(String, String)>) {
+    let (resolver, holder, shelf) = membership_shapes();
+    let store = membership_world();
+    let keep = |v: Vec<(String, String)>| -> Vec<(String, String)> {
+        v.into_iter()
+            .filter(|(id, _)| ids.contains(&id.as_str()))
+            .collect()
+    };
+    let top = q(json!({ "include": { "items": true } }));
+    let top = super::query::execute_model_query(&store, holder.as_ref(), &top, &resolver)
+        .await
+        .unwrap();
+    let nested = q(json!({ "include": { "holder": { "include": { "items": true } } } }));
+    let nested = super::query::execute_model_query(&store, shelf.as_ref(), &nested, &resolver)
+        .await
+        .unwrap();
+    (
+        keep(item_classes(&top.instances[0]["items"])),
+        keep(item_classes(&nested.instances[0]["holder"]["items"])),
+    )
+}
+
+/// A class whose group query requires what the target lacks (a required
+/// property read through a getter, a required flag with no fixed value) is
+/// not the target's class: it is read as `Base`, not lost.
+#[tokio::test]
+async fn polymorphic_target_lacking_a_getter_or_valueless_requirement_is_read_as_base() {
+    let expected = pairs(&[("we://u/1", "Base"), ("we://u/2", "Base")]);
+    assert_eq!(
+        membership_items(&["we://u/1", "we://u/2"]).await,
+        (expected.clone(), expected),
+        "(top level, nested)"
+    );
+}
+
+/// A class's `local` predicates count only through Local links, as loading
+/// reads them: a target holding `SpecialL`'s flags only as Shared links is
+/// read as `Base`, not lost.
+#[tokio::test]
+async fn polymorphic_target_with_shared_links_on_local_predicates_is_read_as_base() {
+    let expected = pairs(&[("we://u/3", "Base")]);
+    assert_eq!(
+        membership_items(&["we://u/3"]).await,
+        (expected.clone(), expected),
+        "(top level, nested)"
+    );
+}
