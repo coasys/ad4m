@@ -2,8 +2,11 @@
 //! the seed, and the single-shot fallback. No model server.
 
 use super::run::{
-    interpretation_tool_cap, run_harness_pass, DEFAULT_INTERPRETATION_TOOL_CALLS, RUN_MODE_FALLBACK,
+    interpretation_tool_cap, run_harness_pass, DEFAULT_INTERPRETATION_TOOL_CALLS,
+    RUN_MODE_FALLBACK, RUN_MODE_HARNESS,
 };
+use super::seed::tests::{FLAT_NOTE_SDNA, NOTE_SDNA, TOPIC_SDNA};
+use super::seed::HARNESS_GUIDE;
 use super::InterpretationRunCursor;
 use super::{DedupStrategy, InterpretationOutcome, TranscriptTurn};
 use crate::agent::AgentContext;
@@ -22,29 +25,12 @@ use serde_json::{json, Value};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
-const TOPIC_SDNA: &str = r#"{
-  "target_class":"ns://Topic",
-  "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://type","target":"ns://topic"}],
-  "properties":[
-{"path":"ns://type","name":"type","has_value":"ns://topic","min_count":1,"max_count":1},
-{"path":"ns://title","name":"title","identity":true,"min_count":1,"max_count":1,"resolve_language":"literal","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://title","target":"value"}]}
-  ]
-}"#;
-
-const NOTE_SDNA: &str = r#"{
-  "target_class":"ns://Note",
-  "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://type","target":"ns://note"}],
-  "properties":[
-{"path":"ns://type","name":"type","has_value":"ns://note","min_count":1,"max_count":1},
-{"path":"ns://title","name":"title","identity":true,"min_count":1,"max_count":1,"resolve_language":"literal","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://title","target":"value"}]},
-{"path":"ns://about","name":"about","relation_kind":"hasOne","target_class_name":"Topic","class":"ns://TopicShape"}
-  ]
-}"#;
-
 /// One answer of the scripted model.
 enum Step {
     /// A tool call.
     Call(&'static str, Value),
+    /// A tool call whose arguments come from the messages so far.
+    CallWith(&'static str, fn(&[Value]) -> Value),
     /// A text answer with no tool call.
     Say(&'static str),
     /// An HTTP error from the model server.
@@ -109,7 +95,7 @@ impl CompletionSource for Scripted {
             // A request with no tools (the wind-down, a best-effort answer,
             // the single-shot fallback) skips the scripted tool calls.
             if tools.is_empty() {
-                while matches!(steps.front(), Some(Step::Call(..))) {
+                while matches!(steps.front(), Some(Step::Call(..) | Step::CallWith(..))) {
                     steps.pop_front();
                 }
             }
@@ -117,6 +103,7 @@ impl CompletionSource for Scripted {
         };
         match step {
             Some(Step::Call(name, args)) => Ok(call(name, args)),
+            Some(Step::CallWith(name, args)) => Ok(call(name, args(messages))),
             Some(Step::Say(text)) => Ok(HarnessCompletion {
                 content: text.to_string(),
                 tool_calls: vec![],
@@ -151,6 +138,28 @@ impl CompletionSource for Scripted {
             }),
         }
     }
+}
+
+/// The base of the row the last `note_create` made, from its tool result.
+fn created_note(messages: &[Value]) -> String {
+    messages
+        .iter()
+        .rev()
+        .filter_map(|m| m["content"].as_str())
+        .find_map(|c| c.strip_prefix("created: "))
+        .expect("a created row")
+        .trim()
+        .to_string()
+}
+
+/// The content of the tool result for the call `id`.
+fn tool_result(messages: &[Value], id: &str) -> String {
+    messages
+        .iter()
+        .find(|m| m["role"] == "tool" && m["tool_call_id"] == id)
+        .and_then(|m| m["content"].as_str())
+        .unwrap_or_else(|| panic!("no result for {id}"))
+        .to_string()
 }
 
 /// Unregisters the perspective when the test ends, also on panic.
@@ -237,8 +246,86 @@ async fn about(p: &mut PerspectiveInstance, ctx: &AgentContext, note: &str, topi
     .unwrap();
 }
 
+async fn about_targets(p: &PerspectiveInstance, note: &str) -> Vec<String> {
+    p.get_links(&LinkQuery {
+        source: Some(note.to_string()),
+        predicate: Some("ns://about".to_string()),
+        ..Default::default()
+    })
+    .await
+    .unwrap()
+    .into_iter()
+    .map(|l| l.data.target)
+    .collect()
+}
+
 fn count(titles: &[String], title: &str) -> usize {
     titles.iter().filter(|t| *t == title).count()
+}
+
+// The model walks from the topic to its neighbours, finds the topic, and
+// attaches a new note to it.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_model_walks_the_graph_and_attaches_a_new_row() {
+    let (mut p, shapes, ctx) = graph_with_topic().await;
+    let model = Scripted::new(vec![
+        Step::Call("get_children", json!({"parent": "old://topic"})),
+        Step::Call(
+            "instance_query",
+            json!({"class_name": "Note", "filter": {"about": "old://topic"}, "limit": 500}),
+        ),
+        Step::Call(
+            "note_create",
+            json!({"title": "Second quote", "type": "ns://note"}),
+        ),
+        Step::CallWith(
+            "note_propose_link_child",
+            |m| json!({"note_uri": created_note(m), "predicate": "ns://about", "linked_uri": "old://topic"}),
+        ),
+        Step::Say("Done."),
+    ]);
+    let outcome = pass(&mut p, &shapes, &ctx, model.clone()).await;
+    assert_eq!(outcome.mode, RUN_MODE_HARNESS);
+    assert_eq!(model.left(), 0, "the whole script ran");
+
+    let seen = model.seen();
+    let (first, tools) = &seen[0];
+    assert_eq!(first[0]["content"], HARNESS_GUIDE);
+    let prompt: Value = serde_json::from_str(first[1]["content"].as_str().unwrap()).unwrap();
+    assert!(prompt["seed"]["note"].is_string(), "{prompt}");
+    for walk in ["instance_query", "get_children", "instance_get"] {
+        assert!(tools.contains(&walk.to_string()), "{tools:?}");
+    }
+    assert!(
+        !tools
+            .iter()
+            .any(|t| t.ends_with("_query") && t != "instance_query"),
+        "no per-class read: {tools:?}"
+    );
+
+    let last = &seen.last().unwrap().0;
+    let children = tool_result(last, "call-get_children");
+    assert!(
+        children.contains("old://note"),
+        "via: all reaches the note: {children}"
+    );
+    assert!(children.ends_with("1 of 1 shown."), "{children}");
+    let query = tool_result(last, "call-instance_query");
+    assert!(query.contains("old://note"), "{query}");
+    let (rows, shown) = query.rsplit_once('\n').unwrap();
+    assert!(shown.ends_with("shown."), "{shown}");
+    let rows: Value = serde_json::from_str(rows).unwrap();
+    assert!(rows["instances"].as_array().unwrap().len() <= 50);
+
+    let titles = graph_titles_lower(&p, &shapes).await;
+    assert_eq!(count(&titles, "second quote"), 1, "{titles:?}");
+    let new_note = outcome
+        .bases
+        .iter()
+        .find(|b| b.starts_with("run://pass/"))
+        .expect("the new note")
+        .clone();
+    assert_eq!(about_targets(&p, &new_note).await, vec!["old://topic"]);
 }
 
 /// The single-shot answer of a fallback.
@@ -298,6 +385,41 @@ async fn a_harness_error_falls_back_to_single_shot() {
         Step::Say(FALLBACK_ANSWER),
     ])
     .await;
+}
+
+// Fixture B: no relation and no containment. The walk and the write work on
+// a flat graph.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_flat_social_dna_passes() {
+    let (mut p, shapes, ctx) =
+        setup_perspective_no_llm(&[("Topic", TOPIC_SDNA), ("Note", FLAT_NOTE_SDNA)]).await;
+    seed_instance(&mut p, &ctx, &shapes[1], "run://pass/note/1", "First quote").await;
+    let model = Scripted::new(vec![
+        Step::Call("instance_query", json!({"class_name": "Note"})),
+        Step::Call("get_children", json!({"parent": "run://pass/note/1"})),
+        Step::Call(
+            "note_create",
+            json!({"title": "Second quote", "type": "ns://note"}),
+        ),
+        Step::Say("Done."),
+    ]);
+    let outcome = pass(&mut p, &shapes, &ctx, model.clone()).await;
+    assert_eq!(outcome.mode, RUN_MODE_HARNESS);
+    let seen = model.seen();
+    let prompt: Value = serde_json::from_str(seen[0].0[1]["content"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        prompt["seed"]["outline"],
+        "- [Note] First quote (run://pass/note/1)"
+    );
+    assert!(
+        !seen[0].1.contains(&"note_propose_link_child".to_string()),
+        "no relation, no link tool"
+    );
+    let last = &seen.last().unwrap().0;
+    assert!(tool_result(last, "call-get_children").ends_with("0 of 0 shown."));
+    let titles = graph_titles_lower(&p, &shapes).await;
+    assert_eq!(count(&titles, "second quote"), 1, "{titles:?}");
+    assert_eq!(count(&titles, "first quote"), 1, "{titles:?}");
 }
 
 // The harness is the default path (#1804): an absent `maxToolCalls` starts
