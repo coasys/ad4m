@@ -1078,7 +1078,7 @@ impl PerspectiveInstance {
                     return false;
                 }
                 if !online_set.contains(did) {
-                    log::info!(
+                    log::debug!(
                         "auto_processor supervisor `{uuid}`: agent `{did}` aged out of \
                          freshness window; aborting loop"
                     );
@@ -1100,7 +1100,7 @@ impl PerspectiveInstance {
                 let uuid_clone = uuid.clone();
                 let did_clone = did.clone();
                 let handle = tokio::spawn(async move {
-                    log::info!(
+                    log::debug!(
                         "auto_processor supervisor `{uuid_clone}`: starting loop for agent \
                          `{did_clone}`"
                     );
@@ -4443,7 +4443,7 @@ impl PerspectiveInstance {
         if classes.names().is_empty() {
             return serde_json::to_string(&super::model_query::ModelQueryResult {
                 instances: vec![],
-                total_count: 0,
+                total_count: query_input.count.unwrap_or(false).then_some(0),
             })
             .map_err(|e| {
                 deno_core::anyhow::anyhow!("Failed to serialize model query result: {}", e)
@@ -4489,7 +4489,7 @@ impl PerspectiveInstance {
                 // handing the store an empty VALUES block.
                 return serde_json::to_string(&super::model_query::ModelQueryResult {
                     instances: vec![],
-                    total_count: 0,
+                    total_count: query_input.count.unwrap_or(false).then_some(0),
                 })
                 .map_err(|e| {
                     deno_core::anyhow::anyhow!("Failed to serialize model query result: {}", e)
@@ -7079,12 +7079,27 @@ impl PerspectiveInstance {
         log::debug!("Fallback sync loop ended for perspective {}", uuid);
     }
 
-    /// Auto-processor watch loop (P-B2b2 polling MVP).
+    /// Auto-processor watch loop.
     ///
-    /// One instance per perspective, joined into `start_background_tasks`.
-    /// Every tick (`AUTO_PROCESSOR_TICK_MS` while turns are pending, backing
-    /// off to `AUTO_PROCESSOR_IDLE_TICK_MAX_MS` while idle, see
-    /// [`next_tick_delay_ms`](crate::perspectives::auto_processor::watcher::next_tick_delay_ms)):
+    /// One instance per perspective, joined into `start_background_tasks`
+    /// (and one per online managed user, from
+    /// `managed_user_auto_processor_supervisor`). It ticks every
+    /// `AUTO_PROCESSOR_TICK_MS` while turns are pending and the executor has
+    /// an LLM to run them. While idle, or while turns wait for a model
+    /// (`TickOutcome::NoModel`: nothing is drained), it sleeps until the
+    /// perspective's store takes a write (a link added or removed, by anyone:
+    /// local, a link language, the pass itself), waits `AUTO_PROCESSOR_TICK_MS` more so a burst of writes makes one
+    /// tick, and ticks. A write-woken tick also waits out the idle back-off
+    /// since the last tick that read the store (doubling from
+    /// `AUTO_PROCESSOR_TICK_MS` to `AUTO_PROCESSOR_IDLE_TICK_MAX_MS`, see
+    /// [`next_tick_delay_ms`](crate::perspectives::auto_processor::watcher::next_tick_delay_ms)),
+    /// so a store busy with writes that add no turn is read no more often
+    /// than the poll this replaced. With no write it ticks after
+    /// [`idle_wait_ms`](crate::perspectives::auto_processor::watcher::idle_wait_ms)
+    /// (60 s, or when a deferral ends). A tick reuses the store reads of the
+    /// one before while no write landed in between (`TickReads`), so an idle
+    /// perspective costs no query at all, and after writes that only added
+    /// links it reads only the turns they add (`delta_read`). Each tick:
     ///   1. Load every `AutoProcessorConfig` declared on this perspective's
     ///      shared graph (`load_processors`). Zero configs = no-op tick.
     ///   2. Per config, run its `source_scope_query` to gather the current
@@ -7102,47 +7117,89 @@ impl PerspectiveInstance {
     ///      `ShapesMissing` and `EmptyTranscript` do not write sources, so the
     ///      ids are retried once the shape or transcript lands.
     ///
-    /// This is the "polling MVP". The event-driven variant
-    /// (subscribe to `Topic::LinkAdded` events, record `link.data.source`
-    /// deltas) is a follow-up optimisation — the coordination correctness
-    /// envelope is the same because the `ProcessingClaim` (P-A) is the real
-    /// double-processing guard, not the trigger latency.
+    /// The trigger only decides *when* a tick runs; the `ProcessingClaim`
+    /// (P-A) is the double-processing guard, not the trigger latency.
     /// `context` is the agent this executor runs passes as — production passes
     /// the main agent; a multi-user test spawns one loop per managed user so the
     /// `ProcessingClaim` election runs across distinct DIDs on one executor.
     pub(crate) async fn auto_processor_watch_loop(&self, context: AgentContext) {
         use crate::perspectives::auto_processor::watcher::{
-            next_tick_delay_ms, WatcherState, AUTO_PROCESSOR_TICK_MS,
+            idle_wait_ms, model_readiness, next_tick_delay_ms, wait_for_tick, TickOutcome, WaitEnd,
+            WatcherState, AUTO_PROCESSOR_TICK_MS,
         };
         use std::time::{SystemTime, UNIX_EPOCH};
 
         let uuid = self.uuid.clone();
         let mut watcher = WatcherState::new();
-        let mut delay_ms = AUTO_PROCESSOR_TICK_MS;
+        let mut writes = self.sparql_store.watch_writes();
+        // The first pass runs after one base tick, whatever the store does.
+        let mut wait = Some(AUTO_PROCESSOR_TICK_MS);
+        // The last tick that found the store changed, so it read it, and its
+        // generation. A write-woken idle tick runs no sooner than `idle_floor_ms`
+        // after it: writes that add no turn must not make the loop read the
+        // store more often than the idle back-off did.
+        let mut last_read: Option<(u64, tokio::time::Instant)> = None;
+        let mut idle_floor_ms = AUTO_PROCESSOR_TICK_MS;
+        // After a `NoModel` tick the idle wait also ends when a model may have
+        // become available, so a model configured while turns wait is used at
+        // once rather than after the next write or the idle fallback.
+        let mut models = model_readiness().await;
+        let mut waiting_for_model = false;
 
-        while !self.is_teardown.load(Ordering::Acquire) {
-            // Sleep in base-tick slices so teardown is observed as promptly
-            // while backed off as at the base rate.
-            let mut remaining = delay_ms;
-            while remaining > 0 {
-                if self.is_teardown.load(Ordering::Acquire) {
-                    return;
+        loop {
+            let end = match wait {
+                Some(ms) => wait_for_tick(&self.is_teardown, ms, None, None).await,
+                None => {
+                    let now_ms = chrono::Utc::now().timestamp_millis();
+                    let ms = idle_wait_ms(&watcher, now_ms);
+                    let models = models.as_mut().filter(|_| waiting_for_model);
+                    match wait_for_tick(&self.is_teardown, ms, Some(&mut writes), models).await {
+                        // Let the rest of a burst of writes land first, and
+                        // keep the back-off since the last read.
+                        WaitEnd::Write => {
+                            let since_read = last_read
+                                .map(|(_, at)| at.elapsed().as_millis() as u64)
+                                .unwrap_or(u64::MAX);
+                            let floor = idle_floor_ms.saturating_sub(since_read);
+                            wait_for_tick(
+                                &self.is_teardown,
+                                floor.max(AUTO_PROCESSOR_TICK_MS),
+                                None,
+                                None,
+                            )
+                            .await
+                        }
+                        other => other,
+                    }
                 }
-                let step = remaining.min(AUTO_PROCESSOR_TICK_MS);
-                sleep(Duration::from_millis(step)).await;
-                remaining -= step;
+            };
+            if end == WaitEnd::Teardown {
+                break;
             }
-            if self.is_teardown.load(Ordering::Acquire) {
-                return;
+            // Writes up to here are seen by this tick; one landing during it
+            // (the pass's own, or a peer's) wakes the next.
+            let generation = *writes.borrow_and_update();
+            if last_read.is_none_or(|(g, _)| g != generation) {
+                last_read = Some((generation, tokio::time::Instant::now()));
             }
             let now_ms = match SystemTime::now().duration_since(UNIX_EPOCH) {
                 Ok(d) => d.as_millis() as i64,
                 Err(_) => continue, // clock before epoch — skip tick
             };
-            let had_pending = self
+            // A readiness change from here on wakes the next wait.
+            if let Some(rx) = models.as_mut() {
+                rx.borrow_and_update();
+            }
+            let outcome = self
                 .run_auto_processor_tick(&mut watcher, now_ms, &context)
                 .await;
-            delay_ms = next_tick_delay_ms(delay_ms, had_pending);
+            waiting_for_model = outcome == TickOutcome::NoModel;
+            if waiting_for_model && models.is_none() {
+                models = model_readiness().await;
+            }
+            let polls = outcome.polls_at_base_rate();
+            wait = polls.then_some(AUTO_PROCESSOR_TICK_MS);
+            idle_floor_ms = next_tick_delay_ms(idle_floor_ms, polls);
         }
 
         log::debug!("auto_processor_watch_loop ended for perspective {}", uuid);
@@ -7157,106 +7214,214 @@ impl PerspectiveInstance {
     /// Loads every declared `AutoProcessorConfig`, records new-since-processed
     /// transcript turns into `watcher` (gather minus this processor's
     /// `InterpretationRun.sources`, optionally windowed), then drains and runs
-    /// any ready batch.
+    /// any ready batch. The config, transcript and cursor reads are kept in
+    /// `watcher` and reused while the store's write generation is unchanged;
+    /// after writes that only added links the kept transcript is brought up
+    /// to date with a read of what they add (`TickReads::merge_transcript`).
+    /// The windows and deferrals are applied at `now_ms` either way.
     ///
     /// `context` is the agent this executor runs the pass as — the production
     /// loop passes the main agent; a multi-user test passes each managed user's
     /// context so the `ProcessingClaim` election runs across distinct DIDs
     /// (proving two users on one executor don't double-process).
     ///
-    /// Returns whether a declared processor had turns pending after recording,
-    /// i.e. whether the loop must keep polling at the base rate (#1072). It is
-    /// sampled before draining, so a drained batch that is retried (stand-down,
-    /// awaiting author, missing shapes, pass error) keeps the base rate: the
-    /// next tick re-records it. `false` when no processor is declared or every
-    /// gathered turn was already processed or deferred. If loading the
-    /// processors fails, any queued turn counts. A per-config query failure
-    /// records nothing for that config, so a failing scope query backs off
-    /// instead of logging a warning twice a second.
+    /// Returns [`TickOutcome::Pending`] when a declared processor had turns
+    /// pending after recording, i.e. the loop must keep polling at the base
+    /// rate (#1072). It is sampled before draining, so a drained batch that is
+    /// retried (stand-down, awaiting author, missing shapes, pass error) keeps
+    /// the base rate: the next tick re-records it. `Idle` when no processor is
+    /// declared or every gathered turn was already processed or deferred. If
+    /// loading the processors fails, any queued turn counts. A per-config
+    /// query failure records nothing for that config, so a failing scope
+    /// query backs off instead of logging a warning twice a second.
+    /// `NoModel` when turns are pending but the executor has no LLM: nothing
+    /// is drained, and the loop backs off as if idle (#1682).
+    ///
+    /// [`TickOutcome::Pending`]: crate::perspectives::auto_processor::watcher::TickOutcome
     pub(crate) async fn run_auto_processor_tick(
         &self,
         watcher: &mut crate::perspectives::auto_processor::watcher::WatcherState,
         now_ms: i64,
         context: &AgentContext,
-    ) -> bool {
+    ) -> crate::perspectives::auto_processor::watcher::TickOutcome {
         use crate::perspectives::auto_processor::{
             config::load_processors,
-            cursor::{load_processed_source_ids, turn_in_source_window},
+            cursor::{load_processed_sources, processed_ids_in_window, turn_in_source_window},
+            delta_read::{delta_query, DeltaRead},
             events::{emit, AutoProcessorEvent, AutoProcessorStep},
-            watcher::{run_one_pass, PassOutcome, PendingTurn},
+            watcher::{
+                model_available, run_one_pass, CachedTurn, PassOutcome, PendingTurn, TickOutcome,
+            },
         };
 
         let uuid = self.uuid.clone();
-        let configs = match load_processors(self).await {
-            Ok(cs) => cs,
-            Err(e) => {
-                log::warn!(
-                    "auto_processor_tick [{}]: load_processors failed: {e:#}",
-                    uuid
-                );
-                return watcher.has_pending();
-            }
+        // Read before any query, so a write during one makes the next tick read again.
+        let generation = self.sparql_store.write_generation();
+        let configs = match watcher.reads.configs(generation) {
+            Some(cs) => cs,
+            None => match load_processors(self).await {
+                Ok(cs) => watcher.reads.set_configs(generation, cs),
+                Err(e) => {
+                    log::warn!(
+                        "auto_processor_tick [{}]: load_processors failed: {e:#}",
+                        uuid
+                    );
+                    return if watcher.has_pending() {
+                        TickOutcome::Pending
+                    } else {
+                        TickOutcome::Idle
+                    };
+                }
+            },
         };
         if configs.is_empty() {
-            return false;
+            return TickOutcome::Idle;
         }
 
         // 1. Record new-since-last-processed turns per config (payload kept).
-        for cfg in &configs {
-            let transcript = match crate::perspectives::interpretation::gather_transcript_sparql(
-                self,
-                &cfg.source_scope_query,
-            )
-            .await
-            {
-                Ok(t) => t,
-                Err(e) => {
-                    log::warn!(
-                        "auto_processor `{}` [{}]: gather_transcript_sparql failed: {e:#}",
-                        cfg.processor_id,
-                        uuid
-                    );
-                    continue;
-                }
-            };
-            let processed = match load_processed_source_ids(
-                self,
-                &cfg.processor_id,
-                now_ms,
-                cfg.source_window_ms,
-            )
-            .await
-            {
-                Ok(s) => s,
-                Err(e) => {
-                    log::warn!(
-                        "auto_processor `{}` [{}]: load_processed_source_ids failed: {e:#}",
-                        cfg.processor_id,
-                        uuid
-                    );
-                    continue;
-                }
-            };
-            for turn in &transcript {
-                if let Some(window_ms) = cfg.source_window_ms {
-                    if !turn_in_source_window(&turn.timestamp, now_ms, window_ms) {
+        for cfg in configs.iter() {
+            let processed_rows = match watcher.reads.processed(&cfg.processor_id, generation) {
+                Some(rows) => rows,
+                None => match load_processed_sources(self, &cfg.processor_id).await {
+                    Ok(rows) => watcher
+                        .reads
+                        .set_processed(&cfg.processor_id, generation, rows),
+                    Err(e) => {
+                        log::warn!(
+                            "auto_processor `{}` [{}]: load_processed_source_ids failed: {e:#}",
+                            cfg.processor_id,
+                            uuid
+                        );
                         continue;
                     }
+                },
+            };
+            let processed = processed_ids_in_window(&processed_rows, now_ms, cfg.source_window_ms);
+            // Inside the window and not consumed: may be queued (unless deferred).
+            let queueable = |id: &str, timestamp: &str| {
+                cfg.source_window_ms
+                    .is_none_or(|w| turn_in_source_window(timestamp, now_ms, w))
+                    && !processed.contains(id)
+            };
+            // Turns queued at an earlier tick (kept while no model was set,
+            // or past a batch cap) are checked again: a run may have consumed
+            // them since, or they may have left the window.
+            watcher.retain_pending(&cfg.processor_id, |t| queueable(&t.id, &t.timestamp));
+            // A kept read is reused unless a turn it keeps without text has
+            // become queueable (its run aged out of the window).
+            let kept = watcher.reads.transcript(cfg).filter(|(_, turns)| {
+                !turns.iter().any(|t| {
+                    matches!(t, CachedTurn::Consumed { .. }) && queueable(t.id(), t.timestamp())
+                })
+            });
+            // After writes that only added links, read what they can add to
+            // the kept read (late turns with old timestamps included, see
+            // `delta_read`). Anything else (no kept read, a removal or reload
+            // since, a log that no longer reaches back, a scope query a delta
+            // cannot follow) reads the whole transcript.
+            let delta = match &kept {
+                Some((kept_at, _)) if *kept_at == generation => None,
+                Some((kept_at, _)) => self
+                    .sparql_store
+                    .additions_since(*kept_at, generation)
+                    .map(|added| delta_query(&cfg.source_scope_query, &added))
+                    .filter(|d| *d != DeltaRead::Full),
+                None => None,
+            };
+            let transcript = match (kept, delta) {
+                (Some((kept_at, turns)), _) if kept_at == generation => turns,
+                (kept, Some(delta)) => {
+                    // Release the kept copy, so the merge can take it over.
+                    drop(kept);
+                    let gained = match delta {
+                        DeltaRead::Query(query) => {
+                            crate::perspectives::interpretation::gather_transcript_sparql(
+                                self, &query,
+                            )
+                            .await
+                        }
+                        _ => Ok(Vec::new()),
+                    };
+                    match gained {
+                        Ok(t) => watcher.reads.merge_transcript(
+                            cfg,
+                            generation,
+                            t.iter().map(PendingTurn::from_transcript).collect(),
+                            queueable,
+                        ),
+                        Err(e) => {
+                            log::warn!(
+                                "auto_processor `{}` [{}]: reading the turns added since the last \
+                                 tick failed: {e:#}",
+                                cfg.processor_id,
+                                uuid
+                            );
+                            continue;
+                        }
+                    }
                 }
-                let pending = PendingTurn::from_transcript(turn);
-                if processed.contains(&pending.id)
+                _ => match crate::perspectives::interpretation::gather_transcript_sparql(
+                    self,
+                    &cfg.source_scope_query,
+                )
+                .await
+                {
+                    Ok(t) => watcher.reads.set_transcript(
+                        cfg,
+                        generation,
+                        t.iter().map(PendingTurn::from_transcript).collect(),
+                        queueable,
+                    ),
+                    Err(e) => {
+                        log::warn!(
+                            "auto_processor `{}` [{}]: gather_transcript_sparql failed: {e:#}",
+                            cfg.processor_id,
+                            uuid
+                        );
+                        continue;
+                    }
+                },
+            };
+            for turn in transcript.iter() {
+                // A turn kept without text was not queueable at this tick's `now_ms` (checked above).
+                let CachedTurn::Full(pending) = turn else {
+                    continue;
+                };
+                if !queueable(&pending.id, &pending.timestamp)
                     || watcher.is_deferred(&cfg.processor_id, &pending.id, now_ms)
                 {
                     continue;
                 }
-                watcher.record_item(&cfg.processor_id, pending, now_ms);
+                watcher.record_item(&cfg.processor_id, pending.clone(), now_ms);
             }
         }
 
         let had_pending = watcher.has_pending_for(configs.iter().map(|c| c.processor_id.as_str()));
+        if !had_pending {
+            return TickOutcome::Idle;
+        }
+        // Every pass prompts the default LLM. Without one, a drained batch
+        // would be claimed and fail, and the loop would retry it twice a
+        // second for as long as the executor has no model. Leave the turns
+        // queued instead (their debounce clocks keep running, so they drain
+        // on the first tick that finds a model) and let the loop back off.
+        if !model_available().await {
+            if !watcher.waiting_for_model {
+                log::info!(
+                    "auto_processor [{uuid}]: turns are waiting but no LLM is configured; \
+                     backing off until a tick finds one"
+                );
+                watcher.waiting_for_model = true;
+            }
+            return TickOutcome::NoModel;
+        }
+        if watcher.waiting_for_model {
+            log::info!("auto_processor [{uuid}]: an LLM is configured; processing resumes");
+            watcher.waiting_for_model = false;
+        }
 
         // 2. Drain + run a pass per config.
-        for cfg in &configs {
+        for cfg in configs.iter() {
             let Some(batch) = watcher.drain_ready_batch(cfg, now_ms) else {
                 continue;
             };
@@ -7338,7 +7503,7 @@ impl PerspectiveInstance {
                 }
             }
         }
-        had_pending
+        TickOutcome::Pending
     }
 
     /// Reset the fallback sync interval to 30 seconds when new links are added

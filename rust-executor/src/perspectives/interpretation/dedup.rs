@@ -440,6 +440,15 @@ fn effective_strategy(strategy: &DedupStrategy) -> std::borrow::Cow<'_, DedupStr
     Cow::Owned(DedupStrategy::NormalizedString)
 }
 
+/// The embedding model of a semantic `strategy` when this executor has it,
+/// else `None`: the model the `existing` block's similarity order embeds with.
+pub(crate) fn semantic_embedding_model(strategy: &DedupStrategy) -> Option<String> {
+    match effective_strategy(strategy).as_ref() {
+        DedupStrategy::Semantic { model, .. } => Some(model.clone()),
+        DedupStrategy::NormalizedString => None,
+    }
+}
+
 /// Strategy dispatcher: pick the string or semantic dedup path based on
 /// `strategy`, preserving [`ProposedInstance`] order in both cases so
 /// downstream `new:<Class>:<n>` ordinals still line up.
@@ -554,6 +563,7 @@ mod tests {
             title: "Ship the MVP".to_string(),
             class: "Task".to_string(),
             properties: BTreeMap::new(),
+            updated_at: String::new(),
         }]);
         let mut identity_props = HashMap::new();
         identity_props.insert("Task".to_string(), "title".to_string());
@@ -763,6 +773,7 @@ mod tests {
             title: "Ship the MVP".to_string(),
             class: "Task".to_string(),
             properties: BTreeMap::new(),
+            updated_at: String::new(),
         }]);
         let string_res: Vec<Resolution> =
             resolve_already_present(proposed_str, &existing, &identity_props)
@@ -1037,6 +1048,7 @@ mod tests {
             title: "Ship the MVP".to_string(),
             class: "Task".to_string(),
             properties: BTreeMap::new(),
+            updated_at: String::new(),
         }]);
         let mut identity_props = HashMap::new();
         identity_props.insert("Task".to_string(), "title".to_string());
@@ -1091,6 +1103,7 @@ mod tests {
             title: "Ship the MVP".to_string(),
             class: "Task".to_string(),
             properties: BTreeMap::new(),
+            updated_at: String::new(),
         }]);
         let kept = filter_already_present(proposed, &existing_trusted, &identity_props);
         assert_eq!(kept.len(), 1, "a trusted id bypasses dedup; got {kept:#?}");

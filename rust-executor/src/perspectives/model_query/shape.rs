@@ -19,7 +19,7 @@ use super::types::{ModelShape, ShapeProperty, ShapeRelation, WhereCondition};
 use super::utils::escape_sparql_string;
 use crate::perspectives::sparql_store::EvalStop;
 use crate::perspectives::sparql_store::SparqlStore;
-use deno_core::anyhow::{anyhow, Error};
+use anyhow::{anyhow, Error};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 
@@ -172,6 +172,7 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
         let target_class_name = first["targetClassName"]
             .as_str()
             .map(decode_literal_string_target);
+        let polymorphic = parse_bool_literal_target(first["polymorphic"].as_str()).unwrap_or(false);
         let where_filter = parse_where_filter_literal(first["whereFilter"].as_str());
         let where_predicates = parse_where_predicates_literal(first["wherePredicates"].as_str());
         let filter_enabled = parse_bool_literal_target(first["filterEnabled"].as_str());
@@ -322,6 +323,7 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
                 max_count: max_count.map(|m| m as usize),
                 target_class_name: resolved_target_class_name,
                 target_class_uri: target_class_uri.clone().unwrap_or_default(),
+                polymorphic,
             });
         } else {
             properties.push(ShapeProperty {
@@ -400,6 +402,7 @@ const PROPERTY_FIELDS: &[(&str, &str)] = &[
     ("sh://class", "className"),
     ("ad4m://relationKind", "relationKind"),
     ("ad4m://targetClassName", "targetClassName"),
+    ("ad4m://polymorphic", "polymorphic"),
     ("ad4m://whereFilter", "whereFilter"),
     ("ad4m://wherePredicates", "wherePredicates"),
     ("ad4m://filter", "filterEnabled"),
@@ -803,11 +806,7 @@ pub(crate) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<Mode
                 .get("transform")
                 .map(|v| {
                     serde_json::from_value::<TransformExpression>(v.clone()).map_err(|e| {
-                        deno_core::anyhow::anyhow!(
-                            "Failed to parse transform for property '{}': {}",
-                            name,
-                            e
-                        )
+                        anyhow::anyhow!("Failed to parse transform for property '{}': {}", name, e)
                     })
                 })
                 .transpose()?;
@@ -914,6 +913,7 @@ pub(crate) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<Mode
                     max_count,
                     target_class_name,
                     target_class_uri,
+                    polymorphic: rel_meta["polymorphic"].as_bool().unwrap_or(false),
                 });
             }
         }

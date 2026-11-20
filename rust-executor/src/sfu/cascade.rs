@@ -361,7 +361,7 @@ impl CascadeManager {
             rtc,
             true,
         );
-        peer.pending_offer = Some(pending);
+        peer.note_initial_offer(pending, sdp_offer.clone(), Instant::now());
 
         self.pipes.insert(
             pipe_key,
