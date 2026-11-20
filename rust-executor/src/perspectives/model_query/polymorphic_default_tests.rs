@@ -126,7 +126,7 @@ fn node(result: &ModelQueryResult) -> &Value {
 fn assert_collection(task: &Value) {
     let from = &task["extractedFrom"];
     assert_eq!(from["id"], "we://c/1", "extractedFrom hydrated: {task}");
-    assert_eq!(from["__subjectClass"], "CollectionBlock");
+    assert_eq!(from["__subjectClass"], "we://models/CollectionBlock");
 }
 
 #[tokio::test]
@@ -348,9 +348,11 @@ fn item_classes(items: &Value) -> Vec<(String, String)> {
     out
 }
 
+/// `(id, class)` pairs, each class by its target class IRI: `__subjectClass`
+/// on a polymorphic row is the IRI.
 fn pairs(v: &[(&str, &str)]) -> Vec<(String, String)> {
     v.iter()
-        .map(|(a, b)| (a.to_string(), b.to_string()))
+        .map(|(a, b)| (a.to_string(), format!("we://models/{b}")))
         .collect()
 }
 
