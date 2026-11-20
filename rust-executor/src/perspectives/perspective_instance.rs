@@ -990,7 +990,7 @@ impl PerspectiveInstance {
         use crate::perspectives::auto_processor::watcher::select_online_managed_users;
         use std::collections::HashMap;
         use std::time::{SystemTime, UNIX_EPOCH};
-        use tokio::task::JoinHandle;
+        use crate::rt::JoinHandle;
 
         /// How often the supervisor re-evaluates the online-user set. Short
         /// enough that a user joining a call sees interpretation within
@@ -1066,7 +1066,7 @@ impl PerspectiveInstance {
                 let this = self.clone();
                 let uuid_clone = uuid.clone();
                 let did_clone = did.clone();
-                let handle = tokio::spawn(async move {
+                let handle = crate::rt::spawn(async move {
                     log::debug!(
                         "auto_processor supervisor `{uuid_clone}`: starting loop for agent \
                          `{did_clone}`"
@@ -1553,7 +1553,7 @@ impl PerspectiveInstance {
             {
                 let after = self.notification_trigger_snapshot().await;
                 let new_matches = Self::subtract_before_notification_matches(&before, &after);
-                tokio::spawn(Self::publish_notification_matches(
+                crate::rt::spawn(Self::publish_notification_matches(
                     uuid.clone(),
                     new_matches,
                 ));
@@ -1863,7 +1863,7 @@ impl PerspectiveInstance {
         let self_clone = self.clone();
         let diff_clone = diff.clone();
 
-        tokio::spawn(async move {
+        crate::rt::spawn(async move {
             if let Err(e) = self_clone.commit(&diff_clone).await {
                 log::error!("PerspectiveInstance::commit() returned error: {:?}\nStoring in pending diffs for later", e);
                 let handle_clone = self_clone.persisted.lock().await.clone();
@@ -3356,7 +3356,7 @@ impl PerspectiveInstance {
         // Spawn a task that logs every 10 seconds while the query is running
         let query_for_logging = query.clone();
         let execute_start_for_logging = execute_start.clone();
-        let logging_handle = tokio::spawn(async move {
+        let logging_handle = crate::rt::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
             interval.tick().await;
             loop {
@@ -4566,7 +4566,7 @@ impl PerspectiveInstance {
     ) {
         let self_clone = self.clone();
 
-        tokio::spawn(async move {
+        crate::rt::spawn(async move {
             // In Disabled, Simple, or SdnaOnly mode, just trigger subscription checks
             // (Pooled mode prolog updates don't apply - run_query_all only works in Pooled mode)
             if PROLOG_MODE == PrologMode::Disabled
@@ -4648,7 +4648,7 @@ impl PerspectiveInstance {
                 let service_clone = service.clone();
                 let uuid_clone = uuid.clone();
                 let query_clone = query.clone();
-                tokio::spawn(async move {
+                crate::rt::spawn(async move {
                     if let Err(e) = service_clone
                         .run_query_all(notification_pool_name(&uuid_clone), query_clone)
                         .await
@@ -4916,7 +4916,7 @@ impl PerspectiveInstance {
             )
             .await?;
         let service_clone = service.clone();
-        tokio::spawn(async move {
+        crate::rt::spawn(async move {
             let _ = service_clone
                 .update_perspective_links(
                     notification_pool_name(&uuid),
@@ -5137,7 +5137,7 @@ impl PerspectiveInstance {
             // send back to all clients through neighbourhood signal subscription
             let payload_clone = payload.clone();
             let self_clone = self.clone();
-            tokio::spawn(async move {
+            crate::rt::spawn(async move {
                 self_clone
                     .telepresence_signal_from_link_language(payload_clone, None)
                     .await;

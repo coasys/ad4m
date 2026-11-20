@@ -42,7 +42,7 @@ pub(crate) async fn get_perspective_or_404(uuid: &str) -> Result<PerspectiveInst
     if config.db_backend.as_deref() == Some("shared") {
         let uuid_owned = uuid.to_string();
         let rehydrated =
-            tokio::task::spawn_blocking(move || rehydrate_perspective_from_backend(&uuid_owned))
+            crate::rt::spawn_blocking(move || rehydrate_perspective_from_backend(&uuid_owned))
                 .await
                 .map_err(|e| WsRpcError::internal(format!("rehydrate task join: {}", e)))?;
         if let Ok(Some(perspective)) = rehydrated {
@@ -102,7 +102,7 @@ fn rehydrate_perspective_from_backend(uuid: &str) -> Result<Option<PerspectiveIn
     crate::perspectives::register_perspective(uuid.to_string(), p.clone());
 
     // Start background tasks
-    tokio::task::spawn(p.clone().start_background_tasks());
+    crate::rt::spawn(p.clone().start_background_tasks());
 
     Ok(Some(p))
 }
@@ -248,7 +248,7 @@ async fn list_perspectives(_params: Value, ctx: Arc<RequestContext>) -> Result<V
     // responds. Wrap the whole scan in `spawn_blocking`.
     let config = crate::config::get_global_config();
     if config.db_backend.as_deref() == Some("shared") {
-        tokio::task::spawn_blocking(|| {
+        crate::rt::spawn_blocking(|| {
             let backend = crate::db_backend::db_backend();
             if let Ok(remote_perspectives) = backend.list("shared:platform", "perspectives") {
                 for meta in remote_perspectives {
@@ -1078,7 +1078,7 @@ async fn subject_classes_of_handler(
     let gate = crate::perspectives::sparql_store::query_gate(&ctx).await;
     let stop = gate.stop();
     let result =
-        tokio::task::spawn_blocking(move || perspective.subject_classes_of_stopped(&stop, &uris))
+        crate::rt::spawn_blocking(move || perspective.subject_classes_of_stopped(&stop, &uris))
             .await;
 
     match result {
@@ -1140,7 +1140,7 @@ async fn evaluate_getters_handler(
     // cancel, the deadline, or this call's future dropped ends the eval.
     let gate = crate::perspectives::sparql_store::query_gate(&ctx).await;
     let stop = gate.stop();
-    let result = tokio::task::spawn_blocking(move || {
+    let result = crate::rt::spawn_blocking(move || {
         perspective.evaluate_getters_stopped(
             &stop,
             &class_name,

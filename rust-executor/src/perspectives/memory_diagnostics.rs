@@ -196,7 +196,7 @@ pub fn start_memory_diagnostics() {
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
 
-    tokio::spawn(async move {
+    crate::rt::spawn(async move {
         mem_log!(verbose, "Memory diagnostics started (reporting every 30s)");
         let mut prev_rss: usize = 0;
         let mut prev_allocated: usize = 0;
@@ -245,7 +245,7 @@ pub fn start_memory_diagnostics() {
             }
 
             // Per-perspective stats
-            let perspective_stats = tokio::task::spawn_blocking(collect_perspective_stats)
+            let perspective_stats = crate::rt::spawn_blocking(collect_perspective_stats)
                 .await
                 .unwrap_or_default();
 

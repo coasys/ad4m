@@ -2279,7 +2279,7 @@ impl SparqlStore {
         let store = self.clone();
         let stop = stop.clone();
         let query = query_string.to_string();
-        tokio::task::spawn_blocking(move || store.query(&stop, &query))
+        crate::rt::spawn_blocking(move || store.query(&stop, &query))
             .await
             .map_err(|e| anyhow!("spawn_blocking join error: {}", e))?
     }
@@ -2308,7 +2308,7 @@ impl SparqlStore {
         // external ?target/?t bindings into AD4M's internal literal:*: wire
         // format, which callers of an ad-hoc query string have no reason to
         // expect (CodeRabbit review, PR #855).
-        tokio::task::spawn_blocking(move || store.query_arbitrary(&stop, &query))
+        crate::rt::spawn_blocking(move || store.query_arbitrary(&stop, &query))
             .await
             .map_err(|e| anyhow!("spawn_blocking join error: {}", e))?
     }

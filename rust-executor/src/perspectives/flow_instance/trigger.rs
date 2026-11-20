@@ -325,7 +325,7 @@ impl PerspectiveInstance {
             return;
         }
         let mut this = self.clone();
-        tokio::spawn(async move {
+        crate::rt::spawn(async move {
             tokio::time::sleep(FLOW_PASS_DEBOUNCE).await;
             let touch = this
                 .flow_pass_queue

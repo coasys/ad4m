@@ -53,7 +53,7 @@ use std::sync::Arc;
 /// the claim will expire naturally after one more `ttl_ms` window — exactly the
 /// crash-detection window the module doc intends.
 struct LeaseGuard {
-    abort_handle: tokio::task::AbortHandle,
+    abort_handle: crate::rt::AbortHandle,
     /// Set to `true` if a renewal write fails. Callers can check this before
     /// committing expensive results to detect the rare case where the claim
     /// expired mid-pass and may have been re-taken by another peer.
@@ -75,7 +75,7 @@ impl LeaseGuard {
         // window before expiry — same safety margin as the lease-heartbeat
         // pattern used in distributed systems.
         let interval_ms = (ttl_ms / 3).max(1_000) as u64;
-        let handle = tokio::spawn(async move {
+        let handle = crate::rt::spawn(async move {
             let mut ticker = tokio::time::interval(tokio::time::Duration::from_millis(interval_ms));
             ticker.tick().await; // skip the immediate first tick; pass just started
             loop {
