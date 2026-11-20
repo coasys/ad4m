@@ -2,8 +2,8 @@ use super::write_log::{AddedLink, WriteDelta, WriteLog};
 use crate::languages::literal::RFC3986_COMPONENT_ENCODE;
 use crate::types::LinkStatus;
 use crate::types::{DecoratedExpressionProof, DecoratedLinkExpression, Link, LinkExpression};
+use anyhow::{anyhow, Error};
 use chrono::DateTime as ChronoDateTime;
-use deno_core::anyhow::{anyhow, Error};
 use oxigraph::model::*;
 use oxigraph::sparql::{QueryResults, SparqlEvaluator};
 use oxigraph::store::{Store, StoreOptions, Transaction};
@@ -2947,7 +2947,7 @@ impl SparqlStore {
         let query = query_string.to_string();
         tokio::task::spawn_blocking(move || store.query(&stop, &query))
             .await
-            .map_err(|e| deno_core::anyhow::anyhow!("spawn_blocking join error: {}", e))?
+            .map_err(|e| anyhow!("spawn_blocking join error: {}", e))?
     }
 
     /// `query_arbitrary` on the blocking pool under `stop` — the eval checks
@@ -2976,7 +2976,7 @@ impl SparqlStore {
         // expect (CodeRabbit review, PR #855).
         tokio::task::spawn_blocking(move || store.query_arbitrary(&stop, &query))
             .await
-            .map_err(|e| deno_core::anyhow::anyhow!("spawn_blocking join error: {}", e))?
+            .map_err(|e| anyhow!("spawn_blocking join error: {}", e))?
     }
 
     /// Remove all triples from the store.
