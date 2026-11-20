@@ -323,9 +323,9 @@ async fn publish_kept<R: ExecutorRpc>(
     let device_key_id = listed_id(&incept, &status.device_key).ok_or_else(|| {
         ClientError::Protocol("the kept incept does not list this executor's key".into())
     })?;
-    // The brake: a new log with no vouching note carries a proof of work. The proof is
-    // deterministic, so a resume sends the same one; a store that holds the log already
-    // answers the repeat with its head.
+    // The brake: a new log with no vouching note carries a proof of work over a challenge the
+    // store just issued (`identity.powParams`), so a resume solves a fresh one; a store that
+    // holds the log already answers the repeat with its head without reading the proof.
     let pow = crate::pow::solve_for(executor, &incept.scid).await?;
     let head = executor
         .publish(std::slice::from_ref(&incept), Some(&pow))

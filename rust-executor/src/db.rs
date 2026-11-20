@@ -3641,8 +3641,8 @@ impl Ad4mDb {
 
         // The rows above went in as the export had them, in the clear.
         let sealed = self.seal_plain_values()?;
-        if sealed > 0 {
-            log::info!("Sealed {} imported values", sealed);
+        if sealed.sealed > 0 {
+            log::info!("Sealed {} imported values", sealed.sealed);
         }
 
         Ok(result)

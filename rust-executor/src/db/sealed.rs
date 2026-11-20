@@ -37,6 +37,16 @@ use ad4m_keyring::KeyVersion;
 /// A row as `seal_plain_values` reads it: rowid, owner, key values, column values.
 type StoredRow = (i64, Option<String>, Vec<String>, Vec<Option<String>>);
 
+/// What [`Ad4mDb::seal_plain_values`] did.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SealPlainReport {
+    /// Values sealed under their row's store.
+    pub sealed: usize,
+    /// Rows that could not be sealed and stay in the clear (their store did not resolve, or
+    /// a value would not seal), each table's count and reason logged.
+    pub skipped: usize,
+}
+
 /// What [`Ad4mDb::reseal_store_values`] did.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ResealReport {
@@ -460,13 +470,18 @@ impl Ad4mDb {
     }
 
     /// Seals every value of a sealed column still in the clear: after the export into a
-    /// keyed file, and after an import. Answers how many values it sealed.
-    pub(crate) fn seal_plain_values(&self) -> Ad4mDbResult<usize> {
+    /// keyed file, and after an import. A row that cannot be sealed (its store does not
+    /// resolve, e.g. a `perspective` that is no uuid, or a value that will not seal) is
+    /// skipped and stays in the clear: it is logged with its table and reason, never its
+    /// content, so one such row does not stop the rest of the move.
+    pub(crate) fn seal_plain_values(&self) -> Ad4mDbResult<SealPlainReport> {
+        let mut report = SealPlainReport::default();
         if !self.seals() {
-            return Ok(0);
+            return Ok(report);
         }
         let tx = self.conn.unchecked_transaction()?;
-        let mut sealed = 0;
+        // (table, rows skipped, the first row's reason): logged after the pass.
+        let mut skips: Vec<(&'static str, usize, String)> = Vec::new();
         for table in SEALED_TABLES {
             // A notification of an older executor names its owner by `user_email` until
             // `migrate_notification_owners` gives it the user's DID: seal it for that user.
@@ -513,22 +528,41 @@ impl Ad4mDb {
                     continue;
                 }
                 let key: Vec<&str> = keys.iter().map(String::as_str).collect();
-                let writer = self.writer(table, owner.as_deref(), &key, None)?;
-                for (column, value) in table.columns.iter().zip(values) {
-                    let Some(value) = value.filter(|v| !sqlite::is_sealed(v)) else {
-                        continue;
-                    };
-                    let value = writer.seal(column, &value)?;
-                    tx.execute(
-                        &format!("UPDATE {} SET {column} = ?1 WHERE rowid = ?2", table.table),
-                        params![value, rowid],
-                    )?;
-                    sealed += 1;
+                let row: rusqlite::Result<usize> = (|| {
+                    let writer = self.writer(table, owner.as_deref(), &key, None)?;
+                    let mut sealed = 0;
+                    for (column, value) in table.columns.iter().zip(&values) {
+                        let Some(value) = value.as_deref().filter(|v| !sqlite::is_sealed(v)) else {
+                            continue;
+                        };
+                        let value = writer.seal(column, value)?;
+                        tx.execute(
+                            &format!("UPDATE {} SET {column} = ?1 WHERE rowid = ?2", table.table),
+                            params![value, rowid],
+                        )?;
+                        sealed += 1;
+                    }
+                    Ok(sealed)
+                })();
+                match row {
+                    Ok(sealed) => report.sealed += sealed,
+                    Err(e) => {
+                        report.skipped += 1;
+                        match skips.iter_mut().find(|(name, _, _)| *name == table.table) {
+                            Some((_, count, _)) => *count += 1,
+                            None => skips.push((table.table, 1, e.to_string())),
+                        }
+                    }
                 }
             }
         }
         tx.commit()?;
-        Ok(sealed)
+        for (table, count, reason) in &skips {
+            log::warn!(
+                "{table}: {count} row(s) could not be sealed and stay in the clear: {reason}"
+            );
+        }
+        Ok(report)
     }
 
     /// Seals again, under the current version of store `store`'s key, every value of a sealed

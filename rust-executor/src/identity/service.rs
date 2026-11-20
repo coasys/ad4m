@@ -1600,6 +1600,10 @@ mod tests {
                 bits: 8,
                 previous_bits: 6,
                 changed_at: 1,
+                challenge: ad4m_ldk::identity::PowChallenge {
+                    nonce: "5TestChallenge".into(),
+                    expires: 5,
+                },
             })
         }
         async fn attach_note(
@@ -2901,6 +2905,7 @@ mod tests {
                     pow: Some(crate::identity::types::Pow {
                         nonce: "proof-nonce".into(),
                         bits: 8,
+                        challenge: "proof-challenge".into(),
                     }),
                 },
             )
@@ -2920,6 +2925,7 @@ mod tests {
             vec![Some(ad4m_ldk::identity::Pow {
                 nonce: "proof-nonce".into(),
                 bits: 8,
+                challenge: "proof-challenge".into(),
             })]
         );
         assert_eq!(
@@ -2928,6 +2934,10 @@ mod tests {
                 bits: 8,
                 previous_bits: 6,
                 changed_at: 1,
+                challenge: crate::identity::types::PowChallenge {
+                    nonce: "5TestChallenge".into(),
+                    expires: 5,
+                },
             }
         );
     }

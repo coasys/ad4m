@@ -25,6 +25,7 @@ type State = {
   expertMode: boolean;
   multiUserEnabled: boolean;
   freeHostingEnabled: boolean;
+  storageSealed: boolean;
   notifications: NotificationType[];
 };
 
@@ -38,6 +39,8 @@ type ContextProps = {
     toggleExpertMode: () => void;
     setMultiUserEnabled: (enabled: boolean) => void;
     setFreeHostingEnabled: (enabled: boolean) => void;
+    unlockStorage: (secret: string) => Promise<void>;
+    finishStorageUnlock: () => Promise<void>;
     handleNotification: (notification: NotificationType) => void;
   };
 };
@@ -57,6 +60,7 @@ const initialState: ContextProps = {
     expertMode: getForVersion("expertMode") === "true",
     multiUserEnabled: false,
     freeHostingEnabled: true,
+    storageSealed: false,
     notifications: [],
   },
   methods: {
@@ -67,6 +71,8 @@ const initialState: ContextProps = {
     toggleExpertMode: () => null,
     setMultiUserEnabled: () => null,
     setFreeHostingEnabled: () => null,
+    unlockStorage: async () => {},
+    finishStorageUnlock: async () => {},
     handleNotification: () => null,
   },
 };
@@ -228,6 +234,24 @@ export function Ad4minProvider({ children }: any) {
     async (url: string) => {
       const client = await buildAd4mClient(url);
       try {
+        // A gated executor answers only the storage calls, so this has to be the first
+        // call: `agent.status` (what checkConnection runs) is refused until the stores
+        // are open. `sealed` needs the user's secret; `unlocking`/`migrating` just need
+        // the wait (e.g. the app restarted mid-move) — the storage screen does both.
+        const storage = await client.runtime.storageStatus();
+        if (storage.state !== "open") {
+          setState((prev) => ({
+            ...prev,
+            client,
+            url,
+            storageSealed: true,
+            connected: true,
+            connectedLoading: false,
+          }));
+          setForVersion("url", url as string);
+          return;
+        }
+
         await checkConnection(url, client);
 
         const { isInitialized, isUnlocked } =
@@ -239,6 +263,7 @@ export function Ad4minProvider({ children }: any) {
           url,
           isInitialized,
           isUnlocked,
+          storageSealed: false,
           connected: true,
           connectedLoading: false,
         }));
@@ -249,6 +274,44 @@ export function Ad4minProvider({ children }: any) {
       }
     },
     [checkConnection, checkIfAgentIsInitialized]
+  );
+
+  // Waits out `unlocking`/`migrating` (the move of plaintext data under the keys; while
+  // it runs only the storage calls answer), then finishes the connect the open stores
+  // allow. Also the path back from a gated start whose unlock already ran.
+  const finishStorageUnlock = useCallback(async () => {
+    const client = state.client;
+    if (!client) throw new Error("Not connected to the executor");
+
+    const deadline = Date.now() + 10 * 60 * 1000;
+    for (;;) {
+      const storage = await client.runtime.storageStatus();
+      if (storage.state === "open") break;
+      if (Date.now() > deadline)
+        throw new Error("Timed out waiting for storage to open");
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+
+    const { isInitialized, isUnlocked } =
+      await checkIfAgentIsInitialized(client);
+
+    setState((prev) => ({
+      ...prev,
+      isInitialized,
+      isUnlocked,
+      storageSealed: false,
+    }));
+  }, [state.client, checkIfAgentIsInitialized]);
+
+  const unlockStorage = useCallback(
+    async (secret: string) => {
+      const client = state.client;
+      if (!client) throw new Error("Not connected to the executor");
+
+      await client.runtime.unlockStorage(secret);
+      await finishStorageUnlock();
+    },
+    [state.client, finishStorageUnlock]
   );
 
   useEffect(() => {
@@ -378,6 +441,8 @@ export function Ad4minProvider({ children }: any) {
           toggleExpertMode,
           setMultiUserEnabled,
           setFreeHostingEnabled,
+          unlockStorage,
+          finishStorageUnlock,
           handleNotification,
         },
       }}

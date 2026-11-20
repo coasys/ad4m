@@ -3,8 +3,8 @@
 //!
 //! One SQLite file holds the hash-chain module's tables (`chain_heads`, `chain_entries`,
 //! `chain_forks`, type `coasys:kel`) and the store's own (`logs`, `heads`, `keys`, `agents`,
-//! `nonces`, `feed`, `offers`, `claims`, `fork_signers`, `inbox`, `records`, `requests`,
-//! `buckets`, `brake`, `pow`, `notes`). The store replays every event with the identity core before it appends, and
+//! `nonces`, `pow_seen`, `feed`, `offers`, `claims`, `fork_signers`, `inbox`, `records`,
+//! `requests`, `buckets`, `brake`, `pow`, `notes`). The store replays every event with the identity core before it appends, and
 //! commits each append with its head, key-index rows, feed items, the claim it spends and the
 //! inbox messages and requests it ends in one transaction (the one-transaction rule of
 //! `identity-store/AGENTS.md`). It can withhold an event, never forge one: every client checks
@@ -15,7 +15,7 @@
 //! the store redeems at the platform (`vouch.rs`). The store has no sign-up pairing yet.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -71,7 +71,10 @@ pub struct Settings {
     pub brake_addr_per_day: u32,
     /// `TRUSTED_PROXIES`: comma-separated addresses or ranges (`10.0.0.0/8`) of the proxies in
     /// front of the store. Only a request whose socket peer is one of them is read for its
-    /// client's address from `CF-Connecting-IP`, else `X-Forwarded-For`. Default none.
+    /// client's address from `CF-Connecting-IP`, else `X-Forwarded-For`. Default none —
+    /// required when the store runs behind a proxy: without it every client counts as the
+    /// proxy's one address for the brake, and the store says so on the first request that
+    /// carries a proxy header (`Store::note_untrusted_proxy_headers`).
     pub trusted_proxies: Vec<brake::Cidr>,
     /// `VOUCH_URL`: the vouching service's base URL (`POST {VOUCH_URL}/api/vouch/redeem`). None:
     /// every token gets `503 vouch-unavailable`.
@@ -246,14 +249,19 @@ pub struct Store {
     pub settings: Settings,
     /// The folded logs held in memory (`held.rs`).
     pub held: held::HeldLogs,
-    /// The proof-of-work parameters it runs with (`GET /v1/pow`), fixed at the start.
-    pow: ad4m_ldk::identity::PowParams,
+    /// The proof-of-work cost it runs with (`GET /v1/pow`'s bits), fixed at the start.
+    pow: brake::PowCost,
     /// The client of the vouching service.
     http: reqwest::Client,
     clock: Clock,
     started_at: u64,
     waits: Mutex<Waits>,
     fault: AtomicU8,
+    /// [`brake::GLOBAL_EMPTY_WARNING`] was logged and no log has been admitted since
+    /// (one line per empty episode of the global bucket).
+    global_empty_logged: AtomicBool,
+    /// The untrusted-proxy-headers warning was logged once already.
+    untrusted_proxy_warned: AtomicBool,
 }
 
 impl Store {
@@ -269,7 +277,7 @@ impl Store {
                     "identity-store: the proof-of-work record failed: {:?}",
                     e.body
                 );
-                ad4m_ldk::identity::PowParams {
+                brake::PowCost {
                     bits: settings.pow_bits,
                     previous_bits: settings.pow_bits,
                     changed_at: started_at,
@@ -286,6 +294,8 @@ impl Store {
             started_at,
             waits: Mutex::new(Waits::default()),
             fault: AtomicU8::new(Fault::None as u8),
+            global_empty_logged: AtomicBool::new(false),
+            untrusted_proxy_warned: AtomicBool::new(false),
         })
     }
 
@@ -312,9 +322,58 @@ impl Store {
         self.started_at
     }
 
-    /// The proof-of-work parameters of `GET /v1/pow`.
-    pub fn pow_params(&self) -> &ad4m_ldk::identity::PowParams {
-        &self.pow
+    /// The proof-of-work cost of `GET /v1/pow` (`bits`, `previousBits`, `changedAt`).
+    pub fn pow_params(&self) -> brake::PowCost {
+        self.pow
+    }
+
+    /// A fresh challenge for `GET /v1/pow`'s next proof (`brake::challenge`): one use, good
+    /// until `expires`.
+    pub fn pow_challenge(&self) -> ad4m_ldk::identity::PowChallenge {
+        brake::challenge(&self.key.pow_challenge_key(), self.now())
+    }
+
+    /// Logs [`brake::GLOBAL_EMPTY_WARNING`] when the global bucket is empty: once per empty
+    /// episode, so an alert can match the one line without a log line per refused request.
+    /// The flag resets on the next log the brake admits (`log.rs`), so the next empty episode
+    /// logs it again.
+    pub(crate) fn notice_global_empty(&self) {
+        if !self.global_empty_logged.swap(true, Ordering::SeqCst) {
+            eprintln!(
+                "identity-store: warning: {} ({} no-note logs an hour); new logs without a \
+                 vouching note get 429 global",
+                brake::GLOBAL_EMPTY_WARNING,
+                self.settings.brake_global_per_hour
+            );
+        }
+    }
+
+    /// For tests: the empty-global-bucket line was logged and no log has been admitted since.
+    pub fn global_empty_logged(&self) -> bool {
+        self.global_empty_logged.load(Ordering::SeqCst)
+    }
+
+    /// Resets the one-line-per-episode flag after the brake admitted a log.
+    pub(crate) fn clear_global_empty_logged(&self) {
+        self.global_empty_logged.store(false, Ordering::SeqCst);
+    }
+
+    /// Logs once when a request carries `CF-Connecting-IP` or `X-Forwarded-For` but
+    /// `TRUSTED_PROXIES` is empty: behind a proxy every client then counts as the proxy's one
+    /// address for the brake (`brake::Sender`).
+    pub(crate) fn note_untrusted_proxy_headers(&self) {
+        if !self.untrusted_proxy_warned.swap(true, Ordering::SeqCst) {
+            eprintln!(
+                "identity-store: warning: a request carried proxy headers but TRUSTED_PROXIES \
+                 is empty; behind a proxy set TRUSTED_PROXIES to the proxy's address or \
+                 range, or every client counts as the proxy's one address for the brake"
+            );
+        }
+    }
+
+    /// For tests: the untrusted-proxy-headers warning was logged.
+    pub fn untrusted_proxy_warned(&self) -> bool {
+        self.untrusted_proxy_warned.load(Ordering::SeqCst)
     }
 
     /// `GET /v1/metrics`: each brake bucket's level, one per line (`brake::metrics`).
@@ -435,6 +494,7 @@ impl Store {
         gone += conn.execute("DELETE FROM requests WHERE expires <= ?1", [now])?;
         let window = db::to_sql(request::NONCE_WINDOW_S)?;
         gone += conn.execute("DELETE FROM nonces WHERE seen_at <= ?1 - ?2", [now, window])?;
+        gone += conn.execute("DELETE FROM pow_seen WHERE expires <= ?1", [now])?;
         Ok(gone)
     }
 }

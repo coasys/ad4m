@@ -17,21 +17,23 @@ use crate::ClientError;
 /// ([`ClientError::PowTooCostly`]), as `pow::solve` does not return until it finds a proof.
 pub const MAX_POW_BITS: u8 = 28;
 
-/// A proof for `scid` at `params.bits`. Deterministic: the same `scid` and bits give the same
-/// proof, so a resumed create sends the proof it sent before.
+/// A proof for `scid` at `params.bits` over `params.challenge` (a `GET /v1/pow` answer): the
+/// store spends the challenge once, and only until `challenge.expires`, so a publish that ran
+/// past it, and a resumed create, read `identity.powParams` again for a fresh one.
 pub fn solve(scid: &str, params: &PowParams) -> Result<Pow, ClientError> {
     if params.bits > MAX_POW_BITS {
         return Err(ClientError::PowTooCostly(params.bits));
     }
-    let solved = core_pow::solve(scid, params.bits);
+    let solved = core_pow::solve(scid, &params.challenge.nonce, params.bits);
     Ok(Pow {
         nonce: solved.nonce,
         bits: solved.bits,
+        challenge: solved.challenge,
     })
 }
 
-/// Reads the store's cost through the executor (`identity.powParams`, from the store's
-/// `GET /v1/pow`) and solves the proof for `scid`.
+/// Reads the store's cost and a fresh challenge through the executor (`identity.powParams`,
+/// from the store's `GET /v1/pow`) and solves the proof for `scid` over them.
 pub async fn solve_for<R: ExecutorRpc>(
     executor: &ViaExecutor<R>,
     scid: &str,
@@ -43,12 +45,17 @@ pub async fn solve_for<R: ExecutorRpc>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ad4m_ldk::identity::PowChallenge;
 
     fn params(bits: u8) -> PowParams {
         PowParams {
             bits,
             previous_bits: bits,
             changed_at: 0,
+            challenge: PowChallenge {
+                nonce: "5TestChallenge".into(),
+                expires: 0,
+            },
         }
     }
 
@@ -57,9 +64,11 @@ mod tests {
         let scid = "QmTestScidForThePowOfTheClient";
         let pow = solve(scid, &params(10)).unwrap();
         assert_eq!(pow.bits, 10);
+        assert_eq!(pow.challenge, "5TestChallenge");
         let core = core_pow::Pow {
             nonce: pow.nonce.clone(),
             bits: pow.bits,
+            challenge: pow.challenge.clone(),
         };
         assert!(core_pow::check(scid, &core, 10));
         assert_eq!(solve(scid, &params(10)).unwrap(), pow, "deterministic");

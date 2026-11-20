@@ -255,6 +255,9 @@ fn incept_json(edit: impl FnOnce(&mut Value)) -> Vec<Value> {
 
 /// A `next` that is not a multihash: `-` is not a base58btc character.
 const NOT_A_HASH: &str = "not-a-multihash";
+/// The host challenge every proof of the pow vector commits to (the base58 text of a token as
+/// `GET /v1/pow` would carry it; to the proof it is any text).
+const POW_VECTOR_CHALLENGE: &str = "5VeCtOrSpOwChALLeNgEfRoMtEhOsT";
 
 /// Every refusal case of the format spec, one per rule.
 pub fn refusal_cases() -> Vec<Case> {
@@ -941,18 +944,18 @@ fn build_pow() -> Value {
     let cases: Vec<Value> = [8u8, 12, 16]
         .iter()
         .map(|&bits| {
-            let p = pow::solve(&scid, bits);
+            let p = pow::solve(&scid, POW_VECTOR_CHALLENGE, bits);
             let nonce: [u8; 16] = bs58::decode(&p.nonce)
                 .into_vec()
                 .unwrap()
                 .try_into()
                 .unwrap();
-            let hash = pow::pow_hash(&scid, &nonce);
+            let hash = pow::pow_hash(&scid, &p.challenge, &nonce);
             json!({"scid": scid, "bits": bits, "pow": p, "hash": hex(&hash),
                    "zeroBits": pow::leading_zero_bits(&hash)})
         })
         .collect();
-    json!({"description": "sha256(\"coasys:pow\" ‖ scid ‖ nonce) with at least `bits` leading zero bits; the solver counts nonces from 0 as 16 big-endian bytes.", "cases": cases})
+    json!({"description": "sha256(\"coasys:pow\" ‖ scid ‖ challenge ‖ nonce) with at least `bits` leading zero bits; the solver counts nonces from 0 as 16 big-endian bytes. `challenge` is the host's challenge the proof commits to (any text; a host pins its value).", "cases": cases})
 }
 
 fn domain_value(domain: &str) -> Value {
@@ -1133,13 +1136,13 @@ fn check_pow(file: &Value) {
         let bits = case["bits"].as_u64().unwrap() as u8;
         let p: pow::Pow = serde_json::from_value(case["pow"].clone()).unwrap();
         assert!(pow::check(scid, &p, bits));
-        assert_eq!(pow::solve(scid, bits), p);
+        assert_eq!(pow::solve(scid, &p.challenge, bits), p);
         let nonce: [u8; 16] = bs58::decode(&p.nonce)
             .into_vec()
             .unwrap()
             .try_into()
             .unwrap();
-        let hash = pow::pow_hash(scid, &nonce);
+        let hash = pow::pow_hash(scid, &p.challenge, &nonce);
         assert_eq!(hex(&hash), case["hash"]);
         let zeros = pow::leading_zero_bits(&hash);
         assert_eq!(zeros, case["zeroBits"].as_u64().unwrap() as u32);

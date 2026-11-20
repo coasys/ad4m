@@ -83,6 +83,9 @@ const Profile = (props: Props) => {
   const [exportStatus, setExportStatus] = useState("");
   const [importStatus, setImportStatus] = useState("");
 
+  const [storageSecret, setStorageSecret] = useState("");
+  const [secretCopied, setSecretCopied] = useState(false);
+
   const [networkMetrics, setNetworkMetrics] = useState("");
   const [showNetworkMetrics, setShowNetworkMetrics] = useState(false);
 
@@ -351,6 +354,26 @@ const Profile = (props: Props) => {
     }
   };
 
+  const backupStorageSecret = async () => {
+    const yes = await dialogAsk(
+      "This shows the storage secret that seals this device's data. Anyone who has it can open the data. Keep it somewhere safe, away from this device. Show it?",
+      { title: "Back up storage secret", kind: "warning" }
+    );
+    if (!yes) return;
+    try {
+      const secret = await invoke<string>("storage_secret_get");
+      setSecretCopied(false);
+      setStorageSecret(secret);
+    } catch (error) {
+      alert("Could not read the storage secret: " + error);
+    }
+  };
+
+  const copySecret = () => {
+    copyText(storageSecret);
+    setSecretCopied(true);
+  };
+
   const handleImport = async () => {
     try {
       setImportStatus("Importing...");
@@ -522,6 +545,31 @@ const Profile = (props: Props) => {
               {importStatus || "Import Database"}
             </j-button>
           </j-box>
+          <j-box px="500" my="500">
+            <j-button onClick={backupStorageSecret} full variant="ghost">
+              <j-icon size="sm" slot="start" name="key"></j-icon>
+              Back up storage secret
+            </j-button>
+          </j-box>
+          {storageSecret && (
+            <j-box px="500" my="500">
+              <j-box mb="200">
+                <j-text size="400" color="ui-500">
+                  The secret that seals this device's data. Store it somewhere safe — anyone
+                  who has it can open the data.
+                </j-text>
+              </j-box>
+              <j-flex a="center" gap="200">
+                <j-input value={storageSecret} readonly full></j-input>
+                <j-button size="sm" variant="ghost" onClick={copySecret}>
+                  <j-icon
+                    size="sm"
+                    name={!secretCopied ? "clipboard" : "clipboard-check"}
+                  ></j-icon>
+                </j-button>
+              </j-flex>
+            </j-box>
+          )}
           <j-box px="500" my="500">
             <j-button onClick={() => setClearAgentModalOpen(true)} full variant="ghost">
               <j-icon size="sm" slot="start" name="trash"></j-icon>

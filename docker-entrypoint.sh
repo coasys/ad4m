@@ -293,6 +293,12 @@ ws_rpc() {
 # shellcheck source=docker/ai-env.sh
 . /usr/local/lib/ad4m/ai-env.sh
 
+# ensure_storage_secret: the executor's storage secret on the data volume (docker/
+# storage-secret.sh). Without one `ad4m-executor run` starts sealed and every call below
+# would be refused `storage-sealed`.
+# shellcheck source=docker/storage-secret.sh
+. /usr/local/lib/ad4m/storage-secret.sh
+
 # ── Global discovery space (create on first boot, inject URL into WE) ───
 setup_global_space() {
     local we_dist="/opt/ad4m/we-dist"
@@ -436,6 +442,10 @@ CADDYEOF
 
 # ── Local AI shipped in the image (INCLUDE_MODELS=true) ──────────────────────
 seed_local_ai /opt/ad4m/local-ai-state /opt/ad4m/local-ai /data/local-ai
+
+# ── Storage secret: first start creates /data/storage-secret, later starts reuse it;
+#    sealed data without it refuses to start (a new secret could not open it) ────────────
+ensure_storage_secret /data
 
 # ── Start executor in background, auto-generate agent, then wait ────────────
 ad4m-executor run \
