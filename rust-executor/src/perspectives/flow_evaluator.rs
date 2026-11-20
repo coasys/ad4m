@@ -717,7 +717,7 @@ pub(crate) fn revocation_link_counts_for_did(
 /// setters write. Shared with the pure reader, so both match the same
 /// spellings.
 pub(crate) fn did_literal_url(did: &str) -> anyhow::Result<String> {
-    use ad4m_client::literal::Literal;
+    use ad4m_literal::Literal;
     Literal::from_string(did.to_string())
         .to_url()
         .map_err(|e| anyhow::anyhow!("literal encode DID `{did}`: {e}"))
@@ -1611,7 +1611,7 @@ mod tests {
 
     #[test]
     fn to_url_emits_the_single_colon_spelling_target_names_did_expects() {
-        use ad4m_client::literal::Literal;
+        use ad4m_literal::Literal;
         let url = Literal::from_string("did:key:zAlice".to_string())
             .to_url()
             .expect("literal encode");
@@ -1849,7 +1849,7 @@ mod tests {
     #[test]
     fn grant_and_revocation_predicates_match_alike_and_both_need_a_signature() {
         use crate::agent::signatures::TestSigner;
-        use ad4m_client::literal::Literal;
+        use ad4m_literal::Literal;
         let did = "did:key:alice";
         let did_literal = did_literal_url(did).unwrap();
         let other = Literal::from_string("did:key:bob".to_string())

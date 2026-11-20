@@ -22,7 +22,8 @@ pub mod expressions;
 pub mod flow;
 pub mod instances;
 pub mod languages;
-pub mod literal;
+// The literal:// codec lives in its own crate (it builds for wasm32); the old path stays.
+pub use ad4m_literal as literal;
 pub mod model;
 pub mod neighbourhoods;
 pub mod perspective_proxy;

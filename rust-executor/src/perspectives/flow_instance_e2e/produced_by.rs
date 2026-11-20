@@ -14,7 +14,7 @@ async fn plant_receipt(
     f: &mut Fixture,
     receipt: &crate::perspectives::flow_instance::receipt::FlowReceipt,
 ) {
-    let body = ad4m_client::literal::Literal::from_json(
+    let body = ad4m_literal::Literal::from_json(
         serde_json::to_value(receipt).expect("receipt serialises"),
     )
     .to_url()
@@ -614,11 +614,9 @@ pub(super) async fn mint_honest_task_receipt(
 
 /// `receipt`'s body as any member would write it under its node.
 fn receipt_body(receipt: &crate::perspectives::flow_instance::receipt::FlowReceipt) -> String {
-    ad4m_client::literal::Literal::from_json(
-        serde_json::to_value(receipt).expect("receipt serialises"),
-    )
-    .to_url()
-    .expect("literal url")
+    ad4m_literal::Literal::from_json(serde_json::to_value(receipt).expect("receipt serialises"))
+        .to_url()
+        .expect("literal url")
 }
 
 /// A receipt of the fixture's flow minted from fixture-signed material

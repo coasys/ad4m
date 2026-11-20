@@ -917,7 +917,7 @@ mod tests {
     /// Nothing of the `Gated` flow is stored: no `ad4m://has_flow` link naming
     /// it, no link under its namespace, and the loader does not return it.
     async fn assert_gated_flow_not_stored(perspective: &PerspectiveInstance) {
-        let gated_name = ad4m_client::literal::Literal::from_string("Gated".to_string())
+        let gated_name = ad4m_literal::Literal::from_string("Gated".to_string())
             .to_url()
             .expect("literal url");
         let links = perspective

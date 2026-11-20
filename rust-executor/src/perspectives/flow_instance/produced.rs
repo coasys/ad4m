@@ -121,7 +121,7 @@ use crate::perspectives::flow_evaluator::EvidenceItem;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::perspectives::shacl_parser::SHACLFlow;
 use crate::types::{Link, LinkQuery, LinkStatus};
-use ad4m_client::literal::{Literal, LiteralValue};
+use ad4m_literal::{Literal, LiteralValue};
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap};
 

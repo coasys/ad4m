@@ -34,7 +34,7 @@ use crate::types::domain::Perspective;
 use crate::types::{
     DecoratedLinkExpression, Link, LinkExpression, LinkStatus, OnlineAgent, PerspectiveExpression,
 };
-use ad4m_client::literal::{Literal, LiteralValue};
+use ad4m_literal::{Literal, LiteralValue};
 use anyhow::Error as AnyError;
 use std::collections::HashMap;
 use std::sync::Mutex;

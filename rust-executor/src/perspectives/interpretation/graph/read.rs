@@ -47,7 +47,7 @@ pub async fn gather_transcript(
 /// parse/serialize type); non-string literals (number/bool/json) and
 /// non-literal URIs yield `None`.
 pub(crate) fn decode_literal_string(uri: &str) -> Option<String> {
-    use ad4m_client::literal::{Literal, LiteralValue};
+    use ad4m_literal::{Literal, LiteralValue};
     match Literal::from_url(uri.to_string()).ok()?.get().ok()? {
         LiteralValue::String(s) => Some(s),
         _ => None,
@@ -75,7 +75,7 @@ pub(crate) fn decode_literal_string(uri: &str) -> Option<String> {
 /// So: a string literal is the body; a JSON envelope carrying a string `data` is
 /// the body inside it; anything else is still not a message body.
 pub(crate) fn decode_transcript_body(uri: &str) -> Option<String> {
-    use ad4m_client::literal::{Literal, LiteralValue};
+    use ad4m_literal::{Literal, LiteralValue};
     match Literal::from_url(uri.to_string()).ok()?.get().ok()? {
         LiteralValue::String(s) => Some(s),
         // An expression envelope. `data` is the payload the author signed; the
@@ -449,7 +449,7 @@ mod tests {
     /// with nothing in it: no error, no warning, no event.
     #[test]
     fn transcript_body_reads_an_expression_envelope() {
-        use ad4m_client::literal::Literal;
+        use ad4m_literal::Literal;
 
         // What `@Optional` (no resolveLanguage) stores.
         let bare = Literal::from_string("the words".to_string())
@@ -486,7 +486,7 @@ mod tests {
     #[tokio::test]
     async fn gather_transcript_reads_expression_envelope_body() {
         use crate::types::{Link, LinkStatus};
-        use ad4m_client::literal::Literal;
+        use ad4m_literal::Literal;
 
         let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
 
@@ -527,7 +527,7 @@ mod tests {
     #[tokio::test]
     async fn gather_transcript_sparql_reads_expression_envelope_body() {
         use crate::types::{Link, LinkStatus};
-        use ad4m_client::literal::Literal;
+        use ad4m_literal::Literal;
 
         let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
 

@@ -466,7 +466,7 @@ pub(crate) fn subject_class(class_name: &str) -> SubjectClassOption {
 
 /// The value inside a `literal:` URL, or the target unchanged when it is not one.
 pub(crate) fn resolve_literal_value(target: &str) -> String {
-    use ad4m_client::literal::Literal;
+    use ad4m_literal::Literal;
     if let Ok(literal) = Literal::from_url(target.to_string()) {
         match literal.get() {
             Ok(value) => value.to_string(),
@@ -480,7 +480,7 @@ pub(crate) fn resolve_literal_value(target: &str) -> String {
 /// Encode a string value as a `literal:string:` URL. Uses rust-client's `Literal` for proper
 /// URL encoding.
 pub(crate) fn encode_literal(value: &str) -> String {
-    use ad4m_client::literal::Literal;
+    use ad4m_literal::Literal;
     Literal::from_string(value.to_string())
         .to_url()
         .unwrap_or_else(|_| format!("literal:string:{}", value))

@@ -237,7 +237,7 @@ pub async fn load_class_properties_with_uri(
     class_name: &str,
 ) -> (Vec<ShaclProperty>, Option<String>) {
     // Try both URL-encoded and raw formats (Flux uses raw, Rust Literal encodes)
-    let encoded = ad4m_client::literal::Literal::from_string(format!("shacl://{}", class_name))
+    let encoded = ad4m_literal::Literal::from_string(format!("shacl://{}", class_name))
         .to_url()
         .unwrap_or_else(|_| format!("literal:string:shacl://{}", class_name));
     let raw = format!("literal:string:shacl://{}", class_name);
@@ -340,7 +340,7 @@ pub async fn load_class_properties_with_uri(
             .await
         {
             Ok(links) if !links.is_empty() => {
-                ad4m_client::literal::Literal::from_url(links[0].data.target.clone())
+                ad4m_literal::Literal::from_url(links[0].data.target.clone())
                     .ok()
                     .and_then(|l| l.get().ok())
                     .and_then(|v| v.to_string().parse::<u32>().ok())
@@ -357,7 +357,7 @@ pub async fn load_class_properties_with_uri(
             .await
         {
             Ok(links) if !links.is_empty() => {
-                ad4m_client::literal::Literal::from_url(links[0].data.target.clone())
+                ad4m_literal::Literal::from_url(links[0].data.target.clone())
                     .ok()
                     .and_then(|l| l.get().ok())
                     .and_then(|v| v.to_string().parse::<u32>().ok())
