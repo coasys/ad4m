@@ -613,6 +613,15 @@ jobs:
               cargo test -p ad4m-hash-chain --target wasm32-unknown-unknown --features wasm
           no_output_timeout: 30m
       - run:
+          # ad4m-literal (moved out of ad4m-client, which re-exports it): its tests, and the
+          # wasm32 build the web executor needs.
+          name: ad4m-literal tests and wasm32 check
+          when: always
+          command: |
+            cargo test --release -p ad4m-literal
+            cargo check -p ad4m-literal --target wasm32-unknown-unknown
+          no_output_timeout: 30m
+      - run:
           # ad4m-ldk/rust is its own workspace, so the commands above skip it.
           name: ad4m-ldk (Rust) tests
           when: always

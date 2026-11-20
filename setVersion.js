@@ -94,14 +94,22 @@ console.log("Executor version: " + tests.version + " -> " + VERSION)
 tests.version = VERSION
 fs.writeFileSync('tests/js/package.json', JSON.stringify(tests, null, 2) + '\n')
 
-const rustClient = replaceVersionLine(fs.readFileSync('rust-client/Cargo.toml', 'utf8'), VERSION)
+const rustLiteral = replaceVersionLine(fs.readFileSync('ad4m-literal/Cargo.toml', 'utf8'), VERSION)
+console.log("ad4m-literal version: " + rustLiteral.oldVersion + " -> " + VERSION)
+fs.writeFileSync('ad4m-literal/Cargo.toml', rustLiteral.newContent)
+
+let rustClient = replaceVersionLine(fs.readFileSync('rust-client/Cargo.toml', 'utf8'), VERSION)
 console.log("rust-client version: " + rustClient.oldVersion + " -> " + VERSION)
+rustClient = replaceVersionLine(rustClient.newContent, VERSION, `ad4m-literal = { path = "../ad4m-literal", version=`, ` }`)
+console.log(`rust-client ad4m-literal dep: ${rustClient.oldVersion} -> ${VERSION}`)
 fs.writeFileSync('rust-client/Cargo.toml', rustClient.newContent)
 
 let rustExecutorCargo = replaceVersionLine(fs.readFileSync('rust-executor/Cargo.toml', 'utf8'), VERSION)
 console.log("rust-executor version: " + rustExecutorCargo.oldVersion + " -> " + VERSION)
 rustExecutorCargo = replaceVersionLine(rustExecutorCargo.newContent, VERSION, `ad4m-client = { path = "../rust-client", version=`, ` }`)
 console.log(`rust-executor ad4m-client dep: ${rustExecutorCargo.oldVersion} -> ${VERSION}`)
+rustExecutorCargo = replaceVersionLine(rustExecutorCargo.newContent, VERSION, `ad4m-literal = { path = "../ad4m-literal", version=`, ` }`)
+console.log(`rust-executor ad4m-literal dep: ${rustExecutorCargo.oldVersion} -> ${VERSION}`)
 fs.writeFileSync('rust-executor/Cargo.toml', rustExecutorCargo.newContent)
 
 const globalsRs = replaceVersionLine(
