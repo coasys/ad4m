@@ -17,7 +17,7 @@
 //!                      │      execute_model_query_inner and reads its rows
 //!                      ▼
 //!              2. count; a record one class returned is read as it, one several
-//!                      │      returned goes to subject_classes_of ──▶ choose()
+//!                      │      returned goes to subject_class_iris_of ──▶ choose()
 //!                      │      among those classes; each record is kept once
 //!                      ▼
 //!              3. sort once (nulls last, then id), limit/offset once
@@ -51,8 +51,9 @@
 //!   `__subjectClass` / `__subjectClasses`, which sort on the values below.
 //! - `limit` / `offset` apply once over the union; `totalCount` is the union
 //!   after `where`.
-//! - Every row carries `__subjectClass` (the class it was hydrated as) and
-//!   `__subjectClasses` (every class it conforms to), as polymorphic members do.
+//! - Every row carries `__subjectClass` (the class it was hydrated as: the key
+//!   it was asked for by) and `__subjectClasses` (every class it conforms to,
+//!   by target class IRI), as polymorphic members do.
 
 use super::filtering::{compare_values, extract_sort_value};
 use super::projection::resolve_projections;
@@ -62,8 +63,9 @@ use super::types::{
     ModelQueryInput, ModelQueryResult, ModelShape, OrderDirection, ProjectionInput, Scope,
     ShapeResolver, SortKey, WhereCondition,
 };
+use crate::perspectives::shacl_parser::class_name_of;
 use crate::perspectives::sparql_store::{EvalStop, SparqlStore};
-use deno_core::anyhow::{anyhow, Error};
+use anyhow::{anyhow, Error};
 use serde_json::Value;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -365,7 +367,8 @@ pub(crate) fn refuse_union_reads(query: &ModelQueryInput) -> Result<(), Error> {
 
 /// Execute one model query over several classes.
 ///
-/// `classes` are bare class names, each resolved through `resolver`; a missing
+/// `classes` are class IRIs or names, each resolved through `resolver`; a
+/// row's `__subjectClass` is the key it was asked for by. A missing
 /// shape surfaces as the resolver's error, so the caller's shape-wait loop
 /// treats it exactly as it treats a single class.
 pub async fn execute_union_query(
@@ -521,7 +524,9 @@ pub async fn execute_union_query_with_views(
     let mut classified: HashMap<String, Vec<String>> = if shared.is_empty() {
         HashMap::new()
     } else {
-        crate::perspectives::subject_classes_of::subject_classes_of(stop, store, resolver, &shared)?
+        crate::perspectives::subject_classes_of::subject_class_iris_of(
+            stop, store, resolver, &shared,
+        )?
     };
     let preferred = query.prefer_classes.as_deref().unwrap_or(&[]);
     let mut union: Vec<Member> = Vec::with_capacity(all_ids.len());
@@ -532,15 +537,17 @@ pub async fn execute_union_query_with_views(
         let chosen = if readers.len() == 1 {
             (*first).clone()
         } else {
-            let conforms: Vec<String> = classified
-                .get(id)
-                .map(|all| {
-                    all.iter()
-                        .filter(|c| readers.contains(c))
-                        .cloned()
-                        .collect()
-                })
-                .unwrap_or_default();
+            // Classified by class IRI; a requested key (an IRI or a name) is a
+            // reading of the record when one of its classes is that IRI or has
+            // that name.
+            let mut conforms: Vec<String> = Vec::new();
+            for class in classified.get(id).into_iter().flatten() {
+                for key in readers {
+                    if (*key == class || **key == class_name_of(class)) && !conforms.contains(key) {
+                        conforms.push((*key).clone());
+                    }
+                }
+            }
             // Classification is structural and skips a class with no required
             // triples; the store's conformance query still answers for it. Such
             // a record falls back to the first requested class that returned it.
@@ -589,12 +596,14 @@ pub async fn execute_union_query_with_views(
         .map(|m| m.id.clone())
         .collect();
     if !unclassified.is_empty() {
-        classified.extend(crate::perspectives::subject_classes_of::subject_classes_of(
-            stop,
-            store,
-            resolver,
-            &unclassified,
-        )?);
+        classified.extend(
+            crate::perspectives::subject_classes_of::subject_class_iris_of(
+                stop,
+                store,
+                resolver,
+                &unclassified,
+            )?,
+        );
     }
 
     // 4. Hydrate the page as the caller asked, one query per chosen class.

@@ -2,8 +2,8 @@ use super::write_log::{AddedLink, WriteDelta, WriteLog};
 use crate::languages::literal::RFC3986_COMPONENT_ENCODE;
 use crate::types::LinkStatus;
 use crate::types::{DecoratedExpressionProof, DecoratedLinkExpression, Link, LinkExpression};
+use anyhow::{anyhow, Error};
 use chrono::DateTime as ChronoDateTime;
-use deno_core::anyhow::{anyhow, Error};
 use oxigraph::model::*;
 use oxigraph::sparql::{QueryResults, SparqlEvaluator};
 use oxigraph::store::{Store, StoreOptions, Transaction};
@@ -2315,20 +2315,6 @@ impl SparqlStore {
         self.query_links(stop, None, Some(predicate), None, None, None, None)
     }
 
-    /// Get all links with the given predicate where source ends with the given suffix.
-    pub fn get_links_by_predicate_and_source_suffix(
-        &self,
-        stop: &EvalStop,
-        predicate: &str,
-        source_suffix: &str,
-    ) -> Result<Vec<DecoratedLinkExpression>, Error> {
-        let links = self.get_links_by_predicate(stop, predicate)?;
-        Ok(links
-            .into_iter()
-            .filter(|l| l.data.source.ends_with(source_suffix))
-            .collect())
-    }
-
     fn sparql_evaluator(&self, stop: &EvalStop) -> SparqlEvaluator {
         SparqlEvaluator::new()
             .with_cancellation_token(stop.token.clone())
@@ -2556,7 +2542,7 @@ impl SparqlStore {
         let query = query_string.to_string();
         tokio::task::spawn_blocking(move || store.query(&stop, &query))
             .await
-            .map_err(|e| deno_core::anyhow::anyhow!("spawn_blocking join error: {}", e))?
+            .map_err(|e| anyhow!("spawn_blocking join error: {}", e))?
     }
 
     /// `query_arbitrary` on the blocking pool under `stop` — the eval checks
@@ -2585,7 +2571,7 @@ impl SparqlStore {
         // expect (CodeRabbit review, PR #855).
         tokio::task::spawn_blocking(move || store.query_arbitrary(&stop, &query))
             .await
-            .map_err(|e| deno_core::anyhow::anyhow!("spawn_blocking join error: {}", e))?
+            .map_err(|e| anyhow!("spawn_blocking join error: {}", e))?
     }
 
     /// Remove all triples from the store.

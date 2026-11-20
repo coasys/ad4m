@@ -52,14 +52,14 @@ describe("Container", () => {
     }).toThrow("UnaliasedBlock implements Container but has no relation or alias named `children`");
   });
 
-  it("register() writes nothing", async () => {
+  it("register() sends no shape: the executor holds it", async () => {
     const { PerspectiveProxy } = await import("./PerspectiveProxy");
-    const calls: string[] = [];
+    const sent: unknown[][] = [];
     const proxy = Object.create(PerspectiveProxy.prototype);
-    Object.defineProperty(proxy, "addSdna", { value: () => { calls.push("addSdna"); } });
-    Object.defineProperty(proxy, "addSdnaAll", { value: () => { calls.push("addSdnaAll"); } });
-    await expect(proxy.ensureSubjectClasses([Container])).resolves.toBeUndefined();
-    await expect(proxy.ensureSubjectClass(Container)).resolves.toBeUndefined();
-    expect(calls).toEqual([]);
+    Object.defineProperty(proxy, "registerShapes", {
+      value: async (shapes: unknown[]) => { sent.push(shapes); return { unchanged: [], written: [], generation: 0 }; },
+    });
+    await Container.register(proxy);
+    expect(sent).toEqual([[]]);
   });
 });
