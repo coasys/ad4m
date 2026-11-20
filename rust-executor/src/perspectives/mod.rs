@@ -1,5 +1,8 @@
+// AI: not in the web executor (wasm32).
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod agent_session;
 #[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
 mod agent_session_tests;
 pub mod auto_processor;
 pub(crate) mod content_address;
@@ -18,10 +21,13 @@ pub(crate) mod hardwired_class;
 pub(crate) mod hosted_status;
 pub(crate) mod ingest;
 pub mod instances;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod interpretation;
 #[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
 mod interpretation_e2e;
 #[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
 mod interpretation_harness_e2e;
 // `pub(crate)` so test modules outside `perspectives` (e.g. the MCP flow
 // tools, which read flow state through the same loaders) can seed a real
@@ -30,6 +36,7 @@ mod interpretation_harness_e2e;
 #[cfg(test)]
 mod ingest_proof_tests;
 #[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod interpretation_test_support;
 pub mod memory_diagnostics;
 pub mod migration;
