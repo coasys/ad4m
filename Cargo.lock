@@ -20967,6 +20967,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "web-executor"
+version = "0.0.0"
+dependencies = [
+ "ad4m-executor",
+ "console_error_panic_hook",
+ "js-sys",
+ "log",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+]
+
+[[package]]
 name = "web-executor-link-test"
 version = "0.0.0"
 dependencies = [
