@@ -711,10 +711,14 @@ pub(crate) async fn run_interpretation_with_strategy_and_model_linked(
         emit_ctx,
         flow_filter,
         slice_link,
+        RUN_MODE_SINGLE_SHOT,
+        None,
     )
     .await
 }
 
+/// One single-shot pass over the whole `transcript`, with no split; `mode`
+/// and `completions` as in [`super::overflow::split_overflowing_batch`].
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_interpretation_once(
     perspective: &mut PerspectiveInstance,
@@ -729,6 +733,8 @@ pub(super) async fn run_interpretation_once(
     emit_debug_events: bool,
     emit_ctx: Option<&crate::perspectives::auto_processor::events::InterpretationEmitContext>,
     flow_filter: Option<&[String]>,
+    mode: &'static str,
+    completions: Option<Arc<dyn crate::ai_service::harness::CompletionSource>>,
 ) -> anyhow::Result<InterpretationOutcome> {
     run_single_shot(
         perspective,
@@ -743,8 +749,8 @@ pub(super) async fn run_interpretation_once(
         emit_debug_events,
         emit_ctx,
         flow_filter,
-        RUN_MODE_SINGLE_SHOT,
-        None,
+        mode,
+        completions,
     )
     .await
 }
@@ -1617,7 +1623,12 @@ pub(crate) async fn run_harness_pass(
             task.model_id,
             pass_started.elapsed().as_millis(),
         );
-        return run_single_shot(
+        // Through the overflow split (#1808), as the single-shot arm: a batch
+        // that does not fit the window is halved, and a source that alone
+        // does not fit is recorded, so the next tick does not take it again.
+        // No slice link: the caller links the pass's bases, as for a harness
+        // pass.
+        return super::overflow::split_overflowing_batch(
             perspective,
             shapes,
             transcript,
@@ -1630,6 +1641,7 @@ pub(crate) async fn run_harness_pass(
             emit_debug_events,
             emit_ctx,
             flow_filter,
+            None,
             RUN_MODE_FALLBACK,
             completions_for_fallback,
         )

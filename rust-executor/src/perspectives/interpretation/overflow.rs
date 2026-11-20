@@ -22,10 +22,12 @@ use super::{
     InterpretationOutcome, InterpretationRunCursor, InterpretationRunMeta, TranscriptTurn,
 };
 use crate::agent::AgentContext;
+use crate::ai_service::harness::CompletionSource;
 use crate::perspectives::model_query::types::{ModelShape, Scope};
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use std::collections::HashSet;
 use std::ops::Range;
+use std::sync::Arc;
 
 /// Where to attach the bases a slice has just committed, before the next
 /// slice loads existing records.
@@ -42,6 +44,10 @@ pub(crate) struct SliceScopeLink<'a> {
 /// Run `transcript`, splitting it in half whenever the prompt does not fit
 /// the model window. A transient error stops the walk: halves already
 /// recorded stay recorded, and the rest are left for the next pass.
+///
+/// `mode` is the run record's mode of each slice: single-shot, or the
+/// fallback of a harness pass. `completions` is the model a test passes;
+/// `None` is the AI service.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn split_overflowing_batch(
     perspective: &mut PerspectiveInstance,
@@ -57,6 +63,8 @@ pub(super) async fn split_overflowing_batch(
     emit_ctx: Option<&crate::perspectives::auto_processor::events::InterpretationEmitContext>,
     flow_filter: Option<&[String]>,
     slice_link: Option<&SliceScopeLink<'_>>,
+    mode: &'static str,
+    completions: Option<Arc<dyn CompletionSource>>,
 ) -> anyhow::Result<InterpretationOutcome> {
     if transcript.is_empty()
         || cursor.is_some_and(|cursor| cursor.sources.len() != transcript.len())
@@ -81,6 +89,8 @@ pub(super) async fn split_overflowing_batch(
             emit_debug_events,
             emit_ctx,
             flow_filter,
+            mode,
+            completions,
         )
         .await;
     }
@@ -121,6 +131,8 @@ pub(super) async fn split_overflowing_batch(
             emit_debug_events,
             emit_for_slice,
             flow_filter,
+            mode,
+            completions.clone(),
         )
         .await;
         match result {
@@ -191,7 +203,7 @@ fn merge_outcomes(outcomes: Vec<InterpretationOutcome>) -> InterpretationOutcome
     let mut bases = Vec::new();
     let mut flow_proposals = Vec::new();
     let mut debug = None;
-    // Every slice runs single-shot (`run_interpretation_once`).
+    // Every slice runs single-shot (`run_interpretation_once`), in one mode.
     let mode = outcomes
         .first()
         .map_or(super::run::RUN_MODE_SINGLE_SHOT, |o| o.mode);
