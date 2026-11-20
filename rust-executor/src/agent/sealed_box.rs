@@ -14,11 +14,11 @@
 
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
+use anyhow::anyhow;
+use anyhow::Error as AnyError;
 #[cfg(test)]
 use curve25519_dalek::edwards::CompressedEdwardsY;
 use curve25519_dalek::montgomery::MontgomeryPoint;
-use deno_core::anyhow::anyhow;
-use deno_core::error::AnyError;
 #[cfg(test)]
 use did_key::KeyMaterial;
 use hkdf::Hkdf;

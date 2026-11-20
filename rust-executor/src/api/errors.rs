@@ -1,3 +1,4 @@
+#[cfg(not(target_arch = "wasm32"))]
 use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
@@ -23,6 +24,7 @@ struct ErrorResponse {
     code: u16,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, message) = match self {
@@ -50,8 +52,8 @@ impl From<String> for ApiError {
     }
 }
 
-impl From<deno_core::error::AnyError> for ApiError {
-    fn from(e: deno_core::error::AnyError) -> Self {
+impl From<anyhow::Error> for ApiError {
+    fn from(e: anyhow::Error) -> Self {
         ApiError::Internal(e.to_string())
     }
 }

@@ -129,6 +129,7 @@ fn format_bytes_signed(bytes: isize) -> String {
 /// Read jemalloc stats via the `tikv-jemalloc-ctl` crate.
 /// Returns (allocated, active, metadata, resident, mapped) in bytes.
 fn jemalloc_stats() -> (usize, usize, usize, usize, usize) {
+    #[cfg(not(target_arch = "wasm32"))]
     #[cfg(not(target_env = "msvc"))]
     {
         use tikv_jemalloc_ctl::{epoch, stats};
@@ -139,6 +140,11 @@ fn jemalloc_stats() -> (usize, usize, usize, usize, usize) {
         let resident = stats::resident::read().unwrap_or(0);
         let mapped = stats::mapped::read().unwrap_or(0);
         (allocated, active, metadata, resident, mapped)
+    }
+    // No jemalloc on wasm32.
+    #[cfg(target_arch = "wasm32")]
+    {
+        (0, 0, 0, 0, 0)
     }
     #[cfg(target_env = "msvc")]
     {

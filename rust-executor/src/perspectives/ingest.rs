@@ -22,7 +22,7 @@ use super::perspective_instance::PerspectiveInstance;
 #[cfg(doc)]
 use super::sparql_store::SparqlStore;
 use crate::types::{LinkExpression, PerspectiveDiff};
-use deno_core::error::AnyError;
+use anyhow::Error as AnyError;
 use std::sync::PoisonError;
 
 /// Drop from a remote diff every addition whose proof does not verify

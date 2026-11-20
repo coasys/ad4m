@@ -7,8 +7,8 @@ use crate::agent::{create_signed_expression, AgentContext};
 use crate::types::{
     DecoratedLinkExpression, DecoratedPerspectiveDiff, LinkExpression, LinkStatus, PerspectiveDiff,
 };
-use deno_core::anyhow::anyhow;
-use deno_core::error::AnyError;
+use anyhow::anyhow;
+use anyhow::Error as AnyError;
 #[cfg(test)]
 use std::sync::atomic::Ordering;
 use std::sync::PoisonError;

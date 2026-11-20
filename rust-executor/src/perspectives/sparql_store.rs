@@ -7,7 +7,10 @@ use anyhow::{anyhow, Error};
 use chrono::DateTime as ChronoDateTime;
 use oxigraph::model::*;
 use oxigraph::sparql::{QueryResults, SparqlEvaluator};
+#[cfg(not(target_arch = "wasm32"))]
 use oxigraph::store::{Store, StoreOptions, Transaction};
+#[cfg(target_arch = "wasm32")]
+use oxigraph::store::{Store, Transaction};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -1253,6 +1256,7 @@ impl SparqlStore {
     /// If `data_path` is `None`, creates an in-memory store (useful for tests).
     pub fn new(data_path: Option<&str>) -> Result<Self, Error> {
         let store = match data_path {
+            #[cfg(not(target_arch = "wasm32"))]
             Some(path) => {
                 let store_path = std::path::PathBuf::from(path).join("sparql_store");
                 std::fs::create_dir_all(&store_path).map_err(|e| {
@@ -1274,6 +1278,13 @@ impl SparqlStore {
                         e
                     )
                 })?
+            }
+            #[cfg(target_arch = "wasm32")]
+            Some(path) => {
+                return Err(anyhow!(
+                    "A persistent SPARQL store is not available in the web executor (path {})",
+                    path
+                ))
             }
             None => Store::new()?,
         };
@@ -2328,6 +2339,7 @@ impl SparqlStore {
     /// Flush pending writes to disk.
     /// This ensures RocksDB memtable data is written to SST files,
     /// allowing the memtable memory to be reclaimed.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn flush(&self) -> Result<(), Error> {
         self.store
             .flush()
@@ -2339,6 +2351,7 @@ impl SparqlStore {
     /// hard-linked when `target` is on the same filesystem. Copying the live
     /// store directory instead can capture files that do not belong together,
     /// because writes and compaction keep changing it.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn backup(&self, target: &std::path::Path) -> Result<(), Error> {
         self.store
             .backup(target)
@@ -2361,6 +2374,8 @@ impl SparqlStore {
             }
             self.insert_link_triples(link)?;
         }
+        // wasm32 stores are in memory: there is no flush and nothing to flush.
+        #[cfg(not(target_arch = "wasm32"))]
         self.flush()?;
         Ok(())
     }

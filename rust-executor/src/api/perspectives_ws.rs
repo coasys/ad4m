@@ -614,7 +614,7 @@ async fn query_prolog(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
 /// The wire answer for a stopped evaluation: a cancelled one is 499, the
 /// same as `ws_rpc` gives a raced call; one that hit the query deadline is
 /// 504 and its message says which deadline passed. Other errors are 500.
-fn query_eval_error_ws(e: deno_core::anyhow::Error) -> WsRpcError {
+fn query_eval_error_ws(e: anyhow::Error) -> WsRpcError {
     let msg = e.to_string();
     if msg.contains("query cancelled") {
         WsRpcError {
@@ -866,7 +866,7 @@ async fn subscribed(
     perspective: &PerspectiveInstance,
     ctx: &RequestContext,
     connection_id: &str,
-    opened: Result<(String, u64, String), deno_core::error::AnyError>,
+    opened: Result<(String, u64, String), anyhow::Error>,
 ) -> Result<Value, WsRpcError> {
     let (subscription_id, revision, result) = opened.map_err(|e| {
         if e.downcast_ref::<SubscriptionIdTaken>().is_some() {

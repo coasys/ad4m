@@ -10,8 +10,8 @@
 //! Commands two classes share run once. Values are not converted: what one
 //! class stores as HTML another gets as is. Creating one is refused.
 
-use deno_core::anyhow::anyhow;
-use deno_core::error::AnyError;
+use anyhow::anyhow;
+use anyhow::Error as AnyError;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 

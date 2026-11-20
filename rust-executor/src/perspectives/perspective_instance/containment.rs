@@ -4,7 +4,7 @@
 //! as a child of `perspective_instance` to reach its private state.
 
 use super::super::sparql_store::EvalStop;
-use deno_core::error::AnyError;
+use anyhow::Error as AnyError;
 use std::sync::Arc;
 
 use super::PerspectiveInstance;

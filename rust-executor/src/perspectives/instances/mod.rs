@@ -405,7 +405,7 @@ async fn require_instance(
         Err(e) => Err(InstanceError::Failed {
             class_name: class_name.to_string(),
             step: WriteStep::ReadInstance,
-            error: deno_core::anyhow::anyhow!(e),
+            error: anyhow::anyhow!(e),
         }),
     }
 }
@@ -629,7 +629,7 @@ pub(crate) struct CascadeFailure {
     /// What the cascade was doing.
     pub step: CascadeStep,
     /// What failed.
-    pub error: deno_core::anyhow::Error,
+    pub error: anyhow::Error,
 }
 
 /// Remove every link touching `uri` (as source or target), in `batch_id` when given. Same

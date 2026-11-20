@@ -1,7 +1,7 @@
 use crate::secret::Secret;
 use crate::utils;
 use crate::wallet::{KEY_NAME_MAIN, KEY_NAME_PLATFORM};
-use deno_core::error::AnyError;
+use anyhow::Error as AnyError;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};

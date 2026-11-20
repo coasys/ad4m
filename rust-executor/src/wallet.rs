@@ -1,9 +1,9 @@
+use anyhow::anyhow;
+use anyhow::Error as AnyError;
 use argon2::{self, Argon2};
 use base64::Engine;
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
-use deno_core::anyhow::anyhow;
-use deno_core::error::AnyError;
 use did_key::{CoreSign, DIDCore, Ed25519KeyPair, KeyMaterial, PatchedKeyPair};
 use lazy_static::lazy_static;
 use once_cell::sync::OnceCell;
@@ -161,13 +161,13 @@ pub(crate) fn reencrypt_as_legacy(cipher: &str, passphrase: &str) -> String {
 /// reused a zero nonce.
 mod legacy {
     use super::B64;
+    use anyhow::anyhow;
+    use anyhow::Error as AnyError;
     use argon2::password_hash::Salt;
     use argon2::{Argon2, PasswordHasher};
     use base64::Engine;
     use crypto_box::aead::Aead;
     use crypto_box::{Nonce, PublicKey, SalsaBox, SecretKey};
-    use deno_core::anyhow::anyhow;
-    use deno_core::error::AnyError;
     use zeroize::Zeroizing;
 
     pub(super) fn slice_to_u8_array(slice: &[u8]) -> [u8; 32] {
@@ -717,6 +717,7 @@ impl WalletBackend for LocalWallet {
 // ── SharedWallet ────────────────────────────────────────────────────────────
 
 /// Cached key material fetched from the external wallet service.
+#[cfg(not(target_arch = "wasm32"))]
 struct CachedKey {
     secret: Vec<u8>,
     public: Vec<u8>,
@@ -725,6 +726,7 @@ struct CachedKey {
 
 /// TTL for cached key material (30 seconds).
 /// Kept short to limit JWT-verification asymmetry during key rotation.
+#[cfg(not(target_arch = "wasm32"))]
 const SHARED_WALLET_CACHE_TTL_SECS: u64 = 30;
 
 /// Wallet backend that delegates key operations to an external HTTP service.
@@ -734,6 +736,7 @@ const SHARED_WALLET_CACHE_TTL_SECS: u64 = 30;
 /// Key material fetched over HTTP gets cached in-process with a 30-second TTL.
 /// Signing always happens locally — the secret key bytes come over the wire
 /// but the actual Ed25519 sign operation runs in this process.
+#[cfg(not(target_arch = "wasm32"))]
 pub struct SharedWallet {
     base_url: String,
     token: String,
@@ -741,6 +744,7 @@ pub struct SharedWallet {
     cache: RwLock<std::collections::HashMap<String, CachedKey>>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl SharedWallet {
     pub fn new(base_url: String, token: String) -> Self {
         SharedWallet {
@@ -810,6 +814,7 @@ impl SharedWallet {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl WalletBackend for SharedWallet {
     fn generate_keypair(&self, name: &str) -> Result<(), AnyError> {
         let url = format!("{}/keys/{}", self.base_url, urlencoding::encode(name));

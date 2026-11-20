@@ -4,7 +4,7 @@
 //! A child module of `perspective_instance` so it can reach the private
 //! subscription registry without widening its visibility.
 
-use deno_core::error::AnyError;
+use anyhow::Error as AnyError;
 use futures::future::BoxFuture;
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
@@ -843,7 +843,7 @@ mod tests {
         );
         // The client cancels (or its connection closes) while the first
         // result is still being computed: the call future is dropped (#1595).
-        let never = std::future::pending::<Result<String, deno_core::error::AnyError>>();
+        let never = std::future::pending::<Result<String, anyhow::Error>>();
         let opening = p.open_subscription("s".into(), query, never);
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(50), opening)

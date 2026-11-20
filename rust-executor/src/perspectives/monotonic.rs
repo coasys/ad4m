@@ -75,7 +75,7 @@ use crate::types::{
     PerspectiveDiff,
 };
 use ad4m_client::literal::Literal;
-use deno_core::error::AnyError;
+use anyhow::Error as AnyError;
 
 // ---------------------------------------------------------------------------
 // Vocabulary. Defined here, not in the code that writes it, so this module

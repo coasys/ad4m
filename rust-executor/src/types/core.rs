@@ -1,4 +1,4 @@
-use deno_core::{anyhow::anyhow, error::AnyError};
+use anyhow::{anyhow, Error as AnyError};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::fmt::Display;
 use std::str::FromStr;

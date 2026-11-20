@@ -1,7 +1,7 @@
 //! Why an instance write did not happen (or happened in part).
 
 use super::ValidationError;
-use deno_core::anyhow::Error as AnyError;
+use anyhow::Error as AnyError;
 use serde::{Serialize, Serializer};
 use ts_rs::TS;
 

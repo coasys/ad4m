@@ -274,6 +274,10 @@ wasm-bindgen-futures = "0.4"
 wasmtimer = "0.4"
 # Utc::now / Local::now from the JS Date.
 chrono = { version = "0.4.6", features = ["serde", "wasmbind"] }
+# Features native gets from other crates (deno: fallible_uint; elliptic-curve: zeroize):
+# u64 values in SQLite rows (db.rs), Zeroizing over a digest (agent/sealed_box.rs).
+rusqlite = { version = "0.40.0", features = ["fallible_uint"] }
+generic-array = { version = "0.14", features = ["zeroize"] }
 
 [target.'cfg(all(not(target_env = "msvc"), not(target_arch = "wasm32")))'.dependencies]
 tikv-jemalloc-ctl = { version = "0.6", features = ["stats"] }

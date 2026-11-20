@@ -5,8 +5,8 @@ use super::core::{
 use crate::agent::capabilities::{AuthInfo, Capability};
 use crate::agent::signatures::verify_or_false;
 use crate::secret::Secret;
-use deno_core::anyhow::anyhow;
-use deno_core::error::AnyError;
+use anyhow::anyhow;
+use anyhow::Error as AnyError;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 

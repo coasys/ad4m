@@ -43,7 +43,7 @@
 pub mod linked_list;
 pub mod types;
 
-use deno_core::anyhow::{anyhow, Error};
+use anyhow::{anyhow, Error};
 
 pub use types::{
     make_pid, OrderingConfig, OrderingDiff, OrderingEntry, COLLECTION_ORDER_PREDICATE, LIST_HEAD,

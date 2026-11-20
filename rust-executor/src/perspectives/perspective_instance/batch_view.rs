@@ -24,7 +24,7 @@
 use super::PerspectiveInstance;
 use crate::db::link_identity;
 use crate::types::{DecoratedLinkExpression, Link, LinkExpression, LinkQuery};
-use deno_core::error::AnyError;
+use anyhow::Error as AnyError;
 use std::collections::{HashMap, HashSet};
 
 /// A link on a batch's effective graph — one entry per [`link_identity`], however many

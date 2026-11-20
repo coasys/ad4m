@@ -1,5 +1,8 @@
+// AI: not in the web executor (wasm32).
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod agent_session;
 #[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
 mod agent_session_tests;
 pub mod auto_processor;
 pub(crate) mod content_address;
@@ -18,10 +21,13 @@ pub(crate) mod hardwired_class;
 pub(crate) mod hosted_status;
 pub(crate) mod ingest;
 pub mod instances;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod interpretation;
 #[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
 mod interpretation_e2e;
 #[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
 mod interpretation_harness_e2e;
 // `pub(crate)` so test modules outside `perspectives` (e.g. the MCP flow
 // tools, which read flow state through the same loaders) can seed a real
@@ -30,6 +36,7 @@ mod interpretation_harness_e2e;
 #[cfg(test)]
 mod ingest_proof_tests;
 #[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod interpretation_test_support;
 pub mod memory_diagnostics;
 pub mod migration;
@@ -88,12 +95,10 @@ static FAIL_METADATA_SWEEP: std::sync::Mutex<Vec<String>> = std::sync::Mutex::ne
 
 /// Remove the links in the store's metadata vocabulary that `p`'s store holds
 /// (see [`sparql_store::SparqlStore::purge_link_metadata_links`]).
-fn sweep_link_metadata(p: &PerspectiveInstance) -> Result<usize, deno_core::anyhow::Error> {
+fn sweep_link_metadata(p: &PerspectiveInstance) -> Result<usize, anyhow::Error> {
     #[cfg(test)]
     if FAIL_METADATA_SWEEP.lock().unwrap().contains(&p.uuid) {
-        return Err(deno_core::anyhow::anyhow!(
-            "induced metadata-vocabulary sweep failure"
-        ));
+        return Err(anyhow::anyhow!("induced metadata-vocabulary sweep failure"));
     }
     p.sparql_store.purge_link_metadata_links()
 }

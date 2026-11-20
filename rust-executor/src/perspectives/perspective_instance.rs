@@ -32,9 +32,9 @@ use crate::types::{
     PerspectiveState, PerspectiveStateFilter,
 };
 use ad4m_client::literal::Literal;
+use anyhow::anyhow;
+use anyhow::Error as AnyError;
 use chrono::DateTime;
-use deno_core::anyhow::anyhow;
-use deno_core::error::AnyError;
 use futures::future;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -1178,7 +1178,7 @@ impl PerspectiveInstance {
     pub fn sync_existing_links_to_sparql(
         &self,
         links: &[DecoratedLinkExpression],
-    ) -> Result<(), deno_core::anyhow::Error> {
+    ) -> Result<(), anyhow::Error> {
         let link_exprs: Vec<LinkExpression> = links
             .iter()
             .map(|l| {
@@ -3847,7 +3847,7 @@ impl PerspectiveInstance {
     /// text is caller-supplied, so it uses `query_arbitrary` rather than
     /// `query` (no wire-format re-encoding of coincidentally-named
     /// `?target`/`?t` bindings; see `SparqlStore::query_arbitrary`).
-    pub fn sparql_query(&self, query: String) -> Result<String, deno_core::anyhow::Error> {
+    pub fn sparql_query(&self, query: String) -> Result<String, anyhow::Error> {
         self.sparql_query_stopped(&EvalStop::none(), &query)
     }
 
@@ -3858,7 +3858,7 @@ impl PerspectiveInstance {
         &self,
         stop: &EvalStop,
         query: &str,
-    ) -> Result<String, deno_core::anyhow::Error> {
+    ) -> Result<String, anyhow::Error> {
         self.sparql_store.query_arbitrary(stop, query)
     }
 
@@ -3904,7 +3904,7 @@ impl PerspectiveInstance {
         &self,
         stop: EvalStop,
         query: String,
-    ) -> Result<String, deno_core::anyhow::Error> {
+    ) -> Result<String, anyhow::Error> {
         self.sparql_store.query_cancellable(&stop, &query).await
     }
 
@@ -4187,7 +4187,7 @@ impl PerspectiveInstance {
         &self,
         class_name: &str,
         query_json: &str,
-    ) -> Result<String, deno_core::anyhow::Error> {
+    ) -> Result<String, anyhow::Error> {
         self.model_query_stopped(&EvalStop::none(), class_name, query_json)
             .await
     }
@@ -4199,7 +4199,7 @@ impl PerspectiveInstance {
         stop: &EvalStop,
         class_name: &str,
         query_json: &str,
-    ) -> Result<String, deno_core::anyhow::Error> {
+    ) -> Result<String, anyhow::Error> {
         let classes = super::model_query::QueryClasses::One(class_name.to_string());
         self.model_query_classes_within(stop, &classes, query_json, MODEL_QUERY_SHAPE_WAIT)
             .await
@@ -4210,7 +4210,7 @@ impl PerspectiveInstance {
         &self,
         classes: &super::model_query::QueryClasses,
         query_json: &str,
-    ) -> Result<String, deno_core::anyhow::Error> {
+    ) -> Result<String, anyhow::Error> {
         self.model_query_classes_within(
             &EvalStop::none(),
             classes,
@@ -4227,7 +4227,7 @@ impl PerspectiveInstance {
         stop: &EvalStop,
         classes: &super::model_query::QueryClasses,
         query_json: &str,
-    ) -> Result<String, deno_core::anyhow::Error> {
+    ) -> Result<String, anyhow::Error> {
         self.model_query_classes_within(stop, classes, query_json, MODEL_QUERY_SHAPE_WAIT)
             .await
     }
@@ -4240,7 +4240,7 @@ impl PerspectiveInstance {
         class_name: &str,
         query_json: &str,
         shape_wait: Duration,
-    ) -> Result<String, deno_core::anyhow::Error> {
+    ) -> Result<String, anyhow::Error> {
         let classes = super::model_query::QueryClasses::One(class_name.to_string());
         self.model_query_classes_within(&EvalStop::none(), &classes, query_json, shape_wait)
             .await
@@ -4255,9 +4255,9 @@ impl PerspectiveInstance {
         classes: &super::model_query::QueryClasses,
         query_json: &str,
         shape_wait: Duration,
-    ) -> Result<String, deno_core::anyhow::Error> {
+    ) -> Result<String, anyhow::Error> {
         let mut query_input: super::model_query::ModelQueryInput = serde_json::from_str(query_json)
-            .map_err(|e| deno_core::anyhow::anyhow!("Failed to parse model query: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to parse model query: {}", e))?;
 
         // `where.producedByFlow` is resolved here, not in the pipeline: it
         // needs the perspective (receipts, flow catalogue) and signature
@@ -4267,7 +4267,7 @@ impl PerspectiveInstance {
         // of N is N *valid* outputs, never N rows later thinned. Malformed or
         // mis-placed filters error rather than silently admit everything.
         let produced_by_flow = super::model_query::take_produced_by_flow(&mut query_input)
-            .map_err(deno_core::anyhow::Error::msg)?;
+            .map_err(anyhow::Error::msg)?;
 
         // Cross-peer safety: on a shared perspective we may be asked about
         // a class whose SHACL hasn't synced yet. Poll briefly rather than
@@ -4298,9 +4298,7 @@ impl PerspectiveInstance {
                 instances: vec![],
                 total_count: query_input.count.unwrap_or(false).then_some(0),
             })
-            .map_err(|e| {
-                deno_core::anyhow::anyhow!("Failed to serialize model query result: {}", e)
-            });
+            .map_err(|e| anyhow::anyhow!("Failed to serialize model query result: {}", e));
         }
         // A built-in's own rows (`Container`) are read through its view.
         let shapes = classes
@@ -4336,7 +4334,7 @@ impl PerspectiveInstance {
                 .map(|v| v.output.id)
                 .collect();
             if !super::model_query::constrain_ids(&mut query_input, allowed)
-                .map_err(deno_core::anyhow::Error::msg)?
+                .map_err(anyhow::Error::msg)?
             {
                 // No valid output survives; answer directly rather than
                 // handing the store an empty VALUES block.
@@ -4344,9 +4342,7 @@ impl PerspectiveInstance {
                     instances: vec![],
                     total_count: query_input.count.unwrap_or(false).then_some(0),
                 })
-                .map_err(|e| {
-                    deno_core::anyhow::anyhow!("Failed to serialize model query result: {}", e)
-                });
+                .map_err(|e| anyhow::anyhow!("Failed to serialize model query result: {}", e));
             }
         }
 
@@ -4407,9 +4403,8 @@ impl PerspectiveInstance {
         self.finish_container_rows(stop, named, &query_input, &mut result)
             .await?;
 
-        serde_json::to_string(&result).map_err(|e| {
-            deno_core::anyhow::anyhow!("Failed to serialize model query result: {}", e)
-        })
+        serde_json::to_string(&result)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize model query result: {}", e))
     }
 
     /// Evaluate property getters for a batch of instances in-process.
@@ -4420,7 +4415,7 @@ impl PerspectiveInstance {
         class_name: &str,
         instance_ids: &[String],
         property_names: Option<&[String]>,
-    ) -> Result<String, deno_core::anyhow::Error> {
+    ) -> Result<String, anyhow::Error> {
         self.evaluate_getters_stopped(&EvalStop::none(), class_name, instance_ids, property_names)
     }
 
@@ -4431,7 +4426,7 @@ impl PerspectiveInstance {
         class_name: &str,
         instance_ids: &[String],
         property_names: Option<&[String]>,
-    ) -> Result<String, deno_core::anyhow::Error> {
+    ) -> Result<String, anyhow::Error> {
         let shape = self.get_shape(class_name)?;
         let result = super::model_query::evaluate_getters_batch(
             stop,
@@ -4441,9 +4436,8 @@ impl PerspectiveInstance {
             property_names,
         )?;
 
-        serde_json::to_string(&result).map_err(|e| {
-            deno_core::anyhow::anyhow!("Failed to serialize evaluate_getters result: {}", e)
-        })
+        serde_json::to_string(&result)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize evaluate_getters result: {}", e))
     }
 
     /// Returns what `ad4m://retracted` tombstones did on the way in

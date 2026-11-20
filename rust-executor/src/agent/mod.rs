@@ -1,8 +1,8 @@
 use std::path;
 use std::sync::{Arc, Mutex};
 
-use deno_core::anyhow::anyhow;
-use deno_core::error::AnyError;
+use anyhow::anyhow;
+use anyhow::Error as AnyError;
 use serde::{Deserialize, Serialize};
 
 use crate::types::domain::Perspective;
