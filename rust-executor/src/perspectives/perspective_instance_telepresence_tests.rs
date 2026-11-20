@@ -246,17 +246,17 @@ fn offer() -> PerspectiveExpression {
 /// against today's `CallPolicy` (red: no cache, errors become mesh) and
 /// the fixed `Result<CallPolicy>` alike.
 trait AsPolicyResult {
-    fn as_result(self) -> Result<CallPolicy, AnyError>;
+    fn into_result(self) -> Result<CallPolicy, AnyError>;
 }
 
 impl AsPolicyResult for Result<CallPolicy, AnyError> {
-    fn as_result(self) -> Result<CallPolicy, AnyError> {
+    fn into_result(self) -> Result<CallPolicy, AnyError> {
         self
     }
 }
 
 impl AsPolicyResult for CallPolicy {
-    fn as_result(self) -> Result<CallPolicy, AnyError> {
+    fn into_result(self) -> Result<CallPolicy, AnyError> {
         Ok(self)
     }
 }
@@ -421,7 +421,7 @@ async fn a_broadcast_to_only_local_members_skips_the_language() {
 
     // One policy read verifies "all hosted" and caches that verdict.
     assert_eq!(
-        read_policy(&url).await.as_result().unwrap().mode,
+        read_policy(&url).await.into_result().unwrap().mode,
         "designated"
     );
 
@@ -565,7 +565,7 @@ async fn a_blocked_policy_check_serves_the_last_policy() {
     let first = timeout(Duration::from_secs(3), read_policy(&url))
         .await
         .expect("the first policy read waited on the language")
-        .as_result()
+        .into_result()
         .expect("the first policy read failed");
     assert_eq!(
         first.mode, "designated",
@@ -577,7 +577,7 @@ async fn a_blocked_policy_check_serves_the_last_policy() {
         let policy = timeout(Duration::from_secs(3), read_policy(&url))
             .await
             .unwrap_or_else(|_| panic!("policy read {i} waited on the blocked language"))
-            .as_result()
+            .into_result()
             .unwrap_or_else(|e| panic!("policy read {i} failed: {e}"));
         assert_eq!(
             policy.mode, "designated",
@@ -606,7 +606,7 @@ async fn a_failed_policy_check_without_an_earlier_one_errors() {
     let policy = timeout(Duration::from_secs(60), read_policy(&url))
         .await
         .expect("the policy read waited past its deadline")
-        .as_result();
+        .into_result();
     assert!(
         policy.is_err(),
         "a failed check with no earlier policy answered {policy:?} instead of an error"
@@ -644,7 +644,7 @@ async fn a_policy_read_without_a_link_language_stays_mesh() {
     let policy = timeout(Duration::from_secs(3), read_policy(&url))
         .await
         .expect("the policy read waited on something")
-        .as_result()
+        .into_result()
         .expect("a neighbourhood without a link language changed: it must not error");
     assert_eq!(policy.mode, "mesh");
 
@@ -739,7 +739,7 @@ async fn a_remote_member_who_joins_inside_the_cache_window_gets_the_next_signal(
     let instance = neighbourhood(&stub, vec![crate::agent::did()]).await;
     let url = instance.persisted.lock().await.shared_url.clone().unwrap();
     assert_eq!(
-        read_policy(&url).await.as_result().unwrap().mode,
+        read_policy(&url).await.into_result().unwrap().mode,
         "designated",
         "setup: everyone is local"
     );
@@ -866,7 +866,7 @@ async fn an_expired_policy_with_a_blocked_check_serves_the_last_policy() {
     let instance = neighbourhood(&stub, vec![crate::agent::did()]).await;
     let url = instance.persisted.lock().await.shared_url.clone().unwrap();
     assert_eq!(
-        read_policy(&url).await.as_result().unwrap().mode,
+        read_policy(&url).await.into_result().unwrap().mode,
         "designated",
         "setup: expected the honest policy"
     );
@@ -876,7 +876,7 @@ async fn an_expired_policy_with_a_blocked_check_serves_the_last_policy() {
     let policy = timeout(Duration::from_secs(3), read_policy(&url))
         .await
         .expect("a policy read past the cache's lifetime waited on the blocked language")
-        .as_result()
+        .into_result()
         .expect("a policy read past the cache's lifetime failed");
     assert_eq!(policy.mode, "designated");
 
@@ -888,7 +888,7 @@ async fn an_expired_policy_with_a_blocked_check_serves_the_last_policy() {
     let policy = timeout(Duration::from_secs(3), read_policy(&url))
         .await
         .expect("the policy read waited")
-        .as_result()
+        .into_result()
         .expect("the policy read failed");
     assert_eq!(policy.mode, "mesh", "the expired entry hid a remote member");
 
