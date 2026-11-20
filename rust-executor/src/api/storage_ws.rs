@@ -230,7 +230,7 @@ fn reencrypt_refusal(e: ReencryptError) -> WsRpcError {
         ReencryptError::UnknownStore => WsRpcError::not_found(e.to_string()),
         ReencryptError::Running(_) => WsRpcError::conflict(e.to_string()),
         ReencryptError::Keyring(e) => keyring_refusal(e),
-        e @ (ReencryptError::Rows(_) | ReencryptError::Files(_)) => {
+        e @ (ReencryptError::Rows(_) | ReencryptError::Files(_) | ReencryptError::Snapshot(_)) => {
             WsRpcError::internal(e.to_string())
         }
     }
@@ -268,6 +268,7 @@ async fn reencrypt(gate: Option<Arc<StorageGate>>, params: Value) -> Result<Valu
         match rotation::finish(
             &keys,
             &ExecutorRows,
+            &crate::perspective_snapshot::replace_snapshot,
             &languages,
             &job_store,
             version,

@@ -288,7 +288,7 @@ mod tests {
         version[28] ^= 1;
         assert!(matches!(
             open_archive(&keys, &version),
-            Err(ArchiveError::Keyring(KeyringError::UnknownStore))
+            Err(ArchiveError::Keyring(KeyringError::VersionRetired { .. }))
         ));
         let mut format = sealed.clone();
         format[8] = 2;

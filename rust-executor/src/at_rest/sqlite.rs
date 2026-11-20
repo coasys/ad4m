@@ -308,7 +308,7 @@ pub fn open_value(
     let (_, key) = keys
         .subkey(store, Some(version), SubkeyPurpose::Rows)
         .map_err(|e| match e {
-            KeyringError::UnknownStore => does_not_open(),
+            KeyringError::UnknownStore | KeyringError::VersionRetired { .. } => does_not_open(),
             other => SealError::Keyring(other),
         })?;
     let cipher = XChaCha20Poly1305::new_from_slice(key.expose_secret()).expect("32-byte key");

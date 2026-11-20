@@ -101,7 +101,9 @@ fn io_error(path: &Path, error: io::Error) -> LangStorageError {
     }
 }
 
-/// The one lock of the languages' files. Whoever replaces a language file holds it from the
+/// The one lock of the languages' files: one for the whole process, not one per store or per
+/// language, so a replace of any language's file waits for the replace of any other's.
+/// Whoever replaces a language file holds it from the
 /// moment it takes the key it seals under until the file is renamed into place: a language's
 /// write, the seal-again of a file read under another store or still in the clear, the
 /// re-encryption's seal-again of a file under an older key version, and the move from
@@ -111,9 +113,20 @@ fn io_error(path: &Path, error: io::Error) -> LangStorageError {
 /// version and has not published yet.
 static FILES: Mutex<()> = Mutex::new(());
 
+/// How many callers are blocked on the files lock now.
+static WAITING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// How many callers of [`exclusive`] wait for the files lock at this moment (a diagnostic:
+/// a test holding the lock reads it to know a job reached the lock, instead of sleeping).
+pub fn waiting() -> usize {
+    WAITING.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 /// Runs `f` while holding the languages' files lock.
 pub fn exclusive<T>(f: impl FnOnce() -> T) -> T {
+    WAITING.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let _held = FILES.lock().unwrap_or_else(|p| p.into_inner());
+    WAITING.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
     f()
 }
 
@@ -440,7 +453,9 @@ pub fn delete_storage(languages: &Path, address: &str) -> io::Result<usize> {
     if !folder.is_dir() {
         return Ok(0);
     }
-    delete_files_in(&folder, true)
+    // Under the files lock: a re-encryption's seal-again that checked a file before this
+    // delete and renames after it would bring the deleted file back.
+    exclusive(|| delete_files_in(&folder, true))
 }
 
 fn delete_files_in(dir: &Path, top: bool) -> io::Result<usize> {
@@ -798,7 +813,7 @@ pub(crate) fn migrate_with(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn open_keys(folder: &Path) -> Arc<DataKeys> {
@@ -888,6 +903,43 @@ mod tests {
         );
     }
 
+    /// Waits until a caller beyond the `before` that were waiting is blocked on the files
+    /// lock: the rendezvous of a test that holds it. Fails after ten seconds.
+    pub(crate) fn wait_for_waiter(before: usize) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while waiting() <= before {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "nobody waits for the files lock"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    /// A delete of a language's storage waits for a replace in flight: it does not unlink
+    /// before the lock is free, so a seal-again that checked a file before the delete cannot
+    /// rename it back after.
+    #[test]
+    fn a_delete_of_a_languages_storage_waits_for_the_files_lock() {
+        let data = tempfile::tempdir().unwrap();
+        let languages = data.path().join("languages");
+        let folder = languages.join("QmLanguageA");
+        std::fs::create_dir_all(&folder).unwrap();
+        let file = folder.join("kv.json");
+        std::fs::write(&file, b"data").unwrap();
+        std::thread::scope(|scope| {
+            let job = exclusive(|| {
+                let before = waiting();
+                let job = scope.spawn(|| delete_storage(&languages, "QmLanguageA"));
+                wait_for_waiter(before);
+                assert!(file.exists(), "nothing is unlinked while the lock is held");
+                job
+            });
+            assert_eq!(job.join().unwrap().unwrap(), 1);
+        });
+        assert!(!file.exists());
+    }
+
     /// A write that lands while the re-encryption seals a file again is kept: the replace
     /// waits for the write or sees it, it never overwrites it with the older content.
     #[test]
@@ -904,13 +956,15 @@ mod tests {
         keys.begin_store_rotation(&store).unwrap();
 
         // The test is the writer: it holds the files lock, the job has read the old file and
-        // waits for the lock, and the write lands before the job looks at the file again.
+        // is counted among the lock's waiters, and only then the write lands, before the job
+        // looks at the file again. A job that never waits for the lock never shows up as a
+        // waiter, and the test fails.
         let new = seal(&keys, &store, "QmLanguageA", "kv.json", b"new").unwrap();
         std::thread::scope(|scope| {
             let job = exclusive(|| {
+                let before = waiting();
                 let job = scope.spawn(|| reseal_store(&keys, &languages, &store));
-                std::thread::sleep(std::time::Duration::from_millis(300));
-                assert!(!job.is_finished(), "the job waits for the files lock");
+                wait_for_waiter(before);
                 files::write_atomic(&folder.join("kv.json"), &new).unwrap();
                 job
             });
