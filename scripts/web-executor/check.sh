@@ -10,9 +10,12 @@
 #    Prints `wasm32 link: ok` or `wasm32 link: failed`.
 # 3. The size of that Wasm, raw and gzip (-9), as cargo writes it: no wasm-bindgen and no
 #    wasm-opt pass.
+# 4. The link test crate's wasm-bindgen tests under Node (web-executor-link-test/tests/),
+#    when wasm-bindgen-test-runner is on the PATH; skipped otherwise.
 #
-# Exit 0 only when both pass. Uses CARGO_TARGET_DIR when it is set. The compiler output of
-# a failing step is in $LOG_DIR (default: a temporary directory, printed on failure).
+# Exit 0 only when the check, the link and the tests (if run) pass. Uses CARGO_TARGET_DIR
+# when it is set. The compiler output of a failing step is in $LOG_DIR (default: a temporary
+# directory, printed on failure).
 
 set -uo pipefail
 
@@ -56,5 +59,20 @@ RAW=$(wc -c <"$WASM")
 GZ=$(gzip -9 -c "$WASM" | wc -c)
 mib() { awk -v b="$1" 'BEGIN { printf "%.1f MiB", b / 1048576 }'; }
 echo "wasm32 size: raw $RAW bytes ($(mib "$RAW")), gzip $GZ bytes ($(mib "$GZ"))"
+
+# 4. Tests under Node.
+if command -v wasm-bindgen-test-runner >/dev/null 2>&1; then
+    if CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner \
+        cargo test -p web-executor-link-test --target "$TARGET" >"$LOG_DIR/test.log" 2>&1; then
+        PASSED=$(grep -oE '[0-9]+ passed' "$LOG_DIR/test.log" | awk '{ n += $1 } END { print n + 0 }')
+        echo "wasm32 tests: $PASSED passed"
+    else
+        echo "wasm32 tests: failed"
+        echo "  log: $LOG_DIR/test.log"
+        STATUS=1
+    fi
+else
+    echo "wasm32 tests: skipped (no wasm-bindgen-test-runner)"
+fi
 
 exit "$STATUS"
