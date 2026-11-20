@@ -152,6 +152,8 @@ impl PrepareLease {
         }
     }
 
+    /// Test-only. The lib build does not call it.
+    #[cfg(test)]
     pub(crate) fn clone_watcher(&self) -> Option<WatcherState> {
         self.slot.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
