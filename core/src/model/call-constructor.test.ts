@@ -1,7 +1,6 @@
 import { Ad4mModel } from "./Ad4mModel";
 import { HasMany, Model, Property } from "./decorators";
 import { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
-import { clearQueryCache } from "./query-cache";
 
 // A `call` constructor mints the record inside its language and
 // `perspective.createSubject` answers the minted URL (`<lang>://<id>`),
@@ -58,7 +57,6 @@ function callingProxy(createSubjectResult: boolean | string) {
 const writtenTo = (call: any[]) => call[3];
 
 describe("a call constructor's minted URL", () => {
-  beforeEach(() => clearQueryCache());
 
   it("createSubject returns the URL the RPC answered, not the input address", async () => {
     const { proxy } = callingProxy(MINTED);

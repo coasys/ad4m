@@ -58,6 +58,10 @@ import { isContainedScope, isContainmentTraversal, isTraverseScope } from "./typ
  */
 const SUBJECT_CLASS_KEY = '__subjectClass';
 
+/** {@link Ad4mModel.hasCallActions} per class: a class's shape is fixed once
+ *  it is declared. */
+const callActionsCache = new WeakMap<Function, boolean>();
+
 /**
  * The IRI the executor names `cls` by (`queriedAs`: its target class), or
  * `undefined` for something that is not a declared model class.
@@ -609,7 +613,11 @@ export class Ad4mModel {
   /** The target class IRI of this class (`sh:targetClass` of its shape),
    *  which the executor addresses it by. */
   static getTargetClass(): string {
-    const targetClass = this.generateSHACL().shape?.targetClass;
+    // A class from `fromSHACL` keeps the shape's own target class: its name
+    // need not be the IRI's local name (a mount's `MountThing` for
+    // `mounttest://Thing`), so the generated `namespace + name` is not it.
+    const source = Object.prototype.hasOwnProperty.call(this, 'sourceShape') ? (this as any).sourceShape : undefined;
+    const targetClass = source?.targetClass ?? this.generateSHACL().shape?.targetClass;
     if (!targetClass) throw new Error(`Class ${this.name} has no target class: declare it with @Model.`);
     return targetClass;
   }
@@ -1137,6 +1145,28 @@ export class Ad4mModel {
    * Shape resolution happens server-side from the perspective's SHACL triples.
    * @internal
    */
+  /**
+   * Whether this class's shape declares a language `call` action: a
+   * constructor, destructor, or a property's setter, adder or remover (a
+   * mounted class, whose records live in a language). Such a class writes
+   * through the validated `perspective.instance*` RPCs, which run the
+   * declared actions; every other class keeps its `executeAction` / subject
+   * writes. A class from {@link fromSHACL} answers from the shape it was
+   * made from.
+   */
+  static hasCallActions(): boolean {
+    if (!callActionsCache.has(this)) {
+      const shape = (this as any).sourceShape ?? this.generateSHACL().shape;
+      const calls = (actions?: any[]) => (actions ?? []).some((a) => a?.action === 'call');
+      callActionsCache.set(this, !!shape && (
+        calls(shape.constructor_actions) ||
+        calls(shape.destructor_actions) ||
+        (shape.properties ?? []).some((p: any) => calls(p.setter) || calls(p.adder) || calls(p.remover))
+      ));
+    }
+    return callActionsCache.get(this)!;
+  }
+
   /**
    * The IRI the executor addresses this class by: its target class, or a
    * built-in abstract class's URI (`ad4m://TextContent`, #1446). The URI is
@@ -1755,17 +1785,72 @@ export class Ad4mModel {
   }
 
   private async setProperty(key: string, value: any, batchId?: string) {
-    if (!batchId) {
-      // Validated write — the executor runs the property's declared setter
-      // (a mounted class's `call` setter reaches its language).
-      await this._perspective.instanceUpdate({
-        className: (this.constructor as typeof Ad4mModel).getClassName(),
-        baseUri: this._baseExpression,
-        properties: { [key]: value },
-      });
+    if (this.callBacked()) {
+      await this.instanceUpdate({ [key]: value }, batchId);
       return;
     }
     await this.sendWrites(await this.planProperty(key, value), batchId);
+  }
+
+  /** Whether this row writes through the validated `instance*` RPCs: its
+   *  class declares `call` actions ({@link Ad4mModel.hasCallActions}) and it
+   *  is not read through an abstract class (those dispatch per record). */
+  private callBacked(): boolean {
+    return !this.abstractName() && (this.constructor as typeof Ad4mModel).hasCallActions();
+  }
+
+  /** `perspective.instanceUpdate` on this row, under the class's target
+   *  class IRI (two classes may share a name, #1666). The executor runs each
+   *  property's declared setter; a collection is its full member list (`[]`
+   *  clears). A caller's batch is passed on: the executor refuses it when a
+   *  setter calls a language, since the batch cannot roll the call back. */
+  private async instanceUpdate(properties: Record<string, any>, batchId?: string) {
+    await this._perspective.instanceUpdate({
+      className: (this.constructor as typeof Ad4mModel).queriedAs(),
+      baseUri: this._baseExpression,
+      properties,
+      ...(batchId && { batchId }),
+    });
+  }
+
+  /** The members `key` holds now, as IDs, read fresh from the perspective:
+   *  an add or remove on a call-backed class is a full-list replace through
+   *  the declared setter, the only collection write its shape declares. */
+  private async currentMembers(key: string): Promise<string[]> {
+    const fresh = new (this.constructor as any)(this._perspective, this._baseExpression);
+    await fresh.get();
+    const members = fresh[key];
+    return Array.isArray(members) ? members.map((m: any) => this.resolveRelationId(m)) : [];
+  }
+
+  /** The member list `key` should hold after a relation write of `kind`
+   *  with `ids`: a setter's ids as given, an adder's or remover's applied
+   *  to the current members. */
+  private async membersAfter(key: string, kind: 'setter' | 'adder' | 'remover', ids: string[]): Promise<string[]> {
+    if (kind === 'setter') return ids;
+    const current = await this.currentMembers(key);
+    if (kind === 'adder') return [...current, ...ids.filter((id) => !current.includes(id))];
+    return current.filter((id) => !ids.includes(id));
+  }
+
+  /** A relation write on a call-backed row (see {@link callBacked}): a
+   *  forward collection is replaced through `instanceUpdate` with its full
+   *  member list, so a declared `call` setter reaches the language (an add or
+   *  remove included; `[]` clears). A `hasOne` goes as its scalar member. A
+   *  reverse relation, or a `hasOne` being cleared, keeps the legacy write. */
+  private async callRelation(key: string, kind: 'setter' | 'adder' | 'remover', value: any, batchId?: string) {
+    const relMeta = this.getRelationOptions(key);
+    const ids = (value == null ? [] : Array.isArray(value) ? value : [value]).map((v) => this.resolveRelationId(v));
+    const reverse = relMeta?.kind === "belongsToOne" || relMeta?.kind === "belongsToMany";
+    if (!reverse && relMeta?.kind !== "hasOne") {
+      await this.instanceUpdate({ [key]: await this.membersAfter(key, kind, ids) }, batchId);
+      return;
+    }
+    if (!reverse && kind !== 'remover' && ids.length > 0) {
+      await this.instanceUpdate({ [key]: ids[0] }, batchId);
+      return;
+    }
+    await this.sendWrites(this.planRelation(key, kind, value), batchId);
   }
 
   /** Resolve a relation argument to a plain string ID. Accepts either a raw
@@ -1805,43 +1890,19 @@ export class Ad4mModel {
 
   /** A relation setter, adder or remover call: on a row read through an
    *  abstract class it dispatches through the executor (see
-   *  {@link relationThroughAbstract}); unbatched it goes through the
-   *  `instance*` RPCs, batched through `executeAction` writes. */
+   *  {@link relationThroughAbstract}); on a call-backed class through
+   *  `instanceUpdate` ({@link callRelation}); otherwise its writes go out in
+   *  as few `executeAction` calls as {@link sendWrites} allows. */
   private async writeRelation(key: string, kind: 'setter' | 'adder' | 'remover', value: any, batchId?: string) {
     const predicate = this.getRelationOptions(key)?.predicate;
     if (predicate && kind !== 'remover') this._relationsWritten.add(predicate);
+    if (this.callBacked()) {
+      await this.callRelation(key, kind, value, batchId);
+      return;
+    }
     const abstractName = this.abstractName();
     if (!abstractName) {
-      if (batchId) {
-        await this.sendWrites(this.planRelation(key, kind, value), batchId);
-        return;
-      }
-      if (value == null) return;
-      // Validated write — a setter is the full member list (`[]` clears);
-      // an adder/remover is one incremental collection call per member. A
-      // `hasOne` goes as its scalar member — except a clear, which a scalar
-      // patch cannot express — and a reverse relation keeps the legacy
-      // `executeAction` write: the SHACL marks it read-only.
-      const className = (this.constructor as typeof Ad4mModel).getClassName();
-      const ids = (Array.isArray(value) ? value : [value]).map((v) => this.resolveRelationId(v));
-      const relMeta = this.getRelationOptions(key);
-      const forward = relMeta?.kind !== "belongsToOne" && relMeta?.kind !== "belongsToMany";
-      if (forward && relMeta?.kind !== "hasOne") {
-        if (kind === 'setter') {
-          await this._perspective.instanceUpdate({ className, baseUri: this._baseExpression, properties: { [key]: ids } });
-          return;
-        }
-        const method = kind === 'adder' ? 'instanceAddToCollection' : 'instanceRemoveFromCollection';
-        for (const itemUri of ids) {
-          await this._perspective[method]({ className, baseUri: this._baseExpression, collection: key, itemUri });
-        }
-        return;
-      }
-      if (forward && kind === 'setter' && ids.length > 0) {
-        await this._perspective.instanceUpdate({ className, baseUri: this._baseExpression, properties: { [key]: ids[0] } });
-        return;
-      }
-      await this.sendWrites(this.planRelation(key, kind, value));
+      await this.sendWrites(this.planRelation(key, kind, value), batchId);
       return;
     }
     if (!this.getRelationOptions(key)) {
@@ -1883,14 +1944,10 @@ export class Ad4mModel {
       const abstractName = this.abstractName();
       if (abstractName) {
         await this.perspective.updateSubject(abstractName, this._baseExpression, this.changedValuesForDispatch(), batchId);
-      } else if (batchId) {
-        // A caller's batch stays on the `executeAction` writes — the instance*
-        // RPCs would stage into it too, but the effective-graph reads and the
-        // no-changes-allowed rule (instanceUpdate refuses an empty patch)
-        // match this path's semantics exactly.
-        await this.innerUpdate(true, batchId);
+      } else if (this.callBacked()) {
+        await this.callUpdate(batchId);
       } else {
-        await this.instanceWrites();
+        await this.innerUpdate(true, batchId);
       }
       if (batchId) {
         // Batch hasn't been committed yet — getData() would fetch stale data
@@ -1912,72 +1969,34 @@ export class Ad4mModel {
         `a class that has its properties; querying '${name}' reads it.`
       );
     }
-    const metadata = (this.constructor as typeof Ad4mModel).getModelMetadata();
-
-    if (!batchId) {
-      // Unbatched: the validated `instanceCreate` — the executor checks the
-      // values against the class's registered shape, runs its lifecycle
-      // actions (a mounted class's `call` constructor mints the record in the
-      // language), and writes the collections its setters don't cover.
-      const properties: Record<string, any> = {};
-      const deferredRelations: string[] = [];
-      for (const [key, value] of Object.entries(this)) {
-        if (value === undefined || value === null || value?.action) continue;
-        const relMeta = metadata.relations[key];
-        if (relMeta) {
-          // The SHACL marks getter, readOnly and reverse relations unwritable;
-          // a reverse relation still gets the legacy write below, as before.
-          if (relMeta.getter || relMeta.readOnly) continue;
-          if (relMeta.direction === "reverse") {
-            deferredRelations.push(key);
-            continue;
-          }
-          const ids = (Array.isArray(value) ? value : [value]).map((v) => this.resolveRelationId(v));
-          if (ids.length === 0) continue;
-          // `hasOne` is a scalar in the shape; a collection is the member list.
-          properties[key] = this.getRelationOptions(key)?.kind === "hasOne" ? ids[0] : ids;
-          continue;
-        }
-        const propMeta = metadata.properties[key];
-        // Only offer keys with a declared, settable model property — ORM
-        // bookkeeping fields (_baseExpression, _perspective) and read-only
-        // properties/flags are excluded.
-        if (!propMeta || propMeta.readOnly) continue;
-        properties[key] = value;
-      }
-      const created = await this.perspective.instanceCreate({
-        className: (this.constructor as typeof Ad4mModel).getClassName(),
-        baseUri: this._baseExpression,
-        properties,
-      });
-      // A `call` constructor mints the record inside its language and the RPC
-      // answers the minted URL — that URL, not `_baseExpression`, is the
-      // instance's id.
-      this._baseExpression = created.baseUri;
-      // A relation field can hold an action envelope ({action, value}) — the
-      // instance calls below run it (the same dispatch writeRelation makes).
-      for (const key of deferredRelations) {
-        await this.writeRelation(key, 'setter', (this as any)[key]);
-      }
-      for (const [key, value] of Object.entries(this)) {
-        if (!metadata.relations[key] || !value?.action) continue;
-        const kind = value.action === "adder" || value.action === "remover" ? value.action : "setter";
-        await this.writeRelation(key, kind, value.value);
-      }
-      await this.getData();
+    if (this.callBacked()) {
+      await this.callCreate(batchId);
       return;
     }
+    let batchCreatedHere = false;
+    if(!batchId) {
+      batchId = await this.perspective.createBatch()
+      batchCreatedHere = true;
+    }
 
-    // Inside a caller's batch the writes stage through `executeAction` — the
-    // create-then-save-in-one-batch flow reads the batch's staged links.
-    const initialValues = {};
+    const metadata = (this.constructor as typeof Ad4mModel).getModelMetadata();
+
     // Track properties resolved through expression_create — a signed literal
     // envelope or a custom (non-"literal") resolveLanguage. These may fail
     // inside a batch context, so defer them to setProperty after createSubject.
     const deferredExpressionProps: string[] = [];
+
+    const initialValues = {};
     for (const [key, value] of Object.entries(this)) {
       if (value !== undefined && value !== null && !(Array.isArray(value) && value.length > 0) && !value?.action) {
         const propMeta = metadata.properties[key];
+        // Only offer keys with a declared, settable model property. This
+        // excludes ORM bookkeeping fields (_baseExpression, _perspective —
+        // enumerable instance fields, not model properties), relations
+        // (@HasOne also registers a property, but innerUpdate writes it as a
+        // relation), and read-only properties/flags (readOnly: true). None of
+        // these have an `ad4m://setter` on the Rust side, which otherwise logs
+        // a "declares no setter" warning per key on every save().
         if (!propMeta || propMeta.readOnly || metadata.relations[key]) {
           continue;
         }
@@ -2015,11 +2034,96 @@ export class Ad4mModel {
     }
     await this.sendWrites(writes, batchId);
 
+    // If we got a batchId passed in, we let the caller decide when to commit.
     // We can't call getData() since the instance won't exist in the perspective
-    // until the batch is committed. Take a snapshot so that a subsequent save()
-    // within the same batch routes through the UPDATE path instead of CREATE,
-    // avoiding duplicate links (e.g. two competing "title" values).
-    this.takeSnapshot();
+    // until the batch is committed.
+    if (batchCreatedHere) {
+      await this.perspective.commitBatch(batchId)
+      await this.getData();
+    } else {
+      // Take a snapshot so that a subsequent save() within the same batch
+      // routes through the UPDATE path instead of CREATE, avoiding duplicate
+      // links (e.g. two competing "title" values).
+      this.takeSnapshot();
+    }
+  }
+
+  /** Create on a call-backed class (see {@link callBacked}): one validated
+   *  `instanceCreate` under the class's target class IRI. The executor runs
+   *  the declared constructor — a `call` mints the record in its language
+   *  and answers the minted URL, which becomes this instance's id — and the
+   *  setters the shape declares. A reverse relation and an action envelope
+   *  are written after, through {@link writeRelation}. */
+  private async callCreate(batchId?: string) {
+    const ctor = this.constructor as typeof Ad4mModel;
+    const metadata = ctor.getModelMetadata();
+    const properties: Record<string, any> = {};
+    const deferred: [string, 'setter' | 'adder' | 'remover', any][] = [];
+    for (const [key, value] of Object.entries(this)) {
+      if (value === undefined || value === null) continue;
+      const relMeta = metadata.relations[key];
+      if (relMeta) {
+        if (relMeta.getter || relMeta.readOnly) continue;
+        if (value?.action) {
+          const kind = value.action === "adder" || value.action === "remover" ? value.action : "setter";
+          deferred.push([key, kind, value.value]);
+          continue;
+        }
+        if (relMeta.direction === "reverse") {
+          deferred.push([key, 'setter', value]);
+          continue;
+        }
+        const ids = (Array.isArray(value) ? value : [value]).map((v) => this.resolveRelationId(v));
+        if (ids.length === 0) continue;
+        properties[key] = this.getRelationOptions(key)?.kind === "hasOne" ? ids[0] : ids;
+        continue;
+      }
+      const propMeta = metadata.properties[key];
+      if (!propMeta || propMeta.readOnly) continue;
+      properties[key] = value;
+    }
+    const created = await this._perspective.instanceCreate({
+      className: ctor.queriedAs(),
+      baseUri: this._baseExpression,
+      properties,
+      ...(batchId && { batchId }),
+    });
+    this._baseExpression = created.baseUri;
+    for (const [key, kind, value] of deferred) {
+      await this.writeRelation(key, kind, value, batchId);
+    }
+    if (batchId) this.takeSnapshot();
+    else await this.getData();
+  }
+
+  /** Update on a call-backed class (see {@link callBacked}): the changed
+   *  fields as one `instanceUpdate` patch, so the declared setters run in one
+   *  grouped call. A forward collection is its full member list — `[]`
+   *  included, which clears it in the language; an adder or remover envelope
+   *  is applied to the current members first. A getter or readOnly relation
+   *  is not written; a reverse relation and a `hasOne` clear keep the legacy
+   *  write. A save with no change sends nothing. */
+  private async callUpdate(batchId?: string) {
+    const relations = (this.constructor as typeof Ad4mModel).getModelMetadata().relations;
+    const patch: Record<string, any> = {};
+    for (const [key, value] of Object.entries(this.changedValues())) {
+      const relMeta = relations[key];
+      if (!relMeta) {
+        patch[key] = value;
+        continue;
+      }
+      if (relMeta.getter || relMeta.readOnly) continue;
+      const kind = value?.action === "adder" || value?.action === "remover" ? value.action : "setter";
+      const members = value?.action ? value.value : value;
+      const ids = (members == null ? [] : Array.isArray(members) ? members : [members]).map((v) => this.resolveRelationId(v));
+      const scalar = this.getRelationOptions(key)?.kind === "hasOne";
+      if (relMeta.direction === "reverse" || (scalar && (kind === "remover" || ids.length === 0))) {
+        await this.sendWrites(this.planRelation(key, kind, members), batchId);
+        continue;
+      }
+      patch[key] = scalar ? ids[0] : await this.membersAfter(key, kind, ids);
+    }
+    if (Object.keys(patch).length > 0) await this.instanceUpdate(patch, batchId);
   }
 
   /** The name the executor knows the class by when it is abstract (#1435):
@@ -2052,51 +2156,6 @@ export class Ad4mModel {
         return [key, ids(value)];
       })
     );
-  }
-
-  /** The unbatched update writes: the changed fields as one `instanceUpdate`
-   *  patch plus the incremental collection calls an adder/remover envelope
-   *  asks for. A `hasMany` relation in the patch is the full member list
-   *  (`[]` clears); a `hasOne` is its scalar member. A reverse (`belongsTo*`),
-   *  getter or readOnly relation — the SHACL marks those read-only — keeps
-   *  the legacy `executeAction` write, as does a `hasOne` being cleared
-   *  (a scalar patch cannot express "no member"). An envelope keeps its
-   *  incremental semantics where the relation is a forward collection.
-   *  A no-change save makes no calls at all (`instanceUpdate` refuses an
-   *  empty patch, and there is nothing to refuse anyway). */
-  private async instanceWrites() {
-    const relations = (this.constructor as typeof Ad4mModel).getModelMetadata().relations;
-    const className = (this.constructor as typeof Ad4mModel).getClassName();
-    const patch: Record<string, any> = {};
-    const calls: Promise<any>[] = [];
-    for (const [key, value] of Object.entries(this.changedValues())) {
-      const relMeta = relations[key];
-      if (!relMeta || value == null) {
-        patch[key] = value;
-        continue;
-      }
-      if (relMeta.getter || relMeta.readOnly) continue;
-      const action = value.action === "adder" || value.action === "remover" ? value.action : "setter";
-      const members = value.action ? value.value : value;
-      const ids = (Array.isArray(members) ? members : [members]).map((v) => this.resolveRelationId(v));
-      const scalar = this.getRelationOptions(key)?.kind === "hasOne";
-      if (action !== "setter" && relMeta.direction !== "reverse" && !scalar) {
-        const method = action === "adder" ? "instanceAddToCollection" : "instanceRemoveFromCollection";
-        for (const itemUri of ids) {
-          calls.push(this._perspective[method]({ className, baseUri: this._baseExpression, collection: key, itemUri }));
-        }
-        continue;
-      }
-      if (action === "setter" && relMeta.direction !== "reverse" && ids.length > 0) {
-        patch[key] = scalar ? ids[0] : ids;
-        continue;
-      }
-      await this.sendWrites(this.planRelation(key, action, members));
-    }
-    if (Object.keys(patch).length > 0) {
-      await this._perspective.instanceUpdate({ className, baseUri: this._baseExpression, properties: patch });
-    }
-    await Promise.all(calls);
   }
 
   private cleanCopy() {
@@ -2373,6 +2432,17 @@ export class Ad4mModel {
    * ```
    */
   async delete(batchId?: string) {
+    if (this.callBacked()) {
+      // The executor runs the declared destructor (a `call` reaches the
+      // language), then removes the links left on the node. A caller's
+      // batch is refused there when the destructor calls.
+      await this._perspective.instanceRemove({
+        className: (this.constructor as typeof Ad4mModel).queriedAs(),
+        baseUri: this._baseExpression,
+        ...(batchId && { batchId }),
+      });
+      return;
+    }
     const metadata = (this.constructor as typeof Ad4mModel).getModelMetadata();
     // Through an abstract class (#1435), `removeSubject` runs the destructors
     // of the record's own classes.
@@ -2381,19 +2451,8 @@ export class Ad4mModel {
     );
 
     if (hasDestructor) {
-      if (!batchId) {
-        // Validated remove — the executor runs the declared destructor first
-        // (a mounted class's `call` destructor reaches its language), then
-        // cleans the links it does not own. Through an abstract class it
-        // dispatches to the record's own classes.
-        await this._perspective.instanceRemove({
-          className: this.abstractName() ?? (this.constructor as typeof Ad4mModel).getClassName(),
-          baseUri: this._baseExpression,
-        });
-      } else {
-        // Remove the subject itself (destructor actions)
-        await this._perspective.removeSubject(this, this._baseExpression, batchId);
-      }
+      // Remove the subject itself (destructor actions)
+      await this._perspective.removeSubject(this, this._baseExpression, batchId);
     } else {
       // No destructor (all-optional model).
       // SAFETY: We must NOT remove all outgoing links because another model
@@ -2804,6 +2863,10 @@ export class Ad4mModel {
   ): typeof Ad4mModel {
     const DynamicModelClass = class extends (this as any) {} as unknown as typeof Ad4mModel;
     (DynamicModelClass as any).className = name;
+    // The shape as registered, actions included: the class's generated shape
+    // carries link actions only, but a `call` constructor, setter or
+    // destructor decides how its writes go ({@link hasCallActions}).
+    (DynamicModelClass as any).sourceShape = shape;
     (DynamicModelClass.prototype as any).className = name;
 
     // Build a backward-compat fallback map: predicate → fixed-IRI-value from
