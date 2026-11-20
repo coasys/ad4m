@@ -616,6 +616,10 @@ impl LoopWakes {
 /// yet fetchable). A new link language on the handle retries at once.
 const LINK_LANGUAGE_RETRY_MIN: Duration = Duration::from_millis(500);
 const LINK_LANGUAGE_RETRY_MAX: Duration = Duration::from_secs(30);
+/// How long `online_agents` waits on the link language's roster call before
+/// answering the locally known users instead: the language runtime serves
+/// one call at a time, and a stalled call must not stall the roster.
+const ONLINE_AGENTS_LANGUAGE_TIMEOUT: Duration = Duration::from_secs(2);
 /// How long a notification check waits after the first changed link, so a
 /// burst of links is checked once.
 const NOTIFICATION_DEBOUNCE: Duration = Duration::from_millis(100);
@@ -4997,15 +5001,39 @@ impl PerspectiveInstance {
 
     pub async fn online_agents(&self) -> Result<Vec<OnlineAgent>, AnyError> {
         // Remote peers via the link language's telepresence adapter (when one is
-        // present — i.e. a real multi-executor neighbourhood).
+        // present — i.e. a real multi-executor neighbourhood). The language
+        // runtime serves one call at a time, so the call is time-boxed: a
+        // slow or stuck language call must not stall the roster. On timeout
+        // or error the locally known users still answer.
         let link_language_clone = self.link_language.read().await.clone();
         let has_link_language = link_language_clone.is_some();
+        let remote = match link_language_clone {
+            Some(mut link_language) => {
+                match time::timeout(
+                    ONLINE_AGENTS_LANGUAGE_TIMEOUT,
+                    link_language.get_online_agents(),
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => Err(anyhow!(
+                        "get_online_agents did not answer within {:?}",
+                        ONLINE_AGENTS_LANGUAGE_TIMEOUT
+                    )),
+                }
+            }
+            None => Ok(Vec::new()),
+        };
         // A remote multi-user node publishes its agents' statuses as one bundle;
         // `unpack` turns it back into one verified entry per agent.
-        let mut agents: Vec<OnlineAgent> = if let Some(mut link_language) = link_language_clone {
-            hosted_status::unpack(link_language.get_online_agents().await?)
-        } else {
-            Vec::new()
+        let (mut agents, remote_error): (Vec<OnlineAgent>, Option<AnyError>) = match remote {
+            Ok(remote_agents) => (hosted_status::unpack(remote_agents), None),
+            Err(e) => {
+                log::warn!(
+                    "online_agents: the link-language call failed or timed out ({e}); answering with co-located users only"
+                );
+                (Vec::new(), Some(e))
+            }
         };
 
         // Co-located multi-tenancy users: a neighbourhood's locally-managed
@@ -5033,13 +5061,18 @@ impl PerspectiveInstance {
         // source" error whenever there's no link language AND we found no
         // locally-online managed users. Callers (notably the auto-processor
         // watcher) rely on that error to fall through to their claim-based path
-        // rather than reading an empty set as "everyone is offline". We only
-        // diverge from the old link-language passthrough when we actually have
-        // co-located managed users to report. (A link language that returns an
-        // empty set is a genuine "nobody online" and stays `Ok(vec![])`, as
-        // before.)
-        if agents.is_empty() && !has_link_language {
-            return Err(self.no_link_language_error().await);
+        // rather than reading an empty set as "everyone is offline". A link
+        // language that answered an empty set is a genuine "nobody online" and
+        // stays `Ok(vec![])`; a link-language call that failed is "unknown",
+        // not "nobody online" — it surfaces its error as before, unless we
+        // actually have co-located managed users to report.
+        if agents.is_empty() {
+            if !has_link_language {
+                return Err(self.no_link_language_error().await);
+            }
+            if let Some(e) = remote_error {
+                return Err(e);
+            }
         }
 
         Ok(agents)
