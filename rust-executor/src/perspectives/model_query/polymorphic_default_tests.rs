@@ -987,3 +987,96 @@ async fn iri_flags_whose_names_sanitise_alike_each_check_their_own_link() {
         .collect();
     assert_eq!(ids, vec!["we://u/10"]);
 }
+
+/// [`emit_shapes`] and two more. `SpecialV` requires two valued properties
+/// whose names sanitise alike (`a-b` on `we://va`, `a_b` on `we://vb`).
+/// `SpecialL` is `Special`'s `we://kind` with the value `we://special_local`
+/// and a `local` getter-backed collection whose predicate
+/// `literal://string:abc` is not a parseable IRI: loading does not read it,
+/// but the class's status filter names it.
+fn collide_shapes() -> (StaticShapeResolver, Arc<ModelShape>, Arc<ModelShape>) {
+    let (resolver, holder, shelf) = emit_shapes();
+    for (name, json) in [
+        (
+            "SpecialV",
+            r#"{"className":"SpecialV","properties":{
+                 "a-b":{"predicate":"we://va","required":true},
+                 "a_b":{"predicate":"we://vb","required":true}
+               },"relations":{}}"#,
+        ),
+        (
+            "SpecialL",
+            r#"{"className":"SpecialL","properties":{
+                 "flag":{"predicate":"we://flag","required":true,"flag":true,"initial":"we://base"},
+                 "kind":{"predicate":"we://kind","required":true,"flag":true,"initial":"we://special_local"}
+               },"relations":{
+                 "odd":{"predicate":"literal://string:abc","kind":"hasMany","getter":"?source <we://none> ?target","local":true}
+               }}"#,
+        ),
+    ] {
+        resolver.register(name, parse_shape_from_json(json, name).unwrap());
+    }
+    (resolver, holder, shelf)
+}
+
+/// [`emit_world`], with `SpecialV` and `SpecialL` registered. `v/1` carries
+/// `we://va` and `we://vb` with different values, `v/2` with the same one.
+/// Holder `h/2` holds `u/13`, `Base` with the `we://kind` of `SpecialL`.
+fn collide_world() -> SparqlStore {
+    use super::link_status_tests::ls_link;
+    let signer = crate::agent::signatures::TestSigner::generate();
+    let store = emit_world();
+    let shared = |s: &str, p: &str, t: &str| ls_link(&signer, s, p, t, 1, LinkStatus::Shared);
+    for l in [
+        shared("we://models/SpecialV", "rdf://type", "ad4m://SubjectClass"),
+        shared("we://models/SpecialL", "rdf://type", "ad4m://SubjectClass"),
+        shared("we://v/1", "we://va", "literal://string:one"),
+        shared("we://v/1", "we://vb", "literal://string:two"),
+        shared("we://v/2", "we://va", "literal://string:same"),
+        shared("we://v/2", "we://vb", "literal://string:same"),
+        shared("we://h/2", "we://flag", "we://holder"),
+        shared("we://h/2", "we://holds", "we://u/13"),
+        shared("we://u/13", "we://flag", "we://base"),
+        shared("we://u/13", "we://kind", "we://special_local"),
+    ] {
+        store.add_link(&l).unwrap();
+    }
+    store
+}
+
+/// Two required valued properties whose names sanitise alike (`a-b`, `a_b`)
+/// each check their own link, whether their values differ or are equal.
+#[tokio::test]
+async fn valued_properties_whose_names_sanitise_alike_each_check_their_own_link() {
+    let (resolver, _, _) = collide_shapes();
+    let store = collide_world();
+    let special_v = super::types::ShapeResolver::get_shape(&resolver, "SpecialV").unwrap();
+    let result =
+        super::query::execute_model_query(&store, special_v.as_ref(), &q(json!({})), &resolver)
+            .await
+            .unwrap();
+    let mut ids: Vec<&str> = result
+        .instances
+        .iter()
+        .filter_map(|i| i["id"].as_str())
+        .collect();
+    ids.sort();
+    assert_eq!(ids, vec!["we://v/1", "we://v/2"]);
+}
+
+/// A class whose status filter names a `local` predicate that cannot be
+/// emitted as `<…>` cannot run its own query, so classification skips it:
+/// the read succeeds and `u/13` falls back to `Base`.
+#[tokio::test]
+async fn polymorphic_read_skips_a_class_with_an_unemittable_local_predicate() {
+    let (resolver, holder, _) = collide_shapes();
+    let store = collide_world();
+    let query = q(json!({ "where": { "id": "we://h/2" }, "include": { "items": true } }));
+    let result = super::query::execute_model_query(&store, holder.as_ref(), &query, &resolver)
+        .await
+        .expect("the read succeeds");
+    assert_eq!(
+        item_classes(&result.instances[0]["items"]),
+        pairs(&[("we://u/13", "Base")])
+    );
+}
