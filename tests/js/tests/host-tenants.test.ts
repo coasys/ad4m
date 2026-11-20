@@ -128,7 +128,10 @@ describe("Host: sign-up, invites, join, leave keeping or deleting the data, rejo
         holder = new Holder();
         await holder.send({ cmd: "connect", url: baseUrl(a.ports[0]), token: "" });
         did = (await holder.send({ cmd: "create" })).did;
-        h = await startNode("h", ADMIN_CREDENTIAL);
+        // A host asks for a vouching note beside the identity's log (check 8): A's device key
+        // attaches the note an email check gave.
+        await vouch.give("tok-host-tenants", "person-host@example.org");
+        await a.client.identity.attachNote("tok-host-tenants");        h = await startNode("h", ADMIN_CREDENTIAL);
         await h.client.runtime.setMultiUserEnabled(true);
     });
 
@@ -204,6 +207,24 @@ describe("Host: sign-up, invites, join, leave keeping or deleting the data, rejo
         expect((await session.perspective.all()).map((p) => p.uuid)).to.include(perspectiveUuid);
         // The operator's main agent does not see the tenant's perspective as its own.
         expect((await a.client.perspective.all()).map((p) => p.uuid)).to.not.include(perspectiveUuid);
+
+        // `host.usage` reports this tenant's own figures (AR-05 4.6): its one private
+        // perspective, link bytes in its storage, free access.
+        await created.add({ source: "ad4m://self", predicate: "test://has", target: "test://item" });
+        const usage = await session.host.usage();
+        expect(usage.privatePerspectives).to.equal(1);
+        expect(usage.spaces).to.have.length(0);
+        // The total stands for 15 minutes once measured (the join test measured it empty).
+        expect(usage.storage.usedBytes).to.be.at.least(0);
+        expect(usage.storage.measuredAt).to.match(/^\d{4}-\d\d-\d\dT/);
+        expect(usage.aiRuns.count).to.equal(0);
+        expect(usage.spend.freeAccess).to.equal(true);
+        expect(usage.spend.chargedSoFar).to.equal(0);
+
+        // The tenant's own data leaves as a file: its perspective and the link.
+        const file = await session.data.exportFile();
+        expect(file[0]).to.equal(0x1f);
+        expect(file[1]).to.equal(0x8b);
     });
 
     it("leave(keep): the tenant is detached, its sessions end, its device key is gone, the data stays", async () => {

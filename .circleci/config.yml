@@ -887,6 +887,38 @@ jobs:
           path: test-artifacts
           destination: test-logs
 
+  # An executor as a host (AR-05): sign-up setting, invites, join, use, leave keeping or
+  # deleting the data, the held tenant, usage, and export on one host with import on another.
+  # No Holochain. The suite builds identity-store and the holder example with cargo.
+  integration-tests-host-tenants:
+    machine: true
+    resource_class: coasys/marvin-light
+    steps:
+      - setup_integration_test_environment:
+          local: true
+      - run:
+          name: Run host-tenants integration tests (identity-store, a person's executor, hosts)
+          command: |
+            mkdir -p "${TEST_ARTIFACTS:?}"
+            set -o pipefail
+            cd ./tests/js && pnpm run test-main-host-tenants 2>&1 | tee "$TEST_ARTIFACTS/mocha.log"
+          no_output_timeout: 30m
+      - run:
+          name: Collect logs on failure
+          when: always
+          command: |
+            mkdir -p "${TEST_ARTIFACTS:?}"
+            shopt -s nullglob
+            for ad4m_dir in tests/js/tst-tmp/agents/*/ad4m; do
+              agent_id="$(basename "$(dirname "$ad4m_dir")")"
+              mkdir -p "$TEST_ARTIFACTS/$agent_id"
+              cp -r "$ad4m_dir/logs" "$TEST_ARTIFACTS/$agent_id/" 2>/dev/null || true
+            done
+      - store_artifacts:
+          when: always
+          path: test-artifacts
+          destination: test-logs
+
   # Multi-node suites that need Holochain: links syncing between executors
   # through p-diff-sync (tests/js/tests/integration.test.ts).
   integration-tests-multi-node-holochain:
@@ -1291,6 +1323,9 @@ workflows:
           requires:
             - build
       - integration-tests-identity:
+          requires:
+            - build
+      - integration-tests-host-tenants:
           requires:
             - build
       - integration-tests-multi-node-holochain:

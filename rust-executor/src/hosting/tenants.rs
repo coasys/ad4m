@@ -192,6 +192,34 @@ pub fn live_tenant_of(did_scid: &str) -> Result<Option<Tenant>, HostRefusal> {
         .transpose()
 }
 
+/// The live record whose device key is `device_did`: the tenant a session of that managed
+/// agent acts as.
+pub fn live_tenant_of_device(device_did: &str) -> Result<Option<Tenant>, HostRefusal> {
+    db_backend()
+        .live_tenant_of_device(device_did)
+        .map_err(db_err)?
+        .map(Tenant::of)
+        .transpose()
+}
+
+/// Whether a call by the managed agent `device_did` is admitted (AR-05 4.5.7, R64): a `Held`
+/// tenant's session may only read, export (`data.export*`), see its usage and leave; every
+/// other call answers `not-admitted`. `read` is whether the method is an idempotent read.
+/// Every other agent, and a tenant in any other state, is admitted here.
+pub fn admit_call(device_did: &str, method: &str, read: bool) -> Result<(), HostRefusal> {
+    let may = read
+        || method.starts_with("data.export")
+        || method == "host.usage"
+        || method == "host.leave";
+    if may {
+        return Ok(());
+    }
+    match live_tenant_of_device(device_did)? {
+        Some(t) if t.state == TenantState::Held => Err(HostRefusal::NotAdmitted),
+        _ => Ok(()),
+    }
+}
+
 /// Every live record.
 pub fn live_tenants() -> Result<Vec<Tenant>, HostRefusal> {
     db_backend()

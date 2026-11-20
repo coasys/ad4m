@@ -571,7 +571,7 @@ pub async fn remove_perspective(uuid: &str) -> Option<PerspectiveInstance> {
 
 /// The folder of perspective `uuid`'s files (its SPARQL store) under the data folder, when a
 /// data folder is set.
-fn perspective_dir(uuid: &str) -> Option<std::path::PathBuf> {
+pub(crate) fn perspective_dir(uuid: &str) -> Option<std::path::PathBuf> {
     get_app_data_path().map(|data_path| {
         std::path::Path::new(&data_path)
             .join("perspectives")

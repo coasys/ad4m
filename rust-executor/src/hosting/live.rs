@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use super::{ClaimFacts, HostEnv, HostEvent, HostRefusal, KeyStanding, LeaveResult, LogFacts};
 use crate::agent::{AgentContext, AgentService};
 use crate::at_rest::data_keys::DestroyReason;
-use crate::identity::cache::CacheError;
+use crate::identity::cache::{scid_from, CacheError};
 use crate::identity::types::OfferKind;
 
 /// The executor's real [`HostEnv`].
@@ -54,7 +54,7 @@ impl HostEnv for LiveEnv {
                 // A cached log answers a store that is down; none means no verdict.
                 let cached = service
                     .cache
-                    .chain(did_scid)
+                    .chain(scid_from(did_scid))
                     .await
                     .map_err(|_| HostRefusal::StoreUnreachable)?;
                 if cached.is_none() {
@@ -64,7 +64,8 @@ impl HostEnv for LiveEnv {
             }
         }
         Ok(LogFacts {
-            vouched: service.cache.vouched(did_scid),
+            // The cache keys its notes by the bare scid, not the DID.
+            vouched: service.cache.vouched(scid_from(did_scid)),
         })
     }
 
@@ -86,7 +87,23 @@ impl HostEnv for LiveEnv {
             db.add_user_prehashed(tenant_id, &did, &unusable_password_hash())
                 .map_err(db_error)?;
         } else {
+            // A rejoin: the kept data is owned by the key the tenant had. The new key takes
+            // its perspectives, notifications and flow bookkeeping over, as a re-key does.
+            let previous = db
+                .get_user(tenant_id)
+                .map(|user| user.did)
+                .ok()
+                .filter(|old| !old.is_empty() && *old != did);
             db.set_user_did(tenant_id, &did).map_err(db_error)?;
+            if let Some(old) = previous {
+                let failed = crate::identity::rekey::move_from_retired(&[old], &did).await;
+                if !failed.is_empty() {
+                    return Err(format!(
+                        "the kept data did not move to the new key: {}",
+                        failed.join("; ")
+                    ));
+                }
+            }
         }
         Ok((name, did))
     }
@@ -122,7 +139,7 @@ impl HostEnv for LiveEnv {
             Ok(key) => key,
             Err(_) => return KeyStanding::Gone,
         };
-        match service.cache.trusted(did_scid).await {
+        match service.cache.trusted(scid_from(did_scid)).await {
             Ok(Some((chain, head))) => {
                 let state = chain.state();
                 let Some(id) = state.device_key_id_of(&key).cloned() else {
@@ -142,7 +159,8 @@ impl HostEnv for LiveEnv {
 
     fn bind_device(&self, device_did: &str, did_scid: &str, now: u64) -> Result<(), String> {
         crate::db_backend::db_backend()
-            .set_agent_identity(device_did, did_scid, now)
+            // The binding is keyed by the bare scid, as key logins and `agents_of_identity` read it.
+            .set_agent_identity(device_did, scid_from(did_scid), now)
             .map_err(db_error)
     }
 

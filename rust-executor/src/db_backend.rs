@@ -443,6 +443,7 @@ macro_rules! ad4m_db_methods {
             fn insert_tenant(&self, tenant: &TenantRow) -> Ad4mDbResult<TenantInsert>;
             fn tenant(&self, id: &str) -> Ad4mDbResult<Option<TenantRow>>;
             fn live_tenant_of(&self, did_scid: &str) -> Ad4mDbResult<Option<TenantRow>>;
+            fn live_tenant_of_device(&self, device_did: &str) -> Ad4mDbResult<Option<TenantRow>>;
             fn live_tenants(&self) -> Ad4mDbResult<Vec<TenantRow>>;
             fn expired_pending_tenants(&self, now: u64) -> Ad4mDbResult<Vec<TenantRow>>;
             fn count_serving_tenants(&self) -> Ad4mDbResult<u32>;
@@ -459,6 +460,8 @@ macro_rules! ad4m_db_methods {
             fn revoke_invite(&self, id: &str) -> Ad4mDbResult<bool>;
             fn count_ai_run(&self, tenant_id: &str, day: &str) -> Ad4mDbResult<()>;
             fn ai_runs(&self, tenant_id: &str, day: &str) -> Ad4mDbResult<u64>;
+            fn link_bytes(&self, uuid: &str) -> Ad4mDbResult<u64>;
+            fn compute_charged(&self, agent_did: &str) -> Ad4mDbResult<f64>;
             fn delete_ai_runs(&self, tenant_id: &str) -> Ad4mDbResult<usize>;
             fn delete_user(&self, username: &str) -> Ad4mDbResult<bool>;
             fn unbind_agent_identity(&self, agent_did: &str) -> Ad4mDbResult<bool>;

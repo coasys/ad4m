@@ -8,8 +8,9 @@ use ts_rs::TS;
 
 use crate::agent::capabilities::*;
 use crate::hosting::live::LiveEnv;
+use crate::hosting::meter::{self, TenantUsage};
 use crate::hosting::policy::{self, HostPolicyPatch, HostPolicyView, SignupPolicy};
-use crate::hosting::tenants::{self, HostJoinStatus, JoinRequest, JoinResult, Tenant, TenantState};
+use crate::hosting::tenants::{self, HostJoinStatus, JoinRequest, JoinResult, Tenant};
 use crate::hosting::{HostEnv, HostRefusal, LeaveResult};
 use crate::types::RequestContext;
 
@@ -139,20 +140,6 @@ pub struct RemoveTenantResult {
     pub removed: bool,
 }
 
-/// `host.usage`: the tenant's own numbers (no limits; the host only meters).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export)]
-pub struct TenantUsage {
-    pub tenant_id: String,
-    pub state: String,
-    /// AI runs counted today (UTC).
-    #[ts(type = "number")]
-    pub ai_runs_today: u64,
-    #[ts(type = "number | null")]
-    pub activated_at: Option<u64>,
-}
-
 fn value<T: Serialize>(v: T) -> Result<Value, WsRpcError> {
     serde_json::to_value(v).map_err(|e| WsRpcError::internal(e.to_string()))
 }
@@ -165,13 +152,7 @@ fn params<T: serde::de::DeserializeOwned>(v: Value) -> Result<T, WsRpcError> {
 /// agent and any agent no record owns.
 fn session_tenant(ctx: &RequestContext) -> Result<Tenant, HostRefusal> {
     let did = ctx.user_did().ok_or(HostRefusal::NotATenant)?;
-    tenants::live_tenants()?
-        .into_iter()
-        .find(|t| {
-            matches!(t.state, TenantState::Active | TenantState::Held)
-                && t.row.device_did.as_deref() == Some(did)
-        })
-        .ok_or(HostRefusal::NotATenant)
+    tenants::live_tenant_of_device(did)?.ok_or(HostRefusal::NotATenant)
 }
 
 async fn info(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
@@ -204,17 +185,7 @@ async fn join_status(raw: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsR
 }
 
 async fn usage(_raw: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let t = session_tenant(&ctx)?;
-    let day = chrono::Utc::now().format("%Y-%m-%d").to_string();
-    let runs = crate::db_backend::db_backend()
-        .ai_runs(&t.row.id, &day)
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
-    value(TenantUsage {
-        tenant_id: t.row.id,
-        state: t.state.as_str().into(),
-        ai_runs_today: runs,
-        activated_at: t.row.activated_at,
-    })
+    value(meter::usage(&session_tenant(&ctx)?).await?)
 }
 
 async fn leave(raw: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {

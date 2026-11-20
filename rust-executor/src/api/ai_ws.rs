@@ -442,6 +442,7 @@ fn without_endpoint_urls(message: &str, endpoints: &[crate::types::Endpoint]) ->
 
 async fn ai_prompt(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_compute_credits_ws(ctx.user_did())?;
+    crate::hosting::meter::count_ai_run(ctx.user_did());
 
     // The task the guard checked.
     let task_id = PROMPT_TASK_ID.require(&params)?;
@@ -462,6 +463,7 @@ async fn ai_prompt(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
 
 async fn ai_embed(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_compute_credits_ws(ctx.user_did())?;
+    crate::hosting::meter::count_ai_run(ctx.user_did());
 
     let body: EmbedRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -490,6 +492,7 @@ async fn open_transcription_stream(
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
     check_compute_credits_ws(ctx.user_did())?;
+    crate::hosting::meter::count_ai_run(ctx.user_did());
 
     let body: AiTranscriptionOpenParams = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;

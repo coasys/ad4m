@@ -59,6 +59,12 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'host.leave': (p: Record<string, unknown>) => ({ kept: p.keepData, removedPerspectives: 0, leftSharedPerspectives: 0, keyDestroyedAt: null, shreddedEverywhereAt: null }),
     'host.createInvite': { inviteId: 'i-1', secret: 'c2VjcmV0', expiresAt: 9 },
     'host.removeTenant': { removed: true },
+    // ── Data ── (the file is the bytes of "abc")
+    'data.exportPrepare': { exportId: 'e1', size: 3, sha256: 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad', chunks: 1, expiresAt: 9 },
+    'data.exportChunk': { data: 'YWJj' },
+    'data.importBegin': { importId: 'i1' },
+    'data.importChunk': (p: Record<string, unknown>) => ({ chunks: (p.index as number) + 1 }),
+    'data.importCommit': { perspectives: [['a', 'b']], linksWritten: 1, linksInvalid: 0, neighbourhoodUrls: [] },
     // ── Bots ──
     'bot.createAgent': { did: 'did:key:z6MkBot', key: 'z6MkBot', owner: 'did:scid:coasys:1:QmTest', offerId: 'offer', matchCode: 'R7K Q2M', expires: 1, token: 'bot-token' },
     'bot.grant': { did: 'did:key:z6MkBot', name: 'helper', owner: 'did:scid:coasys:1:QmTest', offerId: 'offer', createdAt: 1, grant: { spaces: ['neighbourhood://Qm1'], can: ['read', 'write'], expires: null, state: 'active', version: 3, updatedAt: 1 }, key: null },
@@ -1414,6 +1420,29 @@ describe('HostClient', () => {
         expect(lastRpcCall!.params).toEqual({ expiresInDays: 3, note: 'for ada' });
         await ad4m.host.removeTenant('t1');
         expect(lastRpcCall!.params).toEqual({ tenantId: 't1' });
+    });
+});
+
+describe('DataClient', () => {
+    test('exportFile() prepares, reads every chunk and returns the checked bytes', async () => {
+        const file = await ad4m.data.exportFile(['p1']);
+        expect(Array.from(file)).toEqual([97, 98, 99]);
+        expect(lastRpcCall!.type).toBe('data.exportChunk');
+        expect(lastRpcCall!.params).toEqual({ exportId: 'e1', index: 0 });
+    });
+
+    test('importFile() declares size and hash, sends the chunks, then commits', async () => {
+        const imported = await ad4m.data.importFile(new Uint8Array([97, 98, 99]));
+        expect(lastRpcCall!.type).toBe('data.importCommit');
+        expect(lastRpcCall!.params).toEqual({ importId: 'i1' });
+        expect(imported.linksWritten).toBe(1);
+    });
+
+    test('importBegin() and importChunk() send their params', async () => {
+        await ad4m.data.importBegin(3, 'ab');
+        expect(lastRpcCall!.params).toEqual({ size: 3, sha256: 'ab' });
+        await ad4m.data.importChunk('i1', 0, 'YWJj');
+        expect(lastRpcCall!.params).toEqual({ importId: 'i1', index: 0, data: 'YWJj' });
     });
 });
 

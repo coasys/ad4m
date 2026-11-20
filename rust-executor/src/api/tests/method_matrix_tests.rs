@@ -761,6 +761,16 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
     ),
     ("host.joinStatus", || json!({ "joinHandle": "h" })),
     ("host.leave", || json!({ "keepData": true })),
+    (
+        "data.exportChunk",
+        || json!({ "exportId": "e", "index": 0 }),
+    ),
+    ("data.importBegin", || json!({ "size": 1, "sha256": "00" })),
+    (
+        "data.importChunk",
+        || json!({ "importId": "i", "index": 0, "data": "" }),
+    ),
+    ("data.importCommit", || json!({ "importId": "i" })),
     ("host.setPolicy", || json!({ "signup": "no_one" })),
     (
         "host.createInvite",

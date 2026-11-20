@@ -204,7 +204,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-285 methods: Cap 90, CapAnyPointer 1, Executor 48, Open 13, Operator 49, Owns 79, UserOrOperator 5. Local only (the operator on this machine): 17.
+290 methods: Cap 93, CapAnyPointer 3, Executor 48, Open 13, Operator 49, Owns 79, UserOrOperator 5. Local only (the operator on this machine): 17.
 
 | Method | Guard |
 |---|---|
@@ -276,6 +276,11 @@ the guard checked:
 | `bot.list` | `Executor(agent:READ)` |
 | `bot.log` | `Executor(agent:READ)` |
 | `bot.setGrant` | `Executor(agent:UPDATE)` |
+| `data.exportChunk` | `CapAnyPointer(perspective:READ)` |
+| `data.exportPrepare` | `CapAnyPointer(perspective:READ)` |
+| `data.importBegin` | `Cap(perspective:CREATE)` |
+| `data.importChunk` | `Cap(perspective:CREATE)` |
+| `data.importCommit` | `Cap(perspective:CREATE)` |
 | `expression.create` | `Cap(expression:CREATE)` |
 | `expression.get` | `Cap(expression:READ)` |
 | `expression.getMany` | `Cap(expression:READ)` |
