@@ -2570,6 +2570,7 @@ mod event_spec_tests {
                     encrypted_at_rest: false,
                     stores: None,
                     keyring_id: "00".repeat(16),
+                    keyring_exists: true,
                     secret_source: None,
                     secret_on_data_disk: None,
                     root_generation: None,
