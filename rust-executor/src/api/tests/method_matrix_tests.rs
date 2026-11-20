@@ -547,8 +547,6 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
     ),
     ("perspective.verifyFlowReceipt", || json!({ "receipt": {} })),
     ("perspective.flowValidOutputs", || json!({ "flow": "f" })),
-    ("perspective.getShaclTargetClass", || json!({ "name": "S" })),
-    ("perspective.getShacl", || json!({ "name": "S" })),
     ("perspective.update", || json!({ "name": "n" })),
     ("perspective.addLink", || json!({ "link": link() })),
     ("perspective.addLinkExpression", || {
@@ -576,10 +574,7 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
         "perspective.linkMutations",
         || json!({ "mutations": { "additions": [link()], "removals": [] } }),
     ),
-    (
-        "perspective.addSdna",
-        || json!({ "name": "C", "sdnaType": "subject_class" }),
-    ),
+    ("perspective.registerShapes", || json!({ "shapes": [] })),
     (
         "perspective.executeCommands",
         || json!({ "commands": "[]", "expression": "e" }),

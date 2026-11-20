@@ -125,7 +125,7 @@ async fn discard_batch_checks_the_update_capability() {
     assert_eq!(err.code, 403);
 }
 
-// ── perspective.getAllShacl { names } ───────────────────────────────────
+// ── perspective.registerShapes / perspective.shapes ───────────────────────────────────
 
 pub(crate) const TODO_SDNA: &str = r#"{
   "target_class": "test://Todo",
@@ -161,18 +161,14 @@ fn shape_names(reply: &Value) -> Vec<String> {
 }
 
 #[tokio::test]
-async fn get_all_shacl_without_names_returns_every_shape() {
+async fn shapes_without_names_returns_every_class() {
     let p = registered_perspective(&[("Todo", TODO_SDNA), ("Note", NOTE_SDNA)]).await;
-    let all = call(
-        "perspective.getAllShacl",
-        json!({ "uuid": p.0 }),
-        admin_ctx(),
-    )
-    .await
-    .unwrap();
+    let all = call("perspective.shapes", json!({ "uuid": p.0 }), admin_ctx())
+        .await
+        .unwrap();
     assert_eq!(shape_names(&all), vec!["Note", "Todo"]);
     let with_null = call(
-        "perspective.getAllShacl",
+        "perspective.shapes",
         json!({ "uuid": p.0, "names": null }),
         admin_ctx(),
     )
@@ -182,17 +178,13 @@ async fn get_all_shacl_without_names_returns_every_shape() {
 }
 
 #[tokio::test]
-async fn get_all_shacl_names_filters_the_reply() {
+async fn shapes_names_filters_the_reply() {
     let p = registered_perspective(&[("Todo", TODO_SDNA), ("Note", NOTE_SDNA)]).await;
-    let all = call(
-        "perspective.getAllShacl",
-        json!({ "uuid": p.0 }),
-        admin_ctx(),
-    )
-    .await
-    .unwrap();
+    let all = call("perspective.shapes", json!({ "uuid": p.0 }), admin_ctx())
+        .await
+        .unwrap();
     let only_todo = call(
-        "perspective.getAllShacl",
+        "perspective.shapes",
         json!({ "uuid": p.0, "names": ["Todo", "Unknown"] }),
         admin_ctx(),
     )
@@ -211,7 +203,7 @@ async fn get_all_shacl_names_filters_the_reply() {
     );
 
     let none = call(
-        "perspective.getAllShacl",
+        "perspective.shapes",
         json!({ "uuid": p.0, "names": [] }),
         admin_ctx(),
     )
@@ -231,56 +223,33 @@ const TAG_SDNA: &str = r#"{
   ]
 }"#;
 
-/// Names of a `getAllShacl` reply in the order the executor returned them.
-fn shape_names_in_order(reply: &Value) -> Vec<String> {
-    reply
-        .as_array()
-        .expect("array")
-        .iter()
-        .map(|e| e["name"].as_str().unwrap().to_string())
-        .collect()
-}
-
+/// The reply is sorted by class name, whatever order the names are asked in.
 #[tokio::test]
-async fn get_all_shacl_names_keeps_the_perspective_order() {
+async fn shapes_reply_is_sorted_by_name() {
     let p = registered_perspective(&[("Todo", TODO_SDNA), ("Note", NOTE_SDNA), ("Tag", TAG_SDNA)])
         .await;
-    let all = call(
-        "perspective.getAllShacl",
-        json!({ "uuid": p.0 }),
-        admin_ctx(),
-    )
-    .await
-    .unwrap();
-    let all_names = shape_names_in_order(&all);
-    assert_eq!(all_names.len(), 3, "{all_names:?}");
-
-    // Ask for two of the three, in the reverse of the perspective's order:
-    // the reply follows the perspective, not the request.
-    let unwanted = &all_names[1];
-    let mut requested: Vec<&String> = all_names.iter().filter(|n| *n != unwanted).collect();
-    requested.reverse();
     let filtered = call(
-        "perspective.getAllShacl",
-        json!({ "uuid": p.0, "names": requested }),
+        "perspective.shapes",
+        json!({ "uuid": p.0, "names": ["Todo", "Note"] }),
         admin_ctx(),
     )
     .await
     .unwrap();
-    let expected: Vec<String> = all_names
+    let names: Vec<&str> = filtered
+        .as_array()
+        .unwrap()
         .iter()
-        .filter(|n| *n != unwanted)
-        .cloned()
+        .map(|e| e["name"].as_str().unwrap())
         .collect();
-    assert_eq!(shape_names_in_order(&filtered), expected);
+    assert_eq!(names, vec!["Note", "Todo"]);
 }
 
 #[tokio::test]
-async fn get_all_shacl_rejects_malformed_names() {
+async fn shapes_rejects_malformed_names() {
     let p = registered_perspective(&[]).await;
     for bad in [json!("Todo"), json!([1]), json!({ "a": 1 })] {
         let err = call(
-            "perspective.getAllShacl",
+            "perspective.shapes",
             json!({ "uuid": p.0, "names": bad }),
             admin_ctx(),
         )
@@ -288,6 +257,67 @@ async fn get_all_shacl_rejects_malformed_names() {
         .expect_err("malformed names");
         assert_eq!(err.code, 400);
     }
+}
+
+/// Over the wire: a registered shape reads back through `perspective.shapes`
+/// as the shape `registerShapes` was given, and registering it again writes
+/// nothing.
+#[tokio::test]
+async fn register_shapes_then_shapes_round_trips() {
+    let p = registered_perspective(&[]).await;
+    let todo: Value = serde_json::from_str(TODO_SDNA).unwrap();
+    let first = call(
+        "perspective.registerShapes",
+        json!({ "uuid": p.0, "shapes": [todo.clone()] }),
+        admin_ctx(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(first["written"], json!(["test://Todo"]));
+    assert_eq!(first["unchanged"], json!([]));
+
+    let shapes = call("perspective.shapes", json!({ "uuid": p.0 }), admin_ctx())
+        .await
+        .unwrap();
+    assert_eq!(shape_names(&shapes), vec!["Todo"]);
+    let stored = &shapes[0]["shape"];
+    assert_eq!(stored["target_class"], todo["target_class"]);
+    assert_eq!(
+        stored["constructor_actions"], todo["constructor_actions"],
+        "{stored}"
+    );
+    assert_eq!(
+        stored["properties"][0]["setter"],
+        todo["properties"][0]["setter"]
+    );
+
+    let again = call(
+        "perspective.registerShapes",
+        json!({ "uuid": p.0, "shapes": [todo] }),
+        admin_ctx(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(again["written"], json!([]));
+    assert_eq!(again["unchanged"], json!(["test://Todo"]));
+    assert_eq!(again["generation"], first["generation"]);
+}
+
+#[tokio::test]
+async fn register_shapes_refuses_an_encoder_refusal_with_400() {
+    let p = registered_perspective(&[]).await;
+    let err = call(
+        "perspective.registerShapes",
+        json!({ "uuid": p.0, "shapes": [{ "target_class": "test://X", "properties": [
+            { "path": "test://a", "name": "a" },
+            { "path": "test://b", "name": "a" }
+        ] }] }),
+        admin_ctx(),
+    )
+    .await
+    .expect_err("duplicate property name");
+    assert_eq!(err.code, 400);
+    assert!(err.message.contains("twice"), "{}", err.message);
 }
 
 // ── agent.byDIDs ────────────────────────────────────

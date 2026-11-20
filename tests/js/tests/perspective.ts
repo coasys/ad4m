@@ -322,7 +322,7 @@ export default function perspectiveTests(testContext: TestContext) {
                 // the links here, since the agent's own links never mention it.
                 const me = 'did:test:me'
                 try {
-                    await p.ensureSubjectClass(WakerNote)
+                    await WakerNote.register(p)
                     await manager.subscribe({
                         id: 'waker-mention-parents',
                         type: 'mention',

@@ -34,7 +34,9 @@ use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClas
 use crate::types::{Link, LinkExpression, LinkQuery, LinkStatus};
 
 use super::scalar_string;
-use crate::perspectives::hardwired_class::{ensure_subject_class, subject_class_registered};
+use crate::perspectives::hardwired_class::{
+    ensure_subject_classes, subject_class_registered, HardwiredClass,
+};
 
 /// Instances already reported as unloadable, so each is complained about once.
 ///
@@ -101,11 +103,9 @@ fn log_flow_selection_once(cfg: &AutoProcessorConfig) {
     }
 }
 
-/// Local subject-class name of a processor config.
-pub(crate) const AUTO_PROCESSOR_CLASS: &str = "AutoProcessor";
-/// Target-class URI of [`AUTO_PROCESSOR_CLASS`] — used to detect prior
-/// registration.
-const AUTO_PROCESSOR_TARGET_CLASS: &str = "ad4m://AutoProcessor";
+/// The subject class of a processor config, by its IRI: an app class named
+/// `AutoProcessor` is another class.
+pub(crate) const AUTO_PROCESSOR_CLASS: &str = "ad4m://AutoProcessor";
 
 /// Hard-wired SDNA for the [`AUTO_PROCESSOR_CLASS`] subject class.
 ///
@@ -440,25 +440,25 @@ pub fn processor_node(processor_id: &str) -> String {
 }
 
 /// Idempotently register the hard-wired [`AUTO_PROCESSOR_CLASS`] subject class.
-/// Refreshes the SHACL if an older registration predates the `source_class`
-/// selection: `ad4m://flow` cannot be the marker — the pre-`source_class`
-/// shape already carries it for `flows`, so an old stored shape would pass
-/// the freshness check and its missing setters would silently drop every new
-/// field a processor is written with.
 pub async fn ensure_auto_processor_class(
     perspective: &mut PerspectiveInstance,
     context: &AgentContext,
 ) -> anyhow::Result<()> {
-    ensure_subject_class(
-        perspective,
-        AUTO_PROCESSOR_CLASS,
-        AUTO_PROCESSOR_TARGET_CLASS,
-        AUTO_PROCESSOR_SDNA,
-        Some("ad4m://source_class"),
-        context,
-    )
-    .await
+    ensure_subject_classes(perspective, &[AUTO_PROCESSOR], context).await
 }
+
+/// The hard-wired `AutoProcessor` class. `source_class` is its newest property
+/// and `source_scope_query` is one a later revision removed: a stored shape
+/// missing the first or still declaring the second is older. `ad4m://flow`
+/// cannot be the newest-path marker — the pre-`source_class` shape already
+/// carries it for `flows`, so an old stored shape would pass that check and
+/// its missing setters would silently drop every new field a processor is
+/// written with.
+pub(crate) const AUTO_PROCESSOR: HardwiredClass = HardwiredClass {
+    sdna: AUTO_PROCESSOR_SDNA,
+    newest_path: Some("ad4m://source_class"),
+    removed_path: Some("ad4m://source_scope_query"),
+};
 
 /// Register the class if needed, then mint the processor as a subject instance.
 /// Writing the same `processor_id` twice overwrites its scalars (the setters
@@ -596,7 +596,13 @@ pub async fn write_processor(
            state, and a local-only class list would make one peer's view of what to extract differ
            from everyone else's.
         */
+        // Each class is stored by its target class IRI: a bare name reads the
+        // least IRI of that name, which a class registered later can change.
+        // A class not registered yet is stored as given.
         for class in cfg.interpretation_classes.iter() {
+            let class = perspective
+                .get_shape(class)
+                .map_or_else(|_| class.clone(), |s| s.target_class.clone());
             perspective
                 .add_link(
                     Link {
@@ -743,7 +749,7 @@ pub async fn load_processors(
 ) -> anyhow::Result<Vec<AutoProcessorConfig>> {
     // The watcher polls this on every perspective, most of which never declare
     // a processor: no registered class ⇒ no shape to query ⇒ nothing to load.
-    if !subject_class_registered(perspective, AUTO_PROCESSOR_TARGET_CLASS).await? {
+    if !subject_class_registered(perspective, AUTO_PROCESSOR_CLASS).await? {
         return Ok(Vec::new());
     }
     // Property names MUST match the camelCase names in AUTO_PROCESSOR_SDNA
@@ -1096,23 +1102,18 @@ mod tests {
     /// must be gone afterwards, not just joined by the new paths.
     #[tokio::test]
     async fn write_processor_upgrades_a_stored_old_shape() {
-        use crate::perspectives::hardwired_class::shacl_path_present;
-        use crate::perspectives::perspective_instance::SdnaType;
-
         let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
-        p.add_sdna(
-            AUTO_PROCESSOR_CLASS.to_string(),
-            String::new(),
-            SdnaType::SubjectClass,
-            Some(OLD_AUTO_PROCESSOR_SDNA.to_string()),
-            &ctx,
-        )
-        .await
-        .expect("store old shape");
+        p.register_shape_json(OLD_AUTO_PROCESSOR_SDNA, &ctx)
+            .await
+            .expect("store old shape");
+        let declares = |p: &PerspectiveInstance, path: &str| {
+            p.shapes(Some(vec![AUTO_PROCESSOR_CLASS.to_string()]))
+                .expect("shapes")
+                .iter()
+                .any(|s| s.shape.properties.iter().any(|prop| prop.path == path))
+        };
         assert!(
-            shacl_path_present(&p, AUTO_PROCESSOR_TARGET_CLASS, "ad4m://source_scope_query")
-                .await
-                .expect("shacl_path_present"),
+            declares(&p, "ad4m://source_scope_query"),
             "fixture check: the stored shape is the old one"
         );
 
@@ -1122,15 +1123,11 @@ mod tests {
             .expect("write_processor");
 
         assert!(
-            shacl_path_present(&p, AUTO_PROCESSOR_TARGET_CLASS, "ad4m://source_class")
-                .await
-                .expect("shacl_path_present"),
+            declares(&p, "ad4m://source_class"),
             "the write must refresh the stored shape to the current SDNA"
         );
         assert!(
-            !shacl_path_present(&p, AUTO_PROCESSOR_TARGET_CLASS, "ad4m://source_scope_query")
-                .await
-                .expect("shacl_path_present"),
+            !declares(&p, "ad4m://source_scope_query"),
             "the refresh replaces the shape — no `source_scope_query` left"
         );
         let loaded = load_processors(&p).await.expect("load_processors");
@@ -1320,7 +1317,7 @@ mod tests {
             vec![Link {
                 source: processor_node("partial"),
                 predicate: Some("rdf://type".into()),
-                target: AUTO_PROCESSOR_TARGET_CLASS.into(),
+                target: AUTO_PROCESSOR_CLASS.into(),
             }],
             LinkStatus::Shared,
             None,
@@ -1524,6 +1521,38 @@ mod tests {
         assert_eq!(
             loaded[0].interpretation_classes,
             vec!["ns://Question".to_string(), "ns://Task".to_string()]
+        );
+    }
+
+    /// A class is stored by its target class IRI. A bare name reads only the
+    /// least IRI of its name, and which that is changes as classes of the
+    /// name register: the processor keeps the class it was configured with.
+    /// A class not registered yet is stored as given.
+    #[tokio::test]
+    async fn interpretation_classes_are_stored_by_iri() {
+        let task = |ns: &str| {
+            format!(
+                r#"{{"target_class":"{ns}://Task","constructor_actions":[{{"action":"addLink","source":"this","predicate":"rdf://type","target":"{ns}://Task"}}],"properties":[]}}"#
+            )
+        };
+        let (b, c) = (task("b"), task("c"));
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("Task", &b), ("Task", &c)]).await;
+        let mut cfg = sample_config("by-iri");
+        cfg.interpretation_classes = vec!["Task".into(), "c://Task".into(), "ns://Later".into()];
+        write_processor(&mut p, &cfg, Some(false), &ctx)
+            .await
+            .expect("write");
+        p.register_shape_json(&task("a"), &ctx)
+            .await
+            .expect("a://Task");
+        let loaded = load_processors(&p).await.expect("load");
+        assert_eq!(
+            loaded[0].interpretation_classes,
+            vec![
+                "b://Task".to_string(),
+                "c://Task".to_string(),
+                "ns://Later".to_string()
+            ]
         );
     }
 
@@ -1974,7 +2003,7 @@ mod tests {
                 Link {
                     source: processor_node("no-text"),
                     predicate: Some("rdf://type".into()),
-                    target: AUTO_PROCESSOR_TARGET_CLASS.into(),
+                    target: AUTO_PROCESSOR_CLASS.into(),
                 },
                 Link {
                     source: processor_node("no-text"),

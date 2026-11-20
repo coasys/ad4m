@@ -696,12 +696,12 @@ const MESSAGE_SDNA_BODY2: &str = r#"{
 /// the pending queue is drained of it — before the fix the kept read was
 /// trusted for as long as only schema writes landed.
 ///
-/// The write goes through `add_sdna` — the production commit path — because
-/// a raw `sparql_store` write takes the unclassifiable fallback and would
-/// mark the read stale by accident, hiding the bug it tests for.
+/// The write goes through `register_shape_json` — the production commit
+/// path — because a raw `sparql_store` write takes the unclassifiable
+/// fallback and would mark the read stale by accident, hiding the bug it
+/// tests for.
 #[tokio::test]
 async fn a_schema_write_stales_the_kept_transcript() {
-    use crate::perspectives::perspective_instance::SdnaType;
     use crate::types::{Link, LinkStatus};
 
     let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
@@ -748,15 +748,9 @@ async fn a_schema_write_stales_the_kept_transcript() {
         "an unrelated write must not re-read the kept transcript"
     );
 
-    p.add_sdna(
-        "ns://Message".into(),
-        String::new(),
-        SdnaType::SubjectClass,
-        Some(MESSAGE_SDNA_V2.into()),
-        &ctx,
-    )
-    .await
-    .expect("add_sdna");
+    p.register_shape_json(MESSAGE_SDNA_V2, &ctx)
+        .await
+        .expect("register_shape_json");
     p.run_auto_processor_tick(&mut watcher, now_ms + 1000, &ctx)
         .await;
     assert_eq!(
@@ -774,15 +768,9 @@ async fn a_schema_write_stales_the_kept_transcript() {
     // stale the read: with `body` moved to `ns://body2` the old rules still
     // watch `ns://body`, and a data write on the new predicate would match
     // nothing — neither wake nor stale (#1795).
-    p.add_sdna(
-        "ns://Message".into(),
-        String::new(),
-        SdnaType::SubjectClass,
-        Some(MESSAGE_SDNA_BODY2.into()),
-        &ctx,
-    )
-    .await
-    .expect("add_sdna body2");
+    p.register_shape_json(MESSAGE_SDNA_BODY2, &ctx)
+        .await
+        .expect("register_shape_json body2");
     p.run_auto_processor_tick(&mut watcher, now_ms + 1500, &ctx)
         .await;
     let reads = transcript_queries(&p);
@@ -865,10 +853,10 @@ async fn a_shape_detail_edit_stales_the_kept_transcript() {
         "resolveLanguage on an instance property URI is data, not schema"
     );
 
-    // A local write on the shape's property node — `ns://ns://Message.type`
-    // here (the fixture names the class by URI) — is the stored shape. The
-    // flag property declares no `resolveLanguage`, so the shape the tick
-    // reads shows whether it took the edit.
+    // A local write on the shape's property node — `ns://Message.type`
+    // here (`{namespace}{ClassName}.{name}` for `ns://Message`'s `type`) —
+    // is the stored shape. The flag property declares no `resolveLanguage`,
+    // so the shape the tick reads shows whether it took the edit.
     let type_language = |p: &PerspectiveInstance| {
         p.get_shape("ns://Message")
             .expect("shape")
@@ -880,7 +868,7 @@ async fn a_shape_detail_edit_stales_the_kept_transcript() {
     assert_eq!(type_language(&p), None);
     p.add_link(
         Link {
-            source: "ns://ns://Message.type".into(),
+            source: "ns://Message.type".into(),
             predicate: Some("ad4m://resolveLanguage".into()),
             target: "literal:string:literal".into(),
         },
@@ -909,7 +897,7 @@ async fn a_shape_detail_edit_stales_the_kept_transcript() {
     // the tick drains, so the property node already answers as a shape.
     let signer = crate::agent::signatures::TestSigner::generate();
     let data = crate::types::Link {
-        source: "ns://ns://Message.body".into(),
+        source: "ns://Message.body".into(),
         predicate: Some("ad4m://transform".into()),
         target: "literal:string:{}".into(),
     }
@@ -970,7 +958,7 @@ async fn a_schema_write_seen_before_its_feed_entry_is_read_under_the_new_shape()
     // Straight into the store: no feed entry, no cache drop.
     let mut schema = crate::types::LinkExpression::from(
         crate::agent::signatures::TestSigner::generate().sign(crate::types::Link {
-            source: "ns://ns://Message.type".into(),
+            source: "ns://Message.type".into(),
             predicate: Some("ad4m://resolveLanguage".into()),
             target: "literal:string:literal".into(),
         }),
@@ -1031,7 +1019,7 @@ async fn a_first_tick_after_a_schema_entry_it_never_saw_reads_the_new_shape() {
     // Written and broadcast, but the writer has not dropped the cache yet.
     let mut schema = crate::types::LinkExpression::from(
         crate::agent::signatures::TestSigner::generate().sign(crate::types::Link {
-            source: "ns://ns://Message.type".into(),
+            source: "ns://Message.type".into(),
             predicate: Some("ad4m://resolveLanguage".into()),
             target: "literal:string:literal".into(),
         }),
@@ -1101,9 +1089,9 @@ async fn a_tick_inside_a_diff_still_being_written_drains_nothing() {
         l.status = Some(LinkStatus::Shared);
         l
     };
-    let label = "ns://ns://Message.label";
+    let label = "ns://Message.label";
     let first_half = [
-        link("ns://ns://MessageShape", "sh://property", label),
+        link("ns://MessageShape", "sh://property", label),
         link(label, "rdf://type", "sh://PropertyShape"),
         link(label, "sh://path", "ns://label"),
     ];
@@ -1169,14 +1157,11 @@ async fn a_tick_inside_a_diff_still_being_written_drains_nothing() {
 fn peer_shape_diff(sdna_json: &str) -> crate::types::PerspectiveDiff {
     let signer = crate::agent::signatures::TestSigner::generate();
     crate::types::PerspectiveDiff {
-        additions: crate::perspectives::shacl_parser::parse_shacl_to_links(
-            sdna_json,
-            "ns://Message",
-        )
-        .expect("shape links")
-        .into_iter()
-        .map(|l| crate::types::LinkExpression::from(signer.sign(l.normalize())))
-        .collect(),
+        additions: crate::perspectives::shacl_parser::parse_shacl_to_links(sdna_json, "Message")
+            .expect("shape links")
+            .into_iter()
+            .map(|l| crate::types::LinkExpression::from(signer.sign(l.normalize())))
+            .collect(),
         removals: vec![],
     }
 }

@@ -29,6 +29,7 @@ use super::types::{
     ShapeRelation, ShapeResolver, WhereCondition,
 };
 use super::utils::{validate_iri, values_or_str_filter};
+use crate::perspectives::shacl_parser::class_name_of;
 use crate::perspectives::sparql_store::{EvalStop, SparqlStore};
 use crate::types::LinkStatus;
 
@@ -244,7 +245,7 @@ fn reject_untyped_without_polymorphic(
     rel: &ShapeRelation,
     sub_query: &ModelQueryInput,
 ) -> Result<(), Error> {
-    if rel.target_class_name.is_empty() && !sub_query.polymorphic.unwrap_or(false) {
+    if rel.target().is_empty() && !sub_query.polymorphic.unwrap_or(false) {
         return Err(anyhow!(
             "include on relation '{}': the relation declares no target class, so its \
              targets cannot be hydrated. Either give it a target, or read it with \
@@ -256,7 +257,8 @@ fn reject_untyped_without_polymorphic(
 }
 
 /// The JSON key carrying each polymorphically-hydrated instance's concrete
-/// class, so the TypeScript layer can construct the right model class for it.
+/// class, by target class IRI (two classes may share a name), so the
+/// TypeScript layer can construct the right model class for it.
 ///
 /// Half of a wire contract: the reader is `SUBJECT_CLASS_KEY` in
 /// `core/src/model/Ad4mModel.ts`, and the two are separate literals in separate
@@ -267,10 +269,10 @@ fn reject_untyped_without_polymorphic(
 pub(crate) const SUBJECT_CLASS_KEY: &str = "__subjectClass";
 
 /// The JSON key carrying every class a polymorphically-hydrated instance
-/// conforms to, most specific first — the whole set [`SUBJECT_CLASS_KEY`] names
-/// only the head of.
+/// conforms to, by target class IRI, most specific first — the whole set
+/// [`SUBJECT_CLASS_KEY`] names only the head of.
 ///
-/// Always present, even where it holds a single name. A key that appeared only
+/// Always present, even where it holds a single class. A key that appeared only
 /// when a target was ambiguous would be one every consumer had to guard, to
 /// learn something a one-element array says just as well.
 ///
@@ -290,7 +292,7 @@ pub(crate) const SUBJECT_CLASSES_KEY: &str = "__subjectClasses";
 /// per group against that group's own shape. The cost is one query per *distinct
 /// class present*, not per instance.
 ///
-/// Each instance carries its class name back under [`SUBJECT_CLASS_KEY`], which
+/// Each instance carries its target class IRI back under [`SUBJECT_CLASS_KEY`], which
 /// is what lets the caller construct the matching model class rather than the
 /// one the relation declared.
 ///
@@ -344,18 +346,30 @@ pub(crate) const SUBJECT_CLASSES_KEY: &str = "__subjectClasses";
 pub(super) fn choose<'a>(matched: &'a [String], preferred: &[String]) -> Option<&'a String> {
     preferred
         .iter()
-        .find_map(|want| matched.iter().find(|have| *have == want))
+        .find_map(|want| {
+            matched
+                .iter()
+                .find(|have| *have == want || class_name_of(have) == *want)
+        })
         .or_else(|| matched.first())
 }
 
 /// Every class in `matched`, in the order [`choose`] picks from: the caller's
-/// preferred classes the target conforms to, then the rest by specificity.
-/// The head is what `choose` returns.
+/// preferred classes the target conforms to (each matched by IRI or by name,
+/// as `choose` matches them), then the rest by specificity. The head is what
+/// `choose` returns.
 fn candidates(matched: &[String], preferred: &[String]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    for class in preferred.iter().chain(matched) {
-        if matched.contains(class) && !out.contains(class) {
-            out.push(class.clone());
+    for want in preferred {
+        for have in matched {
+            if (have == want || class_name_of(have) == *want) && !out.contains(have) {
+                out.push(have.clone());
+            }
+        }
+    }
+    for have in matched {
+        if !out.contains(have) {
+            out.push(have.clone());
         }
     }
     out
@@ -374,7 +388,9 @@ async fn hydrate_polymorphic(
 ) -> Result<(), Error> {
     // `limit`/`offset` were refused before either resolver ran — see
     // `reject_pagination_on_polymorphic`. Nothing to check here.
-    let classes = crate::perspectives::subject_classes_of::subject_classes_of(
+    // By class IRI: two classes may share a name, and each target hydrates
+    // through the class it conforms to.
+    let classes = crate::perspectives::subject_classes_of::subject_class_iris_of(
         stop, store, resolver, target_ids,
     )?;
 
@@ -386,7 +402,7 @@ async fn hydrate_polymorphic(
     // whichever the caller asked for, falling back to the most specific.
     // The rest are not lost: they ride back on the instance below.
     //
-    // `subject_classes_of` reads every link, where the group query reads only
+    // `subject_class_iris_of` reads every link, where the group query reads only
     // the links `linkStatus` / `includeUnverified` admit. A target classified
     // through a link the read does not admit (a Local type link under a Shared
     // read) is not returned by its class's query; it is retried as its next
@@ -395,7 +411,7 @@ async fn hydrate_polymorphic(
     let preferred = sub_query.prefer_classes.as_deref().unwrap_or(&[]);
     let mut pending: Vec<(String, Vec<String>)> = Vec::new();
     for id in target_ids {
-        match classes.get(id).map(|names| candidates(names, preferred)) {
+        match classes.get(id).map(|iris| candidates(iris, preferred)) {
             Some(cands) if !cands.is_empty() => pending.push((id.clone(), cands)),
             _ => {
                 // A target matching no registered class is skipped rather than
@@ -420,11 +436,11 @@ async fn hydrate_polymorphic(
                 .push(id.clone());
         }
 
-        for (class_name, ids) in by_class {
-            let target_shape = match resolver.get_shape(&class_name) {
+        for (class, ids) in by_class {
+            let target_shape = match resolver.get_shape(&class) {
                 Ok(s) => s,
                 Err(e) => {
-                    log::warn!("polymorphic include: no shape for '{class_name}': {e}");
+                    log::warn!("polymorphic include: no shape for '{class}': {e}");
                     continue;
                 }
             };
@@ -451,17 +467,15 @@ async fn hydrate_polymorphic(
             for mut inst in result.instances {
                 if let Some(id) = inst["id"].as_str().map(|s| s.to_string()) {
                     if let Some(obj) = inst.as_object_mut() {
-                        obj.insert(
-                            SUBJECT_CLASS_KEY.to_string(),
-                            Value::String(class_name.clone()),
-                        );
+                        obj.insert(SUBJECT_CLASS_KEY.to_string(), Value::String(class.clone()));
                         // The readings this one was chosen over. Costs nothing to
                         // return — the classification that picked the head had to
                         // produce the whole set to rank it.
                         let all = classes
                             .get(&id)
+                            .filter(|all| !all.is_empty())
                             .cloned()
-                            .unwrap_or_else(|| vec![class_name.clone()]);
+                            .unwrap_or_else(|| vec![class.clone()]);
                         obj.insert(
                             SUBJECT_CLASSES_KEY.to_string(),
                             Value::Array(all.into_iter().map(Value::String).collect()),
@@ -737,7 +751,7 @@ async fn resolve_forward_include(
         // `resolve_includes_recursive` has refused an untyped relation that is
         // not polymorphic (`reject_untyped_without_polymorphic`), so the target
         // class named here is never empty.
-        let target_shape = resolver.get_shape(&rel.target_class_name)?;
+        let target_shape = resolver.get_shape(rel.target())?;
         if let Some(page) = &page {
             let parent_ids: Vec<String> = instances
                 .iter()
@@ -940,7 +954,7 @@ async fn resolve_reverse_include(
         } else {
             // As on the forward path: an untyped relation was refused by
             // `reject_untyped_without_polymorphic`, so the class is never empty.
-            let target_shape = resolver.get_shape(&rel.target_class_name)?;
+            let target_shape = resolver.get_shape(rel.target())?;
             if let Some(page) = &page {
                 // The sources were read above over the same predicate and
                 // under the same link guard as the scope's step, so the scope
@@ -1218,5 +1232,39 @@ mod per_parent_tests {
             q.where_clause.as_ref().and_then(|w| w.get("id")),
             Some(WhereCondition::StringArray(ids)) if ids == &vec!["we://c/1".to_string()]
         ));
+    }
+}
+
+#[cfg(test)]
+mod candidates_tests {
+    use super::*;
+
+    /// `hydrate_polymorphic` tries a target's classes in `candidates` order,
+    /// so its first try must be the class `choose` picks: a preferred key
+    /// matches a class IRI or that class's name.
+    #[test]
+    fn candidates_start_with_what_choose_picks() {
+        let s = |v: &[&str]| v.iter().map(|c| c.to_string()).collect::<Vec<_>>();
+        let matched = s(&["app://ImagePost", "a://Post", "b://Post"]);
+        for (preferred, want) in [
+            (s(&[]), s(&["app://ImagePost", "a://Post", "b://Post"])),
+            (
+                s(&["Post"]),
+                s(&["a://Post", "b://Post", "app://ImagePost"]),
+            ),
+            (
+                s(&["b://Post"]),
+                s(&["b://Post", "app://ImagePost", "a://Post"]),
+            ),
+            (
+                s(&["Missing", "ImagePost", "Post"]),
+                s(&["app://ImagePost", "a://Post", "b://Post"]),
+            ),
+        ] {
+            let got = candidates(&matched, &preferred);
+            assert_eq!(got, want, "preferred {preferred:?}");
+            assert_eq!(got.first(), choose(&matched, &preferred), "{preferred:?}");
+        }
+        assert!(candidates(&[], &s(&["Post"])).is_empty());
     }
 }

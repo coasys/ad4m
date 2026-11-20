@@ -11,13 +11,13 @@ import {
     Optional,
     Model,
     Property,
+    PerspectiveProxy,
 } from "@coasys/ad4m";
 import { TestContext } from './integration.test'
 
-// Exercises the four server-side SHACL resolution endpoints added in PR #935
-// (perspective.getShaclNames / getShaclTargetClass / getShacl / getAllShacl).
-// Runs inside the shared "Integration tests" executor via integration.test.ts
-// — no separate executor spin-up, same pattern as perspective.ts / ai.ts.
+// Class registration over the executor: perspective.registerShapes and
+// perspective.shapes. Runs inside the shared "Integration tests" executor via
+// integration.test.ts, same pattern as perspective.ts / ai.ts.
 
 @Model({ name: "Message" })
 class ShaclMessage extends Ad4mModel {
@@ -40,17 +40,25 @@ class ShaclTodo extends Ad4mModel {
     comments: string[] = [];
 }
 
+/** Every link of the perspective with its author and timestamp: a link
+ *  removed and added back again shows as changed. */
+async function snapshot(perspective: PerspectiveProxy): Promise<string[]> {
+    return (await perspective.get(new LinkQuery({})))
+        .map((l) => JSON.stringify([l.data.source, l.data.predicate ?? "", l.data.target, l.author, l.timestamp]))
+        .sort();
+}
+
 export default function shaclRpcTests(testContext: TestContext) {
     return () => {
-        describe("SHACL RPC endpoints (perspective.getShacl*)", () => {
+        describe("Class registration (perspective.registerShapes / shapes)", () => {
             // Own perspective (not the one used by other suites in this run)
             // so the "before any class is registered" assertions aren't
-            // polluted by SDNA classes other test suites may have registered.
+            // polluted by classes other test suites may have registered.
             let perspectiveUuid: string;
+            const perspective = async () => (await testContext.ad4mClient.perspective.byUUID(perspectiveUuid))!;
 
             before(async () => {
-                const perspective = await testContext.ad4mClient.perspective.add("shacl-rpc-endpoints");
-                perspectiveUuid = perspective.uuid;
+                perspectiveUuid = (await testContext.ad4mClient.perspective.add("shacl-rpc-endpoints")).uuid;
             });
 
             after(async () => {
@@ -59,297 +67,264 @@ export default function shaclRpcTests(testContext: TestContext) {
                 }
             });
 
-            describe("before any SHACL class is registered", () => {
-                it("getShaclNames() returns []", async () => {
-                    const perspective = await testContext.ad4mClient.perspective.byUUID(perspectiveUuid);
-                    expect(await perspective!.getShaclNames()).to.deep.equal([]);
+            async function withPerspective(name: string, body: (p: PerspectiveProxy) => Promise<void>) {
+                const p = await testContext.ad4mClient.perspective.add(name);
+                try {
+                    await body(p);
+                } finally {
+                    await testContext.ad4mClient.perspective.remove(p.uuid);
+                }
+            }
+
+            describe("before any class is registered", () => {
+                it("shapes() returns []", async () => {
+                    expect(await (await perspective()).shapes()).to.deep.equal([]);
                 });
 
-                it("getAllShacl() returns []", async () => {
-                    const perspective = await testContext.ad4mClient.perspective.byUUID(perspectiveUuid);
-                    expect(await perspective!.getAllShacl()).to.deep.equal([]);
-                });
-
-                it("getShaclTargetClass('Todo') returns undefined", async () => {
-                    const perspective = await testContext.ad4mClient.perspective.byUUID(perspectiveUuid);
-                    expect(await perspective!.getShaclTargetClass("Todo")).to.be.undefined;
-                });
-
-                it("getShacl('Todo') returns null", async () => {
-                    const perspective = await testContext.ad4mClient.perspective.byUUID(perspectiveUuid);
-                    expect(await perspective!.getShacl("Todo")).to.be.null;
+                it("shapes(['Todo']) returns []", async () => {
+                    expect(await (await perspective()).shapes(["Todo"])).to.deep.equal([]);
                 });
             });
 
             describe("after registering Message + Todo", () => {
                 before(async () => {
-                    const perspective = await testContext.ad4mClient.perspective.byUUID(perspectiveUuid);
-                    await perspective!.ensureSDNASubjectClass(ShaclMessage);
-                    await perspective!.ensureSDNASubjectClass(ShaclTodo);
+                    const result = await Ad4mModel.registerAll(await perspective(), [ShaclMessage, ShaclTodo]);
+                    expect(result.written).to.deep.equal(["ad4m://Message", "todo://Todo"]);
+                    expect(result.unchanged).to.deep.equal([]);
                 });
 
-                it("getShaclNames() returns the two registered names", async () => {
-                    const perspective = await testContext.ad4mClient.perspective.byUUID(perspectiveUuid);
-                    const names = await perspective!.getShaclNames();
-                    // Order not guaranteed — the executor returns names in the
-                    // order they appear in the perspective's has_shacl link scan.
-                    expect(names.slice().sort()).to.deep.equal(["Message", "Todo"]);
+                it("shapes() returns both classes, sorted by name, each with a hash", async () => {
+                    const all = await (await perspective()).shapes();
+                    expect(all.map((s) => s.name)).to.deep.equal(["Message", "Todo"]);
+                    // The namespace of the first property names the class.
+                    expect(all.map((s) => s.shape.targetClass)).to.deep.equal(["ad4m://Message", "todo://Todo"]);
+                    for (const { hash } of all) expect(hash).to.match(/^[0-9a-f]{64}$/);
                 });
 
-                it("getShaclTargetClass() resolves each registered name to the class URI", async () => {
-                    const perspective = await testContext.ad4mClient.perspective.byUUID(perspectiveUuid);
-                    // Namespace inference walks the first @Property/@Flag predicate:
-                    //   Message: `ad4m://type`  → ns `ad4m://` → target `ad4m://Message`
-                    //   Todo:    `todo://state` → ns `todo://` → target `todo://Todo`
-                    expect(await perspective!.getShaclTargetClass("Message")).to.equal("ad4m://Message");
-                    expect(await perspective!.getShaclTargetClass("Todo")).to.equal("todo://Todo");
+                it("shapes(names) returns only the named classes, equal to the unfiltered read's", async () => {
+                    const p = await perspective();
+                    const all = await p.shapes();
+                    const some = await p.shapes(["Todo", "DoesNotExist"]);
+                    expect(some.map((s) => s.name)).to.deep.equal(["Todo"]);
+                    expect(some[0].hash).to.equal(all.find((s) => s.name === "Todo")!.hash);
+                    expect(await p.shapes([])).to.deep.equal([]);
                 });
 
-                it("getShaclTargetClass() returns undefined for an unknown name", async () => {
-                    const perspective = await testContext.ad4mClient.perspective.byUUID(perspectiveUuid);
-                    expect(await perspective!.getShaclTargetClass("DoesNotExist")).to.be.undefined;
+                it("the stored Todo is the shape the model generates", async () => {
+                    const [todo] = await (await perspective()).shapes(["Todo"]);
+                    expect(todo.shape.nodeShapeUri).to.equal("todo://TodoShape");
+                    const byName = Object.fromEntries(todo.shape.properties.map((p) => [p.name, p]));
+                    expect(Object.keys(byName).sort()).to.deep.equal(["comments", "state", "title"]);
+                    expect(byName.state.path).to.equal("todo://state");
+                    expect(byName.title.path).to.equal("todo://has_title");
+                    expect(byName.comments.path).to.equal("todo://comment");
+                    expect(byName.comments.collection).to.equal(true);
+                    expect(byName.state.collection).to.not.equal(true);
                 });
 
-                it("getShacl('Todo') returns a SHACLShape with the expected shape URI + target class", async () => {
-                    const perspective = await testContext.ad4mClient.perspective.byUUID(perspectiveUuid);
-                    const shape = await perspective!.getShacl("Todo");
-                    expect(shape).to.not.be.null;
-                    expect(shape!.nodeShapeUri).to.equal("todo://TodoShape");
-                    expect(shape!.targetClass).to.equal("todo://Todo");
-
-                    const propByName: Record<string, any> = {};
-                    for (const p of shape!.properties) {
-                        if (p.name) propByName[p.name] = p;
-                    }
-                    // Todo declares three properties across three decorator kinds.
-                    expect(Object.keys(propByName).sort()).to.deep.equal(["comments", "state", "title"]);
-
-                    // @Property({through: "todo://state"}) — scalar, path matches.
-                    expect(propByName.state.path).to.equal("todo://state");
-                    // @Optional({through: "todo://has_title", resolveLanguage:"literal"})
-                    expect(propByName.title.path).to.equal("todo://has_title");
-                    // @HasMany({through: "todo://comment"}) — collection, path only.
-                    expect(propByName.comments.path).to.equal("todo://comment");
-                });
-
-                it("getShacl('Message') reconstructs a shape with the Flag + Optional properties", async () => {
-                    const perspective = await testContext.ad4mClient.perspective.byUUID(perspectiveUuid);
-                    const shape = await perspective!.getShacl("Message");
-                    expect(shape).to.not.be.null;
-                    expect(shape!.nodeShapeUri).to.equal("ad4m://MessageShape");
-                    expect(shape!.targetClass).to.equal("ad4m://Message");
-
-                    const names = shape!.properties
-                        .map((p) => p.name)
-                        .filter((n): n is string => Boolean(n))
-                        .sort();
-                    expect(names).to.deep.equal(["body", "type"]);
-
-                    const byName = Object.fromEntries(
-                        shape!.properties.filter((p) => p.name).map((p) => [p.name as string, p]),
-                    );
-                    // @Flag pins a fixed target via sh:hasValue; verify the path AND
-                    // that the fixed value round-trips (the SHACL fingerprint that
-                    // a @Flag survived the RPC boundary intact).
+                it("the stored Message keeps the @Flag's fixed value", async () => {
+                    const [message] = await (await perspective()).shapes(["Message"]);
+                    const byName = Object.fromEntries(message.shape.properties.map((p) => [p.name, p]));
+                    expect(Object.keys(byName).sort()).to.deep.equal(["body", "type"]);
                     expect(byName.type.path).to.equal("ad4m://type");
                     expect(byName.type.hasValue).to.equal("ad4m://message");
                     expect(byName.body.path).to.equal("todo://state");
                 });
 
-                it("getClassShape('Todo') reports the @HasMany relation as a collection", async () => {
-                    // ensureSDNASubjectClass sends SHACLShape.toJSON() to the
-                    // executor, which types a property ad4m://CollectionShape
-                    // only when the JSON carries `collection: true`.
-                    const perspective = await testContext.ad4mClient.perspective.byUUID(perspectiveUuid);
-                    const classShape = await perspective!.getClassShape("Todo");
-                    expect(classShape).to.not.be.null;
-                    const byName = Object.fromEntries(classShape!.properties.map((p) => [p.name, p]));
-                    expect(byName.comments.collection).to.equal(true);
-                    expect(byName.state.collection).to.equal(false);
+                it("registering the same classes again writes no link", async () => {
+                    const p = await perspective();
+                    const before = await snapshot(p);
+                    const result = await Ad4mModel.registerAll(p, [ShaclMessage, ShaclTodo]);
+                    expect(result.unchanged).to.deep.equal(["ad4m://Message", "todo://Todo"]);
+                    expect(result.written).to.deep.equal([]);
+                    expect(await snapshot(p)).to.deep.equal(before);
                 });
+            });
 
-                it("a class added with addShacl() appears in subjectClasses() and getClassShape()", async () => {
-                    // Own perspective, so the getShaclNames()/getAllShacl() checks on the
-                    // shared one keep seeing exactly Message + Todo.
-                    const perspective = await testContext.ad4mClient.perspective.add("shacl-rpc-addshacl");
-                    try {
+            it("a changed shape is rewritten, and links other apps put on it stay", async () => {
+                await withPerspective("shacl-rpc-refresh", async (p) => {
+                    const note = (datatype: string) => {
                         const shape = new SHACLShape("note://Note");
-                        shape.addProperty({ name: "text", path: "note://text", datatype: "xsd://string", maxCount: 1 });
-                        shape.addProperty({ name: "tags", path: "note://tag", relationKind: "hasMany" });
-                        await perspective.addShacl("Note", shape);
+                        shape.addProperty({ name: "text", path: "note://text", datatype, maxCount: 1 });
+                        return shape;
+                    };
+                    const first = await p.registerShapes([note("xsd://string")]);
+                    expect(first.written).to.deep.equal(["note://Note"]);
+                    // An annotation another app keeps on the property node.
+                    await p.add(new Link({ source: "note://Note.text", predicate: "other://label", target: "literal://string:Text" }));
 
-                        expect(await perspective.subjectClasses()).to.include("Note");
-                        const classShape = await perspective.getClassShape("Note");
-                        expect(classShape).to.not.be.null;
-                        const byName = Object.fromEntries(classShape!.properties.map((p) => [p.name, p]));
-                        expect(Object.keys(byName).sort()).to.deep.equal(["tags", "text"]);
-                        expect(byName.tags.collection).to.equal(true);
-                        expect(byName.text.collection).to.equal(false);
-                    } finally {
-                        await testContext.ad4mClient.perspective.remove(perspective.uuid);
-                    }
+                    const second = await p.registerShapes([note("xsd://integer")]);
+                    expect(second.written).to.deep.equal(["note://Note"]);
+                    expect(second.generation).to.be.greaterThan(first.generation);
+
+                    const [stored] = await p.shapes(["Note"]);
+                    expect(stored.shape.properties.map((prop) => prop.datatype)).to.deep.equal(["xsd://integer"]);
+                    const datatypes = await p.get(new LinkQuery({ source: "note://Note.text", predicate: "sh://datatype" }));
+                    expect(datatypes.map((l) => l.data.target)).to.deep.equal(["xsd://integer"]);
+                    expect(await p.get(new LinkQuery({ source: "note://Note.text", predicate: "other://label" }))).to.have.length(1);
                 });
+            });
 
-                it("addShacl() keeps the shape URI, and an all-optional class can be instantiated", async () => {
-                    const perspective = await testContext.ad4mClient.perspective.add("shacl-rpc-shape-uri");
-                    try {
-                        const shape = new SHACLShape("shapes://MemoShape", "memo://Memo");
+            it("a shape given a new URI moves: the class points to the new one only", async () => {
+                await withPerspective("shacl-rpc-move", async (p) => {
+                    const memo = (shapeUri: string) => {
+                        const shape = new SHACLShape(shapeUri, "memo://Memo");
                         shape.addProperty({
                             name: "body", path: "memo://body", maxCount: 1,
                             setter: [{ action: "setSingleTarget", source: "this", predicate: "memo://body", target: "value" }],
                         });
-                        await perspective.addShacl("Memo", shape);
+                        return shape;
+                    };
+                    await p.registerShapes([memo("old://MemoShape")]);
+                    await p.registerShapes([memo("new://MemoShape")]);
 
-                        expect((await perspective.getShacl("Memo"))!.nodeShapeUri).to.equal("shapes://MemoShape");
-                        await perspective.createSubject("Memo", "memo://1", { body: "hi" });
-                        expect(await perspective.get(new LinkQuery({ source: "memo://1", predicate: "memo://body" }))).to.have.length(1);
-                    } finally {
-                        await testContext.ad4mClient.perspective.remove(perspective.uuid);
-                    }
+                    const [stored] = await p.shapes(["Memo"]);
+                    expect(stored.shape.nodeShapeUri).to.equal("new://MemoShape");
+                    const pointers = await p.get(new LinkQuery({ source: "memo://Memo", predicate: "ad4m://shape" }));
+                    expect(pointers.map((l) => l.data.target)).to.deep.equal(["new://MemoShape"]);
+                    expect(await p.get(new LinkQuery({ source: "old://MemoShape" }))).to.deep.equal([]);
+
+                    // An all-optional class can be instantiated.
+                    await p.createSubject("Memo", "memo://1", { body: "hi" });
+                    expect(await p.get(new LinkQuery({ source: "memo://1", predicate: "memo://body" }))).to.have.length(1);
                 });
+            });
 
-                it("addShacl() rejects a shape URI that does not end with `{name}Shape`", async () => {
-                    const perspective = await testContext.ad4mClient.perspective.add("shacl-rpc-bad-shape-uri");
+            it("keeps two classes of one name apart by their target class IRIs", async () => {
+                await withPerspective("shacl-rpc-iri", async (p) => {
+                    const note = (ns: string, field: string) => {
+                        const shape = new SHACLShape(`${ns}Note`);
+                        shape.addProperty({
+                            name: field, path: `${ns}${field}`, maxCount: 1,
+                            setter: [{ action: "setSingleTarget", source: "this", predicate: `${ns}${field}`, target: "value" }],
+                        });
+                        return shape;
+                    };
+                    expect((await p.registerShapes([note("b://", "body")])).written).to.deep.equal(["b://Note"]);
+                    expect((await p.registerShapes([note("a://", "text")])).written).to.deep.equal(["a://Note"]);
+
+                    // A name lists every class of that name, the least IRI first; an IRI only its own.
+                    const notes = await p.shapes(["Note"]);
+                    expect(notes.map((s) => s.shape.targetClass)).to.deep.equal(["a://Note", "b://Note"]);
+                    const [b] = await p.shapes(["b://Note"]);
+                    expect(b.shape.properties.map((prop) => prop.path)).to.deep.equal(["b://body"]);
+
+                    // Each IRI writes its own class.
+                    await p.createSubject("a://Note", "note://a1", { text: "A" });
+                    await p.createSubject("b://Note", "note://b1", { body: "B" });
+                    expect(await p.get(new LinkQuery({ source: "note://a1", predicate: "a://text" }))).to.have.length(1);
+                    expect(await p.get(new LinkQuery({ source: "note://b1", predicate: "b://body" }))).to.have.length(1);
+                    expect(await p.get(new LinkQuery({ source: "note://b1", predicate: "a://text" }))).to.deep.equal([]);
+
+                    // Registering both again writes nothing.
+                    const before = await snapshot(p);
+                    const again = await p.registerShapes([note("a://", "text"), note("b://", "body")]);
+                    expect(again.written).to.deep.equal([]);
+                    expect(await snapshot(p)).to.deep.equal(before);
+                });
+            });
+
+            it("refuses a shape URI another class holds, and writes nothing", async () => {
+                await withPerspective("shacl-rpc-shared-uri", async (p) => {
+                    const a = new SHACLShape("shared://NoteShape", "a://Note");
+                    a.addProperty({ name: "text", path: "a://text" });
+                    await p.registerShapes([a]);
+                    const before = await snapshot(p);
+
+                    const b = new SHACLShape("shared://NoteShape", "b://Note");
+                    b.addProperty({ name: "text", path: "b://text" });
+                    let error: Error | undefined;
                     try {
-                        let error: Error | undefined;
-                        try {
-                            await perspective.addShacl("Note", new SHACLShape("shapes://MemoShape", "note://Note"));
-                        } catch (e) {
-                            error = e as Error;
-                        }
-                        expect(error?.message).to.contain("NoteShape");
-                    } finally {
-                        await testContext.ad4mClient.perspective.remove(perspective.uuid);
+                        await p.registerShapes([b]);
+                    } catch (e) {
+                        error = e as Error;
                     }
+                    expect(error?.message).to.contain("already belongs to class 'a://Note'");
+                    expect(await snapshot(p)).to.deep.equal(before);
                 });
+            });
 
-                it("addFlow() replaces the stored transitions when a flow is re-added", async () => {
-                    const perspective = await testContext.ad4mClient.perspective.add("shacl-rpc-flow-readd");
+            it("refuses a shape URI that does not name its class", async () => {
+                await withPerspective("shacl-rpc-shape-uri", async (p) => {
+                    let error: Error | undefined;
                     try {
-                        const todoFlow = () => {
-                            const flow = new SHACLFlow("Todo", "todo://");
-                            flow.addState({ name: "ready", value: 0 });
-                            flow.addState({ name: "done", value: 1 });
-                            flow.addTransition({ actionName: "Complete", fromState: "ready", toState: "done", actions: [] });
-                            return flow;
-                        };
-                        const transitions = async () =>
-                            (await perspective.getFlow("Todo"))!.transitions.map((t) => `${t.fromState}->${t.toState}:${t.actionName}`);
-
-                        // A flow stored with the old `{from}To{to}` transition URIs.
-                        const legacy = todoFlow().toLinks().map((l) => ({
-                            ...l,
-                            source: l.source.replace(/\.transition\/.*$/, ".readyTodone"),
-                            target: l.target.replace(/\.transition\/.*$/, ".readyTodone"),
-                        }));
-                        await perspective.addLinks(legacy);
-
-                        await perspective.addFlow("Todo", todoFlow());
-                        expect(await transitions()).to.deep.equal(["ready->done:Complete"]);
-
-                        await perspective.addFlow("Todo", todoFlow());
-                        expect(await transitions()).to.deep.equal(["ready->done:Complete"]);
-                    } finally {
-                        await testContext.ad4mClient.perspective.remove(perspective.uuid);
+                        await p.registerShapes([new SHACLShape("shapes://MemoShape", "note://Note")]);
+                    } catch (e) {
+                        error = e as Error;
                     }
+                    expect(error?.message).to.contain("NoteShape");
                 });
+            });
 
-                it("addFlow() replaces a changed rule and leaves links it does not own", async () => {
-                    const perspective = await testContext.ad4mClient.perspective.add("shacl-rpc-flow-rule");
-                    try {
-                        const todoFlow = (n: number) => {
-                            const flow = new SHACLFlow("Todo", "todo://");
-                            flow.addState({ name: "ready", value: 0 });
-                            flow.addState({ name: "done", value: 1, consensusRule: { n } });
-                            flow.addTransition({ actionName: "Complete", fromState: "ready", toState: "done", actions: [] });
-                            return flow;
-                        };
-                        const stateUri = todoFlow(1).stateUri("done");
-                        const rules = async () =>
-                            (await perspective.get(new LinkQuery({ source: stateUri, predicate: "ad4m://consensusRule" })))
-                                .map((l) => JSON.parse(Literal.fromUrl(l.data.target).get()).n);
+            it("addFlow() replaces the stored transitions when a flow is re-added", async () => {
+                await withPerspective("shacl-rpc-flow-readd", async (p) => {
+                    const todoFlow = () => {
+                        const flow = new SHACLFlow("Todo", "todo://");
+                        flow.addState({ name: "ready", value: 0 });
+                        flow.addState({ name: "done", value: 1 });
+                        flow.addTransition({ actionName: "Complete", fromState: "ready", toState: "done", actions: [] });
+                        return flow;
+                    };
+                    const transitions = async () =>
+                        (await p.getFlow("Todo"))!.transitions.map((t) => `${t.fromState}->${t.toState}:${t.actionName}`);
 
-                        await perspective.addFlow("Todo", todoFlow(2));
-                        // A link on the flow's URI that is not part of its definition.
-                        const flowUri = todoFlow(1).flowUri;
-                        await perspective.add(new Link({ source: flowUri, predicate: "todo://receipt", target: "todo://r1" }));
+                    // A flow stored with the old `{from}To{to}` transition URIs.
+                    const legacy = todoFlow().toLinks().map((l) => ({
+                        ...l,
+                        source: l.source.replace(/\.transition\/.*$/, ".readyTodone"),
+                        target: l.target.replace(/\.transition\/.*$/, ".readyTodone"),
+                    }));
+                    await p.addLinks(legacy);
 
-                        await perspective.addFlow("Todo", todoFlow(3));
-                        expect(await rules()).to.deep.equal([3]);
-                        expect(await perspective.get(new LinkQuery({ source: flowUri, predicate: "todo://receipt" })))
-                            .to.have.length(1);
+                    await p.addFlow("Todo", todoFlow());
+                    expect(await transitions()).to.deep.equal(["ready->done:Complete"]);
 
-                        // An unchanged definition writes nothing. A count alone
-                        // would also pass if every link were removed and added
-                        // back, so each link's author and timestamp are compared.
-                        const snapshot = async () =>
-                            (await perspective.get(new LinkQuery({})))
-                                .map((l) => JSON.stringify([l.data.source, l.data.predicate ?? "", l.data.target, l.author, l.timestamp]))
-                                .sort();
-                        const before = await snapshot();
-                        await perspective.addFlow("Todo", todoFlow(3));
-                        expect(await snapshot()).to.deep.equal(before);
-                        expect(await rules()).to.deep.equal([3]);
-                    } finally {
-                        await testContext.ad4mClient.perspective.remove(perspective.uuid);
-                    }
+                    await p.addFlow("Todo", todoFlow());
+                    expect(await transitions()).to.deep.equal(["ready->done:Complete"]);
                 });
+            });
 
-                it("getShacl() keeps parentShapes of a class registered with addSdna()", async () => {
-                    const perspective = await testContext.ad4mClient.perspective.add("shacl-rpc-parents");
-                    try {
-                        const shape = new SHACLShape("zoo://Dog");
-                        shape.addParentShape("zoo://AnimalShape");
-                        shape.addProperty({ name: "name", path: "zoo://name", datatype: "xsd://string", maxCount: 1 });
-                        await perspective.addSdna("Dog", "", "subject_class", JSON.stringify(shape.toJSON()));
+            it("addFlow() replaces a changed rule and leaves links it does not own", async () => {
+                await withPerspective("shacl-rpc-flow-rule", async (p) => {
+                    const todoFlow = (n: number) => {
+                        const flow = new SHACLFlow("Todo", "todo://");
+                        flow.addState({ name: "ready", value: 0 });
+                        flow.addState({ name: "done", value: 1, consensusRule: { n } });
+                        flow.addTransition({ actionName: "Complete", fromState: "ready", toState: "done", actions: [] });
+                        return flow;
+                    };
+                    const stateUri = todoFlow(1).stateUri("done");
+                    const rules = async () =>
+                        (await p.get(new LinkQuery({ source: stateUri, predicate: "ad4m://consensusRule" })))
+                            .map((l) => JSON.parse(Literal.fromUrl(l.data.target).get()).n);
 
-                        expect((await perspective.getShacl("Dog"))!.parentShapes).to.deep.equal(["zoo://AnimalShape"]);
-                    } finally {
-                        await testContext.ad4mClient.perspective.remove(perspective.uuid);
-                    }
+                    await p.addFlow("Todo", todoFlow(2));
+                    // A link on the flow's URI that is not part of its definition.
+                    const flowUri = todoFlow(1).flowUri;
+                    await p.add(new Link({ source: flowUri, predicate: "todo://receipt", target: "todo://r1" }));
+
+                    await p.addFlow("Todo", todoFlow(3));
+                    expect(await rules()).to.deep.equal([3]);
+                    expect(await p.get(new LinkQuery({ source: flowUri, predicate: "todo://receipt" })))
+                        .to.have.length(1);
+
+                    // An unchanged definition writes nothing.
+                    const before = await snapshot(p);
+                    await p.addFlow("Todo", todoFlow(3));
+                    expect(await snapshot(p)).to.deep.equal(before);
+                    expect(await rules()).to.deep.equal([3]);
                 });
+            });
 
-                it("getShacl() returns null for an unknown name", async () => {
-                    const perspective = await testContext.ad4mClient.perspective.byUUID(perspectiveUuid);
-                    expect(await perspective!.getShacl("DoesNotExist")).to.be.null;
-                });
+            it("shapes() keeps the parentShapes of a registered class", async () => {
+                await withPerspective("shacl-rpc-parents", async (p) => {
+                    const shape = new SHACLShape("zoo://Dog");
+                    shape.addParentShape("zoo://AnimalShape");
+                    shape.addProperty({ name: "name", path: "zoo://name", datatype: "xsd://string", maxCount: 1 });
+                    await p.registerShapes([shape]);
 
-                it("getAllShacl() returns both shapes with matching name+targetClass+property counts", async () => {
-                    const perspective = await testContext.ad4mClient.perspective.byUUID(perspectiveUuid);
-                    const all = await perspective!.getAllShacl();
-                    expect(all.length).to.equal(2);
-
-                    const byName = Object.fromEntries(all.map((e) => [e.name, e.shape]));
-                    expect(Object.keys(byName).sort()).to.deep.equal(["Message", "Todo"]);
-                    expect(byName.Message.targetClass).to.equal("ad4m://Message");
-                    expect(byName.Todo.targetClass).to.equal("todo://Todo");
-
-                    // Property counts match what the decorator model declared —
-                    // proves the bulk-fetch endpoint reconstructs the same shape
-                    // that the single-fetch endpoint returns.
-                    expect(byName.Message.properties.length).to.equal(2);
-                    expect(byName.Todo.properties.length).to.equal(3);
-                });
-
-                it("getAllShacl({ names }) returns only the named shapes, equal to the unfiltered read's", async () => {
-                    const perspective = await testContext.ad4mClient.perspective.byUUID(perspectiveUuid);
-                    const all = await perspective!.getAllShacl();
-                    const some = await perspective!.getAllShacl({ names: ["Todo", "DoesNotExist"] });
-                    expect(some.map((e) => e.name)).to.deep.equal(["Todo"]);
-                    expect(JSON.stringify(some[0].shape)).to.equal(JSON.stringify(all.find((e) => e.name === "Todo")!.shape));
-                    expect(await perspective!.getAllShacl({ names: [] })).to.deep.equal([]);
-                });
-
-                it("getShacl(name).properties matches the single-shape RPC result inside getAllShacl()", async () => {
-                    const perspective = await testContext.ad4mClient.perspective.byUUID(perspectiveUuid);
-                    // Consistency check: bulk and single fetch must agree on
-                    // properties. Compare by (name, path) pairs — order-insensitive.
-                    const single = await perspective!.getShacl("Todo");
-                    const all = await perspective!.getAllShacl();
-                    const fromAll = all.find((e) => e.name === "Todo")!.shape;
-
-                    const key = (s: any) => s.properties.map((p: any) => `${p.name ?? ""}=${p.path}`).sort();
-                    expect(key(single)).to.deep.equal(key(fromAll));
+                    const [dog] = await p.shapes(["Dog"]);
+                    expect(dog.shape.parentShapes).to.deep.equal(["zoo://AnimalShape"]);
                 });
             });
         });

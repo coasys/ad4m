@@ -45,9 +45,9 @@ pub async fn load_processed_sources(
     processor_id: &str,
 ) -> anyhow::Result<Vec<ProcessedSource>> {
     use crate::perspectives::hardwired_class::subject_class_registered;
-    use crate::perspectives::interpretation::{INTERP_RUN_CLASS, INTERP_RUN_TARGET_CLASS};
+    use crate::perspectives::interpretation::INTERP_RUN_CLASS;
 
-    if !subject_class_registered(perspective, INTERP_RUN_TARGET_CLASS).await? {
+    if !subject_class_registered(perspective, INTERP_RUN_CLASS).await? {
         return Ok(Vec::new());
     }
     // `ranAt` only matters once a window applies it in Rust — it stays a
