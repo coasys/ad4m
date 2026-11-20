@@ -115,9 +115,10 @@ pub struct AiSessionMessage {
     pub role: AiSessionMessageRole,
     /// The transcript entry: `{"text": ..}` for user and assistant turns;
     /// `{"name", "arguments", "target"?, "writes", "result"? | "error"?}` for a
-    /// tool step. `writes` is the executor's own read of the call's side effect
-    /// (`agent_session::tool_writes`), so a client marking the steps that
-    /// changed something does not have to guess from the name.
+    /// tool step. `writes` is the tool's declared intent
+    /// (`agent_session::tool_writes`), recorded before the call runs. It does
+    /// not say the call changed anything: a refused or failed write still has
+    /// `writes: true`.
     #[ts(type = "unknown")]
     pub content: Value,
     /// Set on the assistant's turns and on tool steps: `running` until it ends.
@@ -158,9 +159,9 @@ pub fn assistant_content(text: &str) -> Value {
 
 /// The `content` of a tool step when the model asked for the call. `target` is the id the
 /// call acts on (a `perspective_id` or other address argument) when there is one.
-/// `writes` says whether the call is one that changes something
-/// (`agent_session::tool_writes`): the same answer the write-tools gate gives,
-/// so the flag and the gate can never disagree.
+/// `writes` is the tool's declared intent (`agent_session::tool_writes`), recorded
+/// before the call runs. A refused or failed write still has `writes: true`. The
+/// flag and the write-tools gate read the same function, so they agree.
 pub fn tool_content(name: &str, arguments: &Value, target: Option<&str>) -> Value {
     let writes = crate::perspectives::agent_session::tool_writes(name);
     match target {
