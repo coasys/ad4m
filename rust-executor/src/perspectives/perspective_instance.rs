@@ -5029,7 +5029,15 @@ impl PerspectiveInstance {
         // A remote multi-user node publishes its agents' statuses as one bundle;
         // `unpack` turns it back into one verified entry per agent.
         let mut agents: Vec<OnlineAgent> = match remote {
-            Ok(remote_agents) => hosted_status::unpack(remote_agents),
+            Ok(remote_agents) => {
+                let agents = hosted_status::unpack(remote_agents);
+                if let Some(url) = self.persisted.lock().await.shared_url.clone() {
+                    for agent in &agents {
+                        crate::sfu::config_store::saw_member(&url, &agent.did);
+                    }
+                }
+                agents
+            }
             Err(e) => {
                 log::warn!(
                     "online_agents: the link-language call failed or timed out ({e}); the roster is unknown"

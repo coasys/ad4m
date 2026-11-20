@@ -42,12 +42,18 @@ enum StubMode {
 struct StubLanguage {
     address: String,
     mode: Arc<std::sync::Mutex<StubMode>>,
+    peers: Arc<std::sync::Mutex<Vec<String>>>,
     scripts: Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 impl StubLanguage {
     fn set(&self, mode: StubMode) {
         *self.mode.lock().unwrap() = mode;
+    }
+
+    /// What `peersRemote()` answers from now on.
+    fn set_peers(&self, peers: Vec<String>) {
+        *self.peers.lock().unwrap() = peers;
     }
 
     /// Every script the language was asked to run, in order.
@@ -87,9 +93,11 @@ async fn stub_language(peers: Vec<String>, caps: &[Capability]) -> StubLanguage 
         .await;
     register_capabilities(&address, caps.iter().copied().collect());
     let mode = Arc::new(std::sync::Mutex::new(StubMode::Serve));
+    let peers = Arc::new(std::sync::Mutex::new(peers));
     let scripts = Arc::new(std::sync::Mutex::new(Vec::new()));
     {
         let mode = mode.clone();
+        let peers = peers.clone();
         let scripts = scripts.clone();
         tokio::spawn(async move {
             while let Some(request) = requests.recv().await {
@@ -97,7 +105,7 @@ async fn stub_language(peers: Vec<String>, caps: &[Capability]) -> StubLanguage 
                     LanguageOperation::Execute(script, _) => {
                         scripts.lock().unwrap().push(script.clone());
                         if script.contains("peersRemote") {
-                            Ok(serde_json::to_string(&peers).unwrap())
+                            Ok(serde_json::to_string(&*peers.lock().unwrap()).unwrap())
                         } else if script.contains("telepresenceGetOnlineAgents") {
                             Ok("[]".to_string())
                         } else {
@@ -121,6 +129,7 @@ async fn stub_language(peers: Vec<String>, caps: &[Capability]) -> StubLanguage 
     StubLanguage {
         address,
         mode,
+        peers,
         scripts,
     }
 }
@@ -692,6 +701,53 @@ async fn only_a_beat_of_the_same_sender_device_and_call_is_superseded() {
     );
     // offer + mixed + me/desk/room:x + phone + room:y + co-user.
     assert_eq!(stub.send_count(), 6, "{:?}", stub.scripts());
+
+    stub.stop().await;
+    crate::perspectives::unregister_perspective(&instance.uuid);
+}
+
+/// A remote member who joins after a membership check found everyone local
+/// gets the next signal: its first signal here ends the "every member local"
+/// verdict, which would otherwise skip the remote send for the cache's 60 s.
+#[tokio::test(start_paused = true)]
+async fn a_remote_member_who_joins_inside_the_cache_window_gets_the_next_signal() {
+    test_setup();
+    let stub = stub_language(
+        Vec::new(),
+        &[
+            Capability::PeersRemote,
+            Capability::TelepresenceSendBroadcast,
+        ],
+    )
+    .await;
+    let instance = neighbourhood(&stub, vec![crate::agent::did()]).await;
+    let url = instance.persisted.lock().await.shared_url.clone().unwrap();
+    assert_eq!(
+        read_policy(&url).await.as_result().unwrap().mode,
+        "designated",
+        "setup: everyone is local"
+    );
+    instance.send_broadcast(offer(), false).await.unwrap();
+    sleep(Duration::from_millis(50)).await;
+    assert_eq!(stub.send_count(), 0, "setup: an all-local send was not skipped");
+
+    // A remote member joins 5 s later and beats through the link language.
+    sleep(Duration::from_secs(5)).await;
+    stub.set_peers(vec!["did:key:remote".to_string()]);
+    crate::perspectives::handle_telepresence_signal_from_link_language(
+        signal_from("did:key:remote", &[("desk", beat_in("room:x"))]),
+        stub.address.clone(),
+        None,
+    );
+    sleep(Duration::from_millis(50)).await;
+
+    instance.send_broadcast(offer(), false).await.unwrap();
+    sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        stub.send_count(),
+        1,
+        "the signal after a remote member joined never reached the link language"
+    );
 
     stub.stop().await;
     crate::perspectives::unregister_perspective(&instance.uuid);

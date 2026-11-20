@@ -682,6 +682,11 @@ pub(crate) fn publish_telepresence_signal(
     signal: PerspectiveExpression,
     recipient_did: Option<String>,
 ) {
+    // A signal from a member this executor does not host ends an "every
+    // member local" verdict, so the next broadcast reaches that member.
+    if let Some(url) = &handle.shared_url {
+        crate::sfu::config_store::saw_member(url, &signal.author);
+    }
     let audience = event_recipients(&handle);
     let recipients = match recipient_did {
         Some(recipient) if audience.contains(&recipient) => vec![recipient],

@@ -159,6 +159,9 @@ struct PolicyCacheEntry {
     policy: CallPolicy,
     at: Instant,
     every_member_local: Option<bool>,
+    /// Set by [`saw_member`]: a member this executor does not host showed
+    /// up, so the next `read_policy` checks again whatever the entry's age.
+    stale: bool,
 }
 
 lazy_static! {
@@ -171,7 +174,7 @@ fn cached_policy(neighbourhood_url: &str) -> Option<CallPolicy> {
         .lock()
         .expect("policy cache lock")
         .get(neighbourhood_url)
-        .filter(|entry| entry.at.elapsed() < POLICY_CACHE_TTL)
+        .filter(|entry| !entry.stale && entry.at.elapsed() < POLICY_CACHE_TTL)
         .map(|entry| entry.policy.clone())
 }
 
@@ -192,6 +195,7 @@ fn cache_policy(neighbourhood_url: &str, policy: &CallPolicy, every_member_local
             policy: policy.clone(),
             at: Instant::now(),
             every_member_local,
+            stale: false,
         },
     );
 }
@@ -208,6 +212,31 @@ pub(crate) fn every_member_local(neighbourhood_url: &str) -> bool {
         .is_some_and(|entry| {
             entry.every_member_local == Some(true) && entry.at.elapsed() < POLICY_CACHE_TTL
         })
+}
+
+/// `did` is a member of the neighbourhood (it signalled there, or the link
+/// language listed it online). When this executor does not host it, an
+/// "every member local" verdict is wrong: it ends at once, so the next
+/// broadcast goes out remotely instead of being skipped for the rest of
+/// [`POLICY_CACHE_TTL`], and the next policy read checks the members again
+/// (a failed check answers mesh).
+/// Costs a map lookup unless the verdict is "every member local".
+pub(crate) fn saw_member(neighbourhood_url: &str, did: &str) {
+    if !every_member_local(neighbourhood_url) || hosted_dids().iter().any(|h| h == did) {
+        return;
+    }
+    if let Some(entry) = POLICY_CACHE
+        .lock()
+        .expect("policy cache lock")
+        .get_mut(neighbourhood_url)
+    {
+        // Only a computed policy has a verdict, and "every member local"
+        // computed "designated": with a member elsewhere it is mesh, also
+        // for a check that fails before it can say so.
+        entry.policy.mode = "mesh".to_string();
+        entry.every_member_local = Some(false);
+        entry.stale = true;
+    }
 }
 
 /// [`stored_policy`], or the policy of a neighbourhood with none: this
@@ -278,6 +307,11 @@ pub async fn read_policy(neighbourhood_url: &str) -> Result<CallPolicy, AnyError
 /// known member is not.
 pub async fn hosts_every_member(perspective: &PerspectiveInstance) -> Result<bool, AnyError> {
     let members = perspective.others().await?;
+    Ok(all_hosted(&members, &hosted_dids()))
+}
+
+/// The agents this executor hosts: its users and the main agent.
+fn hosted_dids() -> Vec<String> {
     let mut hosted: Vec<String> = crate::db_backend::db_backend()
         .list_users()
         .unwrap_or_default()
@@ -285,7 +319,7 @@ pub async fn hosts_every_member(perspective: &PerspectiveInstance) -> Result<boo
         .map(|user| user.did)
         .collect();
     hosted.extend(did_for_context(&AgentContext::main_agent()).ok());
-    Ok(all_hosted(&members, &hosted))
+    hosted
 }
 
 fn all_hosted(members: &[String], hosted: &[String]) -> bool {
