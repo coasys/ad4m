@@ -1127,13 +1127,21 @@ pub(super) fn shape_conformance_patterns(
     // `?source <pred> object .`, kept only when a link the guard admits
     // asserts it. The object is `<iri>` or a `?_cf…` variable unique to the
     // property, which also names the reifier.
+    // An IRI-valued triple's reifier is named after its predicate and value,
+    // sanitised, plus a counter: `we://p-a` and `we://p_a` sanitise alike, and
+    // one reifier variable for both would demand one link asserting two triples.
+    let iri_reifiers = std::cell::Cell::new(0usize);
     let triple = |pred: &str, object: &str| {
         let reifier = match object.strip_prefix("?_") {
             Some(var) => format!("?_r{var}"),
-            None => format!(
-                "?_rcf{}",
-                format!("{pred}{object}").replace(|c: char| !c.is_alphanumeric(), "_")
-            ),
+            None => {
+                let n = iri_reifiers.get();
+                iri_reifiers.set(n + 1);
+                format!(
+                    "?_rcf{n}_{}",
+                    format!("{pred}{object}").replace(|c: char| !c.is_alphanumeric(), "_")
+                )
+            }
         };
         format!(
             "    ?source <{pred}> {object} .{}",

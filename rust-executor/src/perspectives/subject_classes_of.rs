@@ -44,7 +44,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
 use super::model_query::types::{ModelShape, ShapeResolver};
-use super::model_query::utils::looks_like_absolute_iri;
+use super::model_query::utils::{emittable_iri, looks_like_absolute_iri};
 use super::model_query::{
     conformance_triples, instance_link_predicates, local_predicates, ConformanceObject, LinkGuard,
 };
@@ -160,17 +160,20 @@ struct Membership {
 /// With [`Membership`]'s loaded-link clause, a node is classified as a class
 /// exactly when that class's query, under the same read, returns it.
 ///
-/// The predicates are emitted as `<…>` IRIREFs, where a relative reference does
-/// not merely fail to match — it fails to *parse*, and SPARQL rejects the whole
-/// query. A class carrying one is therefore dropped entirely rather than tested
-/// with the offending property quietly removed, which would only make the
-/// class easier to match than its definition says.
+/// The predicates are emitted as `<…>` IRIREFs, where one that is not a
+/// parseable IRI (a relative reference, `literal://string:x`) does not merely
+/// fail to match — it fails to *parse*, and SPARQL rejects the whole query,
+/// the classifier's batch for every class as well as the class's own. A class
+/// carrying one is therefore dropped entirely ([`emittable_iri`], also for its
+/// loaded predicates in [`membership`]) rather than tested with the offending
+/// property quietly removed, which would only make the class easier to match
+/// than its definition says.
 fn required_triples(shape: &ModelShape) -> Option<Vec<Required>> {
     let local = local_predicates(shape);
     let mut triples = Vec::new();
     for t in conformance_triples(shape).triples {
         let pred = &t.property.predicate;
-        if !looks_like_absolute_iri(pred) {
+        if !emittable_iri(pred) {
             return None;
         }
         triples.push(Required {
@@ -186,15 +189,18 @@ fn required_triples(shape: &ModelShape) -> Option<Vec<Required>> {
     Some(triples)
 }
 
-/// [`Membership`] of `shape`, or `None` when the class cannot be tested.
+/// [`Membership`] of `shape`, or `None` when the class cannot be tested: a
+/// predicate its query emits is not [`emittable_iri`], so that query cannot
+/// parse and returns nothing, and fetching it would fail the whole batch.
 fn membership(shape: &ModelShape) -> Option<Membership> {
     let required = required_triples(shape)?;
     let local = local_predicates(shape);
-    let loaded = instance_link_predicates(shape)
+    let loaded = instance_link_predicates(shape);
+    if !loaded.iter().all(|p| emittable_iri(p)) {
+        return None;
+    }
+    let loaded = loaded
         .into_iter()
-        // A predicate that cannot be emitted cannot be fetched; it is never
-        // counted as carried (the class's own query fails on it anyway).
-        .filter(|p| looks_like_absolute_iri(p))
         .map(|p| (p.to_string(), local.contains(&format!("<{p}>"))))
         .collect();
     Some(Membership { required, loaded })
@@ -306,8 +312,8 @@ pub(crate) fn subject_classes_of_with_pending(
                 Some(m) if !m.required.is_empty() => shapes.push((name, m)),
                 Some(_) => {}
                 None => log::warn!(
-                    "subjectClassesOf: skipping class '{name}': a required predicate is not \
-                     an absolute IRI"
+                    "subjectClassesOf: skipping class '{name}': a predicate its query emits is \
+                     not a parseable IRI"
                 ),
             },
             // A class whose SHACL will not parse cannot classify anything; skip
