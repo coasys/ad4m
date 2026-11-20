@@ -31,7 +31,7 @@ use super::link_author::{
 };
 use super::types::{
     ContainedScope, InstanceQueryPlan, ModelQueryInput, ModelShape, OrderDirection, Scope,
-    ScopeDirection, ShapeResolver, SortKey, SparqlPagination, WhereCondition,
+    ScopeDirection, ShapeProperty, ShapeResolver, SortKey, SparqlPagination, WhereCondition,
 };
 use super::utils::{
     emittable_iri, escape_sparql_string, format_literal_number, looks_like_absolute_iri,
@@ -640,7 +640,7 @@ pub(super) fn local_status_filter(shape: &ModelShape) -> String {
 }
 
 /// The `local: true` predicates, as `<iri>` terms, sorted and deduplicated.
-pub(super) fn local_predicates(shape: &ModelShape) -> Vec<String> {
+pub(crate) fn local_predicates(shape: &ModelShape) -> Vec<String> {
     let mut preds: Vec<String> = shape
         .properties
         .iter()
@@ -1010,6 +1010,89 @@ fn walked_pairs(pairs: &[(String, String)], path: &str) -> String {
     }
 }
 
+/// What a conformance triple requires of its object.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum ConformanceObject {
+    /// This IRI.
+    Iri(String),
+    /// A term whose `STR()` is this value: a flag value that is not a
+    /// parseable IRI ("true", `literal://…`).
+    Str(String),
+    /// Any object: only the predicate's presence is required.
+    Any,
+}
+
+/// One triple `?source <property.predicate> object` a node must carry.
+#[derive(Debug, Clone)]
+pub(crate) struct ConformanceTriple<'a> {
+    pub(crate) property: &'a ShapeProperty,
+    pub(crate) object: ConformanceObject,
+}
+
+/// The triples a node must carry to be an instance of `shape`: tiers 1 and 2
+/// of [`shape_conformance_patterns`], which emits them, and the definition
+/// `subject_classes_of` classifies with, so a class is a node's class exactly
+/// when that class's own query admits the node. Empty when the shape has
+/// neither (the structural tier, if allowed, is all that is left).
+#[derive(Debug, Clone)]
+pub(crate) struct Conformance<'a> {
+    pub(crate) triples: Vec<ConformanceTriple<'a>>,
+    /// Tier 2: the shape has no required property, so its first property
+    /// with an initial value stands in.
+    pub(crate) initial_tier: bool,
+}
+
+pub(crate) fn conformance_triples(shape: &ModelShape) -> Conformance<'_> {
+    // A flag's object: `emittable_iri`, not `validate_iri`: an initial like
+    // "true" or "literal://string:x" passes the injection guard but is not a
+    // parseable IRI, and `<true>` makes the whole query fail to parse. STR()
+    // matches the `new_unchecked` store term either way.
+    let flag_object = |initial: &str| {
+        if emittable_iri(initial) {
+            ConformanceObject::Iri(initial.to_string())
+        } else {
+            ConformanceObject::Str(initial.to_string())
+        }
+    };
+    // 1. Every required property with a usable predicate: a getter-backed
+    //    one too, and a flag with no fixed value (presence only).
+    let triples: Vec<ConformanceTriple> = shape
+        .properties
+        .iter()
+        .filter(|p| p.is_required && validate_iri(&p.predicate).is_ok())
+        .map(|p| ConformanceTriple {
+            property: p,
+            object: match (&p.is_flag, &p.initial_value) {
+                (true, Some(initial)) => flag_object(initial),
+                _ => ConformanceObject::Any,
+            },
+        })
+        .collect();
+    if !triples.is_empty() {
+        return Conformance {
+            triples,
+            initial_tier: false,
+        };
+    }
+    // 2. No required property: the first property with an initial value.
+    let first_initial = shape.properties.iter().find_map(|p| {
+        let initial = p.initial_value.as_ref()?;
+        validate_iri(&p.predicate).ok()?;
+        Some(ConformanceTriple {
+            property: p,
+            object: if p.is_flag {
+                flag_object(initial)
+            } else {
+                ConformanceObject::Any
+            },
+        })
+    });
+    Conformance {
+        triples: first_initial.into_iter().collect(),
+        initial_tier: true,
+    }
+}
+
 /// The patterns that say "`?source` is an instance of this class", derived from
 /// the shape alone, in fallback tiers:
 /// 1. Required properties → `?source <pred> ?_cf_name .`
@@ -1058,7 +1141,13 @@ pub(super) fn shape_conformance_patterns(
         )
     };
 
-    let mut has_conformance = false;
+    let conformance = conformance_triples(shape);
+    let has_conformance = !conformance.triples.is_empty();
+    let var_prefix = if conformance.initial_tier {
+        "_cfInit_"
+    } else {
+        "_cf_"
+    };
     // The flag triples with an IRI value go first, in shape order. Oxigraph's
     // join planner (`sparopt::reorder_joins`) starts from the first of the
     // cheapest patterns. A flag triple `?source <pred> <iri>` costs the same as
@@ -1067,69 +1156,28 @@ pub(super) fn shape_conformance_patterns(
     // matches only the class's instances. The order of a conjunction does not
     // change its result.
     let mut leading_flags = 0;
-    for prop in &shape.properties {
-        if prop.is_required {
-            if validate_iri(&prop.predicate).is_err() {
-                continue;
+    for t in &conformance.triples {
+        let var = format!(
+            "?{var_prefix}{}",
+            t.property.name.replace(|c: char| !c.is_alphanumeric(), "_")
+        );
+        let pred = &t.property.predicate;
+        match &t.object {
+            ConformanceObject::Iri(iri) if !conformance.initial_tier => {
+                conformance_patterns.insert(leading_flags, triple(pred, &format!("<{iri}>")));
+                leading_flags += 1;
             }
-            let safe_name = prop.name.replace(|c: char| !c.is_alphanumeric(), "_");
-            has_conformance = true;
-            if prop.is_flag {
-                if let Some(ref initial) = prop.initial_value {
-                    // `emittable_iri`, not `validate_iri`: an initial like
-                    // "true" or "literal://string:x" passes the injection
-                    // guard but is not a parseable IRI, and `<true>` makes
-                    // the whole query fail to parse. STR() matches the
-                    // `new_unchecked` store term either way.
-                    if emittable_iri(initial) {
-                        conformance_patterns.insert(
-                            leading_flags,
-                            triple(&prop.predicate, &format!("<{initial}>")),
-                        );
-                        leading_flags += 1;
-                    } else {
-                        let escaped = escape_sparql_string(initial);
-                        conformance_patterns.push(format!(
-                            "{} FILTER(STR(?_cf_{safe_name}) = \"{escaped}\")",
-                            triple(&prop.predicate, &format!("?_cf_{safe_name}"))
-                        ));
-                    }
-                } else {
-                    conformance_patterns
-                        .push(triple(&prop.predicate, &format!("?_cf_{safe_name}")));
-                }
-            } else {
-                conformance_patterns.push(triple(&prop.predicate, &format!("?_cf_{safe_name}")));
+            ConformanceObject::Iri(iri) => {
+                conformance_patterns.push(triple(pred, &format!("<{iri}>")));
             }
-        }
-    }
-
-    // Fallback: if no required properties, try initial values
-    if !has_conformance {
-        for prop in &shape.properties {
-            if let Some(ref initial) = prop.initial_value {
-                if validate_iri(&prop.predicate).is_err() {
-                    continue;
-                }
-                let safe_name = prop.name.replace(|c: char| !c.is_alphanumeric(), "_");
-                has_conformance = true;
-                if prop.is_flag {
-                    // Same `emittable_iri` gate as the required branch above.
-                    if emittable_iri(initial) {
-                        conformance_patterns.push(triple(&prop.predicate, &format!("<{initial}>")));
-                    } else {
-                        let escaped = escape_sparql_string(initial);
-                        conformance_patterns.push(format!(
-                            "{} FILTER(STR(?_cfInit_{safe_name}) = \"{escaped}\")",
-                            triple(&prop.predicate, &format!("?_cfInit_{safe_name}"))
-                        ));
-                    }
-                } else {
-                    conformance_patterns
-                        .push(triple(&prop.predicate, &format!("?_cfInit_{safe_name}")));
-                }
-                break;
+            ConformanceObject::Str(value) => {
+                let escaped = escape_sparql_string(value);
+                conformance_patterns.push(format!(
+                    "{} FILTER(STR({var}) = \"{escaped}\")",
+                    triple(pred, &var)
+                ));
             }
+            ConformanceObject::Any => conformance_patterns.push(triple(pred, &var)),
         }
     }
 
