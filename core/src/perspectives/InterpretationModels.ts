@@ -184,6 +184,12 @@ export class InterpretationRun extends Ad4mModel {
   /** Raw LLM response this pass received. Same rules as `debugPrompt`. */
   @Optional({ through: "ad4m://interp/debug_response", resolveLanguage: "literal" })
   debugResponse?: string;
+
+  /** How the pass ran: `single-shot`, `harness`, or `fallback` (a harness
+   *  pass that ended without a usable answer and ran single-shot on the same
+   *  batch). Absent on runs from before this property. */
+  @Optional({ through: "ad4m://interp/mode" })
+  mode?: string;
 }
 
 // ── InterpretationOverlay ───────────────────────────────────────────────────
