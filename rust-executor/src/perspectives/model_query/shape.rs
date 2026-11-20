@@ -658,8 +658,8 @@ pub(crate) fn parse_where_filter(val: &Value) -> Option<BTreeMap<String, WhereCo
 #[cfg(test)]
 pub(crate) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<ModelShape, Error> {
     use super::types::TransformExpression;
-    let meta: Value =
-        serde_json::from_str(json).map_err(|e| anyhow::anyhow!("Failed to parse shape JSON: {}", e))?;
+    let meta: Value = serde_json::from_str(json)
+        .map_err(|e| anyhow::anyhow!("Failed to parse shape JSON: {}", e))?;
 
     let target_class = meta["className"].as_str().unwrap_or(class_name).to_string();
 
