@@ -611,23 +611,14 @@
           ]
         }
       },
-      "connect": {
+      "connect-lib": {
         "packageJson": {
           "dependencies": [
             "npm:@types/node@^16.11.11",
-            "npm:@undecaf/barcode-detector-polyfill@~0.9.15",
-            "npm:@undecaf/zbar-wasm@~0.9.12",
-            "npm:auto-bind@^5.0.1",
-            "npm:esbuild-plugin-copy@^2.1.1",
-            "npm:esbuild-plugin-lit@^0.0.10",
-            "npm:esbuild-plugin-replace@^1.4.0",
             "npm:esbuild@~0.15.5",
             "npm:happy-dom@14",
-            "npm:lit@^2.3.1",
             "npm:np@^7.6.2",
-            "npm:npm-run-all@^4.1.5",
             "npm:typescript@^4.6.2",
-            "npm:vite@^4.1.1",
             "npm:vitest@^1.6.0"
           ]
         }
@@ -727,6 +718,7 @@
         "packageJson": {
           "dependencies": [
             "npm:@peculiar/webcrypto@^1.1.7",
+            "npm:@roamhq/wrtc@0.10",
             "npm:@types/chai-as-promised@*",
             "npm:@types/chai@*",
             "npm:@types/expect@*",
@@ -756,14 +748,17 @@
             "npm:mocha@*",
             "npm:node-fetch@^3.3.0",
             "npm:node-wget-js@^1.0.1",
+            "npm:playwright-core@^1.63.0",
             "npm:react@^17.0.1",
             "npm:run-script-os@^1.1.6",
             "npm:sinon@*",
             "npm:ts-mocha@*",
             "npm:ts-node@10.9.1",
+            "npm:tsx@^4.23.15",
             "npm:typescript@^4.6.2",
             "npm:unzipper@~0.10.11",
-            "npm:uuid@*"
+            "npm:uuid@*",
+            "npm:ws@^8.16.0"
           ]
         }
       },

@@ -72,7 +72,10 @@ and answers `JoinAdded`, so a repeated claim keeps the first row's identity and 
   record's identity): any other web app gets the grant of the agent that speaks for the
   identity, within the capabilities it asked for. The web grant's `auth.app_url` is the origin,
   and a web renewal statement must name that origin (`grant`). `agent.signSessionStatement`
-  stays native-only.
+  stays native-only. `tests/js/tests/identity-web-login.test.ts` runs it against a real
+  executor: a fake registry on loopback (`AD4M_IDENTITY_REGISTRY_URL`), a browser key held in
+  JS that claims the holder's offer and signs every statement itself (nothing asks the
+  executor to sign).
 - The cache only extends a log. A different event at a held seq that holds (below) records a
   fork, appends nothing and fires `identity-fork` once per fork, to the sessions of the
   identity's local agents.

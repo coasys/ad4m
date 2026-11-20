@@ -851,7 +851,8 @@ jobs:
           destination: test-logs
 
   # Identity end to end: a real identity-store and three executors (create, link,
-  # first-link refusal, revoke, a store restored behind the cache, cache after restart).
+  # first-link refusal, revoke, a store restored behind the cache, cache after restart),
+  # then the web login suite (a browser key held in JS, a fake app registry, the code and PKCE).
   # No Holochain. The suite builds identity-store and the holder example with cargo.
   integration-tests-identity:
     machine: true
