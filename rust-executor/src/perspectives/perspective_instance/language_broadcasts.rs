@@ -48,7 +48,13 @@ fn is_presence_beat(payload: &PerspectiveExpression) -> bool {
         link.data.predicate.as_deref() == Some(RTC_PREDICATE)
             && serde_json::from_str::<serde_json::Value>(&link.data.source)
                 .ok()
-                .and_then(|source| source.get("message")?.get("kind")?.as_str().map(str::to_owned))
+                .and_then(|source| {
+                    source
+                        .get("message")?
+                        .get("kind")?
+                        .as_str()
+                        .map(str::to_owned)
+                })
                 .as_deref()
                 == Some("beat")
     })

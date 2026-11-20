@@ -76,8 +76,9 @@ impl StubLanguage {
 /// `Language::new`. Calls start in `StubMode::Serve`.
 async fn stub_language(peers: Vec<String>, caps: &[Capability]) -> StubLanguage {
     let address = format!("QmStub{}", Uuid::new_v4().simple());
-    let (tx, mut requests) =
-        tokio::sync::mpsc::unbounded_channel::<crate::languages::language_runtime::LanguageRuntimeRequest>();
+    let (tx, mut requests) = tokio::sync::mpsc::unbounded_channel::<
+        crate::languages::language_runtime::LanguageRuntimeRequest,
+    >();
     LanguageController::global_instance()
         .set_runtime_for_test(
             &address,
@@ -105,10 +106,7 @@ async fn stub_language(peers: Vec<String>, caps: &[Capability]) -> StubLanguage 
                     }
                     _ => Ok("null".to_string()),
                 };
-                let blocked = matches!(
-                    *mode.lock().unwrap(),
-                    StubMode::Block | StubMode::Fail
-                );
+                let blocked = matches!(*mode.lock().unwrap(), StubMode::Block | StubMode::Fail);
                 if blocked {
                     sleep(STUB_DELAY).await;
                 }
@@ -477,10 +475,7 @@ async fn online_agents_reports_co_located_users_while_the_language_is_blocked() 
 
     let stub = stub_language(
         Vec::new(),
-        &[
-            Capability::PeersRemote,
-            Capability::TelepresenceGetAgents,
-        ],
+        &[Capability::PeersRemote, Capability::TelepresenceGetAgents],
     )
     .await;
     let instance = neighbourhood(&stub, vec![user.to_string()]).await;
@@ -520,7 +515,10 @@ async fn a_blocked_policy_check_serves_the_last_policy() {
         .expect("the first policy read waited on the language")
         .as_result()
         .expect("the first policy read failed");
-    assert_eq!(first.mode, "designated", "setup: expected the honest policy");
+    assert_eq!(
+        first.mode, "designated",
+        "setup: expected the honest policy"
+    );
 
     stub.set(StubMode::Block);
     for i in 0..10 {

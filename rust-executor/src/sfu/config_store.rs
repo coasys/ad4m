@@ -162,8 +162,7 @@ struct PolicyCacheEntry {
 }
 
 lazy_static! {
-    static ref POLICY_CACHE: Mutex<HashMap<String, PolicyCacheEntry>> =
-        Mutex::new(HashMap::new());
+    static ref POLICY_CACHE: Mutex<HashMap<String, PolicyCacheEntry>> = Mutex::new(HashMap::new());
 }
 
 /// The resolved policy when it is less than [`POLICY_CACHE_TTL`] old.

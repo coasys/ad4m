@@ -1810,16 +1810,18 @@ impl SfuService {
         &self,
         neighbourhood_url: &str,
     ) -> Result<Option<String>, String> {
-        Ok(match config_store::read_policy(neighbourhood_url)
-            .await
-            .map_err(|e| e.to_string())?
-            .mode
-            .as_str()
-        {
-            "designated" => Some(self.gossip.local_did().to_string()),
-            "gateway" => Some("gateway".to_string()), // Sentinel — caller resolves gateway DID
-            _ => None,
-        })
+        Ok(
+            match config_store::read_policy(neighbourhood_url)
+                .await
+                .map_err(|e| e.to_string())?
+                .mode
+                .as_str()
+            {
+                "designated" => Some(self.gossip.local_did().to_string()),
+                "gateway" => Some("gateway".to_string()), // Sentinel — caller resolves gateway DID
+                _ => None,
+            },
+        )
     }
 
     /// The SFU nodes under the neighbourhood's mode: for `cascaded`, this
