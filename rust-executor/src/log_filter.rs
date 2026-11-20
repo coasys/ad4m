@@ -269,6 +269,9 @@ impl FilterState {
 
     /// Whether a record with `metadata` is logged now.
     pub fn enabled(&self, metadata: &Metadata) -> bool {
+        if is_audit(metadata) && self.current().is_some() {
+            return true;
+        }
         if let Some(over) = self.current() {
             if let Some(level) = over.level_for(metadata.target()) {
                 return metadata.level() <= level;
@@ -280,6 +283,9 @@ impl FilterState {
     /// Whether `record` is logged now: [`Self::enabled`] for its target and level, and the
     /// startup filter's `/regex` (if any) for its message.
     pub fn record_enabled(&self, record: &Record) -> bool {
+        if is_audit(record.metadata()) && self.current().is_some() {
+            return true;
+        }
         if let Some(over) = self.current() {
             if let Some(level) = over.level_for(record.target()) {
                 return record.level() <= level
@@ -342,6 +348,13 @@ impl FilterState {
             reverts_at: over.map(|o| o.until_wall),
         }
     }
+}
+
+/// A warning of this module: `log.filter-set`, the audit line of an override. No override
+/// hides it, not even the `off` or `error` it reports (it is logged once the override is in
+/// force, through it).
+fn is_audit(metadata: &Metadata) -> bool {
+    metadata.target() == module_path!() && metadata.level() <= log::Level::Warn
 }
 
 /// The executor's logger: `inner` (an env_logger that passes every record to its output)
@@ -589,6 +602,41 @@ mod tests {
             .set_override("rmcp=debug", Duration::from_secs(60))
             .unwrap();
         assert!(state.enabled(&meta(RMCP_SESSIONS, log::Level::Info)));
+        state.set_override("", DEFAULT_TTL).unwrap();
+    }
+
+    /// `off` (or `error`) still logs its own `log.filter-set` line: the audit of who turned
+    /// the logs down must not be hidden by that very filter.
+    #[test]
+    fn an_override_does_not_hide_its_own_audit_line() {
+        let state = test_state();
+        state.set_startup("info");
+        let sink = Sink::default();
+        let logger = ReloadableLogger::with_state(Box::new(sink.clone()), state);
+        for (spec, ttl) in [("off", 4321), ("error", 4322)] {
+            state.set_override(spec, Duration::from_secs(ttl)).unwrap();
+            let captured =
+                crate::call_diag::capture::lines("log.filter-set", &[&format!("ttl_s={ttl}")]);
+            let audit = captured.last().expect("log.filter-set was emitted");
+            logger.log(
+                &Record::builder()
+                    .target(&audit.target)
+                    .level(audit.level)
+                    .args(format_args!("{}", audit.line))
+                    .build(),
+            );
+            logger.log(
+                &Record::builder()
+                    .target("rust_executor::db")
+                    .level(log::Level::Warn)
+                    .args(format_args!("hidden"))
+                    .build(),
+            );
+            let seen = sink.0.lock().unwrap().clone();
+            assert_eq!(seen.len(), 1, "{spec:?}: {seen:?}");
+            assert!(seen[0].contains("event=log.filter-set"), "{seen:?}");
+            sink.0.lock().unwrap().clear();
+        }
         state.set_override("", DEFAULT_TTL).unwrap();
     }
 
