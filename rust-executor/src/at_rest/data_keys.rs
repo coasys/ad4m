@@ -72,8 +72,6 @@ pub enum SubkeyPurpose {
     LanguageStorage,
     Rows,
     Archive,
-    /// The executor's own secrets outside the stores (the local-network certificate's key).
-    Secret,
 }
 
 /// Why a key was destroyed: the reason its tombstone keeps.
@@ -122,7 +120,6 @@ impl SubkeyPurpose {
             SubkeyPurpose::LanguageStorage => "ad4m:at-rest:lang:v1",
             SubkeyPurpose::Rows => "ad4m:at-rest:row:v1",
             SubkeyPurpose::Archive => "ad4m:at-rest:archive:v1",
-            SubkeyPurpose::Secret => "ad4m:at-rest:secret:v1",
         }
     }
 }

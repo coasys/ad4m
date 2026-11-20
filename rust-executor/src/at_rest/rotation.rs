@@ -358,7 +358,6 @@ mod tests {
     /// job waits for it before it retires the old version, counts its file and seals it again.
     #[test]
     fn a_write_holding_the_old_version_is_not_stranded_by_the_retirement() {
-        use std::sync::mpsc;
         let folder = tempfile::tempdir().unwrap();
         let keys = keyring(folder.path());
         let db = database(folder.path(), &keys);
@@ -381,39 +380,22 @@ mod tests {
             }),
         );
 
-        let (taken_tx, taken_rx) = mpsc::channel::<()>();
-        let (go_tx, go_rx) = mpsc::channel::<()>();
-        let go_rx = Mutex::new(go_rx);
-        let taken_tx = Mutex::new(taken_tx);
-        *lang_storage::PAUSE_AFTER_SEAL.lock().unwrap() = Some(Arc::new(move || {
-            taken_tx.lock().unwrap().send(()).unwrap();
-            go_rx.lock().unwrap().recv().unwrap();
-        }));
-        let writer_keys = keys.clone();
-        let writer_folder = language_folder.clone();
+        // A writer holds the files lock with a file sealed under version 1 and not yet in
+        // place; the job starts once it holds the lock and publishes after the job reached it.
+        let held =
+            lang_storage::seal(&keys, &store, "QmWriter", "kv.json", b"acknowledged").unwrap();
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel::<()>();
+        let file = language_folder.join("kv.json");
         let writer = std::thread::spawn(move || {
-            lang_storage::write_file(
-                Some(&writer_keys),
-                lang_storage::Caller {
-                    folder: &writer_folder,
-                    address: "QmWriter",
-                    system: false,
-                },
-                "kv.json",
-                "acknowledged",
-            )
+            lang_storage::exclusive(|| {
+                locked_tx.send(()).unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                crate::at_rest::files::write_atomic(&file, &held).unwrap();
+            })
         });
-        // The writer holds version 1 and has not renamed its file.
-        taken_rx.recv().unwrap();
-        // Release it once the job is waiting for the files lock.
-        let releaser = std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(500));
-            go_tx.send(()).unwrap();
-        });
+        locked_rx.recv().unwrap();
         let report = reencrypt(&keys, &db, &languages, &store);
-        releaser.join().unwrap();
-        *lang_storage::PAUSE_AFTER_SEAL.lock().unwrap() = None;
-        writer.join().unwrap().unwrap();
+        writer.join().unwrap();
         let report = report.unwrap();
         assert_eq!(
             report.left, 1,

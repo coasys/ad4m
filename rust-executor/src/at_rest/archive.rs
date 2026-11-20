@@ -17,8 +17,9 @@
 //! or reordered does not open. The key is a store key's subkey for archives
 //! ([`SubkeyPurpose::Archive`]) of the version in the header: the executor store's for a
 //! whole archive, a perspective store's for the part of the snapshot that holds that
-//! perspective (the caller names the store; see `perspective_snapshot`). Every segment's associated data
-//! is a label and the whole header, so a header changed in any byte does not open either.
+//! perspective (the caller names the store; see `perspective_snapshot`). Every segment's
+//! associated data is a label and the whole header, so a header changed in any byte does not
+//! open either.
 //!
 //! An archive opens only under the keyring that sealed it.
 

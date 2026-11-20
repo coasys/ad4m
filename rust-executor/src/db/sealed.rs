@@ -472,10 +472,11 @@ impl Ad4mDb {
     /// Seals every value of a sealed column still in the clear: after the export into a
     /// keyed file (`known_plain`: the export came from a plaintext database, so every value
     /// is plaintext, whatever it starts with), and after an import into a file that may hold
-    /// sealed rows already (a value is skipped only when it opens as sealed). A row that cannot be sealed (its store does not
-    /// resolve, e.g. a `perspective` that is no uuid, or a value that will not seal) is
-    /// skipped and stays in the clear: it is logged with its table and reason, never its
-    /// content, so one such row does not stop the rest of the move.
+    /// sealed rows already (a value is skipped only when it opens as sealed). A row that
+    /// cannot be sealed (its store does not resolve, e.g. a `perspective` that is no uuid, or
+    /// a value that will not seal) is skipped and stays in the clear: it is logged with its
+    /// table and reason, never its content, so one such row does not stop the rest of the
+    /// move.
     pub(crate) fn seal_plain_values(&self, known_plain: bool) -> Ad4mDbResult<SealPlainReport> {
         let mut report = SealPlainReport::default();
         if !self.seals() {

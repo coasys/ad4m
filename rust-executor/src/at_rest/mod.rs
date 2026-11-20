@@ -19,7 +19,6 @@ pub mod agent_passphrase;
 pub mod archive;
 pub mod data_keys;
 pub mod database;
-pub mod executor_secrets;
 pub mod files;
 pub mod keyring_file;
 pub mod lang_storage;

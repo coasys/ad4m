@@ -117,22 +117,6 @@ pub fn exclusive<T>(f: impl FnOnce() -> T) -> T {
     f()
 }
 
-/// A test's pause between a writer's key and its publication.
-#[cfg(test)]
-pub(crate) static PAUSE_AFTER_SEAL: Mutex<Option<Arc<dyn Fn() + Send + Sync>>> = Mutex::new(None);
-
-#[cfg(test)]
-fn pause_after_seal() {
-    // The hook runs without the static's lock, so a test can clear it while it waits.
-    let pause = PAUSE_AFTER_SEAL.lock().unwrap().clone();
-    if let Some(pause) = pause {
-        pause();
-    }
-}
-
-#[cfg(not(test))]
-fn pause_after_seal() {}
-
 static INSTALLED: OnceLock<Arc<DataKeys>> = OnceLock::new();
 
 /// Installs the keys the languages' storage calls seal under. `run` calls it once the keyring
@@ -405,7 +389,6 @@ fn reseal(
             Err(e) => return Err(e.to_string()),
         }
         let sealed = seal(keys, scope, address, file, plain).map_err(|e| e.to_string())?;
-        pause_after_seal();
         files::write_atomic(full, &sealed).map_err(|e| e.to_string())
     });
     if let Err(e) = written {
@@ -438,9 +421,7 @@ pub fn write_file(
         let bytes = match keys {
             Some(keys) => {
                 let scope = scope_for(keys, caller.address);
-                let sealed = seal(keys, &scope, caller.address, &file, content.as_bytes())?;
-                pause_after_seal();
-                sealed
+                seal(keys, &scope, caller.address, &file, content.as_bytes())?
             }
             None => content.as_bytes().to_vec(),
         };
@@ -602,7 +583,6 @@ pub fn reseal_store(
                 Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
                 Err(e) => return Err(io_error(&path, e)),
             }
-            pause_after_seal();
             files::write_atomic(&path, &sealed).map_err(|e| io_error(&path, e))?;
             Ok(true)
         })?;
@@ -912,7 +892,6 @@ mod tests {
     /// waits for the write or sees it, it never overwrites it with the older content.
     #[test]
     fn a_write_during_a_reseal_survives() {
-        use std::sync::mpsc;
         let data = tempfile::tempdir().unwrap();
         let keys = open_keys(data.path());
         let store = StoreId::Perspective(uuid::Uuid::new_v4());
@@ -924,35 +903,19 @@ mod tests {
         std::fs::write(folder.join("kv.json"), old).unwrap();
         keys.begin_store_rotation(&store).unwrap();
 
-        let (at_rename_tx, at_rename_rx) = mpsc::channel::<()>();
-        let (go_tx, go_rx) = mpsc::channel::<()>();
-        let at_rename_tx = Mutex::new(at_rename_tx);
-        let go_rx = Mutex::new(go_rx);
-        *PAUSE_AFTER_SEAL.lock().unwrap() = Some(Arc::new(move || {
-            at_rename_tx.lock().unwrap().send(()).unwrap();
-            go_rx.lock().unwrap().recv().unwrap();
-        }));
-        let job_keys = keys.clone();
-        let job_languages = languages.clone();
-        let job_store = store.clone();
-        let job = std::thread::spawn(move || reseal_store(&job_keys, &job_languages, &job_store));
-        // The job has read, sealed and checked the file, and is about to rename.
-        at_rename_rx.recv().unwrap();
-        *PAUSE_AFTER_SEAL.lock().unwrap() = None;
-        let writer_keys = keys.clone();
-        let writer_folder = folder.clone();
-        let writer = std::thread::spawn(move || {
-            write_file(
-                Some(&writer_keys),
-                caller(&writer_folder, "QmLanguageA"),
-                "kv.json",
-                "new",
-            )
+        // The test is the writer: it holds the files lock, the job has read the old file and
+        // waits for the lock, and the write lands before the job looks at the file again.
+        let new = seal(&keys, &store, "QmLanguageA", "kv.json", b"new").unwrap();
+        std::thread::scope(|scope| {
+            let job = exclusive(|| {
+                let job = scope.spawn(|| reseal_store(&keys, &languages, &store));
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                assert!(!job.is_finished(), "the job waits for the files lock");
+                files::write_atomic(&folder.join("kv.json"), &new).unwrap();
+                job
+            });
+            job.join().unwrap().unwrap();
         });
-        std::thread::sleep(std::time::Duration::from_millis(300));
-        go_tx.send(()).unwrap();
-        job.join().unwrap().unwrap();
-        writer.join().unwrap().unwrap();
         assert_eq!(
             read_file(Some(&keys), caller(&folder, "QmLanguageA"), "kv.json").unwrap(),
             "new"
