@@ -47,6 +47,13 @@ commands:
             if [ -e .git ] && ! git rev-parse --git-dir >/dev/null 2>&1; then
               heal "corrupted .git (git rev-parse fails)"
             fi
+            # A .git that opens but has no origin remote fails checkout with "No such remote
+            # 'origin'" (seen 2026-11-20, after the runner's disk filled during checkout). Checkout
+            # sets origin's URL but never adds the remote, so add it back here.
+            if [ -e .git ] && ! git remote get-url origin >/dev/null 2>&1; then
+              echo "fix_workdir: no origin remote -- adding it"
+              git remote add origin "$CIRCLE_REPOSITORY_URL"
+            fi
             # A .git that opens but lacks objects its refs reach passes the check above and then
             # fails checkout with "pack has N unresolved deltas": checkout offers the local refs as
             # haves, GitHub sends a thin pack against them, and the bases are not there. A

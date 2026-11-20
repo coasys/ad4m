@@ -238,10 +238,23 @@ run_step "$TMP/w"
 
 echo "unborn HEAD (empty repo from a previous heal, checkout never ran): no-op"
 rm -rf "$TMP/w"; mkdir "$TMP/w"; git -C "$TMP/w" init -q; echo x > "$TMP/w/x"
+git -C "$TMP/w" remote add origin "https://example.invalid/coasys/ad4m.git"
 run_step "$TMP/w"
 [ "$STEP_RC" = 0 ] || fail "step exited $STEP_RC: $STEP_LOG"
 [ -d "$TMP/w/.git" ] || fail ".git removed from an empty repository"
 [ -z "$STEP_LOG" ] || fail "unborn HEAD printed: $STEP_LOG"
+
+echo "clone without its origin remote (2026-11-20 state): origin added, nothing else touched"
+make_workdir
+before="$(objects_of "$TMP/w")"
+git -C "$TMP/w" remote remove origin
+run_step "$TMP/w"
+[ "$STEP_RC" = 0 ] || fail "step exited $STEP_RC: $STEP_LOG"
+grep -q "no origin remote -- adding it" <<<"$STEP_LOG" || fail "no origin log line: $STEP_LOG"
+grep -q "removing .git" <<<"$STEP_LOG" && fail "a clone without origin was healed: $STEP_LOG"
+[ "$(git -C "$TMP/w" remote get-url origin)" = "https://example.invalid/coasys/ad4m.git" ] || fail "origin not set from CIRCLE_REPOSITORY_URL"
+[ "$(objects_of "$TMP/w")" = "$before" ] || fail "objects changed"
+[ "$(cat "$TMP/w/target/release/ad4m")" = cached ] || fail "untracked cache touched"
 
 if [ "$FAILED" = 0 ]; then
     echo "All fix_workdir tests passed"
