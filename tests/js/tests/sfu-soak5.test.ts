@@ -35,7 +35,8 @@ import { startWorld, type World } from "../helpers/sfu/e2e/world.js";
  * The full run is a report: it fails only when the join fails, and its findings are in
  * summary.json and the logs. SOAK_PHASES=rebind is a regression test and fails unless, after
  * each rebinding, every pair receives again within RECOVER_MS (20 s, read on a 2 s sampling
- * grid), every pair receives at the end, and no dead pair or asymmetric event outlasts the
+ * grid; a recovery slower than that always fails, one in its last 2 s may fail too), every
+ * pair receives at the end, and no dead pair or asymmetric event outlasts the
  * grace (GRACE_MS) the rebinding is allowed.
  *
  * u3's transport is also read every second (`probe-u3.jsonl`), so a receive gap is timed to
@@ -540,6 +541,7 @@ describe(`SFU soak: five Chromium tabs in one ${TOPOLOGY} call`, function () {
     const isDisrupted = (name: string, at: number) => (disrupted.get(name) ?? 0) > at;
     const prev = new Map<string, number>(); // `${r}>${s}` -> app-level packet sum
     const lastGrowth = new Map<string, number>();
+    const growthTimes = new Map<string, number[]>(); // `${r}>${s}` -> times of the samples that saw it grow
     const transportPrev = new Map<string, number>(); // `${r}` -> transport packet sum
     const transportGrowth = new Map<string, number>();
     const deadOpen = new Map<string, { since: number; expected: boolean; phase: string }>();
@@ -582,6 +584,12 @@ describe(`SFU soak: five Chromium tabs in one ${TOPOLOGY} call`, function () {
             ...(pair ? { pid: pair.participantId, tracks: pair.tracks, aPkts: pair.a.pkts, aBytes: pair.a.bytes, aLevel: pair.a.level, vPkts: pair.v.pkts, vBytes: pair.v.bytes, frames: pair.v.frames, width: pair.v.width, peak: Number(pair.peak.toFixed(4)), luma: pair.luma === null ? null : Math.round(pair.luma), pc: pair.pc } : {}),
             rState: s.state, rPc: s.pcs.map((pc) => `${pc.conn}/${pc.ice}`),
           }) + "\n");
+          if (sum > 0 && prev.get(key) !== sum) {
+            const times = growthTimes.get(key) ?? [];
+            times.push(at);
+            if (times.length > 1_000) times.shift();
+            growthTimes.set(key, times);
+          }
           if (!lastGrowth.has(key) || (sum > 0 && prev.get(key) !== sum)) lastGrowth.set(key, at);
           prev.set(key, sum);
         }
@@ -748,12 +756,31 @@ describe(`SFU soak: five Chromium tabs in one ${TOPOLOGY} call`, function () {
           disrupt(probed.name);
           await rebind();
           const at = Date.now();
-          // Every pair receives again within RECOVER_MS, read on the sampling grid: a pair
-          // counts once a sample after that bound saw it grow.
+          // Every pair receives again within RECOVER_MS. A pair's recovery is the time from the
+          // rebinding to the first sample that saw it grow after its last gap (no growth for
+          // more than two samples); 0 when it never stopped. Samples see a recovery late, never
+          // early, so any recovery slower than RECOVER_MS fails; one in the last sampling
+          // interval before the bound (2 s) can fail too. A pair must still grow at the check.
           await wait(RECOVER_MS + SAMPLE_MS + 1_000);
-          const late = pairKeys().filter((key) => (lastGrowth.get(key) ?? 0) < at + RECOVER_MS - 1_000);
-          if (late.length) failures.push(`rebinding ${i + 1}: not receiving ${RECOVER_MS / 1000} s after it: ${late.join(", ")}`);
-          say(late.length ? `RECOVERY FAILED after rebinding ${i + 1}: ${late.join(", ")}` : `rebinding ${i + 1}: every pair receives again within ${RECOVER_MS / 1000} s`);
+          const check = Date.now();
+          const gapMs = 2 * SAMPLE_MS + 1_000;
+          const recovery = (key: string): number => {
+            const times = (growthTimes.get(key) ?? []).filter((t) => t > at - gapMs && t <= check);
+            if (!times.length || check - times[times.length - 1] > gapMs) return Infinity;
+            let before = times[0] <= at ? times[0] : -Infinity;
+            let recovered = 0;
+            for (const t of times) {
+              if (t - before > gapMs) recovered = t - at;
+              before = t;
+            }
+            return recovered;
+          };
+          const recoveries = pairKeys().map((key) => ({ key, ms: recovery(key) }));
+          const late = recoveries.filter((r) => r.ms > RECOVER_MS);
+          const observed = recoveries.filter((r) => r.ms > 0).map((r) => `${r.key} ${Number.isFinite(r.ms) ? `${(r.ms / 1000).toFixed(1)} s` : "not receiving"}`);
+          say(`rebinding ${i + 1}: recoveries ${observed.length ? observed.join(", ") : "none needed (no pair stopped)"}`);
+          if (late.length) failures.push(`rebinding ${i + 1}: not receiving again within ${RECOVER_MS / 1000} s: ${late.map((r) => `${r.key} (${Number.isFinite(r.ms) ? `${(r.ms / 1000).toFixed(1)} s` : "not receiving"})`).join(", ")}`);
+          say(late.length ? `RECOVERY FAILED after rebinding ${i + 1}: ${late.map((r) => r.key).join(", ")}` : `rebinding ${i + 1}: every pair receives again within ${RECOVER_MS / 1000} s`);
           // Then u3 settles and its grace runs out with a dead window to spare: a pair still
           // dead by then, or dead again, is an unexpected event.
           settle(probed.name);
