@@ -223,19 +223,24 @@ impl FilterState {
     }
 
     /// Remove `expired` unless another override replaced it meanwhile.
+    ///
+    /// `log::set_max_level` is written only under the `over` write lock (here, in
+    /// [`Self::set_override`] and in [`install`]), so the last level written always belongs to
+    /// the last override written: a revert cannot lower the level after a newer override
+    /// raised it.
     fn revert_if(&self, expired: &Override) {
         let reverted = {
             let mut slot = self.over.write().unwrap();
             if slot.as_ref().is_some_and(|o| o.until == expired.until) {
                 *slot = None;
                 self.has_override.store(false, Ordering::Relaxed);
+                log::set_max_level(self.startup_max());
                 true
             } else {
                 false
             }
         };
         if reverted {
-            log::set_max_level(self.startup_max());
             // After the lock is gone: this line goes through the filter again.
             crate::call_diag!(
                 log::Level::Info,
@@ -295,9 +300,13 @@ impl FilterState {
             until_wall: chrono::Utc::now() + chrono::Duration::from_std(ttl).unwrap_or_default(),
         };
         let max = over.max_level().max(self.startup_max());
-        *self.over.write().unwrap() = Some(over.clone());
-        self.has_override.store(true, Ordering::Relaxed);
-        log::set_max_level(max);
+        {
+            // One step under the lock with the level (see `revert_if`).
+            let mut slot = self.over.write().unwrap();
+            *slot = Some(over.clone());
+            self.has_override.store(true, Ordering::Relaxed);
+            log::set_max_level(max);
+        }
         crate::call_diag!(
             log::Level::Warn,
             "log.filter-set",
@@ -353,6 +362,7 @@ impl Log for ReloadableLogger {
 pub fn install(inner: Box<dyn Log>, startup_spec: &str) -> Result<(), log::SetLoggerError> {
     state().set_startup(startup_spec);
     log::set_boxed_logger(Box::new(ReloadableLogger::new(inner)))?;
+    let _slot = state().over.write().unwrap();
     log::set_max_level(state().startup_max());
     Ok(())
 }
