@@ -2,7 +2,8 @@ use log::{debug, error, info};
 use serde_json::Value as JsonValue;
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::runtime::Builder;
 use tokio::sync::{
@@ -51,6 +52,10 @@ pub struct LanguageRuntimeHandle {
     call_deadline: Duration,
     /// The request the runtime is running.
     running: RunningRequest,
+    /// Set by the runtime's `load_module` (`LanguageRuntime::is_wasm_bundle`):
+    /// the language is wasm-bindgen output, so every call into it runs in the
+    /// ordered slot, a concurrent-marked one included.
+    wasm: Arc<AtomicBool>,
 }
 
 impl LanguageRuntimeHandle {
@@ -72,6 +77,8 @@ impl LanguageRuntimeHandle {
         let prefix_len = 8.min(addr.len());
         let running = RunningRequest::default();
         let runtime_running = running.clone();
+        let wasm = Arc::new(AtomicBool::new(false));
+        let runtime_wasm = wasm.clone();
 
         std::thread::Builder::new()
             .name(format!("lang-{}", &addr[..prefix_len]))
@@ -82,8 +89,12 @@ impl LanguageRuntimeHandle {
                     .expect("Failed to create Tokio runtime for language");
 
                 rt.block_on(async {
-                    let runtime =
-                        LanguageRuntime::new(addr.clone(), storage_directory, is_system_language);
+                    let runtime = LanguageRuntime::new(
+                        addr.clone(),
+                        storage_directory,
+                        is_system_language,
+                        runtime_wasm,
+                    );
 
                     // Execute bootstrap module to make Deno ops available
                     if let Err(e) = runtime.init().await {
@@ -103,6 +114,7 @@ impl LanguageRuntimeHandle {
             tx,
             call_deadline: LANGUAGE_CALL_DEADLINE,
             running,
+            wasm,
         })
     }
 
@@ -119,6 +131,7 @@ impl LanguageRuntimeHandle {
             tx,
             call_deadline: LANGUAGE_CALL_DEADLINE,
             running: RunningRequest::default(),
+            wasm: Default::default(),
         }
     }
 
@@ -133,6 +146,22 @@ impl LanguageRuntimeHandle {
     #[cfg(test)]
     pub(crate) fn running_request(&self) -> RunningRequest {
         self.running.clone()
+    }
+
+    /// Test-only: mark the language WASM, as `load_module` does on a real runtime.
+    #[cfg(test)]
+    pub(crate) fn set_wasm(&self) {
+        self.wasm.store(true, Ordering::SeqCst);
+    }
+
+    /// The kind a call effectively runs as: a concurrent-marked call counts as
+    /// ordered on a WASM language, whose flag `load_module` may only set after
+    /// the call was sent — so it is read on each check, not once at send.
+    fn effective_kind(&self, kind: CallKind) -> CallKind {
+        match kind {
+            CallKind::Concurrent if self.wasm.load(Ordering::SeqCst) => CallKind::Ordered,
+            kind => kind,
+        }
     }
 
     /// The error for a call that will not run because the language's running call has run for
@@ -166,7 +195,7 @@ impl LanguageRuntimeHandle {
                 {
                     break;
                 }
-                let (error, limit) = match (kind, running.ordered) {
+                let (error, limit) = match (self.effective_kind(kind), running.ordered) {
                     (CallKind::Ordered, Some((_, since))) => {
                         (self.busy_error(since), since + self.call_deadline)
                     }
@@ -179,6 +208,13 @@ impl LanguageRuntimeHandle {
                     ),
                 };
                 if Instant::now() >= limit {
+                    // `finish` clears the running marker and sends the result
+                    // under this lock, so a marker gone here means a finished
+                    // call's result was already sent — take it over the
+                    // deadline error.
+                    if let Ok(result) = response_rx.try_recv() {
+                        return Ok(result);
+                    }
                     // Dropped under the lock the runtime starts a call under, so the runtime
                     // either has started this call (and the check above broke out) or will
                     // skip it.
@@ -212,9 +248,10 @@ impl LanguageRuntimeHandle {
             LanguageOperation::Execute(_, _, kind) => Some(*kind),
             _ => None,
         };
-        if kind == Some(CallKind::Ordered) {
+        if kind.map(|kind| self.effective_kind(kind)) == Some(CallKind::Ordered) {
             // Not queued behind a call that has run past the deadline: retries during a hang
-            // would pile up in the channel. A concurrent call does not wait for that call.
+            // would pile up in the channel. A concurrent call does not wait for that call —
+            // unless the language is WASM and runs it ordered too (`effective_kind`).
             if let Some((_, since)) = self.running.lock().unwrap().ordered {
                 if since.elapsed() >= self.call_deadline {
                     return Err(self.busy_error(since));

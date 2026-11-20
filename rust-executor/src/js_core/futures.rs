@@ -1,5 +1,5 @@
-use deno_core::error::{CoreError, JsError};
-use deno_core::{v8, PollEventLoopOptions};
+use deno_core::error::{CoreError, CoreErrorKind, JsError};
+use deno_core::{v8, JsRuntime, PollEventLoopOptions};
 use deno_runtime::worker::MainWorker;
 use futures::Future;
 use std::cell::RefCell;
@@ -15,7 +15,34 @@ use tokio::sync::Mutex as TokioMutex;
 /// dynamic import): it belongs to no call, so a call's future hands it to the
 /// loop's owner (the `process_requests` event-loop branch, the only future
 /// that reports them) instead of ending its own call on it.
-pub(crate) type EventLoopErrors = Rc<RefCell<VecDeque<CoreError>>>;
+#[derive(Default)]
+pub(crate) struct EventLoopSink {
+    errors: VecDeque<CoreError>,
+    /// The loop reported a stalled module evaluation: deno repeats that error
+    /// on every `poll_event_loop` for ever, so `EventLoopFuture` stops polling
+    /// — parked, not spinning. A call's own future still drives the loop while
+    /// it runs.
+    stalled: bool,
+}
+
+pub(crate) type EventLoopErrors = Rc<RefCell<EventLoopSink>>;
+
+/// Whether an event-loop error names a module evaluation that can never
+/// finish. Deno reports a stalled top-level await as a bare V8 message
+/// (`JsError::from_v8_message`, whose `name` is never set — the only error on
+/// the event-loop path with no exception behind it) and an evaluation it
+/// cannot account for as `ModuleEvaluationDeadlock`. Either repeats on every
+/// poll once the loop is otherwise idle, unlike a rejection, which is drained
+/// once — so it is also the signal to stop driving the loop for it.
+fn is_stalled_module_evaluation(err: &CoreError) -> bool {
+    match err.as_kind() {
+        CoreErrorKind::ModuleEvaluationDeadlock => true,
+        CoreErrorKind::Js(js_error) => {
+            js_error.name.is_none() && js_error.exception_message.contains("Top-level await")
+        }
+        _ => false,
+    }
+}
 
 pub struct EventLoopFuture {
     worker: Arc<TokioMutex<MainWorker>>,
@@ -34,8 +61,14 @@ impl Future for EventLoopFuture {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         // Report an error a call's future collected while driving the loop:
         // reported once, here, no matter whose poll surfaced it.
-        if let Some(err) = self.errors.borrow_mut().pop_front() {
-            return Poll::Ready(Err(err));
+        {
+            let mut errors = self.errors.borrow_mut();
+            if let Some(err) = errors.errors.pop_front() {
+                return Poll::Ready(Err(err));
+            }
+            if errors.stalled {
+                return Poll::Pending;
+            }
         }
         let worker = self.worker.try_lock();
         if let Ok(mut worker) = worker {
@@ -49,7 +82,14 @@ impl Future for EventLoopFuture {
                     ..Default::default()
                 },
             ) {
-                Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+                Poll::Ready(Err(e)) => {
+                    if is_stalled_module_evaluation(&e) {
+                        // The stall is reported on every poll for ever:
+                        // report it once, then park, or the request loop spins.
+                        self.errors.borrow_mut().stalled = true;
+                    }
+                    Poll::Ready(Err(e))
+                }
                 // Event loop drained or has pending work with registered
                 // wakers. Return Pending — deno_core's internal wakers
                 // (I/O, timers) or the channel in the surrounding select!
@@ -91,6 +131,27 @@ where
     }
 }
 
+/// A settled call promise becomes its string result. deno v2.9: `handle_scope()`
+/// is gone from JsRuntime — `v8::scope!` against the raw isolate + main_context.
+/// The inner v8 resolve error (`Box<JsError>`) becomes `CoreError` here so the
+/// outer future type stays the same.
+fn into_result(
+    result: Result<v8::Global<v8::Value>, Box<JsError>>,
+    js_runtime: &mut JsRuntime,
+) -> Result<String, CoreError> {
+    match result {
+        Ok(result) => {
+            let main_context = js_runtime.main_context();
+            let isolate = js_runtime.v8_isolate();
+            deno_core::v8::scope!(let handle_scope, isolate);
+            let ctx = deno_core::v8::Local::new(handle_scope, main_context);
+            let scope = &mut deno_core::v8::ContextScope::new(handle_scope, ctx);
+            Ok(result.open(scope).to_rust_string_lossy(scope))
+        }
+        Err(err) => Err(CoreError::from(err)),
+    }
+}
+
 impl<F> Future for SmartGlobalVariableFuture<F>
 where
     F: Future<Output = Result<v8::Global<v8::Value>, Box<JsError>>> + Unpin,
@@ -112,59 +173,40 @@ where
         let mut value_pin = Pin::new(&mut self.value);
 
         if let Poll::Ready(result) = value_pin.as_mut().poll(cx) {
-            match result {
-                Ok(result) => {
-                    // deno v2.9: handle_scope() gone from JsRuntime. Use
-                    // v8::scope! against the raw isolate + main_context.
-                    let main_context = worker.js_runtime.main_context();
-                    let isolate = worker.js_runtime.v8_isolate();
-                    deno_core::v8::scope!(let handle_scope, isolate);
-                    let ctx = deno_core::v8::Local::new(handle_scope, main_context);
-                    let scope = &mut deno_core::v8::ContextScope::new(handle_scope, ctx);
-                    let result = result.open(scope).to_rust_string_lossy(scope);
-                    return Poll::Ready(Ok(result));
-                }
-                // deno v2.9: inner v8 resolve returns Box<JsError>; wrap
-                // into CoreError so the outer Future type stays consistent.
-                Err(err) => return Poll::Ready(Err(CoreError::from(err))),
-            };
+            return Poll::Ready(into_result(result, &mut worker.js_runtime));
         }
 
-        let event_loop_poll = worker
+        if let Poll::Ready(event_loop_result) = worker
             .js_runtime
-            .poll_event_loop(cx, deno_core::PollEventLoopOptions::default());
-        if let Poll::Ready(event_loop_result) = event_loop_poll {
+            .poll_event_loop(cx, deno_core::PollEventLoopOptions::default())
+        {
             if let Err(err) = event_loop_result {
+                if is_stalled_module_evaluation(&err) {
+                    // A module evaluation that can never finish (a stalled
+                    // top-level await in an `import()`): the loop can no
+                    // longer reach quiescence, so a promise still pending
+                    // waits on work the loop will never do — the call ends
+                    // with the error rather than pending for ever. Re-poll the
+                    // promise first: this very tick may have settled it.
+                    return match value_pin.poll(cx) {
+                        Poll::Ready(result) => {
+                            Poll::Ready(into_result(result, &mut worker.js_runtime))
+                        }
+                        Poll::Pending => Poll::Ready(Err(err)),
+                    };
+                }
                 // An event-loop error is isolate-level, not this call's: an
                 // unhandled rejection in any promise on the isolate lands
                 // here, whichever call drove this poll. Hand it to the
                 // loop's owner and keep polling — this call ends only when
                 // its own promise settles, or it would free its slot (the
                 // ordered one included) while its script still runs.
-                errors.borrow_mut().push_back(err);
+                errors.borrow_mut().errors.push_back(err);
             }
 
             if let Poll::Ready(result) = value_pin.poll(cx) {
-                match result {
-                    Ok(result) => {
-                        // deno v2.9: handle_scope() gone; use v8::scope! against
-                        // raw isolate + main_context.
-                        let main_context = worker.js_runtime.main_context();
-                        let isolate = worker.js_runtime.v8_isolate();
-                        deno_core::v8::scope!(let handle_scope, isolate);
-                        let ctx = deno_core::v8::Local::new(handle_scope, main_context);
-                        let scope = &mut deno_core::v8::ContextScope::new(handle_scope, ctx);
-                        let result = result.open(scope).to_rust_string_lossy(scope);
-                        return Poll::Ready(Ok(result));
-                    }
-                    // deno v2.9: Box<JsError> → CoreError conversion.
-                    Err(err) => return Poll::Ready(Err(CoreError::from(err))),
-                };
+                return Poll::Ready(into_result(result, &mut worker.js_runtime));
             }
-
-            //return Poll::Ready(Err(anyhow::anyhow!(
-            //    "Promise resolution is still pending but the event loop has already resolved."
-            //)));
         }
 
         Poll::Pending

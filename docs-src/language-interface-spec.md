@@ -628,6 +628,9 @@ lock across their awaits, so every call into a WASM language runs
 ordered. Whatever fires from inside an export's invocation — an `emit*`
 import, a callback closure the language was handed, a promise it
 started — runs as that invoking call's agent, whichever agent that is.
+A call with no acting-agent token acts as no agent: the agent
+operations (`agentDid()`, `agentSign()`, `createSignedExpression()`,
+the sealed boxes) refuse rather than fall back to the main agent.
 
 #### Multi-user imports
 

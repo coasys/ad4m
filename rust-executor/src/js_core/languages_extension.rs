@@ -296,6 +296,7 @@ mod tests {
             own.clone(),
             dir.path().to_path_buf(),
             false,
+            Default::default(),
         );
         runtime.init().await.unwrap();
         let mut state = IsolateState::new();

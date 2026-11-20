@@ -562,6 +562,50 @@ async fn a_call_sent_after_a_slow_concurrent_call_does_not_wait_for_it() {
     assert_eq!(slow.expect("the slow call answers").trim(), "slow");
 }
 
+/// `finish` clears a call's running marker and sends its result under the one
+/// lock. A caller whose deadline check runs in what was once the gap between
+/// the two — marker gone, result on its way — takes the delivered result, not
+/// "did not start" (a retried write would then apply twice). Played
+/// deterministically: the thread below holds the lock across the call's whole
+/// wait, then sends the result and releases — the state the waiter sees after
+/// `finish` — so the waiter's next check finds the marker gone, the deadline
+/// (zero) past, and the result already there. Without the `try_recv`, the call
+/// would return the "did not start" error below.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_call_finished_as_its_deadline_passes_returns_its_result() {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let handle = LanguageRuntimeHandle::from_channel("QmFinishRace".into(), tx)
+        .with_call_deadline(Duration::ZERO);
+    let running = handle.running_request();
+
+    let (held_tx, held_rx) = std::sync::mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        let _guard = running.lock().unwrap();
+        held_tx.send(()).unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+    });
+    held_rx.recv().unwrap();
+
+    // Concurrent: `send`'s admission check does not lock for it, so the request
+    // is queued while the thread holds `running`.
+    let call = tokio::spawn({
+        let handle = handle.clone();
+        async move { handle.execute_concurrent("1 + 1".into()).await }
+    });
+    let request = within(Duration::from_secs(5), "the request", rx.recv())
+        .await
+        .expect("the call is queued");
+
+    // `finish` with the marker never set: the result sent under the lock the
+    // waiter blocks on, held past the deadline.
+    request.response_tx.send(Ok("2".to_string())).unwrap();
+
+    let result = within(Duration::from_secs(10), "the call", call)
+        .await
+        .expect("the call task completes");
+    assert_eq!(result.expect("the finished call answers").trim(), "2");
+}
+
 /// At the in-flight bound, the next concurrent call waits until a running one ends, without
 /// holding up ordered calls: a burst cannot grow one runtime's futures without bound.
 #[tokio::test(flavor = "multi_thread")]
@@ -833,6 +877,45 @@ async fn a_read_whose_caller_left_before_it_started_is_not_run() {
 // Isolate-level errors and WASM languages
 // ---------------------------------------------------------------------------
 
+/// A bundle whose top-level await can never settle stalls its module
+/// evaluation: deno reports the stall as an event-loop error on every poll once
+/// the loop is otherwise idle. The load ends with that error instead of holding
+/// its slot — and the request loop behind it — for ever.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_module_stalled_on_top_level_await_fails_its_load() {
+    crate::test_utils::setup_wallet();
+    crate::test_utils::setup_agent();
+    let address = "QmStalledLoad".to_string();
+    let (handle, dir) = spawn_runtime(&address);
+    let context = LanguageContext::new(
+        crate::agent::did(),
+        crate::agent::signing_key_id(),
+        None,
+        dir.path().to_path_buf(),
+        address,
+    );
+    let bundle = "await new Promise(() => {});\nexport function init() {}\n";
+    let result = within(
+        Duration::from_secs(20),
+        "the module load",
+        handle.load_module(bundle.to_string(), context),
+    )
+    .await;
+    let err = result.expect_err("the stalled module load fails");
+    assert!(
+        err.contains("never resolved") || err.contains("still pending"),
+        "unexpected error: {err}"
+    );
+
+    // The isolate still answers calls: a failed evaluation poisons only its
+    // quiescence, not the work a call drives in its own polls.
+    let pong = within(Duration::from_secs(10), "a later call", async {
+        handle.execute("1 + 1".into()).await
+    })
+    .await;
+    assert_eq!(pong.expect("a later call answers").trim(), "2");
+}
+
 /// An unhandled rejection is an isolate-level error, not a call's. A concurrent call that
 /// leaves one behind must not end the ordered call running beside it: the ordered call keeps
 /// its slot until its own promise settles, so a call queued behind it starts only after it,
@@ -1006,6 +1089,7 @@ async fn a_wasm_language_runs_concurrent_calls_in_order_as_their_agents() {
         ))
         .await
         .expect("the get answers");
+
     let author = serde_json::from_str::<serde_json::Value>(&expression)
         .unwrap()
         .pointer("/author")
@@ -1016,6 +1100,43 @@ async fn a_wasm_language_runs_concurrent_calls_in_order_as_their_agents() {
         author, alice,
         "the create signed as {author}, not the managed user"
     );
+}
+
+/// A concurrent-marked call on a WASM language runs ordered, so its caller's
+/// deadline is the ordered one: behind a running call already past the
+/// deadline it is refused at once (not queued to wait out the concurrent
+/// deadline); behind one approaching it, it gets the busy error when that
+/// call passes the deadline — the error names the running call, not "did not
+/// start". `set_wasm` plays `load_module`'s share of the flag.
+#[tokio::test]
+async fn a_concurrent_call_on_wasm_gets_the_ordered_deadline() {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let handle = LanguageRuntimeHandle::from_channel("QmWasmDeadline".into(), tx)
+        .with_call_deadline(Duration::from_millis(500));
+    handle.set_wasm();
+    let running = handle.running_request();
+
+    // Already past the deadline: refused at once, never queued.
+    running.lock().unwrap().ordered = Some((u64::MAX, Instant::now() - Duration::from_secs(1)));
+    let refused = within(Duration::from_secs(1), "the refused call", async {
+        handle.execute_concurrent("1 + 1".into()).await
+    })
+    .await;
+    assert!(refused
+        .expect_err("the running call is past the deadline")
+        .contains("is busy"));
+    assert!(rx.try_recv().is_err(), "the refused call was queued");
+
+    // Approaching it: the wait ends at the running call's deadline with the
+    // busy error, not at the concurrent deadline with "did not start".
+    running.lock().unwrap().ordered = Some((u64::MAX, Instant::now() - Duration::from_millis(450)));
+    let queued = within(Duration::from_secs(1), "the queued call", async {
+        handle.execute_concurrent("1 + 1".into()).await
+    })
+    .await;
+    assert!(queued
+        .expect_err("the running call passed the deadline")
+        .contains("is busy"));
 }
 
 // ---------------------------------------------------------------------------

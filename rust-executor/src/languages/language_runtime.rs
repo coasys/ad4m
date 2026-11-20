@@ -7,9 +7,9 @@ use futures::future::LocalBoxFuture;
 use futures::stream::{FuturesUnordered, StreamExt};
 use log::{debug, error, info, warn};
 use serde_json::Value as JsonValue;
-use std::cell::Cell;
 use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc::UnboundedReceiver, oneshot};
@@ -43,6 +43,18 @@ pub(crate) struct LanguageRuntimeRequest {
     pub queued_at: Instant,
     /// Names the request in `RunningRequest`.
     pub id: u64,
+}
+
+impl LanguageRuntimeRequest {
+    /// An `Execute` whose caller stopped waiting: `begin` will not run it and a
+    /// queued one is pruned. A lifecycle request is never gone — its caller
+    /// cannot stop waiting for it.
+    fn caller_gone(
+        operation: &LanguageOperation,
+        response_tx: &oneshot::Sender<Result<String, String>>,
+    ) -> bool {
+        matches!(operation, LanguageOperation::Execute(..)) && response_tx.is_closed()
+    }
 }
 
 /// The requests a runtime is running. The runtime writes it; the handle reads it to tell a
@@ -127,7 +139,9 @@ pub struct LanguageRuntime {
     js_core: JsCore,
     /// Set by `load_module`: the bundle is wasm-bindgen output (a Rust/ALDK
     /// language), so every call into it runs ordered, `Concurrent` included.
-    wasm: Cell<bool>,
+    /// Shared with the handle, which applies the ordered call's deadline to
+    /// concurrent-marked calls too (`LanguageRuntimeHandle::effective_kind`).
+    wasm: Arc<AtomicBool>,
 }
 
 impl LanguageRuntime {
@@ -135,6 +149,7 @@ impl LanguageRuntime {
         language_address: String,
         storage_directory: PathBuf,
         is_system_language: bool,
+        wasm: Arc<AtomicBool>,
     ) -> Self {
         info!(
             "Creating LanguageRuntime for: {} (system={})",
@@ -143,7 +158,7 @@ impl LanguageRuntime {
         Self {
             language_address,
             js_core: JsCore::new_for_language(storage_directory, is_system_language),
-            wasm: Cell::new(false),
+            wasm,
         }
     }
 
@@ -178,7 +193,8 @@ impl LanguageRuntime {
         // wasm-bindgen-futures' single module-wide microtask queue, which does
         // not restore each task's V8 async context, so a call resumed beside
         // another would act as the other call's agent (`is_wasm_bundle`).
-        self.wasm.set(Self::is_wasm_bundle(source));
+        self.wasm
+            .store(Self::is_wasm_bundle(source), Ordering::SeqCst);
 
         // Use a synthetic URL unique to this language so Deno's module map
         // doesn't collide if multiple languages are loaded in the same runtime.
@@ -416,6 +432,9 @@ struct Finished {
     response_tx: oneshot::Sender<Result<String, String>>,
     result: Result<String, String>,
     is_teardown: bool,
+    /// `begin` did not run it — the caller had already gone — so the error is
+    /// a skip, not a failure (logged at debug, LOGGING.md).
+    skipped: bool,
 }
 
 impl LanguageRuntime {
@@ -466,8 +485,7 @@ impl LanguageRuntime {
             // again (a commit goes to the pending diffs).
             let skip = {
                 let mut running = running.lock().unwrap();
-                let skip =
-                    matches!(operation, LanguageOperation::Execute(..)) && response_tx.is_closed();
+                let skip = LanguageRuntimeRequest::caller_gone(&operation, &response_tx);
                 if !skip {
                     if as_concurrent {
                         running.concurrent.insert(id);
@@ -486,6 +504,7 @@ impl LanguageRuntime {
                         addr
                     )),
                     is_teardown: false,
+                    skipped: true,
                 };
             }
             let is_teardown = matches!(operation, LanguageOperation::Teardown);
@@ -495,6 +514,7 @@ impl LanguageRuntime {
                 response_tx,
                 result,
                 is_teardown,
+                skipped: false,
             }
         })
     }
@@ -539,14 +559,15 @@ impl LanguageRuntime {
         result
     }
 
-    /// Clears `done` from `running` and answers its caller. Returns whether it was the
-    /// teardown.
+    /// Clears `done` from `running` and answers its caller — under the one lock, so a
+    /// caller whose wait passes its deadline just then finds the result already sent
+    /// rather than a stale "not started". Returns whether it was the teardown.
     fn finish(&self, done: Finished, running: &RunningRequest, as_concurrent: bool) -> bool {
         let addr = &self.language_address;
-        if let Err(ref e) = done.result {
-            error!("[lang:{}] Operation failed: {}", addr, e);
-        } else {
-            debug!("[lang:{}] Operation completed successfully", addr);
+        match &done.result {
+            Err(e) if done.skipped => debug!("[lang:{}] {}", addr, e),
+            Err(e) => error!("[lang:{}] Operation failed: {}", addr, e),
+            Ok(_) => debug!("[lang:{}] Operation completed successfully", addr),
         }
         {
             let mut running = running.lock().unwrap();
@@ -555,8 +576,8 @@ impl LanguageRuntime {
             } else {
                 running.ordered = None;
             }
+            let _ = done.response_tx.send(done.result);
         }
-        let _ = done.response_tx.send(done.result);
         done.is_teardown
     }
 
@@ -594,20 +615,29 @@ impl LanguageRuntime {
                     FuturesUnordered::new();
                 let mut closed = false;
                 loop {
+                    // A call whose caller has gone would be skipped by `begin`
+                    // anyway; prune it here so it never occupies a queue slot.
+                    // A lifecycle request always stays: its caller cannot stop
+                    // waiting for it.
+                    queue.retain(|r| {
+                        !LanguageRuntimeRequest::caller_gone(&r.operation, &r.response_tx)
+                    });
                     // Start what may start. Ordered and lifecycle requests keep send order:
                     // nothing later starts while one ahead waits, and no call sits beside a
                     // lifecycle request. A concurrent call has no order to keep, so it is
                     // skipped over when it cannot start — held only by the bound or a
                     // lifecycle request ahead of it — and never delays the calls behind it.
+                    // `lifecycle_ahead` follows the scan: it counts the requests still
+                    // queued ahead of the candidate.
+                    let mut lifecycle_ahead = false;
                     let mut i = 0;
                     while i < queue.len() {
                         // A call sent concurrent counts as ordered on a WASM
                         // language (`load_module`, `is_wasm_bundle`): nothing
                         // beside it ever runs on the isolate.
-                        let is_concurrent = queue[i].operation.is_concurrent() && !this.wasm.get();
+                        let is_concurrent =
+                            queue[i].operation.is_concurrent() && !this.wasm.load(Ordering::SeqCst);
                         let is_lifecycle = queue[i].operation.is_lifecycle();
-                        let lifecycle_ahead =
-                            queue.iter().take(i).any(|r| r.operation.is_lifecycle());
                         let may_start = if is_concurrent {
                             !ordered_is_lifecycle
                                 && !lifecycle_ahead
@@ -618,6 +648,7 @@ impl LanguageRuntime {
                                 && (!is_lifecycle || concurrent.is_empty())
                         };
                         if !may_start {
+                            lifecycle_ahead |= is_lifecycle;
                             i += 1;
                             continue;
                         }
@@ -647,7 +678,7 @@ impl LanguageRuntime {
                                     // On a WASM language it waits for the ordered slot like
                                     // an ordered call (`is_wasm_bundle`).
                                     let start_now = request.operation.is_concurrent()
-                                        && !this.wasm.get()
+                                        && !this.wasm.load(Ordering::SeqCst)
                                         && !ordered_is_lifecycle
                                         && concurrent.len() < MAX_CONCURRENT_CALLS
                                         && !queue.iter().any(|r| r.operation.is_lifecycle());

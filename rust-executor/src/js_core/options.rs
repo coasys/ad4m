@@ -118,6 +118,7 @@ mod tests {
             "wallet-check".to_string(),
             dir.path().to_path_buf(),
             false,
+            Default::default(),
         );
         runtime.init().await.unwrap();
         let wallet = runtime.execute("typeof globalThis.WALLET").await.unwrap();
@@ -139,6 +140,7 @@ mod tests {
             "agent-ops-check".to_string(),
             dir.path().to_path_buf(),
             false,
+            Default::default(),
         );
         runtime.init().await.unwrap();
         for op in ["unlock", "lock", "load", "save_agent_profile"] {
@@ -166,6 +168,7 @@ mod tests {
             "console-check".to_string(),
             dir.path().to_path_buf(),
             false,
+            Default::default(),
         );
         runtime.init().await.unwrap();
         runtime

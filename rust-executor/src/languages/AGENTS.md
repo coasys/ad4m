@@ -107,11 +107,21 @@ deadline error
 (`a_read_admitted_beside_a_read_that_holds_the_thread_gets_an_error_at_the_deadline`).
 The runtime never
 starts a call whose caller has gone, so a deadline error means the call did
-not run. A call that never returns (a hung `await` or a JS CPU loop) still
-blocks the ordered calls of its language and its own caller, but the callers
-behind it get errors instead of waiting for ever. A JS CPU loop blocks
-concurrent calls too: the isolate has one thread. Loading and teardown wait as
-before.
+not run.
+
+A call that never returns, by kind. A hung ordered call (an `await` nothing
+settles) blocks the language's ordered calls and its own caller for ever; the
+callers queued behind it get the deadline error instead of waiting for ever,
+and a new one fails at once. A hung concurrent call occupies one of the 16
+slots, so concurrent calls queue behind it until the bound is reached — and it
+delays the lifecycle requests that run with no call beside them (loading,
+callback registration, teardown) until it ends. No deadline bounds a running
+call: the deadline only covers calls that have not started, so a hung
+concurrent call's own caller waits until it ends — for ever, if it never
+does. A JS CPU loop is worse: the isolate has one thread, so it blocks every
+call of that language, ordered and concurrent, and the event loop itself —
+a queued caller's deadline still fires and reports the error, but nothing
+runs until the loop yields.
 
 Calls into a Language are built as JS source via `format!` and evaluated (≈20
 sites in `mod.rs`). A malformed template used to deadlock that language forever
