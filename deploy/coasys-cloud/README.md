@@ -10,7 +10,7 @@ person typing the storage secret.
 | `coasys-cloud` | `install <tag>`, `deploy <tag>`, `rollback`, `unlock`, `status` (run with `sudo`) |
 | `coasys-cloud.service` | System unit: `User=coasys-cloud`, restart rules for exit 75/78/79, hardening |
 | `executor-config.json` | Settings: port 12500, multi-user on, `host.signup` `by_invite`, no per-tenant limits |
-| `nginx.conf.example` | The `cloud.coasys.org` vhost: TLS, `/internal/` answers 404, no MCP |
+| `nginx.conf.example` | The `cloud.coasys.app` vhost: TLS, `/internal/` answers 404, no MCP |
 | `test/coasys-cloud.test.sh` | The script against stubs (release download, systemd, executor) |
 
 ## Layout

@@ -7,7 +7,7 @@
   "run_dapp_server": false,
   "mcp_enabled": false,
   "multi_user_config": { "enabled": true, "tls_config": null, "smtp_config": null },
-  "public_origins": ["https://cloud.coasys.org"],
+  "public_origins": ["https://cloud.coasys.app"],
   "host": {
     "signup": "by_invite",
     "display": { "name": "Coasys cloud", "run_by_coasys": true }

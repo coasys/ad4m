@@ -1,18 +1,18 @@
-# The vhost of cloud.coasys.org (AR-09 4.12.2): TLS here, HTTP and WebSocket to the
+# The vhost of cloud.coasys.app (AR-09 4.12.2): TLS here, HTTP and WebSocket to the
 # executor on 127.0.0.1:12500. MCP is not proxied. The firewall opens TCP 443 and the
 # media server's UDP range; the executor's listeners are all on loopback.
 server {
     listen 80;
-    server_name cloud.coasys.org;
+    server_name cloud.coasys.app;
     return 301 https://$host$request_uri;
 }
 
 server {
     listen 443 ssl;
-    server_name cloud.coasys.org;
+    server_name cloud.coasys.app;
     # A certificate from Let's Encrypt through the DNS challenge, renewed by a timer.
-    ssl_certificate     /etc/letsencrypt/live/cloud.coasys.org/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/cloud.coasys.org/privkey.pem;
+    ssl_certificate     /etc/letsencrypt/live/cloud.coasys.app/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/cloud.coasys.app/privkey.pem;
     add_header X-Robots-Tag "noindex, nofollow" always;
     client_max_body_size 50m;
 
