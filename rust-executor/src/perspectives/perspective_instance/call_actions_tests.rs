@@ -705,4 +705,149 @@ mod instance_writes {
         assert_eq!(calls(&lang).await, before, "the language was called");
         assert_eq!(things(&p).await.len(), 1, "the record is still there");
     }
+
+    /// An app's abstract class the mount's `TextContent` alias answers to
+    /// (the built-in `ad4m://TextContent` is not an instance* class).
+    async fn register_text_content(p: &mut PerspectiveInstance, ctx: &AgentContext) {
+        p.add_sdna(
+            "TextContent".to_string(),
+            String::new(),
+            SdnaType::SubjectClass,
+            Some(
+                json!({
+                    "target_class": "app://TextContent",
+                    "abstract": true,
+                    "properties": [{
+                        "path": "app://text", "name": "text", "datatype": "xsd:string",
+                        "max_count": 1, "writable": true,
+                        "setter": [{"action": "setSingleTarget", "source": "this",
+                                    "predicate": "app://text", "target": "value"}],
+                    }],
+                })
+                .to_string(),
+            ),
+            ctx,
+        )
+        .await
+        .unwrap();
+    }
+
+    /// An abstract `instanceRemove` whose record's destructor calls a
+    /// language refuses a caller's batch before the call, like a concrete one.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn abstract_remove_refuses_a_caller_batch_before_calling() {
+        let lang = load_mount_test_language().await;
+        create_in_language(&lang, json!({"title": "hello"})).await;
+        let (mut p, ctx) = mounted(&lang).await;
+        register_text_content(&mut p, &ctx).await;
+        let batch = p.create_batch().await;
+        let before = calls(&lang).await;
+
+        let result = instance_remove(
+            &mut p,
+            &ctx,
+            InstanceRemove {
+                class_name: "app://TextContent".into(),
+                base_uri: format!("{lang}://t1"),
+                batch_id: Some(batch),
+            },
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(InstanceError::CallsInBatch { .. })),
+            "{result:?}"
+        );
+        assert_eq!(calls(&lang).await, before, "the language was called");
+    }
+
+    /// Lal P2: `instanceUpdate` through an abstract class reaches a mounted
+    /// record's `call` setter unbatched — the write core must not open a
+    /// batch of its own around it (`run_call_actions` refuses one).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn abstract_update_calls_without_a_batch() {
+        let lang = load_mount_test_language().await;
+        create_in_language(&lang, json!({"title": "hello"})).await;
+        let (mut p, ctx) = mounted(&lang).await;
+        register_text_content(&mut p, &ctx).await;
+
+        instance_update(
+            &mut p,
+            &ctx,
+            InstanceUpdate {
+                class_name: "app://TextContent".into(),
+                base_uri: format!("{lang}://t1"),
+                properties: Map::from_iter([("text".to_string(), json!("bye"))]),
+                batch_id: None,
+            },
+        )
+        .await
+        .expect("abstract instance update");
+
+        let updates: Vec<Value> = calls(&lang)
+            .await
+            .into_iter()
+            .filter(|c| c["name"] == "update")
+            .collect();
+        assert_eq!(updates.len(), 1, "{updates:?}");
+        assert_eq!(updates[0]["params"], json!({"title": "bye"}));
+        assert_eq!(things(&p).await[0]["title"], "bye");
+    }
+
+    /// Lal P2: a link constructor with a `call` setter on one property must
+    /// still write a setter-less collection's item links on create. Whether
+    /// the constructor calls — not whether any action calls — decides if
+    /// the collection goes to `create_subject`, which skips it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_call_setter_does_not_swallow_a_plain_collection_on_create() {
+        let lang = load_mount_test_language().await;
+        create_in_language(&lang, json!({"title": "a"})).await;
+        let update =
+            json!([{"action": "call", "source": "this", "predicate": "update", "target": "{}"}]);
+        let shape = json!({
+            "target_class": "mounttest://Mixed",
+            "constructor_actions": [{"action": "addLink", "source": "this", "predicate": "rdf://type", "target": "mounttest://Mixed"}],
+            "destructor_actions": [{"action": "removeLink", "source": "this", "predicate": "rdf://type", "target": "mounttest://Mixed"}],
+            "properties": [
+                {"path": "rdf://type", "name": "type", "has_value": "mounttest://Mixed", "min_count": 1, "max_count": 1},
+                {"path": "mounttest://title", "name": "title", "max_count": 1, "writable": true, "setter": update},
+                {"path": "mounttest://ref", "name": "refs", "collection": true, "node_kind": "IRI", "writable": true},
+            ],
+        });
+        let (mut p, ctx) = super::mounted("Mixed", shape.to_string()).await;
+        let base = format!("{lang}://t1");
+
+        instance_create(
+            &mut p,
+            &ctx,
+            InstanceCreate {
+                class_name: "Mixed".into(),
+                base_uri: Some(base.clone()),
+                properties: Some(Map::from_iter([
+                    ("title".to_string(), json!("b")),
+                    ("refs".to_string(), json!(["ad4m://r1", "ad4m://r2"])),
+                ])),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("mixed create");
+
+        let refs = p
+            .get_links(&LinkQuery {
+                source: Some(base),
+                predicate: Some("mounttest://ref".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(refs.len(), 2, "the plain collection was skipped: {refs:?}");
+        let updates: Vec<Value> = calls(&lang)
+            .await
+            .into_iter()
+            .filter(|c| c["name"] == "update")
+            .collect();
+        assert_eq!(updates.len(), 1, "{updates:?}");
+        assert_eq!(updates[0]["params"], json!({"title": "b"}));
+    }
 }

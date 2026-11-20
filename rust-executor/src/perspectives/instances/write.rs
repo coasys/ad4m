@@ -470,8 +470,9 @@ pub async fn create(
             }
             Some(SetterKind::Links) => true,
             // With no setter the only writer left is the constructor call
-            // itself; a link constructor leaves it to the item links below.
-            None => has_calls,
+            // itself; a link constructor leaves it to the item links below,
+            // whatever its setters do (`create_subject` skips it).
+            None => ctor_is_call,
         };
         if through_subject {
             initial.insert(collection.clone(), Value::Array(items.clone()));
@@ -736,6 +737,20 @@ pub async fn update(
         }
     }
 
+    // Through an abstract class the record's own classes' setters write:
+    // ask them whether any of those calls a language.
+    if is_abstract {
+        has_calls = perspective
+            .abstract_update_calls(
+                &class_name,
+                &stored,
+                &Value::Object(subject_values.clone()),
+                agent,
+            )
+            .await
+            .map_err(|e| failed(&class_name, WriteStep::UpdateSubject, e))?;
+    }
+
     // One batch for the whole update so remove-old + add-new per property lands atomically
     // (same reasoning as the per-class setters: without it a peer can observe the property as
     // unset in between). With `call` actions there is no batch at all: a
@@ -815,6 +830,13 @@ pub async fn remove(
         .is_abstract_class(&class_name)
         .map_err(|e| failed(&class_name, WriteStep::ReadShape, e))?;
     if is_abstract {
+        if perspective
+            .abstract_remove_calls(&class_name, &stored)
+            .await
+            .map_err(|e| failed(&class_name, WriteStep::ReadShape, e))?
+        {
+            refuse_batch_for_calls(perspective, &class_name, params.batch_id.as_deref()).await?;
+        }
         perspective
             .remove_subject(subject_class(&class_name), stored, params.batch_id, agent)
             .await
