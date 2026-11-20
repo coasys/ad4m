@@ -184,6 +184,12 @@ pub async fn strip_noop_updates(
 ///   filtered down to the novel triples.
 /// - `Update` ops pass through unchanged (their base already exists by
 ///   definition).
+/// - A harness `Create` mints its base and the model links to it
+///   (`propose_link_child`). When dedup turns that `Create` into an `Update`
+///   or drops it, the source and target of every `AddLinks` are rewritten to
+///   the base that stays (the existing row, or the first `Create` of the
+///   batch), so no link names a row that is never written. A link that the
+///   rewrite turns into a link from a row to itself is dropped.
 pub(crate) fn dedup_ops_against_existing(
     ops: Vec<InterpretationOp>,
     existing: &ExistingInstances,
@@ -214,12 +220,14 @@ pub(crate) fn dedup_ops_against_existing(
         }
     }
 
-    // Intra-batch: (class, normalized identity) → index of the first Create
+    // Intra-batch: (class, normalized identity) → base of the first Create
     // we kept, so a later same-key Create is dropped.
-    let mut seen_in_batch: HashMap<String, HashMap<String, usize>> = HashMap::new();
+    let mut seen_in_batch: HashMap<String, HashMap<String, String>> = HashMap::new();
+    // Minted base of a Create that dedup removed → the base that stays.
+    let mut survivor: HashMap<String, String> = HashMap::new();
 
     let mut out = Vec::with_capacity(ops.len());
-    for (idx, op) in ops.into_iter().enumerate() {
+    for op in ops {
         match op {
             InterpretationOp::Create {
                 base,
@@ -256,6 +264,7 @@ pub(crate) fn dedup_ops_against_existing(
                         "harness dedup: Create({class}, {:?}) → Update on existing {existing_base}",
                         id_value,
                     );
+                    survivor.insert(base, existing_base.clone());
                     out.push(InterpretationOp::Update {
                         base: existing_base,
                         class,
@@ -266,30 +275,53 @@ pub(crate) fn dedup_ops_against_existing(
 
                 // Intra-batch dedup: drop if we already kept a Create with the
                 // same (class, normalized identity) earlier in this drain.
-                if seen_in_batch
+                if let Some(kept) = seen_in_batch
                     .get(&class)
                     .and_then(|m| m.get(&normalized))
-                    .is_some()
+                    .cloned()
                 {
                     log::debug!(
                         "harness dedup: dropping intra-batch duplicate Create({class}, {:?})",
                         id_value,
                     );
+                    survivor.insert(base, kept);
                     continue;
                 }
                 seen_in_batch
                     .entry(class.clone())
                     .or_default()
-                    .insert(normalized, idx);
+                    .insert(normalized, base.clone());
                 out.push(InterpretationOp::Create {
                     base,
                     class,
                     values,
                 });
             }
+            // Rewritten below, once every Create of the drain is seen: a link
+            // may come before the Create whose base it names.
+            op @ InterpretationOp::AddLinks { .. } => out.push(op),
+            // Update ops pass through — their base already exists.
+            op @ InterpretationOp::Update { .. } => out.push(op),
+        }
+    }
+    let rewrite = |base: String| survivor.get(&base).cloned().unwrap_or(base);
+    out.into_iter()
+        .filter_map(|op| match op {
             InterpretationOp::AddLinks { source, links } => {
+                let source = rewrite(source);
                 let novel: Vec<_> = links
                     .into_iter()
+                    .filter_map(|link| {
+                        let was_loop = link.source == link.target;
+                        let link = crate::types::Link {
+                            source: rewrite(link.source),
+                            predicate: link.predicate,
+                            target: rewrite(link.target),
+                        };
+                        // Two rows of the batch were one row: the link between
+                        // them would point the row at itself.
+                        (was_loop || link.source != link.target).then_some(link)
+                    })
                     .filter(|link| {
                         let predicate = link.predicate.clone().unwrap_or_default();
                         !existing_links.contains(&(
@@ -303,18 +335,16 @@ pub(crate) fn dedup_ops_against_existing(
                     log::debug!(
                         "harness dedup: dropping AddLinks on {source} — all triples already exist"
                     );
-                    continue;
+                    return None;
                 }
-                out.push(InterpretationOp::AddLinks {
+                Some(InterpretationOp::AddLinks {
                     source,
                     links: novel,
-                });
+                })
             }
-            // Update ops pass through — their base already exists.
-            op @ InterpretationOp::Update { .. } => out.push(op),
-        }
-    }
-    out
+            op => Some(op),
+        })
+        .collect()
 }
 
 /// Persist a planned set of [`InterpretationOp`]s into the perspective, inside a
@@ -2807,6 +2837,134 @@ mod tests {
         let deduped = dedup_ops_against_existing(ops, &existing, &shapes, &ExistingLinks::new());
         assert_eq!(deduped.len(), 1);
         assert!(matches!(&deduped[0], InterpretationOp::Update { .. }));
+    }
+
+    /// A harness `Create` of an Intention titled `title`, on `base`.
+    fn intention_create(base: &str, title: &str) -> InterpretationOp {
+        InterpretationOp::Create {
+            base: base.to_string(),
+            class: "Intention".to_string(),
+            values: serde_json::Map::from_iter([("title".to_string(), serde_json::json!(title))]),
+        }
+    }
+
+    /// An `AddLinks` of one `ns://child` link from `source` to `target`.
+    fn child_link(source: &str, target: &str) -> InterpretationOp {
+        InterpretationOp::AddLinks {
+            source: source.to_string(),
+            links: vec![Link {
+                source: source.to_string(),
+                predicate: Some("ns://child".to_string()),
+                target: target.to_string(),
+            }],
+        }
+    }
+
+    /// Every (source, link source, link target) of the `AddLinks` in `ops`.
+    fn link_ends(ops: &[InterpretationOp]) -> Vec<(String, String, String)> {
+        ops.iter()
+            .filter_map(|op| match op {
+                InterpretationOp::AddLinks { source, links } => Some(
+                    links
+                        .iter()
+                        .map(|l| (source.clone(), l.source.clone(), l.target.clone()))
+                        .collect::<Vec<_>>(),
+                ),
+                _ => None,
+            })
+            .flatten()
+            .collect()
+    }
+
+    // X2 / F6 on #1821: the model creates a row that already exists and links
+    // it under a topic and to a child. Dedup makes the Create an Update on the
+    // existing row; the links must name that row, not the minted base.
+    #[tokio::test]
+    async fn dedup_ops_rewrites_links_of_a_create_that_matches_an_existing_row() {
+        let (_perspective, shapes, _ctx) =
+            setup_perspective_no_llm(&[("Intention", INTENTION_SDNA)]).await;
+        let existing = existing_map(vec![InstanceContext {
+            id: "soa://existing/intention/1".to_string(),
+            title: "Fix login".to_string(),
+            class: "Intention".to_string(),
+            properties: std::collections::BTreeMap::new(),
+            updated_at: String::new(),
+        }]);
+        let ops = vec![
+            intention_create("run://pass/new-1", "Fix login"),
+            child_link("soa://topic/1", "run://pass/new-1"),
+            child_link("run://pass/new-1", "soa://other/1"),
+        ];
+
+        let deduped = dedup_ops_against_existing(ops, &existing, &shapes, &ExistingLinks::new());
+        assert!(
+            matches!(&deduped[0], InterpretationOp::Update { base, .. } if base == "soa://existing/intention/1"),
+            "{deduped:#?}"
+        );
+        assert_eq!(
+            link_ends(&deduped),
+            vec![
+                (
+                    "soa://topic/1".to_string(),
+                    "soa://topic/1".to_string(),
+                    "soa://existing/intention/1".to_string()
+                ),
+                (
+                    "soa://existing/intention/1".to_string(),
+                    "soa://existing/intention/1".to_string(),
+                    "soa://other/1".to_string()
+                ),
+            ],
+            "no link names the minted base: {deduped:#?}"
+        );
+    }
+
+    // X2 / F6: two Creates of the same row in one batch. The second is
+    // dropped; its links move to the first, a link between the two (now a
+    // link from the row to itself) goes, and a link that then exists in the
+    // graph goes too.
+    #[tokio::test]
+    async fn dedup_ops_rewrites_links_of_a_create_dropped_inside_the_batch() {
+        let (_perspective, shapes, _ctx) =
+            setup_perspective_no_llm(&[("Intention", INTENTION_SDNA)]).await;
+        let mut existing_links = ExistingLinks::new();
+        existing_links.insert((
+            "soa://topic/old".to_string(),
+            "ns://child".to_string(),
+            "run://pass/new-1".to_string(),
+        ));
+        let ops = vec![
+            // A link before the Create it names.
+            child_link("soa://topic/1", "run://pass/new-2"),
+            intention_create("run://pass/new-1", "Ship the MVP"),
+            intention_create("run://pass/new-2", "  ship the  MVP "),
+            child_link("run://pass/new-1", "run://pass/new-2"),
+            child_link("soa://topic/old", "run://pass/new-2"),
+        ];
+
+        let deduped =
+            dedup_ops_against_existing(ops, &ExistingInstances::new(), &shapes, &existing_links);
+        let creates: Vec<_> = deduped
+            .iter()
+            .filter_map(|op| match op {
+                InterpretationOp::Create { base, .. } => Some(base.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            creates,
+            vec!["run://pass/new-1".to_string()],
+            "{deduped:#?}"
+        );
+        assert_eq!(
+            link_ends(&deduped),
+            vec![(
+                "soa://topic/1".to_string(),
+                "soa://topic/1".to_string(),
+                "run://pass/new-1".to_string()
+            )],
+            "{deduped:#?}"
+        );
     }
 
     // ---- apply_ops_and_run_flow_passes — the shared interpretation tail ----
