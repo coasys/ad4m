@@ -4,8 +4,10 @@
 //!
 //! It fires the stop on the request's cancel or on the deadline, whichever comes first, and
 //! ends when the gate drops. One limit native does not have: an eval runs inline on the
-//! Worker's one thread (`rt::spawn_blocking`), so this task cannot run while an eval does. A
-//! deadline or a cancel that falls inside an eval stops only the evals after it (S15).
+//! Worker's one thread (`rt::spawn_blocking`), and this task first runs at its first poll,
+//! after the eval has started. So it cannot stop a runaway synchronous query: until S15 puts
+//! a deadline check inside the eval itself, it bounds nothing. A deadline or a cancel stops
+//! only the evals that start after it fired.
 
 use std::time::Duration;
 
