@@ -95,6 +95,14 @@ commands:
             if [ -e .git ]; then
               if head_sha="$(git rev-parse --verify -q HEAD)"; then
                 git update-ref --no-deref HEAD "$head_sha"
+                # Every build output and cache is gitignored, so an untracked file that no
+                # .gitignore covers is left from a checkout that stopped part way (seen 2026-11-20,
+                # after the disk filled: another branch's core/src/host/HostClient.ts broke tsc).
+                # git clean without -x keeps the ignored caches.
+                cleaned="$(git clean -fd)"
+                if [ -n "$cleaned" ]; then
+                  echo "fix_workdir: removed $(wc -l \<<<"$cleaned") untracked path(s) no .gitignore covers"
+                fi
               fi
               # Records after the first are the linked worktrees (the first is this one).
               held="$(git worktree list --porcelain | awk -v RS= 'NR > 1' | sed -n 's/^branch //p')"

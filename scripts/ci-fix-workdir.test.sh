@@ -74,6 +74,7 @@ make_workdir() {
     git -C "$TMP/w" update-ref refs/remotes/origin/other "$ORIGIN_HEAD"
     mkdir -p "$TMP/w/target/release"
     echo cached > "$TMP/w/target/release/ad4m"
+    echo "/target/" > "$TMP/w/.git/info/exclude"   # ignored, as the repository's .gitignore does
     echo dirty >> "$TMP/w/f"
 }
 objects_of() { git -C "$1" cat-file --batch-all-objects --batch-check='%(objectname)' | sort; }
@@ -255,6 +256,16 @@ grep -q "removing .git" <<<"$STEP_LOG" && fail "a clone without origin was heale
 [ "$(git -C "$TMP/w" remote get-url origin)" = "https://example.invalid/coasys/ad4m.git" ] || fail "origin not set from CIRCLE_REPOSITORY_URL"
 [ "$(objects_of "$TMP/w")" = "$before" ] || fail "objects changed"
 [ "$(cat "$TMP/w/target/release/ad4m")" = cached ] || fail "untracked cache touched"
+
+echo "untracked file no .gitignore covers (a checkout stopped part way): removed, ignored cache kept"
+make_workdir
+mkdir -p "$TMP/w/src/host"; echo stale > "$TMP/w/src/host/HostClient.ts"
+run_step "$TMP/w"
+[ "$STEP_RC" = 0 ] || fail "step exited $STEP_RC: $STEP_LOG"
+[ ! -e "$TMP/w/src/host" ] || fail "stale untracked file left"
+grep -q "removed 1 untracked path(s) no .gitignore covers" <<<"$STEP_LOG" || fail "no clean log line: $STEP_LOG"
+[ "$(cat "$TMP/w/target/release/ad4m")" = cached ] || fail "ignored cache removed"
+[ "$(tail -1 "$TMP/w/f")" = dirty ] || fail "tracked file touched"
 
 if [ "$FAILED" = 0 ]; then
     echo "All fix_workdir tests passed"
