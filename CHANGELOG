@@ -6,10 +6,6 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 ## unreleased
 
 ### Changed
-- **Breaking: once an agent binds an identity, every link it signs carries an anchor** [#1597](https://github.com/coasys/ad4m/pull/1597)
-  - The anchor names the position of the signer's key log when the link was signed, so a revoked device key cannot backdate a link to before its `revoke`.
-  - Neighbourhoods on the old p-diff-sync DNA and executors without this release cannot verify those links: the old DNA drops `proof.anchor`, so the signature no longer matches the bytes the receiver rebuilds, and the default link guard hides them.
-  - Upgrading is a migration, not a mixed-version rollout: old neighbourhoods break for upgraded agents with an identity. Publish the neighbourhood again on a link language from the new DNA and copy its links.
 - **Breaking: links from a Neighbourhood are stored only if their signature verifies, and a verified proof is never replaced by a later copy** [#1194](https://github.com/coasys/ad4m/pull/1194)
   - Part of [#1146](https://github.com/coasys/ad4m/issues/1146).
   - A link language diff's additions are checked against each link's own `author` before they are stored. One that does not verify is dropped and logged, so neither model queries (even with `includeUnverified`) nor Prolog, raw SPARQL, `queryLinks` or flows see it. Before, it was stored with `proof.valid: false`, and a copy of a genuine link with a bad signature flipped the genuine link to `false`.
