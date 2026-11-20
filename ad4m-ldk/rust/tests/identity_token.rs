@@ -158,8 +158,6 @@ impl IdentityCapability for Agent {
     async fn identity_pow_params(&mut self) -> LanguageResult<PowParams> {
         Ok(PowParams {
             bits: 22,
-            previous_bits: 20,
-            changed_at: 3,
             challenge: PowChallenge {
                 nonce: "5Challenge".into(),
                 expires: 4,
@@ -453,10 +451,7 @@ fn identity_calls_pass_events_through_unchanged() {
         block_on(lang.identity_key_owner("z6MkKey".into(), 8)).unwrap(),
         None
     );
-    assert_eq!(
-        block_on(lang.identity_pow_params()).unwrap().previous_bits,
-        20
-    );
+    assert_eq!(block_on(lang.identity_pow_params()).unwrap().bits, 22);
     assert_eq!(
         block_on(lang.identity_attach_note("did:scid:zScid".into(), "tok".into(), request()))
             .unwrap()
@@ -809,14 +804,12 @@ fn identity_wire_types_use_ar01_field_names() {
     wire(
         &PowParams {
             bits: 22,
-            previous_bits: 20,
-            changed_at: 3,
             challenge: PowChallenge {
                 nonce: "5Challenge".into(),
                 expires: 4,
             },
         },
-        json!({"bits": 22, "previousBits": 20, "changedAt": 3,
+        json!({"bits": 22,
                "challenge": {"nonce": "5Challenge", "expires": 4}}),
     );
 

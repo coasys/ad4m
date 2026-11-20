@@ -158,12 +158,10 @@ async fn health() -> Answer {
 
 async fn pow_params(State(store): Shared) -> Answer {
     // `GET /v1/pow` answers the cost the next proof must meet and mints the one-use challenge
-    // it solves over (`store.pow_challenge`). The caller fetches again for another log.
-    let cost = store.pow_params();
+    // it solves over, tagged with that cost (`store.pow_challenge`). The caller fetches again
+    // for another log.
     let params = PowParams {
-        bits: cost.bits,
-        previous_bits: cost.previous_bits,
-        changed_at: cost.changed_at,
+        bits: store.settings.pow_bits,
         challenge: store.pow_challenge(),
     };
     ok(params)

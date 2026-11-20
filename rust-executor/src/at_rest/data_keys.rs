@@ -36,6 +36,10 @@ pub enum KeyringError {
     UnknownOwner,
     #[error("no such store")]
     UnknownStore,
+    /// The store exists (its key is not destroyed), but the key version asked for is not
+    /// held: it was retired by a re-encryption. Data still sealed under it no longer opens.
+    #[error("the key of {store} has no version {version}: it is retired")]
+    VersionRetired { store: String, version: u32 },
     #[error("the owner exists already")]
     OwnerExists,
     #[error("the store exists already")]
@@ -72,8 +76,6 @@ pub enum SubkeyPurpose {
     LanguageStorage,
     Rows,
     Archive,
-    /// The executor's own secrets outside the stores (the local-network certificate's key).
-    Secret,
 }
 
 /// Why a key was destroyed: the reason its tombstone keeps.
@@ -122,7 +124,6 @@ impl SubkeyPurpose {
             SubkeyPurpose::LanguageStorage => "ad4m:at-rest:lang:v1",
             SubkeyPurpose::Rows => "ad4m:at-rest:row:v1",
             SubkeyPurpose::Archive => "ad4m:at-rest:archive:v1",
-            SubkeyPurpose::Secret => "ad4m:at-rest:secret:v1",
         }
     }
 }
@@ -668,7 +669,10 @@ impl DataKeys {
     }
 
     /// A subkey of store `id`'s key for `purpose`: of `version`, or of the current version.
-    /// Returns the version it is of.
+    /// Returns the version it is of. A store that does not exist (destroyed) is
+    /// `UnknownStore`; a version of a live store that is not held (retired) is
+    /// `VersionRetired`: the two differ for a reader of old data, which is gone for good in
+    /// the first and lost to a rotation in the second.
     pub fn subkey(
         &self,
         id: &StoreId,
@@ -678,10 +682,12 @@ impl DataKeys {
         self.with_open(|open| {
             let store = open.file.store(id).ok_or(KeyringError::UnknownStore)?;
             let version = version.unwrap_or_else(|| store.key.current());
-            let key = open
-                .stores
-                .get(&(id.clone(), version))
-                .ok_or(KeyringError::UnknownStore)?;
+            let key = open.stores.get(&(id.clone(), version)).ok_or_else(|| {
+                KeyringError::VersionRetired {
+                    store: id.to_string(),
+                    version: version.0,
+                }
+            })?;
             Ok((version, hkdf_subkey(key, &[], purpose.info())))
         })
     }

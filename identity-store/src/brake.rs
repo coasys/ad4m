@@ -12,9 +12,10 @@
 //!    store's log);
 //! 3. the **address bucket**: `BRAKE_ADDR_BURST` no-note logs at once per address, refilled
 //!    `BRAKE_ADDR_PER_DAY` per 24 h (`429 {scope:"address"}`);
-//! 4. the **proof of work** at `POW_BITS` (or the previous bits for [`POW_GRACE_S`] after a
-//!    change) over a one-use challenge `GET /v1/pow` mints for it, good for
-//!    [`CHALLENGE_TTL_S`] seconds (`403 {error:"pow"}`).
+//! 4. the **proof of work** at the bits its one-use challenge carries (`GET /v1/pow` mints it
+//!    at `POW_BITS`, tagged with them), good for [`CHALLENGE_TTL_S`] seconds
+//!    (`403 {error:"pow"}`). A change of `POW_BITS` needs no grace: a challenge in flight keeps
+//!    the bits it was issued at and dies within [`CHALLENGE_TTL_S`].
 //!
 //! Only an admitted log takes a token from the global and the address bucket, in the append's
 //! own transaction. Buckets refill continuously; their levels sit in the `brake` table (the
@@ -22,8 +23,9 @@
 //!
 //! An address is the IPv4 address itself, or the /64 prefix of an IPv6 address (an IPv4 address
 //! mapped into IPv6 counts as the IPv4 address). It is the socket's peer, unless that peer is a
-//! trusted proxy (`TRUSTED_PROXIES`): then `CF-Connecting-IP`, else the nearest
-//! `X-Forwarded-For` entry that is no trusted proxy.
+//! trusted proxy (`TRUSTED_PROXIES`): then the one header `CLIENT_IP_HEADER` names, the nearest
+//! `X-Forwarded-For` entry that is no trusted proxy (the default) or `CF-Connecting-IP`; the
+//! other header is never read.
 
 use std::fmt::Write as _;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
@@ -46,8 +48,6 @@ use crate::{Settings, Store};
 /// Refused requests per address per hour on the brake's path: the failure bucket's size and
 /// hourly refill.
 pub const FAILURES_PER_HOUR: u32 = 30;
-/// How long after a change of `POW_BITS` a proof at the previous bits still passes: 10 minutes.
-pub const POW_GRACE_S: u64 = 600;
 /// The longest `retryAfter` the brake answers (a bucket that never refills).
 pub const MAX_RETRY_S: u64 = 86_400;
 /// The address of a request whose socket peer the server did not record.
@@ -140,31 +140,65 @@ pub fn address_of(ip: IpAddr) -> String {
     }
 }
 
-/// The client's IP: the socket's `peer`, unless the peer is one of `trusted`; then
-/// `CF-Connecting-IP`, else the nearest `X-Forwarded-For` entry that is no trusted proxy (each
-/// proxy appends the address it saw, so entries left of it are the client's to write), else the
-/// peer itself.
-pub fn client_ip(peer: IpAddr, headers: &HeaderMap, trusted: &[Cidr]) -> IpAddr {
+/// The one header a trusted proxy fills with the client's address (`CLIENT_IP_HEADER`). Only
+/// that header is ever read: a proxy that passes the other one through unchanged would let a
+/// caller write its own address.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ClientIpHeader {
+    /// `X-Forwarded-For`, the default: each proxy appends the address it saw.
+    #[default]
+    XForwardedFor,
+    /// `CF-Connecting-IP`, for Cloudflare ingress: Cloudflare sets it to the client's address.
+    CfConnectingIp,
+}
+
+impl FromStr for ClientIpHeader {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<ClientIpHeader, String> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "x-forwarded-for" => Ok(ClientIpHeader::XForwardedFor),
+            "cf-connecting-ip" => Ok(ClientIpHeader::CfConnectingIp),
+            other => Err(format!(
+                "{other} is neither x-forwarded-for nor cf-connecting-ip"
+            )),
+        }
+    }
+}
+
+/// The client's IP: the socket's `peer`, unless the peer is one of `trusted`; then what `header`
+/// names: the nearest `X-Forwarded-For` entry that is no trusted proxy (each proxy appends the
+/// address it saw, so entries left of it are the client's to write), or the one address of
+/// `CF-Connecting-IP`. The other header is ignored. The peer itself when that header is
+/// missing or garbled.
+pub fn client_ip(
+    peer: IpAddr,
+    headers: &HeaderMap,
+    trusted: &[Cidr],
+    header: ClientIpHeader,
+) -> IpAddr {
     let is_trusted = |ip: IpAddr| trusted.iter().any(|c| c.contains(ip));
     if !is_trusted(peer) {
         return peer;
     }
-    let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
-    if let Some(ip) = header("cf-connecting-ip").and_then(|v| IpAddr::from_str(v.trim()).ok()) {
-        return ip;
+    match header {
+        ClientIpHeader::CfConnectingIp => headers
+            .get("cf-connecting-ip")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| IpAddr::from_str(v.trim()).ok())
+            .unwrap_or(peer),
+        ClientIpHeader::XForwardedFor => headers
+            .get_all("x-forwarded-for")
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .flat_map(|v| v.split(','))
+            .filter_map(|v| IpAddr::from_str(v.trim()).ok())
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .find(|ip| !is_trusted(*ip))
+            .unwrap_or(peer),
     }
-    let forwarded: Vec<IpAddr> = headers
-        .get_all("x-forwarded-for")
-        .iter()
-        .filter_map(|v| v.to_str().ok())
-        .flat_map(|v| v.split(','))
-        .filter_map(|v| IpAddr::from_str(v.trim()).ok())
-        .collect();
-    forwarded
-        .into_iter()
-        .rev()
-        .find(|ip| !is_trusted(*ip))
-        .unwrap_or(peer)
 }
 
 /// The sender's address (see [`address_of`], [`client_ip`]), read from the socket peer the
@@ -204,6 +238,7 @@ impl FromRequestParts<Arc<Store>> for Sender {
                 peer.ip(),
                 &parts.headers,
                 &store.settings.trusted_proxies,
+                store.settings.client_ip_header,
             )),
             None => UNKNOWN_ADDRESS.to_string(),
         }))
@@ -312,6 +347,19 @@ fn require(
     Ok(())
 }
 
+/// `429 {scope:"failure"}` when the failure bucket of `address` is empty: step 1 of the brake,
+/// which every new log from an address passes before any signature replays, with a vouching
+/// token or without. Takes nothing.
+pub(crate) fn check_failure(conn: &Connection, address: &str, now: u64) -> Result<(), ApiError> {
+    require(
+        conn,
+        "failure",
+        &failure_name(address),
+        &failure_bucket(),
+        now,
+    )
+}
+
 /// Steps 1 to 3 of the brake for a no-note log from `address`: the failure, global and address
 /// buckets, each `429` when empty. Takes nothing.
 pub(crate) fn check_buckets(
@@ -320,13 +368,7 @@ pub(crate) fn check_buckets(
     address: &str,
     now: u64,
 ) -> Result<(), ApiError> {
-    require(
-        conn,
-        "failure",
-        &failure_name(address),
-        &failure_bucket(),
-        now,
-    )?;
+    check_failure(conn, address, now)?;
     require(conn, "global", GLOBAL, &global_bucket(settings), now)?;
     require(
         conn,
@@ -370,27 +412,15 @@ fn prune(conn: &Connection, prefix: &str, bucket: &Bucket, now: u64) -> Result<(
     Ok(())
 }
 
-/// The proof-of-work cost the store runs with, without the per-request challenge:
-/// `GET /v1/pow` reports it and [`check_pow`] applies it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct PowCost {
-    /// The bits a proof must meet.
-    pub bits: u8,
-    /// The bits before the last change; proofs at them pass for [`POW_GRACE_S`] after
-    /// `changed_at`.
-    pub previous_bits: u8,
-    /// When `bits` last changed (unix seconds).
-    pub changed_at: u64,
-}
-
 /// The label of each challenge's tag, and of the challenge key's derivation
 /// (`StoreKey::pow_challenge_key`): a tag for one never verifies as the other.
 const CHALLENGE_LABEL: &str = "coasys:pow-challenge";
-/// A challenge's bytes: `expires` (8 big-endian) ‖ 16 random ‖ the 16-byte tag.
-const CHALLENGE_LEN: usize = 8 + 16 + 16;
+/// A challenge's bytes: `expires` (8 big-endian) ‖ `bits` (1) ‖ 16 random ‖ the 16-byte tag
+/// (over the first 25, so `bits` is covered).
+const CHALLENGE_LEN: usize = 8 + 1 + 16 + 16;
 /// The longest base58 text of a challenge's bytes (an overlong text is refused before
-/// decoding, whose cost grows quadratically): ceil(40 * log58(256)) = ceil(54.63) = 55.
-const CHALLENGE_TEXT_MAX: usize = 55;
+/// decoding, whose cost grows quadratically): ceil(41 * log58(256)) = ceil(55.99) = 56.
+const CHALLENGE_TEXT_MAX: usize = 56;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -403,14 +433,16 @@ fn challenge_tag(key: &[u8; 32], body: &[u8]) -> [u8; 16] {
     mac.finalize().into_bytes()[..16].try_into().unwrap()
 }
 
-/// `GET /v1/pow`'s challenge for the next proof: `expires` ‖ 16 random ‖ the store's tag, as
-/// base58btc. Stateless: the tag makes every unspent challenge openable at check time; spending
+/// `GET /v1/pow`'s challenge for the next proof: `expires` ‖ `bits` ‖ 16 random ‖ the store's
+/// tag over all of them, as base58btc. The bits are the cost the proof must meet. Stateless:
+/// the tag makes every unspent challenge openable at check time; spending
 /// it writes one `pow_seen` row, kept until `expires` (the check's own delete, and `sweep`).
-pub(crate) fn challenge(key: &[u8; 32], now: u64) -> PowChallenge {
+pub(crate) fn challenge(key: &[u8; 32], bits: u8, now: u64) -> PowChallenge {
     let expires = now + CHALLENGE_TTL_S;
-    let mut body = [0u8; 8 + 16];
+    let mut body = [0u8; 8 + 1 + 16];
     body[..8].copy_from_slice(&expires.to_be_bytes());
-    body[8..].copy_from_slice(&rand::random::<[u8; 16]>());
+    body[8] = bits;
+    body[9..].copy_from_slice(&rand::random::<[u8; 16]>());
     let tag = challenge_tag(key, &body);
     let mut token = [0u8; CHALLENGE_LEN];
     token[..body.len()].copy_from_slice(&body);
@@ -421,10 +453,10 @@ pub(crate) fn challenge(key: &[u8; 32], now: u64) -> PowChallenge {
     }
 }
 
-/// The `expires` a `nonce` carries when it is one of this store's challenges — the tag
-/// verifies under `key` in constant time. Anything else (empty, overlong, no base58, a wrong
-/// tag, another store's challenge) is `None`.
-fn open_challenge(key: &[u8; 32], nonce: &str) -> Option<u64> {
+/// The `expires` and `bits` a `nonce` carries when it is one of this store's challenges — the
+/// tag (over both) verifies under `key` in constant time. Anything else (empty, overlong, no
+/// base58, a wrong tag or tampered bits, another store's challenge) is `None`.
+fn open_challenge(key: &[u8; 32], nonce: &str) -> Option<(u64, u8)> {
     if nonce.len() > CHALLENGE_TEXT_MAX {
         return None;
     }
@@ -436,11 +468,11 @@ fn open_challenge(key: &[u8; 32], nonce: &str) -> Option<u64> {
         .chain_update(body)
         .verify_truncated_left(tag)
         .ok()?;
-    u64::from_be_bytes(bytes[..8].try_into().unwrap()).into()
+    Some((u64::from_be_bytes(bytes[..8].try_into().unwrap()), bytes[8]))
 }
 
-/// Step 4: `proof` meets the store's bits (or the previous bits within [`POW_GRACE_S`] of
-/// their change) over a fresh challenge of `GET /v1/pow` — unexpired, unforged, unspent — which
+/// Step 4: `proof` meets the bits its challenge carries, over a fresh challenge of
+/// `GET /v1/pow` — unexpired, unforged, unspent — which
 /// this call spends with a `pow_seen` row until `expires`. Missing, expired, forged and spent
 /// challenges and a proof under another SCID or challenge are all `403 pow`. Runs inside the
 /// append's transaction, so a challenge whose publish is later refused (the events fail the
@@ -449,19 +481,19 @@ pub(crate) fn check_pow(
     conn: &Connection,
     scid: &str,
     proof: Option<&ad4m_ldk::identity::Pow>,
-    params: &PowCost,
     key: &[u8; 32],
     now: u64,
 ) -> Result<(), ApiError> {
     let refused = || {
         ApiError::forbidden(
             "pow",
-            "a new log with no vouching note needs a proof of work at the store's bits over a \
-             fresh challenge of GET /v1/pow",
+            "a new log with no vouching note needs a proof of work at the bits of a fresh \
+             challenge of GET /v1/pow",
         )
     };
     let proof = proof.ok_or_else(refused)?;
-    let Some(expires) = open_challenge(key, &proof.challenge).filter(|e| *e > now) else {
+    let Some((expires, bits)) = open_challenge(key, &proof.challenge).filter(|(e, _)| *e > now)
+    else {
         return Err(refused());
     };
     let proof = ad4m_identity_core::pow::Pow {
@@ -469,10 +501,7 @@ pub(crate) fn check_pow(
         bits: proof.bits,
         challenge: proof.challenge.clone(),
     };
-    let at_bits = ad4m_identity_core::pow::check(scid, &proof, params.bits);
-    let in_grace = now < params.changed_at.saturating_add(POW_GRACE_S)
-        && ad4m_identity_core::pow::check(scid, &proof, params.previous_bits);
-    if !(at_bits || in_grace) {
+    if !ad4m_identity_core::pow::check(scid, &proof, bits) {
         return Err(refused());
     }
     // One use: the row stays until the challenge would have expired anyway. A proof that
@@ -489,49 +518,6 @@ pub(crate) fn check_pow(
         return Err(refused());
     }
     Ok(())
-}
-
-/// The proof-of-work cost the store runs with: `bits` from the settings; when they differ
-/// from the bits the database last ran with, those become `previousBits` and `changedAt` is
-/// now. The first start records `previousBits = bits`, `changedAt = now`.
-pub(crate) fn pow_params(conn: &Connection, bits: u8, now: u64) -> Result<PowCost, ApiError> {
-    let row: Option<(i64, i64, i64)> = conn
-        .query_row(
-            "SELECT bits, previous_bits, changed_at FROM pow WHERE id = 1",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .optional()?;
-    let params = match row {
-        Some((stored, previous, at)) if stored == i64::from(bits) => {
-            return Ok(PowCost {
-                bits,
-                previous_bits: u8::try_from(previous).unwrap_or(bits),
-                changed_at: from_sql(at),
-            })
-        }
-        Some((stored, _, _)) => PowCost {
-            bits,
-            previous_bits: u8::try_from(stored).unwrap_or(bits),
-            changed_at: now,
-        },
-        None => PowCost {
-            bits,
-            previous_bits: bits,
-            changed_at: now,
-        },
-    };
-    conn.execute(
-        "INSERT INTO pow (id, bits, previous_bits, changed_at) VALUES (1, ?1, ?2, ?3)
-         ON CONFLICT(id) DO UPDATE SET bits = excluded.bits, previous_bits = excluded.previous_bits,
-                                       changed_at = excluded.changed_at",
-        params![
-            i64::from(params.bits),
-            i64::from(params.previous_bits),
-            to_sql(params.changed_at)?
-        ],
-    )?;
-    Ok(params)
 }
 
 /// `GET /v1/metrics`: the brake's levels at `now`, in plain text: the global bucket, and for the
@@ -648,36 +634,71 @@ mod tests {
     }
 
     #[test]
-    fn the_client_address_comes_from_headers_only_behind_a_trusted_proxy() {
+    fn the_client_address_comes_from_the_named_header_only_behind_a_trusted_proxy() {
+        use ClientIpHeader::{CfConnectingIp, XForwardedFor};
         let trusted: Vec<Cidr> = vec!["10.0.0.0/8".parse().unwrap()];
         let h = headers(&[
             ("cf-connecting-ip", "198.51.100.9"),
             ("x-forwarded-for", "192.0.2.5"),
         ]);
         // Not from a trusted proxy: the headers are ignored.
+        for header in [XForwardedFor, CfConnectingIp] {
+            assert_eq!(
+                client_ip(ip("203.0.113.1"), &h, &trusted, header),
+                ip("203.0.113.1")
+            );
+        }
+        // From one: only the named header counts, whatever the other says.
         assert_eq!(
-            client_ip(ip("203.0.113.1"), &h, &trusted),
-            ip("203.0.113.1")
+            client_ip(ip("10.1.1.1"), &h, &trusted, XForwardedFor),
+            ip("192.0.2.5")
         );
-        // From one: CF-Connecting-IP first.
-        assert_eq!(client_ip(ip("10.1.1.1"), &h, &trusted), ip("198.51.100.9"));
-        // Without it, the nearest X-Forwarded-For entry that is no trusted proxy.
+        assert_eq!(
+            client_ip(ip("10.1.1.1"), &h, &trusted, CfConnectingIp),
+            ip("198.51.100.9")
+        );
+        // A client-written CF header does not move an X-Forwarded-For setting, and the reverse.
+        let h = headers(&[("cf-connecting-ip", "198.51.100.9")]);
+        assert_eq!(
+            client_ip(ip("10.1.1.1"), &h, &trusted, XForwardedFor),
+            ip("10.1.1.1")
+        );
+        let h = headers(&[("x-forwarded-for", "192.0.2.5")]);
+        assert_eq!(
+            client_ip(ip("10.1.1.1"), &h, &trusted, CfConnectingIp),
+            ip("10.1.1.1")
+        );
+        // The nearest X-Forwarded-For entry that is no trusted proxy.
         let h = headers(&[("x-forwarded-for", "1.2.3.4, 192.0.2.5, 10.9.9.9")]);
-        assert_eq!(client_ip(ip("10.1.1.1"), &h, &trusted), ip("192.0.2.5"));
+        assert_eq!(
+            client_ip(ip("10.1.1.1"), &h, &trusted, XForwardedFor),
+            ip("192.0.2.5")
+        );
         let h = headers(&[
             ("x-forwarded-for", "1.2.3.4"),
             ("x-forwarded-for", "192.0.2.6"),
         ]);
-        assert_eq!(client_ip(ip("10.1.1.1"), &h, &trusted), ip("192.0.2.6"));
+        assert_eq!(
+            client_ip(ip("10.1.1.1"), &h, &trusted, XForwardedFor),
+            ip("192.0.2.6")
+        );
         // A garbled header: the peer.
         let h = headers(&[
             ("cf-connecting-ip", "nonsense"),
             ("x-forwarded-for", "junk"),
         ]);
-        assert_eq!(client_ip(ip("10.1.1.1"), &h, &trusted), ip("10.1.1.1"));
+        for header in [XForwardedFor, CfConnectingIp] {
+            assert_eq!(
+                client_ip(ip("10.1.1.1"), &h, &trusted, header),
+                ip("10.1.1.1")
+            );
+        }
         // No proxies trusted: always the peer.
         let h = headers(&[("cf-connecting-ip", "198.51.100.9")]);
-        assert_eq!(client_ip(ip("10.1.1.1"), &h, &[]), ip("10.1.1.1"));
+        assert_eq!(
+            client_ip(ip("10.1.1.1"), &h, &[], CfConnectingIp),
+            ip("10.1.1.1")
+        );
     }
 
     #[test]
@@ -732,23 +753,21 @@ mod tests {
     }
 
     #[test]
-    fn pow_params_record_a_change_of_bits() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(crate::db::SCHEMA).unwrap();
-        let first = pow_params(&conn, 22, 100).unwrap();
+    fn a_challenge_carries_its_bits_under_its_tag() {
+        let key = [7u8; 32];
+        let c = challenge(&key, 22, 1_000);
         assert_eq!(
-            (first.bits, first.previous_bits, first.changed_at),
-            (22, 22, 100)
+            open_challenge(&key, &c.nonce),
+            Some((1_000 + CHALLENGE_TTL_S, 22))
         );
-        // The same bits again: unchanged.
-        let again = pow_params(&conn, 22, 900).unwrap();
-        assert_eq!(again, first);
-        // Raised: the old bits are previous, changed now.
-        let raised = pow_params(&conn, 24, 1_000).unwrap();
+        // Changing the bits byte (offset 8) breaks the tag.
+        let mut bytes = bs58::decode(&c.nonce).into_vec().unwrap();
+        bytes[8] = 8;
         assert_eq!(
-            (raised.bits, raised.previous_bits, raised.changed_at),
-            (24, 22, 1_000)
+            open_challenge(&key, &bs58::encode(&bytes).into_string()),
+            None
         );
-        assert_eq!(pow_params(&conn, 24, 5_000).unwrap(), raised);
+        // Another store's key does not open it.
+        assert_eq!(open_challenge(&[8u8; 32], &c.nonce), None);
     }
 }

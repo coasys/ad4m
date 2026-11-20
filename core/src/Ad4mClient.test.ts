@@ -44,7 +44,7 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     // ── Identity ──
     'identity.status': { did: 'did:scid:coasys:1:QmTest', deviceKey: 'z6MkTest', deviceEnc: 'z6LSTest', keyId: 'd1', revoked: null, head: null, fork: null, storeBehind: null, store: { url: 'https://store.ad4m.dev', trusted: true }, vouched: false },
     'identity.publish': { seq: 0, hash: 'QmHead', time: 1, sig: 'z' },
-    'identity.powParams': { bits: 22, previousBits: 20, changedAt: 5, challenge: { nonce: 'Challenge1', expires: 300 } },
+    'identity.powParams': { bits: 22, challenge: { nonce: 'Challenge1', expires: 300 } },
     'index.configure': (p: Record<string, unknown>) => p,
     'index.status': { config: { url: 'https://index.example/v1/index', enabled: true }, scid: 'did:scid:coasys:1:QmTest', executorDid: 'did:key:z6MkTest', allowed: true, listing: null },
     'index.publish': (p: Record<string, unknown>) => ({ listingId: 'l1', ...p, state: 'listed', reason: null }),
@@ -64,6 +64,12 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'host.leave': (p: Record<string, unknown>) => ({ kept: p.keepData, removedPerspectives: 0, leftSharedPerspectives: 0, keyDestroyedAt: null, shreddedEverywhereAt: null }),
     'host.createInvite': { inviteId: 'i-1', secret: 'c2VjcmV0', expiresAt: 9 },
     'host.removeTenant': { removed: true },
+    // ── Data ── (the file is the bytes of "abc")
+    'data.exportPrepare': { exportId: 'e1', size: 3, sha256: 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad', chunks: 1, expiresAt: 9 },
+    'data.exportChunk': { data: 'YWJj' },
+    'data.importBegin': { importId: 'i1' },
+    'data.importChunk': (p: Record<string, unknown>) => ({ chunks: (p.index as number) + 1 }),
+    'data.importCommit': { perspectives: [['a', 'b']], linksWritten: 1, linksInvalid: 0, neighbourhoodUrls: [] },
     // ── Bots ──
     'bot.createAgent': { did: 'did:key:z6MkBot', key: 'z6MkBot', owner: 'did:scid:coasys:1:QmTest', offerId: 'offer', matchCode: 'R7K Q2M', expires: 1, token: 'bot-token' },
     'bot.grant': { did: 'did:key:z6MkBot', name: 'helper', owner: 'did:scid:coasys:1:QmTest', offerId: 'offer', createdAt: 1, grant: { spaces: ['neighbourhood://Qm1'], can: ['read', 'write'], expires: null, state: 'active', version: 3, updatedAt: 1 }, key: null },
@@ -80,7 +86,7 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'agent.lock': { did: 'did:test:123', isInitialized: true, isUnlocked: false },
     'agent.unlock': { did: 'did:test:123', isInitialized: true, isUnlocked: true },
     'agent.import': { did: 'did:test:imported', isInitialized: true, isUnlocked: true },
-    'agent.byDid': (p: Record<string, unknown>) => ({ did: p.did, perspective: new Perspective() }),
+    'agent.byDIDs': (p: Record<string, unknown>) => (p.dids as string[]).map(did => ({ did, perspective: new Perspective() })),
     'agent.updateProfile': { did: 'did:test:123', perspective: new Perspective(), directMessageLanguage: 'lang://dm' },
     'agent.sign': 'signed-message-data',
     'agent.isLocked': false,
@@ -222,10 +228,10 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
         };
     },
     'expression.getMany': (p: Record<string, unknown>) => {
-        // Return one result per URL (aligned by index), matching real API behavior
+        // One entry per URL, in order: what `expression.get` answers for it.
         const urls = (p.urls || []) as string[];
-        return urls.map((url: string) => ({
-            author: 'did:test:1', timestamp: '2023-01-01', data: { type: 'test' },
+        return urls.map(() => ({
+            author: 'did:test:123', timestamp: '2024-01-01', data: '{"content":"hello"}',
             language: { address: 'lang://test' }, proof: { valid: true },
         }));
     },
@@ -551,6 +557,7 @@ describe('AgentClient', () => {
 
     test('byDID() fetches agent by DID', async () => {
         const agent = await ad4m.agent.byDID('did:test:other');
+        expect(lastRpcCall!.params.dids).toEqual(['did:test:other']);
         expect(agent.did).toBe('did:test:other');
     });
 
@@ -1197,8 +1204,18 @@ describe('ExpressionClient', () => {
     test('getMany() returns multiple expressions', async () => {
         const exprs = await ad4m.expression.getMany(['url1', 'url2']);
         expect(exprs).toHaveLength(2);
-        expect(exprs[0].author).toBe('did:test:1');
-        expect(exprs[1].author).toBe('did:test:1');
+        expect(exprs[0].author).toBe('did:test:123');
+        expect(exprs[1].author).toBe('did:test:123');
+    });
+
+    test('getMany() sends at most 200 URLs per expression.getMany call', async () => {
+        const freshClient = newClient();
+        const urls = Array.from({ length: 201 }, (_, i) => `lang://test/Qm${i}`);
+        const exprs = await freshClient.expression.getMany(urls);
+        expect(exprs).toHaveLength(201);
+        const calls = lastOf(MockWebSocket.instances).rpc.filter(c => c.type === 'expression.getMany');
+        expect(calls.map(c => (c.params.urls as string[]).length)).toEqual([200, 1]);
+        expect(calls.flatMap(c => c.params.urls as string[])).toEqual(urls);
     });
 
     test('getRaw() returns raw expression', async () => {
@@ -1433,6 +1450,29 @@ describe('HostClient', () => {
     });
 });
 
+describe('DataClient', () => {
+    test('exportFile() prepares, reads every chunk and returns the checked bytes', async () => {
+        const file = await ad4m.data.exportFile(['p1']);
+        expect(Array.from(file)).toEqual([97, 98, 99]);
+        expect(lastRpcCall!.type).toBe('data.exportChunk');
+        expect(lastRpcCall!.params).toEqual({ exportId: 'e1', index: 0 });
+    });
+
+    test('importFile() declares size and hash, sends the chunks, then commits', async () => {
+        const imported = await ad4m.data.importFile(new Uint8Array([97, 98, 99]));
+        expect(lastRpcCall!.type).toBe('data.importCommit');
+        expect(lastRpcCall!.params).toEqual({ importId: 'i1' });
+        expect(imported.linksWritten).toBe(1);
+    });
+
+    test('importBegin() and importChunk() send their params', async () => {
+        await ad4m.data.importBegin(3, 'ab');
+        expect(lastRpcCall!.params).toEqual({ size: 3, sha256: 'ab' });
+        await ad4m.data.importChunk('i1', 0, 'YWJj');
+        expect(lastRpcCall!.params).toEqual({ importId: 'i1', index: 0, data: 'YWJj' });
+    });
+});
+
 // ===================== BOT TESTS =====================
 describe('BotClient', () => {
     test('createAgent() sends the offer and the name', async () => {
@@ -1511,7 +1551,7 @@ describe('IdentityClient', () => {
         const params = await ad4m.identity.powParams();
         expect(lastRpcCall!.type).toBe('identity.powParams');
         expect(lastRpcCall!.params).toEqual({});
-        expect(params).toEqual({ bits: 22, previousBits: 20, changedAt: 5, challenge: { nonce: 'Challenge1', expires: 300 } });
+        expect(params).toEqual({ bits: 22, challenge: { nonce: 'Challenge1', expires: 300 } });
     });
 
     test('attachNote() sends the token and returns the note', async () => {

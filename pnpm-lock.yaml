@@ -73,7 +73,7 @@ importers:
   ad4m-hooks/react:
     dependencies:
       '@coasys/ad4m':
-        specifier: workspace:0.13.1-staging.11
+        specifier: workspace:0.13.1-staging.15
         version: link:../../core
       '@coasys/hooks-helpers':
         specifier: workspace:*
@@ -94,7 +94,7 @@ importers:
   ad4m-hooks/vue:
     dependencies:
       '@coasys/ad4m':
-        specifier: workspace:0.13.1-staging.11
+        specifier: workspace:0.13.1-staging.15
         version: link:../../core
       '@coasys/hooks-helpers':
         specifier: workspace:*
@@ -583,7 +583,7 @@ importers:
   connect-lib:
     devDependencies:
       '@coasys/ad4m':
-        specifier: workspace:0.13.1-staging.11
+        specifier: workspace:0.13.1-staging.15
         version: link:../core
       '@types/node':
         specifier: 18.11.10

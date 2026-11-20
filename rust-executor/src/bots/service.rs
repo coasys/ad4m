@@ -346,8 +346,9 @@ pub async fn create(params: CreateBotParams) -> Result<CreatedBot, WsRpcError> {
         capabilities: Some(get_user_default_capabilities()),
         user_email: Some(username),
     };
-    let (token, _) = crate::agent::grants::mint(agent, auth, None, DEFAULT_TOKEN_VALID_PERIOD)
-        .map_err(WsRpcError::internal)?;
+    let (token, _) =
+        crate::agent::grants::mint(agent, auth, None, DEFAULT_TOKEN_VALID_PERIOD, None)
+            .map_err(WsRpcError::internal)?;
     Ok(CreatedBot {
         key: did.strip_prefix("did:key:").unwrap_or(&did).to_string(),
         did,

@@ -50,8 +50,6 @@ mod tests {
     fn params(bits: u8) -> PowParams {
         PowParams {
             bits,
-            previous_bits: bits,
-            changed_at: 0,
             challenge: PowChallenge {
                 nonce: "5TestChallenge".into(),
                 expires: 0,

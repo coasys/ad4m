@@ -7,7 +7,9 @@
 //! | `index_client.rs` | The hosting index's HTTP client (AR-07): sign-in with the main device key, the listing, `IndexConfig`, `LocalListing`; touches no globals |
 //! | `live.rs` | `LiveEnv`: the real wallet, users table, person store and identity service |
 //! | `policy.rs` | `HostPolicy` (sign-up setting, cap, label, pinned fields) in the `settings` row `host_policy`; `seed_from_config` |
-//! | `tenants.rs` | `TenantRecord`, its states, the gate and `join`, activation, expiry and the revocation sweep, `leave`, `remove_tenant`, `admit_claimed_guest`, invites |
+//! | `tenants.rs` | `TenantRecord`, its states, the gate and `join`, activation, expiry and the revocation sweep, `leave`, `remove_tenant`, `admit_claimed_guest`, `admit_call` (the Held rule), invites |
+//! | `meter.rs` | `host.usage` (AR-05 4.6): spaces, private perspectives, storage (re-measured every 15 minutes), AI runs counted per tenant per day, spend |
+//! | `transfer.rs` | The chunked carriage of an export and of an import: gzip, 1 MiB chunks, one at a time per person, 4 exports an hour, 15 minutes to expiry |
 //!
 //! Every effect outside the tenants table goes through [`HostEnv`], so the gate and the
 //! states run in unit tests without a wallet, a keyring or a store.
@@ -15,8 +17,10 @@
 pub mod export;
 pub mod index_client;
 pub mod live;
+pub mod meter;
 pub mod policy;
 pub mod tenants;
+pub mod transfer;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};

@@ -306,6 +306,8 @@ struct Entry {
     #[cfg_attr(not(debug_assertions), allow(dead_code))]
     result: Check,
     guard: Option<Guard>,
+    /// [`MethodFlags::read`]: a `Held` tenant's session may call it.
+    read: bool,
     /// [`MethodFlags::or_null`]: answer `null` where the method would answer 404.
     or_null: bool,
     /// [`MethodFlags::local_only`]: only the operator on this machine may call it.
@@ -323,8 +325,11 @@ pub struct MethodFlags<'a> {
 }
 
 impl MethodFlags<'_> {
-    pub fn read(self) -> Self {
+    pub fn read(mut self) -> Self {
         self.spec.read = true;
+        if let Some(entry) = self.entry.as_mut() {
+            entry.read = true;
+        }
         self
     }
     pub fn long(self) -> Self {
@@ -475,6 +480,7 @@ impl HandlerMap {
             params: check::<P>,
             result: check::<R>,
             guard: None,
+            read: false,
             or_null: false,
             local_only: false,
             opens: false,
@@ -641,6 +647,9 @@ impl HandlerMap {
                 // cannot be told a bot must not pass as a user.
                 let mut pending = None;
                 if let Some(did) = ctx.session.managed_did() {
+                    // A `Held` tenant's session is limited to reads, exports, its usage and
+                    // leaving (AR-05 R64). The one place a session is admitted.
+                    crate::hosting::tenants::admit_call(did, msg_type, entry.read)?;
                     if let Some(bot) = crate::bots::classify(did)? {
                         pending =
                             crate::bots::admit(&bot, msg_type, guard, params, ctx, record).await?;
@@ -717,6 +726,7 @@ pub fn build_handler_map() -> HandlerMap {
     super::hosting_ws::register_ws_handlers(&mut map);
     super::index_ws::register_ws_handlers(&mut map);
     super::host_ws::register_ws_handlers(&mut map);
+    super::data_ws::register_ws_handlers(&mut map);
     super::sfu_ws::register_ws_handlers(&mut map);
     super::identity_ws::register_ws_handlers(&mut map);
     super::key_login_ws::register_ws_handlers(&mut map);

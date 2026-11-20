@@ -156,10 +156,8 @@ pub async fn import_into(
         }
         let uuid = sink.new_perspective(p.name.clone()).await?;
         for link in &p.links {
-            if sink.write(&uuid, link.clone()).await? {
-                report.links_written += 1;
-            } else {
-                report.links_written += 1;
+            report.links_written += 1;
+            if !sink.write(&uuid, link.clone()).await? {
                 report.links_invalid += 1;
             }
         }
@@ -168,20 +166,27 @@ pub async fn import_into(
     Ok(report)
 }
 
-/// The executor's real sink: perspectives owned by `owner`, links through
-/// `PerspectiveInstance::add_link_expression` (a proof that arrived with the link is judged
-/// as a peer's is).
+/// The executor's real sink: perspectives owned by `owner` (`None`: the main agent, whose
+/// perspectives have no owner), links through `PerspectiveInstance::add_link_expression` (a
+/// proof that arrived with the link is judged as a peer's is).
 pub struct LivePerspectives {
-    pub owner: String,
+    pub owner: Option<String>,
 }
 
 #[async_trait]
 impl LinkSink for LivePerspectives {
     async fn new_perspective(&mut self, name: Option<String>) -> Result<String, String> {
-        let handle = crate::types::PerspectiveHandle::new_with_owner(
-            name.unwrap_or_default(),
-            self.owner.clone(),
-        );
+        let name = name.unwrap_or_default();
+        let handle = match &self.owner {
+            Some(owner) => crate::types::PerspectiveHandle::new_with_owner(name, owner.clone()),
+            None => crate::types::PerspectiveHandle::new(
+                uuid::Uuid::new_v4().to_string(),
+                Some(name),
+                None,
+                None,
+                crate::types::PerspectiveState::Private,
+            ),
+        };
         let uuid = handle.uuid.clone();
         crate::perspectives::add_perspective(handle, None).await?;
         Ok(uuid)
@@ -205,19 +210,39 @@ impl LinkSink for LivePerspectives {
     }
 }
 
-/// The export of every perspective `owner` owns, as the file holds it.
+/// The export of every perspective `owner` owns (`None`: the main agent's, which have no
+/// owner), as the file holds it. `only` narrows it to those uuids; naming one `owner` does not
+/// own is `Err(uuid)`, so a person's export never holds another's perspective.
 pub async fn export_owned(
-    owner: &str,
+    owner: Option<&str>,
+    only: Option<&[String]>,
     executor_did: &str,
     person_did_scid: Option<String>,
+    device_did: &str,
     now_iso: String,
-) -> Result<ExportFile, String> {
-    let mut perspectives = Vec::new();
+) -> Result<ExportFile, ExportError> {
+    let mut mine = Vec::new();
     for instance in crate::perspectives::all_perspectives() {
         let handle = instance.persisted.lock().await.clone();
-        if !handle.is_owned_by(owner) {
-            continue;
+        let owned = match owner {
+            Some(owner) => handle.is_owned_by(owner),
+            None => handle.is_unowned(),
+        };
+        if owned {
+            mine.push((instance, handle));
         }
+    }
+    if let Some(only) = only {
+        if let Some(foreign) = only
+            .iter()
+            .find(|uuid| !mine.iter().any(|(_, h)| &h.uuid == *uuid))
+        {
+            return Err(ExportError::NotYours(foreign.clone()));
+        }
+        mine.retain(|(_, h)| only.contains(&h.uuid));
+    }
+    let mut perspectives = Vec::new();
+    for (instance, handle) in mine {
         let links = instance
             .get_links(&crate::types::LinkQuery {
                 source: None,
@@ -229,7 +254,7 @@ pub async fn export_owned(
                 include_unverified: Some(true),
             })
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| ExportError::Failed(e.to_string()))?;
         perspectives.push(exported_perspective(
             &handle.uuid,
             handle.name.clone(),
@@ -243,9 +268,17 @@ pub async fn export_owned(
         created_at: now_iso,
         executor_did: executor_did.to_string(),
         person_did_scid,
-        device_did: owner.to_string(),
+        device_did: device_did.to_string(),
         perspectives,
     })
+}
+
+/// Why an export is refused.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExportError {
+    /// The caller named a perspective it does not own (or that does not exist).
+    NotYours(String),
+    Failed(String),
 }
 
 #[cfg(test)]

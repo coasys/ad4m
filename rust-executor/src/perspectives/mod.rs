@@ -45,6 +45,7 @@ pub mod shacl_to_prolog;
 pub mod sparql_store;
 pub mod subject_classes_of;
 pub mod utils;
+pub(crate) mod write_log;
 use crate::types::{
     LinkQuery, LinkStatus, NeighbourhoodSignalFilter, PerspectiveEvent, PerspectiveExpression,
     PerspectiveHandle, PerspectiveRemovedEvent, PerspectiveState,
@@ -401,6 +402,10 @@ pub enum Recheck {
     /// whether or not the key map holds that log now. After the re-check's receiver lagged,
     /// since a lost change may belong to a log the map's bound dropped.
     Logged,
+    /// The links stored as `flagged`: each tick, since a revocation notice
+    /// (`verdict::NOTICE_PREDICATE`) arriving after them may vouch for one and lift it back
+    /// to `valid`.
+    Flagged,
 }
 
 /// Judges the links of `scope` again in every perspective, from the key map, and rewrites
@@ -571,7 +576,7 @@ pub async fn remove_perspective(uuid: &str) -> Option<PerspectiveInstance> {
 
 /// The folder of perspective `uuid`'s files (its SPARQL store) under the data folder, when a
 /// data folder is set.
-fn perspective_dir(uuid: &str) -> Option<std::path::PathBuf> {
+pub(crate) fn perspective_dir(uuid: &str) -> Option<std::path::PathBuf> {
     get_app_data_path().map(|data_path| {
         std::path::Path::new(&data_path)
             .join("perspectives")
@@ -629,6 +634,17 @@ pub fn register_link_language_perspective(language_address: String, handle: Pers
         .write()
         .unwrap()
         .insert(language_address, handle);
+}
+
+/// Routes `link_language` to `handle` in the cache, as a neighbourhood's start does; `None`
+/// removes the route.
+#[cfg(test)]
+pub(crate) fn route_link_language_for_test(link_language: &str, handle: Option<PerspectiveHandle>) {
+    let mut cache = LINK_LANG_TO_PERSPECTIVE_HANDLE.write().unwrap();
+    match handle {
+        Some(handle) => cache.insert(link_language.to_string(), handle),
+        None => cache.remove(link_language),
+    };
 }
 
 /// Look up PerspectiveHandle by link language address from cache

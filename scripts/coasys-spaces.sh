@@ -29,9 +29,20 @@
 #   EXECUTOR_PUBLISH_DIR        the published executors (/mnt/hdd/executor-artifacts), the layout
 #                               the build job's "Publish the executor on this host" step writes
 #   COASYS_SPACES_TIER          real (host model, Whisper) or stub; default real
-#   COASYS_SPACES_LLM_BASE_URL  OpenAI-compatible base URL (http://localhost:11434/v1)
-#   COASYS_SPACES_LLM_MODEL     model id (qwen3.8-27b-48k)
-#   COASYS_SPACES_LLM_NUM_CTX   context window an Ollama server runs it with (16384; empty: as is)
+#   COASYS_SPACES_LLM_BASE_URL  OpenAI-compatible base URL. The nightly job sets staging's
+#                               llama-server (http://127.0.0.1:12460/v1). The default below is
+#                               Ollama, for a hand run that still points there.
+#   COASYS_SPACES_LLM_MODEL     model id. The nightly job sets qwen3.8-27b-ud-q4_k_m.
+#   COASYS_SPACES_LLM_NUM_CTX   Ollama only: context window of an /api/create variant
+#                               (16384 when unset; empty: leave the model as the server has it).
+#                               The nightly job sets this empty. llama-server has no /api/create,
+#                               and this script does not call it unless /api/version says Ollama.
+#   COASYS_SPACES_LLM_ENDPOINT_KIND, COASYS_SPACES_LLM_NATIVE_TOOLS,
+#   COASYS_SPACES_LLM_REQUEST_TIMEOUT_SECS, COASYS_SPACES_LLM_MAX_NUM_CTX
+#                               passed through to the suite. This script does not
+#                               interpret them. The nightly job sets LLAMA_SERVER,
+#                               true, 900 and 90112. WE's real tier reads them
+#                               (we#468); unset, that harness keeps its defaults.
 #   SOCIAL_DNA_PACKAGE          passed to the suite when set
 set -euo pipefail
 
@@ -280,7 +291,21 @@ cmd_we() {
     pnpm install --no-frozen-lockfile
     check_override ad4m "$core"
     check_override connect "$connect"
-    PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=1 pnpm --filter "$WE_PACKAGE" exec playwright-core install chromium
+    # `pnpm exec` only finds a bin of the filtered package. WE dev declares
+    # playwright-core on @we/app-web. The e2e harness (coasys/we#468) moves it
+    # to @we/e2e, and filtering the app then fails with "playwright-core not found".
+    log "installing Chromium with $(chromium_package)"
+    PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=1 pnpm --filter "$(chromium_package)" exec playwright-core install chromium
+}
+
+# The package whose playwright-core installs Chromium. See cmd_we.
+chromium_package() {
+    local pkg="$WE_DIR/packages/e2e/package.json"
+    if [ -f "$pkg" ] && jq -e '.dependencies["playwright-core"] // .devDependencies["playwright-core"]' >/dev/null "$pkg"; then
+        echo @we/e2e
+        return
+    fi
+    echo "$WE_PACKAGE"
 }
 
 # Fails unless we-web resolves @coasys/<name> to the packed tarball.
@@ -310,11 +335,12 @@ cmd_llm_check() {
     fi
     local models
     if ! models="$(curl -sf --max-time 15 "$LLM_BASE_URL/models")"; then
-        die "the model server at $LLM_BASE_URL does not answer (GET /models). On the runner: systemctl status ollama"
+        die "the model server at $LLM_BASE_URL does not answer (GET /models). On the runner: systemctl --user status llama-qwen27b"
     fi
     # Ollama's /v1/models lists an untagged model as `<name>:latest`; the bare name is that model.
+    # llama-server lists the alias as the id, with no tag.
     if ! jq -e --arg m "$LLM_MODEL" '[.data[]?.id] | (index($m) // index($m + ":latest"))' >/dev/null <<<"$models"; then
-        die "the model server at $LLM_BASE_URL has no model '$LLM_MODEL' (it has: $(jq -r '[.data[]?.id] | join(", ")' <<<"$models")). On the runner: ollama pull $LLM_MODEL"
+        die "the model server at $LLM_BASE_URL has no model '$LLM_MODEL' (it has: $(jq -r '[.data[]?.id] | join(", ")' <<<"$models")). On the runner: systemctl --user status llama-qwen27b (it should already serve '$LLM_MODEL'; this job does not load a model)"
     fi
     log "$LLM_BASE_URL serves $LLM_MODEL"
     rm -f "$WORK/llm-model"
@@ -325,14 +351,21 @@ cmd_llm_check() {
 # and cuts a longer prompt without an error; extraction's prompt is about 6,000 tokens. A request
 # cannot raise it there, so on an Ollama server this makes a variant of the model with
 # LLM_NUM_CTX tokens (`/api/create`, no download) and names it in $WORK/llm-model for `test`.
-# A model whose own num_ctx is already that large is used as it is: a variant would be a second
-# load on the GPU, beside the one staging and llm-e2e keep loaded. Another server keeps the model.
+# A model whose own num_ctx is already that large is used as it is.
+# An empty COASYS_SPACES_LLM_NUM_CTX (what the nightly job sets) skips this. A server that is not
+# Ollama does too: /api/create runs only after /api/version returns a .version. llama-server
+# answers that path with 404, so this never makes a variant against it.
 with_context_window() {
-    local root="${LLM_BASE_URL%/}" variant answer own
+    local root="${LLM_BASE_URL%/}" variant answer own version
     root="${root%/v1}"
-    [ -n "$LLM_NUM_CTX" ] || return 0
-    if ! curl -sf --max-time 15 "$root/api/version" >/dev/null; then
-        log "$root is not an Ollama server; the model keeps its own context window"
+    if [ -z "$LLM_NUM_CTX" ]; then
+        log "COASYS_SPACES_LLM_NUM_CTX is empty; $LLM_MODEL keeps the server's context window"
+        return 0
+    fi
+    # /api/version is Ollama's. A 404, or a body with no .version, is not Ollama: do not POST /api/create.
+    version="$(curl -sf --max-time 15 "$root/api/version" || true)"
+    if ! jq -e '.version' >/dev/null 2>&1 <<<"$version"; then
+        log "$root is not an Ollama server; leaving $LLM_MODEL as it is (no /api/create)"
         return 0
     fi
     own="$(curl -sf --max-time 15 "$root/api/show" -H 'content-type: application/json' \
@@ -373,7 +406,6 @@ cmd_test() {
       if (pkg.name !== process.argv[2] || !pkg.scripts?.["test:spaces"]) process.exit(1);
     ' "$WE_DIR/apps/we-web/package.json" "$WE_PACKAGE" ||
         die "WE $WE_REF has no $WE_PACKAGE with a test:spaces script at apps/we-web"
-    use_we_pnpm
     mkdir -p "$ARTIFACTS"
     {
         echo "ad4m $AD4M_SHA"
@@ -381,13 +413,21 @@ cmd_test() {
         echo "executor $(cat "$WORK/executor.source" 2>/dev/null || echo "?")"
         echo "tier $TIER"
         [ "$TIER" = real ] && echo "model $(served_model) at $LLM_BASE_URL"
+        # The four values the nightly job sets and the suite registers. Written
+        # before pnpm, so a later install failure still shows what would be sent.
+        echo "llm kind ${COASYS_SPACES_LLM_ENDPOINT_KIND:-unset} nativeTools ${COASYS_SPACES_LLM_NATIVE_TOOLS:-unset} requestTimeoutSecs ${COASYS_SPACES_LLM_REQUEST_TIMEOUT_SECS:-unset} maxNumCtx ${COASYS_SPACES_LLM_MAX_NUM_CTX:-unset}"
         echo "social dna ${SOCIAL_DNA_PACKAGE:-fixture}"
     } | tee "$ARTIFACTS/run.txt"
+    use_we_pnpm
     cd "$WE_DIR"
     AD4M_EXECUTOR="$EXECUTOR" \
         COASYS_SPACES_TIER="$TIER" \
         COASYS_SPACES_LLM_BASE_URL="$LLM_BASE_URL" \
         COASYS_SPACES_LLM_MODEL="$(served_model)" \
+        COASYS_SPACES_LLM_ENDPOINT_KIND="${COASYS_SPACES_LLM_ENDPOINT_KIND:-}" \
+        COASYS_SPACES_LLM_NATIVE_TOOLS="${COASYS_SPACES_LLM_NATIVE_TOOLS:-}" \
+        COASYS_SPACES_LLM_REQUEST_TIMEOUT_SECS="${COASYS_SPACES_LLM_REQUEST_TIMEOUT_SECS:-}" \
+        COASYS_SPACES_LLM_MAX_NUM_CTX="${COASYS_SPACES_LLM_MAX_NUM_CTX:-}" \
         COASYS_SPACES_ARTIFACTS="$ARTIFACTS" \
         pnpm --filter "$WE_PACKAGE" test:spaces 2>&1 | tee "$ARTIFACTS/test-spaces.log"
 }
@@ -411,6 +451,7 @@ case "${1:-}" in
     executor) cmd_executor ;;
     sdk) cmd_sdk ;;
     we) cmd_we ;;
+    chromium-package) chromium_package ;;
     llm-check) cmd_llm_check ;;
     build-web) cmd_build_web ;;
     test) cmd_test ;;

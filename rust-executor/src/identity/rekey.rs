@@ -133,7 +133,7 @@ async fn rekey_and_move() -> Result<DeviceKeys, WsRpcError> {
 
 /// Moves the perspective owners, the notification owners and the flow bookkeeping of every DID
 /// in `retired` to `new`. Returns the places that did not move; the others still move.
-async fn move_from_retired(retired: &[String], new: &str) -> Vec<String> {
+pub(crate) async fn move_from_retired(retired: &[String], new: &str) -> Vec<String> {
     let mut failed: Vec<String> = Vec::new();
     for instance in crate::perspectives::all_perspectives() {
         let handle = instance.persisted.lock().await.clone();

@@ -174,6 +174,20 @@ impl Ad4mDb {
             .optional()?)
     }
 
+    /// The record that is not deleted and whose device key is `device_did`.
+    pub fn live_tenant_of_device(&self, device_did: &str) -> Ad4mDbResult<Option<TenantRow>> {
+        Ok(self
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT {TENANT_COLUMNS} FROM tenants WHERE device_did = ?1 AND state <> 'deleted'"
+                ),
+                [device_did],
+                tenant_of,
+            )
+            .optional()?)
+    }
+
     /// Every record that is not deleted, oldest first.
     pub fn live_tenants(&self) -> Ad4mDbResult<Vec<TenantRow>> {
         let mut stmt = self.conn.prepare(&format!(
@@ -359,6 +373,26 @@ impl Ad4mDb {
             .unwrap_or(0))
     }
 
+    /// The bytes of perspective `uuid`'s link rows: the lengths of source, predicate, target,
+    /// author and proof (signature and key) (AR-05 4.6, `storage.usedBytes`).
+    pub fn link_bytes(&self, uuid: &str) -> Ad4mDbResult<u64> {
+        Ok(self.conn.query_row(
+            "SELECT COALESCE(SUM(LENGTH(source) + LENGTH(predicate) + LENGTH(target)
+                 + LENGTH(author) + LENGTH(signature) + LENGTH(key)), 0) FROM link WHERE perspective = ?1",
+            [uuid],
+            |row| row.get::<_, i64>(0),
+        )? as u64)
+    }
+
+    /// The credits charged to `agent_did` so far: the sum of its `compute_log` costs.
+    pub fn compute_charged(&self, agent_did: &str) -> Ad4mDbResult<f64> {
+        Ok(self.conn.query_row(
+            "SELECT COALESCE(SUM(cost), 0.0) FROM compute_log WHERE agent_did = ?1",
+            [agent_did],
+            |row| row.get(0),
+        )?)
+    }
+
     /// Tests: removes the setting `key`.
     #[cfg(test)]
     pub(crate) fn clear_setting_for_test(&self, key: &str) -> Ad4mDbResult<()> {
@@ -389,6 +423,14 @@ impl Ad4mDb {
         self.conn.execute_batch(
             "DELETE FROM tenants; DELETE FROM host_invites; DELETE FROM tenant_ai_runs;",
         )?;
+        Ok(())
+    }
+
+    /// Tests: empties the link rows and the compute log, which the usage meter reads.
+    #[cfg(test)]
+    pub fn clear_usage_for_test(&self) -> Ad4mDbResult<()> {
+        self.conn
+            .execute_batch("DELETE FROM link; DELETE FROM compute_log;")?;
         Ok(())
     }
 

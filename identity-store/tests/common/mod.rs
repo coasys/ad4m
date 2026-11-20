@@ -291,7 +291,7 @@ impl TestStore {
     /// A proof of work for `scid` at the store's current bits over a fresh challenge of
     /// `GET /v1/pow`, as a client's (`store.pow_challenge`, then `pow::solve`).
     pub fn pow_for(&self, scid: &str) -> Value {
-        let bits = self.store.pow_params().bits;
+        let bits = self.store.settings.pow_bits;
         let challenge = self.store.pow_challenge();
         serde_json::to_value(ad4m_identity_core::pow::solve(scid, &challenge.nonce, bits)).unwrap()
     }

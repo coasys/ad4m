@@ -314,11 +314,13 @@ pub const RECHECK_EVERY: Duration = Duration::from_secs(60);
 
 /// The re-check of stored links: the links of each key whose verdict the cache changed (a
 /// revocation, a key a log lists for the first time), and every [`RECHECK_EVERY`] the links
-/// that could not be checked and those of each bot key whose scope expired since the last
-/// tick (since start on the first). When the receiver lags, the changes it missed are made up
-/// for by [`lag_scopes`], which does not rely on the key map still holding the changed log.
-/// Each re-check judges a link again from the key map and rewrites it only when its verdict or
-/// person changed, so it is idempotent.
+/// that could not be checked, those stored `flagged` (a revocation notice arriving after
+/// them may lift one), and those of each bot key whose scope expired since the last tick
+/// (since start on the first). When the receiver lags, the changes it missed are made up
+/// for by [`lag_scopes`], which sweeps the marks the cache journaled as well as the key
+/// map, so a lost change of a log the map's bound dropped is found anyway. Each re-check
+/// judges a link again from the key map and rewrites it only when its verdict or person
+/// changed, so it is idempotent.
 async fn run_recheck(
     service: Arc<IdentityService>,
     mut changes: tokio::sync::broadcast::Receiver<verdict::VerdictChange>,
@@ -337,6 +339,8 @@ async fn run_recheck(
     let mut tick = tokio::time::interval(RECHECK_EVERY);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut expired_until = 0;
+    // The id of the last journaled mark a lag recovery already swept ([`lag_scopes`]).
+    let mut marks_swept = 0;
     // Signers whose re-check failed in some perspective: asked again on the next tick.
     let mut failed: BTreeSet<String> = BTreeSet::new();
     // A lag recovery's sweep of the links stored with a person failed somewhere: run again on
@@ -347,13 +351,21 @@ async fn run_recheck(
             change = changes.recv() => {
                 let mut signers = BTreeSet::new();
                 let mut lagged = false;
+                let mut revoked = Vec::new();
                 match change {
                     Ok(change) => {
                         signers.insert(format!("did:key:{}", change.key));
+                        if change.verdict == verdict::KeyVerdict::Revoked {
+                            revoked.push((change.scid.clone(), change.key.clone()));
+                        }
                         loop {
                             match changes.try_recv() {
                                 Ok(change) => {
                                     signers.insert(format!("did:key:{}", change.key));
+                                    if change.verdict == verdict::KeyVerdict::Revoked {
+                                        revoked
+                                            .push((change.scid.clone(), change.key.clone()));
+                                    }
                                 }
                                 Err(TryRecvError::Lagged(_)) => lagged = true,
                                 Err(TryRecvError::Empty) | Err(TryRecvError::Closed) => break,
@@ -364,7 +376,11 @@ async fn run_recheck(
                     Err(RecvError::Closed) => return,
                 }
                 let scopes = if lagged {
-                    lag_scopes(service.cache.key_map(), signers)
+                    let (scopes, swept, lagged_revoked) =
+                        lag_scopes(&service.cache, signers, marks_swept).await;
+                    marks_swept = swept;
+                    revoked.extend(lagged_revoked);
+                    scopes
                 } else {
                     vec![crate::perspectives::Recheck::Signers(signers)]
                 };
@@ -375,15 +391,31 @@ async fn run_recheck(
                                 failed.extend(signers)
                             }
                             crate::perspectives::Recheck::Logged => logged_failed = true,
-                            crate::perspectives::Recheck::CantCheck => {}
+                            crate::perspectives::Recheck::CantCheck
+                            | crate::perspectives::Recheck::Flagged => {}
                         }
                     }
+                }
+                // A revocation also calls for the notices that let a late syncer count the
+                // links this executor already held.
+                for (scid, key) in revoked {
+                    publish_revocation_notices(&service, &scid, &key).await;
                 }
             }
             _ = tick.tick() => {
                 let now = service::now();
-                let mut signers = expired_signers(service.cache.key_map(), expired_until, now);
+                let (mut signers, logs) =
+                    expired_signers(&service.cache, expired_until, now);
                 expired_until = now;
+                // A journaled scope may belong to a log the map's bound dropped: read it
+                // back, so the re-check judges the bot's links with it.
+                for scid in logs {
+                    if let Err(e) = service.cache.trusted(&scid).await {
+                        log::warn!(
+                            "identity: could not read the journaled log {scid} for the expiry re-check: {e}"
+                        );
+                    }
+                }
                 signers.append(&mut failed);
                 if !signers.is_empty() {
                     let scope = crate::perspectives::Recheck::Signers(signers);
@@ -399,37 +431,177 @@ async fn run_recheck(
                             .await;
                 }
                 crate::perspectives::recheck_links(&crate::perspectives::Recheck::CantCheck).await;
+                crate::perspectives::recheck_links(&crate::perspectives::Recheck::Flagged).await;
             }
         }
     }
 }
 
-/// The signers (`did:key`) of the bot keys whose scope expired in `(after, upto]`.
-pub(crate) fn expired_signers(map: &cache::KeyMap, after: u64, upto: u64) -> BTreeSet<String> {
-    map.expiring(after, upto)
+/// The signers (`did:key`) of the bot keys whose scope expired in `(after, upto]` — the
+/// keys the key map still lists and those journaled under the cache's marks for a log the
+/// map has since dropped ([`KelCache::marked_expiring`]) — and the `scid`s of those
+/// journaled logs, for the caller to read back into the map before the re-check.
+pub(crate) fn expired_signers(
+    cache: &KelCache,
+    after: u64,
+    upto: u64,
+) -> (BTreeSet<String>, BTreeSet<String>) {
+    let mut signers: BTreeSet<String> = cache::global_key_map()
+        .expiring(after, upto)
         .into_iter()
         .map(|key| format!("did:key:{key}"))
-        .collect()
+        .collect();
+    let mut logs = BTreeSet::new();
+    match cache.marked_expiring(after, upto) {
+        Ok(marks) => marks.into_iter().for_each(|(key, scid)| {
+            signers.insert(format!("did:key:{key}"));
+            logs.insert(scid);
+        }),
+        Err(e) => log::warn!("identity: could not read the journaled scope expiries: {e}"),
+    }
+    (signers, logs)
 }
 
-/// The re-checks after the receiver lagged (changes were missed): the links of `signers` (the
-/// changes it did receive) and of every key the map lists, then every link stored with a
-/// person. A lost change may belong to a log the map's bound dropped (a start-up load past the
-/// bound overflows the change buffer too), so the map's keys alone would miss it; a stored
-/// person names the log, which the re-check reads back from the cache ([`read_logs_of`]).
-pub(crate) fn lag_scopes(
-    map: &cache::KeyMap,
+/// The re-checks after the receiver lagged (changes were missed): the links of `signers`
+/// (the changes it did receive), of every key the map lists, and of every key journaled
+/// past the mark `since` ([`KelCache::marked_since`]) — a lost change may belong to a log
+/// the map's bound dropped (a start-up load past the bound overflows the change buffer
+/// too), and the marks still name its keys, so a link stored `valid` with no person is
+/// found whether or not the log is still held. The journaled logs are read back into the
+/// map first, so the links are judged with them. Then every link stored with a person: a
+/// stored person names the log, which the re-check reads back from the cache
+/// ([`read_logs_of`]). The id answered beside the scopes is where the next sweep starts,
+/// and the `(scid, key)` list beside it is the journaled keys the restored logs show
+/// revoked — a lost `Revoked` change still gets its revocation notices
+/// ([`publish_revocation_notices`]).
+pub(crate) async fn lag_scopes(
+    cache: &KelCache,
     mut signers: BTreeSet<String>,
-) -> Vec<crate::perspectives::Recheck> {
+    since: u64,
+) -> (
+    Vec<crate::perspectives::Recheck>,
+    u64,
+    Vec<(String, String)>,
+) {
     signers.extend(
-        map.listed_keys()
+        cache::global_key_map()
+            .listed_keys()
             .into_iter()
             .map(|key| format!("did:key:{key}")),
     );
-    vec![
-        crate::perspectives::Recheck::Signers(signers),
-        crate::perspectives::Recheck::Logged,
-    ]
+    let mut revoked = Vec::new();
+    match cache.marked_since(since) {
+        Ok(marks) => {
+            let mut logs = BTreeSet::new();
+            for (key, scid) in &marks {
+                signers.insert(format!("did:key:{key}"));
+                logs.insert(scid.clone());
+            }
+            for scid in logs {
+                if let Err(e) = cache.trusted(&scid).await {
+                    log::warn!(
+                        "identity: could not read the journaled log {scid} for the lag recovery: {e}"
+                    );
+                }
+            }
+            for (key, scid) in marks {
+                let Some(log) = cache.key_map().log(&scid) else {
+                    continue;
+                };
+                let revoked_key = log
+                    .state
+                    .device_key_id_of(&key)
+                    .and_then(|id| log.state.keys.get(id))
+                    .and_then(|record| record.revoked)
+                    .is_some_and(|at| at <= log.trusted);
+                if revoked_key {
+                    revoked.push((scid, key));
+                }
+            }
+        }
+        Err(e) => log::warn!("identity: could not read the journaled key changes: {e}"),
+    }
+    let swept = cache.last_mark().unwrap_or_else(|e| {
+        log::warn!("identity: could not read the change journal's head: {e}");
+        since
+    });
+    (
+        vec![
+            crate::perspectives::Recheck::Signers(signers),
+            crate::perspectives::Recheck::Logged,
+        ],
+        swept,
+        revoked,
+    )
+}
+
+/// The revocation of `author`'s device key the key map knows, as `(person, revoked)`: the
+/// `did:scid` of the log that lists the signer and the seq its `revoke` sits at (at or below
+/// the trusted seq). `None` when no trusted log lists the key, or lists it unrevoked — the
+/// two cases a revocation notice ([`verdict::NOTICE_PREDICATE`]) has nothing to say to.
+pub(crate) fn revocation_of(author: &str) -> Option<(String, u64)> {
+    let key = resolver::multikey_of(author)?;
+    let cache::KeyLookup::Listed { scid, log } = cache::global_key_map().lookup(key) else {
+        return None;
+    };
+    let id = log.state.device_key_id_of(&key.to_string())?;
+    let revoked = log
+        .state
+        .keys
+        .get(id)?
+        .revoked
+        .filter(|r| *r <= log.trusted)?;
+    Some((ad4m_identity_core::did_of(&scid), revoked))
+}
+
+/// A `VerdictChange` revoked `key` of the identity `scid`: the links this executor's
+/// perspectives already counted as `valid` under it are attested to every reader by a
+/// revocation notice ([`verdict::NOTICE_PREDICATE`]), signed into each perspective that
+/// holds them by a device key of `scid` the revocation left valid — impossible before the
+/// revocation, so a `valid` notice orders the vouched link ahead of it for a reader that
+/// synced late. Nothing is written when no local agent still speaks for `scid`: a notice
+/// only carries weight from a key the revocation left valid.
+async fn publish_revocation_notices(service: &IdentityService, scid: &str, key: &str) {
+    let Some(log) = service.cache.key_map().log(scid) else {
+        return;
+    };
+    let agents = crate::db_backend::db_backend()
+        .agents_of_identity(scid)
+        .unwrap_or_else(|e| {
+            log::warn!(
+                "identity: could not read the agents of {scid} for the revocation notices: {e}"
+            );
+            Vec::new()
+        });
+    let now = service::now();
+    let context = agents.iter().find_map(|did| {
+        let key = resolver::multikey_of(did)?;
+        log.state.device_key_id_of(&key.to_string())?;
+        (verdict::key_verdict(&log.state, log.trusted, key, now) == verdict::KeyVerdict::Valid)
+            .then(|| {
+                if crate::agent::did() == *did {
+                    crate::agent::AgentContext::main_agent()
+                } else {
+                    crate::agent::AgentContext::managed(did.clone())
+                }
+            })
+    });
+    let Some(context) = context else {
+        return;
+    };
+    let author = format!("did:key:{key}");
+    let person = ad4m_identity_core::did_of(scid);
+    for perspective in crate::perspectives::all_perspectives() {
+        if let Err(e) = perspective
+            .publish_revocation_notices(&author, &person, &context)
+            .await
+        {
+            log::warn!(
+                "identity: revocation notices for {author} in perspective {} failed: {e}",
+                perspective.uuid
+            );
+        }
+    }
 }
 
 /// The verdict of a signed expression (a link) and its person, from the executor's key map,
@@ -830,43 +1002,90 @@ mod tests {
     }
 
     /// The tick re-checks the links of each bot key whose scope expired since the last tick:
-    /// once, and never a key without a scope or one whose scope has not expired.
-    #[test]
-    fn the_tick_rechecks_the_bot_keys_whose_scope_expired_since_the_last_one() {
-        use ad4m_identity_core::BotScope;
-        let bot = TestLog::new(64);
-        let person = TestLog::new(65);
-        let map = cache::KeyMap::new();
-        let mut state = bot.chain().state().clone();
-        state.keys.get_mut("d1").unwrap().scopes = vec![(
-            0,
-            BotScope {
+    /// once, and never a key without a scope or one whose scope has not expired. The marks
+    /// the cache journaled answer the same after the key map dropped the log.
+    #[tokio::test]
+    async fn the_tick_rechecks_the_bot_keys_whose_scope_expired_since_the_last_one() {
+        use ad4m_identity_core::build::{add_unsigned, cosign};
+        use ad4m_identity_core::{BotScope, DeviceKey, KeyLife};
+        let mut log = TestLog::new(64);
+        let bot = ed25519_dalek::SigningKey::from_bytes(&[66; 32]);
+        let chain = log.chain();
+        let device = DeviceKey {
+            id: chain.state().next_device_id(),
+            sign: bot.key(),
+            enc: ad4m_identity_core::encode_x25519_multikey(&[66; 32]),
+            life: KeyLife::Bot(BotScope {
                 can: vec!["read".into()],
                 expires: 1_500,
-            },
-        )];
-        map.publish(&bot.scid(), cache::TrustedLog { state, trusted: 0 });
-        map.publish(
-            &person.scid(),
-            cache::TrustedLog {
-                state: person.chain().state().clone(),
-                trusted: 0,
-            },
-        );
-        let bot_signer = BTreeSet::from([agent_of(&bot)]);
+            }),
+        };
+        let mut event = add_unsigned(&chain, device, "offer", "co-sig").unwrap();
+        cosign(&mut event, "m0", &log.master).unwrap();
+        log.events.push(event);
+        let person = TestLog::new(65);
+        let cache = trusting();
+        accept_signed(&cache, &log.events).await;
+        accept_signed(&cache, &person.events).await;
+        let bot_signer = BTreeSet::from([format!("did:key:{}", bot.key())]);
         assert!(
-            expired_signers(&map, 0, 1_000).is_empty(),
+            expired_signers(&cache, 0, 1_000).0.is_empty(),
             "not expired yet"
         );
-        assert_eq!(expired_signers(&map, 1_000, 2_000), bot_signer);
+        assert_eq!(expired_signers(&cache, 1_000, 2_000).0, bot_signer);
         assert!(
-            expired_signers(&map, 2_000, 3_000).is_empty(),
+            expired_signers(&cache, 2_000, 3_000).0.is_empty(),
             "already rechecked"
         );
         assert_eq!(
-            expired_signers(&map, 0, 3_000),
+            expired_signers(&cache, 0, 3_000).0,
             bot_signer,
             "after a restart"
+        );
+        // The journaled mark still answers after the key map dropped the log, and names
+        // the log to read back.
+        cache.key_map().forget(&log.scid());
+        let (signers, logs) = expired_signers(&cache, 0, 3_000);
+        assert_eq!(signers, bot_signer, "the map forgot the log");
+        assert_eq!(logs, BTreeSet::from([log.scid()]));
+    }
+
+    /// After the receiver lags, the journaled marks name every key whose verdict changed —
+    /// including of a log the key map's bound dropped before the recovery — so the re-check
+    /// finds its stored links though none carries a person ([`lag_scopes`]).
+    #[tokio::test]
+    async fn the_lag_recovery_sweeps_the_journaled_keys_the_map_dropped() {
+        let mut log = TestLog::new(70);
+        let cache = trusting();
+        accept_signed(&cache, &log.events).await;
+        log.revoke_d1();
+        accept_signed(&cache, &log.events).await;
+        let signer = agent_of(&log);
+        // The bound evicts the log before the recovery runs.
+        cache.key_map().forget(&log.scid());
+        let (scopes, swept, revoked) = lag_scopes(&cache, BTreeSet::new(), 0).await;
+        let signers = scopes
+            .iter()
+            .find_map(|scope| match scope {
+                crate::perspectives::Recheck::Signers(signers) => Some(signers),
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            signers.contains(&signer),
+            "the journaled mark names the revoked key"
+        );
+        // And the lost Revoked change still gets its notices: the restored log names the
+        // key and its log.
+        assert_eq!(
+            revoked,
+            vec![(log.scid(), log.device.key().to_string())],
+            "the lost revocation is still published"
+        );
+        // Marks at or before `swept` are not swept again.
+        assert!(
+            cache.marked_since(swept).unwrap().is_empty(),
+            "already swept"
         );
     }
 

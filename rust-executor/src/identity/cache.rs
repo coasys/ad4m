@@ -651,6 +651,16 @@ CREATE TABLE IF NOT EXISTS identity_fork_signers (
     seq INTEGER NOT NULL,
     theirs TEXT NOT NULL,
     PRIMARY KEY (scid, signer)
+);
+-- One row per key-verdict change (`expires` NULL) and per bot scope `expires` an
+-- accepted head publishes, so the re-check recovers from a change its receiver lagged
+-- past and finds a scope that expires after its log left the bounded key map.
+CREATE TABLE IF NOT EXISTS identity_key_marks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    multikey TEXT NOT NULL,
+    scid TEXT NOT NULL,
+    expires INTEGER,
+    UNIQUE (multikey, scid, expires)
 );";
 
 fn now() -> u64 {
@@ -903,6 +913,7 @@ impl KelCache {
             .iter()
             .chain(state.keys.values())
             .map(|r| r.sign.clone());
+        let mut changed_keys = Vec::new();
         for key in keys {
             let verdict = key_verdict(state, trusted, &key, now);
             let changed = match &held {
@@ -916,6 +927,7 @@ impl KelCache {
                 }
             };
             if changed {
+                changed_keys.push(key.clone());
                 // No receiver is not an error: nothing re-checks then.
                 let _ = self.changes.send(VerdictChange {
                     key,
@@ -924,6 +936,94 @@ impl KelCache {
                 });
             }
         }
+        self.journal_marks(scid, state, trusted, &changed_keys);
+    }
+
+    /// Writes `identity_key_marks` rows for this publish: one per changed key, and one per
+    /// bot scope `expires` `state` holds at `trusted`. A change the re-check's bounded
+    /// receiver lags past is still found in the journal after the log left the bounded key
+    /// map ([`KelCache::marked_since`]), and a scope that expires while its log is away is
+    /// still re-checked ([`KelCache::marked_expiring`]). A failed write only logs: the next
+    /// publish of a later head marks the same keys again.
+    fn journal_marks(&self, scid: &str, state: &KeyState, trusted: u64, changed_keys: &[String]) {
+        let Ok(meta) = self.meta.lock() else {
+            return;
+        };
+        for key in changed_keys {
+            if let Err(e) = meta.execute(
+                "INSERT INTO identity_key_marks (multikey, scid, expires) VALUES (?1, ?2, NULL)",
+                params![key, scid],
+            ) {
+                log::warn!("identity: could not journal the change of {key} in {scid}: {e}");
+                return;
+            }
+        }
+        for record in state.keys.values() {
+            if record.added > trusted {
+                continue;
+            }
+            for (_, scope) in &record.scopes {
+                if let Err(e) = meta.execute(
+                    "INSERT OR IGNORE INTO identity_key_marks (multikey, scid, expires) VALUES (?1, ?2, ?3)",
+                    params![record.sign, scid, scope.expires as i64],
+                ) {
+                    log::warn!(
+                        "identity: could not journal a scope expiry of {} in {scid}: {e}",
+                        record.sign
+                    );
+                    return;
+                }
+            }
+        }
+    }
+
+    /// The `(key, scid)` journaled past mark `id` ([`KelCache::journal_marks`]): every
+    /// verdict change the re-check's receiver may have missed, with the log that can be
+    /// read back for it even after the key map dropped it.
+    pub(crate) fn marked_since(&self, id: u64) -> Result<Vec<(String, String)>, CacheError> {
+        let meta = self.meta.lock().map_err(storage)?;
+        let mut statement = meta
+            .prepare("SELECT DISTINCT multikey, scid FROM identity_key_marks WHERE id > ?1")
+            .map_err(storage)?;
+        let rows = statement
+            .query_map(params![id as i64], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(storage)?;
+        rows.collect::<Result<_, _>>().map_err(storage)
+    }
+
+    /// The id of the last journaled mark (0 for none): the recovery's next `since`.
+    pub(crate) fn last_mark(&self) -> Result<u64, CacheError> {
+        let meta = self.meta.lock().map_err(storage)?;
+        meta.query_row(
+            "SELECT COALESCE(MAX(id), 0) FROM identity_key_marks",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|id| id as u64)
+        .map_err(storage)
+    }
+
+    /// The `(key, scid)` of bot scopes whose `expires` falls in `(after, upto]` journaled
+    /// under [`KelCache::journal_marks`] — including of logs the key map has since dropped,
+    /// which [`KeyMap::expiring`] can no longer see; the `scid` reads such a log back.
+    pub(crate) fn marked_expiring(
+        &self,
+        after: u64,
+        upto: u64,
+    ) -> Result<Vec<(String, String)>, CacheError> {
+        let meta = self.meta.lock().map_err(storage)?;
+        let mut statement = meta
+            .prepare(
+                "SELECT DISTINCT multikey, scid FROM identity_key_marks
+                 WHERE expires IS NOT NULL AND expires > ?1 AND expires <= ?2",
+            )
+            .map_err(storage)?;
+        let rows = statement
+            .query_map(params![after as i64, upto as i64], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .map_err(storage)?;
+        rows.collect::<Result<_, _>>().map_err(storage)
     }
 
     /// Pins the local identity `scid` in the key map ([`KeyMap::pin`]) and loads its trusted
@@ -1118,7 +1218,11 @@ impl KelCache {
                 )
                 .map_err(storage)?;
             }
-            for table in ["identity_heads", "identity_fork_signers"] {
+            for table in [
+                "identity_heads",
+                "identity_fork_signers",
+                "identity_key_marks",
+            ] {
                 tx.execute(
                     &format!("DELETE FROM {table} WHERE scid = ?1"),
                     params![scid],

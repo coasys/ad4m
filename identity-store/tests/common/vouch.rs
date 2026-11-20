@@ -51,6 +51,8 @@ struct Ledger {
     spent: Vec<String>,
     failing: bool,
     redeems: u32,
+    /// While set, a redeem waits (after it counts) until [`VouchServer::release`].
+    gate: Option<Arc<tokio::sync::Semaphore>>,
 }
 
 struct Shared {
@@ -110,6 +112,18 @@ impl VouchServer {
         self.shared.ledger.lock().unwrap().failing = failing;
     }
 
+    /// Makes every later redeem wait, once it reached the service, until [`Self::release`].
+    pub fn hold(&self) {
+        self.shared.ledger.lock().unwrap().gate = Some(Arc::new(tokio::sync::Semaphore::new(0)));
+    }
+
+    /// Lets the redeems waiting at [`Self::hold`] go, and every later one.
+    pub fn release(&self) {
+        if let Some(gate) = self.shared.ledger.lock().unwrap().gate.take() {
+            gate.add_permits(1 << 20);
+        }
+    }
+
     /// How many redeems reached the service.
     pub fn redeems(&self) -> u32 {
         self.shared.ledger.lock().unwrap().redeems
@@ -131,8 +145,15 @@ async fn redeem(
     if headers.get("authorization").and_then(|v| v.to_str().ok()) != Some(bearer.as_str()) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
+    let gate = {
+        let mut ledger = shared.ledger.lock().unwrap();
+        ledger.redeems += 1;
+        ledger.gate.clone()
+    };
+    if let Some(gate) = gate {
+        gate.acquire().await.unwrap().forget();
+    }
     let mut ledger = shared.ledger.lock().unwrap();
-    ledger.redeems += 1;
     if ledger.failing {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }

@@ -49,6 +49,7 @@ pub async fn embeddings(
         check_compute_credits(agent_did)
             .map_err(|_| OpenAIError::insufficient_quota("Insufficient compute credits"))?;
     }
+    crate::hosting::meter::count_ai_run(auth.user_did());
 
     let service = AIService::global_instance()
         .await
