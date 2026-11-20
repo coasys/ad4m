@@ -148,7 +148,12 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   key-bound session made inherits that session's binding, delegated (`KeyBinding::delegated`,
   column `delegated`): `revoke_key` and `revoke_identity` reach it, but it is no key session —
   `Session::key_binding()`, `user.renewSession`, `end_all_sessions` and the renewal-challenge
-  slot treat it as any other grant.
+  slot treat it as any other grant. An approval still waiting for its code is no grant yet, so
+  it carries the approving session's binding and grant id (`pending::Approval`): `revoke_key`,
+  `revoke_identity` and `revoke_agent_except` first drop the approvals they would end
+  (`PendingRequests::drop_*`, same selection as the grants, `keep`/`before` on the approval's
+  time), under the lock a redemption mints under; `generate_capability_token` also refuses an
+  approval whose session's grant no longer holds. Operator approvals carry no binding and stay.
 - **Managed agents' wallet keys** are named by the DID (`KEY_NAME_MAIN` for the main agent):
   `AgentService::create_managed_agent_key` creates one under its DID,
   `AgentService::wallet_key_for_did` finds it (cached). A shared wallet cannot name keys, so there

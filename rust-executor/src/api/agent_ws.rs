@@ -723,7 +723,7 @@ async fn permit_capability_handler(
     let random_number_challenge = crate::agent::capabilities::permit_capability_within(
         auth,
         &held,
-        ctx.session.grant().and_then(|g| g.key.as_ref()),
+        ctx.session.grant().map(|g| &**g),
     )
     .map_err(|_| missing())?;
     Ok(Value::String(random_number_challenge))
