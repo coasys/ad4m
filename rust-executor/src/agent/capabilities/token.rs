@@ -49,6 +49,22 @@ pub(crate) fn sign_token(
     Ok((token, claims))
 }
 
+/// HS256 validation with jsonwebtoken 8's audience rule on every target: a token's `aud` is
+/// checked only against an expected audience, and none is set. jsonwebtoken 10 (the wasm32
+/// build) instead rejects every token that carries an `aud` when none is expected, and every
+/// token this executor signs carries one.
+#[cfg(not(target_arch = "wasm32"))]
+fn hs256_validation() -> jsonwebtoken::Validation {
+    jsonwebtoken::Validation::new(Algorithm::HS256)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn hs256_validation() -> jsonwebtoken::Validation {
+    let mut validation = jsonwebtoken::Validation::new(Algorithm::HS256);
+    validation.validate_aud = false;
+    validation
+}
+
 pub fn decode_jwt(token: String) -> Result<Claims, AnyError> {
     let backend = wallet_backend();
     let name = signing_key_name();
@@ -71,7 +87,7 @@ pub fn decode_jwt(token: String) -> Result<Claims, AnyError> {
     let result = jsonwebtoken::decode::<Claims>(
         &token,
         &DecodingKey::from_secret(secret_key.as_slice()),
-        &jsonwebtoken::Validation::new(Algorithm::HS256),
+        &hs256_validation(),
     )?;
 
     Ok(result.claims)
@@ -84,7 +100,7 @@ pub fn decode_jwt(token: String) -> Result<Claims, AnyError> {
 /// which only a token this executor issued has.
 /// `None` when the token does not parse.
 pub fn read_stored_claims(token: &str) -> Option<Claims> {
-    let mut validation = jsonwebtoken::Validation::new(Algorithm::HS256);
+    let mut validation = hs256_validation();
     validation.insecure_disable_signature_validation();
     validation.validate_exp = false;
     validation.required_spec_claims.clear();

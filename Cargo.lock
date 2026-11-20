@@ -20971,6 +20971,7 @@ version = "0.0.0"
 dependencies = [
  "ad4m-executor",
  "futures",
+ "jsonwebtoken 10.4.0",
  "wasm-bindgen-test",
 ]
 
