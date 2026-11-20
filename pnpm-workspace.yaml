@@ -4,6 +4,7 @@ packages:
   - 'docs-src'
   - 'ui'
   - 'connect-lib'
+  - 'identity-wasm'
   - 'bootstrap-languages/*'
   - 'ad4m-ldk/js'
   - 'link-server'

@@ -129,7 +129,7 @@ async function pump<T>(promise: Promise<T>): Promise<T> {
 function answerConnect(overrides: Record<string, unknown> = {}) {
   frame.handler = (message) => {
     if (message.type === 'connect') {
-      frame.send({ type: 'connected', state: message.state, executor: EXECUTOR, code: 'code-1', did: 'did:key:a', role: 'user', ...overrides });
+      frame.send({ type: 'connected', state: message.state, executor: EXECUTOR, code: 'code-1', did: 'did:key:a', ...overrides });
     }
   };
 }
@@ -180,7 +180,7 @@ describe('Ad4mConnect.connect', () => {
   it('ignores an answer from another origin, another window or for another state', async () => {
     frame.handler = (message) => {
       if (message.type !== 'connect') return;
-      const good = { type: 'connected', state: message.state, executor: EXECUTOR, code: 'code-1', did: 'd', role: 'user' };
+      const good = { type: 'connected', state: message.state, executor: EXECUTOR, code: 'code-1', did: 'd' };
       frame.send({ ...good, code: 'from-evil-origin' }, 'https://evil.example');
       frame.send({ ...good, code: 'from-other-window' }, AUTH, {});
       frame.send({ ...good, code: 'wrong-state', state: 'other' });

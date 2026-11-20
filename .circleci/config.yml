@@ -616,6 +616,9 @@ jobs:
               cargo test -p ad4m-hash-chain --target wasm32-unknown-unknown --features wasm
             CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=$RUNNER \
               cargo test --release -p ad4m-keyring --target wasm32-unknown-unknown
+            # The identity core's wasm exports and the new device's link steps (the shared vectors).
+            CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=$RUNNER \
+              cargo test -p ad4m-identity-core --target wasm32-unknown-unknown --features wasm,build
           no_output_timeout: 30m
       - run:
           # ad4m-ldk/rust is its own workspace, so the commands above skip it.

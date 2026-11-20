@@ -15,6 +15,7 @@ export type {
   FromFrame,
   ToFrame,
 } from './messages';
+export { originOf } from './messages';
 export { isEmbedded } from './utils';
 /**
  * Opens the Connect frame and returns the core at once and the client as a promise, so listeners

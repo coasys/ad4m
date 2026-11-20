@@ -12279,3 +12279,152 @@ async fn a_locked_custody_enc_key_leaves_the_master_key_in_the_inbox() {
         .expect("the master key still waits");
     assert_eq!(taken.index, 0);
 }
+
+/// A browser links with nothing but `ad4m_identity_core::device` (what the WASM package
+/// exports) and a signing key it only uses to sign bytes: its device string, the pre-join read,
+/// the ticket's checks against the log, the claim, the match code, then, once linked, its key
+/// in the replayed log and the private record, opened with the receipt checked.
+#[tokio::test]
+async fn a_browser_links_through_the_device_module_alone() {
+    use ad4m_identity_core::device::{self, EncKey};
+    use ad4m_identity_core::inbox::Accept;
+
+    let store = TestStore::new();
+    let a = custody(&store, 1);
+    let vault = MemoryVault::new();
+    let did = create(&a, &vault, 14).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+
+    // The browser: a signing key that only signs bytes, and an X25519 key.
+    let browser = SigningKey::from_bytes(&[9; 32]);
+    let sign = Signer::key(&browser);
+    let enc = EncKey::from_secret([5; 32]);
+    let r = device::new_r(&mut rand_core::OsRng);
+    let text = device::device_string(
+        &sign,
+        &enc.multikey(),
+        &r,
+        SystemClock.now() + 300,
+        Some("Chrome on a laptop"),
+        STORE_URL,
+    )
+    .unwrap();
+    let flow = LinkFlow::scan(
+        &a,
+        &vault,
+        &did,
+        OfferKind::Device,
+        &DeviceString::parse(&text).unwrap(),
+        STORE_URL,
+        &SystemClock,
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+
+    // The pre-join read.
+    let address = device::pre_address(&sign, &r).unwrap();
+    let path = format!("/v1/inbox/pre/{address}");
+    let auth = json!({
+        "address": address, "sign": sign, "r": r,
+        "store": StoreKey::from_secret(STORE_SECRET).did(),
+        "method": "GET", "path": path,
+        "nonce": device::new_r(&mut rand_core::OsRng),
+        "expires": SystemClock.now() + 60,
+    });
+    let sig = device::proof_value(&Signer::sign(
+        &browser,
+        &device::pre_auth_bytes(&auth).unwrap(),
+    ))
+    .unwrap();
+    let header = device::pre_auth_header(&auth, &sig).unwrap();
+    let (code, messages) = store
+        .send_with("GET", &path, None, PRE_INBOX_HEADER, header)
+        .await;
+    assert_eq!(code, 200, "{messages}");
+
+    // Open, fetch the log the ticket names, check, claim.
+    let payload =
+        device::open_message(&enc, &address, messages[0]["sealed"].as_str().unwrap()).unwrap();
+    assert_eq!(device::ticket_scid(&payload), Some(scid.as_str()));
+    let page = a.fake().log(&scid).await.unwrap();
+    let chain = fold_page(&page);
+    let Accept::ClaimOffer(ticket) =
+        device::check_message(&payload, &sign, &chain, SystemClock.now()).unwrap()
+    else {
+        panic!("a ticket asks for a claim");
+    };
+    let co_sig = device::proof_value(&Signer::sign(
+        &browser,
+        &device::claim_bytes(&ticket, &sign, &enc.multikey(), false).unwrap(),
+    ))
+    .unwrap();
+    let claim = device::claim(
+        &ticket,
+        &sign,
+        &enc.multikey(),
+        false,
+        Some("Chrome on a laptop"),
+        &co_sig,
+    )
+    .unwrap();
+    let claim_path = format!("/v1/offers/{scid}/{}/claim", ticket.offer_id);
+    let (code, answer) = store
+        .send(
+            "POST",
+            &claim_path,
+            Some(&serde_json::to_value(&claim).unwrap()),
+            None,
+        )
+        .await;
+    assert_eq!(code, 201, "{answer}");
+
+    // Both screens show one code.
+    let claimed = flow.wait_for_claim().await.unwrap();
+    assert_eq!(
+        claimed.match_code,
+        device::match_code(&scid, &ticket.offer_id, &sign)
+    );
+    let linked = flow
+        .confirm(&claimed, entry("Chrome", DeviceKind::Browser), false)
+        .await
+        .unwrap();
+
+    // The replayed log lists the browser's key; the record opens with the receipt checked.
+    let page = a.fake().log(&scid).await.unwrap();
+    let chain = fold_page(&page);
+    let key_id = chain.state().device_key_id_of(&sign).cloned().unwrap();
+    assert_eq!(key_id, linked.key_id);
+    let store_key = page["head"]["store"].as_str().unwrap().to_string();
+    let record_path = format!("/v1/private/{scid}");
+    let req = json!({
+        "did": did, "store": store_key, "keyId": key_id,
+        "kelSeq": chain.head().seq, "kelHash": chain.head().hash,
+        "method": "GET", "path": record_path,
+        "bodyHash": device::body_hash(b""),
+        "nonce": device::new_r(&mut rand_core::OsRng),
+        "expires": SystemClock.now() + 60,
+    });
+    let sig = device::proof_value(&Signer::sign(
+        &browser,
+        &device::request_bytes(&req).unwrap(),
+    ))
+    .unwrap();
+    let header = device::request_header(&req, &sig).unwrap();
+    let (code, stored) = store.send("GET", &record_path, None, Some(header)).await;
+    assert_eq!(code, 200, "{stored}");
+    let opened = device::open_record(
+        &serde_json::from_value(stored["record"].clone()).unwrap(),
+        &serde_json::from_value(stored["receipt"].clone()).unwrap(),
+        &chain,
+        &[store_key],
+        &key_id,
+        &enc,
+    )
+    .unwrap();
+    assert_eq!(opened.devices[&key_id].name, "Chrome");
+    // The browser runs no executor, so the picker leaves it out.
+    assert!(device::picker_devices(&opened)
+        .iter()
+        .all(|d| d.key_id != key_id));
+}

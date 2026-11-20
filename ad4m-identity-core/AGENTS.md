@@ -29,7 +29,8 @@ request box), is informative.
 | `src/link.rs` | device linking: `Offer`, `SignedOffer`, `Claim`, `ClaimBody`, `ClaimView`, `OfferState`, `LinkError`; `offer_commit`, `sign_offer`/`verify_offer`, `make_claim`/`verify_claim`, `verify_claim_view` (the holder's check of the store's claim view before `add_claimed`), `check_secret`, `match_code`, `check_add` (conditions 2–5 of the store's claim check, `identity-store/AGENTS.md`), `may_keep_master` (whether the log lets a device key keep the master key: a standing key of the incept, or an `add` whose co-signature is over a claim that said `canKeepMaster`; never the record's kind), `OfferString` (offer string and link), `DeviceString` |
 | `src/build.rs` | feature `build`: `*_unsigned` builders, `signing_input`, `attach_proof`, `Signer`, `cosign`, `incept_human`, `add_claimed`, `revoke`, `scope`, `rotate`, `sign_domain` |
 | `src/words.rs` | feature `words`: `generate`, `parse`, `seed`, `master_key`, `salt`, `next_commitment`, `recovery_secret`, `derive_ed25519` |
-| `src/wasm.rs` | feature `wasm`: the `KelChain` class (`fold`, `import`), `KelHandle` (`state`, `didDocument(version?, alsoKnownAs?)`) and the `Pow` class (`solve`, `solveRange` in rounds, `check`) for the party that builds event #0 |
+| `src/device.rs` | the new device's side of linking as pure functions on text, JSON and bytes, for a surface that cannot export its signing key (a browser's WebCrypto key): `EncKey` (the X25519 key, zeroed on drop), `device_string`, `pre_address`, `pre_auth_bytes`/`pre_auth_header`, `open_message`, `ticket_scid`, `check_message`, `claim_bytes`/`claim`, `match_code`, `body_hash`, `request_bytes`/`request_header`, `statement_bytes`/`signed_statement` (the executor's `coasys:session` statement), `proof_value`, `open_record`, `picker_devices`. A `*_bytes` function gives the bytes to sign; the function after it takes the signature, checks it and builds the value to send. It calls `inbox`, `link`, `record` and `requests`; it holds no crypto of its own. Needs no feature |
+| `src/wasm.rs` | feature `wasm`: the `KelChain` class (`fold`, `import`), `KelHandle` (`state`, `didDocument(version?, alsoKnownAs?)`, `deviceKeyId(sign)`), the `Pow` class (`solve`, `solveRange` in rounds, `check`) for the party that builds event #0, and one export per `device` function (the `EncKey` class holds the X25519 key in WASM memory; no export takes or holds an Ed25519 key). The npm package `@coasys/identity-wasm` (`identity-wasm/`) is this module built for `web` (its build script passes `--crate-type cdylib` to `cargo rustc`; the manifest stays `rlib` so native consumers link no shared library) |
 | `tests/common/mod.rs` | fixed keys, the `Log` builder, the refusal cases, the vector builders and checkers |
 
 ## Rules
@@ -121,6 +122,11 @@ cargo build -p ad4m-identity-core --target wasm32-unknown-unknown --no-default-f
 CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=$PWD/target/wasm-tools/bin/wasm-bindgen-test-runner \
   cargo test -p ad4m-identity-core --target wasm32-unknown-unknown --features build,words,wasm
 ```
+
+`tests/device.rs` takes every link step of a new device against the fixtures (native and
+wasm32); `tests/wasm_device.rs` checks the exports against `vectors/devices.json` and
+`vectors/link.json` (wasm32, features `wasm,build`). The whole link against a real store is
+`ad4m-identity-client/tests/flows.rs` (`a_browser_links_through_the_device_module_alone`).
 
 The wasm runner must match the locked `wasm-bindgen` (see `ad4m-hash-chain/AGENTS.md` to
 install it). `tests/vectors_fresh.rs` fails when the committed vectors differ from what the

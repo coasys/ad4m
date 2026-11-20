@@ -1,6 +1,7 @@
 name: Publish snapshot packages
 
-# Every push to `dev` and every pull request publishes `@coasys/ad4m` and `@coasys/connect`
+# Every push to `dev` and every pull request publishes `@coasys/ad4m`, `@coasys/connect` and
+# `@coasys/identity-wasm`
 # to pkg.pr.new, as a snapshot installable by URL:
 #
 #   pnpm add https://pkg.pr.new/@coasys/ad4m@<commit>
@@ -61,7 +62,19 @@ jobs:
       - name: Build modules
         run: pnpm run build-npm-packages
 
-      # Both packages in one call, so the PR comment lists them together. Connect's snapshot matches
+      # `@coasys/identity-wasm` is Rust built for wasm32, which `build-npm-packages` (also run by the
+      # release workflows) does not build. The wasm-bindgen CLI must be the version `Cargo.lock`
+      # pins; the build script refuses another.
+      - name: Set up Rust for the identity wasm package
+        run: |
+          rustup target add wasm32-unknown-unknown
+          WASM_BINDGEN=$(grep -A1 '^name = "wasm-bindgen"$' Cargo.lock | sed -n 's/^version = "\(.*\)"$/\1/p')
+          cargo install wasm-bindgen-cli --version "$WASM_BINDGEN" --locked
+
+      - name: Build identity-wasm
+        run: pnpm --filter @coasys/identity-wasm run build
+
+      # All three packages in one call, so the PR comment lists them together. Connect's snapshot matches
       # core's because connect's build bundles core from this checkout; core is only a
       # devDependency of connect, which an app installing connect does not get. An app installs
       # both snapshots from the same commit. `--pnpm` packs with `pnpm pack`, which, unlike
@@ -69,4 +82,4 @@ jobs:
       # `--commentWithSha` makes the PR comment link the commit's snapshot, which never changes,
       # rather than the PR's, which moves with every push.
       - name: Publish to pkg.pr.new
-        run: pnpm dlx pkg-pr-new@0.0.88 publish --pnpm --commentWithSha ./core ./connect-lib
+        run: pnpm dlx pkg-pr-new@0.0.88 publish --pnpm --commentWithSha ./core ./connect-lib ./identity-wasm

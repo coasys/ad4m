@@ -1,0 +1,34 @@
+{
+  "name": "@coasys/identity-wasm",
+  "description": "The new device's side of did:scid:coasys:1 for the browser: key log replay, the device link steps, the private record, signing inputs. WASM; it never holds a signing key",
+  "license": "CAL-1.0",
+  "type": "module",
+  "main": "pkg/identity.js",
+  "module": "pkg/identity.js",
+  "types": "pkg/identity.d.ts",
+  "sideEffects": false,
+  "files": [
+    "pkg/identity.js",
+    "pkg/identity.d.ts",
+    "pkg/identity_bg.wasm",
+    "pkg/identity_bg.wasm.d.ts"
+  ],
+  "exports": {
+    ".": {
+      "types": "./pkg/identity.d.ts",
+      "import": "./pkg/identity.js",
+      "default": "./pkg/identity.js"
+    },
+    "./identity_bg.wasm": "./pkg/identity_bg.wasm"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node scripts/smoke.mjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/coasys/ad4m.git",
+    "directory": "identity-wasm"
+  },
+  "version": "0.13.1-staging.15"
+}

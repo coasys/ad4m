@@ -32,7 +32,12 @@ Options:
 multi-user node as a guest, with no frame.
 
 Message types for the frame (`ConnectRequest`, `ConnectAnswer`, `ConnectRenew`, `ConnectRenewed`,
-`ConnectDenied`, `ConnectReady`, `ConnectSignOut`) are exported from the package.
+`ConnectDenied`, `ConnectReady`, `ConnectSignOut`) are exported from the package, with
+`originOf(url)`, the origin the frame and the app compare with `event.origin`. `ConnectAnswer`
+carries the executor, the one-time code and the person's DID; the session's role comes from the
+executor's `user.redeemCode` answer, not from the frame.
+
+The frame itself uses [`@coasys/identity-wasm`](../identity-wasm) for the identity formats.
 
 This package replaces `@coasys/ad4m-connect`. When it starts it removes the `ad4m-token` keys that
 package left in `localStorage`.

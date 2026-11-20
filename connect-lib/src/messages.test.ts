@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { originOf as exportedOriginOf } from './index';
 import { isFrameMessage, originOf } from './messages';
 
 const frame = {} as Window;
@@ -17,5 +18,9 @@ describe('messages', () => {
   it('reduces a URL to its origin', () => {
     expect(originOf('https://staging.coasys.id/connect?x=1')).toBe('https://staging.coasys.id');
     expect(originOf('http://localhost:5173')).toBe('http://localhost:5173');
+  });
+
+  it('is exported from the package for the frame to compare origins with', () => {
+    expect(exportedOriginOf).toBe(originOf);
   });
 });

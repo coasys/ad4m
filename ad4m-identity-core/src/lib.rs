@@ -19,6 +19,7 @@ mod policy;
 mod seal;
 mod state;
 
+pub mod device;
 pub mod document;
 pub mod domain;
 pub mod inbox;

@@ -5,6 +5,7 @@
     "docs-src",
     "ui",
     "connect-lib",
+    "identity-wasm",
     "test-runner",
     "bootstrap-languages/*",
     "tests/js",

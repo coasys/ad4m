@@ -39,7 +39,6 @@ export type ConnectAnswer = {
   code: string;
   /** The person's `did:scid` identity. */
   did: string;
-  role: string;
 };
 
 /** App to frame: sign a renewal of grant `grantId`, for the challenge the executor gave the app. */
