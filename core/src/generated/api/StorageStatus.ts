@@ -23,6 +23,11 @@ stores: StoreStates | null,
  */
 keyringId: string, 
 /**
+ * The data folder has a keyring file. `false` only on a first start, which `keyringId`
+ * cannot show: a sealed keyring with no file still has a (random) id.
+ */
+keyringExists: boolean, 
+/**
  * Operator only: where this start's secret came from; `null` while sealed.
  */
 secretSource: SecretSourceKind | null, 

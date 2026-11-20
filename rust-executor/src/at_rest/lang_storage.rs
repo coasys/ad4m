@@ -113,20 +113,29 @@ fn io_error(path: &Path, error: io::Error) -> LangStorageError {
 /// version and has not published yet.
 static FILES: Mutex<()> = Mutex::new(());
 
-/// How many callers are blocked on the files lock now.
-static WAITING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// The threads blocked on the files lock now. A set of thread ids, not a count, so a test
+/// that holds the lock sees whether its own job reached the lock, whatever other tests run
+/// in parallel (a test holding the lock makes any other thread's write wait for it too).
+static WAITING: Mutex<Vec<std::thread::ThreadId>> = Mutex::new(Vec::new());
 
-/// How many callers of [`exclusive`] wait for the files lock at this moment (a diagnostic:
-/// a test holding the lock reads it to know a job reached the lock, instead of sleeping).
-pub fn waiting() -> usize {
-    WAITING.load(std::sync::atomic::Ordering::SeqCst)
+/// Whether the thread `id` waits for the files lock at this moment (a diagnostic: a test
+/// holding the lock reads it to know its job reached the lock, instead of sleeping).
+pub fn is_waiting(id: std::thread::ThreadId) -> bool {
+    WAITING
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .contains(&id)
 }
 
 /// Runs `f` while holding the languages' files lock.
 pub fn exclusive<T>(f: impl FnOnce() -> T) -> T {
-    WAITING.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let me = std::thread::current().id();
+    WAITING.lock().unwrap_or_else(|p| p.into_inner()).push(me);
     let _held = FILES.lock().unwrap_or_else(|p| p.into_inner());
-    WAITING.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    WAITING
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .retain(|t| *t != me);
     f()
 }
 
@@ -903,11 +912,11 @@ pub(crate) mod tests {
         );
     }
 
-    /// Waits until a caller beyond the `before` that were waiting is blocked on the files
-    /// lock: the rendezvous of a test that holds it. Fails after ten seconds.
-    pub(crate) fn wait_for_waiter(before: usize) {
+    /// Waits until the thread `job` is blocked on the files lock: the rendezvous of a test
+    /// that holds it. Fails after ten seconds.
+    pub(crate) fn wait_for_waiter(job: std::thread::ThreadId) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while waiting() <= before {
+        while !is_waiting(job) {
             assert!(
                 std::time::Instant::now() < deadline,
                 "nobody waits for the files lock"
@@ -929,9 +938,8 @@ pub(crate) mod tests {
         std::fs::write(&file, b"data").unwrap();
         std::thread::scope(|scope| {
             let job = exclusive(|| {
-                let before = waiting();
                 let job = scope.spawn(|| delete_storage(&languages, "QmLanguageA"));
-                wait_for_waiter(before);
+                wait_for_waiter(job.thread().id());
                 assert!(file.exists(), "nothing is unlinked while the lock is held");
                 job
             });
@@ -962,9 +970,8 @@ pub(crate) mod tests {
         let new = seal(&keys, &store, "QmLanguageA", "kv.json", b"new").unwrap();
         std::thread::scope(|scope| {
             let job = exclusive(|| {
-                let before = waiting();
                 let job = scope.spawn(|| reseal_store(&keys, &languages, &store));
-                wait_for_waiter(before);
+                wait_for_waiter(job.thread().id());
                 files::write_atomic(&folder.join("kv.json"), &new).unwrap();
                 job
             });

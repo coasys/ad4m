@@ -271,7 +271,17 @@ below are the same for both.
    open the keyring (`journalctl --user -u ad4m-executor | grep -i storage`).
    `locked` means the keyring does not hold the passphrase of an agent made
    before it (see "An agent from before the keyring"); `no-agent` means
-   step 9 of the setup has not run.
+   step 9 of the setup has not run. `runtime.storageStatus` shows
+   `keyringExists: false` on a first start (no `keyring.json` yet; the
+   `keyringId` it shows then is a new one, the id the first unlock writes).
+
+   In shared mode (platform snapshots), a start that could not restore the
+   remote snapshot logs `Perspective restore failed` and refuses every
+   snapshot upload (`Snapshot upload refused`, each time) so the remote
+   snapshot is not replaced by the empty set the executor started with. Fix
+   the cause the error names (the platform's reachability, the keyring that
+   sealed the snapshot) and restart the executor: the next start's restore
+   lifts the block.
 
 4. Nothing listens beyond loopback:
 

@@ -21,11 +21,15 @@
 //! snapshot ([`ReplaceSnapshot`]), which seals the part under the new, current version and
 //! replaces the old upload. When that fails, the versions are not retired and the job
 //! stops with [`ReencryptError::Snapshot`]: running it again resumes and tries again, so the
-//! newest snapshot is never left unreadable by a rotation. A snapshot another task sealed
-//! under the old version in the moment before the new one became current and uploaded after
-//! ours is the one remaining way to a stranded part; a restore then fails naming the
-//! perspective and the version (`DataKeys::subkey`: `VersionRetired`) rather than leaving the
-//! perspective out, and the next periodic snapshot repairs the upload.
+//! newest snapshot is never left unreadable by a rotation. Every snapshot upload
+//! holds one lock (`perspective_snapshot::snapshot_lock`) from sealing to the end of its PUT,
+//! and [`finish`] holds it across the replacement and the retirement, so a snapshot sealed
+//! under the old version cannot land after the replacement: it lands before, and is replaced.
+//! Lock order: the snapshot lock, then the languages' files lock. A restore that still meets a
+//! part under a retired version fails naming the perspective and the version
+//! (`DataKeys::subkey`: `VersionRetired`) rather than leaving the perspective out. A start
+//! whose restore failed uploads no snapshot at all, so the remote one is never replaced by a
+//! partial set (`perspective_snapshot`).
 //!
 //! The executor's own store is not re-encrypted here: its key also keys the SQLCipher
 //! database file, which the executor opens once at start.
@@ -208,7 +212,15 @@ pub fn finish(
             break;
         }
     }
-    if report.left == 0 && matches!(store, StoreId::Perspective(_)) && has_retiring(keys, store)? {
+    // The snapshot lock (`perspective_snapshot::snapshot_lock`), held from here through the
+    // retirement: a snapshot another task sealed under a version about to go finishes its
+    // upload first, and none starts sealing under it after. Taken before the files lock below
+    // (the order the lock documents).
+    let snapshot = (report.left == 0
+        && matches!(store, StoreId::Perspective(_))
+        && has_retiring(keys, store)?)
+    .then(crate::perspective_snapshot::snapshot_lock);
+    if snapshot.is_some() {
         // The snapshot rule (module docs): the part of the newest snapshot is under a version
         // about to go, so a snapshot under the current one replaces it first.
         replace_snapshot().map_err(ReencryptError::Snapshot)?;
@@ -271,7 +283,7 @@ pub fn reencrypt(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::at_rest::data_keys::SubkeyPurpose;
     use crate::at_rest::keyring_file::{path_in, KeyOwner};
@@ -280,6 +292,17 @@ mod tests {
     use crate::types::{PerspectiveHandle, PerspectiveState};
     use std::path::PathBuf;
     use std::sync::Arc;
+
+    /// Every test that runs [`finish`] on a perspective's store holds this for its whole run.
+    /// `finish` takes the process-global snapshot lock and then the files lock, and
+    /// `a_write_holding_the_old_version_...` holds the files lock while it waits for its job:
+    /// a parallel test that holds the snapshot lock and waits for the files lock would wait for
+    /// that writer, while the writer's job waits for the snapshot lock. Run one at a time, the
+    /// order is the production one.
+    pub(crate) fn serial() -> std::sync::MutexGuard<'static, ()> {
+        static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        SERIAL.lock().unwrap_or_else(|p| p.into_inner())
+    }
 
     fn keyring(folder: &Path) -> Arc<DataKeys> {
         let keys = DataKeys::load(path_in(folder)).unwrap();
@@ -340,6 +363,7 @@ mod tests {
     /// version and retires the old one; another perspective's values stay as they are.
     #[test]
     fn a_reencrypted_store_carries_only_the_new_version_and_others_are_untouched() {
+        let _serial = serial();
         let folder = tempfile::tempdir().unwrap();
         let keys = keyring(folder.path());
         let db = database(folder.path(), &keys);
@@ -404,6 +428,7 @@ mod tests {
     /// job waits for it before it retires the old version, counts its file and seals it again.
     #[test]
     fn a_write_holding_the_old_version_is_not_stranded_by_the_retirement() {
+        let _serial = serial();
         let folder = tempfile::tempdir().unwrap();
         let keys = keyring(folder.path());
         let db = database(folder.path(), &keys);
@@ -434,11 +459,11 @@ mod tests {
             lang_storage::seal(&keys, &store, "QmWriter", "kv.json", b"acknowledged").unwrap();
         let (locked_tx, locked_rx) = std::sync::mpsc::channel::<()>();
         let file = language_folder.join("kv.json");
-        let before = lang_storage::waiting();
+        let job = std::thread::current().id();
         let writer = std::thread::spawn(move || {
             lang_storage::exclusive(|| {
                 locked_tx.send(()).unwrap();
-                lang_storage::tests::wait_for_waiter(before);
+                lang_storage::tests::wait_for_waiter(job);
                 crate::at_rest::files::write_atomic(&file, &held).unwrap();
             })
         });
@@ -479,6 +504,7 @@ mod tests {
     /// no further version and finishes the move.
     #[test]
     fn a_stopped_reencryption_resumes_without_a_new_version() {
+        let _serial = serial();
         let folder = tempfile::tempdir().unwrap();
         let keys = keyring(folder.path());
         let db = database(folder.path(), &keys);
@@ -517,6 +543,7 @@ mod tests {
     /// is taken. A store that is not a perspective's takes no snapshot.
     #[test]
     fn the_old_version_stays_until_the_snapshot_is_replaced() {
+        let _serial = serial();
         let tries = std::sync::atomic::AtomicUsize::new(0);
         let down = || {
             tries.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -542,6 +569,7 @@ mod tests {
     /// lost, and the store stays retiring.
     #[test]
     fn a_value_that_does_not_open_keeps_the_old_version() {
+        let _serial = serial();
         let folder = tempfile::tempdir().unwrap();
         let keys = keyring(folder.path());
         let db = database(folder.path(), &keys);
@@ -565,6 +593,7 @@ mod tests {
 
     #[test]
     fn the_executors_store_an_unknown_store_and_a_running_job_are_refused() {
+        let _serial = serial();
         let folder = tempfile::tempdir().unwrap();
         let keys = keyring(folder.path());
         let db = database(folder.path(), &keys);

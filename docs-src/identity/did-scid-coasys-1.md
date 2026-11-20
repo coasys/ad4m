@@ -937,7 +937,11 @@ a new string ends the read of the last one.
   note for the main agent's identity, in a request the device key signs; it answers 409
   `already-vouched` when the store keeps a note, 403 `vouch` when the vouching service
   refuses the token, 503 `vouch-unavailable` when the store has no service, and 409
-  `no-identity` when the main agent speaks for no identity. `identity.status.vouched` is the
+  `no-identity` when the main agent speaks for no identity. A refusal a client acts on carries
+  its kind as the reply's `error.data`, so no client reads the message: 429
+  `{"error":"rate-limited","scope","retryAfter"}`, 403 `{"error":"forbidden","reason"}` (`pow`,
+  `vouch`, ...), 409 `{"error":"already-vouched"}` and `{"error":"no-identity"}`; the message text
+  stays for people. `identity.status.vouched` is the
   store's `vouched` on the page that holds the head.
 - The executor never opens the private record. It passes the record and request-box calls
   with a store request the caller signed with the master key, or signs one with its own key

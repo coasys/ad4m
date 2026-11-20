@@ -12,7 +12,16 @@
 //! restore fails naming the perspective. A store's re-encryption therefore replaces the
 //! snapshot before it retires a version (`at_rest::rotation`).
 //! On startup in shared mode, downloads, opens and extracts the latest
-//! snapshot so OxiGraph opens with the restored data. A snapshot uploaded
+//! snapshot so OxiGraph opens with the restored data. If that restore fails (the platform is
+//! unreachable, the snapshot does not open under this keyring, a part is under a retired key
+//! version), the executor still starts, but with no perspectives it must not upload: the
+//! first snapshot would replace the remote one, the only backup. So every snapshot upload is
+//! refused, with an error logged each time, until the executor restarts and its restore
+//! succeeds (or finds no snapshot). An operator fixes the cause named in the restore error
+//! (restore connectivity, the keyring that sealed the snapshot) and restarts; nothing is
+//! uploaded meanwhile, so the remote snapshot stays as it was. Every upload also holds one
+//! lock ([`snapshot_lock`]) from sealing to the end of the PUT, so no older snapshot lands
+//! after a newer one. A snapshot uploaded
 //! before snapshots were sealed (a plain tar.gz) is restored once and replaced
 //! by a sealed one; after this executor has uploaded a sealed snapshot, a
 //! plain one is refused.
@@ -268,15 +277,47 @@ fn missing_stores(
 /// Uploads a snapshot taken now in place of the last one, where the periodic backup runs
 /// (shared mode); elsewhere there is no snapshot to replace. A perspective's re-encryption
 /// calls it before it retires a key version (`at_rest::rotation`, the snapshot rule).
+///
+/// The caller must hold [`snapshot_lock`]: `rotation::finish` takes it before it calls this and
+/// keeps it until the retirement is done. This function does not take it (the lock is not
+/// re-entrant), unlike [`backup_perspectives`].
 pub fn replace_snapshot() -> Result<(), String> {
     let config = crate::config::get_global_config();
     if config.wallet_backend.as_deref() != Some("shared") {
         return Ok(());
     }
-    backup_perspectives(&config).map_err(|e| e.to_string())
+    backup_locked(&config).map_err(|e| e.to_string())
 }
 
-/// Backup all perspective data to the platform backend.
+/// The one lock of snapshot uploads: whoever seals a snapshot holds it until its upload is
+/// done, so an older snapshot cannot land after a newer one (a snapshot sealed under a key
+/// version that a re-encryption has retired since would replace the one that replaced it).
+/// Producers: [`backup_perspectives`] (periodic and shutdown) and `rotation::finish`, which
+/// holds it across [`replace_snapshot`] and the retirement of the versions.
+///
+/// Lock order: this lock first, then the languages' files lock (`lang_storage::exclusive`),
+/// which `rotation::finish` takes inside it to retire. Nothing that holds the files lock
+/// takes this one, and a snapshot never takes the files lock: no cycle.
+pub fn snapshot_lock() -> std::sync::MutexGuard<'static, ()> {
+    static SNAPSHOT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    SNAPSHOT.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// Set when this start's restore of the remote snapshot failed: the executor does not know
+/// what the remote snapshot holds and has none of it, so any upload would replace the only
+/// backup with a partial or empty set. It stays set until the executor restarts with a restore
+/// that succeeds (or finds no snapshot).
+static RESTORE_FAILED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Notes the outcome of a startup restore for [`backup_perspectives`].
+fn record_restore(result: Result<Restored, AnyError>) -> Result<Restored, AnyError> {
+    RESTORE_FAILED.store(result.is_err(), std::sync::atomic::Ordering::SeqCst);
+    result
+}
+
+/// Backup all perspective data to the platform backend, holding [`snapshot_lock`] from the
+/// checkpoints to the end of the upload. Refuses, with an error logged each time, while this
+/// start's restore has failed.
 ///
 /// 1. Checkpoint every open SPARQL store into a staging directory next to
 ///    `perspectives/` (same filesystem, so the checkpoints hard-link).
@@ -284,6 +325,22 @@ pub fn replace_snapshot() -> Result<(), String> {
 /// 3. Seal the archive under the keyring; refuse while the keyring is sealed.
 /// 4. Presign a PUT URL from the platform backend and upload the sealed archive.
 pub fn backup_perspectives(config: &Ad4mConfig) -> Result<(), AnyError> {
+    let _snapshot = snapshot_lock();
+    backup_locked(config)
+}
+
+/// [`backup_perspectives`] with [`snapshot_lock`] already held by the caller.
+fn backup_locked(config: &Ad4mConfig) -> Result<(), AnyError> {
+    if RESTORE_FAILED.load(std::sync::atomic::Ordering::SeqCst) {
+        log::error!(
+            "Snapshot upload refused: this start could not restore the remote snapshot, so \
+             uploading would replace it. Fix the cause named in the restore error above and \
+             restart the executor; the remote snapshot is untouched"
+        );
+        return Err(anyhow!(
+            "Snapshot upload refused: the restore of the remote snapshot failed at start"
+        ));
+    }
     let did = crate::agent::did();
     let persp_dir = perspectives_dir(config)?;
 
@@ -335,6 +392,10 @@ pub enum Restored {
 /// is open. Downloads the snapshot, opens it under the keyring and extracts it
 /// to the data directory.
 pub fn restore_perspectives(config: &Ad4mConfig) -> Result<Restored, AnyError> {
+    record_restore(try_restore(config))
+}
+
+fn try_restore(config: &Ad4mConfig) -> Result<Restored, AnyError> {
     let did = crate::agent::did();
     let data_path = config
         .app_data_path
@@ -347,7 +408,8 @@ pub fn restore_perspectives(config: &Ad4mConfig) -> Result<Restored, AnyError> {
 
 /// Checkpoints `stores`, archives the checkpoints, seals the archive under `keys` and uploads
 /// it for `did`. The staging directory is made next to `persp_dir` and removed again. After
-/// the upload, a plain snapshot is no longer restored on this executor.
+/// the upload, a plain snapshot is no longer restored on this executor. The caller holds
+/// [`snapshot_lock`].
 fn upload_sealed_snapshot(
     config: &Ad4mConfig,
     did: &str,
@@ -355,6 +417,16 @@ fn upload_sealed_snapshot(
     stores: &[(String, std::sync::Arc<SparqlStore>)],
     persp_dir: &Path,
 ) -> Result<(), AnyError> {
+    let sealed = seal_snapshot(keys, stores, persp_dir)?;
+    put_snapshot(config, did, keys, sealed)
+}
+
+/// The sealed archive of a snapshot of `stores` (the first half of [`upload_sealed_snapshot`]).
+fn seal_snapshot(
+    keys: &DataKeys,
+    stores: &[(String, std::sync::Arc<SparqlStore>)],
+    persp_dir: &Path,
+) -> Result<Vec<u8>, AnyError> {
     // A unique name, so a shutdown backup and a periodic one cannot collide.
     let staging = persp_dir
         .parent()
@@ -367,7 +439,17 @@ fn upload_sealed_snapshot(
     let sealed = archive::seal_archive(keys, &data?)
         .map_err(|e| anyhow!("Failed to seal the snapshot: {}", e))?;
     log::info!("Snapshot sealed: {} bytes", sealed.len());
+    Ok(sealed)
+}
 
+/// Uploads a sealed snapshot in place of the remote one (the second half of
+/// [`upload_sealed_snapshot`]).
+fn put_snapshot(
+    config: &Ad4mConfig,
+    did: &str,
+    keys: &DataKeys,
+    sealed: Vec<u8>,
+) -> Result<(), AnyError> {
     let presign_resp = presign(config, "put", did)?;
     upload(&presign_resp.url, sealed)?;
     if let Err(e) = archive::mark_sealed_only(keys) {
@@ -967,6 +1049,7 @@ mod tests {
     /// rotation replaces the snapshot before it retires, so the restore gives every link.
     #[test]
     fn a_rotation_does_not_drop_a_live_perspective_from_the_snapshot() {
+        let _serial = crate::at_rest::rotation::tests::serial();
         let stub = PresignStub::start();
         let live = TempDir::new().unwrap();
         let keys = open_keys(live.path());
@@ -1007,6 +1090,100 @@ mod tests {
                 "{uuid}"
             );
         }
+    }
+
+    /// A snapshot sealed under version 1 and still uploading while the perspective is
+    /// re-encrypted: the re-encryption waits for the snapshot lock, so the old upload lands
+    /// first, the replacement (under version 2) after it, and the restore finds the
+    /// perspective. Without the lock the old upload lands last and the restore fails.
+    #[test]
+    fn an_old_upload_does_not_land_after_the_rotation_that_retired_its_version() {
+        let _serial = crate::at_rest::rotation::tests::serial();
+        use std::sync::mpsc::{channel, RecvTimeoutError};
+        let stub = PresignStub::start();
+        let live = TempDir::new().unwrap();
+        let keys = open_keys(live.path());
+        let stores = stores_with_markers(live.path());
+        let config = stub.config();
+        let persp_dir = live.path().join("perspectives");
+        let store = perspective_store(UUID_A);
+
+        // The periodic snapshot holds the lock from sealing under version 1 to the end of its
+        // upload, and its upload is slow.
+        let snapshot = snapshot_lock();
+        let old = seal_snapshot(&keys, &stores, &persp_dir).unwrap();
+        // The re-encryption: version 2 becomes current, the replacement is uploaded and
+        // version 1 retires.
+        let (version, resumed) = keys.begin_store_rotation(&store).unwrap();
+        let (done_tx, done_rx) = channel::<()>();
+        std::thread::scope(|scope| {
+            let rotation = scope.spawn(|| {
+                let report = crate::at_rest::rotation::finish(
+                    &keys,
+                    &NoRows,
+                    &|| {
+                        upload_sealed_snapshot(&config, DID, &keys, &stores, &persp_dir)
+                            .map_err(|e| e.to_string())
+                    },
+                    &live.path().join("languages"),
+                    &store,
+                    version,
+                    resumed,
+                )
+                .unwrap();
+                done_tx.send(()).unwrap();
+                report
+            });
+            // With the lock the rotation is still waiting for the old upload when the
+            // timeout ends; without it, it is done long before.
+            match done_rx.recv_timeout(std::time::Duration::from_secs(1)) {
+                Ok(()) | Err(RecvTimeoutError::Timeout) => {}
+                Err(e) => panic!("{e}"),
+            }
+            put_snapshot(&config, DID, &keys, old).unwrap();
+            drop(snapshot);
+            assert_eq!(rotation.join().unwrap().retired.len(), 1);
+        });
+
+        let restored = TempDir::new().unwrap();
+        assert_eq!(
+            download_and_restore(&config, DID, &keys, restored.path()).unwrap(),
+            Restored::Sealed
+        );
+        assert!(restored
+            .path()
+            .join(format!("perspectives/{UUID_A}"))
+            .exists());
+    }
+
+    /// A restore that failed at start blocks every snapshot upload, so the executor never
+    /// replaces the remote snapshot with the empty set it started with; a restore that
+    /// succeeds (the next start) lifts the block.
+    #[test]
+    fn a_failed_restore_blocks_the_next_snapshot_upload() {
+        let stub = PresignStub::start();
+        let data = TempDir::new().unwrap();
+        let keys = open_keys(data.path());
+        let config = stub.config();
+        stub.put(b"the remote backup".to_vec());
+
+        let failed = record_restore(download_and_restore(&config, DID, &keys, data.path()));
+        assert!(failed.is_err());
+        let err = backup_perspectives(&config).unwrap_err().to_string();
+        assert!(err.contains("restore"), "{err}");
+        assert_eq!(
+            stub.uploaded(),
+            b"the remote backup",
+            "the remote snapshot is untouched"
+        );
+
+        // The next start: no snapshot is a restore that succeeded.
+        stub.object.lock().unwrap().take();
+        assert_eq!(
+            record_restore(download_and_restore(&config, DID, &keys, data.path())).unwrap(),
+            Restored::Nothing
+        );
+        assert!(!RESTORE_FAILED.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     /// A snapshot whose part is sealed under a version the keyring retired, of a perspective
