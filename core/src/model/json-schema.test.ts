@@ -100,6 +100,21 @@ describe("fromJSONSchema: enum", () => {
     );
     expect(status.in).toEqual([{ value: "fed://pending", label: "Pending" }]);
   });
+
+  it("leaves an empty enum unconstrained", () => {
+    const Cls: any = Ad4mModel.fromJSONSchema(
+      {
+        title: "Empty",
+        type: "object",
+        properties: { kind: { type: "string", enum: [] } },
+      },
+      { name: "EmptyEnum", namespace: "fed://" },
+    );
+    const kind = Cls.generateSHACL().shape.properties.find(
+      (p: any) => p.name === "kind",
+    );
+    expect(kind.in).toBeUndefined();
+  });
 });
 
 describe("fromJSONSchema: array of objects", () => {
