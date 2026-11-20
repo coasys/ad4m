@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { wsUrlToHttpBase, getInitials, getHue, checkConnection, isEmbedded, setLocal, getLocal, removeLocal, adoptStoredSession, compareVersions } from './utils';
+import { wsUrlToHttpBase, getInitials, getHue, checkConnection, isEmbedded, setLocal, getLocal, removeLocal, adoptStoredSession, compareVersions, formatPrice } from './utils';
 
 // The version every key is stored under, pinned so the tests below can name older and newer ones.
 vi.mock('../../package.json', () => ({ version: '0.10.2-staging.3' }));
@@ -329,5 +329,29 @@ describe('checkConnection', () => {
     }));
 
     await expect(checkConnection('http://localhost:12000', 10)).rejects.toThrow('timed out');
+  });
+});
+
+describe('formatPrice', () => {
+  it('formats zero as "0.00"', () => {
+    expect(formatPrice(0)).toBe('0.00');
+  });
+
+  it('formats prices >= 0.01 to 2 decimal places', () => {
+    expect(formatPrice(0.01)).toBe('0.01');
+    expect(formatPrice(1.5)).toBe('1.50');
+  });
+
+  it('formats prices >= 0.0001 and < 0.01 to 4 decimal places', () => {
+    expect(formatPrice(0.0099)).toBe('0.0099');
+    expect(formatPrice(0.0001)).toBe('0.0001');
+  });
+
+  it('formats prices >= 0.000001 and < 0.0001 to 6 decimal places', () => {
+    expect(formatPrice(0.000001)).toBe('0.000001');
+  });
+
+  it('formats prices below 0.000001 in exponential notation', () => {
+    expect(formatPrice(0.0000009)).toBe('9.00e-7');
   });
 });

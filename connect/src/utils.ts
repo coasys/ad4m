@@ -149,3 +149,12 @@ export function getHue(str: string): number {
   return ((hash % 360) + 360) % 360;
 }
 
+/** Format a HOT price with enough decimal places to be meaningful */
+export function formatPrice(price: number): string {
+  if (price === 0) return "0.00";
+  if (price >= 0.01) return price.toFixed(2);
+  if (price >= 0.0001) return price.toFixed(4);
+  if (price >= 0.000001) return price.toFixed(6);
+  return price.toExponential(2);
+}
+
