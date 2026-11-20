@@ -155,30 +155,38 @@ async fn neighbourhood(language: &StubLanguage, owners: Vec<String>) -> Perspect
 /// `{device, message}` encoding (`MeshManager` writes the message for
 /// `source`, `ad4m://session/rtc` for `predicate`, `*` for `target`).
 fn signal(message: serde_json::Value) -> PerspectiveExpression {
+    signal_from(&crate::agent::did(), &[("desk", message)])
+}
+
+/// A broadcast by `author` with one telepresence link per `(device, message)`.
+fn signal_from(author: &str, links: &[(&str, serde_json::Value)]) -> PerspectiveExpression {
     PerspectiveExpression {
-        author: crate::agent::did(),
+        author: author.to_string(),
         timestamp: "2026-11-19T00:00:00.000Z".to_string(),
         data: crate::types::domain::Perspective {
-            links: vec![DecoratedLinkExpression {
-                author: String::new(),
-                timestamp: String::new(),
-                data: Link {
-                    source: serde_json::to_string(&serde_json::json!({
-                        "device": "desk",
-                        "message": message,
-                    }))
-                    .unwrap(),
-                    predicate: Some("ad4m://session/rtc".to_string()),
-                    target: "*".to_string(),
-                },
-                proof: DecoratedExpressionProof {
-                    key: String::new(),
-                    signature: String::new(),
-                    valid: Some(true),
-                    invalid: Some(false),
-                },
-                status: None,
-            }],
+            links: links
+                .iter()
+                .map(|(device, message)| DecoratedLinkExpression {
+                    author: String::new(),
+                    timestamp: String::new(),
+                    data: Link {
+                        source: serde_json::to_string(&serde_json::json!({
+                            "device": device,
+                            "message": message,
+                        }))
+                        .unwrap(),
+                        predicate: Some("ad4m://session/rtc".to_string()),
+                        target: "*".to_string(),
+                    },
+                    proof: DecoratedExpressionProof {
+                        key: String::new(),
+                        signature: String::new(),
+                        valid: Some(true),
+                        invalid: Some(false),
+                    },
+                    status: None,
+                })
+                .collect(),
         },
         proof: DecoratedExpressionProof {
             key: String::new(),
@@ -191,7 +199,22 @@ fn signal(message: serde_json::Value) -> PerspectiveExpression {
 
 /// A mesh presence beat, as `Session`'s beat timer publishes it.
 fn beat() -> PerspectiveExpression {
-    signal(serde_json::json!({"v": 1, "call": "room:x", "to": "*", "kind": "beat"}))
+    signal(beat_in("room:x"))
+}
+
+/// A beat message in `call`.
+fn beat_in(call: &str) -> serde_json::Value {
+    serde_json::json!({"v": 1, "call": call, "to": "*", "kind": "beat"})
+}
+
+/// How many link-language sends carried `needle` (a call id, a device, an
+/// SDP: the payload arrives JSON-escaped inside the script, which keeps
+/// such plain words intact).
+fn sends_with(stub: &StubLanguage, needle: &str) -> usize {
+    stub.scripts()
+        .iter()
+        .filter(|s| s.contains("telepresenceSendBroadcast") && s.contains(needle))
+        .count()
 }
 
 /// A mesh message that must not be lost: an SDP offer.
@@ -608,5 +631,68 @@ async fn a_policy_read_without_a_link_language_stays_mesh() {
         .expect("a neighbourhood without a link language changed: it must not error");
     assert_eq!(policy.mode, "mesh");
 
+    crate::perspectives::unregister_perspective(&instance.uuid);
+}
+
+/// Coalescing drops only a beat a newer one supersedes: the same sender,
+/// device and call. Beats of other devices or calls are other news, and a
+/// payload with anything besides beats in it is never dropped as one.
+#[tokio::test(start_paused = true)]
+async fn only_a_beat_of_the_same_sender_device_and_call_is_superseded() {
+    test_setup();
+    let stub = stub_language(
+        vec!["did:key:remote".to_string()],
+        &[
+            Capability::PeersRemote,
+            Capability::TelepresenceSendBroadcast,
+        ],
+    )
+    .await;
+    let me = crate::agent::did();
+    let instance = neighbourhood(&stub, vec![me.clone(), "did:key:co-user".to_string()]).await;
+    stub.set(StubMode::Block);
+
+    // Holds the language while the rest queue.
+    instance.send_broadcast(offer(), false).await.unwrap();
+    let mixed = signal_from(
+        &me,
+        &[
+            ("desk", beat_in("room:x")),
+            (
+                "desk",
+                serde_json::json!({"v": 1, "call": "room:x", "to": "*", "kind": "ice",
+                    "candidate": {"candidate": "mixed-candidate"}}),
+            ),
+        ],
+    );
+    for payload in [
+        mixed,
+        signal_from(&me, &[("desk", beat_in("room:x"))]),
+        signal_from(&me, &[("phone", beat_in("room:x"))]),
+        signal_from(&me, &[("desk", beat_in("room:y"))]),
+        signal_from("did:key:co-user", &[("desk", beat_in("room:x"))]),
+    ] {
+        instance.send_broadcast(payload, false).await.unwrap();
+    }
+    // `sleep`, not one `advance`: the paused clock then steps through each
+    // send's delay in turn.
+    sleep(STUB_DELAY * 8).await;
+
+    assert_eq!(
+        sends_with(&stub, "mixed-candidate"),
+        1,
+        "a payload with an ICE candidate beside a beat was dropped as a beat"
+    );
+    assert_eq!(sends_with(&stub, "phone"), 1, "another device's beat was dropped");
+    assert_eq!(sends_with(&stub, "room:y"), 1, "another call's beat was dropped");
+    assert_eq!(
+        sends_with(&stub, "co-user"),
+        1,
+        "another sender's beat was dropped"
+    );
+    // offer + mixed + me/desk/room:x + phone + room:y + co-user.
+    assert_eq!(stub.send_count(), 6, "{:?}", stub.scripts());
+
+    stub.stop().await;
     crate::perspectives::unregister_perspective(&instance.uuid);
 }

@@ -9,7 +9,8 @@
 //! by a background task, one send at a time and at most
 //! `MAX_PENDING_BROADCASTS` deep. Past the bound a send is refused so the
 //! caller learns it did not go out, and a queued presence beat is dropped
-//! the moment a newer one arrives — it is superseded anyway.
+//! the moment a newer one of the same sender, device and call arrives —
+//! it is superseded anyway.
 
 use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
@@ -39,25 +40,34 @@ pub(crate) struct BroadcastQueue {
     draining: bool,
 }
 
-/// `payload` is a presence beat: an `ad4m://session/rtc` link whose
-/// `source` parses to a `{ message: { kind: "beat" } }` — the JSON the
-/// client's telepresence channel writes, `device` beside `message`. A newer
-/// beat supersedes every queued one, so queued beats are dropped.
-fn is_presence_beat(payload: &PerspectiveExpression) -> bool {
-    payload.data.links.iter().any(|link| {
-        link.data.predicate.as_deref() == Some(RTC_PREDICATE)
-            && serde_json::from_str::<serde_json::Value>(&link.data.source)
-                .ok()
-                .and_then(|source| {
-                    source
-                        .get("message")?
-                        .get("kind")?
-                        .as_str()
-                        .map(str::to_owned)
-                })
-                .as_deref()
-                == Some("beat")
-    })
+/// Who a presence beat speaks for: `(sender DID, device, call)`. `Some`
+/// only when every link of `payload` is an `ad4m://session/rtc` link whose
+/// `source` parses to `{ device, message: { kind: "beat", call } }` (the
+/// JSON the client's telepresence channel writes) and they all name the
+/// same device and call. A payload with anything else in it is not a beat:
+/// dropping it would drop that too.
+fn beat_key(payload: &PerspectiveExpression) -> Option<(String, String, String)> {
+    let mut key: Option<(String, String, String)> = None;
+    for link in &payload.data.links {
+        if link.data.predicate.as_deref() != Some(RTC_PREDICATE) {
+            return None;
+        }
+        let source: serde_json::Value = serde_json::from_str(&link.data.source).ok()?;
+        let message = source.get("message")?;
+        if message.get("kind")?.as_str()? != "beat" {
+            return None;
+        }
+        let this = (
+            payload.author.clone(),
+            source.get("device")?.as_str()?.to_string(),
+            message.get("call")?.as_str()?.to_string(),
+        );
+        match &key {
+            Some(key) if *key != this => return None,
+            _ => key = Some(this),
+        }
+    }
+    key
 }
 
 impl PerspectiveInstance {
@@ -89,8 +99,10 @@ impl PerspectiveInstance {
         }
 
         let mut queue = self.language_broadcasts.lock().unwrap();
-        if is_presence_beat(&payload) {
-            queue.pending.retain(|queued| !is_presence_beat(queued));
+        if let Some(key) = beat_key(&payload) {
+            queue
+                .pending
+                .retain(|queued| beat_key(queued).as_ref() != Some(&key));
         }
         if queue.pending.len() >= MAX_PENDING_BROADCASTS {
             return Err(anyhow!(
