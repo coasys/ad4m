@@ -5192,6 +5192,151 @@ mod tests {
         no_operator();
     }
 
+    /// Approves an app's request as `session` and returns what redeems it, without redeeming.
+    async fn approved_pending_by(session: &Session) -> (String, String) {
+        let auth = AuthInfo::try_from(app()).unwrap();
+        let request_id = crate::agent::capabilities::request_capability(
+            auth.clone(),
+            AgentContext::main_agent(),
+        )
+        .await
+        .unwrap();
+        let extended = crate::agent::capabilities::AuthInfoExtended {
+            request_id: request_id.clone(),
+            auth,
+        };
+        let code = crate::api::ws_handler::build_handler_map()
+            .dispatch(
+                "agent.permitCapability",
+                serde_json::json!({
+                    "auth": serde_json::to_string(&extended).unwrap()
+                }),
+                Arc::new(crate::types::RequestContext::for_session(session.clone())),
+            )
+            .await
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .to_string();
+        (request_id, code)
+    }
+
+    async fn redeem(request: &(String, String)) -> Result<String, String> {
+        crate::agent::capabilities::generate_capability_token(request.0.clone(), request.1.clone())
+            .await
+            .map(|t| t.expose().to_string())
+    }
+
+    // An approval that waits for its code is no grant yet, so revocations that walk the grants
+    // missed it: approve, revoke, redeem minted a fresh 180-day app. Each revocation now ends
+    // the approvals of the sessions it ends.
+    #[tokio::test]
+    async fn an_approval_waiting_for_its_code_dies_with_the_key() {
+        let world = world(203).await;
+        world.operate();
+        let login = world.login_as(&world.phone).await.unwrap();
+        let session = open(&login.token).unwrap();
+        let request = approved_pending_by(&session).await;
+        Grants::global()
+            .revoke_key(&world.did, &world.phone.key())
+            .unwrap();
+        assert!(redeem(&request).await.is_err());
+        assert!(
+            !crate::agent::capabilities::pending::PendingRequests::global().contains(&request.0)
+        );
+        no_operator();
+    }
+
+    #[tokio::test]
+    async fn an_approval_waiting_for_its_code_dies_with_the_identity() {
+        let world = world(204).await;
+        world.operate();
+        let login = world.login_as(&world.phone).await.unwrap();
+        let session = open(&login.token).unwrap();
+        let request = approved_pending_by(&session).await;
+        Grants::global()
+            .revoke_identity(&world.did, None, None)
+            .unwrap();
+        assert!(redeem(&request).await.is_err());
+        no_operator();
+    }
+
+    #[tokio::test]
+    async fn an_approval_waiting_for_its_code_dies_with_end_all_sessions() {
+        let world = world(205).await;
+        world.operate();
+        let login = world.login_as(&world.phone).await.unwrap();
+        let session = open(&login.token).unwrap();
+        let request = approved_pending_by(&session).await;
+        end_all_sessions(&session, false, None).unwrap();
+        assert!(redeem(&request).await.is_err());
+        no_operator();
+    }
+
+    // Over-reach guard: `keep_current` keeps the caller's own session, and what it approved.
+    #[tokio::test]
+    async fn an_approval_by_the_kept_session_still_redeems() {
+        let world = world(206).await;
+        world.operate();
+        let login = world.login_as(&world.phone).await.unwrap();
+        let session = open(&login.token).unwrap();
+        let request = approved_pending_by(&session).await;
+        end_all_sessions(&session, true, None).unwrap();
+        let token = redeem(&request).await.unwrap();
+        assert!(open(&token).is_ok());
+        no_operator();
+    }
+
+    // Another identity's revocation does not reach this identity's approval.
+    #[tokio::test]
+    async fn an_approval_of_another_identity_still_redeems() {
+        let world = world(207).await;
+        world.operate();
+        let login = world.login_as(&world.phone).await.unwrap();
+        let session = open(&login.token).unwrap();
+        let request = approved_pending_by(&session).await;
+        Grants::global()
+            .revoke_key("did:scid:coasys:1:QmOther", &world.phone.key())
+            .unwrap();
+        Grants::global()
+            .revoke_identity("did:scid:coasys:1:QmOther", None, None)
+            .unwrap();
+        assert!(open(&redeem(&request).await.unwrap()).is_ok());
+        no_operator();
+    }
+
+    // The operator's approval has no binding: device revocation leaves it redeemable.
+    #[tokio::test]
+    async fn an_operator_approval_waiting_for_its_code_survives_device_revocation() {
+        let world = world(208).await;
+        world.operate();
+        let request = approved_pending_by(&Session::for_test(Principal::Operator)).await;
+        Grants::global()
+            .revoke_key(&world.did, &world.phone.key())
+            .unwrap();
+        Grants::global()
+            .revoke_identity(&world.did, None, None)
+            .unwrap();
+        assert!(open(&redeem(&request).await.unwrap()).is_ok());
+        no_operator();
+    }
+
+    // An approval by a session that ended without the drop (a revocation racing the approval)
+    // is refused at redemption, which checks the approving session still holds.
+    #[tokio::test]
+    async fn an_approval_by_an_ended_session_is_refused_at_redemption() {
+        let world = world(209).await;
+        world.operate();
+        let login = world.login_as(&world.phone).await.unwrap();
+        let session = open(&login.token).unwrap();
+        let request = approved_pending_by(&session).await;
+        Grants::global()
+            .revoke(std::slice::from_ref(session.grant().unwrap()))
+            .unwrap();
+        assert!(redeem(&request).await.is_err());
+        no_operator();
+    }
+
     // An approval by an unbound session mints an unbound grant, as before: the admin
     // credential has no key binding to pass on, and `revoke_key`/`revoke_identity` skip it.
     #[tokio::test]
