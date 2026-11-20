@@ -7,6 +7,7 @@
 //! their apps ask again. Only redemption writes: it mints the grant ([`crate::agent::grants`]).
 
 use super::types::AuthInfo;
+use crate::agent::grants::KeyBinding;
 use crate::agent::AgentContext;
 use crate::secret::Secret;
 use std::collections::HashMap;
@@ -94,6 +95,10 @@ struct PendingRequest {
     target: RequestTarget,
     /// Set by the approval; goes to the approver only. Always six digits ([`is_code`]).
     code: Option<Secret>,
+    /// The binding the minted grant carries: the approving session's key binding,
+    /// delegated — so the device's revocation and the identity's sessions-end reach it.
+    /// `None` when no key-bound session approved.
+    key: Option<KeyBinding>,
     attempts: u8,
     /// Order of arrival: a request with a smaller one is older.
     seq: u64,
@@ -253,6 +258,7 @@ impl PendingRequests {
                 auth,
                 target,
                 code: None,
+                key: None,
                 attempts: 0,
                 seq: NEXT_SEQ.fetch_add(1, Ordering::Relaxed),
                 expires_at,
@@ -270,15 +276,18 @@ impl PendingRequests {
     }
 
     /// Approves the request with `auth`, which may grant less than the app asked for, and
-    /// `code`. A second approval replaces the code and the auth. The app then has the
-    /// request's lifetime again to redeem it. The request's target stays as requested.
-    /// `code` must be six digits ([`is_code`]): the empty code approves nothing.
+    /// `code`. A second approval replaces the code, the auth and the key. The app then has
+    /// the request's lifetime again to redeem it. The request's target stays as requested.
+    /// `code` must be six digits ([`is_code`]): the empty code approves nothing. `key` is
+    /// the approving session's key binding, delegated ([`KeyBinding::delegate`]): the
+    /// minted grant carries it, so it ends with the device key and the identity.
     pub fn approve(
         &self,
         request_id: &str,
         auth: AuthInfo,
         code: Secret,
         now: u64,
+        key: Option<KeyBinding>,
     ) -> Result<(), String> {
         if !is_code(code.expose()) {
             return Err("An approval code has six digits".to_string());
@@ -290,13 +299,15 @@ impl PendingRequests {
         )?;
         request.auth = auth;
         request.code = Some(code);
+        request.key = key;
         request.attempts = 0;
         request.expires_at = now + request_ttl(&request.target);
         Ok(())
     }
 
     /// Redeems the request when `code` is its code, in one step under the lock: `mint` gets
-    /// the request's target and approved auth, and the request goes only when `mint`
+    /// the request's target, its approved auth and the approving session's key binding
+    /// (`None` when no key-bound session approved), and the request goes only when `mint`
     /// succeeds, so a code redeems once and a failed mint leaves it redeemable. A wrong code
     /// counts an attempt, and the [`MAX_CODE_ATTEMPTS`]th deletes the request. A code that is
     /// not six digits ([`is_code`]) is refused before the lookup and counts nothing.
@@ -307,7 +318,7 @@ impl PendingRequests {
         request_id: &str,
         code: &str,
         now: u64,
-        mint: impl FnOnce(&AgentContext, &AuthInfo) -> Result<T, String>,
+        mint: impl FnOnce(&AgentContext, &AuthInfo, Option<&KeyBinding>) -> Result<T, String>,
     ) -> Result<T, RedeemError> {
         // Only a six-digit code can redeem. Checked before any lookup or comparison, so the
         // empty code (or any other malformed one) never matches and touches no request.
@@ -325,13 +336,15 @@ impl PendingRequests {
                 // Before the approval there is no code to guess, so nothing is counted.
                 None => Err(RedeemError::NotPermitted),
                 Some(expected) if expected.expose_for_compare(code) => match &request.target {
-                    RequestTarget::Agent(target) => match mint(target, &request.auth) {
-                        Ok(minted) => {
-                            pending.remove(request_id);
-                            Ok(minted)
+                    RequestTarget::Agent(target) => {
+                        match mint(target, &request.auth, request.key.as_ref()) {
+                            Ok(minted) => {
+                                pending.remove(request_id);
+                                Ok(minted)
+                            }
+                            Err(e) => Err(RedeemError::Mint(e)),
                         }
-                        Err(e) => Err(RedeemError::Mint(e)),
-                    },
+                    }
                     RequestTarget::NoAgent => Err(RedeemError::Mint(
                         "No agent on this executor has the name this request gave".to_string(),
                     )),
@@ -399,6 +412,7 @@ impl PendingRequests {
                     auth: AuthInfo::default(),
                     target: RequestTarget::NoAgent,
                     code: Some(Secret::new("123456")),
+                    key: None,
                     attempts: 0,
                     seq: NEXT_SEQ.fetch_add(1, Ordering::Relaxed),
                     expires_at: u64::MAX,
@@ -440,11 +454,15 @@ mod tests {
             .request(id.to_string(), AuthInfo::default(), main(), now)
             .unwrap();
         pending
-            .approve(id, AuthInfo::default(), "123456".into(), now)
+            .approve(id, AuthInfo::default(), "123456".into(), now, None)
             .unwrap();
     }
 
-    fn minted(_: &AgentContext, auth: &AuthInfo) -> Result<AuthInfo, String> {
+    fn minted(
+        _: &AgentContext,
+        auth: &AuthInfo,
+        _: Option<&KeyBinding>,
+    ) -> Result<AuthInfo, String> {
         Ok(auth.clone())
     }
 
@@ -485,14 +503,53 @@ mod tests {
             user_email: Some("mallory@example.org".into()),
             ..AuthInfo::default()
         };
-        pending.approve("a", granted, "123456".into(), 0).unwrap();
+        pending
+            .approve("a", granted, "123456".into(), 0, None)
+            .unwrap();
         let (target, auth) = pending
-            .redeem("a", "123456", 1, |target, auth| {
+            .redeem("a", "123456", 1, |target, auth, _| {
                 Ok((target.clone(), auth.clone()))
             })
             .unwrap();
         assert_eq!(target, alice);
         assert_eq!(auth.app_name, "granted");
+    }
+
+    // A request a key-bound session approved keeps the binding it was approved with
+    // (the delegated copy `permit_capability_within` stores), and redemption hands it to
+    // the mint.
+    #[test]
+    fn redeeming_passes_the_approvals_key_to_mint() {
+        let pending = PendingRequests::default();
+        pending
+            .request("a".into(), AuthInfo::default(), main(), 0)
+            .unwrap();
+        let session = KeyBinding::new(
+            "did:scid:coasys:1:QmA".into(),
+            "z6MkA".into(),
+            "d2".into(),
+            1,
+            1,
+        );
+        pending
+            .approve(
+                "a",
+                AuthInfo::default(),
+                "123456".into(),
+                0,
+                Some(session.delegate()),
+            )
+            .unwrap();
+        let (key, delegated) = pending
+            .redeem("a", "123456", 1, |_, _, key| {
+                Ok((
+                    key.map(|k| k.key.clone()),
+                    key.is_some_and(|k| k.delegated()),
+                ))
+            })
+            .unwrap();
+        assert_eq!(key.as_deref(), Some("z6MkA"));
+        assert!(delegated, "the mint gets the delegated copy");
     }
 
     // The old flow took the request out, then put it back when the token could not be issued:
@@ -502,7 +559,7 @@ mod tests {
     fn a_failed_mint_keeps_the_request_approved_and_redeemable() {
         let pending = PendingRequests::default();
         approved(&pending, "a", 0);
-        let failed = pending.redeem("a", "123456", 1, |_, _| -> Result<(), String> {
+        let failed = pending.redeem("a", "123456", 1, |_, _, _| -> Result<(), String> {
             Err("Executor is locked".into())
         });
         assert_eq!(failed, Err(RedeemError::Mint("Executor is locked".into())));
@@ -546,6 +603,7 @@ mod tests {
                 AuthInfo::default(),
                 "123456".into(),
                 23 * 60 * 60,
+                None,
             )
             .unwrap();
         assert_eq!(pending.expires_at("managed"), Some(47 * 60 * 60));
@@ -569,10 +627,10 @@ mod tests {
         assert_eq!(pending.target("nobody", 0), Some(RequestTarget::NoAgent));
 
         pending
-            .approve("nobody", AuthInfo::default(), "123456".into(), 0)
+            .approve("nobody", AuthInfo::default(), "123456".into(), 0, None)
             .unwrap();
         let mut minted = false;
-        let result = pending.redeem("nobody", "123456", 1, |_, _| {
+        let result = pending.redeem("nobody", "123456", 1, |_, _, _| {
             minted = true;
             Ok(())
         });
@@ -587,7 +645,7 @@ mod tests {
             .request("a".into(), AuthInfo::default(), main(), 0)
             .unwrap();
         pending
-            .approve("a", AuthInfo::default(), "123456".into(), TTL - 1)
+            .approve("a", AuthInfo::default(), "123456".into(), TTL - 1, None)
             .unwrap();
         assert!(redeem(&pending, "a", "123456", 2 * TTL - 2).is_ok());
     }
@@ -599,10 +657,16 @@ mod tests {
             .request("a".into(), AuthInfo::default(), main(), 0)
             .unwrap();
         assert!(pending
-            .approve("a", AuthInfo::default(), "123456".into(), TTL)
+            .approve("a", AuthInfo::default(), "123456".into(), TTL, None)
             .is_err());
         assert!(pending
-            .approve("never-requested", AuthInfo::default(), "123456".into(), 0)
+            .approve(
+                "never-requested",
+                AuthInfo::default(),
+                "123456".into(),
+                0,
+                None
+            )
             .is_err());
     }
 
@@ -677,7 +741,7 @@ mod tests {
                 .request(id.clone(), AuthInfo::default(), RequestTarget::NoAgent, 0)
                 .unwrap();
             pending
-                .approve(&id, AuthInfo::default(), "123456".into(), 0)
+                .approve(&id, AuthInfo::default(), "123456".into(), 0, None)
                 .unwrap();
         }
         assert!(pending
@@ -703,7 +767,7 @@ mod tests {
                 .request(id.into(), AuthInfo::default(), target, 0)
                 .unwrap();
             pending
-                .approve(id, AuthInfo::default(), "123456".into(), 0)
+                .approve(id, AuthInfo::default(), "123456".into(), 0, None)
                 .unwrap();
         };
         for i in 0..MAX_PENDING_REQUESTS_PER_TARGET {
@@ -865,7 +929,7 @@ mod tests {
                     .request(id.clone(), AuthInfo::default(), agent(a), 1)
                     .unwrap();
                 approved_only
-                    .approve(&id, AuthInfo::default(), "123456".into(), 1)
+                    .approve(&id, AuthInfo::default(), "123456".into(), 1, None)
                     .unwrap();
             }
         }
@@ -927,7 +991,13 @@ mod tests {
         // An approved request is never evicted.
         for i in 1..MAX_PENDING_REQUESTS_PER_TARGET {
             pending
-                .approve(&format!("a1-{i}"), AuthInfo::default(), "123456".into(), 2)
+                .approve(
+                    &format!("a1-{i}"),
+                    AuthInfo::default(),
+                    "123456".into(),
+                    2,
+                    None,
+                )
                 .unwrap();
         }
         pending
@@ -939,7 +1009,7 @@ mod tests {
             .unwrap();
         assert!(!pending.contains("a1-new"));
         pending
-            .approve("a1-newer", AuthInfo::default(), "123456".into(), 3)
+            .approve("a1-newer", AuthInfo::default(), "123456".into(), 3, None)
             .unwrap();
         assert!(pending
             .request("a1-last".into(), AuthInfo::default(), agent(1), 3)
@@ -985,7 +1055,7 @@ mod tests {
             );
         }
         pending
-            .approve("a", AuthInfo::default(), "123456".into(), 0)
+            .approve("a", AuthInfo::default(), "123456".into(), 0, None)
             .unwrap();
         assert!(redeem(&pending, "a", "123456", 0).is_ok());
     }
@@ -1003,7 +1073,7 @@ mod tests {
         for code in ["", "12345", "1234567", "12345a", " 23456", fullwidth] {
             assert!(
                 pending
-                    .approve("a", AuthInfo::default(), Secret::new(code), 0)
+                    .approve("a", AuthInfo::default(), Secret::new(code), 0, None)
                     .is_err(),
                 "{code:?} approves nothing"
             );
@@ -1015,7 +1085,7 @@ mod tests {
         );
 
         pending
-            .approve("a", AuthInfo::default(), "123456".into(), 0)
+            .approve("a", AuthInfo::default(), "123456".into(), 0, None)
             .unwrap();
         for _ in 0..2 * MAX_CODE_ATTEMPTS {
             for code in ["", "12345", "1234567", "12345a"] {

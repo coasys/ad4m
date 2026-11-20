@@ -1379,6 +1379,7 @@ mod tests {
                 key_id: "d2".to_string(),
                 head_seq: 1,
                 checked_at: 10,
+                delegated: false,
             }),
             ..GrantRow::default()
         };

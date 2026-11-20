@@ -11,7 +11,7 @@ pub use token::*;
 #[allow(ambiguous_glob_reexports)]
 pub use types::*;
 
-use crate::agent::grants::now;
+use crate::agent::grants::{now, KeyBinding};
 use crate::agent::AgentContext;
 use crate::events::Event;
 use crate::presence::{last_seen_write_due, LAST_SEEN_CLOCK_SKEW_S};
@@ -492,7 +492,11 @@ pub fn request_target(request_id: &str) -> Option<RequestTarget> {
 /// every capability: [`permit_capability_within`] with no limit beyond the request's agent.
 /// For the operator and dev-mode auto-permit; a session approves with its own capabilities.
 pub fn permit_capability(auth_info_extended: AuthInfoExtended) -> Result<String, String> {
-    permit_capability_within(auth_info_extended, std::slice::from_ref(&*ALL_CAPABILITY))
+    permit_capability_within(
+        auth_info_extended,
+        std::slice::from_ref(&*ALL_CAPABILITY),
+        None,
+    )
 }
 
 /// Approves a pending request with `auth_info_extended.auth`, which may grant less than the
@@ -501,10 +505,13 @@ pub fn permit_capability(auth_info_extended: AuthInfoExtended) -> Result<String,
 /// (`agent.permitCapability`'s guard, `api::guards::Owner::Request`, which MCP's auto-permit
 /// calls through as its caller). An approver grants no more than it holds itself (`approver`, its
 /// session's capabilities): an app with AGENT_PERMIT approves only within its own grant, so
-/// it cannot mint a wider one.
+/// it cannot mint a wider one. `key` is the approving session's key binding: the minted
+/// grant carries it delegated, so the app's token ends with the device and the identity
+/// (`grants::mint`). `None` when no key-bound session approves.
 pub fn permit_capability_within(
     auth_info_extended: AuthInfoExtended,
     approver: &[Capability],
+    key: Option<&KeyBinding>,
 ) -> Result<String, String> {
     let mut auth = auth_info_extended.auth;
     if let Some(approved) = &auth.capabilities {
@@ -522,6 +529,7 @@ pub fn permit_capability_within(
         auth,
         Secret::new(code.clone()),
         now(),
+        key.map(KeyBinding::delegate),
     )?;
     Ok(code)
 }
@@ -594,7 +602,7 @@ fn capability_overlap(a: &Capability, b: &Capability) -> Option<Capability> {
 /// token goes only to the caller; the grant keeps its id.
 pub async fn generate_capability_token(request_id: String, code: String) -> Result<Secret, String> {
     let (token, grant) = PendingRequests::global()
-        .redeem(&request_id, &code, now(), |target, auth| {
+        .redeem(&request_id, &code, now(), |target, auth, key| {
             let capabilities = match &auth.capabilities {
                 Some(approved) => {
                     let caps = grant_caps_for(target, approved);
@@ -617,6 +625,7 @@ pub async fn generate_capability_token(request_id: String, code: String) -> Resu
                 auth,
                 Some(request_id.clone()),
                 DEFAULT_TOKEN_VALID_PERIOD,
+                key.cloned(),
             )
         })
         .map_err(|e| e.to_string())?;
