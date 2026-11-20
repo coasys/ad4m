@@ -9,7 +9,8 @@ members = [
     "cli",
     "rust-client",
     "rust-executor",
-    "ui/src-tauri"
+    "ui/src-tauri",
+    "web-executor-link-test"
 ]
 # scripts/install-hc-toolchain.sh clones coasys/holochain at the rev pinned in
 # our Cargo.lock into .hc-toolchain/src/ and builds `hc` from THERE, but that

@@ -100,8 +100,6 @@ sysinfo = { version = "0.38", default-features = false, features = ["system", "d
 libloading = "0.8"
 
 
-jsonwebtoken = "8.3.0"
-
 webbrowser = "0.8.12"
 web-time = "1.1.0"
 
@@ -156,6 +154,8 @@ tower-service = "0.3"
 # Crates that do not build for wasm32 (the web executor). Versions and features
 # are the native ones; the wasm32 table below has the web executor's choices.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Signs with ring 0.16 (C), which does not link for wasm32; wasm32 has its own line below.
+jsonwebtoken = "8.3.0"
 # coasys/deno v2.9.5-coasys-1 folds deno_core + rusty_v8 into the monorepo
 # (libs/core/, libs/deno_v8/). All deno-family crates now come from a single
 # coasys/deno tag. Underlying v8 pulled from coasys/rusty_v8 v150.4.0-coasys
@@ -280,6 +280,10 @@ chrono = { version = "0.4.6", features = ["serde", "wasmbind"] }
 # u64 values in SQLite rows (db.rs), Zeroizing over a digest (agent/sealed_box.rs).
 rusqlite = { version = "0.40.0", features = ["fallible_uint"] }
 generic-array = { version = "0.14", features = ["zeroize"] }
+# JWTs (HS256, agent/capabilities/token.rs) on RustCrypto: native's jsonwebtoken 8 uses
+# ring 0.16, whose P-256/P-384 C is built only for x86 and ARM, so it does not link for
+# wasm32. Same API for the calls the executor makes.
+jsonwebtoken = { version = "10", default-features = false, features = ["rust_crypto"] }
 
 [target.'cfg(all(not(target_env = "msvc"), not(target_arch = "wasm32")))'.dependencies]
 tikv-jemalloc-ctl = { version = "0.6", features = ["stats"] }

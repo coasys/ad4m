@@ -1,0 +1,23 @@
+# Link test for the web executor (S8): a cdylib that depends on ad4m-executor and reaches
+# ring 2, so a release build for wasm32 proves the crate links. Not published. On native it
+# is an empty lib with no dependencies (the executor dependency is wasm32-only), so the
+# native dependency set and build do not change.
+[package]
+name = "web-executor-link-test"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+ad4m-executor = { path = "../rust-executor" }
+
+# Tests of the web executor as a whole crate, under Node: CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=
+# wasm-bindgen-test-runner cargo test -p web-executor-link-test --target wasm32-unknown-unknown
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"
+jsonwebtoken = { version = "10", default-features = false, features = ["rust_crypto"] }
+serde_json = "1"
