@@ -134,9 +134,30 @@ pub struct FilterStatus {
     pub reverts_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+/// The startup filter: its `RUST_LOG` text, the env_logger filter it builds, and, when it has
+/// a `/regex` part, a filter that applies only that regex (to the records an override lets
+/// through: env_logger applies the regex to every record, in `Filter::matches`).
+struct Startup {
+    spec: String,
+    filter: env_logger::filter::Filter,
+    regex: Option<env_logger::filter::Filter>,
+}
+
+impl Startup {
+    fn new(spec: &str) -> Self {
+        Startup {
+            spec: spec.to_string(),
+            filter: build_filter(spec),
+            regex: spec
+                .split_once('/')
+                .map(|(_, regex)| build_filter(&format!("trace/{regex}"))),
+        }
+    }
+}
+
 /// The filter every log call asks: the startup filter plus an override.
 pub struct FilterState {
-    startup: RwLock<Option<(String, env_logger::filter::Filter)>>,
+    startup: RwLock<Option<Startup>>,
     has_override: AtomicBool,
     over: RwLock<Option<Override>>,
 }
@@ -159,29 +180,30 @@ fn build_filter(spec: &str) -> env_logger::filter::Filter {
 impl FilterState {
     /// Record the startup filter. Called once by [`install`].
     fn set_startup(&self, spec: &str) {
-        *self.startup.write().unwrap() = Some((spec.to_string(), build_filter(spec)));
+        *self.startup.write().unwrap() = Some(Startup::new(spec));
+    }
+
+    /// `f` of the startup filter; before [`install`] (unit tests), the one the environment's
+    /// `RUST_LOG` would give.
+    fn with_startup<T>(&self, f: impl FnOnce(&Startup) -> T) -> T {
+        match &*self.startup.read().unwrap() {
+            Some(startup) => f(startup),
+            None => f(&Startup::new(
+                &std::env::var("RUST_LOG").unwrap_or_default(),
+            )),
+        }
     }
 
     fn startup_spec(&self) -> String {
-        if let Some((spec, _)) = &*self.startup.read().unwrap() {
-            return spec.clone();
-        }
-        std::env::var("RUST_LOG").unwrap_or_default()
+        self.with_startup(|s| s.spec.clone())
     }
 
     fn startup_enabled(&self, metadata: &Metadata) -> bool {
-        if let Some((_, filter)) = &*self.startup.read().unwrap() {
-            return filter.enabled(metadata);
-        }
-        // Not installed (unit tests): the filter the environment would give.
-        build_filter(&self.startup_spec()).enabled(metadata)
+        self.with_startup(|s| s.filter.enabled(metadata))
     }
 
     fn startup_max(&self) -> LevelFilter {
-        match &*self.startup.read().unwrap() {
-            Some((_, filter)) => filter.filter(),
-            None => build_filter(&self.startup_spec()).filter(),
-        }
+        self.with_startup(|s| s.filter.filter())
     }
 
     /// The override in force; one whose time is up is removed here.
@@ -232,6 +254,18 @@ impl FilterState {
             }
         }
         self.startup_enabled(metadata)
+    }
+
+    /// Whether `record` is logged now: [`Self::enabled`] for its target and level, and the
+    /// startup filter's `/regex` (if any) for its message.
+    pub fn record_enabled(&self, record: &Record) -> bool {
+        if let Some(over) = self.current() {
+            if let Some(level) = over.level_for(record.target()) {
+                return record.level() <= level
+                    && self.with_startup(|s| s.regex.as_ref().is_none_or(|r| r.matches(record)));
+            }
+        }
+        self.with_startup(|s| s.filter.matches(record))
     }
 
     /// Set `spec` as the override for `ttl` (at most [`MAX_TTL`]). An empty `spec` reverts to
@@ -303,7 +337,7 @@ impl Log for ReloadableLogger {
     }
 
     fn log(&self, record: &Record) {
-        if state().enabled(record.metadata()) {
+        if state().record_enabled(record) {
             self.inner.log(record);
         }
     }
@@ -514,5 +548,27 @@ mod tests {
             .unwrap();
         assert!(state.enabled(&meta(RMCP_SESSIONS, log::Level::Info)));
         state.set_override("", DEFAULT_TTL).unwrap();
+    }
+
+    /// A startup `RUST_LOG` with a `/regex` keeps only the messages it matches, with or
+    /// without an override (env_logger applies it in `matches`, not in `enabled`).
+    #[test]
+    fn the_startup_regex_still_filters_messages() {
+        let state = state();
+        state.set_startup("info/keep");
+        let sink = Sink::default();
+        let logger = ReloadableLogger::new(Box::new(sink.clone()));
+        log_info(&logger, "rust_executor::db", "keep this");
+        log_info(&logger, "rust_executor::db", "drop this");
+        state
+            .set_override("ws_rpc=debug", Duration::from_secs(60))
+            .unwrap();
+        log_debug(&logger, WS_RPC, "keep debug");
+        log_debug(&logger, WS_RPC, "drop debug");
+        state.set_override("", DEFAULT_TTL).unwrap();
+        assert_eq!(
+            *sink.0.lock().unwrap(),
+            vec!["keep this".to_string(), "keep debug".to_string()]
+        );
     }
 }
