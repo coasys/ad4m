@@ -770,7 +770,7 @@ const SHARED_DB_CACHE_TTL_SECS: u64 = 30;
 /// update until the user reconnects" are the failure mode.
 struct CachedRow {
     data: Value,
-    fetched_at: std::time::Instant,
+    fetched_at: crate::rt::time::Instant,
 }
 
 impl SharedDb {
@@ -877,7 +877,7 @@ impl DbBackend for SharedDb {
                 key,
                 CachedRow {
                     data: data.clone(),
-                    fetched_at: std::time::Instant::now(),
+                    fetched_at: crate::rt::time::Instant::now(),
                 },
             );
         }

@@ -302,7 +302,7 @@ impl PerspectiveInstance {
             if has_did {
                 break;
             }
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            crate::rt::time::sleep(Duration::from_secs(1)).await;
         }
         self.enqueue_flow_pass(FlowTouch {
             every_instance: true,
@@ -326,7 +326,7 @@ impl PerspectiveInstance {
         }
         let mut this = self.clone();
         crate::rt::spawn(async move {
-            tokio::time::sleep(FLOW_PASS_DEBOUNCE).await;
+            crate::rt::time::sleep(FLOW_PASS_DEBOUNCE).await;
             let touch = this
                 .flow_pass_queue
                 .lock()
@@ -348,7 +348,7 @@ impl PerspectiveInstance {
     /// recorded what it expected to record. Panics after ten seconds.
     #[cfg(test)]
     pub(crate) async fn settle_flow_passes(&self) {
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let deadline = crate::rt::time::Instant::now() + Duration::from_secs(10);
         loop {
             if self
                 .flow_pass_queue
@@ -359,10 +359,10 @@ impl PerspectiveInstance {
                 return;
             }
             assert!(
-                std::time::Instant::now() < deadline,
+                crate::rt::time::Instant::now() < deadline,
                 "a flow pass was still queued or running after 10 s"
             );
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            crate::rt::time::sleep(Duration::from_millis(20)).await;
         }
     }
 

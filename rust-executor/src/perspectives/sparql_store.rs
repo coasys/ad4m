@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use web_time::Instant;
+use crate::rt::time::Instant;
 
 /// `StopInfo::kind`: how the evaluation carrying the stop ended, for the error
 /// it reports. `0` while it may still run; written once, first writer wins.

@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::time::{SystemTime, UNIX_EPOCH};
+use crate::rt::time::{SystemTime, UNIX_EPOCH};
 use ts_rs::TS;
 
 #[derive(Debug, Serialize, Deserialize, Clone, TS)]

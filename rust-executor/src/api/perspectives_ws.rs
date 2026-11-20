@@ -1338,7 +1338,7 @@ async fn run_interpretation_handler(
             processor_id: "runInterpretation",
         }
     });
-    let bases = match tokio::time::timeout(
+    let bases = match crate::rt::time::timeout(
         Duration::from_secs(RUN_INTERPRETATION_TIMEOUT_SECS),
         crate::perspectives::interpretation::run_interpretation_observed_linked(
             &mut perspective,
@@ -1568,7 +1568,7 @@ async fn run_interpretation_with_harness_handler(
         std::sync::Arc::new(WsHarnessCreditGate::new(ctx.user_did().map(str::to_string))),
     );
 
-    let bases = match tokio::time::timeout(
+    let bases = match crate::rt::time::timeout(
         Duration::from_secs(RUN_INTERPRETATION_HARNESS_TIMEOUT_SECS),
         crate::perspectives::interpretation::run_interpretation_with_harness_and_model(
             &mut perspective,

@@ -263,7 +263,7 @@ impl Session {
             let wait = std::time::Duration::from_secs(expired.saturating_sub(super::grants::now()));
             tokio::select! {
                 _ = grant.ended.cancelled() => {}
-                _ = tokio::time::sleep(wait) => {}
+                _ = crate::rt::time::sleep(wait) => {}
             }
         }
     }

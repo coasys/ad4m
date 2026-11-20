@@ -221,7 +221,7 @@ pub async fn renew_claim(
     ttl_ms: i64,
     context: &AgentContext,
 ) -> anyhow::Result<()> {
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use crate::rt::time::{SystemTime, UNIX_EPOCH};
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -404,19 +404,19 @@ pub async fn settle_claim(
     if settle_ms == 0 {
         return Ok(decide_claim(&me, &read(now()).await?));
     }
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(settle_ms);
+    let deadline = crate::rt::time::Instant::now() + std::time::Duration::from_millis(settle_ms);
     let poll = std::time::Duration::from_millis(poll_ms.max(1));
     loop {
         let outcome = decide_claim(&me, &read(now()).await?);
         // Only a smaller DID ends the wait early. A larger peer is not the
         // winner; the claim that beats us may not have synced yet.
         if matches!(outcome, ClaimOutcome::BackedOff { .. })
-            || std::time::Instant::now() >= deadline
+            || crate::rt::time::Instant::now() >= deadline
         {
             return Ok(outcome);
         }
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        tokio::time::sleep(remaining.min(poll)).await;
+        let remaining = deadline.saturating_duration_since(crate::rt::time::Instant::now());
+        crate::rt::time::sleep(remaining.min(poll)).await;
     }
 }
 

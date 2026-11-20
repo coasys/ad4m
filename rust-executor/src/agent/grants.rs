@@ -380,8 +380,8 @@ fn prune_cutoff(now: u64) -> u64 {
 
 /// Seconds since the Unix epoch.
 pub(crate) fn now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    crate::rt::time::SystemTime::now()
+        .duration_since(crate::rt::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(u64::MAX)
 }
