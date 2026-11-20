@@ -80,6 +80,8 @@ mod expected_links;
 pub use expected_links::{ExpectedLinks, LinksChanged};
 // A batch's effective view of the graph for the validated write core.
 mod batch_view;
+// Remote telepresence broadcasts, off the link-language queue's critical path.
+mod language_broadcasts;
 
 #[cfg(test)]
 #[path = "perspective_instance_subscription_tests.rs"]
@@ -645,6 +647,10 @@ pub struct PerspectiveInstance {
     local_agents_mutex: Arc<Mutex<()>>,
     prolog_update_mutex: Arc<RwLock<()>>,
     link_language: Arc<RwLock<Option<Language>>>,
+    /// Remote telepresence broadcasts waiting on the link language, drained
+    /// one at a time by a background task so `send_broadcast` never waits on
+    /// the language's serial queue (see `language_broadcasts`).
+    language_broadcasts: Arc<std::sync::Mutex<language_broadcasts::BroadcastQueue>>,
     /// Wakes the background loops that wait on state changes instead of a
     /// timer: `ensure_link_language` when the handle's link language changes
     /// (a publish sets `neighbourhood`), `nh_sync_loop` once it attaches,
@@ -799,6 +805,7 @@ impl PerspectiveInstance {
             local_agents_mutex: Arc::new(Mutex::new(())),
             prolog_update_mutex: Arc::new(RwLock::new(())),
             link_language: Arc::new(RwLock::new(None)),
+            language_broadcasts: Arc::new(std::sync::Mutex::new(Default::default())),
             wakes: Arc::new(LoopWakes::default()),
             trigger_notification_check: Arc::new(AtomicBool::new(false)),
             trigger_subscription_check: Arc::new(AtomicBool::new(false)),
@@ -5166,10 +5173,18 @@ impl PerspectiveInstance {
             }
         }
 
-        // Also send through link language for remote users
+        // Remote members get the broadcast through the link language, off
+        // this RPC's critical path: the language runtime serves one call at
+        // a time, and a slow call there must not hold — or fail — a
+        // broadcast. The send is queued and drained in the background, or
+        // skipped when every member is local; only a full queue fails here.
         let link_language_clone = self.link_language.read().await.clone();
-        if let Some(mut link_language) = link_language_clone {
-            link_language.send_broadcast(payload).await
+        if let Some(link_language) = link_language_clone {
+            self.broadcast_remotely(
+                link_language,
+                payload,
+                current_perspective_handle.shared_url.as_deref(),
+            )
         } else {
             Err(self.no_link_language_error().await)
         }
