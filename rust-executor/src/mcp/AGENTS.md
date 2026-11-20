@@ -31,9 +31,10 @@ Model Context Protocol server exposing AD4M to LLM agents (`rmcp`). Transport in
   in-process session (`Session::in_process`, no token, no grant) acting as the
   perspective's owner — the user who owns it, otherwise the main agent — and either way
   limited to querying that perspective. Never the operator
-  (`perspectives::interpretation::run::pass_mcp_context`). The pass is offered the read
-  tools generated for its offered classes only, matched by exact name
-  (`Ad4mMcpHandler::class_tool_names`), never a static tool.
+  (`perspectives::interpretation::run::pass_mcp_context`). The pass is offered three read
+  tools only, the walk tools `instance_query`, `get_children` and `instance_get`, with
+  `class_name` limited to its offered classes (`perspectives::interpretation::walk_tools`).
+  No per-class read tool and no other static tool.
 
 ## Tools that wrap an RPC method dispatch through the handler map
 

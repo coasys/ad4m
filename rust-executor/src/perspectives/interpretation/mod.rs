@@ -55,6 +55,7 @@ mod parse;
 mod prompt;
 mod run;
 mod types;
+pub(crate) mod walk_tools;
 
 pub use dedup::*;
 pub use graph::*;
