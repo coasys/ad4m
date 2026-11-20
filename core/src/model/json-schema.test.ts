@@ -167,4 +167,14 @@ describe("fromJSONSchema: array of objects", () => {
     expect(value).not.toContain("object%20Object");
     expect(Literal.fromUrl(value).get()).toEqual(split);
   });
+
+  it("marks the property dirty when an element changes but keeps its id", () => {
+    const Cls = build("ExpenseD");
+    const e: any = new Cls(undefined, "expense://e2");
+    e.participants = [{ id: "u1", username: "ann" }];
+    e.takeSnapshot();
+    expect(e.changedFields()).not.toContain("participants");
+    e.participants = [{ id: "u1", username: "anna" }];
+    expect(e.changedFields()).toContain("participants");
+  });
 });

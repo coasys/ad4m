@@ -15,7 +15,9 @@ import type { JSONSchemaProperty, JSONSchema, JSONSchemaToModelOptions } from ".
 import { buildSPARQLQuery, valueToLiteralIri, effectiveLiteralStorage } from "./query-sparql";
 import { ModelQueryBuilder } from "./ModelQueryBuilder";
 import {
+  isPropertyOnly,
   normalizeValue,
+  snapshotOf,
 } from "./hydration";
 import type {
   Scope, TraverseScope, IncludeMap, Query,
@@ -903,10 +905,7 @@ export class Ad4mModel {
 
     // Always snapshot properties
     for (const propName of Object.keys(metadata.properties)) {
-      const val = (this as any)[propName];
-      snap[propName] = normalizeValue(
-        Array.isArray(val) ? [...val] : val,
-      );
+      snap[propName] = snapshotOf((this as any)[propName], isPropertyOnly(metadata, propName));
     }
 
     // Snapshot relations only when appropriate:
@@ -995,7 +994,7 @@ export class Ad4mModel {
       // setRelationValues call during innerUpdate.
       if (!(field in this._snapshot)) continue;
 
-      const current = normalizeValue((this as any)[field]);
+      const current = snapshotOf((this as any)[field], isPropertyOnly(metadata, field));
       const original = this._snapshot[field];
 
       if (Array.isArray(current) || Array.isArray(original)) {
@@ -2161,8 +2160,7 @@ export class Ad4mModel {
       const modelInstance = instance as Ad4mModel;
       if (modelInstance._snapshot) {
         for (const propName of evaluatedPropertyNames) {
-          const val = (instance as any)[propName];
-          modelInstance._snapshot[propName] = normalizeValue(Array.isArray(val) ? [...val] : val);
+          modelInstance._snapshot[propName] = snapshotOf((instance as any)[propName], isPropertyOnly(metadata, propName));
         }
       }
     }
