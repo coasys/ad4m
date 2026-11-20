@@ -13,7 +13,7 @@ use crate::agent::AgentContext;
 use crate::ai_service::harness::provider::ToolSchema;
 use crate::ai_service::harness::{CompletionSource, HarnessCompletion, HarnessToolCall};
 use crate::perspectives::interpretation_test_support::{
-    graph_titles_lower, seed_instance, setup_perspective_no_llm,
+    graph_titles_lower, seed_instance, seed_llm_overlay, setup_perspective_no_llm,
 };
 use crate::perspectives::model_query::types::ModelShape;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
@@ -432,6 +432,46 @@ fn an_absent_cap_starts_the_harness_and_zero_starts_single_shot() {
     );
     assert_eq!(interpretation_tool_cap(Some(0)), None);
     assert_eq!(interpretation_tool_cap(Some(7)), Some(7));
+}
+
+// A pass never rewrites a row of another source (#1804): an update of a row
+// outside the pass scope keeps its content. A row in the scope changes.
+// Both rows carry an interpretation overlay, so only the scope rule decides.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_update_never_rewrites_a_row_outside_the_scope() {
+    let (mut p, shapes, ctx) = graph_with_topic().await;
+    seed_llm_overlay(
+        &mut p,
+        &ctx,
+        &shapes[0],
+        "old://topic",
+        json!({"title": "Budget"}),
+    )
+    .await;
+    seed_instance(&mut p, &ctx, &shapes[0], "run://pass/topic/1", "Quotes").await;
+    seed_llm_overlay(
+        &mut p,
+        &ctx,
+        &shapes[0],
+        "run://pass/topic/1",
+        json!({"title": "Quotes"}),
+    )
+    .await;
+    let model = Scripted::new(vec![
+        Step::Say("No tools today."),
+        Step::Say(
+            r#"{"instances":[
+                {"class":"Topic","id":"old://topic","title":"Budget rewritten"},
+                {"class":"Topic","id":"run://pass/topic/1","title":"Quotes rewritten"}
+            ]}"#,
+        ),
+    ]);
+    let outcome = pass(&mut p, &shapes, &ctx, model).await;
+    assert_eq!(outcome.mode, RUN_MODE_FALLBACK);
+    let titles = graph_titles_lower(&p, &shapes).await;
+    assert_eq!(count(&titles, "budget"), 1, "{titles:?}");
+    assert_eq!(count(&titles, "budget rewritten"), 0, "{titles:?}");
+    assert_eq!(count(&titles, "quotes rewritten"), 1, "{titles:?}");
 }
 
 /// A batch whose sources the pass consumes: its run record holds them.
