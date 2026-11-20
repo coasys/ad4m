@@ -1,6 +1,6 @@
 use super::shape::parse_shape_from_json;
 use super::types::{InstanceLinks, ModelShape, ShapeProperty, ShapeResolver};
-use deno_core::anyhow::{anyhow, Error};
+use anyhow::{anyhow, Error};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
