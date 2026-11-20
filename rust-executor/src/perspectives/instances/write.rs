@@ -553,40 +553,38 @@ pub async fn create(
             });
             continue;
         }
-        // A setter-less collection is replaced through its synthesized
-        // `collectionSetter` — the same write `update` makes — so a declared
-        // ordering gets its entries on create too, not just on later saves.
         let (predicate, status) = collection_links[collection].clone();
-        if let Err(e) = perspective
-            .replace_collection_without_setter(
-                &class_name,
-                collection,
-                &predicate,
-                status == LinkStatus::Local,
-                &base_uri,
-                &Value::Array(items.clone()),
-                links_batch.clone(),
-                agent,
-            )
-            .await
-        {
-            abandon_batch(perspective, &batch).await;
-            return Err(failed(
-                &class_name,
-                WriteStep::AddCollectionItem {
-                    collection: collection.clone(),
-                    item: String::new(),
-                },
-                e,
-            ));
-        }
-        let added: Vec<String> = items
-            .iter()
-            .map(|item| match item {
+        let mut added = Vec::with_capacity(items.len());
+        for item in items {
+            let item_str = match item {
                 Value::String(s) => s.clone(),
                 other => other.to_string(),
-            })
-            .collect();
+            };
+            // The validated value, not its text: re-parsing would turn the string "false" of
+            // a string collection into a boolean.
+            let target =
+                property_value_target(perspective, &class_name, collection, item, agent).await;
+            let link = Link {
+                source: base_uri.clone(),
+                predicate: Some(predicate.clone()),
+                target,
+            };
+            if let Err(e) = perspective
+                .add_link(link, status.clone(), links_batch.clone(), agent)
+                .await
+            {
+                abandon_batch(perspective, &batch).await;
+                return Err(failed(
+                    &class_name,
+                    WriteStep::AddCollectionItem {
+                        collection: collection.clone(),
+                        item: item_str,
+                    },
+                    e,
+                ));
+            }
+            added.push(item_str);
+        }
         collections_set.push(super::CollectionItems {
             collection: collection.clone(),
             items: added,
