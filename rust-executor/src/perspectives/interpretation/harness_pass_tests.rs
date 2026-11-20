@@ -1,7 +1,9 @@
 //! A harness pass end to end with a scripted model (#1804): the walk tools,
 //! the seed, and the single-shot fallback. No model server.
 
-use super::run::{run_harness_pass, RUN_MODE_FALLBACK};
+use super::run::{
+    interpretation_tool_cap, run_harness_pass, DEFAULT_INTERPRETATION_TOOL_CALLS, RUN_MODE_FALLBACK,
+};
 use super::InterpretationRunCursor;
 use super::{DedupStrategy, InterpretationOutcome, TranscriptTurn};
 use crate::agent::AgentContext;
@@ -296,6 +298,18 @@ async fn a_harness_error_falls_back_to_single_shot() {
         Step::Say(FALLBACK_ANSWER),
     ])
     .await;
+}
+
+// The harness is the default path (#1804): an absent `maxToolCalls` starts
+// it with the default cap, and 0 starts single-shot.
+#[test]
+fn an_absent_cap_starts_the_harness_and_zero_starts_single_shot() {
+    assert_eq!(
+        interpretation_tool_cap(None),
+        Some(DEFAULT_INTERPRETATION_TOOL_CALLS)
+    );
+    assert_eq!(interpretation_tool_cap(Some(0)), None);
+    assert_eq!(interpretation_tool_cap(Some(7)), Some(7));
 }
 
 /// A batch whose sources the pass consumes: its run record holds them.

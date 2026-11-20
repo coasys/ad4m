@@ -664,6 +664,22 @@ pub struct InterpretationOutcome {
     pub mode: &'static str,
 }
 
+/// The tool-call cap of a harness pass whose config or request leaves
+/// `maxToolCalls` out (#1804). Each proposal counts against the cap, and a
+/// new row with a parent costs two calls, so it is above the harness default.
+pub const DEFAULT_INTERPRETATION_TOOL_CALLS: u32 = 40;
+
+/// The path a pass takes from its `maxToolCalls` (#1804): absent → the
+/// harness with [`DEFAULT_INTERPRETATION_TOOL_CALLS`]; `0` → single-shot
+/// (`None`); `n` → the harness with the cap `n`.
+pub fn interpretation_tool_cap(max_tool_calls: Option<u32>) -> Option<u32> {
+    match max_tool_calls {
+        None => Some(DEFAULT_INTERPRETATION_TOOL_CALLS),
+        Some(0) => None,
+        Some(n) => Some(n),
+    }
+}
+
 /// The run record's `mode` for a single-shot pass.
 pub const RUN_MODE_SINGLE_SHOT: &str = "single-shot";
 /// The run record's `mode` for a harness pass.

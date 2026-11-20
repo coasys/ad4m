@@ -209,9 +209,11 @@ export interface AddAutoProcessorConfig {
   mintScope?: RawScope;
   /**
    * Tool-call budget for the interpretation-pass harness this processor
-   * runs. Omit / `0` → single-shot LLM path. `N > 0` → engage the
-   * tool-calling harness with a cap of N calls per pass. Round-tripped
-   * through the SDNA via `AutoProcessorConfig.maxToolCalls`.
+   * runs. Omit → the tool-calling harness with the executor's default cap
+   * (40). `0` → single-shot LLM path. `N > 0` → the harness with a cap of N
+   * calls per pass. A harness pass that ends without a usable answer falls
+   * back to single-shot. Round-tripped through the SDNA via
+   * `AutoProcessorConfig.maxToolCalls`.
    */
   maxToolCalls?: number;
   /**
