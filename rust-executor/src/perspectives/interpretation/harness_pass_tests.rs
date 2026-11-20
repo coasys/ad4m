@@ -35,6 +35,11 @@ enum Step {
     Say(&'static str),
     /// An HTTP error from the model server.
     Fail(u16),
+    /// The model server refuses the prompt: it does not fit the window.
+    Overflow,
+    /// An HTTP error whose body is the given text (a server that echoes the
+    /// prompt).
+    FailWith(u16, &'static str),
 }
 
 /// A model that answers from a script, and records what it was sent.
@@ -108,6 +113,22 @@ impl CompletionSource for Scripted {
                     url: "http://127.0.0.1:8080/v1/chat/completions".into(),
                     status: reqwest::StatusCode::from_u16(code).unwrap(),
                     body: "scripted failure".into(),
+                    retry_after: None,
+                }
+            )),
+            Some(Step::FailWith(code, body)) => Err(anyhow::anyhow!(
+                crate::ai_service::providers::http::UpstreamStatus {
+                    url: "http://127.0.0.1:8080/v1/chat/completions".into(),
+                    status: reqwest::StatusCode::from_u16(code).unwrap(),
+                    body: body.into(),
+                    retry_after: None,
+                }
+            )),
+            Some(Step::Overflow) => Err(anyhow::anyhow!(
+                crate::ai_service::providers::http::UpstreamStatus {
+                    url: "http://127.0.0.1:8080/v1/chat/completions".into(),
+                    status: reqwest::StatusCode::BAD_REQUEST,
+                    body: "the request exceeds the available context size".into(),
                     retry_after: None,
                 }
             )),
@@ -624,4 +645,119 @@ async fn a_credit_halt_returns_the_credit_error_and_does_not_fall_back() {
     );
     assert_eq!(count(&titles, "from fallback"), 0, "{titles:?}");
     assert_eq!(count(&titles, "from harness"), 0, "{titles:?}");
+}
+
+// X1 / F4 on #1821: the fallback goes through the #1808 split. The harness
+// fails; the fallback's two-source batch does not fit, so it is halved; the
+// first source runs, and the second, which alone does not fit, is recorded
+// so the next tick does not take the batch again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fallback_whose_batch_overflows_is_split_and_the_item_that_does_not_fit_is_recorded() {
+    let (mut p, shapes, ctx) = graph_with_topic().await;
+    let model = Scripted::new(vec![
+        Step::Fail(400),
+        Step::Overflow,
+        Step::Say(FALLBACK_ANSWER),
+        Step::Overflow,
+    ]);
+    let cursor = batch_cursor();
+    let _registered = register(&p).await;
+    let out = run_harness_pass(
+        &mut p,
+        &shapes,
+        &[
+            TranscriptTurn::from_speaker_text("Nico", "We need a second quote."),
+            TranscriptTurn::from_speaker_text("Lal", "A very long turn."),
+        ],
+        "run://pass/",
+        &ctx,
+        None,
+        None,
+        Some(&cursor),
+        10,
+        None,
+        None,
+        true,
+        None,
+        None,
+        &DedupStrategy::default(),
+        false,
+        Some(model.clone()),
+    )
+    .await;
+    let err = out.expect_err("a source that does not fit fails the pass");
+    assert!(
+        format!("{err:#}").contains("does not fit the model window"),
+        "{err:#}"
+    );
+    assert_eq!(model.left(), 0, "the whole script ran");
+    let titles = graph_titles_lower(&p, &shapes).await;
+    assert_eq!(count(&titles, "from fallback"), 1, "{titles:?}");
+    let runs = model_instances(&p, INTERP_RUN_CLASS, &["mode"]).await;
+    assert!(
+        runs.iter().any(|r| r["mode"] == RUN_MODE_FALLBACK),
+        "the half that ran is a fallback run: {runs:?}"
+    );
+    let processed = crate::perspectives::auto_processor::cursor::load_processed_source_ids(
+        &p,
+        "cap-test",
+        chrono::Utc::now().timestamp_millis(),
+        None,
+    )
+    .await
+    .expect("cursor");
+    for source in &cursor.sources {
+        assert!(
+            processed.contains(source),
+            "{source} is recorded (run, or does not fit): {processed:?}"
+        );
+    }
+}
+
+/// A tool surface with one tool that answers nothing.
+struct OneTool;
+
+#[async_trait::async_trait]
+impl crate::ai_service::harness::provider::ToolProvider for OneTool {
+    async fn tools(&self) -> Vec<ToolSchema> {
+        vec![ToolSchema::zero_arg("lookup", "")]
+    }
+    async fn call(&self, _name: &str, _args: Value) -> Result<String> {
+        Ok(String::new())
+    }
+}
+
+// F11 on #1821: after the third upstream failure (a round, its retry, and the
+// final request without tools) the fallback reason names the status and not
+// the response body, which can echo the prompt.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_fallback_reason_of_an_upstream_failure_carries_no_response_body() {
+    const ECHO: &str = "ECHOED-PROMPT-MARKER: Nico said the budget needs a second quote";
+    let model = Scripted::new(vec![
+        Step::FailWith(500, ECHO),
+        Step::FailWith(500, ECHO),
+        Step::FailWith(500, ECHO),
+    ]);
+    let result = crate::ai_service::harness::run_with_tools_outcome(
+        "m",
+        vec![json!({"role": "user", "content": "find it"})],
+        Arc::new(OneTool),
+        model.clone(),
+        crate::ai_service::harness::HarnessConfig::default(),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(
+        model.left(),
+        0,
+        "the round, its retry and the final request ran"
+    );
+    assert!(result.is_err(), "the final request failed too");
+    let reason = super::fallback_reason(&result, 0, 0).expect("an error falls back");
+    assert!(reason.contains("HTTP 500"), "{reason}");
+    assert!(
+        !reason.contains("ECHOED-PROMPT-MARKER"),
+        "the reason carries the upstream body: {reason}"
+    );
 }
