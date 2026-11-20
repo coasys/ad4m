@@ -754,6 +754,12 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
     ),
     ("identity.deleteRequest", || json!({ "id": "r" })),
     ("identity.unwrapRecordKey", || json!({ "wrapped": "w" })),
+    // Hosting index: the sample config keeps the index off, so nothing leaves the process.
+    ("index.configure", || json!({ "url": "", "enabled": false })),
+    (
+        "index.publish",
+        || json!({ "name": "n", "description": "", "location": "l", "url": "https://h.example" }),
+    ),
     // Storage.
     ("storage.unlock", || json!({ "secret": "5a".repeat(32) })),
     (
@@ -1549,6 +1555,10 @@ async fn operator_methods_answer_everyone_else_admin_credential_required() {
             "identity.rekey",
             "identity.resetLog",
             "identity.unwrapRecordKey",
+            "index.configure",
+            "index.publish",
+            "index.status",
+            "index.withdraw",
             "runtime.config",
             "runtime.grantNotification",
             "runtime.importData",
@@ -1912,6 +1922,7 @@ fn only_methods_whose_guard_checks_no_capability_are_open() {
         open,
         vec![
             "agent.isLocked",
+            "host.info",
             "runtime.freeHostingEnabled",
             "runtime.info",
             "runtime.storageStatus",

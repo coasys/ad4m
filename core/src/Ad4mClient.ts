@@ -6,6 +6,7 @@ import { RuntimeClient } from './runtime/RuntimeClient'
 import { ExpressionClient } from './expression/ExpressionClient'
 import { AIClient } from './ai/AIClient'
 import { IdentityClient } from './identity/IdentityClient'
+import { HostingIndexClient } from './hosting/HostingIndexClient'
 import { BotClient } from './bot/BotClient'
 import { ApiClient, EventFilter } from './apiClient'
 import type { EventMap, EventName } from './generated/api/Events'
@@ -34,6 +35,7 @@ export class Ad4mClient {
     #runtimeClient: RuntimeClient
     #aiClient: AIClient
     #identityClient: IdentityClient
+    #hostingIndexClient: HostingIndexClient
     #botClient: BotClient
 
     constructor(
@@ -55,6 +57,7 @@ export class Ad4mClient {
         this.#perspectiveClient.setAIClient(this.#aiClient)
         this.#runtimeClient = new RuntimeClient(baseUrl, token, this.#apiClient)
         this.#identityClient = new IdentityClient(baseUrl, token, this.#apiClient)
+        this.#hostingIndexClient = new HostingIndexClient(baseUrl, token, this.#apiClient)
         this.#botClient = new BotClient(baseUrl, token, this.#apiClient)
 
         // Register with AD4M DevTools if the bridge is installed (e.g. browser extension)
@@ -98,6 +101,11 @@ export class Ad4mClient {
     /** The executor's identity calls (`did:scid:coasys:1`). */
     get identity(): IdentityClient {
         return this.#identityClient
+    }
+
+    /** This executor's listing in the hosting index (operator only). */
+    get hostingIndex(): HostingIndexClient {
+        return this.#hostingIndexClient
     }
 
     /** Bots that act for a person under the person's grant. */

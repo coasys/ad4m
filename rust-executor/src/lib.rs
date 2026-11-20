@@ -16,6 +16,7 @@ mod globals;
 pub mod helpers;
 pub mod holochain_service;
 pub mod identity;
+pub mod index_client;
 pub mod js_core;
 pub mod mcp;
 pub mod perspective_snapshot;

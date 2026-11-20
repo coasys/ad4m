@@ -204,7 +204,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-273 methods: Cap 88, CapAnyPointer 1, Executor 48, Open 10, Operator 42, Owns 79, UserOrOperator 5. Local only (the operator on this machine): 17.
+278 methods: Cap 88, CapAnyPointer 1, Executor 48, Open 11, Operator 46, Owns 79, UserOrOperator 5. Local only (the operator on this machine): 17.
 
 | Method | Guard |
 |---|---|
@@ -282,6 +282,7 @@ the guard checked:
 | `expression.getRaw` | `Cap(expression:READ)` |
 | `expression.interact` | `Cap(expression:UPDATE)` |
 | `expression.interactions` | `Cap(expression:READ)` |
+| `host.info` | `Open` |
 | `hosting.info` | `Cap(runtime.hosting:READ)` |
 | `hosting.requestPayment` | `Cap(agent:UPDATE)` |
 | `hosting.setHotWallet` | `Cap(agent:UPDATE)` |
@@ -317,6 +318,10 @@ the guard checked:
 | `identity.resolve` | `Cap(agent:READ)` |
 | `identity.status` | `Cap(agent:READ)` |
 | `identity.unwrapRecordKey` | `Operator`, local only |
+| `index.configure` | `Operator` |
+| `index.publish` | `Operator` |
+| `index.status` | `Operator` |
+| `index.withdraw` | `Operator` |
 | `language.all` | `Cap(language:READ)` |
 | `language.applyTemplate` | `Cap(language:CREATE)` |
 | `language.get` | `Cap(language:READ)` |

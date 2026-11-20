@@ -45,6 +45,11 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'identity.status': { did: 'did:scid:coasys:1:QmTest', deviceKey: 'z6MkTest', deviceEnc: 'z6LSTest', keyId: 'd1', revoked: null, head: null, fork: null, storeBehind: null, store: { url: 'https://store.ad4m.dev', trusted: true }, vouched: false },
     'identity.publish': { seq: 0, hash: 'QmHead', time: 1, sig: 'z' },
     'identity.powParams': { bits: 22, previousBits: 20, changedAt: 5 },
+    'index.configure': (p: Record<string, unknown>) => p,
+    'index.status': { config: { url: 'https://index.example/v1/index', enabled: true }, scid: 'did:scid:coasys:1:QmTest', executorDid: 'did:key:z6MkTest', allowed: true, listing: null },
+    'index.publish': (p: Record<string, unknown>) => ({ listingId: 'l1', ...p, state: 'listed', reason: null }),
+    'index.withdraw': true,
+    'host.info': { operatorDid: 'did:scid:coasys:1:QmTest', executorDid: 'did:key:z6MkTest', signup: 'anyone', admitsGuests: true, freeAccess: true, full: false, version: '1' },
     'identity.attachNote': (p: Record<string, unknown>) => ({ did: 'did:scid:coasys:1:QmTest', method: 'email', time: 1, voucher: 'did:key:z6MkVoucher', sig: String(p.token) }),
     'identity.claimOffer': (p: Record<string, unknown>) => ({ did: 'did:scid:coasys:1:QmTest', offerId: 'offer', matchCode: 'R7K Q2M', kind: 'node', expires: 1, needsAccept: false, echo: p }),
     'identity.acceptJoin': { accepted: true },
@@ -1535,6 +1540,43 @@ describe('IdentityClient', () => {
 });
 
 // ===================== AI TESTS =====================
+describe('HostingIndexClient', () => {
+    test('configure() sends the url and the switch', async () => {
+        const config = { url: 'https://index.example/v1/index', enabled: true };
+        expect(await ad4m.hostingIndex.configure(config)).toEqual(config);
+        expect(lastRpcCall!.type).toBe('index.configure');
+        expect(lastRpcCall!.params).toEqual(config);
+    });
+
+    test('status() reads the listing through the executor', async () => {
+        const status = await ad4m.hostingIndex.status();
+        expect(lastRpcCall!.type).toBe('index.status');
+        expect(lastRpcCall!.params).toEqual({});
+        expect(status.allowed).toBe(true);
+        expect(status.listing).toBeNull();
+    });
+
+    test('publish() sends only the operator text', async () => {
+        const text = { name: 'Home', description: 'A host', location: 'Berlin', url: 'https://host.example.org' };
+        const listing = await ad4m.hostingIndex.publish(text);
+        expect(lastRpcCall!.type).toBe('index.publish');
+        expect(lastRpcCall!.params).toEqual(text);
+        expect(listing.state).toBe('listed');
+    });
+
+    test('withdraw() calls index.withdraw', async () => {
+        expect(await ad4m.hostingIndex.withdraw()).toBe(true);
+        expect(lastRpcCall!.type).toBe('index.withdraw');
+    });
+
+    test('hostInfo() calls host.info', async () => {
+        const info = await ad4m.hostingIndex.hostInfo();
+        expect(lastRpcCall!.type).toBe('host.info');
+        expect(info.signup).toBe('anyone');
+        expect(info.executorDid).toBe('did:key:z6MkTest');
+    });
+});
+
 describe('AIClient', () => {
     test('getModels() returns models', async () => {
         const models = await ad4m.ai.getModels();
