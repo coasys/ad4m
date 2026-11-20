@@ -335,6 +335,36 @@ impl PerspectiveInstance {
         Ok(false)
     }
 
+    /// Whether a member list for `name` can be set on `base` through the
+    /// abstract `abstract_class`: some class of the record it reaches has a
+    /// way to set it, as `update_through_abstract` picks it — the class's
+    /// setter, or a `collectionSetter` on its link adder's predicate. Read
+    /// from the declared actions only; the abstract shape's own setters do
+    /// not decide it.
+    pub(crate) async fn abstract_collection_settable(
+        &self,
+        abstract_class: &str,
+        base: &str,
+        name: &str,
+    ) -> Result<bool, AnyError> {
+        let (alias_key, _shape) = self.abstract_shape(abstract_class)?;
+        let index = self.abstract_index()?;
+        for class in self.write_targets(abstract_class, base)? {
+            let own_shape = self.get_shape(&class)?;
+            let Some(own) = index.own_name(&class, &own_shape, name, &alias_key) else {
+                continue;
+            };
+            if self
+                .actions_for(&class, own, Op::Set, true)
+                .await?
+                .is_some()
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Whether `remove_subject` through the abstract `abstract_class` on
     /// `base` calls into a language: some destructor of the record's classes
     /// it reaches is a `call`.

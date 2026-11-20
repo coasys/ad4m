@@ -351,6 +351,41 @@ async fn a_collection_setter_through_an_abstract_class_sets_the_members() {
     assert!(targets_on(&p, "ad4m://f1", "ns://children").is_empty());
 }
 
+/// `instanceUpdate` (the validated write behind the RPC and the
+/// MCP tool) through the abstract `Folderish`, whose `children` declares no
+/// setter of its own, still sets the members through the record's own
+/// class: Folder's `collectionSetter`. Whether a collection can be set is
+/// the record's classes' to say, not the abstract shape's.
+#[tokio::test(flavor = "multi_thread")]
+async fn instance_update_through_an_abstract_class_uses_the_concrete_collection_setter() {
+    use crate::perspectives::instances::{update as instance_update, InstanceUpdate};
+    let (mut p, ctx) = relation_setup().await;
+    let old = vec![link("ad4m://f1", "ns://folder_child", "ad4m://c0")];
+    p.add_links(old, LinkStatus::Shared, None, &ctx)
+        .await
+        .unwrap();
+    instance_update(
+        &mut p,
+        &ctx,
+        InstanceUpdate {
+            class_name: "Folderish".into(),
+            base_uri: "ad4m://f1".into(),
+            properties: serde_json::Map::from_iter([(
+                "children".to_string(),
+                json!(["ad4m://c1", "ad4m://c2"]),
+            )]),
+            batch_id: None,
+        },
+    )
+    .await
+    .expect("instanceUpdate through the abstract class");
+    assert_eq!(
+        targets_on(&p, "ad4m://f1", "ns://folder_child"),
+        ["ad4m://c1", "ad4m://c2"]
+    );
+    assert!(targets_on(&p, "ad4m://f1", "ns://children").is_empty());
+}
+
 /// The same on the concrete class, which `perspective.updateSubject`
 /// reaches: an update sets exactly the members given, and so does a create.
 #[tokio::test(flavor = "multi_thread")]
