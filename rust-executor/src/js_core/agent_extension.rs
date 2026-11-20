@@ -27,11 +27,16 @@ use std::collections::HashMap;
 // every continuation the call creates (awaits, promise reactions, timers). The
 // ops below act as the `CallAgent` JS hands them, and as no agent when there is
 // none: they refuse. Authority comes only from a token. The host's own entries
-// into a language (module evaluation, `init`, callback registration, teardown:
-// `LanguageRuntime::execute_as_host`) and the calls it makes as the node (a
-// Holochain signal, a sync) run with a main-agent token like any call, so code
-// that clears its async context, or calls an op with no token, during a call
-// for a managed user cannot sign or open sealed data as the main agent.
+// into a language run with a main-agent token the same way: its script calls
+// (`init`, callback registration, teardown) go through
+// `LanguageRuntime::execute_as_host`, and the bundle's module evaluation
+// (`JsCore::load_module_from_source`) enters the token with `__ad4mEnterCallAgent`
+// around `mod_evaluate` — deno_core carries the ambient async context into the
+// evaluation, so the module's top-level code and the timers it starts act as
+// the main agent. So do the calls the host makes as the node (a Holochain
+// signal, a sync). Code that clears its async context, or calls an op with no
+// token, during a call for a managed user cannot sign or open sealed data as
+// the main agent.
 //
 // Not enforced: a token is a JS value, so language code can keep one. Code that
 // saves the async context (`getAsyncContext`) during Bob's call and restores it

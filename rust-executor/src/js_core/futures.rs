@@ -1,4 +1,4 @@
-use deno_core::error::{CoreError, CoreErrorKind, JsError};
+use deno_core::error::{CoreError, JsError};
 use deno_core::{v8, JsRuntime, PollEventLoopOptions};
 use deno_runtime::worker::MainWorker;
 use futures::Future;
@@ -15,34 +15,7 @@ use tokio::sync::Mutex as TokioMutex;
 /// dynamic import): it belongs to no call, so a call's future hands it to the
 /// loop's owner (the `process_requests` event-loop branch, the only future
 /// that reports them) instead of ending its own call on it.
-#[derive(Default)]
-pub(crate) struct EventLoopSink {
-    errors: VecDeque<CoreError>,
-    /// The loop reported a stalled module evaluation: deno repeats that error
-    /// on every `poll_event_loop` for ever, so `EventLoopFuture` stops polling
-    /// — parked, not spinning. A call's own future still drives the loop while
-    /// it runs.
-    stalled: bool,
-}
-
-pub(crate) type EventLoopErrors = Rc<RefCell<EventLoopSink>>;
-
-/// Whether an event-loop error names a module evaluation that can never
-/// finish. Deno reports a stalled top-level await as a bare V8 message
-/// (`JsError::from_v8_message`, whose `name` is never set — the only error on
-/// the event-loop path with no exception behind it) and an evaluation it
-/// cannot account for as `ModuleEvaluationDeadlock`. Either repeats on every
-/// poll once the loop is otherwise idle, unlike a rejection, which is drained
-/// once — so it is also the signal to stop driving the loop for it.
-fn is_stalled_module_evaluation(err: &CoreError) -> bool {
-    match err.as_kind() {
-        CoreErrorKind::ModuleEvaluationDeadlock => true,
-        CoreErrorKind::Js(js_error) => {
-            js_error.name.is_none() && js_error.exception_message.contains("Top-level await")
-        }
-        _ => false,
-    }
-}
+pub(crate) type EventLoopErrors = Rc<RefCell<VecDeque<CoreError>>>;
 
 pub struct EventLoopFuture {
     worker: Arc<TokioMutex<MainWorker>>,
@@ -63,11 +36,8 @@ impl Future for EventLoopFuture {
         // reported once, here, no matter whose poll surfaced it.
         {
             let mut errors = self.errors.borrow_mut();
-            if let Some(err) = errors.errors.pop_front() {
+            if let Some(err) = errors.pop_front() {
                 return Poll::Ready(Err(err));
-            }
-            if errors.stalled {
-                return Poll::Pending;
             }
         }
         let worker = self.worker.try_lock();
@@ -82,14 +52,7 @@ impl Future for EventLoopFuture {
                     ..Default::default()
                 },
             ) {
-                Poll::Ready(Err(e)) => {
-                    if is_stalled_module_evaluation(&e) {
-                        // The stall is reported on every poll for ever:
-                        // report it once, then park, or the request loop spins.
-                        self.errors.borrow_mut().stalled = true;
-                    }
-                    Poll::Ready(Err(e))
-                }
+                Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
                 // Event loop drained or has pending work with registered
                 // wakers. Return Pending — deno_core's internal wakers
                 // (I/O, timers) or the channel in the surrounding select!
@@ -181,27 +144,13 @@ where
             .poll_event_loop(cx, deno_core::PollEventLoopOptions::default())
         {
             if let Err(err) = event_loop_result {
-                if is_stalled_module_evaluation(&err) {
-                    // A module evaluation that can never finish (a stalled
-                    // top-level await in an `import()`): the loop can no
-                    // longer reach quiescence, so a promise still pending
-                    // waits on work the loop will never do — the call ends
-                    // with the error rather than pending for ever. Re-poll the
-                    // promise first: this very tick may have settled it.
-                    return match value_pin.poll(cx) {
-                        Poll::Ready(result) => {
-                            Poll::Ready(into_result(result, &mut worker.js_runtime))
-                        }
-                        Poll::Pending => Poll::Ready(Err(err)),
-                    };
-                }
                 // An event-loop error is isolate-level, not this call's: an
                 // unhandled rejection in any promise on the isolate lands
                 // here, whichever call drove this poll. Hand it to the
                 // loop's owner and keep polling — this call ends only when
                 // its own promise settles, or it would free its slot (the
                 // ordered one included) while its script still runs.
-                errors.borrow_mut().errors.push_back(err);
+                errors.borrow_mut().push_back(err);
             }
 
             if let Poll::Ready(result) = value_pin.poll(cx) {

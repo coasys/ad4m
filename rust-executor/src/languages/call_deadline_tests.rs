@@ -12,6 +12,7 @@ use super::language_runtime::{CallKind, MAX_CONCURRENT_CALLS};
 use super::language_runtime_handle::LanguageRuntimeHandle;
 use crate::agent::AgentContext;
 use crate::languages::language_context::LanguageContext;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// The process-wide V8 start: a second `Once` here set the flags after another test had
@@ -26,6 +27,19 @@ fn spawn_runtime(name: &str) -> (LanguageRuntimeHandle, tempfile::TempDir) {
     let handle =
         LanguageRuntimeHandle::spawn(name.to_string(), dir.path().to_path_buf(), false).unwrap();
     (handle, dir)
+}
+
+/// Drops the last handle and waits for the runtime to end: the runtime holds
+/// its clone of the running request until `process_requests` returns.
+async fn drop_and_await_end(handle: LanguageRuntimeHandle) {
+    let running = handle.running_request();
+    drop(handle);
+    within(Duration::from_secs(10), "the runtime's end", async {
+        while Arc::strong_count(&running) > 1 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
 }
 
 /// A JS expression that resolves after `ms` without using the CPU: a file-storage upload,
@@ -885,9 +899,13 @@ async fn a_read_whose_caller_left_before_it_started_is_not_run() {
 // ---------------------------------------------------------------------------
 
 /// A bundle whose top-level await can never settle stalls its module
-/// evaluation: deno reports the stall as an event-loop error on every poll once
-/// the loop is otherwise idle. The load ends with that error instead of holding
-/// its slot — and the request loop behind it — for ever.
+/// evaluation: the load drives the evaluation itself (`JsCore::load_module_from_source`),
+/// so the stall the event loop reports ends it instead of pending for ever.
+/// Deno cannot retract the pending evaluation — it keeps reporting the stall on
+/// every poll while the isolate is otherwise idle — so a load that fails this
+/// way ends the language: the caller drops the handle, as
+/// `LanguageController::load_language` does on any load error, the channel
+/// closes and the runtime's thread ends.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_module_stalled_on_top_level_await_fails_its_load() {
     crate::test_utils::setup_wallet();
@@ -914,13 +932,101 @@ async fn a_module_stalled_on_top_level_await_fails_its_load() {
         "unexpected error: {err}"
     );
 
-    // The isolate still answers calls: a failed evaluation poisons only its
-    // quiescence, not the work a call drives in its own polls.
-    let pong = within(Duration::from_secs(10), "a later call", async {
-        handle.execute("1 + 1".into()).await
+    drop_and_await_end(handle).await;
+}
+
+/// A stalled dynamic `import()` is an isolate-level error, not a call's — a
+/// concurrent call that leaves one pending must not end the ordered call
+/// running beside it. The ordered call keeps its slot until its own promise
+/// settles: a call queued behind it does not start, and the call that stalled
+/// stays pending with its own (never-settling) promise.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stalled_import_in_a_concurrent_call_does_not_free_the_ordered_call() {
+    let (handle, dir) = spawn_runtime("QmStalledImport");
+    handle
+        .execute("(globalThis.__log = [], 0)".into())
+        .await
+        .unwrap();
+    // In the storage directory, the one path the sandbox may read.
+    let stalled_module = dir.path().join("stalled.js");
+    std::fs::write(
+        &stalled_module,
+        "await new Promise(() => {});\nexport const x = 1;\n",
+    )
+    .unwrap();
+    let stalled_url = url::Url::from_file_path(&stalled_module).unwrap();
+
+    // Ordered: starts, then awaits a resolver the test holds in a global.
+    let ordered = {
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            handle
+                .execute(
+                    r#"(globalThis.__log.push("ordered"),
+                        await new Promise((resolve) => (globalThis.__resolveOrdered = resolve)),
+                        "ordered")"#
+                        .into(),
+                )
+                .await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Concurrent: its `import()` stalls on the module's top-level await — the
+    // event loop reports the stall as an isolate-level error.
+    let stalled = {
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            concurrent(&handle, format!(r#"await import("{stalled_url}")"#)).await
+        })
+    };
+    // Queued behind the ordered call: starts only when it ends.
+    let behind = {
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            handle
+                .execute(r#"(globalThis.__log.push("behind"), "behind")"#.into())
+                .await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+
+    // The stall ended neither call: the ordered one still holds its slot, so
+    // the queued call has not started, and the stalled call's own promise is
+    // still pending.
+    let log = within(Duration::from_secs(10), "the check", async {
+        concurrent(&handle, "JSON.stringify(globalThis.__log)".into()).await
     })
     .await;
-    assert_eq!(pong.expect("a later call answers").trim(), "2");
+    assert_eq!(
+        log.expect("the check answers").trim(),
+        r#"["ordered"]"#,
+        "a call ran before the ordered call's promise settled"
+    );
+    assert!(
+        !ordered.is_finished(),
+        "the ordered call ended on the stall"
+    );
+    assert!(!stalled.is_finished(), "the call that stalled answered");
+    assert!(!behind.is_finished(), "the queued call answered");
+
+    // A concurrent call resolves the global the ordered call awaits: it ends
+    // with its own result, then the queued call runs.
+    concurrent(&handle, "(globalThis.__resolveOrdered(), 0)".into())
+        .await
+        .unwrap();
+    let ordered = within(Duration::from_secs(10), "the ordered call", ordered)
+        .await
+        .unwrap();
+    assert_eq!(ordered.expect("the ordered call answers").trim(), "ordered");
+    let behind = within(Duration::from_secs(10), "the call behind", behind)
+        .await
+        .unwrap();
+    assert_eq!(behind.expect("the call behind answers").trim(), "behind");
+
+    // The stalled call's promise never settles; the runtime ends with the isolate.
+    stalled.abort();
+    drop_and_await_end(handle).await;
 }
 
 /// An unhandled rejection is an isolate-level error, not a call's. A concurrent call that

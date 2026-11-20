@@ -225,14 +225,7 @@ impl LanguageRuntimeHandle {
 
     /// Send an operation and wait for the result.
     async fn send(&self, mut operation: LanguageOperation) -> Result<String, String> {
-        let op_name = format!("{:?}", operation);
         let (response_tx, response_rx) = oneshot::channel();
-
-        debug!(
-            "[handle:{}] Sending operation: {}",
-            self.language_address,
-            &op_name[..op_name.len().min(100)]
-        );
 
         // Only script calls give up: loading a language and its teardown wait for it.
         // A call sent concurrent runs ordered on a WASM language (`is_wasm_bundle`):
@@ -247,6 +240,14 @@ impl LanguageRuntimeHandle {
             }
             _ => None,
         };
+
+        // Formatted after the WASM rewrite so the log names the kind sent.
+        let op_name = format!("{:?}", operation);
+        debug!(
+            "[handle:{}] Sending operation: {}",
+            self.language_address,
+            &op_name[..op_name.len().min(100)]
+        );
         if kind == Some(CallKind::Ordered) {
             // Not queued behind a call that has run past the deadline: retries during a hang
             // would pile up in the channel. A concurrent call does not wait for that call.

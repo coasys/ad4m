@@ -1,3 +1,4 @@
+use crate::agent::AgentContext;
 use ::futures::Future;
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
@@ -247,48 +248,36 @@ impl JsCore {
         Ok(())
     }
 
-    /// Load an ES module from source code directly (no file I/O).
-    /// The module is registered under a synthetic URL so it can be evaluated.
+    /// Loads an ES module from source code (no file I/O), registered under the
+    /// synthetic URL `specifier`, and evaluates it as `agent`. A module loaded
+    /// before is not evaluated again.
+    ///
+    /// `__ad4mEnterCallAgent` takes the agent's token (`agent_extension`,
+    /// registered under `call_id`) into the isolate's async context the way
+    /// `__ad4mRunCall` does (`agent_extension.js`); `mod_evaluate` runs the
+    /// module's top-level code under it — deno_core carries the ambient
+    /// continuation-preserved embedder data into the evaluation and every
+    /// continuation it creates — and `__ad4mLeaveCallAgent` restores the
+    /// context. The evaluation is driven by `with_event_loop_promise`, so an
+    /// error the loop reports — a top-level throw, or a top-level await that
+    /// can never settle — ends this load, not whatever call happened to be
+    /// driving the loop.
+    ///
+    /// A stalled top-level await leaves the pending evaluation behind: deno
+    /// reports it on every `poll_event_loop` while the loop is otherwise
+    /// idle, and nothing retracts it. The caller is expected to end the
+    /// isolate on this error (a failed load drops the runtime).
     pub async fn load_module_from_source(
         &self,
         specifier: &str,
         source: String,
+        call_id: u64,
+        agent: AgentContext,
     ) -> Result<(), AnyError> {
-        if let Some(module_id) = self.load_module_source(specifier, source).await? {
-            let mut worker = self.worker.lock().await;
-            let evaluate_fut = worker.js_runtime.mod_evaluate(module_id);
-            worker
-                .js_runtime
-                .with_event_loop_future(evaluate_fut, PollEventLoopOptions::default())
-                .await?;
-        }
-        Ok(())
-    }
-
-    /// Load an ES module from source code without evaluating it: the first `import()` of
-    /// `specifier` evaluates it, in the async context of the code that imports it (deno_core
-    /// carries the importer's context into the evaluation), so the module's top-level code
-    /// runs as the agent of the call that imports it.
-    pub async fn load_module_from_source_unevaluated(
-        &self,
-        specifier: &str,
-        source: String,
-    ) -> Result<(), AnyError> {
-        self.load_module_source(specifier, source).await?;
-        Ok(())
-    }
-
-    /// Registers the module under `specifier`. Returns its id, or `None` if it was loaded
-    /// before.
-    async fn load_module_source(
-        &self,
-        specifier: &str,
-        source: String,
-    ) -> Result<Option<deno_core::ModuleId>, AnyError> {
         let mut worker = self.worker.lock().await;
         let mut loaded_modules = self.loaded_modules.lock().await;
         if loaded_modules.contains(specifier) {
-            return Ok(None);
+            return Ok(());
         }
 
         let url = Url::parse(specifier)
@@ -298,7 +287,31 @@ impl JsCore {
             .load_side_es_module_from_code(&url, source)
             .await?;
         loaded_modules.insert(specifier.to_string());
-        Ok(Some(module_id))
+
+        agent_extension::register_call_agent(call_id, agent);
+        let entered = worker.execute_script(
+            "js_core",
+            format!("globalThis.__ad4mEnterCallAgent({call_id})").into(),
+        );
+        // The token is taken out on entry; drop it if entry failed.
+        agent_extension::forget_call_agent(call_id);
+        entered.map_err(|e| anyhow!("Failed to enter the call's agent: {}", e))?;
+        // `mod_evaluate` calls `module.evaluate` synchronously, under the
+        // async context the isolate holds now, before the token is left.
+        let evaluate = worker.js_runtime.mod_evaluate(module_id);
+        let leave = worker.execute_script(
+            "js_core",
+            deno_core::FastString::from_static("globalThis.__ad4mLeaveCallAgent()"),
+        );
+        let evaluated = worker
+            .js_runtime
+            .with_event_loop_promise(evaluate, PollEventLoopOptions::default())
+            .await;
+        match (evaluated, leave) {
+            (Err(e), _) => Err(e.into()),
+            (Ok(_), Err(e)) => Err(anyhow!("Failed to restore the async context: {}", e)),
+            (Ok(_), Ok(_)) => Ok(()),
+        }
     }
 
     /// Initialize a language-specific runtime by executing the minimal bootstrap module.

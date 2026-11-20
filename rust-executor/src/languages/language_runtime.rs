@@ -17,21 +17,10 @@ use tokio::sync::{mpsc::UnboundedReceiver, oneshot};
 // The agent a call acts as
 // ---------------------------------------------------------------------------
 //
-// One language runtime serves every user of the executor. A call names the
-// agent it acts as (`AgentContext`, e.g. a managed user publishing their
-// profile), and reads run beside other calls, so that agent cannot be a
-// runtime-wide setting: a call that resumed after an await would act as
-// whichever call set it last. The runtime registers the call's agent under the
-// call's id (`register_call_agent`) and runs the script inside
-// `__ad4mRunCall(id, ...)`, which takes the agent out once as an unforgeable
-// token and keeps it in a V8 async-context variable. V8 carries that variable
-// with every continuation the call creates (awaits, promise reactions, timers),
-// and the agent ops (`agent_did`, `agent_sign`, ...) sign as the token they are
-// given. With no token they refuse. The host's own entries into the language
-// (module evaluation, init, callback registration, teardown) run the same way
-// with a main-agent token (`execute_as_host`), and so does every timer, socket
-// handler and promise they start; a Holochain signal arrives as a call as the
-// main agent. See `js_core/agent_extension.rs`.
+// One language runtime serves every user of the executor, and calls into one
+// language overlap, so the agent a call acts as travels with the call, not
+// with the thread: see `js_core/agent_extension.rs`, "The agent a call acts
+// as".
 
 /// Request sent to a LanguageRuntime via its channel
 #[derive(Debug)]
@@ -163,8 +152,9 @@ impl LanguageRuntime {
     }
 
     /// Load a language bundle from source code directly (no file I/O in JS).
-    /// The bundle is loaded as an ES module via Deno's runtime API and its
-    /// full module namespace is captured as `globalThis.languageModule`.
+    /// The bundle is registered as an ES module and evaluated under the main
+    /// agent's token (`JsCore::load_module_from_source`), then its full module
+    /// namespace is captured as `globalThis.languageModule`.
     pub async fn load_module(
         &self,
         id: u64,
@@ -190,10 +180,18 @@ impl LanguageRuntime {
                 .unwrap_or_default(),
         );
 
-        // Loaded, not evaluated: the `import()` below evaluates it, under the main agent's
-        // token, so the bundle's top-level code and the timers it starts act as the main agent.
+        // Evaluated as the main agent, so the bundle's top-level code and the
+        // timers it starts act as the main agent. A bundle whose top-level
+        // await never settles fails the load, and the isolate keeps reporting
+        // the stall: `LanguageController` drops the handle on the error, the
+        // channel closes and this runtime's thread ends.
         self.js_core
-            .load_module_from_source_unevaluated(&specifier, source.to_string())
+            .load_module_from_source(
+                &specifier,
+                source.to_string(),
+                id,
+                AgentContext::main_agent(),
+            )
             .await
             .map_err(|e| format!("Failed to load language bundle: {}", e))?;
 
@@ -561,7 +559,9 @@ impl LanguageRuntime {
         done.is_teardown
     }
 
-    /// Main event loop: process requests from the channel until Teardown.
+    /// Main event loop: process requests from the channel until Teardown, or
+    /// until the channel closes (every handle dropped: no caller is left, so
+    /// work still in flight is dropped with the isolate rather than drained).
     ///
     /// Concurrent calls (`CallKind::Concurrent`) start as they arrive and run beside every
     /// other call, up to [`MAX_CONCURRENT_CALLS`] in flight; past the bound the next ones
@@ -635,8 +635,12 @@ impl LanguageRuntime {
                             ordered_is_lifecycle = is_lifecycle;
                         }
                     }
-                    if closed && queue.is_empty() && ordered.is_none() && concurrent.is_empty() {
-                        // Channel closed (all senders dropped) and every request answered.
+                    if closed && queue.is_empty() {
+                        // Channel closed: every handle is gone, so nothing is
+                        // left that could wait on a call still in flight —
+                        // return rather than drain. A call that can never end
+                        // (a promise nothing settles, a stalled import())
+                        // otherwise keeps this thread alive for ever.
                         info!("[lang:{}] Request channel closed, shutting down", addr);
                         return;
                     }

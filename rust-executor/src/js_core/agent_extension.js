@@ -9,12 +9,8 @@ import {
 ((globalThis) => {
     const core = Deno.core;
 
-    // The agent of the call this code runs for: a token from `agent_call_token`, kept in a
-    // V8 async-context variable, so every await, promise reaction and timer of the call
-    // keeps it while other calls into this language run (agent_extension.rs, "The agent a
-    // call acts as"). Outside any call it is null and the ops refuse: no token, no agent.
-    // The host enters a language only through `__ad4mRunCall`, with a main-agent token for
-    // its own entries (loading, init, callback registration, teardown).
+    // The agent of the call this code runs for, kept in a V8 async-context
+    // variable: agent_extension.rs, "The agent a call acts as".
     const callAgent = new core.AsyncVariable();
     const caller = () => callAgent.get() ?? null;
 
@@ -28,6 +24,30 @@ import {
             } finally {
                 core.setAsyncContext(previous);
             }
+        },
+        writable: false,
+        enumerable: false,
+        configurable: false,
+    });
+
+    // The host's module evaluation is driven from Rust (`JsCore::load_module_from_source`),
+    // not a script call: `__ad4mEnterCallAgent` takes the call's token into the
+    // async context the way `__ad4mRunCall` does, and `__ad4mLeaveCallAgent`
+    // restores the context it replaced. Evaluations do not nest: one module
+    // evaluates at a time, under the runtime's worker lock.
+    let replaced;
+    Object.defineProperty(globalThis, "__ad4mEnterCallAgent", {
+        value: (id) => {
+            replaced = callAgent.enter(agent_call_token(id));
+        },
+        writable: false,
+        enumerable: false,
+        configurable: false,
+    });
+    Object.defineProperty(globalThis, "__ad4mLeaveCallAgent", {
+        value: () => {
+            core.setAsyncContext(replaced);
+            replaced = undefined;
         },
         writable: false,
         enumerable: false,

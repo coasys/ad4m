@@ -63,9 +63,11 @@ variable that every await, promise reaction and timer of the call inherits.
 The agent ops sign as that token. With no token they refuse (signing, sealed
 boxes, and `did` / `signingKeyId` too: code with no token acts as no agent).
 The host's own entries into a language run the same way, with a main-agent
-token (`LanguageRuntime::execute_as_host`): the bundle's evaluation (the
-module is loaded unevaluated and the capture script's `import()` evaluates it
-under the token), `init`, callback registration and teardown. Timers,
+token (`LanguageRuntime::execute_as_host`): the bundle's evaluation
+(`JsCore::load_module_from_source` evaluates it under the token, which
+`__ad4mEnterCallAgent`/`__ad4mLeaveCallAgent` enter and restore around
+`mod_evaluate`), `init`, callback registration and teardown.
+Timers,
 sockets and promises they start inherit that token, so server-link's
 WebSocket handlers and reconnects act as the main agent; Holochain signals
 and syncs arrive as calls as the main agent. And a callback a language fires
@@ -114,7 +116,7 @@ A call that never returns, by kind. A hung ordered call (an `await` nothing
 settles) blocks the language's ordered calls and its own caller for ever; the
 callers queued behind it get the deadline error instead of waiting for ever,
 and a new one fails at once. A hung concurrent call occupies one of the 16
-slots, so concurrent calls queue behind it until the bound is reached — and it
+slots — further concurrent calls queue only once all 16 are taken — and it
 delays the lifecycle requests that run with no call beside them (loading,
 callback registration, teardown) until it ends. No deadline bounds a running
 call: the deadline only covers calls that have not started, so a hung
@@ -122,7 +124,9 @@ concurrent call's own caller waits until it ends — for ever, if it never
 does. A JS CPU loop is worse: the isolate has one thread, so it blocks every
 call of that language, ordered and concurrent, and the event loop itself —
 a queued caller's deadline still fires and reports the error, but nothing
-runs until the loop yields.
+runs until the loop yields. When every handle to the language is gone the
+channel closes and the runtime's thread ends; a call still in flight ends
+with the isolate.
 
 Calls into a Language are built as JS source via `format!` and evaluated (≈20
 sites in `mod.rs`). A malformed template used to deadlock that language forever

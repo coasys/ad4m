@@ -53,6 +53,8 @@ async fn language_isolate() -> (JsCore, tempfile::TempDir) {
     js.load_module_from_source(
         "https://ad4m.language/http-fetch-test/bundle.js",
         r#"import { httpFetch } from "ad4m:host"; globalThis.__httpFetch = httpFetch;"#.to_string(),
+        0,
+        crate::agent::AgentContext::main_agent(),
     )
     .await
     .expect("load test bundle");
