@@ -616,7 +616,7 @@ mod tests {
             .collect();
         for (status, include_unverified) in [(None, None), (Some(LinkStatus::Shared), Some(true))] {
             let mut instances = vec![json!({ "id": "we://s7" })];
-            let started = std::time::Instant::now();
+            let started = web_time::Instant::now();
             attach_links(
                 &crate::perspectives::sparql_store::EvalStop::none(),
                 &store,

@@ -660,7 +660,7 @@ mod tests {
                 json!({ "id": "we://s7", LINKS_KEY: { "children": [] } }),
                 json!({ "id": "we://s8", "children": [] }),
             ];
-            let started = std::time::Instant::now();
+            let started = web_time::Instant::now();
             fill_container_rows(
                 &crate::perspectives::sparql_store::EvalStop::none(),
                 &store,

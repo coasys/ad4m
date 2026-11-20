@@ -167,6 +167,7 @@ rocket = "0.5.0"
 jsonwebtoken = "8.3.0"
 
 webbrowser = "0.8.12"
+web-time = "1.1.0"
 
 # holochain = { version = "0.5.2", features = ["test_utils", "default"] }
 # holochain_cli_bundle = { version = "0.5.2" }
