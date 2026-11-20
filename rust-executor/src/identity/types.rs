@@ -212,14 +212,9 @@ pub struct PowChallenge {
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct PowParams {
-    /// The leading zero bits a proof must have.
+    /// The leading zero bits a proof must have: the cost the challenge below was issued at,
+    /// which the store checks the proof against whatever its cost is by then.
     pub bits: u8,
-    /// The bits before the last change; a proof at these bits passes for 10 minutes after
-    /// `changedAt`.
-    pub previous_bits: u8,
-    /// When `bits` last changed (unix seconds).
-    #[ts(type = "number")]
-    pub changed_at: u64,
     /// A fresh challenge for the next proof; the caller solves over `challenge.nonce` and must
     /// fetch again for another log (the store spends each challenge once and at most to
     /// `expires`).

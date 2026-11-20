@@ -110,8 +110,9 @@ export class IdentityClient {
     }
 
     /**
-     * The proof-of-work cost the store asks for now (its `GET /v1/pow`): a proof at `bits`
-     * passes, and at `previousBits` too for 10 minutes after `changedAt`.
+     * The proof-of-work cost the store asks for now (its `GET /v1/pow`) and a challenge issued
+     * at it: a proof over that challenge passes at `bits`, even if the store's cost changes
+     * before the challenge expires.
      */
     async powParams(): Promise<PowParams> {
         return this.#apiClient.call("identity.powParams", {});

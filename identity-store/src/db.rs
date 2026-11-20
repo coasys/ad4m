@@ -134,12 +134,6 @@ CREATE TABLE IF NOT EXISTS brake (
     tokens     REAL NOT NULL,
     updated_at INTEGER NOT NULL
 );
-CREATE TABLE IF NOT EXISTS pow (
-    id            INTEGER PRIMARY KEY CHECK (id = 1),
-    bits          INTEGER NOT NULL,
-    previous_bits INTEGER NOT NULL,
-    changed_at    INTEGER NOT NULL
-);
 CREATE TABLE IF NOT EXISTS notes (
     scid      TEXT PRIMARY KEY,
     note      TEXT NOT NULL,

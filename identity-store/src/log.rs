@@ -74,16 +74,20 @@ fn events_of(body: &[u8]) -> Result<Vec<Event>, ApiError> {
 enum Admission<'a> {
     /// No vouching token: the brake (`brake.rs`), for a request from the address `sender`.
     Brake { sender: &'a str },
-    /// A vouching token not yet redeemed: every check of the append runs, nothing is committed.
-    VouchCheck,
+    /// A vouching token not yet redeemed, from the address `sender`: the failure bucket first (the
+    /// brake's step 1), then every check of the append; nothing is committed.
+    VouchCheck { sender: &'a str },
     /// A token the vouching service redeemed for `note`: the log is committed with it.
     Vouched(&'a VouchNote),
 }
 
-/// Whether a refusal on the brake's path takes a token from the sender's failure bucket: every
-/// refusal of the request itself (`4xx`) but the brake's own `429`.
+/// Whether a refusal takes a token from the sender's failure bucket: every refusal of the
+/// request itself (`4xx`) but the brake's own `429`, and the vouching service's `503` (a token
+/// request a store cannot redeem costs a replay all the same).
 fn charges_failure(e: &ApiError) -> bool {
-    e.status.is_client_error() && e.status != axum::http::StatusCode::TOO_MANY_REQUESTS
+    use axum::http::StatusCode;
+    (e.status.is_client_error() && e.status != StatusCode::TOO_MANY_REQUESTS)
+        || e.status == StatusCode::SERVICE_UNAVAILABLE
 }
 
 /// The store's own check of expiries (the core reads no clock): a bot scope's `expires` in an
@@ -367,12 +371,14 @@ impl Store {
     ///
     /// Event #0 of a log the store does not hold is admitted by the brake when the request
     /// carries no vouching token: the buckets and the proof of work are checked before any
-    /// signature replays. A request without a token that is refused (`4xx` but `429`) while
-    /// the store holds no log at `scid` takes a token from the sender's failure bucket: bad
-    /// proofs, bad events and malformed bodies alike. With a token, every check of the append
-    /// runs first (nothing committed), then the token is redeemed (`vouch.rs`), then the log is
-    /// committed with its note (`admitted_by = 'vouch'`, no brake): a token is spent only on an
-    /// append that passes.
+    /// signature replays. With a token, the sender's failure bucket is checked first (the
+    /// brake's step 1, so a token that never redeems cannot make the store replay without
+    /// limit), then every check of the append runs (nothing committed), then the token is
+    /// redeemed (`vouch.rs`), then the log is committed with its note (`admitted_by =
+    /// 'vouch'`, no global or address bucket, no proof): a token is spent only on an append
+    /// that passes. Either way, a request refused (`4xx` but `429`, or the vouching service's
+    /// `503`) while the store holds no log at `scid` takes a token from the sender's failure
+    /// bucket: bad proofs, bad events, malformed bodies and refused tokens alike.
     pub async fn append(
         &self,
         scid: &str,
@@ -383,21 +389,26 @@ impl Store {
         let committed = |head: Option<SignedHead>| {
             head.ok_or_else(|| ApiError::internal("the append committed no head"))
         };
-        let token = match (&req.vouch, &req.pow) {
-            (Some(token), None) => token,
-            _ => {
-                let result = self.append_admitted(scid, req, body, Admission::Brake { sender });
-                if let Err(refusal) = &result {
-                    if charges_failure(refusal) && self.head(scid)?.is_none() {
-                        self.charge_failure(sender)?;
-                    }
+        let result = match (&req.vouch, &req.pow) {
+            (Some(token), None) => {
+                async {
+                    self.append_admitted(scid, req, body, Admission::VouchCheck { sender })?;
+                    let note = self.redeem(token, &did_of(scid)).await?;
+                    self.append_admitted(scid, req, body, Admission::Vouched(&note))
+                        .and_then(committed)
                 }
-                return result.and_then(committed);
+                .await
             }
+            _ => self
+                .append_admitted(scid, req, body, Admission::Brake { sender })
+                .and_then(committed),
         };
-        self.append_admitted(scid, req, body, Admission::VouchCheck)?;
-        let note = self.redeem(token, &did_of(scid)).await?;
-        committed(self.append_admitted(scid, req, body, Admission::Vouched(&note))?)
+        if let Err(refusal) = &result {
+            if charges_failure(refusal) && self.head(scid)?.is_none() {
+                self.charge_failure(sender)?;
+            }
+        }
+        result
     }
 
     /// Takes a token from the failure bucket of `sender`, in a transaction of its own (the
@@ -508,21 +519,30 @@ impl Store {
                 }
                 // The brake, before any signature of the request replays: the buckets, then the
                 // proof of work over its one-use challenge.
-                if let Admission::Brake { sender } = admission {
-                    if let Err(refusal) = brake::check_buckets(&tx, &self.settings, sender, now) {
-                        if refusal.body["scope"] == "global" {
-                            self.notice_global_empty();
+                match admission {
+                    Admission::Brake { sender } => {
+                        if let Err(refusal) = brake::check_buckets(&tx, &self.settings, sender, now)
+                        {
+                            if refusal.body["scope"] == "global" {
+                                self.notice_global_empty();
+                            }
+                            return Err(refusal);
                         }
-                        return Err(refusal);
+                        brake::check_pow(
+                            &tx,
+                            scid,
+                            req.pow.as_ref(),
+                            &self.key.pow_challenge_key(),
+                            now,
+                        )?;
                     }
-                    brake::check_pow(
-                        &tx,
-                        scid,
-                        req.pow.as_ref(),
-                        &self.pow_params(),
-                        &self.key.pow_challenge_key(),
-                        now,
-                    )?;
+                    // A token skips the global and address buckets and the proof (the note
+                    // is its cost), not the failure bucket: refused tokens cannot make the
+                    // store replay without limit.
+                    Admission::VouchCheck { sender } => {
+                        brake::check_failure(&tx, sender, now)?;
+                    }
+                    Admission::Vouched(_) => {}
                 }
                 if first.scid != scid {
                     return Err(ApiError::invalid(
@@ -617,7 +637,7 @@ impl Store {
         }
 
         // Every check passed: the token is redeemed only now, without the database lock.
-        if let Admission::VouchCheck = admission {
+        if let Admission::VouchCheck { .. } = admission {
             return Ok(None);
         }
 
@@ -663,7 +683,7 @@ impl Store {
                     vouch::put_note(&tx, scid, note, now)?;
                     "vouch"
                 }
-                Admission::VouchCheck => {
+                Admission::VouchCheck { .. } => {
                     return Err(ApiError::internal("a vouch check reached the commit"))
                 }
             };

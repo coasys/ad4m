@@ -470,11 +470,14 @@ impl Ad4mDb {
     }
 
     /// Seals every value of a sealed column still in the clear: after the export into a
-    /// keyed file, and after an import. A row that cannot be sealed (its store does not
-    /// resolve, e.g. a `perspective` that is no uuid, or a value that will not seal) is
-    /// skipped and stays in the clear: it is logged with its table and reason, never its
-    /// content, so one such row does not stop the rest of the move.
-    pub(crate) fn seal_plain_values(&self) -> Ad4mDbResult<SealPlainReport> {
+    /// keyed file (`known_plain`: the export came from a plaintext database, so every value
+    /// is plaintext, whatever it starts with), and after an import into a file that may hold
+    /// sealed rows already (a value is skipped only when it opens as sealed). A row that
+    /// cannot be sealed (its store does not resolve, e.g. a `perspective` that is no uuid, or
+    /// a value that will not seal) is skipped and stays in the clear: it is logged with its
+    /// table and reason, never its content, so one such row does not stop the rest of the
+    /// move.
+    pub(crate) fn seal_plain_values(&self, known_plain: bool) -> Ad4mDbResult<SealPlainReport> {
         let mut report = SealPlainReport::default();
         if !self.seals() {
             return Ok(report);
@@ -524,15 +527,23 @@ impl Ad4mDb {
                 })?
                 .collect::<Result<_, _>>()?;
             for (rowid, owner, keys, values) in rows {
-                if values.iter().flatten().all(|v| sqlite::is_sealed(v)) {
-                    continue;
-                }
                 let key: Vec<&str> = keys.iter().map(String::as_str).collect();
+                // A value already sealed opens under its row's key. One that only starts
+                // with the prefix (`s1: notes`) does not: it is plaintext.
+                let sealed_already = |column: &str, value: &str| {
+                    !known_plain
+                        && sqlite::is_sealed(value)
+                        && self
+                            .reader(table, owner.as_deref(), &key)
+                            .and_then(|reader| reader.open(column, value.to_string()))
+                            .is_ok()
+                };
                 let row: rusqlite::Result<usize> = (|| {
                     let writer = self.writer(table, owner.as_deref(), &key, None)?;
                     let mut sealed = 0;
                     for (column, value) in table.columns.iter().zip(&values) {
-                        let Some(value) = value.as_deref().filter(|v| !sqlite::is_sealed(v)) else {
+                        let Some(value) = value.as_deref().filter(|v| !sealed_already(column, v))
+                        else {
                             continue;
                         };
                         let value = writer.seal(column, value)?;

@@ -44,7 +44,7 @@
 //! `createdAt`: that is the earlier date, so for role eligibility it widens
 //! the window.
 
-use deno_core::anyhow::{anyhow, Error};
+use anyhow::{anyhow, Error};
 use serde::de::DeserializeOwned;
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
@@ -463,6 +463,7 @@ mod tests {
             max_count: None,
             target_class_name: target.into(),
             target_class_uri: String::new(),
+            polymorphic: false,
         };
         let mut top = shape("Top", vec![relation("mids", "we://mids")]);
         top.include_relations = vec![rel("mids", "we://mids", "Mid")];

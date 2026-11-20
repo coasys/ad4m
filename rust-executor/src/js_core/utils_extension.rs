@@ -1,6 +1,6 @@
 use cid::Cid;
 use deno_core::op2;
-use log::{debug, error, warn};
+use log::{log, Level};
 use multibase::Base;
 use multihash_codetable::{Code, MultihashDigest};
 
@@ -20,14 +20,28 @@ fn hash(#[string] data: String) -> Result<String, AnyhowWrapperError> {
     Ok(format!("Qm{}", encoded_cid))
 }
 
+/// Test-only record of every console line with its level: a test cannot rely on
+/// `log::set_logger` (a prior test's `try_init` may already own the global logger).
+#[cfg(test)]
+pub(crate) static CONSOLE_LINES: std::sync::Mutex<Vec<(Level, String)>> =
+    std::sync::Mutex::new(Vec::new());
+
+fn console_line(level: Level, data: &str) {
+    #[cfg(test)]
+    CONSOLE_LINES
+        .lock()
+        .unwrap()
+        .push((level, data.to_string()));
+    log!(level, "[JSCORE]: {}", data);
+}
+
 #[op2]
 #[string]
 fn console_log(#[string] data: String) -> Result<String, AnyhowWrapperError> {
     // JS `console.log` maps to Rust `debug` — mirroring browser semantics,
     // where console.log is developer chatter, not an operator-facing event.
-    // JS callers that need info-level visibility should use `console.info`
-    // (routed via a follow-up op) or emit through a structured channel.
-    debug!("[JSCORE]: {}", data);
+    // JS callers that need info-level visibility use `console.info`.
+    console_line(Level::Debug, &data);
 
     Ok(String::from("temp"))
 }
@@ -35,7 +49,15 @@ fn console_log(#[string] data: String) -> Result<String, AnyhowWrapperError> {
 #[op2]
 #[string]
 fn console_debug(#[string] data: String) -> Result<String, AnyhowWrapperError> {
-    debug!("[JSCORE]: {}", data);
+    console_line(Level::Debug, &data);
+
+    Ok(String::from("temp"))
+}
+
+#[op2]
+#[string]
+fn console_info(#[string] data: String) -> Result<String, AnyhowWrapperError> {
+    console_line(Level::Info, &data);
 
     Ok(String::from("temp"))
 }
@@ -43,7 +65,7 @@ fn console_debug(#[string] data: String) -> Result<String, AnyhowWrapperError> {
 #[op2]
 #[string]
 fn console_error(#[string] data: String) -> Result<String, AnyhowWrapperError> {
-    error!("[JSCORE]: {}", data);
+    console_line(Level::Error, &data);
 
     Ok(String::from("temp"))
 }
@@ -51,14 +73,14 @@ fn console_error(#[string] data: String) -> Result<String, AnyhowWrapperError> {
 #[op2]
 #[string]
 fn console_warn(#[string] data: String) -> Result<String, AnyhowWrapperError> {
-    warn!("[JSCORE]: {}", data);
+    console_line(Level::Warn, &data);
 
     Ok(String::from("temp"))
 }
 
 deno_core::extension!(
     utils_service,
-    ops = [hash, console_log, console_debug, console_error, console_warn],
+    ops = [hash, console_log, console_debug, console_info, console_error, console_warn],
     esm_entry_point = "ext:utils_service/utils_extension.js",
     esm = [dir "src/js_core", "utils_extension.js"]
 );

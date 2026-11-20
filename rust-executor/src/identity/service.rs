@@ -1598,8 +1598,6 @@ mod tests {
         async fn pow_params(&self) -> Result<ad4m_ldk::identity::PowParams, IdentityError> {
             Ok(ad4m_ldk::identity::PowParams {
                 bits: 8,
-                previous_bits: 6,
-                changed_at: 1,
                 challenge: ad4m_ldk::identity::PowChallenge {
                     nonce: "5TestChallenge".into(),
                     expires: 5,
@@ -2932,8 +2930,6 @@ mod tests {
             service.pow_params().await.unwrap(),
             PowParams {
                 bits: 8,
-                previous_bits: 6,
-                changed_at: 1,
                 challenge: crate::identity::types::PowChallenge {
                     nonce: "5TestChallenge".into(),
                     expires: 5,

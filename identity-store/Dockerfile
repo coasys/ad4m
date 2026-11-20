@@ -11,7 +11,9 @@
 # Behind a reverse proxy or load balancer, TRUSTED_PROXIES is required: set it to the proxy's
 # address or range (`-e TRUSTED_PROXIES=10.0.0.0/8`). Unset, every client counts as the proxy's
 # one address for the signup brake — a few failures an hour lock all sign-ups. The first
-# request carrying a proxy header logs a warning while it is unset.
+# request carrying a proxy header logs a warning while it is unset. CLIENT_IP_HEADER names the
+# one header the proxy sets to the client's address: `x-forwarded-for` (the default) or, behind
+# Cloudflare, `-e CLIENT_IP_HEADER=cf-connecting-ip`. The other header is never read.
 
 FROM rust:1.96.1-bookworm AS build
 RUN apt-get update && apt-get install -y --no-install-recommends libsqlite3-dev \

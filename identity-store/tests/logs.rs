@@ -969,8 +969,6 @@ async fn a_new_log_with_no_note_needs_a_proof_that_meets_the_bits() {
 
     let pow_params = t.get("/v1/pow").await.body;
     assert_eq!(pow_params["bits"], 8);
-    assert_eq!(pow_params["previousBits"], 8);
-    assert_eq!(pow_params["changedAt"], T0);
 }
 
 #[tokio::test]

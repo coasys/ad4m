@@ -83,7 +83,7 @@ pub struct Pow {
 #[serde(rename_all = "camelCase")]
 pub struct PowChallenge {
     /// The token the proof's `challenge` carries and hashes over: base58btc of
-    /// `expires` ‖ 16 random ‖ the store's tag.
+    /// `expires` ‖ `bits` ‖ 16 random ‖ the store's tag (over all of them).
     pub nonce: String,
     /// Unix seconds the token is good until; a proof that arrives past it is refused.
     pub expires: u64,
@@ -93,9 +93,9 @@ pub struct PowChallenge {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PowParams {
+    /// The leading zero bits a proof must have: the cost the challenge below was issued at,
+    /// which the store checks the proof against whatever its cost is by then.
     pub bits: u8,
-    pub previous_bits: u8,
-    pub changed_at: u64,
     /// A fresh challenge for the next proof; the caller solves over `challenge.nonce` and must
     /// fetch again for another log (the store spends each challenge once and at most to
     /// `expires`).

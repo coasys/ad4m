@@ -6,7 +6,26 @@
 //! columns and the language storage files that name it. Once nothing under an older version
 //! is left, the older versions are dropped from the keyring. Until then data under them still
 //! opens, so a job that stops (a crash, a value that does not open) loses nothing; running it
-//! again resumes it, without making yet another version.
+//! again resumes it, without making yet another version. A language file's write, and this
+//! job's seal-again of a file, hold one lock (`lang_storage::exclusive`) from taking the key to
+//! renaming the file in place, and the job counts and retires under it: a write that took an
+//! older version just before the new one became current is in place before the older version
+//! goes, and is counted.
+//!
+//! **The snapshot rule.** A platform snapshot holds each perspective's part sealed under the
+//! perspective store's key at the version that was current when the snapshot was taken, and
+//! only the newest snapshot exists (an upload replaces it). Retiring a version therefore
+//! strands the part of every snapshot taken under it, and a restore could not open the
+//! perspective (it is alive: its key is there, only that version is gone). So before
+//! [`finish`] retires versions of a perspective's store it has the executor take a new
+//! snapshot ([`ReplaceSnapshot`]), which seals the part under the new, current version and
+//! replaces the old upload. When that fails, the versions are not retired and the job
+//! stops with [`ReencryptError::Snapshot`]: running it again resumes and tries again, so the
+//! newest snapshot is never left unreadable by a rotation. A snapshot another task sealed
+//! under the old version in the moment before the new one became current and uploaded after
+//! ours is the one remaining way to a stranded part; a restore then fails naming the
+//! perspective and the version (`DataKeys::subkey`: `VersionRetired`) rather than leaving the
+//! perspective out, and the next periodic snapshot repairs the upload.
 //!
 //! The executor's own store is not re-encrypted here: its key also keys the SQLCipher
 //! database file, which the executor opens once at start.
@@ -26,6 +45,10 @@ use crate::db::sealed::ResealReport;
 /// under an older version (written by a writer that read the old version just before the
 /// new one became current).
 const PASSES: usize = 3;
+
+/// Uploads a platform snapshot taken now, replacing the one before it (an executor that
+/// uploads none answers `Ok`): `perspective_snapshot::replace_snapshot` in the executor.
+pub type ReplaceSnapshot<'a> = &'a dyn Fn() -> Result<(), String>;
 
 /// The sealed database columns of the stores, as the job needs them.
 pub trait SealedRows {
@@ -79,6 +102,8 @@ pub enum ReencryptError {
     Rows(String),
     #[error("the store's language files: {0}")]
     Files(String),
+    #[error("the snapshot could not be replaced, so the old key versions stay until it can: {0}")]
+    Snapshot(String),
 }
 
 impl From<KeyringError> for ReencryptError {
@@ -152,6 +177,7 @@ pub fn begin(keys: &DataKeys, store: &StoreId) -> Result<(KeyVersion, bool), Ree
 pub fn finish(
     keys: &DataKeys,
     rows: &dyn SealedRows,
+    replace_snapshot: ReplaceSnapshot,
     languages: &Path,
     store: &StoreId,
     version: KeyVersion,
@@ -182,9 +208,27 @@ pub fn finish(
             break;
         }
     }
+    if report.left == 0 && matches!(store, StoreId::Perspective(_)) && has_retiring(keys, store)? {
+        // The snapshot rule (module docs): the part of the newest snapshot is under a version
+        // about to go, so a snapshot under the current one replaces it first.
+        replace_snapshot().map_err(ReencryptError::Snapshot)?;
+    }
     if report.left == 0 {
-        report.retired = keys.retire_store_versions(store)?;
-    } else {
+        // A language write holds the files lock from taking the key to renaming its file in
+        // place. Counting again and retiring under that lock finds every file a writer that
+        // took an older version published, and no writer takes one after (the current version
+        // is the new one): nothing is stranded under a version that is gone.
+        report.retired = lang_storage::exclusive(|| -> Result<Vec<KeyVersion>, ReencryptError> {
+            let files_left = lang_storage::count_store_files_not_under(languages, store, version)
+                .map_err(|e| ReencryptError::Files(e.to_string()))?;
+            if files_left > 0 {
+                report.left = files_left;
+                return Ok(Vec::new());
+            }
+            Ok(keys.retire_store_versions(store)?)
+        })?;
+    }
+    if report.left != 0 {
         log::warn!(
             "🔑 {store}: {} values or files are still under an older key ({} do not open); \
              the older key versions stay until a re-encryption moves them",
@@ -195,16 +239,35 @@ pub fn finish(
     Ok(report)
 }
 
+/// Whether `store`'s key holds a version that retiring would drop.
+fn has_retiring(keys: &DataKeys, store: &StoreId) -> Result<bool, ReencryptError> {
+    let id = store.to_string();
+    Ok(keys
+        .summary()?
+        .stores
+        .iter()
+        .any(|s| s.id == id && !s.retiring.is_empty()))
+}
+
 /// [`begin`] then [`finish`], holding the store's claim.
 pub fn reencrypt(
     keys: &DataKeys,
     rows: &dyn SealedRows,
+    replace_snapshot: ReplaceSnapshot,
     languages: &Path,
     store: &StoreId,
 ) -> Result<ReencryptReport, ReencryptError> {
     let _claim = Claim::take(store)?;
     let (version, resumed) = begin(keys, store)?;
-    finish(keys, rows, languages, store, version, resumed)
+    finish(
+        keys,
+        rows,
+        replace_snapshot,
+        languages,
+        store,
+        version,
+        resumed,
+    )
 }
 
 #[cfg(test)]
@@ -295,7 +358,7 @@ mod tests {
             vec![KeyVersion(1); 2]
         );
 
-        let report = reencrypt(&keys, &db, &languages, &moved).unwrap();
+        let report = reencrypt(&keys, &db, &|| Ok(()), &languages, &moved).unwrap();
         assert_eq!(report.version, KeyVersion(2));
         assert!(!report.resumed);
         assert_eq!(report.resealed_values, 2);
@@ -336,6 +399,82 @@ mod tests {
             .is_err());
     }
 
+    /// A language's write that took the old key version before the re-encryption switched to
+    /// the new one, and publishes after the job has counted and resealed, is not stranded: the
+    /// job waits for it before it retires the old version, counts its file and seals it again.
+    #[test]
+    fn a_write_holding_the_old_version_is_not_stranded_by_the_retirement() {
+        let folder = tempfile::tempdir().unwrap();
+        let keys = keyring(folder.path());
+        let db = database(folder.path(), &keys);
+        let store = perspective(&db, "moved");
+        let StoreId::Perspective(uuid) = &store else {
+            unreachable!()
+        };
+        let languages = folder.path().join("languages");
+        let language_folder = languages.join("QmWriter");
+        std::fs::create_dir_all(&language_folder).unwrap();
+        crate::perspectives::route_link_language_for_test(
+            "QmWriter",
+            Some(PerspectiveHandle {
+                uuid: uuid.to_string(),
+                name: None,
+                neighbourhood: None,
+                shared_url: None,
+                state: PerspectiveState::Private,
+                owners: None,
+            }),
+        );
+
+        // A writer holds the files lock with a file sealed under version 1 and not yet in
+        // place; the job starts once it holds the lock, and the writer publishes once the job
+        // is counted among the lock's waiters. A job that retires without taking the lock
+        // never waits, and the writer's wait fails.
+        let held =
+            lang_storage::seal(&keys, &store, "QmWriter", "kv.json", b"acknowledged").unwrap();
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel::<()>();
+        let file = language_folder.join("kv.json");
+        let before = lang_storage::waiting();
+        let writer = std::thread::spawn(move || {
+            lang_storage::exclusive(|| {
+                locked_tx.send(()).unwrap();
+                lang_storage::tests::wait_for_waiter(before);
+                crate::at_rest::files::write_atomic(&file, &held).unwrap();
+            })
+        });
+        locked_rx.recv().unwrap();
+        let report = reencrypt(&keys, &db, &|| Ok(()), &languages, &store);
+        writer.join().unwrap();
+        let report = report.unwrap();
+        assert_eq!(
+            report.left, 1,
+            "the job counted the write that landed after it began"
+        );
+        let me = lang_storage::Caller {
+            folder: &language_folder,
+            address: "QmWriter",
+            system: false,
+        };
+        assert_eq!(
+            lang_storage::read_file(Some(&keys), me, "kv.json").unwrap(),
+            "acknowledged",
+            "the write that held version 1 still opens"
+        );
+        // The write is in place and still under version 1, which stays: nothing is stranded,
+        // and the job run again moves the file and then retires version 1.
+        assert!(report.retired.is_empty());
+        let again = reencrypt(&keys, &db, &|| Ok(()), &languages, &store).unwrap();
+        assert!(again.resumed);
+        assert_eq!((again.left, again.resealed_files), (0, 1));
+        assert_eq!(again.retired, vec![KeyVersion(1)]);
+        assert_eq!(
+            lang_storage::read_file(Some(&keys), me, "kv.json").unwrap(),
+            "acknowledged",
+            "and after the retirement"
+        );
+        crate::perspectives::route_link_language_for_test("QmWriter", None);
+    }
+
     /// A job that stopped after the new version became current resumes: the next run makes
     /// no further version and finishes the move.
     #[test]
@@ -360,7 +499,7 @@ mod tests {
             vec!["resumed".to_string()]
         );
 
-        let report = reencrypt(&keys, &db, folder.path(), &store).unwrap();
+        let report = reencrypt(&keys, &db, &|| Ok(()), folder.path(), &store).unwrap();
         assert_eq!((report.version, report.resumed), (KeyVersion(2), true));
         assert_eq!(report.retired, vec![KeyVersion(1)]);
         assert_eq!(
@@ -368,9 +507,35 @@ mod tests {
             vec![KeyVersion(2); 2]
         );
         // A second re-encryption makes version 3.
-        let again = reencrypt(&keys, &db, folder.path(), &store).unwrap();
+        let again = reencrypt(&keys, &db, &|| Ok(()), folder.path(), &store).unwrap();
         assert_eq!(again.version, KeyVersion(3));
         assert_eq!(again.retired, vec![KeyVersion(2)]);
+    }
+
+    /// A snapshot that cannot be replaced keeps the old version: the newest snapshot's part
+    /// is under it. The job stops with the error, and run again it retires once a snapshot
+    /// is taken. A store that is not a perspective's takes no snapshot.
+    #[test]
+    fn the_old_version_stays_until_the_snapshot_is_replaced() {
+        let tries = std::sync::atomic::AtomicUsize::new(0);
+        let down = || {
+            tries.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err("the platform is down".to_string())
+        };
+        let folder = tempfile::tempdir().unwrap();
+        let keys = keyring(folder.path());
+        let db = database(folder.path(), &keys);
+        let store = perspective(&db, "moved");
+        assert_eq!(
+            reencrypt(&keys, &db, &down, folder.path(), &store),
+            Err(ReencryptError::Snapshot("the platform is down".to_string()))
+        );
+        assert_eq!(keys.retiring_versions(&store).unwrap(), vec![KeyVersion(1)]);
+        assert_eq!(tries.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        let report = reencrypt(&keys, &db, &|| Ok(()), folder.path(), &store).unwrap();
+        assert!(report.resumed);
+        assert_eq!(report.retired, vec![KeyVersion(1)]);
     }
 
     /// A value under the old version that does not open keeps the old version: nothing is
@@ -391,7 +556,7 @@ mod tests {
                 [uuid.to_string()],
             )
             .unwrap();
-        let report = reencrypt(&keys, &db, folder.path(), &store).unwrap();
+        let report = reencrypt(&keys, &db, &|| Ok(()), folder.path(), &store).unwrap();
         assert_eq!(report.unopenable, 1);
         assert_eq!(report.left, 1);
         assert!(report.retired.is_empty());
@@ -404,13 +569,14 @@ mod tests {
         let keys = keyring(folder.path());
         let db = database(folder.path(), &keys);
         assert_eq!(
-            reencrypt(&keys, &db, folder.path(), &StoreId::Executor),
+            reencrypt(&keys, &db, &|| Ok(()), folder.path(), &StoreId::Executor),
             Err(ReencryptError::ExecutorStore)
         );
         assert_eq!(
             reencrypt(
                 &keys,
                 &db,
+                &|| Ok(()),
                 folder.path(),
                 &StoreId::Perspective(uuid::Uuid::new_v4())
             ),
@@ -420,11 +586,11 @@ mod tests {
         keys.create_person(KeyOwner::Main).unwrap();
         let claim = Claim::take(&store).unwrap();
         assert_eq!(
-            reencrypt(&keys, &db, folder.path(), &store),
+            reencrypt(&keys, &db, &|| Ok(()), folder.path(), &store),
             Err(ReencryptError::Running(store.to_string()))
         );
         drop(claim);
-        let report = reencrypt(&keys, &db, folder.path(), &store).unwrap();
+        let report = reencrypt(&keys, &db, &|| Ok(()), folder.path(), &store).unwrap();
         assert_eq!(report.version, KeyVersion(2));
     }
 }

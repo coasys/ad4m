@@ -44,7 +44,7 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     // ── Identity ──
     'identity.status': { did: 'did:scid:coasys:1:QmTest', deviceKey: 'z6MkTest', deviceEnc: 'z6LSTest', keyId: 'd1', revoked: null, head: null, fork: null, storeBehind: null, store: { url: 'https://store.ad4m.dev', trusted: true }, vouched: false },
     'identity.publish': { seq: 0, hash: 'QmHead', time: 1, sig: 'z' },
-    'identity.powParams': { bits: 22, previousBits: 20, changedAt: 5, challenge: { nonce: 'Challenge1', expires: 300 } },
+    'identity.powParams': { bits: 22, challenge: { nonce: 'Challenge1', expires: 300 } },
     'identity.attachNote': (p: Record<string, unknown>) => ({ did: 'did:scid:coasys:1:QmTest', method: 'email', time: 1, voucher: 'did:key:z6MkVoucher', sig: String(p.token) }),
     'identity.claimOffer': (p: Record<string, unknown>) => ({ did: 'did:scid:coasys:1:QmTest', offerId: 'offer', matchCode: 'R7K Q2M', kind: 'node', expires: 1, needsAccept: false, echo: p }),
     'identity.acceptJoin': { accepted: true },
@@ -81,7 +81,7 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'agent.lock': { did: 'did:test:123', isInitialized: true, isUnlocked: false },
     'agent.unlock': { did: 'did:test:123', isInitialized: true, isUnlocked: true },
     'agent.import': { did: 'did:test:imported', isInitialized: true, isUnlocked: true },
-    'agent.byDid': (p: Record<string, unknown>) => ({ did: p.did, perspective: new Perspective() }),
+    'agent.byDIDs': (p: Record<string, unknown>) => (p.dids as string[]).map(did => ({ did, perspective: new Perspective() })),
     'agent.updateProfile': { did: 'did:test:123', perspective: new Perspective(), directMessageLanguage: 'lang://dm' },
     'agent.sign': 'signed-message-data',
     'agent.isLocked': false,
@@ -223,10 +223,10 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
         };
     },
     'expression.getMany': (p: Record<string, unknown>) => {
-        // Return one result per URL (aligned by index), matching real API behavior
+        // One entry per URL, in order: what `expression.get` answers for it.
         const urls = (p.urls || []) as string[];
-        return urls.map((url: string) => ({
-            author: 'did:test:1', timestamp: '2023-01-01', data: { type: 'test' },
+        return urls.map(() => ({
+            author: 'did:test:123', timestamp: '2024-01-01', data: '{"content":"hello"}',
             language: { address: 'lang://test' }, proof: { valid: true },
         }));
     },
@@ -549,6 +549,7 @@ describe('AgentClient', () => {
 
     test('byDID() fetches agent by DID', async () => {
         const agent = await ad4m.agent.byDID('did:test:other');
+        expect(lastRpcCall!.params.dids).toEqual(['did:test:other']);
         expect(agent.did).toBe('did:test:other');
     });
 
@@ -1195,8 +1196,18 @@ describe('ExpressionClient', () => {
     test('getMany() returns multiple expressions', async () => {
         const exprs = await ad4m.expression.getMany(['url1', 'url2']);
         expect(exprs).toHaveLength(2);
-        expect(exprs[0].author).toBe('did:test:1');
-        expect(exprs[1].author).toBe('did:test:1');
+        expect(exprs[0].author).toBe('did:test:123');
+        expect(exprs[1].author).toBe('did:test:123');
+    });
+
+    test('getMany() sends at most 200 URLs per expression.getMany call', async () => {
+        const freshClient = newClient();
+        const urls = Array.from({ length: 201 }, (_, i) => `lang://test/Qm${i}`);
+        const exprs = await freshClient.expression.getMany(urls);
+        expect(exprs).toHaveLength(201);
+        const calls = lastOf(MockWebSocket.instances).rpc.filter(c => c.type === 'expression.getMany');
+        expect(calls.map(c => (c.params.urls as string[]).length)).toEqual([200, 1]);
+        expect(calls.flatMap(c => c.params.urls as string[])).toEqual(urls);
     });
 
     test('getRaw() returns raw expression', async () => {
@@ -1524,7 +1535,7 @@ describe('IdentityClient', () => {
         const params = await ad4m.identity.powParams();
         expect(lastRpcCall!.type).toBe('identity.powParams');
         expect(lastRpcCall!.params).toEqual({});
-        expect(params).toEqual({ bits: 22, previousBits: 20, changedAt: 5, challenge: { nonce: 'Challenge1', expires: 300 } });
+        expect(params).toEqual({ bits: 22, challenge: { nonce: 'Challenge1', expires: 300 } });
     });
 
     test('attachNote() sends the token and returns the note', async () => {

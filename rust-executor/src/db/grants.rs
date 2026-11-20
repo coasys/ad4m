@@ -38,6 +38,9 @@ pub struct GrantKeyRow {
     pub head_seq: u64,
     /// When the key was last found valid (Unix seconds).
     pub checked_at: u64,
+    /// Whether the grant inherited the binding from the session that approved it (`true`),
+    /// or a key login opened it (`false`). See `agent::grants::KeyBinding::delegated`.
+    pub delegated: bool,
 }
 
 fn to_sql(secs: u64) -> i64 {
@@ -76,10 +79,11 @@ const KEY_LOGIN_COLUMNS: &[(&str, &str)] = &[
     ("key_id", "TEXT"),
     ("head_seq", "INTEGER"),
     ("checked_at", "INTEGER"),
+    ("delegated", "INTEGER NOT NULL DEFAULT 0"),
 ];
 
 const COLUMNS: &str = "id, request_id, agent_did, auth_info, state, expires_at, created_at, \
-     role, scid, signing_key, key_id, head_seq, checked_at";
+     role, scid, signing_key, key_id, head_seq, checked_at, delegated";
 
 /// Test seam: the next end-of-grant write (`revoke_grants`, `delete_grants`) fails, so
 /// `agent::grants` sees a write the table did not take.
@@ -154,7 +158,7 @@ impl Ad4mDb {
         self.conn.execute(
             &format!(
                 "INSERT OR IGNORE INTO grants ({COLUMNS})
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)"
             ),
             params![
                 grant.id,
@@ -170,6 +174,9 @@ impl Ad4mDb {
                 key.map(|k| &k.key_id),
                 key.map(|k| to_sql(k.head_seq)),
                 key.map(|k| to_sql(k.checked_at)),
+                // NOT NULL: `false` for every grant without a binding, never NULL (which
+                // OR IGNORE would drop silently).
+                key.is_some_and(|k| k.delegated),
             ],
         )?;
         Ok(())
@@ -192,6 +199,7 @@ impl Ad4mDb {
                     key_id: row.get::<_, Option<String>>(10)?.unwrap_or_default(),
                     head_seq: from_sql(row.get::<_, Option<i64>>(11)?.unwrap_or(0)),
                     checked_at: from_sql(row.get::<_, Option<i64>>(12)?.unwrap_or(0)),
+                    delegated: row.get::<_, Option<i64>>(13)?.unwrap_or(0) != 0,
                 }),
                 _ => None,
             };
@@ -351,6 +359,7 @@ mod tests {
                 key_id: "d2".into(),
                 head_seq: 3,
                 checked_at: 40,
+                delegated: false,
             }),
             ..row(id, 2_000)
         }

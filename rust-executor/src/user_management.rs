@@ -182,6 +182,7 @@ pub fn generate_user_jwt(email: &str, app_name: &str) -> Result<String, String> 
         auth_info,
         None,
         DEFAULT_TOKEN_VALID_PERIOD,
+        None,
     )
     .map(|(token, _)| token)
     .map_err(|e| format!("Failed to generate token: {}", e))
