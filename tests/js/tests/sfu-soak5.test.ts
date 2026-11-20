@@ -30,7 +30,13 @@ import { startWorld, type World } from "../helpers/sfu/e2e/world.js";
  * SOAK_SCALE (phase length multiplier, default 1: about 28 minutes), SOAK_SHAPED_BROWSER
  * (firefox puts the shaped seat u3 in Firefox), SOAK_RUST_LOG (the executor's RUST_LOG),
  * SOAK_PHASES=rebind (only the join; everyone but u3 turns camera and mic off for 30 s; then
- * two NAT rebindings of u3 90 s apart: about 5 minutes).
+ * two NAT rebindings of u3, about 95 s apart: about 5 minutes).
+ *
+ * The full run is a report: it fails only when the join fails, and its findings are in
+ * summary.json and the logs. SOAK_PHASES=rebind is a regression test and fails unless, after
+ * each rebinding, every pair receives again within RECOVER_MS (20 s, read on a 2 s sampling
+ * grid), every pair receives at the end, and no dead pair or asymmetric event outlasts the
+ * grace (GRACE_MS) the rebinding is allowed.
  *
  * u3's transport is also read every second (`probe-u3.jsonl`), so a receive gap is timed to
  * the second, and each tab logs the SHA-256 of the SDK bundle it loaded.
@@ -40,12 +46,16 @@ const TOPOLOGY = (process.env.SOAK_TOPOLOGY ?? "sfu") as "sfu" | "mesh";
 const SCALE = Number(process.env.SOAK_SCALE ?? "1");
 const RUN_DIR = process.env.SOAK_RUN_DIR ?? path.join(os.tmpdir(), "sfu-soak5", new Date().toISOString().replace(/[:.]/g, "-"));
 const NAMES = ["u1", "u2", "u3", "u4", "u5"];
-const SAMPLE_MS = 5_000;
 const DEAD_MS = 15_000;
 /** After an intended disruption ends, how long its pairs may stay quiet without counting as unexpected. */
 const GRACE_MS = 45_000;
 const ROOM = `soak5-${TOPOLOGY}`;
 const ONLY_REBIND = process.env.SOAK_PHASES === "rebind";
+/** Every pair is read this often: in SOAK_PHASES=rebind often enough to time RECOVER_MS to 2 s. */
+const SAMPLE_MS = ONLY_REBIND ? 2_000 : 5_000;
+/** In SOAK_PHASES=rebind, how soon after a rebinding every pair must receive again: the
+ *  measured repairs take 7-8 s (client watchdog) and 37-38 s (server backstop, rebuild). */
+const RECOVER_MS = 20_000;
 
 /** What one tab reports about one remote participant (a sender). */
 interface PairSample {
@@ -725,14 +735,41 @@ describe(`SFU soak: five Chromium tabs in one ${TOPOLOGY} call`, function () {
         for (const t of others) settle(t.name);
         await wait(20_000);
         phase = "3-network";
-        disrupt(probed.name);
-        act(`${probed.name}: NAT rebinding, no loss: new public port ${await relay.rebind()}`); await wait(90_000);
-        act(`${probed.name}: 3 s blip, then NAT rebinding`); await net(probed, { down: true }); await wait(3_000);
-        await net(probed, {}); act(`${probed.name}: new public port ${await relay.rebind()}`); await wait(90_000);
-        settle(probed.name);
+        const failures: string[] = [];
+        const pairKeys = () => tabs.flatMap((r) => tabs.filter((x) => x !== r).map((x) => `${r.name}>${x.name}`));
+        const rebindings = [
+          async () => { act(`${probed.name}: NAT rebinding, no loss: new public port ${await relay.rebind()}`); },
+          async () => {
+            act(`${probed.name}: 3 s blip, then NAT rebinding`); await net(probed, { down: true }); await wait(3_000);
+            await net(probed, {}); act(`${probed.name}: new public port ${await relay.rebind()}`);
+          },
+        ];
+        for (const [i, rebind] of rebindings.entries()) {
+          disrupt(probed.name);
+          await rebind();
+          const at = Date.now();
+          // Every pair receives again within RECOVER_MS, read on the sampling grid: a pair
+          // counts once a sample after that bound saw it grow.
+          await wait(RECOVER_MS + SAMPLE_MS + 1_000);
+          const late = pairKeys().filter((key) => (lastGrowth.get(key) ?? 0) < at + RECOVER_MS - 1_000);
+          if (late.length) failures.push(`rebinding ${i + 1}: not receiving ${RECOVER_MS / 1000} s after it: ${late.join(", ")}`);
+          say(late.length ? `RECOVERY FAILED after rebinding ${i + 1}: ${late.join(", ")}` : `rebinding ${i + 1}: every pair receives again within ${RECOVER_MS / 1000} s`);
+          // Then u3 settles and its grace runs out with a dead window to spare: a pair still
+          // dead by then, or dead again, is an unexpected event.
+          settle(probed.name);
+          await wait(GRACE_MS + DEAD_MS + SAMPLE_MS);
+        }
         phase = "3b-quiet";
-        act("clear");
-        await wait(10_000);
+        const now = Date.now();
+        const silent = pairKeys().filter((key) => now - (lastGrowth.get(key) ?? 0) > 2 * SAMPLE_MS + 1_000);
+        if (silent.length) failures.push(`at the end, not receiving: ${silent.join(", ")}`);
+        const unexpectedDead = [...deadEvents, ...[...deadOpen].map(([pair, o]) => ({ pair, ...o, from: new Date(o.since).toISOString(), to: "still dead" }))].filter((e: any) => !e.expected);
+        if (unexpectedDead.length) failures.push(`unexpected dead pairs: ${unexpectedDead.map((e: any) => `${e.pair} from ${e.from} to ${e.to}`).join("; ")}`);
+        const unexpectedAsym = asymEvents.filter((e) => !e.expected);
+        if (unexpectedAsym.length) failures.push(`unexpected asymmetric events: ${unexpectedAsym.map((e) => `${e.receiver} at ${e.t}`).join("; ")}`);
+        if (asymOpen.size) failures.push(`still asymmetric at the end: ${[...asymOpen.keys()].join(", ")}`);
+        act(failures.length ? `FAILED: ${failures.join(" | ")}` : "every pair recovered after each rebinding; no unexpected dead or asymmetric event");
+        if (failures.length) throw new Error(`receive recovery failed:\n${failures.join("\n")}`);
         return;
       }
 
