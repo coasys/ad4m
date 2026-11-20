@@ -23,7 +23,7 @@ use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use super::query::{execute_model_query_inner, order_fully_pushable};
-use super::sparql_builder::{all_where_pushable, verified_link_exists};
+use super::sparql_builder::{all_where_pushable, verified_link_exists, LinkGuard};
 use super::types::{
     IncludeValue, ModelQueryInput, ModelShape, OrderDirection, Scope, ScopeDirection,
     ShapeRelation, ShapeResolver, WhereCondition,
@@ -374,8 +374,15 @@ async fn hydrate_polymorphic(
 ) -> Result<(), Error> {
     // `limit`/`offset` were refused before either resolver ran — see
     // `reject_pagination_on_polymorphic`. Nothing to check here.
+    // Classified over the links this read admits, as the group queries
+    // hydrate: a class a target is only through a Local or unverified link
+    // is not one of its classes here.
     let classes = crate::perspectives::subject_classes_of::subject_classes_of(
-        stop, store, resolver, target_ids,
+        stop,
+        store,
+        resolver,
+        target_ids,
+        LinkGuard::of(sub_query),
     )?;
 
     // Group by class, keeping the ids of each group in the order they arrived so

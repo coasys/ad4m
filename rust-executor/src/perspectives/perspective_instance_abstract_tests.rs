@@ -226,7 +226,12 @@ async fn a_delete_through_an_abstract_class_runs_each_destructor() {
     p.remove_subject(class("TextContent"), "ad4m://m1".into(), None, &ctx)
         .await
         .unwrap();
-    let classes = p.subject_classes_of(&["ad4m://m1".to_string()]).unwrap();
+    let classes = p
+        .subject_classes_of(
+            &["ad4m://m1".to_string()],
+            crate::perspectives::model_query::LinkGuard::ANY,
+        )
+        .unwrap();
     assert_eq!(classes["ad4m://m1"], vec!["Task".to_string()]);
 }
 
@@ -753,7 +758,10 @@ async fn the_builtin_text_content_is_read_by_its_uri() {
         .await
         .unwrap();
     let classes = perspective
-        .subject_classes_of(&["ad4m://message/b".to_string(), "ad4m://chat/b".to_string()])
+        .subject_classes_of(
+            &["ad4m://message/b".to_string(), "ad4m://chat/b".to_string()],
+            crate::perspectives::model_query::LinkGuard::ANY,
+        )
         .unwrap();
     assert_eq!(classes.get("ad4m://message/b"), None, "{classes:?}");
     assert_eq!(classes["ad4m://chat/b"], vec!["Chat".to_string()]);

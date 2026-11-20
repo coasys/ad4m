@@ -279,6 +279,7 @@ fn an_abstract_class_is_never_a_records_class() {
         &store,
         &StoreResolver(&store),
         &["app://r1".to_string(), "app://r2".to_string()],
+        crate::perspectives::model_query::LinkGuard::ANY,
     )
     .unwrap();
     assert!(!classes.contains_key("app://r1"), "{classes:?}");

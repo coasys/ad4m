@@ -3,6 +3,7 @@ use super::hosted_status;
 use super::model_query::is_safe_iri_target;
 use super::model_query::load_shape_from_store;
 use super::model_query::types::{ModelShape, ShapeResolver};
+use super::model_query::LinkGuard;
 use super::monotonic::{committable, drop_monotonic_removals, refuse_monotonic_removal};
 use super::sdna::{generic_link_fact, is_sdna_link};
 use super::shacl_parser::{check_consensus_rule_links, parse_flow_to_links, parse_shacl_to_links};
@@ -3876,22 +3877,33 @@ impl PerspectiveInstance {
     /// most specific first. A caller that can only act on one takes the first.
     ///
     /// URIs that match no registered class are simply absent from the map.
-    pub fn subject_classes_of(
+    ///
+    /// `guard` is the links classification reads: `LinkGuard::ANY` for every
+    /// link, or a read's own (`LinkGuard::of(query)`) for a caller serving one.
+    pub(crate) fn subject_classes_of(
         &self,
         uris: &[String],
+        guard: LinkGuard<'_>,
     ) -> Result<std::collections::HashMap<String, Vec<String>>, AnyError> {
-        self.subject_classes_of_stopped(&EvalStop::none(), uris)
+        self.subject_classes_of_stopped(&EvalStop::none(), uris, guard)
     }
 
     /// [`Self::subject_classes_of`] under `stop` — every store evaluation
     /// the classification makes ends when the call's gate fires.
-    pub fn subject_classes_of_stopped(
+    pub(crate) fn subject_classes_of_stopped(
         &self,
         stop: &EvalStop,
         uris: &[String],
+        guard: LinkGuard<'_>,
     ) -> Result<std::collections::HashMap<String, Vec<String>>, AnyError> {
         let resolver = self.shape_resolver();
-        super::subject_classes_of::subject_classes_of(stop, &self.sparql_store, &resolver, uris)
+        super::subject_classes_of::subject_classes_of(
+            stop,
+            &self.sparql_store,
+            &resolver,
+            uris,
+            guard,
+        )
     }
 
     /// Cancellation-aware async variant of [`Self::sparql_query`].
@@ -3951,6 +3963,9 @@ impl PerspectiveInstance {
             &resolver,
             &[source.to_string()],
             &pending,
+            // The write side: every link this agent holds, staged ones too,
+            // as before. No read's admission applies here.
+            LinkGuard::ANY,
         )
         .ok()?;
         for class_name in classes.get(source)? {

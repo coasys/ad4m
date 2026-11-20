@@ -1077,7 +1077,15 @@ async fn subject_classes_of_handler(
     let gate = crate::perspectives::sparql_store::query_gate(&ctx).await;
     let stop = gate.stop();
     let result =
-        tokio::task::spawn_blocking(move || perspective.subject_classes_of_stopped(&stop, &uris))
+        // Every link, as before: the RPC takes no `linkStatus` or
+        // `includeUnverified`, so it serves no read's admission.
+        tokio::task::spawn_blocking(move || {
+            perspective.subject_classes_of_stopped(
+                &stop,
+                &uris,
+                crate::perspectives::model_query::LinkGuard::ANY,
+            )
+        })
             .await;
 
     match result {

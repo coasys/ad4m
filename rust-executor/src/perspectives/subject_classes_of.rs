@@ -45,6 +45,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::model_query::types::{ModelShape, ShapeResolver};
 use super::model_query::utils::looks_like_absolute_iri;
+use super::model_query::LinkGuard;
 use super::shacl_parser::ABSTRACT_PREDICATE;
 use super::sparql_store::{EvalStop, SparqlStore};
 
@@ -188,13 +189,21 @@ fn order_by_specificity(matches: &mut Vec<(String, usize)>) -> Vec<String> {
 /// perspective has not registered. Absence is used rather than an empty list
 /// because an empty list would claim the stronger thing — that the URI belongs
 /// to no class — which this cannot know.
+///
+/// `guard` is the links classification reads: a triple counts only when a link
+/// asserting it passes the guard, the same check the read's own conformance
+/// and hydration apply. A caller serving a read passes the read's
+/// (`LinkGuard::of(query)`), so a target is never classified through a link
+/// the read cannot see (a Local type link under a Shared read); one that
+/// serves no read passes [`LinkGuard::ANY`], every link.
 pub fn subject_classes_of(
     stop: &EvalStop,
     store: &SparqlStore,
     resolver: &dyn ShapeResolver,
     uris: &[String],
+    guard: LinkGuard<'_>,
 ) -> Result<HashMap<String, Vec<String>>, Error> {
-    subject_classes_of_with_pending(stop, store, resolver, uris, &[])
+    subject_classes_of_with_pending(stop, store, resolver, uris, &[], guard)
 }
 
 /// [`subject_classes_of`], counting links that are staged but not yet committed.
@@ -215,6 +224,7 @@ pub fn subject_classes_of_with_pending(
     resolver: &dyn ShapeResolver,
     uris: &[String],
     pending: &[(String, String, String)],
+    guard: LinkGuard<'_>,
 ) -> Result<HashMap<String, Vec<String>>, Error> {
     let mut out: HashMap<String, Vec<String>> = HashMap::new();
     if uris.is_empty() {
@@ -289,7 +299,7 @@ pub fn subject_classes_of_with_pending(
     }
 
     if !flag_preds.is_empty() {
-        let rows = fetch(stop, store, &values_clause, &flag_preds, true)?;
+        let rows = fetch(stop, store, &values_clause, &flag_preds, true, guard)?;
         for row in &rows {
             let (s, p, o) = match (row["s"].as_str(), row["p"].as_str(), row["o"].as_str()) {
                 (Some(s), Some(p), Some(o)) => (s, p, o),
@@ -309,7 +319,7 @@ pub fn subject_classes_of_with_pending(
     }
 
     if !presence_preds.is_empty() {
-        let rows = fetch(stop, store, &values_clause, &presence_preds, false)?;
+        let rows = fetch(stop, store, &values_clause, &presence_preds, false, guard)?;
         for row in &rows {
             let (s, p) = match (row["s"].as_str(), row["p"].as_str()) {
                 (Some(s), Some(p)) => (s, p),
@@ -355,13 +365,15 @@ pub fn subject_classes_of_with_pending(
 ///
 /// `with_object` selects the object as well, which flag matching needs and a
 /// presence test does not — a required property's value can be an arbitrarily
-/// long literal, and none of it is read.
+/// long literal, and none of it is read. `guard` keeps a triple only when a
+/// link asserting it passes; empty when it admits every link.
 fn fetch(
     stop: &EvalStop,
     store: &SparqlStore,
     values_clause: &str,
     preds: &HashSet<&str>,
     with_object: bool,
+    guard: LinkGuard<'_>,
 ) -> Result<Vec<Value>, Error> {
     let pred_values = preds
         .iter()
@@ -371,11 +383,13 @@ fn fetch(
 
     let query = if with_object {
         format!(
-            "SELECT DISTINCT ?s ?p ?o WHERE {{ VALUES ?s {{ {values_clause} }} VALUES ?p {{ {pred_values} }} ?s ?p ?o . }}"
+            "SELECT DISTINCT ?s ?p ?o WHERE {{ VALUES ?s {{ {values_clause} }} VALUES ?p {{ {pred_values} }} ?s ?p ?o .{} }}",
+            guard.exists("?s", "?p", "?o")
         )
     } else {
         format!(
-            "SELECT DISTINCT ?s ?p WHERE {{ VALUES ?s {{ {values_clause} }} VALUES ?p {{ {pred_values} }} ?s ?p ?_o . }}"
+            "SELECT DISTINCT ?s ?p WHERE {{ VALUES ?s {{ {values_clause} }} VALUES ?p {{ {pred_values} }} ?s ?p ?_o .{} }}",
+            guard.exists("?s", "?p", "?_o")
         )
     };
 

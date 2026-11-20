@@ -496,14 +496,14 @@ pub(super) fn proof_valid_filter(include_unverified: Option<bool>) -> &'static s
 /// links only. A missing annotation fails closed: both checks are required
 /// triples, so a link with no status or no verdict does not pass.
 #[derive(Debug, Clone, Copy, Default)]
-pub(super) struct LinkGuard<'a> {
-    pub(super) status: Option<&'a LinkStatus>,
-    pub(super) include_unverified: Option<bool>,
+pub(crate) struct LinkGuard<'a> {
+    pub(crate) status: Option<&'a LinkStatus>,
+    pub(crate) include_unverified: Option<bool>,
 }
 
 impl<'a> LinkGuard<'a> {
     /// The guard a query asks for.
-    pub(super) fn of(query: &'a ModelQueryInput) -> Self {
+    pub(crate) fn of(query: &'a ModelQueryInput) -> Self {
         LinkGuard {
             status: query.link_status.as_ref(),
             include_unverified: query.include_unverified,
@@ -511,9 +511,9 @@ impl<'a> LinkGuard<'a> {
     }
 
     /// No restriction at all: any status, unverified links included. The
-    /// emitted SPARQL is then what it was before the guard existed.
-    #[cfg(test)]
-    pub(super) const ANY: LinkGuard<'static> = LinkGuard {
+    /// emitted SPARQL is then what it was before the guard existed. What a
+    /// caller that serves no read (a write, a flow spawn) classifies with.
+    pub(crate) const ANY: LinkGuard<'static> = LinkGuard {
         status: None,
         include_unverified: Some(true),
     };
@@ -582,7 +582,7 @@ impl<'a> LinkGuard<'a> {
     /// an expression): a Cartesian product that scanned every reifier passing
     /// the checks, for every row. On 76k links that was a full scan per
     /// hydrated relation (`test_perf_exists_guard_binds_the_reifier`).
-    pub(super) fn exists(&self, subject: &str, predicate: &str, object: &str) -> String {
+    pub(crate) fn exists(&self, subject: &str, predicate: &str, object: &str) -> String {
         if self.is_open() {
             return String::new();
         }

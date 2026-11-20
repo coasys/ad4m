@@ -23,7 +23,7 @@ use crate::perspectives::model_query::abstract_classes::{
 use crate::perspectives::model_query::builtin_classes::{builtin, CONTAINER_URI};
 use crate::perspectives::model_query::containment::{self, ContainmentEdges};
 use crate::perspectives::model_query::types::ModelShape;
-use crate::perspectives::model_query::{ModelQueryInput, QueryClasses};
+use crate::perspectives::model_query::{LinkGuard, ModelQueryInput, QueryClasses};
 use crate::perspectives::perspective_instance::SubjectClassOption;
 use serde_json::Value;
 
@@ -254,8 +254,10 @@ impl PerspectiveInstance {
     /// it is, among those the abstract class reads. Never empty.
     fn write_targets(&self, abstract_class: &str, base: &str) -> Result<Vec<String>, AnyError> {
         let resolution = self.resolve_abstract(abstract_class)?;
+        // Every link: a write reaches the classes the record is in this
+        // agent's whole perspective, Local links included; no read applies.
         let own = self
-            .subject_classes_of(&[base.to_string()])?
+            .subject_classes_of(&[base.to_string()], LinkGuard::ANY)?
             .remove(base)
             .unwrap_or_default();
         let targets: Vec<String> = resolution
@@ -634,8 +636,10 @@ impl PerspectiveInstance {
             return Ok(None);
         }
         let resolution = self.resolve_abstract(CONTAINER_URI)?;
+        // Every link: a write reaches the classes the record is in this
+        // agent's whole perspective, Local links included; no read applies.
         let own = self
-            .subject_classes_of(&[base.to_string()])?
+            .subject_classes_of(&[base.to_string()], LinkGuard::ANY)?
             .remove(base)
             .unwrap_or_default();
         let index = self.abstract_index()?;
