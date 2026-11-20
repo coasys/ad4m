@@ -8,6 +8,7 @@
 
 use super::types::AuthInfo;
 use crate::agent::grants::KeyBinding;
+use crate::agent::session::TokenId;
 use crate::agent::AgentContext;
 use crate::secret::Secret;
 use std::collections::HashMap;
@@ -87,6 +88,17 @@ pub fn is_code(code: &str) -> bool {
     code.len() == 6 && code.bytes().all(|b| b.is_ascii_digit())
 }
 
+/// A key-bound session's approval of a request: what the minted grant inherits, and whose
+/// it is.
+#[derive(Debug)]
+pub struct Approval {
+    /// The approving session's key binding, delegated ([`KeyBinding::delegate`]).
+    pub key: KeyBinding,
+    /// The approving session's grant. The approval holds only while it does: once the
+    /// session ends (its key revoked, its identity's sessions ended), so does the approval.
+    pub grant: TokenId,
+}
+
 /// One capability request.
 struct PendingRequest {
     /// What the app asked for; after the approval, what the approver granted.
@@ -95,10 +107,12 @@ struct PendingRequest {
     target: RequestTarget,
     /// Set by the approval; goes to the approver only. Always six digits ([`is_code`]).
     code: Option<Secret>,
-    /// The binding the minted grant carries: the approving session's key binding,
-    /// delegated — so the device's revocation and the identity's sessions-end reach it.
-    /// `None` when no key-bound session approved.
-    key: Option<KeyBinding>,
+    /// The key-bound session that approved it: the binding the minted grant carries
+    /// (delegated — so the device's revocation and the identity's sessions-end reach it) and
+    /// the session's grant. `None` when no key-bound session approved.
+    approval: Option<Approval>,
+    /// When the approval came (Unix seconds); what `before` of `user.endAllSessions` compares.
+    approved_at: u64,
     attempts: u8,
     /// Order of arrival: a request with a smaller one is older.
     seq: u64,
@@ -258,7 +272,8 @@ impl PendingRequests {
                 auth,
                 target,
                 code: None,
-                key: None,
+                approval: None,
+                approved_at: 0,
                 attempts: 0,
                 seq: NEXT_SEQ.fetch_add(1, Ordering::Relaxed),
                 expires_at,
@@ -280,14 +295,15 @@ impl PendingRequests {
     /// the request's lifetime again to redeem it. The request's target stays as requested.
     /// `code` must be six digits ([`is_code`]): the empty code approves nothing. `key` is
     /// the approving session's key binding, delegated ([`KeyBinding::delegate`]): the
-    /// minted grant carries it, so it ends with the device key and the identity.
+    /// minted grant carries it, so it ends with the device key and the identity; and an
+    /// approval ends with its session ([`PendingRequests::drop_key`] and its siblings).
     pub fn approve(
         &self,
         request_id: &str,
         auth: AuthInfo,
         code: Secret,
         now: u64,
-        key: Option<KeyBinding>,
+        approval: Option<Approval>,
     ) -> Result<(), String> {
         if !is_code(code.expose()) {
             return Err("An approval code has six digits".to_string());
@@ -299,15 +315,71 @@ impl PendingRequests {
         )?;
         request.auth = auth;
         request.code = Some(code);
-        request.key = key;
+        request.approval = approval;
+        request.approved_at = now;
         request.attempts = 0;
         request.expires_at = now + request_ttl(&request.target);
         Ok(())
     }
 
+    /// Drops the approved requests that `ends` (the approvals a revocation ends with their
+    /// session), under the lock a redemption mints under: a redemption either finished before
+    /// (its grant exists for the revocation that follows to end) or finds no request. Call it
+    /// before ending the grants. An unapproved request has no approver and stays. Returns
+    /// how many went.
+    fn drop_approved(&self, ends: impl Fn(&PendingRequest) -> bool) -> usize {
+        let mut pending = self.lock();
+        let before = pending.len();
+        pending.retain(|_, request| request.code.is_none() || !ends(request));
+        before - pending.len()
+    }
+
+    /// Drops the approvals of sessions bound to the device key `key` of the identity `scid`:
+    /// [`crate::agent::grants::Grants::revoke_key`]'s selection.
+    pub fn drop_key(&self, scid: &str, key: &str) -> usize {
+        self.drop_approved(|r| {
+            r.approval
+                .as_ref()
+                .is_some_and(|a| a.key.scid == scid && a.key.key == key)
+        })
+    }
+
+    /// Drops the approvals of sessions bound to the identity `scid`, except those of the
+    /// session `keep` and approvals made at or after `before`:
+    /// [`crate::agent::grants::Grants::revoke_identity`]'s selection.
+    pub fn drop_identity(&self, scid: &str, keep: Option<&TokenId>, before: Option<u64>) -> usize {
+        self.drop_approved(|r| {
+            r.approval.as_ref().is_some_and(|a| {
+                a.key.scid == scid
+                    && Some(&a.grant) != keep
+                    && before.is_none_or(|before| r.approved_at < before)
+            })
+        })
+    }
+
+    /// Drops the approved requests for `agent`, except those the session `keep` approved and
+    /// approvals made at or after `before`: the selection of
+    /// [`crate::agent::grants::Grants::revoke_agent_except`], which ends every grant on the
+    /// agent, approved apps included.
+    pub fn drop_agent(
+        &self,
+        agent: &AgentContext,
+        keep: Option<&TokenId>,
+        before: Option<u64>,
+    ) -> usize {
+        self.drop_approved(|r| {
+            r.target == RequestTarget::Agent(agent.clone())
+                && r.approval
+                    .as_ref()
+                    .map(|a| &a.grant)
+                    .is_none_or(|g| Some(g) != keep)
+                && before.is_none_or(|before| r.approved_at < before)
+        })
+    }
+
     /// Redeems the request when `code` is its code, in one step under the lock: `mint` gets
-    /// the request's target, its approved auth and the approving session's key binding
-    /// (`None` when no key-bound session approved), and the request goes only when `mint`
+    /// the request's target, its approved auth and the key-bound approval (`None` when no
+    /// key-bound session approved; the mint checks that its session still holds), and the request goes only when `mint`
     /// succeeds, so a code redeems once and a failed mint leaves it redeemable. A wrong code
     /// counts an attempt, and the [`MAX_CODE_ATTEMPTS`]th deletes the request. A code that is
     /// not six digits ([`is_code`]) is refused before the lookup and counts nothing.
@@ -318,7 +390,7 @@ impl PendingRequests {
         request_id: &str,
         code: &str,
         now: u64,
-        mint: impl FnOnce(&AgentContext, &AuthInfo, Option<&KeyBinding>) -> Result<T, String>,
+        mint: impl FnOnce(&AgentContext, &AuthInfo, Option<&Approval>) -> Result<T, String>,
     ) -> Result<T, RedeemError> {
         // Only a six-digit code can redeem. Checked before any lookup or comparison, so the
         // empty code (or any other malformed one) never matches and touches no request.
@@ -337,7 +409,7 @@ impl PendingRequests {
                 None => Err(RedeemError::NotPermitted),
                 Some(expected) if expected.expose_for_compare(code) => match &request.target {
                     RequestTarget::Agent(target) => {
-                        match mint(target, &request.auth, request.key.as_ref()) {
+                        match mint(target, &request.auth, request.approval.as_ref()) {
                             Ok(minted) => {
                                 pending.remove(request_id);
                                 Ok(minted)
@@ -412,7 +484,8 @@ impl PendingRequests {
                     auth: AuthInfo::default(),
                     target: RequestTarget::NoAgent,
                     code: Some(Secret::new("123456")),
-                    key: None,
+                    approval: None,
+                    approved_at: 0,
                     attempts: 0,
                     seq: NEXT_SEQ.fetch_add(1, Ordering::Relaxed),
                     expires_at: u64::MAX,
@@ -458,11 +531,7 @@ mod tests {
             .unwrap();
     }
 
-    fn minted(
-        _: &AgentContext,
-        auth: &AuthInfo,
-        _: Option<&KeyBinding>,
-    ) -> Result<AuthInfo, String> {
+    fn minted(_: &AgentContext, auth: &AuthInfo, _: Option<&Approval>) -> Result<AuthInfo, String> {
         Ok(auth.clone())
     }
 
@@ -537,14 +606,17 @@ mod tests {
                 AuthInfo::default(),
                 "123456".into(),
                 0,
-                Some(session.delegate()),
+                Some(Approval {
+                    key: session.delegate(),
+                    grant: TokenId("g".into()),
+                }),
             )
             .unwrap();
         let (key, delegated) = pending
             .redeem("a", "123456", 1, |_, _, key| {
                 Ok((
-                    key.map(|k| k.key.clone()),
-                    key.is_some_and(|k| k.delegated()),
+                    key.map(|a| a.key.key.clone()),
+                    key.is_some_and(|a| a.key.delegated()),
                 ))
             })
             .unwrap();
