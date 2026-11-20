@@ -79,6 +79,11 @@ pub struct SfuPeer {
     /// When ICE last reported `Disconnected` without coming back, or `None`.
     /// See [`ICE_DISCONNECT_GRACE`].
     pub disconnected_since: Option<Instant>,
+    /// Whether ICE has reached `Connected` or `Completed` on this peer. A
+    /// later fall back to `Checking` means its path failed.
+    pub had_path: bool,
+    /// When the peer was made. See [`PEER_ESTABLISH_TIMEOUT`].
+    pub created_at: Instant,
     /// An ICE restart the client asked for (`sfu.callRestartIce`), from the
     /// request until its answer lands or the offer's retry budget ends.
     /// The offer SDP lives in [`PendingNegotiation`].
@@ -168,6 +173,15 @@ pub const ICE_DISCONNECT_GRACE: Duration = Duration::from_secs(10);
 /// but its state arrives only on the next poll.
 pub const ICE_RESTART_GRACE: Duration = Duration::from_secs(15);
 
+/// How long a peer may go without ever reaching ICE `Connected` before it
+/// is dropped. A cascade pipe whose answer never arrives has no remote
+/// candidate: str0m keeps it in `Checking` and never reports
+/// `Disconnected`, so the disconnect grace never starts. Dropped, its pipe
+/// entry goes ([`super::service`]'s dead-pipe cleanup) and the next announce
+/// dials a new pipe. A client that never connects ends the same way. A peer
+/// that had a path is never ended by this.
+pub const PEER_ESTABLISH_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Wait before the first resend of an unanswered offer. The wait doubles
 /// once: resends at t=10s and t=30s, then every [`OFFER_RESEND_STEADY`]
 /// (t=60s, 90s, ...) for as long as the offer is unanswered.
@@ -228,6 +242,8 @@ impl SfuPeer {
             is_pipe,
             channels: HashMap::new(),
             disconnected_since: None,
+            had_path: false,
+            created_at: Instant::now(),
             ice_restart: None,
             drops_logged: HashSet::new(),
             write_errors_logged: HashSet::new(),
@@ -254,11 +270,27 @@ impl SfuPeer {
             IceConnectionState::Disconnected => self.disconnected_since.or(Some(now)),
             _ => None,
         };
+        if matches!(
+            state,
+            IceConnectionState::Connected | IceConnectionState::Completed
+        ) {
+            self.had_path = true;
+        }
     }
 
-    /// Whether the peer stayed disconnected past its grace and is to be
-    /// dropped. See [`ICE_DISCONNECT_GRACE`] and [`ICE_RESTART_GRACE`].
+    /// Whether ICE never had a path within [`PEER_ESTABLISH_TIMEOUT`] of the
+    /// peer being made.
+    pub fn never_established(&self, now: Instant) -> bool {
+        !self.had_path && now >= self.created_at + PEER_ESTABLISH_TIMEOUT
+    }
+
+    /// Whether the peer stayed disconnected past its grace, or never had a
+    /// path, and is to be dropped. See [`ICE_DISCONNECT_GRACE`],
+    /// [`ICE_RESTART_GRACE`] and [`PEER_ESTABLISH_TIMEOUT`].
     pub fn stayed_disconnected(&self, now: Instant) -> bool {
+        if self.never_established(now) {
+            return true;
+        }
         let Some(since) = self.disconnected_since else {
             return false;
         };
@@ -1301,7 +1333,14 @@ impl SfuServer {
                 let mut dead_peers: Vec<DeadPeer> = Vec::new();
                 let now = Instant::now();
                 for (pid, peer) in peers.iter_mut() {
-                    if peer.stayed_disconnected(now) {
+                    if peer.never_established(now) {
+                        info!(
+                            "SFU: peer {} never connected within {} s, dropping it",
+                            pid,
+                            PEER_ESTABLISH_TIMEOUT.as_secs()
+                        );
+                        peer.rtc.disconnect();
+                    } else if peer.stayed_disconnected(now) {
                         info!("SFU: peer {} stayed disconnected, dropping it", pid);
                         peer.rtc.disconnect();
                     }
