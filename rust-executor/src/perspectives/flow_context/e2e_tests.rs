@@ -89,7 +89,7 @@ fn delivery_flow_json() -> String {
 #[tokio::test(flavor = "multi_thread")]
 async fn gather_active_flow_contexts_wires_definition_and_instance_e2e() {
     // 1) Real perspective, no LLM — everything else is genuine
-    //    (SPARQL store, Prolog engine, add_sdna registration path,
+    //    (SPARQL store, Prolog engine, register_shapes path,
     //     model_query resolution).
     let (mut perspective, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
 
