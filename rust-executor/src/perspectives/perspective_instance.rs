@@ -32,9 +32,9 @@ use crate::types::{
     PerspectiveState, PerspectiveStateFilter,
 };
 use ad4m_client::literal::Literal;
-use chrono::DateTime;
 use anyhow::anyhow;
 use anyhow::Error as AnyError;
+use chrono::DateTime;
 use futures::future;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -4298,9 +4298,7 @@ impl PerspectiveInstance {
                 instances: vec![],
                 total_count: query_input.count.unwrap_or(false).then_some(0),
             })
-            .map_err(|e| {
-                anyhow::anyhow!("Failed to serialize model query result: {}", e)
-            });
+            .map_err(|e| anyhow::anyhow!("Failed to serialize model query result: {}", e));
         }
         // A built-in's own rows (`Container`) are read through its view.
         let shapes = classes
@@ -4344,9 +4342,7 @@ impl PerspectiveInstance {
                     instances: vec![],
                     total_count: query_input.count.unwrap_or(false).then_some(0),
                 })
-                .map_err(|e| {
-                    anyhow::anyhow!("Failed to serialize model query result: {}", e)
-                });
+                .map_err(|e| anyhow::anyhow!("Failed to serialize model query result: {}", e));
             }
         }
 
@@ -4407,9 +4403,8 @@ impl PerspectiveInstance {
         self.finish_container_rows(stop, named, &query_input, &mut result)
             .await?;
 
-        serde_json::to_string(&result).map_err(|e| {
-            anyhow::anyhow!("Failed to serialize model query result: {}", e)
-        })
+        serde_json::to_string(&result)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize model query result: {}", e))
     }
 
     /// Evaluate property getters for a batch of instances in-process.
@@ -4441,9 +4436,8 @@ impl PerspectiveInstance {
             property_names,
         )?;
 
-        serde_json::to_string(&result).map_err(|e| {
-            anyhow::anyhow!("Failed to serialize evaluate_getters result: {}", e)
-        })
+        serde_json::to_string(&result)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize evaluate_getters result: {}", e))
     }
 
     /// Returns what `ad4m://retracted` tombstones did on the way in

@@ -10,12 +10,12 @@ use crate::types::{
     PerspectiveExpression, PerspectiveHandle, PerspectiveState, SentMessage,
 };
 use crate::utils::constant_time_eq;
+use anyhow::anyhow;
+use anyhow::Error as AnyError;
 use argon2::{
     password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
     Argon2,
 };
-use anyhow::anyhow;
-use anyhow::Error as AnyError;
 use rand::Rng;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
