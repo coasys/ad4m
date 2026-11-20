@@ -1801,7 +1801,13 @@ test.each([
     expect(api.sfuCallLeave).not.toHaveBeenCalled()
     expect(api.sfuCallJoin).toHaveBeenCalledTimes(1)
 
+    // The executor never got the answer: the resume sends its offer again.
+    api.sfuCallResume.mockImplementationOnce(async () => {
+        api.emitOffer(offer("renegotiate"))
+        return true
+    })
     api.emitReconnect()
+    await flush()
     await flush()
     const answer = JSON.stringify({ type: "answer", sdp: "local-answer" })
     expect(api.sfuCallAnswerServerOffer.mock.calls).toEqual([
@@ -1885,8 +1891,63 @@ test("after the socket reconnects the manager asks the executor to resume its se
     await manager.leave()
 })
 
-test("an answer the socket fault kept goes out before the resume", async () => {
+test("after the socket is back the resume goes first: a restart offer whose event was lost is answered, never with the answer kept for the offer before it", async () => {
+    // The server matches an answer by its mid list only (#1834): the answer
+    // kept for X, sent first, would use up R's token.
     const api = fakeApi()
+    const manager = new SfuManager(api, ROOM, ME, URL)
+    await manager.join(fakeStream())
+    distinctAnswers(currentPc())
+    api.sfuCallAnswerServerOffer.mockRejectedValueOnce(new RpcError(503, "WebSocket connection closed"))
+    api.emitOffer(offer("X"))
+    await flush()
+    // The server applied X's answer, then started a restart R; R's event was lost.
+    api.sfuCallResume.mockImplementationOnce(async () => {
+        api.log.push("sfuCallResume")
+        api.emitOffer(offer("R"))
+        return true
+    })
+    api.log.length = 0
+
+    api.emitReconnect()
+    await flush()
+    await flush()
+
+    expect(answersSent(api)).toEqual([answerTo("X"), answerTo("R")])
+    expect(api.log[0]).toBe("sfuCallResume")
+    await manager.leave()
+})
+
+test("an offer the resume sends again gets the answer the socket kept for it, without being applied again", async () => {
+    const api = fakeApi()
+    const manager = new SfuManager(api, ROOM, ME, URL)
+    await manager.join(fakeStream())
+    distinctAnswers(currentPc())
+    api.sfuCallAnswerServerOffer.mockRejectedValueOnce(new RpcError(503, "WebSocket connection closed"))
+    api.emitOffer(offer("X"))
+    await flush()
+    api.sfuCallResume.mockImplementationOnce(async () => {
+        api.log.push("sfuCallResume")
+        api.emitOffer(offer("X"))
+        return true
+    })
+
+    api.emitReconnect()
+    await flush()
+    await flush()
+
+    expect(answersSent(api)).toEqual([answerTo("X"), answerTo("X")])
+    expect(currentPc().remoteSdps()).toEqual(["server-answer", "X"])
+    await manager.leave()
+})
+
+test("an executor without sfu.callResume (404) gets the answer the socket kept, after the refusal", async () => {
+    const api = fakeApi()
+    api.sfuCallResume.mockImplementation(async () => {
+        api.log.push("sfuCallResume")
+        throw new RpcError(404, "Unknown type: sfu.callResume")
+    })
+    api.sfuListRooms.mockResolvedValue([room([MINE, ME])])
     const manager = new SfuManager(api, ROOM, ME, URL)
     await manager.join(fakeStream())
     api.sfuCallAnswerServerOffer.mockRejectedValueOnce(new RpcError(503, "WebSocket connection closed"))
@@ -1896,8 +1957,28 @@ test("an answer the socket fault kept goes out before the resume", async () => {
 
     api.emitReconnect()
     await flush()
+    await flush()
 
-    expect(api.log).toEqual(["sfuCallAnswerServerOffer", "sfuCallResume"])
+    expect(api.log).toEqual(["sfuCallResume", "sfuCallAnswerServerOffer"])
+    expect(api.sfuCallLeave).not.toHaveBeenCalled()
+    await manager.leave()
+})
+
+test("an api without sfuCallResume sends the answer the socket kept once the socket is back", async () => {
+    const api = fakeApi() as Partial<ReturnType<typeof fakeApi>>
+    delete api.sfuCallResume
+    const full = api as ReturnType<typeof fakeApi>
+    const manager = new SfuManager(api as SfuNeighbourhoodApi, ROOM, ME, URL)
+    await manager.join(fakeStream())
+    full.sfuCallAnswerServerOffer.mockRejectedValueOnce(new RpcError(503, "WebSocket connection closed"))
+    full.emitOffer(offer("renegotiate"))
+    await flush()
+    full.log.length = 0
+
+    full.emitReconnect()
+    await flush()
+
+    expect(full.log).toEqual(["sfuCallAnswerServerOffer"])
     await manager.leave()
 })
 
@@ -2344,6 +2425,11 @@ test("an answer the socket kept is dropped when a newer offer arrives; after the
         // B's answer was lost too: the next socket gets B's, never A's.
         failB(new RpcError(503, "WebSocket connection closed"))
         await flush()
+        // The executor never got B's answer: the resume sends B again.
+        api.sfuCallResume.mockImplementationOnce(async () => {
+            api.emitOffer(offer("B"))
+            return true
+        })
         api.emitReconnect()
         await jest.advanceTimersByTimeAsync(0)
         expect(answersSent(api)).toEqual([answerTo("A"), answerTo("B"), answerTo("B")])

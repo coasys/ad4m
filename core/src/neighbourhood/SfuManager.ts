@@ -1094,21 +1094,27 @@ export class SfuManager {
     }
 
     /**
-     * The executor socket opened again: send what a fault kept from it, then
-     * ask for what the executor sent while it was down (an offer, a roster).
-     * The answer goes first, so a resumed offer is not one it already answers.
+     * The executor socket opened again: ask for what the executor sent while
+     * it was down (an offer, a roster). The resume goes before an answer a
+     * fault kept: the executor matches an answer to its pending offer by mids
+     * only (#1834), so a kept answer sent first could use up a restart offer
+     * this client never saw. A resent offer picks the kept answer up
+     * (`applyServerOffers`) or drops it (`noteOffer`). Without the resume (no
+     * method, or 404 "Unknown type") the kept answer goes out directly.
      */
     private socketBack(): void {
         const pc = this.state.peerConnection
         if (!pc || this.reconnecting) return
         this.checkIceSoon()
         this.offerQueue = this.offerQueue.then(() =>
-            this.timeBoxed(async () => {
-                const unsent = this.unsentAnswer
-                if (unsent && this.answersCurrentOffer(unsent)) await this.sendAnswer(unsent)
-                await this.resume(pc)
-            }),
+            this.timeBoxed(() => (this.neighbourhood.sfuCallResume ? this.resume(pc) : this.sendUnsentAnswer())),
         )
+    }
+
+    /** Send the answer a socket fault kept, if it still answers the newest offer. */
+    private async sendUnsentAnswer(): Promise<void> {
+        const unsent = this.unsentAnswer
+        if (unsent && this.answersCurrentOffer(unsent)) await this.sendAnswer(unsent)
     }
 
     /**
@@ -1132,6 +1138,7 @@ export class SfuManager {
             }
             if (err instanceof RpcError && err.status === 404 && err.body.startsWith("Unknown type")) {
                 console.info("SFU: this executor has no sfu.callResume; checking the room for this session")
+                await this.sendUnsentAnswer()
             } else {
                 console.warn("SFU: the executor refused to resume the session; checking the room for it:", err)
             }

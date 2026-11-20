@@ -324,9 +324,10 @@ call: it closes the connection, leaves the session, emits `error` and then
 `call-ended` (`{ reason: "gave-up" }`, also on the `Session`, which goes
 idle) for the UI to show; a new `join` starts over. A rebuild keeps
 the participants and clears only their media. Only an SDP the connection
-cannot apply rebuilds from a renegotiation: an answer the socket lost (503,
-408) is sent again once the socket is back, then the SDK calls
-`sfu.callResume`; a resume refused other than by the socket (an executor
+cannot apply rebuilds from a renegotiation: once the socket is back the SDK
+calls `sfu.callResume` first, and an answer the socket lost (503, 408) goes
+again only for the offer the resume sends again (directly when the executor
+has no `sfu.callResume`); a resume refused other than by the socket (an executor
 without it answers 404 "Unknown type") rejoins if `sfu.listRooms` no longer
 lists the session, and otherwise waits for the executor's own resend. Of the server offers waiting, only the newest
 is applied, and each step of the offer queue gets 10 s. The restart names the session's `participantId` (only that session
