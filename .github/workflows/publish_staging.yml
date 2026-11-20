@@ -776,6 +776,17 @@ jobs:
 
       - run: pnpm install --no-frozen-lockfile
       - run: cargo login ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      - name: Publish ad4m-literal crate (ad4m-client depends on it)
+        working-directory: ad4m-literal
+        run: |
+          set +e
+          OUTPUT=$(cargo publish --allow-dirty 2>&1)
+          EXIT=$?
+          set -e
+          echo "$OUTPUT"
+          if [ $EXIT -ne 0 ]; then
+            echo "$OUTPUT" | grep -q "already exists" && echo "Already published — OK" || exit $EXIT
+          fi
       - name: Publish ad4m-client crate
         working-directory: rust-client
         run: |
