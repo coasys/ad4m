@@ -196,7 +196,13 @@ fn membership(shape: &ModelShape) -> Option<Membership> {
     let required = required_triples(shape)?;
     let local = local_predicates(shape);
     let loaded = instance_link_predicates(shape);
-    if !loaded.iter().all(|p| emittable_iri(p)) {
+    // The class's query emits every loaded predicate, and every `local` one in
+    // its status filter, as `<iri>`: one that does not parse fails the query.
+    if !loaded.iter().all(|p| emittable_iri(p))
+        || !local
+            .iter()
+            .all(|p| emittable_iri(p.trim_start_matches('<').trim_end_matches('>')))
+    {
         return None;
     }
     let loaded = loaded

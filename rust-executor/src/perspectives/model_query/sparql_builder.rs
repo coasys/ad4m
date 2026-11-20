@@ -1164,11 +1164,27 @@ pub(super) fn shape_conformance_patterns(
     // matches only the class's instances. The order of a conjunction does not
     // change its result.
     let mut leading_flags = 0;
+    // A variable-valued triple's object variable (and so its reifier) is named
+    // after its property, sanitised: `a-b` and `a_b` sanitise alike, and one
+    // variable for both would demand one link asserting both triples with one
+    // value. A later name that collides gets a counter; the first keeps the
+    // bare name, which the timestamp probe joins on.
+    let mut taken = std::collections::HashSet::new();
     for t in &conformance.triples {
-        let var = format!(
+        let base = format!(
             "?{var_prefix}{}",
             t.property.name.replace(|c: char| !c.is_alphanumeric(), "_")
         );
+        let var = (0..)
+            .map(|n| {
+                if n == 0 {
+                    base.clone()
+                } else {
+                    format!("{base}_{n}")
+                }
+            })
+            .find(|v| taken.insert(v.clone()))
+            .expect("an unused name");
         let pred = &t.property.predicate;
         match &t.object {
             ConformanceObject::Iri(iri) if !conformance.initial_tier => {
