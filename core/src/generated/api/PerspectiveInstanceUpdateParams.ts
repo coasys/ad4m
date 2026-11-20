@@ -3,7 +3,7 @@
 export type PerspectiveInstanceUpdateParams = { uuid: string, className: string, baseUri: string, 
 /**
  * Values by property name, at least one: one JSON value per single-valued
- * property, an array of member URIs per collection.
+ * property, an array of member URIs per collection that declares a setter.
  */
 properties: Record<string, unknown>, 
 /**

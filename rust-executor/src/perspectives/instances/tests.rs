@@ -4,6 +4,7 @@ use super::write::{
     add_to_collection, create, remove_from_collection, update, InstanceAddToCollection,
     InstanceCreate, InstanceRemoveFromCollection, InstanceUpdate,
 };
+use super::{InstanceError, ValidationProblem};
 use crate::agent::AgentContext;
 use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
@@ -424,12 +425,32 @@ mod decoded_literal {
     }
 }
 
-/// An `update` patch names a collection's full member list: with no declared
-/// `ad4m://setter` the collection is replaced through its own predicate —
-/// members not in the list leave, `[]` clears.
+/// `Counted` with `counts` written through a declared `collectionSetter`.
+const SET_COUNTED_SDNA: &str = r#"{
+  "target_class": "ns://Counted",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"rdf://type","target":"ns://Counted"}
+  ],
+  "properties": [
+    {"path":"ns://counted_title","name":"title","datatype":"xsd:string","min_count":1,"max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://counted_title","target":"value"}]},
+    {"path":"ns://flag","name":"flags","datatype":"xsd:boolean","collection":true,"writable":true,
+     "adder":[{"action":"addLink","source":"this","predicate":"ns://flag","target":"value"}],
+     "remover":[{"action":"removeLink","source":"this","predicate":"ns://flag","target":"value"}]},
+    {"path":"ns://count","name":"counts","datatype":"xsd:integer","collection":true,"writable":true,
+     "setter":[{"action":"collectionSetter","source":"this","predicate":"ns://count","target":"value"}],
+     "adder":[{"action":"addLink","source":"this","predicate":"ns://count","target":"value"}],
+     "remover":[{"action":"removeLink","source":"this","predicate":"ns://count","target":"value"}]}
+  ]
+}"#;
+
+/// An `update` patch names the full member list of a collection with a
+/// declared `ad4m://setter` — members not in the list leave, `[]` clears. A
+/// collection with no setter is refused (`collectionNotSettable`): its
+/// members change through `add_to_collection` / `remove_from_collection`.
 #[tokio::test(flavor = "multi_thread")]
 async fn update_replaces_a_collections_member_list() {
-    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("Counted", COUNTED_SDNA)]).await;
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("Counted", SET_COUNTED_SDNA)]).await;
     let base = create(
         &mut p,
         &ctx,
@@ -490,6 +511,34 @@ async fn update_replaces_a_collections_member_list() {
     assert_eq!(
         stored_targets(&p, &base, "ns://flag").await,
         vec!["literal:boolean:true"]
+    );
+
+    let refused = update(
+        &mut p,
+        &ctx,
+        InstanceUpdate {
+            class_name: "Counted".into(),
+            base_uri: base.clone(),
+            properties: Map::from_iter([("flags".to_string(), json!([]))]),
+            batch_id: None,
+        },
+    )
+    .await;
+    match refused {
+        Err(InstanceError::Validation { errors, .. }) => {
+            assert_eq!(errors.len(), 1, "{errors:?}");
+            assert_eq!(errors[0].property, "flags");
+            assert!(
+                matches!(errors[0].problem, ValidationProblem::CollectionNotSettable),
+                "{errors:?}"
+            );
+        }
+        other => panic!("a setter-less collection must be refused on update: {other:?}"),
+    }
+    assert_eq!(
+        stored_targets(&p, &base, "ns://flag").await,
+        vec!["literal:boolean:true"],
+        "the refused update wrote nothing"
     );
 }
 
