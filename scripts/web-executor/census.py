@@ -2,8 +2,9 @@
 
 Reads rust-executor/src (relative to the repo root this script lives in) and prints one
 line per hazard class: "<class> in ring 2: <count>". A count is a number of source lines.
-Test code is not counted: test files, `#[cfg(test)] mod x { ... }` blocks, modules declared
-under `#[cfg(test)]`, and comment lines.
+Not counted: test files, `#[cfg(test)] mod x { ... }` blocks, modules declared under
+`#[cfg(test)]`, comment lines, and items under `#[cfg(not(target_arch = "wasm32"))]`
+(native only: the web executor never compiles them).
 
 Ring 2 is the part of the executor the web executor builds (E1's ring2.py). A site that
 goes through `crate::rt` (the runtime shim) is not a hazard: `rt::spawn(`,
@@ -117,6 +118,37 @@ def strip_tests(lines):
     return out
 
 
+NATIVE_ONLY = re.compile(r'\s*#\[cfg\(not\(target_arch = "wasm32"\)\)\]\s*$')
+
+
+def strip_native_only(lines):
+    """Blank out each item or statement under `#[cfg(not(target_arch = "wasm32"))]`:
+    the web executor never compiles it, so it holds no wasm32 hazard."""
+    out, i = [], 0
+    while i < len(lines):
+        if not NATIVE_ONLY.match(lines[i]):
+            out.append(lines[i])
+            i += 1
+            continue
+        depth, opened, j = 0, False, i + 1
+        while j < len(lines):
+            code = code_part(lines[j])
+            if not opened and code.strip().startswith(("#[", "///")):
+                j += 1
+                continue
+            for c in code:
+                if c == "{":
+                    depth, opened = depth + 1, True
+                elif c == "}":
+                    depth -= 1
+            if (opened and depth <= 0) or (not opened and code.rstrip().endswith(";")):
+                break
+            j += 1
+        out += [""] * (j - i + 1)
+        i = j + 1
+    return out
+
+
 def test_modules(src_dir):
     """Paths (relative to the crate) of modules declared as `#[cfg(test)] mod x;`."""
     excluded = []
@@ -166,7 +198,7 @@ def main():
                 continue
             text = open(os.path.join(dp, f), encoding="utf-8").read()
             names, has_module = rt_time_imports(text)
-            for no, line in enumerate(strip_tests(text.split("\n")), 1):
+            for no, line in enumerate(strip_native_only(strip_tests(text.split("\n"))), 1):
                 if line.strip().startswith("//"):
                     continue
                 code = code_part(line)
