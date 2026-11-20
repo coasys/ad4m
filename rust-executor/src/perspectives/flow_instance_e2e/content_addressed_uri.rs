@@ -141,12 +141,9 @@ async fn an_honest_run_through_the_real_co_sign_path_mints_a_verifying_receipt()
 /// relation-shaped class drops both with a "declares no setter" warning.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_client_registered_relation_shape_does_not_drop_the_proposal_collections() {
-    use crate::perspectives::flow_classes::{
-        FLOW_TRANSITION_PROPOSAL_CLASS, FLOW_TRANSITION_PROPOSAL_SDNA,
-    };
+    use crate::perspectives::flow_classes::FLOW_TRANSITION_PROPOSAL_SDNA;
     use crate::perspectives::flow_instance::atom::OUTPUT_PREDICATE;
     use crate::perspectives::flow_instance::produced::mint_flow_receipt;
-    use crate::perspectives::perspective_instance::SdnaType;
 
     let mut f = seed_satisfied_fixture(None).await;
 
@@ -167,13 +164,7 @@ async fn a_client_registered_relation_shape_does_not_drop_the_proposal_collectio
     }
     let ctx = f.ctx.clone();
     f.perspective
-        .add_sdna(
-            FLOW_TRANSITION_PROPOSAL_CLASS.to_string(),
-            String::new(),
-            SdnaType::SubjectClass,
-            Some(shape.to_string()),
-            &ctx,
-        )
+        .register_shape_json(&shape.to_string(), &ctx)
         .await
         .expect("register the relation-style proposal shape");
 
