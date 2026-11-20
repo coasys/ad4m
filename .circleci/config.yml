@@ -630,6 +630,11 @@ jobs:
       - run:
           name: cargo fmt --check
           command: cargo fmt --check
+      - run:
+          # rust-executor/src/lib.rs only include!s these two roots, and rustfmt
+          # does not follow include!, so cargo fmt skips every executor module.
+          name: rustfmt --check the executor's crate roots
+          command: rustfmt --edition 2021 --check rust-executor/src/lib_native.rs rust-executor/src/lib_wasm.rs
 
   rust-tests:
     machine: true

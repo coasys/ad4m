@@ -23,6 +23,7 @@ use crate::prolog_service::{
 };
 use crate::prolog_service::{PrologMode, PROLOG_MODE};
 use crate::pubsub::get_global_pubsub;
+use crate::rt::time::{sleep, TimerInstant as Instant};
 use crate::runtime_service::notification_access::notifications_to_fire;
 use crate::types::*;
 use crate::types::{
@@ -44,9 +45,8 @@ use std::sync::atomic::AtomicI64;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, PoisonError};
 use std::time::Duration;
-use tokio::sync::{Mutex, Notify, RwLock};
-use crate::rt::time::{sleep, TimerInstant as Instant};
 use tokio::join;
+use tokio::sync::{Mutex, Notify, RwLock};
 use urlencoding;
 
 /// Tracks which predicates have changed since the last subscription check.
@@ -988,9 +988,9 @@ impl PerspectiveInstance {
     ///   with James in a live call.
     async fn managed_user_auto_processor_supervisor(&self) {
         use crate::perspectives::auto_processor::watcher::select_online_managed_users;
-        use std::collections::HashMap;
         use crate::rt::time::{SystemTime, UNIX_EPOCH};
         use crate::rt::JoinHandle;
+        use std::collections::HashMap;
 
         /// How often the supervisor re-evaluates the online-user set. Short
         /// enough that a user joining a call sees interpretation within
