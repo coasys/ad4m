@@ -397,14 +397,15 @@ impl TickReads {
         else {
             return self.set_transcript(cfg, generation, gained, queueable);
         };
-        // The entry is already out of the map. A stop puts it back at
-        // `kept_at`, so the failed merge is not marked current.
+        // The entry is already out of the map. A stop puts the pre-merge
+        // turns back at `kept_at`. The merge edits a copy, so a stop cannot
+        // store a partial vector under the old generation.
+        let original = kept;
         if read_stopped_now() {
-            self.transcripts
-                .insert(cfg.processor_id.clone(), (kept_at, query, kept));
+            self.restore_transcript(cfg, kept_at, query, original);
             return Err(());
         }
-        let mut turns = Arc::try_unwrap(kept).unwrap_or_else(|shared| (*shared).clone());
+        let mut turns = (*original).clone();
         let mut stopped = false;
         for (i, turn) in turns.iter_mut().enumerate() {
             if i % 64 == 0 && read_stopped_now() {
@@ -421,19 +422,19 @@ impl TickReads {
             }
         }
         if stopped {
-            self.restore_transcript(cfg, kept_at, query, turns);
+            self.restore_transcript(cfg, kept_at, query, original);
             return Err(());
         }
         if !gained.is_empty() {
             if read_stopped_now() {
-                self.restore_transcript(cfg, kept_at, query, turns);
+                self.restore_transcript(cfg, kept_at, query, original);
                 return Err(());
             }
             let order = transcript_order(&cfg.source_scope_query);
             let mut known: HashSet<String> = turns.iter().map(|t| t.id().to_string()).collect();
             for (i, t) in gained.into_iter().enumerate() {
                 if i % 64 == 0 && read_stopped_now() {
-                    self.restore_transcript(cfg, kept_at, query, turns);
+                    self.restore_transcript(cfg, kept_at, query, original);
                     return Err(());
                 }
                 if known.insert(t.id.clone()) {
@@ -452,7 +453,7 @@ impl TickReads {
             }
         }
         if read_stopped_now() {
-            self.restore_transcript(cfg, kept_at, query, turns);
+            self.restore_transcript(cfg, kept_at, query, original);
             return Err(());
         }
         let turns = Arc::new(turns);
@@ -461,16 +462,17 @@ impl TickReads {
         Ok(turns)
     }
 
-    /// Put a merge that stopped back at the generation it already had.
+    /// Put a merge that stopped back at the generation it already had,
+    /// with the turns from before the merge.
     fn restore_transcript(
         &mut self,
         cfg: &AutoProcessorConfig,
         kept_at: u64,
         query: String,
-        turns: Vec<CachedTurn>,
+        turns: Arc<Vec<CachedTurn>>,
     ) {
         self.transcripts
-            .insert(cfg.processor_id.clone(), (kept_at, query, Arc::new(turns)));
+            .insert(cfg.processor_id.clone(), (kept_at, query, turns));
     }
 
     /// Keep `turns`, with the text only of those `queueable` accepts, one per
@@ -3176,5 +3178,34 @@ mod tests {
             .expect("fresh transcript");
         assert_eq!(*merged, *read, "the merge holds what a fresh read holds");
         assert_eq!(reads.transcript(&c), Some((2, merged)));
+    }
+
+    /// A stop after a merge has rewritten a kept turn must put back the turns
+    /// from before the merge, still at the old generation. The watcher is not
+    /// inside the cancelled future: the stop is bound on this thread.
+    #[test]
+    fn a_stopped_merge_restores_the_turns_from_before_the_merge() {
+        use crate::perspectives::sparql_store::{BoundStop, EvalGate, EvalStop};
+
+        let c = cfg("merge-stop", 0, 32);
+        let mut reads = TickReads::default();
+        reads
+            .set_transcript(&c, 1, vec![pt("a")], |_, _| true)
+            .expect("kept transcript");
+        let gate = EvalGate::request(std::time::Duration::from_secs(30), None);
+        let _bound = BoundStop::bind(&gate.stop());
+        // Poll 1 is the check before the loop. Poll 2 is the kept turn, before
+        // its text is dropped. Poll 3 is the check before the gained turn is
+        // inserted, after that kept turn was rewritten.
+        let _arm = EvalStop::stop_after_polls(3);
+        let queueable = |id: &str, _: &str| id != "a";
+        let merged = reads.merge_transcript(&c, 2, vec![pt("c")], queueable);
+        assert!(merged.is_err(), "the merge ran past its stop");
+        let (generation, turns) = reads.transcript(&c).expect("the old transcript stays");
+        assert_eq!(generation, 1, "a stopped merge is not marked current");
+        match turns.first() {
+            Some(CachedTurn::Full(t)) if t.id == "a" && t.text == "a" => {}
+            other => panic!("a stopped merge stored a partial transcript: {other:?}"),
+        }
     }
 }

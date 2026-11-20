@@ -95,7 +95,39 @@ impl EvalStop {
     /// Whether the eval carrying this stop must end. The evaluator checks the
     /// token itself; manual scans (`for_each_matched_link`) check this.
     pub(crate) fn is_stopped(&self) -> bool {
+        #[cfg(test)]
+        self.fire_stop_after_polls();
         self.stop.kind.load(Ordering::Acquire) != RUNNING || self.token.is_cancelled()
+    }
+
+    /// Test arm: the nth call of [`Self::is_stopped`] on this thread cancels
+    /// the stop. `0` is off. Does not count [`Self::stopped_err`].
+    #[cfg(test)]
+    pub(crate) fn stop_after_polls(n: u32) -> StopAfterPolls {
+        let prev_after = STOP_AFTER_POLLS.with(|c| c.replace(n));
+        let prev_seen = STOP_POLLS_SEEN.with(|c| c.replace(0));
+        StopAfterPolls {
+            prev_after,
+            prev_seen,
+        }
+    }
+
+    #[cfg(test)]
+    fn fire_stop_after_polls(&self) {
+        let fire = STOP_AFTER_POLLS.with(|after| {
+            let n = after.get();
+            if n == 0 {
+                return false;
+            }
+            STOP_POLLS_SEEN.with(|seen| {
+                let next = seen.get().saturating_add(1);
+                seen.set(next);
+                next >= n
+            })
+        });
+        if fire {
+            self.cancel_for_test();
+        }
     }
 
     /// The error a stopped eval reports, saying why; `None` while it may
@@ -235,6 +267,27 @@ pub(crate) fn query_deadline() -> Duration {
             .filter(|secs| *secs > 0)
             .unwrap_or(30),
     )
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static STOP_AFTER_POLLS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    static STOP_POLLS_SEEN: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Restores the previous [`EvalStop::stop_after_polls`] arm.
+#[cfg(test)]
+pub(crate) struct StopAfterPolls {
+    prev_after: u32,
+    prev_seen: u32,
+}
+
+#[cfg(test)]
+impl Drop for StopAfterPolls {
+    fn drop(&mut self) {
+        STOP_AFTER_POLLS.with(|c| c.set(self.prev_after));
+        STOP_POLLS_SEEN.with(|c| c.set(self.prev_seen));
+    }
 }
 
 std::thread_local! {
