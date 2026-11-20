@@ -222,13 +222,12 @@ impl LanguageRuntimeHandle {
 
     /// Send an operation and wait for the result.
     async fn send(&self, operation: LanguageOperation) -> Result<String, String> {
-        let op_name = format!("{:?}", operation);
         let (response_tx, response_rx) = oneshot::channel();
 
         debug!(
             "[handle:{}] Sending operation: {}",
             self.language_address,
-            &op_name[..op_name.len().min(100)]
+            op_summary(&operation)
         );
 
         // Only script calls give up: loading a language and its teardown wait for it.
@@ -368,5 +367,27 @@ impl LanguageRuntimeHandle {
             Some(name) => format!("{} ({})", name, self.language_address),
             None => self.language_address.clone(),
         }
+    }
+}
+
+/// The start of `operation`'s `{:?}` for a log line: a script can be long.
+fn op_summary(operation: &LanguageOperation) -> String {
+    format!("{:?}", operation).chars().take(100).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A script with a multi-byte character across byte 100 of its `{:?}` (a name with an
+    /// umlaut) is cut at a character, not in the middle of one.
+    #[test]
+    fn a_long_script_is_cut_at_a_character() {
+        // `Execute("` is 9 bytes: 90 ASCII bytes put the `ü` at bytes 99..101.
+        let script = format!("{}ü and more", "a".repeat(90));
+        let op = LanguageOperation::Execute(script, AgentContext::main_agent());
+        let summary = op_summary(&op);
+        assert_eq!(summary.chars().count(), 100);
+        assert!(summary.ends_with('ü'), "{summary:?}");
     }
 }

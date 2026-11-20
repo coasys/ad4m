@@ -399,7 +399,7 @@ impl LanguageRuntime {
                             Some(request) => {
                                 queued.lock().unwrap().remove(&request.id);
                                 let is_teardown = matches!(request.operation, LanguageOperation::Teardown);
-                                debug!("[lang:{}] Processing operation: {:?}", addr, request.operation);
+                                debug!("[lang:{}] Processing operation: {}", addr, request.operation.name());
                                 // Time in this runtime's queue (#1133 symptom ①): the
                                 // counterpart of the `[hc-actor] … waited` line.
                                 let waited = request.queued_at.elapsed();
