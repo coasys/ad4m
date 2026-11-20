@@ -1108,6 +1108,7 @@ impl PerspectiveInstance {
     pub async fn teardown_background_tasks(&self) {
         self.is_teardown.store(true, Ordering::Release);
         self.wakes.all();
+        self.language_broadcasts.lock().unwrap().abort();
     }
 
     /// Return diagnostic stats for this perspective's memory-relevant data structures.

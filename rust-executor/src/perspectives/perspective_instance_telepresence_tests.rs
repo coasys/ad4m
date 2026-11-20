@@ -34,6 +34,9 @@ enum StubMode {
     Block,
     /// Sleep `STUB_DELAY`, then fail — a language call that errors.
     Fail,
+    /// Never answer, and take the next call at once: a call the runtime
+    /// lost (the reply sender is kept, so the caller waits forever).
+    Hang,
 }
 
 /// A link language served by this test. `Execute` calls arrive on its
@@ -100,6 +103,7 @@ async fn stub_language(peers: Vec<String>, caps: &[Capability]) -> StubLanguage 
         let peers = peers.clone();
         let scripts = scripts.clone();
         tokio::spawn(async move {
+            let mut lost = Vec::new();
             while let Some(request) = requests.recv().await {
                 let reply = match &request.operation {
                     LanguageOperation::Execute(script, _) => {
@@ -114,6 +118,10 @@ async fn stub_language(peers: Vec<String>, caps: &[Capability]) -> StubLanguage 
                     }
                     _ => Ok("null".to_string()),
                 };
+                if matches!(*mode.lock().unwrap(), StubMode::Hang) {
+                    lost.push(request.response_tx);
+                    continue;
+                }
                 let blocked = matches!(*mode.lock().unwrap(), StubMode::Block | StubMode::Fail);
                 if blocked {
                     sleep(STUB_DELAY).await;
@@ -751,4 +759,78 @@ async fn a_remote_member_who_joins_inside_the_cache_window_gets_the_next_signal(
 
     stub.stop().await;
     crate::perspectives::unregister_perspective(&instance.uuid);
+}
+
+/// A language call that never answers holds one send for at most the
+/// send's time-box; the broadcasts behind it still go out.
+#[tokio::test(start_paused = true)]
+async fn a_hung_language_send_is_abandoned_after_its_time_box() {
+    test_setup();
+    let stub = stub_language(
+        vec!["did:key:remote".to_string()],
+        &[
+            Capability::PeersRemote,
+            Capability::TelepresenceSendBroadcast,
+        ],
+    )
+    .await;
+    let instance = neighbourhood(&stub, vec![crate::agent::did()]).await;
+    stub.set(StubMode::Hang);
+
+    instance.send_broadcast(offer(), false).await.unwrap();
+    instance
+        .send_broadcast(
+            signal(serde_json::json!({"v": 1, "call": "room:x", "to": "*", "kind": "ice",
+                "candidate": {"candidate": "behind-the-hung-send"}})),
+            false,
+        )
+        .await
+        .unwrap();
+    sleep(Duration::from_millis(50)).await;
+    assert_eq!(stub.send_count(), 1, "setup: the first send is in flight");
+
+    sleep(Duration::from_secs(120)).await;
+    assert_eq!(
+        sends_with(&stub, "behind-the-hung-send"),
+        1,
+        "the broadcast behind a hung send never went out"
+    );
+
+    stub.stop().await;
+    crate::perspectives::unregister_perspective(&instance.uuid);
+}
+
+/// Teardown during a hung send ends the drain task at once: it holds a
+/// clone of the perspective, and with it the perspective's store.
+#[tokio::test(start_paused = true)]
+async fn teardown_during_a_hung_send_ends_the_drain_task() {
+    test_setup();
+    let stub = stub_language(
+        vec!["did:key:remote".to_string()],
+        &[
+            Capability::PeersRemote,
+            Capability::TelepresenceSendBroadcast,
+        ],
+    )
+    .await;
+    let instance = neighbourhood(&stub, vec![crate::agent::did()]).await;
+    crate::perspectives::unregister_perspective(&instance.uuid);
+    let held = || Arc::strong_count(&instance.language_broadcasts);
+    let before = held();
+    stub.set(StubMode::Hang);
+
+    instance.send_broadcast(offer(), false).await.unwrap();
+    sleep(Duration::from_millis(50)).await;
+    assert_eq!(stub.send_count(), 1, "setup: the send is in flight");
+    assert!(held() > before, "setup: the drain task holds the perspective");
+
+    instance.teardown_background_tasks().await;
+    sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        held(),
+        before,
+        "the drain task still holds the perspective after teardown"
+    );
+
+    stub.stop().await;
 }

@@ -6,14 +6,16 @@
 //! mesh offers, ICE candidates — queued behind it and died waiting. So the
 //! remote send is not part of the RPC: `send_broadcast` answers once local
 //! delivery is done and leaves the send to a per-perspective queue drained
-//! by a background task, one send at a time and at most
-//! `MAX_PENDING_BROADCASTS` deep. Past the bound a send is refused so the
-//! caller learns it did not go out, and a queued presence beat is dropped
-//! the moment a newer one of the same sender, device and call arrives —
-//! it is superseded anyway.
+//! by a background task, one send at a time, each time-boxed to
+//! `SEND_TIMEOUT`, and at most `MAX_PENDING_BROADCASTS` deep. Past the
+//! bound a send is refused so the caller learns it did not go out, and a
+//! queued presence beat is dropped the moment a newer one of the same
+//! sender, device and call arrives — it is superseded anyway. Teardown
+//! aborts the task, even mid-send.
 
 use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
@@ -28,16 +30,31 @@ use crate::types::PerspectiveExpression;
 /// growing a backlog the RPC reported as sent.
 pub(crate) const MAX_PENDING_BROADCASTS: usize = 8;
 
+/// How long one link-language send may take before the drain task gives
+/// it up and moves on: a call the runtime never answers must not hold
+/// every broadcast behind it.
+const SEND_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// The predicate the call protocol's messages go out on
 /// (`core/src/neighbourhood/MeshManager.ts`'s `RTC_PREDICATE`).
 const RTC_PREDICATE: &str = "ad4m://session/rtc";
 
-/// Remote broadcasts waiting on the link language, and whether a task is
-/// draining them.
+/// Remote broadcasts waiting on the link language, and the task draining
+/// them, if one runs.
 #[derive(Default)]
 pub(crate) struct BroadcastQueue {
     pending: VecDeque<PerspectiveExpression>,
-    draining: bool,
+    drain: Option<tokio::task::AbortHandle>,
+}
+
+impl BroadcastQueue {
+    /// Stop the drain task, mid-send if it is in one, and drop what waits.
+    pub(crate) fn abort(&mut self) {
+        if let Some(drain) = self.drain.take() {
+            drain.abort();
+        }
+        self.pending.clear();
+    }
 }
 
 /// Who a presence beat speaks for: `(sender DID, device, call)`. `Some`
@@ -99,6 +116,9 @@ impl PerspectiveInstance {
         }
 
         let mut queue = self.language_broadcasts.lock().unwrap();
+        if self.is_teardown.load(Ordering::Acquire) {
+            return Ok(());
+        }
         if let Some(key) = beat_key(&payload) {
             queue
                 .pending
@@ -110,36 +130,40 @@ impl PerspectiveInstance {
             ));
         }
         queue.pending.push_back(payload);
-        if queue.draining {
+        if queue.drain.is_some() {
             return Ok(());
         }
-        queue.draining = true;
-        drop(queue);
 
+        // Spawned under the queue's lock, so the handle is in place before
+        // the task can look at the queue (and clear it when done).
         let this = self.clone();
-        tokio::spawn(async move {
+        let drain = tokio::spawn(async move {
             let mut language = language;
             loop {
                 let next = {
                     let mut queue = this.language_broadcasts.lock().unwrap();
                     match queue.pending.pop_front() {
-                        Some(payload) => payload,
-                        None => {
-                            queue.draining = false;
+                        Some(payload) if !this.is_teardown.load(Ordering::Acquire) => payload,
+                        _ => {
+                            queue.drain = None;
                             break;
                         }
                     }
                 };
-                if this.is_teardown.load(Ordering::Acquire) {
-                    break;
-                }
                 // A slow language call holds this task, never the RPCs that
                 // queued behind it — they already answered.
-                if let Err(e) = language.send_broadcast(next).await {
-                    log::warn!("Telepresence broadcast via the link language failed: {e}");
+                match tokio::time::timeout(SEND_TIMEOUT, language.send_broadcast(next)).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        log::warn!("Telepresence broadcast via the link language failed: {e}")
+                    }
+                    Err(_) => log::warn!(
+                        "Telepresence broadcast via the link language did not answer within {SEND_TIMEOUT:?}; giving it up"
+                    ),
                 }
             }
         });
+        queue.drain = Some(drain.abort_handle());
         Ok(())
     }
 }
