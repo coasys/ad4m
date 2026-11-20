@@ -18,7 +18,7 @@ use super::types::{ModelShape, ShapeProperty, ShapeRelation, WhereCondition};
 use super::utils::escape_sparql_string;
 use crate::perspectives::sparql_store::EvalStop;
 use crate::perspectives::sparql_store::SparqlStore;
-use deno_core::anyhow::{anyhow, Error};
+use anyhow::{anyhow, Error};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 
@@ -642,11 +642,7 @@ pub(crate) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<Mode
                 .get("transform")
                 .map(|v| {
                     serde_json::from_value::<TransformExpression>(v.clone()).map_err(|e| {
-                        deno_core::anyhow::anyhow!(
-                            "Failed to parse transform for property '{}': {}",
-                            name,
-                            e
-                        )
+                        anyhow::anyhow!("Failed to parse transform for property '{}': {}", name, e)
                     })
                 })
                 .transpose()?;
