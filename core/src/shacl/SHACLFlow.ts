@@ -1,6 +1,7 @@
 import { Link } from "../links/Links";
 import { Literal } from "../Literal";
 import { AD4MAction } from "./SHACLShape";
+import { encodeRFC3986URIComponent } from "../rfc3986";
 
 // Re-export AD4MAction for consumers who import from SHACLFlow
 export { AD4MAction };
@@ -630,8 +631,7 @@ export class SHACLFlow {
    * executor's flow writer (`parse_flow_to_links`) builds the same URI.
    */
   transitionUri(fromState: string, toState: string, actionName: string): string {
-    const part = (s: string) =>
-      encodeURIComponent(s).replace(/[!'()*]/g, c => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+    const part = encodeRFC3986URIComponent;
     return `${this.namespace}${this.name}.transition/${part(fromState)}/${part(toState)}/${part(actionName)}`;
   }
 
