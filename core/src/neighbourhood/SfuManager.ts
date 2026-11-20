@@ -830,10 +830,11 @@ export class SfuManager {
      *  - someone else sends: the room lists another participant this
      *    client holds a received track of;
      *  - inbound RTP over all media sections has not grown for 5 s, while
-     *    outbound RTP has;
+     *    this client sends now (outbound RTP grew since the read before);
      *  - and the RTCP reports on this client's own media have stopped: more
      *    than two report intervals with none, the interval being the
-     *    shortest for what this client sends (str0m: video 1 s, audio 5 s).
+     *    shortest for what this client sends now (str0m: video 1 s, audio
+     *    5 s), read from the last second's send activity.
      *    So over 2 s for a client sending video, over 10 s for audio only:
      *    one lost report is not a dead path.
      *
@@ -862,8 +863,8 @@ export class SfuManager {
     private watchReceiving(pc: RTCPeerConnection): void {
         this.stopReceiveWatch()
         this.stall = null
-        // Since when inbound RTP and the reports have not changed, and what was sent by then.
-        let rtp: { at: number; inbound: number; outbound: number; outboundVideo: number } | null = null
+        // Since when inbound RTP and the reports have not changed.
+        let rtp: { at: number; inbound: number } | null = null
         let reports: { at: number; key: string } | null = null
         let last: ReceiveSample | null = null
         let sampling = false
@@ -893,8 +894,9 @@ export class SfuManager {
                 return
             }
             const now = Date.now()
+            const previous = last
             // Media or a report since the last read: the path back works.
-            if (last && (sample.inbound !== last.inbound || sample.reports !== last.reports)) {
+            if (previous && (sample.inbound !== previous.inbound || sample.reports !== previous.reports)) {
                 if (this.stall?.pc === pc) console.info("SFU: receiving again after the ICE restart")
                 this.stall = null
                 if (this.stallRebuild) {
@@ -903,9 +905,7 @@ export class SfuManager {
                 }
             }
             last = sample
-            if (!rtp || sample.inbound !== rtp.inbound) {
-                rtp = { at: now, inbound: sample.inbound, outbound: sample.outbound, outboundVideo: sample.outboundVideo }
-            }
+            if (!rtp || sample.inbound !== rtp.inbound) rtp = { at: now, inbound: sample.inbound }
             if (!reports || sample.reports !== reports.key) reports = { at: now, key: sample.reports }
 
             const stall = this.stall?.pc === pc ? this.stall : null
@@ -931,13 +931,12 @@ export class SfuManager {
                 rtp = reports = null
                 return
             }
+            // What this client sends now, against the read before: not since inbound
+            // last moved, or a camera turned off in an idle room keeps the video window.
+            if (!previous || sample.outbound <= previous.outbound) return
             const reportMs =
-                sample.outboundVideo > rtp.outboundVideo ? SfuManager.VIDEO_REPORT_MS : SfuManager.AUDIO_REPORT_MS
-            if (
-                now - rtp.at >= SfuManager.RECEIVE_STALL_MS &&
-                now - reports.at > SfuManager.MISSED_REPORTS * reportMs &&
-                sample.outbound > rtp.outbound
-            ) {
+                sample.outboundVideo > previous.outboundVideo ? SfuManager.VIDEO_REPORT_MS : SfuManager.AUDIO_REPORT_MS
+            if (now - rtp.at >= SfuManager.RECEIVE_STALL_MS && now - reports.at > SfuManager.MISSED_REPORTS * reportMs) {
                 console.info("SFU: receiving nothing while sending, restarting ICE")
                 rtp = reports = null
                 this.stall = { pc, failures: 0, deadline: now + SfuManager.RESTART_TIMEOUT_MS }

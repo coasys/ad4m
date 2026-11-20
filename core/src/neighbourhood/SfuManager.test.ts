@@ -1985,6 +1985,46 @@ describe("the receive-stall watchdog", () => {
         expect(api.sfuCallRestartIce).not.toHaveBeenCalled()
     })
 
+    // What the client sends is read from its current send activity (each read
+    // against the one before), not from when inbound last moved: a client that
+    // changes what it sends in an idle room is judged on what it sends now.
+
+    test("a client that turns its camera off in an idle room is judged on the 5 s audio reports from then on", async () => {
+        const { api, pc } = await flowingCall()
+        // Everyone else stops sending; this client keeps sending video (reports every second) for 10 s.
+        pc.flow = { inbound: false, outbound: true, video: true, feedback: true }
+        await jest.advanceTimersByTimeAsync(10_000)
+        // Camera off: audio only, and str0m reports on it every 5 s.
+        pc.flow = { inbound: false, outbound: true, video: false, feedback: false }
+        for (let report = 1; report <= 12; report++) {
+            await jest.advanceTimersByTimeAsync(4_000)
+            pc.flow.feedback = true
+            await jest.advanceTimersByTimeAsync(1_000)
+            pc.flow.feedback = false
+        }
+        expect(api.sfuCallRestartIce).not.toHaveBeenCalled()
+    })
+
+    test("while it still sends video in an idle room, reports missing for over 2 s restart it", async () => {
+        const { api, pc } = await flowingCall()
+        pc.flow = { inbound: false, outbound: true, video: true, feedback: true }
+        await jest.advanceTimersByTimeAsync(10_000)
+        expect(api.sfuCallRestartIce).not.toHaveBeenCalled()
+        pc.flow.feedback = false
+        await jest.advanceTimersByTimeAsync(4_000)
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(1)
+    })
+
+    test("a client that turns all its tracks off in an idle room is left alone", async () => {
+        const { api, pc } = await flowingCall()
+        pc.flow = { inbound: false, outbound: true, video: true, feedback: true }
+        await jest.advanceTimersByTimeAsync(10_000)
+        // Camera and mic off (`replaceTrack(null)`): nothing goes out, no reports come back.
+        pc.flow = { inbound: false, outbound: false, video: false, feedback: false }
+        await jest.advanceTimersByTimeAsync(60_000)
+        expect(api.sfuCallRestartIce).not.toHaveBeenCalled()
+    })
+
     test("a client that sends only audio restarts once two audio reports in a row are missing", async () => {
         const { api, pc } = await flowingCall()
         pc.flow = { inbound: false, outbound: true, video: false, feedback: false }
