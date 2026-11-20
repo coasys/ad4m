@@ -36,6 +36,22 @@ pub(crate) const LANGUAGE_CALL_DEADLINE: Duration = Duration::from_secs(60);
 /// Ids for `LanguageRuntimeRequest::id`.
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(0);
 
+/// A call's entry in the queue report while its caller waits; removed when dropped. The
+/// runtime also removes it when it takes the call.
+struct QueuedEntry<'a> {
+    queued: &'a QueuedRequests,
+    id: u64,
+}
+
+impl Drop for QueuedEntry<'_> {
+    fn drop(&mut self) {
+        self.queued
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.id);
+    }
+}
+
 /// What [`LanguageRuntimeHandle::queue_snapshot`] reports.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct QueueSnapshot {
@@ -230,24 +246,27 @@ impl LanguageRuntimeHandle {
         let queued_at = Instant::now();
         let started = Arc::new(std::sync::OnceLock::new());
         self.queued.lock().unwrap().insert(id, queued_at);
-        if let Err(e) = self.tx.send(LanguageRuntimeRequest {
-            operation,
-            response_tx,
-            queued_at,
+        // Off the queue report however this call ends: answered, failed, or dropped by a
+        // caller that stopped waiting (a timeout, a cancelled RPC).
+        let _queued = QueuedEntry {
+            queued: &self.queued,
             id,
-            started: started.clone(),
-        }) {
-            self.queued.lock().unwrap().remove(&id);
-            return Err(format!("Language runtime channel closed: {}", e));
-        }
+        };
+        self.tx
+            .send(LanguageRuntimeRequest {
+                operation,
+                response_tx,
+                queued_at,
+                id,
+                started: started.clone(),
+            })
+            .map_err(|e| format!("Language runtime channel closed: {}", e))?;
 
         let response = if is_call {
             self.wait_for_call(id, response_rx).await
         } else {
             response_rx.await
         };
-        // Taken, answered or given up: no longer waiting, also for a runtime a test plays.
-        self.queued.lock().unwrap().remove(&id);
         // For a caller that times its phases (`neighbourhood.sendBroadcast`): the time in
         // the queue, then the time the call ran.
         let ended = Instant::now();

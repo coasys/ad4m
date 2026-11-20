@@ -102,4 +102,23 @@ mod tests {
         assert_eq!(capture::lines("language.queue", &[&language]).len(), 1);
         controller.set_runtime_for_test(&address, None).await;
     }
+
+    /// A caller that stops waiting (its future dropped: a timeout, a cancelled RPC) takes its
+    /// call off the queue report, though the runtime never answered it.
+    #[tokio::test]
+    async fn a_cancelled_call_leaves_the_queue_report() {
+        let address = format!("QmCancelledCall{}", uuid::Uuid::new_v4().simple());
+        let (tx, mut requests) = tokio::sync::mpsc::unbounded_channel();
+        let handle = LanguageRuntimeHandle::from_channel(address, tx);
+        let waited =
+            tokio::time::timeout(Duration::from_millis(50), handle.execute("hang()".into())).await;
+        assert!(waited.is_err(), "the call was answered");
+        // The runtime still holds the request; nobody waits for it any more.
+        let _held = requests.recv().await.unwrap();
+        assert!(
+            handle.queue_snapshot().is_none(),
+            "a dropped call still counts as waiting: {:?}",
+            handle.queue_snapshot()
+        );
+    }
 }
