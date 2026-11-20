@@ -178,6 +178,11 @@ fn matches_allowed(candidate: &Value, allowed: &Value) -> bool {
 pub(crate) fn coerce_scalar(info: &PropView<'_>, value: &Value) -> Result<Value, ValidationError> {
     let err = |problem: ValidationProblem| ValidationError::on(info, problem, Some(value));
 
+    if let Value::Array(items) = value {
+        return Err(err(ValidationProblem::ArrayForScalar {
+            length: items.len(),
+        }));
+    }
     if value.is_null() {
         return Err(err(ValidationProblem::Null));
     }
@@ -198,23 +203,6 @@ pub(crate) fn coerce_scalar(info: &PropView<'_>, value: &Value) -> Result<Value,
     }
 
     let wrong_type = || err(ValidationProblem::WrongType);
-
-    // A structured value on an open (`string`) datatype keeps the
-    // `literal:json:` encoding the subject writers have always used for it —
-    // a `metadata = {...}` property on a JSON-schema model round-trips whole.
-    // A typed scalar refuses it: an object is not a boolean.
-    match value {
-        Value::Array(items) if info.type_name() != "string" => {
-            return Err(err(ValidationProblem::ArrayForScalar {
-                length: items.len(),
-            }));
-        }
-        Value::Array(_) | Value::Object(_) if info.type_name() == "string" => {
-            return Ok(value.clone());
-        }
-        Value::Object(_) => return Err(wrong_type()),
-        _ => {}
-    }
     let coerced = match info.type_name().as_str() {
         "boolean" => match value {
             Value::Bool(_) => Ok(value.clone()),
