@@ -394,10 +394,6 @@ pub enum Recheck {
     /// whether or not the key map holds that log now. After the re-check's receiver lagged,
     /// since a lost change may belong to a log the map's bound dropped.
     Logged,
-    /// The links stored as `flagged`: each tick, since a revocation notice
-    /// (`verdict::NOTICE_PREDICATE`) arriving after them may vouch for one and lift it back
-    /// to `valid`.
-    Flagged,
 }
 
 /// Judges the links of `scope` again in every perspective, from the key map, and rewrites

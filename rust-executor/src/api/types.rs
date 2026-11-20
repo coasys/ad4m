@@ -475,18 +475,7 @@ pub struct NotificationGrantRequest {
     pub granted: bool,
 }
 
-// ── SDNA / Commands / Subjects ──
-
-#[derive(Deserialize, TS)]
-#[ts(optional_fields)]
-#[serde(rename_all = "camelCase")]
-#[ts(export)]
-pub struct AddSdnaRequest {
-    pub name: String,
-    pub sdna_code: Option<String>,
-    pub sdna_type: String,
-    pub shacl_json: Option<String>,
-}
+// ── Commands / Subjects ──
 
 #[derive(Deserialize, TS)]
 #[ts(optional_fields)]

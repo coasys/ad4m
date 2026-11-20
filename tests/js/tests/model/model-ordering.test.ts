@@ -10,7 +10,7 @@
  * was being dropped in the serialisation between them.
  *
  * These drive the real path: `@Model` classes registered through
- * `ensureSubjectClass`, saved through a real batch, read back through the ORM.
+ * `register()`, saved through a real batch, read back through the ORM.
  *
  * Why a reorder rather than a fresh create is the load-bearing case: on create,
  * the collection's links are written in the order assigned, so reading by link
