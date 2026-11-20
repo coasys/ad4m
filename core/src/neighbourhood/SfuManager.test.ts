@@ -1446,6 +1446,24 @@ test("ICE disconnected also checks the executor socket once, with the restart", 
     }
 })
 
+test("ICE disconnected checks the socket with a 3 s deadline, so a dead socket is redialled before the 15 s restart timeout", async () => {
+    // Two probes of 8 s (16 s) outlast the restart's 15 s; ICE going
+    // disconnected is its own proof of a broken path.
+    fakeTimers()
+    try {
+        const api = fakeApi()
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream())
+        await iceState("connected")
+
+        await iceState("disconnected")
+        expect(api.checkConnection.mock.calls).toEqual([[3_000]])
+        await manager.leave()
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
 test("a lost restart offer stays open until the executor can resend it", async () => {
     // ICE drops, the offer is lost, and signaling returns 2 s later. The
     // executor resends that offer at 10 s. The restart stays open through

@@ -98,8 +98,9 @@ export interface SfuNeighbourhoodApi {
     /** Check the executor socket now; one found dead is redialled and
      *  `onNetworkChange` fires. Called when ICE goes disconnected, since a
      *  network switch the platform announced nothing for leaves that socket
-     *  OPEN and dead, and the restart would go out on it. */
-    checkConnection(): void
+     *  OPEN and dead, and the restart would go out on it. `deadlineMs` is how
+     *  long each probe waits for an answer (the client's default when unset). */
+    checkConnection(deadlineMs?: number): void
     sfuAddIceCandidate(
         neighbourhoodUrl: string,
         roomName: string,
@@ -331,6 +332,11 @@ export class SfuManager {
      *  for ICE. A restart that connects clears the timer at once. */
     private static readonly RESTART_TIMEOUT_MS =
         SfuManager.OFFER_RESEND_BASE_MS + SfuManager.RESTART_AFTER_RESEND_MS
+    /** How long each socket probe waits on ICE disconnected. Short: ICE going
+     *  disconnected is its own proof of a broken path, and two probes must drop
+     *  a dead socket well inside RESTART_TIMEOUT_MS for the restart to go out
+     *  on a new one. */
+    private static readonly ICE_SOCKET_CHECK_MS = 3_000
     /** A rebuild is running: a second failure signal joins it rather than starting another. */
     private reconnecting = false
     /** Bumped by `leave()`, so a reconnect in flight stops before rejoining. */
@@ -634,7 +640,7 @@ export class SfuManager {
             } else if (pc.iceConnectionState === "disconnected") {
                 // The path may be gone with no `online` event; the restart
                 // needs a live socket, and a dead one is redialled in seconds.
-                this.neighbourhood.checkConnection()
+                this.neighbourhood.checkConnection(SfuManager.ICE_SOCKET_CHECK_MS)
                 this.restartIce(pc)
             } else if (
                 pc.iceConnectionState === "connected" ||

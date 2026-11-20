@@ -255,8 +255,8 @@ export class NeighbourhoodClient {
 
     /** Check the client's socket now: one that says nothing within a
      *  deadline is treated as a network change. See {@link ApiClient.checkConnection}. */
-    checkConnection(): void {
-        this.#apiClient.checkConnection()
+    checkConnection(deadlineMs?: number): void {
+        this.#apiClient.checkConnection(deadlineMs)
     }
 
     async sfuGetConfig(neighbourhoodUrl: string): Promise<SfuConfig> {

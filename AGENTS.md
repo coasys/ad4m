@@ -344,7 +344,9 @@ socket a network switch left OPEN is noticed in 10 to 20 s. `online` redials
 at once; `change` on `navigator.connection` (only when its `type` or
 `navigator.onLine` changed) and ICE `disconnected` run `checkConnection`,
 which sends no probe when the socket delivered a message in the last 5 s and
-drops a socket only after two probes in a row got nothing for 8 s each.
+drops a socket only after two probes in a row got nothing for 8 s each
+(3 s each on ICE `disconnected`, so a dead socket is redialled well inside
+the 15 s restart window).
 
 SFU behind NAT (`rust-executor/src/sfu/{server,reachability}.rs`): the SFU
 binds `sfu_bind_addr` on `sfu_udp_port` (0/unset: ephemeral; a fixed port
