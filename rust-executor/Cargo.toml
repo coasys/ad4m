@@ -274,7 +274,8 @@ wasm-bindgen-futures = "0.4"
 [target.'cfg(all(not(target_env = "msvc"), not(target_arch = "wasm32")))'.dependencies]
 tikv-jemalloc-ctl = { version = "0.6", features = ["stats"] }
 
-[dev-dependencies]
+# Native tests. Several of these crates do not build for wasm32 (mockito, tokio-tungstenite).
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 tempfile = "3"
 # Already in the lockfile as a transitive dependency; test-only certificate
 # fixtures for the MCP TLS end-to-end test.
@@ -288,6 +289,10 @@ http-body-util = "0.1"
 mockito = "1"
 # Same version axum's `ws` feature uses: a real client for socket-level tests.
 tokio-tungstenite = "0.29"
+
+# The web executor's tests run under Node with wasm-bindgen-test (src/web/AGENTS.md).
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"
 
 [build-dependencies]
 fs_extra = "1.3.0"

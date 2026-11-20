@@ -20,6 +20,7 @@ pub mod perspective_snapshot;
 pub mod perspectives;
 pub mod presence;
 mod prolog_service;
+pub mod rt;
 pub mod runtime_service;
 pub mod secret;
 pub mod sfu;
