@@ -160,13 +160,12 @@ pub struct FilterState {
     startup: RwLock<Option<Startup>>,
     has_override: AtomicBool,
     over: RwLock<Option<Override>>,
+    /// Whether this state sets `log`'s global max level: the executor's own does; a test's
+    /// does not, so tests do not change it under each other.
+    drives_max_level: bool,
 }
 
-static STATE: LazyLock<FilterState> = LazyLock::new(|| FilterState {
-    startup: RwLock::new(None),
-    has_override: AtomicBool::new(false),
-    over: RwLock::new(None),
-});
+static STATE: LazyLock<FilterState> = LazyLock::new(|| FilterState::new(true));
 
 /// The executor's filter state.
 pub fn state() -> &'static FilterState {
@@ -178,6 +177,23 @@ fn build_filter(spec: &str) -> env_logger::filter::Filter {
 }
 
 impl FilterState {
+    fn new(drives_max_level: bool) -> Self {
+        FilterState {
+            startup: RwLock::new(None),
+            has_override: AtomicBool::new(false),
+            over: RwLock::new(None),
+            drives_max_level,
+        }
+    }
+
+    /// `log::set_max_level`, for the executor's state only. Called with the `over` write
+    /// lock held (see `revert_if`).
+    fn set_max_level(&self, level: LevelFilter) {
+        if self.drives_max_level {
+            log::set_max_level(level);
+        }
+    }
+
     /// Record the startup filter. Called once by [`install`].
     fn set_startup(&self, spec: &str) {
         *self.startup.write().unwrap() = Some(Startup::new(spec));
@@ -234,7 +250,7 @@ impl FilterState {
             if slot.as_ref().is_some_and(|o| o.until == expired.until) {
                 *slot = None;
                 self.has_override.store(false, Ordering::Relaxed);
-                log::set_max_level(self.startup_max());
+                self.set_max_level(self.startup_max());
                 true
             } else {
                 false
@@ -305,7 +321,7 @@ impl FilterState {
             let mut slot = self.over.write().unwrap();
             *slot = Some(over.clone());
             self.has_override.store(true, Ordering::Relaxed);
-            log::set_max_level(max);
+            self.set_max_level(max);
         }
         crate::call_diag!(
             log::Level::Warn,
@@ -332,21 +348,31 @@ impl FilterState {
 /// behind [`state()`].
 pub struct ReloadableLogger {
     inner: Box<dyn Log>,
+    state: &'static FilterState,
 }
 
 impl ReloadableLogger {
     pub fn new(inner: Box<dyn Log>) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            state: state(),
+        }
+    }
+
+    /// Test-only: a logger behind a state of the test's own.
+    #[cfg(test)]
+    fn with_state(inner: Box<dyn Log>, state: &'static FilterState) -> Self {
+        Self { inner, state }
     }
 }
 
 impl Log for ReloadableLogger {
     fn enabled(&self, metadata: &Metadata) -> bool {
-        state().enabled(metadata)
+        self.state.enabled(metadata)
     }
 
     fn log(&self, record: &Record) {
-        if state().record_enabled(record) {
+        if self.state.record_enabled(record) {
             self.inner.log(record);
         }
     }
@@ -373,6 +399,12 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     const WS_RPC: &str = "rust_executor::api::ws_rpc";
+
+    /// A filter state of this test's own: tests run in parallel, and the executor's global
+    /// state is shared (only `runtime_ws_tests` uses that one, through the RPC).
+    fn test_state() -> &'static FilterState {
+        Box::leak(Box::new(FilterState::new(false)))
+    }
 
     fn meta(target: &str, level: log::Level) -> Metadata<'_> {
         Metadata::builder().target(target).level(level).build()
@@ -464,10 +496,10 @@ mod tests {
     /// filtered, and after the second the startup filter is back by itself.
     #[test]
     fn an_override_lets_debug_through_until_its_time_is_up() {
-        let state = state();
+        let state = test_state();
         state.set_startup("info");
         let sink = Sink::default();
-        let logger = ReloadableLogger::new(Box::new(sink.clone()));
+        let logger = ReloadableLogger::with_state(Box::new(sink.clone()), state);
 
         log_debug(&logger, WS_RPC, "before");
         let status = state
@@ -492,7 +524,7 @@ mod tests {
 
     #[test]
     fn an_empty_filter_reverts_at_once_and_a_bad_ttl_is_refused() {
-        let state = state();
+        let state = test_state();
         state.set_startup("info");
         state
             .set_override("sfu=debug", Duration::from_secs(60))
@@ -524,10 +556,10 @@ mod tests {
     /// warn (`logging::without_mcp_session_ids`); no override may lift it unless it names rmcp.
     #[test]
     fn an_override_never_logs_mcp_session_ids() {
-        let state = state();
+        let state = test_state();
         state.set_startup(&crate::logging::without_mcp_session_ids("info"));
         let sink = Sink::default();
-        let logger = ReloadableLogger::new(Box::new(sink.clone()));
+        let logger = ReloadableLogger::with_state(Box::new(sink.clone()), state);
         for spec in [
             "debug",
             "trace",
@@ -564,10 +596,10 @@ mod tests {
     /// without an override (env_logger applies it in `matches`, not in `enabled`).
     #[test]
     fn the_startup_regex_still_filters_messages() {
-        let state = state();
+        let state = test_state();
         state.set_startup("info/keep");
         let sink = Sink::default();
-        let logger = ReloadableLogger::new(Box::new(sink.clone()));
+        let logger = ReloadableLogger::with_state(Box::new(sink.clone()), state);
         log_info(&logger, "rust_executor::db", "keep this");
         log_info(&logger, "rust_executor::db", "drop this");
         state
