@@ -724,6 +724,7 @@ pub fn device_views(state: &ad4m_identity_core::KeyState, this: &str) -> Vec<Dev
                 expires: scope.map(|s| s.expires),
                 added_seq: record.added,
                 revoked_seq: record.revoked,
+                unlinked_seq: record.unlinked,
                 this_device: record.sign == this,
             }
         })
