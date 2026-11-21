@@ -318,7 +318,7 @@ pub fn check_signed_with<T: serde::Serialize>(
     entered_after_revoke: Option<bool>,
     now: u64,
 ) -> CheckedLink {
-    check_signed_with_provenance(expr, map, entered_after_revoke, now, |_| false)
+    check_signed_with_provenance(expr, map, entered_after_revoke, None, now, |_| false)
 }
 
 /// [`check_signed_with`]; `own(author)`: this executor signs `expr` itself, now (the local
@@ -329,6 +329,7 @@ pub fn check_signed_with_provenance<T: serde::Serialize>(
     expr: &crate::types::Expression<T>,
     map: &KeyMap,
     entered_after_revoke: Option<bool>,
+    received_at: Option<u64>,
     now: u64,
     own: impl Fn(&str) -> bool,
 ) -> CheckedLink {
@@ -349,6 +350,7 @@ pub fn check_signed_with_provenance<T: serde::Serialize>(
         anchor: expr.proof.anchor,
         log,
         entered_after_revoke,
+        received_at,
         now,
     });
     // A link not counted yet is admitted only on a head the store confirmed within
@@ -3069,7 +3071,7 @@ mod tests {
             serde_json::to_value(FakeStore::new(held.events.clone()).page(0).unwrap()).unwrap();
         let mut forged = held.events[1].clone();
         forged.proof.clear();
-        if let ad4m_identity_core::Op::Revoke { revoke } = &mut forged.op {
+        if let ad4m_identity_core::Op::Revoke { revoke, .. } = &mut forged.op {
             revoke.push("d9".into());
         }
         page["events"][1] = serde_json::to_value(&forged).unwrap();
@@ -4126,7 +4128,7 @@ mod link_check_tests {
         let map = resolver.cache.key_map();
 
         assert_eq!(
-            check_signed_with_provenance(&link, map, None, NOW, |_| true).verdict,
+            check_signed_with_provenance(&link, map, None, None, NOW, |_| true).verdict,
             LinkVerdict::Valid,
             "this executor's own agent signed it now"
         );

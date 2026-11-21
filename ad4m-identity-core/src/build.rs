@@ -43,6 +43,8 @@ pub enum BuildError {
     Ended,
     #[error("the signer is not the current master key")]
     NotCurrentMaster,
+    #[error("the signer is not the device key the log lists under that id")]
+    NotTheKey,
     #[error("the revealed key and salt do not hash to the committed next key")]
     NextMismatch,
     #[error("the event already carries a proof by {0}")]
@@ -112,12 +114,28 @@ pub fn add_unsigned(
     )
 }
 
-/// A `revoke` of device keys after the head.
-pub fn revoke_unsigned(chain: &KelChain, keys: &[KeyId]) -> Result<Event, BuildError> {
+/// A `revoke` of device keys after the head. `since` (ms since the epoch) is the time from
+/// which the person no longer trusts them; `None` means the revoke's own append time.
+pub fn revoke_unsigned(
+    chain: &KelChain,
+    keys: &[KeyId],
+    since: Option<u64>,
+) -> Result<Event, BuildError> {
     later(
         chain,
         Op::Revoke {
             revoke: keys.to_vec(),
+            since,
+        },
+    )
+}
+
+/// An `unlink` of one device key after the head, with no proof.
+pub fn unlink_unsigned(chain: &KelChain, key: &KeyId) -> Result<Event, BuildError> {
+    later(
+        chain,
+        Op::Unlink {
+            unlink: key.clone(),
         },
     )
 }
@@ -253,9 +271,38 @@ pub fn add_claimed(
 }
 
 /// A `revoke` signed by the current master key.
-pub fn revoke(chain: &KelChain, master: &dyn Signer, keys: &[KeyId]) -> Result<Event, BuildError> {
-    let event = revoke_unsigned(chain, keys)?;
+pub fn revoke(
+    chain: &KelChain,
+    master: &dyn Signer,
+    keys: &[KeyId],
+    since: Option<u64>,
+) -> Result<Event, BuildError> {
+    let event = revoke_unsigned(chain, keys, since)?;
     signed_by_master(chain, master, event)
+}
+
+/// An `unlink` signed by the current master key.
+pub fn unlink(chain: &KelChain, master: &dyn Signer, key: &KeyId) -> Result<Event, BuildError> {
+    let event = unlink_unsigned(chain, key)?;
+    signed_by_master(chain, master, event)
+}
+
+/// An `unlink` of `key_id` signed by that key itself. The signer must be the key the log lists
+/// under `key_id`.
+pub fn unlink_self(
+    chain: &KelChain,
+    key_id: &KeyId,
+    signer: &dyn Signer,
+) -> Result<Event, BuildError> {
+    let record = chain
+        .state()
+        .keys
+        .get(key_id)
+        .filter(|r| r.sign == signer.key())
+        .ok_or(BuildError::NotTheKey)?;
+    let mut event = unlink_unsigned(chain, &record.id)?;
+    cosign(&mut event, key_id, signer)?;
+    Ok(event)
 }
 
 /// A `scope` signed by the current master key.

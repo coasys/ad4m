@@ -45,9 +45,15 @@ pub enum Op {
         offer: String,
         co_sig: String,
     },
+    /// `since` (ms since the epoch) is the time from which the person no longer trusts the
+    /// keys; left out of the JSON when absent, meaning the revoke's own append time.
     Revoke {
         revoke: Vec<KeyId>,
+        since: Option<u64>,
     },
+    /// One active device, node or bot key signs nothing new from this seq on. Signed by the
+    /// master key or by the key itself.
+    Unlink { unlink: KeyId },
     /// `revoke` is left out of the JSON when empty; an explicit `"revoke": []` is refused.
     Rotate {
         master: Multikey,
@@ -70,6 +76,7 @@ impl Op {
             Op::Incept { .. } => "incept",
             Op::Add { .. } => "add",
             Op::Revoke { .. } => "revoke",
+            Op::Unlink { .. } => "unlink",
             Op::Rotate { .. } => "rotate",
             Op::Scope { .. } => "scope",
         }
@@ -176,7 +183,13 @@ impl Serialize for Event {
                 map.serialize_entry("offer", offer)?;
                 map.serialize_entry("coSig", co_sig)?;
             }
-            Op::Revoke { revoke } => map.serialize_entry("revoke", revoke)?,
+            Op::Revoke { revoke, since } => {
+                map.serialize_entry("revoke", revoke)?;
+                if let Some(since) = since {
+                    map.serialize_entry("since", since)?;
+                }
+            }
+            Op::Unlink { unlink } => map.serialize_entry("unlink", unlink)?,
             Op::Rotate {
                 master,
                 salt,
@@ -352,7 +365,8 @@ impl Event {
         let op_fields: &[&str] = match op_name.as_str() {
             "incept" => &["kind", "master", "next", "add"],
             "add" => &["add", "offer", "coSig"],
-            "revoke" => &["revoke"],
+            "revoke" => &["revoke", "since"],
+            "unlink" => &["unlink"],
             "rotate" => &["master", "salt", "next", "revoke"],
             "scope" => &["key", "can", "expires"],
             _ => return Err(format_err(FormatError::UnknownOp(op_name))),
@@ -376,6 +390,13 @@ impl Event {
             },
             "revoke" => Op::Revoke {
                 revoke: strings(map, "revoke")?,
+                since: match map.get("since") {
+                    None => None,
+                    Some(_) => Some(integer(map, "since")?),
+                },
+            },
+            "unlink" => Op::Unlink {
+                unlink: string(map, "unlink")?,
             },
             "rotate" => Op::Rotate {
                 master: string(map, "master")?,

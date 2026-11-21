@@ -29,6 +29,7 @@ workspace's `Cargo.lock`); rusqlite 0.40 on the system `libsqlite3`.
 | `tests/common/agent.rs` | a test person: fixed keys, a log built with the core's builders, offers, claims, signed requests, records |
 | `tests/common/mod.rs` | `TestStore`: a real store on a temp file with an injected clock, called through the router |
 | `tests/logs.rs`, `tests/offers.rs` | the store's acceptance tests: logs, heads, the key index, signed requests, limits and agent records; offers, claims, the state poll and the claim check |
+| `tests/unlink.rs` | `unlink` signed by the key itself or the master, a third device's unlink refused (and a device-signed rival no fork), an unlinked key's requests refused and a revoke after it, the `since` bounds against the store's append time |
 | `tests/held.rs` | the held folds: no replay per request, a forged request reads no log, an append's head in force at once, the bound, rival events (one that does not replay refused on the held fold with no replay), `state_before` against a fold at every seq |
 | `tests/append_copies.rs` | an append copies the held fold once, taken or refused at its last event (a counting allocator) |
 | `tests/authenticate.rs` | authenticated before any replay: junk and wrongly signed appends, offers and requests on an unheld log replay nothing; a valid append and a `rotate` replay once; the length cap |
@@ -238,8 +239,8 @@ tests name them by these names.
   device keys with their revocation and bot scope) and the next-key commitment in `logs.next`.
   - An append (`log::authenticate_first`): the first event's proof must verify under the key
     that signs at its seq. Only masters sign events after #0 (`KelPolicy`: `add`, `revoke`,
-    `scope` by the current master, `rotate` by the master it reveals; a device key never signs
-    one), so that key is the master current there, or for a `rotate` the key the stored
+    `scope` by the current master, `rotate` by the master it reveals; a device key signs
+    only an `unlink` of itself), so that key is the master current there, or for a `rotate` the key the stored
     next-key commitment names (at the head) or the master the log rotated onto (a rival). An
     event that continues the head without it is refused with the replay's own error (`400
     MissingProof`, `BadProof`, `NextMismatch`, `Ended`; an event with several faults may be
@@ -256,8 +257,15 @@ tests name them by these names.
     on a held full rotation log, where the prefix replay took 220–240 ms. A rival that passes
     is replayed on the stored prefix before it is recorded, once per signing master, since a
     recorded fork answers the next rival by that master.
+    The one device-signed event is the `unlink` of the signing key itself (`self_unlink_signer`):
+    it passes only where it continues the head, and only for an active key the index lists once;
+    a rival never takes that path, since a device-signed rival recorded as a fork would freeze
+    the current master. A `revoke`'s `since` (ms) is checked in the append against the store's
+    own time (whole seconds): not after it, not before the append time of the `add` of any key the revoke names (`400 since`; the
+    store refuses, it does not clamp). The key index carries `unlinked` beside `revoked`; an
+    unlinked key counts as revoked for signed requests and records (`Standing.revoked`).
   - A signed request (`request.rs`): the signature under the indexed key, then the indexed
-    standing (revoked, a bot key, or not the current master on a master route) before the
+    standing (revoked or unlinked, a bot key, or not the current master on a master route) before the
     log is read.
   - An offer (`offers.rs`, an unauthenticated route): `by.keyId` must be the indexed current
     master and its signature must verify under that key before the log is read.
