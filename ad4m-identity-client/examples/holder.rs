@@ -24,8 +24,8 @@
 //! {"cmd":"rotate","did":"did:scid:…","keyIds":[]}   -> {"index","seq","tries","unlinked","pushes","record","kept"}
 //! {"cmd":"refreshMaster","did":"did:scid:…"}         -> {"refreshed","index"?,"id"?,"record"?}
 //! {"cmd":"removeMaster","did":"did:scid:…"}          -> {"record"}
-//! {"cmd":"restore","words":"…","name":"Laptop","kind":"desktop-app","lockOut":["d1"]}
-//!        -> {"did","devices","index","seq","tries","unlinked","keyId","pushes","record"}
+//! {"cmd":"restore","words":"…","name":"Laptop","kind":"desktop-app","lockOut":["d1"],"since":ms?}
+//!        -> {"did","devices","index","seq","tries","revoked","keyId","pushes","record"}
 //!           (an enrolment that failed after the rotation: {…,"enrolled":{"error"}} instead of
 //!           keyId, pushes and record)
 //! ```
@@ -372,7 +372,7 @@ async fn main() {
                             .collect(),
                     };
                     let restored = flow
-                        .finish(&lock_out, this)
+                        .finish(&lock_out, command["since"].as_u64(), this)
                         .await
                         .map_err(|e| e.to_string())?;
                     let mut answer = json!({
@@ -381,7 +381,7 @@ async fn main() {
                         "index": restored.index,
                         "seq": restored.head.seq,
                         "tries": restored.tries,
-                        "unlinked": restored.unlinked,
+                        "revoked": restored.revoked,
                     });
                     match &restored.enrolled {
                         Ok(enrolled) => {

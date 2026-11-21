@@ -14,17 +14,22 @@
 //! revocation of theirs, and the new version's record key is wrapped to the remaining devices
 //! only, so a revoked device cannot read it.
 //!
-//! "Also replace my master key" ([`revoke_and_rotate`]): the keys are revoked here as above
-//! (with the person's `since`), then a `rotate` replaces the master key, which needs the 12
-//! words. A device that may have held the master key is revoked this way, so the key it held
-//! signs nothing more. A plain rotation ([`super::rotate`]) that drops keys only unlinks them:
-//! revoking is always this explicit action.
+//! "Also replace my master key" ([`revoke_and_rotate`]): a `rotate` replaces the master key
+//! first (it needs the 12 words), naming no key and never sending the new master to the keys
+//! to revoke; then the `revoke` of those keys follows, signed by the new master, with the
+//! person's `since`. Rotating first is what lets it recover a frozen identity: after a rival
+//! event by the current master the store accepts only a `rotate`, so a revoke signed by the
+//! current master would be refused. A device that may have held the master key is revoked
+//! this way, so the key it held signs nothing more. A plain rotation ([`super::rotate`])
+//! that drops keys only unlinks them: revoking is always this explicit action.
 
 use ad4m_identity_core::build::revoke as revoke_event;
 use ad4m_identity_core::{KelChain, KeyId};
 use ad4m_ldk::identity::SignedHead;
 
 use crate::executor::{ExecutorRpc, ViaExecutor};
+use crate::flows::master::transient;
+use crate::flows::rotate::MAX_TRIES;
 use crate::record;
 use crate::request::{chain_of, scid_of};
 use crate::vault::{MasterSigner, MasterUse, Vault};
@@ -73,11 +78,16 @@ pub async fn revoke<R: ExecutorRpc>(
 /// *n* (they derive it, and must derive the current master), so no vault unlock is needed.
 ///
 /// Refused before anything is published when `key_ids` is empty or names no key of the log,
-/// when the words do not derive the current master, or when it names this device's own key.
-/// A key already revoked is not revoked again. The revoke is public once published: a failure
-/// of the rotation after it is returned as an error, and the keys stay revoked (a retry
-/// rotates only). The private record is written again by the rotation, without the revoked
-/// devices.
+/// when the words do not derive the current master, when it names this device's own key, or
+/// when `since` is later than now (the store would refuse it after the rotation). A key already
+/// revoked is not revoked again.
+///
+/// The rotation is public once published. A failure of the revoke after it is
+/// [`ClientError::RotatedNotRevoked`]: the master key is replaced and the devices are not
+/// yet revoked. Calling this again with the same arguments then publishes only the revoke,
+/// when the head of the log is the rotation that made the words' master current and the keys
+/// are still not revoked; otherwise it rotates again. The returned `head` is the revoke's and
+/// `record` the write after it, which drops the revoked devices.
 #[allow(clippy::too_many_arguments)]
 pub async fn revoke_and_rotate<R: ExecutorRpc>(
     executor: &ViaExecutor<R>,
@@ -92,6 +102,7 @@ pub async fn revoke_and_rotate<R: ExecutorRpc>(
     if key_ids.is_empty() {
         return Err(ClientError::Protocol("a revocation names a key".into()));
     }
+    check_since(since, clock)?;
     let status = executor.status().await?;
     if status.did.as_deref() != Some(did) {
         return Err(ClientError::Protocol(format!(
@@ -111,20 +122,132 @@ pub async fn revoke_and_rotate<R: ExecutorRpc>(
     check_keys(&chain, did, key_ids)?;
     let seed = ad4m_identity_core::words::seed(words);
     let index = super::rotate::current_index(&chain, &seed)?;
-    let signer = super::rotate::master_of(&seed, index)?;
-    // A key the log already revoked stays as it is (an unlinked one may still be revoked).
     let state = chain.state();
-    let mut to_revoke: Vec<KeyId> = Vec::new();
+    // A key the log already revoked stays as it is (an unlinked one may still be revoked).
+    let pending = still_valid(&chain, key_ids);
+    // A retry: the log's head is the rotation that made this master current, and the keys are
+    // not revoked yet, as when an earlier call rotated and its revoke failed
+    // ([`ClientError::RotatedNotRevoked`]). Only the revoke is left; another rotation would
+    // replace the master the devices were kept from.
+    let rotated_already = !pending.is_empty()
+        && index > 0
+        && state
+            .masters
+            .get(index as usize)
+            .is_some_and(|m| m.added == chain.head().seq);
+    // Rotate first, naming none of the keys, and never send them the new master: the revoke
+    // follows, signed by it. A frozen log (a rival event by the current master) accepts only a
+    // rotation, so a revoke signed by the current master would be refused. With nothing left
+    // to revoke it is only the rotation.
+    let first = if rotated_already {
+        None
+    } else {
+        let rotated = super::rotate::rotate_excluding(
+            executor,
+            vault,
+            did,
+            words,
+            &[],
+            key_ids,
+            clock,
+            random,
+        )
+        .await?;
+        if pending.is_empty() {
+            return Ok(rotated);
+        }
+        Some(rotated)
+    };
+    let index = first.as_ref().map_or(index, |rotated| rotated.index);
+    let head = publish_revoke(executor, did, &seed, &pending, since)
+        .await
+        .map_err(|e| ClientError::RotatedNotRevoked {
+            index,
+            cause: e.to_string(),
+        })?;
+    // The revoked devices leave the record, which is wrapped to the rest only.
+    let record = record::write(executor, vault, did, &[], random).await;
+    Ok(match first {
+        Some(rotated) => super::rotate::Rotated {
+            head,
+            record,
+            ..rotated
+        },
+        None => super::rotate::Rotated {
+            head,
+            index,
+            unlinked: Vec::new(),
+            tries: 0,
+            pushes: Vec::new(),
+            record,
+            kept: super::rotate::keep(vault, &scid_of(did)?, &seed, index),
+        },
+    })
+}
+
+/// The keys of `key_ids` that the log holds and has not revoked (an unlinked one may still be
+/// revoked), each once.
+pub(crate) fn still_valid(chain: &KelChain, key_ids: &[KeyId]) -> Vec<KeyId> {
+    let state = chain.state();
+    let mut keys: Vec<KeyId> = Vec::new();
     for id in key_ids {
-        if state.keys[id].revoked.is_none() && !to_revoke.contains(id) {
-            to_revoke.push(id.clone());
+        if state.keys.get(id).is_some_and(|k| k.revoked.is_none()) && !keys.contains(id) {
+            keys.push(id.clone());
         }
     }
-    if !to_revoke.is_empty() {
-        let event = revoke_event(&chain, &signer, &to_revoke, since)?;
-        executor.publish(std::slice::from_ref(&event)).await?;
+    keys
+}
+
+/// Refused when `since` (ms) is later than the clock's now: the store refuses it too, and a
+/// rotation must not stand without its revoke for that.
+pub(crate) fn check_since(since: Option<u64>, clock: &dyn Clock) -> Result<(), ClientError> {
+    match since {
+        Some(since) if since / 1000 > clock.now() => {
+            Err(ClientError::Protocol("since is later than now".into()))
+        }
+        _ => Ok(()),
     }
-    super::rotate::rotate(executor, vault, did, words, &[], clock, random).await
+}
+
+/// The head the executor accepted for the log of `did`.
+pub(crate) async fn chain_head<R: ExecutorRpc>(
+    executor: &ViaExecutor<R>,
+    did: &str,
+) -> Result<SignedHead, ClientError> {
+    executor
+        .log(did, 0, true)
+        .await?
+        .head
+        .ok_or_else(|| ClientError::Protocol("the executor accepted no head for the log".into()))
+}
+
+/// Publishes the `revoke` of the keys of `key_ids` that are not revoked, signed by the master
+/// the words `seed` derive as the log's current one (the new master, after a rotation). A
+/// `409`, or an answer that never came, reads the log again and builds it on the new head, at
+/// most [`MAX_TRIES`] times, then [`ClientError::LogBusy`]; keys revoked by then are left out,
+/// and when none is left the head is answered. Answers the head after the revoke.
+pub(crate) async fn publish_revoke<R: ExecutorRpc>(
+    executor: &ViaExecutor<R>,
+    did: &str,
+    seed: &ad4m_identity_core::words::Seed,
+    key_ids: &[KeyId],
+    since: Option<u64>,
+) -> Result<SignedHead, ClientError> {
+    for _ in 0..MAX_TRIES {
+        let chain = chain_of(executor, did).await?;
+        let keys = still_valid(&chain, key_ids);
+        if keys.is_empty() {
+            return chain_head(executor, did).await;
+        }
+        let signer = super::rotate::master_of(seed, super::rotate::current_index(&chain, seed)?)?;
+        let event = revoke_event(&chain, &signer, &keys, since)?;
+        match executor.publish(std::slice::from_ref(&event)).await {
+            Ok(head) => return Ok(head),
+            Err(e) if e.code == 409 || transient(&ClientError::Rpc(e.clone())) => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Err(ClientError::LogBusy)
 }
 
 /// Every key of `key_ids` is a key of the log: checked before the unlock, so the person is not
@@ -149,6 +272,7 @@ pub(crate) fn check_keys(
 /// log. The record write after the publish reads the newest version with its receipt: a
 /// version a revoked key wrote before the revocation still opens (the writer is checked at
 /// the seq the store accepted it), so the write builds on it and keeps what it says.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn revoke_with<R: ExecutorRpc>(
     executor: &ViaExecutor<R>,
     vault: &dyn Vault,

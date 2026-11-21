@@ -4131,9 +4131,9 @@ async fn a_revocation_with_a_rotation_needs_the_words() {
     };
     deleted.unwrap();
     rotated.kept.as_ref().unwrap();
-    // revoked by its own event, then rotated: the rotation unlinks nothing
+    // rotated first (unlinking nothing), then revoked by its own event: `head` is the revoke
     assert_eq!((rotated.index, rotated.unlinked.clone()), (1, vec![]));
-    let revoke_seq = rotated.head.seq - 1;
+    let revoke_seq = rotated.head.seq;
     assert_eq!(host.status().await.unwrap().revoked, Some(revoke_seq));
     assert_eq!(key_end(&a, &did, &d3).await, (None, Some(revoke_seq)));
     assert!(
@@ -4176,11 +4176,11 @@ async fn a_revocation_with_a_rotation_needs_the_words() {
     )
     .await
     .unwrap();
-    // two events: the explicit revoke (with the person's `since`), then the rotation that
-    // names no key
+    // two events: the rotation that names no key, then the explicit revoke (with the
+    // person's `since`) signed by the new master
     assert_eq!(a.fake().publishes.get(), publishes + 2);
     assert_eq!((rotated.index, rotated.unlinked.clone()), (2, vec![]));
-    let revoke_seq = rotated.head.seq - 1;
+    let revoke_seq = rotated.head.seq;
     assert_eq!(phone.status().await.unwrap().revoked, Some(revoke_seq));
     let chain = ad4m_identity_core::fold(&a.events(&did).await.unwrap()).unwrap();
     let record = &chain.state().keys[&d2];
@@ -4188,7 +4188,8 @@ async fn a_revocation_with_a_rotation_needs_the_words() {
         (record.revoked, record.revoked_since, record.unlinked),
         (Some(revoke_seq), Some(since), None)
     );
-    // revoking a key the log already revoked publishes only the rotation
+    // revoking a key the log already revoked publishes only the rotation (the log's head is
+    // the revoke, not a rotation: no retry)
     let again = revoke_and_rotate(
         &a,
         &vault,
@@ -4297,12 +4298,17 @@ async fn the_words_restore_the_identity_on_a_new_device() {
         .filter(|d| d.lock_out)
         .map(|d| d.key_id.clone())
         .collect();
+    let since = SystemClock.now() * 1000;
     let restored = flow
-        .finish(&lock_out, entry("New phone", DeviceKind::PhoneApp))
+        .finish(
+            &lock_out,
+            Some(since),
+            entry("New phone", DeviceKind::PhoneApp),
+        )
         .await
         .unwrap();
     assert_eq!((restored.index, restored.tries), (1, 1));
-    assert_eq!(restored.unlinked, lock_out);
+    assert_eq!(restored.revoked, lock_out);
     let enrolled = restored.enrolled.as_ref().unwrap();
     assert_eq!(enrolled.key_id, "d4");
     assert!(enrolled.pushes.is_empty(), "the kept holder was locked out");
@@ -4310,7 +4316,7 @@ async fn the_words_restore_the_identity_on_a_new_device() {
     assert_eq!(new_vault.staged_index(&scid).unwrap(), None);
     // The rotation is published: a second `finish` on the flow is refused, not rotated again.
     assert!(matches!(
-        flow.finish(&[], entry("New phone", DeviceKind::PhoneApp))
+        flow.finish(&[], None, entry("New phone", DeviceKind::PhoneApp))
             .await,
         Err(ClientError::Protocol(_))
     ));
@@ -4321,11 +4327,21 @@ async fn the_words_restore_the_identity_on_a_new_device() {
         (status.did.as_deref(), status.key_id.as_deref()),
         (Some(did.as_str()), Some("d4"))
     );
-    // locked out by the rotation: unlinked, not revoked
-    assert!(key_end(&new, &did, "d1").await.0.is_some());
-    assert!(key_end(&new, &did, &d2).await.0.is_some());
-    assert_eq!(key_end(&new, &did, "d1").await.1, None);
+    // locked out by an explicit revoke after the rotation, with the person's `since`: the
+    // rotation itself unlinks nothing; the revoke is the head of the rotation's successor
+    let revoke_seq = restored.head.seq;
+    for id in ["d1", d2.as_str()] {
+        assert_eq!(key_end(&new, &did, id).await, (None, Some(revoke_seq)));
+    }
     assert_eq!(key_end(&new, &did, &d3).await, (None, None));
+    let chain = ad4m_identity_core::fold(&new.events(&did).await.unwrap()).unwrap();
+    assert_eq!(chain.state().keys["d1"].revoked_since, Some(since));
+    assert_eq!(chain.state().keys[&d2].revoked_since, Some(since));
+    assert_eq!(
+        chain.state().masters[1].added,
+        revoke_seq - 1,
+        "rotate, then revoke"
+    );
 
     let opened = record::read(&new, &new_vault, &did).await.unwrap().unwrap();
     assert_eq!(opened.record.devices["d4"].name, "New phone");
@@ -4347,6 +4363,327 @@ async fn the_words_restore_the_identity_on_a_new_device() {
         .await
         .unwrap();
     assert_eq!(rotated.index, 2);
+}
+
+// ─── rotate first, then revoke (review of #1667) ───
+
+/// An executor that refuses the `identity.publish` of a `revoke` while `refuse` is set (the
+/// store does not answer); everything else goes through.
+struct RefusingRevoke<'a> {
+    inner: &'a Adapted,
+    refuse: Cell<bool>,
+}
+
+#[async_trait(?Send)]
+impl ExecutorRpc for RefusingRevoke<'_> {
+    async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        if method == "identity.publish" && self.refuse.get() {
+            let first = Event::from_json(&params["events"][0]).unwrap();
+            if matches!(first.op, Op::Revoke { .. }) {
+                return Err(RpcError {
+                    code: 503,
+                    message: "the store did not answer".into(),
+                });
+            }
+        }
+        self.inner.call(method, params).await
+    }
+}
+
+/// The store freezes an identity after a rival event by the current master and then accepts
+/// only a `rotate`. A revoke signed by the current master gets `forked`, so "revoke and
+/// rotate" rotates first and revokes with the new master: the owner recovers with the words,
+/// and the targets end revoked with the person's `since`.
+#[tokio::test]
+async fn revoke_and_rotate_recovers_a_frozen_identity() {
+    let store = TestStore::new();
+    let a = custody(&store, 1);
+    let desk = custody(&store, 2);
+    let vault = MemoryVault::new();
+    let desk_vault = MemoryVault::new();
+    let did = create(&a, &vault, 61).await;
+    let scid = ad4m_identity_core::scid_of(&did).unwrap().to_string();
+    let d2 = holding_app(
+        &a,
+        &vault,
+        &did,
+        &desk,
+        &desk_vault,
+        entry("Desk", DeviceKind::DesktopApp),
+    )
+    .await;
+    let words = words::from_entropy(&[61; 16]);
+
+    // Whoever holds master #0 signs a second event at the head's seq: a fork, which freezes.
+    let events = a.events(&did).await.unwrap();
+    let before = ad4m_identity_core::fold(&events[..events.len() - 1]).unwrap();
+    let m0 = words::master_key(&words::seed(&words), 0).unwrap();
+    let rival = build::revoke(&before, &m0, &["d1".to_string()], None).unwrap();
+    let (code, body) = store
+        .send(
+            "POST",
+            &format!("/v1/logs/{scid}/events"),
+            Some(&json!({ "events": [rival] })),
+            None,
+        )
+        .await;
+    assert_eq!((code, body["error"].as_str()), (409, Some("forked")));
+    // Frozen: a revoke signed by the current master is refused too.
+    let refused = revoke(
+        &a,
+        &vault,
+        &did,
+        std::slice::from_ref(&d2),
+        None,
+        &SystemClock,
+        &OsRandom,
+    )
+    .await;
+    assert!(
+        matches!(&refused, Err(ClientError::Rpc(e)) if e.code == 409),
+        "{refused:?}"
+    );
+
+    let since = SystemClock.now() * 1000;
+    let rotated = revoke_and_rotate(
+        &a,
+        &vault,
+        &did,
+        std::slice::from_ref(&d2),
+        Some(since),
+        &words,
+        &SystemClock,
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    assert_eq!(rotated.index, 1);
+    assert!(rotated.unlinked.is_empty());
+    rotated.record.as_ref().unwrap();
+    let revoke_seq = rotated.head.seq;
+    assert_eq!(key_end(&a, &did, &d2).await, (None, Some(revoke_seq)));
+    let chain = ad4m_identity_core::fold(&a.events(&did).await.unwrap()).unwrap();
+    assert_eq!(chain.state().keys[&d2].revoked_since, Some(since));
+    assert_eq!(
+        chain.state().masters[1].added,
+        revoke_seq - 1,
+        "rotate, then revoke"
+    );
+    let opened = record::read(&a, &vault, &did).await.unwrap().unwrap();
+    assert!(!opened.record.devices.contains_key(&d2));
+}
+
+/// The keys to revoke never receive the new master: a holder that is revoked right after is
+/// the device the person fears holds the old one. A holder that stays is sent it.
+#[tokio::test]
+async fn revoke_and_rotate_sends_the_new_master_to_no_revoked_device() {
+    let store = TestStore::new();
+    let a = custody(&store, 1);
+    let desk = custody(&store, 2);
+    let laptop = custody(&store, 3);
+    let vault = MemoryVault::new();
+    let desk_vault = MemoryVault::new();
+    let laptop_vault = MemoryVault::new();
+    let did = create(&a, &vault, 62).await;
+    let d2 = holding_app(
+        &a,
+        &vault,
+        &did,
+        &desk,
+        &desk_vault,
+        entry("Desk", DeviceKind::DesktopApp),
+    )
+    .await;
+    let d3 = holding_app(
+        &a,
+        &vault,
+        &did,
+        &laptop,
+        &laptop_vault,
+        entry("Laptop", DeviceKind::DesktopApp),
+    )
+    .await;
+    let words = words::from_entropy(&[62; 16]);
+    let rotated = revoke_and_rotate(
+        &a,
+        &vault,
+        &did,
+        std::slice::from_ref(&d2),
+        None,
+        &words,
+        &SystemClock,
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    let sent: Vec<&str> = rotated.pushes.iter().map(|(id, _)| id.as_str()).collect();
+    assert_eq!(sent, [d3.as_str()], "the revoked desk got no copy");
+    assert!(rotated.pushes[0].1.is_ok());
+    assert_eq!(key_end(&a, &did, &d2).await.1, Some(rotated.head.seq));
+}
+
+/// A rotation whose revoke fails stands: the error says the master key is replaced and the
+/// devices are not yet revoked, and the same call again publishes only the revoke (no second
+/// rotation), with the person's `since`. A `since` later than now is refused before the
+/// rotation, so no rotation is left without its revoke.
+#[tokio::test]
+async fn a_failed_revoke_after_the_rotation_is_retried_without_a_second_rotation() {
+    let store = TestStore::new();
+    let a = custody(&store, 1);
+    let desk = custody(&store, 2);
+    let vault = MemoryVault::new();
+    let desk_vault = MemoryVault::new();
+    let did = create(&a, &vault, 63).await;
+    let d2 = holding_app(
+        &a,
+        &vault,
+        &did,
+        &desk,
+        &desk_vault,
+        entry("Desk", DeviceKind::DesktopApp),
+    )
+    .await;
+    let words = words::from_entropy(&[63; 16]);
+    let flaky = ViaExecutor::new(RefusingRevoke {
+        inner: a.rpc(),
+        refuse: Cell::new(false),
+    });
+    let publishes = a.fake().publishes.get();
+
+    let later = SystemClock.now() * 1000 + 3_600_000;
+    let future = revoke_and_rotate(
+        &flaky,
+        &vault,
+        &did,
+        std::slice::from_ref(&d2),
+        Some(later),
+        &words,
+        &SystemClock,
+        &OsRandom,
+    )
+    .await;
+    assert!(
+        matches!(future, Err(ClientError::Protocol(_))),
+        "{future:?}"
+    );
+    assert_eq!(a.fake().publishes.get(), publishes, "nothing published");
+
+    let since = SystemClock.now() * 1000;
+    flaky.rpc().refuse.set(true);
+    let failed = revoke_and_rotate(
+        &flaky,
+        &vault,
+        &did,
+        std::slice::from_ref(&d2),
+        Some(since),
+        &words,
+        &SystemClock,
+        &OsRandom,
+    )
+    .await;
+    assert!(
+        matches!(
+            &failed,
+            Err(ClientError::RotatedNotRevoked { index: 1, .. })
+        ),
+        "{failed:?}"
+    );
+    assert_eq!(a.fake().publishes.get(), publishes + 1, "the rotation");
+    assert_eq!(
+        key_end(&a, &did, &d2).await,
+        (None, None),
+        "not revoked yet"
+    );
+
+    flaky.rpc().refuse.set(false);
+    let rotated = revoke_and_rotate(
+        &flaky,
+        &vault,
+        &did,
+        std::slice::from_ref(&d2),
+        Some(since),
+        &words,
+        &SystemClock,
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    assert_eq!(a.fake().publishes.get(), publishes + 2, "only the revoke");
+    assert_eq!(rotated.index, 1);
+    rotated.kept.as_ref().unwrap();
+    rotated.record.as_ref().unwrap();
+    let chain = ad4m_identity_core::fold(&a.events(&did).await.unwrap()).unwrap();
+    assert_eq!(chain.state().masters.len(), 2, "no second rotation");
+    assert_eq!(chain.state().keys[&d2].revoked, Some(rotated.head.seq));
+    assert_eq!(chain.state().keys[&d2].revoked_since, Some(since));
+}
+
+/// A restore whose revoke fails after the rotation: `finish` says so, the devices are not
+/// reported locked out, and `revoke_locked_out` publishes the revoke and enrols.
+#[tokio::test]
+async fn a_restore_whose_revoke_fails_is_retried_by_revoke_locked_out() {
+    let store = TestStore::new();
+    let a = custody(&store, 1);
+    let new_rpc = adapted(&store, 4);
+    let vault = MemoryVault::new();
+    let new_vault = MemoryVault::new();
+    let did = create(&a, &vault, 64).await;
+    let words = words::from_entropy(&[64; 16]);
+    let new = ViaExecutor::new(RefusingRevoke {
+        inner: &new_rpc,
+        refuse: Cell::new(true),
+    });
+    let mut flow = RestoreFlow::start(&new, &new_vault, words.phrase(), &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    let later = SystemClock.now() * 1000 + 3_600_000;
+    let future = flow
+        .finish(
+            &["d1".to_string()],
+            Some(later),
+            entry("New laptop", DeviceKind::DesktopApp),
+        )
+        .await;
+    assert!(
+        matches!(future, Err(ClientError::Protocol(_))),
+        "{future:?}"
+    );
+    assert_eq!(a.events(&did).await.unwrap().len(), 1, "nothing published");
+
+    let since = SystemClock.now() * 1000;
+    let failed = flow
+        .finish(
+            &["d1".to_string()],
+            Some(since),
+            entry("New laptop", DeviceKind::DesktopApp),
+        )
+        .await;
+    assert!(
+        matches!(
+            &failed,
+            Err(ClientError::RotatedNotRevoked { index: 1, .. })
+        ),
+        "{failed:?}"
+    );
+    assert_eq!(key_end(&a, &did, "d1").await, (None, None));
+    new.rpc().refuse.set(false);
+    let restored = flow
+        .revoke_locked_out(entry("New laptop", DeviceKind::DesktopApp))
+        .await
+        .unwrap();
+    assert_eq!(
+        (restored.index, restored.revoked.clone()),
+        (1, vec!["d1".to_string()])
+    );
+    restored.enrolled.as_ref().unwrap();
+    let chain = ad4m_identity_core::fold(&a.events(&did).await.unwrap()).unwrap();
+    assert_eq!(chain.state().masters.len(), 2, "no second rotation");
+    assert_eq!(chain.state().keys["d1"].revoked_since, Some(since));
+    assert!(matches!(
+        flow.revoke_locked_out(entry("New laptop", DeviceKind::DesktopApp))
+            .await,
+        Err(ClientError::Protocol(_))
+    ));
 }
 
 // ─── custody before publish in a rotation; the creator listed (review of #1667) ───
@@ -4961,7 +5298,7 @@ async fn a_restore_whose_staged_key_was_promoted_first_enrols() {
         .await
         .unwrap();
     let restored = flow
-        .finish(&[], entry("New laptop", DeviceKind::DesktopApp))
+        .finish(&[], None, entry("New laptop", DeviceKind::DesktopApp))
         .await
         .unwrap();
     assert_eq!(restored.index, 1);
@@ -5002,7 +5339,7 @@ async fn a_restore_whose_vault_refuses_after_the_publish_is_recovered_by_the_wor
     let lock_out: Vec<String> = flow.devices().iter().map(|d| d.key_id.clone()).collect();
     assert_eq!(lock_out.len(), 2);
     let failed = flow
-        .finish(&lock_out, entry("New laptop", DeviceKind::DesktopApp))
+        .finish(&lock_out, None, entry("New laptop", DeviceKind::DesktopApp))
         .await;
     assert!(
         matches!(
@@ -5033,7 +5370,7 @@ async fn a_restore_whose_vault_refuses_after_the_publish_is_recovered_by_the_wor
         .unwrap();
     assert_eq!(flow.devices().len(), 2);
     let restored = flow
-        .finish(&lock_out, entry("New laptop", DeviceKind::DesktopApp))
+        .finish(&lock_out, None, entry("New laptop", DeviceKind::DesktopApp))
         .await
         .unwrap();
     assert_eq!(restored.index, 1);
@@ -5090,12 +5427,13 @@ async fn a_restore_whose_link_fails_after_the_publish_holds_a_key_it_cannot_use(
     let restored = flow
         .finish(
             &["d1".to_string()],
+            None,
             entry("New laptop", DeviceKind::DesktopApp),
         )
         .await
         .unwrap();
     assert_eq!(
-        (restored.index, restored.unlinked.clone()),
+        (restored.index, restored.revoked.clone()),
         (1, vec!["d1".to_string()])
     );
     assert!(
@@ -5109,7 +5447,7 @@ async fn a_restore_whose_link_fails_after_the_publish_holds_a_key_it_cannot_use(
         None,
         "not a device of the log yet"
     );
-    assert!(key_end(&a, &did, "d1").await.0.is_some());
+    assert!(key_end(&a, &did, "d1").await.1.is_some());
 
     // The retry enrols on the same flow.
     new.rpc().refuse.set(false);
@@ -5375,10 +5713,7 @@ async fn answering_with_words_reports_a_failed_delete_with_the_rotation() {
     assert_eq!((rotated.index, rotated.unlinked.clone()), (1, vec![]));
     rotated.kept.as_ref().unwrap();
     assert_eq!(vault.master_index(&scid).unwrap(), Some(1));
-    assert_eq!(
-        host.status().await.unwrap().revoked,
-        Some(rotated.head.seq - 1)
-    );
+    assert_eq!(host.status().await.unwrap().revoked, Some(rotated.head.seq));
 }
 
 /// One vault store seen through two handles: the custody folder is shared by every desktop app
@@ -5993,7 +6328,7 @@ async fn a_restored_device_is_a_keeper_in_the_log() {
         .await
         .unwrap();
     let restored = flow
-        .finish(&[], entry("New laptop", DeviceKind::DesktopApp))
+        .finish(&[], None, entry("New laptop", DeviceKind::DesktopApp))
         .await
         .unwrap();
     let enrolled = restored.enrolled.unwrap();

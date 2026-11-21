@@ -26,7 +26,7 @@
 //! 4. The record's master-signed write comes first: it re-attests the recovery key with
 //!    master *n*+1 — until it lands, the stored attestation is stale and every device write
 //!    would be refused rather than seal the record without it — and lists this device.
-//! 5. Master *n*+1 goes to every other device that kept the master key: each device the record
+//! 5. Master *n*+1 goes (except to keys the caller excludes, as a revoke-with-rotation's targets) to every other device that kept the master key: each device the record
 //!    lists as holding it (`true` or `"offered"`), valid at the head, that the log after the
 //!    rotation lets keep it ([`ad4m_identity_core::link::may_keep_master`]; the record's device
 //!    kind grants nothing, any linked device can write the record), sealed to its `enc` key in its joined inbox ([`super::master`], with the retry list). The store
@@ -288,6 +288,7 @@ pub(crate) fn kept_holders(
     events: &[Event],
     chain: &KelChain,
     own: Option<&str>,
+    exclude: &[KeyId],
 ) -> Vec<KeyId> {
     let state = chain.state();
     let head = chain.head().seq;
@@ -296,6 +297,7 @@ pub(crate) fn kept_holders(
         .iter()
         .filter(|(id, entry)| {
             Some(id.as_str()) != own
+                && !exclude.contains(*id)
                 && matches!(entry.holds_master, HoldsMaster::Yes | HoldsMaster::Offered)
                 && state.keys.contains_key(*id)
                 && state.key_valid_at(id, head)
@@ -334,6 +336,7 @@ pub(crate) async fn hand_over<R: ExecutorRpc>(
     this: Option<ThisDevice>,
     fence_epoch: Option<u64>,
     recovery_key: &Multikey,
+    exclude: &[KeyId],
     clock: &dyn Clock,
     random: &dyn Random,
 ) -> (
@@ -355,7 +358,7 @@ pub(crate) async fn hand_over<R: ExecutorRpc>(
     };
     let own = this.as_ref().map(|t| t.key_id.as_str());
     let holders = opened
-        .map(|o| kept_holders(&o.record, &events, &chain, own))
+        .map(|o| kept_holders(&o.record, &events, &chain, own, exclude))
         .unwrap_or_default();
     let index = signer.index();
     // The master-signed write comes before the pushes: it re-attests the recovery key with
@@ -485,6 +488,51 @@ pub async fn rotate<R: ExecutorRpc>(
     clock: &dyn Clock,
     random: &dyn Random,
 ) -> Result<Rotated, ClientError> {
+    rotate_excluding(executor, vault, did, words, unlink, &[], clock, random).await
+}
+
+/// The vault keeps master `index` of `seed` for `scid` once the log made it current: promoted
+/// here or by another app's refresh first ([`promote`]). Nothing staged at `index` and the
+/// vault keeping no master at or past it (another app's rotation re-staged the slot): the
+/// words make the same key, so it is stored under the vault's never-go-back rule
+/// ([`Vault::store_master`]; a key another app kept meanwhile wins). Answers the index the
+/// vault keeps: this one, or a later one.
+pub(crate) fn keep(
+    vault: &dyn Vault,
+    scid: &str,
+    seed: &Seed,
+    index: u32,
+) -> Result<u32, ClientError> {
+    match promote(vault, scid, index) {
+        Ok(kept) => Ok(kept),
+        Err(VaultError::NotFound) => {
+            let key = words::master_key(seed, index)?;
+            Ok(
+                match vault.store_master(scid, index, Secret::new(key.to_bytes()))? {
+                    Stored::Stored => index,
+                    Stored::AlreadyNewer { kept } => kept,
+                },
+            )
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// [`rotate`] that never sends master *n*+1 to the devices `exclude` (key ids), whatever the
+/// record says of them: the devices a `revoke` follows ([`super::revoke::revoke_and_rotate`],
+/// restore's lock-out), which must not receive the key that replaces the one they may hold.
+/// `exclude` is a list of keys of the log, not checked here.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn rotate_excluding<R: ExecutorRpc>(
+    executor: &ViaExecutor<R>,
+    vault: &dyn Vault,
+    did: &str,
+    words: &Words,
+    unlink: &[KeyId],
+    exclude: &[KeyId],
+    clock: &dyn Clock,
+    random: &dyn Random,
+) -> Result<Rotated, ClientError> {
     let scid = scid_of(did)?;
     let seed = words::seed(words);
     let status = executor.status().await?;
@@ -507,26 +555,7 @@ pub async fn rotate<R: ExecutorRpc>(
     let published = publish_rotation(executor, vault, &scid, did, &seed, unlink, random).await?;
     let index = published.signer.index();
     // The rotation is public from here: what fails after it is reported, not returned.
-    // Promoted here or by another app's refresh first ([`promote`]). Nothing staged at `index`
-    // and the vault keeping no master at or past it (another app's rotation re-staged the
-    // slot): the words make the same key, so it is stored under the vault's never-go-back
-    // rule ([`Vault::store_master`]; a key another app kept meanwhile wins, and `kept` names
-    // the index the vault keeps — this rotation's, or a later one's).
-    let kept = match promote(vault, &scid, index) {
-        Ok(kept) => Ok(kept),
-        Err(VaultError::NotFound) => words::master_key(&seed, index)
-            .map_err(ClientError::from)
-            .and_then(|key| {
-                vault
-                    .store_master(&scid, index, Secret::new(key.to_bytes()))
-                    .map_err(ClientError::from)
-            })
-            .map(|stored| match stored {
-                Stored::Stored => index,
-                Stored::AlreadyNewer { kept } => kept,
-            }),
-        Err(e) => Err(e.into()),
-    };
+    let kept = keep(vault, &scid, &seed, index);
     // The record's rewrite is the new master's: it re-attests the recovery key, which a
     // device-signed write cannot install. The mark this write makes is fenced by the
     // custody epoch the promote or store just produced.
@@ -550,6 +579,7 @@ pub async fn rotate<R: ExecutorRpc>(
         }),
         Some(fence_epoch),
         &recovery_key_of(&seed),
+        exclude,
         clock,
         random,
     )

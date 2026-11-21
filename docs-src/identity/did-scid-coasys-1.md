@@ -989,6 +989,6 @@ current master key:
   posted the request (its signed store request, by that device key at a position the log
   holds, covers `JCS({body, expires})`) and that it still holds (not past `expires`; a
   `confirm-revoke` names keys valid at the head): `send-master` as above, `confirm-revoke` with a
-  `revoke` signed by the master key (one with `rotate` needs the 12 words: the `revoke` comes first, signed by master *n*, then a `rotate` that unlinks no key, so the keys stay revoked). It then deletes the
+  `revoke` signed by the master key (one with `rotate` needs the 12 words: a `rotate` that unlinks no key comes first, then the `revoke` signed by master *n*+1, so a log a rival event froze, which accepts only a `rotate`, recovers; the keys being revoked are not sent master *n*+1. A rotation that landed with the `revoke` failed is reported as such, and answering again publishes only the revoke). It then deletes the
   request with a store request the master key signs (after a rotation, master *n*+1; a delete
   that fails then is reported with the rotation, which stands).

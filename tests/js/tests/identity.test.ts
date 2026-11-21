@@ -1084,7 +1084,7 @@ describe("Identity: the device inbox, a ticket in the pre-join inbox and a maste
             expect(restored.did).to.equal(did);
             expect(restored.devices.map((d: any) => d.keyId)).to.deep.equal(["d1", "d2"]);
             expect(restored).to.include({ index: 2, keyId: "d3" });
-            expect(restored.unlinked).to.deep.equal(["d1"]);
+            expect(restored.revoked).to.deep.equal(["d1"]);
             expect(restored.pushes.d2).to.be.a("string");
 
             const status = await laptop.client.identity.status();
@@ -1092,9 +1092,9 @@ describe("Identity: the device inbox, a ticket in the pre-join inbox and a maste
             expect(status.keyId).to.equal("d3");
             const devices = await laptop.client.identity.devices();
             const dropped = devices.find((d) => d.keyId === "d1")!;
-            // A restore's lock-out unlinks: it never revokes.
-            expect(dropped.unlinkedSeq).to.equal(restored.seq);
-            expect(dropped.revokedSeq).to.be.null;
+            // A restore's lock-out rotates, then revokes the lost device by the new master.
+            expect(dropped.revokedSeq).to.equal(restored.seq);
+            expect(dropped.unlinkedSeq).to.be.null;
             const opened = await restorer.send({ cmd: "record", did });
             expect(opened.record.devices.d3).to.include({ name: "Laptop", kind: "desktop-app", holdsMaster: true });
             expect(opened.record.devices.d1).to.be.undefined;

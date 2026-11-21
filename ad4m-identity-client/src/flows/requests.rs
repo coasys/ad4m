@@ -13,7 +13,8 @@
 //!   `holdsMaster: "offered"`.
 //! - `confirm-revoke`: the listed keys are revoked ([`super::revoke`]). One that asks for a
 //!   rotation too needs the 12 words: [`answer`] refuses it with [`ClientError::NeedsWords`],
-//!   and [`answer_with_words`] revokes the keys, then rotates ([`super::revoke::revoke_and_rotate`]).
+//!   and [`answer_with_words`] rotates first, then revokes the keys with master *n*+1
+//!   ([`super::revoke::revoke_and_rotate`]; the rotation comes first so a frozen log recovers).
 //!
 //! The answered request is deleted with a store request the master key signs (master *n*+1
 //! after a rotation).
@@ -42,7 +43,7 @@ pub enum Answered {
     MasterSent(Sent),
     /// `confirm-revoke`: the keys are revoked.
     Revoked(Revoked),
-    /// `confirm-revoke` with the words: the keys are revoked in a rotation. The rotation
+    /// `confirm-revoke` with the words: the master key is rotated, then the keys are revoked. The rotation
     /// stands whatever `deleted` says: a request left in the box after it names keys the
     /// rotation already revoked, and answering it again is refused.
     Rotated {
@@ -167,9 +168,11 @@ pub async fn answer<R: ExecutorRpc>(
 }
 
 /// [`answer`] with the 12 `words`, which a `confirm-revoke` asking for a rotation needs: the
-/// listed keys are revoked, then a `rotate` to master *n*+1 follows
-/// ([`super::revoke::revoke_and_rotate`]; this device keeps *n*+1 and sends it to the apps that
-/// kept the master key), and the request is deleted with master *n*+1. Any other request is answered as [`answer`] does.
+/// `rotate` to master *n*+1 is published first, then the listed keys are revoked with master
+/// *n*+1 ([`super::revoke::revoke_and_rotate`]; this device keeps *n*+1 and sends it to the apps
+/// that kept the master key, never to the keys being revoked), and the request is deleted with
+/// master *n*+1. A rotation that landed with a revoke that failed is `RotatedNotRevoked`, the
+/// request stays, and answering again publishes only the revoke. Any other request is answered as [`answer`] does.
 pub async fn answer_with_words<R: ExecutorRpc>(
     executor: &ViaExecutor<R>,
     vault: &dyn Vault,
