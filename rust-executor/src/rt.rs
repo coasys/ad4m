@@ -1,15 +1,16 @@
 //! The runtime the executor's code spawns tasks on.
 //!
 //! Native: tokio's own items, re-exported as they are, so `crate::rt::spawn` is
-//! `tokio::spawn` and a `crate::rt::JoinHandle` is a `tokio::task::JoinHandle`.
+//! `tokio::spawn`, a `crate::rt::JoinHandle` is a `tokio::task::JoinHandle` and a
+//! `crate::rt::JoinSet` is a `tokio::task::JoinSet`.
 //! wasm32 (the web executor): the JS event loop of the page or Worker, in
 //! `crate::web::rt`, with the same names and methods.
 
 #[cfg(not(target_arch = "wasm32"))]
-pub use tokio::task::{spawn, spawn_blocking, AbortHandle, JoinError, JoinHandle};
+pub use tokio::task::{spawn, spawn_blocking, AbortHandle, JoinError, JoinHandle, JoinSet};
 
 #[cfg(target_arch = "wasm32")]
-pub use crate::web::rt::{spawn, spawn_blocking, AbortHandle, JoinError, JoinHandle};
+pub use crate::web::rt::{spawn, spawn_blocking, AbortHandle, JoinError, JoinHandle, JoinSet};
 
 /// Clocks and timers.
 ///

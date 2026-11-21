@@ -1,7 +1,7 @@
 //! Tasks on the JS event loop: the wasm32 half of `crate::rt`.
 //!
 //! The names and methods are tokio's (`tokio::task::{spawn, spawn_blocking, JoinHandle,
-//! AbortHandle, JoinError}`), so code written against `crate::rt` builds on both targets.
+//! AbortHandle, JoinError, JoinSet}`), so code written against `crate::rt` builds on both targets.
 //! What differs, because there is one thread:
 //! - `spawn` takes a future that need not be `Send`; it runs on
 //!   `wasm_bindgen_futures::spawn_local`.
@@ -144,6 +144,80 @@ where
             abort,
             finished: Arc::new(AtomicBool::new(true)),
         },
+    }
+}
+
+/// A set of tasks whose results come back in the order they finish: tokio's
+/// `tokio::task::JoinSet` (needs a tokio runtime), over [`spawn`]. The methods the executor
+/// uses: `spawn`, `try_join_next`, `join_next`, `abort_all`, `len`, `is_empty`. Dropping the
+/// set aborts its tasks, as tokio's does.
+pub struct JoinSet<T> {
+    tasks: futures::stream::FuturesUnordered<JoinHandle<T>>,
+}
+
+impl<T> Default for JoinSet<T> {
+    fn default() -> Self {
+        JoinSet {
+            tasks: futures::stream::FuturesUnordered::new(),
+        }
+    }
+}
+
+impl<T: 'static> JoinSet<T> {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Runs `future` on the JS event loop as a task of this set.
+    pub fn spawn<F>(&mut self, future: F) -> AbortHandle
+    where
+        F: Future<Output = T> + 'static,
+    {
+        let handle = spawn(future);
+        let abort = handle.abort_handle();
+        self.tasks.push(handle);
+        abort
+    }
+
+    /// The result of a task that has finished, if one has; never waits.
+    pub fn try_join_next(&mut self) -> Option<Result<T, JoinError>> {
+        use futures::stream::Stream;
+        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+        match Pin::new(&mut self.tasks).poll_next(&mut cx) {
+            Poll::Ready(result) => result,
+            Poll::Pending => None,
+        }
+    }
+
+    /// Waits for the next task to finish; `None` once the set is empty.
+    pub async fn join_next(&mut self) -> Option<Result<T, JoinError>> {
+        use futures::stream::StreamExt;
+        self.tasks.next().await
+    }
+
+    /// Aborts every task; each still comes back from `join_next`, cancelled.
+    pub fn abort_all(&mut self) {
+        for task in self.tasks.iter() {
+            task.abort();
+        }
+    }
+}
+
+impl<T> JoinSet<T> {
+    pub fn len(&self) -> usize {
+        self.tasks.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.tasks.is_empty()
+    }
+}
+
+impl<T> Drop for JoinSet<T> {
+    fn drop(&mut self) {
+        for task in self.tasks.iter() {
+            task.abort();
+        }
     }
 }
 

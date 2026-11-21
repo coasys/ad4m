@@ -20,7 +20,12 @@ use crate::types::RequestContext;
 
 use super::event_interest;
 use super::ws_handler::{HandlerMap, WsRpcError};
-use super::ws_rpc::token_ended_frame;
+
+/// Why a connection whose token stopped working ends: the close frame's reason
+/// (`ws_rpc::token_ended_frame`), and the message of the 401 its calls in flight get. It starts
+/// with the words a refused request gets (`AuthError::Revoked`), so a call that the close fails
+/// reads the same as one the check refuses.
+pub(crate) const TOKEN_ENDED_REASON: &str = "Unauthorized access: the token expired or was revoked";
 
 /// Per-connection registry of in-flight request ids → cancellation
 /// tokens.  A client cancels an in-flight request by sending
@@ -47,7 +52,7 @@ pub(crate) struct Connection {
     inflight: InflightRegistry,
     interest: event_interest::SharedInterest,
     /// Dispatched calls still running.
-    calls: std::sync::Mutex<tokio::task::JoinSet<()>>,
+    calls: std::sync::Mutex<crate::rt::JoinSet<()>>,
     /// Fires when the connection closes (and with `session_over`, its parent). Every call's
     /// `ctx.cancel_token` is a child of it, so closing the socket stops the eval of any
     /// query still running — its first result has nobody left to receive it, and an
@@ -284,7 +289,7 @@ impl Connection {
                 biased;
                 _ = drop_token.cancelled() => {
                     if session_over.is_cancelled() {
-                        json!({"id": id, "error": {"code": 401, "message": token_ended_frame().reason.as_str()}})
+                        json!({"id": id, "error": {"code": 401, "message": TOKEN_ENDED_REASON}})
                     } else {
                         // 499 mirrors nginx's "Client Closed Request" status —
                         // the OpenAPI SDKs and most HTTP clients recognise it.
@@ -353,7 +358,7 @@ where
 {
     let tx_events = conn.tx.clone();
     let event_session_over = conn.session_over.clone();
-    let event_task = tokio::spawn(async move {
+    let event_task = crate::rt::spawn(async move {
         while let Some(msg) = events.next().await {
             if tx_events.send(msg).is_err() {
                 return;
