@@ -20,6 +20,12 @@ pub enum InstanceError {
         class_name: String,
         registered: Vec<String>,
     },
+    /// More than one registered class carries that name; `candidates` lists
+    /// their target class IRIs — pass one of those instead.
+    AmbiguousClass {
+        class_name: String,
+        candidates: Vec<String>,
+    },
     /// Collection membership is written through the record's own class, not an abstract one.
     AbstractClass { class_name: String },
     /// An instance id (`field`) that is not an absolute URI.

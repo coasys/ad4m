@@ -303,6 +303,19 @@ pub async fn create(
     agent: &AgentContext,
     params: InstanceCreate,
 ) -> Result<InstanceCreated, InstanceError> {
+    // A hard-wired class (a flow run, an auto-processor) is the executor's to register: the
+    // first instance written registers it, so resolving it below finds its shape.
+    crate::perspectives::hardwired_class::ensure_before_write(
+        perspective,
+        &params.class_name,
+        agent,
+    )
+    .await
+    .map_err(|error| InstanceError::Failed {
+        class_name: params.class_name.clone(),
+        step: WriteStep::CreateSubject,
+        error,
+    })?;
     let (class_name, shape) = resolve_class(perspective, &params.class_name).await?;
 
     let props = params.properties.unwrap_or_default();
