@@ -2091,6 +2091,180 @@
     {
       "error": {
         "code": "policy",
+        "reason": "UnlinkedKey"
+      },
+      "events": [
+        {
+          "add": [
+            {
+              "enc": "z6LSoKsNQ3ZWym1Qsf7fL6ajAHqjpzaudw4hEvtzA8ejGDgz",
+              "id": "d1",
+              "sign": "z6MkoLDHstjfesQKtngXMequRUhP96dNkWrGDghVxxCoksYQ"
+            }
+          ],
+          "format": "coasys/1",
+          "kind": "human",
+          "master": "z6Mkpuq56j9kNo4YqZvGtWoxCzKZfbFK329q3zsYWQVjEqMq",
+          "next": "QmYGaczyoimbrQLjPtYTQYcQ4X6WvMuKQiWQ98jTuD3i6n",
+          "op": "incept",
+          "prev": null,
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "zqVps9BKyMJNaJpdGrKgQNy8jNqFE55nAgZYJX6prvxCnuqfvstwY11xB2A2puVaW3dQCVJbvA8CY3UXUM7498Fv",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m0"
+            },
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z4p9rYrAi4wFuWPXbn2c3ujpvyk8EwEAu6baJHLzwac3k3JWvNfxSn89ELQPxBPzAPckfWj2YKHPzUe5qbnfbPi43",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#d1"
+            }
+          ],
+          "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+          "seq": 0
+        },
+        {
+          "format": "coasys/1",
+          "op": "unlink",
+          "prev": "QmbuhcFbietSm6p3Q99nhBNodQnvyduqNLk68fEjCeKR71",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z67qyA7MxmwHUjsQ6STmUtW3SSoskteNCnFdLZTzNuyVA8ExjCG3zmAXauvcK1WAs8MbHL6HH5UYLFvnnU81JCqFL",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m0"
+            }
+          ],
+          "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+          "seq": 1,
+          "unlink": "d1"
+        },
+        {
+          "format": "coasys/1",
+          "master": "z6Mko91TaXkMdgzgpaQXWcwqQJCYz6rHsopLB4fScGjwWhQK",
+          "next": "QmVvFnLYvMzZ2XJuoBvyZsqt9qn6hZo4MUTMC8Fj9aHJXd",
+          "op": "rotate",
+          "prev": "QmbNhJkxjYsvtT3tWWP8LXwaGWmyYN924tvRFyBcS4YHZY",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z2Ufr4tSpZ61Q3pz1pR1PuWHoYnkMcZagU7bL5LrNqdfmJQiwsd5LtrKgneeSzaSbJPygXwDBLHJaw3zqRxCVUrjA",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m1"
+            }
+          ],
+          "salt": "7DqbanfBGH8JLz4xeScbj2",
+          "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+          "seq": 2,
+          "unlink": [
+            "d1"
+          ]
+        }
+      ],
+      "name": "rotate unlinking a key already unlinked",
+      "rule": "16"
+    },
+    {
+      "error": {
+        "code": "policy",
+        "reason": "RevokedKey"
+      },
+      "events": [
+        {
+          "add": [
+            {
+              "enc": "z6LSoKsNQ3ZWym1Qsf7fL6ajAHqjpzaudw4hEvtzA8ejGDgz",
+              "id": "d1",
+              "sign": "z6MkoLDHstjfesQKtngXMequRUhP96dNkWrGDghVxxCoksYQ"
+            }
+          ],
+          "format": "coasys/1",
+          "kind": "human",
+          "master": "z6Mkpuq56j9kNo4YqZvGtWoxCzKZfbFK329q3zsYWQVjEqMq",
+          "next": "QmYGaczyoimbrQLjPtYTQYcQ4X6WvMuKQiWQ98jTuD3i6n",
+          "op": "incept",
+          "prev": null,
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "zqVps9BKyMJNaJpdGrKgQNy8jNqFE55nAgZYJX6prvxCnuqfvstwY11xB2A2puVaW3dQCVJbvA8CY3UXUM7498Fv",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m0"
+            },
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z4p9rYrAi4wFuWPXbn2c3ujpvyk8EwEAu6baJHLzwac3k3JWvNfxSn89ELQPxBPzAPckfWj2YKHPzUe5qbnfbPi43",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#d1"
+            }
+          ],
+          "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+          "seq": 0
+        },
+        {
+          "format": "coasys/1",
+          "op": "revoke",
+          "prev": "QmbuhcFbietSm6p3Q99nhBNodQnvyduqNLk68fEjCeKR71",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z4TF59rZv4pqugg2485xdGKRQ7qz1aAtbEfZxQqTBtxhTKq7L8SGPFkLQejK9srbsK4bruRucm2sE8b5SSHw7LSkt",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m0"
+            }
+          ],
+          "revoke": [
+            "d1"
+          ],
+          "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+          "seq": 1
+        },
+        {
+          "format": "coasys/1",
+          "master": "z6Mko91TaXkMdgzgpaQXWcwqQJCYz6rHsopLB4fScGjwWhQK",
+          "next": "QmVvFnLYvMzZ2XJuoBvyZsqt9qn6hZo4MUTMC8Fj9aHJXd",
+          "op": "rotate",
+          "prev": "QmbXoSaRvQkui7D7Ao2dweTYqGKtFsUipfK9s8pVBg9X6k",
+          "proof": [
+            {
+              "cryptosuite": "eddsa-jcs-2022",
+              "domain": "coasys:kel",
+              "proofPurpose": "assertionMethod",
+              "proofValue": "z3VGPeNQTdxmk3oLTC1kzCqJRoscSsZmsiFkjLoB77fD4RwkXrD9FtDo5JrE9Qz823wnGC3FNcirAF2mZc9T7goL4",
+              "type": "DataIntegrityProof",
+              "verificationMethod": "did:scid:coasys:1:QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p#m1"
+            }
+          ],
+          "salt": "7DqbanfBGH8JLz4xeScbj2",
+          "scid": "QmXkG6CaZsu4Bmhz9jE1E24rtzT4pPyq4kmRVgt2nxU91p",
+          "seq": 2,
+          "unlink": [
+            "d1"
+          ]
+        }
+      ],
+      "name": "rotate unlinking a revoked key",
+      "rule": "16"
+    },
+    {
+      "error": {
+        "code": "policy",
         "reason": "MissingProof"
       },
       "events": [

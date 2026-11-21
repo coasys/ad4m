@@ -418,19 +418,19 @@
             "cryptosuite": "eddsa-jcs-2022",
             "domain": "coasys:kel",
             "proofPurpose": "assertionMethod",
-            "proofValue": "zEGYYKRDxG8EtLyQMts8oWuuF1ugjr7kGadyb5AnnTzJ8xL5HHsGo8aRA91eX71eWyijbByxbSumda6cs4tZVyvg",
+            "proofValue": "z48mod9S92MP8SaZoov3seZTRXDcHedCTAoz8EwtMdoPNF6WQoySipvniPq2oYimTVMDjMC3ijZ4o8oGgCGEcYFWL",
             "type": "DataIntegrityProof",
             "verificationMethod": "did:scid:coasys:1:QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c#m1"
           }
         ],
-        "revoke": [
-          "d1"
-        ],
         "salt": "7DqbanfBGH8JLz4xeScbj2",
         "scid": "QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c",
-        "seq": 5
+        "seq": 5,
+        "unlink": [
+          "d1"
+        ]
       },
-      "eventHash": "QmbuZW5E3NQh8KUpN1H4Neu9ByUX1EdbMgetSEoK9f4U4c",
+      "eventHash": "QmU55NHxAYVjpysCvsoCpMxXzVHohFZiFNLfd13oosu2oQ",
       "key": "z6Mko91TaXkMdgzgpaQXWcwqQJCYz6rHsopLB4fScGjwWhQK",
       "keyId": "m1",
       "name": "seq 5 by m1",
@@ -438,7 +438,7 @@
         "cryptosuite": "eddsa-jcs-2022",
         "domain": "coasys:kel",
         "proofPurpose": "assertionMethod",
-        "proofValue": "zEGYYKRDxG8EtLyQMts8oWuuF1ugjr7kGadyb5AnnTzJ8xL5HHsGo8aRA91eX71eWyijbByxbSumda6cs4tZVyvg",
+        "proofValue": "z48mod9S92MP8SaZoov3seZTRXDcHedCTAoz8EwtMdoPNF6WQoySipvniPq2oYimTVMDjMC3ijZ4o8oGgCGEcYFWL",
         "type": "DataIntegrityProof",
         "verificationMethod": "did:scid:coasys:1:QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c#m1"
       },
@@ -450,7 +450,7 @@
         "verificationMethod": "did:scid:coasys:1:QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c#m1"
       },
       "result": "ok",
-      "signingInput": "6d559c246e83bb50bb7dab141ed3b892750bed83b8c9127a4961d52ff343ea13c9963569964785c10833eea75f1c4608f46363510f284ab5658eb2dd5f52fdf5"
+      "signingInput": "6d559c246e83bb50bb7dab141ed3b892750bed83b8c9127a4961d52ff343ea135528b5be9d5d2fd1e286c8f23051dedeb76dcd3f918426562e0e79229e8d5427"
     },
     {
       "configHash": "6d559c246e83bb50bb7dab141ed3b892750bed83b8c9127a4961d52ff343ea13",
@@ -466,13 +466,13 @@
         "format": "coasys/1",
         "offer": "offer-1",
         "op": "add",
-        "prev": "QmbuZW5E3NQh8KUpN1H4Neu9ByUX1EdbMgetSEoK9f4U4c",
+        "prev": "QmU55NHxAYVjpysCvsoCpMxXzVHohFZiFNLfd13oosu2oQ",
         "proof": [
           {
             "cryptosuite": "eddsa-jcs-2022",
             "domain": "coasys:kel",
             "proofPurpose": "assertionMethod",
-            "proofValue": "z3mvpMFSLMGW6L48VKocvmXVte5Bk2fV5P1U9ebMiLdGKVSz5jmh19aohLmDBEN5Zqdz6c8FDgsURbNK2Q1mGeo4b",
+            "proofValue": "z4HVp8QxE2Y9Hf1BQzcJru4HeBHYJqbP1UwKhjhbf3xF9MCuwoxbiKSziGt6ph5rE7UCoTH4CGjPjegJURrPB1coD",
             "type": "DataIntegrityProof",
             "verificationMethod": "did:scid:coasys:1:QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c#m1"
           }
@@ -480,7 +480,7 @@
         "scid": "QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c",
         "seq": 6
       },
-      "eventHash": "QmNkRHSG48baLHguazUAn4QcAeJCkTkp1Kodj92pAiTL51",
+      "eventHash": "QmWjfuhCeJmyfncTGwUrNVstW5gqEzwLngeqxvBMJzKuio",
       "key": "z6Mko91TaXkMdgzgpaQXWcwqQJCYz6rHsopLB4fScGjwWhQK",
       "keyId": "m1",
       "name": "seq 6 by m1",
@@ -488,7 +488,7 @@
         "cryptosuite": "eddsa-jcs-2022",
         "domain": "coasys:kel",
         "proofPurpose": "assertionMethod",
-        "proofValue": "z3mvpMFSLMGW6L48VKocvmXVte5Bk2fV5P1U9ebMiLdGKVSz5jmh19aohLmDBEN5Zqdz6c8FDgsURbNK2Q1mGeo4b",
+        "proofValue": "z4HVp8QxE2Y9Hf1BQzcJru4HeBHYJqbP1UwKhjhbf3xF9MCuwoxbiKSziGt6ph5rE7UCoTH4CGjPjegJURrPB1coD",
         "type": "DataIntegrityProof",
         "verificationMethod": "did:scid:coasys:1:QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c#m1"
       },
@@ -500,7 +500,7 @@
         "verificationMethod": "did:scid:coasys:1:QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c#m1"
       },
       "result": "ok",
-      "signingInput": "6d559c246e83bb50bb7dab141ed3b892750bed83b8c9127a4961d52ff343ea130616c2632e4f617786e59163613eb50763cb8b4b20d971b1ca7506fff66a5914"
+      "signingInput": "6d559c246e83bb50bb7dab141ed3b892750bed83b8c9127a4961d52ff343ea137cc335eaf06d58a7b38d5e86526c559f31784c285bcc3bd2993fa8d7bc196cc8"
     },
     {
       "configHash": "d295c41bd5dd00e5aee0ad335ddd079dde7c477691748ddb4454d112fe911c7e",
@@ -509,13 +509,13 @@
         "master": "z6MkiHTZ9xT973Yj5KJCXbHKw8j7XyzYYEW5BZTmzppkKEoP",
         "next": null,
         "op": "rotate",
-        "prev": "QmNkRHSG48baLHguazUAn4QcAeJCkTkp1Kodj92pAiTL51",
+        "prev": "QmWjfuhCeJmyfncTGwUrNVstW5gqEzwLngeqxvBMJzKuio",
         "proof": [
           {
             "cryptosuite": "eddsa-jcs-2022",
             "domain": "coasys:kel",
             "proofPurpose": "assertionMethod",
-            "proofValue": "zJx5knjk2Ay3uqb8XoJ7dHmJ8tE5XXyUsPtSHr6ZqUwC64kGEXvmpnCAyF7WgFmWS9Vk883niymSVXPJPua8shxE",
+            "proofValue": "z4r5Ec5eXv4X2FwQjCr3aMS8TjnKUxXoNFtANB53uhzYkLkojgiGBCNxYWi7KApdsWSwWECSH2kan5oKJ4dgiUKDc",
             "type": "DataIntegrityProof",
             "verificationMethod": "did:scid:coasys:1:QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c#m2"
           }
@@ -524,7 +524,7 @@
         "scid": "QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c",
         "seq": 7
       },
-      "eventHash": "QmQBbhT5XQ5MjzYMMEQEmGXnfzovJ5q2ipq7XjNetmNRJR",
+      "eventHash": "QmUfKax3swnXuakv21m8gkYfPY3ZXiRMrm8BPFsFZfXrPj",
       "key": "z6MkiHTZ9xT973Yj5KJCXbHKw8j7XyzYYEW5BZTmzppkKEoP",
       "keyId": "m2",
       "name": "seq 7 by m2",
@@ -532,7 +532,7 @@
         "cryptosuite": "eddsa-jcs-2022",
         "domain": "coasys:kel",
         "proofPurpose": "assertionMethod",
-        "proofValue": "zJx5knjk2Ay3uqb8XoJ7dHmJ8tE5XXyUsPtSHr6ZqUwC64kGEXvmpnCAyF7WgFmWS9Vk883niymSVXPJPua8shxE",
+        "proofValue": "z4r5Ec5eXv4X2FwQjCr3aMS8TjnKUxXoNFtANB53uhzYkLkojgiGBCNxYWi7KApdsWSwWECSH2kan5oKJ4dgiUKDc",
         "type": "DataIntegrityProof",
         "verificationMethod": "did:scid:coasys:1:QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c#m2"
       },
@@ -544,7 +544,7 @@
         "verificationMethod": "did:scid:coasys:1:QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c#m2"
       },
       "result": "ok",
-      "signingInput": "d295c41bd5dd00e5aee0ad335ddd079dde7c477691748ddb4454d112fe911c7e1b65bdddeda23569d3d7121b00683c0ebf0487984bb1c43a7d83fd9f4b3f93fa"
+      "signingInput": "d295c41bd5dd00e5aee0ad335ddd079dde7c477691748ddb4454d112fe911c7e5dee88b70cc9962c0028702686357b7728d637aefc8cc162615c48753c89cc9a"
     },
     {
       "event": {
