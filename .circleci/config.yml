@@ -688,6 +688,10 @@ jobs:
       - setup_env
       - restore_rust_compile_inputs
       - run:
+          # The WASM language the runtime's ordering tests load; without the bundle they skip.
+          name: Build test WASM language
+          command: bash tests/rust-languages/build.sh && test -f tests/rust-languages/test-wasm-language/build/bundle.js
+      - run:
           # Unit tests, the crate's integration tests and doc-tests; the same command as
           # the crate's `pnpm test` script.
           name: rust-executor tests
