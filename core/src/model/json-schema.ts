@@ -22,6 +22,8 @@ export interface JSONSchemaProperty {
   items?: JSONSchemaProperty;
   properties?: { [key: string]: JSONSchemaProperty };
   required?: string[];
+  enum?: unknown[];
+  $ref?: string;
   "x-ad4m"?: {
     through?: string;
     resolveLanguage?: string;
@@ -38,6 +40,8 @@ export interface JSONSchema {
   type?: string;
   properties?: { [key: string]: JSONSchemaProperty };
   required?: string[];
+  $defs?: { [key: string]: JSONSchemaProperty };
+  definitions?: { [key: string]: JSONSchemaProperty };
   "x-ad4m"?: {
     namespace?: string;
     className?: string;
@@ -88,6 +92,41 @@ export function isArrayType(schema: JSONSchemaProperty): boolean {
 
 export function isObjectType(schema: JSONSchemaProperty): boolean {
   return isSchemaType(schema, "object");
+}
+
+/**
+ * Follows a local `$ref` ("#/$defs/X", "#/definitions/X") in the root schema,
+ * also through a chain of refs. Returns the schema itself when it has no
+ * `$ref`, and undefined when the ref is not local, does not resolve, or loops.
+ */
+export function resolveLocalRef(schema: JSONSchemaProperty, root?: JSONSchema): JSONSchemaProperty | undefined {
+  const seen = new Set<string>();
+  let current: JSONSchemaProperty | undefined = schema;
+  while (current?.$ref) {
+    const ref: string = current.$ref;
+    if (!root || !ref.startsWith("#/") || seen.has(ref)) return undefined;
+    seen.add(ref);
+    let node: any = root;
+    for (const part of ref.slice(2).split("/")) {
+      const key = decodeURIComponent(part).replace(/~1/g, "/").replace(/~0/g, "~");
+      node = node !== null && typeof node === "object" && Object.prototype.hasOwnProperty.call(node, key) ? node[key] : undefined;
+    }
+    current = node !== null && typeof node === "object" ? node : undefined;
+  }
+  return current;
+}
+
+/**
+ * An array whose items are objects. It is stored as one JSON value (like a
+ * free object), not as a relation: a relation holds link targets, and an
+ * object element has no IRI, so it was written as "[object Object]".
+ * A local `$ref` in `items` is followed in `root`; other refs stay relations.
+ */
+export function isObjectArrayType(schema: JSONSchemaProperty, root?: JSONSchema): boolean {
+  if (!isArrayType(schema) || !schema.items) return false;
+  const items = resolveLocalRef(schema.items, root);
+  if (!items) return false;
+  return isObjectType(items) || (items.type === undefined && items.properties !== undefined);
 }
 
 export function isNumericType(schema: JSONSchemaProperty): boolean {
@@ -250,6 +289,16 @@ export function getDefaultValueForType(type?: string): any {
 // ─── buildModelFromJSONSchema ────────────────────────────────────────────────
 
 /**
+ * Property names every instance already carries. The executor refuses a class
+ * that declares one (`RESERVED_PROPERTY_NAMES` in
+ * rust-executor/src/perspectives/shacl_parser.rs), and on the generated
+ * prototype `id` and `timestamp` would hide Ad4mModel's own getters.
+ */
+export const RESERVED_SCHEMA_PROPERTY_NAMES = [
+  "id", "baseExpression", "createdAt", "updatedAt", "author", "timestamp", "__links",
+];
+
+/**
  * Core implementation of `Ad4mModel.fromJSONSchema()`.
  *
  * Creates a dynamic Ad4mModel subclass from a JSON Schema definition,
@@ -265,9 +314,10 @@ export function buildModelFromJSONSchema(
   schema: JSONSchema,
   options: JSONSchemaToModelOptions
 ): typeof Ad4mModel {
-  // Disallow top-level "author" property since Ad4mModel provides it implicitly via link authorship
-  if (schema?.properties && Object.prototype.hasOwnProperty.call(schema.properties, "author")) {
-    throw new Error('JSON Schema must not define a top-level "author" property because Ad4mModel already exposes it. Please rename the property (e.g., "writer").');
+  // Disallow top-level properties that collide with the fields Ad4mModel exposes itself
+  const reserved = Object.keys(schema?.properties ?? {}).filter((name) => RESERVED_SCHEMA_PROPERTY_NAMES.includes(name));
+  if (reserved.length > 0) {
+    throw new Error(`JSON Schema must not define the top-level ${reserved.map((n) => `"${n}"`).join(", ")} propert${reserved.length > 1 ? "ies" : "y"}: Ad4mModel already exposes ${reserved.length > 1 ? "them" : "it"} (reserved: ${RESERVED_SCHEMA_PROPERTY_NAMES.join(", ")}). Please rename the property (e.g., "author" to "writer").`);
   }
   // Determine namespace with cascading precedence
   const namespace = determineNamespace(schema, options);
@@ -291,7 +341,8 @@ export function buildModelFromJSONSchema(
       const predicate = determinePredicate(schema, propertyName, propertySchema, namespace, options);
       const isRequired = schema.required?.includes(propertyName) || false;
       const propertyType = normalizeSchemaType(propertySchema.type);
-      const isArray = isArrayType(propertySchema);
+      // An array of objects is one JSON-valued property, not a relation.
+      const isArray = isArrayType(propertySchema) && !isObjectArrayType(propertySchema, schema);
       
       if (isArray) {
         // Handle arrays as relations
@@ -342,20 +393,33 @@ export function buildModelFromJSONSchema(
 
         if (isObjectType(propertySchema)) {
           console.warn(`Property "${propertyName}" is an object type. It will be stored as JSON. Consider flattening complex objects for better semantic querying.`);
+        } else if (isObjectArrayType(propertySchema, schema)) {
+          console.warn(`Property "${propertyName}" is an array of objects. It will be stored as one JSON value. Consider a relation to model instances for better semantic querying.`);
         }
 
         if (isRequired && !initial) {
           if (isObjectType(propertySchema)) {
             initial = 'literal:json:{}';
+          } else if (isObjectArrayType(propertySchema, schema)) {
+            initial = 'literal:json:[]';
           } else {
             initial = "ad4m://undefined";
           }
+        }
+
+        // A string `enum` becomes `sh:in`, unless propertyOptions sets `options` itself.
+        // Other enums are left unconstrained: `sh:in` entries are strings.
+        let allowed = getPropertyOption(propertyName, propertySchema, options, 'options');
+        const stringEnum = Array.isArray(propertySchema.enum) && propertySchema.enum.length > 0 && propertySchema.enum.every((v) => typeof v === "string");
+        if (allowed === undefined && stringEnum) {
+          allowed = (propertySchema.enum as string[]).map((value) => ({ value }));
         }
 
         properties[propertyName] = {
           through: predicate,
           required: isRequired,
           writable: writable,
+          ...(allowed !== undefined && { options: allowed }),
           ...(resolveLanguage !== undefined && { resolveLanguage }),
           ...(local !== undefined && { local }),
           ...(initial && { initial })
