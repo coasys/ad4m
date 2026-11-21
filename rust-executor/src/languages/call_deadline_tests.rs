@@ -44,18 +44,34 @@ async fn log_reaches(handle: &LanguageRuntimeHandle, expected: &str) {
     .await;
 }
 
-/// The CPU time this process has used, user and system.
-fn process_cpu_time() -> Duration {
-    let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
-    // SAFETY: getrusage fills the struct it is given.
-    let usage = unsafe {
-        assert_eq!(libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()), 0);
-        usage.assume_init()
-    };
-    let time = |t: libc::timeval| {
-        Duration::from_secs(t.tv_sec as u64) + Duration::from_micros(t.tv_usec as u64)
-    };
-    time(usage.ru_utime) + time(usage.ru_stime)
+/// The CPU time, user and system, of the one thread of this process named
+/// `name` (a runtime's thread is `lang-` plus the first 8 characters of its
+/// address): other tests running in parallel do not count.
+#[cfg(target_os = "linux")]
+fn runtime_thread_cpu_time(name: &str) -> Duration {
+    let threads = std::fs::read_dir("/proc/self/task").unwrap();
+    let stats: Vec<String> = threads
+        .filter_map(|t| {
+            let path = t.ok()?.path();
+            let comm = std::fs::read_to_string(path.join("comm")).ok()?;
+            (comm.trim() == name).then(|| std::fs::read_to_string(path.join("stat")).ok())?
+        })
+        .collect();
+    assert_eq!(stats.len(), 1, "one thread named {name}");
+    // utime and stime are fields 14 and 15, counted after the ")" that ends
+    // the thread name.
+    let fields: Vec<u64> = stats[0]
+        .rsplit_once(')')
+        .unwrap()
+        .1
+        .split_whitespace()
+        .skip(11)
+        .take(2)
+        .map(|f| f.parse().unwrap())
+        .collect();
+    // SAFETY: sysconf reads a constant.
+    let ticks_per_second = unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as u64;
+    Duration::from_millis((fields[0] + fields[1]) * 1000 / ticks_per_second)
 }
 
 /// Drops the last handle and waits for the runtime to end: the runtime holds
@@ -974,7 +990,7 @@ async fn a_module_stalled_on_top_level_await_fails_its_load() {
 /// stays pending with its own (never-settling) promise.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_stalled_import_in_a_concurrent_call_does_not_free_the_ordered_call() {
-    let (handle, dir) = spawn_runtime("QmStalledImport");
+    let (handle, dir) = spawn_runtime("QmImportStall");
     handle
         .execute("(globalThis.__log = [], 0)".into())
         .await
@@ -1029,13 +1045,16 @@ async fn a_stalled_import_in_a_concurrent_call_does_not_free_the_ordered_call() 
     // The loop now has nothing to do but report the stall: it waits for the
     // next request instead of polling again (`EventLoopFuture`), so the
     // process stays idle rather than spinning a core.
-    let cpu_before = process_cpu_time();
-    tokio::time::sleep(Duration::from_millis(1000)).await;
-    let cpu_idle = process_cpu_time() - cpu_before;
-    assert!(
-        cpu_idle < Duration::from_millis(500),
-        "the runtime spun on the stall: {cpu_idle:?} of CPU in 1 s idle"
-    );
+    #[cfg(target_os = "linux")]
+    {
+        let cpu_before = runtime_thread_cpu_time("lang-QmImport");
+        tokio::time::sleep(Duration::from_millis(1000)).await;
+        let cpu_idle = runtime_thread_cpu_time("lang-QmImport") - cpu_before;
+        assert!(
+            cpu_idle < Duration::from_millis(500),
+            "the runtime spun on the stall: {cpu_idle:?} of CPU in 1 s idle"
+        );
+    }
 
     // The stall ended neither call: the ordered one still holds its slot, so
     // the queued call has not started, and the stalled call's own promise is
