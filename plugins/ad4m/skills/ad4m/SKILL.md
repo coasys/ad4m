@@ -269,8 +269,8 @@ Type the parent the same way, then read what else is under it — `ad4m_instance
 
 When a post is for a person or another bot, it carries a **real mention** of them, the way humans tag each other in chat. This is the most reliable wake signal and the one humans read as "this is for you":
 
-- Put their DID in the item's `mentions` relation: `ad4m_instance_create(..., properties={"text": "@Hex ...", "mentions": ["did:key:…"]})`.
-- When the class keeps text marks (We text blocks have a `marks` property), cover the `@Name` with a mention mark: `{"start": 0, "end": 4, "type": "mention", "did": "did:key:…"}`.
+- Put their DID in the item's mentions relation: `ad4m_instance_create(..., properties={"text": "@Hex ...", "mentions": ["did:key:…"]})`. The relation's name depends on the class (it is the one aliased to the built-in Mentioning); `ad4m_describe_perspective` shows it. Each DID becomes one mention link. The executor does not derive these links from marks.
+- When the class keeps text marks (We text blocks have a `marks` property), cover each `@Name` with a mention mark. `marks` is a JSON array encoded as a string, even for one mark: `"marks": "[{\"start\": 0, \"end\": 4, \"type\": \"mention\", \"did\": \"did:key:…\"}]"`. `start` and `end` count code points, and `end` is exclusive.
 - Tag each person or bot you answer or ask, including the one who mentioned you. Do not tag people a post is not for.
 
 Plain `@Name` text without the `mentions` link does not wake anyone reliably: the text match only fires on whole-word profile names and can miss, and the reader cannot tell intent from a passing word. Get a DID from the item you were woken by (`Mentioned by`), from `author` on the items you read, or from the agent's profile.
