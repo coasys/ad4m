@@ -113,9 +113,12 @@ so the same file runs on both link languages.
 `integration-tests-mcp` and `integration-tests-email-verification` do not run on
 PRs. They run with `integration-tests-sfu-e2e` in the 2-hourly dev tier
 (workflow `dev-2-hourly`, pipeline parameter `run-dev-2-hourly`), only when dev
-has moved. A red job there opens the GitHub issue `dev red: <job>`, or comments
-on it, with the PRs merged since the tier's last green commit
-(`.circleci/scripts/dev-tier.sh`). To run one on a PR, run its script locally.
+has moved or the last run on its head was red. They use the stash of `build`'s
+run on the same commit, and build it themselves when that stash is gone. A red
+job there opens the GitHub issue `dev red: <job>` with the PRs merged since the
+tier's last green commit, and comments on it only for a new red commit or a
+change of state (`.circleci/scripts/dev-tier.sh`). To run one on a PR, run its
+script locally.
 
 ### Nightly (`nightly-llm-e2e` workflow)
 

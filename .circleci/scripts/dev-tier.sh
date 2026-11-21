@@ -9,6 +9,20 @@
 #                             (the caller halts green). A red run after a green
 #                             one on the same commit runs again. Any lookup
 #                             failure answers "run".
+#   dev-tier.sh stash <job>   before the suite. The scheduled pipeline has no
+#                             `build` job: the suite uses the stash of the push
+#                             pipeline's `build` of this commit. Exits 0 when the
+#                             stash is there (it waits while that build runs, up
+#                             to DEV_TIER_WAIT_SECS); 11 when that build is red
+#                             (the caller fails without an issue: the suite
+#                             cannot run); 12 "build here" when the stash is gone
+#                             and no build of the commit runs (`build` deletes
+#                             stashes older than 12 hours, so a red tier on a
+#                             quiet dev would otherwise never run again), when
+#                             no build of the commit is found, or at the
+#                             deadline. A CircleCI lookup that fails counts as
+#                             "may be running" until the deadline. Any other
+#                             exit: the caller builds here too.
 #   dev-tier.sh red <job>     last step, on failure. Opens one GitHub issue
 #                             titled "dev red: <job>", or comments on it when it
 #                             is open. It lists the last green commit of this
@@ -44,6 +58,12 @@
 #   DEV_TIER_NO_ISSUE     set by an earlier step: the failure is not the suite's
 #                         (no build stash for the commit); `red` opens nothing
 #   DEV_TIER_WORKFLOW     default dev-2-hourly
+#   DEV_TIER_WAIT_SECS    stash: how long to wait for a running build, default 2700
+#   DEV_TIER_POLL_SECS    stash: default 30
+#   DEV_TIER_NONE_GRACE_SECS  stash: how long "no build of this commit yet" waits
+#                         before building here (the push pipeline may start a
+#                         moment after the schedule), default 300
+#   CI_ARTIFACT_DIR       stash: the stash is $CI_ARTIFACT_DIR/<sha>, default /var/lib/ci-artifacts
 #   DEV_TIER_REPO         default coasys/ad4m
 #   DEV_TIER_CIRCLE_API   default https://circleci.com/api/v1.1/project/circleci/VRkXSnZDyBKHhkHKBHTmLj/W84Q4MGGTeZwizersNwxB4
 #   DEV_TIER_GITHUB_API   default https://api.github.com
@@ -54,10 +74,10 @@ set -uo pipefail
 mode="${1:-}"
 job="${2:-}"
 case "$mode" in
-  moved|red|green) ;;
-  *) echo "usage: dev-tier.sh moved|red|green <job>" >&2; exit 2 ;;
+  moved|stash|red|green) ;;
+  *) echo "usage: dev-tier.sh moved|stash|red|green <job>" >&2; exit 2 ;;
 esac
-[ -z "$job" ] && { echo "usage: dev-tier.sh moved|red|green <job>" >&2; exit 2; }
+[ -z "$job" ] && { echo "usage: dev-tier.sh moved|stash|red|green <job>" >&2; exit 2; }
 
 branch="${CIRCLE_BRANCH:-dev}"
 sha="${CIRCLE_SHA1:-}"
@@ -137,6 +157,76 @@ if [ "$mode" = moved ]; then
       ;;
   esac
   exit 0
+fi
+
+# Prints the state of the newest `build` (workflow build-and-test) of $sha on
+# $branch: "running <url>", "failed <status> <url>" (failed, timed out),
+# "done <status> <url>" (any other end: success, cancelled, ...), "none" (not in
+# the last 500 jobs) or "unknown" (the lookup failed).
+build_state() {
+  local enc offset body hit
+  local auth=()
+  [ -n "${CIRCLECI_API_TOKEN:-}" ] && auth=(-H "Circle-Token: $CIRCLECI_API_TOKEN")
+  enc="$(jq -rn --arg b "$branch" '$b|@uri')" || { echo unknown; return; }
+  for offset in 0 100 200 300 400; do
+    body="$(curl -fsSL --max-time 20 --retry 2 "${auth[@]}" \
+      "$circle_api/tree/$enc?limit=100&shallow=true&offset=$offset" 2>/dev/null)" || { echo unknown; return; }
+    hit="$(jq -r --arg s "$sha" '
+      if type != "array" then "unknown"
+      elif length == 0 then "none"
+      else (first(.[] | select(.workflows.workflow_name? == "build-and-test" and .workflows.job_name? == "build"
+                               and .vcs_revision == $s and (.status // "") != "not_run")
+                 | if (.lifecycle // "finished") != "finished" then "running \(.build_url // "")"
+                   elif (.status == "failed" or .status == "timedout") then "failed \(.status) \(.build_url // "")"
+                   else "done \(.status // "unknown") \(.build_url // "")"
+                   end) // "")
+      end' <<<"$body" 2>/dev/null)" || { echo unknown; return; }
+    [ -n "$hit" ] && { echo "$hit"; return; }
+  done
+  echo none
+}
+
+if [ "$mode" = stash ]; then
+  [ -z "$sha" ] && { echo "build here: no CIRCLE_SHA1"; exit 12; }
+  dir="${CI_ARTIFACT_DIR:-/var/lib/ci-artifacts}/$sha"
+  wait_secs="${DEV_TIER_WAIT_SECS:-2700}"
+  poll="${DEV_TIER_POLL_SECS:-30}"
+  grace="${DEV_TIER_NONE_GRACE_SECS:-300}"
+  start=$SECONDS
+  said=""
+  while :; do
+    missing=""
+    for f in ad4m ad4m-executor identity-store holder integration-inputs.tar; do
+      [ -s "$dir/$f" ] || missing="$missing $f"
+    done
+    [ -z "$missing" ] && { echo "stash: $dir has build's outputs of $sha"; exit 0; }
+    read -r state rest <<<"$(build_state)"
+    case "$state" in
+      running) note="build of ${sha:0:12} is running (${rest:-})" ;;
+      failed)
+        echo "build of ${sha:0:12} failed: ${rest:-}. Not building here: the suite does not run on a red build"
+        exit 11
+        ;;
+      done)
+        echo "build here: build of ${sha:0:12} finished (${rest:-}) but its stash is gone (missing:$missing; build deletes stashes older than 12 hours)"
+        exit 12
+        ;;
+      none)
+        note="no build of ${sha:0:12} on $branch in the last 500 jobs"
+        if [ $((SECONDS - start)) -ge "$grace" ]; then
+          echo "build here: $note, and no stash (missing:$missing)"
+          exit 12
+        fi
+        ;;
+      *) note="cannot tell whether a build of ${sha:0:12} is running (CircleCI lookup failed)" ;;
+    esac
+    if [ $((SECONDS - start)) -ge "$wait_secs" ]; then
+      echo "build here: waited ${wait_secs}s for the stash of ${sha:0:12} (missing:$missing); $note"
+      exit 12
+    fi
+    [ "$said" != "$note" ] && { echo "waiting for$missing in $dir: $note"; said="$note"; }
+    sleep "$poll"
+  done
 fi
 
 if [ "$mode" = red ] && [ -n "${DEV_TIER_NO_ISSUE:-}" ]; then
