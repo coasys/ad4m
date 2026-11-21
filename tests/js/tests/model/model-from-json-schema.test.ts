@@ -70,7 +70,7 @@ describe("Ad4mModel.fromJSONSchema", () => {
       person.age = 30;
       person.email = "alice.johnson@example.com";
 
-      await perspective!.ensureSDNASubjectClass(PersonClass);
+      await PersonClass.register(perspective!);
       await person.save();
 
       // Create a second person to test multiple instances
@@ -131,7 +131,7 @@ describe("Ad4mModel.fromJSONSchema", () => {
       contact.name = "Bob Wilson";
       contact.email = "bob.wilson@company.com";
 
-      await perspective!.ensureSDNASubjectClass(ContactClass);
+      await ContactClass.register(perspective!);
       await contact.save();
 
       // Create second contact to test multiple instances
@@ -206,7 +206,7 @@ describe("Ad4mModel.fromJSONSchema", () => {
       product.description =
         "A high-performance gaming laptop with RTX graphics";
 
-      await perspective!.ensureSDNASubjectClass(ProductClass);
+      await ProductClass.register(perspective!);
       await product.save();
 
       // Create a second product with different pricing
@@ -278,7 +278,7 @@ describe("Ad4mModel.fromJSONSchema", () => {
       book.writer = "F. Scott Fitzgerald";
       book.isbn = "978-0-7432-7356-5";
 
-      await perspective!.ensureSDNASubjectClass(BookClass);
+      await BookClass.register(perspective!);
       await book.save();
 
       // Add a second book
@@ -441,7 +441,7 @@ describe("Ad4mModel.fromJSONSchema", () => {
       }) as any;
       expect(BlogPostClass.className).to.equal("BlogPost");
 
-      await perspective!.ensureSDNASubjectClass(BlogPostClass);
+      await BlogPostClass.register(perspective!);
 
       // Create a blog post with complex data
       const post1 = new BlogPostClass(perspective!);
@@ -550,7 +550,7 @@ describe("Ad4mModel.fromJSONSchema", () => {
         namespace: "holon://person/",
       }) as any;
 
-      await perspective!.ensureSDNASubjectClass(PersonHolonClass);
+      await PersonHolonClass.register(perspective!);
 
       // Test with realistic data
       const person = new PersonHolonClass(perspective!);
