@@ -25,6 +25,7 @@ use crate::prolog_service::{
 };
 use crate::prolog_service::{PrologMode, PROLOG_MODE};
 use crate::pubsub::get_global_pubsub;
+use crate::rt::time::{sleep, TimerInstant as Instant};
 use crate::runtime_service::notification_access::notifications_to_fire;
 use crate::types::*;
 use crate::types::{
@@ -46,9 +47,8 @@ use std::sync::atomic::AtomicI64;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, PoisonError};
 use std::time::Duration;
+use tokio::join;
 use tokio::sync::{Mutex, Notify, RwLock};
-use tokio::time::{sleep, Instant};
-use tokio::{join, time};
 use urlencoding;
 
 /// Tracks which predicates have changed since the last subscription check.
@@ -620,7 +620,7 @@ pub struct PerspectiveInstance {
     trigger_subscription_check: Arc<AtomicBool>,
     /// Predicates of links changed since last subscription check.
     changed_predicates: Arc<Mutex<ChangedPredicates>>,
-    commit_debounce_timer: Arc<Mutex<Option<tokio::time::Instant>>>,
+    commit_debounce_timer: Arc<Mutex<Option<crate::rt::time::TimerInstant>>>,
     immediate_commits_remaining: Arc<Mutex<usize>>,
     /// Held by `commit` from its pending-queue check until the diff is sent or
     /// queued, so a diff that fails after a slow language call is queued ahead
@@ -629,7 +629,7 @@ pub struct PerspectiveInstance {
     subscribed_queries: Arc<Mutex<HashMap<String, SubscribedQuery>>>,
     batch_store: Arc<RwLock<HashMap<String, TimestampedBatch>>>,
     // Fallback sync tracking for ensure_public_links_are_shared
-    last_successful_fallback_sync: Arc<Mutex<Option<tokio::time::Instant>>>,
+    last_successful_fallback_sync: Arc<Mutex<Option<crate::rt::time::TimerInstant>>>,
     fallback_sync_interval: Arc<Mutex<Duration>>,
     pub(crate) sparql_store: Arc<crate::perspectives::sparql_store::SparqlStore>,
     /// Held by every write to `sparql_store` ([`Self::persist_link_diff`]), and by
@@ -953,9 +953,9 @@ impl PerspectiveInstance {
     ///   with James in a live call.
     async fn managed_user_auto_processor_supervisor(&self) {
         use crate::perspectives::auto_processor::watcher::select_online_managed_users;
+        use crate::rt::time::{SystemTime, UNIX_EPOCH};
+        use crate::rt::JoinHandle;
         use std::collections::HashMap;
-        use std::time::{SystemTime, UNIX_EPOCH};
-        use tokio::task::JoinHandle;
 
         /// How often the supervisor re-evaluates the online-user set. Short
         /// enough that a user joining a call sees interpretation within
@@ -1031,7 +1031,7 @@ impl PerspectiveInstance {
                 let this = self.clone();
                 let uuid_clone = uuid.clone();
                 let did_clone = did.clone();
-                let handle = tokio::spawn(async move {
+                let handle = crate::rt::spawn(async move {
                     log::debug!(
                         "auto_processor supervisor `{uuid_clone}`: starting loop for agent \
                          `{did_clone}`"
@@ -1326,7 +1326,7 @@ impl PerspectiveInstance {
 
     async fn pending_diffs_loop(&self) {
         let uuid = self.uuid.clone();
-        let mut interval = time::interval(Duration::from_millis(100));
+        let mut interval = crate::rt::time::interval(Duration::from_millis(100));
         let mut last_diff_time = None;
         // A failed commit waits 100 ms × 2^failures (at most 30 s) before
         // the next attempt, instead of retrying on every tick.
@@ -1347,7 +1347,7 @@ impl PerspectiveInstance {
 
                 if last_diff_time.is_none() {
                     // First diff in a burst - start timer
-                    last_diff_time = Some(tokio::time::Instant::now());
+                    last_diff_time = Some(crate::rt::time::TimerInstant::now());
                 }
 
                 // Commit if either:
@@ -1518,13 +1518,13 @@ impl PerspectiveInstance {
             {
                 let after = self.notification_trigger_snapshot().await;
                 let new_matches = Self::subtract_before_notification_matches(&before, &after);
-                tokio::spawn(Self::publish_notification_matches(
+                crate::rt::spawn(Self::publish_notification_matches(
                     uuid.clone(),
                     new_matches,
                 ));
                 before = after;
             }
-            tokio::time::sleep_until(checked_at + NOTIFICATION_MIN_SPACING).await;
+            crate::rt::time::sleep_until(checked_at + NOTIFICATION_MIN_SPACING).await;
         }
     }
 
@@ -1813,7 +1813,7 @@ impl PerspectiveInstance {
             crate::db_backend::db_backend().add_pending_diff(&handle.uuid, diff)?;
             // Update or start timer
             let mut timer = self.commit_debounce_timer.lock().await;
-            *timer = Some(tokio::time::Instant::now());
+            *timer = Some(crate::rt::time::TimerInstant::now());
         }
 
         Ok(())
@@ -1828,7 +1828,7 @@ impl PerspectiveInstance {
         let self_clone = self.clone();
         let diff_clone = diff.clone();
 
-        tokio::spawn(async move {
+        crate::rt::spawn(async move {
             if let Err(e) = self_clone.commit(&diff_clone).await {
                 log::error!("PerspectiveInstance::commit() returned error: {:?}\nStoring in pending diffs for later", e);
                 let handle_clone = self_clone.persisted.lock().await.clone();
@@ -2892,20 +2892,20 @@ impl PerspectiveInstance {
         F: FnOnce(Arc<PrologService>, String, String) -> Fut,
         Fut: Future<Output = Result<Result<QueryResolution, String>, AnyError>> + Send,
     {
-        let total_start = std::time::Instant::now();
+        let total_start = crate::rt::time::Instant::now();
         log::trace!(
             "🧠🧠 Prolog query starting: {} (chars: {})",
             query.chars().take(100).collect::<String>(),
             query.len()
         );
 
-        let ensure_start = std::time::Instant::now();
+        let ensure_start = crate::rt::time::Instant::now();
         self.ensure_prolog_engine_pool().await?;
         log::trace!("🧠🔧 Engine pool ensured in {:?}", ensure_start.elapsed());
 
         let uuid = self.uuid.clone();
 
-        let service_start = std::time::Instant::now();
+        let service_start = crate::rt::time::Instant::now();
         let service = get_prolog_service().await;
         log::trace!("🧠📞 Service retrieved in {:?}", service_start.elapsed());
 
@@ -2920,7 +2920,7 @@ impl PerspectiveInstance {
         // Only acquire the prolog read lock in Pooled mode where write locks
         // are taken during fact updates. In other modes, no writes happen so
         // the lock would only add contention without providing synchronization.
-        let lock_start = std::time::Instant::now();
+        let lock_start = crate::rt::time::Instant::now();
         let _read_lock = if use_lock && PROLOG_MODE == PrologMode::Pooled {
             log::trace!("🧠🔒 Waiting for prolog_update_mutex read lock...");
             let guard = self.prolog_update_mutex.read().await;
@@ -2935,13 +2935,13 @@ impl PerspectiveInstance {
 
         // Execute query with periodic logging and timeout handling
         log::trace!("🧠⏳ Starting query execution...");
-        let execute_start = std::time::Instant::now();
+        let execute_start = crate::rt::time::Instant::now();
 
         // Spawn a task that logs every 10 seconds while the query is running
         let query_for_logging = query.clone();
         let execute_start_for_logging = execute_start.clone();
-        let logging_handle = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+        let logging_handle = crate::rt::spawn(async move {
+            let mut interval = crate::rt::time::interval(std::time::Duration::from_secs(10));
             interval.tick().await;
             loop {
                 interval.tick().await;
@@ -2959,7 +2959,7 @@ impl PerspectiveInstance {
         let service = Arc::new(service);
         let query_clone = query.clone();
         let result_future = executor(service, pool_name, query_clone);
-        let result_with_timeout = tokio::time::timeout(timeout_duration, result_future).await;
+        let result_with_timeout = crate::rt::time::timeout(timeout_duration, result_future).await;
 
         // Cancel the logging task since query completed or timed out
         logging_handle.abort();
@@ -4186,7 +4186,7 @@ impl PerspectiveInstance {
     ) {
         let self_clone = self.clone();
 
-        tokio::spawn(async move {
+        crate::rt::spawn(async move {
             // In Disabled, Simple, or SdnaOnly mode, just trigger subscription checks
             // (Pooled mode prolog updates don't apply - run_query_all only works in Pooled mode)
             if PROLOG_MODE == PrologMode::Disabled
@@ -4261,14 +4261,14 @@ impl PerspectiveInstance {
                 let _write_guard = self_clone.prolog_update_mutex.write().await;
                 //log::info!("🔧 PROLOG UPDATE: Acquired prolog_update_mutex after {:?}", mutex_wait_start.elapsed());
 
-                let query_start = std::time::Instant::now();
+                let query_start = crate::rt::time::Instant::now();
                 let query = format!("{}.", assertions.join(","));
                 //log::info!("🔧 PROLOG UPDATE: Running assertion query: {} chars", query.len());
 
                 let service_clone = service.clone();
                 let uuid_clone = uuid.clone();
                 let query_clone = query.clone();
-                tokio::spawn(async move {
+                crate::rt::spawn(async move {
                     if let Err(e) = service_clone
                         .run_query_all(notification_pool_name(&uuid_clone), query_clone)
                         .await
@@ -4300,7 +4300,7 @@ impl PerspectiveInstance {
                 let _write_guard = self_clone.prolog_update_mutex.write().await;
                 //log::info!("🔧 PROLOG UPDATE: Acquired prolog_update_mutex after {:?}", mutex_wait_start.elapsed());
 
-                let rebuild_start = std::time::Instant::now();
+                let rebuild_start = crate::rt::time::Instant::now();
                 match self_clone.update_prolog_engine_facts().await {
                     Ok(()) => {
                         log::trace!(
@@ -4536,7 +4536,7 @@ impl PerspectiveInstance {
             )
             .await?;
         let service_clone = service.clone();
-        tokio::spawn(async move {
+        crate::rt::spawn(async move {
             let _ = service_clone
                 .update_perspective_links(
                     notification_pool_name(&uuid),
@@ -4757,7 +4757,7 @@ impl PerspectiveInstance {
             // send back to all clients through neighbourhood signal subscription
             let payload_clone = payload.clone();
             let self_clone = self.clone();
-            tokio::spawn(async move {
+            crate::rt::spawn(async move {
                 self_clone
                     .telepresence_signal_from_link_language(payload_clone, None)
                     .await;
@@ -6301,7 +6301,7 @@ impl PerspectiveInstance {
                     // Update last successful sync time and increase interval
                     {
                         *self.last_successful_fallback_sync.lock().await =
-                            Some(tokio::time::Instant::now());
+                            Some(crate::rt::time::TimerInstant::now());
                         *self.fallback_sync_interval.lock().await = Duration::from_secs(300);
                     }
                     log::debug!("Fallback sync successful for perspective {}, increasing interval to 5 minutes", uuid);
@@ -6389,7 +6389,7 @@ impl PerspectiveInstance {
             idle_wait_ms, model_readiness, next_tick_delay_ms, wait_for_tick, TickOutcome, WaitEnd,
             WatcherState, AUTO_PROCESSOR_TICK_MS,
         };
-        use std::time::{SystemTime, UNIX_EPOCH};
+        use crate::rt::time::{SystemTime, UNIX_EPOCH};
 
         let uuid = self.uuid.clone();
         let mut watcher = WatcherState::new();
@@ -6400,7 +6400,7 @@ impl PerspectiveInstance {
         // generation. A write-woken idle tick runs no sooner than `idle_floor_ms`
         // after it: writes that add no turn must not make the loop read the
         // store more often than the idle back-off did.
-        let mut last_read: Option<(u64, tokio::time::Instant)> = None;
+        let mut last_read: Option<(u64, crate::rt::time::TimerInstant)> = None;
         let mut idle_floor_ms = AUTO_PROCESSOR_TICK_MS;
         // After a `NoModel` tick the idle wait also ends when a model may have
         // become available, so a model configured while turns wait is used at
@@ -6442,7 +6442,7 @@ impl PerspectiveInstance {
             // (the pass's own, or a peer's) wakes the next.
             let generation = *writes.borrow_and_update();
             if last_read.is_none_or(|(g, _)| g != generation) {
-                last_read = Some((generation, tokio::time::Instant::now()));
+                last_read = Some((generation, crate::rt::time::TimerInstant::now()));
             }
             let now_ms = match SystemTime::now().duration_since(UNIX_EPOCH) {
                 Ok(d) => d.as_millis() as i64,

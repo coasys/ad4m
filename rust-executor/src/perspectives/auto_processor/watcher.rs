@@ -53,7 +53,7 @@ use std::sync::Arc;
 /// the claim will expire naturally after one more `ttl_ms` window — exactly the
 /// crash-detection window the module doc intends.
 struct LeaseGuard {
-    abort_handle: tokio::task::AbortHandle,
+    abort_handle: crate::rt::AbortHandle,
     /// Set to `true` if a renewal write fails. Callers can check this before
     /// committing expensive results to detect the rare case where the claim
     /// expired mid-pass and may have been re-taken by another peer.
@@ -75,8 +75,9 @@ impl LeaseGuard {
         // window before expiry — same safety margin as the lease-heartbeat
         // pattern used in distributed systems.
         let interval_ms = (ttl_ms / 3).max(1_000) as u64;
-        let handle = tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(tokio::time::Duration::from_millis(interval_ms));
+        let handle = crate::rt::spawn(async move {
+            let mut ticker =
+                crate::rt::time::interval(tokio::time::Duration::from_millis(interval_ms));
             ticker.tick().await; // skip the immediate first tick; pass just started
             loop {
                 ticker.tick().await;
@@ -813,12 +814,12 @@ pub async fn wait_for_tick(
     mut writes: Option<&mut tokio::sync::watch::Receiver<u64>>,
     mut model: Option<&mut tokio::sync::watch::Receiver<u64>>,
 ) -> WaitEnd {
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(ms);
+    let deadline = crate::rt::time::TimerInstant::now() + std::time::Duration::from_millis(ms);
     loop {
         if teardown.load(Ordering::Acquire) {
             return WaitEnd::Teardown;
         }
-        let now = tokio::time::Instant::now();
+        let now = crate::rt::time::TimerInstant::now();
         if now >= deadline {
             return WaitEnd::Elapsed;
         }
@@ -834,7 +835,7 @@ pub async fn wait_for_tick(
                 Some(()) => return WaitEnd::ModelReady,
                 None => model_closed = true,
             },
-            _ = tokio::time::sleep(slice) => {}
+            _ = crate::rt::time::sleep(slice) => {}
         }
         if writes_closed {
             writes = None;
@@ -1061,7 +1062,7 @@ pub async fn run_one_pass(
         .map_err(|e| anyhow::anyhow!("run_one_pass: did_for_context: {e:#}"))?;
     let item_ids: Vec<String> = turns.iter().map(|t| t.id.clone()).collect();
     let batch_authors: Vec<String> = turns.iter().map(|t| t.speaker.clone()).collect();
-    let pass_started = std::time::Instant::now();
+    let pass_started = crate::rt::time::Instant::now();
     /*
        Derived once, up here, rather than at the claim below where it used to be.
 
@@ -1244,8 +1245,8 @@ pub async fn run_one_pass(
         settle_ms,
         super::claim::CLAIM_SETTLE_POLL_MS,
         || {
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            crate::rt::time::SystemTime::now()
+                .duration_since(crate::rt::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis() as i64
         },
@@ -1645,8 +1646,8 @@ pub async fn run_one_pass(
 
     // A peer claim that synced during the pass. Refuse `Processed` so the
     // other executor's retirement is not counted twice.
-    let now_confirm = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let now_confirm = crate::rt::time::SystemTime::now()
+        .duration_since(crate::rt::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as i64;
     #[cfg(test)]

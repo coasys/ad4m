@@ -378,7 +378,7 @@ async fn publish_agent_updated(agent: &Agent) {
 /// to answer or time out. `publish_agent_to_language` serializes publishes, so a
 /// profile update made right after this still wins.
 fn spawn_main_agent_publish() {
-    tokio::spawn(async {
+    crate::rt::spawn(async {
         if let Err(e) = AgentService::publish_agent_to_language(&AgentContext::main_agent()).await {
             log::warn!("Error publishing agent expression: {}", e);
         }
@@ -551,7 +551,7 @@ pub(crate) async fn unlock_main_agent(passphrase: String) -> Result<AgentStatus,
 
         // The main agent's profile, then every managed user's, so the profiles an earlier
         // agent language held reach the configured store.
-        tokio::spawn(async {
+        crate::rt::spawn(async {
             if let Err(e) =
                 AgentService::publish_agent_to_language(&AgentContext::main_agent()).await
             {

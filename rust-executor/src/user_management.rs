@@ -341,7 +341,7 @@ pub fn login_user(email: &str, password: &str, app_name: &str) -> Result<String,
 /// that (past the client's 30 s RPC timeout on a loaded node). The stored profile is what
 /// reads of the agent need; `publish_agent_to_language` reads it under its lock, so a profile
 /// update made right after still wins.
-pub fn init_user_profile(did: &str) -> Result<tokio::task::JoinHandle<()>, String> {
+pub fn init_user_profile(did: &str) -> Result<crate::rt::JoinHandle<()>, String> {
     use crate::agent::{AgentContext, AgentService};
     use crate::types::domain::{Agent, Perspective as DomainPerspective};
 
@@ -354,7 +354,7 @@ pub fn init_user_profile(did: &str) -> Result<tokio::task::JoinHandle<()>, Strin
         .map_err(|e| format!("Failed to store user agent profile: {}", e))?;
 
     let ctx = AgentContext::managed(did.to_string());
-    Ok(tokio::spawn(async move {
+    Ok(crate::rt::spawn(async move {
         if let Err(e) = AgentService::publish_agent_to_language(&ctx).await {
             log::warn!("Failed to publish new user to agent language: {}", e);
         }

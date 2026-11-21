@@ -100,6 +100,9 @@ dependencies = [
  "futures-channel",
  "futures-core",
  "futures-util",
+ "getrandom 0.1.16",
+ "getrandom 0.2.17",
+ "getrandom 0.3.4",
  "hex",
  "hkdf 0.12.4",
  "holochain",
@@ -145,7 +148,6 @@ dependencies = [
  "rustls-pemfile 2.2.0",
  "schemars 1.2.2",
  "scryer-prolog",
- "secp256k1",
  "semver",
  "serde",
  "serde_ignored",
@@ -176,6 +178,10 @@ dependencies = [
  "urlencoding",
  "uuid 1.24.1",
  "voice_activity_detector",
+ "wasm-bindgen-futures",
+ "wasm-bindgen-test",
+ "wasmtimer",
+ "web-time",
  "webbrowser",
  "x509-parser 0.16.0",
  "zeroize",
@@ -6985,8 +6991,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8fc3cb4d91f53b50155bdcfd23f6a4c39ae1969c2ae85982b135750cccaf5fce"
 dependencies = [
  "cfg-if",
+ "js-sys",
  "libc",
  "wasi 0.9.0+wasi-snapshot-preview1",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -12980,6 +12988,7 @@ checksum = "9b993c12c391a7733c93171f9d07fbd80e4b99060ce3e4c76e0875cb3e63d0a8"
 dependencies = [
  "dashmap 6.2.1",
  "getrandom 0.3.4",
+ "js-sys",
  "libc",
  "oxiri",
  "oxrdf",
@@ -13080,6 +13089,7 @@ version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "034779b2d182d5069cd28b1f921ba334cad708ab1340db9776312464b6874b78"
 dependencies = [
+ "js-sys",
  "thiserror 2.0.20",
 ]
 
@@ -16106,26 +16116,6 @@ dependencies = [
  "hybrid-array",
  "subtle",
  "zeroize",
-]
-
-[[package]]
-name = "secp256k1"
-version = "0.27.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "25996b82292a7a57ed3508f052cfff8640d38d32018784acd714758b43da9c8f"
-dependencies = [
- "rand 0.8.5",
- "secp256k1-sys",
- "serde",
-]
-
-[[package]]
-name = "secp256k1-sys"
-version = "0.8.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4473013577ec77b4ee3668179ef1186df3146e2cf2d927bd200974c6fe60fd99"
-dependencies = [
- "cc",
 ]
 
 [[package]]
@@ -20830,6 +20820,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "03a4a3f055a804a2f3d86e816a9df78a8fa57762212a8506164959224a40cd48"
 dependencies = [
  "libm",
+]
+
+[[package]]
+name = "wasmtimer"
+version = "0.4.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c62b7f338e4397a45d054c15a2b36a93d57cccdda7be11a7d7b045d47b5e70ce"
+dependencies = [
+ "futures",
+ "js-sys",
+ "parking_lot",
+ "pin-project-lite",
+ "slab",
+ "wasm-bindgen",
 ]
 
 [[package]]

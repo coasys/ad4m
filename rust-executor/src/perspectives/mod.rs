@@ -134,7 +134,7 @@ static OPENED: std::sync::LazyLock<tokio::sync::watch::Sender<bool>> =
 /// tasks have ended, whether each opened or not (see [`opened`]).
 pub fn open_at_start() {
     let tasks = initialize_from_db();
-    tokio::spawn(async move {
+    crate::rt::spawn(async move {
         for task in tasks {
             let _ = task.await;
         }
@@ -150,7 +150,7 @@ pub async fn opened() {
 
 /// Open every perspective in the database, each in its own task. Returns the
 /// tasks, so a test can wait for them.
-pub fn initialize_from_db() -> Vec<tokio::task::JoinHandle<()>> {
+pub fn initialize_from_db() -> Vec<crate::rt::JoinHandle<()>> {
     let mut tasks = Vec::new();
     let handles = crate::db_backend::db_backend()
         .get_all_perspectives()
@@ -172,7 +172,7 @@ pub fn initialize_from_db() -> Vec<tokio::task::JoinHandle<()>> {
         }
 
         // Spawn async task to initialize perspective
-        tasks.push(tokio::spawn(async move {
+        tasks.push(crate::rt::spawn(async move {
             let p = PerspectiveInstance::new(handle_clone.clone(), None);
 
             // Run literal:// → literal: URI migration (idempotent)
@@ -288,7 +288,7 @@ pub fn initialize_from_db() -> Vec<tokio::task::JoinHandle<()>> {
 
             if should_start_tasks {
                 // Start background tasks
-                tokio::spawn(p.start_background_tasks());
+                crate::rt::spawn(p.start_background_tasks());
             }
         }));
     }
@@ -330,7 +330,7 @@ pub async fn add_perspective(
     }
 
     let p = PerspectiveInstance::new(handle.clone(), created_from_join);
-    tokio::spawn(p.clone().start_background_tasks());
+    crate::rt::spawn(p.clone().start_background_tasks());
 
     {
         let mut perspectives = PERSPECTIVES.write().unwrap();
@@ -535,7 +535,7 @@ pub async fn remove_perspective(uuid: &str) -> Option<PerspectiveInstance> {
 }
 
 pub fn handle_perspective_diff_from_link_language(diff: PerspectiveDiff, language_address: String) {
-    tokio::spawn(handle_perspective_diff_from_link_language_impl(
+    crate::rt::spawn(handle_perspective_diff_from_link_language_impl(
         diff,
         language_address,
     ));
@@ -615,7 +615,7 @@ pub fn handle_sync_state_changed_from_link_language(
     state: PerspectiveState,
     language_address: String,
 ) {
-    tokio::spawn(handle_sync_state_changed_from_link_language_impl(
+    crate::rt::spawn(handle_sync_state_changed_from_link_language_impl(
         state,
         language_address,
     ));
@@ -647,7 +647,7 @@ pub fn handle_telepresence_signal_from_link_language(
         publish_telepresence_signal(handle, signal, recipient_did);
     } else {
         // Slow path: need to look up perspective by language address
-        tokio::spawn(handle_telepresence_signal_from_link_language_impl(
+        crate::rt::spawn(handle_telepresence_signal_from_link_language_impl(
             signal,
             language_address,
             recipient_did,

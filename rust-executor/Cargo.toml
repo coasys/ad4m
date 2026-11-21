@@ -33,6 +33,127 @@ generate_snapshot = []  # Feature flag for snapshot generation mode
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+url = "2.3.1"
+urlencoding = "2.1"
+percent-encoding = "2"
+futures = "0.3.28"
+tokio-stream = { version = "0.1.12", features = ["sync"] }
+tokio-util = "0.7"
+lazy_static = "1.4.0"
+chrono = { version = "0.4.6", features = ["serde"] }
+env_logger = "0.10.0"
+colored = "2.0"
+# `raw_value`: the events of an `identity.*` frame are read from their own text.
+serde_json = { version = "1.0.95", features = ["raw_value"] }
+rmpv = "1"
+rmp-serde = "1"
+uuid = "1.3.0"
+log = "0.4.19"
+serde = "1.0.159"
+serde_ignored = "0.1"
+crypto_box = "0.8.2"
+chacha20poly1305 = "0.10.1"
+# Sealed boxes to an agent's DID key (agent/sealed_box.rs).
+aes-gcm = "0.10.3"
+curve25519-dalek = "4.1.3"
+hkdf = "0.12.4"
+zeroize = "1.9"
+hex = "0.4.3"
+lru = "0.12.5"
+argon2 = { version = "0.5.0", features = ["simple"] }
+rand = "0.8.5"
+base64 = "0.21.0"
+async-trait = "0.1"
+schemars = "1.0"
+clap = { version = "4.0.8", features = ["derive"] }
+fs_extra = "1.3.0"
+os_info = "3.7.0"
+semver = "1.0.17"
+did-key = "0.2.1"
+# The key log: the hash-chain module's SQLite store for the KelCache, the identity
+# core's fold, builders and offer/claim module (never `words`: no node makes the words), and
+# the identity wire types the agent language speaks.
+ad4m-hash-chain = { path = "../ad4m-hash-chain", features = ["sqlite"] }
+ad4m-identity-core = { path = "../ad4m-identity-core", features = ["build"] }
+ad4m-ldk = { path = "../ad4m-ldk/rust" }
+ed25519-dalek = "2.2.0"
+bs58 = "0.5.1"
+multibase = "0.9.1"
+# cid 0.10.1 pulls core2 ^0.4, but core2 0.4.0 was yanked from crates.io.
+# Bumped to cid 0.11 + multihash 0.19 + multihash-codetable 0.2. Same fix
+# pattern as noted in MEMORY.md from the earlier HC 0.7.0 attempt.
+#
+# multihash 0.19 dropped per-hash features (no more "sha2"/"sha3"/etc.);
+# hash codes moved to a separate multihash-codetable crate. Source imports
+# for Code / MultihashDigest updated accordingly.
+multihash = { version = "0.19" }
+multihash-codetable = { version = "0.2", features = ["sha2"] }
+cid = "0.11"
+once_cell = "1.17.1"
+rust-embed="8.0.0"
+dirs = "5.0.1"
+# Local AI hardware detection (`ai_service/local/hardware.rs`): RAM, CPU, disks,
+# processes; NVML and the Vulkan loader are opened at run time, when present.
+sysinfo = { version = "0.38", default-features = false, features = ["system", "disk"] }
+libloading = "0.8"
+
+
+jsonwebtoken = "8.3.0"
+
+webbrowser = "0.8.12"
+web-time = "1.1.0"
+
+# holochain = { version = "0.5.2", features = ["test_utils", "default"] }
+# holochain_cli_bundle = { version = "0.5.2" }
+# holochain_types = { version = "0.5.2" }
+#kitsune2_api = "0.1.15"
+
+# `url2` is a small Url2 wrapper used for constructing HC network URLs. It
+# was previously reached transitively via `kitsune_p2p_types 0.5.0-dev.9`
+# (`kitsune_p2p_types::dependencies::url2::Url2`) — that pin was HC-0.5
+# vintage and, together with `holochain_cli_run_local_services 0.5.0-dev.12`,
+# dragged in a second `lair_keystore_api 0.5.3` plus ~30 pre-HC-0.7 crates.
+# Dropped in favour of the direct crate. Data's PR #907 review LOW item.
+url2 = "0.0.6"
+
+# scryer-prolog = { path = "../../scryer-prolog", features = ["multi_thread"] }
+
+
+# rusqlite = { version = "0.29.0", git = "https://github.com/coasys/rusqlite.git", rev = "12ec1330bd4b46411ab9895364da4a3e172d0fbb", features = ["bundled"] }
+# Bumped from 0.34 to 0.40 to match coasys/deno v2.9.5's deno_cache which pins
+# rusqlite ^0.40. AD4M's rusqlite usage in src/db.rs is stable API only
+# (Connection::open, conn.execute, OptionalExtension) so the bump is free.
+# Also lets us drop the whole [patch.crates-io] for lair (which only existed
+# to force rusqlite 0.34 alignment with the OLD deno).
+rusqlite = "0.40.0"
+fake = { version = "2.9.2", features = ["derive"] }
+sha2 = "0.10.8"
+regex = "1.5.4"
+json5 = "0.4"
+serde_yaml = "0.9"
+rayon = "1.7.0"  # For parallel processing in filtering optimization
+
+include_dir = "0.6.0"
+rustls-pemfile = "2"
+x509-parser = "0.16"
+
+deflate = "1.0.0"
+tar = "0.4"
+flate2 = "1"
+futures-core = "0.3.30"
+futures-util = "0.3.30"
+futures-channel = "0.3.30"
+libc = "0.2"
+anyhow = "1.0.95"
+thiserror = "2.0.12"
+# The SPARQL algebra oxigraph parses with (same version), for rewriting a query.
+spargebra = { version = "0.4.8", features = ["sparql-12"] }
+ts-rs = { version = "12.0.1", features = ["serde-compat", "no-serde-warnings", "serde-json-impl", "chrono-impl", "url-impl"] }
+tower-service = "0.3"
+
+# Crates that do not build for wasm32 (the web executor). Versions and features
+# are the native ones; the wasm32 table below has the web executor's choices.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # coasys/deno v2.9.5-coasys-1 folds deno_core + rusty_v8 into the monorepo
 # (libs/core/, libs/deno_v8/). All deno-family crates now come from a single
 # coasys/deno tag. Underlying v8 pulled from coasys/rusty_v8 v150.4.0-coasys
@@ -92,95 +213,13 @@ tokio = { version = "1.25.0", features = ["full"] }
 # upstream default; aws-lc-rs is already built for deno_crypto. Without the
 # default `examples` feature, which pulls in an HTTP server.
 str0m = { version = "0.24.1", default-features = false, features = ["aws-lc-rs"] }
-url = "2.3.1"
-urlencoding = "2.1"
-percent-encoding = "2"
-futures = "0.3.28"
-tokio-stream = { version = "0.1.12", features = ["sync"] }
-tokio-util = "0.7"
-lazy_static = "1.4.0"
 signal-hook = "0.3"
-chrono = { version = "0.4.6", features = ["serde"] }
-env_logger = "0.10.0"
-colored = "2.0"
-# `raw_value`: the events of an `identity.*` frame are read from their own text.
-serde_json = { version = "1.0.95", features = ["raw_value"] }
-rmpv = "1"
-rmp-serde = "1"
-uuid = "1.3.0"
-log = "0.4.19"
-serde = "1.0.159"
-serde_ignored = "0.1"
-secp256k1 = { version = "0.27.0", features = ["rand", "serde"] }
-crypto_box = "0.8.2"
-chacha20poly1305 = "0.10.1"
-# Sealed boxes to an agent's DID key (agent/sealed_box.rs).
-aes-gcm = "0.10.3"
-curve25519-dalek = "4.1.3"
-hkdf = "0.12.4"
-zeroize = "1.9"
-hex = "0.4.3"
-lru = "0.12.5"
-argon2 = { version = "0.5.0", features = ["simple"] }
-rand = "0.8.5"
-base64 = "0.21.0"
 rmcp = { version = "0.17.0", features = ["server", "transport-streamable-http-server"] }
-async-trait = "0.1"
 axum = { version = "0.8", features = ["ws", "multipart"] }
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 tower-http = { version = "0.6", features = ["cors", "set-header", "catch-panic"] }
-schemars = "1.0"
-clap = { version = "4.0.8", features = ["derive"] }
-fs_extra = "1.3.0"
-os_info = "3.7.0"
-semver = "1.0.17"
-did-key = "0.2.1"
-# The key log: the hash-chain module's SQLite store for the KelCache, the identity
-# core's fold, builders and offer/claim module (never `words`: no node makes the words), and
-# the identity wire types the agent language speaks.
-ad4m-hash-chain = { path = "../ad4m-hash-chain", features = ["sqlite"] }
-ad4m-identity-core = { path = "../ad4m-identity-core", features = ["build"] }
-ad4m-ldk = { path = "../ad4m-ldk/rust" }
-ed25519-dalek = "2.2.0"
-bs58 = "0.5.1"
 zip = "0.6.4"
-multibase = "0.9.1"
-# cid 0.10.1 pulls core2 ^0.4, but core2 0.4.0 was yanked from crates.io.
-# Bumped to cid 0.11 + multihash 0.19 + multihash-codetable 0.2. Same fix
-# pattern as noted in MEMORY.md from the earlier HC 0.7.0 attempt.
-#
-# multihash 0.19 dropped per-hash features (no more "sha2"/"sha3"/etc.);
-# hash codes moved to a separate multihash-codetable crate. Source imports
-# for Code / MultihashDigest updated accordingly.
-multihash = { version = "0.19" }
-multihash-codetable = { version = "0.2", features = ["sha2"] }
-cid = "0.11"
-once_cell = "1.17.1"
-rust-embed="8.0.0"
-dirs = "5.0.1"
-# Local AI hardware detection (`ai_service/local/hardware.rs`): RAM, CPU, disks,
-# processes; NVML and the Vulkan loader are opened at run time, when present.
-sysinfo = { version = "0.38", default-features = false, features = ["system", "disk"] }
-libloading = "0.8"
 rocket = "0.5.0"
-
-
-jsonwebtoken = "8.3.0"
-
-webbrowser = "0.8.12"
-
-# holochain = { version = "0.5.2", features = ["test_utils", "default"] }
-# holochain_cli_bundle = { version = "0.5.2" }
-# holochain_types = { version = "0.5.2" }
-#kitsune2_api = "0.1.15"
-
-# `url2` is a small Url2 wrapper used for constructing HC network URLs. It
-# was previously reached transitively via `kitsune_p2p_types 0.5.0-dev.9`
-# (`kitsune_p2p_types::dependencies::url2::Url2`) — that pin was HC-0.5
-# vintage and, together with `holochain_cli_run_local_services 0.5.0-dev.12`,
-# dragged in a second `lair_keystore_api 0.5.3` plus ~30 pre-HC-0.7 crates.
-# Dropped in favour of the direct crate. Data's PR #907 review LOW item.
-url2 = "0.0.6"
 # Bumped to HC 0.7.0 stable (from 0.7.0-dev.16). Now compiles cleanly against
 # modern serde (1.0.228+) because deno_ast 0.53.3 (from coasys/deno v2.9.5)
 # pulls swc_common 14.0.4+ which was rewritten for the serde-core split.
@@ -197,67 +236,50 @@ holochain_types = { version = "0.7.0", git = "https://github.com/coasys/holochai
 # ^0.40, upstream lair 0.7.1 (also on rusqlite ^0.40) works cleanly.
 lair_keystore_api = "0.7.1"
 sodoken = "=0.1.0"
-
 scryer-prolog = { version = "0.10", git = "https://github.com/coasys/scryer-prolog", branch = "ad4m" }
-# scryer-prolog = { path = "../../scryer-prolog", features = ["multi_thread"] }
-
 ad4m-client = { path = "../rust-client", version="0.13.1-staging.16" }
 reqwest = { version = "0.11.20", features = ["json", "native-tls", "blocking", "stream", "multipart"] }
 # reqwest 0.11's DNS `Name` (the identity resolver's public-address-only `dns_resolver`).
 hyper_014 = { package = "hyper", version = "0.14.21", default-features = false, features = ["tcp", "client"] }
-
-# rusqlite = { version = "0.29.0", git = "https://github.com/coasys/rusqlite.git", rev = "12ec1330bd4b46411ab9895364da4a3e172d0fbb", features = ["bundled"] }
-# Bumped from 0.34 to 0.40 to match coasys/deno v2.9.5's deno_cache which pins
-# rusqlite ^0.40. AD4M's rusqlite usage in src/db.rs is stable API only
-# (Connection::open, conn.execute, OptionalExtension) so the bump is free.
-# Also lets us drop the whole [patch.crates-io] for lair (which only existed
-# to force rusqlite 0.34 alignment with the OLD deno).
-rusqlite = "0.40.0"
-fake = { version = "2.9.2", features = ["derive"] }
-sha2 = "0.10.8"
-regex = "1.5.4"
-json5 = "0.4"
-serde_yaml = "0.9"
-rayon = "1.7.0"  # For parallel processing in filtering optimization
 lettre = "0.11"  # For sending verification emails via SMTP
-
-include_dir = "0.6.0"
 rustls = "0.23"
 tokio-rustls = "0.26"
-rustls-pemfile = "2"
-x509-parser = "0.16"
-
 # Silero VAD (ONNX, embedded): the speech gate before a transcription request
 # (ai_service/transcription.rs), dev's crate and model, so dev's thresholds hold.
 voice_activity_detector = "0.1.1"
 # Its ort (=2.0.0-rc.4) builds only against ort-sys rc.4; a newer pre-release matches
 # ort's requirement and does not compile (size_t is gone from it).
 ort-sys = "=2.0.0-rc.4"
-deflate = "1.0.0"
-tar = "0.4"
-flate2 = "1"
-futures-core = "0.3.30"
-futures-util = "0.3.30"
-futures-channel = "0.3.30"
-libc = "0.2"
-anyhow = "1.0.95"
 portpicker = "0.1.1"
 # Bumped from 0.5.6 to 0.7.x to match what deno v2.9.5's deno_ops #[op2]
 # macro expects. Old version co-existed in the tree (from other transitives)
 # and my JsErrorClass impl on AnyhowWrapperError was against the wrong copy,
 # leaving the op2-generated code seeing an unimplemented trait.
 deno_error = "0.7"
-thiserror = "2.0.12"
 oxigraph = { version = "0.5.13", features = ["rocksdb", "rdf-12"] }
-# The SPARQL algebra oxigraph parses with (same version), for rewriting a query.
-spargebra = { version = "0.4.8", features = ["sparql-12"] }
-ts-rs = { version = "12.0.1", features = ["serde-compat", "no-serde-warnings", "serde-json-impl", "chrono-impl", "url-impl"] }
-tower-service = "0.3"
 
-[target.'cfg(not(target_env = "msvc"))'.dependencies]
+# The web executor (wasm32). Same versions as the native table; features without
+# sockets, threads, RocksDB or native TLS.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+tokio = { version = "1.25.0", features = ["sync", "macros", "rt", "time", "io-util"] }
+oxigraph = { version = "0.5.13", default-features = false, features = ["rdf-12", "js"] }
+reqwest = { version = "0.11.20", features = ["json", "multipart"] }
+uuid = { version = "1.3.0", features = ["v4", "js"] }
+# Randomness from the JS host, one key per getrandom major in the tree.
+getrandom01 = { package = "getrandom", version = "0.1", features = ["wasm-bindgen"] }
+getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
+getrandom03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
+wasm-bindgen-futures = "0.4"
+# Timers on setTimeout with tokio's API (src/web/time.rs).
+wasmtimer = "0.4"
+# Utc::now / Local::now from the JS Date.
+chrono = { version = "0.4.6", features = ["serde", "wasmbind"] }
+
+[target.'cfg(all(not(target_env = "msvc"), not(target_arch = "wasm32")))'.dependencies]
 tikv-jemalloc-ctl = { version = "0.6", features = ["stats"] }
 
-[dev-dependencies]
+# Native tests. Several of these crates do not build for wasm32 (mockito, tokio-tungstenite).
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 tempfile = "3"
 # Already in the lockfile as a transitive dependency; test-only certificate
 # fixtures for the MCP TLS end-to-end test.
@@ -271,6 +293,10 @@ http-body-util = "0.1"
 mockito = "1"
 # Same version axum's `ws` feature uses: a real client for socket-level tests.
 tokio-tungstenite = "0.29"
+
+# The web executor's tests run under Node with wasm-bindgen-test (src/web/AGENTS.md).
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"
 
 [build-dependencies]
 fs_extra = "1.3.0"

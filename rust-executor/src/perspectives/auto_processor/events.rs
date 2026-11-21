@@ -347,13 +347,13 @@ pub async fn next_event_matching<F>(
 where
     F: FnMut(&AutoProcessorEvent) -> bool,
 {
-    let deadline = tokio::time::Instant::now() + timeout;
+    let deadline = crate::rt::time::TimerInstant::now() + timeout;
     loop {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let remaining = deadline.saturating_duration_since(crate::rt::time::TimerInstant::now());
         if remaining.is_zero() {
             return None;
         }
-        match tokio::time::timeout(remaining, rx.recv()).await {
+        match crate::rt::time::timeout(remaining, rx.recv()).await {
             Ok(Ok(json)) => {
                 if let Ok(ev) = serde_json::from_str::<AutoProcessorEvent>(&json) {
                     if pred(&ev) {

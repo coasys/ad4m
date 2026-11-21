@@ -23,6 +23,10 @@ const WE_AGENT_TOOLS_FILES: [(&str, &str); 2] = [
 ];
 
 fn main() {
+    // The web executor (wasm32) has no Deno snapshot, no dapp and no Holochain DNA.
+    if std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("wasm32") {
+        return;
+    }
     println!(
         "cargo:rustc-env=ALLIANCE_DNA_VERSION={}",
         ALLIANCE_DNA_VERSION

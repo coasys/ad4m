@@ -212,7 +212,7 @@ pub(crate) async fn track_last_seen_at(agent_did: &str, now: i64) {
     // Cache miss or stale - need to check database
     // Use spawn_blocking to avoid blocking the async runtime
     let agent_did_clone = agent_did.clone();
-    let should_update = tokio::task::spawn_blocking(move || {
+    let should_update = crate::rt::spawn_blocking(move || {
         let user = crate::db_backend::db_backend().get_user_by_did(&agent_did_clone);
         if let Ok(Some(user)) = user {
             if let Some(last_seen) = user.last_seen {
@@ -272,7 +272,7 @@ pub(crate) async fn track_last_seen_at(agent_did: &str, now: i64) {
 
         // Perform the update in spawn_blocking
         let agent_did_for_update = agent_did.clone();
-        let update_result = tokio::task::spawn_blocking(move || {
+        let update_result = crate::rt::spawn_blocking(move || {
             crate::db_backend::db_backend().update_agent_last_seen(&agent_did_for_update)
         })
         .await;

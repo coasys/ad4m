@@ -852,7 +852,7 @@ impl AgentService {
             }
             // A hung publish must not stop the next agents or keep the publish lock: dropping
             // it at the deadline releases the lock.
-            match tokio::time::timeout(
+            match crate::rt::time::timeout(
                 MANAGED_PROFILE_PUBLISH_TIMEOUT,
                 publish(AgentContext::managed(did.clone())),
             )

@@ -1,5 +1,6 @@
 use super::write_log::{AddedLink, WriteDelta, WriteLog};
 use crate::languages::literal::RFC3986_COMPONENT_ENCODE;
+use crate::rt::time::Instant;
 use crate::types::LinkStatus;
 use crate::types::{DecoratedExpressionProof, DecoratedLinkExpression, Link, LinkExpression};
 use anyhow::{anyhow, Error};
@@ -11,7 +12,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// `StopInfo::kind`: how the evaluation carrying the stop ended, for the error
 /// it reports. `0` while it may still run; written once, first writer wins.
@@ -2264,7 +2265,7 @@ impl SparqlStore {
         let store = self.clone();
         let stop = stop.clone();
         let query = query_string.to_string();
-        tokio::task::spawn_blocking(move || store.query(&stop, &query))
+        crate::rt::spawn_blocking(move || store.query(&stop, &query))
             .await
             .map_err(|e| anyhow!("spawn_blocking join error: {}", e))?
     }
@@ -2293,7 +2294,7 @@ impl SparqlStore {
         // external ?target/?t bindings into AD4M's internal literal:*: wire
         // format, which callers of an ad-hoc query string have no reason to
         // expect (CodeRabbit review, PR #855).
-        tokio::task::spawn_blocking(move || store.query_arbitrary(&stop, &query))
+        crate::rt::spawn_blocking(move || store.query_arbitrary(&stop, &query))
             .await
             .map_err(|e| anyhow!("spawn_blocking join error: {}", e))?
     }

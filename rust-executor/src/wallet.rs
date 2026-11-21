@@ -720,7 +720,7 @@ impl WalletBackend for LocalWallet {
 struct CachedKey {
     secret: Vec<u8>,
     public: Vec<u8>,
-    fetched_at: std::time::Instant,
+    fetched_at: crate::rt::time::Instant,
 }
 
 /// TTL for cached key material (30 seconds).
@@ -787,7 +787,7 @@ impl SharedWallet {
                 CachedKey {
                     secret: secret.clone(),
                     public: public.clone(),
-                    fetched_at: std::time::Instant::now(),
+                    fetched_at: crate::rt::time::Instant::now(),
                 },
             );
         }
