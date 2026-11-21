@@ -489,6 +489,9 @@ pub struct ScopeIndex {
 struct IndexState {
     rules: Arc<RuleTable>,
     ready: HashSet<ClassId>,
+    /// Raised by every [`ScopeIndex::install`]: a reader that sees the same
+    /// epoch before and after its reads saw no rule replaced in between.
+    epoch: u64,
 }
 
 impl ScopeIndex {
@@ -547,6 +550,7 @@ impl ScopeIndex {
             state: RwLock::new(IndexState {
                 rules: Arc::new(RuleTable::new(rules)),
                 ready,
+                epoch: 0,
             }),
             builds: Default::default(),
             noncanonical_logged: Default::default(),
@@ -588,7 +592,14 @@ impl ScopeIndex {
         if let Ok(mut state) = self.state.write() {
             state.ready.remove(&rule.id);
             state.rules = Arc::new(state.rules.with(rule));
+            state.epoch += 1;
         }
+    }
+
+    /// The number of rules installed so far (see [`IndexState::epoch`]), or
+    /// `None` when the state cannot be read.
+    pub(crate) fn epoch(&self) -> Option<u64> {
+        self.state.read().ok().map(|state| state.epoch)
     }
 
     /// Mark `class` ready when its rule is still `rule`.

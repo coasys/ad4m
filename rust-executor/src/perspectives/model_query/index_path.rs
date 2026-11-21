@@ -108,6 +108,11 @@ pub(super) fn index_page(
     if let Some(err) = stop.stopped_err("query") {
         return Err(err);
     }
+    // Read before the rule is checked: installing a rule (and building it)
+    // raises the epoch and not the write generation.
+    let Some(epoch) = store.scope_index_epoch() else {
+        return Ok(None);
+    };
     let Some(rule) = indexed_rule(store, shape, query, pagination) else {
         return Ok(None);
     };
@@ -177,12 +182,11 @@ pub(super) fn index_page(
     #[cfg(test)]
     after_reads(store);
     // The guards above ran before the reads. A write during them (a flag time
-    // outside the executor's form, even one removed again), or another rule
-    // of the class installed and built, means what was read may not answer
-    // this query: the caller's SPARQL id phase does.
+    // outside the executor's form, even one removed again), or a rule
+    // installed (even one replaced and installed again), means what was read
+    // may not answer this query: the caller's SPARQL id phase does.
     if store.settled_write_generation()? != Some(generation)
-        || store.scope_index_rule(&rule.class).as_ref() != Some(&rule)
-        || store.scope_index_readiness(&rule) != Readiness::Ready
+        || store.scope_index_epoch() != Some(epoch)
     {
         return Ok(None);
     }

@@ -1541,6 +1541,11 @@ impl SparqlStore {
             .cloned()
     }
 
+    /// The scope index's rule epoch: raised each time a rule is installed.
+    pub(crate) fn scope_index_epoch(&self) -> Option<u64> {
+        self.scope_index.epoch()
+    }
+
     /// A reader of the scope index.
     pub fn scope_reader(&self) -> ScopeReader<'_> {
         ScopeReader::new(&self.store)

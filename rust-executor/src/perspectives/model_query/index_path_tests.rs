@@ -767,3 +767,31 @@ fn a_new_rule_during_the_reads_goes_to_sparql() {
     .unwrap();
     assert_eq!(page, None);
 }
+
+/// The class's rule replaced and then installed and built again while the
+/// page's entries and count were read: the rule is the same and ready at the
+/// end, but the reads may hold the other rule's entries, so the query goes to
+/// SPARQL.
+#[test]
+fn a_rule_replaced_and_restored_during_the_reads_goes_to_sparql() {
+    let world = small_world(5);
+    let shape = (*world.shape).clone();
+    AFTER_READS.with(|h| {
+        *h.borrow_mut() = Some(Box::new(move |store: &SparqlStore| {
+            for shape in [shape_with_flag("si://Other"), shape] {
+                let (rule, _) = store.scope_index_register(&shape).unwrap().unwrap();
+                store.scope_index_build_now(&rule).unwrap();
+                assert_eq!(store.scope_index_readiness(&rule), Readiness::Ready);
+            }
+        }));
+    });
+    let page = index_page(
+        &EvalStop::none(),
+        &world.indexed,
+        &world.shape,
+        &query(json!({})),
+        &newest_first(0, 3),
+    )
+    .unwrap();
+    assert_eq!(page, None);
+}
