@@ -87,6 +87,71 @@ where
     }))
 }
 
+/// One interpretation prompt: the request and response events, then the model
+/// call. `allow_size_retry` is true in the parse loop, where a size problem
+/// may add the thinking-off call, and false for the empty-answer retry, which
+/// must not nest that call.
+async fn prompt_interpretation_text(
+    service: &crate::ai_service::AIService,
+    task_id: String,
+    prompt: &str,
+    stick_no_thinking: &std::sync::atomic::AtomicBool,
+    allow_size_retry: bool,
+    emit_ctx: Option<&crate::perspectives::auto_processor::events::InterpretationEmitContext>,
+    debug_response: Option<&std::sync::Mutex<Option<String>>>,
+) -> anyhow::Result<String> {
+    use crate::perspectives::auto_processor::events::{
+        emit, AutoProcessorEvent, AutoProcessorStep,
+    };
+
+    if let Some(ctx) = emit_ctx {
+        emit(
+            AutoProcessorEvent::new(
+                &ctx.perspective_uuid,
+                &ctx.processor_id,
+                AutoProcessorStep::LlmRequestSent,
+            )
+            .with_agent_did(&ctx.agent_did)
+            .with_items(&ctx.item_ids)
+            .with_batch_key(&ctx.batch_key)
+            .with_llm_input(prompt.to_string()),
+        )
+        .await;
+    }
+
+    let result = service
+        .prompt_interpretation_call(
+            task_id,
+            prompt.to_string(),
+            Some(stick_no_thinking),
+            allow_size_retry,
+        )
+        .await
+        .context("AIService::prompt failed")?;
+
+    if let Some(ctx) = emit_ctx {
+        emit(
+            AutoProcessorEvent::new(
+                &ctx.perspective_uuid,
+                &ctx.processor_id,
+                AutoProcessorStep::LlmResponseReceived,
+            )
+            .with_agent_did(&ctx.agent_did)
+            .with_items(&ctx.item_ids)
+            .with_batch_key(&ctx.batch_key)
+            .with_llm_output(result.text.clone()),
+        )
+        .await;
+    }
+
+    if let Some(slot) = debug_response {
+        if let Ok(mut guard) = slot.lock() {
+            *guard = Some(result.text.clone());
+        }
+    }
+    Ok(result.text)
+}
+
 /// Drop [`InterpretationOp::Update`] ops whose new field values already match
 /// the perspective's current state (per-property value-set equality). Small LLMs
 /// occasionally re-emit an existing `existing` entry verbatim after being
@@ -806,27 +871,28 @@ pub(super) async fn run_interpretation_once(
             .map_err(|e| anyhow::anyhow!("run_interpretation: AIService not ready: {e:#}"))?;
 
         // Mid-pass observability (Nico 2026-08-20 + CodeRabbit #903 CR #6):
-        // `LlmRequestSent` fires right before EACH `service.prompt` call and
+        // `LlmRequestSent` fires right before EACH model call and
         // `LlmResponseReceived` fires right after EACH successful prompt
         // response — including responses that later fail parsing, so a UI
-        // can diagnose why a retry happened. Both live INSIDE the retry
-        // callback: emitting them once around the whole retry loop would
-        // hide any raw response that wasn't the final parse-successful one.
+        // can diagnose why a retry happened. Both live inside
+        // [`prompt_interpretation_text`], which the parse loop and the
+        // empty-answer retry share. Emitting them once around the whole
+        // loop would hide any raw response that was not the one we kept.
         //
-        // `debug_response_capture` retains the LAST successful raw response
-        // for `InterpretationRun` persistence — the same value that ends up
-        // on the run node's `debugResponse` scalar. Retries only happen when
-        // parsing fails, so the value in the cell after `retry_interpretation_parse`
-        // succeeds is by construction the final (parse-successful) attempt.
+        // `debug_response_capture` retains the raw response kept for
+        // `InterpretationRun` persistence — the same value that ends up
+        // on the run node's `debugResponse` scalar. The parse loop replaces
+        // it on every successful prompt. The empty-answer retry replaces it
+        // only when that retry's text parses; a retry that does not parse
+        // leaves the first answer.
         let debug_response_capture: std::sync::Arc<std::sync::Mutex<Option<String>>> =
             std::sync::Arc::new(std::sync::Mutex::new(None));
         // One no-reasoning retry per pass. Once a pass falls back, later parse
         // retries stay there instead of spending another reasoning attempt.
+        // The empty-answer retry does not run after that fallback: the size
+        // retry already spent the pass's one extra model call.
         let stick_no_thinking = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let InterpretationOutput {
-            instances,
-            flow_proposals: llm_proposals,
-        } = retry_interpretation_parse(|_attempt| {
+        let mut parsed = retry_interpretation_parse(|_attempt| {
             let service = service.clone();
             let task_id = task.task_id.clone();
             let prompt = prompt.clone();
@@ -834,57 +900,96 @@ pub(super) async fn run_interpretation_once(
             let emit_ctx_cloned = emit_ctx.cloned();
             let stick_no_thinking = stick_no_thinking.clone();
             async move {
-                use crate::perspectives::auto_processor::events::{
-                    emit, AutoProcessorEvent, AutoProcessorStep,
-                };
-
-                if let Some(ctx) = emit_ctx_cloned.as_ref() {
-                    emit(
-                        AutoProcessorEvent::new(
-                            &ctx.perspective_uuid,
-                            &ctx.processor_id,
-                            AutoProcessorStep::LlmRequestSent,
-                        )
-                        .with_agent_did(&ctx.agent_did)
-                        .with_items(&ctx.item_ids)
-                        .with_batch_key(&ctx.batch_key)
-                        .with_llm_input(prompt.clone()),
-                    )
-                    .await;
-                }
-
-                let result = service
-                    // Internal caller (interpretation runner) — no user auth context; billing skipped.
-                    // Reasoning first, capped so thinking cannot overflow the window.
-                    // A size failure retries once with thinking off.
-                    .prompt_interpretation_pass(task_id, prompt, Some(stick_no_thinking.as_ref()))
-                    .await
-                    .context("AIService::prompt failed")?;
-
-                if let Some(ctx) = emit_ctx_cloned.as_ref() {
-                    emit(
-                        AutoProcessorEvent::new(
-                            &ctx.perspective_uuid,
-                            &ctx.processor_id,
-                            AutoProcessorStep::LlmResponseReceived,
-                        )
-                        .with_agent_did(&ctx.agent_did)
-                        .with_items(&ctx.item_ids)
-                        .with_batch_key(&ctx.batch_key)
-                        .with_llm_output(result.text.clone()),
-                    )
-                    .await;
-                }
-
-                if emit_debug_events {
-                    if let Ok(mut slot) = capture.lock() {
-                        *slot = Some(result.text.clone());
-                    }
-                }
-                Ok(result.text)
+                prompt_interpretation_text(
+                    &service,
+                    task_id,
+                    &prompt,
+                    &stick_no_thinking,
+                    true,
+                    emit_ctx_cloned.as_ref(),
+                    emit_debug_events.then_some(capture.as_ref()),
+                )
+                .await
             }
         })
         .await?;
+        // A parsed answer with nothing in it, on a pass that had transcript
+        // items, is asked once more. This is not the parse loop (that one
+        // retries bad JSON up to five times) and it does not nest the
+        // thinking-off retry. One extra model call for emptiness, total.
+        if parsed.instances.is_empty()
+            && parsed.flow_proposals.is_empty()
+            && !transcript.is_empty()
+        {
+            let processor = emit_ctx
+                .map(|ctx| ctx.processor_id.as_str())
+                .or(cursor.map(|cursor| cursor.processor.as_str()))
+                .unwrap_or("-");
+            let perspective_uuid = emit_ctx
+                .map(|ctx| ctx.perspective_uuid.as_str())
+                .unwrap_or(perspective.uuid.as_str());
+            if stick_no_thinking.load(std::sync::atomic::Ordering::Relaxed) {
+                log::debug!(
+                    "interpretation: empty answer after the thinking-off retry; not prompting again processor={processor} perspective={perspective_uuid} transcript_items={}",
+                    transcript.len()
+                );
+            } else {
+                log::warn!(
+                    "interpretation: empty answer with transcript items; retrying once processor={processor} perspective={perspective_uuid} transcript_items={}",
+                    transcript.len()
+                );
+                let previous_debug = emit_debug_events
+                    .then(|| {
+                        debug_response_capture
+                            .lock()
+                            .ok()
+                            .and_then(|slot| slot.clone())
+                    })
+                    .flatten();
+                match prompt_interpretation_text(
+                    &service,
+                    task.task_id.clone(),
+                    &prompt,
+                    &stick_no_thinking,
+                    false,
+                    emit_ctx,
+                    emit_debug_events.then_some(debug_response_capture.as_ref()),
+                )
+                .await
+                {
+                    Ok(text) => match parse_interpretation_output(&text) {
+                        Ok(retry) => {
+                            log::warn!(
+                                "interpretation: empty-answer retry found instances={} flow_proposals={}",
+                                retry.instances.len(),
+                                retry.flow_proposals.len()
+                            );
+                            parsed = retry;
+                        }
+                        Err(error) => {
+                            if emit_debug_events {
+                                if let Ok(mut slot) = debug_response_capture.lock() {
+                                    *slot = previous_debug;
+                                }
+                            }
+                            log::warn!(
+                                "interpretation: empty-answer retry found instances=0 flow_proposals=0 error={error}"
+                            );
+                        }
+                    },
+                    Err(error) => {
+                        log::warn!(
+                            "interpretation: empty-answer retry found instances=0 flow_proposals=0 error={error}"
+                        );
+                        return Err(error);
+                    }
+                }
+            }
+        }
+        let InterpretationOutput {
+            instances,
+            flow_proposals: llm_proposals,
+        } = parsed;
         // Handles (`P3`) back to full ids.
         let instances = shown.handles.resolve(instances, shapes);
 
