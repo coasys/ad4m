@@ -72,7 +72,7 @@ describe("Ad4mModel — Custom Getters", function () {
       await ad4m.perspective.remove(perspective.uuid);
     }
     perspective = await ad4m.perspective.add("getter-test");
-    await perspective.ensureSDNASubjectClass(BlogPost);
+    await BlogPost.register(perspective);
   });
 
   it("should evaluate getter for property", async () => {
@@ -208,8 +208,8 @@ describe("Ad4mModel — Where-Clause Relation Filtering", function () {
       await ad4m.perspective.remove(perspective.uuid);
     }
     perspective = await ad4m.perspective.add("where-getter-test");
-    await perspective.ensureSDNASubjectClass(Task);
-    await perspective.ensureSDNASubjectClass(TaskBoard);
+    await Task.register(perspective);
+    await TaskBoard.register(perspective);
   });
 
   it("where-compiled getter should only return matching children", async () => {

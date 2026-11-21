@@ -514,10 +514,10 @@ describeIfLLM("ai.session* — persistent AI sessions (WS + real LLM)", function
         adder: [{ action: "addLink", source: "this", predicate: `${ns}member`, target: "value" }],
         remover: [{ action: "removeLink", source: "this", predicate: `${ns}member`, target: "value" }],
       });
-      await p.addShacl(`FloodClass${i}`, shape);
+      await p.registerShapes([shape]);
     }
     // The classes really landed — the list the per-class tool generation reads.
-    expect(await p.subjectClasses()).to.have.length(CLASS_COUNT);
+    expect(await p.shapes()).to.have.length(CLASS_COUNT);
 
     // A turn that needs a tool call and a continuation after it — the exact
     // request shape the oversized tool list broke.
@@ -567,9 +567,9 @@ describeIfLLM("ai.session* — persistent AI sessions (WS + real LLM)", function
       shape.setConstructorActions([
         { action: "addLink", source: "this", predicate: "rdf://type", target: `${ns}BigClass${i}` },
       ]);
-      await p.addShacl(`BigClass${i}`, shape);
+      await p.registerShapes([shape]);
     }
-    expect(await p.subjectClasses()).to.have.length(CLASS_COUNT);
+    expect(await p.shapes()).to.have.length(CLASS_COUNT);
 
     const s = await newSession({
       title: "a very large tool result",

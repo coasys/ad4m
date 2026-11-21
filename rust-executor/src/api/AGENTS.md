@@ -204,7 +204,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-271 methods: Cap 87, CapAnyPointer 1, Executor 48, Open 10, Operator 42, Owns 79, UserOrOperator 4. Local only (the operator on this machine): 17.
+268 methods: Cap 87, CapAnyPointer 1, Executor 48, Open 10, Operator 42, Owns 76, UserOrOperator 4. Local only (the operator on this machine): 17.
 
 | Method | Guard |
 |---|---|
@@ -338,7 +338,6 @@ the guard checked:
 | `perspective.addLink` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.addLinkExpression` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.addLinks` | `Owns(Perspective uuid, perspective:UPDATE)` |
-| `perspective.addSdna` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.all` | `CapAnyPointer(perspective:READ)` |
 | `perspective.commitBatch` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.create` | `Cap(perspective:CREATE)` |
@@ -353,10 +352,6 @@ the guard checked:
 | `perspective.flowStates` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.flowValidOutputs` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.get` | `Owns(Perspective uuid, perspective:READ)`, 404 → `null` |
-| `perspective.getAllShacl` | `Owns(Perspective uuid, perspective:READ)` |
-| `perspective.getShacl` | `Owns(Perspective uuid, perspective:READ)` |
-| `perspective.getShaclNames` | `Owns(Perspective uuid, perspective:READ)` |
-| `perspective.getShaclTargetClass` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.getSubjectData` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.instanceAddToCollection` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.instanceCreate` | `Owns(Perspective uuid, perspective:UPDATE)` |
@@ -373,6 +368,7 @@ the guard checked:
 | `perspective.queryLinks` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.queryProlog` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.querySparql` | `Owns(Perspective uuid, perspective:READ)` |
+| `perspective.registerShapes` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.rejectFlowProposal` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.rejectInterpretation` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.remove` | `Owns(Perspective uuid, perspective:DELETE)` |
@@ -384,6 +380,7 @@ the guard checked:
 | `perspective.runAgent` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.runInterpretation` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.runInterpretationWithHarness` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.shapes` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.snapshot` | `Owns(Perspective uuid, perspective:READ)`, 404 → `null` |
 | `perspective.subjectClassesOf` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.subscribeQuery` | `Owns(Perspective uuid, perspective:READ)` |
