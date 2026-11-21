@@ -18,6 +18,7 @@ keyId: string,
  */
 added: number, 
 /**
- * The seq of the revoke or rotate that ended it.
+ * The seq of the revoke that ended it, the rotate that replaced it (a master key), or the
+ * event that ended the log. `None` for a key that was only unlinked.
  */
 revoked: number | null, };

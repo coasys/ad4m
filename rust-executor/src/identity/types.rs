@@ -134,7 +134,8 @@ pub struct KeyOwner {
     /// The seq of the event that added it.
     #[ts(type = "number")]
     pub added: u64,
-    /// The seq of the revoke or rotate that ended it.
+    /// The seq of the revoke that ended it, the rotate that replaced it (a master key), or the
+    /// event that ended the log. `None` for a key that was only unlinked.
     #[ts(type = "number | null")]
     pub revoked: Option<u64>,
 }

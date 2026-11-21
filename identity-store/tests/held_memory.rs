@@ -135,7 +135,7 @@ fn rotation_log(n: usize) -> Vec<Event> {
                 &multikey(&key(&format!("master {}", i + 1))),
                 &salt(i + 1),
             )),
-            revoke: Vec::new(),
+            unlink: Vec::new(),
         };
         let event = next_event(events.last().unwrap(), op, &format!("m{i}"), &master);
         events.push(event);

@@ -190,16 +190,17 @@ impl Log {
         self.push(event);
     }
 
-    /// The `rotate` to master n+1 (not appended); `end` commits to nothing.
-    pub fn rotate_event(&self, revoke: &[&str], end: bool) -> Event {
+    /// The `rotate` to master n+1 (not appended), dropping (unlinking) the keys `unlink`;
+    /// `end` commits to nothing.
+    pub fn rotate_event(&self, unlink: &[&str], end: bool) -> Event {
         let n = self.n + 1;
-        let ids: Vec<String> = revoke.iter().map(|s| s.to_string()).collect();
+        let ids: Vec<String> = unlink.iter().map(|s| s.to_string()).collect();
         let next_commitment = if end { None } else { Some(next(n + 1)) };
         build::rotate(&self.chain, &master(n), &salt(n), next_commitment, &ids).unwrap()
     }
 
-    pub fn rotate(&mut self, revoke: &[&str], end: bool) {
-        let event = self.rotate_event(revoke, end);
+    pub fn rotate(&mut self, unlink: &[&str], end: bool) {
+        let event = self.rotate_event(unlink, end);
         self.push(event);
         self.n += 1;
     }
@@ -609,6 +610,24 @@ pub fn refusal_cases() -> Vec<Case> {
     let mut events = unlinked.events.clone();
     events.push(again);
     case("unlink twice", "16", typed(&events), policy("UnlinkedKey"));
+
+    let mut events = unlinked.events.clone();
+    events.push(unlinked.rotate_event(&["d1"], false));
+    case(
+        "rotate unlinking a key already unlinked",
+        "16",
+        typed(&events),
+        policy("UnlinkedKey"),
+    );
+
+    let mut events = revoked.events.clone();
+    events.push(revoked.rotate_event(&["d1"], false));
+    case(
+        "rotate unlinking a revoked key",
+        "16",
+        typed(&events),
+        policy("RevokedKey"),
+    );
 
     let mut by_other = Log::new();
     by_other.add(KeyLife::Standing);
